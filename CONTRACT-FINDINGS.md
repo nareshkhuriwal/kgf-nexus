@@ -1571,3 +1571,42 @@ This is the third variant of one mistake in this session — a check that passes
 while testing less than it appears to (see F70's vacuous lease assertion and
 F71's name-addressed example runs). Worth watching for directly: **if a test can
 skip, CI must prove it did not.**
+
+### F78. ADR-0011 rule 5 demonstrated on a live stack, not just by inspection
+
+Rule 5 promises a rolling deploy can run mixed versions against one schema. Until now
+nothing had exercised it: the migration gate (F77) reasons about SQL statement shapes,
+which is necessary and not the same as running an old binary against a new schema.
+
+The identity merge (`c6321ff`, adding `users`, `sessions`, `scoped_tokens`,
+`audit_log` via `0007_identity`) made a genuine test cheap, so it was run rather than
+argued about. A gateway built from the pre-merge commit (`1831450`, verified to contain
+zero `/namespaces/{ns}/users` route strings) was pointed at the post-merge database
+(verified to have all four identity tables):
+
+```
+healthz                        200
+readyz                         200
+request with no credential     401
+request with a valid API key   200
+pre-existing schedule routes   200
+routes the binary never knew   404
+```
+
+Zero panics in its log. The two results that matter are the last two: an old replica
+keeps serving its own routes normally, and a route it has never heard of is a clean
+404 rather than a 500 — so a load balancer during a rolling deploy sees a working
+replica, not a half-broken one.
+
+This makes `0007_identity` additive **in practice**, which is a stronger claim than
+additive by inspection. It also generalises: the property being demonstrated is that
+new TABLES are invisible to an old binary, which is the easy case. It says nothing
+about an altered or dropped column, and F77's gate is still what prevents those from
+being written.
+
+One attribution note, recorded because it cost real time twice in one session: a
+running container is NOT evidence of the binary you think it is. The same mixed-version
+state was first reported from the container's start time, but the image had been
+rebuilt eight minutes after the merge and contained BOTH route sets — so the
+"pre-merge binary" was in fact post-merge. Verified here by checking route strings in
+the binary rather than by timestamps, which is the only reliable way to tell.
