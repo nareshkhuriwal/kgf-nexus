@@ -84,6 +84,9 @@ type API struct {
 	logs  LogStreamer
 	log   *slog.Logger
 	clock func() time.Time
+	// limiter is nil when rate limiting is disabled, which is the zero-config
+	// default and what keeps dev and the existing tests unchanged.
+	limiter *rateLimiter
 }
 
 // New builds the REST API.
@@ -92,6 +95,16 @@ func New(db store.GWDB, auth *authn.Authenticator, wfm WorkflowManager, rm Resou
 		log = slog.Default()
 	}
 	return &API{db: db, auth: auth, wfm: wfm, rm: rm, logs: logs, log: log, clock: time.Now}
+}
+
+// WithRateLimit enables per-credential rate limiting on every route.
+//
+// Opt-in rather than on by default so enabling it is a deliberate deployment
+// decision: a limit guessed wrong is itself an outage, and the right number
+// depends on the fleet's size and the console's poll interval.
+func (a *API) WithRateLimit(cfg RateLimitConfig) *API {
+	a.limiter = newRateLimiter(cfg, a.clock)
+	return a
 }
 
 // Routes builds the mux for §8.2.
@@ -134,6 +147,12 @@ func (a *API) Routes() http.Handler {
 // way to register a route.
 func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Request, authn.Principal)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Before authentication on purpose: an unauthenticated flood is exactly
+		// the case that needs limiting, and authenticating first would spend a
+		// database round trip per rejected request.
+		if a.rateLimited(w, r) {
+			return
+		}
 		p, err := a.auth.Authenticate(r.Context(), authn.ExtractBearer(r.Header.Get("Authorization")))
 		if errors.Is(err, authn.ErrUnauthenticated) {
 			// No detail about WHY. Distinguishing "no such key" from "revoked"

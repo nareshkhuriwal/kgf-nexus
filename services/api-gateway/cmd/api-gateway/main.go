@@ -90,6 +90,21 @@ func run() error {
 
 	// ── REST listener ─────────────────────────────────────────────────────
 	api := rest.New(db, auth, wfmClient, rmClient, nil, log)
+
+	// Rate limiting is opt-in because a limit guessed wrong is itself an outage:
+	// the right number depends on fleet size and the console's poll interval. Off
+	// by default keeps every existing deployment behaving exactly as before, and
+	// NEXUS_RATE_LIMIT_RPS turns it on for a deployment that has chosen a number.
+	if rps := envFloat("NEXUS_RATE_LIMIT_RPS", 0); rps > 0 {
+		cfg := rest.RateLimitConfig{
+			RequestsPerSecond: rps,
+			Burst:             envFloat("NEXUS_RATE_LIMIT_BURST", 0),
+		}
+		api = api.WithRateLimit(cfg)
+		log.Info("per-credential rate limiting enabled",
+			"requests_per_second", cfg.RequestsPerSecond, "burst", cfg.Burst,
+			"why", "the gateway is the only ingress, so an unlimited one has no defence against a retry loop or credential stuffing")
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", api.Routes())
 
@@ -258,6 +273,21 @@ func newLogger() *slog.Logger {
 	// read by eye.
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})).
 		With("service", "api-gateway")
+}
+
+// envFloat reads a float setting, treating an unparseable value as absent rather
+// than as zero: silently disabling a limit the operator asked for would be worse
+// than ignoring a typo, because nothing would report it.
+func envFloat(key string, def float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
+	}
+	return f
 }
 
 func env(key, def string) string {
