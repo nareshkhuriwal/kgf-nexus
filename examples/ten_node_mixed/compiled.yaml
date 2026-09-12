@@ -1,0 +1,438 @@
+api_version: nexus.dev/v1
+description: 10-node mixed CPU/GPU DAG with fan-out and fan-in (Phase 1 exit criteria).
+edges:
+  - from_node_id: build_features
+    output_to_input:
+      features: result
+    to_node_id: train_baseline
+  - from_node_id: build_features
+    output_to_input:
+      features: result
+    to_node_id: train_large
+  - from_node_id: build_features
+    output_to_input:
+      features: result
+    to_node_id: train_small
+  - from_node_id: evaluate
+    output_to_input:
+      evaluation: result
+    to_node_id: publish_report
+  - from_node_id: evaluate
+    output_to_input:
+      evaluation: result
+    to_node_id: register
+  - from_node_id: ingest
+    output_to_input:
+      raw: result
+    to_node_id: validate_schema
+  - from_node_id: register
+    output_to_input:
+      registration: result
+    to_node_id: notify
+  - from_node_id: train_baseline
+    output_to_input:
+      baseline: result
+    to_node_id: evaluate
+  - from_node_id: train_large
+    output_to_input:
+      large: result
+    to_node_id: evaluate
+  - from_node_id: train_small
+    output_to_input:
+      small: result
+    to_node_id: evaluate
+  - from_node_id: validate_schema
+    output_to_input:
+      validated: result
+    to_node_id: build_features
+labels:
+  team: ml-platform
+  tier: production
+max_active_runs: 2
+name: ten-node-mixed
+namespace: default
+params:
+  dataset_uri:
+    required: true
+    type: string
+run_timeout_ms: 86400000
+tasks:
+  - cache:
+      enabled: true
+    id: build_features
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      validated:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      limit:
+        cpu_millis: 8000
+        memory_bytes: 25769803776
+      request:
+        cpu_millis: 4000
+        disk_bytes: 53687091200
+        memory_bytes: 17179869184
+    retry:
+      initial_ms: 10000
+      jitter: full
+      max_attempts: 3
+      max_ms: 600000
+      multiplier: 2
+      retry_on:
+        - ERROR_CLASS_OOM
+        - ERROR_CLASS_TIMEOUT
+        - ERROR_CLASS_TRANSIENT
+        - ERROR_CLASS_WORKER_LOST
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: ml.build_features
+    timeouts:
+      heartbeat_ms: 600000
+      schedule_to_close_ms: 21600000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 10800000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - id: evaluate
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      baseline:
+        required: true
+        type: json
+      large:
+        required: true
+        type: json
+      small:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    prefer_same_worker_as: build_features
+    queue: gpu
+    resources:
+      limit:
+        gpu_count: 1
+      request:
+        cpu_millis: 4000
+        gpu_count: 1
+        memory_bytes: 17179869184
+    retry:
+      initial_ms: 30000
+      jitter: full
+      max_attempts: 3
+      max_ms: 600000
+      multiplier: 2
+      no_retry_on:
+        - ERROR_CLASS_NOT_FOUND
+        - ERROR_CLASS_PERMISSION_DENIED
+        - ERROR_CLASS_VALIDATION
+      retry_on:
+        - ERROR_CLASS_OOM
+        - ERROR_CLASS_TIMEOUT
+        - ERROR_CLASS_TRANSIENT
+        - ERROR_CLASS_WORKER_LOST
+      retry_on_different_worker: true
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: ml.evaluate
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 10800000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 3600000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - id: ingest
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    input_params:
+      dataset_uri: dataset_uri
+    inputs:
+      dataset_uri:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 2000
+        disk_bytes: 107374182400
+        memory_bytes: 4294967296
+    retry:
+      initial_ms: 15000
+      jitter: full
+      max_attempts: 4
+      max_ms: 600000
+      multiplier: 2
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: ml.ingest
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 14400000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 7200000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - id: notify
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      registration:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 250
+        memory_bytes: 268435456
+    retry:
+      initial_ms: 5000
+      jitter: full
+      max_attempts: 3
+      max_ms: 600000
+      multiplier: 2
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: ml.notify
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 14400000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 300000
+    trigger_rule: TRIGGER_RULE_ALL_DONE
+    version: 1
+  - id: publish_report
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      evaluation:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 1000
+        memory_bytes: 2147483648
+    retry:
+      initial_ms: 10000
+      jitter: full
+      max_attempts: 3
+      max_ms: 600000
+      multiplier: 2
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: ml.publish_report
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 14400000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 1200000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - id: register
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      evaluation:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 1000
+        custom:
+          license_token: 1
+        memory_bytes: 2147483648
+    retry:
+      initial_ms: 10000
+      jitter: full
+      max_attempts: 5
+      max_ms: 600000
+      multiplier: 2
+      retry_on:
+        - ERROR_CLASS_TIMEOUT
+        - ERROR_CLASS_TRANSIENT
+        - ERROR_CLASS_WORKER_LOST
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: ml.register
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 14400000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 1800000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - id: train_baseline
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      features:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 8000
+        memory_bytes: 34359738368
+    retry:
+      initial_ms: 10000
+      jitter: full
+      max_attempts: 2
+      max_ms: 600000
+      multiplier: 2
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: ml.train_baseline
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 18000000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 7200000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - concurrency_key: model-training
+    concurrency_limit: 2
+    id: train_large
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      features:
+        required: true
+        type: json
+    node_selector:
+      gpu-interconnect: nvlink
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: gpu
+    resources:
+      limit:
+        gpu_count: 2
+      request:
+        cpu_millis: 8000
+        disk_bytes: 214748364800
+        gpu_count: 2
+        gpu_kind: nvidia-a100
+        gpu_memory_bytes: 42949672960
+        memory_bytes: 68719476736
+    retry:
+      initial_ms: 30000
+      jitter: full
+      max_attempts: 3
+      max_ms: 600000
+      multiplier: 2
+      no_retry_on:
+        - ERROR_CLASS_NOT_FOUND
+        - ERROR_CLASS_PERMISSION_DENIED
+        - ERROR_CLASS_VALIDATION
+      retry_on:
+        - ERROR_CLASS_OOM
+        - ERROR_CLASS_TIMEOUT
+        - ERROR_CLASS_TRANSIENT
+        - ERROR_CLASS_WORKER_LOST
+      retry_on_different_worker: true
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: ml.train_large
+    timeouts:
+      heartbeat_ms: 600000
+      schedule_to_close_ms: 72000000
+      schedule_to_start_ms: 7200000
+      start_to_close_ms: 28800000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - concurrency_key: model-training
+    concurrency_limit: 2
+    id: train_small
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      features:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: gpu
+    resources:
+      limit:
+        gpu_count: 1
+      request:
+        cpu_millis: 4000
+        gpu_count: 1
+        gpu_kind: nvidia-a10
+        gpu_memory_bytes: 25769803776
+        memory_bytes: 17179869184
+    retry:
+      initial_ms: 30000
+      jitter: full
+      max_attempts: 3
+      max_ms: 600000
+      multiplier: 2
+      no_retry_on:
+        - ERROR_CLASS_NOT_FOUND
+        - ERROR_CLASS_PERMISSION_DENIED
+        - ERROR_CLASS_VALIDATION
+      retry_on:
+        - ERROR_CLASS_OOM
+        - ERROR_CLASS_TIMEOUT
+        - ERROR_CLASS_TRANSIENT
+        - ERROR_CLASS_WORKER_LOST
+      retry_on_different_worker: true
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: ml.train_small
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 28800000
+      schedule_to_start_ms: 3600000
+      start_to_close_ms: 14400000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - id: validate_schema
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      raw:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 1000
+        memory_bytes: 2147483648
+    retry:
+      initial_ms: 10000
+      jitter: full
+      max_attempts: 1
+      max_ms: 600000
+      multiplier: 2
+      no_retry_on:
+        - ERROR_CLASS_VALIDATION
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: ml.validate_schema
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 14400000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 1200000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1

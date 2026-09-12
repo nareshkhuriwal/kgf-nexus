@@ -1,0 +1,397 @@
+# Nexus MVP: one-command bring-up (architecture §11 Phase 1).
+#
+#   docker compose -f deploy/docker-compose.yml up --build
+#
+# Topology, in dependency order:
+#   postgres, minio            → infrastructure
+#   minio-init                 → creates the result bucket, then exits
+#   migrate                    → applies services/migrations/*.up.sql, then exits
+#   six control-plane services → ADR-0011; each waits for postgres AND migrate
+#   two worker agents          → DIFFERENT capacity, so resource-aware
+#                                scheduling and the mixed CPU/GPU exit
+#                                criterion are actually exercisable
+#   ui                         → nginx, serves the console and proxies /v1
+#
+# Credentials below are DEV-ONLY and deliberately obvious. They exist so
+# `docker compose up` works with no setup; they are not a secret-management
+# story and must never be used outside a laptop.
+
+name: nexus
+
+# ── Shared fragments ──────────────────────────────────────────────────────
+x-postgres-env: &postgres-env
+  # Per-service DB roles are ADR-0011's enforcement mechanism for table
+  # ownership. The MVP uses one superuser role because the roles and grants are
+  # a migration that does not exist yet; the URL is per-service so switching to
+  # distinct roles is a values change, not a topology change.
+  DATABASE_URL: postgres://nexus:nexus-dev-password@postgres:5432/nexus?sslmode=disable
+
+x-service-env: &service-env
+  <<: *postgres-env
+  LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
+  LOG_FORMAT: json
+  NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
+  # Inter-service addressing. Every cross-service write goes through the owner's
+  # gRPC API (ADR-0011 rule 1), so every service needs to know where the owners
+  # live.
+  WORKFLOW_MANAGER_ADDR: workflow-manager:9090
+  DAG_ENGINE_ADDR: dag-engine:9090
+  SCHEDULER_ADDR: scheduler:9090
+  RESOURCE_MANAGER_ADDR: resource-manager:9090
+  EVENT_SERVICE_ADDR: event-service:9090
+  API_GATEWAY_ADDR: api-gateway:9091
+
+x-minio-env: &minio-env
+  RESULT_STORE_ENDPOINT: http://minio:9000
+  RESULT_STORE_BUCKET: ${NEXUS_RESULT_BUCKET:-nexus-results}
+  RESULT_STORE_REGION: us-east-1
+  RESULT_STORE_ACCESS_KEY: ${MINIO_ROOT_USER:-nexusadmin}
+  RESULT_STORE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-nexus-dev-password}
+  # Results at or below this size are inlined in Postgres rather than costing two
+  # round-trips to the blob store (ADR-0008; §12 proposes 64 KiB).
+  RESULT_STORE_INLINE_THRESHOLD_BYTES: "65536"
+
+x-go-build: &go-build
+  context: ..
+  dockerfile: deploy/Dockerfile.service
+
+# Common wait: postgres healthy AND the migration job exited 0. A service that
+# starts against an unmigrated schema fails in a way that looks like a code bug.
+x-depends-on-db: &depends-on-db
+  postgres:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
+
+x-service-healthcheck: &service-healthcheck
+  # Every service exposes /healthz + /readyz (ADR-0011 rule 3). /readyz is the
+  # right probe for dependency ordering: it means "I can serve", not merely "my
+  # process is alive".
+  test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/readyz || exit 1"]
+  interval: 5s
+  timeout: 3s
+  retries: 12
+  start_period: 15s
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: nexus-dev-password   # DEV ONLY
+      POSTGRES_DB: nexus
+      # Faster and adequate for a laptop; never for a real deployment.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    command:
+      # Postgres IS the dispatch queue (ADR-0002), so the connection budget has
+      # to cover six services plus agents plus a human with psql open.
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+    ports:
+      - "${NEXUS_POSTGRES_PORT:-55433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # -d nexus matters: pg_isready with no database succeeds while the initdb
+      # bootstrap database is still being replaced, which lets dependents start
+      # a beat too early.
+      test: ["CMD-SHELL", "pg_isready -U nexus -d nexus"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  minio:
+    # quay.io, not Docker Hub: MinIO moved its official images to quay.io and
+    # the docker.io/minio/minio repository no longer resolves.
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-nexusadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-nexus-dev-password}   # DEV ONLY
+    ports:
+      - "${NEXUS_MINIO_PORT:-9000}:9000"
+      - "${NEXUS_MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  # Bucket auto-creation. A separate one-shot container rather than a service
+  # startup step, for the same reason as migrations: exactly one actor performs
+  # the setup, and everything else waits for it to finish.
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      <<: *minio-env
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mc alias set nexus "$${RESULT_STORE_ENDPOINT}" "$${RESULT_STORE_ACCESS_KEY}" "$${RESULT_STORE_SECRET_KEY}"
+        # --ignore-existing makes a second `compose up` a no-op rather than a failure.
+        mc mb --ignore-existing "nexus/$${RESULT_STORE_BUCKET}"
+        # Results are content-addressed and immutable; versioning would only
+        # accumulate garbage for content that can never change (ADR-0008).
+        mc anonymous set none "nexus/$${RESULT_STORE_BUCKET}"
+        echo "minio-init: bucket $${RESULT_STORE_BUCKET} ready"
+    restart: "no"
+
+  # ── Migration job (ADR-0011 rule 4) ─────────────────────────────────────
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *postgres-env
+      MIGRATIONS_DIR: /migrations
+    volumes:
+      # Read-only: the job applies the frozen migrations, it does not author them.
+      - ../services/migrations:/migrations:ro
+    restart: "no"
+
+  # ── Control plane: six services, ADR-0011 ───────────────────────────────
+  api-gateway:
+    build:
+      <<: *go-build
+      args:
+        # SERVICE_PATH is the main package. It is passed explicitly for every
+        # service because the six services do not all place main in the same
+        # spot (some use cmd/<name>/), and an implicit convention that half the
+        # repo violates is worse than none. Override per service if a main
+        # package moves: --build-arg SERVICE_PATH=services/x/cmd/x
+        SERVICE: api-gateway
+        SERVICE_PATH: services/api-gateway/cmd/api-gateway
+    depends_on: *depends-on-db
+    environment:
+      <<: [*service-env, *minio-env]
+      HTTP_ADDR: ":8080"        # REST for humans, CLI, UI (§8.2)
+      GRPC_ADDR: ":9091"        # worker RPCs (§8.1) — deliberately a separate
+                                # listener so chatty worker traffic never
+                                # contends with UI queries (§3.2)
+      # Static API keys are the MVP authn story (§11). `make seed` inserts one.
+      AUTH_MODE: api_key
+    ports:
+      - "${NEXUS_API_PORT:-8080}:8080"
+      - "${NEXUS_GRPC_PORT:-9091}:9091"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
+
+  workflow-manager:
+    build:
+      <<: *go-build
+      args:
+        SERVICE: workflow-manager
+        SERVICE_PATH: services/workflow-manager/cmd/workflow-manager
+    depends_on: *depends-on-db
+    environment:
+      <<: *service-env
+      HTTP_ADDR: ":8080"
+      GRPC_ADDR: ":9090"
+      # A single reconciler polls timers WHERE fire_at <= now() FOR UPDATE SKIP
+      # LOCKED (§3.2). Every deadline in the system is a row in that table.
+      TIMER_POLL_INTERVAL_MS: "1000"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
+
+  dag-engine:
+    build:
+      <<: *go-build
+      args:
+        SERVICE: dag-engine
+        SERVICE_PATH: services/dag-engine
+    depends_on: *depends-on-db
+    environment:
+      <<: *service-env
+      HTTP_ADDR: ":8080"
+      GRPC_ADDR: ":9090"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      <<: *go-build
+      args:
+        SERVICE: scheduler
+        SERVICE_PATH: services/scheduler
+    depends_on: *depends-on-db
+    environment:
+      <<: *service-env
+      HTTP_ADDR: ":8080"
+      GRPC_ADDR: ":9090"
+      # best_fit reduces fragmentation; spread is available for
+      # resilience-sensitive workloads (§3.2).
+      SCHEDULER_BIN_PACKING: best_fit
+      # Bounded look-ahead prevents a large GPU task at the head of the queue
+      # from blocking small ones, while the aging term guarantees the blocked
+      # large task eventually wins. Without both, naive priority queues starve
+      # big jobs forever.
+      SCHEDULER_LOOKAHEAD: "32"
+      SCHEDULER_AGING_MS: "30000"
+      # Correctness comes from the atomic claim (§5.3), not leader election, so
+      # replicas can be scaled up freely: `docker compose up --scale scheduler=3`.
+      SCHEDULER_POLL_INTERVAL_MS: "500"
+      LEASE_TTL_MS: "30000"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
+
+  resource-manager:
+    build:
+      <<: *go-build
+      args:
+        SERVICE: resource-manager
+        SERVICE_PATH: services/resource-manager/cmd/resource-manager
+    depends_on: *depends-on-db
+    environment:
+      <<: *service-env
+      HTTP_ADDR: ":8080"
+      GRPC_ADDR: ":9090"
+      # Three missed heartbeats. Reconciliation against the worker's reported
+      # running_attempt_ids is what stops the capacity ledger drifting (§3.2).
+      WORKER_LIVENESS_TIMEOUT_MS: "15000"
+      RECONCILE_INTERVAL_MS: "10000"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
+
+  event-service:
+    build:
+      <<: *go-build
+      args:
+        SERVICE: event-service
+        SERVICE_PATH: services/event-service
+    depends_on: *depends-on-db
+    environment:
+      <<: *service-env
+      HTTP_ADDR: ":8080"
+      GRPC_ADDR: ":9090"
+      # run_events is append-only (invariant 8); this service is its sole writer.
+      EVENT_SSE_KEEPALIVE_MS: "15000"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
+
+  # ── Execution plane: two agents with DIFFERENT capacity ─────────────────
+  # The capacities differ on purpose. The Phase 1 exit criterion is a 10-node
+  # DAG with MIXED CPU/GPU tasks completing correctly, which is only a real test
+  # if some tasks can run on one worker and not the other. Two identical workers
+  # would let a broken resource matcher pass.
+  agent-cpu:
+    build:
+      <<: *go-build
+      args:
+        SERVICE: agent
+        SERVICE_PATH: agent/cmd/nexus-agent
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    environment:
+      <<: *minio-env
+      # Workers hold an API token and never database credentials: a compromised
+      # worker cannot corrupt runs it never touched (§3.1 invariant 2).
+      NEXUS_CONTROL_PLANE_ADDR: api-gateway:9091
+      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:-dev-worker-key}
+      NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
+      AGENT_QUEUES: default
+      AGENT_LABELS: "zone=local,accelerator=none"
+      AGENT_EXECUTORS: subprocess,docker
+      # 8 cores / 16 GiB / no GPU.
+      AGENT_CAPACITY_CPU_MILLIS: "8000"
+      AGENT_CAPACITY_MEMORY_BYTES: "17179869184"
+      AGENT_CAPACITY_GPU_COUNT: "0"
+      AGENT_CAPACITY_DISK_BYTES: "53687091200"
+      AGENT_HEARTBEAT_INTERVAL_MS: "5000"
+      # The local write-ahead log is what lets a restarted agent know it started
+      # a task but not how it ended, and report INDETERMINATE rather than
+      # guessing (§6.3).
+      AGENT_WAL_DIR: /var/lib/nexus/wal
+      LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
+    volumes:
+      - agent-cpu-wal:/var/lib/nexus/wal
+      # The docker executor runs tasks as sibling containers. Mounting the host
+      # socket is effectively root on the host — acceptable on a laptop, never
+      # in production, where the k8s executor (ADR-0007) is the answer.
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  agent-gpu:
+    build:
+      <<: *go-build
+      args:
+        SERVICE: agent
+        SERVICE_PATH: agent/cmd/nexus-agent
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    environment:
+      <<: *minio-env
+      NEXUS_CONTROL_PLANE_ADDR: api-gateway:9091
+      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:-dev-worker-key}
+      NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
+      # Subscribes to BOTH queues so gpu work has somewhere to go while the
+      # cpu-only agent still handles the default queue.
+      AGENT_QUEUES: default,gpu
+      AGENT_LABELS: "zone=local,accelerator=nvidia"
+      AGENT_EXECUTORS: subprocess,docker
+      # 4 cores / 32 GiB / 2 simulated GPUs. Advertised capacity is a ledger
+      # entry, not a hardware probe, so the scheduler's GPU matching is
+      # exercisable on a machine with no GPU at all.
+      AGENT_CAPACITY_CPU_MILLIS: "4000"
+      AGENT_CAPACITY_MEMORY_BYTES: "34359738368"
+      AGENT_CAPACITY_GPU_COUNT: "2"
+      AGENT_CAPACITY_GPU_KIND: ${NEXUS_GPU_KIND:-nvidia-a100}
+      AGENT_CAPACITY_GPU_MEMORY_BYTES: "42949672960"
+      AGENT_CAPACITY_DISK_BYTES: "53687091200"
+      AGENT_HEARTBEAT_INTERVAL_MS: "5000"
+      AGENT_WAL_DIR: /var/lib/nexus/wal
+      LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
+    volumes:
+      - agent-gpu-wal:/var/lib/nexus/wal
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  # ── UI ──────────────────────────────────────────────────────────────────
+  ui:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.ui
+      args:
+        # Empty base: nginx proxies /v1 on the same origin, so the bundle carries
+        # no absolute URL and the image works behind any hostname.
+        VITE_NEXUS_API_BASE: ""
+        VITE_NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
+    depends_on:
+      api-gateway:
+        # The UI renders an honest error rather than a blank screen when the
+        # gateway is down, so it does not strictly need to wait. Waiting anyway
+        # means the first page load after `up` shows data instead of an error.
+        condition: service_healthy
+    ports:
+      - "${NEXUS_UI_PORT:-3000}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  minio-data:
+  agent-cpu-wal:
+  agent-gpu-wal:

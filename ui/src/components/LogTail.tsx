@@ -1,0 +1,181 @@
+/**
+ * Streaming log tail for one attempt.
+ *
+ * Transport: EventSource against the logs endpoint with follow=true, falling
+ * back to a plain fetch + interval when the stream cannot be established. Same
+ * reasoning as the event stream — a log pane that has silently stopped
+ * following looks exactly like a task that has stopped logging, and those are
+ * very different situations.
+ *
+ * The buffer is capped. An unbounded log pane is how an operator console
+ * becomes the thing that falls over during the incident it is meant to explain.
+ */
+
+import { useEffect, useRef, useState } from 'react';
+import { ApiError, api, logStreamUrl, parseLogPayload } from '../api/client';
+import type { LogLine } from '../api/types';
+import { ErrorBox, Loading } from './Status';
+
+const MAX_LINES = 5000;
+const FALLBACK_POLL_MS = 3000;
+const STREAM_HANDSHAKE_MS = 5000;
+
+type Transport = 'connecting' | 'stream' | 'polling';
+
+export function LogTail({
+  namespace,
+  attemptId,
+  live,
+}: {
+  namespace: string;
+  attemptId: string;
+  /** False for a terminal attempt: the log is complete, so stop following. */
+  live: boolean;
+}) {
+  const [lines, setLines] = useState<LogLine[] | null>(null);
+  const [transport, setTransport] = useState<Transport>('connecting');
+  const [error, setError] = useState<unknown>(null);
+  const [follow, setFollow] = useState(true);
+  const paneRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setLines(null);
+    setError(null);
+    setTransport('connecting');
+
+    let cancelled = false;
+    let source: EventSource | null = null;
+    let timer: number | undefined;
+    let handshake: number | undefined;
+
+    const append = (incoming: LogLine[]) => {
+      if (cancelled || incoming.length === 0) return;
+      setLines((prev) => {
+        const next = [...(prev ?? []), ...incoming];
+        return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
+      });
+    };
+
+    const pollOnce = async () => {
+      try {
+        const fetched = await api.getLogs(namespace, attemptId);
+        if (cancelled) return;
+        // Replace rather than append: the non-streaming endpoint returns the
+        // whole tail, so appending would duplicate every line each cycle.
+        setLines(fetched);
+        setError(null);
+      } catch (err) {
+        if (cancelled) return;
+        // A 404 on a not-yet-started attempt is expected, not an error worth
+        // shouting about; show it as an empty log instead.
+        if (err instanceof ApiError && err.isNotImplemented) {
+          setLines((prev) => prev ?? []);
+          setError(prev404(err));
+        } else {
+          setError(err);
+        }
+      }
+    };
+
+    const transportRef = { current: 'connecting' as Transport };
+
+    const startPolling = () => {
+      if (cancelled || transportRef.current === 'polling') return;
+      transportRef.current = 'polling';
+      setTransport('polling');
+      void pollOnce();
+      if (live) timer = window.setInterval(() => void pollOnce(), FALLBACK_POLL_MS);
+    };
+
+    if (typeof EventSource !== 'undefined' && live) {
+      source = new EventSource(logStreamUrl(namespace, attemptId));
+      source.onopen = () => {
+        if (cancelled) return;
+        transportRef.current = 'stream';
+        setTransport('stream');
+        setLines((prev) => prev ?? []);
+      };
+      source.onmessage = (ev) => {
+        if (cancelled) return;
+        transportRef.current = 'stream';
+        setTransport('stream');
+        append(parseLogPayload(ev.data));
+      };
+      source.onerror = () => {
+        source?.close();
+        source = null;
+        startPolling();
+      };
+      handshake = window.setTimeout(() => {
+        if (!cancelled && transportRef.current !== 'stream') {
+          source?.close();
+          source = null;
+          startPolling();
+        }
+      }, STREAM_HANDSHAKE_MS);
+    } else {
+      startPolling();
+    }
+
+    return () => {
+      cancelled = true;
+      source?.close();
+      if (timer !== undefined) window.clearInterval(timer);
+      if (handshake !== undefined) window.clearTimeout(handshake);
+    };
+  }, [namespace, attemptId, live]);
+
+  useEffect(() => {
+    if (follow && paneRef.current) {
+      paneRef.current.scrollTop = paneRef.current.scrollHeight;
+    }
+  }, [lines, follow]);
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <span>logs · attempt {attemptId.slice(0, 8)}</span>
+        <span className="spacer" />
+        <span className="chip">
+          {!live ? 'complete' : transport === 'stream' ? 'streaming' : transport === 'polling' ? 'polling' : 'connecting'}
+        </span>
+        <label className="row" style={{ gap: 5, fontSize: 11, color: 'var(--fg-muted)' }}>
+          <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />
+          follow
+        </label>
+      </div>
+
+      {error !== null && lines === null ? (
+        <div style={{ padding: 12 }}>
+          <ErrorBox error={error} what="logs" />
+        </div>
+      ) : lines === null ? (
+        <Loading rows={6} label="Loading logs" />
+      ) : lines.length === 0 ? (
+        <div className="logs muted">
+          No log output.
+          {live
+            ? ' If the attempt has not started, the worker has not opened a log stream yet.'
+            : ' The attempt produced no output.'}
+        </div>
+      ) : (
+        <div className="logs" ref={paneRef} role="log" aria-live={follow ? 'polite' : 'off'}>
+          {lines.map((l, i) => (
+            <div key={i} className={`log-line ${l.stream === 'stderr' ? 'stderr' : ''}`}>
+              {l.ts && <span className="log-ts">{l.ts}</span>}
+              <span className="log-msg">{l.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Downgrades a "not built yet" log error to something non-alarming. */
+function prev404(err: ApiError): ApiError {
+  return new ApiError(
+    'No log stream available for this attempt yet (the logs endpoint returned 404).',
+    { status: err.status, url: err.url, body: err.body },
+  );
+}

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexus-sdk"
+version = "0.1.0"
+description = "Python SDK for the Nexus workflow orchestration platform -- a compiler for WorkflowSpec, not a scheduler hook."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [{name = "Khuriwal Group"}]
+keywords = ["workflow", "orchestration", "dag", "scheduler"]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+
+# No runtime dependencies, deliberately. The SDK is installed into every task
+# image; each dependency is a version conflict waiting to happen with the user's
+# own requirements. The HTTP client is built on urllib from the stdlib.
+dependencies = []
+
+[project.optional-dependencies]
+# YAML is needed only to RENDER a compiled spec, never to compile one.
+yaml = ["PyYAML>=6.0"]
+dev = ["pytest>=8.0", "PyYAML>=6.0"]
+
+[project.urls]
+Homepage = "https://github.com/khuriwalgroup/kgf-nexus"
+
+[tool.setuptools.packages.find]
+include = ["nexus*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_unused_ignores = true

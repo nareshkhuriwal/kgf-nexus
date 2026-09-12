@@ -1,0 +1,293 @@
+// Command workflow-manager owns the WorkflowRun lifecycle, the workflow_specs and
+// workflow_runs tables, and the durable timer table (ADR-0011).
+//
+// Its most operationally important component is the timer reconciler: EVERY
+// deadline in the system is a row in `timers`, and this process is what makes those
+// rows fire. Using the database rather than in-memory timers means a restart of this
+// service loses nothing — the failure mode of in-memory timer wheels, where a
+// rolling deploy silently drops every pending deadline (§3.2).
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
+	"google.golang.org/grpc"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
+	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/grpcapi"
+	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/runs"
+	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/timers"
+)
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("workflow-manager exited with an error", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	log := newLogger()
+	slog.SetDefault(log)
+
+	cfg := loadConfig()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	dbCtx, dbCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer dbCancel()
+	pool, err := store.GWOpen(dbCtx, cfg.DatabaseURL, cfg.MaxConns)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer pool.Close()
+	db := store.GWDB(pool)
+
+	// Peer clients. The workflow-manager owns runs but not nodes or attempts, so
+	// materializing a DAG and cancelling attempts are calls to their owners.
+	dagClient := grpcapi.NewDAGEngineClient(cfg.DAGEngineAddr, log)
+	schedClient := grpcapi.NewSchedulerClient(cfg.SchedulerAddr, log)
+	eventClient := grpcapi.NewEventClient(cfg.EventServiceAddr, log)
+
+	runSvc := runs.New(db, eventClient, dagClient, schedClient, log)
+
+	// ── timer reconciler ──────────────────────────────────────────────────
+	// The claimant identifies THIS replica in timers.claimed_by. Using the
+	// hostname plus the pid means a restarted pod on the same host does not look
+	// like its predecessor, so the stale-claim sweeper correctly reclaims what the
+	// dead process was holding.
+	claimant := fmt.Sprintf("%s/%d", hostname(), os.Getpid())
+	rec := timers.New(db, timers.Config{
+		Interval:     cfg.TimerInterval,
+		BatchSize:    cfg.TimerBatchSize,
+		ClaimTimeout: cfg.TimerClaimTimeout,
+		Claimant:     claimant,
+	}, log)
+
+	registerTimerHandlers(rec, runSvc, schedClient, log)
+
+	// ── gRPC API ──────────────────────────────────────────────────────────
+	grpcSrv := grpc.NewServer()
+	grpcapi.Register(grpcSrv, runSvc, log)
+
+	grpcLis, err := net.Listen("tcp", cfg.GRPCAddr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", cfg.GRPCAddr, err)
+	}
+
+	// ── health ────────────────────────────────────────────────────────────
+	hc := health.New(map[string]health.Check{
+		"postgres": func(ctx context.Context) error { return pool.Ping(ctx) },
+		// Readiness includes the timer BACKLOG, because a reconciler that is
+		// falling behind is a silent correctness problem: deadlines still fire,
+		// just too late to mean what they promised. Surfacing it as
+		// not-ready sheds traffic from this replica and makes the condition
+		// visible instead of merely slow.
+		"timer_backlog": func(ctx context.Context) error {
+			due, _, err := rec.Backlog(ctx)
+			if err != nil {
+				return err
+			}
+			if due > int64(cfg.TimerBacklogAlert) {
+				return fmt.Errorf("%d timers are overdue (threshold %d)", due, cfg.TimerBacklogAlert)
+			}
+			return nil
+		},
+	})
+	mux := http.NewServeMux()
+	hc.Routes(mux)
+	healthSrv := &http.Server{
+		Addr:              cfg.HealthAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+	}
+
+	errCh := make(chan error, 3)
+	go func() {
+		log.Info("gRPC listener started", "addr", cfg.GRPCAddr)
+		if err := grpcSrv.Serve(grpcLis); err != nil {
+			errCh <- fmt.Errorf("grpc listener: %w", err)
+		}
+	}()
+	go func() {
+		log.Info("health listener started", "addr", cfg.HealthAddr)
+		if err := healthSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- fmt.Errorf("health listener: %w", err)
+		}
+	}()
+
+	// The reconciler runs in THIS process alongside the API rather than as a
+	// separate deployment. Several replicas may run it concurrently and correctness
+	// does not depend on there being one: FOR UPDATE SKIP LOCKED means two replicas
+	// never claim the same timer, so no leader election is needed (§3.2).
+	recDone := make(chan struct{})
+	go func() {
+		defer close(recDone)
+		if err := rec.Run(ctx); err != nil {
+			errCh <- fmt.Errorf("timer reconciler: %w", err)
+		}
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		log.Info("shutdown signal received; draining")
+	}
+
+	hc.BeginDraining()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancel()
+
+	// The reconciler stops first, so no new timer effects start while the API is
+	// winding down. Any batch it had claimed is left claimed and is reclaimed by the
+	// stale-claim sweeper on another replica — losing nothing, which is the point of
+	// claiming rather than deleting.
+	select {
+	case <-recDone:
+	case <-shutdownCtx.Done():
+		log.Warn("timer reconciler did not stop within the grace period")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		grpcSrv.GracefulStop()
+		close(stopped)
+	}()
+	if err := healthSrv.Shutdown(shutdownCtx); err != nil {
+		log.Error("health shutdown did not complete cleanly", "error", err)
+	}
+	select {
+	case <-stopped:
+	case <-shutdownCtx.Done():
+		grpcSrv.Stop()
+	}
+
+	log.Info("workflow-manager stopped")
+	return nil
+}
+
+// registerTimerHandlers wires every timer kind this service dispatches.
+//
+// A kind with no handler is left claimed and then re-pooled rather than discarded
+// (see the reconciler), so a missing registration degrades to a stalled deadline
+// that shows up in the backlog metric — loud rather than silent. Registering all of
+// them here, in one place, is what makes it possible to see at a glance that none is
+// missing.
+func registerTimerHandlers(rec *timers.Reconciler, runSvc *runs.Service, sched *grpcapi.SchedulerClient, log *slog.Logger) {
+	// run_deadline: the run's own wall-clock budget. Owned here because
+	// workflow_runs is this service's table.
+	rec.Handle(timers.KindRunDeadline, func(ctx context.Context, t store.Timer) error {
+		return runSvc.OnRunDeadline(ctx, t.SubjectID)
+	})
+
+	// The four attempt-scoped timeouts and the retry backoff all act on
+	// task_attempts and leases, which the SCHEDULER owns. The reconciler lives here
+	// because `timers` is this service's table, but the EFFECT is applied by the
+	// owner — the alternative would be this service writing another's table, which
+	// ADR-0011's per-service DB roles make fail at the database anyway.
+	//
+	// Splitting the timer store from the timer effect is the one awkward seam the
+	// decomposition creates, and it is preferable to the alternative: a per-service
+	// timer table would mean several reconcilers, several sweepers, and no single
+	// place to answer "what deadlines are overdue right now".
+	forward := func(kind string, fn func(context.Context, string) error) {
+		rec.Handle(kind, func(ctx context.Context, t store.Timer) error {
+			if err := fn(ctx, t.SubjectID); err != nil {
+				return fmt.Errorf("dispatch %s for %s: %w", kind, t.SubjectID, err)
+			}
+			return nil
+		})
+	}
+	forward(timers.KindScheduleToStart, sched.OnScheduleToStart)
+	forward(timers.KindStartToClose, sched.OnStartToClose)
+	forward(timers.KindScheduleToClose, sched.OnScheduleToClose)
+	forward(timers.KindHeartbeat, sched.OnHeartbeatTimeout)
+	forward(timers.KindRetryBackoff, sched.OnRetryBackoff)
+	forward(timers.KindLeaseExpiry, sched.OnLeaseExpiry)
+}
+
+type config struct {
+	GRPCAddr          string
+	HealthAddr        string
+	DatabaseURL       string
+	MaxConns          int32
+	DAGEngineAddr     string
+	SchedulerAddr     string
+	EventServiceAddr  string
+	TimerInterval     time.Duration
+	TimerBatchSize    int
+	TimerClaimTimeout time.Duration
+	TimerBacklogAlert int
+	ShutdownTimeout   time.Duration
+}
+
+func loadConfig() config {
+	return config{
+		GRPCAddr:         env("NEXUS_WFM_GRPC_ADDR", ":9091"),
+		HealthAddr:       env("NEXUS_WFM_HEALTH_ADDR", ":8081"),
+		DatabaseURL:      env("NEXUS_DATABASE_URL", "postgres://postgres:test@localhost:55432/nexus"),
+		MaxConns:         int32(envInt("NEXUS_DB_MAX_CONNS", 20)),
+		DAGEngineAddr:    env("NEXUS_DAG_ENGINE_ADDR", ""),
+		SchedulerAddr:    env("NEXUS_SCHEDULER_ADDR", ""),
+		EventServiceAddr: env("NEXUS_EVENT_SERVICE_ADDR", ""),
+		// One second bounds how LATE a deadline can fire. It is therefore
+		// correctness-adjacent, not merely a performance knob: it must stay well
+		// inside the smallest deadline the platform enforces.
+		TimerInterval:     time.Duration(envInt("NEXUS_TIMER_INTERVAL_MS", 1000)) * time.Millisecond,
+		TimerBatchSize:    envInt("NEXUS_TIMER_BATCH_SIZE", 100),
+		TimerClaimTimeout: time.Duration(envInt("NEXUS_TIMER_CLAIM_TIMEOUT_SEC", 120)) * time.Second,
+		TimerBacklogAlert: envInt("NEXUS_TIMER_BACKLOG_ALERT", 1000),
+		ShutdownTimeout:   time.Duration(envInt("NEXUS_SHUTDOWN_TIMEOUT_SEC", 30)) * time.Second,
+	}
+}
+
+func newLogger() *slog.Logger {
+	level := slog.LevelInfo
+	if v := os.Getenv("NEXUS_LOG_LEVEL"); v != "" {
+		_ = level.UnmarshalText([]byte(v))
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})).
+		With("service", "workflow-manager")
+}
+
+func hostname() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return "unknown-host"
+	}
+	return h
+}
+
+func env(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
+}

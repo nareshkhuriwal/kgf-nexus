@@ -1,0 +1,701 @@
+// Package rest implements the public REST/JSON API from architecture §8.2.
+//
+// This surface is for humans, the CLI, and the UI. The worker protocol lives on a
+// SEPARATE gRPC listener and a separate port: worker traffic is chatty and
+// latency-sensitive, and a fleet of workers long-polling must not contend with a
+// UI query that scans a run's history (§3.2).
+package rest
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/spec"
+)
+
+// WorkflowManager is the workflow-manager's API as the gateway needs it.
+//
+// The gateway owns NEITHER workflow_specs nor workflow_runs (ADR-0011), so every
+// mutation here is a call, not a query. The gateway's job is authentication,
+// validation, and shape — not lifecycle.
+type WorkflowManager interface {
+	PutSpec(ctx context.Context, namespace, name, hash string, canonicalJSON []byte, createdBy string) (row store.SpecRow, created bool, err error)
+	CreateRun(ctx context.Context, req CreateRunRequest) (run store.RunRow, created bool, err error)
+	CancelRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
+	PauseRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
+	ResumeRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
+	RetryRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
+}
+
+// ResourceManagerAPI is the resource-manager's API as the gateway needs it.
+type ResourceManagerAPI interface {
+	DrainWorker(ctx context.Context, namespace, workerID string) error
+	Capacity(ctx context.Context, namespace string) (CapacityReport, error)
+}
+
+// LogStreamer resolves an attempt's logs.
+//
+// Logs live in the result store, NOT in the metadata store, and are streamed
+// through rather than buffered: task payloads never transit the control plane
+// (invariant 6), and an attempt's log can be gigabytes.
+type LogStreamer interface {
+	StreamAttemptLogs(ctx context.Context, namespace, attemptID string, w http.ResponseWriter) error
+}
+
+// CreateRunRequest is the run-creation call.
+type CreateRunRequest struct {
+	Namespace      string
+	SpecID         string
+	SpecName       string
+	IdempotencyKey string
+	TriggerKind    string
+	Params         map[string]any
+	Priority       int32
+	Actor          string
+}
+
+// CapacityReport is advertised-versus-committed capacity for a namespace.
+type CapacityReport struct {
+	Namespace  string         `json:"namespace"`
+	Advertised map[string]any `json:"advertised"`
+	Committed  map[string]any `json:"committed"`
+	Workers    int            `json:"workers"`
+	// Pending explains a stall. A UI showing an unexplained "0 running, 40
+	// pending" is useless during an incident; a structured reason turns it into
+	// "waiting_for_resources: gpu".
+	PendingAttempts int `json:"pending_attempts"`
+}
+
+// API is the REST handler set.
+type API struct {
+	db    store.GWDB
+	auth  *authn.Authenticator
+	wfm   WorkflowManager
+	rm    ResourceManagerAPI
+	logs  LogStreamer
+	log   *slog.Logger
+	clock func() time.Time
+}
+
+// New builds the REST API.
+func New(db store.GWDB, auth *authn.Authenticator, wfm WorkflowManager, rm ResourceManagerAPI, logs LogStreamer, log *slog.Logger) *API {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &API{db: db, auth: auth, wfm: wfm, rm: rm, logs: logs, log: log, clock: time.Now}
+}
+
+// Routes builds the mux for §8.2.
+//
+// Go 1.22+ pattern routing is used rather than a third-party router: the path set
+// is small and fixed, and a dependency whose only job is splitting strings is a
+// dependency whose CVEs we would have to track for no benefit.
+func (a *API) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.Handle("POST /v1/namespaces/{ns}/specs", a.guard(authn.ActionWrite, a.submitSpec))
+	mux.Handle("GET /v1/namespaces/{ns}/specs/{name}/versions", a.guard(authn.ActionRead, a.listSpecVersions))
+
+	mux.Handle("POST /v1/namespaces/{ns}/runs", a.guard(authn.ActionWrite, a.createRun))
+	mux.Handle("GET /v1/namespaces/{ns}/runs", a.guard(authn.ActionRead, a.listRuns))
+	mux.Handle("GET /v1/namespaces/{ns}/runs/{id}", a.guard(authn.ActionRead, a.getRun))
+	mux.Handle("GET /v1/namespaces/{ns}/runs/{id}/events", a.guard(authn.ActionRead, a.getRunEvents))
+	mux.Handle("POST /v1/namespaces/{ns}/runs/{id}/cancel", a.guard(authn.ActionWrite, a.cancelRun))
+	mux.Handle("POST /v1/namespaces/{ns}/runs/{id}/pause", a.guard(authn.ActionWrite, a.pauseRun))
+	mux.Handle("POST /v1/namespaces/{ns}/runs/{id}/resume", a.guard(authn.ActionWrite, a.resumeRun))
+	mux.Handle("POST /v1/namespaces/{ns}/runs/{id}/retry", a.guard(authn.ActionWrite, a.retryRun))
+
+	mux.Handle("GET /v1/namespaces/{ns}/attempts/{id}/logs", a.guard(authn.ActionRead, a.attemptLogs))
+
+	mux.Handle("GET /v1/namespaces/{ns}/workers", a.guard(authn.ActionRead, a.listWorkers))
+	mux.Handle("POST /v1/namespaces/{ns}/workers/{id}/drain", a.guard(authn.ActionAdminWrite, a.drainWorker))
+	mux.Handle("GET /v1/namespaces/{ns}/capacity", a.guard(authn.ActionRead, a.capacity))
+
+	// The schema the gateway actually enforces, served so authors and the SDK can
+	// validate locally against the same grammar rather than a documented copy of it.
+	mux.HandleFunc("GET /v1/schemas/workflow-spec-v1.json", a.serveSchema)
+
+	return mux
+}
+
+// guard authenticates, authorizes for the path's namespace, and then dispatches.
+//
+// Wrapping every handler means no route can be added without an authorization
+// decision: forgetting the check is not possible, because the check is the only
+// way to register a route.
+func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Request, authn.Principal)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, err := a.auth.Authenticate(r.Context(), authn.ExtractBearer(r.Header.Get("Authorization")))
+		if errors.Is(err, authn.ErrUnauthenticated) {
+			// No detail about WHY. Distinguishing "no such key" from "revoked"
+			// would make this endpoint an oracle for probing valid keys.
+			writeError(w, http.StatusUnauthorized, "unauthenticated", "valid credentials are required")
+			return
+		}
+		if err != nil {
+			// A database outage is not an authentication failure; 503 tells the
+			// client to retry rather than to rotate its credential.
+			a.log.ErrorContext(r.Context(), "authentication backend failed", "error", err)
+			writeError(w, http.StatusServiceUnavailable, "unavailable", "authentication is temporarily unavailable")
+			return
+		}
+
+		ns := r.PathValue("ns")
+		if err := p.Authorize(ns, action); err != nil {
+			writeError(w, http.StatusForbidden, "forbidden", "not permitted for this namespace")
+			return
+		}
+
+		h(w, r.WithContext(authn.WithPrincipal(r.Context(), p)), p)
+	})
+}
+
+// ── specs ─────────────────────────────────────────────────────────────────
+
+// submitSpec runs the full pipeline: accept JSON or YAML, validate structurally
+// and semantically, canonicalize, content-address, store.
+//
+// A byte-identical resubmit is a NO-OP that returns the existing version with 200
+// rather than creating a redundant one (ADR-0004). The distinction between 200 and
+// 201 is the only way a client can tell "this was already here" from "I just
+// created it", which matters to a CI pipeline deciding whether anything changed.
+func (a *API) submitSpec(w http.ResponseWriter, r *http.Request, p authn.Principal) {
+	body, err := readBody(r, maxSpecBytes)
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "spec_too_large", err.Error())
+		return
+	}
+
+	format := spec.DetectFormat(body, contentType(r))
+	compiled, err := spec.Compile(body, format)
+	if err != nil {
+		var vf *spec.ValidationFailure
+		if errors.As(err, &vf) {
+			// 422, not 400: the request was well-formed HTTP and well-formed JSON;
+			// the DOCUMENT is semantically unacceptable. The distinction tells a
+			// client whether to fix its transport or its content.
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"error":    "spec_invalid",
+				"message":  "spec failed validation",
+				"problems": vf.Problems,
+			})
+			return
+		}
+		a.log.ErrorContext(r.Context(), "spec compilation failed unexpectedly", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not compile spec")
+		return
+	}
+
+	ns := r.PathValue("ns")
+	if got := compiled.Proto.GetNamespace(); got != ns {
+		// The path and the document must agree. Silently preferring one would let a
+		// caller authenticated for namespace A store a spec claiming namespace B.
+		writeError(w, http.StatusUnprocessableEntity, "namespace_mismatch",
+			fmt.Sprintf("spec declares namespace %q but was submitted to %q", got, ns))
+		return
+	}
+
+	row, created, err := a.wfm.PutSpec(r.Context(), ns, compiled.Proto.GetName(), compiled.Hash, compiled.Canonical, p.Name)
+	if err != nil {
+		a.log.ErrorContext(r.Context(), "failed to store spec", "namespace", ns, "error", err)
+		writeError(w, http.StatusBadGateway, "upstream_unavailable", "could not store spec")
+		return
+	}
+
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, map[string]any{
+		"id":         row.ID,
+		"namespace":  row.Namespace,
+		"name":       row.Name,
+		"version":    row.Version,
+		"spec_hash":  row.SpecHash,
+		"created":    created,
+		"task_count": len(compiled.Proto.GetTasks()),
+	})
+}
+
+func (a *API) listSpecVersions(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	rows, err := store.GatewayListSpecVersions(r.Context(), a.db, r.PathValue("ns"), r.PathValue("name"), intParam(r, "limit", 50))
+	if err != nil {
+		a.fail(w, r, "list spec versions", err)
+		return
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, s := range rows {
+		out = append(out, map[string]any{
+			"id": s.ID, "name": s.Name, "version": s.Version,
+			"spec_hash": s.SpecHash, "created_by": s.CreatedBy, "created_at": s.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"versions": out})
+}
+
+func (a *API) serveSchema(w http.ResponseWriter, r *http.Request) {
+	b, err := spec.SchemaBytes()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "schema unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/schema+json")
+	// The schema is immutable for the life of the binary, so it is safe to cache
+	// hard; a client re-fetching it on every validation is pure waste.
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = w.Write(b)
+}
+
+// ── runs ──────────────────────────────────────────────────────────────────
+
+// createRun is the endpoint where the Idempotency-Key header is honoured.
+//
+// The three outcomes are all load-bearing:
+//   - no key            -> create normally
+//   - key + same body   -> return the CACHED response, do not create again
+//   - key + DIFFERENT body -> 409
+//
+// That last case is the interesting one. The lazy implementation returns the
+// cached response for any reuse of the key, which silently answers a question
+// about request B with the result of request A. Returning 409 catches the client
+// bug — a retry loop whose body changed, or a key derived from too little of the
+// input — at the moment it is cheapest to find, instead of quietly running the
+// wrong workflow.
+func (a *API) createRun(w http.ResponseWriter, r *http.Request, p authn.Principal) {
+	ns := r.PathValue("ns")
+
+	body, err := readBody(r, maxRunBytes)
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
+		return
+	}
+
+	// The body is canonicalized BEFORE fingerprinting, so two byte-different but
+	// semantically identical requests (different key order, different whitespace)
+	// are correctly recognized as the same request rather than 409-ing a
+	// well-behaved client.
+	canonical, err := spec.CanonicalizeJSON(nonEmptyJSON(body))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+
+	var req struct {
+		SpecID      string         `json:"spec_id"`
+		SpecName    string         `json:"spec_name"`
+		TriggerKind string         `json:"trigger_kind"`
+		Params      map[string]any `json:"params"`
+		Priority    int32          `json:"priority"`
+	}
+	if err := json.Unmarshal(canonical, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if req.SpecID == "" && req.SpecName == "" {
+		writeError(w, http.StatusBadRequest, "missing_spec", "either spec_id or spec_name is required")
+		return
+	}
+
+	idemKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	requestHash := store.HashRequest(canonical)
+
+	if idemKey != "" {
+		cached, replay, err := store.GatewayClaimIdempotencyKey(r.Context(), a.db, ns, idemKey, requestHash)
+		switch {
+		case errors.Is(err, store.ErrIdempotencyConflict):
+			writeError(w, http.StatusConflict, "idempotency_key_reused",
+				"this Idempotency-Key was already used with a different request body")
+			return
+		case err != nil:
+			a.fail(w, r, "claim idempotency key", err)
+			return
+		case replay:
+			// Byte-for-byte the original response. Replaying it rather than
+			// re-deriving it means a client sees an identical answer even if the
+			// run has since changed state, which is what makes the retry safe to
+			// treat as the original call.
+			a.log.InfoContext(r.Context(), "replayed cached response for idempotency key",
+				"namespace", ns, "idempotency_key", idemKey)
+			w.Header().Set("Idempotency-Replayed", "true")
+			writeRaw(w, http.StatusOK, cached)
+			return
+		}
+	}
+
+	run, created, err := a.wfm.CreateRun(r.Context(), CreateRunRequest{
+		Namespace:      ns,
+		SpecID:         req.SpecID,
+		SpecName:       req.SpecName,
+		IdempotencyKey: idemKey,
+		TriggerKind:    orDefault(req.TriggerKind, "api"),
+		Params:         req.Params,
+		Priority:       req.Priority,
+		Actor:          "user:" + p.Name,
+	})
+	if err != nil {
+		// The claim must be RELEASED on failure, or a transient error would poison
+		// the key permanently and the client's correct retry could never succeed.
+		if idemKey != "" {
+			if relErr := store.GatewayReleaseIdempotencyKey(r.Context(), a.db, ns, idemKey); relErr != nil {
+				a.log.ErrorContext(r.Context(), "failed to release idempotency claim after a failed creation",
+					"namespace", ns, "idempotency_key", idemKey, "error", relErr)
+			}
+		}
+		if errors.Is(err, store.ErrMaxActiveRuns) {
+			writeError(w, http.StatusTooManyRequests, "max_active_runs", err.Error())
+			return
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "spec_not_found", "no such spec")
+			return
+		}
+		a.fail(w, r, "create run", err)
+		return
+	}
+
+	payload := runPayload(run)
+	status := http.StatusCreated
+	if !created {
+		status = http.StatusOK
+	}
+
+	if idemKey != "" {
+		encoded, err := json.Marshal(payload)
+		if err == nil {
+			if err := store.GatewayStoreIdempotentResponse(r.Context(), a.db, ns, idemKey, encoded); err != nil {
+				// The run EXISTS; only the replay cache failed. Failing the request
+				// now would be worse: the client would retry and, finding the key
+				// claimed with no cached response, be stuck.
+				a.log.ErrorContext(r.Context(), "run created but response not cached for replay",
+					"run_id", run.ID, "idempotency_key", idemKey, "error", err)
+			}
+		}
+	}
+
+	writeJSON(w, status, payload)
+}
+
+func (a *API) listRuns(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	f := store.RunFilter{
+		SpecName: r.URL.Query().Get("spec"),
+		Limit:    intParam(r, "limit", 100),
+	}
+	if s := r.URL.Query().Get("state"); s != "" {
+		f.States = strings.Split(s, ",")
+	}
+	if b := r.URL.Query().Get("before"); b != "" {
+		t, err := time.Parse(time.RFC3339, b)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_before", "before must be an RFC3339 timestamp")
+			return
+		}
+		f.Before = &t
+	}
+
+	rows, err := store.GatewayListRuns(r.Context(), a.db, r.PathValue("ns"), f)
+	if err != nil {
+		a.fail(w, r, "list runs", err)
+		return
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, run := range rows {
+		out = append(out, runPayload(run))
+	}
+	resp := map[string]any{"runs": out}
+	// Keyset cursor, so deep pagination neither degrades nor skips rows as new
+	// runs arrive mid-listing.
+	if len(rows) == f.Limit && len(rows) > 0 {
+		resp["next_before"] = rows[len(rows)-1].CreatedAt.Format(time.RFC3339Nano)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// getRun returns the run plus its node and attempt states, which is what a detail
+// view needs; making the UI issue three requests to render one page would just
+// move the joins to the client.
+func (a *API) getRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	ns, id := r.PathValue("ns"), r.PathValue("id")
+	run, err := store.GatewayGetRun(r.Context(), a.db, ns, id)
+	if err != nil {
+		a.fail(w, r, "get run", err)
+		return
+	}
+	nodes, err := store.GatewayListRunNodes(r.Context(), a.db, id)
+	if err != nil {
+		a.fail(w, r, "list run nodes", err)
+		return
+	}
+	attempts, err := store.GatewayListRunAttempts(r.Context(), a.db, id)
+	if err != nil {
+		a.fail(w, r, "list run attempts", err)
+		return
+	}
+
+	nodeOut := make([]map[string]any, 0, len(nodes))
+	for _, n := range nodes {
+		nodeOut = append(nodeOut, map[string]any{
+			"node_id": n.NodeID, "task_ref": n.TaskRef, "state": n.State,
+			"trigger_rule": n.TriggerRule, "max_attempts": n.MaxAttempts,
+			"attempts_used": n.AttemptsUsed, "map_index": n.MapIndex,
+		})
+	}
+	attemptOut := make([]map[string]any, 0, len(attempts))
+	for _, at := range attempts {
+		attemptOut = append(attemptOut, attemptPayload(at))
+	}
+
+	payload := runPayload(run)
+	payload["nodes"] = nodeOut
+	payload["attempts"] = attemptOut
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (a *API) cancelRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	a.lifecycle(w, r, "cancel", a.wfm.CancelRun)
+}
+
+func (a *API) pauseRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	a.lifecycle(w, r, "pause", a.wfm.PauseRun)
+}
+
+func (a *API) resumeRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	a.lifecycle(w, r, "resume", a.wfm.ResumeRun)
+}
+
+func (a *API) retryRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	a.lifecycle(w, r, "retry", a.wfm.RetryRun)
+}
+
+func (a *API) lifecycle(w http.ResponseWriter, r *http.Request, op string, fn func(context.Context, string, string) (store.RunRow, error)) {
+	run, err := fn(r.Context(), r.PathValue("ns"), r.PathValue("id"))
+	if errors.Is(err, store.ErrRunStateConflict) {
+		// 409 with the reason, not a bare rejection: an operator who clicks pause
+		// on a run that just failed deserves to be told it did not apply and why.
+		writeError(w, http.StatusConflict, "run_state_conflict", err.Error())
+		return
+	}
+	if err != nil {
+		a.fail(w, r, op+" run", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, runPayload(run))
+}
+
+// ── events, with SSE live tail ─────────────────────────────────────────────
+
+// getRunEvents returns run history, or streams it live when the client asks for
+// server-sent events.
+//
+// The cursor is the event SEQUENCE, not a timestamp. run_events carries
+// UNIQUE(run_id, seq) and is append-only, so sequence is a total order with no
+// ties and no clock dependency — which is exactly what a live tail needs in order
+// to resume across a reconnect without gaps or duplicates. A timestamp cursor
+// would drop or repeat events written in the same millisecond.
+func (a *API) getRunEvents(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	ns, id := r.PathValue("ns"), r.PathValue("id")
+	// Namespace-scoped existence check first: without it, event history would be
+	// readable across tenants by guessing a run UUID.
+	if _, err := store.GatewayGetRun(r.Context(), a.db, ns, id); err != nil {
+		a.fail(w, r, "get run", err)
+		return
+	}
+
+	after := int32(intParam(r, "after_seq", 0))
+	// Last-Event-ID is how SSE clients resume automatically after a dropped
+	// connection; honouring it means a reconnect costs nothing.
+	if lastID := r.Header.Get("Last-Event-ID"); lastID != "" {
+		if n, err := strconv.Atoi(lastID); err == nil && n > 0 {
+			after = int32(n)
+		}
+	}
+
+	if wantsSSE(r) {
+		a.streamEvents(w, r, id, after)
+		return
+	}
+
+	events, err := store.GatewayListRunEvents(r.Context(), a.db, id, after, intParam(r, "limit", 500))
+	if err != nil {
+		a.fail(w, r, "list run events", err)
+		return
+	}
+	out := make([]map[string]any, 0, len(events))
+	for _, e := range events {
+		out = append(out, eventPayload(e))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": out})
+}
+
+// streamEvents holds the connection open and pushes new events as they land.
+//
+// Polling the append-only table rather than subscribing in-process because the
+// events are written by ANOTHER service (event-service owns run_events) and
+// possibly another replica, which this process has no in-memory signal for. The
+// sequence cursor makes the poll exact rather than approximate: we never re-send
+// and never skip.
+func (a *API) streamEvents(w http.ResponseWriter, r *http.Request, runID string, after int32) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "this server cannot stream")
+		return
+	}
+
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	// Buffering proxies would defeat a live tail entirely by holding events until
+	// the response ends, which for a stream is never.
+	h.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	ticker := time.NewTicker(sseInterval)
+	defer ticker.Stop()
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+
+	ctx := r.Context()
+	for {
+		events, err := store.GatewayListRunEvents(ctx, a.db, runID, after, sseBatch)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			a.log.ErrorContext(ctx, "SSE event read failed", "run_id", runID, "error", err)
+			fmt.Fprintf(w, "event: error\ndata: {\"error\":\"read_failed\"}\n\n")
+			flusher.Flush()
+			return
+		}
+		for _, e := range events {
+			payload, err := json.Marshal(eventPayload(e))
+			if err != nil {
+				continue
+			}
+			// id: lets the client resume via Last-Event-ID after a drop.
+			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", e.Seq, e.Kind, payload)
+			after = e.Seq
+		}
+		if len(events) > 0 {
+			flusher.Flush()
+			// More may be waiting; drain before parking on the ticker so a burst
+			// is not delivered one poll interval at a time.
+			if len(events) == sseBatch {
+				continue
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			// The client hung up. Returning cleanly, with no error log: a closed
+			// tail is the normal end of every SSE stream, and logging it as a
+			// failure would bury real errors under UI navigation noise.
+			return
+		case <-keepalive.C:
+			// A comment frame proves liveness to intermediaries that would
+			// otherwise reap an idle connection mid-run.
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+		case <-ticker.C:
+		}
+	}
+}
+
+// ── attempts, workers, capacity ───────────────────────────────────────────
+
+func (a *API) attemptLogs(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	ns, id := r.PathValue("ns"), r.PathValue("id")
+	// Namespace-scoped existence check before streaming anything, so logs are not
+	// readable across tenants by attempt UUID.
+	if _, err := store.GatewayGetAttempt(r.Context(), a.db, ns, id); err != nil {
+		a.fail(w, r, "get attempt", err)
+		return
+	}
+	if a.logs == nil {
+		writeError(w, http.StatusNotImplemented, "logs_unavailable", "no log backend is configured")
+		return
+	}
+	if err := a.logs.StreamAttemptLogs(r.Context(), ns, id, w); err != nil {
+		// Headers may already be written, so this cannot become a clean error
+		// response; log it and let the truncated stream speak for itself.
+		a.log.ErrorContext(r.Context(), "attempt log stream failed", "attempt_id", id, "error", err)
+	}
+}
+
+func (a *API) listWorkers(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	rows, err := store.GatewayListWorkers(r.Context(), a.db, r.PathValue("ns"))
+	if err != nil {
+		a.fail(w, r, "list workers", err)
+		return
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, wk := range rows {
+		out = append(out, map[string]any{
+			"id": wk.ID, "hostname": wk.Hostname, "queues": wk.Queues,
+			"executors": wk.Executors, "state": wk.State,
+			"labels": rawJSON(wk.Labels), "capacity": rawJSON(wk.Capacity),
+			"committed":     rawJSON(wk.Committed),
+			"agent_version": wk.AgentVersion,
+			"registered_at": wk.RegisteredAt, "last_heartbeat_at": wk.LastHeartbeatAt,
+			"active_attempts": wk.ActiveAttempts,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workers": out})
+}
+
+// drainWorker asks the worker to stop taking new work and finish what it has.
+//
+// The command does not reach the worker here: the control plane never dials a
+// worker (ADR-0005). It marks the worker DRAINING, and the DRAIN directive rides
+// the next heartbeat RESPONSE. At a 5s heartbeat that is a 5s worst case, which is
+// entirely adequate for a deploy or a scale-in — hence 202 Accepted rather than
+// 200, because the drain has been recorded, not yet performed.
+func (a *API) drainWorker(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	ns, id := r.PathValue("ns"), r.PathValue("id")
+	if _, err := store.GatewayGetWorker(r.Context(), a.db, ns, id); err != nil {
+		a.fail(w, r, "get worker", err)
+		return
+	}
+	if err := a.rm.DrainWorker(r.Context(), ns, id); err != nil {
+		a.fail(w, r, "drain worker", err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"worker_id": id,
+		"state":     "DRAINING",
+		"detail":    "the DRAIN directive will be delivered on the worker's next heartbeat response",
+	})
+}
+
+func (a *API) capacity(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	report, err := a.rm.Capacity(r.Context(), r.PathValue("ns"))
+	if err != nil {
+		a.fail(w, r, "read capacity", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+// fail maps an internal error onto a status code.
+//
+// Not-found is distinguished from a genuine fault so a client can tell "you asked
+// for something that does not exist" from "we are broken"; everything else is 500
+// with the detail in the log, never in the response, because an error string can
+// carry SQL or internal identifiers.
+func (a *API) fail(w http.ResponseWriter, r *http.Request, op string, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "not found")
+		return
+	}
+	a.log.ErrorContext(r.Context(), "request failed", "op", op, "error", err)
+	writeError(w, http.StatusInternalServerError, "internal", "request failed")
+}

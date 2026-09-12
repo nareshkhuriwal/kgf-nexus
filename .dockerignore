@@ -1,0 +1,7 @@
+# Keeps the build context small and reproducible. The repo root is the build
+# context for every image, so node_modules and build outputs must not ride along.
+.git
+.DS_Store
+**/node_modules
+ui/dist
+gpt_architecture.zip

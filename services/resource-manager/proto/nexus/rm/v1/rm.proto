@@ -1,0 +1,184 @@
+syntax = "proto3";
+
+package nexus.rm.v1;
+
+import "nexus/v1/common.proto";
+
+option go_package = "github.com/khuriwalgroup/kgf-nexus/services/resource-manager/gen/nexus/rm/v1;rmv1";
+
+// ResourceManagerService is the capacity ledger's API (architecture §3.2).
+//
+// It lives in the resource manager's own directory rather than in proto/nexus/v1
+// because the frozen contract does not define it and must not be edited. Every
+// message here references the frozen nexus.v1 types, so the resource vector the
+// scheduler reasons about and the one this service accounts for are literally
+// the same type — there is no translation layer to drift.
+//
+// OWNERSHIP (ADR-0011): this service owns the `workers` and `reservations`
+// tables and is the only writer of them, with ONE documented exception — the
+// scheduler writes reservations and workers.committed inside its dispatch claim
+// transaction, because atomicity with the lease and the attempt CAS outweighs
+// ownership purity (invariant 4). This API serves every other mutation path:
+// release on completion, release on worker death, and reconciliation.
+service ResourceManagerService {
+  // Creates a worker row and returns its per-SESSION id. A restarted agent gets
+  // a NEW id and can never reclaim its predecessor's leases (§5.5).
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+
+  // Records liveness AND reconciles the ledger against the worker's reported
+  // running attempts. The two are one RPC because the heartbeat is the only
+  // moment we have ground truth, and reconciling anywhere else means reconciling
+  // against a guess.
+  rpc HeartbeatWorker(HeartbeatWorkerRequest) returns (HeartbeatWorkerResponse);
+
+  rpc SetWorkerState(SetWorkerStateRequest) returns (SetWorkerStateResponse);
+  rpc GetWorker(GetWorkerRequest) returns (GetWorkerResponse);
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+
+  // Commits capacity outside the dispatch transaction. Refused with a structured
+  // shortfall rather than a bare error, so the caller can record an
+  // operator-legible pending_reason instead of an unexplained stall.
+  rpc Reserve(ReserveRequest) returns (ReserveResponse);
+
+  // IDEMPOTENT: releasing an absent reservation succeeds. Release is driven by
+  // completion reports, lease expiry and reconciliation — three independent
+  // at-least-once paths that will sometimes all fire for one attempt.
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+
+  // Explicit reconciliation, for the periodic sweep and for operator repair.
+  rpc Reconcile(ReconcileRequest) returns (ReconcileResponse);
+
+  // Frees a dead worker's entire committed vector (§5.5).
+  rpc ReleaseAllForWorker(ReleaseAllForWorkerRequest) returns (ReconcileResponse);
+}
+
+// WorkerState mirrors the frozen `worker_state` DB enum (§5.5). QUARANTINED is
+// declared but NOT issued in Phase 1; it is the Phase 2 circuit breaker for the
+// poison host.
+enum WorkerState {
+  WORKER_STATE_UNSPECIFIED = 0;
+  WORKER_STATE_ACTIVE = 1;
+  WORKER_STATE_DRAINING = 2;
+  WORKER_STATE_QUARANTINED = 3;
+  WORKER_STATE_DEAD = 4;
+}
+
+message RegisterWorkerRequest {
+  string namespace = 1;
+  string hostname = 2;
+  repeated string queues = 3;
+  map<string, string> labels = 4;
+  nexus.v1.ResourceVector capacity = 5;
+  repeated string executors = 6;
+  string agent_version = 7;
+  // Hashed by the CALLER, never the raw token: a token at rest in the metadata
+  // store is a credential a metadata compromise would leak.
+  string session_token_hash = 8;
+}
+
+message RegisterWorkerResponse { string worker_id = 1; }
+
+message HeartbeatWorkerRequest {
+  string worker_id = 1;
+  // GROUND TRUTH. Any reservation we hold for this worker that is absent here is
+  // a LEAK and is released.
+  repeated string running_attempt_ids = 2;
+  // Reservations younger than this are never treated as leaks: a
+  // just-dispatched attempt legitimately has not reached the worker yet, and
+  // without the grace the leak detector becomes a leak generator by cancelling
+  // work the instant it is scheduled.
+  int64 reconcile_grace_ms = 3;
+}
+
+message HeartbeatWorkerResponse {
+  repeated Reservation released = 1;
+  nexus.v1.ResourceVector committed = 2;
+  bool worker_known = 3;
+}
+
+message Reservation {
+  string id = 1;
+  string worker_id = 2;
+  string attempt_id = 3;
+  nexus.v1.ResourceVector resources = 4;
+  int64 created_at_unix_ms = 5;
+}
+
+message SetWorkerStateRequest {
+  string worker_id = 1;
+  WorkerState state = 2;
+  string reason = 3;
+}
+
+message SetWorkerStateResponse {
+  // False when the transition was not legal from the current state, rather than
+  // an error: a losing race with a concurrent sweep is normal, not exceptional.
+  bool applied = 1;
+  WorkerState current = 2;
+  // Populated when the transition to DEAD released capacity.
+  repeated Reservation released = 3;
+}
+
+message GetWorkerRequest { string worker_id = 1; }
+message GetWorkerResponse { WorkerInfo worker = 1; }
+
+message WorkerInfo {
+  string id = 1;
+  string namespace = 2;
+  string hostname = 3;
+  repeated string queues = 4;
+  repeated string executors = 5;
+  map<string, string> labels = 6;
+  nexus.v1.ResourceVector capacity = 7;
+  nexus.v1.ResourceVector committed = 8;
+  // capacity - committed, computed server-side so every caller agrees on it.
+  nexus.v1.ResourceVector free = 9;
+  WorkerState state = 10;
+  string agent_version = 11;
+  int64 registered_at_unix_ms = 12;
+  int64 last_heartbeat_at_unix_ms = 13;
+}
+
+message ListWorkersRequest {
+  string namespace = 1;
+  string queue = 2;
+}
+message ListWorkersResponse { repeated WorkerInfo workers = 1; }
+
+message ReserveRequest {
+  string worker_id = 1;
+  string attempt_id = 2;
+  nexus.v1.ResourceVector request = 3;
+}
+
+message ReserveResponse {
+  bool granted = 1;
+  Reservation reservation = 2;
+  // Structured refusal, e.g. "waiting_for_resources: gpu (need 4, free 3)".
+  // Numbers rather than a bare boolean, because "your task has been PENDING for
+  // 40 minutes" is an unactionable support ticket.
+  string shortfall_reason = 3;
+  nexus.v1.ResourceVector free = 4;
+}
+
+message ReleaseRequest { string attempt_id = 1; }
+
+message ReleaseResponse {
+  // True when this call performed the release; false when there was nothing to
+  // release. NOT an error either way — release is idempotent by contract.
+  bool released = 1;
+  Reservation reservation = 2;
+}
+
+message ReconcileRequest {
+  string worker_id = 1;
+  repeated string running_attempt_ids = 2;
+  int64 grace_ms = 3;
+}
+
+message ReconcileResponse {
+  repeated Reservation released = 1;
+  nexus.v1.ResourceVector committed = 2;
+}
+
+message ReleaseAllForWorkerRequest { string worker_id = 1; }

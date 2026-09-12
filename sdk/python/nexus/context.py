@@ -1,0 +1,413 @@
+"""TaskContext: what a handler is given at execution time, inside the worker.
+
+This module runs on the WORKER, not in the control plane and not at compile time.
+It is the other half of the SDK: `task.py`/`workflow.py` compile a document,
+this file executes a handler against a dispatched attempt.
+
+The most important thing here is the effect guard (architecture §6.2). Read
+`TaskContext.record_effect` before writing a handler that touches anything
+outside the result store.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+import json
+import logging
+import os
+import sys
+import time
+from typing import Any, Callable, Iterator, Mapping, Protocol
+
+__all__ = [
+    "TaskContext",
+    "ResultStore",
+    "InMemoryResultStore",
+    "FileResultStore",
+    "StructuredLogger",
+    "derive_idempotency_key",
+    "EffectNotRecorded",
+]
+
+
+class EffectNotRecorded(LookupError):
+    """Raised by `previous_result` for an effect that was never recorded."""
+
+
+def derive_idempotency_key(
+    run_id: str, node_id: str, map_index: int | str | None, task_version: int | str
+) -> str:
+    """Derive the platform idempotency key. THE PLATFORM OWNS THIS, not users.
+
+        sha256(run_id ‖ node_id ‖ map_index|"-" ‖ task_version)
+
+    `attempt_number` is deliberately EXCLUDED (CONTRACT.md invariant 1, §6.2).
+    All retries of the same logical work therefore share one key -- that
+    exclusion is the entire mechanism of at-least-once-plus-dedup. Including the
+    attempt number would make every retry a fresh effect and turn a downstream
+    system's deduplication into a no-op.
+
+    This function exists in the SDK so a worker can verify the key the control
+    plane sent, and so tests can construct a real one. It is NOT a hook for users
+    to invent their own keys: hand-rolled keys are the most common source of
+    idempotency bugs in practice, which is why the platform derives them.
+    """
+    if not run_id or not node_id:
+        raise ValueError("idempotency key needs a non-empty run_id and node_id")
+    mi = "-" if map_index is None or map_index == "" else str(map_index)
+    payload = f"{run_id}\x00{node_id}\x00{mi}\x00{task_version}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+# ── Result store ──────────────────────────────────────────────────────────────
+
+
+class ResultStore(Protocol):
+    """The result store interface. Payloads never transit the control plane.
+
+    Workers read and write object storage directly (CONTRACT.md invariant 6,
+    ADR-0008): the control plane holds a reference, never the bytes. That is what
+    keeps a 40 GiB model artifact from flowing through the API gateway.
+    """
+
+    def put(self, value: Any, *, key: str | None = None) -> Mapping[str, Any]:
+        """Store a value; return a ResultRef-shaped dict."""
+        ...
+
+    def get(self, ref: Mapping[str, Any] | str) -> Any:
+        """Fetch a value by ResultRef or by key."""
+        ...
+
+    def exists(self, key: str) -> bool: ...
+
+
+# Small results are inlined rather than stored as blobs, to avoid two network
+# round-trips for `{"rows": 42}` (ADR-0008). 64 KiB is the architecture's
+# proposed boundary (§12 open question 4).
+INLINE_MAX_BYTES = 64 * 1024
+
+
+def _encode(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+class InMemoryResultStore:
+    """A result store backed by a dict. For unit tests and the subprocess executor."""
+
+    def __init__(self) -> None:
+        self._blobs: dict[str, bytes] = {}
+
+    def put(self, value: Any, *, key: str | None = None) -> dict[str, Any]:
+        data = _encode(value)
+        digest = hashlib.sha256(data).hexdigest()
+        if len(data) <= INLINE_MAX_BYTES and key is None:
+            return {
+                "inline": data.decode("utf-8"),
+                "content_type": "application/json",
+                "size_bytes": len(data),
+            }
+        k = key or digest
+        self._blobs[k] = data
+        return {
+            "blob": {"bucket": "memory", "key": k, "sha256": digest},
+            "content_type": "application/json",
+            "size_bytes": len(data),
+        }
+
+    def get(self, ref: Mapping[str, Any] | str) -> Any:
+        if isinstance(ref, str):
+            return json.loads(self._blobs[ref])
+        if "inline" in ref:
+            raw = ref["inline"]
+            return json.loads(raw if isinstance(raw, str) else bytes(raw))
+        return json.loads(self._blobs[ref["blob"]["key"]])
+
+    def exists(self, key: str) -> bool:
+        return key in self._blobs
+
+
+class FileResultStore:
+    """A result store backed by a local directory.
+
+    Used by the subprocess executor and by the effect journal when no object
+    store is configured. Writes are atomic (write-temp-then-rename) because the
+    effect journal's value depends on a recorded effect being either fully there
+    or absent -- a half-written journal entry would be worse than none.
+    """
+
+    def __init__(self, root: str) -> None:
+        self.root = os.path.abspath(root)
+        os.makedirs(self.root, exist_ok=True)
+
+    def _path(self, key: str) -> str:
+        safe = key.replace("/", "_").replace("..", "_")
+        return os.path.join(self.root, safe + ".json")
+
+    def put(self, value: Any, *, key: str | None = None) -> dict[str, Any]:
+        data = _encode(value)
+        digest = hashlib.sha256(data).hexdigest()
+        if len(data) <= INLINE_MAX_BYTES and key is None:
+            return {
+                "inline": data.decode("utf-8"),
+                "content_type": "application/json",
+                "size_bytes": len(data),
+            }
+        k = key or digest
+        path = self._path(k)
+        tmp = path + f".tmp.{os.getpid()}"
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        return {
+            "blob": {"bucket": "file", "key": k, "sha256": digest},
+            "content_type": "application/json",
+            "size_bytes": len(data),
+        }
+
+    def get(self, ref: Mapping[str, Any] | str) -> Any:
+        if isinstance(ref, str):
+            with open(self._path(ref), "rb") as f:
+                return json.loads(f.read())
+        if "inline" in ref:
+            raw = ref["inline"]
+            return json.loads(raw if isinstance(raw, str) else bytes(raw))
+        with open(self._path(ref["blob"]["key"]), "rb") as f:
+            return json.loads(f.read())
+
+    def exists(self, key: str) -> bool:
+        return os.path.exists(self._path(key))
+
+
+# ── Structured logging ────────────────────────────────────────────────────────
+
+
+class StructuredLogger:
+    """Structured JSON logging with run_id/attempt_id on every line.
+
+    Correlation fields are attached by the context rather than by the handler,
+    because a log line that cannot be tied back to an attempt is nearly useless
+    when you are looking at one bad run out of ten thousand (architecture §9).
+    """
+
+    def __init__(self, fields: Mapping[str, Any], stream: Any | None = None) -> None:
+        self._fields = dict(fields)
+        self._stream = stream if stream is not None else sys.stderr
+
+    def bind(self, **fields: Any) -> "StructuredLogger":
+        return StructuredLogger({**self._fields, **fields}, self._stream)
+
+    def _emit(self, level: str, msg: str, fields: Mapping[str, Any]) -> None:
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
+            "level": level,
+            "msg": msg,
+            **self._fields,
+            **fields,
+        }
+        try:
+            line = json.dumps(record, default=repr, sort_keys=False)
+        except (TypeError, ValueError):  # pragma: no cover - default=repr covers most
+            line = json.dumps({"level": level, "msg": msg, "log_encode_error": True})
+        print(line, file=self._stream, flush=True)
+
+    def debug(self, msg: str, **fields: Any) -> None:
+        self._emit("DEBUG", msg, fields)
+
+    def info(self, msg: str, **fields: Any) -> None:
+        self._emit("INFO", msg, fields)
+
+    def warning(self, msg: str, **fields: Any) -> None:
+        self._emit("WARN", msg, fields)
+
+    warn = warning
+
+    def error(self, msg: str, **fields: Any) -> None:
+        self._emit("ERROR", msg, fields)
+
+
+# ── TaskContext ───────────────────────────────────────────────────────────────
+
+HeartbeatFn = Callable[[str | None, float | None], None]
+
+
+@dataclasses.dataclass(slots=True)
+class TaskContext:
+    """Everything a handler is given about its own execution.
+
+    Constructed by the worker agent from the TaskAssignment it polled. Handlers
+    receive it as their first argument.
+    """
+
+    run_id: str
+    node_id: str
+    attempt_id: str
+    attempt_number: int
+    task_ref: str
+    task_version: int
+    idempotency_key: str
+    idempotency_mode: str = "required"
+    map_index: int | None = None
+    namespace: str = "default"
+    worker_id: str = ""
+    lease_token: str = ""
+    start_to_close_deadline_unix_ms: int = 0
+    store: Any = dataclasses.field(default_factory=InMemoryResultStore)
+    log: StructuredLogger = dataclasses.field(default=None)  # type: ignore[assignment]
+    inputs: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+    _heartbeat_fn: HeartbeatFn | None = None
+    _effects: dict[str, Any] = dataclasses.field(default_factory=dict)
+    _effects_loaded: bool = False
+
+    def __post_init__(self) -> None:
+        if self.log is None:
+            self.log = StructuredLogger(
+                {
+                    "run_id": self.run_id,
+                    "node_id": self.node_id,
+                    "attempt_id": self.attempt_id,
+                    "attempt": self.attempt_number,
+                    "task_ref": self.task_ref,
+                }
+            )
+
+    # ── progress signalling ─────────────────────────────────────────────────
+    def heartbeat(self, message: str | None = None) -> None:
+        """Report liveness. Silence longer than `timeouts.heartbeat` means retry.
+
+        A long-running task that does not heartbeat is indistinguishable from a
+        wedged one, so the platform assumes the worse of the two. Call this from
+        inside your loops.
+        """
+        if self._heartbeat_fn is not None:
+            self._heartbeat_fn(message, None)
+        elif message:
+            self.log.debug("heartbeat", detail=message)
+
+    def progress(self, fraction: float, message: str | None = None) -> None:
+        """Report fractional progress in [0.0, 1.0]. Also counts as a heartbeat."""
+        if not 0.0 <= fraction <= 1.0:
+            raise ValueError(f"progress fraction must be in [0,1], got {fraction}")
+        if self._heartbeat_fn is not None:
+            self._heartbeat_fn(message, fraction)
+        else:
+            self.log.debug("progress", fraction=fraction, detail=message)
+
+    def remaining_ms(self) -> int | None:
+        """Milliseconds left before start_to_close, per CONTROL-PLANE time.
+
+        The deadline was computed by the control plane and shipped in the
+        assignment; worker clocks are never authoritative (invariant 7). This
+        still reads the local clock to measure the remaining interval, so treat
+        the result as advisory -- use it to decide whether to start another chunk
+        of work, not to decide whether a deadline has legally passed.
+        """
+        if not self.start_to_close_deadline_unix_ms:
+            return None
+        return max(0, self.start_to_close_deadline_unix_ms - int(time.time() * 1000))
+
+    # ── the effect guard ────────────────────────────────────────────────────
+    #
+    # THE THREE IDEMPOTENCY MECHANISMS, IN DESCENDING ORDER OF STRENGTH.
+    #
+    # Nexus is at-least-once (ADR-0006): your handler CAN run more than once for
+    # one logical unit of work. Which of these you use decides what guarantee you
+    # actually have. The SDK states the ordering instead of hiding it, because a
+    # user who believes they have mechanism 1 while using mechanism 3 has a
+    # correctness bug they cannot see.
+    #
+    #   1. DOWNSTREAM-NATIVE DEDUP  (strongest)
+    #      Pass ctx.idempotency_key to a system that deduplicates on it:
+    #          payments.charge(..., idempotency_key=ctx.idempotency_key)
+    #      The effect becomes exactly-once at the only boundary where that is
+    #      achievable -- inside the system performing it. No window.
+    #
+    #   2. CONDITIONAL WRITE
+    #          INSERT INTO t (idem_key, ...) VALUES (%s, ...)
+    #          ON CONFLICT (idem_key) DO NOTHING
+    #      Atomic in the target store, so also no window -- but it requires that
+    #      you control the schema.
+    #
+    #   3. PLATFORM EFFECT JOURNAL  (weakest -- this API)
+    #      effect_recorded / record_effect / previous_result. For downstream
+    #      systems with no native dedup and no conditional write.
+    #      THE WRITE-THEN-CRASH WINDOW STILL EXISTS: if the process dies after
+    #      the downstream write but before record_effect returns, the retry
+    #      repeats the effect. What the journal buys is that the window shrinks
+    #      from the whole task to a single write. That is a real improvement and
+    #      not a guarantee; do not describe it as one.
+
+    def effect_recorded(self, name: str) -> bool:
+        """True if this named effect already landed under this idempotency key.
+
+        Guard the top of a side-effecting handler with this. Mechanism 3 above --
+        read that comment block for what it does and does not promise.
+        """
+        self._load_effects()
+        return name in self._effects
+
+    def record_effect(self, name: str, value: Any = None) -> None:
+        """Journal that a named effect landed, durably, keyed by idempotency_key.
+
+        Call this IMMEDIATELY after the downstream write, never before: recording
+        first and writing second would make a crash in between skip the effect
+        forever, which is strictly worse than repeating it.
+        """
+        self._load_effects()
+        self._effects[name] = value
+        # Keyed by idempotency_key, which excludes attempt_number -- so attempt 2
+        # reads what attempt 1 wrote. That is the point of the exclusion.
+        self.store.put(
+            {"idempotency_key": self.idempotency_key, "effects": self._effects},
+            key=self._journal_key(),
+        )
+
+    def previous_result(self, name: str) -> Any:
+        """The value recorded for a named effect by an earlier attempt."""
+        self._load_effects()
+        try:
+            return self._effects[name]
+        except KeyError:
+            raise EffectNotRecorded(
+                f"effect {name!r} was never recorded for idempotency key "
+                f"{self.idempotency_key[:12]}...; guard with effect_recorded() first"
+            ) from None
+
+    def _journal_key(self) -> str:
+        return f"effects/{self.idempotency_key}"
+
+    def _load_effects(self) -> None:
+        """Read the journal once per attempt; cache thereafter.
+
+        Cached because a guarded handler calls effect_recorded on every effect and
+        a store round-trip per call would be a needless cost on the hot path.
+        """
+        if self._effects_loaded:
+            return
+        self._effects_loaded = True
+        key = self._journal_key()
+        try:
+            if self.store.exists(key):
+                doc = self.store.get(key)
+                if isinstance(doc, Mapping) and isinstance(doc.get("effects"), Mapping):
+                    self._effects = dict(doc["effects"])
+        except (OSError, ValueError, KeyError) as e:
+            # A journal we cannot read means we do not know whether the effect
+            # landed. Treating it as "not recorded" risks a duplicate; treating it
+            # as "recorded" risks skipping the work entirely. We choose the
+            # duplicate, because at-least-once is the platform's stated guarantee
+            # and silently never doing the work is not a failure mode users can
+            # detect.
+            self.log.warning(
+                "effect journal unreadable; proceeding as if no effect was recorded",
+                error=str(e),
+                idempotency_key_prefix=self.idempotency_key[:12],
+            )
+
+    def __repr__(self) -> str:
+        return (
+            f"TaskContext(run={self.run_id} node={self.node_id} "
+            f"attempt={self.attempt_number} idem={self.idempotency_key[:12]}...)"
+        )

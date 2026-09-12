@@ -1,0 +1,167 @@
+api_version: nexus.dev/v1
+description: The three idempotency mechanisms, in descending order of strength.
+edges:
+  - from_node_id: charge_customer
+    output_to_input:
+      charge: result
+    to_node_id: record_ledger
+  - from_node_id: charge_customer
+    output_to_input:
+      charge: result
+    to_node_id: send_receipt
+  - from_node_id: record_ledger
+    output_to_input:
+      ledger: result
+    to_node_id: send_receipt
+  - from_node_id: send_receipt
+    output_to_input:
+      receipt: result
+    to_node_id: archive_invoice
+fail_fast: true
+name: idempotent-effect
+namespace: default
+params:
+  amount_cents:
+    required: true
+    type: int
+  order_id:
+    required: true
+    type: string
+run_timeout_ms: 7200000
+tasks:
+  - id: archive_invoice
+    idempotency: IDEMPOTENCY_MODE_NONE
+    inputs:
+      receipt:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 500
+        memory_bytes: 1073741824
+    retry:
+      initial_ms: 10000
+      jitter: full
+      max_attempts: 3
+      max_ms: 600000
+      multiplier: 2
+      retry_on:
+        - ERROR_CLASS_TIMEOUT
+        - ERROR_CLASS_TRANSIENT
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: billing.archive_invoice
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 14400000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 1800000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - id: charge_customer
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    input_params:
+      amount_cents: amount_cents
+      order_id: order_id
+    inputs:
+      amount_cents:
+        required: true
+        type: json
+      order_id:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 500
+        memory_bytes: 536870912
+    retry:
+      initial_ms: 10000
+      jitter: full
+      max_attempts: 5
+      max_ms: 600000
+      multiplier: 2
+      retry_on:
+        - ERROR_CLASS_TIMEOUT
+        - ERROR_CLASS_TRANSIENT
+        - ERROR_CLASS_WORKER_LOST
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: billing.charge_customer
+    timeouts:
+      heartbeat_ms: 60000
+      schedule_to_close_ms: 14400000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 300000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - id: record_ledger
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      charge:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 500
+        memory_bytes: 536870912
+    retry:
+      initial_ms: 5000
+      jitter: full
+      max_attempts: 5
+      max_ms: 600000
+      multiplier: 2
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: billing.record_ledger
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 14400000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 300000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - id: send_receipt
+    idempotency: IDEMPOTENCY_MODE_BEST_EFFORT
+    inputs:
+      charge:
+        required: true
+        type: json
+      ledger:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 250
+        memory_bytes: 268435456
+    retry:
+      initial_ms: 10000
+      jitter: full
+      max_attempts: 4
+      max_ms: 600000
+      multiplier: 2
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: billing.send_receipt
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 14400000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 300000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1

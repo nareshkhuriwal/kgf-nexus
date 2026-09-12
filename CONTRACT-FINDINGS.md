@@ -149,3 +149,104 @@ Timer claiming, lease reconciliation and the liveness sweep are scoped to the
 replica's own queue. The docs do not specify this, but a fleet-wide reconciler
 would have every replica contending on every other queue's rows — exactly the
 coordination ADR-0002 exists to eliminate. Worth adding to §3.2.
+
+---
+
+## From UI + deploy workstream
+
+### F11. No REST endpoint returns attempt rows — WILL BREAK INTEGRATION
+**Severity:** real contract gap, highest integration risk. **Status: open, needs gateway change.**
+§8.2 gives `GET /runs/{id}` (detail + node states) and `GET /attempts/{id}/logs`,
+but nothing returns the attempt rows themselves. Yet "every attempt for a node,
+retries as separate rows" is an explicit Phase 1 UI requirement, and it is the
+whole point of invariant 9 (a retry is a NEW attempt; history is never mutated).
+The UI codes against `GET /runs/{id}/attempts`, which is NOT in the contract.
+**Resolution:** add `GET /runs/{id}/attempts` to §8.2 and implement it in the
+gateway. Embedding attempts in the run-detail response is the alternative, but a
+separate endpoint is better: attempt history grows unboundedly with retries and
+should be independently pageable.
+
+### F12. event-service was never assigned to any workstream
+**Severity:** my fan-out omission, not an agent error. **Status: FIXED — built centrally.**
+ADR-0011 lists six services; only five were assigned. `docker compose up` cannot
+start until it exists. Built directly rather than spawning another agent.
+
+### F13. Service main.go paths are inconsistent
+**Severity:** cosmetic but breaks the parameterised Dockerfile.
+Three services use `services/<name>/cmd/<name>/main.go`, two use
+`services/<name>/main.go`. The single parameterised Dockerfile needs one
+`SERVICE_PATH` per service as a result.
+**Resolution:** accept both via a per-service build arg (already how it works).
+Not worth churning five services to normalize during Phase 1.
+
+### F14. Node-state derivation when node and latest attempt disagree
+**Severity:** genuine unspecified behaviour.
+`task_nodes.state` and `task_attempts.state` are independent columns and nothing
+says which wins when they disagree (node RUNNING, latest attempt LOST).
+**Resolution (adopted):** the **node column is authoritative** for node state —
+it is what the DAG engine reconciles and what run-terminality is computed from.
+Attempt state is authoritative for *attempt* display, and `pending_reason` is
+lifted from the latest attempt. This is what the UI implemented. Should be
+stated in §5.1.
+
+### F15. JSON enum serialisation undecided
+**Severity:** real interop risk.
+The DB uses bare labels (`UPSTREAM_FAILED`); protobuf uses prefixed
+(`NODE_STATE_UPSTREAM_FAILED`). §8.2 never says which the JSON API emits.
+**Resolution (adopted):** the REST API emits **bare DB labels** — they match
+CONTRACT.md's canonical names, are what operators see in SQL, and keep the wire
+format readable. The UI normalizes both defensively, which is correct regardless.
+Gateway must confirm it emits bare labels.
+
+### F16. MinIO images moved off Docker Hub
+**Severity:** environmental, affects anyone pulling MinIO.
+`docker.io/minio/minio` no longer resolves (pull access denied). Compose now uses
+`quay.io/minio/minio` and `quay.io/minio/mc`.
+
+### F17. §8.2 has no /capacity response shape
+Minor. The UI falls back to client-side aggregation over ACTIVE/DRAINING workers
+when `/capacity` 404s, which is a reasonable degradation either way.
+
+---
+
+## From CLI + SDK workstream
+
+### F18. WorkflowSpec has no wire home for literal or param input bindings — BLOCKER
+**Severity:** highest. Without this, no workflow can pass a constant or bind a
+run parameter to a task. **Status: open, needs a proto decision.**
+`Edge.output_to_input` covers upstream→downstream wiring, but nothing expresses
+"this input is the literal 10" or "this input comes from run param `source`".
+The SDK emits `input_literals` (JSON-encoded scalars) and `input_params` on
+TaskSpec; these are the SDK author's invention and will fail the gateway's JSON
+Schema until the proto adopts them.
+**Resolution:** add both fields to `TaskSpec` in the next proto revision. The
+names are reasonable and already implemented on both the SDK and CLI sides;
+`internal/dag`'s InputPlan already models edge ≻ param ≻ default precedence, so
+the resolution order is settled — only the wire fields are missing.
+
+### F19. §4.3's `idempotency_key_from` contradicts invariant 1
+**Severity:** doc defect. **Status: resolved — remove from §4.3.**
+The §4.3 YAML sketch shows a user-configurable
+`idempotency_key_from: [run_id, node_id, map_index]`, but CONTRACT.md invariant 1
+and ADR-0006 both state the PLATFORM derives the key and users never influence
+it — and the field is absent from `TaskSpec` in the proto. The SDK correctly
+treated the proto as authoritative and did not expose it.
+Leaving it in the doc would invite users to think they can weaken the key, which
+is exactly the mistake ADR-0006 exists to prevent. Delete it from §4.3.
+
+### F20. `ERROR_CLASS_VALIDATION` vs `validation_error` spelling
+Minor. §4.3's YAML writes `validation_error`; `common.proto` has
+`ERROR_CLASS_VALIDATION`. The SDK accepts both author spellings and emits the
+proto name. The JSON Schema should accept both for the same reason.
+
+### F21. §4.3 fields absent from the proto
+`tolerations` and `cache.key_from` appear in the §4.3 sketch but not in
+`TaskSpec`. The SDK omitted them rather than inventing field names — correct.
+Also undefined: whether a task's `priority` or the workflow's wins when both are
+set. Needs a rule; suggest task overrides workflow, workflow supplies the default.
+
+### F22. schedule_to_close vs start_to_close is unvalidated
+A spec with `schedule_to_close < start_to_close` can never complete even one
+attempt. The SDK added a client-side rejection. The gateway's semantic
+validation should reject it server-side too, since the SDK is not the only
+submission path.

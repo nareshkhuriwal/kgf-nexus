@@ -1,0 +1,16 @@
+# Migration job (ADR-0011 rule 4): schema migrations are applied by a DEDICATED
+# JOB, never by a service at startup, because concurrent service replicas must
+# not race to migrate.
+#
+# Deliberately a plain postgres-client image running psql rather than a Go
+# migration binary. The migrations are ordered SQL files with no templating, and
+# a job whose only dependency is psql cannot fail to start because the Go code
+# it shares with the services does not compile yet — which matters during Phase
+# 1 bring-up, where the services are still being written.
+
+FROM postgres:16-alpine
+
+COPY deploy/migrate.sh /usr/local/bin/migrate.sh
+RUN chmod +x /usr/local/bin/migrate.sh
+
+ENTRYPOINT ["/usr/local/bin/migrate.sh"]

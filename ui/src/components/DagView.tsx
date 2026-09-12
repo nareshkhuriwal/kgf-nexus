@@ -1,0 +1,269 @@
+/**
+ * DAG rendering.
+ *
+ * Hand-rolled SVG rather than a graph library: the layout requirement is a
+ * layered left-to-right DAG, which buildDagGraph already computes, and a
+ * dependency that owns the node rendering would make the state-treatment
+ * requirement (every state distinct, three of them emphatically so) somebody
+ * else's styling decision.
+ *
+ * Each node carries FOUR independent state channels: fill colour, border
+ * colour, border dash pattern, and a glyph. A root-cause FAILED node also gets
+ * an outer halo. That redundancy is what makes the view readable in greyscale,
+ * at a glance, and to a colour-blind operator.
+ */
+
+import { useMemo } from 'react';
+import type { DagGraph, DagNode } from '../lib/dag';
+import { STATE_TABLES, stateVisual } from '../lib/states';
+import { StateBadge } from './StateBadge';
+
+const NODE_W = 176;
+const NODE_H = 56;
+const GAP_X = 76;
+const GAP_Y = 20;
+const PAD = 26;
+
+interface Placed {
+  node: DagNode;
+  x: number;
+  y: number;
+}
+
+function layout(graph: DagGraph): { placed: Placed[]; width: number; height: number } {
+  const placed: Placed[] = [];
+  let maxRows = 0;
+  graph.layers.forEach((layer, depth) => {
+    maxRows = Math.max(maxRows, layer.length);
+    layer.forEach((id, row) => {
+      const node = graph.byId[id];
+      if (!node) return;
+      placed.push({
+        node,
+        x: PAD + depth * (NODE_W + GAP_X),
+        y: PAD + row * (NODE_H + GAP_Y),
+      });
+    });
+  });
+  return {
+    placed,
+    width: PAD * 2 + Math.max(1, graph.layers.length) * (NODE_W + GAP_X) - GAP_X,
+    height: PAD * 2 + Math.max(1, maxRows) * (NODE_H + GAP_Y) - GAP_Y,
+  };
+}
+
+/** Cubic bezier between right edge of `from` and left edge of `to`. */
+function edgePath(a: Placed, b: Placed): string {
+  const x1 = a.x + NODE_W;
+  const y1 = a.y + NODE_H / 2;
+  const x2 = b.x;
+  const y2 = b.y + NODE_H / 2;
+  const dx = Math.max(28, (x2 - x1) / 2);
+  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+}
+
+export function DagView({
+  graph,
+  selectedNodeId,
+  onSelect,
+}: {
+  graph: DagGraph;
+  selectedNodeId?: string | null;
+  onSelect: (nodeId: string) => void;
+}) {
+  const { placed, width, height } = useMemo(() => layout(graph), [graph]);
+  const byId = useMemo(() => {
+    const m: Record<string, Placed> = {};
+    for (const p of placed) m[p.node.node_id] = p;
+    return m;
+  }, [placed]);
+
+  if (graph.nodes.length === 0) {
+    return (
+      <div className="notice empty" style={{ margin: 12 }}>
+        <span className="notice-glyph">∅</span>
+        <div>
+          <div className="notice-title">No nodes materialised for this run</div>
+          <div className="notice-detail">
+            The DAG engine expands a spec into task_nodes when the run is created. An empty graph on a
+            PENDING run means that has not happened yet.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {graph.hasCycle && (
+        <div className="notice error" style={{ margin: 12 }} role="alert">
+          <span className="notice-glyph">!</span>
+          <div>
+            <div className="notice-title">This graph contains a cycle</div>
+            <div className="notice-detail">
+              Acyclicity is validated at submit time, so this should be impossible. Layout depths below
+              the cycle are unreliable. Report it — the spec or the node projection is wrong.
+            </div>
+          </div>
+        </div>
+      )}
+      <div className="dag-viewport">
+        <svg
+          width={width}
+          height={height}
+          viewBox={`0 0 ${width} ${height}`}
+          role="img"
+          aria-label={`Run DAG, ${graph.nodes.length} nodes`}
+        >
+          <defs>
+            <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--border-strong)" />
+            </marker>
+            <marker
+              id="arrow-failed"
+              viewBox="0 0 8 8"
+              refX="7"
+              refY="4"
+              markerWidth="7"
+              markerHeight="7"
+              orient="auto"
+            >
+              <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--tone-danger-bd)" />
+            </marker>
+          </defs>
+
+          {graph.edges.map((e) => {
+            const a = byId[e.from_node_id];
+            const b = byId[e.to_node_id];
+            if (!a || !b) return null;
+            // An edge is highlighted when it is the path along which a failure
+            // propagated, which is how a cascade reads as a cascade.
+            const propagates =
+              (a.node.state === 'FAILED' || a.node.state === 'UPSTREAM_FAILED') &&
+              b.node.state === 'UPSTREAM_FAILED';
+            return (
+              <path
+                key={`${e.from_node_id}->${e.to_node_id}`}
+                className={`dag-edge${propagates ? ' failed-path' : ''}`}
+                d={edgePath(a, b)}
+                markerEnd={propagates ? 'url(#arrow-failed)' : 'url(#arrow)'}
+              />
+            );
+          })}
+
+          {placed.map(({ node, x, y }) => {
+            const v = stateVisual('node', node.state);
+            const selected = node.node_id === selectedNodeId;
+            const attemptCount = node.attempts.length;
+            return (
+              <g
+                key={node.node_id}
+                transform={`translate(${x},${y})`}
+                className={`tone-${v.tone}`}
+                onClick={() => onSelect(node.node_id)}
+                onKeyDown={(ev) => {
+                  if (ev.key === 'Enter' || ev.key === ' ') {
+                    ev.preventDefault();
+                    onSelect(node.node_id);
+                  }
+                }}
+                tabIndex={0}
+                role="button"
+                aria-label={`${node.node_id}, ${v.label}${
+                  node.isRootCause ? ', root cause of the failure' : ''
+                }`}
+              >
+                <title>
+                  {`${node.node_id} — ${v.label}\n${v.hint}` +
+                    (node.isRootCause ? '\nROOT CAUSE: the earliest failure on this path.' : '') +
+                    (node.pendingReason ? `\n${node.pendingReason}` : '')}
+                </title>
+                {node.isRootCause && (
+                  <rect
+                    className="dag-rootcause-halo"
+                    x={-5}
+                    y={-5}
+                    width={NODE_W + 10}
+                    height={NODE_H + 10}
+                    rx={9}
+                  />
+                )}
+                <rect
+                  className={`dag-node${selected ? ' selected' : ''}`}
+                  width={NODE_W}
+                  height={NODE_H}
+                  rx={6}
+                  strokeDasharray={dashFor(v.borderStyle)}
+                />
+                <text className="dag-glyph" x={11} y={21} fill="var(--tone-bd)">
+                  {v.glyph}
+                </text>
+                <text className="dag-node-label" x={29} y={21}>
+                  {truncate(node.node_id, 17)}
+                </text>
+                <text className="dag-node-sub" x={11} y={37}>
+                  {truncate(node.task_ref, 26)}
+                </text>
+                <text className="dag-node-state" x={11} y={50} fill="var(--tone-bd)">
+                  {v.label}
+                </text>
+                {attemptCount > 1 && (
+                  <text className="dag-node-sub" x={NODE_W - 11} y={50} textAnchor="end">
+                    {attemptCount} attempts
+                  </text>
+                )}
+                {node.pendingReason && attemptCount <= 1 && (
+                  <text className="dag-node-sub" x={NODE_W - 11} y={50} textAnchor="end" fill="var(--tone-warning-fg)">
+                    stalled
+                  </text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+      <DagLegend />
+    </>
+  );
+}
+
+/**
+ * Double borders cannot be expressed on an SVG rect, so the SVG channel for
+ * "double" is a wide dash — visually distinct from dashed and dotted, which is
+ * all the requirement actually needs.
+ */
+function dashFor(style: string): string | undefined {
+  switch (style) {
+    case 'dashed':
+      return '7 4';
+    case 'dotted':
+      return '2 3';
+    case 'double':
+      return '12 3 2 3';
+    default:
+      return undefined;
+  }
+}
+
+function truncate(s: string, n: number): string {
+  return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
+}
+
+/**
+ * The legend is not decoration: it is the mapping from the visual treatment to
+ * the state names, which is what makes the distinctions usable by someone who
+ * has not read the state machine.
+ */
+export function DagLegend() {
+  const states = Object.keys(STATE_TABLES.node);
+  return (
+    <div className="legend">
+      {states.map((s) => (
+        <span className="legend-item" key={s}>
+          <StateBadge kind="node" state={s} small />
+          <span>{STATE_TABLES.node[s]?.hint.split('.')[0]}</span>
+        </span>
+      ))}
+    </div>
+  );
+}

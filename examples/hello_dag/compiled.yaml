@@ -1,0 +1,111 @@
+api_version: nexus.dev/v1
+description: 'Three tasks in a line: extract, transform, load.'
+edges:
+  - from_node_id: extract
+    output_to_input:
+      data: result
+    to_node_id: transform
+  - from_node_id: transform
+    output_to_input:
+      summary: result
+    to_node_id: load
+name: hello-dag
+namespace: default
+params:
+  source:
+    required: true
+    type: string
+run_timeout_ms: 3600000
+tasks:
+  - id: extract
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    input_params:
+      source: source
+    inputs:
+      source:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 500
+        memory_bytes: 536870912
+    retry:
+      initial_ms: 10000
+      jitter: full
+      max_attempts: 3
+      max_ms: 600000
+      multiplier: 2
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: hello.extract
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 14400000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 600000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - id: load
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      summary:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 500
+        memory_bytes: 536870912
+    retry:
+      initial_ms: 10000
+      jitter: full
+      max_attempts: 3
+      max_ms: 600000
+      multiplier: 2
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: hello.load
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 14400000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 600000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - id: transform
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      data:
+        required: true
+        type: json
+    outputs:
+      result:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 1000
+        memory_bytes: 1073741824
+    retry:
+      initial_ms: 10000
+      jitter: full
+      max_attempts: 3
+      max_ms: 600000
+      multiplier: 2
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    task_ref: hello.transform
+    timeouts:
+      heartbeat_ms: 300000
+      schedule_to_close_ms: 14400000
+      schedule_to_start_ms: 1800000
+      start_to_close_ms: 900000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1

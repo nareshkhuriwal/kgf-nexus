@@ -1,0 +1,61 @@
+# Multi-stage build for ALL six Go control-plane services and the agent.
+#
+# One parameterised Dockerfile rather than seven near-identical ones: the build
+# is byte-identical per service apart from the package path, and seven copies of
+# the same file drift the moment someone bumps a Go version in six of them.
+# `SERVICE` selects which main package to compile.
+#
+# Build context is the REPO ROOT, because the module lives there and every
+# service imports internal/ and gen/. Building from services/<name>/ would put
+# the shared packages outside the context.
+#
+#   docker build -f deploy/Dockerfile.service --build-arg SERVICE=scheduler .
+
+ARG GO_VERSION=1.25
+
+# ── build ─────────────────────────────────────────────────────────────────
+FROM golang:${GO_VERSION}-alpine AS build
+
+# git is needed by `go mod download` for any VCS-resolved dependency.
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /src
+
+# Dependencies are copied and downloaded first so an edit to any .go file
+# reuses the cached module layer instead of re-downloading the whole graph.
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+
+COPY . .
+
+# SERVICE is the directory under services/ (or "agent" for the worker agent).
+ARG SERVICE
+ARG SERVICE_PATH
+ARG VERSION=dev
+
+# CGO off => a static binary that runs in a scratch/alpine image with no libc
+# dependency, which is the whole reason the agent is shippable as one file.
+# -trimpath keeps build paths out of the binary so images are reproducible.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build \
+      -trimpath \
+      -ldflags "-s -w -X main.version=${VERSION}" \
+      -o /out/service \
+      ./${SERVICE_PATH:-services/${SERVICE}}
+
+# ── runtime ───────────────────────────────────────────────────────────────
+FROM alpine:3.21 AS runtime
+
+# wget is present in busybox and is what the compose healthchecks use to probe
+# /healthz; ca-certificates is needed for any outbound TLS (MinIO over https).
+RUN apk add --no-cache ca-certificates tzdata \
+ && adduser -D -u 10001 nexus
+
+COPY --from=build /out/service /usr/local/bin/nexus-service
+
+# Never run the control plane as root: a compromised service should not be able
+# to write outside its own container filesystem.
+USER 10001:10001
+
+ENTRYPOINT ["/usr/local/bin/nexus-service"]

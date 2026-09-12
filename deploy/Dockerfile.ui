@@ -1,0 +1,35 @@
+# Multi-stage build for the React operator console.
+#
+# The runtime image serves static files through nginx and proxies /v1 to the
+# api-gateway, so the browser sees ONE origin. That avoids CORS configuration on
+# the gateway entirely — one fewer thing to get wrong in a bring-up whose whole
+# promise is a single command.
+#
+# Build context is the repo root (consistent with the Go services), so the
+# COPY paths are ui/-prefixed.
+
+FROM node:20-alpine AS build
+
+WORKDIR /app
+
+# Lockfile-first so a source edit does not invalidate the install layer.
+COPY ui/package.json ui/package-lock.json* ./
+RUN npm ci --no-audit --no-fund
+
+COPY ui/ ./
+
+# The API base is empty on purpose: nginx proxies /v1 on the same origin, so the
+# bundle needs no absolute URL and the same image works behind any hostname.
+ARG VITE_NEXUS_API_BASE=""
+ARG VITE_NEXUS_NAMESPACE="default"
+ENV VITE_NEXUS_API_BASE=${VITE_NEXUS_API_BASE} \
+    VITE_NEXUS_NAMESPACE=${VITE_NEXUS_NAMESPACE}
+
+RUN npm run build
+
+FROM nginx:1.27-alpine AS runtime
+
+COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80
