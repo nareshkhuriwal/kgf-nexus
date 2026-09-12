@@ -465,7 +465,11 @@ export function App() {
             returnFocusTo={hamburgerRef}
           />
         ) : (
-          <aside className="chrome chrome-sidebar">
+          // The collapsed class goes on the WRAPPER as well as the rail: the
+          // wrapper owns the column's width and the rail owns what is inside
+          // it, and the width is the half that must not depend on selector
+          // support for :has().
+          <aside className={`chrome chrome-sidebar${railCollapsed ? ' collapsed' : ''}`}>
             <Sidebar canAdmin={canAdmin} collapsed={railCollapsed} />
           </aside>
         )}

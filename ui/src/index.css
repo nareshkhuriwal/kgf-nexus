@@ -236,6 +236,27 @@
   --shadow-md: 0 4px 12px rgba(1, 4, 9, 0.4);
   --shadow-lg: 0 16px 40px rgba(1, 4, 9, 0.55);
 
+  /*
+     The navbar's height, as a layout measurement rather than a spacing step.
+
+     The rail sticks BELOW the bar and is exactly as tall as what the bar leaves,
+     so both of its numbers derive from this one. It is declared here rather than
+     inferred at runtime because measuring the bar to position its sibling means
+     a layout read on every resize to learn something that does not change.
+
+     It is AUTHORITATIVE, not descriptive: .navbar takes this as its own height
+     rather than being measured for it. The alternative was to derive the number
+     from the bar's padding plus its tallest child's line box, which computes to
+     48.5px today -- a fractional value that depends on the font's metrics and
+     would drift silently the next time the type scale moved. Setting the height
+     instead means the bar and the rail are wrong together or right together,
+     which is the only relationship that matters here.
+
+     52px because it clears that 48.5px comfortably and is divisible by 4, so
+     the bar's contents centre on whole pixels.
+  */
+  --navbar-h: 52px;
+
   /* A stacking order stated once, so a new overlay cannot land arbitrarily
      above or below an existing one. */
   --z-base: 0;
@@ -430,7 +451,18 @@ code, .mono, pre { font-family: var(--mono); font-size: var(--text-sm); }
 .brand-mark { color: var(--accent); font-family: var(--mono); }
 
 /* 1680px is a layout ceiling, not a spacing step -- it has no token by design. */
-.main { flex: 1; padding: var(--space-6); max-width: 1680px; width: 100%; margin: 0 auto; }
+/* min-width:0 is load-bearing, not defensive: .main is a flex child, and its
+   default min-width:auto means a wide table or the DAG canvas inside it can
+   refuse to shrink and shove the rail off the left edge. The overflow belongs to
+   the scroll containers inside the page, not to the shell. */
+.main {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-6);
+  max-width: 1680px;
+  width: 100%;
+  margin: 0 auto;
+}
 
 /* ── Primitives ────────────────────────────────────────────────────────── */
 .panel {
@@ -1341,9 +1373,9 @@ tr.version-current > td { background: var(--bg-hover); }
    layout breakpoints/rail widths, which are viewport measurements rather than
    steps on a density scale, for the same reason .grid-2's 380px is literal. */
 
-/* The sidebar is a column beside the page, so the app becomes a row. The
-   navbar keeps the original stacked column. */
-.app-sidebar { flex-direction: row; align-items: stretch; }
+/* .app-sidebar and .app-navbar are GONE with the layout preference that
+   stamped them. The app is a column (bar, then row) and .shell is the row --
+   there is no longer a variant to key off. */
 
 /* ── Brand ─────────────────────────────────────────────────────────────── */
 /* The mark takes the accent; the word does not. Two accent-coloured elements
@@ -1356,17 +1388,55 @@ tr.version-current > td { background: var(--bg-hover); }
   color: var(--fg);
 }
 
+/* ── The shell row ─────────────────────────────────────────────────────── */
+/*
+   The rail and the page, side by side BENEATH the navbar.
+
+   This rule was missing when the two chromes were merged into one shell, and
+   its absence produced both of the layout faults that followed. Without a flex
+   row the wrapper was a plain block, so the rail and the page stacked
+   vertically: the page began a full rail-height below the bar, which is why the
+   content appeared to start most of a screen down. Worth stating plainly
+   because the JSX looked correct and the fault was entirely here.
+
+   min-height:0 rather than a height: the row must be free to grow with whatever
+   the page renders, while still letting the rail's own sticky positioning work
+   against it. align-items:stretch is the default and is what gives the rail its
+   full-height band.
+*/
+.shell {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+}
+
 /* ── Sidebar ───────────────────────────────────────────────────────────── */
 /* 240px is a layout measurement, not a spacing step: it is the width at which
    the longest label plus its glyph stops wrapping. */
 .chrome-sidebar {
   flex: 0 0 240px;
   width: 240px;
+  /*
+     Sticky BELOW the bar, not at the viewport top.
+
+     top:0 with height:100vh is what this carried when the rail was the whole
+     chrome and had the viewport to itself. With a bar above it, top:0 pinned the
+     rail over that bar -- the overlap that was reported -- and 100vh made it one
+     bar-height taller than the space it actually has, so its own account footer
+     sat off the bottom of the screen.
+
+     Both numbers now come from --navbar-h, declared once beside the bar's own
+     padding so the two cannot drift: the rail starts where the bar ends and is
+     exactly as tall as what is left.
+  */
   position: sticky;
-  top: 0;
+  top: var(--navbar-h);
   align-self: flex-start;
-  height: 100vh;
-  z-index: var(--z-sticky);
+  height: calc(100vh - var(--navbar-h));
+  /* Below the bar in the stacking order, deliberately: where they meet, the bar
+     is the thing that must stay on top. */
+  z-index: calc(var(--z-sticky) - 1);
 }
 
 /* Its own panel against the page ground, rather than a flat band: the rail is
@@ -1463,17 +1533,73 @@ tr.version-current > td { background: var(--bg-hover); }
 }
 .nav-item.active:hover { background: color-mix(in srgb, var(--accent) 24%, transparent); }
 
-.nav-glyph {
+/* The icon's wrapper, not the SVG: sizing the box means the icon itself never
+   has to know which state the rail is in. Replaces .nav-glyph, which sized a
+   monospaced text character and has had nothing to style since the destinations
+   gained drawn icons. */
+.nav-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--space-6);
+  width: 18px;
+  height: 18px;
   flex: 0 0 auto;
-  font-family: var(--mono);
-  font-size: var(--text-md);
-  line-height: 1;
 }
+.nav-icon svg { width: 100%; height: 100%; display: block; }
 .nav-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── The collapsed rail ────────────────────────────────────────────────── */
+/*
+   The icon-and-label rail, per the Airflow reference: each destination becomes
+   a centred icon with a small label beneath it.
+
+   NOT icons-only. The label is what keeps a collapsed destination identifiable
+   without a hover, which is why Sidebar.tsx renders it in both states and this
+   block only moves and shrinks it. A rail that dropped the label would be
+   trading a real navigation aid for about 40px.
+
+   72px is a layout measurement: the width at which the longest label that must
+   not wrap ("Workflows", "Schedules") fits at --text-xs with the rail's padding.
+   The group headings go, because at this width they cannot be read without
+   wrapping and the groups still read as groups from the gaps between them.
+*/
+/* Keyed off a class on the wrapper that App already knows how to set, rather
+   than :has(). The parent's WIDTH depends on the child's state, and expressing
+   that with :has() makes the rail's layout contingent on selector support for
+   the one property that must never be wrong. */
+.chrome-sidebar.collapsed {
+  flex-basis: 72px;
+  width: 72px;
+}
+.sidebar.collapsed {
+  padding-inline: var(--space-2);
+}
+.sidebar.collapsed .nav-group-label {
+  /* Hidden, not removed from the DOM -- see Sidebar.tsx. It is already
+     aria-hidden, so display:none changes nothing in the accessibility tree. */
+  display: none;
+}
+.sidebar.collapsed .nav-item {
+  /* A column instead of a row: icon above, label under it, both centred. */
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-2);
+  text-align: center;
+}
+.sidebar.collapsed .nav-label {
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+  /* The label may not wrap to a second line: two-line rows would make the rail
+     ragged and its height depend on which words happen to be in it. Ellipsis
+     is the honest truncation, and the full name is always a click away in the
+     expanded rail. */
+  max-width: 100%;
+}
+/* The groups keep their separation without their headings, so the four concerns
+   still read as four. */
+.sidebar.collapsed .nav-group + .nav-group {
+  margin-top: var(--space-5);
+}
 
 /* Pinned to the bottom, away from the destinations: signing out is not a
    place to go, and a mis-click there ends a session mid-incident. */
@@ -1483,19 +1609,11 @@ tr.version-current > td { background: var(--bg-hover); }
   margin-top: auto;
 }
 
-/* In the rail the trigger is a full-width row, not a bare avatar: there is
-   horizontal room for the address, and an operator with two tabs open on two
-   deployments needs to see WHO this one is. */
-.app-sidebar .profile-trigger { width: 100%; border-radius: var(--radius-md); }
-.app-sidebar .profile-panel {
-  /* Opens upward and to the right, because the trigger sits at the bottom-left
-     corner of the viewport; the default (down, right-aligned) would open off
-     the bottom of the screen. */
-  top: auto;
-  bottom: calc(100% + var(--space-3));
-  right: auto;
-  left: 0;
-}
+/* The rail-specific trigger and panel treatments are gone too. They opened the
+   account panel UPWARD, because in the old sidebar layout the trigger sat at the
+   bottom-left corner of the viewport. The account control is in the bar now, at
+   the top-right, so the default downward-and-right placement is correct and a
+   rail override would fight it. */
 
 /* ── Navbar ────────────────────────────────────────────────────────────── */
 /* Same two tokens as the rail, for the same reason: the band is raised surface
@@ -1524,8 +1642,15 @@ tr.version-current > td { background: var(--bg-hover); }
   display: flex;
   align-items: center;
   gap: var(--space-5);
-  padding: var(--space-4) var(--space-6);
+  /* Block padding is gone: the bar takes --navbar-h and centres its contents,
+     so the height the rail positions itself against is the height the bar
+     actually has. Padding plus intrinsic content height would leave the token
+     describing the bar rather than defining it, and the two would drift the
+     next time the type scale moved. */
+  height: var(--navbar-h);
+  padding-inline: var(--space-6);
   flex-wrap: nowrap;
+  box-sizing: border-box;
 }
 .navbar .brand { display: flex; align-items: center; gap: var(--space-4); flex: 0 0 auto; }
 
@@ -1534,11 +1659,6 @@ tr.version-current > td { background: var(--bg-hover); }
 .navbar-nav { flex: 0 1 auto; min-width: 0; overflow-x: auto; }
 .navbar-nav .nav-list { flex-direction: row; gap: var(--space-2); }
 .navbar .nav-item { padding: var(--space-3) var(--space-5); white-space: nowrap; }
-/* The glyph is redundant next to a visible label in a row, and dropping it
-   buys the width that keeps the bar on one line. It returns below, where the
-   labels are the thing that has to go. */
-.navbar .nav-glyph { display: none; }
-
 /* The right-hand cluster. margin-left:auto rather than a spacer element, and it
    moved from .navbar-account to the cluster that now contains it — the account
    control is no longer the only thing pinned to that end. */
@@ -1551,58 +1671,49 @@ tr.version-current > td { background: var(--bg-hover); }
 }
 
 /* ── Responsive ────────────────────────────────────────────────────────────
-   Below 900px the rail collapses to an icon-only column: the destinations stay
-   reachable and in the same order rather than being hidden behind a toggle
-   that must itself be found. Everything below is a viewport measurement. */
+   Two viewport thresholds, and they do different things.
+
+   At 900px the rail adopts the COLLAPSED shape automatically — the same
+   icon-above-label rail the hamburger produces, reusing those rules rather than
+   inventing a third width. The operator's own collapsed preference still wins
+   when they have set it; this only supplies a sensible default where the
+   expanded rail would crowd the page.
+
+   At 560px the rail leaves the layout entirely and the destinations arrive as
+   the off-canvas drawer instead. KEEP 560 IN STEP WITH NARROW_QUERY in App.tsx,
+   which decides in JS whether to render the rail or the drawer; that file
+   carries the matching cross-reference. Below this width there is no room for
+   a column of any width beside the content.
+
+   Everything here is a viewport measurement, not a step on the density scale. */
 @media (max-width: 900px) {
-  .chrome-sidebar { flex-basis: 60px; width: 60px; }
-  .sidebar { padding: var(--space-5) var(--space-3); align-items: stretch; }
-
-  /* The label and the namespace chip are what go; the mark and the glyphs
-     carry the rail. Each link keeps its accessible name, so nothing is lost to
-     a screen reader or to a title tooltip -- and the namespace survives on the
-     account trigger's own title even once its chip is hidden. */
-  .sidebar .brand-word,
-  .app-sidebar .profile-ns,
-  .sidebar .nav-group-label,
-  .sidebar .nav-item .nav-label,
-  .app-sidebar .profile-email,
-  .app-sidebar .profile-caret { display: none; }
-
-  .sidebar-brand { align-items: center; padding: var(--space-0); }
-  .nav-item { justify-content: center; padding: var(--space-4) var(--space-2); }
-  .app-sidebar .profile-trigger { justify-content: center; }
-
-  /* The panel is wider than the rail it hangs off, so it is released from the
-     rail's width rather than being clipped to 60px. */
-  .app-sidebar .profile-panel { left: var(--space-0); min-width: 260px; }
-
-  /* In the navbar the labels go and the glyphs come back, which is the same
-     trade in the other axis. */
-  .navbar .nav-glyph { display: inline-flex; }
-  .navbar .nav-item .nav-label { display: none; }
-  .app-navbar .profile-ns { display: none; }
+  .chrome-sidebar { flex-basis: 72px; width: 72px; }
+  .sidebar { padding-inline: var(--space-2); }
+  .sidebar .nav-group-label { display: none; }
+  .sidebar .nav-item {
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-4) var(--space-2);
+    text-align: center;
+  }
+  .sidebar .nav-label { font-size: var(--text-xs); line-height: var(--leading-tight); }
+  .sidebar .nav-group + .nav-group { margin-top: var(--space-5); }
 
   /* The search field collapses to its icon rather than being squeezed: a
      150px-wide box containing a truncated sentence and a keyboard hint is
-     neither readable nor obviously a search, and the accessible name and the
-     title tooltip both survive the collapse because they are not the visible
-     text. */
+     neither readable nor obviously a search. The accessible name and the title
+     tooltip both survive, because neither is the visible text. */
   .navsearch { flex: 0 0 auto; width: auto; max-width: none; }
   .navsearch-text,
   .navsearch-kbd { display: none; }
 }
 
-/* At phone width the page must not scroll sideways. min-width:0 on the flex
-   child is what actually permits that: without it a wide table forces the
-   whole row wider than the viewport instead of scrolling inside its own
-   container. */
-.app-sidebar .main { min-width: 0; }
-
 @media (max-width: 560px) {
-  .navbar { gap: var(--space-4); padding: var(--space-3) var(--space-4); }
-  .chrome-sidebar { flex-basis: 48px; width: 48px; }
+  .navbar { gap: var(--space-4); padding-inline: var(--space-4); }
+  /* The rail is not rendered at all here — App swaps it for the drawer — so
+     there is no width to set. The page takes the full row. */
   .main { padding: var(--space-5); }
+  .profile-ns { display: none; }
 }
 
 /* ── Appearance panel ──────────────────────────────────────────────────── */
@@ -3159,13 +3270,6 @@ a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
   flex-direction: column;
   gap: var(--space-6);
 }
-/* The glyph is kept here even though the navbar row hides it: in a vertical
-   list there is room, and the glyph is what makes the groups scannable as
-   blocks instead of as twelve lines of text. The rule is scoped rather than
-   relying on specificity, since .navbar .nav-glyph would otherwise reach these
-   rows — the drawer is rendered inside .navbar. */
-.navdrawer .nav-glyph { display: inline-flex; }
-
 /* At phone width the drawer IS the navigation: the bar's own labels are already
    gone, leaving a row of glyphs, so the panel that names the destinations
    should take the screen rather than leave a strip of dimmed page beside it. */

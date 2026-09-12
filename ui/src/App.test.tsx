@@ -114,6 +114,28 @@ describe('the application shell', () => {
   });
 
   /**
+   * The collapsed state reaches the WRAPPER, not just the rail.
+   *
+   * This shipped broken: App set the class on <Sidebar> only, and every
+   * collapsed style that mattered — the column's 72px width above all — keys off
+   * the wrapper. So the button toggled state, the rail re-rendered, and nothing
+   * moved. The React-level test passed throughout, which is exactly why this
+   * assertion is about the class landing on both elements rather than about the
+   * boolean changing.
+   */
+  it('marks both the rail and its column as collapsed', async () => {
+    renderApp();
+
+    const column = document.querySelector('.chrome-sidebar')!;
+    expect(column.className).not.toContain('collapsed');
+
+    fireEvent.click(screen.getByRole('button', { name: /collapse the sidebar/i }));
+
+    await waitFor(() => expect(column.className).toContain('collapsed'));
+    expect(document.querySelector('.sidebar')!.className).toContain('collapsed');
+  });
+
+  /**
    * Exactly one account menu.
    *
    * Worth its own assertion because the first wiring of this shell passed
