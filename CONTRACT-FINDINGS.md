@@ -616,3 +616,26 @@ the API key", which leaves an operator hunting through config for something they
 can set in the header.
 Verified: `dev-admin-key` does not appear in the built bundle, and the console
 renders 3 runs and the worker fleet once a key is saved.
+
+### F54. API keys were guessable literals; now generated — FIXED
+**Severity:** real security defect, plus the cause of a confusing 401.
+`make seed` defaulted to the literals `dev-admin-key` / `dev-worker-key`, and
+compose defaulted the agents to the same. Any deployment that forgot to override
+them shipped a credential an attacker could guess in one try, and because the
+worker key grants registration, that is fleet access.
+**Resolution:** `make seed` now generates 256-bit random keys
+(`nxs_admin_<64 hex>`), prints each plaintext exactly once, and stores only the
+SHA-256 hash. Compose no longer has a literal default for the worker key -- the
+variable is required, so a missing key fails loudly at startup rather than
+silently falling back to a known one.
+Verified: the generated admin key returns 200, the revoked literals return 401,
+and both agents re-registered on the generated worker key.
+
+### F55. Console 401 could not be distinguished from 403 — FIXED
+A key lacking the role (403) and a key not recognised at all (401) rendered the
+same "check the API key" message, sending the operator to re-paste a key that
+was never the problem. The console now distinguishes them, names the header
+control that fixes it, and reports the stored key's length -- a key pasted from
+a terminal with a trailing newline is otherwise indistinguishable from a wrong
+one. The key is also trimmed on read as well as on write, since a key stored by
+an earlier build was never trimmed at all.

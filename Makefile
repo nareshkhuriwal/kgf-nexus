@@ -117,24 +117,37 @@ ui-test: ## Run the UI component tests
 # The key is inserted hashed (api_keys.key_hash), matching how the gateway
 # verifies it: a plaintext key in the database would defeat the point of hashing
 # at rest even in dev.
-seed: ## Create a dev API key (prints the plaintext once)
+seed: ## Generate and install API keys (prints each plaintext exactly once)
 	@command -v psql >/dev/null || { echo "psql not found; run: $(COMPOSE) exec postgres psql -U nexus -d nexus"; exit 1; }
 	@set -euo pipefail; \
-	KEY="$${NEXUS_DEV_API_KEY:-dev-admin-key}"; \
+	gen() { \
+	  if command -v openssl >/dev/null 2>&1; then \
+	    printf 'nxs_%s_%s' "$$1" "$$(openssl rand -hex 32)"; \
+	  else \
+	    printf 'nxs_%s_%s' "$$1" "$$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"; \
+	  fi; \
+	}; \
+	KEY="$${NEXUS_DEV_API_KEY:-$$(gen admin)}"; \
 	HASH=$$(printf '%s' "$$KEY" | shasum -a 256 | cut -d' ' -f1); \
 	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
 	  "INSERT INTO api_keys (namespace, name, key_hash, role) \
-	   VALUES ('$(NAMESPACE)', 'dev-admin', '$$HASH', 'admin') \
+	   VALUES ('$(NAMESPACE)', 'admin-$$(date +%Y%m%d%H%M%S)', '$$HASH', 'admin') \
 	   ON CONFLICT (key_hash) DO NOTHING"; \
-	WKEY="$${NEXUS_WORKER_API_KEY:-dev-worker-key}"; \
+	WKEY="$${NEXUS_WORKER_API_KEY:-$$(gen worker)}"; \
 	WHASH=$$(printf '%s' "$$WKEY" | shasum -a 256 | cut -d' ' -f1); \
 	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
 	  "INSERT INTO api_keys (namespace, name, key_hash, role) \
-	   VALUES ('$(NAMESPACE)', 'dev-worker', '$$WHASH', 'worker') \
+	   VALUES ('$(NAMESPACE)', 'worker-$$(date +%Y%m%d%H%M%S)', '$$WHASH', 'worker') \
 	   ON CONFLICT (key_hash) DO NOTHING"; \
-	echo "seed: admin  key = $$KEY"; \
-	echo "seed: worker key = $$WKEY  (matches the agents' NEXUS_WORKER_API_KEY)"; \
-	echo "seed: DEV ONLY — these are not secrets."
+	echo ""; \
+	echo "  admin  key (console, CLI):  $$KEY"; \
+	echo "  worker key (agents):        $$WKEY"; \
+	echo ""; \
+	echo "  Only the SHA-256 hash is stored, so these cannot be recovered."; \
+	echo "  Copy the admin key into the console via the header's \"Set API key\"."; \
+	echo "  Give the worker key to the agents as NEXUS_WORKER_API_KEY, then:"; \
+	echo "      NEXUS_WORKER_API_KEY=$$WKEY $(COMPOSE) up -d agent-cpu agent-gpu"; \
+	echo ""
 
 # EXAMPLE selects which of examples/*/compiled.yaml to submit. ten_node_mixed is
 # the default because it IS the Phase 1 exit criterion: 10 nodes, mixed CPU/GPU.

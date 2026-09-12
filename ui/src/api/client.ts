@@ -50,7 +50,11 @@ const API_KEY_STORAGE = 'nexus.apiKey';
  */
 export function getApiKey(): string {
   try {
-    const stored = window.localStorage.getItem(API_KEY_STORAGE);
+    // Trim on READ as well as on write. A key pasted from a terminal very often
+    // carries a trailing space or newline, and a key stored by an earlier build
+    // was never trimmed at all -- both produce a 401 that looks identical to a
+    // wrong key, which is close to undiagnosable from the UI.
+    const stored = window.localStorage.getItem(API_KEY_STORAGE)?.trim();
     if (stored) return stored;
   } catch {
     // Private browsing and blocked site-data both throw here. Falling through to
@@ -60,8 +64,9 @@ export function getApiKey(): string {
 }
 
 export function setApiKey(key: string): void {
+  const clean = key.trim();
   try {
-    if (key) window.localStorage.setItem(API_KEY_STORAGE, key);
+    if (clean) window.localStorage.setItem(API_KEY_STORAGE, clean);
     else window.localStorage.removeItem(API_KEY_STORAGE);
   } catch {
     // Non-fatal: the key simply will not persist across reloads.
@@ -151,9 +156,17 @@ function serverMessage(status: number, body: string): string {
   if (status === 401 || status === 403) {
     // Name the control that fixes it. "Check the API key" leaves an operator
     // hunting through config for something they can set in the header.
-    return getApiKey()
-      ? `Not authorised (HTTP ${status}). The API key in this browser was refused — use “API key” in the header to replace it.`
-      : `Not authorised (HTTP ${status}). No API key is set — use “Set API key” in the header.`;
+    const key = getApiKey();
+    if (!key) {
+      return `Not authorised (HTTP ${status}). No API key is set — use “Set API key” in the header.`;
+    }
+    // 403 means the key was RECOGNISED but lacks the role, which is a different
+    // fix from 401 (key not recognised at all). Saying "check your key" for a
+    // 403 sends the operator to re-paste a key that was never the problem.
+    if (status === 403) {
+      return `Forbidden (HTTP 403). This key is valid but lacks permission — a worker key cannot read this; use an admin key.`;
+    }
+    return `Not authorised (HTTP 401). The API key in this browser was refused (${key.length} chars). Use “API key” in the header to replace it.`;
   }
   if (status === 404) return `Not found (HTTP 404). This endpoint may not be implemented yet.`;
   if (status === 501) return `Not implemented yet (HTTP 501).`;
