@@ -30,8 +30,43 @@ export const API_BASE = RAW_BASE.replace(/\/$/, '');
 export const DEFAULT_NAMESPACE =
   (import.meta.env?.VITE_NEXUS_NAMESPACE as string | undefined) ?? 'default';
 
-/** Dev convenience: a static API key can be baked in for local Compose. */
-const API_KEY = (import.meta.env?.VITE_NEXUS_API_KEY as string | undefined) ?? '';
+/**
+ * Build-time key, used only as a fallback for a local Compose convenience build.
+ *
+ * Anything baked into the bundle is readable by everyone who loads the page, so
+ * the runtime key below takes precedence: the operator supplies it in the
+ * browser and it never leaves that browser.
+ */
+const BUILD_API_KEY = (import.meta.env?.VITE_NEXUS_API_KEY as string | undefined) ?? '';
+
+const API_KEY_STORAGE = 'nexus.apiKey';
+
+/**
+ * The API key the console should present.
+ *
+ * Read on every request rather than captured once, so saving a key takes effect
+ * immediately without a reload -- the console is otherwise stuck showing 401s
+ * until the operator thinks to refresh, which reads as "my key is wrong".
+ */
+export function getApiKey(): string {
+  try {
+    const stored = window.localStorage.getItem(API_KEY_STORAGE);
+    if (stored) return stored;
+  } catch {
+    // Private browsing and blocked site-data both throw here. Falling through to
+    // the build-time key keeps the console usable rather than failing outright.
+  }
+  return BUILD_API_KEY;
+}
+
+export function setApiKey(key: string): void {
+  try {
+    if (key) window.localStorage.setItem(API_KEY_STORAGE, key);
+    else window.localStorage.removeItem(API_KEY_STORAGE);
+  } catch {
+    // Non-fatal: the key simply will not persist across reloads.
+  }
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -62,7 +97,8 @@ export class ApiError extends Error {
 }
 
 function authHeaders(): Record<string, string> {
-  return API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {};
+  const key = getApiKey();
+  return key ? { Authorization: `Bearer ${key}` } : {};
 }
 
 export function apiUrl(path: string): string {
@@ -112,7 +148,13 @@ function serverMessage(status: number, body: string): string {
   } catch {
     /* body was not JSON; fall through to the generic text */
   }
-  if (status === 401 || status === 403) return `Not authorised (HTTP ${status}). Check the API key.`;
+  if (status === 401 || status === 403) {
+    // Name the control that fixes it. "Check the API key" leaves an operator
+    // hunting through config for something they can set in the header.
+    return getApiKey()
+      ? `Not authorised (HTTP ${status}). The API key in this browser was refused — use “API key” in the header to replace it.`
+      : `Not authorised (HTTP ${status}). No API key is set — use “Set API key” in the header.`;
+  }
   if (status === 404) return `Not found (HTTP 404). This endpoint may not be implemented yet.`;
   if (status === 501) return `Not implemented yet (HTTP 501).`;
   if (status >= 500) return `The server failed (HTTP ${status}).`;

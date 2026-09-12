@@ -9,7 +9,8 @@
 
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { useEffect, useState } from 'react';
-import { API_BASE, DEFAULT_NAMESPACE } from './api/client';
+import { useQueryClient } from '@tanstack/react-query';
+import { API_BASE, DEFAULT_NAMESPACE, getApiKey, setApiKey } from './api/client';
 import { RunListPage } from './pages/RunListPage';
 import { RunDetailPage } from './pages/RunDetailPage';
 import { WorkersPage } from './pages/WorkersPage';
@@ -18,6 +19,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 const NS_KEY = 'nexus.namespace';
 
 export function App() {
+  const queryClient = useQueryClient();
   const [namespace, setNamespace] = useState(
     () => window.localStorage.getItem(NS_KEY) ?? DEFAULT_NAMESPACE,
   );
@@ -25,6 +27,21 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem(NS_KEY, namespace);
   }, [namespace]);
+
+  // The key lives in the browser, never in the bundle: anything baked in at
+  // build time is readable by everyone who loads the page.
+  const [apiKey, setApiKeyState] = useState(() => getApiKey());
+  const [keyDraft, setKeyDraft] = useState('');
+  const [keyOpen, setKeyOpen] = useState(false);
+
+  function saveKey(next: string) {
+    setApiKey(next);
+    setApiKeyState(next);
+    setKeyOpen(false);
+    // Every page's data was fetched with the old credential, so re-fetch rather
+    // than leave stale 401 panels on screen next to a now-valid key.
+    queryClient.invalidateQueries();
+  }
 
   return (
     <div className="app">
@@ -51,6 +68,45 @@ export function App() {
               aria-label="namespace"
             />
           </label>
+          {keyOpen ? (
+            <form
+              className="row"
+              style={{ gap: 6 }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                saveKey(keyDraft.trim());
+              }}
+            >
+              <input
+                type="password"
+                value={keyDraft}
+                onChange={(e) => setKeyDraft(e.target.value)}
+                placeholder="API key"
+                aria-label="API key"
+                style={{ width: 200 }}
+                autoFocus
+              />
+              <button type="submit">Save</button>
+              <button type="button" onClick={() => setKeyOpen(false)}>
+                Cancel
+              </button>
+            </form>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setKeyDraft(apiKey);
+                setKeyOpen(true);
+              }}
+              title={
+                apiKey
+                  ? 'An API key is set for this browser. Click to change it.'
+                  : 'No API key set — every request will be refused with 401.'
+              }
+            >
+              {apiKey ? 'API key ✓' : 'Set API key'}
+            </button>
+          )}
           <span className="chip" title={`API base: ${API_BASE || 'same origin'}`}>
             {API_BASE || 'same origin'}
           </span>

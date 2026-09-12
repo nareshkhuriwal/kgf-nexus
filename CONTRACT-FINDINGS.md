@@ -597,3 +597,22 @@ ADR-0004's "both surfaces produce the identical document".
 The examples' `compiled.yaml` files use proto names, so they would be REJECTED
 by the schema as written. **The schema should accept both**, exactly as the SDK
 already does for `validation`/`validation_error` (F20).
+
+### F53. The console had no way to supply an API key — FIXED
+**Severity:** the UI was unusable; every panel showed HTTP 401.
+The client read `VITE_NEXUS_API_KEY` at BUILD time and compose never passed it,
+so the shipped bundle carried an empty credential and every request was refused.
+Baking one in would have been the wrong fix: anything in the bundle is readable
+by everyone who loads the page.
+**Resolution:** the key is entered in the header and stored in `localStorage`,
+alongside the namespace control that already worked this way. It is read on
+every request rather than captured once, so saving takes effect immediately
+without a reload -- otherwise the console sits on stale 401 panels next to a
+valid key, which reads as "my key is wrong". Saving invalidates all queries so
+existing error panels re-fetch. The build-time variable remains as a fallback
+for local convenience builds only.
+The 401 message now names the control that fixes it rather than saying "check
+the API key", which leaves an operator hunting through config for something they
+can set in the header.
+Verified: `dev-admin-key` does not appear in the built bundle, and the console
+renders 3 runs and the worker fleet once a key is saved.
