@@ -59,13 +59,46 @@ describe('the Nexus mark', () => {
 
 describe('the serialised mark', () => {
   // currentColor cannot resolve outside a document, so the data-URI form has to
-  // pin a colour explicitly or the favicon renders invisible.
-  it('pins a colour, because currentColor cannot resolve in a favicon', () => {
+  // pin a colour explicitly or it renders invisible.
+  it('pins a colour, because currentColor cannot resolve outside a document', () => {
     const uri = logoDataUri('#818cf8');
 
     expect(uri.startsWith('data:image/svg+xml,')).toBe(true);
     const decoded = decodeURIComponent(uri.slice('data:image/svg+xml,'.length));
     expect(decoded).toContain('#818cf8');
     expect(decoded).not.toContain('currentColor');
+  });
+
+  /**
+   * The serialised form is cut for SMALL sizes, and these are the two properties
+   * that make it legible there.
+   *
+   * The component's own numbers — a 1.6 stroke on a 24 viewBox, edges held back
+   * to 0.55 opacity — work in a rail at 20px and up, and fail at 16px: the
+   * strokes land on ~1.07 device pixels and the edges keep barely 0.6px of ink,
+   * which rasterises to a grey smudge rather than a mark. So this form uses a 32
+   * viewBox with heavier strokes and no opacity knockback.
+   *
+   * Asserted as ratios rather than literals so the geometry can be retuned; what
+   * must not come back is sub-pixel line-work at a 16px render.
+   */
+  it('stays above one device pixel when rendered at 16px', () => {
+    const decoded = decodeURIComponent(logoDataUri().slice('data:image/svg+xml,'.length));
+
+    const viewBox = /viewBox="0 0 (\d+) \1"/.exec(decoded);
+    expect(viewBox).not.toBeNull();
+    const units = Number(viewBox![1]);
+
+    const widths = [...decoded.matchAll(/stroke-width="([\d.]+)"/g)].map((m) => Number(m[1]));
+    expect(widths.length).toBeGreaterThan(0);
+    for (const w of widths) {
+      expect((w * 16) / units).toBeGreaterThan(1);
+    }
+  });
+
+  it('spends no opacity on de-emphasis, since there is none to spare at 16px', () => {
+    const decoded = decodeURIComponent(logoDataUri().slice('data:image/svg+xml,'.length));
+
+    expect(decoded).not.toContain('opacity');
   });
 });

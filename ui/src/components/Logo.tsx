@@ -64,20 +64,27 @@ export function Logo({ size = 20, className, title }: LogoProps) {
 }
 
 /**
- * The mark as a standalone data-URI, for the favicon and anywhere a string is
- * required instead of a component.
+ * The mark as a standalone data-URI, for anywhere a string is required instead
+ * of a component -- an <img src>, a canvas, an email.
  *
- * Kept in sync with the component above by construction -- same geometry,
- * written once here as the serialised form. `currentColor` cannot resolve
- * outside the document, so the favicon pins the accent explicitly.
+ * NOT the favicon. The favicon is a static file at public/favicon.svg, because
+ * the browser asks for it by URL before any of this JavaScript has run. That
+ * file also carries DIFFERENT geometry on purpose: it is cut for 16px, where
+ * this component's 1.6 strokes at 0.55 opacity fall below one device pixel and
+ * grey out. See the comment there.
+ *
+ * This function keeps the SMALL-SIZE cut rather than the component's, since a
+ * data-URI mark is almost always being dropped somewhere small and fixed. The
+ * geometry matching public/favicon.svg is what stops a third variant existing.
+ * `currentColor` cannot resolve outside a document, so the colour is pinned.
  */
 export function logoDataUri(color = '#818cf8'): string {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
-<g stroke="${color}" stroke-width="1.6" stroke-linecap="round" opacity="0.55">
-<path d="M12 12 L12 4.4"/><path d="M12 12 L18.6 15.8"/><path d="M12 12 L5.4 15.8"/></g>
-<circle cx="12" cy="12" r="3.1" fill="${color}"/>
-<g stroke="${color}" stroke-width="1.6" fill="none">
-<circle cx="12" cy="3.4" r="2.1"/><circle cx="19.4" cy="16.3" r="2.1"/><circle cx="4.6" cy="16.3" r="2.1"/></g>
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+<g stroke="${color}" stroke-width="2.6" stroke-linecap="round">
+<path d="M16 16 L16 7.4"/><path d="M16 16 L23.5 20.3"/><path d="M16 16 L8.5 20.3"/></g>
+<circle cx="16" cy="16" r="4.3" fill="${color}"/>
+<g stroke="${color}" stroke-width="2.2" fill="none">
+<circle cx="16" cy="5.6" r="2.9"/><circle cx="25.6" cy="21.6" r="2.9"/><circle cx="6.4" cy="21.6" r="2.9"/></g>
 </svg>`;
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
