@@ -98,6 +98,8 @@ type API struct {
 	// backfills is nil when no backfill upstream is configured, for the same reason
 	// as schedules.
 	backfills BackfillManager
+	// fleet reports upstream connectivity; nil when not wired.
+	fleet FleetHealth
 	// identity is nil unless WithIdentity was called, in which case the identity
 	// and admin routes are simply not registered. See admin.go.
 	identity IdentityAdmin
@@ -130,6 +132,49 @@ func (a *API) WithSchedules(m ScheduleManager) *API {
 // WithBackfills wires the backfill upstream, enabling those routes.
 func (a *API) WithBackfills(m BackfillManager) *API {
 	a.backfills = m
+	return a
+}
+
+// FleetHealth reports the gateway's view of every upstream it dials.
+//
+// An interface rather than the concrete upstream clients, for the reason every
+// other upstream here is one: the rest package must stay testable without
+// dialling anything, and a fake that returns a fixed fleet is how the handler's
+// behaviour gets pinned.
+type FleetHealth interface {
+	UpstreamHealth() []UpstreamHealth
+}
+
+// UpstreamHealth is one upstream's observed connectivity.
+//
+// Declared HERE rather than imported from the upstream package, because that
+// package already imports this one -- the gateway's REST layer defines the
+// shapes its handlers serve, and the upstream layer fills them in. Taking the
+// dependency the other way is an import cycle.
+type UpstreamHealth struct {
+	// Name is the service, as an operator names it.
+	Name string `json:"name"`
+	// Addr is what this gateway was configured to dial, which is half of every
+	// "why can't it see X" investigation.
+	Addr string `json:"addr"`
+	// State is the gRPC connectivity state: IDLE, CONNECTING, READY,
+	// TRANSIENT_FAILURE or SHUTDOWN. Reported verbatim rather than flattened to a
+	// boolean, because IDLE (nothing dialled yet) and TRANSIENT_FAILURE (tried and
+	// failed) are different problems with different fixes.
+	State string `json:"state"`
+	// Configured is false when no address was set. Such an upstream is not
+	// unhealthy -- it was never asked for -- and showing it as DOWN would send an
+	// operator chasing a service this deployment does not run.
+	Configured bool `json:"configured"`
+}
+
+// WithFleetHealth wires the health reporter, enabling GET /v1/health/fleet.
+//
+// Nil-tolerant like the schedule upstreams: a gateway assembled without it
+// answers 501 on that route rather than refusing to start, so this is additive
+// for any deployment that has not wired it.
+func (a *API) WithFleetHealth(f FleetHealth) *API {
+	a.fleet = f
 	return a
 }
 
@@ -187,6 +232,13 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("GET /v1/namespaces/{ns}/workers", a.guard(authn.ActionRead, a.listWorkers))
 	mux.Handle("POST /v1/namespaces/{ns}/workers/{id}/drain", a.guard(authn.ActionAdminWrite, a.drainWorker))
 	mux.Handle("GET /v1/namespaces/{ns}/capacity", a.guard(authn.ActionRead, a.capacity))
+
+	// Fleet health is NOT namespaced: the control plane is one deployment, and a
+	// scheduler that is down is down for every namespace. Guarded on read rather
+	// than admin because "is the platform up" is the question every operator
+	// needs answered during an incident, and it exposes only service names,
+	// configured addresses and connectivity states -- no tenant data.
+	mux.Handle("GET /v1/health/fleet", a.guard(authn.ActionRead, a.fleetHealth))
 
 	// The schema the gateway actually enforces, served so authors and the SDK can
 	// validate locally against the same grammar rather than a documented copy of it.
@@ -351,6 +403,39 @@ func (a *API) submitSpec(w http.ResponseWriter, r *http.Request, p authn.Princip
 		"spec_hash":  row.SpecHash,
 		"created":    created,
 		"task_count": len(compiled.Proto.GetTasks()),
+	})
+}
+
+// fleetHealth reports the gateway's view of every upstream it dials.
+//
+// CONNECTIVITY, not readiness, and the payload says so in its own body rather
+// than relying on the reader to know. See upstream.UpstreamHealth for why the
+// cheap answer is the right one here: this is the endpoint called when something
+// is already wrong, so it must not itself be able to hang.
+func (a *API) fleetHealth(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	if a.fleet == nil {
+		writeError(w, http.StatusNotImplemented, "not_configured",
+			"this gateway was not wired with a fleet health reporter")
+		return
+	}
+	ups := a.fleet.UpstreamHealth()
+
+	// "degraded" rather than "unhealthy": the gateway answering at all means the
+	// ingress is up, and an upstream that is merely IDLE has not failed -- it has
+	// not been dialled yet, which is normal before first use.
+	overall := "ok"
+	for _, u := range ups {
+		if u.Configured && u.State != "READY" && u.State != "IDLE" {
+			overall = "degraded"
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    overall,
+		"upstreams": ups,
+		// Stated in the payload because a client that treats this as a readiness
+		// check will otherwise report a connected-but-failing service as healthy.
+		"measures": "gRPC connectivity from this gateway, read without a network " +
+			"round trip; not each service's own /readyz",
 	})
 }
 

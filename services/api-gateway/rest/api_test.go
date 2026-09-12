@@ -577,3 +577,102 @@ func TestBodySizeLimit(t *testing.T) {
 		t.Errorf("an oversized body returned %d, want 413", rec.Code)
 	}
 }
+
+// fakeFleet is a fixed upstream report, so the handler's behaviour is pinned
+// without dialling anything.
+type fakeFleet struct{ ups []UpstreamHealth }
+
+func (f fakeFleet) UpstreamHealth() []UpstreamHealth { return f.ups }
+
+// A fleet where every configured upstream is connected is "ok".
+func TestFleetHealthReportsOKWhenEverythingIsReady(t *testing.T) {
+	rec := get(t, buildFleetAPI(t, fakeFleet{ups: []UpstreamHealth{
+		{Name: "scheduler", Addr: "scheduler:9090", State: "READY", Configured: true},
+		{Name: "dag-engine", Addr: "dag:9090", State: "READY", Configured: true},
+	}}), "/v1/health/fleet", adminKey)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Status    string `json:"status"`
+		Upstreams []struct {
+			Name, State string
+		} `json:"upstreams"`
+		Measures string `json:"measures"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Status != "ok" {
+		t.Errorf("status = %q, want ok", body.Status)
+	}
+	if len(body.Upstreams) != 2 {
+		t.Errorf("reported %d upstreams, want 2", len(body.Upstreams))
+	}
+	// The payload must say what it measured, or a client will treat connectivity
+	// as readiness and call a failing service healthy.
+	if !strings.Contains(body.Measures, "connectivity") {
+		t.Errorf("payload does not state what it measures: %q", body.Measures)
+	}
+}
+
+// A failed upstream degrades the fleet; an IDLE one does NOT, because idle means
+// "not dialled yet", which is normal before first use rather than a fault.
+func TestFleetHealthDistinguishesFailureFromIdle(t *testing.T) {
+	degraded := get(t, buildFleetAPI(t, fakeFleet{ups: []UpstreamHealth{
+		{Name: "scheduler", State: "TRANSIENT_FAILURE", Configured: true},
+	}}), "/v1/health/fleet", adminKey)
+	if got := statusField(t, degraded); got != "degraded" {
+		t.Errorf("a failed upstream gave status %q, want degraded", got)
+	}
+
+	idle := get(t, buildFleetAPI(t, fakeFleet{ups: []UpstreamHealth{
+		{Name: "scheduler", State: "IDLE", Configured: true},
+	}}), "/v1/health/fleet", adminKey)
+	if got := statusField(t, idle); got != "ok" {
+		t.Errorf("an IDLE upstream gave status %q, want ok (idle is not a fault)", got)
+	}
+}
+
+// An upstream nobody configured is not a fault either: reporting it as down
+// sends an operator chasing a service this deployment does not run.
+func TestFleetHealthIgnoresUnconfiguredUpstreams(t *testing.T) {
+	rec := get(t, buildFleetAPI(t, fakeFleet{ups: []UpstreamHealth{
+		{Name: "dag-engine", State: "UNCONFIGURED", Configured: false},
+	}}), "/v1/health/fleet", adminKey)
+	if got := statusField(t, rec); got != "ok" {
+		t.Errorf("an unconfigured upstream gave status %q, want ok", got)
+	}
+}
+
+// A gateway assembled without a reporter answers 501, not 500: the feature is
+// absent, not broken.
+func TestFleetHealthIsNotImplementedWhenUnwired(t *testing.T) {
+	h, _, _ := newTestAPI(t)
+	rec := get(t, h, "/v1/health/fleet", adminKey)
+	if rec.Code != http.StatusNotImplemented {
+		t.Errorf("status = %d, want 501 when no reporter is wired", rec.Code)
+	}
+}
+
+func statusField(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return body.Status
+}
+
+// buildFleetAPI is newTestAPI plus a wired health reporter.
+func buildFleetAPI(t *testing.T, f FleetHealth) http.Handler {
+	t.Helper()
+	db := newRestDB()
+	db.addKey(adminKey, "team-ml", "ci", "admin")
+	api := New(db, authn.New(db), &fakeWFM{}, fakeRM{}, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil))).WithFleetHealth(f)
+	return api.Routes()
+}

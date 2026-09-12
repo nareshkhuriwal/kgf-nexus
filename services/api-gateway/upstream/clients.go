@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"google.golang.org/grpc"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
@@ -344,6 +345,10 @@ type SchedulerClient struct {
 	// because the two calls are one causal step: a result that is applied without
 	// a reconcile leaves the run stalled with no error anywhere.
 	dag *dagGRPC
+	// dagAddr is kept alongside the connection purely so Health() can report
+	// WHICH address this gateway was told to dial. Half of any "why can't it see
+	// the dag-engine" question is answered by the configured address.
+	dagAddr string
 	// claimPeers are the ADDITIONAL scheduler replicas a worker poll is offered
 	// to, beyond grpc.
 	//
@@ -395,6 +400,7 @@ func DialScheduler(ctx context.Context, addr, dagAddr string, log *slog.Logger) 
 			"remedy", "set NEXUS_DAG_ENGINE_ADDR")
 		return c, nil
 	}
+	c.dagAddr = dagAddr
 	d, err := dialDAG(ctx, dagAddr, log)
 	if err != nil {
 		return nil, err
@@ -560,4 +566,114 @@ func errNotWired(service, method string) error {
 // on every heartbeat.
 func isNoRows(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows)
+}
+
+// ── Upstream health ───────────────────────────────────────────────────────
+//
+// WHAT THIS IS AND IS NOT. Every service serves /healthz and /readyz (ADR-0011
+// rule 3), but those are HTTP endpoints on each service's own port and the
+// gateway is the only ingress (§3.2) -- so a console has no route to them and
+// nothing in the system aggregates them. This closes that, using what the
+// gateway already holds: a gRPC connection per upstream.
+//
+// It reports CONNECTIVITY, not readiness. grpc.ClientConn.GetState() is read
+// from the connection's own state machine with no network round trip, so this
+// endpoint cannot itself be slow, cannot time out, and cannot add load to a
+// struggling upstream -- which is exactly what you want from the thing you call
+// when you suspect something is wrong. The trade is that READY here means "the
+// transport is up", not "that service says it is ready to serve"; a service can
+// be connected and still failing its own dependency checks.
+//
+// Calling each upstream's /readyz instead would be more truthful and much worse
+// behaved: six HTTP requests per poll, each able to hang, from the one component
+// that must stay responsive during an incident. Connectivity is the honest cheap
+// answer, and it is labelled as such rather than dressed up as a health check.
+
+// UpstreamHealth is defined by the rest package, which serves it: that package
+// already imports nothing from here, and this one imports it, so the type lives
+// there and is filled in here.
+type UpstreamHealth = rest.UpstreamHealth
+
+// connState reports a connection's state, or a configured-but-absent marker.
+func connState(conn *grpc.ClientConn) string {
+	if conn == nil {
+		return "UNCONFIGURED"
+	}
+	return conn.GetState().String()
+}
+
+// Health reports the workflow-manager connection.
+func (c *WorkflowManagerClient) Health() UpstreamHealth {
+	h := UpstreamHealth{Name: "workflow-manager", Addr: c.addr, Configured: c.grpc != nil}
+	if c.grpc != nil {
+		h.State = connState(c.grpc.conn)
+	} else {
+		h.State = "UNCONFIGURED"
+	}
+	return h
+}
+
+// Health reports the resource-manager connection.
+func (c *ResourceManagerClient) Health() UpstreamHealth {
+	h := UpstreamHealth{Name: "resource-manager", Addr: c.addr, Configured: c.grpc != nil}
+	if c.grpc != nil {
+		h.State = connState(c.grpc.conn)
+	} else {
+		h.State = "UNCONFIGURED"
+	}
+	return h
+}
+
+// Health reports the scheduler and dag-engine connections.
+//
+// Two entries from one client because they are two SERVICES an operator thinks
+// about separately, even though one Go type happens to hold both: a run that
+// will not advance is a dag-engine question, and a task that will not dispatch
+// is a scheduler one. Additional scheduler replicas wired for worker polls are
+// reported individually, since a fleet where one replica is down behaves
+// differently from one where all are.
+func (c *SchedulerClient) Health() []UpstreamHealth {
+	out := []UpstreamHealth{{Name: "scheduler", Addr: c.addr, Configured: c.grpc != nil, State: "UNCONFIGURED"}}
+	if c.grpc != nil {
+		out[0].State = connState(c.grpc.conn)
+	}
+	for _, p := range c.claimPeers {
+		out = append(out, UpstreamHealth{
+			Name: "scheduler (queue peer)", Addr: p.addr, Configured: true, State: connState(p.conn),
+		})
+	}
+	dag := UpstreamHealth{Name: "dag-engine", Configured: c.dag != nil, State: "UNCONFIGURED"}
+	if c.dag != nil {
+		dag.Addr = c.dagAddr
+		dag.State = connState(c.dag.conn)
+	}
+	return append(out, dag)
+}
+
+// Fleet aggregates every upstream the gateway dials into one health report.
+//
+// A tiny struct rather than a function taking three arguments, so main wires it
+// once and a new upstream is added in one place instead of at every call site.
+type Fleet struct {
+	WFM   *WorkflowManagerClient
+	RM    *ResourceManagerClient
+	Sched *SchedulerClient
+}
+
+// UpstreamHealth implements rest.FleetHealth.
+//
+// Ordered scheduler-and-dag-engine first because those are the two an operator
+// checks when work is not moving, which is the reason this endpoint gets called.
+func (f Fleet) UpstreamHealth() []UpstreamHealth {
+	var out []UpstreamHealth
+	if f.Sched != nil {
+		out = append(out, f.Sched.Health()...)
+	}
+	if f.WFM != nil {
+		out = append(out, f.WFM.Health())
+	}
+	if f.RM != nil {
+		out = append(out, f.RM.Health())
+	}
+	return out
 }

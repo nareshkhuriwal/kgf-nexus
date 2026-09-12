@@ -106,7 +106,11 @@ func run() error {
 		// because it owns the table, and it already holds the connection.
 		WithSchedules(wfmClient).
 		WithBackfills(wfmClient).
-		WithIdentity(rest.NewStoreIdentityAdmin(db))
+		WithIdentity(rest.NewStoreIdentityAdmin(db)).
+		// Nothing else in the deployment aggregates per-service health: each
+		// service serves its own /healthz and /readyz, but the gateway is the only
+		// ingress, so a console has no route to them.
+		WithFleetHealth(upstream.Fleet{WFM: wfmClient, RM: rmClient, Sched: schedClient})
 
 	// Rate limiting is opt-in because a limit guessed wrong is itself an outage:
 	// the right number depends on fleet size and the console's poll interval. Off
