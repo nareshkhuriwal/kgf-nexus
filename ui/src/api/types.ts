@@ -492,3 +492,127 @@ export interface CreateRunRequest {
   priority?: number;
   trigger_kind?: string;
 }
+
+// ── attention triage ────────────────────────────────────────────────────────
+
+/**
+ * Why an item is on the triage list. Open-ended on purpose: the server ranks and
+ * classifies, and a kind this build has never heard of must still render its
+ * summary rather than disappear, so the union carries a string escape hatch.
+ */
+export type AttentionKind =
+  | 'indeterminate_outcome'
+  | 'retry_exhausted'
+  | 'blocked_on_capacity'
+  | 'run_failed'
+  | 'run_stalled'
+  | (string & {});
+
+/** Two levels, not five: an operator triaging mid-incident sorts into now/soon. */
+export type AttentionSeverity = 'critical' | 'warning' | (string & {});
+
+/**
+ * One row of GET /v1/namespaces/{ns}/attention.
+ *
+ * `link` is resolved SERVER-side and used verbatim. The server knows whether an
+ * item is about a run or one attempt within it, so composing the href here from
+ * run_id and attempt_id would be the console re-deriving something it was
+ * already told — and getting it wrong the first time the shape changes.
+ *
+ * The optional fields are optional per ITEM, not per deployment: a run_failed
+ * row has no node, a blocked attempt has no retry reason. They are therefore
+ * tested for PRESENCE (`!== undefined`) rather than truthiness, because
+ * `node_id: ""` and `reason: ""` are server answers, not absences.
+ */
+export interface AttentionItem {
+  kind: AttentionKind;
+  severity: AttentionSeverity;
+  summary: string;
+  detail: string;
+  link: string;
+  run_id: string;
+  run_state: RunState;
+  spec_name?: string;
+  occurred_at: string;
+  node_id?: string;
+  attempt_id?: string;
+  reason?: string;
+}
+
+/**
+ * The triage response.
+ *
+ * `items` arrives ranked and deterministic, so the console renders it in the
+ * order given. Re-sorting client-side would put a cheap local heuristic in front
+ * of the server's ranking and make two browsers disagree about what matters most.
+ *
+ * `count` describes the items RETURNED, and `truncated` says the namespace holds
+ * more than the limit asked for — which is why the page needs a "view all"
+ * affordance rather than a total it could subtract from.
+ */
+export interface AttentionList {
+  count: number;
+  truncated: boolean;
+  items: AttentionItem[];
+}
+
+/**
+ * The one `reason` that unlocks a force-retry affordance.
+ *
+ * Keyed off `reason`, never off `kind`: an indeterminate_outcome KIND says the
+ * platform could not tell whether the work happened, while this REASON says the
+ * platform has decided a human must choose. Gating a destructive re-run on the
+ * kind would offer it for items the server never asked a human about.
+ */
+export const ATTENTION_REASON_NEEDS_HUMAN = 'indeterminate_outcome_requires_human';
+
+// ── fleet connectivity ──────────────────────────────────────────────────────
+
+/**
+ * gRPC channel state as this gateway last observed it.
+ *
+ * IDLE is NOT a fault: a channel that has not been dialled since startup reports
+ * IDLE, which is the normal state of an upstream nobody has needed yet.
+ */
+export type UpstreamState =
+  | 'READY'
+  | 'IDLE'
+  | 'CONNECTING'
+  | 'TRANSIENT_FAILURE'
+  | 'SHUTDOWN'
+  | 'UNCONFIGURED'
+  | (string & {});
+
+/**
+ * One upstream row.
+ *
+ * `configured: false` is NOT a fault either — it means this deployment never
+ * asked for that upstream. Counting either IDLE or unconfigured as broken would
+ * make a healthy single-queue deployment render as a red dashboard.
+ */
+export interface FleetUpstream {
+  name: string;
+  addr: string;
+  state: UpstreamState;
+  configured: boolean;
+}
+
+/**
+ * GET /v1/health/fleet — NOT namespaced, because there is one control plane.
+ *
+ * `status` is the server's verdict and the only thing that decides ok vs
+ * degraded. The console does not recompute it from the rows: the gateway knows
+ * which upstreams this deployment actually requires, and a client-side rollup
+ * would have to guess that and would disagree on the deployments that matter.
+ *
+ * `measures` is the payload's own description of what it measured — gRPC
+ * connectivity read from the local channel, not each service's own /readyz. It
+ * is surfaced verbatim rather than paraphrased into "health", because the gap
+ * between "the channel is up" and "the service is ready" is exactly what an
+ * operator reading this panel mid-incident must not have hidden from them.
+ */
+export interface FleetHealth {
+  status: 'ok' | 'degraded' | (string & {});
+  upstreams: FleetUpstream[];
+  measures?: string;
+}

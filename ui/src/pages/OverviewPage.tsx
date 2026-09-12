@@ -4,31 +4,48 @@
 /**
  * Overview: the first screen, and the one an operator lands on mid-incident.
  *
- * The organising constraint is that this page aggregates FOUR independent
+ * The organising constraint is that this page aggregates SIX independent
  * queries, and the failure mode that would make it worthless is one dead
  * endpoint blanking the whole dashboard. So every panel owns its own
  * loading/error/empty state and renders what it has; a 500 from /capacity costs
  * the capacity panel and nothing else.
  *
- * The second constraint is honesty about provenance. Two of the six things the
- * overview is asked to show are not backend metrics:
+ * The page is ordered by what an operator came for. "Needs attention" is first
+ * because it is the reason the page is open: it is the server's own ranked
+ * triage list, and everything below it is context for the rows in it.
+ *
+ * The second constraint is honesty about provenance, and two claims on this page
+ * are still narrower than they look:
  *   - queue AGE is derived here from the oldest non-terminal run, because the
  *     platform exposes queue DEPTH (capacity.pending_attempts) and no age at all;
- *   - service health is not exposed through the gateway in any form, so what
- *     this page reports is API reachability from this browser plus the worker
- *     states the fleet already publishes.
+ *   - fleet health measures gRPC CONNECTIVITY from this gateway — whether each
+ *     channel is dialled — and not whether the service behind it is ready. The
+ *     payload says so in its own `measures` field and the panel repeats it,
+ *     because "connected" and "ready" diverge exactly when it matters.
  * Both are labelled as what they are. A dashboard that quietly upgrades an
  * inference into a measurement is worse than one with a visible gap, because
  * the gap is the thing an operator needs to know about.
  */
 
+
 import { Link } from 'react-router-dom';
-import { useCapacity, useRuns, useSchedules, useWorkers } from '../api/hooks';
-import type { RunSummary, Worker, WorkerState } from '../api/types';
+import { useAttention, useCapacity, useFleetHealth, useRuns, useWorkers } from '../api/hooks';
+import type {
+  AttentionItem,
+  AttentionList,
+  FleetHealth,
+  FleetUpstream,
+  RunSummary,
+  Worker,
+  WorkerState,
+} from '../api/types';
+import { ATTENTION_REASON_NEEDS_HUMAN } from '../api/types';
+import { ApiError } from '../api/client';
+import { Forbidden } from '../components/Forbidden';
 import { PageHeader } from '../components/PageHeader';
 import { StateBadge } from '../components/StateBadge';
 import { CapacityGrid, deriveCapacity } from '../components/CapacityGrid';
-import { AsyncPanel, Empty, ErrorBox, StaleWarning } from '../components/Status';
+import { AsyncPanel, Empty, ErrorBox, Loading, StaleWarning } from '../components/Status';
 import { EMPTY, fmtAge, fmtDurationMs, fmtTs, parseTs, shortId } from '../lib/format';
 import { isTerminal } from '../lib/states';
 
@@ -44,6 +61,17 @@ const RUN_WINDOW = 50;
 /** Only enough failures to answer "is something broken right now?". */
 const FAILURE_WINDOW = 5;
 
+/**
+ * How many triage rows the panel shows.
+ *
+ * Well under the server's 200 cap: this is a landing panel, and an operator who
+ * needs to read past a dozen rows is triaging, which is what the "view all"
+ * affordance is for. Asking for one more than we render is what lets the server
+ * tell us honestly that there IS more (`truncated`), instead of the page
+ * inferring it from a count it would have to trust.
+ */
+const ATTENTION_LIMIT = 12;
+
 /** What each panel shows at a glance before you drill into it. */
 const ACTIVE_PREVIEW = 6;
 const RECENT_PREVIEW = 6;
@@ -53,7 +81,8 @@ export function OverviewPage({ namespace }: { namespace: string }) {
   const failures = useRuns(namespace, { state: 'FAILED', limit: FAILURE_WINDOW });
   const workers = useWorkers(namespace);
   const capacity = useCapacity(namespace);
-  const schedules = useSchedules(namespace);
+  const attention = useAttention(namespace, { limit: ATTENTION_LIMIT });
+  const fleet = useFleetHealth();
   const now = Date.now();
 
   const active = (runs.data ?? []).filter((r) => !isTerminal('run', r.state));
@@ -65,20 +94,15 @@ export function OverviewPage({ namespace }: { namespace: string }) {
         title="Overview"
         subtitle={
           <>
-            namespace <code>{namespace}</code> · runs refresh every 4s, fleet every 5s
+            namespace <code>{namespace}</code> · runs refresh every 4s, workers every 5s,
+            triage every 10s
           </>
         }
       />
 
-      <HealthPanel
-        queries={[
-          { what: 'runs', query: runs, to: '/runs' },
-          { what: 'workers', query: workers, to: '/workers' },
-          { what: 'capacity', query: capacity, to: '/workers' },
-          { what: 'schedules', query: schedules, to: '/schedules' },
-        ]}
-        workers={workers.data}
-      />
+      <AttentionPanel query={attention} now={now} />
+
+      <FleetPanel query={fleet} workers={workers} />
 
       <div className="grid-2">
         <QueuePanel
@@ -136,72 +160,307 @@ function oldestWaiting(runs: RunSummary[] | undefined): RunSummary | null {
 }
 
 /**
- * What this browser can actually observe about the platform.
+ * The triage list: the reason this page is open.
  *
- * Deliberately NOT called "service health". The gateway exposes no health or
- * dependency endpoint, so the console cannot say whether the scheduler, the DAG
- * engine or Postgres are well — only whether each read it makes is answered.
- * The panel says so in its own subtitle, because an operator who reads a green
- * row as "the fleet is healthy" has been misled by this screen, not informed.
+ * Rendered in the order the server returned. The ranking is computed where the
+ * data is and is documented as deterministic, so re-sorting here would replace a
+ * considered ordering with a local heuristic and — worse — make two browsers
+ * looking at the same incident disagree about what is most urgent.
+ *
+ * The empty state is the one that needed the most care. An operator who sees
+ * nothing here has been told the best possible news, and the previous vocabulary
+ * for "no rows" on this console (a grey ∅ and "No items") reads as a gap in the
+ * data rather than as an all-clear. So the empty case gets its own success-toned
+ * treatment instead of <Empty>, which is reserved for absences.
  */
-function HealthPanel({
-  queries,
+function AttentionPanel({
+  query,
+  now,
+}: {
+  query: {
+    data: AttentionList | undefined;
+    error: unknown;
+    isLoading: boolean;
+    refetch?: () => void;
+  };
+  now: number;
+}) {
+  const list = query.data;
+  // A 403 is an answer, not a failure: this credential may read runs but not the
+  // aggregate. Retrying it forever is the wrong offer, so it gets the permission
+  // screen rather than an ErrorBox with a button.
+  const forbidden = query.error instanceof ApiError && query.error.status === 403;
+  const critical = (list?.items ?? []).filter((i) => i.severity === 'critical').length;
+
+  return (
+    <div className="panel ov-attention">
+      <div className="panel-head">
+        <span>needs attention</span>
+        <span className="spacer" />
+        {list !== undefined && list.items.length > 0 && (
+          <>
+            {critical > 0 && (
+              <span className="chip ov-chip-critical">{critical} critical</span>
+            )}
+            <span className="chip">
+              {list.items.length} item{list.items.length === 1 ? '' : 's'}
+              {list.truncated ? '+' : ''}
+            </span>
+          </>
+        )}
+      </div>
+
+      {/* Stale rows beat no rows mid-incident: the list already on screen is
+          still the best available ranking, so a failed refresh warns above it
+          rather than replacing it. */}
+      {query.error != null && list !== undefined && !forbidden ? (
+        <div className="panel-body ov-stale-slot">
+          <StaleWarning error={query.error} />
+        </div>
+      ) : null}
+
+      {forbidden ? (
+        <div className="panel-body">
+          <Forbidden
+            what="the triage list"
+            detail="Ranking what needs attention reads every run, attempt and capacity wait in this namespace, so it needs a credential that can list all three."
+          />
+        </div>
+      ) : query.error != null && list === undefined ? (
+        <div className="panel-body">
+          <ErrorBox error={query.error} what="the triage list" onRetry={query.refetch} />
+        </div>
+      ) : list === undefined ? (
+        <Loading rows={3} label="Loading needs attention" />
+      ) : list.items.length === 0 ? (
+        <AttentionAllClear />
+      ) : (
+        <>
+          <ul className="ov-attn-list">
+            {list.items.map((item, i) => (
+              // Index is part of the key on purpose: the same run can appear
+              // twice (a failed run and its exhausted attempt are two distinct
+              // things to act on), so run_id alone is not unique here.
+              <AttentionRow key={`${item.run_id}:${item.kind}:${i}`} item={item} now={now} />
+            ))}
+          </ul>
+          {list.truncated && (
+            <div className="panel-body ov-attn-more">
+              {/* The server said there is more; it did not say how much, so this
+                  does not invent a remainder. */}
+              <Link to="/runs">view all runs needing attention →</Link>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Nothing needs attention.
+ *
+ * Success-toned and affirmative. The distinction being drawn is between "we
+ * looked and everything is fine" and "we have no data", and an operator who
+ * cannot tell those apart cannot trust the panel when it IS empty.
+ */
+function AttentionAllClear() {
+  return (
+    <div className="ov-allclear" role="status">
+      <span className="ov-allclear-glyph" aria-hidden="true">
+        ✓
+      </span>
+      <div>
+        <div className="ov-allclear-title">Nothing needs attention</div>
+        <div className="sub">
+          No run has failed or stalled, no attempt is blocked on capacity, and no retry budget has
+          run out in this namespace.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One triage row.
+ *
+ * Severity is carried by a dot AND by the row's left border AND by the word in
+ * the meta line, never by colour alone. The tones are the state palette
+ * (--tone-danger-* / --tone-blocked-*) rather than the accent: the accent is
+ * brand and operator-chosen, so spending it on severity would let someone make
+ * a critical row indistinguishable from a warning by picking a new theme.
+ */
+function AttentionRow({ item, now }: { item: AttentionItem; now: number }) {
+  const critical = item.severity === 'critical';
+  // PRESENCE, not truthiness. `node_id: ""` is a server answer about a node with
+  // an empty name; treating it as absent would silently drop a real field.
+  const node = item.node_id !== undefined ? item.node_id : null;
+  // Gated on the REASON, not the kind: the kind says the outcome was
+  // indeterminate, only this reason says the server has decided a human must
+  // choose. A force-retry offered on kind alone would re-run work for items
+  // nobody asked a human about.
+  const needsHuman = item.reason === ATTENTION_REASON_NEEDS_HUMAN;
+
+  return (
+    <li className={`ov-attn-row ${critical ? 'critical' : 'warning'}`}>
+      <span
+        className={`ov-attn-dot ${critical ? 'critical' : 'warning'}`}
+        aria-hidden="true"
+      />
+      <div className="ov-attn-text">
+        <div className="ov-attn-summary">{item.summary}</div>
+        <div className="ov-attn-detail">{item.detail}</div>
+        <div className="ov-attn-meta">
+          <span className={critical ? 'tone-text-danger' : 'tone-text-warning'}>
+            {critical ? 'critical' : 'warning'}
+          </span>
+          <span aria-hidden="true">·</span>
+          <span className="mono">{item.kind}</span>
+          {item.spec_name !== undefined && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span>{item.spec_name}</span>
+            </>
+          )}
+          {node !== null && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="mono">{node}</span>
+            </>
+          )}
+          <span aria-hidden="true">·</span>
+          <span className="nowrap" title={fmtTs(item.occurred_at)}>
+            {fmtAge(item.occurred_at, now)}
+          </span>
+        </div>
+        {needsHuman && (
+          <div className="ov-attn-human">
+            The platform cannot tell whether this work took effect. Re-running it may duplicate a
+            side effect, so it needs a person to decide —{' '}
+            <code>nexusctl run retry {item.run_id} --force</code>.
+          </div>
+        )}
+      </div>
+      {/* `link` verbatim: the server resolved whether this item is about the run
+          or one attempt inside it, and recomposing it here would be the console
+          re-deriving something it was handed. */}
+      <Link to={item.link} className="ov-attn-link">
+        open
+      </Link>
+    </li>
+  );
+}
+
+/**
+ * Fleet CONNECTIVITY — the honest replacement for the old reachability panel.
+ *
+ * The panel this supersedes existed only because the gateway exposed no health
+ * endpoint at all, so it reported the one thing it could see: whether this
+ * browser's own reads were answered. /v1/health/fleet is a real endpoint, and
+ * per-service rows are a genuine improvement on that — but the honesty has to
+ * survive the upgrade, because the new answer is ALSO narrower than "health":
+ *
+ *   - it is gRPC channel state as this gateway last observed it, read from the
+ *     local channel with no round trip, NOT each service's own /readyz. A READY
+ *     channel to a service that is deadlocked behind it still reads READY;
+ *   - IDLE is not a fault. A channel nobody has dialled since startup is IDLE,
+ *     which is the normal state of an upstream this deployment has not needed;
+ *   - configured:false is not a fault either. It means nobody asked for that
+ *     upstream, and drawing it red would make a correct single-queue deployment
+ *     look broken;
+ *   - `status` is the server's verdict and is not recomputed here. The gateway
+ *     knows which upstreams this deployment REQUIRES; the console does not, so a
+ *     client-side rollup would guess — and guess wrong on exactly the
+ *     deployments where it matters.
+ *
+ * The payload's own `measures` sentence is rendered verbatim rather than
+ * paraphrased, so the scope of the claim comes from the thing making it.
+ */
+function FleetPanel({
+  query,
   workers,
 }: {
-  queries: { what: string; query: { error: unknown; isLoading: boolean; data: unknown }; to: string }[];
-  workers: Worker[] | undefined;
+  query: {
+    data: FleetHealth | undefined;
+    error: unknown;
+    isLoading: boolean;
+    refetch?: () => void;
+  };
+  workers: { data: Worker[] | undefined };
 }) {
-  const failing = queries.filter((q) => q.query.error != null);
+  const fleet = query.data;
+  const forbidden = query.error instanceof ApiError && query.error.status === 403;
+  const degraded = fleet?.status === 'degraded';
 
   return (
     <div className="panel">
       <div className="panel-head">
-        <span>api reachability</span>
+        <span>fleet connectivity</span>
         <span className="spacer" />
-        <span className="chip" title="Counted from this browser's own requests.">
-          {queries.length - failing.length}/{queries.length} endpoints answering
-        </span>
+        {fleet !== undefined && (
+          <span
+            className={`chip ${degraded ? 'ov-chip-critical' : fleet.status === 'ok' ? 'ov-chip-ok' : ''}`}
+            title="The gateway's own verdict. Not recomputed from the rows below."
+          >
+            {fleet.status}
+          </span>
+        )}
       </div>
+
+      {query.error != null && fleet !== undefined && !forbidden ? (
+        <div className="panel-body ov-stale-slot">
+          <StaleWarning error={query.error} />
+        </div>
+      ) : null}
+
       <div className="panel-body">
-        <div className="sub" style={{ marginBottom: 'var(--space-5)' }}>
-          Observed from this browser only. The gateway exposes no service-health or dependency
-          endpoint, so this is not a fleet health check: a row reads “answering” when the console’s
-          own request to it succeeded, and says nothing about the services behind it.
-        </div>
+        {forbidden ? (
+          <Forbidden
+            what="fleet connectivity"
+            detail="Reading the control plane's upstream channels is a platform-wide view, so it needs an admin credential rather than a namespace-scoped one."
+          />
+        ) : query.error != null && fleet === undefined ? (
+          <ErrorBox error={query.error} what="fleet connectivity" onRetry={query.refetch} />
+        ) : fleet === undefined ? (
+          <Loading rows={3} label="Loading fleet connectivity" />
+        ) : (
+          <>
+            <div className="ov-measures">
+              <strong>Connectivity, not readiness.</strong>{' '}
+              {fleet.measures ??
+                'gRPC connectivity from this gateway, read without a network round trip; not each service’s own /readyz'}
+              . A dialled channel does not prove the service behind it is serving.
+            </div>
 
-        <div className="grid-2">
-          {queries.map((q) => (
-            <Link key={q.what} to={q.to} className="ov-health-row">
-              <span
-                className={`pulse ${q.query.error != null ? 'off' : q.query.isLoading ? 'stale' : ''}`}
-                aria-hidden="true"
+            {fleet.upstreams.length === 0 ? (
+              <Empty
+                title="No upstreams reported"
+                detail="The gateway answered but named no upstream channels."
               />
-              <span className="mono">{q.what}</span>
-              <span className="spacer" />
-              <span className={q.query.error != null ? 'tone-text-danger' : 'faint'}>
-                {q.query.error != null
-                  ? 'not answering'
-                  : q.query.isLoading
-                    ? 'checking…'
-                    : 'answering'}
-              </span>
-            </Link>
-          ))}
-        </div>
+            ) : (
+              <div className="grid-2 ov-upstreams">
+                {fleet.upstreams.map((u) => (
+                  <UpstreamRow key={`${u.name}:${u.addr}`} upstream={u} />
+                ))}
+              </div>
+            )}
+          </>
+        )}
 
-        {/* Worker states ARE published by the platform, so this half is a real
-            measurement rather than an inference, and is kept visually separate
-            from the reachability rows above for that reason. */}
+        {/* Worker states ARE published by the control plane, so this half is a
+            real measurement about the fleet's ability to do work rather than a
+            statement about channels, and is kept visually separate for that
+            reason. */}
         <div className="ov-divider" />
         <div className="attempt-section-title">worker states (reported by the control plane)</div>
-        {workers === undefined ? (
+        {workers.data === undefined ? (
           <span className="faint">—</span>
-        ) : workers.length === 0 ? (
+        ) : workers.data.length === 0 ? (
           <span className="faint">No workers registered.</span>
         ) : (
-          <div className="row" style={{ gap: 'var(--space-5)' }}>
-            {workerStateCounts(workers).map(([state, n]) => (
-              <Link key={state} to="/workers" className="row ov-count-link" style={{ gap: 'var(--space-2)' }}>
+          <div className="row ov-worker-counts">
+            {workerStateCounts(workers.data).map(([state, n]) => (
+              <Link key={state} to="/workers" className="row ov-count-link ov-count-gap">
                 <StateBadge kind="worker" state={state} small />
                 <span className="mono">{n}</span>
               </Link>
@@ -211,6 +470,71 @@ function HealthPanel({
       </div>
     </div>
   );
+}
+
+/**
+ * One upstream channel.
+ *
+ * Three visual classes, not two: fault, benign-not-connected, and connected.
+ * Collapsing the middle one into "fault" is the specific mistake this row
+ * exists to avoid — IDLE and UNCONFIGURED are the states of an upstream nobody
+ * has needed, and a dashboard that paints them red trains operators to ignore it.
+ */
+function UpstreamRow({ upstream }: { upstream: FleetUpstream }) {
+  const tone = upstreamTone(upstream);
+  return (
+    <div className={`ov-health-row ov-upstream ${tone}`}>
+      <span className={`ov-attn-dot ${tone}`} aria-hidden="true" />
+      <div className="ov-upstream-text">
+        <span className="ov-upstream-name">{upstream.name}</span>
+        <span className="mono faint ov-upstream-addr">{upstream.addr}</span>
+      </div>
+      <span className="spacer" />
+      <span className="ov-upstream-state mono" title={upstreamExplanation(upstream)}>
+        {upstream.configured ? upstream.state : 'not configured'}
+      </span>
+    </div>
+  );
+}
+
+/** States that mean something is actually wrong with a channel we asked for. */
+const UPSTREAM_FAULTS = new Set(['TRANSIENT_FAILURE', 'SHUTDOWN']);
+
+/**
+ * Which of the three classes a row falls into.
+ *
+ * `configured` is checked FIRST: an unconfigured upstream's state field is not a
+ * claim about anything, so reading it at all would invent a verdict.
+ */
+function upstreamTone(u: FleetUpstream): 'ok' | 'idle' | 'critical' {
+  if (!u.configured) return 'idle';
+  if (UPSTREAM_FAULTS.has(u.state)) return 'critical';
+  if (u.state === 'READY') return 'ok';
+  // IDLE, CONNECTING and anything this build has not heard of: not asserted to
+  // be broken. An unknown state is a gap in this console, not a fault in the
+  // fleet, and must not be reported as one.
+  return 'idle';
+}
+
+/** The tooltip that keeps a grey dot from reading as a shrug. */
+function upstreamExplanation(u: FleetUpstream): string {
+  if (!u.configured) return 'This deployment does not configure this upstream. Not a fault.';
+  switch (u.state) {
+    case 'READY':
+      return 'The gRPC channel is connected. Says nothing about whether the service behind it is ready.';
+    case 'IDLE':
+      return 'The channel has not been dialled since startup. Not a fault — it connects on first use.';
+    case 'CONNECTING':
+      return 'The channel is dialling.';
+    case 'TRANSIENT_FAILURE':
+      return 'The last connection attempt failed and the channel is backing off before retrying.';
+    case 'SHUTDOWN':
+      return 'The channel has been shut down and will not reconnect.';
+    case 'UNCONFIGURED':
+      return 'No address was configured for this upstream. Not a fault.';
+    default:
+      return `Channel state ${u.state}, which this console does not recognise — it is not reported as a fault.`;
+  }
 }
 
 /** Non-zero worker-state tallies, worst first — DEAD is why you are looking. */

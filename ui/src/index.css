@@ -1410,3 +1410,190 @@ tr.version-current > td { background: var(--bg-hover); }
   line-height: var(--leading-normal);
   color: var(--tone-warning-fg);
 }
+
+/* ── Overview: triage & fleet connectivity ─────────────────────────────────
+   Appended for the rewired overview. It follows the shell's visual language —
+   calm, generously spaced, colour spent only on state — and the same rule that
+   governs the sidebar governs it: the ACCENT is brand and operator-chosen, so
+   nothing here uses it. Severity is carried by the --tone-* state palette, which
+   is the palette an operator cannot reconfigure out from under themselves.
+
+   Every length is a token; the 1px hairlines are the documented exception. */
+
+/* The triage panel is the page's first answer, so it gets the weight of one:
+   a slightly stronger border than a body panel, which is enough to read as
+   "start here" without a coloured header competing with the rows inside it. */
+.ov-attention { border-color: var(--border-strong); }
+
+.ov-attn-list {
+  list-style: none;
+  margin: var(--space-0);
+  padding: var(--space-0);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Rows are separated by a hairline rather than by gaps and borders: a stack of
+   twelve individually-bordered cards reads as twelve unrelated things, and this
+   is one ranked list. The left border is where severity lives. */
+.ov-attn-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-5);
+  padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--border);
+  border-left: var(--space-1) solid transparent;
+}
+.ov-attn-list > .ov-attn-row:last-child { border-bottom: none; }
+.ov-attn-row.critical { border-left-color: var(--tone-danger-bd); background: var(--tone-danger-bg); }
+.ov-attn-row.warning { border-left-color: var(--tone-blocked-bd); }
+
+/* Severity as a dot, redundantly with the left border and with the word in the
+   meta line. Three signals so the row survives a colour-blind reader, a
+   monochrome screenshot and a high-contrast mode independently. */
+.ov-attn-dot {
+  flex: 0 0 auto;
+  width: var(--space-4);
+  height: var(--space-4);
+  margin-top: var(--space-2);
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+}
+.ov-attn-dot.critical { background: var(--tone-danger-fg); border-color: var(--tone-danger-bd); }
+.ov-attn-dot.warning { background: var(--tone-blocked-fg); border-color: var(--tone-blocked-bd); }
+/* Benign-not-connected: outlined, not filled. A hollow dot reads as "nothing to
+   report here", where a filled grey one reads as a state someone chose. */
+.ov-attn-dot.idle { background: transparent; border-color: var(--border-strong); }
+.ov-attn-dot.ok { background: var(--tone-success-fg); border-color: var(--tone-success-bd); }
+
+.ov-attn-text { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: var(--space-2); }
+
+.ov-attn-summary {
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  color: var(--fg);
+}
+
+/* The detail sentence is the server explaining itself, so it is given room to be
+   read as prose rather than truncated into a tooltip. */
+.ov-attn-detail {
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--fg-muted);
+}
+
+.ov-attn-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--fg-faint);
+}
+
+/* The one destructive affordance on the page, so it is a callout and not a
+   button: the console does not force-retry, it tells you what will happen and
+   hands you the command that does. */
+.ov-attn-human {
+  margin-top: var(--space-2);
+  padding: var(--space-4) var(--space-5);
+  border-left: var(--space-1) solid var(--tone-warning-bd);
+  background: var(--tone-warning-bg);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--fg-muted);
+}
+
+.ov-attn-link {
+  flex: 0 0 auto;
+  align-self: center;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.ov-attn-more { border-top: 1px solid var(--border); }
+
+/* Good news, styled as such. Success-toned and affirmative, deliberately NOT
+   the grey ∅ this console uses for "no data": an operator has to be able to tell
+   "we checked and you are fine" from "we have nothing to show you". */
+.ov-allclear {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-5);
+  margin: var(--space-5);
+  padding: var(--space-6);
+  border: 1px solid var(--tone-success-bd);
+  border-radius: var(--radius-md);
+  background: var(--tone-success-bg);
+}
+.ov-allclear-glyph {
+  flex: 0 0 auto;
+  font-size: var(--text-lg);
+  line-height: var(--leading-tight);
+  color: var(--tone-success-fg);
+  font-weight: var(--weight-bold);
+}
+.ov-allclear-title {
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+  color: var(--tone-success-fg);
+  margin-bottom: var(--space-2);
+}
+
+/* Verdict chips. Only two are tinted, because only two are verdicts: anything
+   the server says that this build does not recognise keeps the plain chip rather
+   than being coloured into a claim. */
+.ov-chip-critical { color: var(--tone-danger-fg); border-color: var(--tone-danger-bd); }
+.ov-chip-ok { color: var(--tone-success-fg); border-color: var(--tone-success-bd); }
+
+/* The scope-of-measurement note. Neutral rather than warning-toned, and that is
+   deliberate: unlike the derived queue age, connectivity IS measured — the note
+   narrows the claim rather than disowning it, so it should not shout. */
+.ov-measures {
+  margin-bottom: var(--space-6);
+  padding: var(--space-4) var(--space-5);
+  border-left: var(--space-1) solid var(--border-strong);
+  background: var(--bg-inset);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+.ov-measures strong { color: var(--fg); }
+
+.ov-upstreams { gap: var(--space-4); }
+
+/* A faulted upstream is the only tinted row. READY and IDLE both sit on the
+   inset ground, because "connected" is not an achievement to celebrate and
+   "not dialled" is not a problem to flag. */
+.ov-upstream { align-items: center; gap: var(--space-5); }
+.ov-upstream.critical { border-color: var(--tone-danger-bd); background: var(--tone-danger-bg); }
+.ov-upstream .ov-attn-dot { margin-top: var(--space-0); }
+
+.ov-upstream-text { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.ov-upstream-name {
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ov-upstream-addr { font-size: var(--text-xs); }
+.ov-upstream-state { font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; }
+
+/* Replaces two inline style attributes, so the spacing lives with the rest of
+   the page's spacing rather than in the component. */
+.ov-worker-counts { gap: var(--space-5); flex-wrap: wrap; }
+.ov-count-gap { gap: var(--space-2); }
+.ov-stale-slot { padding-bottom: var(--space-0); }
+
+/* At phone width the drill-down link drops below the text instead of squeezing
+   the summary into a one-word-per-line column. 560px is a viewport measurement,
+   matching the breakpoint the shell already uses. */
+@media (max-width: 560px) {
+  .ov-attn-row { flex-wrap: wrap; padding: var(--space-5); }
+  .ov-attn-link { align-self: flex-start; margin-left: calc(var(--space-4) + var(--space-5)); }
+}

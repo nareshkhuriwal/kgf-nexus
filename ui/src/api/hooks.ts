@@ -17,7 +17,7 @@ import {
   useQueryClient,
   type UseQueryOptions,
 } from '@tanstack/react-query';
-import { ApiError, api, type RunListFilter } from './client';
+import { ApiError, api, type AttentionFilter, type RunListFilter } from './client';
 import type {
   Attempt,
   Backfill,
@@ -46,6 +46,11 @@ export const qk = {
   workflows: (ns: string, search: string) => ['workflows', ns, search] as const,
   specVersions: (ns: string, name: string) => ['spec-versions', ns, name] as const,
   specDef: (ns: string, id: string) => ['spec-def', ns, id] as const,
+  attention: (ns: string, f: AttentionFilter) =>
+    ['attention', ns, f.limit ?? 0, f.blocked_for ?? '', f.failed_within ?? '', f.stalled_for ?? ''] as const,
+  // No namespace segment: /v1/health/fleet is one control plane, so every
+  // namespace shares the cache entry rather than refetching on a switch.
+  fleetHealth: () => ['fleet-health'] as const,
 };
 
 export function shouldRetry(failureCount: number, error: unknown): boolean {
@@ -423,5 +428,48 @@ export function useCreateRun(namespace: string) {
       if (created?.id) void qc.invalidateQueries({ queryKey: qk.run(namespace, created.id) });
     },
     retry: false,
+  });
+}
+
+
+// ── attention & fleet connectivity ──────────────────────────────────────────
+
+/**
+ * The triage list.
+ *
+ * 10s rather than the run list's 4s. The list is a RANKED AGGREGATE over runs,
+ * attempts and capacity waits, so it is the most expensive read on the overview,
+ * and nothing it reports becomes actionable inside four seconds — a retry budget
+ * that ran out stays run out. Polling it at incident speed would spend the
+ * gateway's time to re-render the same nineteen rows.
+ */
+const ATTENTION_POLL_MS = 10_000;
+
+export function useAttention(namespace: string, filter: AttentionFilter = {}) {
+  return useQuery({
+    queryKey: qk.attention(namespace, filter),
+    queryFn: () => api.getAttention(namespace, filter),
+    refetchInterval: ATTENTION_POLL_MS,
+    ...base,
+  });
+}
+
+/**
+ * Fleet connectivity.
+ *
+ * Cheap server-side — the gateway reads its own gRPC channel states without a
+ * network round trip — but cheap is not free: it is still an HTTP request per
+ * tick, and a channel does not change state on a 4s cadence. 15s is slow enough
+ * to cost nothing and fast enough that an upstream dropping to
+ * TRANSIENT_FAILURE surfaces while the operator is still looking at the page.
+ */
+const FLEET_POLL_MS = 15_000;
+
+export function useFleetHealth() {
+  return useQuery({
+    queryKey: qk.fleetHealth(),
+    queryFn: () => api.getFleetHealth(),
+    refetchInterval: FLEET_POLL_MS,
+    ...base,
   });
 }

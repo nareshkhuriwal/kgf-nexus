@@ -18,11 +18,13 @@
 
 import type {
   Attempt,
+  AttentionList,
   Backfill,
   CapacitySummary,
   CreateRunRequest,
   CreateScheduleRequest,
   CronPreview,
+  FleetHealth,
   LogLine,
   RunDetail,
   RunEvent,
@@ -260,6 +262,19 @@ export interface RunListFilter {
   limit?: number;
 }
 
+/**
+ * Triage query knobs. The three windows are Go duration strings on the wire
+ * ("15m", "1h") and are passed through untouched: the gateway owns the defaults
+ * and the parsing, and a console that pre-formatted them would drift from it.
+ */
+export interface AttentionFilter {
+  /** Server default 50, server maximum 200. */
+  limit?: number;
+  blocked_for?: string;
+  failed_within?: string;
+  stalled_for?: string;
+}
+
 export const api = {
   async listRuns(namespace: string, filter: RunListFilter = {}): Promise<RunSummary[]> {
     const q = new URLSearchParams();
@@ -336,6 +351,60 @@ export const api = {
 
   getCapacity(namespace: string): Promise<CapacitySummary> {
     return request<CapacitySummary>(`${ns(namespace)}/capacity`);
+  },
+
+  /**
+   * The triage list: everything in this namespace that wants a human.
+   *
+   * The response is already ranked, so no ordering option is offered here — a
+   * `sort` parameter would invite a caller to override a decision the server is
+   * better placed to make, and two consoles disagreeing about what is most
+   * urgent is worse than either ordering alone.
+   *
+   * The thresholds are the server's defaults unless a caller overrides them;
+   * they are passed through rather than hardcoded because "how long is stalled"
+   * is a per-deployment judgement, not a console constant.
+   *
+   * Normalised through asList like every other collection: a gateway that grows
+   * paging and answers a bare array must not blank this panel. count/truncated
+   * fall back to the items in hand, so the worst case is a missing "view all"
+   * rather than a crash.
+   */
+  async getAttention(
+    namespace: string,
+    opts: AttentionFilter = {},
+  ): Promise<AttentionList> {
+    const q = new URLSearchParams();
+    if (opts.limit !== undefined) q.set('limit', String(opts.limit));
+    if (opts.blocked_for) q.set('blocked_for', opts.blocked_for);
+    if (opts.failed_within) q.set('failed_within', opts.failed_within);
+    if (opts.stalled_for) q.set('stalled_for', opts.stalled_for);
+    const qs = q.toString();
+    const payload = await request<unknown>(`${ns(namespace)}/attention${qs ? `?${qs}` : ''}`);
+    const items = asList<AttentionList['items'][number]>(payload, 'attention');
+    const obj = (payload ?? {}) as Partial<AttentionList>;
+    return {
+      items,
+      count: typeof obj.count === 'number' ? obj.count : items.length,
+      truncated: obj.truncated === true,
+    };
+  },
+
+  /**
+   * Fleet connectivity. NOT namespaced: there is one control plane behind every
+   * namespace, so scoping this per namespace would imply a per-tenant fleet that
+   * does not exist and would refetch the same answer once per namespace switch.
+   */
+  async getFleetHealth(): Promise<FleetHealth> {
+    const payload = await request<unknown>('/v1/health/fleet');
+    const obj = (payload ?? {}) as Partial<FleetHealth>;
+    return {
+      // Never recomputed from the rows: see FleetHealth. An absent status is
+      // reported as unknown rather than optimistically as ok.
+      status: typeof obj.status === 'string' ? obj.status : 'unknown',
+      upstreams: asList<FleetHealth['upstreams'][number]>(payload, 'upstreams'),
+      measures: obj.measures,
+    };
   },
 
   async listSchedules(namespace: string, limit = 100): Promise<Schedule[]> {
