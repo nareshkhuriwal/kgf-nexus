@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Worker fleet view plus a capacity summary.
  *
@@ -87,7 +90,7 @@ export function WorkersPage({ namespace }: { namespace: string }) {
         </div>
 
         {workers.error != null && workers.data !== undefined ? (
-          <div style={{ padding: 12, paddingBottom: 0 }}>
+          <div style={{ padding: 'var(--space-5)', paddingBottom: 0 }}>
             <StaleWarning error={workers.error} />
           </div>
         ) : null}
@@ -179,7 +182,7 @@ function WorkerRow({ worker, now }: { worker: Worker; now: number }) {
         )}
       </td>
       <td className="nowrap">
-        <div className="faint" style={{ fontSize: 11 }}>
+        <div className="faint" style={{ fontSize: 'var(--text-xs)' }}>
           cpu {fmtPercent(worker.cpu_utilization)} · mem {fmtPercent(worker.memory_utilization)}
         </div>
       </td>
@@ -188,7 +191,7 @@ function WorkerRow({ worker, now }: { worker: Worker; now: number }) {
         {fmtAge(worker.last_heartbeat_at, now)}
         {stale && <div className="chip warn">stale</div>}
       </td>
-      <td className="mono" style={{ fontSize: 11 }}>
+      <td className="mono" style={{ fontSize: 'var(--text-xs)' }}>
         {Object.entries(worker.labels ?? {}).length === 0 ? (
           <span className="faint">{EMPTY}</span>
         ) : (
@@ -199,7 +202,7 @@ function WorkerRow({ worker, now }: { worker: Worker; now: number }) {
           ))
         )}
       </td>
-      <td className="faint mono" style={{ fontSize: 11 }}>
+      <td className="faint mono" style={{ fontSize: 'var(--text-xs)' }}>
         {worker.agent_version ?? EMPTY}
         {worker.executors && worker.executors.length > 0 && <div>{worker.executors.join(',')}</div>}
       </td>

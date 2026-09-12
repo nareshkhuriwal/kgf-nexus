@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * DAG rendering.
  *
@@ -80,7 +83,7 @@ export function DagView({
 
   if (graph.nodes.length === 0) {
     return (
-      <div className="notice empty" style={{ margin: 12 }}>
+      <div className="notice empty" style={{ margin: 'var(--space-5)' }}>
         <span className="notice-glyph">∅</span>
         <div>
           <div className="notice-title">No nodes materialised for this run</div>
@@ -96,7 +99,7 @@ export function DagView({
   return (
     <>
       {graph.hasCycle && (
-        <div className="notice error" style={{ margin: 12 }} role="alert">
+        <div className="notice error" style={{ margin: 'var(--space-5)' }} role="alert">
           <span className="notice-glyph">!</span>
           <div>
             <div className="notice-title">This graph contains a cycle</div>

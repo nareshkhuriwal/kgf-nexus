@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Run list: filter by state and spec, newest first, live.
  *
@@ -39,7 +42,7 @@ export function RunListPage({ namespace }: { namespace: string }) {
 
       <div className="panel">
         <div className="panel-head">
-          <label className="row" style={{ gap: 6 }}>
+          <label className="row" style={{ gap: 'var(--space-3)' }}>
             <span style={{ textTransform: 'none', letterSpacing: 0 }}>state</span>
             <select value={state} onChange={(e) => setParam('state', e.target.value)}>
               <option value="">any</option>
@@ -50,7 +53,7 @@ export function RunListPage({ namespace }: { namespace: string }) {
               ))}
             </select>
           </label>
-          <label className="row" style={{ gap: 6 }}>
+          <label className="row" style={{ gap: 'var(--space-3)' }}>
             <span style={{ textTransform: 'none', letterSpacing: 0 }}>spec</span>
             <input
               type="search"
@@ -75,7 +78,7 @@ export function RunListPage({ namespace }: { namespace: string }) {
 
         {/* Stale data plus a warning beats an error box that hides the data. */}
         {query.error != null && query.data !== undefined ? (
-          <div style={{ padding: 12, paddingBottom: 0 }}>
+          <div style={{ padding: 'var(--space-5)', paddingBottom: 0 }}>
             <StaleWarning error={query.error} />
           </div>
         ) : null}
@@ -180,7 +183,7 @@ function NodeCounts({ counts }: { counts: Partial<Record<NodeState, number>> | u
   };
   entries.sort((a, b) => (rank[a[0]] ?? 9) - (rank[b[0]] ?? 9));
   return (
-    <span className="row" style={{ gap: 4 }}>
+    <span className="row" style={{ gap: 'var(--space-2)' }}>
       {entries.map(([s, n]) => (
         <span key={s} className="row" style={{ gap: 3 }}>
           <StateBadge kind="node" state={s} small showGlyph={false} />

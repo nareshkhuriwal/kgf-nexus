@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Loading / empty / error rendering.
  *
@@ -12,7 +15,7 @@ import { ApiError } from '../api/client';
 
 export function Loading({ rows = 4, label = 'Loading…' }: { rows?: number; label?: string }) {
   return (
-    <div aria-busy="true" aria-label={label} style={{ display: 'grid', gap: 8, padding: 12 }}>
+    <div aria-busy="true" aria-label={label} style={{ display: 'grid', gap: 'var(--space-4)', padding: 'var(--space-5)' }}>
       {Array.from({ length: rows }, (_, i) => (
         <div key={i} className="skeleton" style={{ width: `${95 - i * 9}%` }} />
       ))}
@@ -73,7 +76,7 @@ export function ErrorBox({
         {api && api.url && <div className="notice-detail faint">{api.url}</div>}
         {hint && <div className="notice-hint">{hint}</div>}
         {onRetry && (
-          <div style={{ marginTop: 8 }}>
+          <div style={{ marginTop: 'var(--space-4)' }}>
             <button onClick={onRetry}>Retry</button>
           </div>
         )}

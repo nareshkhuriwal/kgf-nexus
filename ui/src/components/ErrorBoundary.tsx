@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Last line of defence against a blank screen.
  *

@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * The only component that renders a state. Everything else composes this, so
  * the FAILED / UPSTREAM_FAILED / SKIPPED distinction cannot drift per screen.

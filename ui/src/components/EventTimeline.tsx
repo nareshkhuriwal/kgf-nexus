@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * The run's append-only event history (run_events), newest first.
  *
@@ -114,7 +117,7 @@ export function EventTimeline({
                 <td className="num faint">{e.seq}</td>
                 <td className="nowrap" title={fmtTs(e.occurred_at)}>
                   <div>{fmtTs(e.occurred_at)}</div>
-                  <div className="faint" style={{ fontSize: 11 }}>
+                  <div className="faint" style={{ fontSize: 'var(--text-xs)' }}>
                     {fmtAge(e.occurred_at, now)}
                   </div>
                 </td>
@@ -181,7 +184,7 @@ function PayloadCell({ payload }: { payload: Record<string, unknown> | undefined
         {open ? 'hide' : `${entries.length} fields`}
       </button>
       {open && (
-        <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontSize: 11 }}>
+        <pre style={{ margin: 'var(--space-2) 0 0', whiteSpace: 'pre-wrap', fontSize: 'var(--text-xs)' }}>
           {JSON.stringify(payload, null, 2)}
         </pre>
       )}

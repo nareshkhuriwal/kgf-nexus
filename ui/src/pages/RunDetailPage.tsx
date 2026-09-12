@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Run detail: DAG, attempt history, log tail, event timeline, and cancel.
  *
@@ -150,7 +153,7 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
           </span>
         </div>
         {attemptsQuery.error != null && attemptsQuery.data === undefined ? (
-          <div style={{ padding: 12, paddingBottom: 0 }}>
+          <div style={{ padding: 'var(--space-5)', paddingBottom: 0 }}>
             <ErrorBox error={attemptsQuery.error} what="attempts (node states still shown below)" />
           </div>
         ) : null}
@@ -269,7 +272,7 @@ function CancelButton({
 
   if (!canCancel) {
     return (
-      <div className="row" style={{ gap: 8 }}>
+      <div className="row" style={{ gap: 'var(--space-4)' }}>
         <button disabled title={`A ${state} run cannot be cancelled.`}>
           cancel run
         </button>
@@ -295,7 +298,7 @@ function CancelButton({
         </button>
       )}
       {error !== null && error !== undefined && (
-        <div className="notice error" style={{ marginTop: 8, textAlign: 'left' }} role="alert">
+        <div className="notice error" style={{ marginTop: 'var(--space-4)', textAlign: 'left' }} role="alert">
           <span className="notice-glyph">!</span>
           <div>
             <div className="notice-title">Cancel failed</div>

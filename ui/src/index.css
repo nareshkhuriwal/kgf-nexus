@@ -236,7 +236,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font: 13px/1.5 var(--sans);
+  font: var(--text-base)/var(--leading-normal) var(--sans);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -294,55 +294,60 @@ a:hover { text-decoration: underline; }
   }
 }
 
-code, .mono, pre { font-family: var(--mono); font-size: 12px; }
+code, .mono, pre { font-family: var(--mono); font-size: var(--text-sm); }
 
 /* ── Shell ─────────────────────────────────────────────────────────────── */
 .app { min-height: 100vh; display: flex; flex-direction: column; }
 
+/* The bar's own gap (18px) and height (46px) sit between scale steps and are
+   off-scale on purpose: the topbar is a fixed chrome band tuned to the brand
+   mark, not a content rhythm, and snapping either would visibly move it. */
 .topbar {
   display: flex; align-items: center; gap: 18px;
-  padding: 0 16px; height: 46px;
+  padding: var(--space-0) var(--space-6); height: 46px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-raised);
-  position: sticky; top: 0; z-index: 20;
+  position: sticky; top: 0; z-index: var(--z-sticky);
   flex-wrap: wrap;
 }
-.brand { font-weight: 650; letter-spacing: -0.2px; display: flex; align-items: center; gap: 8px; }
+.brand { font-weight: 650; letter-spacing: -0.2px; display: flex; align-items: center; gap: var(--space-4); }
 .brand-mark { color: var(--accent); font-family: var(--mono); }
-.nav { display: flex; gap: 4px; }
+.nav { display: flex; gap: var(--space-2); }
 .nav a {
   padding: 5px 10px; border-radius: var(--radius); color: var(--fg-muted);
-  font-weight: 500;
+  font-weight: var(--weight-medium);
 }
 .nav a:hover { background: var(--bg-hover); text-decoration: none; color: var(--fg); }
 .nav a.active { background: var(--bg-hover); color: var(--fg); }
-.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--space-5); }
 
-.main { flex: 1; padding: 16px; max-width: 1680px; width: 100%; margin: 0 auto; }
+/* 1680px is a layout ceiling, not a spacing step -- it has no token by design. */
+.main { flex: 1; padding: var(--space-6); max-width: 1680px; width: 100%; margin: 0 auto; }
 
 /* ── Primitives ────────────────────────────────────────────────────────── */
 .panel {
-  border: 1px solid var(--border); border-radius: 8px;
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
   background: var(--bg-raised); overflow: hidden;
 }
 .panel-head {
   display: flex; align-items: center; gap: 10px;
-  padding: 9px 12px; border-bottom: 1px solid var(--border);
-  background: var(--bg-inset); font-weight: 600; font-size: 12px;
+  padding: 9px var(--space-5); border-bottom: 1px solid var(--border);
+  background: var(--bg-inset); font-weight: var(--weight-bold); font-size: var(--text-sm);
   text-transform: uppercase; letter-spacing: 0.4px; color: var(--fg-muted);
   flex-wrap: wrap;
 }
 .panel-head .spacer { margin-left: auto; }
-.panel-body { padding: 12px; }
-.panel-body.tight { padding: 0; }
+.panel-body { padding: var(--space-5); }
+.panel-body.tight { padding: var(--space-0); }
 
-.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-.col { display: flex; flex-direction: column; gap: 12px; }
-.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 12px; }
+.row { display: flex; gap: var(--space-5); align-items: center; flex-wrap: wrap; }
+.col { display: flex; flex-direction: column; gap: var(--space-5); }
+/* minmax() track floors are layout breakpoints, not spacing -- left literal. */
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: var(--space-5); }
 
-h1 { font-size: 18px; margin: 0 0 2px; font-weight: 650; }
-h2 { font-size: 14px; margin: 0 0 8px; font-weight: 620; }
-.sub { color: var(--fg-muted); font-size: 12px; }
+h1 { font-size: 18px; margin: 0 0 var(--space-1); font-weight: 650; }
+h2 { font-size: var(--text-md); margin: 0 0 var(--space-4); font-weight: 620; }
+.sub { color: var(--fg-muted); font-size: var(--text-sm); }
 
 button, .btn {
   font: inherit; font-weight: 550;
@@ -364,18 +369,20 @@ button.link {
    widgets next to styled ones on the same form. */
 select, textarea,
 input[type='text'], input[type='search'], input[type='number'], input[type='password'] {
-  font: inherit; padding: 4px 8px; border-radius: var(--radius);
+  font: inherit; padding: var(--space-2) var(--space-4); border-radius: var(--radius);
   border: 1px solid var(--border); background: var(--bg-inset); color: var(--fg);
 }
 textarea { resize: vertical; }
 
-label.field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--fg-muted); }
+label.field { display: flex; flex-direction: column; gap: var(--space-2); font-size: var(--text-xs); color: var(--fg-muted); }
 
 /* ── Tables ────────────────────────────────────────────────────────────── */
+/* 12.5px is half a step below --text-base and deliberately off-scale: it is the
+   one size that fits the run table's column count without wrapping IDs. */
 table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 th {
   text-align: left; padding: 7px 10px; color: var(--fg-muted);
-  font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px;
+  font-weight: var(--weight-bold); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.4px;
   border-bottom: 1px solid var(--border); background: var(--bg-inset);
   white-space: nowrap; position: sticky; top: 0;
 }
@@ -388,14 +395,18 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
 /* ── State badge ───────────────────────────────────────────────────────── */
 .badge {
   display: inline-flex; align-items: center; gap: 5px;
-  padding: 1px 7px 1px 6px; border-radius: 999px;
-  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  /* 1px block padding is sub-scale and stays: these pills sit inside table
+     cells, so +1px top and bottom would raise every row in a dense run list. */
+  padding: 1px 7px 1px var(--space-3); border-radius: var(--radius-pill);
+  font-family: var(--mono); font-size: var(--text-xs); font-weight: var(--weight-bold);
   letter-spacing: 0.2px; white-space: nowrap;
   color: var(--tone-fg); background: var(--tone-bg);
   border: 1px solid var(--tone-bd); border-style: var(--tone-border-style, solid);
 }
-.badge .glyph { font-size: 11px; line-height: 1; }
-.badge.sm { font-size: 10px; padding: 0 6px; }
+.badge .glyph { font-size: var(--text-xs); line-height: 1; }
+/* 10px is below the --text-xs floor on purpose: the scale comment records that
+   sizes under 11px were dropped, and this compact badge is the one survivor. */
+.badge.sm { font-size: 10px; padding: var(--space-0) var(--space-3); }
 
 .tone-neutral { --tone-fg: var(--tone-neutral-fg); --tone-bg: var(--tone-neutral-bg); --tone-bd: var(--tone-neutral-bd); }
 .tone-queued  { --tone-fg: var(--tone-queued-fg);  --tone-bg: var(--tone-queued-bg);  --tone-bd: var(--tone-queued-bd); }
@@ -410,21 +421,21 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
 /* ── Status messages ───────────────────────────────────────────────────── */
 .notice {
   display: flex; gap: 10px; align-items: flex-start;
-  padding: 11px 13px; border-radius: 8px; border: 1px solid var(--border);
+  padding: 11px 13px; border-radius: var(--radius-lg); border: 1px solid var(--border);
   background: var(--bg-raised);
 }
 .notice .notice-glyph { font-family: var(--mono); font-weight: 700; }
 .notice.error { border-color: var(--tone-danger-bd); background: var(--tone-danger-bg); }
 .notice.error .notice-glyph { color: var(--tone-danger-fg); }
 .notice.empty { color: var(--fg-muted); border-style: dashed; }
-.notice-title { font-weight: 600; margin-bottom: 2px; }
-.notice-detail { color: var(--fg-muted); font-size: 12px; word-break: break-word; }
-.notice-hint { color: var(--fg-muted); font-size: 12px; margin-top: 6px; }
+.notice-title { font-weight: var(--weight-bold); margin-bottom: var(--space-1); }
+.notice-detail { color: var(--fg-muted); font-size: var(--text-sm); word-break: break-word; }
+.notice-hint { color: var(--fg-muted); font-size: var(--text-sm); margin-top: var(--space-3); }
 
 .skeleton {
   background: linear-gradient(90deg, var(--bg-inset), var(--bg-hover), var(--bg-inset));
   background-size: 200% 100%; animation: shimmer 1.3s linear infinite;
-  border-radius: var(--radius); height: 12px;
+  border-radius: var(--radius); height: var(--space-5);
 }
 @keyframes shimmer { to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) {
@@ -444,54 +455,62 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
   cursor: pointer;
 }
 .dag-node.selected { stroke-width: 3px; }
-.dag-node-label { fill: var(--fg); font: 600 12px var(--sans); pointer-events: none; }
+/* SVG label sizes: 10.5px and 10px are below the --text-xs floor and stay
+   literal. These three lines of text are positioned at fixed x/y offsets inside
+   a fixed 176x56 node box (DagView.tsx), so growing them to 11px would push the
+   sub and state rows into each other rather than reflowing. */
+.dag-node-label { fill: var(--fg); font: var(--weight-bold) var(--text-sm) var(--sans); pointer-events: none; }
 .dag-node-sub { fill: var(--fg-muted); font: 10.5px var(--mono); pointer-events: none; }
 .dag-node-state { font: 700 10px var(--mono); pointer-events: none; }
-.dag-glyph { font: 700 13px var(--mono); pointer-events: none; }
+.dag-glyph { font: 700 var(--text-base) var(--mono); pointer-events: none; }
 .dag-edge { stroke: var(--border-strong); stroke-width: 1.4px; fill: none; }
 .dag-edge.failed-path { stroke: var(--tone-danger-bd); stroke-dasharray: 4 3; }
 /* A root cause gets a halo no other state can produce, so the origin of a
    cascade is findable without reading a single label. */
 .dag-rootcause-halo { fill: none; stroke: var(--tone-danger-bd); stroke-width: 2px; opacity: 0.55; }
 
-.legend { display: flex; gap: 6px 14px; flex-wrap: wrap; padding: 10px 12px; border-top: 1px solid var(--border); }
-.legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--fg-muted); }
+.legend { display: flex; gap: var(--space-3) 14px; flex-wrap: wrap; padding: 10px var(--space-5); border-top: 1px solid var(--border); }
+.legend-item { display: flex; align-items: center; gap: var(--space-3); font-size: var(--text-xs); color: var(--fg-muted); }
 
 /* ── Log tail ──────────────────────────────────────────────────────────── */
+/* 11.5px and 1.55 are tuned to fit a log line's timestamp + message without
+   wrapping at the common panel width; 460px is a viewport cap, not a step. */
 .logs {
   background: var(--bg-inset); font-family: var(--mono); font-size: 11.5px;
-  line-height: 1.55; padding: 8px 10px; max-height: 460px; overflow: auto;
+  line-height: 1.55; padding: var(--space-4) 10px; max-height: 460px; overflow: auto;
   white-space: pre-wrap; word-break: break-word;
 }
-.log-line { display: flex; gap: 8px; }
+.log-line { display: flex; gap: var(--space-4); }
 .log-ts { color: var(--fg-faint); flex: 0 0 auto; }
 .log-line.stderr .log-msg { color: var(--tone-danger-fg); }
 
 /* ── Key/value detail lists ────────────────────────────────────────────── */
-.kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: 12px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-2) 14px; font-size: var(--text-sm); }
 .kv dt { color: var(--fg-muted); }
 .kv dd { margin: 0; font-family: var(--mono); word-break: break-word; }
 
 /* ── Meters ────────────────────────────────────────────────────────────── */
-.meter { height: 6px; border-radius: 3px; background: var(--bg-inset); overflow: hidden; min-width: 72px; border: 1px solid var(--border); }
+.meter { height: var(--space-3); border-radius: var(--radius-sm); background: var(--bg-inset); overflow: hidden; min-width: 72px; border: 1px solid var(--border); }
 .meter > span { display: block; height: 100%; background: var(--tone-active-bd); }
 .meter.hot > span { background: var(--tone-warning-bd); }
 .meter.full > span { background: var(--tone-danger-bd); }
 
 /* ── Timeline ──────────────────────────────────────────────────────────── */
 .timeline { max-height: 520px; overflow: auto; }
-.actor { font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius: 3px; background: var(--bg-inset); border: 1px solid var(--border); white-space: nowrap; }
+/* As with .badge, the 1px block padding on these in-cell pills stays literal. */
+.actor { font-family: var(--mono); font-size: var(--text-xs); padding: 1px 5px; border-radius: var(--radius-sm); background: var(--bg-inset); border: 1px solid var(--border); white-space: nowrap; }
 .actor.scheduler { color: var(--tone-active-fg); }
 .actor.worker { color: var(--tone-queued-fg); }
 .actor.user { color: var(--tone-warning-fg); }
 
-.chip { font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius: 3px; background: var(--bg-inset); border: 1px solid var(--border); color: var(--fg-muted); white-space: nowrap; }
+.chip { font-family: var(--mono); font-size: var(--text-xs); padding: 1px var(--space-3); border-radius: var(--radius-sm); background: var(--bg-inset); border: 1px solid var(--border); color: var(--fg-muted); white-space: nowrap; }
 .chip.warn { color: var(--tone-warning-fg); border-color: var(--tone-warning-bd); }
 
-.attempt-card { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.attempt-card { border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
 .attempt-card + .attempt-card { margin-top: 10px; }
-.attempt-head { display: flex; gap: 10px; align-items: center; padding: 8px 11px; background: var(--bg-inset); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.attempt-head { display: flex; gap: 10px; align-items: center; padding: var(--space-4) 11px; background: var(--bg-inset); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .attempt-body { padding: 11px; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+/* 10.5px: an intentionally sub-scale overline, matching .dag-node-sub. */
 .attempt-section-title { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--fg-faint); margin-bottom: 5px; font-weight: 650; }
 .errbox { border-left: 3px solid var(--tone-danger-bd); background: var(--tone-danger-bg); padding: 7px 9px; border-radius: 0 var(--radius) var(--radius) 0; }
 .pendingbox { border-left: 3px solid var(--tone-warning-bd); background: var(--tone-warning-bg); padding: 7px 9px; border-radius: 0 var(--radius) var(--radius) 0; font-family: var(--mono); font-size: 11.5px; }

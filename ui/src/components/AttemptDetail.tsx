@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Full attempt history for a node.
  *
@@ -225,7 +228,7 @@ function ErrorBlock({ error, state }: { error: TaskError; state: string }) {
   const cls = normalizeState(error.class);
   return (
     <div className="errbox">
-      <div className="row" style={{ gap: 8, marginBottom: 5 }}>
+      <div className="row" style={{ gap: 'var(--space-4)', marginBottom: 5 }}>
         {cls && <span className="chip warn">{cls}</span>}
         {error.type && <strong className="mono">{error.type}</strong>}
         {error.retryable !== undefined && (

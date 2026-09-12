@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Streaming log tail for one attempt.
  *
@@ -139,14 +142,14 @@ export function LogTail({
         <span className="chip">
           {!live ? 'complete' : transport === 'stream' ? 'streaming' : transport === 'polling' ? 'polling' : 'connecting'}
         </span>
-        <label className="row" style={{ gap: 5, fontSize: 11, color: 'var(--fg-muted)' }}>
+        <label className="row" style={{ gap: 5, fontSize: 'var(--text-xs)', color: 'var(--fg-muted)' }}>
           <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />
           follow
         </label>
       </div>
 
       {error !== null && lines === null ? (
-        <div style={{ padding: 12 }}>
+        <div style={{ padding: 'var(--space-5)' }}>
           <ErrorBox error={error} what="logs" />
         </div>
       ) : lines === null ? (
