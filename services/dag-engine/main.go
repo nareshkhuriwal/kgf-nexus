@@ -97,7 +97,10 @@ func run() error {
 	// descriptor in grpcapi.go carries hand-written types rather than protobufs.
 	encoding.RegisterCodec(jsonCodec{})
 
-	grpcSrv := grpc.NewServer()
+	// PeerServerOptions bounds how long one connection lives. Without it a client
+	// that connected before an address swap keeps using a healthy connection to
+	// whatever now answers at the old address, and nothing re-resolves it.
+	grpcSrv := grpc.NewServer(config.PeerServerOptions()...)
 	RegisterDagEngineService(grpcSrv, NewGRPCServer(engine, log))
 
 	lis, err := net.Listen("tcp", *grpcAddr)

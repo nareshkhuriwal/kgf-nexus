@@ -86,7 +86,10 @@ func run() error {
 	// contract-gap reason documented on SpecServiceDesc.
 	encoding.RegisterCodec(grpcapi.JSONCodec{})
 
-	grpcSrv := grpc.NewServer()
+	// PeerServerOptions bounds how long one connection lives. Without it a client
+	// that connected before an address swap keeps using a healthy connection to
+	// whatever now answers at the old address, and nothing re-resolves it.
+	grpcSrv := grpc.NewServer(nexuscfg.PeerServerOptions()...)
 	grpcapi.Register(grpcSrv, runSvc, log)
 	grpcapi.RegisterTyped(grpcSrv, runSvc, db, log)
 

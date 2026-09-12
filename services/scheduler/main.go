@@ -106,7 +106,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen for grpc on %s: %w", *grpcAddr, err)
 	}
-	grpcSrv := grpc.NewServer()
+	// PeerServerOptions bounds how long one connection lives. Without it a client
+	// that connected before an address swap keeps using a healthy connection to
+	// whatever now answers at the old address, and nothing re-resolves it.
+	grpcSrv := grpc.NewServer(config.PeerServerOptions()...)
 	Register(grpcSrv, NewGRPCServer(st, log))
 	RegisterReports(grpcSrv, NewReportServer(st, log))
 
