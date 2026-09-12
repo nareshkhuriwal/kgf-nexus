@@ -234,6 +234,12 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("POST /v1/namespaces/{ns}/workers/{id}/drain", a.guard(authn.ActionAdminWrite, a.drainWorker))
 	mux.Handle("GET /v1/namespaces/{ns}/capacity", a.guard(authn.ActionRead, a.capacity))
 
+	// The triage panel. A read: it aggregates conditions already visible through
+	// /runs, /capacity and a run's events, and exposes no tenant data those do
+	// not, so gating it on admin would only stop the operators who most need it
+	// from seeing it during an incident.
+	mux.Handle("GET /v1/namespaces/{ns}/attention", a.guard(authn.ActionRead, a.attention))
+
 	// Fleet health is NOT namespaced: the control plane is one deployment, and a
 	// scheduler that is down is down for every namespace. Guarded on read rather
 	// than admin because "is the platform up" is the question every operator
