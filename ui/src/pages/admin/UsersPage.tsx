@@ -10,6 +10,14 @@
  * sessions, a password reset does the same — the UI says so BEFORE the click
  * rather than reporting it afterwards, because that consequence is the actual
  * reason an operator is on this screen during an offboarding.
+ *
+ * THE ACCOUNT COUNT IS EXACT HERE, which is unusual in this console and worth
+ * saying. /users takes no `limit` parameter at all, so what comes back is the
+ * namespace's accounts rather than a page of them — "12 accounts" is a fact and
+ * the table is told so. Every other list on these screens is a capped fetch and
+ * gets a count that admits it. The claim is pinned to the endpoint's shape, so
+ * if pagination is ever added to /users this constant is what has to change
+ * with it.
  */
 
 import { useState } from 'react';
@@ -17,9 +25,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { authApi, type User } from '../../api/auth';
 import { errorMessage, shouldRetry } from '../../api/hooks';
 import { AsyncPanel, ErrorBox } from '../../components/Status';
+import { DataTable } from '../../components/DataTable';
+import type { Column, RowCountKind } from '../../components/DataTable';
 import { fmtTs } from '../../lib/format';
 import { PageHeader } from '../../components/PageHeader';
 import { Forbidden } from '../../components/Forbidden';
+
+/** /users sends every account: no `limit`, so no cap to disclose. */
+const USERS_COUNT: RowCountKind = { kind: 'exact' };
 
 export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin: boolean }) {
   const qc = useQueryClient();
@@ -75,6 +88,96 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
     retry: false,
   });
 
+  /**
+   * The column set, declared after the mutations because the actions column
+   * closes over both of them.
+   *
+   * Rebuilt on every render rather than memoised, and deliberately so: the cells
+   * read `disable.isPending` and `revoke.isPending`, so a memo would have to
+   * list those in its dependencies and a stale one would leave a button enabled
+   * during a request that is still in flight. This array is six objects; the
+   * cost of building it is not worth the chance of that bug.
+   */
+  const columns: Column<User>[] = [
+    {
+      key: 'email',
+      header: 'email',
+      cellClass: 'mono',
+      // The identity, and the column an admin scans. Sortable because an
+      // offboarding starts from a name someone was given in a ticket.
+      sort: (a, b) => a.email.localeCompare(b.email),
+      cell: (u) => u.email,
+    },
+    {
+      key: 'name',
+      header: 'name',
+      sort: (a, b) => (a.display_name || '').localeCompare(b.display_name || ''),
+      cell: (u) => u.display_name || <span className="faint">—</span>,
+    },
+    {
+      key: 'role',
+      header: 'role',
+      sort: (a, b) => a.role.localeCompare(b.role),
+      // A role is a capability, not a state, so it stays a neutral chip. Only
+      // `status` below is tone-coloured.
+      cell: (u) => <span className="chip">{u.role}</span>,
+    },
+    {
+      key: 'created',
+      header: 'created',
+      cellClass: 'nowrap faint',
+      sort: (a, b) => Date.parse(a.created_at) - Date.parse(b.created_at),
+      cell: (u) => fmtTs(u.created_at),
+    },
+    {
+      key: 'status',
+      header: 'status',
+      // Disabled accounts gather at one end, which is what an audit of "who
+      // still has access" is actually reading for.
+      sort: (a, b) => Number(a.disabled) - Number(b.disabled),
+      cell: (u) =>
+        u.disabled ? (
+          <span className="badge tone-stopped">disabled</span>
+        ) : (
+          <span className="badge tone-success">active</span>
+        ),
+    },
+    {
+      key: 'actions',
+      header: 'actions',
+      cell: (u) => (
+        <div className="cell-actions">
+          <button
+            type="button"
+            onClick={() => {
+              setNotice(null);
+              disable.mutate(u);
+            }}
+            disabled={disable.isPending}
+            title={
+              u.disabled
+                ? 'Allow this account to sign in again.'
+                : 'Block sign-in AND end every session this account currently holds.'
+            }
+          >
+            {u.disabled ? 'Enable' : 'Disable'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setNotice(null);
+              revoke.mutate(u);
+            }}
+            disabled={revoke.isPending || u.disabled}
+            title="End every session this account holds, without disabling it."
+          >
+            Sign out everywhere
+          </button>
+        </div>
+      ),
+    },
+  ];
+
   if (!canAdmin) {
     return (
       <Forbidden
@@ -128,8 +231,6 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
       <div className="panel">
         <div className="panel-head">
           <span>accounts</span>
-          <span className="spacer" />
-          <span className="chip">{users.data?.length ?? 0}</span>
         </div>
         <AsyncPanel
           query={users}
@@ -139,71 +240,22 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
           emptyDetail="Only API keys can authenticate here so far. Create a user to sign in with an email and password."
         >
           {(list) => (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">email</th>
-                    <th scope="col">name</th>
-                    <th scope="col">role</th>
-                    <th scope="col">created</th>
-                    <th scope="col">status</th>
-                    <th scope="col">actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {list.map((u) => (
-                    <tr key={u.id}>
-                      <td className="mono">{u.email}</td>
-                      <td>{u.display_name || <span className="faint">—</span>}</td>
-                      <td>
-                        {/* A role is a capability, not a state, so it stays a
-                            neutral chip. Only `status` below is tone-coloured. */}
-                        <span className="chip">{u.role}</span>
-                      </td>
-                      <td className="nowrap faint">{fmtTs(u.created_at)}</td>
-                      <td>
-                        {u.disabled ? (
-                          <span className="badge tone-stopped">disabled</span>
-                        ) : (
-                          <span className="badge tone-success">active</span>
-                        )}
-                      </td>
-                      <td>
-                        <div className="cell-actions">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setNotice(null);
-                              disable.mutate(u);
-                            }}
-                            disabled={disable.isPending}
-                            title={
-                              u.disabled
-                                ? 'Allow this account to sign in again.'
-                                : 'Block sign-in AND end every session this account currently holds.'
-                            }
-                          >
-                            {u.disabled ? 'Enable' : 'Disable'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setNotice(null);
-                              revoke.mutate(u);
-                            }}
-                            disabled={revoke.isPending || u.disabled}
-                            title="End every session this account holds, without disabling it."
-                          >
-                            Sign out everywhere
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              rows={list}
+              columns={columns}
+              rowKey={(u) => u.id}
+              noun="accounts"
+              /* Exact, uniquely on this page: see the constant's note. */
+              count={USERS_COUNT}
+              /* Client-side, and honestly so. /users has no `search`
+                 parameter — but unlike the capped lists this one holds every
+                 account, so filtering it really does search the whole
+                 namespace. The table still labels the filter as local, which
+                 understates rather than overstates what it did: the failure
+                 mode worth preventing is a filter that claims more reach than
+                 it has, never one that claims less. */
+              search={{ mode: 'client', fields: (u) => [u.email, u.display_name, u.role] }}
+            />
           )}
         </AsyncPanel>
       </div>

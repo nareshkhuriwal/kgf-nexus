@@ -279,7 +279,13 @@ export function pageCount(total: number, pageSize: number): number {
  */
 export function clampPage(page: number, total: number, pageSize: number): number {
   const last = pageCount(total, pageSize) - 1;
-  if (!Number.isFinite(page)) return 0;
+  // NaN is the only value with no defensible clamp — it is not past either end,
+  // it is not a position at all — so it becomes the first page. The infinities
+  // ARE positions and clamp like any other out-of-range index: Math.min/max
+  // handle them directly, and catching them in this guard would have sent
+  // "past the last page" to the FIRST one, which is the opposite of what the
+  // caller asked for.
+  if (Number.isNaN(page)) return 0;
   return Math.min(Math.max(Math.trunc(page), 0), last);
 }
 

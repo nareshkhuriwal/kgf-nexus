@@ -3,17 +3,40 @@
 
 /**
  * The command palette: one search field that is both the console's navigation
- * and its lookup for "Run id, spec or node".
+ * and its GLOBAL lookup across every entity the console knows about.
  *
  * WHY IT IS NOT A POWER-USER EASTER EGG. The reference design puts a search
  * field at the top of the console, so this is a primary entry point: the row an
  * operator uses during an incident when they have a run id in the clipboard and
  * no interest in finding out which page lists it. That is why the search half
- * talks to the REAL catalog endpoint rather than filtering a list the palette
- * happens to have, and why a failed search says so instead of rendering an
- * empty list -- "no matches" and "I could not ask" are opposite facts, and
- * confusing them during an incident sends an operator looking for a workflow
- * they were just told does not exist.
+ * talks to the REAL endpoints rather than filtering a list the palette happens
+ * to have, and why a failed search says so instead of rendering an empty list
+ * -- "no matches" and "I could not ask" are opposite facts, and confusing them
+ * during an incident sends an operator looking for a workflow they were just
+ * told does not exist.
+ *
+ * WHY IT SEARCHES FIVE THINGS AND USED TO SEARCH ONE. The previous version
+ * asked the workflow catalog and nothing else, while the field promised to
+ * "search runs, workflows and commands". An operator who typed a colleague's
+ * email or a schedule name got an empty panel and drew the only available
+ * conclusion: the console cannot find them. A search that silently covers a
+ * fifth of the console is worse than an obviously narrow one, because the empty
+ * result is indistinguishable from an authoritative "no such thing".
+ *
+ * WHAT THE FAN-OUT GUARANTEES, and why each guarantee is here rather than in
+ * lib/commands.ts:
+ *
+ *  - CONCURRENCY is in lib/commands.ts (`searchEverything`), because who is
+ *    asked and what a per-group failure MEANS is backend policy, testable with
+ *    no DOM.
+ *  - THE OUT-OF-ORDER GUARD is here, because it is a property of this
+ *    component's state: typing is faster than the network, and a fan-out makes
+ *    that worse rather than better -- five in-flight requests per keystroke,
+ *    any of which can land after the operator has moved on. One `live` flag per
+ *    effect run covers all five at once, since they are awaited together.
+ *  - THE DEBOUNCE and the minimum-length gate are here too, and matter five
+ *    times as much as they did: one keystroke is now five requests, so an
+ *    ungated field would put five requests per character on the gateway.
  *
  * Dismissal and focus handling follow ProfileMenu.tsx: Escape closes and
  * returns focus to whatever had it, because a keyboard user dropped at the top
@@ -23,17 +46,21 @@
  */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { api } from '../api/client';
 import { useDebounced } from '../lib/useDebounced';
+import { searchSources } from '../lib/searchSources';
 import {
+  CLIENT_FILTER_CAP,
   COMMANDS,
+  SEARCH_GROUPS,
   asRunId,
   filterCommands,
   runPath,
+  searchEverything,
   shouldSearchRemote,
-  workflowPath,
   type Command,
   type CommandContext,
+  type SearchResults,
+  type SearchSources,
 } from '../lib/commands';
 
 export interface CommandPaletteProps {
@@ -51,6 +78,12 @@ export interface CommandPaletteProps {
   /** Open state, when the shell wants a button in the header to open it too. */
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /**
+   * The five endpoints the search fans out to, injectable only so tests can
+   * make one source hang or refuse without a fetch mock that has to guess which
+   * URL belongs to which group. Production always gets the real wiring.
+   */
+  sources?: SearchSources;
 }
 
 /** One row in the list, whatever produced it. */
@@ -62,11 +95,35 @@ interface Row {
   run: () => void;
 }
 
+/**
+ * One heading and the rows under it -- plus, if there is something to say about
+ * the group that is not a row, a notice.
+ *
+ * A notice is NOT a row: it is not selectable, Enter never runs it, and it does
+ * not enter the option index. That is the point. "I could not search users" is
+ * information about the search, not a destination, and making it an option
+ * would put a thing the operator cannot act on under a cursor whose whole
+ * contract is that Enter does something.
+ */
+interface Section {
+  heading: string;
+  rows: Row[];
+  notice?: { tone: 'muted' | 'danger'; text: string };
+}
+
+/**
+ * The state of the whole fan-out, not of one request.
+ *
+ * `ok` carries per-group results rather than a flat row list, because the
+ * groups that FAILED have to survive as far as the render -- a flat list would
+ * have already thrown that information away, and a group that failed would be
+ * indistinguishable from a group with no matches. That is the one behaviour
+ * this control cannot get wrong.
+ */
 type SearchState =
   | { status: 'idle' }
   | { status: 'loading' }
-  | { status: 'ok'; rows: Row[] }
-  | { status: 'error'; message: string };
+  | { status: 'ok'; results: SearchResults };
 
 export function CommandPalette({
   namespace,
@@ -75,6 +132,7 @@ export function CommandPalette({
   commands = COMMANDS,
   open: openProp,
   onOpenChange,
+  sources = searchSources,
 }: CommandPaletteProps) {
   // Uncontrolled by default: the shell should not have to own state for a thing
   // that opens on a global key. A controlled `open` is accepted so a header
@@ -156,75 +214,186 @@ export function CommandPalette({
     // Guards a slow response for an older query from overwriting a newer one:
     // typing is faster than the network, and out-of-order results would show
     // matches for a prefix the operator has already moved past.
+    //
+    // ONE flag for all five requests, checked once after they have all settled.
+    // That is sound because searchEverything awaits them together, so there is
+    // exactly one state update per query and no window in which a stale group
+    // could be merged into a fresh result. Per-group flags would have bought
+    // nothing and opened that window.
     let live = true;
     setSearch({ status: 'loading' });
-    api
-      .listWorkflows(namespace, debounced, 8)
-      .then((rows) => {
+    searchEverything(namespace, debounced, sources)
+      .then((results) => {
         if (!live) return;
+        setSearch({ status: 'ok', results });
+      })
+      .catch(() => {
+        if (!live) return;
+        // Reaching here means the fan-out ITSELF threw, which it is written not
+        // to do -- every group failure is reported inside the results. It is
+        // still handled rather than left to become an unhandled rejection: a
+        // programming error in the search layer must not leave the panel
+        // spinning "Searching…" forever, which looks like a slow network and
+        // sends the operator to the wrong problem.
         setSearch({
           status: 'ok',
-          rows: rows.slice(0, 8).map((w) => ({
-            id: `workflow.${w.id}`,
-            label: w.name,
-            hint: `Workflow · v${w.latest_version}`,
-            group: 'Search',
-            run: () => onNavigate(workflowPath(w.name)),
-          })),
-        });
-      })
-      .catch((err: unknown) => {
-        if (!live) return;
-        // The API client already produces operator-readable text, including the
-        // "not implemented yet" case, so it is surfaced verbatim rather than
-        // replaced with a generic apology that hides which thing broke.
-        setSearch({
-          status: 'error',
-          message: err instanceof Error ? err.message : 'Workflow search failed.',
+          results: Object.fromEntries(
+            SEARCH_GROUPS.map((g) => [g, { status: 'failed', message: 'The search failed.' }]),
+          ) as SearchResults,
         });
       });
     return () => {
       live = false;
     };
-  }, [open, debounced, namespace, onNavigate]);
+  }, [open, debounced, namespace, sources]);
 
   const ctx: CommandContext = useMemo(
     () => ({ navigate: onNavigate, signOut: onSignOut }),
     [onNavigate, onSignOut],
   );
 
-  // ── the one list ──────────────────────────────────────────────────────────
+  // ── the one list, in sections ─────────────────────────────────────────────
   //
   // Search results lead when there are any: a query that produced a run id or a
   // workflow name is a query about that thing, and burying it under the static
   // commands would make the operator arrow past navigation they did not ask for.
-  const rows: Row[] = useMemo(() => {
-    const out: Row[] = [];
+  //
+  // WHY SECTIONS AND NOT A FLAT LIST WITH A CHANGING HEADING. The old list
+  // printed a heading whenever the group name changed from the previous row,
+  // which works for one search group and breaks for five: a group that FAILED
+  // has no rows, so a change-detecting heading can never print it, and the
+  // group that could not be searched would be exactly as invisible as a group
+  // with no matches. Sections are built explicitly so an empty-but-broken group
+  // still gets its heading and its notice.
+  //
+  // The flat `rows` array below is derived FROM the sections rather than built
+  // alongside them, so the keyboard index and the rendered order cannot drift.
+  const sections: Section[] = useMemo(() => {
+    const out: Section[] = [];
 
+    // A pasted run id, answered with no request at all. It keeps its own
+    // section above the fetched groups because a paste is an unambiguous
+    // instruction -- the operator has the id, they want the run -- and it must
+    // never wait behind a network round trip to appear.
     const runId = asRunId(query);
     if (runId) {
       out.push({
-        id: `run.${runId}`,
-        label: `Open run ${runId}`,
-        hint: runPath(runId),
-        group: 'Search',
-        run: () => onNavigate(runPath(runId)),
+        heading: 'Run',
+        rows: [
+          {
+            id: `run.${runId}`,
+            label: `Open run ${runId}`,
+            hint: runPath(runId),
+            group: 'Run',
+            run: () => onNavigate(runPath(runId)),
+          },
+        ],
       });
     }
 
-    if (search.status === 'ok') out.push(...search.rows);
+    if (search.status === 'ok') {
+      for (const group of SEARCH_GROUPS) {
+        const result = search.results[group];
+        if (!result) continue;
 
-    for (const { command } of filterCommands(query, commands)) {
-      out.push({
+        if (result.status === 'forbidden') {
+          // Not an error. The credential works and is being refused, which is a
+          // fact about permission rather than about the console -- so it is
+          // stated calmly, in its own group, and only where it applies.
+          out.push({
+            heading: group,
+            rows: [],
+            notice: { tone: 'muted', text: `Not searched — this credential may not read ${group.toLowerCase()}.` },
+          });
+          continue;
+        }
+        if (result.status === 'failed') {
+          out.push({
+            heading: group,
+            rows: [],
+            notice: { tone: 'danger', text: `Could not search ${group.toLowerCase()} — ${result.message}` },
+          });
+          continue;
+        }
+        // A group with no matches gets no heading and no note. That is not an
+        // oversight: four silent groups is what makes the fifth one's rows
+        // readable, and a "checked the first 200" line under every group an
+        // operator did NOT ask about would drown the panel in caveats. The
+        // truncation that matters -- a capped group finding nothing, where
+        // "nothing matches" might be wrong -- is instead handled by withholding
+        // that claim below, which is the only place it could mislead anyone.
+        if (result.hits.length === 0) continue;
+
+        out.push({
+          heading: group,
+          rows: result.hits.map((hit) => ({
+            id: hit.id,
+            label: hit.label,
+            hint: hit.hint,
+            group,
+            run: () => onNavigate(hit.path),
+          })),
+          // Said only when it is true and only for the groups that can be
+          // capped, because the alternative is implying a completeness this
+          // search does not have: the users, schedules and workers endpoints
+          // have no search parameter, so those groups matched a capped page in
+          // the browser and a match past the cap was never visible.
+          notice: result.truncated
+            ? { tone: 'muted', text: `Matched within the first ${CLIENT_FILTER_CAP} ${group.toLowerCase()}.` }
+            : undefined,
+        });
+      }
+    }
+
+    // Commands last, grouped as the registry groups them, which is what the
+    // list has always done when nothing is typed.
+    const matched = filterCommands(query, commands);
+    let currentGroup = '';
+    for (const { command } of matched) {
+      const row: Row = {
         id: command.id,
         label: command.title,
         hint: command.hint,
         group: command.group,
         run: () => command.run(ctx),
-      });
+      };
+      if (command.group !== currentGroup) {
+        currentGroup = command.group;
+        out.push({ heading: command.group, rows: [row] });
+      } else {
+        out[out.length - 1]!.rows.push(row);
+      }
     }
     return out;
   }, [query, search, commands, ctx, onNavigate]);
+
+  const rows: Row[] = useMemo(() => sections.flatMap((s) => s.rows), [sections]);
+
+  /**
+   * Whether the search is entitled to say "nothing matches".
+   *
+   * It is not, in two cases, and both are the same mistake in different
+   * clothes: claiming a fact the search never established.
+   *
+   *  - A GROUP WAS REFUSED OR BROKE. A panel with no rows because the users
+   *    endpoint 403'd has not established that no user matches; it has
+   *    established that it could not look.
+   *  - A CAPPED GROUP FOUND NOTHING. The users, schedules and workers endpoints
+   *    have no search parameter, so a miss over a capped page is only a miss
+   *    within that page. The group prints no note of its own (see above -- a
+   *    caveat under every silent group is noise), so the honesty lands here
+   *    instead: the panel stays quiet rather than asserting the thing does not
+   *    exist.
+   */
+  const canClaimNoMatches = useMemo(() => {
+    if (search.status !== 'ok') return true;
+    return SEARCH_GROUPS.every((group) => {
+      const result = search.results[group];
+      if (!result) return true;
+      if (result.status !== 'ok') return false;
+      return !(result.truncated && result.hits.length === 0);
+    });
+  }, [search]);
 
   // Clamp rather than reset: the list changes shape as results arrive, and
   // resetting to 0 on every arrival would yank the cursor out from under an
@@ -292,7 +461,11 @@ export function CommandPalette({
     }
   }
 
-  let groupSoFar = '';
+  // A running index across the sections, so the option a key moves to is the
+  // option the eye is on. Incremented inside the render rather than precomputed
+  // because the sections already carry the order and a parallel index array
+  // would be a second source of truth for the same thing.
+  let flatIndex = -1;
 
   return (
     <div
@@ -313,7 +486,7 @@ export function CommandPalette({
         onKeyDown={onDialogKeyDown}
       >
         <label className="sr-only" id={labelId} htmlFor={`${listId}-input`}>
-          Search runs, workflows and commands
+          Search workflows, runs, schedules, workers, users and commands
         </label>
         <div className="cmdk-field">
           <span className="cmdk-icon" aria-hidden="true">
@@ -324,9 +497,16 @@ export function CommandPalette({
             ref={inputRef}
             type="text"
             className="cmdk-input"
-            // The reference screenshot's wording. It is also the honest list of
-            // what the field accepts, which is why it is not "Search…".
-            placeholder="Run id, spec or node"
+            // The honest list of what a single query string may BE, which is
+            // why it is not "Search…" and why it is not "search anything". A
+            // run id is resolved locally; a name is matched against workflows,
+            // schedules and spec-backed runs; a host or queue reaches the
+            // fleet; an email reaches the user list when the credential may
+            // read it. Nothing here promises node ids, logs or docs, because
+            // none of those are searched -- and over-promising in a placeholder
+            // is the same failure as an empty list for a failed request: the
+            // operator goes looking for something they were told existed.
+            placeholder="Run id, name, host or email"
             role="combobox"
             aria-expanded="true"
             aria-controls={listId}
@@ -345,45 +525,74 @@ export function CommandPalette({
           </kbd>
         </div>
 
-        {search.status === 'error' && (
-          // Stated as a failure, never as an empty result. The list below still
-          // renders the static commands, which are still usable and still true.
-          <p className="cmdk-error" role="alert">
-            Workflow search failed — {search.message}
-          </p>
-        )}
+        {/* There is no panel-wide error banner any more, and that is the point
+            of this whole change. A fan-out has no single failure: one banner
+            reading "search failed" over a panel that is showing perfectly good
+            workflow matches would be false, and the failure that actually
+            happened -- which group, and whether it was refused or broken -- is
+            exactly the fact the operator needs. So every failure is stated
+            inside the group it belongs to, next to the heading whose absence of
+            rows it explains. `role="alert"` stays on those notices so a screen
+            reader is told the search could not complete rather than left with a
+            list that quietly lost a group. */}
 
         <ul className="cmdk-list" id={listId} role="listbox" aria-label="Results">
-          {rows.map((row, i) => {
-            const header = row.group !== groupSoFar ? row.group : null;
-            groupSoFar = row.group;
-            return (
-              <li key={row.id} className="cmdk-row">
-                {header && (
-                  <p className="cmdk-group" aria-hidden="true">
-                    {header}
-                  </p>
-                )}
-                <div
-                  id={`${listId}-${row.id}`}
-                  role="option"
-                  aria-selected={i === active}
-                  className={`cmdk-option${i === active ? ' is-active' : ''}`}
-                  // Pointer selection follows the mouse, so clicking never
-                  // activates a different row than the one under the cursor.
-                  onMouseMove={() => setActive(i)}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => runRow(row)}
-                >
-                  <span className="cmdk-label">{row.label}</span>
-                  {row.hint && <span className="cmdk-hint">{row.hint}</span>}
-                </div>
-              </li>
-            );
-          })}
+          {sections.map((section) => (
+            <li key={`section.${section.heading}`} className="cmdk-row" role="presentation">
+              {/* aria-hidden because the heading is decoration for the eye: the
+                  option's own label already names the thing, and a listbox
+                  child that is not an option confuses the count assistive
+                  technology reports. */}
+              <p className="cmdk-group" aria-hidden="true">
+                {section.heading}
+              </p>
 
-          {rows.length === 0 && search.status !== 'error' && (
-            <li className="cmdk-row">
+              {section.notice && (
+                <p
+                  className={`cmdk-note${section.notice.tone === 'danger' ? ' is-danger' : ''}`}
+                  // Announced for the two cases that are news -- a group that
+                  // could not be searched at all. A truncation notice is not an
+                  // alert: the search worked, it was simply capped, and
+                  // interrupting a screen-reader user mid-typing for that would
+                  // make the honest note more annoying than the dishonest
+                  // silence it replaces.
+                  role={section.rows.length === 0 ? 'alert' : undefined}
+                >
+                  {section.notice.text}
+                </p>
+              )}
+
+              {section.rows.map((row) => {
+                flatIndex += 1;
+                const i = flatIndex;
+                return (
+                  <div
+                    key={row.id}
+                    id={`${listId}-${row.id}`}
+                    role="option"
+                    aria-selected={i === active}
+                    className={`cmdk-option${i === active ? ' is-active' : ''}`}
+                    // Pointer selection follows the mouse, so clicking never
+                    // activates a different row than the one under the cursor.
+                    onMouseMove={() => setActive(i)}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => runRow(row)}
+                  >
+                    <span className="cmdk-label">{row.label}</span>
+                    {row.hint && <span className="cmdk-hint">{row.hint}</span>}
+                  </div>
+                );
+              })}
+            </li>
+          ))}
+
+          {/* "Nothing matches" is an ASSERTION, so it is withheld unless every
+              group was in a position to make it -- see canClaimNoMatches.
+              Claiming nothing matches when three of five sources never replied,
+              or when a capped page was all anyone looked at, is the failure
+              this whole control is built to avoid. */}
+          {rows.length === 0 && canClaimNoMatches && (
+            <li className="cmdk-row" role="presentation">
               <p className="cmdk-empty">
                 {search.status === 'loading' ? 'Searching…' : `Nothing matches “${query}”.`}
               </p>

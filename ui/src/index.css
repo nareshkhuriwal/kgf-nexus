@@ -461,8 +461,39 @@ code, .mono, pre { font-family: var(--mono); font-size: var(--text-sm); }
 .brand { font-weight: 650; letter-spacing: -0.2px; display: flex; align-items: center; gap: var(--space-4); }
 .brand-mark { color: var(--accent); font-family: var(--mono); }
 
-/* 1680px is a layout ceiling, not a spacing step -- it has no token by design. */
-/* min-width:0 is load-bearing, not defensive: .main is a flex child, and its
+/* THE SHELL NO LONGER CAPS ITS WIDTH, and the 1680px ceiling that used to live
+   here is gone. That cap was wrong for what this console actually shows.
+
+   A max-width on a content column exists to stop a LINE OF PROSE from running
+   past the ~75 characters an eye can track back from. That is a real constraint
+   and it still applies here — to the settings text, the form hints, the login
+   lede. It does not apply to a nine-column table of ids and timestamps, which
+   is what the primary screens of this console are. On a 2560px monitor the old
+   cap produced the exact inversion of what it was for: ~440px of empty page on
+   each side while the workflow catalog's spec-hash column was truncated and the
+   fleet table scrolled horizontally inside .table-scroll. The operator was
+   paying for a prose measure on a screen with no prose on it.
+
+   So the CAP MOVES TO THE CONTENT THAT NEEDS ONE rather than being applied to
+   everything from the shell. Three mechanisms, in the block at the end of this
+   stylesheet:
+
+     - .panel-body.measure, applied where a panel's content is prose or a form,
+       holds those to a reading width so the settings page does not become a
+       2500px-wide row of labels floating beside their inputs.
+     - .form-row already lays fields out in an auto-fit grid with a column floor,
+       so a form in a wide panel gains COLUMNS rather than stretching one field
+       to the window's width.
+     - .col.page-measure, for a whole page whose every panel is prose.
+
+   Removing a cap rather than raising it is the more honest of the two available
+   fixes. A raised cap (2200px, say) would be a number with no argument behind
+   it: it is neither the widest useful table nor the widest readable line, just
+   a guess that fails differently on the next monitor. Once the panels that need
+   a measure carry one, the shell has no remaining reason to hold a width — and
+   the tables get every pixel, which is what the screenshot was asking for.
+
+   min-width:0 is load-bearing, not defensive: .main is a flex child, and its
    default min-width:auto means a wide table or the DAG canvas inside it can
    refuse to shrink and shove the rail off the left edge. The overflow belongs to
    the scroll containers inside the page, not to the shell. */
@@ -470,9 +501,7 @@ code, .mono, pre { font-family: var(--mono); font-size: var(--text-sm); }
   flex: 1;
   min-width: 0;
   padding: var(--space-6);
-  max-width: 1680px;
   width: 100%;
-  margin: 0 auto;
 }
 
 /* ── Primitives ────────────────────────────────────────────────────────── */
@@ -3350,4 +3379,239 @@ a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
    should take the screen rather than leave a strip of dimmed page beside it. */
 @media (max-width: 560px) {
   .navdrawer { width: 100%; max-width: none; border-right: 0; }
+}
+
+/* ── Reclaiming the width, and paying for it where it costs ────────────────
+   Companion to the .main block near the top of this file, which no longer caps
+   the shell's width. Read that comment first: it argues that a prose measure
+   was being charged to screens that show no prose, and that the fix is to put
+   the measure on the CONTENT that needs one.
+
+   This is that measure. Three rules, each naming what it protects.
+
+   Every length below is a READING MEASURE — a count of characters an eye can
+   track — rather than a step on the density scale, which is why they are ch and
+   px literals and not --space-* tokens. A spacing token here would be the wrong
+   kind of quantity: doubling the gutter scale must not double how long a line
+   of explanation is allowed to get. */
+
+/* Prose inside a panel body. Applied by the caller, per panel, because a panel
+   body is sometimes a form and sometimes a table and only the page knows which.
+   68ch is the upper end of the conventional 45–75 character line: these are
+   short explanatory paragraphs an operator reads once, not body copy. */
+.panel-body.measure { max-width: 68ch; }
+
+/* The appearance panel is the other prose-shaped block that had no measure of
+   its own: .accent-option is width:100%, so an uncapped page turned each accent
+   row into a 2400px band with its one-line hint stranded beside the swatch. The
+   cap is on the GROUPS, so the radiogroups stay a readable stack of comparable
+   rows -- which is the one thing that control exists to allow. */
+.appearance { max-width: 560px; }
+
+/* A whole page of prose panels. The settings page and the permission-denied
+   screens are the cases: every panel on them is text or a single field, so
+   capping the column once beats tagging each panel. 900px rather than a ch
+   measure because it bounds PANELS, which contain their own padding and borders
+   -- a ch value applied to a box with padding caps something other than the
+   line length it was chosen for. */
+.col.page-measure { max-width: 900px; }
+
+/* The standalone notices -- empty states, permission denials, error boxes.
+   These stretch worst of all when uncapped: .notice is a flex row, so an
+   80-character sentence became one 2400px line with the glyph orphaned at the
+   far left. Capped on the TEXT rather than on the notice, so the box still
+   spans its container and keeps reading as a band across the panel it
+   qualifies, while the sentence inside it stays finishable. */
+.notice-title,
+.notice-detail,
+.notice-hint { max-width: 78ch; }
+
+/* ── DataTable ─────────────────────────────────────────────────────────────
+   The shared list table (components/DataTable.tsx). It deliberately renders
+   ordinary <table> markup and takes the table styles already defined above, so
+   a page that adopts it looks identical to the one it replaced. Everything here
+   styles only the parts that are NEW: the toolbar, the sortable header button
+   and the pager.
+
+   The accent appears nowhere in this block. A sorted column, a disabled pager
+   button and a capped row count all carry MEANING, and meaning comes from
+   --tone-* or from weight and glyph -- never from the brand colour an operator
+   can reassign out from under themselves. Sort direction is carried by a glyph
+   and by aria-sort together, so it survives both a theme swap and a screen
+   reader. */
+
+/* The toolbar band. Sibling of .filterbar and deliberately the same surface and
+   inset: a page that puts its own filters in a .filterbar and its search here
+   must not show two differently-shaded bands stacked on each other. */
+.dt-toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-6);
+  padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-inset);
+  flex-wrap: wrap;
+}
+.dt-toolbar .spacer { margin-left: auto; }
+
+/* Reuses .filter-field for the label-over-control stack, so the search box in a
+   DataTable and the one in the run list's filter bar are the same control. Only
+   the measure is restated. */
+.dt-search input[type='search'] { width: 100%; max-width: 240px; }
+
+/* "searched on the server" / "filters the loaded rows only".
+   The one thing an operator cannot see and that changes what the result means,
+   so it is on screen rather than in a tooltip. Quiet: it qualifies the field
+   above it, it is not a warning about it. */
+.dt-scope {
+  font-size: var(--text-xs);
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+
+/* Tabular so a poll changing 97 to 103 does not shift the chip's neighbours. */
+.dt-count { font-variant-numeric: tabular-nums; }
+
+/* The sortable header.
+
+   A real button filling the <th>, so the whole header cell is the target rather
+   than just the word -- a 6-character header like "cron" is otherwise a tiny hit
+   area in a wide column. It inherits the <th>'s own type treatment (uppercase,
+   tracked, muted) instead of restating it, which is what keeps a sortable header
+   and a plain one looking like the same row. */
+.dt-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-0);
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  text-align: inherit;
+}
+.dt-sort:hover:not(:disabled) { color: var(--fg); border-color: transparent; }
+/* The focus ring is the console's shared one. --focus IS derived from the
+   accent, which is correct here and only here: a focus ring is chrome, not
+   state -- it says "the keyboard is on this", which no theme change can make
+   mean something else. */
+.dt-sort:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
+/* Dimmed on the columns that are sortable but not sorted: the affordance has to
+   be visible before it is used, and at full strength three of them compete with
+   the header text itself. The active arrow takes the foreground. */
+.dt-sort-glyph { color: var(--fg-faint); font-size: var(--text-xs); line-height: 1; }
+th[aria-sort='ascending'] .dt-sort-glyph,
+th[aria-sort='descending'] .dt-sort-glyph { color: var(--fg); }
+/* The sorted column's header is weighted, not tinted. Weight reads at a glance
+   in both themes and cannot be confused with the tone palette the cells below
+   are using for state. */
+th[aria-sort='ascending'],
+th[aria-sort='descending'] { color: var(--fg); }
+
+/* Right-aligned numeric columns, header and cell together so the digits line up
+   under their own label. */
+.dt-end { text-align: right; }
+td.dt-end { font-variant-numeric: tabular-nums; }
+
+/* The pager. Below the rows, inside the panel, on the inset ground so it reads
+   as a footer to the table rather than as another row of it. */
+.dt-pager {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-4) var(--space-6);
+  border-top: 1px solid var(--border);
+  background: var(--bg-inset);
+  flex-wrap: wrap;
+}
+.dt-pager .spacer { margin-left: auto; }
+.dt-pagesize {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.dt-pagesize select { max-width: 90px; }
+
+/* "1–25 of 137+" -- the honest substitute for "page 1 of 6" on an endpoint that
+   reports no total. Tabular for the same reason the count chip is. */
+.dt-range {
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dt-pager-buttons {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.dt-page-of {
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Phone width. The same 560px the shell uses. The toolbar and the pager both
+   become stacked full-width rows: at this width a flex row of five controls
+   wraps into an unreadable staircase, and the search field in particular has to
+   take the whole line to be usable. */
+@media (max-width: 560px) {
+  .dt-toolbar,
+  .dt-pager { gap: var(--space-4); padding: var(--space-5); }
+  .dt-search { width: 100%; }
+  .dt-search input[type='search'] { max-width: none; }
+  .dt-toolbar .spacer,
+  .dt-pager .spacer { display: none; }
+  .dt-pager-buttons { width: 100%; justify-content: space-between; }
+}
+
+/* ── Command palette: per-group notices ────────────────────────────────────
+   Appended at the end of the sheet rather than merged into the palette block
+   above, because that block is being edited concurrently; these selectors are
+   confined to .cmdk-note so there is nothing here to collide with.
+
+   WHY A THIRD KIND OF LINE IN THE LIST. The palette's list already had two:
+   the option rows and .cmdk-empty. A global search needs a third, because a
+   group can now have no rows for two completely different reasons -- nobody
+   matched, or nobody answered -- and the whole value of this control is that
+   those never look the same. The notice sits directly under the heading whose
+   missing rows it explains, so the explanation is attached to the gap rather
+   than floating above the panel as a banner that would also be wrong about the
+   groups that DID answer.
+
+   Indented to the option padding so it reads as belonging to the group and not
+   as a row of its own; it is deliberately not interactive and carries no
+   cursor, because Enter must never land on something that cannot be run. */
+.cmdk-note {
+  margin: 0;
+  padding: var(--space-2) var(--space-6) var(--space-3);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+/* The danger tone is reserved for "I could not ask" -- a source that broke or
+   was unreachable, which is an incident-relevant fact. A group merely REFUSED
+   (403, an ordinary operator searching users) keeps the muted tone above: the
+   console is working exactly as intended, and painting a permission boundary
+   red would train operators to ignore the colour that means something is
+   wrong. Meaning comes from --tone-*, never from --accent, which is brand. */
+.cmdk-note.is-danger {
+  color: var(--tone-danger-fg);
+  background: var(--tone-danger-bg);
+  /* The rule carries the same meaning as the colour, for a reader who cannot
+     separate the two. A hairline measure, so literal px rather than a spacing
+     token -- and subtracted from the indent so the text still lines up with
+     the option labels above it. */
+  border-left: 3px solid var(--tone-danger-bd);
+  padding-left: calc(var(--space-6) - 3px);
 }

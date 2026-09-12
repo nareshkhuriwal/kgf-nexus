@@ -9,6 +9,12 @@
  * them is still being used. `api_keys` has no last_used_at and no expiry, so
  * unused keys accumulated forever with no way to tell a live integration from an
  * abandoned one. That is why last-used is a column here rather than a detail.
+ *
+ * The listing renders NOTHING of a token's plaintext, and that survives the move
+ * to the shared table: the secret exists in this file in exactly one place, the
+ * reveal panel below, and there is a test pinning that it appears in no cell and
+ * no tooltip. A column set is a tempting place to add "the value" to; it must
+ * not be.
  */
 
 import { useState } from 'react';
@@ -16,9 +22,20 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { authApi, type ScopedToken } from '../../api/auth';
 import { errorMessage, shouldRetry } from '../../api/hooks';
 import { AsyncPanel, ErrorBox } from '../../components/Status';
+import { DataTable } from '../../components/DataTable';
+import type { Column, RowCountKind } from '../../components/DataTable';
 import { fmtAge, fmtTs } from '../../lib/format';
 import { PageHeader } from '../../components/PageHeader';
 import { Forbidden } from '../../components/Forbidden';
+
+/**
+ * /tokens takes no `limit`, so the listing is every credential in the namespace
+ * and the count may say so. That matters more here than on the other admin
+ * screens: this table is read to answer "what can still reach this namespace",
+ * and a count that might be hiding a page of live credentials would make the
+ * answer worthless.
+ */
+const TOKENS_COUNT: RowCountKind = { kind: 'exact' };
 
 /** The actions the gateway's authorization matrix actually enforces. */
 const SCOPES = [
@@ -51,6 +68,121 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
     onError: (e) => setActionError(errorMessage(e)),
     retry: false,
   });
+
+  /**
+   * Rebuilt each render rather than memoised: the revoke button reads
+   * `revoke.isPending`, and a stale memo would leave it clickable during a
+   * request already in flight.
+   */
+  const columns: Column<ScopedToken>[] = [
+    {
+      key: 'name',
+      header: 'name',
+      cellClass: 'mono',
+      sort: (a, b) => a.name.localeCompare(b.name),
+      cell: (t) => t.name,
+    },
+    {
+      key: 'role',
+      header: 'role',
+      sort: (a, b) => a.role.localeCompare(b.role),
+      // Role and scopes are capabilities, not states: neutral chips throughout,
+      // so only `status` carries a tone.
+      cell: (t) => <span className="chip">{t.role}</span>,
+    },
+    {
+      key: 'scopes',
+      header: 'scopes',
+      // Not sortable: a set has no order, and sorting by its first element or
+      // its size would be sorting by something the column does not show.
+      cell: (t) =>
+        t.scopes.length === 0 ? (
+          <span className="faint" title="A token with no scopes can do nothing.">
+            none
+          </span>
+        ) : (
+          <div className="chip-set">
+            {t.scopes.map((s) => (
+              <span key={s} className="chip mono">
+                {s}
+              </span>
+            ))}
+          </div>
+        ),
+    },
+    {
+      key: 'expires',
+      header: 'expires',
+      cellClass: 'nowrap faint',
+      /**
+       * A never-expiring token sorts LAST ascending, not first.
+       *
+       * Null is not "expires at the beginning of time"; it is "expires never",
+       * which is further in the future than any date. Infinity says that
+       * explicitly — and it puts the unbounded credentials, which are the ones
+       * this screen exists to replace, at the end of an ascending sort where a
+       * naive null-as-zero would have buried them among the long-expired.
+       */
+      sort: (a, b) =>
+        (a.expires_at ? Date.parse(a.expires_at) : Infinity) -
+        (b.expires_at ? Date.parse(b.expires_at) : Infinity),
+      cell: (t) => (
+        <span title={t.expires_at ? fmtTs(t.expires_at) : ''}>
+          {t.expires_at ? (
+            fmtTs(t.expires_at)
+          ) : (
+            <span title="This credential never expires.">never</span>
+          )}
+        </span>
+      ),
+    },
+    {
+      key: 'last_used',
+      header: 'last used',
+      cellClass: 'nowrap faint',
+      // The column api_keys could never answer, and the one worth sorting on:
+      // ascending puts the never-used credentials first, which is the list an
+      // operator cleaning up abandoned integrations came for.
+      sort: (a, b) =>
+        (a.last_used_at ? Date.parse(a.last_used_at) : -Infinity) -
+        (b.last_used_at ? Date.parse(b.last_used_at) : -Infinity),
+      cell: (t) =>
+        t.last_used_at ? (
+          <>{fmtAge(t.last_used_at, Date.now())}</>
+        ) : (
+          <span title="This token has never authenticated a request.">never</span>
+        ),
+    },
+    {
+      key: 'status',
+      header: 'status',
+      cell: (t) =>
+        t.revoked_at ? (
+          <span className="badge tone-stopped">revoked</span>
+        ) : t.live ? (
+          <span className="badge tone-success">live</span>
+        ) : (
+          <span className="badge tone-warning">expired</span>
+        ),
+    },
+    {
+      key: 'actions',
+      header: 'actions',
+      cell: (t) => (
+        <div className="cell-actions">
+          <button
+            type="button"
+            className="danger"
+            onClick={() => revoke.mutate(t)}
+            disabled={revoke.isPending || t.revoked_at !== null}
+            title="Stop this credential working immediately and permanently."
+          >
+            Revoke
+          </button>
+        </div>
+      ),
+    },
+  ];
 
   if (!canAdmin) {
     return (
@@ -142,8 +274,6 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
       <div className="panel">
         <div className="panel-head">
           <span>tokens</span>
-          <span className="spacer" />
-          <span className="chip">{tokens.data?.length ?? 0}</span>
         </div>
         <AsyncPanel
           query={tokens}
@@ -153,85 +283,20 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
           emptyDetail="Integrations here still use static API keys, which never expire and carry their role's full authority. A scoped token is the narrower alternative."
         >
           {(list) => (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">name</th>
-                    <th scope="col">role</th>
-                    <th scope="col">scopes</th>
-                    <th scope="col">expires</th>
-                    <th scope="col">last used</th>
-                    <th scope="col">status</th>
-                    <th scope="col">actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {list.map((t) => (
-                    <tr key={t.id}>
-                      <td className="mono">{t.name}</td>
-                      <td>
-                        {/* Role and scopes are capabilities, not states: neutral
-                            chips throughout, so only `status` carries a tone. */}
-                        <span className="chip">{t.role}</span>
-                      </td>
-                      <td>
-                        {t.scopes.length === 0 ? (
-                          <span className="faint" title="A token with no scopes can do nothing.">
-                            none
-                          </span>
-                        ) : (
-                          <div className="chip-set">
-                            {t.scopes.map((s) => (
-                              <span key={s} className="chip mono">
-                                {s}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </td>
-                      <td className="nowrap faint" title={t.expires_at ? fmtTs(t.expires_at) : ''}>
-                        {t.expires_at ? (
-                          fmtTs(t.expires_at)
-                        ) : (
-                          <span title="This credential never expires.">never</span>
-                        )}
-                      </td>
-                      <td className="nowrap faint">
-                        {/* The column api_keys could never answer. */}
-                        {t.last_used_at ? (
-                          fmtAge(t.last_used_at, Date.now())
-                        ) : (
-                          <span title="This token has never authenticated a request.">never</span>
-                        )}
-                      </td>
-                      <td>
-                        {t.revoked_at ? (
-                          <span className="badge tone-stopped">revoked</span>
-                        ) : t.live ? (
-                          <span className="badge tone-success">live</span>
-                        ) : (
-                          <span className="badge tone-warning">expired</span>
-                        )}
-                      </td>
-                      <td>
-                        <div className="cell-actions">
-                          <button
-                            type="button"
-                            className="danger"
-                            onClick={() => revoke.mutate(t)}
-                            disabled={revoke.isPending || t.revoked_at !== null}
-                            title="Stop this credential working immediately and permanently."
-                          >
-                            Revoke
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              rows={list}
+              columns={columns}
+              rowKey={(t) => t.id}
+              noun="tokens"
+              count={TOKENS_COUNT}
+              /* The name and the role are the haystack. The SCOPES are
+                 deliberately not: "read" is a substring of a dozen unrelated
+                 names, and a filter that quietly matched on capability would
+                 make an operator believe they had seen every token carrying a
+                 scope when they had only seen the ones whose name mentioned
+                 it. */
+              search={{ mode: 'client', fields: (t) => [t.name, t.role] }}
+            />
           )}
         </AsyncPanel>
       </div>

@@ -293,7 +293,15 @@ describe('the application shell', () => {
     renderApp();
 
     expect(screen.queryByRole('dialog')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Search runs, workflows and commands' }));
+    // The accessible name is the palette's HONEST coverage, which grew when the
+    // search stopped being one call to the workflow catalog. Asserting it by
+    // name here rather than by class is deliberate: if the two ever disagree
+    // about what is searchable, this is the test that catches it.
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Search workflows, runs, schedules, workers, users and commands',
+      }),
+    );
 
     const dialogs = screen.getAllByRole('dialog');
     expect(dialogs).toHaveLength(1);
