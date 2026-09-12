@@ -24,6 +24,8 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/spec"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // WorkflowManager is the workflow-manager's API as the gateway needs it.
@@ -33,6 +35,10 @@ import (
 // validation, and shape — not lifecycle.
 type WorkflowManager interface {
 	PutSpec(ctx context.Context, namespace, name, hash string, canonicalJSON []byte, createdBy string) (row store.SpecRow, created bool, err error)
+	// DeleteSpec removes every version of a workflow name, returning how many
+	// were removed. It REFUSES (FailedPrecondition) when runs or schedules
+	// still reference the workflow; see deleteSpec below for the semantics.
+	DeleteSpec(ctx context.Context, namespace, name string) (int, error)
 	CreateRun(ctx context.Context, req CreateRunRequest) (run store.RunRow, created bool, err error)
 	CancelRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
 	PauseRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
@@ -191,6 +197,14 @@ func (a *API) Routes() http.Handler {
 	// The catalog: one row per workflow NAME, newest version, searchable.
 	mux.Handle("GET /v1/namespaces/{ns}/specs", a.guard(authn.ActionRead, a.listCatalog))
 	mux.Handle("GET /v1/namespaces/{ns}/specs/{name}/versions", a.guard(authn.ActionRead, a.listSpecVersions))
+	// Deleting a workflow definition is ADMIN_WRITE, not WRITE, deliberately.
+	// Submitting a spec is additive and reversible -- a bad version is fixed by
+	// submitting a better one, and the old one is still there. Deleting one
+	// destroys the document irrecoverably and removes a name the rest of the
+	// namespace may create runs by. That is the same class of authority as
+	// draining a worker, which is already ActionAdminWrite, so it gets the same
+	// level rather than being reachable by every CI credential that can deploy.
+	mux.Handle("DELETE /v1/namespaces/{ns}/specs/{name}", a.guard(authn.ActionAdminWrite, a.deleteSpec))
 	// The DEFINITION, on its own collection rather than under /specs/{name}/.
 	// `/specs/id/{id}` would be ambiguous with `/specs/{name}/versions` for a
 	// workflow literally named "id", and net/http rejects the pair outright.
@@ -508,6 +522,96 @@ func (a *API) getSpec(w http.ResponseWriter, r *http.Request, _ authn.Principal)
 		"version": row.Version, "spec_hash": row.SpecHash,
 		"created_by": row.CreatedBy, "created_at": row.CreatedAt,
 		"spec": json.RawMessage(row.SpecJSON),
+	})
+}
+
+// deleteSpec removes every version of a workflow, or refuses and names the blocker.
+//
+// REFERENTIAL INTEGRITY, and why this refuses rather than cascading.
+//
+// Two things point at a workflow spec and they point at it DIFFERENTLY:
+//
+//   - workflow_runs.spec_id is a hard foreign key to workflow_specs(id) with no
+//     ON DELETE clause (migration 0001), so Postgres itself refuses a delete that
+//     would orphan a run. Those runs are the immutable execution history the audit
+//     trail and the event stream reference; ADR-0004 promises a historical run's
+//     exact definition is recoverable forever, and a cascade would break that
+//     promise silently for every run in order to satisfy one click.
+//
+//   - schedules.spec_name is plain TEXT with NO foreign key (migration 0006),
+//     because a schedule deliberately tracks the LATEST version of a name rather
+//     than pinning one. The database therefore will NOT stop a delete that breaks
+//     a schedule: the schedule would keep its next_fire_at, fire on time, fail to
+//     resolve the name, and stop producing runs with nothing in the schedule row
+//     to say why. That is the silent corruption this handler exists to prevent,
+//     and it is checked in application code because nothing else can check it.
+//
+// So the answer is 409 with the blocker NAMED. A soft delete was the alternative
+// and was rejected: a deleted_at column would have to be honoured by the catalog,
+// the version listing, the gateway's spec reads AND the scheduler's name
+// resolution at fire time -- and that last reader lives in another service. A
+// tombstone one reader ignores is worse than no delete, because the operator
+// believes the workflow is gone when it is still firing.
+//
+// The blocker detail is re-derived HERE with a local read rather than carried in
+// the gRPC response, because gRPC delivers no response message alongside a non-OK
+// status. ADR-0011 lets the gateway read any table, so this costs one query on the
+// refusal path only, and it lets the 409 body carry structured fields the console
+// can render as links instead of a sentence the client would have to parse.
+func (a *API) deleteSpec(w http.ResponseWriter, r *http.Request, p authn.Principal) {
+	ns, name := r.PathValue("ns"), r.PathValue("name")
+
+	deleted, err := a.wfm.DeleteSpec(r.Context(), ns, name)
+	if err != nil {
+		switch status.Code(err) {
+		case codes.FailedPrecondition:
+			// Re-read the blockers so the body can name them. A failure to read
+			// them is not fatal: the REFUSAL is the answer, and answering with a
+			// less detailed 409 beats turning a correct refusal into a 500.
+			runs, schedules, cerr := store.WFMCountSpecReferences(r.Context(), a.db, ns, name)
+			body := map[string]any{
+				"error":   "workflow_referenced",
+				"message": status.Convert(err).Message(),
+			}
+			if cerr == nil {
+				body["referencing_runs"] = runs
+				// Always a list, never null: a client rendering "still used by"
+				// should not have to distinguish an empty list from a missing one.
+				if schedules == nil {
+					schedules = []string{}
+				}
+				body["referencing_schedules"] = schedules
+			}
+			// The refusal is audited as loudly as the success. An audit log that
+			// records only what happened cannot show what someone TRIED to do,
+			// and an attempt to delete a workflow with live history is exactly
+			// the event an operator wants to find later.
+			a.auditPrincipal(r, p, "spec.delete", "workflow", ns+"/"+name, store.AuditDenied,
+				map[string]any{"referencing_runs": runs, "referencing_schedules": schedules})
+			writeJSON(w, http.StatusConflict, body)
+			return
+		case codes.NotFound:
+			writeError(w, http.StatusNotFound, "workflow_not_found", "no such workflow in this namespace")
+			return
+		case codes.InvalidArgument:
+			writeError(w, http.StatusBadRequest, "invalid_request", status.Convert(err).Message())
+			return
+		}
+		a.fail(w, r, "delete spec", err)
+		return
+	}
+
+	// Audited on the way OUT, after the owner confirmed it, so the log records what
+	// actually happened rather than what was attempted. The version count is in the
+	// detail because it is the only remaining evidence of how much was destroyed.
+	a.auditPrincipal(r, p, "spec.delete", "workflow", ns+"/"+name, store.AuditSuccess,
+		map[string]any{"versions_deleted": deleted})
+
+	// 200 with the count rather than 204, unlike deleteSchedule: "how many versions
+	// did that remove" is information the operator cannot recover afterwards, and a
+	// 204 would throw it away.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"namespace": ns, "name": name, "versions_deleted": deleted, "deleted": true,
 	})
 }
 

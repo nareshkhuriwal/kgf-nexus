@@ -108,6 +108,47 @@ func (c *WorkflowManagerClient) PutSpec(ctx context.Context, namespace, name, ha
 	return c.grpc.putSpec(ctx, namespace, name, hash, canonicalJSON, createdBy)
 }
 
+// wfmDeleteSpecRequest / wfmDeleteSpecResponse mirror grpcapi's shapes.
+type wfmDeleteSpecRequest struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+type wfmDeleteSpecResponse struct {
+	Deleted int `json:"deleted"`
+}
+
+// DeleteSpec removes a workflow's spec versions through its owner.
+//
+// Like every other write here it is a CALL, not a local statement: workflow_specs
+// is workflow-manager's table and migration 0005's grants refuse a DELETE from the
+// gateway's role at the database.
+//
+// The refusal case (something still references the workflow) arrives as a
+// FailedPrecondition status and is returned UNWRAPPED in its gRPC form, so the
+// REST layer can classify it by CODE rather than by matching message text -- a
+// pgconn error does not survive this hop as a typed error, and message text is not
+// a stable contract.
+func (c *WorkflowManagerClient) DeleteSpec(ctx context.Context, namespace, name string) (int, error) {
+	if c.grpc == nil {
+		return 0, fmt.Errorf("delete spec: %w (workflow-manager owns workflow_specs)", ErrUpstreamNotConfigured)
+	}
+	ctx, cancel := withCallTimeout(ctx)
+	defer cancel()
+
+	var resp wfmDeleteSpecResponse
+	if err := c.grpc.conn.Invoke(ctx, "/nexus.v1.WorkflowSpecService/DeleteSpec",
+		&wfmDeleteSpecRequest{Namespace: namespace, Name: name},
+		&resp, grpc.ForceCodec(wfmJSONCodec{})); err != nil {
+		// Returned bare rather than wrapped with fmt.Errorf: status.Code() reads
+		// through a %w wrap, but the gateway also surfaces the MESSAGE to the
+		// operator, and a wrap would prefix it with plumbing detail ("delete spec
+		// x/y: ") in front of the sentence that names the blocker.
+		return 0, err
+	}
+	return resp.Deleted, nil
+}
+
 // CreateRun creates a run through its owner, which also materializes its DAG.
 func (c *WorkflowManagerClient) CreateRun(ctx context.Context, req rest.CreateRunRequest) (store.RunRow, bool, error) {
 	if c.grpc == nil {

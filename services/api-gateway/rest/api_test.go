@@ -142,6 +142,23 @@ type fakeWFM struct {
 	creates  int
 	nextID   int
 	createFn func() (store.RunRow, bool, error)
+	// deleteSpecFn lets a test choose the owner's answer to a spec delete --
+	// success, the referenced refusal, or not-found -- so the handler's mapping of
+	// each gRPC code to an HTTP status is pinned without a database.
+	deleteSpecFn func(ns, name string) (int, error)
+	// specDeletes records what reached the owner, so a test can prove a refusal
+	// was produced by the owner rather than short-circuited in the gateway.
+	specDeletes []string
+}
+
+func (f *fakeWFM) DeleteSpec(_ context.Context, ns, name string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.specDeletes = append(f.specDeletes, ns+"/"+name)
+	if f.deleteSpecFn != nil {
+		return f.deleteSpecFn(ns, name)
+	}
+	return 3, nil
 }
 
 func (f *fakeWFM) PutSpec(ctx context.Context, namespace, name, hash string, canonicalJSON []byte, createdBy string) (store.SpecRow, bool, error) {

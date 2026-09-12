@@ -264,15 +264,31 @@ func (a *API) setScheduleEnabled(enabled bool) func(http.ResponseWriter, *http.R
 	}
 }
 
-func (a *API) deleteSchedule(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+// deleteSchedule removes a schedule and, by cascade, its tick history.
+//
+// AUDITED, which it was not before. That was a gap, not a decision: creating a
+// token and disabling a user both write an audit row, and deleting a schedule is
+// at least as consequential -- it discards the schedule_runs tick history, so a
+// later backfill over the same interval would re-run work that already ran, with
+// nothing left to say a schedule was ever there. An audit trail that records the
+// creation of a schedule but not its destruction cannot answer "who stopped the
+// nightly job", which is the question someone actually asks.
+func (a *API) deleteSchedule(w http.ResponseWriter, r *http.Request, p authn.Principal) {
 	if a.schedules == nil {
 		scheduleUnavailable(w)
 		return
 	}
-	if err := a.schedules.DeleteSchedule(r.Context(), r.PathValue("ns"), r.PathValue("name")); err != nil {
+	ns, name := r.PathValue("ns"), r.PathValue("name")
+	if err := a.schedules.DeleteSchedule(r.Context(), ns, name); err != nil {
+		// The FAILED attempt is recorded too. An audit log holding only successes
+		// cannot show someone repeatedly trying to delete a schedule they are not
+		// finding, which is as informative as the delete that worked.
+		a.auditPrincipal(r, p, "schedule.delete", "schedule", ns+"/"+name, store.AuditError,
+			map[string]any{"error": err.Error()})
 		a.failSchedule(w, r, "delete schedule", err)
 		return
 	}
+	a.auditPrincipal(r, p, "schedule.delete", "schedule", ns+"/"+name, store.AuditSuccess, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 

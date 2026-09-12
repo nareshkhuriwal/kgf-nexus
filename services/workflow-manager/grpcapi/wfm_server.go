@@ -206,6 +206,11 @@ type specService interface {
 	PutSpec(context.Context, *PutSpecRequest) (*PutSpecResponse, error)
 	GetSpec(context.Context, *GetSpecRequest) (*GetSpecResponse, error)
 	SetRunState(context.Context, *SetRunStateRequest) (*SetRunStateResponse, error)
+	// DeleteSpec is a MUTATION of workflow_specs, so it comes here for the same
+	// reason the schedule writes do: migration 0005's grants refuse a DELETE on
+	// this table from any role but this service's. Routing it locally in the
+	// gateway would fail at the database rather than at review.
+	DeleteSpec(context.Context, *DeleteSpecRequest) (*DeleteSpecResponse, error)
 	// Schedule mutations. Reads are served by the gateway directly; only writes
 	// come here, because `schedules` is this service's table and migration 0005's
 	// grants refuse a write from anyone else at the database.
@@ -340,6 +345,7 @@ var SpecServiceDesc = grpc.ServiceDesc{
 		{MethodName: "PutSpec", Handler: putSpecHandler},
 		{MethodName: "GetSpec", Handler: getSpecHandler},
 		{MethodName: "SetRunState", Handler: setRunStateHandler},
+		{MethodName: "DeleteSpec", Handler: deleteSpecHandler},
 		{MethodName: "CreateSchedule", Handler: createScheduleHandler},
 		{MethodName: "SetScheduleEnabled", Handler: setScheduleEnabledHandler},
 		{MethodName: "DeleteSchedule", Handler: deleteScheduleHandler},
