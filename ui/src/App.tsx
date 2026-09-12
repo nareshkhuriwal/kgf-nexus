@@ -22,6 +22,8 @@ import { TokensPage } from './pages/admin/TokensPage';
 import { AuditPage } from './pages/admin/AuditPage';
 import { OverviewPage } from './pages/OverviewPage';
 import { RunListPage } from './pages/RunListPage';
+import { WorkflowsPage } from './pages/WorkflowsPage';
+import { WorkflowDetailPage } from './pages/WorkflowDetailPage';
 import { RunDetailPage } from './pages/RunDetailPage';
 import { WorkersPage } from './pages/WorkersPage';
 import { SchedulesPage } from './pages/SchedulesPage';
@@ -119,6 +121,11 @@ export function App() {
               than lighting up on every nested route beneath it. */}
           <NavLink to="/" end className={({ isActive }) => (isActive ? 'active' : '')}>
             Overview
+          </NavLink>
+          {/* Before Runs: the catalog is what exists, the run list is what
+              happened to it, and that is the order an operator reasons in. */}
+          <NavLink to="/workflows" className={({ isActive }) => (isActive ? 'active' : '')}>
+            Workflows
           </NavLink>
           <NavLink to="/runs" className={({ isActive }) => (isActive ? 'active' : '')}>
             Runs
@@ -218,6 +225,11 @@ export function App() {
         <ErrorBoundary>
           <Routes>
             <Route path="/" element={<OverviewPage namespace={namespace} />} />
+            <Route path="/workflows" element={<WorkflowsPage namespace={namespace} />} />
+            <Route
+              path="/workflows/:name"
+              element={<WorkflowDetailPage namespace={namespace} />}
+            />
             <Route path="/runs" element={<RunListPage namespace={namespace} />} />
             <Route path="/runs/:runId" element={<RunDetailPage namespace={namespace} />} />
             <Route path="/schedules" element={<SchedulesPage namespace={namespace} />} />

@@ -355,3 +355,140 @@ export interface StartBackfillRequest {
   max_active: number;
   max_runs: number;
 }
+
+/**
+ * The workflow catalog.
+ *
+ * Field names come from the gateway's catalog handlers, not from the store
+ * structs. Two of these collections are deliberately different SHAPES of the
+ * same table: `WorkflowSummary` is one row per workflow NAME (the answer to
+ * "what exists here"), while `SpecVersion` is one row per submitted spec (the
+ * answer to "what has this workflow been"). The list endpoint does not select
+ * spec_json at all, so a definition is only ever reachable through
+ * `SpecDefinition` — which is why the summary carries no `spec` field to
+ * tempt a consumer into rendering half a graph.
+ */
+
+export interface WorkflowSummary {
+  /** The spec id of the LATEST version, which is what a drill-down resolves. */
+  id: string;
+  namespace: string;
+  name: string;
+  latest_version: number;
+  spec_hash: string;
+  created_by: string;
+  /** When the newest version landed, not when the workflow first appeared. */
+  updated_at: string;
+  version_count: number;
+  first_created_at: string;
+}
+
+export interface SpecVersion {
+  id: string;
+  name: string;
+  version: number;
+  spec_hash: string;
+  created_by: string;
+  created_at: string;
+}
+
+/**
+ * One task in a spec definition.
+ *
+ * Every field is optional because this is the AUTHORED document, not a
+ * materialised projection: the SDK fills in whatever the author wrote and the
+ * gateway passes spec_json through unmodified rather than re-marshalling it
+ * (re-encoding would risk handing back bytes whose hash no longer matches the
+ * spec_hash beside them). A task with no `retry` block genuinely has no retry
+ * policy, and the console must render that as "not set" rather than inventing
+ * a default the engine may not actually apply.
+ */
+export interface SpecTask {
+  id: string;
+  task_ref?: string;
+  trigger_rule?: string;
+  queue?: string;
+  version?: number;
+  resources?: ResourceRequest;
+  retry?: {
+    max_attempts?: number;
+    strategy?: string;
+    initial_ms?: number;
+    max_ms?: number;
+    multiplier?: number;
+    jitter?: string;
+    retry_on?: string[];
+    no_retry_on?: string[];
+    retry_on_different_worker?: boolean;
+  };
+  timeouts?: Record<string, number>;
+  runtime?: { executor?: string; command?: string[]; args?: string[] };
+  inputs?: Record<string, { type?: string; required?: boolean }>;
+  outputs?: Record<string, { type?: string; required?: boolean }>;
+  input_params?: Record<string, string>;
+  cache?: { enabled?: boolean };
+  idempotency?: string;
+  concurrency_key?: string;
+  concurrency_limit?: number;
+  node_selector?: Record<string, string>;
+  prefer_same_worker_as?: string;
+}
+
+/** An edge in a spec definition. Identical shape to RunEdge, by construction. */
+export interface SpecEdge {
+  from_node_id: string;
+  to_node_id: string;
+  output_to_input?: Record<string, string>;
+}
+
+/**
+ * One declared run parameter.
+ *
+ * This is the only machine-readable description of what a run submission may
+ * carry, so the submit form derives its guidance from here rather than from a
+ * hand-kept list that would drift from whatever the SDK last published.
+ */
+export interface SpecParam {
+  type?: string;
+  required?: boolean;
+  default?: unknown;
+  description?: string;
+}
+
+export interface SpecDocument {
+  name?: string;
+  namespace?: string;
+  api_version?: string;
+  description?: string;
+  labels?: Record<string, string>;
+  params?: Record<string, SpecParam>;
+  run_timeout_ms?: number;
+  max_active_runs?: number;
+  tasks?: SpecTask[];
+  edges?: SpecEdge[];
+}
+
+/** GET /specdefs/{id} — the definition, addressed by the spec id a run pins. */
+export interface SpecDefinition {
+  id: string;
+  namespace: string;
+  name: string;
+  version: number;
+  spec_hash: string;
+  created_by: string;
+  created_at: string;
+  spec: SpecDocument;
+}
+
+/**
+ * POST /runs. Either spec_id or spec_name is required; the catalog always sends
+ * spec_id, because the catalog's whole premise is that the operator chose a
+ * specific VERSION — resolving by name would silently run a newer one.
+ */
+export interface CreateRunRequest {
+  spec_id?: string;
+  spec_name?: string;
+  params?: Record<string, unknown>;
+  priority?: number;
+  trigger_kind?: string;
+}

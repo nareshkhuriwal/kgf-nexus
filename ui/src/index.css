@@ -469,6 +469,32 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
    cascade is findable without reading a single label. */
 .dag-rootcause-halo { fill: none; stroke: var(--tone-danger-bd); stroke-width: 2px; opacity: 0.55; }
 
+
+/* Spec graph. A definition has no state, so a task box carries no tone: one
+   neutral treatment for every task, and the only variations encode STRUCTURE
+   (entry point) or INTERACTION (selected, or dimmed because it is not a
+   neighbour of the selection). Reusing the state tones here would invite
+   reading a catalog diagram as a live one.
+
+   Stroke widths are literal, matching .dag-node above: they are SVG user-space
+   units inside a viewBox, not CSS lengths, so the spacing scale does not apply
+   to them. */
+.spec-node {
+  fill: var(--bg-raised); stroke: var(--border-strong); stroke-width: 1.5px;
+  cursor: pointer;
+}
+.spec-node.root { stroke: var(--tone-queued-bd); }
+.spec-node.selected { stroke: var(--focus); stroke-width: 3px; }
+.spec-node-g.dimmed { opacity: 0.35; }
+.spec-node-g:hover .spec-node { fill: var(--bg-hover); }
+.dag-edge.spec-related { stroke: var(--tone-active-bd); stroke-width: 2px; }
+.spec-swatch {
+  display: inline-block; width: var(--space-5); height: var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised); border: 1px solid var(--border-strong);
+}
+.spec-swatch.root { border-color: var(--tone-queued-bd); }
+
 .legend { display: flex; gap: var(--space-3) 14px; flex-wrap: wrap; padding: 10px var(--space-5); border-top: 1px solid var(--border); }
 .legend-item { display: flex; align-items: center; gap: var(--space-3); font-size: var(--text-xs); color: var(--fg-muted); }
 
@@ -808,3 +834,40 @@ button.primary:hover:not(:disabled) {
 /* Tone-carrying text, so a panel can mark a value without a hardcoded colour. */
 .tone-text-danger { color: var(--tone-danger-fg); }
 .tone-text-warning { color: var(--tone-warning-fg); }
+
+/* ── Workflow catalog ──────────────────────────────────────────────────────
+   The catalog detail page is a two-column reading layout: the graph and the
+   definition on the left, version history and the submit form on the right.
+   It collapses to one column below the same 380px minimum the rest of the
+   console uses for a two-up grid, so the diagram keeps its own scroll rather
+   than squeezing the panel beside it off screen.
+
+   The column minimum, the breakpoint and the JSON height cap are literal for
+   the same reason .grid-2's 380px and .logs' 460px are: they are viewport
+   measurements, not steps on a density scale, and tokenising them would imply
+   they move together with padding. */
+.catalog-split {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(280px, 1fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .catalog-split { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* A definition is a document, so its raw form is read, not scanned: it gets
+   more height than a log tail and wraps rather than scrolling sideways. */
+.spec-json {
+  background: var(--bg-inset); font-family: var(--mono); font-size: var(--text-xs);
+  line-height: var(--leading-normal); padding: var(--space-5);
+  max-height: 520px; overflow: auto; margin: 0;
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* The selected-version row in the history table. Marked with a left border as
+   well as a fill, because fill alone disappears against a zebra table. */
+/* 3px inset, matching the .errbox left rule: a marker thin enough to read as
+   an edge rather than as a column. */
+tr.version-current > td:first-child { box-shadow: inset 3px 0 0 var(--focus); }
+tr.version-current > td { background: var(--bg-hover); }

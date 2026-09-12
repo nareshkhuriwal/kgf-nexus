@@ -676,3 +676,33 @@ func buildFleetAPI(t *testing.T, f FleetHealth) http.Handler {
 		slog.New(slog.NewTextHandler(io.Discard, nil))).WithFleetHealth(f)
 	return api.Routes()
 }
+
+// A malformed spec_id is the CALLER's error. Letting it reach Postgres and
+// surface as a 500 tells an operator the server broke when the request was
+// simply unusable, sending them to read gateway logs for a fault that is not
+// there. A well-formed id naming no spec is a different answer (404).
+func TestCreateRunRejectsAMalformedSpecID(t *testing.T) {
+	h, _, _ := newTestAPI(t)
+
+	rec := post(t, h, "/v1/namespaces/team-ml/runs", adminKey, "",
+		`{"spec_id":"not-a-uuid","params":{}}`)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for a malformed spec_id", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "invalid_spec_id") {
+		t.Errorf("body does not name the offending field: %s", rec.Body.String())
+	}
+}
+
+// Creating by NAME must still work, and must not be caught by the uuid check.
+func TestCreateRunByNameIsNotTreatedAsAMalformedID(t *testing.T) {
+	h, _, _ := newTestAPI(t)
+
+	rec := post(t, h, "/v1/namespaces/team-ml/runs", adminKey, "",
+		`{"spec_name":"nightly","params":{}}`)
+
+	if rec.Code == http.StatusBadRequest && strings.Contains(rec.Body.String(), "invalid_spec_id") {
+		t.Errorf("a by-name creation was rejected as a malformed uuid: %s", rec.Body.String())
+	}
+}

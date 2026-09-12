@@ -17,52 +17,35 @@
  */
 
 import { useMemo } from 'react';
-import type { DagGraph, DagNode } from '../lib/dag';
+import {
+  NODE_H,
+  NODE_W,
+  edgePath,
+  layoutLayers,
+  type DagGraph,
+  type DagNode,
+  type Placement,
+} from '../lib/dag';
 import { STATE_TABLES, stateVisual } from '../lib/states';
 import { StateBadge } from './StateBadge';
 
-const NODE_W = 176;
-const NODE_H = 56;
-const GAP_X = 76;
-const GAP_Y = 20;
-const PAD = 26;
-
-interface Placed {
+/**
+ * Box geometry and placement come from lib/dag: the catalog's spec graph draws
+ * the same grid, and the layout being shared is what keeps a workflow's
+ * diagram in the catalog identical to its diagram in a run.
+ */
+interface Placed extends Placement {
   node: DagNode;
-  x: number;
-  y: number;
 }
 
 function layout(graph: DagGraph): { placed: Placed[]; width: number; height: number } {
+  const { places, width, height } = layoutLayers(graph.layers);
   const placed: Placed[] = [];
-  let maxRows = 0;
-  graph.layers.forEach((layer, depth) => {
-    maxRows = Math.max(maxRows, layer.length);
-    layer.forEach((id, row) => {
-      const node = graph.byId[id];
-      if (!node) return;
-      placed.push({
-        node,
-        x: PAD + depth * (NODE_W + GAP_X),
-        y: PAD + row * (NODE_H + GAP_Y),
-      });
-    });
-  });
-  return {
-    placed,
-    width: PAD * 2 + Math.max(1, graph.layers.length) * (NODE_W + GAP_X) - GAP_X,
-    height: PAD * 2 + Math.max(1, maxRows) * (NODE_H + GAP_Y) - GAP_Y,
-  };
-}
-
-/** Cubic bezier between right edge of `from` and left edge of `to`. */
-function edgePath(a: Placed, b: Placed): string {
-  const x1 = a.x + NODE_W;
-  const y1 = a.y + NODE_H / 2;
-  const x2 = b.x;
-  const y2 = b.y + NODE_H / 2;
-  const dx = Math.max(28, (x2 - x1) / 2);
-  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+  for (const p of places) {
+    const node = graph.byId[p.id];
+    if (node) placed.push({ ...p, node });
+  }
+  return { placed, width, height };
 }
 
 export function DagView({

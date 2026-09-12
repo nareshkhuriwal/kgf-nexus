@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/spec"
@@ -576,6 +577,19 @@ func (a *API) createRun(w http.ResponseWriter, r *http.Request, p authn.Principa
 	if req.SpecID == "" && req.SpecName == "" {
 		writeError(w, http.StatusBadRequest, "missing_spec", "either spec_id or spec_name is required")
 		return
+	}
+	// Reject a malformed spec_id HERE rather than letting Postgres reject the
+	// cast. A bad uuid is the CALLER's error, and surfacing it as a 500 tells an
+	// operator the server broke when in fact the request was unusable -- which
+	// sends them reading gateway logs for a fault that is not there. A
+	// well-formed id that names no spec is a different answer (404) and is
+	// already handled downstream.
+	if req.SpecID != "" {
+		if _, perr := uuid.Parse(req.SpecID); perr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_spec_id",
+				"spec_id must be a UUID; use spec_name to create a run by name")
+			return
+		}
 	}
 
 	idemKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))

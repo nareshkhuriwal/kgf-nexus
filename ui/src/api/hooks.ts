@@ -21,8 +21,10 @@ import { ApiError, api, type RunListFilter } from './client';
 import type {
   Attempt,
   Backfill,
+  CreateRunRequest,
   CreateScheduleRequest,
   RunEvent,
+  RunSummary,
   Schedule,
   StartBackfillRequest,
 } from './types';
@@ -41,6 +43,9 @@ export const qk = {
   cronPreview: (ns: string, cron: string, tz: string) => ['cron-preview', ns, cron, tz] as const,
   backfills: (ns: string, name: string) => ['backfills', ns, name] as const,
   backfill: (ns: string, id: string) => ['backfill', ns, id] as const,
+  workflows: (ns: string, search: string) => ['workflows', ns, search] as const,
+  specVersions: (ns: string, name: string) => ['spec-versions', ns, name] as const,
+  specDef: (ns: string, id: string) => ['spec-def', ns, id] as const,
 };
 
 export function shouldRetry(failureCount: number, error: unknown): boolean {
@@ -345,4 +350,78 @@ export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) return error.message;
   if (error instanceof Error) return error.message;
   return 'Unknown error.';
+}
+
+
+// ── workflow catalog ────────────────────────────────────────────────────────
+
+/**
+ * The catalog list.
+ *
+ * Not polled. A workflow appears here only when someone submits a spec through
+ * the SDK or CLI, which is an authoring act minutes or days apart -- a timer
+ * would spend requests to show the same 15 rows. The search term is part of the
+ * query key, so each settled term caches independently and backspacing through
+ * a word is instant rather than a second round trip per character.
+ *
+ * The CALLER debounces the term, matching the cron preview: this stays a plain
+ * query so a component that already has a settled value does not pay for a
+ * second delay.
+ */
+export function useWorkflows(namespace: string, search: string) {
+  return useQuery({
+    queryKey: qk.workflows(namespace, search),
+    queryFn: () => api.listWorkflows(namespace, search),
+    // Long enough that typing back and forth across a search term is free, short
+    // enough that a spec submitted from the CLI shows up without a hard reload.
+    staleTime: 30_000,
+    retry: shouldRetry,
+  });
+}
+
+export function useSpecVersions(namespace: string, name: string) {
+  return useQuery({
+    queryKey: qk.specVersions(namespace, name),
+    queryFn: () => api.listSpecVersions(namespace, name),
+    enabled: name !== '',
+    staleTime: 30_000,
+    retry: shouldRetry,
+  });
+}
+
+/**
+ * One spec definition.
+ *
+ * A spec is immutable and content-addressed: the bytes behind an id can never
+ * change, so this is cached for the session rather than re-fetched. Flipping
+ * between versions to compare them is then instant, which is the whole point of
+ * putting version history next to the definition.
+ */
+export function useSpecDefinition(namespace: string, specId: string) {
+  return useQuery({
+    queryKey: qk.specDef(namespace, specId),
+    queryFn: () => api.getSpecDefinition(namespace, specId),
+    enabled: specId !== '',
+    staleTime: Infinity,
+    retry: shouldRetry,
+  });
+}
+
+/**
+ * Submit a run from the catalog.
+ *
+ * retry is off, as with every other mutation here: a run submission is not
+ * idempotent without an Idempotency-Key, and the console deliberately does not
+ * send one (see api.createRun), so a silent retry could create a second run.
+ */
+export function useCreateRun(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateRunRequest) => api.createRun(namespace, body),
+    onSuccess: (created: RunSummary) => {
+      void qc.invalidateQueries({ queryKey: ['runs', namespace] });
+      if (created?.id) void qc.invalidateQueries({ queryKey: qk.run(namespace, created.id) });
+    },
+    retry: false,
+  });
 }

@@ -193,27 +193,11 @@ export function buildDagGraph(run: Pick<RunDetail, 'nodes' | 'edges'>, attempts:
   const states: Record<string, NodeState> = {};
   for (const n of nodes) states[n.node_id] = normNode(n.state);
 
-  const { depths, hasCycle } = computeDepths(nodeIds, upstream, downstream);
+  // Order within a layer by node id, so the layout is stable across refreshes.
+  // A graph that reshuffles on every poll is unusable.
+  const { depths, orderOf, layers, hasCycle } = assignLayers(nodeIds, upstream, downstream);
   const rootCauses = computeRootCauses(nodeIds, states, upstream);
   const grouped = groupAttempts(attempts);
-
-  // Order within a layer by upstream position then node id, so the layout is
-  // stable across refreshes. A graph that reshuffles on every poll is unusable.
-  const layers: string[][] = [];
-  for (const id of nodeIds) {
-    const d = depths[id] ?? 0;
-    (layers[d] ??= []).push(id);
-  }
-  for (const layer of layers) {
-    if (layer) layer.sort((a, b) => a.localeCompare(b));
-  }
-
-  const orderOf: Record<string, number> = {};
-  layers.forEach((layer) => {
-    (layer ?? []).forEach((id, i) => {
-      orderOf[id] = i;
-    });
-  });
 
   const dagNodes: DagNode[] = nodes.map((n) => {
     const list = grouped[n.node_id] ?? [];
@@ -244,7 +228,7 @@ export function buildDagGraph(run: Pick<RunDetail, 'nodes' | 'edges'>, attempts:
     nodes: dagNodes,
     edges,
     byId,
-    layers: layers.map((l) => l ?? []),
+    layers,
     rootCauses: [...rootCauses].sort(),
     hasCycle,
     counts,
@@ -271,4 +255,103 @@ export function summarizeDag(graph: DagGraph): string {
   const total = graph.nodes.length;
   if (total > 0 && (c.SUCCEEDED ?? 0) === total) return 'All nodes succeeded.';
   return total === 0 ? 'No nodes.' : 'No nodes in flight.';
+}
+
+
+/**
+ * Layer assignment shared by the run graph and the spec graph.
+ *
+ * Extracted from buildDagGraph rather than copied into the catalog: "which
+ * column does this node sit in, and in what order within the column" is the
+ * same question for a spec's tasks as for a run's materialised nodes, and two
+ * implementations of it would eventually disagree about the same workflow --
+ * a catalog diagram that does not match the run diagram for the same DAG is
+ * worse than no catalog diagram.
+ */
+export function assignLayers(
+  nodeIds: string[],
+  upstream: Record<string, string[]>,
+  downstream: Record<string, string[]>,
+): { layers: string[][]; depths: Record<string, number>; orderOf: Record<string, number>; hasCycle: boolean } {
+  const { depths, hasCycle } = computeDepths(nodeIds, upstream, downstream);
+
+  const layers: string[][] = [];
+  for (const id of nodeIds) {
+    const d = depths[id] ?? 0;
+    (layers[d] ??= []).push(id);
+  }
+  for (const layer of layers) {
+    if (layer) layer.sort((a, b) => a.localeCompare(b));
+  }
+
+  const orderOf: Record<string, number> = {};
+  layers.forEach((layer) => {
+    (layer ?? []).forEach((id, i) => {
+      orderOf[id] = i;
+    });
+  });
+
+  return { layers: layers.map((l) => l ?? []), depths, orderOf, hasCycle };
+}
+
+/**
+ * Node box geometry, and the placement maths that turns layers into coordinates.
+ *
+ * These live here rather than in DagView so the catalog's spec graph draws
+ * boxes of the same size in the same grid without importing a component. The
+ * numbers are literal pixels on purpose: they are SVG user-space units inside a
+ * viewBox, not CSS lengths, so the spacing tokens do not apply to them and a
+ * token indirection would only hide that.
+ */
+export const NODE_W = 176;
+export const NODE_H = 56;
+const GAP_X = 76;
+const GAP_Y = 20;
+const PAD = 26;
+
+export interface Placement {
+  id: string;
+  x: number;
+  y: number;
+}
+
+/** Places one node per id in `layers`, left→right by depth, top→bottom by rank. */
+export function layoutLayers(layers: string[][]): {
+  places: Placement[];
+  width: number;
+  height: number;
+  byId: Record<string, Placement>;
+} {
+  const places: Placement[] = [];
+  let maxRows = 0;
+  layers.forEach((layer, depth) => {
+    maxRows = Math.max(maxRows, layer.length);
+    layer.forEach((id, row) => {
+      places.push({
+        id,
+        x: PAD + depth * (NODE_W + GAP_X),
+        y: PAD + row * (NODE_H + GAP_Y),
+      });
+    });
+  });
+
+  const byId: Record<string, Placement> = {};
+  for (const p of places) byId[p.id] = p;
+
+  return {
+    places,
+    byId,
+    width: PAD * 2 + Math.max(1, layers.length) * (NODE_W + GAP_X) - GAP_X,
+    height: PAD * 2 + Math.max(1, maxRows) * (NODE_H + GAP_Y) - GAP_Y,
+  };
+}
+
+/** Cubic bezier between the right edge of `a` and the left edge of `b`. */
+export function edgePath(a: Placement, b: Placement): string {
+  const x1 = a.x + NODE_W;
+  const y1 = a.y + NODE_H / 2;
+  const x2 = b.x;
+  const y2 = b.y + NODE_H / 2;
+  const dx = Math.max(28, (x2 - x1) / 2);
+  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
 }

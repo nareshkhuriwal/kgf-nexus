@@ -20,6 +20,7 @@ import type {
   Attempt,
   Backfill,
   CapacitySummary,
+  CreateRunRequest,
   CreateScheduleRequest,
   CronPreview,
   LogLine,
@@ -27,8 +28,11 @@ import type {
   RunEvent,
   RunSummary,
   Schedule,
+  SpecDefinition,
+  SpecVersion,
   StartBackfillRequest,
   Worker,
+  WorkflowSummary,
 } from './types';
 
 /** Injected at build time so the same bundle can front any gateway. */
@@ -270,6 +274,23 @@ export const api = {
     return [...runs].sort((a, b) => Date.parse(b.created_at ?? '') - Date.parse(a.created_at ?? ''));
   },
 
+  /**
+   * Create a run.
+   *
+   * No Idempotency-Key header. The gateway supports one, but a console form is
+   * a deliberate human act rather than a retrying client: reusing a key across
+   * two intentional submissions would replay the FIRST run's response and leave
+   * the operator believing they launched something they did not. A client that
+   * retries automatically (the SDK, the CLI) is where that header belongs.
+   */
+  createRun(namespace: string, body: CreateRunRequest): Promise<RunSummary> {
+    return request<RunSummary>(`${ns(namespace)}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  },
+
   getRun(namespace: string, runId: string): Promise<RunDetail> {
     return request<RunDetailPayload>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}`);
   },
@@ -421,6 +442,57 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
     });
+  },
+
+  // ── workflow catalog ──────────────────────────────────────────────────────
+
+  /**
+   * One row per workflow NAME, newest version summarised.
+   *
+   * `search` is applied SERVER-side rather than by filtering a full list here:
+   * the gateway matches the name case-insensitively against the whole table,
+   * so a namespace with more workflows than one page still finds the match. An
+   * empty search is sent as no parameter at all, which the gateway reads as
+   * "everything".
+   */
+  async listWorkflows(
+    namespace: string,
+    search = '',
+    limit = 200,
+  ): Promise<WorkflowSummary[]> {
+    const q = new URLSearchParams({ limit: String(limit) });
+    const term = search.trim();
+    if (term) q.set('search', term);
+    const payload = await request<unknown>(`${ns(namespace)}/specs?${q.toString()}`);
+    const rows = asList<WorkflowSummary>(payload, 'workflows');
+    // Name order. A catalog is scanned for a name already in mind, and the
+    // gateway does not promise an order -- same reasoning as the schedule list.
+    return [...rows].sort((a, b) => a.name.localeCompare(b.name));
+  },
+
+  /** Version history for one workflow name, newest first. */
+  async listSpecVersions(
+    namespace: string,
+    name: string,
+    limit = 100,
+  ): Promise<SpecVersion[]> {
+    const payload = await request<unknown>(
+      `${ns(namespace)}/specs/${encodeURIComponent(name)}/versions?limit=${limit}`,
+    );
+    const rows = asList<SpecVersion>(payload, 'versions');
+    // Sorted here as well as asked for, so the "latest" marker on this page is
+    // never decided by response order.
+    return [...rows].sort((a, b) => b.version - a.version);
+  },
+
+  /**
+   * The definition, addressed by spec ID rather than name+version.
+   *
+   * `specdefs`, not `specs/{id}`: net/http rejects the latter as ambiguous with
+   * `specs/{name}/versions`, since a workflow could legitimately be named "id".
+   */
+  getSpecDefinition(namespace: string, specId: string): Promise<SpecDefinition> {
+    return request<SpecDefinition>(`${ns(namespace)}/specdefs/${encodeURIComponent(specId)}`);
   },
 
   /**
