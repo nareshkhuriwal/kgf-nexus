@@ -431,6 +431,14 @@ func (c *SchedulerClient) ClaimForWorker(ctx context.Context, workerID string, f
 		return nil, nil
 	}
 	asg, err := c.grpc.claimForWorker(ctx, workerID, free, queues, maxTasks)
+	// F61: the peer fan-out is conditional, and when a gpu-queue attempt sits
+	// PENDING against an idle fleet there is nothing in the logs saying which of
+	// the three conditions kept the poll from reaching the queue's replica.
+	c.log.DebugContext(ctx, "worker claim fan-out",
+		"worker_id", workerID, "queues", queues,
+		"primary_addr", c.addr, "primary_assignments", len(asg), "primary_err", err,
+		"peers", len(c.claimPeers),
+		"peer_loop_will_run", err == nil && len(asg) == 0 && len(c.claimPeers) > 0)
 	if err != nil || len(asg) > 0 || len(c.claimPeers) == 0 {
 		return asg, err
 	}
@@ -448,6 +456,8 @@ func (c *SchedulerClient) ClaimForWorker(ctx context.Context, workerID string, f
 				"worker_id", workerID, "error", err)
 			continue
 		}
+		c.log.DebugContext(ctx, "scheduler peer answered a worker claim",
+			"worker_id", workerID, "peer_addr", peer.addr, "assignments", len(asg))
 		if len(asg) > 0 {
 			return asg, nil
 		}

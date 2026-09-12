@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 )
 
@@ -355,4 +356,69 @@ func TestAgingPreventsStarvationOfLargeTask(t *testing.T) {
 
 func nodeName(prefix string, i int) string {
 	return prefix + "-" + string(rune('a'+i/26)) + string(rune('a'+i%26))
+}
+
+// TestUnschedulableAttemptIsExplainedOnAnIdleQueue pins the commit that F61
+// exposed: an attempt no worker can ever fit must end up PENDING with a
+// structured pending_reason even when the poll dispatches NOTHING.
+//
+// The distinction from the existing coverage is the whole point. Every other
+// test that asserts on pending_reason has some OTHER attempt dispatch in the
+// same pass, so the claim transaction reaches its commit and the explanation
+// rides along with it. On an idle queue there is nothing to dispatch, the claim
+// returns early, and the explanation was being written into a transaction that
+// the deferred Rollback then discarded -- leaving the operator with a stalled
+// run, a healthy-looking fleet, and no field connecting the two, which is
+// exactly the unexplained stall §3.2 says the column exists to prevent.
+//
+// So the queue here holds ONE attempt and it is unplaceable. A regression makes
+// pending_reason empty again, not merely differently worded.
+func TestUnschedulableAttemptIsExplainedOnAnIdleQueue(t *testing.T) {
+	t.Parallel()
+	pool := newTestPool(t)
+	f := newFixture(t, pool)
+	ctx := context.Background()
+
+	// 50 GiB of disk on the only worker, against a 100 GiB request: the
+	// shortfall is on a scalar dimension the SQL pre-filter discards, so the
+	// attempt never reaches domain.Fits through the candidate query and can only
+	// be explained by explainUnschedulable.
+	const (
+		workerDisk = 50 << 30
+		taskDisk   = 100 << 30
+	)
+	workerID := f.addWorker(vec{CPUMillis: 8000, MemoryBytes: 16 << 30, DiskBytes: workerDisk}, nil, nil)
+	attemptID := f.addAttempt("ingest", 0,
+		vec{CPUMillis: 2000, MemoryBytes: 4 << 30, DiskBytes: taskDisk},
+		nodeSpec{TaskRef: "ingest", Version: 1}, time.Now().UTC().Add(-time.Minute))
+
+	st := f.newStore(nil)
+	asg, err := st.ClaimForWorker(ctx, time.Now().UTC(), store.WorkerClaimRequest{
+		WorkerID:     workerID,
+		Queues:       []string{f.queue},
+		FreeCapacity: &nexusv1.ResourceVector{CpuMillis: 8000, MemoryBytes: 16 << 30, DiskBytes: workerDisk},
+		MaxTasks:     1,
+	})
+	if err != nil {
+		t.Fatalf("claim for worker: %v", err)
+	}
+	// An empty poll is the correct outcome here; dispatching a 100 GiB request
+	// onto a 50 GiB worker would be the far worse bug.
+	if len(asg) != 0 {
+		t.Fatalf("dispatched %d assignments; a 100 GiB disk request must not be placed on a 50 GiB worker", len(asg))
+	}
+
+	// The assertion that matters: the reason SURVIVED the transaction.
+	if state := f.attemptState(attemptID); state != "PENDING" {
+		t.Errorf("attempt state = %s, want PENDING; capacity pressure must never fail an attempt", state)
+	}
+	reason := f.pendingReason(attemptID)
+	if reason == "" {
+		t.Fatal("pending_reason is empty after an idle-queue poll: the explanation was rolled back, " +
+			"so an operator sees a stalled run beside an idle fleet with nothing connecting the two")
+	}
+	if !strings.HasPrefix(reason, "waiting_for_resources:") || !strings.Contains(reason, "disk") {
+		t.Errorf("pending_reason = %q, want a structured disk shortfall", reason)
+	}
+	t.Logf("idle-queue poll explained the stall: %s", reason)
 }

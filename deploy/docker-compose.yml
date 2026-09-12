@@ -29,6 +29,11 @@ x-postgres-env: &postgres-env
 x-service-env: &service-env
   <<: *postgres-env
   LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
+  # Both spellings: services added later read NEXUS_LOG_LEVEL (the prefixed
+  # convention every other setting here follows), while the earlier ones read
+  # LOG_LEVEL. Setting only one silently leaves half the fleet at info, which
+  # costs a debugging cycle when a diagnostic log does not appear.
+  NEXUS_LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
   LOG_FORMAT: json
   NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
   # Inter-service addressing. Every cross-service write goes through the owner's

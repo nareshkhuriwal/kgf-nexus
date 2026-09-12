@@ -22,6 +22,10 @@ type schedGRPC struct {
 	conn   *grpc.ClientConn
 	client nexusv1.SchedulerServiceClient
 	log    *slog.Logger
+	// addr is kept for logging only: with several replicas each draining one
+	// queue, a claim log that does not name the replica cannot say which queue
+	// answered (F61).
+	addr string
 }
 
 func dialScheduler(ctx context.Context, addr string, log *slog.Logger) (*schedGRPC, error) {
@@ -32,7 +36,7 @@ func dialScheduler(ctx context.Context, addr string, log *slog.Logger) (*schedGR
 	if err != nil {
 		return nil, fmt.Errorf("dial scheduler at %s: %w", addr, err)
 	}
-	return &schedGRPC{conn: conn, client: nexusv1.NewSchedulerServiceClient(conn), log: log}, nil
+	return &schedGRPC{conn: conn, client: nexusv1.NewSchedulerServiceClient(conn), log: log, addr: addr}, nil
 }
 
 func (s *schedGRPC) close() error { return s.conn.Close() }
