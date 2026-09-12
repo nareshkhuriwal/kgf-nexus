@@ -7,14 +7,19 @@
  * The namespace is a top-level control rather than buried in each page because
  * every §8.2 endpoint is namespace-scoped, and an operator looking at the wrong
  * namespace sees a plausible empty dashboard — the most misleading possible
- * output.
+ * output. So its VALUE is always on screen in the chrome, while the input that
+ * changes it sits in the account menu where it cannot be nudged by accident.
+ *
+ * The chrome itself comes in two shapes — a grouped sidebar and a flat navbar —
+ * chosen by the operator and stamped on <html> by lib/appearance.ts. Both read
+ * the same destination list from navItems.ts; this file decides only which
+ * component renders it, and composes the account menu once for whichever wins.
  */
 
 import { NavLink, Route, Routes, useNavigate } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { API_BASE, DEFAULT_NAMESPACE, getApiKey, setApiKey } from './api/client';
-import { ThemeToggle } from './components/ThemeToggle';
 import { authApi, currentCredential, getSession, setSession } from './api/auth';
 import { LoginPage } from './pages/LoginPage';
 import { UsersPage } from './pages/admin/UsersPage';
@@ -30,7 +35,12 @@ import { SchedulesPage } from './pages/SchedulesPage';
 import { ScheduleDetailPage } from './pages/ScheduleDetailPage';
 import { BackfillDetailPage } from './pages/BackfillDetailPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { CommandPalette } from './components/CommandPalette';
 import { ProfileMenu, ProfileSection } from './components/ProfileMenu';
+import { Sidebar } from './components/Sidebar';
+import { NavBar } from './components/NavBar';
+import { AppearancePanel } from './components/AppearancePanel';
+import { getNavLayout, type NavLayout } from './lib/appearance';
 
 const NS_KEY = 'nexus.namespace';
 
@@ -44,6 +54,16 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem(NS_KEY, namespace);
   }, [namespace]);
+
+  /**
+   * Which chrome to render.
+   *
+   * Seeded from storage, but re-read whenever the account menu opens or closes:
+   * the appearance panel writes through lib/appearance.ts (which stamps <html>
+   * directly, so CSS reacts immediately), and this keeps the React tree in step
+   * without a context or an event bus for a value that changes once a year.
+   */
+  const [navLayout, setNavLayoutState] = useState<NavLayout>(() => getNavLayout());
 
   // The key lives in the browser, never in the bundle: anything baked in at
   // build time is readable by everyone who loads the page.
@@ -105,121 +125,108 @@ export function App() {
     credentialChanged();
   }
 
+  /**
+   * The account menu, built once and handed to whichever chrome is active.
+   *
+   * Composed here rather than inside Sidebar/NavBar because every control in it
+   * is state this component owns — namespace, API key, session — and pushing
+   * that down would mean threading six props through two layouts to render the
+   * same menu twice.
+   */
+  const account = (
+    <ProfileMenu
+      session={session}
+      principal={me.data}
+      organization="KhuriwalGroup IT Solutions"
+      onSignOut={() => void signOut()}
+      onSignIn={() => navigate('/login')}
+      onOpenChange={() => setNavLayoutState(getNavLayout())}
+    >
+      <ProfileSection label="Namespace">
+        <input
+          type="text"
+          value={namespace}
+          onChange={(e) => setNamespace(e.target.value)}
+          aria-label="namespace"
+        />
+      </ProfileSection>
+
+      <ProfileSection label="API key">
+        {keyOpen ? (
+          <form
+            className="row"
+            onSubmit={(e) => {
+              e.preventDefault();
+              saveKey(keyDraft.trim());
+            }}
+          >
+            <input
+              type="password"
+              value={keyDraft}
+              onChange={(e) => setKeyDraft(e.target.value)}
+              placeholder="API key"
+              aria-label="API key"
+              autoFocus
+            />
+            <button type="submit">Save</button>
+            <button type="button" onClick={() => setKeyOpen(false)}>
+              Cancel
+            </button>
+          </form>
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              setKeyDraft(apiKey);
+              setKeyOpen(true);
+            }}
+            title={
+              apiKey
+                ? 'An API key is set for this browser. Click to change it.'
+                : 'No API key set — every request will be refused with 401.'
+            }
+          >
+            {keyPersistFailed ? 'API key ✗ not saved' : apiKey ? 'API key ✓' : 'Set API key'}
+          </button>
+        )}
+      </ProfileSection>
+
+      {/* The API base stays in the menu but OUTSIDE any collapsible control:
+          it says which deployment this tab is pointed at, and mistaking
+          staging for production is exactly the error a hidden value invites. */}
+      <ProfileSection label="Connected to">
+        <span className="chip" title={`API base: ${API_BASE || 'same origin'}`}>
+          {API_BASE || 'same origin'}
+        </span>
+      </ProfileSection>
+
+      <ProfileSection label="Appearance">
+        <AppearancePanel />
+      </ProfileSection>
+    </ProfileMenu>
+  );
+
   return (
-    <div className="app">
+    <div className={`app app-${navLayout}`}>
       {/* First focusable element on the page: a keyboard user must be able to
           reach the content without tabbing the whole nav on every navigation. */}
       <a className="skip-link" href="#main">
         Skip to content
       </a>
-      <header className="topbar">
-        <span className="brand">
-          <span className="brand-mark">◇</span> nexus
-        </span>
-        <nav className="nav">
-          {/* `end` so the overview link is only active on "/" itself, rather
-              than lighting up on every nested route beneath it. */}
-          <NavLink to="/" end className={({ isActive }) => (isActive ? 'active' : '')}>
-            Overview
-          </NavLink>
-          {/* Before Runs: the catalog is what exists, the run list is what
-              happened to it, and that is the order an operator reasons in. */}
-          <NavLink to="/workflows" className={({ isActive }) => (isActive ? 'active' : '')}>
-            Workflows
-          </NavLink>
-          <NavLink to="/runs" className={({ isActive }) => (isActive ? 'active' : '')}>
-            Runs
-          </NavLink>
-          <NavLink to="/schedules" className={({ isActive }) => (isActive ? 'active' : '')}>
-            Schedules
-          </NavLink>
-          <NavLink to="/workers" className={({ isActive }) => (isActive ? 'active' : '')}>
-            Workers
-          </NavLink>
-          {/* Shown only when the gateway says this credential may use them. */}
-          {canAdmin && (
-            <>
-              <NavLink to="/admin/users" className={({ isActive }) => (isActive ? 'active' : '')}>
-                Users
-              </NavLink>
-              <NavLink to="/admin/tokens" className={({ isActive }) => (isActive ? 'active' : '')}>
-                Tokens
-              </NavLink>
-              <NavLink to="/admin/audit" className={({ isActive }) => (isActive ? 'active' : '')}>
-                Audit
-              </NavLink>
-            </>
-          )}
-        </nav>
-        <div className="topbar-right">
-          {/* The API base stays OUTSIDE the menu: it says which deployment
-              this tab is pointed at, and mistaking staging for production is
-              exactly the error a hidden control would let you make. */}
-          <span className="chip" title={`API base: ${API_BASE || 'same origin'}`}>
-            {API_BASE || 'same origin'}
-          </span>
-          <ProfileMenu
-            session={session}
-            principal={me.data}
-            organization="KhuriwalGroup IT Solutions"
-            onSignOut={() => void signOut()}
-            onSignIn={() => navigate('/login')}
-          >
-            <ProfileSection label="Namespace">
-              <input
-                type="text"
-                value={namespace}
-                onChange={(e) => setNamespace(e.target.value)}
-                aria-label="namespace"
-              />
-            </ProfileSection>
 
-            <ProfileSection label="API key">
-              {keyOpen ? (
-                <form
-                  className="row"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    saveKey(keyDraft.trim());
-                  }}
-                >
-                  <input
-                    type="password"
-                    value={keyDraft}
-                    onChange={(e) => setKeyDraft(e.target.value)}
-                    placeholder="API key"
-                    aria-label="API key"
-                    autoFocus
-                  />
-                  <button type="submit">Save</button>
-                  <button type="button" onClick={() => setKeyOpen(false)}>
-                    Cancel
-                  </button>
-                </form>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setKeyDraft(apiKey);
-                    setKeyOpen(true);
-                  }}
-                  title={
-                    apiKey
-                      ? 'An API key is set for this browser. Click to change it.'
-                      : 'No API key set — every request will be refused with 401.'
-                  }
-                >
-                  {keyPersistFailed ? 'API key ✗ not saved' : apiKey ? 'API key ✓' : 'Set API key'}
-                </button>
-              )}
-            </ProfileSection>
+      {/* Mounted at the shell so Cmd+K works from every page. It owns its own
+          open state and renders null while closed, so it costs nothing here. */}
+      <CommandPalette namespace={namespace} onNavigate={navigate} onSignOut={() => void signOut()} />
 
-            <ProfileSection label="Appearance">
-              <ThemeToggle />
-            </ProfileSection>
-          </ProfileMenu>
-        </div>
-      </header>
+      {navLayout === 'navbar' ? (
+        <header className="chrome chrome-navbar">
+          <NavBar canAdmin={canAdmin} namespace={namespace} account={account} />
+        </header>
+      ) : (
+        <header className="chrome chrome-sidebar">
+          <Sidebar canAdmin={canAdmin} namespace={namespace} account={account} />
+        </header>
+      )}
 
       <main className="main" id="main" tabIndex={-1}>
         <ErrorBoundary>

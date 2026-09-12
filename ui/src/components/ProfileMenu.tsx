@@ -10,8 +10,13 @@
  * items and unreadable at eight — and none of them are things an operator
  * touches while actually watching a run.
  *
- * Everything here is per-ACCOUNT or per-BROWSER state. Anything scoped to what
- * is on screen belongs on the page, not in here.
+ * Everything here is per-ACCOUNT or per-BROWSER state -- identity, namespace,
+ * credential, and now appearance. Anything scoped to what is on SCREEN belongs
+ * on the page, not in here.
+ *
+ * The menu owns only its open/closed state and its dismissal behaviour; every
+ * section is passed in as a child, so adding a concern to the account never
+ * means editing this file.
  */
 
 import { useEffect, useId, useRef, useState } from 'react';
@@ -30,6 +35,15 @@ export interface ProfileMenuProps {
   organization?: string;
   onSignOut: () => void;
   onSignIn: () => void;
+  /**
+   * Told when the menu opens or closes.
+   *
+   * The sections inside can change state this component's PARENT renders --
+   * the appearance panel switches the whole chrome -- and the parent has no
+   * other moment at which to notice. Reporting the transition is cheaper than
+   * a context that exists to carry one value between two components.
+   */
+  onOpenChange?: (open: boolean) => void;
   /** Sections rendered inside the menu, in order. */
   children?: ReactNode;
 }
@@ -54,12 +68,20 @@ export function ProfileMenu({
   organization,
   onSignOut,
   onSignIn,
+  onOpenChange,
   children,
 }: ProfileMenuProps) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpenState] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuId = useId();
+
+  // Every open and close goes through here, so onOpenChange cannot be missed by
+  // whichever dismissal path is added next.
+  function setOpen(next: boolean) {
+    setOpenState(next);
+    onOpenChange?.(next);
+  }
 
   // Close on outside click and on Escape. Both are expected of a menu, and
   // their absence is the kind of thing that makes a dropdown feel broken
@@ -102,7 +124,7 @@ export function ProfileMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen(!open)}
         title={email ? `Signed in as ${email}` : 'Account'}
       >
         <span className="avatar" aria-hidden="true">
