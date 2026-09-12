@@ -639,3 +639,23 @@ control that fixes it, and reports the stored key's length -- a key pasted from
 a terminal with a trailing newline is otherwise indistinguishable from a wrong
 one. The key is also trimmed on read as well as on write, since a key stored by
 an earlier build was never trimmed at all.
+
+### F56. The console's key indicator did not reflect what was stored — FIXED
+**Severity:** made a 401 undiagnosable.
+`saveKey` set React state from the typed value while `setApiKey` stored a
+trimmed one, and the localStorage write was never verified. If persistence
+failed -- blocked site data, private browsing, storage pressure -- the header
+displayed "API key ✓" while nothing was stored and every request was refused.
+A console that insists a key is set while sending none is the worst version of
+this failure, because it directs the operator away from the actual cause.
+**Resolution:** `setApiKey` now reads the value back and returns whether it is
+actually readable; the header reflects stored state and shows "API key ✗ not
+saved" when persistence failed.
+
+### F57. Requiring NEXUS_WORKER_API_KEY broke unrelated compose commands — FIXED
+Removing the weak literal default (F54) used compose's `:?` required-variable
+form, which is evaluated for EVERY compose invocation -- so `build ui` and even
+`ps` failed with a message about a key they do not use. The credential now lives
+in `deploy/.env` (gitignored, written by `make seed`), which compose reads
+automatically. This keeps the no-weak-default property without making every
+command depend on an agent credential.

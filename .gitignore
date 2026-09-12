@@ -26,3 +26,4 @@ gpt_architecture.zip
 # nexusctl build output and the SDK test venv
 /nexusctl
 .venv-sdk/
+deploy/.env

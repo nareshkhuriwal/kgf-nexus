@@ -33,10 +33,14 @@ export function App() {
   const [apiKey, setApiKeyState] = useState(() => getApiKey());
   const [keyDraft, setKeyDraft] = useState('');
   const [keyOpen, setKeyOpen] = useState(false);
+  const [keyPersistFailed, setKeyPersistFailed] = useState(false);
 
   function saveKey(next: string) {
-    setApiKey(next);
-    setApiKeyState(next);
+    const stored = setApiKey(next);
+    // Reflect what is actually READABLE, not what was typed: if persistence
+    // failed, the header must not claim a key is set.
+    setApiKeyState(getApiKey());
+    setKeyPersistFailed(!stored && next.trim() !== '');
     setKeyOpen(false);
     // Every page's data was fetched with the old credential, so re-fetch rather
     // than leave stale 401 panels on screen next to a now-valid key.
@@ -104,7 +108,7 @@ export function App() {
                   : 'No API key set — every request will be refused with 401.'
               }
             >
-              {apiKey ? 'API key ✓' : 'Set API key'}
+              {keyPersistFailed ? 'API key ✗ not saved' : apiKey ? 'API key ✓' : 'Set API key'}
             </button>
           )}
           <span className="chip" title={`API base: ${API_BASE || 'same origin'}`}>

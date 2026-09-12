@@ -63,14 +63,24 @@ export function getApiKey(): string {
   return BUILD_API_KEY;
 }
 
-export function setApiKey(key: string): void {
+/**
+ * Persist the key, returning whether it is actually readable afterwards.
+ *
+ * The write is verified by reading it back rather than assumed to have worked.
+ * localStorage can silently fail to persist (blocked site data, private
+ * browsing, storage pressure), and a header that reports success while nothing
+ * was stored is the worst outcome: every request is refused while the console
+ * insists a key is set, which is exactly the state this bug produced.
+ */
+export function setApiKey(key: string): boolean {
   const clean = key.trim();
   try {
     if (clean) window.localStorage.setItem(API_KEY_STORAGE, clean);
     else window.localStorage.removeItem(API_KEY_STORAGE);
   } catch {
-    // Non-fatal: the key simply will not persist across reloads.
+    return false;
   }
+  return getApiKey() === clean;
 }
 
 export class ApiError extends Error {
