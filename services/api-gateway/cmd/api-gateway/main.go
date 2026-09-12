@@ -67,7 +67,14 @@ func run() error {
 	defer pool.Close()
 	db := store.GWDB(pool)
 
-	auth := authn.New(db)
+	// Identity (human sessions and scoped tokens) is resolved by the SAME
+	// authenticator that resolves API keys, so there is still exactly one place a
+	// request is authenticated. API keys are unaffected: WithIdentity only adds
+	// credential kinds, dispatched by prefix, and an unprefixed credential still
+	// takes the original api_keys path.
+	auth := authn.New(db).
+		WithIdentity(authn.StoreIdentity{DB: db}).
+		WithLogger(log)
 
 	// The gateway owns only api_keys and idempotency_keys (ADR-0011). Every other
 	// mutation travels through the owning service. These clients are that boundary.
@@ -90,7 +97,8 @@ func run() error {
 	defer schedClient.Close()
 
 	// ── REST listener ─────────────────────────────────────────────────────
-	api := rest.New(db, auth, wfmClient, rmClient, nil, log)
+	api := rest.New(db, auth, wfmClient, rmClient, nil, log).
+		WithIdentity(rest.NewStoreIdentityAdmin(db))
 
 	// Rate limiting is opt-in because a limit guessed wrong is itself an outage:
 	// the right number depends on fleet size and the console's poll interval. Off

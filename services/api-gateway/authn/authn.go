@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
@@ -44,11 +45,45 @@ const (
 )
 
 // Principal is an authenticated caller.
+//
+// The first four fields are the original API-key principal and are unchanged: a
+// worker or CLI request produces exactly the Principal it always did. The rest
+// describe credential kinds that did not exist before (sessions, scoped tokens)
+// and are ZERO for an API key, which is what makes the addition invisible to
+// every existing caller and handler.
 type Principal struct {
 	KeyID     string
 	Namespace string
 	Name      string
 	Role      Role
+
+	// Kind is how the caller proved identity. Empty means an API key, so the zero
+	// Principal keeps behaving as one.
+	Kind PrincipalKind
+	// UserID is set only for a human session, and is what lets an audit row say
+	// WHICH PERSON acted rather than merely which credential was used.
+	UserID string
+	// Scopes NARROWS what this credential may do within its role. Nil means "no
+	// narrowing" -- the role's full grant -- which is why an API key, whose Scopes
+	// is always nil, is authorized by exactly the pre-existing rule.
+	Scopes []Action
+}
+
+// HasScope reports whether the credential's scopes permit an action.
+//
+// A nil scope list means unscoped, not empty: an unscoped credential is limited
+// only by its role. Treating nil as "permits nothing" would refuse every API key
+// in the fleet the moment this field was introduced.
+func (p Principal) HasScope(a Action) bool {
+	if p.Scopes == nil {
+		return true
+	}
+	for _, s := range p.Scopes {
+		if s == a {
+			return true
+		}
+	}
+	return false
 }
 
 // ErrUnauthenticated means no usable credential was presented.
@@ -87,15 +122,51 @@ func (p Principal) Authorize(namespace string, a Action) error {
 	if !p.Can(a) {
 		return fmt.Errorf("%w: role %s may not %s", ErrForbidden, p.Role, a)
 	}
+	// Scopes INTERSECT with the role and never extend it: the role is checked
+	// first and independently, so a scope naming an action the role lacks grants
+	// nothing. That ordering is what makes scoped tokens safe to add to an
+	// enforcement point that already works -- the worst a bad scope list can do is
+	// refuse a request.
+	if !p.HasScope(a) {
+		return fmt.Errorf("%w: credential is not scoped for %s", ErrForbidden, a)
+	}
 	if namespace != "" && namespace != p.Namespace {
 		return fmt.Errorf("%w: key is scoped to namespace %s, not %s", ErrForbidden, p.Namespace, namespace)
 	}
 	return nil
 }
 
-// Authenticator resolves credentials against the api_keys table.
+// Authenticator resolves credentials against the api_keys table, and — when
+// identity is wired via WithIdentity — against sessions and scoped tokens too.
 type Authenticator struct {
 	db store.GWQuerier
+	// identity is nil unless WithIdentity was called. Nil means this gateway
+	// accepts API keys only, which is precisely the behaviour before identity
+	// existed and is what makes the feature safe to wire incrementally.
+	identity IdentityStore
+	// log records bookkeeping failures that must not fail a request. Nil-safe:
+	// touchFailed falls back to the default logger.
+	log *slog.Logger
+}
+
+// WithLogger sets where non-fatal authentication bookkeeping failures are
+// reported. These are deliberately not returned to the caller, so without a
+// logger they would be invisible.
+func (a *Authenticator) WithLogger(l *slog.Logger) *Authenticator {
+	a.log = l
+	return a
+}
+
+// touchFailed reports a failed last-used write. It is a warning, never an error
+// that reaches the caller: the request is properly authenticated and refusing it
+// because a usage column could not be updated would make a cosmetic write an
+// availability dependency.
+func (a *Authenticator) touchFailed(ctx context.Context, kind, id string, err error) {
+	l := a.log
+	if l == nil {
+		l = slog.Default()
+	}
+	l.WarnContext(ctx, "could not record credential use", "credential_kind", kind, "credential_id", id, "error", err)
 }
 
 // New builds an Authenticator over the given querier.
