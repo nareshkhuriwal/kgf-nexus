@@ -253,28 +253,36 @@ func backoffStrategy(s string) nexusv1.BackoffStrategy {
 }
 
 func errorClass(s string) nexusv1.ErrorClass {
+	// BOTH the authoring spellings and the proto enum names are accepted, because
+	// $defs/ErrorClass in the JSON Schema permits all of them. Accepting a value at
+	// the schema gate and then dropping it here is the worst of both: the submission
+	// succeeds, so the author believes the policy took effect, but the class decodes
+	// to UNSPECIFIED, protojson omits it as a zero value, and the stored node spec
+	// carries no retry_on at all. The attempt then fails with
+	// "error_class_not_in_retry_on" naming a class the author explicitly allowed, and
+	// nothing anywhere reports that their input was discarded (CONTRACT-FINDINGS.md
+	// F20, F52).
 	switch s {
-	case "transient":
+	case "transient", "ERROR_CLASS_TRANSIENT":
 		return nexusv1.ErrorClass_ERROR_CLASS_TRANSIENT
-	case "timeout":
+	case "timeout", "ERROR_CLASS_TIMEOUT":
 		return nexusv1.ErrorClass_ERROR_CLASS_TIMEOUT
-	case "worker_lost":
+	case "worker_lost", "ERROR_CLASS_WORKER_LOST":
 		return nexusv1.ErrorClass_ERROR_CLASS_WORKER_LOST
-	// Both spellings normalize to the one proto constant. Architecture 4.3's YAML
-	// writes validation_error while common.proto has ERROR_CLASS_VALIDATION, and an
-	// author who copied the published example must not be rejected for it
-	// (CONTRACT-FINDINGS.md F20).
-	case "validation", "validation_error":
+	// Architecture 4.3's YAML writes validation_error while common.proto has
+	// ERROR_CLASS_VALIDATION, and an author who copied the published example must
+	// not be rejected for it.
+	case "validation", "validation_error", "ERROR_CLASS_VALIDATION":
 		return nexusv1.ErrorClass_ERROR_CLASS_VALIDATION
-	case "permission_denied":
+	case "permission_denied", "ERROR_CLASS_PERMISSION_DENIED":
 		return nexusv1.ErrorClass_ERROR_CLASS_PERMISSION_DENIED
-	case "application":
+	case "application", "ERROR_CLASS_APPLICATION":
 		return nexusv1.ErrorClass_ERROR_CLASS_APPLICATION
-	case "oom":
+	case "oom", "ERROR_CLASS_OOM":
 		return nexusv1.ErrorClass_ERROR_CLASS_OOM
-	case "not_found":
+	case "not_found", "ERROR_CLASS_NOT_FOUND":
 		return nexusv1.ErrorClass_ERROR_CLASS_NOT_FOUND
-	case "infrastructure":
+	case "infrastructure", "ERROR_CLASS_INFRASTRUCTURE":
 		return nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE
 	default:
 		return nexusv1.ErrorClass_ERROR_CLASS_UNSPECIFIED

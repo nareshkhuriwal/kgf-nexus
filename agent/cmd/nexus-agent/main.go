@@ -43,6 +43,8 @@ func main() {
 			"advertised CPU capacity in millicores")
 		memoryBytes = flag.Int64("memory-bytes", envInt("NEXUS_MEMORY_BYTES", 2<<30),
 			"advertised memory capacity in bytes")
+		diskBytes = flag.Int64("disk-bytes", envInt("NEXUS_DISK_BYTES", 0),
+			"advertised scratch-disk capacity in bytes; 0 means probe the work directory's filesystem")
 		gpuCount = flag.Int("gpu-count", int(envInt("NEXUS_GPU_COUNT", 0)),
 			"advertised GPU count")
 		gpuKind = flag.String("gpu-kind", envOr("NEXUS_GPU_KIND", ""),
@@ -83,6 +85,7 @@ func main() {
 		Capacity: &nexusv1.ResourceVector{
 			CpuMillis:   *cpuMillis,
 			MemoryBytes: *memoryBytes,
+			DiskBytes:   advertisedDisk(*diskBytes, *workDir, log),
 			GpuCount:    int32(*gpuCount),
 			GpuKind:     *gpuKind,
 		},
@@ -166,6 +169,47 @@ func newLogger(level, format string) *slog.Logger {
 		return slog.New(slog.NewTextHandler(os.Stderr, opts))
 	}
 	return slog.New(slog.NewJSONHandler(os.Stderr, opts))
+}
+
+// advertisedDisk resolves the scratch-disk capacity this agent advertises.
+//
+// An explicit --disk-bytes wins. Otherwise the work directory's filesystem is
+// probed, because advertising ZERO disk is not the neutral default it looks
+// like: the scheduler's fit check is a per-dimension comparison, so a worker
+// with disk_bytes=0 can never satisfy a task that declares ANY disk, and the
+// attempt stays PENDING for the life of the run. That failure is silent and
+// reads exactly like a capacity shortage, which is the hardest kind of stall to
+// diagnose from the console.
+//
+// Probing reports the filesystem's TOTAL size rather than its free space
+// deliberately. Capacity advertised for scheduling is a statement about how big
+// this worker is, not about how full it happens to be right now; free space
+// moves with every task and would make placement decisions oscillate. Space
+// actually available at run time is the executor's concern (ADR-0007), and the
+// gap between advertised and enforced is documented as such.
+func advertisedDisk(explicit int64, workDir string, log *slog.Logger) int64 {
+	if explicit > 0 {
+		return explicit
+	}
+	probe := workDir
+	if probe == "" {
+		probe = os.TempDir()
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(probe, &st); err != nil {
+		// Not fatal: a worker with no disk dimension is still useful for every
+		// task that declares none. Logged at WARN because the consequence is a
+		// whole class of task that silently cannot be placed here.
+		log.Warn("could not probe disk capacity; advertising no disk, so tasks declaring disk cannot be placed on this worker",
+			"path", probe, "error", err,
+			"remedy", "set NEXUS_DISK_BYTES")
+		return 0
+	}
+	total := int64(st.Blocks) * int64(st.Bsize)
+	log.Info("advertising probed disk capacity",
+		"path", probe, "disk_bytes", total,
+		"why", "advertising zero would make every task that declares disk unschedulable here")
+	return total
 }
 
 func splitCSV(s string) []string {

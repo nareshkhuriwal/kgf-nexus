@@ -730,3 +730,47 @@ rows away and lose the accounting rather than settle it. Such rows are left for
 a later sweep, by which time lease expiry has released them.
 Verified: the guard selects exactly the 6 orphaned rows and excludes both ACTIVE
 workers.
+
+---
+
+## From exit-criteria verification
+
+### F59. An unschedulable attempt stalled with NO pending_reason — FIXED
+**Severity:** high. This is the exact failure §3.2 says pending_reason prevents.
+Found while running the 10-node exit criterion: `ingest` requests 100GiB of disk
+against 50GiB workers, so it genuinely cannot be placed -- the scheduler was
+RIGHT to refuse it. But the attempt sat PENDING with an EMPTY pending_reason, so
+the console showed a stuck run beside an idle, healthy-looking fleet and nothing
+connecting the two.
+
+Cause: `ClaimForWorker`'s SQL pre-filter (a legitimate optimisation that avoids
+paging rows which cannot fit) excludes such attempts BEFORE the authoritative
+`domain.Fits` check that records a reason. Excluded rows were never explained.
+
+Two bugs had to be fixed to close it, and both are worth remembering:
+
+1. **The nil-slice bug, again.** The explain query's `NOT (id = ANY($2::uuid[]))`
+   received a nil slice, which pgx sends as SQL NULL; `NOT (x = ANY(NULL))` is
+   NULL, not true, so EVERY row was filtered out and nothing was ever explained.
+   The resource manager's leak detector had the identical bug (F-series, worker
+   agent workstream). Verified in Postgres: nil -> NULL, `'{}'` -> true. This is
+   an easy mistake to make twice; any `ANY`/`ALL` against a caller-supplied slice
+   needs a non-nil guard.
+2. **Placement.** The explanation ran only when a poll found NOTHING to claim.
+   On a busy queue a poll almost always finds something, so the permanently
+   unschedulable attempt was never reached. It now runs on the SUCCESS path too
+   -- which is the case that matters most, because the fleet looks healthy while
+   one attempt starves.
+
+Verified live: `waiting_for_resources: disk (need 107374182400, free 53687091200)`.
+
+### F60. The ten_node_mixed example cannot run on a default fleet
+**Severity:** documentation/example defect, not a platform bug. **Status: open.**
+The committed example declares `disk_bytes: 107374182400` (100GiB) on `ingest`,
+`gpu_kind: nvidia-a10` on `train_small`, and NO runtime block at all. The compose
+fleet advertises 50GiB disk, `nvidia-a100`, and only the `subprocess` executor,
+so the example is unschedulable as written -- exactly the shape of problem F59
+now makes visible instead of silent.
+It is also billed as the Phase 1 exit criterion, so it should be runnable against
+the stack the repo ships. Either lower its requests to fit the default fleet or
+raise the compose agents' advertised capacity to match the example.

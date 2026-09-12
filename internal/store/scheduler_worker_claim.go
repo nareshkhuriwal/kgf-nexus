@@ -186,6 +186,19 @@ func (s *SchedulerStore) claimOneForWorker(
 	for i := 0; i < lookAhead; i++ {
 		cand, err := s.selectCandidateForWorker(ctx, tx, now, worker, budget, skipped)
 		if errors.Is(err, ErrNoCandidate) {
+			// Nothing this worker can take. Before giving up, explain any attempt
+			// the SQL pre-filter silently excluded.
+			//
+			// The pre-filter is only an optimisation, but it runs BEFORE the
+			// domain.Fits call that records a reason -- so an attempt that can
+			// never fit the fleet (a 100GiB disk request against 50GiB workers)
+			// is skipped without explanation and sits PENDING forever with an
+			// empty pending_reason. That is precisely the unexplained stall §3.2
+			// says this field exists to prevent: the operator sees a stuck run,
+			// an idle fleet, and no reason connecting the two.
+			if xerr := s.explainUnschedulable(ctx, tx, worker, skipped); xerr != nil {
+				return nil, xerr
+			}
 			return nil, nil
 		}
 		if err != nil {
@@ -229,6 +242,19 @@ func (s *SchedulerStore) claimOneForWorker(
 		idemKey, specJSON, inputRefs, err := s.assignmentDetails(ctx, tx, cand)
 		if err != nil {
 			return nil, err
+		}
+
+		// Explain the leftovers before committing.
+		//
+		// This must happen on the SUCCESS path too, not only when nothing could
+		// be claimed. On a busy queue a poll almost always finds something, so an
+		// attempt the SQL pre-filter permanently excludes -- a 100GiB disk request
+		// against 50GiB workers -- would otherwise never be reached and would sit
+		// PENDING forever with an empty pending_reason while work flowed around
+		// it. An unschedulable attempt on a busy queue is exactly the case an
+		// operator most needs explained, because the fleet looks healthy.
+		if xerr := s.explainUnschedulable(ctx, tx, worker, append(skipped, cand.ID)); xerr != nil {
+			return nil, xerr
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -560,4 +586,76 @@ func containsString(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// explainUnschedulable records why PENDING attempts on this queue could not be
+// placed on this worker, for attempts the SQL pre-filter excluded before the
+// authoritative fit check could record a reason.
+//
+// Deliberately best-effort and bounded: it is diagnostics, not scheduling, so it
+// must never fail a claim or scan the whole backlog. An attempt that already
+// carries a reason is left alone -- the first explanation is usually the most
+// specific, and rewriting it on every poll would churn the row for no gain.
+func (s *SchedulerStore) explainUnschedulable(
+	ctx context.Context, tx pgx.Tx, worker *pollWorker, skip []uuid.UUID,
+) error {
+	// A nil slice reaches Postgres as SQL NULL, and `x <> ALL(NULL)` /
+	// `NOT (x = ANY(NULL))` evaluate to NULL rather than true -- so every row is
+	// filtered out and nothing is ever explained. Forcing a non-nil empty slice
+	// is the fix. (The resource manager's leak detector had the identical bug;
+	// it is an easy one to write twice.)
+	if skip == nil {
+		skip = []uuid.UUID{}
+	}
+	rows, err := tx.Query(ctx, `
+SELECT a.id, a.resource_request
+  FROM task_attempts a
+ WHERE a.state = 'PENDING'
+   AND a.queue = $1
+   AND (a.pending_reason IS NULL OR a.pending_reason = '')
+   AND NOT (a.id = ANY($2::uuid[]))
+ ORDER BY a.scheduled_at
+ LIMIT 20`, s.cfg.Queue, skip)
+	if err != nil {
+		return fmt.Errorf("explain unschedulable: %w", err)
+	}
+	type pend struct {
+		id  uuid.UUID
+		req *nexusv1.ResourceVector
+	}
+	var pending []pend
+	for rows.Next() {
+		var id uuid.UUID
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			rows.Close()
+			return fmt.Errorf("explain unschedulable scan: %w", err)
+		}
+		vec, derr := decodeVector(raw)
+		if derr != nil {
+			continue
+		}
+		pending = append(pending, pend{id: id, req: vec})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("explain unschedulable rows: %w", err)
+	}
+
+	for _, pnd := range pending {
+		fits, short := domain.Fits(worker.Capacity, worker.Committed, pnd.req)
+		if fits {
+			// It fits this worker but was not claimed this pass -- look-ahead or
+			// a concurrency skip. Not a shortfall, so say nothing.
+			continue
+		}
+		reason := domain.ShortfallReason(short)
+		if reason == "" {
+			continue
+		}
+		if err := s.markBlocked(ctx, tx, pnd.id, reason); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -38,8 +38,14 @@ x-service-env: &service-env
   NEXUS_WORKFLOW_MANAGER_ADDR: workflow-manager:9090
   DAG_ENGINE_ADDR: dag-engine:9090
   NEXUS_DAG_ENGINE_ADDR: dag-engine:9090
-  SCHEDULER_ADDR: scheduler:9090
-  NEXUS_SCHEDULER_ADDR: scheduler:9090
+  # A scheduler replica drains exactly ONE queue, and ClaimForWorker answers with
+  # nothing when the polling worker does not serve that queue. So every queue
+  # needs a replica AND the gateway needs to know about all of them: with only
+  # `scheduler` listed, a gpu-queue attempt sits PENDING until the run times out,
+  # which is indistinguishable from a capacity shortage. The gateway offers a
+  # worker poll to each address in turn (see upstream.splitAddrs / claimPeers).
+  SCHEDULER_ADDR: scheduler:9090,scheduler-gpu:9090
+  NEXUS_SCHEDULER_ADDR: scheduler:9090,scheduler-gpu:9090
   RESOURCE_MANAGER_ADDR: resource-manager:9090
   NEXUS_RESOURCE_MANAGER_ADDR: resource-manager:9090
   EVENT_SERVICE_ADDR: event-service:9090

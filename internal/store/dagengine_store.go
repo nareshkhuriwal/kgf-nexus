@@ -124,7 +124,10 @@ func (s *DAGEngineStore) LoadSpec(ctx context.Context, specID string) (*nexusv1.
 	// DiscardUnknown so a spec written by a NEWER service version still parses:
 	// ADR-0011 requires services to stay compatible across one schema version,
 	// and a rolling deploy will have mixed versions writing this table.
-	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(raw, &spec); err != nil {
+	// normalizeSpecEnums first: this document is the author's, so its enum values
+	// may use the short authoring spellings the JSON Schema accepts, which protojson
+	// discards WITHOUT error (see normalizeSpecEnums).
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(normalizeSpecEnums(raw), &spec); err != nil {
 		return nil, fmt.Errorf("parse spec %s: %w", specID, err)
 	}
 	return &spec, nil
@@ -152,7 +155,10 @@ func (s *DAGEngineStore) LoadNodes(ctx context.Context, runID string) ([]DENodeR
 		}
 		n.State = domain.NodeState(state)
 		var ts nexusv1.TaskSpec
-		if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(raw, &ts); err != nil {
+		// Node rows are written by dagengine_writes with UseProtoNames, so they
+		// normally need no rewriting; normalizing anyway costs one prefix check and
+		// covers rows written before this fix.
+		if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(normalizeSpecEnums(raw), &ts); err != nil {
 			return nil, fmt.Errorf("parse spec for node %s/%s: %w", runID, n.NodeID, err)
 		}
 		n.Spec = &ts

@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"encoding/json"
 	"testing"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
@@ -147,5 +148,71 @@ func TestStdoutOutputMustNameADeclaredOutput(t *testing.T) {
 	}
 	if got := c.Proto.GetTasks()[0].GetRuntime().GetStdoutOutput(); got != "result" {
 		t.Errorf("stdout_output did not survive the conversion: %q", got)
+	}
+}
+
+// TestErrorClassAcceptsProtoEnumNames guards a silent-data-loss bug.
+//
+// $defs/ErrorClass in the JSON Schema accepts BOTH the short authoring spellings
+// and the proto enum names, so a spec using ERROR_CLASS_APPLICATION passes
+// validation. Before this was fixed, the decoder recognised only the short form
+// and returned UNSPECIFIED for the rest; protojson then omitted the zero value,
+// the stored node spec carried no retry_on, and the attempt failed with
+// "error_class_not_in_retry_on" naming the very class the author had allowed.
+// Every spelling the schema admits must survive the decode.
+func TestErrorClassAcceptsProtoEnumNames(t *testing.T) {
+	pairs := map[string]nexusv1.ErrorClass{
+		"transient":                     nexusv1.ErrorClass_ERROR_CLASS_TRANSIENT,
+		"ERROR_CLASS_TRANSIENT":         nexusv1.ErrorClass_ERROR_CLASS_TRANSIENT,
+		"timeout":                       nexusv1.ErrorClass_ERROR_CLASS_TIMEOUT,
+		"ERROR_CLASS_TIMEOUT":           nexusv1.ErrorClass_ERROR_CLASS_TIMEOUT,
+		"worker_lost":                   nexusv1.ErrorClass_ERROR_CLASS_WORKER_LOST,
+		"ERROR_CLASS_WORKER_LOST":       nexusv1.ErrorClass_ERROR_CLASS_WORKER_LOST,
+		"validation":                    nexusv1.ErrorClass_ERROR_CLASS_VALIDATION,
+		"validation_error":              nexusv1.ErrorClass_ERROR_CLASS_VALIDATION,
+		"ERROR_CLASS_VALIDATION":        nexusv1.ErrorClass_ERROR_CLASS_VALIDATION,
+		"permission_denied":             nexusv1.ErrorClass_ERROR_CLASS_PERMISSION_DENIED,
+		"ERROR_CLASS_PERMISSION_DENIED": nexusv1.ErrorClass_ERROR_CLASS_PERMISSION_DENIED,
+		"application":                   nexusv1.ErrorClass_ERROR_CLASS_APPLICATION,
+		"ERROR_CLASS_APPLICATION":       nexusv1.ErrorClass_ERROR_CLASS_APPLICATION,
+		"oom":                           nexusv1.ErrorClass_ERROR_CLASS_OOM,
+		"ERROR_CLASS_OOM":               nexusv1.ErrorClass_ERROR_CLASS_OOM,
+		"not_found":                     nexusv1.ErrorClass_ERROR_CLASS_NOT_FOUND,
+		"ERROR_CLASS_NOT_FOUND":         nexusv1.ErrorClass_ERROR_CLASS_NOT_FOUND,
+		"infrastructure":                nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE,
+		"ERROR_CLASS_INFRASTRUCTURE":    nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE,
+	}
+	for in, want := range pairs {
+		if got := errorClass(in); got != want {
+			t.Errorf("errorClass(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// TestErrorClassSpellingsCoverTheSchemaEnum keeps the decoder and the schema from
+// drifting apart: any value $defs/ErrorClass admits must decode to something real,
+// or authors get silent data loss rather than a validation error.
+func TestErrorClassSpellingsCoverTheSchemaEnum(t *testing.T) {
+	var doc struct {
+		Defs map[string]struct {
+			Enum []string `json:"enum"`
+		} `json:"$defs"`
+	}
+	raw, err := SchemaBytes()
+	if err != nil {
+		t.Fatalf("read embedded schema: %v", err)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse embedded schema: %v", err)
+	}
+	vals := doc.Defs["ErrorClass"].Enum
+	if len(vals) == 0 {
+		t.Fatal("schema $defs/ErrorClass has no enum; test cannot verify coverage")
+	}
+	for _, v := range vals {
+		if errorClass(v) == nexusv1.ErrorClass_ERROR_CLASS_UNSPECIFIED {
+			t.Errorf("schema accepts %q but the decoder maps it to UNSPECIFIED, "+
+				"so the value would be silently dropped", v)
+		}
 	}
 }
