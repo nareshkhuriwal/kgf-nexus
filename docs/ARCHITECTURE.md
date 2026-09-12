@@ -828,7 +828,18 @@ PAUSING:   no NEW attempts dispatched; in-flight ones run to completion.
 Everything about multi-scheduler correctness reduces to this one transaction. It is the heart of the design, so it is specified precisely.
 
 ```
-BEGIN ISOLATION LEVEL REPEATABLE READ;
+-- READ COMMITTED, deliberately, NOT REPEATABLE READ.
+-- Verified empirically: under REPEATABLE READ a locking read that reaches a row
+-- another transaction has already COMMITTED an update to does not skip it -- it
+-- aborts the whole transaction with SQLSTATE 40001 (could not serialize access
+-- due to concurrent update). SKIP LOCKED only skips rows *currently locked*; it
+-- does nothing for rows already committed by someone else. With N scheduler
+-- replicas on one queue those aborts are constant and every claim degrades into
+-- a retry loop.
+-- Nothing is lost by using READ COMMITTED: the no-double-dispatch argument rests
+-- on the row locks, the state='PENDING' CAS guard, and UNIQUE(attempt_id) on
+-- leases -- none of which depend on snapshot isolation.
+BEGIN ISOLATION LEVEL READ COMMITTED;
 
   -- 1. Claim a candidate attempt. SKIP LOCKED is what allows N scheduler
   --    replicas to work the same queue without coordination or contention.

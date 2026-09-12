@@ -47,11 +47,23 @@ Rules that make this a real boundary rather than a shared-database free-for-all:
 1. **A service writes only the tables it owns.** Cross-service writes go
    through the owner's gRPC API. Enforced by per-service Postgres roles with
    table-level grants, so a violation fails at the database, not at code review.
-2. **The dispatch transaction is the one deliberate exception.** The scheduler
-   writes `reservations` and `workers.committed` (resource-manager tables)
-   inside the claim transaction, because atomicity there is worth more than
-   ownership purity. This is documented, tested, and the *only* exception.
-   Everywhere else the scheduler calls the resource manager's API.
+2. **The dispatch transaction is the one deliberate exception**, and it spans
+   three non-owned tables. The scheduler writes `reservations` and
+   `workers.committed` (resource-manager), `run_events` (event-service), and
+   `timers` (workflow-manager) inside the claim transaction, because the five
+   facts of a dispatch must commit atomically or the guarantee is lost.
+   Atomicity is the guarantee; table ownership is an organizing principle, so
+   where they conflict atomicity wins. This is documented and tested, and it is
+   the *only* place ownership is crossed. Everywhere outside the claim, a
+   service calls the owner's API.
+
+   A related case is still open: the worker-DEAD transition writes
+   `workers.state` (resource-manager) from the scheduler's liveness sweeper,
+   because marking a worker DEAD must be atomic with expiring its leases — a
+   DEAD worker with live leases is dispatched-to by no one and recovered by no
+   one, so work stalls silently. Either this becomes a further documented
+   exception or the whole worker-death path moves into resource-manager,
+   accepting non-atomicity. See CONTRACT-FINDINGS.md F9.
 3. **Each service is its own container, gRPC API, health/readiness endpoint,
    and scaling unit.** No shared process.
 4. **Schema migrations are a versioned, ordered artifact applied by a

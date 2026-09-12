@@ -69,10 +69,22 @@ cross-service writes go through the owner's gRPC API.
 | resource-manager | workers, reservations |
 | event-service    | run_events |
 
-THE ONE DELIBERATE EXCEPTION: the scheduler writes `reservations` and
-`workers.committed` INSIDE the dispatch claim transaction, because atomicity
-there outweighs ownership purity (invariant 4). This is the only exception.
-Everywhere else, call the owner's API.
+THE DELIBERATE EXCEPTION (dispatch only): inside the §5.3 claim transaction the
+scheduler writes `reservations` + `workers.committed` (resource-manager),
+`run_events` (event-service) and `timers` (workflow-manager), because the five
+facts of a dispatch MUST commit atomically or the no-double-dispatch guarantee
+is lost. Atomicity is the guarantee; ownership is an organizing principle, so
+atomicity wins where they conflict. Outside the claim, call the owner's API.
+
+ISOLATION LEVEL: the claim transaction uses READ COMMITTED, never REPEATABLE
+READ. Under RR a locking read that reaches an already-committed updated row
+aborts with SQLSTATE 40001 instead of skipping it; SKIP LOCKED only skips rows
+currently LOCKED. Verified empirically. Correctness rests on the row locks, the
+state='PENDING' CAS and UNIQUE(attempt_id), not on snapshot isolation.
+
+EVENT SEQ: allocate `run_events.seq` via
+`UPDATE workflow_runs SET event_seq = event_seq + 1 RETURNING event_seq`
+(migration 0002). Never `max(seq)+1` — it races.
 
 Every service: own container, own gRPC API, /healthz + /readyz, own scaling unit.
 Migrations are applied by a dedicated job, NEVER by a service at startup.

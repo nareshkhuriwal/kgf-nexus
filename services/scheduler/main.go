@@ -1,0 +1,205 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+)
+
+func main() {
+	if err := run(); err != nil {
+		// slog is already configured by the time most failures happen; this
+		// covers the pre-logger ones (bad flags, unreachable DB).
+		fmt.Fprintf(os.Stderr, "scheduler: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	var (
+		dsn       = flag.String("dsn", envOr("NEXUS_POSTGRES_DSN", "postgres://postgres:test@localhost:55432/nexus"), "Postgres DSN")
+		queue     = flag.String("queue", envOr("NEXUS_QUEUE", "default"), "queue this replica drains")
+		httpAddr  = flag.String("http-addr", envOr("NEXUS_HTTP_ADDR", ":8081"), "address for /healthz and /readyz")
+		logLevel  = flag.String("log-level", envOr("NEXUS_LOG_LEVEL", "info"), "debug|info|warn|error")
+		leaseTTL  = flag.Duration("lease-ttl", 30*time.Second, "initial lease lifetime (ADR-0010 default)")
+		liveness  = flag.Duration("liveness-window", 30*time.Second, "heartbeat staleness before a worker is DEAD")
+		agingRate = flag.Float64("aging-rate", 1.0, "effective-priority gain per second a PENDING attempt accrues (§7.3)")
+	)
+	flag.Parse()
+
+	// JSON to stderr because these logs are scraped, not read in a terminal.
+	// Every dispatch/lost log carries run_id, attempt_id and worker_id
+	// (CONTRACT.md logging convention) so an incident can be reconstructed by
+	// filtering on one run.
+	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(*logLevel)}))
+	slog.SetDefault(log)
+
+	// A per-process identity, not a per-host one. It lands in timers.claimed_by,
+	// and reusing a hostname across restarts would make a crashed replica's
+	// claimed timers indistinguishable from a live replica's (the same reasoning
+	// ADR-0010 applies to worker identity).
+	instanceID := envOr("HOSTNAME", "") + "/" + uuid.NewString()
+	log = log.With("service", "scheduler", "instance", instanceID, "queue", *queue)
+
+	// Shutdown context. Signals are trapped before anything is opened so a
+	// Ctrl-C during startup still exits cleanly.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := store.NewPool(ctx, store.DefaultPoolConfig(*dsn))
+	if err != nil {
+		return fmt.Errorf("connect to postgres: %w", err)
+	}
+	defer pool.Close()
+
+	claimCfg := store.DefaultClaimConfig(*queue)
+	claimCfg.LeaseTTL = *leaseTTL
+	claimCfg.LivenessWindow = *liveness
+	claimCfg.AgingRate = *agingRate
+
+	st := store.NewSchedulerStore(pool, claimCfg, instanceID)
+	sched := NewSchedulerWithLogger(st, log)
+
+	// The scheduler is live once it can reach the DB. Readiness is stricter:
+	// see readyHandler.
+	var ready atomic.Bool
+	srv := &http.Server{
+		Addr:              *httpAddr,
+		Handler:           healthMux(st, sched, &ready),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	srvErr := make(chan error, 1)
+	go func() {
+		log.Info("health endpoints listening", "addr", *httpAddr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			srvErr <- err
+			return
+		}
+		srvErr <- nil
+	}()
+
+	ready.Store(true)
+	log.Info("scheduler starting",
+		"lease_ttl", claimCfg.LeaseTTL, "liveness_window", claimCfg.LivenessWindow,
+		"aging_rate", claimCfg.AgingRate, "look_ahead", claimCfg.LookAhead)
+
+	done := make(chan struct{})
+	go func() {
+		sched.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case err := <-srvErr:
+		if err != nil {
+			return fmt.Errorf("health server: %w", err)
+		}
+	case <-ctx.Done():
+		log.Info("shutdown signal received; draining")
+	}
+
+	// Fail readiness first so the load balancer stops sending traffic before the
+	// loops stop, then let in-flight claim transactions finish. A claim
+	// interrupted mid-transaction is safe — it rolls back and a peer re-claims —
+	// but finishing it avoids a needless PENDING round trip.
+	ready.Store(false)
+	stop()
+	select {
+	case <-done:
+		log.Info("loops drained")
+	case <-time.After(15 * time.Second):
+		// Bounded: a loop wedged on a slow query must not block the pod's
+		// termination past the orchestrator's grace period.
+		log.Warn("loops did not drain within the grace period; exiting anyway")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error("health server shutdown", "err", err)
+	}
+	log.Info("scheduler stopped")
+	return nil
+}
+
+// NewSchedulerWithLogger builds a Scheduler with default cadences.
+func NewSchedulerWithLogger(st *store.SchedulerStore, log *slog.Logger) *Scheduler {
+	// No NATS in the MVP wiring. The nil notifier is safe by design: the bus is
+	// a hint, and a worker's next poll picks up anything the notification would
+	// have accelerated (§5.3 step 5).
+	return NewScheduler(st, log, DefaultLoopConfig(), nil)
+}
+
+func healthMux(st *store.SchedulerStore, sched *Scheduler, ready *atomic.Bool) *http.ServeMux {
+	mux := http.NewServeMux()
+
+	// /healthz is LIVENESS: is the process itself functioning? It deliberately
+	// does NOT touch Postgres. A DB outage must not make every scheduler replica
+	// fail its liveness probe and get killed — restarting them fixes nothing and
+	// guarantees an empty fleet the moment the database returns.
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	// /readyz is READINESS: can this replica actually do its job right now? It
+	// does query the database, because a replica that cannot claim should be
+	// taken out of rotation rather than silently accepting no work.
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !ready.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"draining"}`))
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if err := st.Ready(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprintf(w, `{"status":"unready","err":%q}`, err.Error())
+			return
+		}
+		if err := sched.LastError(); err != nil {
+			// A loop that is erroring is a real degradation even when the probe
+			// query succeeds, so it is surfaced rather than hidden.
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprintf(w, `{"status":"degraded","err":%q}`, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ready"}`))
+	})
+	return mux
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func parseLevel(s string) slog.Level {
+	switch s {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}

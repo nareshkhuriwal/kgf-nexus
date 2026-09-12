@@ -76,3 +76,76 @@ attempt. No row is written by both in the same state, so no lost update.
 **Actionable:** the dag-engine's Postgres grant on `task_attempts` must be
 `INSERT` only — table-level, satisfying ADR-0011's "enforced by the database,
 not code review" requirement.
+
+---
+
+## From scheduler workstream
+
+### F6. §5.3 specified `REPEATABLE READ`, which does not work — CORRECTED
+**Severity:** real bug in the architecture spec. **Status: FIXED in docs/ARCHITECTURE.md §5.3.**
+Under REPEATABLE READ, a locking read reaching a row another transaction has
+already COMMITTED an update to does not skip it — it aborts the whole
+transaction with SQLSTATE 40001. `SKIP LOCKED` only skips rows *currently
+locked*; it does nothing for rows already committed by someone else. With N
+replicas on one queue those aborts are constant and every claim degrades into a
+retry loop.
+
+Verified empirically against Postgres 16 (concurrent sessions, snapshot held
+open across a committed UPDATE):
+- `REPEATABLE READ` → `ERROR: could not serialize access due to concurrent update`
+- `READ COMMITTED`  → claim proceeds normally
+
+Nothing is lost: the no-double-dispatch argument rests on the row locks, the
+`state='PENDING'` CAS guard, and `UNIQUE(attempt_id)` on leases — none of which
+depend on snapshot isolation. §5.3 now specifies READ COMMITTED with this
+rationale inline.
+
+### F7. `run_events.seq` has no safe allocation mechanism
+**Severity:** real schema gap. **Status: FIXED via migration 0002.**
+`UNIQUE(run_id, seq)` with a plain `INT seq` and no counter forces `max(seq)+1`,
+which races — the scheduler hit `duplicate key value violates unique constraint
+"run_events_run_id_seq_key"` under concurrency. The agent worked around it with
+`pg_advisory_xact_lock(hashtextextended(run_id))`, which is correct but
+serializes all event writers for a run on an advisory lock.
+**Resolution:** added `workflow_runs.event_seq` as an in-row counter; allocation
+becomes `UPDATE ... SET event_seq = event_seq + 1 RETURNING event_seq`, which is
+atomic, contends only on that run's row, and needs no advisory lock. The
+advisory-lock path remains correct and can be removed opportunistically.
+
+### F8. Invariant 4 contradicts the ADR-0011 ownership matrix (run_events, timers)
+**Severity:** genuine contract inconsistency. **Status: resolved — see below.**
+Invariant 4 requires FIVE facts to commit in one transaction (reservation,
+lease, attempt CAS, run_event, timers), but the matrix assigns `run_events` to
+event-service and `timers` to workflow-manager, while naming only ONE exception
+(reservations + workers.committed). These cannot both hold.
+**Resolution (adopted):** invariant 4 wins — atomicity is the guarantee; table
+ownership is an organizing principle. The dispatch transaction is therefore a
+**documented three-table exception**: reservations + workers.committed,
+run_events, and timers. ADR-0011's exception clause needs widening to say so
+explicitly. Everywhere *outside* the claim, ownership holds and services call
+the owner's API.
+
+### F9. Worker DEAD transition spans scheduler and resource-manager ownership
+**Severity:** real, needs a decision.
+The liveness sweeper writes `workers.state`, owned by resource-manager. It lives
+in the scheduler because the DEAD transition must be atomic with expiring that
+worker's leases (scheduler-owned): a worker marked DEAD whose leases are still
+live is dispatched-to by no one and recovered by no one — work silently stalls.
+**Options:** (a) a fourth documented exception, or (b) move the whole
+worker-death path into resource-manager and have it call the scheduler's API to
+expire leases, accepting that the two writes are then not atomic.
+**Deferred to reconciliation pass.** Current behaviour is correct but violates
+the stated matrix.
+
+### F10. §5.3 step 3 references namespace quota, which the schema cannot express
+**Severity:** minor doc/scope mismatch.
+There is no quota table; quotas are Phase 2 per §11. The scheduler implemented
+the `concurrency_slots` semaphore (which the schema does support) and correctly
+left quota out rather than inventing storage. §5.3 should mark the quota step as
+Phase 2.
+
+### Scheduler scoping decision (not a defect)
+Timer claiming, lease reconciliation and the liveness sweep are scoped to the
+replica's own queue. The docs do not specify this, but a fleet-wide reconciler
+would have every replica contending on every other queue's rows — exactly the
+coordination ADR-0002 exists to eliminate. Worth adding to §3.2.
