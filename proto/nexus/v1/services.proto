@@ -1,0 +1,225 @@
+syntax = "proto3";
+
+package nexus.v1;
+
+import "nexus/v1/common.proto";
+import "nexus/v1/workflow.proto";
+
+option go_package = "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1;nexusv1";
+
+// Internal control-plane service APIs (F4, F23, F31).
+//
+// ADR-0011 requires every service to expose a gRPC API so that cross-service
+// writes go through the owner rather than around it. The frozen proto defined
+// only WorkerService, which left the ownership matrix unimplementable as
+// written: no service had any RPC by which to release a reservation or
+// transition a worker, so the only way to satisfy the matrix was to violate it.
+// Three workstreams independently hand-rolled descriptors to work around this.
+// These definitions replace those.
+//
+// These are INTERNAL APIs, reachable only between control-plane services over
+// mTLS. They are deliberately not exposed through the API gateway: a worker
+// that could call ReleaseReservation directly could free capacity it does not
+// hold.
+
+// ─── Resource manager: the capacity ledger ────────────────────────────────
+service ResourceManagerService {
+  rpc Reserve(ReserveRequest) returns (ReserveResponse);
+  // Idempotent: releasing an already-released reservation succeeds rather than
+  // erroring, because the caller cannot always know whether its previous
+  // attempt landed, and an error would push it toward unsafe retry logic.
+  rpc ReleaseReservation(ReleaseReservationRequest) returns (ReleaseResponse);
+  // Reconcile against a worker's reported ground truth. Returns what it freed
+  // so the caller can log the leak rather than silently absorbing it.
+  rpc ReconcileWorker(ReconcileWorkerRequest) returns (ReconcileWorkerResponse);
+  rpc TransitionWorker(TransitionWorkerRequest) returns (TransitionWorkerResponse);
+  rpc GetCapacity(GetCapacityRequest) returns (GetCapacityResponse);
+}
+
+message ReserveRequest {
+  string worker_id = 1;
+  string attempt_id = 2;
+  ResourceVector resources = 3;
+}
+message ReserveResponse {
+  string reservation_id = 1;
+  bool granted = 2;
+  // Populated when granted=false: which dimensions fell short, so the caller
+  // can record a structured pending_reason instead of an opaque failure.
+  repeated string shortfalls = 3;
+}
+
+message ReleaseReservationRequest {
+  string attempt_id = 1;
+}
+message ReleaseResponse {
+  bool released = 1;
+  // False when the reservation was already gone. Not an error: see the
+  // idempotency note on the RPC.
+  bool was_present = 2;
+}
+
+message ReconcileWorkerRequest {
+  string worker_id = 1;
+  // Ground truth from the worker's heartbeat.
+  repeated string running_attempt_ids = 2;
+  // A reservation younger than this is never treated as a leak. Without a grace
+  // period the detector releases work dispatched moments ago -- before the
+  // worker has had a chance to acknowledge it -- and becomes a leak GENERATOR
+  // rather than a leak detector (F25).
+  int64 grace_ms = 3;
+}
+message ReconcileWorkerResponse {
+  repeated string released_attempt_ids = 1;
+  ResourceVector reclaimed = 2;
+}
+
+message TransitionWorkerRequest {
+  string worker_id = 1;
+  // ACTIVE | DRAINING | QUARANTINED | DEAD
+  string target_state = 2;
+  string reason = 3;
+}
+message TransitionWorkerResponse {
+  bool transitioned = 1;
+  string previous_state = 2;
+}
+
+message GetCapacityRequest {
+  string namespace = 1;
+  string queue = 2;
+}
+message GetCapacityResponse {
+  ResourceVector advertised = 1;
+  ResourceVector committed = 2;
+  int32 active_workers = 3;
+  int32 draining_workers = 4;
+}
+
+// ─── DAG engine: dependency resolution ────────────────────────────────────
+service DagEngineService {
+  rpc ValidateSpec(ValidateSpecRequest) returns (ValidateSpecResponse);
+  rpc MaterializeRun(MaterializeRunRequest) returns (MaterializeRunResponse);
+  // Recompute the frontier after an attempt reaches a terminal state.
+  rpc ReconcileRun(ReconcileRunRequest) returns (ReconcileRunResponse);
+}
+
+message ValidateSpecRequest {
+  WorkflowSpec spec = 1;
+}
+message ValidateSpecResponse {
+  bool valid = 1;
+  // ALL errors, not just the first: an author fixing a spec one error per
+  // submit round-trip is a poor experience and hides interacting problems.
+  repeated ValidationError errors = 2;
+}
+message ValidationError {
+  // Machine-readable, e.g. "cycle_detected", "type_mismatch".
+  string code = 1;
+  string message = 2;
+  string node_id = 3;
+  // For cycle_detected: the actual cycle path, so the author can see the loop
+  // rather than being told one exists.
+  repeated string path = 4;
+}
+
+message MaterializeRunRequest {
+  string run_id = 1;
+}
+message MaterializeRunResponse {
+  int32 nodes_created = 1;
+  int32 initial_attempts_created = 2;
+}
+
+message ReconcileRunRequest {
+  string run_id = 1;
+  // Optional: the attempt whose terminal transition triggered this.
+  string trigger_attempt_id = 2;
+}
+message ReconcileRunResponse {
+  repeated string newly_ready_node_ids = 1;
+  repeated string skipped_node_ids = 2;
+  repeated string upstream_failed_node_ids = 3;
+  // Set when the run reached a terminal state this cycle.
+  RunState terminal_run_state = 4;
+}
+
+// ─── Workflow manager: run lifecycle ──────────────────────────────────────
+service WorkflowManagerService {
+  rpc CreateRun(CreateRunRequest) returns (CreateRunResponse);
+  rpc CancelRun(CancelRunRequest) returns (RunActionResponse);
+  rpc PauseRun(PauseRunRequest) returns (RunActionResponse);
+  rpc ResumeRun(ResumeRunRequest) returns (RunActionResponse);
+  rpc RetryRun(RetryRunRequest) returns (RunActionResponse);
+}
+
+message CreateRunRequest {
+  string spec_id = 1;
+  string namespace = 2;
+  // Deduplicates at the outermost layer via UNIQUE(namespace, idempotency_key).
+  string idempotency_key = 3;
+  map<string, string> params = 4;
+  int32 priority = 5;
+  string trigger_kind = 6;
+}
+message CreateRunResponse {
+  string run_id = 1;
+  // True when an existing run was returned rather than a new one created.
+  bool deduplicated = 2;
+}
+
+message CancelRunRequest { string run_id = 1; string reason = 2; }
+message PauseRunRequest  { string run_id = 1; }
+message ResumeRunRequest { string run_id = 1; }
+message RetryRunRequest  { string run_id = 1; bool only_failed = 2; }
+
+message RunActionResponse {
+  RunState state = 1;
+  // False when the transition was refused as illegal for the current state.
+  bool accepted = 2;
+  string reason = 3;
+}
+
+// ─── Event service: append-only history ───────────────────────────────────
+service EventService {
+  rpc AppendEvent(AppendEventRequest) returns (AppendEventResponse);
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+}
+
+message AppendEventRequest {
+  string run_id = 1;
+  string node_id = 2;
+  string attempt_id = 3;
+  string kind = 4;
+  string payload_json = 5;
+  // Required, never optional: an unattributed state transition is useless in
+  // an audit trail, which is a primary purpose of this log.
+  string actor = 6;
+}
+message AppendEventResponse {
+  int64 id = 1;
+  int32 seq = 2;
+}
+
+message ListEventsRequest {
+  string run_id = 1;
+  // Cursor on seq, not timestamp: append-only plus UNIQUE(run_id, seq) gives a
+  // total order with no ties, so a reconnecting tail resumes with neither gaps
+  // nor duplicates. Timestamps can collide and are not monotonic across hosts.
+  int32 after_seq = 2;
+  int32 limit = 3;
+}
+message ListEventsResponse {
+  repeated RunEvent events = 1;
+}
+message RunEvent {
+  int64 id = 1;
+  string run_id = 2;
+  int32 seq = 3;
+  string node_id = 4;
+  string attempt_id = 5;
+  string kind = 6;
+  string payload_json = 7;
+  string actor = 8;
+  int64 occurred_at_unix_ms = 9;
+}

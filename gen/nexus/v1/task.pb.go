@@ -247,8 +247,21 @@ type TaskSpec struct {
 	ConcurrencyLimit int32  `protobuf:"varint,16,opt,name=concurrency_limit,json=concurrencyLimit,proto3" json:"concurrency_limit,omitempty"`
 	// Trigger rule: when this node becomes eligible given upstream states.
 	// MVP supports all_success and all_done (architecture §11 Phase 1).
-	TriggerRule   TriggerRule `protobuf:"varint,17,opt,name=trigger_rule,json=triggerRule,proto3,enum=nexus.v1.TriggerRule" json:"trigger_rule,omitempty"`
-	Priority      int32       `protobuf:"varint,18,opt,name=priority,proto3" json:"priority,omitempty"`
+	TriggerRule TriggerRule `protobuf:"varint,17,opt,name=trigger_rule,json=triggerRule,proto3,enum=nexus.v1.TriggerRule" json:"trigger_rule,omitempty"`
+	// F18: an input may be bound to a constant or to a run parameter, not only
+	// to an upstream output via Edge. Without these a workflow cannot pass a
+	// literal or bind a run param at all, which no real pipeline survives.
+	//
+	// Resolution precedence is edge > param > default (internal/dag InputPlan):
+	// an edge-supplied input always wins, because a value produced by the run is
+	// strictly more specific than one chosen at authoring time.
+	//
+	// Values are JSON-encoded so a single field carries every ValueSpec type
+	// without a per-type oneof; the declared `inputs` type is what validates them.
+	InputLiterals map[string]string `protobuf:"bytes,19,rep,name=input_literals,json=inputLiterals,proto3" json:"input_literals,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Key = this task's input name, value = the WorkflowSpec.params key.
+	InputParams   map[string]string `protobuf:"bytes,20,rep,name=input_params,json=inputParams,proto3" json:"input_params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Priority      int32             `protobuf:"varint,18,opt,name=priority,proto3" json:"priority,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -400,6 +413,20 @@ func (x *TaskSpec) GetTriggerRule() TriggerRule {
 		return x.TriggerRule
 	}
 	return TriggerRule_TRIGGER_RULE_UNSPECIFIED
+}
+
+func (x *TaskSpec) GetInputLiterals() map[string]string {
+	if x != nil {
+		return x.InputLiterals
+	}
+	return nil
+}
+
+func (x *TaskSpec) GetInputParams() map[string]string {
+	if x != nil {
+		return x.InputParams
+	}
+	return nil
 }
 
 func (x *TaskSpec) GetPriority() int32 {
@@ -803,7 +830,8 @@ var File_nexus_v1_task_proto protoreflect.FileDescriptor
 
 const file_nexus_v1_task_proto_rawDesc = "" +
 	"\n" +
-	"\x13nexus/v1/task.proto\x12\bnexus.v1\x1a\x15nexus/v1/common.proto\"\x95\b\n" +
+	"\x13nexus/v1/task.proto\x12\bnexus.v1\x1a\x15nexus/v1/common.proto\"\xad\n" +
+	"\n" +
 	"\bTaskSpec\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x19\n" +
 	"\btask_ref\x18\x02 \x01(\tR\ataskRef\x12\x18\n" +
@@ -822,7 +850,9 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"\aruntime\x18\x0e \x01(\v2\x15.nexus.v1.RuntimeSpecR\aruntime\x12'\n" +
 	"\x0fconcurrency_key\x18\x0f \x01(\tR\x0econcurrencyKey\x12+\n" +
 	"\x11concurrency_limit\x18\x10 \x01(\x05R\x10concurrencyLimit\x128\n" +
-	"\ftrigger_rule\x18\x11 \x01(\x0e2\x15.nexus.v1.TriggerRuleR\vtriggerRule\x12\x1a\n" +
+	"\ftrigger_rule\x18\x11 \x01(\x0e2\x15.nexus.v1.TriggerRuleR\vtriggerRule\x12L\n" +
+	"\x0einput_literals\x18\x13 \x03(\v2%.nexus.v1.TaskSpec.InputLiteralsEntryR\rinputLiterals\x12F\n" +
+	"\finput_params\x18\x14 \x03(\v2#.nexus.v1.TaskSpec.InputParamsEntryR\vinputParams\x12\x1a\n" +
 	"\bpriority\x18\x12 \x01(\x05R\bpriority\x1aN\n" +
 	"\vInputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
@@ -831,6 +861,12 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
 	"\x05value\x18\x02 \x01(\v2\x13.nexus.v1.ValueSpecR\x05value:\x028\x01\x1a?\n" +
 	"\x11NodeSelectorEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a@\n" +
+	"\x12InputLiteralsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a>\n" +
+	"\x10InputParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"^\n" +
 	"\tValueSpec\x12\x12\n" +
@@ -910,7 +946,7 @@ func file_nexus_v1_task_proto_rawDescGZIP() []byte {
 }
 
 var file_nexus_v1_task_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_nexus_v1_task_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_nexus_v1_task_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_nexus_v1_task_proto_goTypes = []any{
 	(TriggerRule)(0),        // 0: nexus.v1.TriggerRule
 	(AttemptState)(0),       // 1: nexus.v1.AttemptState
@@ -924,37 +960,41 @@ var file_nexus_v1_task_proto_goTypes = []any{
 	nil,                     // 9: nexus.v1.TaskSpec.InputsEntry
 	nil,                     // 10: nexus.v1.TaskSpec.OutputsEntry
 	nil,                     // 11: nexus.v1.TaskSpec.NodeSelectorEntry
-	nil,                     // 12: nexus.v1.RuntimeSpec.EnvEntry
-	nil,                     // 13: nexus.v1.TaskAssignment.InputsEntry
-	(*ResourceRequest)(nil), // 14: nexus.v1.ResourceRequest
-	(*Timeouts)(nil),        // 15: nexus.v1.Timeouts
-	(*RetryPolicy)(nil),     // 16: nexus.v1.RetryPolicy
-	(IdempotencyMode)(0),    // 17: nexus.v1.IdempotencyMode
-	(*ResultRef)(nil),       // 18: nexus.v1.ResultRef
+	nil,                     // 12: nexus.v1.TaskSpec.InputLiteralsEntry
+	nil,                     // 13: nexus.v1.TaskSpec.InputParamsEntry
+	nil,                     // 14: nexus.v1.RuntimeSpec.EnvEntry
+	nil,                     // 15: nexus.v1.TaskAssignment.InputsEntry
+	(*ResourceRequest)(nil), // 16: nexus.v1.ResourceRequest
+	(*Timeouts)(nil),        // 17: nexus.v1.Timeouts
+	(*RetryPolicy)(nil),     // 18: nexus.v1.RetryPolicy
+	(IdempotencyMode)(0),    // 19: nexus.v1.IdempotencyMode
+	(*ResultRef)(nil),       // 20: nexus.v1.ResultRef
 }
 var file_nexus_v1_task_proto_depIdxs = []int32{
 	9,  // 0: nexus.v1.TaskSpec.inputs:type_name -> nexus.v1.TaskSpec.InputsEntry
 	10, // 1: nexus.v1.TaskSpec.outputs:type_name -> nexus.v1.TaskSpec.OutputsEntry
-	14, // 2: nexus.v1.TaskSpec.resources:type_name -> nexus.v1.ResourceRequest
+	16, // 2: nexus.v1.TaskSpec.resources:type_name -> nexus.v1.ResourceRequest
 	11, // 3: nexus.v1.TaskSpec.node_selector:type_name -> nexus.v1.TaskSpec.NodeSelectorEntry
-	15, // 4: nexus.v1.TaskSpec.timeouts:type_name -> nexus.v1.Timeouts
-	16, // 5: nexus.v1.TaskSpec.retry:type_name -> nexus.v1.RetryPolicy
-	17, // 6: nexus.v1.TaskSpec.idempotency:type_name -> nexus.v1.IdempotencyMode
+	17, // 4: nexus.v1.TaskSpec.timeouts:type_name -> nexus.v1.Timeouts
+	18, // 5: nexus.v1.TaskSpec.retry:type_name -> nexus.v1.RetryPolicy
+	19, // 6: nexus.v1.TaskSpec.idempotency:type_name -> nexus.v1.IdempotencyMode
 	5,  // 7: nexus.v1.TaskSpec.cache:type_name -> nexus.v1.CachePolicy
 	6,  // 8: nexus.v1.TaskSpec.runtime:type_name -> nexus.v1.RuntimeSpec
 	0,  // 9: nexus.v1.TaskSpec.trigger_rule:type_name -> nexus.v1.TriggerRule
-	12, // 10: nexus.v1.RuntimeSpec.env:type_name -> nexus.v1.RuntimeSpec.EnvEntry
-	7,  // 11: nexus.v1.RuntimeSpec.secrets:type_name -> nexus.v1.SecretRef
-	3,  // 12: nexus.v1.TaskAssignment.spec:type_name -> nexus.v1.TaskSpec
-	13, // 13: nexus.v1.TaskAssignment.inputs:type_name -> nexus.v1.TaskAssignment.InputsEntry
-	4,  // 14: nexus.v1.TaskSpec.InputsEntry.value:type_name -> nexus.v1.ValueSpec
-	4,  // 15: nexus.v1.TaskSpec.OutputsEntry.value:type_name -> nexus.v1.ValueSpec
-	18, // 16: nexus.v1.TaskAssignment.InputsEntry.value:type_name -> nexus.v1.ResultRef
-	17, // [17:17] is the sub-list for method output_type
-	17, // [17:17] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	12, // 10: nexus.v1.TaskSpec.input_literals:type_name -> nexus.v1.TaskSpec.InputLiteralsEntry
+	13, // 11: nexus.v1.TaskSpec.input_params:type_name -> nexus.v1.TaskSpec.InputParamsEntry
+	14, // 12: nexus.v1.RuntimeSpec.env:type_name -> nexus.v1.RuntimeSpec.EnvEntry
+	7,  // 13: nexus.v1.RuntimeSpec.secrets:type_name -> nexus.v1.SecretRef
+	3,  // 14: nexus.v1.TaskAssignment.spec:type_name -> nexus.v1.TaskSpec
+	15, // 15: nexus.v1.TaskAssignment.inputs:type_name -> nexus.v1.TaskAssignment.InputsEntry
+	4,  // 16: nexus.v1.TaskSpec.InputsEntry.value:type_name -> nexus.v1.ValueSpec
+	4,  // 17: nexus.v1.TaskSpec.OutputsEntry.value:type_name -> nexus.v1.ValueSpec
+	20, // 18: nexus.v1.TaskAssignment.InputsEntry.value:type_name -> nexus.v1.ResultRef
+	19, // [19:19] is the sub-list for method output_type
+	19, // [19:19] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_nexus_v1_task_proto_init() }
@@ -969,7 +1009,7 @@ func file_nexus_v1_task_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nexus_v1_task_proto_rawDesc), len(file_nexus_v1_task_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   11,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

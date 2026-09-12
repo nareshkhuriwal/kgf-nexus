@@ -49,6 +49,20 @@ message TaskSpec {
   // MVP supports all_success and all_done (architecture §11 Phase 1).
   TriggerRule trigger_rule = 17;
 
+  // F18: an input may be bound to a constant or to a run parameter, not only
+  // to an upstream output via Edge. Without these a workflow cannot pass a
+  // literal or bind a run param at all, which no real pipeline survives.
+  //
+  // Resolution precedence is edge > param > default (internal/dag InputPlan):
+  // an edge-supplied input always wins, because a value produced by the run is
+  // strictly more specific than one chosen at authoring time.
+  //
+  // Values are JSON-encoded so a single field carries every ValueSpec type
+  // without a per-type oneof; the declared `inputs` type is what validates them.
+  map<string, string> input_literals = 19;
+  // Key = this task's input name, value = the WorkflowSpec.params key.
+  map<string, string> input_params = 20;
+
   int32 priority = 18;
 }
 
