@@ -3,10 +3,11 @@ package upstream
 import (
 	"context"
 	"fmt"
+	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"log/slog"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // dagGRPC calls the dag-engine, which owns task_nodes and task_edges.
@@ -24,7 +25,11 @@ type dagGRPC struct {
 }
 
 func dialDAG(ctx context.Context, addr string, log *slog.Logger) (*dagGRPC, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds, terr := transport.DialOption()
+	if terr != nil {
+		return nil, fmt.Errorf("resolve TLS dial options: %w", terr)
+	}
+	conn, err := grpc.NewClient(config.PeerTarget(addr), append(config.PeerDialOptions(), creds)...)
 	if err != nil {
 		return nil, fmt.Errorf("dial dag-engine at %s: %w", addr, err)
 	}

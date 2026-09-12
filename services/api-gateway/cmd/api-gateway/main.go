@@ -29,6 +29,7 @@ import (
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/rest"
@@ -129,7 +130,15 @@ func run() error {
 	}
 
 	// ── worker gRPC listener ──────────────────────────────────────────────
-	workerSrv := grpc.NewServer(
+	//
+	// This is the one hop that leaves the control-plane network: agents connect
+	// from the execution plane and every call carries an API key and a session
+	// token, so it is the listener where transport encryption matters most.
+	workerTLS, err := transport.ServerOptions()
+	if err != nil {
+		return fmt.Errorf("resolve TLS server options: %w", err)
+	}
+	workerOpts := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(workergrpc.AuthUnaryInterceptor(auth)),
 		// Long polling holds connections open, so the keepalive policy must tolerate
 		// a connection with no activity for the duration of a poll. Without this,
@@ -145,8 +154,9 @@ func run() error {
 		}),
 		// A chatty fleet sends small messages; capping receive size bounds the
 		// memory a misbehaving agent can make the gateway allocate.
-		grpc.MaxRecvMsgSize(4<<20),
-	)
+		grpc.MaxRecvMsgSize(4 << 20),
+	}
+	workerSrv := grpc.NewServer(append(workerOpts, workerTLS...)...)
 
 	wcfg := workergrpc.DefaultConfig()
 	wcfg.ResultStore = &nexusv1.ResultStoreConfig{

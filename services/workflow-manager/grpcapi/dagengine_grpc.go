@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"log/slog"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // The dag-engine's gRPC surface is a HAND-WRITTEN descriptor with a JSON codec
@@ -91,7 +92,11 @@ type deConn struct {
 func dialDAGEngine(addr string, log *slog.Logger) (*deConn, error) {
 	// Insecure for Phase 1, matching every other inter-service client here.
 	// ADR-0011 puts mTLS in the deployment layer.
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds, terr := transport.DialOption()
+	if terr != nil {
+		return nil, fmt.Errorf("resolve TLS dial options: %w", terr)
+	}
+	conn, err := grpc.NewClient(config.PeerTarget(addr), append(config.PeerDialOptions(), creds)...)
 	if err != nil {
 		return nil, fmt.Errorf("dial dag-engine at %s: %w", addr, err)
 	}

@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	rmv1 "github.com/khuriwalgroup/kgf-nexus/services/resource-manager/gen/nexus/rm/v1"
 	"github.com/khuriwalgroup/kgf-nexus/services/resource-manager/internal/server"
 	"google.golang.org/grpc"
@@ -117,7 +118,13 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	// PeerServerOptions bounds how long one connection lives. Without it a client
 	// that connected before an address swap keeps using a healthy connection to
 	// whatever now answers at the old address, and nothing re-resolves it.
-	gs := grpc.NewServer(config.PeerServerOptions()...)
+	sopts, terr := transport.ServerOptions()
+	if terr != nil {
+		// Refusing to start is the point: a deployment that configured TLS
+		// incompletely must not quietly serve plaintext instead.
+		return fmt.Errorf("resolve TLS server options: %w", terr)
+	}
+	gs := grpc.NewServer(append(config.PeerServerOptions(), sopts...)...)
 	rmv1.RegisterResourceManagerServiceServer(gs, svc)
 	hs := health.NewServer()
 	healthpb.RegisterHealthServer(gs, hs)

@@ -3,10 +3,11 @@ package worker
 import (
 	"context"
 	"fmt"
+	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -35,15 +36,28 @@ func (g *GRPCClient) WithAPIKey(key string) *GRPCClient { g.apiKey = key; return
 
 // DialControlPlane connects to the worker gRPC endpoint.
 //
-// Insecure by default is a DEVELOPMENT posture: the worker RPC surface carries
-// lease tokens and session tokens, which are bearer credentials, so a production
-// deployment must terminate TLS. This is flagged here rather than silently
-// defaulted because the failure mode is invisible.
+// This is the one hop that leaves the control-plane network, and every RPC over it
+// carries an API key, a session token and lease tokens -- all bearer credentials,
+// which a passive observer can simply reuse. So transport security matters more
+// here than on any internal hop.
+//
+// Credentials come from the environment when the caller supplies no options (see
+// internal/transport), so a deployment that configures certs gets TLS without a
+// code change, and one that configures none still gets plaintext exactly as before.
+// Caller-supplied options still win, which keeps the existing contract for tests
+// and for an embedder that wants its own credentials.
 func DialControlPlane(ctx context.Context, target string, opts ...grpc.DialOption) (*GRPCClient, error) {
 	if len(opts) == 0 {
-		opts = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+		creds, terr := transport.DialOption()
+		if terr != nil {
+			// Refusing to start beats connecting in the clear: an agent that
+			// silently downgraded would ship its credentials unencrypted while
+			// every health check stayed green.
+			return nil, fmt.Errorf("resolve TLS dial options: %w", terr)
+		}
+		opts = append(config.PeerDialOptions(), creds)
 	}
-	conn, err := grpc.NewClient(target, opts...)
+	conn, err := grpc.NewClient(config.PeerTarget(target), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("dial control plane %s: %w", target, err)
 	}

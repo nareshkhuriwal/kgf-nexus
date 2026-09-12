@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"log/slog"
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 )
@@ -25,7 +26,11 @@ type wfmRunStateClient struct {
 }
 
 func dialWFMRunState(addr string, log *slog.Logger) (*wfmRunStateClient, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds, terr := transport.DialOption()
+	if terr != nil {
+		return nil, fmt.Errorf("resolve TLS dial options: %w", terr)
+	}
+	conn, err := grpc.NewClient(config.PeerTarget(addr), append(config.PeerDialOptions(), creds)...)
 	if err != nil {
 		return nil, fmt.Errorf("dial workflow-manager at %s: %w", addr, err)
 	}

@@ -22,6 +22,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/dag"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 )
 
 func main() {
@@ -100,7 +101,13 @@ func run() error {
 	// PeerServerOptions bounds how long one connection lives. Without it a client
 	// that connected before an address swap keeps using a healthy connection to
 	// whatever now answers at the old address, and nothing re-resolves it.
-	grpcSrv := grpc.NewServer(config.PeerServerOptions()...)
+	sopts, terr := transport.ServerOptions()
+	if terr != nil {
+		// Refusing to start is the point: a deployment that configured TLS
+		// incompletely must not quietly serve plaintext instead.
+		return fmt.Errorf("resolve TLS server options: %w", terr)
+	}
+	grpcSrv := grpc.NewServer(append(config.PeerServerOptions(), sopts...)...)
 	RegisterDagEngineService(grpcSrv, NewGRPCServer(engine, log))
 
 	lis, err := net.Listen("tcp", *grpcAddr)

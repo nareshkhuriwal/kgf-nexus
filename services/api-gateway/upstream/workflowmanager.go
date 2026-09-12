@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"log/slog"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
@@ -32,7 +33,11 @@ type wfmGRPC struct {
 }
 
 func dialWFM(ctx context.Context, addr string, log *slog.Logger) (*wfmGRPC, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds, terr := transport.DialOption()
+	if terr != nil {
+		return nil, fmt.Errorf("resolve TLS dial options: %w", terr)
+	}
+	conn, err := grpc.NewClient(config.PeerTarget(addr), append(config.PeerDialOptions(), creds)...)
 	if err != nil {
 		return nil, fmt.Errorf("dial workflow-manager at %s: %w", addr, err)
 	}

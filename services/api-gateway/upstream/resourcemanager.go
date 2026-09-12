@@ -3,10 +3,11 @@ package upstream
 import (
 	"context"
 	"fmt"
+	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"log/slog"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	rmv1 "github.com/khuriwalgroup/kgf-nexus/services/resource-manager/gen/nexus/rm/v1"
@@ -28,7 +29,11 @@ func dialRM(ctx context.Context, addr string, log *slog.Logger) (*rmGRPC, error)
 	// decomposition; it belongs in the deployment layer (a sidecar or a service
 	// mesh) rather than hard-coded here, so this is a deliberate deferral and not
 	// an oversight.
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds, terr := transport.DialOption()
+	if terr != nil {
+		return nil, fmt.Errorf("resolve TLS dial options: %w", terr)
+	}
+	conn, err := grpc.NewClient(config.PeerTarget(addr), append(config.PeerDialOptions(), creds)...)
 	if err != nil {
 		return nil, fmt.Errorf("dial resource-manager at %s: %w", addr, err)
 	}
