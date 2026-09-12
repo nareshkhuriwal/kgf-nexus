@@ -2,18 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * The three appearance choices, together in one place: theme, accent, layout.
+ * The appearance choices: theme, accent, layout.
  *
  * Together because they are one decision made three ways — "how should this
- * console look to me" — and splitting them across the menu would make the
- * operator hunt. None of them is scoped to what is on screen, which is what
- * qualifies them for the account menu rather than a page.
+ * console look to me" — and splitting them across surfaces would make the
+ * operator hunt. They now live on the SETTINGS PAGE rather than in the account
+ * menu: a swatch grid and a pair of layout miniatures are widgets, and a
+ * floating dropdown is the worst place to operate one, because a stray click
+ * outside it takes the surface away mid-choice. A page cannot be dismissed.
+ *
+ * What the menu keeps is the theme alone, as `ThemeSection`. Light-versus-dark
+ * is the one appearance choice that is made reactively — the sun comes up, the
+ * room lights change — so it has to be reachable without a navigation, while
+ * accent and layout are decided once and then left alone for months.
  *
  * NOTHING HERE HAS A SAVE BUTTON. Every control applies on click, because the
  * result is visible on the same screen the moment it is chosen: a preview IS
  * the confirmation, and a save step would only let someone leave a change
  * half-applied. Persistence is then a separate fact the panel reports honestly
- * rather than assumes — see below.
+ * rather than assumes — see `usePersisted` below.
  */
 
 import { useState } from 'react';
@@ -35,17 +42,23 @@ const LAYOUTS: { value: NavLayout; label: string; hint: string }[] = [
   { value: 'navbar', label: 'Navbar', hint: 'One top row. More vertical room for the page.' },
 ];
 
-export function AppearancePanel() {
+/**
+ * The accent and layout state, and the honesty flag that goes with them.
+ *
+ * A hook rather than duplicated `useState` in two components: the panel and any
+ * future partial view of it must agree on what "applied but not persisted"
+ * means, and the setters are the only place that fact is produced. Splitting
+ * the UI must not fork the state handling.
+ *
+ * `persisted` is whether the last choice survived being written down. The
+ * setters return false when site data is blocked, and the panel says so in the
+ * same words the API-key control uses. Silently forgetting a preference and
+ * then reverting on reload is the behaviour that makes people think a setting
+ * is broken rather than unavailable.
+ */
+function useAppearanceState() {
   const [accent, setAccentState] = useState<AccentName>(() => getAccent());
   const [layout, setLayoutState] = useState<NavLayout>(() => getNavLayout());
-  /**
-   * Whether the last choice survived being written down.
-   *
-   * The setters return false when site data is blocked, and the panel says so
-   * in the same words the API-key control uses. Silently forgetting a
-   * preference and then reverting on reload is the behaviour that makes people
-   * think a setting is broken rather than unavailable.
-   */
   const [persisted, setPersisted] = useState(true);
 
   function chooseAccent(name: AccentName) {
@@ -60,15 +73,49 @@ export function AppearancePanel() {
     setPersisted(ok);
   }
 
+  return { accent, layout, persisted, chooseAccent, chooseLayout };
+}
+
+/**
+ * Reported, never silent. Extracted because both views can produce it and the
+ * wording is the contract, not an implementation detail.
+ *
+ * role=status so the warning is announced when it appears, rather than only
+ * being available to someone who happens to re-read the panel.
+ */
+function PersistenceWarning() {
+  return (
+    <p className="appearance-warning" role="status">
+      Applied, but it won't survive a reload — this browser is blocking site data.
+    </p>
+  );
+}
+
+/**
+ * The theme control on its own, for the account menu.
+ *
+ * Reuses ThemeToggle rather than reimplementing it: that component already owns
+ * the three-state semantics and the OS-change subscription, and a second
+ * control writing the same key would be a second source of truth. It also
+ * reports its own persistence failure through its own status text, so this
+ * wrapper adds no second warning.
+ */
+export function ThemeSection() {
+  return (
+    <section className="appearance-group">
+      <h3 className="appearance-label">Theme</h3>
+      <ThemeToggle />
+    </section>
+  );
+}
+
+/** The full set, for the settings page. */
+export function AppearancePanel() {
+  const { accent, layout, persisted, chooseAccent, chooseLayout } = useAppearanceState();
+
   return (
     <div className="appearance">
-      <section className="appearance-group">
-        <h3 className="appearance-label">Theme</h3>
-        {/* Reused rather than reimplemented: it already owns the three-state
-            semantics and the OS-change subscription, and a second control
-            writing the same key would be a second source of truth. */}
-        <ThemeToggle />
-      </section>
+      <ThemeSection />
 
       <section className="appearance-group">
         <h3 className="appearance-label" id="accent-label">
@@ -141,20 +188,18 @@ export function AppearancePanel() {
                   <span className="layout-glyph-body" />
                 </span>
                 <span className="layout-name">{l.label}</span>
+                {/* Same rule as the accent grid: the tick, not the tint, is
+                    what says "this one". */}
+                <span className="layout-check" aria-hidden="true">
+                  {active ? '✓' : ''}
+                </span>
               </button>
             );
           })}
         </div>
       </section>
 
-      {!persisted && (
-        // role=status so the warning is announced when it appears, rather than
-        // only being available to someone who happens to re-read the panel.
-        <p className="appearance-warning" role="status">
-          Applied, but it won't survive a reload — this browser is blocking site
-          data.
-        </p>
-      )}
+      {!persisted && <PersistenceWarning />}
     </div>
   );
 }

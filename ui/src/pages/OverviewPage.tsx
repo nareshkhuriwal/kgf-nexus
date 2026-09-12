@@ -28,6 +28,7 @@
  */
 
 
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAttention, useCapacity, useFleetHealth, useRuns, useWorkers } from '../api/hooks';
 import type {
@@ -62,15 +63,31 @@ const RUN_WINDOW = 50;
 const FAILURE_WINDOW = 5;
 
 /**
- * How many triage rows the panel shows.
+ * How many triage rows the panel FETCHES.
  *
  * Well under the server's 200 cap: this is a landing panel, and an operator who
  * needs to read past a dozen rows is triaging, which is what the "view all"
- * affordance is for. Asking for one more than we render is what lets the server
- * tell us honestly that there IS more (`truncated`), instead of the page
- * inferring it from a count it would have to trust.
+ * affordance is for. Asking for more than we render is what lets the server tell
+ * us honestly that there IS more (`truncated`), instead of the page inferring it
+ * from a count it would have to trust.
  */
 const ATTENTION_LIMIT = 12;
+
+/**
+ * How many of those rows are on screen before the operator asks for more.
+ *
+ * The panel is the top of a dashboard, not the run explorer, and twelve rows of
+ * three-line prose pushed the fleet and queue context below the fold on a laptop
+ * — which inverted the page's own ordering rationale, where everything under the
+ * triage list is the context for reading it. Five is enough to see whether this
+ * is one bad spec or a namespace-wide event, and the rest are one click away.
+ *
+ * Expand-in-place rather than a scrolling box: a fixed-height scroller hides the
+ * remainder behind a gesture that no keyboard or screen-reader user is told
+ * about, whereas a button is a real, announced affordance and the expansion
+ * leaves every row on the page where find-in-page can reach it.
+ */
+const ATTENTION_PREVIEW = 5;
 
 /** What each panel shows at a glance before you drill into it. */
 const ACTIVE_PREVIEW = 6;
@@ -172,6 +189,15 @@ function oldestWaiting(runs: RunSummary[] | undefined): RunSummary | null {
  * for "no rows" on this console (a grey ∅ and "No items") reads as a gap in the
  * data rather than as an all-clear. So the empty case gets its own success-toned
  * treatment instead of <Empty>, which is reserved for absences.
+ *
+ * Only the first ATTENTION_PREVIEW rows are shown, and the disclosure below them
+ * is careful about WHOSE claim it is making. "Show N more" is a statement about
+ * this response, which the page has counted itself and can therefore promise;
+ * once everything fetched is on screen the only remaining claim about what else
+ * exists is the server's `truncated` flag, so the panel hands off to the runs
+ * view rather than implying twelve was the whole of it. The two are independent:
+ * a truncated response still gets the expand button first, because the rows we
+ * already hold are free to read and the link costs a navigation.
  */
 function AttentionPanel({
   query,
@@ -191,6 +217,14 @@ function AttentionPanel({
   // screen rather than an ErrorBox with a button.
   const forbidden = query.error instanceof ApiError && query.error.status === 403;
   const critical = (list?.items ?? []).filter((i) => i.severity === 'critical').length;
+
+  // Expansion is view state, not data: it deliberately survives the 10s refetch,
+  // because collapsing the list under an operator who had just expanded it —
+  // every ten seconds, mid-incident — would be the panel fighting them.
+  const [expanded, setExpanded] = useState(false);
+  const items = list?.items ?? [];
+  const shown = expanded ? items : items.slice(0, ATTENTION_PREVIEW);
+  const hidden = items.length - shown.length;
 
   return (
     <div className="panel ov-attention">
@@ -237,19 +271,44 @@ function AttentionPanel({
       ) : (
         <>
           <ul className="ov-attn-list">
-            {list.items.map((item, i) => (
+            {shown.map((item, i) => (
               // Index is part of the key on purpose: the same run can appear
               // twice (a failed run and its exhausted attempt are two distinct
               // things to act on), so run_id alone is not unique here.
               <AttentionRow key={`${item.run_id}:${item.kind}:${i}`} item={item} now={now} />
             ))}
           </ul>
-          {list.truncated && (
+          {hidden > 0 ? (
             <div className="panel-body ov-attn-more">
-              {/* The server said there is more; it did not say how much, so this
-                  does not invent a remainder. */}
-              <Link to="/runs">view all runs needing attention →</Link>
+              {/* A count this page is entitled to make: these rows are already in
+                  hand, so the number is exact rather than an estimate of what
+                  the server might still be holding. */}
+              <button
+                type="button"
+                className="ov-attn-expand"
+                onClick={() => setExpanded(true)}
+                aria-expanded={false}
+              >
+                Show {hidden} more
+              </button>
+              {/* Stated alongside, not instead: the server has said there is
+                  more beyond this response, and expanding to the end of what we
+                  fetched must not read as having reached the end of the list. */}
+              {list.truncated && (
+                <span className="sub ov-attn-more-note">
+                  and more beyond these {items.length}
+                </span>
+              )}
             </div>
+          ) : (
+            list.truncated && (
+              <div className="panel-body ov-attn-more">
+                {/* Everything fetched is on screen, so the only remaining claim
+                    about what else exists is the server's. It said there is
+                    more; it did not say how much, so this invents no remainder. */}
+                <Link to="/runs">view all runs needing attention →</Link>
+              </div>
+            )
           )}
         </>
       )}

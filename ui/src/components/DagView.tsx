@@ -14,6 +14,15 @@
  * colour, border dash pattern, and a glyph. A root-cause FAILED node also gets
  * an outer halo. That redundancy is what makes the view readable in greyscale,
  * at a glance, and to a colour-blind operator.
+ *
+ * Selection is deliberately NOT a fifth use of the border colour: it thickens a
+ * separate inset ring, so "which node did I click" and "what state is it in"
+ * never have to share one visual property.
+ *
+ * Edges are orthogonal rounded elbows (lib/dag edgePath) rather than curves,
+ * because a fan-out of three siblings drawn as three beziers overlaps into one
+ * blur and the operator loses the parent→child mapping that is the only reason
+ * to draw edges at all.
  */
 
 import { useMemo } from 'react';
@@ -101,20 +110,29 @@ export function DagView({
           role="img"
           aria-label={`Run DAG, ${graph.nodes.length} nodes`}
         >
+          {/*
+            Arrowheads are drawn on their own rather than inherited from the
+            path's stroke so the head keeps full opacity while the line itself
+            can sit back at a lower one: the direction of flow stays legible
+            without the edges competing with the nodes for attention.
+
+            refX places the tip at the marker's leading edge so the head lands
+            exactly on the target's border instead of overlapping into it.
+          */}
           <defs>
-            <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
-              <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--border-strong)" />
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M 0 1 L 9 5 L 0 9 z" fill="var(--border-strong)" />
             </marker>
             <marker
               id="arrow-failed"
-              viewBox="0 0 8 8"
-              refX="7"
-              refY="4"
-              markerWidth="7"
-              markerHeight="7"
+              viewBox="0 0 10 10"
+              refX="9"
+              refY="5"
+              markerWidth="6"
+              markerHeight="6"
               orient="auto"
             >
-              <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--tone-danger-bd)" />
+              <path d="M 0 1 L 9 5 L 0 9 z" fill="var(--tone-danger-bd)" />
             </marker>
           </defs>
 
@@ -145,7 +163,7 @@ export function DagView({
               <g
                 key={node.node_id}
                 transform={`translate(${x},${y})`}
-                className={`tone-${v.tone}`}
+                className={`dag-node-g tone-${v.tone}${selected ? ' selected' : ''}`}
                 onClick={() => onSelect(node.node_id)}
                 onKeyDown={(ev) => {
                   if (ev.key === 'Enter' || ev.key === ' ') {
@@ -167,39 +185,61 @@ export function DagView({
                 {node.isRootCause && (
                   <rect
                     className="dag-rootcause-halo"
-                    x={-5}
-                    y={-5}
-                    width={NODE_W + 10}
-                    height={NODE_H + 10}
-                    rx={9}
+                    x={-6}
+                    y={-6}
+                    width={NODE_W + 12}
+                    height={NODE_H + 12}
+                    rx={16}
                   />
                 )}
+                {/*
+                  The vertex is built from three stacked rects rather than one.
+                  The shadow rect sits a pixel low to read as elevation, the ring
+                  is a separate inset stroke so the selected state can thicken it
+                  WITHOUT touching the state border (channel 2), and the body
+                  carries fill (channel 1), border colour (channel 2) and border
+                  dash (channel 3). Collapsing these into one rect is what would
+                  force selection and state to share a stroke and lose a channel.
+                */}
+                <rect className="dag-node-shadow" y={2} width={NODE_W} height={NODE_H} rx={12} />
                 <rect
                   className={`dag-node${selected ? ' selected' : ''}`}
                   width={NODE_W}
                   height={NODE_H}
-                  rx={6}
+                  rx={12}
                   strokeDasharray={dashFor(v.borderStyle)}
                 />
-                <text className="dag-glyph" x={11} y={21} fill="var(--tone-bd)">
+                {/*
+                  Channel 4, the glyph, now sits in its own tinted chip. A bare
+                  glyph at 13px was the weakest of the four channels; a filled
+                  square around it survives both a thumbnail and a greyscale
+                  print, which is the whole point of the redundancy.
+                */}
+                <rect className="dag-glyph-chip" x={10} y={11} width={22} height={22} rx={7} />
+                <text className="dag-glyph" x={21} y={26} textAnchor="middle" fill="var(--tone-bd)">
                   {v.glyph}
                 </text>
-                <text className="dag-node-label" x={29} y={21}>
-                  {truncate(node.node_id, 17)}
+                {/* The node id is the thing an operator searches for, so it is
+                    the only element at full foreground weight and colour. */}
+                <text className="dag-node-label" x={40} y={26}>
+                  {truncate(node.node_id, 18)}
                 </text>
-                <text className="dag-node-sub" x={11} y={37}>
-                  {truncate(node.task_ref, 26)}
+                <text className="dag-node-sub" x={40} y={39}>
+                  {truncate(node.task_ref, 24)}
                 </text>
-                <text className="dag-node-state" x={11} y={50} fill="var(--tone-bd)">
+                {/* The state name is repeated as text under the glyph because a
+                    colour plus a symbol still leaves an operator guessing which
+                    of two symbols they are looking at. */}
+                <text className="dag-node-state" x={11} y={55} fill="var(--tone-bd)">
                   {v.label}
                 </text>
                 {attemptCount > 1 && (
-                  <text className="dag-node-sub" x={NODE_W - 11} y={50} textAnchor="end">
+                  <text className="dag-node-sub" x={NODE_W - 11} y={55} textAnchor="end">
                     {attemptCount} attempts
                   </text>
                 )}
                 {node.pendingReason && attemptCount <= 1 && (
-                  <text className="dag-node-sub" x={NODE_W - 11} y={50} textAnchor="end" fill="var(--tone-warning-fg)">
+                  <text className="dag-node-sub" x={NODE_W - 11} y={55} textAnchor="end" fill="var(--tone-warning-fg)">
                     stalled
                   </text>
                 )}

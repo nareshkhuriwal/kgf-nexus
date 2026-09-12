@@ -10,11 +10,16 @@
  * refuses to store the preference the panel must say so; a control that
  * silently forgets is indistinguishable from a broken one, and that is the
  * failure mode this file is mostly here to pin.
+ *
+ * The panel now ships in two sizes — the full set for the settings page and
+ * ThemeSection alone for the account menu — so there is a third claim to hold:
+ * the small one must carry the theme and NOT the two widgets that were moved
+ * off the dropdown, or the split has achieved nothing.
  */
 
 import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AppearancePanel } from './AppearancePanel';
+import { AppearancePanel, ThemeSection } from './AppearancePanel';
 import { ACCENTS } from '../lib/appearance';
 
 beforeEach(() => {
@@ -30,7 +35,7 @@ afterEach(() => {
 });
 
 describe('the appearance panel', () => {
-  it('offers theme, accent and layout together', () => {
+  it('offers theme, accent and layout together on the full panel', () => {
     render(<AppearancePanel />);
 
     expect(screen.getByRole('radiogroup', { name: /colour theme/i })).toBeInTheDocument();
@@ -139,5 +144,48 @@ describe('the appearance panel', () => {
     const written = Array.from({ length: inline.length }, (_, i) => inline.item(i));
     expect(written.filter((p) => p.startsWith('--tone-'))).toEqual([]);
     expect(written.sort()).toEqual(['--accent', '--accent-on', '--focus']);
+  });
+
+  /** Colour is never the only signal for which option is in effect. */
+  it('marks the selected accent and layout with a glyph as well as a fill', () => {
+    render(<AppearancePanel />);
+
+    expect(screen.getByRole('radio', { name: /indigo/i }).textContent).toContain('✓');
+    expect(screen.getByRole('radio', { name: /plum/i }).textContent).not.toContain('✓');
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Navbar' }));
+    expect(screen.getByRole('radio', { name: 'Navbar' }).textContent).toContain('✓');
+    expect(screen.getByRole('radio', { name: 'Sidebar' }).textContent).not.toContain('✓');
+  });
+});
+
+/**
+ * The compact form for the account menu.
+ *
+ * The split exists so the dropdown stops being a settings screen, which means
+ * the interesting assertion is what ThemeSection LACKS. Theme stays because it
+ * is the one appearance choice made reactively — the room lights change — while
+ * accent and layout are decided once and then left for months.
+ */
+describe('the theme-only section', () => {
+  it('offers the theme control', () => {
+    render(<ThemeSection />);
+    expect(screen.getByRole('radiogroup', { name: /colour theme/i })).toBeInTheDocument();
+  });
+
+  it('carries neither the accent grid nor the layout choices', () => {
+    render(<ThemeSection />);
+
+    expect(screen.queryByRole('radiogroup', { name: 'Accent' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radiogroup', { name: 'Layout' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /plum/i })).not.toBeInTheDocument();
+  });
+
+  /** The three-state semantics come from ThemeToggle and must survive the split. */
+  it('still applies a theme choice to the document', () => {
+    render(<ThemeSection />);
+    fireEvent.click(screen.getByRole('radio', { name: /light theme/i }));
+
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light');
   });
 });

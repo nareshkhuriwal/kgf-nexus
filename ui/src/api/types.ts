@@ -203,6 +203,63 @@ export interface Worker {
   last_heartbeat_at: string;
   cpu_utilization?: number;
   memory_utilization?: number;
+  /**
+   * How many attempts this worker is executing (DISPATCHED or RUNNING).
+   *
+   * Counted by the gateway with a correlated subquery rather than read from a
+   * denormalised counter column, deliberately — a drifting counter is exactly
+   * the kind of thing that misleads an operator mid-incident. Optional because
+   * a gateway predating the field simply omits it, and 0 is a claim we would
+   * then be making on its behalf.
+   */
+  active_attempts?: number;
+}
+
+/**
+ * One task attributed to a worker.
+ *
+ * Not `Attempt`. The two describe the same row and are read from opposite
+ * directions: on a run page the run is ambient and `task_ref` sits on the node
+ * beside the attempt, whereas read from a WORKER both of those are the answer —
+ * "this worker is running ml.train, in run 673321b5" — and neither is available
+ * from the attempt row alone. The gateway joins task_nodes to supply task_ref,
+ * so this type carries it as required rather than optional.
+ */
+export interface WorkerAttempt {
+  id: string;
+  run_id: string;
+  node_id: string;
+  /** The task this node executes, e.g. `ml.train:v2`. */
+  task_ref: string;
+  attempt_number: number;
+  state: AttemptState;
+  queue?: string;
+  scheduled_at?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+}
+
+/**
+ * GET /v1/namespaces/{ns}/workers/{id} — one worker plus the tasks on it.
+ *
+ * Two lists rather than one, because they answer different questions and a
+ * single merged list would answer neither well:
+ *
+ * - `running_attempts` is DISPATCHED + RUNNING, the same predicate the fleet
+ *   row's `active_attempts` counts. The two cannot disagree by construction,
+ *   which is what stops an operator hunting for a task that is not there.
+ * - `recent_attempts` is the terminal tail, bounded by the server. It is the
+ *   only thing a DEAD worker can say about itself: its running set is
+ *   necessarily empty, and "what was it doing when it went" is the whole
+ *   question asked of a worker that just died.
+ *
+ * Both are optional: a gateway that predates this route serves the plain worker
+ * payload, and the console must render that as "not reported" rather than as an
+ * idle worker.
+ */
+export interface WorkerDetail extends Worker {
+  running_attempts?: WorkerAttempt[];
+  recent_attempts?: WorkerAttempt[];
 }
 
 /** GET /v1/namespaces/{ns}/capacity — advertised vs committed (§8.2). */

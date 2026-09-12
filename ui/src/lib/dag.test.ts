@@ -12,7 +12,16 @@
 
 import { describe, expect, it } from 'vitest';
 import type { Attempt, NodeState, RunEdge, RunNode } from '../api/types';
-import { buildDagGraph, groupAttempts, summarizeDag } from './dag';
+import {
+  NODE_H,
+  NODE_W,
+  buildDagGraph,
+  edgePath,
+  groupAttempts,
+  layoutGrid,
+  layoutLayers,
+  summarizeDag,
+} from './dag';
 
 function node(id: string, state: NodeState, extra: Partial<RunNode> = {}): RunNode {
   return {
@@ -271,3 +280,200 @@ describe('counts and summary', () => {
     expect(summarizeDag(g)).toBe('1 node running.');
   });
 });
+
+/**
+ * Layout geometry.
+ *
+ * Tested here rather than through the DOM because both the run graph and the
+ * catalog's spec graph consume these coordinates, so a regression in them
+ * silently breaks two screens. The assertions are about RELATIONSHIPS between
+ * placements -- same column, distinct rows, bounds containing every node --
+ * rather than about literal pixel values, so retuning the gaps does not force a
+ * test rewrite while a genuinely broken layout still fails.
+ */
+describe('layout', () => {
+  const xs = (l: ReturnType<typeof layoutLayers>) => l.places.map((p) => p.x);
+  const ys = (l: ReturnType<typeof layoutLayers>) => l.places.map((p) => p.y);
+
+  it('puts each depth in its own column, left to right', () => {
+    const l = layoutLayers([['a'], ['b'], ['c']]);
+    expect(l.byId.a!.x).toBeLessThan(l.byId.b!.x);
+    expect(l.byId.b!.x).toBeLessThan(l.byId.c!.x);
+    // A single-node layer is a single row, so the column is a straight line.
+    expect(new Set(ys(l)).size).toBe(1);
+  });
+
+  it('stacks nodes within a layer into distinct rows of one column', () => {
+    const l = layoutLayers([['a'], ['b', 'c', 'd']]);
+    expect(l.byId.b!.x).toBe(l.byId.c!.x);
+    expect(l.byId.c!.x).toBe(l.byId.d!.x);
+    expect(new Set([l.byId.b!.y, l.byId.c!.y, l.byId.d!.y]).size).toBe(3);
+  });
+
+  it('leaves a gap between adjacent columns wider than the node itself is tall', () => {
+    // The gap is what an edge has to turn in; if columns ever abut, the
+    // orthogonal routing has nowhere to place its channel.
+    const l = layoutLayers([['a'], ['b']]);
+    expect(l.byId.b!.x - (l.byId.a!.x + NODE_W)).toBeGreaterThan(0);
+  });
+
+  it('reports bounds that contain every placed node', () => {
+    const l = layoutLayers([['a', 'b'], ['c']]);
+    for (const p of l.places) {
+      expect(p.x + NODE_W).toBeLessThanOrEqual(l.width);
+      expect(p.y + NODE_H).toBeLessThanOrEqual(l.height);
+    }
+  });
+
+  it('never reports zero bounds for an empty graph', () => {
+    const l = layoutLayers([]);
+    expect(l.places).toEqual([]);
+    expect(l.width).toBeGreaterThan(0);
+    expect(l.height).toBeGreaterThan(0);
+  });
+
+  /**
+   * The degenerate case behind the "DAG is not connected" report: when the API
+   * returns no edges, every node is a root and layering legitimately puts all of
+   * them at depth 0. Rendering that single layer as one column produced a very
+   * tall ribbon; it must wrap into a grid instead.
+   */
+  describe('edgeless graph', () => {
+    const ten = ['n0', 'n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7', 'n8', 'n9'];
+
+    it('wraps a single layer into a grid rather than one tall column', () => {
+      const l = layoutLayers([ten]);
+      expect(new Set(xs(l)).size).toBeGreaterThan(1);
+      expect(new Set(ys(l)).size).toBeGreaterThan(1);
+    });
+
+    it('keeps the grid wider than it is tall, unlike the column it replaces', () => {
+      const grid = layoutLayers([ten]);
+      const column = layoutLayers([['a'], ten]);
+      expect(grid.height).toBeLessThan(column.height);
+      expect(grid.width).toBeGreaterThan(NODE_W * 2);
+    });
+
+    it('places grid nodes in reading order, filling each row before the next', () => {
+      const l = layoutGrid(['a', 'b', 'c', 'd', 'e'], 4);
+      expect(l.byId.a!.y).toBe(l.byId.d!.y);
+      expect(l.byId.a!.x).toBeLessThan(l.byId.b!.x);
+      // The fifth node wraps: same column as the first, next row down.
+      expect(l.byId.e!.x).toBe(l.byId.a!.x);
+      expect(l.byId.e!.y).toBeGreaterThan(l.byId.a!.y);
+    });
+
+    it('gives every node a distinct position in the grid', () => {
+      const l = layoutLayers([ten]);
+      const seen = new Set(l.places.map((p) => `${p.x},${p.y}`));
+      expect(seen.size).toBe(ten.length);
+    });
+
+    it('reports bounds containing the whole grid', () => {
+      const l = layoutLayers([ten]);
+      for (const p of l.places) {
+        expect(p.x + NODE_W).toBeLessThanOrEqual(l.width);
+        expect(p.y + NODE_H).toBeLessThanOrEqual(l.height);
+      }
+    });
+
+    it('does not grid a graph that has real layers', () => {
+      // Two layers means edges exist, so depth is meaningful and must survive.
+      const l = layoutLayers([['a'], ['b']]);
+      expect(l.byId.a!.y).toBe(l.byId.b!.y);
+      expect(l.byId.a!.x).not.toBe(l.byId.b!.x);
+    });
+
+    it('handles a single node without wrapping or throwing', () => {
+      const l = layoutLayers([['only']]);
+      expect(l.places).toHaveLength(1);
+      expect(l.width).toBeGreaterThanOrEqual(NODE_W);
+    });
+  });
+});
+
+/**
+ * Edge routing.
+ *
+ * The path string is asserted on structurally -- where it starts, where it ends,
+ * which commands it uses -- because those are the properties that make an edge
+ * read as a connection: it must leave the source's right edge, arrive at the
+ * target's left edge, and arrive horizontally so the arrowhead points into the
+ * node.
+ */
+describe('edgePath', () => {
+  const a = { id: 'a', x: 0, y: 0 };
+  const nums = (d: string) => d.match(/-?\d+(\.\d+)?/g)!.map(Number);
+
+  it('leaves the right edge of the source at its vertical midpoint', () => {
+    const d = edgePath(a, { id: 'b', x: 300, y: 200 });
+    expect(d.startsWith(`M ${NODE_W} ${NODE_H / 2}`)).toBe(true);
+  });
+
+  it('arrives at the left edge of the target at its vertical midpoint', () => {
+    const b = { id: 'b', x: 300, y: 200 };
+    const d = edgePath(a, b);
+    expect(d.trimEnd().endsWith(`L ${b.x} ${b.y + NODE_H / 2}`)).toBe(true);
+  });
+
+  it('draws a straight line between nodes on the same row', () => {
+    // A jog between two aligned nodes is noise, and worse, implies a turn that
+    // the graph does not actually take.
+    const d = edgePath(a, { id: 'b', x: 300, y: 0 });
+    expect(d).toBe(`M ${NODE_W} ${NODE_H / 2} L 300 ${NODE_H / 2}`);
+    expect(d).not.toContain('A');
+  });
+
+  it('turns with rounded elbows, not a diagonal, when the rows differ', () => {
+    const d = edgePath(a, { id: 'b', x: 300, y: 200 });
+    // Two arcs: one out of the horizontal, one back into it.
+    expect(d.match(/A /g)).toHaveLength(2);
+  });
+
+  it('arrives horizontally whether the target is above or below', () => {
+    for (const dy of [200, -200]) {
+      const b = { id: 'b', x: 300, y: dy };
+      const d = edgePath(a, b);
+      // The final command is a horizontal L at the target's midline.
+      expect(d.trimEnd().endsWith(`L ${b.x} ${b.y + NODE_H / 2}`)).toBe(true);
+      expect(d.match(/A /g)).toHaveLength(2);
+    }
+  });
+
+  it('keeps the turn channel between the two nodes', () => {
+    // An edge that turned outside the gap would cross whichever node sits
+    // there. Only the x of each L command is checked: the numbers in an A
+    // command are radii and sweep flags, not coordinates.
+    const b = { id: 'b', x: 400, y: 150 };
+    const d = edgePath(a, b);
+    const lineXs = [...d.matchAll(/L (-?\d+(?:\.\d+)?) /g)].map((m) => Number(m[1]));
+    expect(lineXs.length).toBeGreaterThan(0);
+    for (const x of lineXs) {
+      expect(x).toBeGreaterThanOrEqual(NODE_W - 1);
+      expect(x).toBeLessThanOrEqual(b.x + 1);
+    }
+  });
+
+  it('shrinks the corner radius rather than overshooting on a tiny row offset', () => {
+    // A 4px offset cannot host a 14px radius; the arcs must not extend past the
+    // midline or the path renders as a visible kink.
+    const b = { id: 'b', x: 300, y: 4 };
+    const d = edgePath(a, b);
+    expect(d).not.toContain('NaN');
+    for (const n of nums(d)) expect(Number.isFinite(n)).toBe(true);
+  });
+
+  it('produces a finite path even when the target sits left of the source', () => {
+    // Only reachable via a cycle, which the view reports rather than hides, so
+    // the renderer must still get a drawable string.
+    const d = edgePath({ id: 'a', x: 400, y: 0 }, { id: 'b', x: 0, y: 120 });
+    expect(d).not.toContain('NaN');
+    for (const n of nums(d)) expect(Number.isFinite(n)).toBe(true);
+  });
+
+  it('is pure: the same placements always yield the same path', () => {
+    const b = { id: 'b', x: 300, y: 90 };
+    expect(edgePath(a, b)).toBe(edgePath(a, b));
+  });
+});
+

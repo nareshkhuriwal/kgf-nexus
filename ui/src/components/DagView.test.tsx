@@ -199,3 +199,141 @@ describe('the node body carries diagnostic detail', () => {
     );
   });
 });
+
+/**
+ * Connectedness.
+ *
+ * The reported symptom was a graph whose nodes rendered as a bare stack with no
+ * visible connections, so "an edge exists for every dependency and it points at
+ * its target" is now asserted rather than assumed. These tests would have
+ * caught the rendering half of that bug; the other half was the gateway
+ * omitting `edges` from the run payload entirely, which no UI test can see.
+ */
+describe('edges read as connections', () => {
+  const svg = () => document.querySelector('svg')!;
+
+  it('draws one edge path per dependency', () => {
+    render(<DagView graph={cascade()} onSelect={() => {}} />);
+    expect(svg().querySelectorAll('path.dag-edge')).toHaveLength(2);
+  });
+
+  it('points every edge at its target with an arrowhead', () => {
+    render(<DagView graph={cascade()} onSelect={() => {}} />);
+    for (const p of svg().querySelectorAll('path.dag-edge')) {
+      // Direction is the whole point: an undirected line cannot express a DAG.
+      expect(p.getAttribute('marker-end')).toMatch(/^url\(#arrow/);
+      expect(p.getAttribute('d')).toBeTruthy();
+      expect(p.getAttribute('d')).not.toContain('NaN');
+    }
+  });
+
+  it('distinguishes the path a failure propagated along', () => {
+    render(<DagView graph={cascade()} onSelect={() => {}} />);
+    // A cascade must read as a cascade, so its edges are marked and get their
+    // own arrowhead rather than sharing the neutral one.
+    const failed = svg().querySelectorAll('path.dag-edge.failed-path');
+    expect(failed.length).toBeGreaterThan(0);
+    for (const p of failed) expect(p.getAttribute('marker-end')).toBe('url(#arrow-failed)');
+  });
+
+  it('draws no edges for a graph that has none, without failing', () => {
+    const graph = buildDagGraph(
+      { nodes: [node('a', 'SUCCEEDED'), node('b', 'SUCCEEDED')], edges: [] } as Pick<
+        RunDetail,
+        'nodes' | 'edges'
+      >,
+      [],
+    );
+    render(<DagView graph={graph} onSelect={() => {}} />);
+    expect(svg().querySelectorAll('path.dag-edge')).toHaveLength(0);
+    expect(screen.getByRole('button', { name: /^a,/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^b,/ })).toBeInTheDocument();
+  });
+
+  /**
+   * An edgeless graph used to stack every node into one very tall column,
+   * because with no edges every node is a root and lands at depth 0. It must
+   * wrap into a grid instead, which is observable as more than one distinct x
+   * among the node transforms.
+   */
+  it('lays an edgeless graph out as a grid rather than one tall column', () => {
+    const ids = ['n0', 'n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7', 'n8', 'n9'];
+    const graph = buildDagGraph(
+      { nodes: ids.map((i) => node(i, 'SUCCEEDED')), edges: [] } as Pick<
+        RunDetail,
+        'nodes' | 'edges'
+      >,
+      [],
+    );
+    render(<DagView graph={graph} onSelect={() => {}} />);
+
+    const cols = new Set<string>();
+    const rows = new Set<string>();
+    for (const g of svg().querySelectorAll('g.dag-node-g')) {
+      const m = /translate\((-?[\d.]+),(-?[\d.]+)\)/.exec(g.getAttribute('transform') ?? '');
+      if (m) {
+        cols.add(m[1]!);
+        rows.add(m[2]!);
+      }
+    }
+    expect(cols.size).toBeGreaterThan(1);
+    expect(rows.size).toBeGreaterThan(1);
+    // Wider than tall, which is what distinguishes a grid from the old ribbon.
+    expect(Number(svg().getAttribute('width'))).toBeGreaterThan(
+      Number(svg().getAttribute('height')),
+    );
+  });
+});
+
+/**
+ * The four redundant state channels are a hard accessibility requirement, not a
+ * styling preference: fill, border colour, border dash and a glyph, so the view
+ * survives greyscale and colour blindness. A redesign is free to retune them but
+ * not to drop one, so their PRESENCE is pinned here.
+ */
+describe('the four redundant state channels survive the restyle', () => {
+  const graph = () =>
+    buildDagGraph(
+      {
+        nodes: [node('waiting', 'PENDING'), node('done', 'SUCCEEDED')],
+        edges: [],
+      } as Pick<RunDetail, 'nodes' | 'edges'>,
+      [],
+    );
+
+  it('keeps a tone class on every node, carrying fill and border colour', () => {
+    render(<DagView graph={graph()} onSelect={() => {}} />);
+    for (const g of document.querySelectorAll('g.dag-node-g')) {
+      // getAttribute, not .className: on an SVG element that property is an
+      // SVGAnimatedString rather than a string.
+      expect(g.getAttribute('class')).toMatch(/tone-/);
+      expect(g.querySelector('rect.dag-node')).toBeTruthy();
+    }
+  });
+
+  it('keeps the border dash channel, which distinguishes states in greyscale', () => {
+    render(<DagView graph={graph()} onSelect={() => {}} />);
+    const dashes = [...document.querySelectorAll('rect.dag-node')].map((r) =>
+      r.getAttribute('stroke-dasharray'),
+    );
+    // PENDING is dashed and SUCCEEDED is solid, so the two must not agree.
+    expect(new Set(dashes).size).toBeGreaterThan(1);
+  });
+
+  it('keeps a glyph on every node, which is the channel that needs no colour', () => {
+    render(<DagView graph={graph()} onSelect={() => {}} />);
+    for (const g of document.querySelectorAll('g.dag-node-g')) {
+      expect(g.querySelector('text.dag-glyph')?.textContent).toBeTruthy();
+    }
+  });
+
+  it('keeps selection separable from state, so neither masks the other', () => {
+    render(<DagView graph={graph()} selectedNodeId="done" onSelect={() => {}} />);
+    const selected = document.querySelectorAll('rect.dag-node.selected');
+    expect(selected).toHaveLength(1);
+    // Selection must not have consumed the state's dash channel.
+    expect(
+      document.querySelector('g.dag-node-g.selected rect.dag-node')?.getAttribute('class'),
+    ).toContain('dag-node');
+  });
+});

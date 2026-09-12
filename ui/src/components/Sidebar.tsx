@@ -7,10 +7,15 @@
  *
  * Vertical rather than horizontal by default because the destination list only
  * grows — eight today across four concerns — and a top bar that wraps to a
- * second line is worse than a rail with room to spare. The rail also gives the
- * namespace somewhere honest to live: directly under the brand, where it reads
- * as "which slice of the world am I looking at" rather than as one more control
- * lost in a row of them.
+ * second line is worse than a rail with room to spare.
+ *
+ * The namespace used to sit directly under the brand and no longer does: a
+ * mono-spaced string tucked under a wordmark reads as part of the product name
+ * rather than as context, which is noise in the one place the eye lands first.
+ * It moved to the account control at the FAR END of the rail — still permanently
+ * on screen, because an operator scoped to the wrong namespace otherwise reads
+ * a plausible empty dashboard as "nothing is running", but now adjacent to the
+ * identity it qualifies rather than to the logo.
  *
  * The account control is pinned to the BOTTOM, away from navigation. Signing
  * out is not a destination, and putting it adjacent to the links invites the
@@ -25,13 +30,20 @@ import { isEndMatch, visibleGroups } from './navItems';
 export interface SidebarProps {
   /** Gate for the Govern group. The gateway's answer, never re-derived here. */
   canAdmin: boolean;
-  /** Shown under the brand: the namespace every page's data is scoped to. */
-  namespace: string;
+  /**
+   * Accepted and deliberately UNUSED.
+   *
+   * The namespace is rendered by the account control now, not by the rail, but
+   * the prop stays in the signature so the shell that composes both layouts
+   * keeps compiling while it is updated. A later cleanup drops it from both
+   * layouts and the caller in one commit.
+   */
+  namespace?: string;
   /** The account control, composed by App so this file owns no session state. */
   account: ReactNode;
 }
 
-export function Sidebar({ canAdmin, namespace, account }: SidebarProps) {
+export function Sidebar({ canAdmin, account }: SidebarProps) {
   const groups = visibleGroups(canAdmin);
 
   return (
@@ -40,12 +52,6 @@ export function Sidebar({ canAdmin, namespace, account }: SidebarProps) {
         <span className="brand" aria-hidden="true">
           <Logo size={20} className="brand-mark" />
           <span className="brand-word">Nexus</span>
-        </span>
-        {/* The namespace is displayed, not edited, here: editing it is a rare
-            act with wide consequences, so it lives behind the account menu
-            while its VALUE stays permanently visible. */}
-        <span className="sidebar-namespace" title={`Namespace: ${namespace}`}>
-          {namespace}
         </span>
       </div>
 

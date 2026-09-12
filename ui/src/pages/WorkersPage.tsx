@@ -18,6 +18,7 @@
  * a ten-column table.
  */
 
+import { Link } from 'react-router-dom';
 import { useCapacity, useWorkers } from '../api/hooks';
 import type { Worker } from '../api/types';
 import { PageHeader } from '../components/PageHeader';
@@ -43,8 +44,16 @@ import {
  */
 export { deriveCapacity };
 
-/** Heartbeat is every 5s (§11); 3 missed beats is the conventional liveness cut. */
-const HEARTBEAT_STALE_MS = 15_000;
+/**
+ * Heartbeat is every 5s (§11); 3 missed beats is the conventional liveness cut.
+ *
+ * Exported alongside the predicate below because the worker DETAIL view applies
+ * the same test and must state the same threshold. Two screens each holding
+ * their own copy of the number is how one of them ends up calling a worker
+ * quiet while the other calls it healthy — a disagreement that costs an operator
+ * far more than the export costs us.
+ */
+export const HEARTBEAT_STALE_MS = 15_000;
 
 /**
  * A worker the control plane still calls ACTIVE while its heartbeat is stale.
@@ -54,8 +63,12 @@ const HEARTBEAT_STALE_MS = 15_000;
  * caught up, so the worker looks schedulable and is not. A DEAD worker is
  * deliberately excluded — its state already says so, and flagging it twice would
  * dilute the flag on the workers whose state does NOT.
+ *
+ * Takes a Worker rather than the detail type so the fleet table and the drill-
+ * down can both pass what they already hold: WorkerDetail extends Worker, and
+ * the predicate needs nothing the narrower shape lacks.
  */
-function heartbeatStale(worker: Worker, now: number): boolean {
+export function heartbeatStale(worker: Worker, now: number): boolean {
   const hb = parseTs(worker.last_heartbeat_at);
   if (hb === null) return false;
   return now - hb > HEARTBEAT_STALE_MS && worker.state === 'ACTIVE';
@@ -144,6 +157,7 @@ export function WorkersPage({ namespace }: { namespace: string }) {
                   <tr>
                     <th>state</th>
                     <th>host</th>
+                    <th>running</th>
                     <th>queues</th>
                     <th>cpu</th>
                     <th>memory</th>
@@ -230,12 +244,22 @@ function WorkerRow({ worker, now }: { worker: Worker; now: number }) {
         <StateBadge kind="worker" state={worker.state} />
       </td>
       <td>
-        <div className="fleet-host">
+        {/* A real <Link>, on the host cell, rather than a click handler on the
+            <tr>. A row-wide onClick is unreachable by keyboard, cannot be
+            middle-clicked into a new tab, and offers no destination on hover —
+            all three of which an operator triaging a fleet actually uses. The
+            host is the anchor because it is what the eye lands on; the id
+            beneath it stays plain text so the two do not read as two links. */}
+        <Link to={`/workers/${encodeURIComponent(worker.id)}`} className="fleet-host" title={`${worker.hostname} — what is running on it`}>
           <span className="fleet-host-name">{worker.hostname}</span>
-          <span className="fleet-host-id" title={worker.id}>
-            {shortId(worker.id, 8)}
-          </span>
-        </div>
+          <span className="fleet-host-id">{shortId(worker.id, 8)}</span>
+        </Link>
+      </td>
+      <td>
+        {/* The count the drill-down expands. Shown even when zero: "this worker
+            is running nothing" is the answer to "why is my queue not moving",
+            and an empty cell would leave it unsaid. */}
+        <RunningCell worker={worker} />
       </td>
       <td className="mono">{worker.queues?.join(', ') || EMPTY}</td>
       <td>
@@ -307,6 +331,29 @@ function WorkerRow({ worker, now }: { worker: Worker; now: number }) {
         </div>
       </td>
     </tr>
+  );
+}
+
+/**
+ * How many tasks this worker is executing.
+ *
+ * Three distinct claims, kept distinct:
+ *
+ * - a number, when the gateway counted one;
+ * - `idle` when that number is zero — the word rather than a bare "0", because
+ *   an idle worker next to a growing queue is a finding, and a digit in a
+ *   ten-column table does not read as one;
+ * - an em dash when the field is absent, which is what a gateway predating
+ *   `active_attempts` sends. Rendering that as 0 would invent an answer.
+ */
+function RunningCell({ worker }: { worker: Worker }) {
+  const n = worker.active_attempts;
+  if (n === undefined) return <span className="faint">{EMPTY}</span>;
+  if (n === 0) return <span className="faint">idle</span>;
+  return (
+    <span className="mono" title={`${n} attempt${n === 1 ? '' : 's'} DISPATCHED or RUNNING`}>
+      {n}
+    </span>
   );
 }
 

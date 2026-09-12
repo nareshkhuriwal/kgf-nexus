@@ -38,6 +38,7 @@ export const qk = {
   runAttempts: (ns: string, id: string) => ['run-attempts', ns, id] as const,
   runEvents: (ns: string, id: string) => ['run-events', ns, id] as const,
   workers: (ns: string) => ['workers', ns] as const,
+  worker: (ns: string, id: string) => ['worker', ns, id] as const,
   capacity: (ns: string) => ['capacity', ns] as const,
   schedules: (ns: string) => ['schedules', ns] as const,
   schedule: (ns: string, name: string) => ['schedule', ns, name] as const,
@@ -134,6 +135,29 @@ export function useWorkers(namespace: string) {
   });
 }
 
+/**
+ * One worker plus the tasks running on it.
+ *
+ * Polled at the same 5s as the fleet listing, and for the same reason: the
+ * heartbeat interval is 5s (§11), so a faster poll shows nothing new while a
+ * slower one lets a worker that has stopped taking work look busy. Sharing the
+ * interval also keeps the detail page and the table it was reached from from
+ * drifting into visibly different answers.
+ *
+ * Not gated on the worker being ACTIVE. A DEAD worker's page is exactly where
+ * an operator lands after a task was lost, and refusing to poll it would freeze
+ * the view at whatever the first read happened to catch.
+ */
+export function useWorker(namespace: string, workerId: string) {
+  return useQuery({
+    queryKey: qk.worker(namespace, workerId),
+    queryFn: () => api.getWorker(namespace, workerId),
+    enabled: workerId !== '',
+    refetchInterval: 5000,
+    ...base,
+  });
+}
+
 export function useCapacity(namespace: string) {
   return useQuery({
     queryKey: qk.capacity(namespace),
@@ -202,9 +226,13 @@ export function useDrainWorker(namespace: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (workerId: string) => api.drainWorker(namespace, workerId),
-    onSuccess: () => {
+    onSuccess: (_data, workerId) => {
       void qc.invalidateQueries({ queryKey: qk.workers(namespace) });
       void qc.invalidateQueries({ queryKey: qk.capacity(namespace) });
+      // The drilled-down worker too, now that drain is offered from its own
+      // page: leaving that entry stale would show ACTIVE next to a button the
+      // operator has just used, which reads as the click having failed.
+      void qc.invalidateQueries({ queryKey: qk.worker(namespace, workerId) });
     },
     retry: false,
   });

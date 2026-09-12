@@ -363,3 +363,74 @@ describe('the worker row is marked beyond its badge', () => {
     expect(row.className).toBe('');
   });
 });
+
+/**
+ * The fleet table became a drill-down.
+ *
+ * The table answers "how much capacity is there"; it cannot answer the question
+ * it raises, which is "that worker is busy — with WHAT?" So each row now links
+ * to the worker's own page. What is pinned here is that the link is a real
+ * anchor with an href: a click handler on the <tr> would be unreachable by
+ * keyboard, impossible to middle-click into a new tab, and would show the
+ * operator no destination on hover — all three of which are used when triaging
+ * a fleet.
+ */
+describe('a row drills into the worker', () => {
+  it('links the host cell to that worker’s detail view', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity')
+        ? [200, { advertised: {}, committed: {} }]
+        : [200, { workers: [worker({ id: 'wk-abc123', hostname: 'agent-cpu-1' })] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+
+    const row = (await screen.findByText('agent-cpu-1')).closest('tr')!;
+    const link = within(row).getByRole('link');
+    // An href, not an onClick: keyboard and middle-click must both work.
+    expect(link).toHaveAttribute('href', '/workers/wk-abc123');
+    expect(link).toContainElement(screen.getByText('agent-cpu-1'));
+  });
+
+  it('encodes an id that needs it, rather than emitting a broken path', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity')
+        ? [200, { advertised: {}, committed: {} }]
+        : [200, { workers: [worker({ id: 'wk/odd id', hostname: 'agent-cpu-1' })] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+
+    const row = (await screen.findByText('agent-cpu-1')).closest('tr')!;
+    expect(within(row).getByRole('link')).toHaveAttribute('href', '/workers/wk%2Fodd%20id');
+  });
+
+  /**
+   * The count the drill-down expands. Three distinct claims kept distinct: a
+   * number, `idle` for zero, and a dash when the gateway did not report the
+   * field at all — rendering that last case as 0 would invent an answer.
+   */
+  it('shows the running count, and says idle rather than 0', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity')
+        ? [200, { advertised: {}, committed: {} }]
+        : [
+            200,
+            {
+              workers: [
+                worker({ id: 'a', hostname: 'agent-busy', active_attempts: 3 }),
+                worker({ id: 'b', hostname: 'agent-idle', active_attempts: 0 }),
+                worker({ id: 'c', hostname: 'agent-silent' }),
+              ],
+            },
+          ],
+    );
+    wrap(<WorkersPage namespace="default" />);
+
+    const rowFor = async (host: string) => (await screen.findByText(host)).closest('tr')!;
+    expect(within(await rowFor('agent-busy')).getByText('3')).toBeInTheDocument();
+    // An idle worker beside a queue that is not moving IS the finding, so it is
+    // a word rather than a digit lost among ten columns.
+    expect(within(await rowFor('agent-idle')).getByText('idle')).toBeInTheDocument();
+    // active_attempts absent: "not reported", which is not the same claim as 0.
+    expect(within(await rowFor('agent-silent')).queryByText('idle')).not.toBeInTheDocument();
+  });
+});

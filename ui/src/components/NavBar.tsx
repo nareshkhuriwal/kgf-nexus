@@ -10,6 +10,13 @@
  * difference between the two layouts is presentation, and presentation is all
  * that should be duplicated.
  *
+ * The namespace is NOT here. It rode next to the brand in both layouts and
+ * read as noise beside the logotype — a mono-spaced string abutting a wordmark
+ * looks like part of the product name. It moved to the account control at the
+ * far end of the bar, which keeps the property that matters (its value is on
+ * screen at all times, so an empty dashboard is legible as "wrong namespace"
+ * rather than "nothing is running") while stopping it competing with the brand.
+ *
  * The group labels are dropped rather than rendered inline. Horizontally they
  * would double the bar's width to restate a classification the operator can
  * already infer from eight labels in a row, and the layout exists precisely for
@@ -23,11 +30,20 @@ import { isEndMatch, visibleItems } from './navItems';
 
 export interface NavBarProps {
   canAdmin: boolean;
-  namespace: string;
+  /**
+   * Accepted and deliberately UNUSED.
+   *
+   * The namespace is rendered by the account control now, not by the chrome,
+   * but the prop stays in the signature so the shell that composes both
+   * layouts keeps compiling while it is updated. It is the kind of thing a
+   * later cleanup removes in one commit across three files rather than a
+   * signature break landing in the middle of a restyle.
+   */
+  namespace?: string;
   account: ReactNode;
 }
 
-export function NavBar({ canAdmin, namespace, account }: NavBarProps) {
+export function NavBar({ canAdmin, account }: NavBarProps) {
   const items = visibleItems(canAdmin);
 
   return (
@@ -35,12 +51,6 @@ export function NavBar({ canAdmin, namespace, account }: NavBarProps) {
       <span className="brand" aria-hidden="true">
         <Logo size={20} className="brand-mark" />
         <span className="brand-word">Nexus</span>
-      </span>
-      {/* The namespace stays visible in this layout too. It is the one piece of
-          context that makes an empty dashboard readable as "wrong namespace"
-          rather than as "nothing is running". */}
-      <span className="navbar-namespace" title={`Namespace: ${namespace}`}>
-        {namespace}
       </span>
 
       <nav className="navbar-nav" aria-label="Primary">

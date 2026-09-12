@@ -303,11 +303,27 @@ export function assignLayers(
  * viewBox, not CSS lengths, so the spacing tokens do not apply to them and a
  * token indirection would only hide that.
  */
-export const NODE_W = 176;
-export const NODE_H = 56;
-const GAP_X = 76;
-const GAP_Y = 20;
-const PAD = 26;
+export const NODE_W = 196;
+export const NODE_H = 64;
+/**
+ * The horizontal gap is deliberately wide relative to the node: it is the only
+ * space an edge has to make its turn, and a route that has to elbow inside a
+ * narrow channel reads as a smudge between two boxes rather than as a
+ * connection. The vertical gap is likewise larger than the old 20 so sibling
+ * fan-outs do not stack their inbound segments on top of each other.
+ */
+const GAP_X = 104;
+const GAP_Y = 34;
+const PAD = 32;
+/** Corner radius of an orthogonal edge's turn. Tuned against GAP_X/2. */
+const ELBOW_R = 14;
+/**
+ * Columns a graph with no edges wraps at. An edgeless graph has no meaningful
+ * left→right reading order, so the only job of the layout is to let the eye
+ * sweep a block of vertices; 4 keeps the block close to square for the 8-16
+ * node runs where this case actually shows up.
+ */
+const GRID_COLS = 4;
 
 export interface Placement {
   id: string;
@@ -315,13 +331,56 @@ export interface Placement {
   y: number;
 }
 
-/** Places one node per id in `layers`, left→right by depth, top→bottom by rank. */
-export function layoutLayers(layers: string[][]): {
+export interface Layout {
   places: Placement[];
   width: number;
   height: number;
   byId: Record<string, Placement>;
-} {
+}
+
+function finish(places: Placement[], cols: number, rows: number): Layout {
+  const byId: Record<string, Placement> = {};
+  for (const p of places) byId[p.id] = p;
+  return {
+    places,
+    byId,
+    width: PAD * 2 + Math.max(1, cols) * (NODE_W + GAP_X) - GAP_X,
+    height: PAD * 2 + Math.max(1, rows) * (NODE_H + GAP_Y) - GAP_Y,
+  };
+}
+
+/**
+ * Wrap-around grid for a graph with no edges at all.
+ *
+ * Every node in an edgeless graph has indegree 0, so layering legitimately puts
+ * all of them at depth 0 -- and the layered layout then draws that single layer
+ * as one tall column, which for ten nodes is a 1000px ribbon the operator has
+ * to scroll past to learn nothing. A depth axis only means something when edges
+ * define it; with no edges there is no order to preserve, so wrapping into a
+ * grid is not a compromise, it is the honest rendering of "these vertices are
+ * unrelated". Kept as a named export so the catalog's spec graph gets the same
+ * treatment for a single-task workflow.
+ */
+export function layoutGrid(ids: string[], cols = GRID_COLS): Layout {
+  const places: Placement[] = ids.map((id, i) => ({
+    id,
+    x: PAD + (i % cols) * (NODE_W + GAP_X),
+    y: PAD + Math.floor(i / cols) * (NODE_H + GAP_Y),
+  }));
+  return finish(places, Math.min(cols, Math.max(1, ids.length)), Math.ceil(ids.length / cols));
+}
+
+/**
+ * Places one node per id in `layers`, left→right by depth, top→bottom by rank.
+ *
+ * A graph whose every node sits at depth 0 is, by construction, a graph with no
+ * edges (any edge would push its target to depth >= 1), so that case is routed
+ * to the grid instead of producing a single tall column.
+ */
+export function layoutLayers(layers: string[][]): Layout {
+  const filled = layers.filter((l) => l.length > 0);
+  if (filled.length === 1) return layoutGrid(filled[0]!);
+
   const places: Placement[] = [];
   let maxRows = 0;
   layers.forEach((layer, depth) => {
@@ -335,23 +394,58 @@ export function layoutLayers(layers: string[][]): {
     });
   });
 
-  const byId: Record<string, Placement> = {};
-  for (const p of places) byId[p.id] = p;
-
-  return {
-    places,
-    byId,
-    width: PAD * 2 + Math.max(1, layers.length) * (NODE_W + GAP_X) - GAP_X,
-    height: PAD * 2 + Math.max(1, maxRows) * (NODE_H + GAP_Y) - GAP_Y,
-  };
+  return finish(places, layers.length, maxRows);
 }
 
-/** Cubic bezier between the right edge of `a` and the left edge of `b`. */
+/**
+ * Orthogonal rounded-elbow route from the right-edge midpoint of `a` to the
+ * left-edge midpoint of `b`.
+ *
+ * Replaces the old cubic bezier because a bezier between two rows sags through
+ * the space between columns, and when several siblings fan out of one node their
+ * curves overlap into a single blur -- the operator cannot tell which parent
+ * feeds which child, which is the one question the edges exist to answer. An
+ * orthogonal route leaves each node horizontally, turns once at a shared mid-x
+ * channel, runs vertically, and arrives horizontally, so every arrival is
+ * perpendicular to the target's left edge and reads unambiguously as "into this
+ * node". The corners are rounded rather than mitred so the result still looks
+ * like a modern diagram rather than a circuit schematic.
+ *
+ * Pure and coordinate-only: the catalog's spec graph draws its edges with the
+ * same function, which is what keeps a workflow's diagram identical in the
+ * catalog and in a run.
+ */
 export function edgePath(a: Placement, b: Placement): string {
   const x1 = a.x + NODE_W;
   const y1 = a.y + NODE_H / 2;
   const x2 = b.x;
   const y2 = b.y + NODE_H / 2;
-  const dx = Math.max(28, (x2 - x1) / 2);
-  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+
+  // Same row: a straight line is both the clearest route and the only one
+  // without a spurious jog.
+  if (Math.abs(y2 - y1) < 1) return `M ${x1} ${y1} L ${x2} ${y2}`;
+
+  // The turn channel sits midway between the two nodes so that edges entering
+  // the same column share a vertical line-up rather than each cutting its own
+  // diagonal. Clamped to keep the channel inside the gap even when a node is
+  // placed to the left of its parent (a cycle, which is reported, not hidden).
+  const mid = x2 > x1 ? x1 + (x2 - x1) / 2 : x1 + GAP_X / 2;
+
+  // Radius must not exceed half of either leg, or the two arcs would overlap
+  // and SVG would render a kink.
+  const r = Math.min(ELBOW_R, Math.abs(mid - x1), Math.abs(x2 - mid), Math.abs(y2 - y1) / 2);
+  const down = y2 > y1;
+  // Sweep flags: the first corner turns from +x into ±y, the second from ±y
+  // back into +x, so the two arcs curve in opposite senses.
+  const s1 = down ? 1 : 0;
+  const s2 = down ? 0 : 1;
+  const vy = down ? y2 - r : y2 + r;
+
+  return (
+    `M ${x1} ${y1} L ${mid - r} ${y1}` +
+    ` A ${r} ${r} 0 0 ${s1} ${mid} ${down ? y1 + r : y1 - r}` +
+    ` L ${mid} ${vy}` +
+    ` A ${r} ${r} 0 0 ${s2} ${mid + r} ${y2}` +
+    ` L ${x2} ${y2}`
+  );
 }

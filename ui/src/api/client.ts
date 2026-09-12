@@ -35,6 +35,7 @@ import type {
   SpecVersion,
   StartBackfillRequest,
   Worker,
+  WorkerDetail,
   WorkflowSummary,
 } from './types';
 
@@ -384,6 +385,21 @@ export const api = {
   async listWorkers(namespace: string): Promise<Worker[]> {
     const payload = await request<unknown>(`${ns(namespace)}/workers`);
     return asList<Worker>(payload, 'workers');
+  },
+
+  /**
+   * One worker plus the tasks attributed to it.
+   *
+   * Served by a single handler, the same shape as `getRun`: the worker, its
+   * running attempts and its recent ones arrive together, because the question
+   * this address exists for is "what is this worker doing" and the worker row
+   * alone cannot answer it. The alternative the old route set left open — walk
+   * every run in the namespace and filter its attempts by worker_id in the
+   * browser — is an unbounded fan-out to answer what the database does with one
+   * partial index.
+   */
+  getWorker(namespace: string, workerId: string): Promise<WorkerDetail> {
+    return request<WorkerDetail>(`${ns(namespace)}/workers/${encodeURIComponent(workerId)}`);
   },
 
   getCapacity(namespace: string): Promise<CapacitySummary> {

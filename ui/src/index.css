@@ -312,27 +312,17 @@ code, .mono, pre { font-family: var(--mono); font-size: var(--text-sm); }
 /* ── Shell ─────────────────────────────────────────────────────────────── */
 .app { min-height: 100vh; display: flex; flex-direction: column; }
 
-/* The bar's own gap (18px) and height (46px) sit between scale steps and are
-   off-scale on purpose: the topbar is a fixed chrome band tuned to the brand
-   mark, not a content rhythm, and snapping either would visibly move it. */
-.topbar {
-  display: flex; align-items: center; gap: 18px;
-  padding: var(--space-0) var(--space-6); height: 46px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-raised);
-  position: sticky; top: 0; z-index: var(--z-sticky);
-  flex-wrap: wrap;
-}
+/* .topbar, .topbar-right, .nav and .nav a are GONE, along with the off-scale
+   18px gap, 46px height and 5px/10px link padding they carried. They styled
+   the single flat header that predated the two-shape chrome, and nothing has
+   rendered them since -- so the "fixed chrome band tuned to the brand" those
+   literals were justified by no longer exists. The live chrome is the two
+   shapes further down, both of which take --bg-raised and a --border hairline
+   and therefore follow the theme rather than pinning one appearance.
+
+   .brand and .brand-mark stay: both layouts still render them. */
 .brand { font-weight: 650; letter-spacing: -0.2px; display: flex; align-items: center; gap: var(--space-4); }
 .brand-mark { color: var(--accent); font-family: var(--mono); }
-.nav { display: flex; gap: var(--space-2); }
-.nav a {
-  padding: 5px 10px; border-radius: var(--radius); color: var(--fg-muted);
-  font-weight: var(--weight-medium);
-}
-.nav a:hover { background: var(--bg-hover); text-decoration: none; color: var(--fg); }
-.nav a.active { background: var(--bg-hover); color: var(--fg); }
-.topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--space-5); }
 
 /* 1680px is a layout ceiling, not a spacing step -- it has no token by design. */
 .main { flex: 1; padding: var(--space-6); max-width: 1680px; width: 100%; margin: 0 auto; }
@@ -462,22 +452,65 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
 @keyframes pulse { 50% { opacity: 0.3; } }
 
 /* ── DAG ───────────────────────────────────────────────────────────────── */
-.dag-viewport { overflow: auto; background: var(--bg-inset); position: relative; }
+/* A faint dotted ground. It gives the orthogonal edges something to read as a
+   plane so the graph looks laid out on a canvas rather than floating, and it
+   makes the pan extent of a wide DAG visible while scrolling. Sized in px
+   because it must align with the SVG user-space grid, not with the type scale. */
+.dag-viewport {
+  overflow: auto; position: relative;
+  background:
+    radial-gradient(var(--border) 1px, transparent 1px) 0 0 / 22px 22px,
+    var(--bg-inset);
+}
+
+/* Node vertex.
+   Stroke widths here are literal: they are SVG user-space units inside a
+   viewBox, not CSS lengths, so the spacing scale does not apply to them and a
+   token indirection would only hide that. */
 .dag-node {
   fill: var(--tone-bg); stroke: var(--tone-bd); stroke-width: 1.5px;
   cursor: pointer;
+  transition: filter 120ms ease;
 }
-.dag-node.selected { stroke-width: 3px; }
+/* Elevation, faked with an offset rect because SVG has no box-shadow. Kept
+   behind the body and non-interactive so it never eats a click. */
+.dag-node-shadow { fill: var(--bg-inset); opacity: 0.5; pointer-events: none; }
+.dag-node-g:hover .dag-node { filter: brightness(1.12); }
+/* Selection thickens the stroke AND adds a focus-coloured outer ring, so it
+   stays distinguishable from a failed node (whose own border is already red)
+   and from the root-cause halo, which is drawn further out again. */
+.dag-node.selected { stroke-width: 3px; paint-order: stroke; }
+.dag-node-g.selected .dag-node { outline: none; }
+/* The glyph chip: channel 4 given a surface of its own. Tinted from the tone so
+   it reinforces the state, at an opacity that keeps the glyph itself the
+   highest-contrast thing inside it. */
+.dag-glyph-chip { fill: var(--tone-bd); opacity: 0.16; pointer-events: none; }
+
 /* SVG label sizes: 10.5px and 10px are below the --text-xs floor and stay
-   literal. These three lines of text are positioned at fixed x/y offsets inside
-   a fixed 176x56 node box (DagView.tsx), so growing them to 11px would push the
-   sub and state rows into each other rather than reflowing. */
-.dag-node-label { fill: var(--fg); font: var(--weight-bold) var(--text-sm) var(--sans); pointer-events: none; }
+   literal. These text rows sit at fixed x/y offsets inside a fixed 196x64 node
+   box (DagView.tsx), so growing them to 11px would push the sub and state rows
+   into each other rather than reflowing. */
+.dag-node-label {
+  fill: var(--fg); font: var(--weight-bold) var(--text-base) var(--sans);
+  letter-spacing: -0.01em; pointer-events: none;
+}
 .dag-node-sub { fill: var(--fg-muted); font: 10.5px var(--mono); pointer-events: none; }
-.dag-node-state { font: 700 10px var(--mono); pointer-events: none; }
-.dag-glyph { font: 700 var(--text-base) var(--mono); pointer-events: none; }
-.dag-edge { stroke: var(--border-strong); stroke-width: 1.4px; fill: none; }
-.dag-edge.failed-path { stroke: var(--tone-danger-bd); stroke-dasharray: 4 3; }
+.dag-node-state { font: 700 10px var(--mono); letter-spacing: 0.06em; pointer-events: none; }
+.dag-glyph { font: 700 var(--text-sm) var(--mono); pointer-events: none; }
+
+/* Edges. Held slightly back in opacity so a dense graph reads as nodes-with-
+   connections rather than a net; the arrowhead markers are drawn at full
+   strength (DagView.tsx) so direction survives the reduction. */
+.dag-edge {
+  stroke: var(--border-strong); stroke-width: 1.6px; fill: none;
+  stroke-linecap: round; stroke-linejoin: round; opacity: 0.75;
+}
+/* A cascade is the one thing worth pulling forward, so the failed path is both
+   thicker and fully opaque as well as dashed and red. */
+.dag-edge.failed-path {
+  stroke: var(--tone-danger-bd); stroke-dasharray: 5 4;
+  stroke-width: 2px; opacity: 1;
+}
 /* A root cause gets a halo no other state can produce, so the origin of a
    cascade is findable without reading a single label. */
 .dag-rootcause-halo { fill: none; stroke: var(--tone-danger-bd); stroke-width: 2px; opacity: 0.55; }
@@ -651,17 +684,6 @@ button.primary:hover:not(:disabled) {
   border-color: var(--accent);
 }
 
-/* ── Sign-in ────────────────────────────────────────────────────────────── */
-.login-wrap {
-  display: flex;
-  justify-content: center;
-  padding-block: var(--space-9);
-}
-.login-card {
-  width: 100%;
-  max-width: 460px;
-}
-
 /* ── One-time token reveal ──────────────────────────────────────────────── */
 .token-reveal {
   border-color: var(--tone-warning-bd);
@@ -743,25 +765,85 @@ button.primary:hover:not(:disabled) {
   border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); overflow: hidden;
 }
 
+/* The namespace chip on the trigger, at the opposite end of the bar from the
+   logo. Mono because it is an identifier, muted because it is context rather
+   than a control, and capped in width so a long namespace scrolls the chip
+   instead of the header. */
+.profile-ns {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Identity: organisation, then the person, then the address, as plain type. No
+   card, no chip, no second avatar -- the trigger that opened this panel already
+   showed one, and repeating it says nothing new. */
 .profile-identity { padding: var(--space-6); }
 /* The organisation sits above the person: it is the answer to "which
    deployment am I about to act on", which matters more than the name. */
 .profile-org { margin: 0 0 var(--space-4); font-size: var(--text-sm); color: var(--fg-muted); }
-.profile-name { margin: 0; font-size: var(--text-md); font-weight: 650; color: var(--fg); }
+/* The name is the largest thing in the panel. It is the answer to the question
+   that made the operator open it, so it should not have to be looked for. */
+.profile-name {
+  margin: 0; font-size: var(--text-lg); font-weight: var(--weight-bold);
+  line-height: var(--leading-tight); color: var(--fg);
+}
 /* An address is long and must not widen the panel or be silently truncated
    without recourse -- the full value is on the element's title. */
 .profile-email {
   margin: var(--space-1) 0 0; font-size: var(--text-sm); color: var(--fg-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.profile-role {
-  margin: var(--space-3) 0 0; font-size: var(--text-xs); color: var(--fg-faint);
-  text-transform: uppercase; letter-spacing: 0.5px;
+
+/* ── Menu groups ───────────────────────────────────────────────────────────
+   Grouping is carried by a hairline and NOTHING ELSE: no uppercase label, no
+   fill, no indent. The panel used to head each group with an overline
+   ("NAMESPACE", "API KEY", "CONNECTED TO", "APPEARANCE"), which is a second
+   boundary marker restating the line's own one -- and the labels only existed
+   because each group wrapped a differently-shaped widget that needed naming.
+   Now every row says what it is, so the line is enough.
+
+   The separator is a border on the group rather than an <hr>, so a group that
+   renders nothing (no admin rows, no facts) contributes no stray line. */
+.profile-group { border-top: 1px solid var(--border); padding: var(--space-3); }
+
+/* One row. Roomy on purpose: this is a menu that is read, not a toolbar that
+   is aimed at, and the rows are the whole panel now that the widgets have gone
+   to the settings page. Hover is the only fill -- a row is not a state. */
+.profile-item {
+  display: block; width: 100%; text-align: left; background: none; border: none;
+  padding: var(--space-4) var(--space-5); border-radius: var(--radius-md);
+  color: var(--fg); font-size: var(--text-md); line-height: var(--leading-normal);
+  cursor: pointer;
+}
+.profile-item:hover { background: var(--bg-hover); }
+
+/* A FACT, not a control: same rhythm as a row so the list stays even, but no
+   hover, no pointer and no role -- nothing here responds to a click, because
+   nothing here can be changed from a dropdown. Both of these are edited on the
+   settings page. */
+.profile-fact {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--space-5); margin: var(--space-0);
+  padding: var(--space-4) var(--space-5);
+  font-size: var(--text-sm); min-width: 0;
+}
+.profile-fact-label { color: var(--fg-muted); flex: 0 0 auto; }
+/* Mono and ellipsised: both values are identifiers, and truncating one must not
+   widen the panel. The full value is on the row's title. */
+.profile-fact-value {
+  font-family: var(--mono); font-size: var(--text-xs); color: var(--fg);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* Separators are borders on the groups rather than <hr>s, so a group that
-   renders nothing contributes no stray line. */
-.profile-sections > .profile-section { border-top: 1px solid var(--border); padding: var(--space-5) var(--space-6); }
+/* Legacy, for a caller still passing a labelled section. Kept so such a caller
+   degrades to a quiet overline instead of an unstyled block; new rows should be
+   .profile-item. */
+.profile-section { padding: var(--space-4) var(--space-5); }
 .profile-section-label {
   margin: 0 0 var(--space-4); font-size: var(--text-xs); color: var(--fg-faint);
   text-transform: uppercase; letter-spacing: 0.5px;
@@ -769,14 +851,6 @@ button.primary:hover:not(:disabled) {
 .profile-section .row { gap: var(--space-4); }
 .profile-section input[type='text'],
 .profile-section input[type='password'] { width: 100%; }
-
-.profile-actions { border-top: 1px solid var(--border); padding: var(--space-3); }
-.profile-item {
-  display: block; width: 100%; text-align: left; background: none; border: none;
-  padding: var(--space-4) var(--space-5); border-radius: var(--radius-md);
-  color: var(--fg); font-size: var(--text-md); cursor: pointer;
-}
-.profile-item:hover { background: var(--bg-hover); }
 
 /* The panel is a floating layer, so on a narrow screen it is pinned to the
    viewport edges instead of overflowing off-screen to the right. */
@@ -1114,7 +1188,16 @@ tr.version-current > td { background: var(--bg-hover); }
 }
 
 /* Its own panel against the page ground, rather than a flat band: the rail is
-   chrome and the page is content, and a border alone does not say so. */
+   chrome and the page is content, and a border alone does not say so.
+
+   THE BAND FOLLOWS THE THEME. Both chrome shapes take --bg-raised with a
+   --border hairline and nothing else, so the header is #f6f8fa on #ffffff in
+   light and #151b23 on #0d1117 in dark. Earlier chrome carried a fixed band
+   colour "tuned to the brand", which is another way of saying it was dark in
+   both themes: a light-mode operator got a dark strip across the top of an
+   otherwise white console, and no theme token could correct it because the
+   value was not derived from one. A chrome colour that ignores the theme is
+   not a brand decision, it is a bug with a rationale attached. */
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -1134,17 +1217,10 @@ tr.version-current > td { background: var(--bg-hover); }
 }
 .sidebar-brand .brand { display: flex; align-items: center; gap: var(--space-4); }
 
-/* The namespace sits under the brand in muted type: always readable, never
-   competing with the destinations for attention. */
-.sidebar-namespace,
-.navbar-namespace {
-  font-family: var(--mono);
-  font-size: var(--text-xs);
-  color: var(--fg-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* .sidebar-namespace / .navbar-namespace are GONE. The namespace no longer sits
+   in the brand cluster in either layout — beside a wordmark a mono string reads
+   as part of the product name — and now rides on the account control at the
+   opposite end of the bar; see .profile-ns in the account-menu block. */
 
 /* The nav scrolls on its own when the destination list outgrows the viewport,
    so the brand and the account control stay pinned rather than being pushed
@@ -1240,12 +1316,21 @@ tr.version-current > td { background: var(--bg-hover); }
 }
 
 /* ── Navbar ────────────────────────────────────────────────────────────── */
+/* Same two tokens as the rail, for the same reason: the band is raised surface
+   plus a hairline, whichever theme is in effect. */
 .chrome-navbar {
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);
   background: var(--bg-raised);
   border-bottom: 1px solid var(--border);
+}
+/* color is set here rather than left to inherit so the band's text follows the
+   theme with its background; the background itself is already carried by
+   .chrome-navbar above and by .sidebar for the rail. */
+.navbar,
+.chrome-sidebar {
+  color: var(--fg);
 }
 .navbar {
   display: flex;
@@ -1274,11 +1359,12 @@ tr.version-current > td { background: var(--bg-hover); }
   .chrome-sidebar { flex-basis: 60px; width: 60px; }
   .sidebar { padding: var(--space-5) var(--space-3); align-items: stretch; }
 
-  /* The label and the namespace are what go; the mark and the glyphs carry
-     the rail. Each link keeps its accessible name, so nothing is lost to a
-     screen reader or to a title tooltip. */
+  /* The label and the namespace chip are what go; the mark and the glyphs
+     carry the rail. Each link keeps its accessible name, so nothing is lost to
+     a screen reader or to a title tooltip -- and the namespace survives on the
+     account trigger's own title even once its chip is hidden. */
   .sidebar .brand-word,
-  .sidebar-namespace,
+  .app-sidebar .profile-ns,
   .sidebar .nav-group-label,
   .sidebar .nav-item .nav-label,
   .app-sidebar .profile-email,
@@ -1296,7 +1382,7 @@ tr.version-current > td { background: var(--bg-hover); }
      trade in the other axis. */
   .navbar .nav-glyph { display: inline-flex; }
   .navbar .nav-item .nav-label { display: none; }
-  .navbar-namespace { display: none; }
+  .app-navbar .profile-ns { display: none; }
 }
 
 /* At phone width the page must not scroll sideways. min-width:0 on the flex
@@ -1513,7 +1599,35 @@ tr.version-current > td { background: var(--bg-hover); }
   white-space: nowrap;
 }
 
-.ov-attn-more { border-top: 1px solid var(--border); }
+/* The disclosure row. It holds either the expand button (with the server's
+   truncation note beside it) or, once everything fetched is shown, the link to
+   the full runs view — so it is a row, and it wraps rather than squeezing the
+   note onto the button's line at narrow widths. */
+.ov-attn-more {
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-4);
+}
+
+/* A real button, because that is what it is — but weighted as a disclosure and
+   not as an action: the actions on this panel are the per-row "open" links, and
+   a filled button here would out-shout every one of them. Sized at the row
+   meta's scale so the panel still ends quietly. */
+.ov-attn-expand {
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  border-color: var(--border);
+  background: var(--bg-inset);
+}
+.ov-attn-expand:hover:not(:disabled) { border-color: var(--border-strong); }
+
+/* The server's claim, kept visually subordinate to the button's exact count:
+   one is a promise about rows we hold, the other is a warning about rows we do
+   not. Reading as equal statements would flatten that difference. */
+.ov-attn-more-note { color: var(--fg-faint); }
 
 /* Good news, styled as such. Success-toned and affirmative, deliberately NOT
    the grey ∅ this console uses for "no data": an operator has to be able to tell
@@ -1862,8 +1976,17 @@ tr.version-current > td { background: var(--bg-hover); }
    --text-xs rather than the old inline 10.5px, which was below the documented
    legibility floor for no reason -- the sub-scale sizes in this sheet are all
    SVG labels pinned to fixed geometry, and a table cell reflows. */
+/* The host cell is the drill-down link into the worker's own page.
+   `text-decoration: none` on the anchor with the underline re-applied to the
+   NAME on hover: the cell is two lines of different weight, and underlining
+   both would read as two separate links to two separate places. The id keeps
+   its faint colour for the same reason — it is the anchor's subtitle, not part
+   of its label. */
+a.fleet-host { text-decoration: none; color: inherit; }
 .fleet-host { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 .fleet-host-name { font-family: var(--mono); color: var(--fg); }
+a.fleet-host:hover .fleet-host-name,
+a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
 .fleet-host-id { font-family: var(--mono); font-size: var(--text-xs); color: var(--fg-faint); }
 
 /* One resource dimension: the exact numbers above the bar that summarises them.
@@ -2176,18 +2299,142 @@ tr.version-current > td { background: var(--bg-hover); }
 }
 
 /* ── Sign-in ───────────────────────────────────────────────────────────────
-   The one unauthenticated screen, and the first thing anyone sees. It is given
-   a centred column of its own rather than a panel dropped in the page grid: at
-   sign-in there is no navigation, no namespace switcher and nothing else on
-   screen, so the page IS the card. */
+   The one unauthenticated screen, and the first thing anyone sees. It takes the
+   whole viewport as a two-column split rather than a card floated on the page
+   background, because with no chrome on screen the left panel is doing the job
+   the shell normally does: saying what this thing is. The right column is the
+   one that carries controls, so it is the one that follows the theme.
+
+   The brand panel's surface is fixed dark in BOTH themes — it is a brand
+   surface, the same decision as a product's marketing header, and a panel that
+   inverted with the theme would leave the wordmark on white half the time. That
+   is the ONE place on this screen where literal colours are justified, so they
+   live here as three named properties rather than scattered down the block.
+   They are not theme tokens and must not be used outside this panel. */
 .login-page {
+  /* Deep navy: a brand surface, not a palette step. Darker than --bg in the
+     dark theme so the split still reads as two surfaces, and independent of the
+     light theme entirely. */
+  --login-brand-bg: #0a1020;
+  --login-brand-fg: #dbe3f4;
+  /* The texture and the seam between columns. Alpha-based so both track the
+     surface above rather than needing a second pair of literals. */
+  --login-brand-ink: rgba(219, 227, 244, 0.10);
+
   min-height: 100vh;
+  display: grid;
+  /* Even halves, as the reference has them. The form column carries its own
+     max-width inside, so a wide monitor widens gutters rather than fields. */
+  grid-template-columns: 1fr 1fr;
+  background: var(--bg);
+}
+
+/* ── Brand panel ── */
+.login-aside {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  padding: var(--space-8) var(--space-7);
+  background: var(--login-brand-bg);
+  color: var(--login-brand-fg);
+  border-right: 1px solid var(--login-brand-ink);
+}
+/* Scaled to cover, so the DAG runs into the form column's edge rather than
+   sitting centred like an illustration. */
+.login-texture {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* A texture, not a figure: cover keeps the nodes circular, where a stretched
+     fit would shear them into ellipses at tall aspect ratios. */
+  object-fit: cover;
+  pointer-events: none;
+}
+.login-texture-edges {
+  stroke: var(--login-brand-ink);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+.login-texture-nodes {
+  fill: var(--login-brand-bg);
+  stroke: var(--login-brand-ink);
+  stroke-width: 1.5;
+}
+/* Above the texture, and held to a reading measure: the lede is prose. */
+.login-aside-inner {
+  position: relative;
+  width: 100%;
+  max-width: 440px;
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-7);
+}
+.login-aside-head { display: flex; align-items: center; gap: var(--space-4); }
+/* The mark here takes the brand foreground, NOT the accent: the accent's one
+   appearance on this screen is the ◇ above the form, and spending it twice
+   would make that rule meaningless. */
+.login-aside-mark { color: var(--login-brand-fg); flex: 0 0 auto; }
+.login-aside-word {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.3px;
+  line-height: var(--leading-tight);
+}
+.login-aside-lede {
+  margin: var(--space-0);
+  font-size: var(--text-lg);
+  line-height: var(--leading-normal);
+  color: var(--login-brand-fg);
+  /* Recessed from the wordmark so the hierarchy survives without introducing a
+     second brand colour. */
+  opacity: 0.78;
+}
+/* What the console covers: true statements about this tool, which is what this
+   space is for — there are no customers to name and inventing any would be
+   fabrication. */
+.login-covers {
+  list-style: none;
+  margin: var(--space-0);
+  padding: var(--space-0);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.login-cover { display: flex; align-items: flex-start; gap: var(--space-4); }
+.login-cover-dot {
+  flex: 0 0 auto;
+  width: var(--space-3);
+  height: var(--space-3);
+  margin-top: var(--space-3);
+  border-radius: var(--radius-pill);
+  background: var(--login-brand-fg);
+  opacity: 0.5;
+}
+.login-cover-text { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.login-cover-title {
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+}
+.login-cover-detail {
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  opacity: 0.62;
+}
+
+/* ── Form column ── */
+.login-main {
   display: flex;
   flex-direction: column;
   justify-content: center;
   align-items: center;
   gap: var(--space-7);
-  padding: var(--space-8) var(--space-6);
+  padding: var(--space-8) var(--space-7);
+  /* Theme-following, deliberately: this half holds the inputs, and pinning it
+     near-white would leave a dark-theme operator staring into a lightbox. */
   background: var(--bg);
 }
 .login-col {
@@ -2198,7 +2445,7 @@ tr.version-current > td { background: var(--bg-hover); }
   flex-direction: column;
   gap: var(--space-7);
 }
-/* The mark is the only accent on the page, which is what the accent is for. */
+/* The ◇ is the only accent on the page, which is what the accent is for. */
 .login-brand {
   display: flex;
   flex-direction: column;
@@ -2224,10 +2471,8 @@ tr.version-current > td { background: var(--bg-hover); }
   color: var(--fg-muted);
   line-height: var(--leading-normal);
 }
-/* The method switch spans the card, because the two paths have equal standing:
-   a key is how the CLI and every worker authenticate, not a fallback. */
-.login-seg { display: flex; }
-.login-seg .seg-btn { flex: 1; justify-content: center; }
+/* No method switch: interactive sign-in is password-only, and a key is the
+   CLI/worker credential configured from Settings. The form is the whole card. */
 .login-form { display: flex; flex-direction: column; gap: var(--space-6); }
 .login-form .form-field > input { width: 100%; }
 .login-submit { width: 100%; justify-content: center; padding-block: var(--space-4); }
@@ -2246,6 +2491,15 @@ tr.version-current > td { background: var(--bg-hover); }
   background: var(--tone-warning-bg);
 }
 .login-warning .notice-glyph { color: var(--tone-warning-fg); }
+
+/* Below 860px the split collapses to the form alone. The brand panel is dropped
+   rather than stacked above the form: every word in it is expository, none of it
+   is an input or a link, and pushing a phone user past a screenful of product
+   description to reach the password field is the wrong trade. */
+@media (max-width: 860px) {
+  .login-page { grid-template-columns: 1fr; }
+  .login-aside { display: none; }
+}
 
 /* ── One-time token reveal ─────────────────────────────────────────────────
    The existing .token-reveal / .token-secret rules still carry the panel and
@@ -2283,7 +2537,10 @@ tr.version-current > td { background: var(--bg-hover); }
   .detail-actions { width: 100%; }
   .confirm-inline { align-items: stretch; }
   .confirm-inline-text { width: 100%; }
-  .login-page { padding: var(--space-6) var(--space-5); justify-content: flex-start; }
+  /* .login-page is a grid now, so the narrow-width padding belongs to the
+     column that actually holds the form. Top-aligned at this width because a
+     centred form on a short landscape phone viewport clips its own footer. */
+  .login-main { padding: var(--space-6) var(--space-5); justify-content: flex-start; }
   .panel-tools { width: 100%; }
   .panel-tools input[type='search'] { flex: 1; }
 }
@@ -2348,3 +2605,95 @@ tr.version-current > td { background: var(--bg-hover); }
   word-break: break-word;
 }
 .audit-actor { word-break: break-word; }
+
+/* ── Settings page ─────────────────────────────────────────────────────────
+   The controls the account menu used to embed, given a page to stand on.
+
+   A settings page is one column of labelled fields, never a grid: each field is
+   a separate decision, and columns invite the eye to compare two things that
+   have nothing to do with each other. The measure is capped for the same
+   reason the audit detail is — a hint that runs the full width of a 1680px
+   console is a hint nobody finishes reading.
+
+   Nothing here introduces a colour. Every field is surface, border and text
+   from the theme tokens, and the one warning on the page (a preference that
+   could not be stored) already borrows the --tone-warning voice from
+   .appearance-warning. */
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 560px;
+}
+/* Fields inside one panel are separated by their own rhythm rather than a rule:
+   a hairline between every field turns three questions into a form to be
+   completed, which these are not -- each is independently answerable. */
+.settings-field + .settings-field { margin-top: var(--space-7); }
+
+.settings-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-faint);
+}
+.settings-value { margin: var(--space-0); font-size: var(--text-base); color: var(--fg); }
+
+/* The hint carries the WHY, which is the whole reason these controls earned a
+   page instead of staying in a dropdown: there was no room to say any of this
+   in a 280px floating layer. Muted and at a reading line-height, so it reads as
+   explanation rather than as a warning. */
+.settings-hint {
+  margin: var(--space-0);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--fg-muted);
+}
+
+.settings-field input[type='text'],
+.settings-field input[type='password'] { width: 100%; max-width: 320px; }
+
+/* The layout miniatures gained a tick alongside the accent options, so colour
+   is not the only signal in either radiogroup. It sits above the glyph rather
+   than beside it because the option is a centred column, and a mark hanging off
+   one side would break the pair's symmetry. */
+.layout-check {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  color: var(--accent);
+  line-height: 1;
+  /* Reserved whether or not it is filled, so selecting an option does not
+     resize it and nudge its neighbour. */
+  min-height: var(--text-xs);
+}
+
+/* ── Worker drill-down ───────────────────────────────────────────────────── */
+
+/* The warning notice.
+   .notice previously came in exactly two flavours, error and empty, so the one
+   statement that is neither -- "this worker is ACTIVE but stopped
+   heartbeating" -- had nowhere honest to sit. Borrowing .notice.error for it
+   would have claimed a request failed when the request succeeded and returned
+   a finding; borrowing .notice.empty would have made a live contradiction look
+   like an absence of data. It takes the warning tone rather than danger for the
+   same reason the fleet row does: the worker's own state still says ACTIVE, and
+   what is wrong is the DISAGREEMENT, not a confirmed failure. */
+.notice.warn { border-color: var(--tone-warning-bd); background: var(--tone-warning-bg); }
+.notice.warn .notice-glyph { color: var(--tone-warning-fg); }
+
+/* The attempt tables on the worker page reuse .table-fleet, which top-aligns
+   its cells for the fleet's three-line stacks. Here every cell is one or two
+   lines and the state badge is the tallest thing in the row, so centring reads
+   better -- scoped to this page's tables rather than changing .table-fleet,
+   which the fleet view is tuned against. */
+.worker-tasks .table-fleet td { vertical-align: middle; }
+
+/* The namespace footnote under an attempt table. It is a single restatement of
+   context that is true of every row, so it is set as quiet as the .sub it
+   borrows from while keeping the table's own horizontal padding. */
+.worker-tasks-note {
+  padding: var(--space-4) var(--space-5);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-sm);
+  color: var(--fg-faint);
+}

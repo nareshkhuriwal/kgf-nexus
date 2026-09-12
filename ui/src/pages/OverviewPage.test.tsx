@@ -26,7 +26,7 @@
 
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
@@ -147,6 +147,27 @@ const attention: AttentionList = {
     }),
   ],
 };
+
+/**
+ * N distinct triage items, numbered so a test can name the exact row it expects
+ * to be hidden or revealed. Distinct summaries matter: with identical text a
+ * disclosure test would pass whether it revealed the remainder or re-rendered
+ * the same five rows twice.
+ */
+function attentionOf(n: number, over: Partial<AttentionList> = {}): AttentionList {
+  return {
+    count: n,
+    truncated: false,
+    items: Array.from({ length: n }, (_, i) =>
+      attentionItem({
+        summary: `Triage item ${i + 1}`,
+        run_id: `run-att-${String(i + 1).padStart(4, '0')}`,
+        link: `/runs/run-att-${String(i + 1).padStart(4, '0')}`,
+      }),
+    ),
+    ...over,
+  };
+}
 
 const fleet: FleetHealth = {
   status: 'ok',
@@ -581,6 +602,115 @@ describe('the triage list the operator came for', () => {
     const panel = screen.getByText('needs attention').closest('.panel')!;
     expect(within(panel as HTMLElement).queryByRole('button', { name: 'Retry' })).toBeNull();
   }, 15000);
+});
+
+/**
+ * How much of the triage list is on screen at once.
+ *
+ * The panel FETCHES more than it SHOWS, and the gap between those two numbers is
+ * where this page can most easily start lying. Three separate claims have to
+ * stay separated:
+ *
+ *   - five rows is a layout decision, and the rest of the page's ordering
+ *     rationale depends on it (everything below the triage list is the context
+ *     for reading it, which is worthless below the fold);
+ *   - "Show N more" is a promise about rows already in hand, so the count is
+ *     exact and the button must actually reveal them;
+ *   - `truncated` is the SERVER's claim about rows nobody has fetched, and it
+ *     has to survive the expansion — reaching the end of twelve is not reaching
+ *     the end of the list, and a panel that fell silent at that point would be
+ *     telling an operator mid-incident that they had seen everything.
+ */
+describe('how much of the triage list is shown at once', () => {
+  /** Five rows, not twelve: the panel is the top of a dashboard. */
+  it('renders only the first five rows when more were fetched', async () => {
+    mockFetch(healthy({ attention: [200, attentionOf(12)] }));
+    wrap(<OverviewPage namespace="default" />);
+
+    await screen.findByText('Triage item 1');
+    const panel = screen.getByText('needs attention').closest('.panel')!;
+    expect(within(panel as HTMLElement).getAllByRole('listitem')).toHaveLength(5);
+
+    expect(screen.getByText('Triage item 5')).toBeInTheDocument();
+    expect(screen.queryByText('Triage item 6')).toBeNull();
+    expect(screen.queryByText('Triage item 12')).toBeNull();
+  });
+
+  /** The count is a promise about rows in hand, so it must be exact. */
+  it('names the exact number it is holding back and reveals all of it', async () => {
+    mockFetch(healthy({ attention: [200, attentionOf(12)] }));
+    wrap(<OverviewPage namespace="default" />);
+
+    await screen.findByText('Triage item 1');
+    const more = screen.getByRole('button', { name: 'Show 7 more' });
+
+    fireEvent.click(more);
+
+    const panel = screen.getByText('needs attention').closest('.panel')!;
+    expect(within(panel as HTMLElement).getAllByRole('listitem')).toHaveLength(12);
+    expect(screen.getByText('Triage item 12')).toBeInTheDocument();
+    // Expanded, so the disclosure has nothing left to offer.
+    expect(screen.queryByRole('button', { name: /show \d+ more/i })).toBeNull();
+  });
+
+  /**
+   * Expand-in-place, not a scroller: the rows join the page rather than a
+   * fixed-height box, so find-in-page and a screen reader's own navigation can
+   * reach them. Pinned because swapping the button for `overflow:auto` would
+   * look equivalent in a screenshot and would not be.
+   */
+  it('reveals the rest in place rather than inside a scrolling box', async () => {
+    mockFetch(healthy({ attention: [200, attentionOf(12)] }));
+    wrap(<OverviewPage namespace="default" />);
+
+    await screen.findByText('Triage item 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Show 7 more' }));
+
+    const list = screen.getByText('needs attention').closest('.panel')!.querySelector('.ov-attn-list')!;
+    // Every revealed row is a child of the same list, not of a nested viewport.
+    expect(list.querySelectorAll(':scope > .ov-attn-row')).toHaveLength(12);
+  });
+
+  /** Nothing to disclose when the whole response already fits. */
+  it('offers no disclosure when everything fetched is already on screen', async () => {
+    mockFetch(healthy({ attention: [200, attentionOf(4)] }));
+    wrap(<OverviewPage namespace="default" />);
+
+    await screen.findByText('Triage item 1');
+    expect(screen.queryByRole('button', { name: /show \d+ more/i })).toBeNull();
+    expect(screen.queryByText(/view all runs needing attention/)).toBeNull();
+  });
+
+  /**
+   * The server's claim is not the page's to withdraw. `truncated` says rows
+   * exist beyond this response, so it must be visible while the list is
+   * collapsed AND after the operator has reached the end of what was fetched —
+   * the whole point of the flag is that a count cannot be trusted to imply it.
+   */
+  it('keeps saying the server has more, both collapsed and expanded', async () => {
+    mockFetch(healthy({ attention: [200, attentionOf(12, { truncated: true })] }));
+    wrap(<OverviewPage namespace="default" />);
+
+    await screen.findByText('Triage item 1');
+    // Collapsed: the exact count sits next to the server's honest caveat.
+    expect(screen.getByRole('button', { name: 'Show 7 more' })).toBeInTheDocument();
+    expect(screen.getByText(/more beyond these 12/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show 7 more' }));
+
+    // Expanded: everything fetched is shown, so the only remaining statement
+    // about what else exists is the server's, and it hands off to the runs view.
+    expect(await screen.findByText(/view all runs needing attention/)).toBeInTheDocument();
+  });
+
+  /** The all-clear must not acquire a disclosure it has nothing to disclose. */
+  it('leaves the all-clear state alone', async () => {
+    mockFetch(healthy({ attention: [200, { count: 0, truncated: false, items: [] }] }));
+    wrap(<OverviewPage namespace="default" />);
+
+    expect(await screen.findByText('Nothing needs attention')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /show \d+ more/i })).toBeNull();
+  });
 });
 
 describe('fleet connectivity semantics the server owns', () => {

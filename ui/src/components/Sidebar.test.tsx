@@ -6,11 +6,17 @@
  *
  * The central claim of this shell is that ONE destination list renders two
  * ways, so the most valuable assertion here is the cross-layout one: whatever
- * the sidebar offers, the navbar offers too. Everything else — the namespace
- * being visible, admin gating surviving in both, the account slot being present
- * — is a property that would silently rot in one layout while the other stayed
- * correct, which is exactly the failure a single data structure is meant to
- * prevent and a test has to actually check.
+ * the sidebar offers, the navbar offers too. Everything else — admin gating
+ * surviving in both, the account slot being present — is a property that would
+ * silently rot in one layout while the other stayed correct, which is exactly
+ * the failure a single data structure is meant to prevent and a test has to
+ * actually check.
+ *
+ * The namespace is asserted ABSENT from both layouts now. It moved to the
+ * account control, which these tests stub out, so the claim they can still make
+ * is the negative one: neither chrome prints it beside the brand. That it is
+ * visible SOMEWHERE is ProfileMenu.test.tsx's assertion, where the control that
+ * renders it actually lives.
  */
 
 import { render, screen, within } from '@testing-library/react';
@@ -28,11 +34,21 @@ function wrap(ui: ReactNode, route = '/') {
 const account = <button type="button">Account slot</button>;
 
 describe('the sidebar', () => {
-  it('shows the brand and the namespace it is scoped to', () => {
-    wrap(<Sidebar canAdmin={false} namespace="payments" account={account} />);
+  it('shows the brand', () => {
+    wrap(<Sidebar canAdmin={false} account={account} />);
 
     expect(screen.getByText('Nexus')).toBeInTheDocument();
-    expect(screen.getByText('payments')).toBeInTheDocument();
+  });
+
+  /**
+   * The chip beside the wordmark is what the operator objected to, and a test
+   * is the only thing that stops it drifting back in the next time someone
+   * wants the namespace "somewhere obvious".
+   */
+  it('does not print the namespace beside the brand', () => {
+    wrap(<Sidebar canAdmin={false} namespace="payments" account={account} />);
+
+    expect(screen.queryByText('payments')).not.toBeInTheDocument();
   });
 
   it('groups the destinations under their headings', () => {
@@ -93,11 +109,11 @@ describe('the sidebar', () => {
 });
 
 describe('the navbar', () => {
-  it('shows the same brand, namespace and account slot', () => {
+  it('shows the same brand and account slot, and no namespace chip either', () => {
     wrap(<NavBar canAdmin={false} namespace="payments" account={account} />);
 
     expect(screen.getByText('Nexus')).toBeInTheDocument();
-    expect(screen.getByText('payments')).toBeInTheDocument();
+    expect(screen.queryByText('payments')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Account slot' })).toBeInTheDocument();
   });
 

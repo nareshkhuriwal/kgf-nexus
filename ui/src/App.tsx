@@ -7,16 +7,28 @@
  * The namespace is a top-level control rather than buried in each page because
  * every §8.2 endpoint is namespace-scoped, and an operator looking at the wrong
  * namespace sees a plausible empty dashboard — the most misleading possible
- * output. So its VALUE is always on screen in the chrome, while the input that
- * changes it sits in the account menu where it cannot be nudged by accident.
+ * output. So its VALUE is always on screen in the chrome — the account control
+ * renders it as a read-only fact — while the input that CHANGES it sits on the
+ * settings page, two deliberate steps away from anything an operator reaches for
+ * mid-incident. Value and control are split on purpose: the fact has to be
+ * unmissable, and the control must not be nudgeable by accident.
  *
  * The chrome itself comes in two shapes — a grouped sidebar and a flat navbar —
  * chosen by the operator and stamped on <html> by lib/appearance.ts. Both read
  * the same destination list from navItems.ts; this file decides only which
  * component renders it, and composes the account menu once for whichever wins.
+ *
+ * Sign-in is the one route OUTSIDE that chrome, expressed as a layout route
+ * rather than a conditional inside it. An unauthenticated visitor has no
+ * namespace worth switching, no account to open a menu for and no catalog for
+ * the command palette to search, so every one of those controls would be a
+ * control that either lies or 401s. A layout route makes that structural — /login
+ * is a sibling of the chrome, not a child of it — so a route added inside the
+ * chrome later cannot accidentally inherit the exception, and the chrome's own
+ * state cannot leak onto a screen that has no session yet.
  */
 
-import { NavLink, Route, Routes, useNavigate } from 'react-router-dom';
+import { NavLink, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { API_BASE, DEFAULT_NAMESPACE, getApiKey, setApiKey } from './api/client';
@@ -26,20 +38,21 @@ import { UsersPage } from './pages/admin/UsersPage';
 import { TokensPage } from './pages/admin/TokensPage';
 import { AuditPage } from './pages/admin/AuditPage';
 import { OverviewPage } from './pages/OverviewPage';
+import { SettingsPage } from './pages/SettingsPage';
 import { RunListPage } from './pages/RunListPage';
 import { WorkflowsPage } from './pages/WorkflowsPage';
 import { WorkflowDetailPage } from './pages/WorkflowDetailPage';
 import { RunDetailPage } from './pages/RunDetailPage';
 import { WorkersPage } from './pages/WorkersPage';
+import { WorkerDetailPage } from './pages/WorkerDetailPage';
 import { SchedulesPage } from './pages/SchedulesPage';
 import { ScheduleDetailPage } from './pages/ScheduleDetailPage';
 import { BackfillDetailPage } from './pages/BackfillDetailPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { CommandPalette } from './components/CommandPalette';
-import { ProfileMenu, ProfileSection } from './components/ProfileMenu';
+import { ProfileMenu } from './components/ProfileMenu';
 import { Sidebar } from './components/Sidebar';
 import { NavBar } from './components/NavBar';
-import { AppearancePanel } from './components/AppearancePanel';
 import { getNavLayout, type NavLayout } from './lib/appearance';
 
 const NS_KEY = 'nexus.namespace';
@@ -58,18 +71,29 @@ export function App() {
   /**
    * Which chrome to render.
    *
-   * Seeded from storage, but re-read whenever the account menu opens or closes:
-   * the appearance panel writes through lib/appearance.ts (which stamps <html>
-   * directly, so CSS reacts immediately), and this keeps the React tree in step
-   * without a context or an event bus for a value that changes once a year.
+   * Seeded from storage and re-read on every navigation. The appearance panel
+   * writes through lib/appearance.ts, which stamps <html> directly so CSS reacts
+   * immediately — but the React tree has to be told, because which COMPONENT
+   * renders the nav is a structural choice, not a styling one.
+   *
+   * It used to re-read when the account menu closed, which was the right hook
+   * while the appearance panel lived inside that menu. The panel is on /settings
+   * now, so the only place the layout can change is that page, and leaving it is
+   * the natural moment to pick the change up. A route change is a cheaper and
+   * more honest trigger than a context or an event bus for a value an operator
+   * changes roughly once.
    */
+  const location = useLocation();
   const [navLayout, setNavLayoutState] = useState<NavLayout>(() => getNavLayout());
+  useEffect(() => {
+    setNavLayoutState(getNavLayout());
+  }, [location.pathname]);
 
   // The key lives in the browser, never in the bundle: anything baked in at
-  // build time is readable by everyone who loads the page.
+  // build time is readable by everyone who loads the page. The state stays here
+  // rather than moving to /settings because the value outlives that page — every
+  // request the shell's children make is authenticated with it.
   const [apiKey, setApiKeyState] = useState(() => getApiKey());
-  const [keyDraft, setKeyDraft] = useState('');
-  const [keyOpen, setKeyOpen] = useState(false);
   const [keyPersistFailed, setKeyPersistFailed] = useState(false);
 
   // Bumped whenever the credential changes, so whoami re-runs rather than
@@ -94,9 +118,23 @@ export function App() {
   });
 
   const canAdmin = me.data?.permissions?.admin_write === true;
-  const session = getSession();
+
+  /**
+   * The stored session, held in STATE rather than read during render.
+   *
+   * This was `getSession()` inline, which looks like state and has none of its
+   * guarantees: a plain localStorage read is only as fresh as the last render,
+   * with no dependency tracking to cause one. Any path that changes the
+   * credential without re-rendering — a token expiring mid-session, signOut's
+   * catch branch, a key saved in another tab — left the account menu showing the
+   * wrong verb with nothing to correct it, which is why the symptom was
+   * intermittent rather than absolute. Refreshed wherever the credential
+   * changes, which is the one moment it can become wrong.
+   */
+  const [session, setSessionState] = useState(() => getSession());
 
   function credentialChanged() {
+    setSessionState(getSession());
     setCredRevision((n) => n + 1);
     queryClient.invalidateQueries();
   }
@@ -119,7 +157,6 @@ export function App() {
     // failed, the header must not claim a key is set.
     setApiKeyState(getApiKey());
     setKeyPersistFailed(!stored && next.trim() !== '');
-    setKeyOpen(false);
     // Every page's data was fetched with the old credential, so re-fetch rather
     // than leave stale 401 panels on screen next to a now-valid key.
     credentialChanged();
@@ -128,85 +165,45 @@ export function App() {
   /**
    * The account menu, built once and handed to whichever chrome is active.
    *
-   * Composed here rather than inside Sidebar/NavBar because every control in it
-   * is state this component owns — namespace, API key, session — and pushing
-   * that down would mean threading six props through two layouts to render the
-   * same menu twice.
+   * Composed here rather than inside Sidebar/NavBar because every fact in it is
+   * state this component owns — namespace, credential, session — and pushing
+   * that down would mean threading it through two layouts to render the same
+   * menu twice.
+   *
+   * The menu is now rows that NAVIGATE, not widgets that act. The namespace
+   * input, the API-key form and the appearance panel all moved to /settings;
+   * what stays is the identity, the two facts an operator has to be able to read
+   * at any moment (which namespace, which deployment), and the way out. The
+   * namespace in particular is load-bearing rather than decorative: every
+   * endpoint is namespace-scoped, so an operator scoped to the wrong one reads a
+   * plausible empty dashboard as "nothing is running".
    */
   const account = (
     <ProfileMenu
       session={session}
       principal={me.data}
       organization="KhuriwalGroup IT Solutions"
+      namespace={namespace}
+      connectedTo={API_BASE || 'same origin'}
+      canAdmin={canAdmin}
       onSignOut={() => void signOut()}
       onSignIn={() => navigate('/login')}
-      onOpenChange={() => setNavLayoutState(getNavLayout())}
-    >
-      <ProfileSection label="Namespace">
-        <input
-          type="text"
-          value={namespace}
-          onChange={(e) => setNamespace(e.target.value)}
-          aria-label="namespace"
-        />
-      </ProfileSection>
-
-      <ProfileSection label="API key">
-        {keyOpen ? (
-          <form
-            className="row"
-            onSubmit={(e) => {
-              e.preventDefault();
-              saveKey(keyDraft.trim());
-            }}
-          >
-            <input
-              type="password"
-              value={keyDraft}
-              onChange={(e) => setKeyDraft(e.target.value)}
-              placeholder="API key"
-              aria-label="API key"
-              autoFocus
-            />
-            <button type="submit">Save</button>
-            <button type="button" onClick={() => setKeyOpen(false)}>
-              Cancel
-            </button>
-          </form>
-        ) : (
-          <button
-            type="button"
-            onClick={() => {
-              setKeyDraft(apiKey);
-              setKeyOpen(true);
-            }}
-            title={
-              apiKey
-                ? 'An API key is set for this browser. Click to change it.'
-                : 'No API key set — every request will be refused with 401.'
-            }
-          >
-            {keyPersistFailed ? 'API key ✗ not saved' : apiKey ? 'API key ✓' : 'Set API key'}
-          </button>
-        )}
-      </ProfileSection>
-
-      {/* The API base stays in the menu but OUTSIDE any collapsible control:
-          it says which deployment this tab is pointed at, and mistaking
-          staging for production is exactly the error a hidden value invites. */}
-      <ProfileSection label="Connected to">
-        <span className="chip" title={`API base: ${API_BASE || 'same origin'}`}>
-          {API_BASE || 'same origin'}
-        </span>
-      </ProfileSection>
-
-      <ProfileSection label="Appearance">
-        <AppearancePanel />
-      </ProfileSection>
-    </ProfileMenu>
+      onOpenSettings={() => navigate('/settings')}
+      onOpenApiKeys={() => navigate('/admin/tokens')}
+      onOpenUsers={() => navigate('/admin/users')}
+    />
   );
 
-  return (
+  /**
+   * The signed-in shell: chrome, command palette, skip link, and an <Outlet/>
+   * for whichever destination is routed into it.
+   *
+   * Declared here rather than in its own file because every value it renders —
+   * namespace, credential, layout, the composed account menu — is state this
+   * component owns, and lifting it out would mean threading all of it back down
+   * through props to build the same header twice.
+   */
+  const chrome = (
     <div className={`app app-${navLayout}`}>
       {/* First focusable element on the page: a keyboard user must be able to
           reach the content without tabbing the whole nav on every navigation. */}
@@ -215,73 +212,101 @@ export function App() {
       </a>
 
       {/* Mounted at the shell so Cmd+K works from every page. It owns its own
-          open state and renders null while closed, so it costs nothing here. */}
+          open state and renders null while closed, so it costs nothing here.
+          Deliberately inside the chrome layout and not above the router: on
+          /login there is no catalog to search and no credential to search it
+          with, so the palette would open onto a list of 401s. */}
       <CommandPalette namespace={namespace} onNavigate={navigate} onSignOut={() => void signOut()} />
 
       {navLayout === 'navbar' ? (
         <header className="chrome chrome-navbar">
-          <NavBar canAdmin={canAdmin} namespace={namespace} account={account} />
+          <NavBar canAdmin={canAdmin} account={account} />
         </header>
       ) : (
         <header className="chrome chrome-sidebar">
-          <Sidebar canAdmin={canAdmin} namespace={namespace} account={account} />
+          <Sidebar canAdmin={canAdmin} account={account} />
         </header>
       )}
 
       <main className="main" id="main" tabIndex={-1}>
         <ErrorBoundary>
-          <Routes>
-            <Route path="/" element={<OverviewPage namespace={namespace} />} />
-            <Route path="/workflows" element={<WorkflowsPage namespace={namespace} />} />
-            <Route
-              path="/workflows/:name"
-              element={<WorkflowDetailPage namespace={namespace} />}
-            />
-            <Route path="/runs" element={<RunListPage namespace={namespace} />} />
-            <Route path="/runs/:runId" element={<RunDetailPage namespace={namespace} />} />
-            <Route path="/schedules" element={<SchedulesPage namespace={namespace} />} />
-            <Route
-              path="/schedules/:name"
-              element={<ScheduleDetailPage namespace={namespace} />}
-            />
-            <Route
-              path="/backfills/:backfillId"
-              element={<BackfillDetailPage namespace={namespace} />}
-            />
-            <Route path="/workers" element={<WorkersPage namespace={namespace} />} />
-            <Route
-              path="/login"
-              element={<LoginPage namespace={namespace} onAuthenticated={credentialChanged} />}
-            />
-            <Route
-              path="/admin/users"
-              element={<UsersPage namespace={namespace} canAdmin={canAdmin} />}
-            />
-            <Route
-              path="/admin/tokens"
-              element={<TokensPage namespace={namespace} canAdmin={canAdmin} />}
-            />
-            <Route
-              path="/admin/audit"
-              element={<AuditPage namespace={namespace} canAdmin={canAdmin} />}
-            />
-            <Route
-              path="*"
-              element={
-                <div className="notice empty">
-                  <span className="notice-glyph">?</span>
-                  <div>
-                    <div className="notice-title">No such page</div>
-                    <div className="notice-detail">
-                      <NavLink to="/">Go to the overview</NavLink>
-                    </div>
-                  </div>
-                </div>
-              }
-            />
-          </Routes>
+          <Outlet />
         </ErrorBoundary>
       </main>
     </div>
+  );
+
+  return (
+    <Routes>
+      {/* Outside the chrome: no nav, no namespace control, no account menu. */}
+      <Route
+        path="/login"
+        element={
+          <ErrorBoundary>
+            <LoginPage namespace={namespace} onAuthenticated={credentialChanged} />
+          </ErrorBoundary>
+        }
+      />
+
+      <Route element={chrome}>
+        <Route path="/" element={<OverviewPage namespace={namespace} />} />
+        <Route path="/workflows" element={<WorkflowsPage namespace={namespace} />} />
+        <Route path="/workflows/:name" element={<WorkflowDetailPage namespace={namespace} />} />
+        <Route path="/runs" element={<RunListPage namespace={namespace} />} />
+        <Route path="/runs/:runId" element={<RunDetailPage namespace={namespace} />} />
+        <Route path="/schedules" element={<SchedulesPage namespace={namespace} />} />
+        <Route path="/schedules/:name" element={<ScheduleDetailPage namespace={namespace} />} />
+        <Route
+          path="/backfills/:backfillId"
+          element={<BackfillDetailPage namespace={namespace} />}
+        />
+        <Route path="/workers" element={<WorkersPage namespace={namespace} />} />
+        <Route path="/workers/:workerId" element={<WorkerDetailPage namespace={namespace} />} />
+        {/* Inside the chrome, and deliberately not in navItems.ts: settings is
+            somewhere you go from your own account control, not a destination
+            competing with the runs and workflows an operator came for. */}
+        <Route
+          path="/settings"
+          element={
+            <SettingsPage
+              namespace={namespace}
+              onNamespaceChange={setNamespace}
+              apiKey={apiKey}
+              onApiKeyChange={saveKey}
+              apiKeyPersistFailed={keyPersistFailed}
+            />
+          }
+        />
+        <Route
+          path="/admin/users"
+          element={<UsersPage namespace={namespace} canAdmin={canAdmin} />}
+        />
+        <Route
+          path="/admin/tokens"
+          element={<TokensPage namespace={namespace} canAdmin={canAdmin} />}
+        />
+        <Route
+          path="/admin/audit"
+          element={<AuditPage namespace={namespace} canAdmin={canAdmin} />}
+        />
+        {/* Inside the chrome on purpose: a mistyped URL from a signed-in
+            operator is a navigation error, and stripping the nav from the one
+            screen that exists to send them somewhere else would be perverse. */}
+        <Route
+          path="*"
+          element={
+            <div className="notice empty">
+              <span className="notice-glyph">?</span>
+              <div>
+                <div className="notice-title">No such page</div>
+                <div className="notice-detail">
+                  <NavLink to="/">Go to the overview</NavLink>
+                </div>
+              </div>
+            </div>
+          }
+        />
+      </Route>
+    </Routes>
   );
 }
