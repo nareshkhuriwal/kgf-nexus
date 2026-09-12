@@ -244,3 +244,45 @@ func WFMDeleteSpec(ctx context.Context, db GWDB, namespace, name string) error {
 	}
 	return nil
 }
+
+// ── existence, for the schedule create path ───────────────────────────────
+
+// WFMSpecNameExists reports whether a workflow NAME has at least one version in
+// this namespace.
+//
+// EXISTS rather than fetching a row, because the question is genuinely boolean:
+// createSchedule needs to know whether the name it was handed resolves to
+// anything at all, and it has no use for the latest version's id, hash or 40KB
+// of spec_json. Calling WFMGetLatestSpec and discarding everything but the error
+// would read the whole document off disk to answer a yes/no, on every schedule
+// creation.
+//
+// It also asks the RIGHT question, which WFMGetLatestSpec does not.
+// WFMGetLatestSpec orders by version and takes the newest; that is correct for
+// run creation, which must pin one version (ADR-0004). A schedule pins nothing —
+// it resolves the name afresh at every fire — so what it needs asserted is that
+// the NAME is inhabited, not which version currently sits on top.
+//
+// THE PREDICATE IS DELIBERATELY IDENTICAL to the schedules half of
+// WFMCountSpecReferences: `namespace = $1 AND name = $2`, exact, with no case
+// folding and no trimming. That pairing is the whole point. Deletion refuses a
+// workflow while a schedule still names it; creation refuses a schedule that
+// names no workflow. If the two used different notions of "the same name" — one
+// case-insensitive, say — a name could be simultaneously unschedulable (creation
+// says it does not exist) and undeletable (deletion says a schedule references
+// it), which is a state an operator cannot get out of from either end. The two
+// queries must agree by construction, so they are written to match and this
+// comment says why.
+func WFMSpecNameExists(ctx context.Context, q GWQuerier, namespace, name string) (bool, error) {
+	var exists bool
+	err := q.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM workflow_specs WHERE namespace = $1 AND name = $2
+		)`,
+		namespace, name,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check workflow %s/%s exists: %w", namespace, name, err)
+	}
+	return exists, nil
+}

@@ -475,6 +475,73 @@ describe('the create form as a deep link', () => {
     });
   });
 
+  /**
+   * The free-text path's round trip, and the reason the picker's escape hatch is
+   * safe to keep.
+   *
+   * The picker prevents a typo for anyone choosing from the catalog, but it
+   * deliberately falls back to a plain input — the catalog fetch is capped and
+   * can fail, and making a valid spec name untypeable would turn a degraded read
+   * into a blocked write. So a name nobody verified CAN still be submitted, and
+   * the gateway is what catches it: it rejects an unknown spec_name with a 400
+   * naming the field and the value, exactly as it does for a bad cron.
+   *
+   * What is pinned here is that the message survives the trip. `serverMessage`
+   * prefers the body's `message` over a status-derived sentence, so the operator
+   * reads the name they actually typed rather than "Bad Request" — which would
+   * leave them with a rejected form and no idea which field was wrong.
+   */
+  it("shows the gateway's rejection of a spec name typed into the free-text path", async () => {
+    let posted: Record<string, unknown> | null = null;
+    mockFetch((url, init) => {
+      if (init?.method === 'POST') {
+        posted = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return [
+          400,
+          {
+            error: 'unknown_spec_name',
+            message:
+              'spec_name "ten-node-mixd" does not name a workflow in namespace "default"; a schedule resolves this name every time it fires, so one that matches nothing would arm, fire on time and produce no runs',
+          },
+        ];
+      }
+      // The catalog fails, which is what forces the picker into free text — the
+      // one mode in which an unverified name can reach the gateway at all. A 403
+      // rather than a 5xx because useWorkflows retries 5xx twice: the retries
+      // would leave the query still settling when the assertions run, and the
+      // point here is the picker's terminal failed state, not its retry policy.
+      if (url.includes('/specs')) return [403, { error: 'forbidden', message: 'no catalog access' }];
+      return catalogOnly(url);
+    });
+    wrapAt('/schedules?new=1');
+
+    // A text input, not a select: the catalog could not be read, so the console
+    // has established nothing about what exists and must let the name be typed.
+    // Waited for rather than read once — the control starts as a select while the
+    // catalog fetch is still in flight and only becomes an input once the fetch
+    // has actually failed, so reading it immediately would catch the wrong one.
+    await waitFor(() =>
+      expect((screen.getByLabelText('workflow') as HTMLElement).tagName).toBe('INPUT'),
+    );
+    const workflow = screen.getByLabelText('workflow') as HTMLInputElement;
+    fireEvent.change(workflow, { target: { value: 'ten-node-mixd' } });
+    fireEvent.change(screen.getByPlaceholderText('nightly-etl'), {
+      target: { value: 'typo-probe' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create schedule/i }));
+
+    await waitFor(() => expect(posted).not.toBeNull());
+    expect(posted).toMatchObject({ spec_name: 'ten-node-mixd' });
+
+    // The SERVER's sentence, not a generic failure. The typed name must appear:
+    // an error that does not quote it back leaves the operator diffing by eye.
+    await waitFor(() => {
+      const alerts = screen.getAllByRole('alert');
+      expect(alerts.some((el) => /ten-node-mixd/.test(el.textContent ?? ''))).toBe(true);
+      expect(alerts.some((el) => /does not name a workflow/.test(el.textContent ?? ''))).toBe(true);
+    });
+  });
+
   it('sends the linked workflow as spec_name and shows the schedule it created', async () => {
     let posted: Record<string, unknown> | null = null;
     mockFetch((url, init) => {

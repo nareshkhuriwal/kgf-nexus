@@ -6,15 +6,20 @@
  *
  * WHY THIS EXISTS AT ALL. The field it replaces was a bare text input, so
  * creating a schedule meant typing a spec name exactly, from memory, with the
- * catalog one navigation away. That would be a mere annoyance if the gateway
- * checked the name — it does not. `POST /schedules` validates the cron, the
- * zone, the overlap policy and the catchup limit, and accepts ANY spec_name:
- * submitting a schedule for a workflow that does not exist returns 201 and
- * arms a row that fires forever and resolves nothing. A typo therefore costs an
- * operator a schedule that looks perfectly healthy on the list page — enabled,
- * next fire time armed — and produces only failures. The picker is not a
- * convenience here; it is the only place in the stack where that name is
- * checked against reality.
+ * catalog one navigation away. When this control was written that was worse
+ * than an annoyance: the gateway accepted ANY spec_name, so a typo returned 201
+ * and armed a row that fired forever and resolved nothing — a schedule that
+ * looked perfectly healthy on the list page and produced only failures.
+ *
+ * THE GATEWAY NOW CHECKS THE NAME TOO, and this control is no longer the only
+ * thing standing between a typo and that row: `POST /schedules` rejects an
+ * unknown spec_name with a 400 naming the field and the value, exactly as it
+ * already did for a bad cron. That does NOT make the picker redundant, for the
+ * ordinary reason a client-side control is not redundant — it turns a round
+ * trip and an error message into a choice from a list, and the operator learns
+ * what exists rather than what does not. It does change what the free-text
+ * fallback below costs: a name typed there that matches nothing is now refused
+ * by the server with a message worth reading, instead of silently accepted.
  *
  * WHY A <select> AND NOT A COMBOBOX. A namespace can hold more workflows than a
  * dropdown wants, and a typeahead is the usual answer. It is not the answer

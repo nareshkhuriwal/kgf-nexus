@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"google.golang.org/grpc/codes"
@@ -76,6 +77,11 @@ func newScheduleAPI(t *testing.T) (http.Handler, *fakeSchedules) {
 	db := newRestDB()
 	db.addKey(adminKey, "team-ml", "ci", "admin")
 	db.addKey(readerKey, "team-ml", "dashboard", "reader")
+	// The workflow every creation test schedules. It must exist, because
+	// createSchedule now refuses a spec_name that names nothing -- so a fixture
+	// without it would be testing a namespace where the workflow really is absent,
+	// and every one of those tests would be asserting the wrong thing.
+	db.addSpec("team-ml", "train")
 	fs := &fakeSchedules{}
 	api := New(db, authn.New(db), &fakeWFM{}, fakeRM{}, nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil))).WithSchedules(fs)
@@ -386,6 +392,10 @@ func TestScheduleErrorsMapFromStatusCodes(t *testing.T) {
 	for _, c := range cases {
 		db := newRestDB()
 		db.addKey(adminKey, "team-ml", "ci", "admin")
+		// The spec must exist so each request reaches the OWNER, which is where the
+		// error under test comes from. Without it every case would be short-circuited
+		// by the spec check into a 400 and the mapping would go untested.
+		db.addSpec("team-ml", "train")
 		api := New(db, authn.New(db), &fakeWFM{}, fakeRM{}, nil,
 			slog.New(slog.NewTextHandler(io.Discard, nil))).
 			WithSchedules(&fakeSchedules{err: c.err})
@@ -461,5 +471,157 @@ func TestBackfillPayloadCarriesTheScheduleNameWhenKnown(t *testing.T) {
 		if _, ok := p["schedule_name"]; ok {
 			t.Errorf("schedule_name was rendered when no name was known: %v", p["schedule_name"])
 		}
+	}
+}
+
+// TestCreateScheduleRejectsUnknownSpecName is the counterpart to the cron check.
+//
+// schedules.spec_name has NO foreign key and cannot have one -- workflow_specs is
+// versioned and unique only on (namespace, name, version), so there is no
+// (namespace, name) key to reference. Without a submit-time check the database
+// accepts any string, the create returns 201 with next_fire_at armed, and the
+// operator gets a schedule that lists as enabled and healthy, fires on time, and
+// creates nothing. That is the same failure mode as a bad cron, so it gets the
+// same treatment: rejected here, with the field and the value named.
+func TestCreateScheduleRejectsUnknownSpecName(t *testing.T) {
+	h, fs := newScheduleAPI(t)
+
+	rec := post(t, h, "/v1/namespaces/team-ml/schedules", adminKey, "",
+		`{"name":"nightly","spec_name":"trian","cron":"0 2 * * *"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400. body=%s", rec.Code, rec.Body)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["error"] != "unknown_spec_name" {
+		t.Errorf("error code = %v, want unknown_spec_name. body=%s", got["error"], rec.Body)
+	}
+	// The message must quote the VALUE back. Whoever hits this is looking at a
+	// string they believed was right, and "unknown workflow" without the name they
+	// typed sends them to diff it by eye -- which is the whole reason the cron
+	// rejection names its offending token.
+	msg, _ := got["message"].(string)
+	for _, want := range []string{`"trian"`, "spec_name", "team-ml"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("rejection %q does not name %q", msg, want)
+		}
+	}
+
+	// And nothing was created. A 400 that still reached the owner would leave the
+	// broken row behind, which is precisely what this exists to prevent.
+	if len(fs.created) != 0 {
+		t.Errorf("the owner was asked to create %+v despite the rejection", fs.created)
+	}
+}
+
+// TestCreateScheduleChecksTheSpecInTheREQUESTNamespace pins that the check is
+// namespaced.
+//
+// A workflow name is unique only within a namespace, so "train exists" is not a
+// fact about the fleet. Checking without the namespace would let a schedule in
+// team-ops be created for a workflow that only team-ml has -- a schedule that
+// passes validation and still resolves nothing at fire time, which is the exact
+// failure this is meant to stop, reintroduced one namespace over.
+func TestCreateScheduleChecksTheSpecInTheRequestNamespace(t *testing.T) {
+	db := newRestDB()
+	db.addKey(adminKey, "team-ops", "ci", "admin")
+	// The workflow exists -- but somewhere else.
+	db.addSpec("team-ml", "train")
+	api := New(db, authn.New(db), &fakeWFM{}, fakeRM{}, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil))).WithSchedules(&fakeSchedules{})
+
+	rec := post(t, api.Routes(), "/v1/namespaces/team-ops/schedules", adminKey, "",
+		`{"name":"nightly","spec_name":"train","cron":"0 2 * * *"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400. body=%s", rec.Code, rec.Body)
+	}
+}
+
+// TestCreateScheduleFailsLoudlyWhenTheCatalogCannotBeRead separates "it does not
+// exist" from "I could not check".
+//
+// If the existence read itself fails, the gateway has established NOTHING about
+// whether the workflow is there. Reporting that as a 400 would tell the operator
+// their workflow does not exist -- a falsehood they would act on, by going to
+// re-create a workflow that was fine. It is an outage and must read as one, so
+// the client retries instead of "fixing" a correct name.
+func TestCreateScheduleFailsLoudlyWhenTheCatalogCannotBeRead(t *testing.T) {
+	db := newRestDB()
+	db.addKey(adminKey, "team-ml", "ci", "admin")
+	api := New(&specReadFailsDB{restDB: db}, authn.New(db), &fakeWFM{}, fakeRM{}, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil))).WithSchedules(&fakeSchedules{})
+
+	rec := post(t, api.Routes(), "/v1/namespaces/team-ml/schedules", adminKey, "",
+		`{"name":"nightly","spec_name":"train","cron":"0 2 * * *"}`)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d, want 500 -- an unreadable catalog is an outage, not a bad request. body=%s",
+			rec.Code, rec.Body)
+	}
+}
+
+// specReadFailsDB answers every query normally except the existence check, which
+// fails. Wrapping rather than reimplementing keeps authentication working, so the
+// request under test reaches the handler rather than dying at the door.
+type specReadFailsDB struct{ *restDB }
+
+func (d *specReadFailsDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, "FROM workflow_specs") {
+		return errRow{errors.New("connection refused")}
+	}
+	return d.restDB.QueryRow(ctx, sql, args...)
+}
+
+// TestScheduleCreationAndSpecDeletionAgreeOnExistence is the two-halves test.
+//
+// Creation refuses a spec_name that names no workflow; deletion refuses a workflow
+// a schedule still names. Those are two ends of one invariant, and if they used
+// different notions of "the same name" a workflow could be simultaneously
+// unschedulable (creation says it does not exist) and undeletable (deletion says a
+// schedule references it) -- a state an operator cannot escape from either end.
+//
+// Both sides read workflow name and schedule spec_name with the SAME exact,
+// unfolded, untrimmed predicate: store.WFMSpecNameExists against workflow_specs,
+// and the schedules half of store.WFMCountSpecReferences. This pins that a name
+// creation ACCEPTS is exactly a name deletion reports as blocked, and that a name
+// creation REJECTS blocks nothing.
+func TestScheduleCreationAndSpecDeletionAgreeOnExistence(t *testing.T) {
+	h, fs := newScheduleAPI(t) // "train" exists in team-ml
+
+	// Half one: the name that exists is accepted, and the schedule is created.
+	rec := post(t, h, "/v1/namespaces/team-ml/schedules", adminKey, "",
+		`{"name":"nightly","spec_name":"train","cron":"0 2 * * *"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("creating a schedule for an existing workflow: status %d, want 201. body=%s", rec.Code, rec.Body)
+	}
+	if len(fs.created) != 1 || fs.created[0].SpecName != "train" {
+		t.Fatalf("owner received %+v, want one schedule for train", fs.created)
+	}
+
+	// Half two: that same name, now referenced by a schedule, is refused by the
+	// delete path with a 409 that NAMES the schedule blocking it. The gateway asks
+	// its owner, which classifies the refusal as FailedPrecondition.
+	dh, wfm, _ := newSpecDeleteAPI(t)
+	wfm.deleteSpecFn = func(ns, name string) (int, error) {
+		return 0, status.Errorf(codes.FailedPrecondition,
+			"workflow %s/%s is still referenced by 0 run(s) and 1 schedule(s)", ns, name)
+	}
+	drec := doJSON(t, dh, http.MethodDelete, "/v1/namespaces/team-ml/specs/train", adminKey, "")
+	if drec.Code != http.StatusConflict {
+		t.Fatalf("deleting a workflow a schedule names: status %d, want 409. body=%s", drec.Code, drec.Body)
+	}
+
+	// Half three, the one that makes this more than two assertions side by side:
+	// the name creation REJECTED must not be one deletion treats as referenced.
+	// A create that was refused leaves nothing behind to block a delete.
+	rec = post(t, h, "/v1/namespaces/team-ml/schedules", adminKey, "",
+		`{"name":"typo","spec_name":"trian","cron":"0 2 * * *"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("creating a schedule for an absent workflow: status %d, want 400. body=%s", rec.Code, rec.Body)
+	}
+	if len(fs.created) != 1 {
+		t.Errorf("the refused create still reached the owner: %+v", fs.created)
 	}
 }

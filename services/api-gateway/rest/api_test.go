@@ -32,12 +32,17 @@ import (
 // ── doubles ───────────────────────────────────────────────────────────────
 
 // restDB models api_keys and idempotency_keys, the two tables the gateway owns and
-// the only ones these tests touch.
+// the only ones these tests touch -- plus the EXISTENCE of workflow names, which
+// createSchedule now reads directly (ADR-0011 lets the gateway read any table).
 type restDB struct {
 	mu sync.Mutex
 	// keyHash -> principal fields
 	keys map[string][4]string
 	idem map[string]*idemRow
+	// "ns\x00name" for every workflow name that exists. A set rather than a
+	// version list because the query under test is EXISTS: a schedule needs the
+	// name to be inhabited and has no interest in which versions inhabit it.
+	specs map[string]bool
 }
 
 type idemRow struct {
@@ -46,7 +51,19 @@ type idemRow struct {
 }
 
 func newRestDB() *restDB {
-	return &restDB{keys: map[string][4]string{}, idem: map[string]*idemRow{}}
+	return &restDB{keys: map[string][4]string{}, idem: map[string]*idemRow{}, specs: map[string]bool{}}
+}
+
+// addSpec declares that a workflow name exists in a namespace.
+//
+// Every test that creates a schedule must call this for the name it uses, which is
+// the point: the gateway refuses an unknown spec_name, so a test fixture that did
+// not declare the workflow would be asserting against a namespace where the
+// workflow genuinely is not there.
+func (d *restDB) addSpec(ns, name string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.specs[ns+"\x00"+name] = true
 }
 
 func (d *restDB) addKey(plaintext, ns, name, role string) {
@@ -100,6 +117,10 @@ func (d *restDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row 
 			return errRow{pgx.ErrNoRows}
 		}
 		return valueRow{[]any{row.requestHash, []byte(row.response)}}
+	// The schedule create path's existence check. Matched on the FROM clause
+	// rather than on "EXISTS", so it keeps working if the query is reformatted.
+	case strings.Contains(sql, "FROM workflow_specs"):
+		return valueRow{[]any{d.specs[args[0].(string)+"\x00"+args[1].(string)]}}
 	}
 	return errRow{fmt.Errorf("restDB: unhandled QueryRow: %s", sql)}
 }
@@ -128,6 +149,10 @@ func (r valueRow) Scan(dest ...any) error {
 			*p = r.vals[i].(string)
 		case *[]byte:
 			*p = r.vals[i].([]byte)
+		// The existence check scans a bool; without this the schedule create path
+		// fails with "unsupported destination" rather than an answer.
+		case *bool:
+			*p = r.vals[i].(bool)
 		default:
 			return fmt.Errorf("unsupported destination %T", d)
 		}

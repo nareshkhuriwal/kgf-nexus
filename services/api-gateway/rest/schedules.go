@@ -150,6 +150,54 @@ func (a *API) createSchedule(w http.ResponseWriter, r *http.Request, p authn.Pri
 		return
 	}
 
+	// Reject a spec_name that names no workflow, HERE, at submit time.
+	//
+	// Exactly the cron argument above, applied to the other field that is only
+	// resolved later. schedules.spec_name is plain TEXT with NO foreign key, and
+	// it cannot have one: workflow_specs is versioned and unique only on
+	// (namespace, name, version), so there is no (namespace, name) key for a
+	// reference to point at. That is deliberate -- a schedule tracks the LATEST
+	// version of a name rather than pinning one (migration 0006) -- and it means
+	// the database will accept any string at all in this column.
+	//
+	// Without this check the failure is the silent one: POST /schedules returns
+	// 201 with next_fire_at armed, the row lists as enabled and healthy, the fire
+	// loop wakes on time, fails to resolve the name, and produces no runs -- with
+	// nothing in the schedule row to say why. "A schedule that looks active and
+	// never fires" is the same failure the cron check exists to prevent, and a
+	// typo in a workflow name is at least as easy to make as a typo in a cron.
+	//
+	// Checked in the GATEWAY and not only in the console, because this endpoint is
+	// reached by nexusctl and the SDK as well as by the browser. The console's
+	// WorkflowPicker keeps a free-text escape hatch by design (the catalog fetch
+	// is capped and can fail), so even the browser can reach here with a name
+	// nobody verified.
+	//
+	// Read locally rather than asked of the owner: ADR-0011 lets the gateway read
+	// any table, and this is the same read the delete path already does -- see
+	// store.WFMSpecNameExists for why the two must use an identical predicate.
+	//
+	// A read FAILURE is not a rejection. If the catalog cannot be read, the
+	// gateway has established nothing about whether the workflow exists, and
+	// turning "I could not check" into "your workflow does not exist" would tell
+	// the operator a falsehood they would act on. It fails as the outage it is.
+	ns := r.PathValue("ns")
+	specExists, err := store.WFMSpecNameExists(r.Context(), a.db, ns, req.SpecName)
+	if err != nil {
+		a.fail(w, r, "check workflow exists", err)
+		return
+	}
+	if !specExists {
+		// Names the FIELD and the VALUE, like the cron rejection names the field
+		// and the token: this is something a person has to fix, and "unknown
+		// workflow" without the name they typed makes them go and diff it by eye.
+		writeError(w, http.StatusBadRequest, "unknown_spec_name",
+			fmt.Sprintf("spec_name %q does not name a workflow in namespace %q; "+
+				"a schedule resolves this name every time it fires, so one that matches nothing "+
+				"would arm, fire on time and produce no runs", req.SpecName, ns))
+		return
+	}
+
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
@@ -164,7 +212,7 @@ func (a *API) createSchedule(w http.ResponseWriter, r *http.Request, p authn.Pri
 	}
 
 	created, err := a.schedules.CreateSchedule(r.Context(), store.Schedule{
-		Namespace:     r.PathValue("ns"),
+		Namespace:     ns,
 		Name:          req.Name,
 		SpecName:      req.SpecName,
 		SpecVersion:   req.SpecVersion,

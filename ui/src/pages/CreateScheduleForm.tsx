@@ -143,9 +143,11 @@ export function CreateScheduleForm({
               Unique within the namespace, and how you address it later.
             </span>
           </label>
-          {/* Not a bare input any more. The gateway does not check spec_name,
-              so this control is the only thing standing between a typo and a
-              schedule that fires forever and resolves nothing — see
+          {/* Not a bare input any more. The gateway now rejects an unknown
+              spec_name as well, so this is defence in depth rather than the
+              only guard — but it is the half that offers a choice instead of
+              an error, and its free-text fallback is the path where the
+              server's rejection is what the operator sees. See
               WorkflowPicker's header for the whole argument. */}
           <WorkflowPicker namespace={namespace} value={specName} onChange={setSpecName} />
         </div>
