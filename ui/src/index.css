@@ -367,11 +367,17 @@ button.link {
   text-decoration: underline; cursor: pointer;
 }
 
-/* Every text-entry control, not just the two the first screens happened to use:
-   number, password and textarea were left unstyled and rendered as raw browser
-   widgets next to styled ones on the same form. */
+/* Every text-entry control, expressed as "not the ones that aren't" rather than
+   as a list of the ones that are.
+
+   The allow-list version of this rule shipped twice with a hole in it: first
+   number/password/textarea, then email, which is why the sign-in form rendered a
+   raw browser widget for its first field next to a styled one for its second. An
+   allow-list has to be edited every time a form uses a new type, and the failure
+   is silent and only visible on the one screen that uses it. Negation means a
+   date, tel or url field is styled the day someone adds it. */
 select, textarea,
-input[type='text'], input[type='search'], input[type='number'], input[type='password'] {
+input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file']):not([type='submit']):not([type='button']):not([type='reset']):not([type='image']) {
   font: inherit; padding: var(--space-2) var(--space-4); border-radius: var(--radius);
   border: 1px solid var(--border); background: var(--bg-inset); color: var(--fg);
 }
@@ -2445,7 +2451,7 @@ a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
   flex-direction: column;
   gap: var(--space-7);
 }
-/* The ◇ is the only accent on the page, which is what the accent is for. */
+/* The mark is the only accent on the page, which is what the accent is for. */
 .login-brand {
   display: flex;
   flex-direction: column;
@@ -2453,10 +2459,11 @@ a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
   gap: var(--space-3);
   text-align: center;
 }
+/* The Logo component, so it inherits currentColor and matches the favicon and
+   the rail. display:block kills the inline baseline gap that otherwise reads as
+   uneven spacing above the wordmark. */
 .login-mark {
-  font-family: var(--mono);
-  font-size: var(--text-xl);
-  line-height: 1;
+  display: block;
   color: var(--accent);
 }
 .login-title {
@@ -2474,8 +2481,46 @@ a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
 /* No method switch: interactive sign-in is password-only, and a key is the
    CLI/worker credential configured from Settings. The form is the whole card. */
 .login-form { display: flex; flex-direction: column; gap: var(--space-6); }
-.login-form .form-field > input { width: 100%; }
-.login-submit { width: 100%; justify-content: center; padding-block: var(--space-4); }
+
+/* The sign-in fields are deliberately larger than the console's table-dense
+   inputs. This is the one form an operator types into before they can see
+   anything, often on an unfamiliar machine, so the target is comfortable and the
+   text is full size rather than the 12.5px the data tables use.
+
+   --bg is the ground here, not --bg-inset: the field sits INSIDE a panel that is
+   already raised, and an inset fill against a raised card is what made these
+   read as flat grey blocks rather than as things you can type in. */
+.login-form .form-field > input {
+  width: 100%;
+  padding: var(--space-4) var(--space-5);
+  font-size: var(--text-md);
+  background: var(--bg);
+  border-color: var(--border-strong);
+  border-radius: var(--radius-md);
+}
+.login-form .form-field > input::placeholder { color: var(--fg-faint); }
+/* Focus is a ring, not just a border-colour change: a 1px hue shift is not
+   enough to locate the caret on a two-field form at a glance. */
+.login-form .form-field > input:focus-visible {
+  outline: none;
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+/* The labels sit close to their own field and far from the one above, so the
+   pairing is read from spacing rather than from alignment alone. */
+.login-form .form-field { gap: var(--space-2); }
+.login-form .form-label { color: var(--fg); }
+
+.login-submit {
+  width: 100%;
+  justify-content: center;
+  padding-block: var(--space-4);
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+}
+/* A submit that is busy or refused must not look like one waiting to be
+   pressed; without this the disabled state is only detectable by clicking. */
+.login-submit:disabled { opacity: 0.6; cursor: progress; }
 .login-foot {
   font-size: var(--text-xs);
   line-height: var(--leading-normal);

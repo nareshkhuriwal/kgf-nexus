@@ -136,10 +136,12 @@ export function LoginPage({
       <div className="login-main">
         <div className="login-col">
           <div className="login-brand">
-            <span className="login-mark" aria-hidden="true">
-              ◇
-            </span>
-            <h1 className="login-title">nexus</h1>
+            {/* The real mark, not a ◇ stand-in. The product has a logo -- a hub
+                with edges to satellite nodes, the same shape as the favicon and
+                the sidebar -- and a lozenge glyph in its place made the sign-in
+                screen the one place the console did not look like itself. */}
+            <Logo size={36} className="login-mark" />
+            <h1 className="login-title">Nexus</h1>
             <div className="login-sub">
               operator console · namespace <code>{namespace}</code>
             </div>

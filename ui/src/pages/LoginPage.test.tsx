@@ -25,7 +25,7 @@
  *
  * The fourth is the accent rule this console enforces everywhere: colour that
  * means something comes from --tone-*, and the accent appears once. On this page
- * the once is the ◇ above the form, so the mark on the brand panel must not
+ * the once is the logo above the form, so the mark on the brand panel must not
  * claim it too.
  */
 
@@ -276,7 +276,7 @@ describe('the brand panel beside the form', () => {
   });
 
   /**
-   * The accent appears ONCE on this page, on the ◇ above the form. The brand
+   * The accent appears ONCE on this page, on the logo above the form. The brand
    * panel's mark takes the brand foreground instead — spending the accent twice
    * would make the rule that governs the rest of the console meaningless here.
    */
@@ -286,5 +286,46 @@ describe('the brand panel beside the form', () => {
     expect(document.querySelectorAll('.login-mark')).toHaveLength(1);
     const asideMark = document.querySelector('.login-aside-mark')!;
     expect(asideMark.className).not.toContain('login-mark');
+  });
+
+  /**
+   * The mark is the product's logo, not a typographic stand-in.
+   *
+   * It rendered as a ◇ character for a while, which made sign-in the one screen
+   * that did not look like the rest of the console — the same shape appears on
+   * the favicon and in the rail, and recognising it is the point of having it.
+   * Asserted as an <svg> because that is the difference a glyph cannot fake.
+   */
+  it('draws the real logo above the form, not a text glyph', () => {
+    renderLogin();
+
+    const mark = document.querySelector('.login-mark')!;
+    expect(mark.tagName.toLowerCase()).toBe('svg');
+    expect(mark.textContent ?? '').not.toContain('◇');
+  });
+
+  /**
+   * Both credential fields must be stylable by the shared input rule.
+   *
+   * This is a guard against a specific bug that shipped twice: the global
+   * text-input rule was an allow-LIST of type attributes, so `email` fell
+   * through it and the first field on this form rendered as a raw browser widget
+   * beside a styled one. The rule is now a negation, and the fields are asserted
+   * to be the types that negation covers. A future `type` here that the rule
+   * excludes (checkbox, range, file…) would be caught by this.
+   */
+  it('uses input types the shared text-input styling covers', () => {
+    renderLogin();
+
+    const unstyled = ['checkbox', 'radio', 'range', 'color', 'file', 'submit', 'button', 'reset', 'image'];
+    const fields = Array.from(
+      document.querySelectorAll<HTMLInputElement>('.login-form .form-field > input'),
+    );
+
+    expect(fields).toHaveLength(2);
+    expect(fields.map((f) => f.type)).toEqual(['email', 'password']);
+    for (const f of fields) {
+      expect(unstyled).not.toContain(f.type);
+    }
   });
 });
