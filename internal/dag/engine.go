@@ -413,6 +413,20 @@ func Reconcile(in ReconcileInput) Decision {
 		in.RunState == RunPausing || in.RunState == RunPaused ||
 		in.RunState == RunCancelling || in.RunState == RunCancelled
 
+	// Cancel withholds work permanently, exactly as fail_fast does, so the same
+	// rule applies: anything it withholds must be SETTLED rather than left
+	// PENDING. A cancelled run's PENDING node is unreachable from both
+	// directions -- propagation will not claim it (its trigger is satisfied) and
+	// dispatch will never take it (the claim query admits only PENDING/RUNNING
+	// runs) -- so the run sits in CANCELLING forever, holding a
+	// max_active_runs slot, and no operator action can free it.
+	//
+	// PAUSING is deliberately NOT here. A pause is meant to be resumed, and its
+	// PENDING nodes must survive to be dispatched afterwards; settling them would
+	// make pause a destructive operation. Cancel is terminal, which is what makes
+	// settling correct for it and wrong for pause.
+	cancelling := in.RunState == RunCancelling || in.RunState == RunCancelled
+
 	if !suppressDispatch {
 		frontier := ReadyFrontier(g, st)
 		d.Frontier = frontier
@@ -421,6 +435,22 @@ func Reconcile(in ReconcileInput) Decision {
 				NodeID: id, From: st.Get(id), To: NodeReady, Reason: ReasonTriggerSatisfied,
 			})
 			st[id] = NodeReady
+		}
+	} else if cancelling {
+		// CANCELLED rather than SKIPPED: these nodes were stopped by an operator's
+		// explicit intervention, which §5.2 distinguishes from work a failure
+		// policy declined (SKIPPED) and from a broken ancestor (UPSTREAM_FAILED).
+		// The distinction is load-bearing downstream -- OnNodesTerminal derives
+		// the run's terminal state from these counts, and a CANCELLED node must
+		// not make the run FAILED.
+		for _, id := range g.Nodes() {
+			switch st.Get(id) {
+			case NodePending, NodeReady:
+				d.Transitions = append(d.Transitions, Transition{
+					NodeID: id, From: st.Get(id), To: NodeCancelled, Reason: ReasonRunCancelled,
+				})
+				st[id] = NodeCancelled
+			}
 		}
 	} else if halted {
 		// fail_fast withholds work PERMANENTLY, so anything it withholds must be

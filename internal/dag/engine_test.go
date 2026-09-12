@@ -568,6 +568,79 @@ func TestReconcile_CancellingReachesCancelledWhenAllTerminal(t *testing.T) {
 	}
 }
 
+// TestReconcile_CancellingSettlesPendingNodes pins F62.
+//
+// The existing cancel test above starts from nodes that are ALREADY terminal,
+// so it never exercised the case that actually wedges a run: a node still
+// PENDING when the cancel lands. That happens on any real cancel -- an in-flight
+// attempt finishes during the cancel fan-out and the engine creates its
+// successor a moment later, after the fan-out has already swept the table.
+//
+// Such a node is unreachable from both directions. Propagation will not claim it
+// (its trigger is satisfied) and dispatch will never take it (the claim query
+// admits only PENDING/RUNNING runs), so without settling it here the run sits in
+// CANCELLING forever holding a max_active_runs slot. Two of these exhausted the
+// namespace limit and blocked every subsequent create, which is how it was found.
+func TestReconcile_CancellingSettlesPendingNodes(t *testing.T) {
+	g := chain(nexusv1.TriggerRule_TRIGGER_RULE_ALL_SUCCESS, "a", "b")
+
+	// "a" succeeded before the cancel landed; "b" is the successor the engine
+	// created afterwards and is still PENDING.
+	d := Reconcile(ReconcileInput{
+		Graph:    g,
+		States:   States{"a": NodeSucceeded, "b": NodePending},
+		RunState: RunCancelling,
+	})
+
+	if got := d.RunState; got != RunCancelled {
+		t.Errorf("run state = %s, want CANCELLED; a PENDING node left unsettled wedges the run", got)
+	}
+	var settled *Transition
+	for i := range d.Transitions {
+		if d.Transitions[i].NodeID == "b" {
+			settled = &d.Transitions[i]
+		}
+	}
+	if settled == nil {
+		t.Fatal("node b was left PENDING on a cancelled run: nothing will ever dispatch it and nothing will ever claim it")
+	}
+	// CANCELLED, not SKIPPED: an operator stopped this work. OnNodesTerminal
+	// derives the run's terminal state from these counts, and the distinction
+	// between "an operator cancelled it" and "a failure policy declined it" is
+	// what keeps a cancelled run from reporting as FAILED.
+	if settled.To != NodeCancelled {
+		t.Errorf("node b settled to %s, want CANCELLED", settled.To)
+	}
+	if settled.Reason != ReasonRunCancelled {
+		t.Errorf("node b reason = %s, want %s", settled.Reason, ReasonRunCancelled)
+	}
+
+	// A READY node -- claimed by the frontier but not yet dispatched -- is the
+	// same hazard and must settle too.
+	dr := Reconcile(ReconcileInput{
+		Graph:    g,
+		States:   States{"a": NodeSucceeded, "b": NodeReady},
+		RunState: RunCancelling,
+	})
+	if dr.RunState != RunCancelled {
+		t.Errorf("run state = %s with a READY node, want CANCELLED", dr.RunState)
+	}
+
+	// Pause must NOT settle anything: it is meant to be resumed, so its PENDING
+	// nodes have to survive to be dispatched afterwards. Settling them would make
+	// pause destructive, which is the bug §5.2 exists to prevent.
+	dp := Reconcile(ReconcileInput{
+		Graph:    g,
+		States:   States{"a": NodeSucceeded, "b": NodePending},
+		RunState: RunPausing,
+	})
+	for _, tr := range dp.Transitions {
+		if tr.NodeID == "b" {
+			t.Errorf("pause settled node b to %s; a paused run must keep its pending work", tr.To)
+		}
+	}
+}
+
 // ── Reconcile end to end ──────────────────────────────────────────────────────
 
 // Driving a full run to completion one reconcile at a time is the closest a pure

@@ -7,7 +7,9 @@ import (
 	"log/slog"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
@@ -166,13 +168,38 @@ func (w *wfmGRPC) createRun(ctx context.Context, req rest.CreateRunRequest) (sto
 		TriggerKind:    req.TriggerKind,
 	})
 	if err != nil {
-		return store.RunRow{}, false, fmt.Errorf("create run: %w", err)
+		// No "create run:" prefix here: the owner's runError already prefixes the
+		// op, and reattachSentinel preserves that message, so wrapping again gives
+		// the operator "create run: create run: ...".
+		return store.RunRow{}, false, reattachSentinel(err)
 	}
 	// The response carries only the id and the dedup flag, so the full row is read
 	// back as a projection. The gateway is permitted to READ every table
 	// (ADR-0011); it is writes that must go through the owner, and this one just
 	// did.
 	return store.RunRow{ID: resp.GetRunId(), Namespace: req.Namespace}, !resp.GetDeduplicated(), nil
+}
+
+// reattachSentinel re-attaches the store sentinel a gRPC status code stands for.
+//
+// The owner maps its sentinels onto codes (runError) precisely so the gateway can
+// answer with the right HTTP status, but a status travels the wire as a code and
+// a string -- the sentinel does not survive it, so `errors.Is(err,
+// ErrMaxActiveRuns)` on this side is always false and every one of those
+// carefully mapped codes fell through to a blanket 500.
+//
+// The visible cost was a workflow at its max_active_runs cap answering
+// "HTTP 500: this is a control-plane fault" when the documented limit was simply
+// doing its job. An operator reads that as an outage and goes looking for one.
+func reattachSentinel(err error) error {
+	switch status.Code(err) {
+	case codes.ResourceExhausted:
+		return fmt.Errorf("%w: %s", store.ErrMaxActiveRuns, status.Convert(err).Message())
+	case codes.NotFound:
+		return fmt.Errorf("%w: %s", store.ErrNotFound, status.Convert(err).Message())
+	default:
+		return err
+	}
 }
 
 // lifecycle performs one run state transition through its owner.

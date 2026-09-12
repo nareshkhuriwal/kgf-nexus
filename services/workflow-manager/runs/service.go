@@ -272,6 +272,22 @@ func (s *Service) Cancel(ctx context.Context, runID string) (store.RunRow, error
 		s.log.WarnContext(ctx, "failed to cancel run deadline timer", "run_id", runID, "error", err)
 	}
 
+	// Settle the nodes cancel withheld. Cancelling the ATTEMPTS above is not the
+	// same as settling the NODES: a cancelled run's PENDING and READY nodes are
+	// unreachable from both directions -- the engine will not advance them (the
+	// run's state suppresses dispatch) and no attempt will ever be created for
+	// them -- so without this the run reports CANCELLED while its graph still
+	// shows eight nodes waiting to run, and any consumer counting node states
+	// sees a run that never finished. Only the engine may write task_nodes
+	// (ADR-0011), so this is a call, not an update.
+	//
+	// Swallowed like Resume's: the cancel is committed and durable, and failing
+	// the operator's call would misreport a state change that already happened.
+	if _, _, _, rerr := s.dag.ReconcileRun(ctx, runID, ""); rerr != nil {
+		s.log.ErrorContext(ctx, "run cancelled but its withheld nodes could not be settled; the graph will show PENDING nodes on a terminal run",
+			"run_id", runID, "error", rerr)
+	}
+
 	return s.MaybeFinalizeCancel(ctx, runID)
 }
 

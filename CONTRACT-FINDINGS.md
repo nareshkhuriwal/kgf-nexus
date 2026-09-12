@@ -853,8 +853,8 @@ Two real defects surfaced while proving this:
 worked, but proving it took a day precisely because a miss would have been
 silent. One scheduler draining several queues would remove the failure mode.
 
-### F62. A run with no RUNNING attempts wedges in CANCELLING — OPEN
-**Severity:** medium. Blocks the namespace via `max_active_runs`.
+### F62. A run with no RUNNING attempts wedges in CANCELLING — FIXED
+**Severity:** medium. Blocked the namespace via `max_active_runs`.
 Cancelling a run whose attempts are all PENDING leaves it in CANCELLING forever.
 `run cancel` reports "running attempts are being signalled; the run reaches
 CANCELLED once they stop" — but there are none to signal, so nothing ever drives
@@ -875,6 +875,58 @@ nothing is in flight.
 gateway maps to **HTTP 500** and the CLI reports as "This is a control-plane
 fault." It is not a fault; it is the documented limit doing its job. It should be
 429 with the limit named, or an operator will chase a phantom outage.
+
+---
+
+**RESOLUTION.** Three distinct defects, each of which alone was enough to wedge
+a cancel. The first was the one that mattered:
+
+1. **`scheduler.CancelRunAttempts` was never wired.** The store method exists and
+   the scheduler SERVES the RPC (`nexus.v1.AttemptReportService/CancelRunAttempts`,
+   over the same hand-written JSON codec the gateway already uses) -- but
+   workflow-manager's client was a stub returning `errNotWired`. So cancel never
+   cancelled a single attempt. Worse, `Cancel` logs the failure as *"reconciler
+   will retry"* and swallows it, and no reconciler retries this: the operator got
+   a success response, the CLI printed "running attempts are being signalled",
+   and nothing was signalled. Now wired.
+
+2. **The engine left withheld nodes PENDING.** `suppressDispatch` covers
+   CANCELLING, but only the `halted` (fail_fast) branch settled what it withheld
+   -- and its comment explains exactly why that is necessary: *"Leaving it PENDING
+   is a hung run... the run sits RUNNING forever holding a concurrency slot with
+   nothing to alert on."* Cancel withholds work just as permanently and had no
+   such branch. `ReasonRunCancelled` was already declared and unused, so the fix
+   had been anticipated and never written.
+
+   PAUSING is deliberately excluded: a pause is meant to be resumed and its
+   PENDING nodes must survive, so settling them would make pause destructive --
+   the very bug b97d1ac fixed.
+
+3. **`Cancel` never asked for a reconcile.** With 1 and 2 fixed the run reached
+   CANCELLED, but its graph still showed eight PENDING nodes, because only the
+   engine may write `task_nodes` and nothing called it. Added the same
+   swallowed-error reconcile `Resume` uses.
+
+Verified live: cancel now returns `state: cancelled` immediately, the racing
+attempt is CANCELLED, and all ten nodes settle. Pinned by
+`TestReconcile_CancellingSettlesPendingNodes`, which starts from a node still
+PENDING when the cancel lands -- the existing cancel test started from nodes
+already terminal, which is why it never caught this.
+
+**On the node labels:** descendants of a cancelled node settle as SKIPPED
+(propagation runs first and claims the subtree); nodes with no cancelled ancestor
+settle as CANCELLED. Deliberate: SKIPPED keeps its existing meaning, matches what
+a fail_fast halt produces, and `OnNodesTerminal` treats neither as a failure, so
+the run still reports CANCELLED rather than FAILED either way.
+
+**The 500 is fixed too, and the cause is worth recording.** Both ends were
+already correct in isolation -- the owner maps `ErrMaxActiveRuns` onto
+`ResourceExhausted`, and the gateway maps `ErrMaxActiveRuns` onto 429. The
+boundary broke it: a gRPC status crosses the wire as a code and a string, so the
+sentinel does not survive, `errors.Is` was always false, and every carefully
+mapped code fell through to a blanket 500. `reattachSentinel` now converts the
+code back into the sentinel on the gateway side. Any future sentinel mapped in
+`runError` needs a case there too, or it silently becomes a 500 again.
 
 ### F63. ten_node_mixed asked for hardware the shipped fleet does not have — FIXED
 **Severity:** blocked Phase 1 exit criterion 1 (this is F60, fully scoped).
