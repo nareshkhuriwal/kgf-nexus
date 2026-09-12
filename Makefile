@@ -19,7 +19,8 @@ DATABASE_URL  ?= postgres://postgres:test@localhost:55432/nexus?sslmode=disable
 MIGRATIONS    := services/migrations
 
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
-        ui-dev ui-build ui-test seed submit-example chaos clean
+        ui-dev ui-build ui-test seed submit-example chaos clean \
+        backup backup-artifacts backup-all restore-drill
 
 help: ## Show this help
 	@echo "Nexus — make targets"
@@ -166,6 +167,28 @@ submit-example: ## Submit an example DAG and create a run (EXAMPLE=ten_node_mixe
 	@test -f examples/$(EXAMPLE)/compiled.yaml || { echo "examples/$(EXAMPLE)/compiled.yaml not found (examples/ is owned by the CLI/SDK workstream)"; exit 1; }
 	$(GO) run ./cli/cmd/nexusctl workflow submit -f examples/$(EXAMPLE)/compiled.yaml --namespace $(NAMESPACE)
 	@echo "Now create a run: go run ./cli/cmd/nexusctl run create --spec <name-from-compiled.yaml> --namespace $(NAMESPACE)"
+
+# ── Backup and restore ────────────────────────────────────────────────────
+# BACKUP_DIR is passed through rather than baked in, so the same targets work
+# against a laptop directory and a mounted backup volume.
+BACKUP_DIR ?= ./backups
+
+backup: ## Dump Postgres only (see backup-all: this is HALF a backup)
+	BACKUP_DIR=$(BACKUP_DIR) deploy/backup.sh
+
+backup-artifacts: ## Mirror the MinIO result bucket only (the other half)
+	BACKUP_DIR=$(BACKUP_DIR) deploy/backup-artifacts.sh
+
+# The target to actually use. Postgres alone leaves large output_refs pointing at
+# objects nobody copied, so `make backup` is deliberately NOT the complete one --
+# backup-all runs both halves in the order that makes the skew safe (objects
+# first, then Postgres; see deploy/backup-artifacts.sh).
+backup-all: ## Back up BOTH stores in the correct order (use this one)
+	BACKUP_DIR=$(BACKUP_DIR) deploy/backup-all.sh
+
+# Uses scratch buckets and a scratch database; never touches live data.
+restore-drill: ## Prove a restore recovers artifacts byte-identically (needs `make up`)
+	deploy/restore-drill.sh
 
 clean: ## Remove build artefacts
 	rm -rf ui/dist ui/node_modules/.vite

@@ -2,9 +2,10 @@
 
 **Status:** Phase 1. Covers the procedures that exist and have been executed.
 **Audience:** whoever is on call.
-**Scope:** Postgres backup and restore, the restore drill and its measured
-result, what these procedures do *not* cover, the RPO/RTO the approach actually
-delivers, and the schema-migration procedure.
+**Scope:** Postgres backup and restore, the artifact (MinIO result store) backup
+and restore and the ordering between the two stores, the restore drills and their
+measured results, what these procedures do *not* cover, the RPO/RTO the approach
+actually delivers, and the schema-migration procedure.
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -26,6 +27,16 @@ MinIO is not possible — neither one knows what the DAG was.
 
 Before the scripts described here existed there was no backup of any kind: no
 `pg_dump`, no PITR, no documented procedure, no stated RPO or RTO.
+
+**Postgres is not the only thing that must be backed up.** Task results larger
+than `RESULT_STORE_INLINE_THRESHOLD_BYTES` (64 KiB) are *not* in Postgres: the
+row holds only a reference, and the bytes live in MinIO
+([ADR-0008](adr/0008-result-store-separation.md)). A Postgres-only backup
+therefore restores a history whose large `output_ref`s point at objects that no
+longer exist — a **dangling ref**, which is silent data loss that *asserts* the
+data is present. §7 covers the artifact half and the ordering between the two.
+`deploy/backup.sh` on its own is half a backup; **`deploy/backup-all.sh` is the
+whole one.**
 
 ---
 
@@ -286,17 +297,14 @@ authors.
 Listed explicitly, because the gap between "we have backups" and "we can recover"
 is made of items like these.
 
-- **MinIO / the result store is not backed up by these scripts.** Task inputs and
-  outputs live in S3-compatible object storage, content-addressed and immutable
-  ([ADR-0008](adr/0008-result-store-separation.md)); the compose stack runs MinIO
-  with bucket `nexus-results`. Postgres holds only *references* (plus results
-  inlined below 64 KiB — `RESULT_STORE_INLINE_THRESHOLD_BYTES`, so small outputs
-  *are* in the Postgres dump). Restoring Postgres alone therefore gives you a
-  history whose large `output_ref`s point at objects that may no longer exist, and
-  a downstream task retried after such a restore will fail to read its input.
-  Object-store backup is a separate procedure — bucket replication, versioning, or
-  `mc mirror` — and **it does not exist yet**. Because objects are immutable and
-  content-addressed, mirroring is straightforward; it simply has not been written.
+- **~~MinIO / the result store is not backed up by these scripts.~~** *Closed —
+  see §7.* `deploy/backup-artifacts.sh` mirrors the result bucket,
+  `deploy/restore-artifacts.sh` restores it, and `deploy/backup-all.sh` runs both
+  halves in the order that makes the skew safe. `deploy/restore-drill.sh` proves a
+  restored artifact is byte-identical and that its `output_ref` still resolves.
+  What remains uncovered is listed in §7.6 — notably that the mirror is a plain
+  local copy with no off-host replication and no encryption, exactly like the
+  Postgres dump.
 - **No off-host copy.** `backup.sh` writes to a local directory. Shipping it
   somewhere that survives the host is the operator's job and is not automated
   here.
@@ -457,7 +465,172 @@ Honest limitations, in order of how much they will surprise you:
 
 ---
 
-## 7. Configuration guard: an explicit DSN in production
+## 7. Artifacts: backing up the result store
+
+Postgres is the system of record, but it is not the whole backup. Results above
+`RESULT_STORE_INLINE_THRESHOLD_BYTES` (64 KiB) live in MinIO; Postgres holds only
+a reference ([ADR-0008](adr/0008-result-store-separation.md)). This section is the
+other half of §2 and §3.
+
+### 7.1 Running it
+
+```bash
+# The whole backup: objects THEN Postgres, in that order, which matters (§7.2).
+BACKUP_DIR=/var/backups/nexus deploy/backup-all.sh     # or: make backup-all
+
+# Either half alone, if you need it:
+BACKUP_DIR=/var/backups/nexus deploy/backup-artifacts.sh
+BACKUP_DIR=/var/backups/nexus deploy/backup.sh
+```
+
+Two connection modes, exactly like `backup.sh`, so the same script runs on a
+laptop and in production:
+
+| Mode | Trigger | What it does |
+|---|---|---|
+| host | `RESULT_STORE_ENDPOINT` (or `NEXUS_RESULT_STORE_ENDPOINT`, `NEXUS_S3_ENDPOINT`) set | runs `mc` on this host against that endpoint |
+| container | nothing set, `nexus-minio-1` present | runs the `mc` **inside** the MinIO container |
+
+Container mode exists because the MinIO image already ships a version-matched
+`mc`, so no host install is needed. Credentials come from
+`RESULT_STORE_ACCESS_KEY` / `RESULT_STORE_SECRET_KEY`, falling back to
+`MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`.
+
+Each run writes `nexus-artifacts-<stamp>/` (the objects, laid out under their
+real keys) and `nexus-artifacts-<stamp>.manifest` (`sha256  size  key` per line).
+Because keys are content-addressed, the manifest is a genuine integrity record
+rather than a restatement of the filename — the drill recomputes every digest and
+compares.
+
+### 7.2 The ordering, and why it is not arbitrary
+
+**Objects are captured first, then Postgres.** This is the part that needed a
+decision rather than a command.
+
+The two stores cannot be snapshotted atomically: no shared transaction, no shared
+clock, and the stack keeps running while both are read. Whichever is captured
+second contains writes the first one missed. That skew cannot be removed, only
+*steered* — into one of two failure modes:
+
+| | What it is | Severity |
+|---|---|---|
+| **Dangling `output_ref`** | row exists, object does not | **Unrecoverable.** Silent: the run reads SUCCEEDED, the UI shows an output link, and a downstream retry fails on an input the database swears exists. The producing attempt is over and the object was content-addressed, so there is no other copy. |
+| **Orphan object** | object exists, no row references it | **Benign.** Wasted disk. ADR-0008 already mandates a reachability-keyed GC sweep over live `output_ref`s, so this is a condition the design expects and already has a cleaner for. |
+
+Capturing objects first means the skew window only ever contains rows written
+*after* the mirror closed. `agent/internal/resultstore.Put` is what upgrades that
+from a hope to a guarantee: it returns the `ResultRef` only **after** `PutObject`
+succeeds, so an object is durable strictly before the row naming it exists. Any
+attempt row in the later Postgres dump therefore references an object that already
+existed when the earlier mirror ran.
+
+**Result: the pair can produce orphans, never dangling refs.** Reversing the order
+inverts exactly this. Running the two halves *concurrently* discards the guarantee
+altogether — with no ordering between them, a row written during the overlap can
+reference an object the mirror had already passed. `backup-all.sh` exists so this
+ordering is not left to whoever writes the cron entry.
+
+What this does **not** buy: a consistent point in time. Neither half is an
+instant, and objects written during the mirror may or may not be included. The
+only claim is the directional one above.
+
+### 7.3 Restore
+
+Restore runs in the **opposite** order — Postgres first, then objects:
+
+```bash
+deploy/restore.sh           backups/nexus-<stamp>.dump          [target-db]
+deploy/restore-artifacts.sh backups/nexus-artifacts-<stamp>/    [target-bucket] [--yes]
+```
+
+The inversion is deliberate. Both orderings converge on the same end state; the
+order only decides which failure is visible *while the restore is in flight*.
+Restoring objects first would leave a window where a service pointed at the
+half-restored database sees runs whose outputs are missing — the dangling-ref
+failure, reintroduced during recovery. Postgres first leaves rows whose objects
+are still arriving, which is the same transient condition as a task that has not
+finished uploading, and which the retry path already handles.
+
+This reduces the blast radius of pointing services at a half-restored stack; it
+does not make it safe. **Wait for both halves.**
+
+Like `restore.sh`, the artifact restore prints a plan and **refuses a target
+bucket that already holds objects** unless `--yes` / `FORCE=1` is given, pointing
+you at a scratch bucket instead. Objects are immutable and content-addressed, so
+re-uploading identical content is a no-op — but nothing can verify a mirror came
+from *this* deployment, and a cross-deployment key collision overwrites data with
+no undo.
+
+### 7.4 The drill
+
+```bash
+deploy/restore-drill.sh      # or: make restore-drill
+```
+
+Precedent: commit c9f6ede proved a Postgres restore rather than asserting one.
+This applies the same standard. "The script exited 0" is not evidence; the drill
+proves the two claims that matter:
+
+1. a restored object is **byte-identical** to the original (sha256 of the bytes
+   read back *out of the bucket*, not out of the mirror), and
+2. a restored `task_attempts.output_ref` **still resolves** to it — following the
+   real `{"result":{"blob":{"key","bucket","sha256"}}}` shape from row to object,
+   the same path a downstream task retried after a restore would take.
+
+Claim 2 is what makes this a drill of the *gap* rather than of `mc mirror`. The
+gap was never "objects cannot be copied"; it was that a restored database points
+at objects nobody backed up.
+
+It uses a **scratch bucket and a scratch database**, both suffixed with the
+script's PID and dropped on exit. It never writes to `nexus-results` and never
+restores over `nexus`.
+
+### 7.5 Why the drill's checks are trusted
+
+A check nobody has seen fail is not evidence. Every assertion is also run against
+a deliberately broken input, and the drill fails if a check passes when it should
+not:
+
+- an object is **deleted** from the restored bucket → the presence check must catch it
+- a **byte is corrupted** → the digest comparison must catch it
+- an `output_ref` points at a **missing key** → the resolution sweep must find exactly one dangling ref
+- a count is read from a **bad alias** → the instrument must error rather than return 0
+
+That last one is not hypothetical, and it is the trap worth knowing about:
+
+> **`mc ls <misspelled-alias>/<bucket>` exits 0 and prints nothing** — byte-identical
+> to "the bucket is empty". A misspelled *bucket* errors (rc=1); a misspelled
+> *alias* does not.
+
+So a zero object count means either "nothing to back up" or "this has been reading
+a typo the whole time". `mc stat` on the bucket distinguishes them because it
+fails on an alias that does not resolve, and **every count in these scripts is
+gated behind that stat**. The drill verifies this instrument before trusting any
+count.
+
+### 7.6 What is still NOT covered
+
+- **No off-host copy, and no encryption.** The mirror is a local directory, same
+  as the Postgres dump (§5). Objects are task outputs and must be treated as
+  secret.
+- **No consistent point in time.** See §7.2. The guarantee is directional
+  (orphans, never dangling refs), not a snapshot.
+- **Orphan objects accumulate** after a restore, by design. The ADR-0008 GC sweep
+  that would reclaim them **is not implemented**; nothing here reclaims that space.
+- **No verification that a full production-sized mirror completes in useful time.**
+  The drill uses a single 128 KiB object. `mc mirror` is incremental and
+  content-addressed keys never change, so subsequent mirrors copy only new
+  objects — but the *first* mirror of a large bucket is unmeasured, and the RTO in
+  §4 does not include artifact restore time. **Measure it on your data.**
+- **Bucket policies, IAM users and versioning are not captured.** Only objects
+  are. A restore recreates the bucket with `anonymous set none`, matching
+  `minio-init`; anything beyond that must be reapplied.
+- **`output_ref`s are not swept against the bucket outside the drill.** There is
+  no ongoing reconciler reporting dangling refs in the live system.
+
+---
+
+## 8. Configuration guard: an explicit DSN in production
 
 Related, because it is the same class of failure as an untested backup — a
 misconfiguration that looks fine until it is not.
