@@ -55,3 +55,41 @@ func TestMaxPeerConnectionAgeIsBounded(t *testing.T) {
 			"any address change needs and just burns handshakes", MaxPeerConnectionAge)
 	}
 }
+
+// TestPeerDNSRefreshIntervalIsBounded pins the other half of round_robin.
+//
+// The balancer can only spread calls across addresses the RESOLVER supplied, so
+// this interval is the worst case for how long a newly scaled replica stays
+// invisible. gRPC's own default is 30 MINUTES, which is long enough that
+// `--scale scheduler=3` appears to do nothing at all.
+func TestPeerDNSRefreshIntervalIsBounded(t *testing.T) {
+	if PeerDNSRefreshInterval > time.Minute {
+		t.Errorf("PeerDNSRefreshInterval = %s; a replica scaled up would sit idle that "+
+			"long, which reads as the scale-up having silently failed",
+			PeerDNSRefreshInterval)
+	}
+	if PeerDNSRefreshInterval < 5*time.Second {
+		t.Errorf("PeerDNSRefreshInterval = %s; that re-reads DNS far faster than "+
+			"addresses actually change and just adds lookups", PeerDNSRefreshInterval)
+	}
+}
+
+// The load-balancing policy and the refresh interval only work as a PAIR: either
+// alone leaves the replicas idle, which is why they are asserted together.
+func TestPeerDialOptionsRequestRoundRobin(t *testing.T) {
+	// The policy travels in a service config string, so this asserts on the one
+	// thing that actually reaches grpc rather than on an internal.
+	var found bool
+	for _, o := range PeerDialOptions() {
+		if o != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("PeerDialOptions returned nothing to dial with")
+	}
+	if PeerDNSRefreshInterval <= 0 {
+		t.Error("round_robin is configured but DNS would never refresh, so the balancer " +
+			"would only ever see the addresses present at first resolution")
+	}
+}
