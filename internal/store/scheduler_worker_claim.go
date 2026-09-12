@@ -199,6 +199,15 @@ func (s *SchedulerStore) claimOneForWorker(
 			if xerr := s.explainUnschedulable(ctx, tx, worker, skipped); xerr != nil {
 				return nil, xerr
 			}
+			// COMMIT, even though nothing was dispatched. explainUnschedulable
+			// writes pending_reason, and the deferred Rollback would discard
+			// every reason it just recorded -- which is exactly the idle-fleet
+			// case the field exists for. The success path below commits for the
+			// same reason; this path was the one that did not, so a stalled queue
+			// with no claims to make stayed permanently unexplained.
+			if err := tx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("commit unschedulable explanation: %w", err)
+			}
 			return nil, nil
 		}
 		if err != nil {
@@ -501,10 +510,23 @@ SELECT a.idempotency_key, n.spec_json::text, a.input_refs::text
 //     been recorded but the in-flight attempts have not yet been individually
 //     moved, which is precisely the window in which the directive must be sent.
 //
-// PAUSING is included on purpose even though §5.2 says pausing does not kill
-// work: a paused run's in-flight attempts must DRAIN, and the CANCEL_ATTEMPT
-// directive is the only channel a pull-only fleet has. The gateway decides what
-// to do with the list; the scheduler's job is to report what should stop.
+// PAUSING is deliberately NOT included, and that is the whole point of pause.
+//
+// It used to be, on the reasoning that a paused run's in-flight attempts must
+// drain and CANCEL_ATTEMPT is the only channel a pull-only fleet has. But the
+// gateway turns every id in this list into a CANCEL_ATTEMPT directive
+// unconditionally, and the agent implements that directive as SIGTERM, grace,
+// SIGKILL. So pausing a run KILLED the very work §5.2 promises to preserve: the
+// attempt came back FAILED with "workload terminated by signal terminated", the
+// retry budget was charged for a failure the task never caused, and an operator
+// who paused a run to investigate destroyed exactly the in-flight compute they
+// were trying to protect. Verified against a live run before this was changed.
+//
+// Draining needs no directive at all. PAUSING already closes the dispatch gate
+// (the claim query below admits only runs in PENDING/RUNNING), so no NEW attempt
+// starts; the in-flight ones finish on their own and MaybeFinalizePause advances
+// PAUSING -> PAUSED when the last of them reports. "Drain" here means "stop
+// feeding it", not "stop it" — and cancel remains the operation that stops work.
 func (s *SchedulerStore) PendingCancellations(
 	ctx context.Context, workerID uuid.UUID,
 ) ([]uuid.UUID, error) {
@@ -515,7 +537,7 @@ SELECT a.id
  WHERE a.worker_id = $1
    AND (a.state = 'CANCELLED'
         OR (a.state IN ('DISPATCHED','RUNNING')
-            AND r.state IN ('CANCELLING','CANCELLED','PAUSING')))
+            AND r.state IN ('CANCELLING','CANCELLED')))
  ORDER BY a.dispatched_at NULLS LAST`
 	rows, err := s.pool.Query(ctx, q, workerID)
 	if err != nil {

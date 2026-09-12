@@ -561,3 +561,93 @@ func TestRetryChargesTheAttemptBudget(t *testing.T) {
 			rows[0].IdemKey, rows[1].IdemKey)
 	}
 }
+
+// setRunState forces the run into a lifecycle state, standing in for the
+// workflow-manager transition the scheduler only ever observes.
+func (f *fixture) setRunState(state string) {
+	f.t.Helper()
+	if _, err := f.pool.Exec(context.Background(),
+		`UPDATE workflow_runs SET state = $2::run_state WHERE id = $1`, f.runID, state); err != nil {
+		f.t.Fatalf("set run state %s: %v", state, err)
+	}
+}
+
+// TestPauseDoesNotCancelInFlightWork is §5.2's central promise: pause stops new
+// dispatch and leaves running work alone; cancel is the operation that stops work.
+//
+// PendingCancellations feeds the gateway, which turns EVERY id it returns into a
+// CANCEL_ATTEMPT directive, and the agent implements that as SIGTERM/grace/SIGKILL.
+// So including PAUSING in this query killed the in-flight attempts of a paused run:
+// the attempt came back FAILED with "workload terminated by signal terminated" and
+// the retry budget was charged for a failure the task never caused. An operator who
+// paused a run to investigate destroyed the compute they were preserving.
+//
+// This test pins the distinction that no test covered before: a PAUSING run reports
+// nothing to cancel, while CANCELLING still reports everything.
+func TestPauseDoesNotCancelInFlightWork(t *testing.T) {
+	t.Parallel()
+	pool := newTestPool(t)
+	f := newFixture(t, pool)
+	ctx := context.Background()
+
+	workerID := f.addWorker(vec{CPUMillis: 4000, MemoryBytes: 8 << 30}, nil, nil)
+	attemptID := f.occupy(workerID, "long-running", vec{CPUMillis: 1000, MemoryBytes: 1 << 30})
+	st := f.newStore(nil)
+
+	// RUNNING: nothing to stop.
+	if ids, err := st.PendingCancellations(ctx, workerID); err != nil {
+		t.Fatalf("pending cancellations (RUNNING): %v", err)
+	} else if len(ids) != 0 {
+		t.Fatalf("a RUNNING run reported %d cancellations, want 0", len(ids))
+	}
+
+	// PAUSING: still nothing to stop. This is the regression.
+	f.setRunState("PAUSING")
+	ids, err := st.PendingCancellations(ctx, workerID)
+	if err != nil {
+		t.Fatalf("pending cancellations (PAUSING): %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("a PAUSING run reported %v as cancellable, want none; the gateway "+
+			"turns these into CANCEL_ATTEMPT and the agent SIGKILLs them, so pause "+
+			"would destroy the in-flight work §5.2 promises to preserve", ids)
+	}
+
+	// CANCELLING: the attempt MUST be reported, or a cancelled run leaves the
+	// worker burning CPU on orphaned work with no channel left to stop it.
+	f.setRunState("CANCELLING")
+	ids, err = st.PendingCancellations(ctx, workerID)
+	if err != nil {
+		t.Fatalf("pending cancellations (CANCELLING): %v", err)
+	}
+	if len(ids) != 1 || ids[0] != attemptID {
+		t.Errorf("a CANCELLING run reported %v, want [%s]", ids, attemptID)
+	}
+}
+
+// TestCancelledAttemptIsReportedRegardlessOfRunState covers the other source in
+// the union: the attempt itself was moved terminal (an operator cancelled one
+// node), so the work on the worker is orphaned even though the run continues.
+func TestCancelledAttemptIsReportedRegardlessOfRunState(t *testing.T) {
+	t.Parallel()
+	pool := newTestPool(t)
+	f := newFixture(t, pool)
+	ctx := context.Background()
+
+	workerID := f.addWorker(vec{CPUMillis: 4000, MemoryBytes: 8 << 30}, nil, nil)
+	attemptID := f.occupy(workerID, "orphaned", vec{CPUMillis: 1000, MemoryBytes: 1 << 30})
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE task_attempts SET state='CANCELLED', ended_at=now() WHERE id=$1`, attemptID); err != nil {
+		t.Fatalf("cancel attempt: %v", err)
+	}
+
+	ids, err := f.newStore(nil).PendingCancellations(ctx, workerID)
+	if err != nil {
+		t.Fatalf("pending cancellations: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != attemptID {
+		t.Errorf("a CANCELLED attempt on a RUNNING run reported %v, want [%s]; "+
+			"the worker would keep executing orphaned work", ids, attemptID)
+	}
+}
