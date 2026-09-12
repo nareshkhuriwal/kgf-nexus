@@ -20,7 +20,7 @@ MIGRATIONS    := services/migrations
 
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test seed submit-example chaos clean \
-        backup backup-artifacts backup-all restore-drill artifact-gc
+        backup backup-artifacts backup-all restore-drill artifact-gc check-refs
 
 help: ## Show this help
 	@echo "Nexus — make targets"
@@ -203,6 +203,14 @@ ARTIFACT_GC_DSN      ?= postgres://nexus:nexus-dev-password@localhost:55433/nexu
 
 artifact-gc: ## Report orphaned result-store objects; deletes NOTHING (ADR-0008)
 	$(GO) run ./services/artifact-gc/cmd/artifact-gc \
+	  -database-url '$(ARTIFACT_GC_DSN)' -endpoint '$(ARTIFACT_GC_ENDPOINT)' $(ARTIFACT_GC_FLAGS)
+
+# The OPPOSITE direction: rows naming an object that is GONE. Read-only by
+# construction, and exits nonzero when any are found so it can be used as a
+# monitoring check. §7.2's backup ordering is designed to produce orphans and
+# never dangling refs, so a hit here is a real fault rather than routine drift.
+check-refs: ## Report rows whose result object is MISSING; read-only (OPERATIONS 7.6)
+	$(GO) run ./services/artifact-gc/cmd/artifact-gc -check-refs \
 	  -database-url '$(ARTIFACT_GC_DSN)' -endpoint '$(ARTIFACT_GC_ENDPOINT)' $(ARTIFACT_GC_FLAGS)
 
 clean: ## Remove build artefacts

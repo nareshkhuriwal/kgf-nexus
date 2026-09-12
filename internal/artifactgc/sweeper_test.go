@@ -6,8 +6,11 @@ import (
 	"io"
 	"log/slog"
 	"sort"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func discardLogger() *slog.Logger {
@@ -481,4 +484,62 @@ func TestExtractKeysHandlesEmptyAndMalformedInput(t *testing.T) {
 		t.Error("a malformed document returned no error; it would silently contribute " +
 			"zero references and make its object look collectable")
 	}
+}
+
+// ── Dangling references ───────────────────────────────────────────────────
+
+// fakeChecker is an in-memory ObjectChecker. It distinguishes "absent" from
+// "could not tell", because collapsing those two is the specific bug that would
+// turn a network blip into a false data-loss report.
+type fakeChecker struct {
+	present map[string]bool
+	statErr error
+	stated  []string
+}
+
+func (f *fakeChecker) StatObject(_ context.Context, key string) (bool, error) {
+	if f.statErr != nil {
+		return false, f.statErr
+	}
+	f.stated = append(f.stated, key)
+	return f.present[key], nil
+}
+
+func (f *fakeChecker) Bucket() string { return "test-bucket" }
+
+// A lookup FAILURE must abort rather than be read as "the object is gone". This
+// is the property that keeps a DNS outage from being reported as total data
+// loss, so it is pinned directly.
+func TestCheckDanglingRefsAbortsWhenTheStoreCannotAnswer(t *testing.T) {
+	checker := &fakeChecker{statErr: errors.New("connection refused")}
+
+	_, err := CheckDanglingRefs(context.Background(), stubQuerier{}, checker, discardLogger(), 0)
+	if err == nil {
+		t.Fatal("a store that could not answer was treated as a successful check")
+	}
+}
+
+// The report must name the ROW, not just the key: an operator cannot act on a
+// content-addressed hash, and "which run lost its output" is the actual question.
+func TestDanglingRefNamesTheDamagedWork(t *testing.T) {
+	d := DanglingRef{
+		Table: "task_attempts", Column: "output_ref",
+		RowID: "att-1", RunID: "run-7", NodeID: "train", State: "SUCCEEDED",
+		Key: "default/abc123",
+	}
+	s := d.String()
+	for _, want := range []string{"run-7", "train", "default/abc123", "output_ref"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("DanglingRef.String() = %q, missing %q", s, want)
+		}
+	}
+}
+
+// stubQuerier returns no rows. Enough for the store-side properties above; the
+// SQL itself is exercised against a real database in the integration tests,
+// matching how the sweep is tested.
+type stubQuerier struct{}
+
+func (stubQuerier) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, errors.New("stub querier: no database")
 }

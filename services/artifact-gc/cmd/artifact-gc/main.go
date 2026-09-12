@@ -34,6 +34,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khuriwalgroup/kgf-nexus/internal/artifactgc"
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
@@ -71,6 +72,15 @@ func main() {
 			"actually delete orphans (requires -i-understand-this-deletes-data); the default reports only")
 		confirm = flag.Bool("i-understand-this-deletes-data", false,
 			"second confirmation required alongside -delete")
+
+		// The OPPOSITE direction from the sweep, and read-only by construction:
+		// rows naming an object the store does not have. It shares none of the
+		// delete guards because it has nothing to guard -- see dangling.go for
+		// why there is no repair mode.
+		checkRefs = flag.Bool("check-refs", false,
+			"instead of sweeping, report rows whose object is MISSING from the store (read-only)")
+		maxRefs = flag.Int("max-refs", envInt("ARTIFACT_GC_MAX_REFS", artifactgc.DefaultMaxRefs),
+			"maximum distinct object keys checked by -check-refs")
 
 		logLevel = flag.String("log-level", envOr("ARTIFACT_GC_LOG_LEVEL", "info"), "debug|info|warn|error")
 		showVer  = flag.Bool("version", false, "print the version and exit")
@@ -111,6 +121,7 @@ func main() {
 
 	if err := run(ctx, log, runConfig{
 		dsn: *dsn, prefix: *prefix, grace: *grace, maxObjects: *maxObjects, dryRun: dryRun,
+		checkRefs: *checkRefs, maxRefs: *maxRefs,
 		minio: artifactgc.MinIOConfig{
 			Endpoint: *endpoint, Bucket: *bucket, Region: *region,
 			AccessKeyID: *access, SecretAccessKey: *secret, UseTLS: *useTLS,
@@ -127,6 +138,8 @@ type runConfig struct {
 	grace      time.Duration
 	maxObjects int
 	dryRun     bool
+	checkRefs  bool
+	maxRefs    int
 	minio      artifactgc.MinIOConfig
 }
 
@@ -143,6 +156,10 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	objects, err := artifactgc.NewMinIOStore(ctx, cfg.minio)
 	if err != nil {
 		return err
+	}
+
+	if cfg.checkRefs {
+		return checkDangling(ctx, pool, objects, log, cfg)
 	}
 
 	sw := artifactgc.NewSweeper(pool, objects, log, artifactgc.Config{
@@ -245,4 +262,51 @@ func envDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// checkDangling reports rows whose object is missing from the store.
+//
+// Exits NONZERO when any are found, so this is usable as a monitoring check.
+// The backup ordering (OPERATIONS §7.2) is designed to produce orphans and
+// never dangling refs, so a nonzero result is a real fault — a restore run out
+// of order, an out-of-band delete, or a GC sweep that removed something it
+// should not have — and not a condition to be tolerated on a schedule.
+func checkDangling(
+	ctx context.Context, pool *pgxpool.Pool, objects *artifactgc.MinIOStore,
+	log *slog.Logger, cfg runConfig,
+) error {
+	log.Info("checking for dangling references (READ-ONLY; nothing will be modified)",
+		"endpoint", cfg.minio.Endpoint, "bucket", objects.Bucket(),
+		"max_refs", cfg.maxRefs, "reference_sources", artifactgc.RefSources())
+
+	rep, err := artifactgc.CheckDanglingRefs(ctx, pool, objects, log, cfg.maxRefs)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("\nartifact-gc dangling-reference check (READ-ONLY)\n")
+	fmt.Printf("  rows scanned          %d  (from %v)\n", rep.RowsScanned, artifactgc.RefSources())
+	fmt.Printf("  distinct keys checked %d\n", rep.RefsChecked)
+	fmt.Printf("  missing objects       %d\n", rep.MissingKeys)
+	fmt.Printf("  damaged rows          %d\n", len(rep.Dangling))
+	if rep.Truncated {
+		fmt.Printf("\n  NOTE: stopped at -max-refs=%d; more references exist and were NOT checked.\n",
+			cfg.maxRefs)
+	}
+	if len(rep.Dangling) == 0 {
+		fmt.Printf("\n  Every reference resolves to an object that exists.\n")
+		return nil
+	}
+
+	fmt.Printf("\n  These rows name an object the store does not have. The result is\n")
+	fmt.Printf("  UNREADABLE, and any downstream task mapping it as an input will fail:\n\n")
+	for _, d := range rep.Dangling {
+		fmt.Printf("    run %s node %-16s %s.%s\n      key %s\n",
+			d.RunID, d.NodeID, d.Table, d.Column, d.Key)
+	}
+	fmt.Printf("\n  Nothing was changed. There is no automatic repair: the object is gone,\n")
+	fmt.Printf("  and rewriting the row would destroy the evidence of what happened.\n")
+
+	return fmt.Errorf("%d dangling reference(s) across %d missing object(s)",
+		len(rep.Dangling), rep.MissingKeys)
 }

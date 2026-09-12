@@ -128,6 +128,29 @@ func (s *MinIOStore) DeleteObject(ctx context.Context, key string) error {
 	return nil
 }
 
+// StatObject reports whether one object exists.
+//
+// The distinction between "not found" and "could not tell" is the whole point of
+// the error return, and it must never be collapsed. A NoSuchKey answer is
+// evidence the object is gone; a timeout, a 403 or a DNS failure is evidence of
+// nothing at all, and returning false for those would report a healthy bucket as
+// total data loss. So only the specific not-found codes yield (false, nil) and
+// everything else is an error the caller must stop on.
+func (s *MinIOStore) StatObject(ctx context.Context, key string) (bool, error) {
+	if key == "" {
+		return false, fmt.Errorf("artifactgc: refusing to stat an empty key")
+	}
+	_, err := s.mc.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+	if err == nil {
+		return true, nil
+	}
+	switch minio.ToErrorResponse(err).Code {
+	case "NoSuchKey", "NotFound":
+		return false, nil
+	}
+	return false, fmt.Errorf("artifactgc: stat %s/%s: %w", s.bucket, key, err)
+}
+
 func stripScheme(endpoint string) string {
 	endpoint = strings.TrimPrefix(endpoint, "https://")
 	return strings.TrimPrefix(endpoint, "http://")

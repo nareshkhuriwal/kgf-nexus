@@ -22,6 +22,7 @@ import (
 	"context"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -388,3 +389,185 @@ func TestLiveKeysAgainstTheRealDatabase(t *testing.T) {
 	}
 	t.Logf("live reference set: %d distinct object keys from %v", len(live), RefSources())
 }
+
+// ── Dangling references (rows naming a missing object) ────────────────────
+
+// presentChecker answers from a fixed set, so a test controls exactly which
+// objects the store is pretending to hold.
+type presentChecker struct{ present map[string]bool }
+
+func (p presentChecker) StatObject(_ context.Context, key string) (bool, error) {
+	return p.present[key], nil
+}
+func (p presentChecker) Bucket() string { return "test-bucket" }
+
+func blobRef(name, key string) string {
+	return `{"` + name + `":{"blob":{"key":"` + key + `","bucket":"nexus-results","sha256":"x"},` +
+		`"size_bytes":"1","content_type":"application/octet-stream"}}`
+}
+
+// The base case: a row naming an object the store does not have is reported,
+// and one that it does have is not.
+func TestCheckDanglingRefsFindsAMissingObject(t *testing.T) {
+	pool := testPool(t)
+	inRollbackTx(t, pool, func(tx pgx.Tx) {
+		seedAttempt(t, tx, blobRef("result", "gone/aaa"), "")
+		seedAttempt(t, tx, blobRef("result", "here/bbb"), "")
+
+		checker := presentChecker{present: map[string]bool{"here/bbb": true}}
+		rep, err := CheckDanglingRefs(context.Background(), tx, checker, discardLogger(), 0)
+		if err != nil {
+			t.Fatalf("check: %v", err)
+		}
+
+		var gone *DanglingRef
+		for i, d := range rep.Dangling {
+			if d.Key == "here/bbb" {
+				t.Errorf("an object the store HAS was reported as dangling: %+v", d)
+			}
+			if d.Key == "gone/aaa" {
+				gone = &rep.Dangling[i]
+			}
+		}
+		if gone == nil {
+			t.Fatalf("the missing object was not reported: %+v", rep.Dangling)
+		}
+		// The row must be identifiable, or the report is unactionable.
+		if gone.RunID == "" || gone.NodeID != "n1" || gone.Column != "output_ref" {
+			t.Errorf("dangling ref does not identify the row: %+v", *gone)
+		}
+	})
+}
+
+// input_refs is the second reference source, and a missing object there breaks a
+// DOWNSTREAM task's inputs — the case that made input_refs load-bearing for the
+// sweep in the first place. It must be checked here too.
+func TestCheckDanglingRefsChecksInputRefsToo(t *testing.T) {
+	pool := testPool(t)
+	inRollbackTx(t, pool, func(tx pgx.Tx) {
+		seedAttempt(t, tx, "", blobRef("features", "gone/inputs"))
+
+		rep, err := CheckDanglingRefs(context.Background(), tx,
+			presentChecker{present: map[string]bool{}}, discardLogger(), 0)
+		if err != nil {
+			t.Fatalf("check: %v", err)
+		}
+		// Scoped to this test's key; the check reads the whole table.
+		var found *DanglingRef
+		for i, d := range rep.Dangling {
+			if d.Key == "gone/inputs" {
+				found = &rep.Dangling[i]
+			}
+		}
+		if found == nil {
+			t.Fatalf("a missing input_refs object was not reported: %+v", rep.Dangling)
+		}
+		if found.Column != "input_refs" {
+			t.Errorf("reported column = %s, want input_refs", found.Column)
+		}
+	})
+}
+
+// One lost object can break several rows. All of them must be reported, because
+// the blast radius is the thing an operator is trying to establish — but the
+// store is only asked about the key ONCE.
+func TestCheckDanglingRefsReportsEveryRowNamingOneLostObject(t *testing.T) {
+	pool := testPool(t)
+	inRollbackTx(t, pool, func(tx pgx.Tx) {
+		// The same object, produced once and copied into a downstream attempt's
+		// inputs: exactly the shape resolveInputs creates.
+		seedAttempt(t, tx, blobRef("result", "gone/shared"), "")
+		seedAttempt(t, tx, "", blobRef("upstream", "gone/shared"))
+
+		checker := &countingChecker{present: map[string]bool{}}
+		rep, err := CheckDanglingRefs(context.Background(), tx, checker, discardLogger(), 0)
+		if err != nil {
+			t.Fatalf("check: %v", err)
+		}
+		// Scoped to THIS test's key: the check reads the whole table, and the
+		// live database holds real rows the transaction does not hide.
+		var mine int
+		for _, d := range rep.Dangling {
+			if d.Key == "gone/shared" {
+				mine++
+			}
+		}
+		if mine != 2 {
+			t.Errorf("reported %d rows naming the lost object, want 2", mine)
+		}
+		if statCount(checker) != 1 {
+			t.Errorf("the shared key was looked up %d times, want 1", statCount(checker))
+		}
+	})
+}
+
+// An inline result carries no blob key at all, so it can never dangle. Reporting
+// one would be a false alarm about data that was never in the object store.
+func TestCheckDanglingRefsIgnoresInlineResults(t *testing.T) {
+	pool := testPool(t)
+	inRollbackTx(t, pool, func(tx pgx.Tx) {
+		seedAttempt(t, tx,
+			`{"result":{"inline":"eyJhIjoxfQ==","size_bytes":"7","content_type":"application/json"}}`, "")
+
+		rep, err := CheckDanglingRefs(context.Background(), tx,
+			presentChecker{present: map[string]bool{}}, discardLogger(), 0)
+		if err != nil {
+			t.Fatalf("check: %v", err)
+		}
+		// Only this test's namespace: pre-existing live rows legitimately name
+		// objects the empty fake does not hold, and they are not what is under
+		// test here.
+		for _, d := range rep.Dangling {
+			if strings.HasPrefix(d.Key, "artifactgc-test/") || d.Key == "" {
+				t.Errorf("an inline result was reported as dangling: %+v", d)
+			}
+		}
+	})
+}
+
+// The live database must be clean. The backup ordering is designed to produce
+// orphans and NEVER dangling refs, so a failure here is a real signal rather
+// than a test that needs relaxing.
+func TestNoDanglingRefsInTheLiveDatabase(t *testing.T) {
+	pool := testPool(t)
+	live, err := LiveKeys(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("live keys: %v", err)
+	}
+	// Pretend every key the database names is present, which makes this assert
+	// the ENUMERATION works against real data without needing MinIO in the test.
+	present := make(map[string]bool, len(live))
+	for k := range live {
+		present[k] = true
+	}
+	rep, err := CheckDanglingRefs(context.Background(), pool, presentChecker{present: present}, discardLogger(), 0)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if len(rep.Dangling) != 0 {
+		t.Errorf("dangling refs reported against a store holding every live key: %+v", rep.Dangling)
+	}
+	if rep.RefsChecked != len(live) {
+		t.Errorf("checked %d keys but LiveKeys found %d; the two enumerations disagree",
+			rep.RefsChecked, len(live))
+	}
+	t.Logf("live database: %d rows scanned, %d distinct keys checked", rep.RowsScanned, rep.RefsChecked)
+}
+
+// countingChecker records how many times each key was looked up, so a test can
+// assert the check asks the store about a key ONCE however many rows name it.
+type countingChecker struct {
+	present map[string]bool
+	calls   map[string]int
+}
+
+func (c *countingChecker) StatObject(_ context.Context, key string) (bool, error) {
+	if c.calls == nil {
+		c.calls = map[string]int{}
+	}
+	c.calls[key]++
+	return c.present[key], nil
+}
+func (c *countingChecker) Bucket() string { return "test-bucket" }
+
+func statCount(c *countingChecker) int { return c.calls["gone/shared"] }
