@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package rest implements the public REST/JSON API from architecture §8.2.
 //
 // This surface is for humans, the CLI, and the UI. The worker protocol lives on a
@@ -139,7 +142,15 @@ func (a *API) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.Handle("POST /v1/namespaces/{ns}/specs", a.guard(authn.ActionWrite, a.submitSpec))
+	// The catalog: one row per workflow NAME, newest version, searchable.
+	mux.Handle("GET /v1/namespaces/{ns}/specs", a.guard(authn.ActionRead, a.listCatalog))
 	mux.Handle("GET /v1/namespaces/{ns}/specs/{name}/versions", a.guard(authn.ActionRead, a.listSpecVersions))
+	// The DEFINITION, on its own collection rather than under /specs/{name}/.
+	// `/specs/id/{id}` would be ambiguous with `/specs/{name}/versions` for a
+	// workflow literally named "id", and net/http rejects the pair outright.
+	// Addressed by spec id because a run pins a spec_id (ADR-0004), so this is
+	// the one address resolving to exactly the bytes a given run executed.
+	mux.Handle("GET /v1/namespaces/{ns}/specdefs/{id}", a.guard(authn.ActionRead, a.getSpec))
 
 	mux.Handle("POST /v1/namespaces/{ns}/runs", a.guard(authn.ActionWrite, a.createRun))
 	mux.Handle("GET /v1/namespaces/{ns}/runs", a.guard(authn.ActionRead, a.listRuns))
@@ -340,6 +351,66 @@ func (a *API) submitSpec(w http.ResponseWriter, r *http.Request, p authn.Princip
 		"spec_hash":  row.SpecHash,
 		"created":    created,
 		"task_count": len(compiled.Proto.GetTasks()),
+	})
+}
+
+// listCatalog serves the workflow catalog: one entry per workflow name.
+//
+// Read locally rather than through the workflow-manager, like every other read:
+// ADR-0011 lets the gateway read any table, and a catalog listing is a projection
+// like the run list.
+func (a *API) listCatalog(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	rows, err := store.GatewayListCatalog(r.Context(), a.db, r.PathValue("ns"),
+		strings.TrimSpace(r.URL.Query().Get("search")), intParam(r, "limit", 100))
+	if err != nil {
+		a.fail(w, r, "list catalog", err)
+		return
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, s := range rows {
+		out = append(out, map[string]any{
+			"id": s.ID, "namespace": s.Namespace, "name": s.Name,
+			// The LATEST version and its hash: what a run created by name today
+			// would actually execute.
+			"latest_version":   s.Version,
+			"spec_hash":        s.SpecHash,
+			"created_by":       s.CreatedBy,
+			"updated_at":       s.CreatedAt,
+			"version_count":    s.VersionCount,
+			"first_created_at": s.FirstCreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workflows": out})
+}
+
+// getSpec serves one spec's DEFINITION, which nothing else exposes.
+//
+// The run DAG view renders task_nodes, which exist only after a run has been
+// created; a catalog has to show a workflow's shape BEFORE anything has run it,
+// and that shape lives only in workflow_specs.spec_json.
+//
+// spec_json is returned as raw JSON rather than re-marshalled through a struct:
+// it is stored canonicalized and content-addressed (ADR-0004), so re-encoding it
+// risks handing a client bytes whose hash no longer matches the spec_hash
+// alongside them.
+func (a *API) getSpec(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	row, err := store.WFMGetSpecByID(r.Context(), a.db, r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, "get spec", err)
+		return
+	}
+	// A spec id is globally unique, so it resolves without the namespace -- but
+	// the route is namespaced and a caller authorized for one namespace must not
+	// read another's definition through it.
+	if row.Namespace != r.PathValue("ns") {
+		writeError(w, http.StatusNotFound, "not_found", "no such spec in this namespace")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": row.ID, "namespace": row.Namespace, "name": row.Name,
+		"version": row.Version, "spec_hash": row.SpecHash,
+		"created_by": row.CreatedBy, "created_at": row.CreatedAt,
+		"spec": json.RawMessage(row.SpecJSON),
 	})
 }
 

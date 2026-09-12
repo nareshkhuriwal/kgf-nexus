@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 package store
 
 import (
@@ -48,6 +51,78 @@ func GatewayGetSpecByHash(ctx context.Context, q GWQuerier, namespace, name, has
 		return SpecRow{}, fmt.Errorf("get spec by hash: %w", err)
 	}
 	return s, nil
+}
+
+// CatalogEntry is one WORKFLOW in the catalog: its newest version, plus the
+// facts that distinguish it from the others at a glance.
+type CatalogEntry struct {
+	SpecRow
+	// VersionCount is how many versions of this workflow exist. A workflow on
+	// version 7 has a different character from one submitted once, and the
+	// catalog's job is to make that visible without a second request per row.
+	VersionCount int32
+	// FirstCreatedAt is when the workflow first appeared, as opposed to
+	// SpecRow.CreatedAt, which is when the LATEST version was submitted. Both
+	// matter: one is age, the other is freshness.
+	FirstCreatedAt time.Time
+}
+
+// GatewayListCatalog returns one row per workflow NAME, carrying its newest
+// version.
+//
+// One row per name rather than per version, because the catalog answers "what
+// workflows exist here", and a list that repeats a workflow once per version
+// buries fifteen workflows under a hundred rows. Version history is a
+// drill-down, served by GatewayListSpecVersions.
+//
+// DISTINCT ON is the right tool and is Postgres-specific: it keeps the first row
+// of each name group under the ORDER BY, which with (name, version DESC) is
+// exactly "the newest version of each workflow" in one pass. The alternative --
+// a window function or a correlated subquery per name -- reads worse and plans
+// no better.
+//
+// spec_json is deliberately NOT selected. It is the largest column in the table
+// and the catalog list never renders a definition; fetching it for every row
+// would make the list cost scale with total workflow SIZE rather than count.
+// GatewayGetSpec serves the definition when something actually needs it.
+func GatewayListCatalog(ctx context.Context, q GWQuerier, namespace, search string, limit int) ([]CatalogEntry, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	// The search is a case-insensitive substring on the workflow name. Matching
+	// on the name alone, not the definition: an operator looking for "retrain"
+	// means the workflow called retrain, and a body match would return every
+	// workflow that happens to mention it in a task ref.
+	rows, err := q.Query(ctx, `
+		SELECT DISTINCT ON (s.name)
+		       s.id::text, s.namespace, s.name, s.version, s.spec_hash,
+		       s.created_by, s.created_at,
+		       (SELECT count(*)::int FROM workflow_specs v
+		         WHERE v.namespace = s.namespace AND v.name = s.name),
+		       (SELECT min(v.created_at) FROM workflow_specs v
+		         WHERE v.namespace = s.namespace AND v.name = s.name)
+		  FROM workflow_specs s
+		 WHERE s.namespace = $1
+		   AND ($2 = '' OR s.name ILIKE '%' || $2 || '%')
+		 ORDER BY s.name, s.version DESC
+		 LIMIT $3`,
+		namespace, search, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list catalog: %w", err)
+	}
+	defer rows.Close()
+
+	var out []CatalogEntry
+	for rows.Next() {
+		var c CatalogEntry
+		if err := rows.Scan(&c.ID, &c.Namespace, &c.Name, &c.Version, &c.SpecHash,
+			&c.CreatedBy, &c.CreatedAt, &c.VersionCount, &c.FirstCreatedAt); err != nil {
+			return nil, fmt.Errorf("scan catalog entry: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // GatewayListSpecVersions returns versions newest-first.

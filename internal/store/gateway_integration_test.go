@@ -1,5 +1,8 @@
 //go:build integration
 
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // These tests exercise the actual SQL against real Postgres. The unit tests use an
 // in-memory fake to cover decision logic fast and everywhere; these cover what a
 // fake fundamentally cannot: that the statements are valid, that the partial unique
@@ -1034,4 +1037,105 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// GatewayListCatalog returns ONE row per workflow name, carrying its newest
+// version. The grouping is the whole point: a catalog that repeats a workflow
+// once per version buries fifteen workflows under a hundred rows.
+func TestIntegrationCatalogGroupsByNameAndKeepsTheNewestVersion(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	ns := uniqueNS(t)
+
+	// Two workflows: one with three versions, one with a single version.
+	for v := 1; v <= 3; v++ {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO workflow_specs (namespace, name, version, spec_hash, spec_json, created_by)
+			VALUES ($1, 'multi', $2, $3, '{}'::jsonb, 'catalog-test')`,
+			ns, v, fmt.Sprintf("hash-multi-%s-%d", ns, v)); err != nil {
+			t.Fatalf("insert version %d: %v", v, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO workflow_specs (namespace, name, version, spec_hash, spec_json, created_by)
+		VALUES ($1, 'single', 1, $2, '{}'::jsonb, 'catalog-test')`,
+		ns, "hash-single-"+ns); err != nil {
+		t.Fatalf("insert single: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM workflow_specs WHERE namespace = $1`, ns)
+	})
+
+	got, err := GatewayListCatalog(ctx, pool, ns, "", 100)
+	if err != nil {
+		t.Fatalf("list catalog: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("catalog returned %d entries, want 2 (one per NAME, not per version)", len(got))
+	}
+
+	by := map[string]CatalogEntry{}
+	for _, c := range got {
+		by[c.Name] = c
+	}
+	if m := by["multi"]; m.Version != 3 {
+		t.Errorf("multi latest version = %d, want 3 (the newest, not the first)", m.Version)
+	}
+	if m := by["multi"]; m.VersionCount != 3 {
+		t.Errorf("multi version_count = %d, want 3", m.VersionCount)
+	}
+	if s := by["single"]; s.VersionCount != 1 {
+		t.Errorf("single version_count = %d, want 1", s.VersionCount)
+	}
+	// FirstCreatedAt is when the WORKFLOW appeared; CreatedAt is when its latest
+	// version did. They are different questions and must not be the same column.
+	if m := by["multi"]; m.FirstCreatedAt.After(m.CreatedAt) {
+		t.Errorf("first_created_at %s is after updated_at %s", m.FirstCreatedAt, m.CreatedAt)
+	}
+}
+
+// Search matches the workflow NAME, case-insensitively. Matching the definition
+// body instead would return every workflow that merely mentions the term in a
+// task ref, which is not what someone typing a name means.
+func TestIntegrationCatalogSearchMatchesNameCaseInsensitively(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	ns := uniqueNS(t)
+
+	for _, name := range []string{"NightlyRetrain", "hourly-ingest"} {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO workflow_specs (namespace, name, version, spec_hash, spec_json, created_by)
+			VALUES ($1, $2, 1, $3, '{}'::jsonb, 'catalog-test')`,
+			ns, name, "hash-"+name+"-"+ns); err != nil {
+			t.Fatalf("insert %s: %v", name, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM workflow_specs WHERE namespace = $1`, ns)
+	})
+
+	got, err := GatewayListCatalog(ctx, pool, ns, "retrain", 100)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "NightlyRetrain" {
+		t.Fatalf("search 'retrain' returned %v, want just NightlyRetrain (case-insensitive)", names(got))
+	}
+
+	// An empty search is "everything", not "nothing".
+	all, err := GatewayListCatalog(ctx, pool, ns, "", 100)
+	if err != nil {
+		t.Fatalf("empty search: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("empty search returned %d, want 2 (empty means unfiltered)", len(all))
+	}
+}
+
+func names(cs []CatalogEntry) []string {
+	out := make([]string, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, c.Name)
+	}
+	return out
 }
