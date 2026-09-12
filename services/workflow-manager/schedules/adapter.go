@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/grpcapi"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/runs"
 )
 
@@ -43,4 +45,35 @@ func (a *RunsAdapter) Create(ctx context.Context, req CreateRunRequest) (string,
 		return "", false, err
 	}
 	return res.Run.ID, res.Created, nil
+}
+
+// BackfillAdapter lets Service satisfy grpcapi.BackfillService.
+//
+// The same one-way-dependency argument as RunsAdapter: the gRPC layer defines the
+// shape it needs and this translates, so schedules does not import grpcapi and
+// grpcapi does not import schedules.
+type BackfillAdapter struct{ svc *Service }
+
+// NewBackfillAdapter wraps the schedule service.
+func NewBackfillAdapter(svc *Service) *BackfillAdapter { return &BackfillAdapter{svc: svc} }
+
+// StartBackfill translates the request shape.
+func (a *BackfillAdapter) StartBackfill(ctx context.Context, req grpcapi.BackfillStart) (store.Backfill, error) {
+	return a.svc.StartBackfill(ctx, BackfillRequest{
+		Namespace: req.Namespace, ScheduleID: req.ScheduleID,
+		From: req.From, To: req.To,
+		MaxActive: req.MaxActive, MaxRuns: req.MaxRuns, CreatedBy: req.CreatedBy,
+	})
+}
+
+func (a *BackfillAdapter) PauseBackfill(ctx context.Context, ns, id string) (store.Backfill, error) {
+	return a.svc.PauseBackfill(ctx, ns, id)
+}
+
+func (a *BackfillAdapter) ResumeBackfill(ctx context.Context, ns, id string) (store.Backfill, error) {
+	return a.svc.ResumeBackfill(ctx, ns, id)
+}
+
+func (a *BackfillAdapter) CancelBackfill(ctx context.Context, ns, id string) (store.Backfill, error) {
+	return a.svc.CancelBackfill(ctx, ns, id)
 }

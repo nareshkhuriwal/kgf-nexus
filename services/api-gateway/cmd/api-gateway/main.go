@@ -93,7 +93,8 @@ func run() error {
 	api := rest.New(db, auth, wfmClient, rmClient, nil, log).
 		// The same client serves both: schedule writes go through workflow-manager
 		// because it owns the table, and it already holds the connection.
-		WithSchedules(wfmClient)
+		WithSchedules(wfmClient).
+		WithBackfills(wfmClient)
 
 	// Rate limiting is opt-in because a limit guessed wrong is itself an outage:
 	// the right number depends on fleet size and the console's poll interval. Off

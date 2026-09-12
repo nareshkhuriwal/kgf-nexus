@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/rest"
 	"google.golang.org/grpc"
 )
 
@@ -112,4 +113,82 @@ func (c *WorkflowManagerClient) DeleteSchedule(ctx context.Context, namespace, n
 		return fmt.Errorf("delete schedule %s/%s: %w", namespace, name, err)
 	}
 	return nil
+}
+
+// ── backfills ───────────────────────────────────────────────────────────────
+
+type wfmStartBackfillRequest struct {
+	Namespace  string    `json:"namespace"`
+	ScheduleID string    `json:"schedule_id"`
+	From       time.Time `json:"from"`
+	To         time.Time `json:"to"`
+	MaxActive  int32     `json:"max_active"`
+	MaxRuns    int32     `json:"max_runs"`
+	CreatedBy  string    `json:"created_by"`
+}
+
+type wfmBackfillActionRequest struct {
+	Namespace string `json:"namespace"`
+	ID        string `json:"id"`
+	Action    string `json:"action"`
+}
+
+type wfmBackfillResponse struct {
+	Backfill store.Backfill `json:"backfill"`
+}
+
+// StartBackfill asks the owner to create a backfill.
+//
+// Validation happens in the OWNER, not here: the bounds it enforces depend on the
+// schedule's cron expression, which the owner already has to load anyway. Duplicating
+// the checks in the gateway would be two places that must agree about what a legal
+// backfill is.
+func (c *WorkflowManagerClient) StartBackfill(ctx context.Context, req rest.BackfillStartRequest) (store.Backfill, error) {
+	if c.grpc == nil {
+		return store.Backfill{}, fmt.Errorf("start backfill: %w (workflow-manager owns schedule_backfills)", ErrUpstreamNotConfigured)
+	}
+	ctx, cancel := withCallTimeout(ctx)
+	defer cancel()
+
+	var resp wfmBackfillResponse
+	if err := c.grpc.conn.Invoke(ctx, "/nexus.v1.WorkflowSpecService/StartBackfill",
+		&wfmStartBackfillRequest{
+			Namespace: req.Namespace, ScheduleID: req.ScheduleID,
+			From: req.From, To: req.To,
+			MaxActive: req.MaxActive, MaxRuns: req.MaxRuns, CreatedBy: req.CreatedBy,
+		}, &resp, grpc.ForceCodec(wfmJSONCodec{})); err != nil {
+		return store.Backfill{}, fmt.Errorf("start backfill for schedule %s: %w", req.ScheduleID, err)
+	}
+	return resp.Backfill, nil
+}
+
+// PauseBackfill stops generation without discarding the cursor.
+func (c *WorkflowManagerClient) PauseBackfill(ctx context.Context, namespace, id string) (store.Backfill, error) {
+	return c.backfillAction(ctx, namespace, id, "pause")
+}
+
+// ResumeBackfill returns a paused backfill to RUNNING.
+func (c *WorkflowManagerClient) ResumeBackfill(ctx context.Context, namespace, id string) (store.Backfill, error) {
+	return c.backfillAction(ctx, namespace, id, "resume")
+}
+
+// CancelBackfill stops generation permanently, leaving created runs alone.
+func (c *WorkflowManagerClient) CancelBackfill(ctx context.Context, namespace, id string) (store.Backfill, error) {
+	return c.backfillAction(ctx, namespace, id, "cancel")
+}
+
+func (c *WorkflowManagerClient) backfillAction(ctx context.Context, namespace, id, action string) (store.Backfill, error) {
+	if c.grpc == nil {
+		return store.Backfill{}, fmt.Errorf("%s backfill: %w (workflow-manager owns schedule_backfills)", action, ErrUpstreamNotConfigured)
+	}
+	ctx, cancel := withCallTimeout(ctx)
+	defer cancel()
+
+	var resp wfmBackfillResponse
+	if err := c.grpc.conn.Invoke(ctx, "/nexus.v1.WorkflowSpecService/BackfillAction",
+		&wfmBackfillActionRequest{Namespace: namespace, ID: id, Action: action},
+		&resp, grpc.ForceCodec(wfmJSONCodec{})); err != nil {
+		return store.Backfill{}, fmt.Errorf("%s backfill %s: %w", action, id, err)
+	}
+	return resp.Backfill, nil
 }

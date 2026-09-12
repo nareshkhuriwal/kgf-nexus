@@ -360,3 +360,166 @@ func scheduleUnavailable(w http.ResponseWriter) {
 	writeError(w, http.StatusNotImplemented, "schedules_unavailable",
 		"this gateway has no schedule service configured")
 }
+
+// ── backfills ───────────────────────────────────────────────────────────────
+
+// BackfillManager is the backfill-mutation surface the gateway needs.
+//
+// Separate from ScheduleManager for the same reason ScheduleManager is separate from
+// WorkflowManager: a gateway pointed at an older workflow-manager satisfies the
+// interfaces that exist and reports the rest unavailable, rather than failing to start.
+type BackfillManager interface {
+	StartBackfill(ctx context.Context, req BackfillStartRequest) (store.Backfill, error)
+	PauseBackfill(ctx context.Context, namespace, id string) (store.Backfill, error)
+	ResumeBackfill(ctx context.Context, namespace, id string) (store.Backfill, error)
+	CancelBackfill(ctx context.Context, namespace, id string) (store.Backfill, error)
+}
+
+// BackfillStartRequest is the gateway's view of a backfill request.
+type BackfillStartRequest struct {
+	Namespace  string
+	ScheduleID string
+	From       time.Time
+	To         time.Time
+	MaxActive  int32
+	MaxRuns    int32
+	CreatedBy  string
+}
+
+func backfillPayload(b store.Backfill) map[string]any {
+	return map[string]any{
+		"id":          b.ID,
+		"schedule_id": b.ScheduleID,
+		"namespace":   b.Namespace,
+		"from":        b.FromTime,
+		"to":          b.ToTime,
+		// The next LOGICAL tick to generate, or null when the interval is exhausted.
+		// Reported because it is the only way to see how far a long backfill has got.
+		"cursor_at":    b.CursorAt,
+		"max_active":   b.MaxActive,
+		"max_runs":     b.MaxRuns,
+		"runs_created": b.RunsCreated,
+		"state":        b.State,
+		"detail":       b.Detail,
+		"created_at":   b.CreatedAt,
+		"updated_at":   b.UpdatedAt,
+		"ended_at":     b.EndedAt,
+		"created_by":   b.CreatedBy,
+	}
+}
+
+type startBackfillRequest struct {
+	From      string `json:"from"`
+	To        string `json:"to"`
+	MaxActive int32  `json:"max_active"`
+	MaxRuns   int32  `json:"max_runs"`
+}
+
+func (a *API) startBackfill(w http.ResponseWriter, r *http.Request, p authn.Principal) {
+	if a.backfills == nil {
+		scheduleUnavailable(w)
+		return
+	}
+	ns, name := r.PathValue("ns"), r.PathValue("name")
+	sch, err := store.WFMGetSchedule(r.Context(), a.db, ns, name)
+	if err != nil {
+		a.failSchedule(w, r, "get schedule", err)
+		return
+	}
+
+	body, err := readBody(r, maxSpecBytes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "unreadable_body", err.Error())
+		return
+	}
+	var req startBackfillRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed_json", "request body is not valid JSON")
+		return
+	}
+
+	from, err := time.Parse(time.RFC3339, req.From)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_from", "from must be an RFC3339 timestamp")
+		return
+	}
+	to, err := time.Parse(time.RFC3339, req.To)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_to", "to must be an RFC3339 timestamp")
+		return
+	}
+
+	bf, err := a.backfills.StartBackfill(r.Context(), BackfillStartRequest{
+		Namespace: ns, ScheduleID: sch.ID, From: from.UTC(), To: to.UTC(),
+		MaxActive: req.MaxActive, MaxRuns: req.MaxRuns, CreatedBy: p.Name,
+	})
+	if err != nil {
+		a.failSchedule(w, r, "start backfill", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, backfillPayload(bf))
+}
+
+func (a *API) listBackfills(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	ns, name := r.PathValue("ns"), r.PathValue("name")
+	sch, err := store.WFMGetSchedule(r.Context(), a.db, ns, name)
+	if err != nil {
+		a.failSchedule(w, r, "get schedule", err)
+		return
+	}
+	rows, err := store.WFMListBackfills(r.Context(), a.db, ns, sch.ID, intParam(r, "limit", 50))
+	if err != nil {
+		a.failSchedule(w, r, "list backfills", err)
+		return
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, b := range rows {
+		out = append(out, backfillPayload(b))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"backfills": out})
+}
+
+func (a *API) getBackfill(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	b, err := store.WFMGetBackfill(r.Context(), a.db, r.PathValue("ns"), r.PathValue("id"))
+	if err != nil {
+		a.failBackfill(w, r, "get backfill", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, backfillPayload(b))
+}
+
+// backfillAction handles pause, resume and cancel.
+func (a *API) backfillAction(action string) func(http.ResponseWriter, *http.Request, authn.Principal) {
+	return func(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+		if a.backfills == nil {
+			scheduleUnavailable(w)
+			return
+		}
+		ns, id := r.PathValue("ns"), r.PathValue("id")
+		var (
+			b   store.Backfill
+			err error
+		)
+		switch action {
+		case "pause":
+			b, err = a.backfills.PauseBackfill(r.Context(), ns, id)
+		case "resume":
+			b, err = a.backfills.ResumeBackfill(r.Context(), ns, id)
+		default:
+			b, err = a.backfills.CancelBackfill(r.Context(), ns, id)
+		}
+		if err != nil {
+			a.failBackfill(w, r, action+" backfill", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, backfillPayload(b))
+	}
+}
+
+func (a *API) failBackfill(w http.ResponseWriter, r *http.Request, op string, err error) {
+	if errors.Is(err, store.ErrBackfillNotFound) {
+		writeError(w, http.StatusNotFound, "backfill_not_found", "no such backfill")
+		return
+	}
+	a.failSchedule(w, r, op, err)
+}

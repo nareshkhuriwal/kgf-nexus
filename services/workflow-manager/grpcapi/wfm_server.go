@@ -205,6 +205,8 @@ type specService interface {
 	CreateSchedule(context.Context, *CreateScheduleRequest) (*ScheduleResponse, error)
 	SetScheduleEnabled(context.Context, *SetScheduleEnabledRequest) (*ScheduleResponse, error)
 	DeleteSchedule(context.Context, *DeleteScheduleRequest) (*DeleteScheduleResponse, error)
+	StartBackfill(context.Context, *StartBackfillRequest) (*BackfillResponse, error)
+	BackfillAction(context.Context, *BackfillActionRequest) (*BackfillResponse, error)
 }
 
 // SpecServer implements the spec half plus the run-state callback.
@@ -212,6 +214,16 @@ type SpecServer struct {
 	db   store.GWDB
 	runs RunService
 	log  *slog.Logger
+	// backfills is nil until a deployment wires the schedule service. Nil answers
+	// Unimplemented rather than panicking, so a workflow-manager built without it
+	// still serves every other RPC on this service.
+	backfills BackfillService
+}
+
+// WithBackfills attaches the backfill service, enabling those RPCs.
+func (s *SpecServer) WithBackfills(b BackfillService) *SpecServer {
+	s.backfills = b
+	return s
 }
 
 // SetRunState applies a run-level transition the DAG engine detected.
@@ -324,6 +336,8 @@ var SpecServiceDesc = grpc.ServiceDesc{
 		{MethodName: "CreateSchedule", Handler: createScheduleHandler},
 		{MethodName: "SetScheduleEnabled", Handler: setScheduleEnabledHandler},
 		{MethodName: "DeleteSchedule", Handler: deleteScheduleHandler},
+		{MethodName: "StartBackfill", Handler: startBackfillHandler},
+		{MethodName: "BackfillAction", Handler: backfillActionHandler},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "services/workflow-manager/grpcapi/wfm_server.go",
@@ -378,12 +392,13 @@ func setRunStateHandler(srv any, ctx context.Context, dec func(any) error, inter
 //
 // db is the workflow-manager's own pool: it is the OWNER of workflow_specs, so
 // writing the table here is the ownership rule being followed, not bent.
-func RegisterTyped(srv *grpc.Server, runSvc RunService, db store.GWDB, log *slog.Logger) {
+// backfills may be nil; those RPCs then answer Unimplemented.
+func RegisterTyped(srv *grpc.Server, runSvc RunService, db store.GWDB, log *slog.Logger, backfills BackfillService) {
 	if log == nil {
 		log = slog.Default()
 	}
 	nexusv1.RegisterWorkflowManagerServiceServer(srv, &RunServer{runs: runSvc, log: log})
-	srv.RegisterService(&SpecServiceDesc, &SpecServer{db: db, runs: runSvc, log: log})
+	srv.RegisterService(&SpecServiceDesc, &SpecServer{db: db, runs: runSvc, log: log, backfills: backfills})
 	log.Info("workflow-manager gRPC registered",
 		"services", []string{"nexus.v1.WorkflowManagerService", "nexus.v1.WorkflowSpecService"})
 }

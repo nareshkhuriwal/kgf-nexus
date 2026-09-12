@@ -86,10 +86,19 @@ func run() error {
 		Claimant:        claimant,
 		BacklogInterval: cfg.TimerBacklogInterval,
 		BacklogAlert:    int64(cfg.TimerBacklogAlert),
-		Metrics:         timers.NewMetrics(reg),
+		// The stalled-run backstop. See Reconciler.sweepStalledRuns: it should
+		// never find anything, and its counter is an alarm rather than a metric.
+		StalledRunAge:      cfg.StalledRunAge,
+		StalledRunInterval: cfg.StalledRunInterval,
+		Metrics:            timers.NewMetrics(reg),
 	}, log)
 
 	registerTimerHandlers(rec, runSvc, schedClient, log)
+
+	// The stalled-run sweep's recovery action. Wired here rather than inside the
+	// timers package because only this file knows how to reach the run service,
+	// which is the same reason the timer handlers are injected.
+	rec.OnStalledRun(runSvc.ReconcileStalled)
 
 	// ── gRPC API ──────────────────────────────────────────────────────────
 	// The JSON codec must be registered before the server starts: the spec half of
@@ -108,7 +117,17 @@ func run() error {
 	}
 	grpcSrv := grpc.NewServer(append(nexuscfg.PeerServerOptions(), sopts...)...)
 	grpcapi.Register(grpcSrv, runSvc, log)
-	grpcapi.RegisterTyped(grpcSrv, runSvc, db, log)
+	// Built before RegisterTyped so the backfill RPCs have a service to call. Its
+	// loop is started further down, after the listeners.
+	schedSvc := schedules.New(db, schedules.NewRunsAdapter(runSvc), schedules.Config{
+		Interval:             cfg.ScheduleInterval,
+		BatchSize:            cfg.ScheduleBatchSize,
+		StalledSweepInterval: cfg.ScheduleSweepInterval,
+		MaxCatchupPerPass:    cfg.ScheduleMaxCatchup,
+		BackfillLease:        cfg.BackfillLease,
+	}, log)
+
+	grpcapi.RegisterTyped(grpcSrv, runSvc, db, log, schedules.NewBackfillAdapter(schedSvc))
 
 	grpcLis, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {
@@ -174,12 +193,6 @@ func run() error {
 	// reconciler: several replicas may run it and correctness does not depend on
 	// there being one, because claiming a due schedule is FOR UPDATE SKIP LOCKED
 	// and a tick's identity is a unique constraint. No leader election.
-	schedSvc := schedules.New(db, schedules.NewRunsAdapter(runSvc), schedules.Config{
-		Interval:             cfg.ScheduleInterval,
-		BatchSize:            cfg.ScheduleBatchSize,
-		StalledSweepInterval: cfg.ScheduleSweepInterval,
-		MaxCatchupPerPass:    cfg.ScheduleMaxCatchup,
-	}, log)
 	schedDone := make(chan struct{})
 	go func() {
 		defer close(schedDone)
@@ -286,11 +299,14 @@ type config struct {
 	TimerClaimTimeout    time.Duration
 	TimerBacklogAlert    int
 	TimerBacklogInterval time.Duration
+	StalledRunAge        time.Duration
+	StalledRunInterval   time.Duration
 
 	ScheduleInterval      time.Duration
 	ScheduleBatchSize     int
 	ScheduleSweepInterval time.Duration
 	ScheduleMaxCatchup    int
+	BackfillLease         time.Duration
 	ShutdownTimeout       time.Duration
 }
 
@@ -315,13 +331,27 @@ func loadConfig() config {
 		// shared state every second for a number that moves slowly.
 		TimerBacklogInterval: time.Duration(envInt("NEXUS_TIMER_BACKLOG_INTERVAL_SEC", 15)) * time.Second,
 
+		// How long a run must show no activity before the stalled-run sweep will
+		// touch it. This is a RACE GUARD, not a tuning knob: a healthy run shows
+		// every node terminal for the moment between its last attempt reporting
+		// and the engine publishing the outcome, and sweeping that window would
+		// replace a correct conclusion with a guessed one. Two minutes is far
+		// longer than that window and far shorter than a human noticing.
+		StalledRunAge: time.Duration(envInt("NEXUS_STALLED_RUN_AGE_SEC", 120)) * time.Second,
+		// Coarse: this is a backstop for something that should never happen, so it
+		// costs a query a minute rather than a query a second.
+		StalledRunInterval: time.Duration(envInt("NEXUS_STALLED_RUN_INTERVAL_SEC", 60)) * time.Second,
+
 		// Cron's resolution is a minute, so polling faster than this buys nothing;
 		// this bounds how late a tick can be to roughly one interval.
 		ScheduleInterval:      time.Duration(envInt("NEXUS_SCHEDULE_INTERVAL_SEC", 15)) * time.Second,
 		ScheduleBatchSize:     envInt("NEXUS_SCHEDULE_BATCH_SIZE", 20),
 		ScheduleSweepInterval: time.Duration(envInt("NEXUS_SCHEDULE_SWEEP_SEC", 300)) * time.Second,
 		ScheduleMaxCatchup:    envInt("NEXUS_SCHEDULE_MAX_CATCHUP", 10),
-		ShutdownTimeout:       time.Duration(envInt("NEXUS_SHUTDOWN_TIMEOUT_SEC", 30)) * time.Second,
+		// Bounds a CRASH mid-backfill, not normal pacing: a pass releases its claim
+		// when done, so this only matters when a replica dies holding one.
+		BackfillLease:   time.Duration(envInt("NEXUS_BACKFILL_LEASE_SEC", 120)) * time.Second,
+		ShutdownTimeout: time.Duration(envInt("NEXUS_SHUTDOWN_TIMEOUT_SEC", 30)) * time.Second,
 	}
 }
 

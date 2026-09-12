@@ -1,0 +1,36 @@
+-- Add a lease to schedule_backfills.
+--
+-- 0006 gave backfills no claim mechanism, and the driver's first version selected
+-- FOR UPDATE SKIP LOCKED on the pool and returned the rows. That does nothing: the
+-- lock is released when the query completes, and the driver then spends seconds
+-- generating runs with no protection. Six concurrent passes produced ten runs against
+-- a max_active of four -- the concurrency cap ADR/ARCHITECTURE §3.2 requires was not
+-- actually enforced.
+--
+-- A lease rather than a held transaction, because the driver creates runs through the
+-- run service: holding a transaction for the whole advance would span an RPC per tick
+-- and keep a row locked for as long as that takes. A stamped claim with an expiry is a
+-- bounded promise instead, so a replica that dies blocks its backfill for at most one
+-- lease period and the next claimant resumes from the persisted cursor.
+--
+-- ADDITIVE (ADR-0011 rule 5): two nullable columns with no default and no backfill, so
+-- there is no rewrite and no lock beyond the metadata change. An old replica that does
+-- not know about them keeps working -- it simply never sets them, which reads as
+-- "unclaimed" and is exactly right for a replica that is not claiming.
+ALTER TABLE schedule_backfills ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+ALTER TABLE schedule_backfills ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+
+-- The claim query's predicate: running, and unclaimed or expired.
+--
+-- NOT created here, deliberately. schedule_backfills already exists (0006), so a
+-- plain CREATE INDEX would hold a write lock for the whole build -- and
+-- CONCURRENTLY cannot run inside a transaction, which migrate.sh wraps every
+-- migration in. Adding it would mean either stalling writes or weakening the
+-- per-migration transaction that makes a failed migration leave the schema
+-- untouched, and neither is worth it for this table: a backfill row exists per
+-- backfill JOB, so the table is tens of rows, and the claim's partial predicate
+-- scans it trivially.
+--
+-- If backfills ever become numerous enough to need the index, it belongs in its own
+-- migration applied outside a transaction, which is a deliberate operational step
+-- rather than a side effect of adding two columns.

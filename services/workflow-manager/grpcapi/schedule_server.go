@@ -213,3 +213,128 @@ func isUniqueViolation(err error) bool {
 	}
 	return false
 }
+
+// ── backfills ───────────────────────────────────────────────────────────────
+
+// StartBackfillRequest asks for a bounded historical catch-up.
+type StartBackfillRequest struct {
+	Namespace  string    `json:"namespace"`
+	ScheduleID string    `json:"schedule_id"`
+	From       time.Time `json:"from"`
+	To         time.Time `json:"to"`
+	MaxActive  int32     `json:"max_active"`
+	MaxRuns    int32     `json:"max_runs"`
+	CreatedBy  string    `json:"created_by"`
+}
+
+// BackfillResponse is the stored row.
+type BackfillResponse struct {
+	Backfill store.Backfill `json:"backfill"`
+}
+
+// BackfillActionRequest names a backfill to pause, resume or cancel.
+type BackfillActionRequest struct {
+	Namespace string `json:"namespace"`
+	ID        string `json:"id"`
+	Action    string `json:"action"`
+}
+
+// BackfillService is the subset of the schedule service these RPCs need.
+//
+// An interface so the gRPC layer does not import the concrete service and create a
+// cycle: schedules already depends on store, and the server depends on both.
+type BackfillService interface {
+	StartBackfill(ctx context.Context, req BackfillStart) (store.Backfill, error)
+	PauseBackfill(ctx context.Context, namespace, id string) (store.Backfill, error)
+	ResumeBackfill(ctx context.Context, namespace, id string) (store.Backfill, error)
+	CancelBackfill(ctx context.Context, namespace, id string) (store.Backfill, error)
+}
+
+// BackfillStart mirrors schedules.BackfillRequest without importing it.
+type BackfillStart struct {
+	Namespace  string
+	ScheduleID string
+	From       time.Time
+	To         time.Time
+	MaxActive  int32
+	MaxRuns    int32
+	CreatedBy  string
+}
+
+// StartBackfill validates through the service and creates the job.
+func (s *SpecServer) StartBackfill(ctx context.Context, req *StartBackfillRequest) (*BackfillResponse, error) {
+	if s.backfills == nil {
+		return nil, status.Error(codes.Unimplemented, "this workflow-manager has no backfill service configured")
+	}
+	bf, err := s.backfills.StartBackfill(ctx, BackfillStart{
+		Namespace: req.Namespace, ScheduleID: req.ScheduleID,
+		From: req.From, To: req.To,
+		MaxActive: req.MaxActive, MaxRuns: req.MaxRuns, CreatedBy: req.CreatedBy,
+	})
+	if err != nil {
+		// InvalidArgument, because every rejection the service produces is something
+		// the operator asked for wrongly -- an inverted interval, a cap over the
+		// ceiling, a window with no tick in it. Returning Internal would tell the
+		// gateway to answer 500 for a request the caller can fix.
+		return nil, status.Errorf(codes.InvalidArgument, "start backfill: %v", err)
+	}
+	return &BackfillResponse{Backfill: bf}, nil
+}
+
+// BackfillAction pauses, resumes or cancels.
+func (s *SpecServer) BackfillAction(ctx context.Context, req *BackfillActionRequest) (*BackfillResponse, error) {
+	if s.backfills == nil {
+		return nil, status.Error(codes.Unimplemented, "this workflow-manager has no backfill service configured")
+	}
+	var (
+		bf  store.Backfill
+		err error
+	)
+	switch req.Action {
+	case "pause":
+		bf, err = s.backfills.PauseBackfill(ctx, req.Namespace, req.ID)
+	case "resume":
+		bf, err = s.backfills.ResumeBackfill(ctx, req.Namespace, req.ID)
+	case "cancel":
+		bf, err = s.backfills.CancelBackfill(ctx, req.Namespace, req.ID)
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "unknown backfill action %q", req.Action)
+	}
+	if errors.Is(err, store.ErrBackfillNotFound) {
+		return nil, status.Error(codes.NotFound, "backfill not found")
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "%s backfill: %v", req.Action, err)
+	}
+	return &BackfillResponse{Backfill: bf}, nil
+}
+
+func startBackfillHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(StartBackfillRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(specService).StartBackfill(ctx, in)
+	}
+	return interceptor(ctx, in, &grpc.UnaryServerInfo{
+		Server: srv, FullMethod: "/nexus.v1.WorkflowSpecService/StartBackfill",
+	}, func(ctx context.Context, req any) (any, error) {
+		return srv.(specService).StartBackfill(ctx, req.(*StartBackfillRequest))
+	})
+}
+
+func backfillActionHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(BackfillActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(specService).BackfillAction(ctx, in)
+	}
+	return interceptor(ctx, in, &grpc.UnaryServerInfo{
+		Server: srv, FullMethod: "/nexus.v1.WorkflowSpecService/BackfillAction",
+	}, func(ctx context.Context, req any) (any, error) {
+		return srv.(specService).BackfillAction(ctx, req.(*BackfillActionRequest))
+	})
+}

@@ -92,6 +92,9 @@ type API struct {
 	// keeps a gateway usable against a workflow-manager that predates schedules,
 	// which is what a rolling upgrade produces (ADR-0011 rule 5).
 	schedules ScheduleManager
+	// backfills is nil when no backfill upstream is configured, for the same reason
+	// as schedules.
+	backfills BackfillManager
 }
 
 // New builds the REST API.
@@ -115,6 +118,12 @@ func (a *API) WithRateLimit(cfg RateLimitConfig) *API {
 // WithSchedules wires the schedule-mutation upstream, enabling those routes.
 func (a *API) WithSchedules(m ScheduleManager) *API {
 	a.schedules = m
+	return a
+}
+
+// WithBackfills wires the backfill upstream, enabling those routes.
+func (a *API) WithBackfills(m BackfillManager) *API {
+	a.backfills = m
 	return a
 }
 
@@ -150,6 +159,16 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("DELETE /v1/namespaces/{ns}/schedules/{name}", a.guard(authn.ActionWrite, a.deleteSchedule))
 	mux.Handle("POST /v1/namespaces/{ns}/schedules/{name}/enable", a.guard(authn.ActionWrite, a.setScheduleEnabled(true)))
 	mux.Handle("POST /v1/namespaces/{ns}/schedules/{name}/disable", a.guard(authn.ActionWrite, a.setScheduleEnabled(false)))
+
+	// Backfills hang off their schedule for creation and listing, and are addressed
+	// by their own id thereafter: a backfill outlives the interval that named it and
+	// an operator tracks it by identity, not by which schedule it came from.
+	mux.Handle("POST /v1/namespaces/{ns}/schedules/{name}/backfills", a.guard(authn.ActionWrite, a.startBackfill))
+	mux.Handle("GET /v1/namespaces/{ns}/schedules/{name}/backfills", a.guard(authn.ActionRead, a.listBackfills))
+	mux.Handle("GET /v1/namespaces/{ns}/backfills/{id}", a.guard(authn.ActionRead, a.getBackfill))
+	mux.Handle("POST /v1/namespaces/{ns}/backfills/{id}/pause", a.guard(authn.ActionWrite, a.backfillAction("pause")))
+	mux.Handle("POST /v1/namespaces/{ns}/backfills/{id}/resume", a.guard(authn.ActionWrite, a.backfillAction("resume")))
+	mux.Handle("POST /v1/namespaces/{ns}/backfills/{id}/cancel", a.guard(authn.ActionWrite, a.backfillAction("cancel")))
 
 	mux.Handle("GET /v1/namespaces/{ns}/workers", a.guard(authn.ActionRead, a.listWorkers))
 	mux.Handle("POST /v1/namespaces/{ns}/workers/{id}/drain", a.guard(authn.ActionAdminWrite, a.drainWorker))

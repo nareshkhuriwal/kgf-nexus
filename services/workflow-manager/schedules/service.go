@@ -20,8 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/khuriwalgroup/kgf-nexus/internal/cron"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 )
@@ -72,6 +74,13 @@ type Config struct {
 	// because a schedule with a generous catchup_limit should still not monopolise
 	// a pass.
 	MaxCatchupPerPass int
+	// BackfillLease is how long a claimed backfill is reserved for one replica.
+	//
+	// It bounds a CRASH, not normal progress: a pass releases its claim when it is
+	// done, so this only matters when a replica dies mid-advance. Long enough that a
+	// slow pass is never treated as dead, short enough that a dead replica does not
+	// stall its backfill for long.
+	BackfillLease time.Duration
 }
 
 // DefaultConfig is deliberately unhurried. Scheduling is not latency-sensitive: a
@@ -83,6 +92,7 @@ func DefaultConfig() Config {
 		BatchSize:            20,
 		StalledSweepInterval: 5 * time.Minute,
 		MaxCatchupPerPass:    10,
+		BackfillLease:        2 * time.Minute,
 	}
 }
 
@@ -94,6 +104,9 @@ type Service struct {
 	log  *slog.Logger
 	// now is injectable so tests can drive time rather than sleep through it.
 	now func() time.Time
+	// claimant identifies this replica in a backfill lease, so a stuck claim can be
+	// traced to the process that took it.
+	claimant string
 }
 
 // New builds the service.
@@ -110,10 +123,17 @@ func New(db store.GWDB, runs RunCreator, cfg Config, log *slog.Logger) *Service 
 	if cfg.MaxCatchupPerPass <= 0 {
 		cfg.MaxCatchupPerPass = DefaultConfig().MaxCatchupPerPass
 	}
+	if cfg.BackfillLease <= 0 {
+		cfg.BackfillLease = DefaultConfig().BackfillLease
+	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{db: db, runs: runs, cfg: cfg, log: log, now: time.Now}
+	host, _ := os.Hostname()
+	return &Service{
+		db: db, runs: runs, cfg: cfg, log: log, now: time.Now,
+		claimant: fmt.Sprintf("%s/%s", host, uuid.NewString()[:8]),
+	}
 }
 
 // Run polls until the context is cancelled.
@@ -150,6 +170,13 @@ func (s *Service) Run(ctx context.Context) error {
 			// outage in which nothing scheduled ever runs again.
 			if _, err := s.FirePass(ctx); err != nil {
 				s.log.ErrorContext(ctx, "schedule pass failed; retrying next tick", "error", err)
+			}
+			// Backfills advance on the same tick as live schedules, deliberately
+			// AFTER them: when both want work, the live schedule should get it
+			// first. A backfill that waits one interval is behaving as intended;
+			// a live tick that waits is late.
+			if _, err := s.BackfillPass(ctx); err != nil {
+				s.log.ErrorContext(ctx, "backfill pass failed; retrying next tick", "error", err)
 			}
 		}
 	}
