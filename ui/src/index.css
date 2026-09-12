@@ -8,6 +8,80 @@
  * looking alike as the UI grows.
  */
 
+/* ── Typeface ──────────────────────────────────────────────────────────────
+   Inter, SELF-HOSTED, as the interface family.
+
+   WHY IT IS BUNDLED AND NOT FETCHED. This is an internal operator console that
+   is expected to run in restricted and air-gapped networks, and a webfont
+   pulled from a CDN fails exactly where failure costs most: the network is
+   segmented or the egress proxy is down, the console falls back to the OS font
+   mid-incident, and every measurement tuned against Inter's metrics — the run
+   table's column count above all — is suddenly being made against something
+   else. A font the deployment cannot serve itself is not a design decision, it
+   is a remote dependency in the render path.
+
+   WHY INTER RATHER THAN THE SYSTEM STACK IT REPLACES. --sans previously read
+   `-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif`,
+   which named Inter AFTER every mainstream platform font — so on macOS,
+   Windows and Android it was never reached, and the declaration was decoration.
+   Inter is now first and actually present. It is drawn for screen UI at small
+   sizes, which is all this console renders, and its digits are the reason it
+   earns its keep here: tabular figures of even width, so a column of durations
+   and counts lines up without the mono family's typewriter texture.
+
+   WHY THE VARIABLE FACE. One file covers 100–900, and this stylesheet asks for
+   400/500/550/600/620/650 — six weights, four of them off the static-cut grid.
+   A static family would snap each to the nearest shipped cut, silently
+   collapsing h1's 650 and h2's 620 into one weight and losing the distinction
+   they were chosen to make. The variable face renders exactly what is asked.
+
+   WHY ONLY THE LATIN SUBSETS. @fontsource-variable/inter ships seven unicode
+   ranges; six of them are Cyrillic, Greek and Vietnamese. Every string this
+   console renders is either a UI label written here or an identifier from the
+   API — spec names, run ids, node ids, timestamps — so those 300KB would be
+   bytes the deployment stores and never serves. latin-ext is kept over latin
+   alone because a person's name in the users table or the audit log may
+   legitimately carry an accent.
+
+   PROVENANCE. The two woff2 files in src/assets/fonts are copied verbatim from
+   @fontsource-variable/inter, which is kept as a devDependency for exactly that
+   reason: it is how the files are refreshed, and it records where they came
+   from. They are NOT imported from node_modules at build time — that would pull
+   all seven subsets. SIL Open Font License; the text ships beside them.
+
+   They live in src/assets rather than public/ so Vite fingerprints them. A
+   stable /fonts/inter.woff2 URL is the one that goes stale: an air-gapped
+   deployment has no CDN to purge, so a font revision behind a far-future
+   cache header would keep serving the old file until someone cleared a browser.
+   A content hash makes the new file a new URL and the problem cannot arise. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  /* 100–900 from one file. See above: this stylesheet asks for six weights. */
+  font-weight: 100 900;
+  /* swap, not block: the text must appear immediately even if the font file is
+     slow off a cold disk or a throttled mount. A blank panel during an incident
+     is worse than one repaint in the fallback face. */
+  font-display: swap;
+  src: url('./assets/fonts/inter-latin-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./assets/fonts/inter-latin-ext-wght-normal.woff2') format('woff2-variations');
+  /* Fetched only when a glyph in this range is actually rendered — an accented
+     name in the users table or the audit log — which is why carrying it costs
+     nothing on a console that never shows one. */
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7,
+    U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF,
+    U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
 :root {
   color-scheme: dark light;
 
@@ -77,8 +151,19 @@
   --tone-stopped-bg: rgba(139, 148, 158, 0.16);
   --tone-stopped-bd: #79828d;
 
+  /* Unchanged, deliberately. The system mono stack is already the right answer
+     for the ids, timestamps and code this console renders in it: the OS mono is
+     the face its user has chosen for exactly that kind of text, and every one of
+     these has the fixed advance width that makes a column of hashes scannable.
+     Inter is an interface family and is not a substitute for any of them. */
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  /* Inter FIRST, and self-hosted so it is actually reached — see the @font-face
+     block above for why it is bundled rather than fetched. The tail is still a
+     real stack rather than a bare `sans-serif`: it is what renders during the
+     swap, and what renders if the font file is ever missing from a deployment.
+     Ordered so each entry is the best UI face on the platform that has it. */
+  --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text',
+    'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --radius: 5px;
 
   /* ── Scales ────────────────────────────────────────────────────────────
@@ -100,16 +185,36 @@
   --space-8: 32px;
   --space-9: 48px;
 
-  /* Type scale. 13px base rather than 16: this console shows tables of IDs and
+  /* Type scale. 14px base rather than 16: this console shows tables of IDs and
      timestamps, and the whole design premise is fitting a run's history on one
-     screen during an incident. Sizes below 11px are deliberately absent -- the
-     existing 10.5px values were already at the edge of legibility. */
-  --text-xs: 11px;
-  --text-sm: 12px;
-  --text-base: 13px;
-  --text-md: 14px;
-  --text-lg: 17px;
-  --text-xl: 22px;
+     screen during an incident.
+
+     RAISED ONE STEP from a 13px base and an 11px floor, because that scale was
+     tuned for density alone and had gone past the point where density pays. An
+     operator reads this console for hours, often on a mis-scaled external
+     monitor at 3am, and 11px body text is where legibility starts costing more
+     than the extra row it buys. 14px is still well below the 16px web default:
+     this is a dense tool, not a document.
+
+     THE RAMP IS NOT UNIFORM, on purpose. The dense end moves by one pixel per
+     step (12/13/14/15) because every one of those sizes is load-bearing against
+     a container that does not reflow — a table column, a badge inside a table
+     cell, a chip in a panel head — and a larger jump there wraps an id. The
+     display end moves further (19, 24) because a heading's job is to be
+     unmistakably above body text, and at a 14px base an 17px h-size no longer
+     was: three pixels of separation reads as a slightly bold paragraph.
+
+     The FLOOR IS NOW 12px, up from 11. Sizes below the floor still exist in
+     four places, each pinned as a literal with its own comment saying which
+     fixed container it is serving; they did not move, because raising them is
+     what would overlap the DAG's label rows or lift every row of a dense table.
+     See .dag-node-sub, .dag-node-state, .badge.sm and .attempt-section-title. */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 15px;
+  --text-lg: 19px;
+  --text-xl: 24px;
 
   --leading-tight: 1.25;
   --leading-normal: 1.5;
@@ -348,7 +453,12 @@ code, .mono, pre { font-family: var(--mono); font-size: var(--text-sm); }
 /* minmax() track floors are layout breakpoints, not spacing -- left literal. */
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: var(--space-5); }
 
-h1 { font-size: 18px; margin: 0 0 var(--space-1); font-weight: 650; }
+/* --text-lg, not the bare 18px that was here. That literal carried no comment
+   justifying itself, which in this stylesheet means it was an untokenised
+   leftover rather than a measurement — and the scale bump proved it: at a 19px
+   --text-lg an 18px h1 had become SMALLER than the token meant for exactly this
+   role, so the page title was quietly outranked by the panel titles using it. */
+h1 { font-size: var(--text-lg); margin: 0 0 var(--space-1); font-weight: 650; }
 h2 { font-size: var(--text-md); margin: 0 0 var(--space-4); font-weight: 620; }
 .sub { color: var(--fg-muted); font-size: var(--text-sm); }
 
@@ -386,9 +496,24 @@ textarea { resize: vertical; }
 label.field { display: flex; flex-direction: column; gap: var(--space-2); font-size: var(--text-xs); color: var(--fg-muted); }
 
 /* ── Tables ────────────────────────────────────────────────────────────── */
-/* 12.5px is half a step below --text-base and deliberately off-scale: it is the
-   one size that fits the run table's column count without wrapping IDs. */
-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+/* 13.5px is half a step below --text-base (14px) and deliberately off-scale,
+   which is the same relationship the old 12.5px had to the old 13px base: the
+   table wants to be a touch quieter than body text without dropping to the
+   --text-sm used for secondary prose.
+
+   It moved WITH the base rather than staying put. The run list is the widest
+   table here — ten columns — and the reason a literal is used at all is that
+   this is the size at which its ids stop wrapping, so the value has to be
+   re-checked rather than merely re-derived. It holds: the ids in these columns
+   are fixed-width and rendered in --mono, whose stack is unchanged, so their
+   measured width tracks the font-size directly and one extra pixel of body size
+   does not change which of them fit. The columns that carry PROSE — a spec
+   name, a failure summary — were already free to wrap and still are.
+
+   If a future column count makes this wrap, the fix is the column set or a
+   per-table size, not a global shave: the sizes above are the readable floor
+   for text an operator reads for hours. */
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 th {
   text-align: left; padding: 7px 10px; color: var(--fg-muted);
   font-weight: var(--weight-bold); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.4px;
@@ -413,9 +538,18 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
   border: 1px solid var(--tone-bd); border-style: var(--tone-border-style, solid);
 }
 .badge .glyph { font-size: var(--text-xs); line-height: 1; }
-/* 10px is below the --text-xs floor on purpose: the scale comment records that
-   sizes under 11px were dropped, and this compact badge is the one survivor. */
-.badge.sm { font-size: 10px; padding: var(--space-0) var(--space-3); }
+/* 11px is below the --text-xs floor (12px) on purpose and did NOT move with the
+   scale by a full step. This variant exists only inside dense table cells, and
+   it is the badge's own height that sets the row height there: a run list is a
+   hundred rows, so a step on this size lifts the whole table and costs more
+   rows than the legibility gain is worth on a label that is one uppercase word
+   an operator recognises by shape and tone rather than reads.
+
+   It went 10px → 11px rather than staying put, because 10px was set against an
+   11px floor and holding it while everything around it grew would have widened
+   the gap to the base size from 3px to 4px — at which point the variant reads
+   as damaged rather than as compact. One pixel keeps the relationship. */
+.badge.sm { font-size: 11px; padding: var(--space-0) var(--space-3); }
 
 .tone-neutral { --tone-fg: var(--tone-neutral-fg); --tone-bg: var(--tone-neutral-bg); --tone-bd: var(--tone-neutral-bd); }
 .tone-queued  { --tone-fg: var(--tone-queued-fg);  --tone-bg: var(--tone-queued-bg);  --tone-bd: var(--tone-queued-bd); }
@@ -492,17 +626,35 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
    highest-contrast thing inside it. */
 .dag-glyph-chip { fill: var(--tone-bd); opacity: 0.16; pointer-events: none; }
 
-/* SVG label sizes: 10.5px and 10px are below the --text-xs floor and stay
-   literal. These text rows sit at fixed x/y offsets inside a fixed 196x64 node
-   box (DagView.tsx), so growing them to 11px would push the sub and state rows
-   into each other rather than reflowing. */
+/* EVERY SIZE IN THIS BLOCK IS A LITERAL, AND NONE OF THEM MOVED WITH THE TYPE
+   SCALE. This is the one place in the stylesheet where that is a hard
+   constraint rather than a judgement call.
+
+   These four text rows sit at FIXED x/y offsets inside a FIXED 196x64 node box
+   whose geometry lives in DagView.tsx and lib/dag.ts — the layout is computed
+   in SVG user space, not laid out by CSS, so nothing here reflows. A row that
+   grows does not push its neighbour down, it overlaps it. Four lines of text in
+   a 64-unit box have roughly two units of slack between them; one extra pixel
+   per row consumes it.
+
+   .dag-node-label and .dag-glyph previously read --text-base and --text-sm, and
+   that was a latent bug rather than a working indirection: it silently coupled
+   a graph's internal geometry to a global density scale, so raising the scale
+   one step — which is exactly what happened — would have overlapped the label
+   with the sub row with no test able to see it. They are now pinned at the
+   values that box was drawn around (13px and 12px, the old --text-base and
+   --text-sm), which is what they were rendering before the scale moved.
+
+   To change any of these, change the node box in DagView.tsx first. The
+   literals are the honest expression of that dependency; a token here would
+   only hide it again. */
 .dag-node-label {
-  fill: var(--fg); font: var(--weight-bold) var(--text-base) var(--sans);
+  fill: var(--fg); font: var(--weight-bold) 13px var(--sans);
   letter-spacing: -0.01em; pointer-events: none;
 }
 .dag-node-sub { fill: var(--fg-muted); font: 10.5px var(--mono); pointer-events: none; }
 .dag-node-state { font: 700 10px var(--mono); letter-spacing: 0.06em; pointer-events: none; }
-.dag-glyph { font: 700 var(--text-sm) var(--mono); pointer-events: none; }
+.dag-glyph { font: 700 12px var(--mono); pointer-events: none; }
 
 /* Edges. Held slightly back in opacity so a dense graph reads as nodes-with-
    connections rather than a net; the arrowhead markers are drawn at full
@@ -551,10 +703,22 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
 .legend-item { display: flex; align-items: center; gap: var(--space-3); font-size: var(--text-xs); color: var(--fg-muted); }
 
 /* ── Log tail ──────────────────────────────────────────────────────────── */
-/* 11.5px and 1.55 are tuned to fit a log line's timestamp + message without
-   wrapping at the common panel width; 460px is a viewport cap, not a step. */
+/* 12.5px and 1.55 are tuned to fit a log line's timestamp + message without
+   wrapping at the common panel width; 460px is a viewport cap, not a step.
+
+   Raised from 11.5px with the scale, and it is the one sub-scale literal here
+   where that was a real risk rather than a formality: a log line is a fixed
+   23-character timestamp followed by arbitrary message text, and the whole
+   point of the tuning was that the timestamp and the start of the message share
+   one line at the panel's usual width. It still does — the gain is one pixel on
+   a --mono face, about 8px across the timestamp, against a panel that is
+   several hundred pixels wide — and the message itself wraps on purpose
+   (white-space: pre-wrap) rather than being clipped, so a narrow panel degrades
+   by wrapping prose rather than by hiding when a line happened. Log text is
+   read for minutes at a time during exactly the incident this console is for,
+   which is the last place to be defending a pixel. */
 .logs {
-  background: var(--bg-inset); font-family: var(--mono); font-size: 11.5px;
+  background: var(--bg-inset); font-family: var(--mono); font-size: 12.5px;
   line-height: 1.55; padding: var(--space-4) 10px; max-height: 460px; overflow: auto;
   white-space: pre-wrap; word-break: break-word;
 }
@@ -588,10 +752,22 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
 .attempt-card + .attempt-card { margin-top: 10px; }
 .attempt-head { display: flex; gap: 10px; align-items: center; padding: var(--space-4) 11px; background: var(--bg-inset); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .attempt-body { padding: 11px; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
-/* 10.5px: an intentionally sub-scale overline, matching .dag-node-sub. */
-.attempt-section-title { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--fg-faint); margin-bottom: 5px; font-weight: 650; }
+/* 11px: an intentionally sub-scale overline. It no longer matches
+   .dag-node-sub, which stayed at 10.5px because the DAG's node box cannot
+   reflow and this card can — the two were only ever equal by coincidence of
+   both being "the smallest thing here".
+
+   Sub-scale is right for an overline regardless of where the floor sits: this
+   is an uppercase, letter-spaced, faint label naming the section below it, and
+   it must not compete with the content it introduces. Raised by half a pixel
+   with the scale for the reason .badge.sm was — the gap to body text is what
+   carries the hierarchy, and letting it widen makes the label look broken. */
+.attempt-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--fg-faint); margin-bottom: 5px; font-weight: 650; }
 .errbox { border-left: 3px solid var(--tone-danger-bd); background: var(--tone-danger-bg); padding: 7px 9px; border-radius: 0 var(--radius) var(--radius) 0; }
-.pendingbox { border-left: 3px solid var(--tone-warning-bd); background: var(--tone-warning-bg); padding: 7px 9px; border-radius: 0 var(--radius) var(--radius) 0; font-family: var(--mono); font-size: 11.5px; }
+/* 12.5px matches .logs, and moved with it: this is the same kind of content —
+   mono machine text read closely — in a box that is free to grow, so there is
+   no fixed container arguing for it to stay behind. */
+.pendingbox { border-left: 3px solid var(--tone-warning-bd); background: var(--tone-warning-bg); padding: 7px 9px; border-radius: 0 var(--radius) var(--radius) 0; font-family: var(--mono); font-size: 12.5px; }
 
 .clickable { cursor: pointer; }
 .nowrap { white-space: nowrap; }

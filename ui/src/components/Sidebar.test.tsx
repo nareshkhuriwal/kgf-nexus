@@ -34,10 +34,19 @@ function wrap(ui: ReactNode, route = '/') {
 const account = <button type="button">Account slot</button>;
 
 describe('the sidebar', () => {
-  it('shows the brand', () => {
-    wrap(<Sidebar canAdmin={false} account={account} />);
+  /**
+   * The brand belongs to the BAR now, not the rail.
+   *
+   * They used to be alternative chromes, so each had to carry the wordmark —
+   * whichever one you chose was the only one on screen. Now they render together,
+   * and two wordmarks stacked in the top-left corner is just the product name
+   * printed twice. Asserted as an absence so the next person tidying the rail's
+   * empty header does not helpfully put it back.
+   */
+  it('leaves the brand to the navbar above it', () => {
+    wrap(<Sidebar canAdmin={false} />);
 
-    expect(screen.getByText('Nexus')).toBeInTheDocument();
+    expect(screen.queryByText('Nexus')).not.toBeInTheDocument();
   });
 
   /**
@@ -46,13 +55,13 @@ describe('the sidebar', () => {
    * wants the namespace "somewhere obvious".
    */
   it('does not print the namespace beside the brand', () => {
-    wrap(<Sidebar canAdmin={false} namespace="payments" account={account} />);
+    wrap(<Sidebar canAdmin={false} />);
 
     expect(screen.queryByText('payments')).not.toBeInTheDocument();
   });
 
   it('groups the destinations under their headings', () => {
-    wrap(<Sidebar canAdmin account={account} namespace="default" />);
+    wrap(<Sidebar canAdmin />);
 
     for (const label of ['Observe', 'Automate', 'Fleet', 'Govern']) {
       expect(screen.getByText(label)).toBeInTheDocument();
@@ -60,7 +69,7 @@ describe('the sidebar', () => {
   });
 
   it('offers every destination as a link', () => {
-    wrap(<Sidebar canAdmin namespace="default" account={account} />);
+    wrap(<Sidebar canAdmin />);
     const nav = screen.getByRole('navigation', { name: 'Primary' });
 
     for (const item of visibleItems(true)) {
@@ -73,7 +82,7 @@ describe('the sidebar', () => {
 
   /** The gateway decides; the rail must not render a link that will 403. */
   it('omits the admin destinations without admin_write', () => {
-    wrap(<Sidebar canAdmin={false} namespace="default" account={account} />);
+    wrap(<Sidebar canAdmin={false} />);
 
     expect(screen.queryByRole('link', { name: 'Users' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Tokens' })).not.toBeInTheDocument();
@@ -88,7 +97,7 @@ describe('the sidebar', () => {
    * than one that lights none: it makes you doubt where you are.
    */
   it('marks exactly the current destination as active', () => {
-    wrap(<Sidebar canAdmin={false} namespace="default" account={account} />, '/runs');
+    wrap(<Sidebar canAdmin={false} />, '/runs');
 
     expect(screen.getByRole('link', { name: 'Runs' }).className).toContain('active');
     expect(screen.getByRole('link', { name: 'Overview' }).className).not.toContain('active');
@@ -96,249 +105,228 @@ describe('the sidebar', () => {
 
   /** Without `end`, "/" would stay lit on every nested route. */
   it('does not leave Overview active on a nested route', () => {
-    wrap(<Sidebar canAdmin={false} namespace="default" account={account} />, '/runs/abc123');
+    wrap(<Sidebar canAdmin={false} />, '/runs/abc123');
 
     expect(screen.getByRole('link', { name: 'Overview' }).className).not.toContain('active');
     expect(screen.getByRole('link', { name: 'Runs' }).className).toContain('active');
   });
 
-  it('renders the account control it is given', () => {
-    wrap(<Sidebar canAdmin={false} namespace="default" account={account} />);
-    expect(screen.getByRole('button', { name: 'Account slot' })).toBeInTheDocument();
+  /**
+   * The account control moved to the bar, and the rail must not grow a second
+   * one. Two account menus on screen at once is not a cosmetic problem: it is
+   * two sign-out buttons, and the tests found exactly that the first time this
+   * shell was wired.
+   */
+  it('renders no account control, which now belongs to the navbar', () => {
+    wrap(<Sidebar canAdmin={false} />);
+    expect(screen.queryByRole('button', { name: 'Account slot' })).not.toBeInTheDocument();
   });
 });
 
 describe('the navbar', () => {
-  it('shows the same brand and account slot, and no namespace chip either', () => {
-    wrap(<NavBar canAdmin={false} namespace="payments" account={account} />);
+  it('carries the brand and the account slot, and no namespace chip', () => {
+    wrap(<NavBar account={account} railExpanded onToggleRail={() => {}} />);
 
     expect(screen.getByText('Nexus')).toBeInTheDocument();
     expect(screen.queryByText('payments')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Account slot' })).toBeInTheDocument();
   });
 
-  /** Flattened: the classification is dropped, the destinations are not. */
-  it('drops the group headings', () => {
-    wrap(<NavBar canAdmin namespace="default" account={account} />);
+  /**
+   * The group headings belong to the rail, which has the vertical room for
+   * them. The bar has no destinations at all now, so it has no classification
+   * to print either.
+   */
+  it('prints no group headings, having no destinations to group', () => {
+    wrap(<NavBar account={account} railExpanded onToggleRail={() => {}} />);
 
     for (const label of ['Observe', 'Automate', 'Fleet', 'Govern']) {
       expect(screen.queryByText(label)).not.toBeInTheDocument();
     }
-  });
-
-  it('honours the same admin gate', () => {
-    wrap(<NavBar canAdmin={false} namespace="default" account={account} />);
-    expect(screen.queryByRole('link', { name: 'Users' })).not.toBeInTheDocument();
-  });
-
-  it('marks the current destination as active', () => {
-    wrap(<NavBar canAdmin={false} namespace="default" account={account} />, '/workers');
-    expect(screen.getByRole('link', { name: 'Workers' }).className).toContain('active');
   });
 });
 
 /**
- * The top-bar controls the bar gained alongside its links.
+ * The bar's tool cluster.
  *
- * The links stayed on purpose — hiding every destination behind the hamburger
- * the way the reference design does would make each navigation two clicks — so
- * these tests are all about the ADDITIONS being honest: the hamburger reports
- * its own state, the drawer supplies the headings the row cannot, the search
- * control opens the one real search rather than being a second one, and every
- * icon-only button has a name. The negative assertions matter as much: a
- * control that renders with nothing behind it is worse in the chrome than
- * anywhere else, because it is on screen on every page.
+ * Every assertion here is about HONESTY rather than appearance, because the
+ * chrome is on screen on every page and gets clicked during an incident: the
+ * hamburger reports the rail's real state, the search control opens the one
+ * real search instead of being a second one, the bell distinguishes "nothing
+ * needs attention" from "I do not know yet", and each icon-only button has an
+ * accessible name. The negative assertions carry the most weight — a control
+ * rendered with nothing behind it teaches an operator that the chrome lies.
  */
-describe('the navbar top-bar controls', () => {
-  it('reports the drawer state on the hamburger', () => {
-    wrap(<NavBar canAdmin account={account} />);
+describe('the navbar tool cluster', () => {
+  it('reports the rail state on the hamburger, and names what the click will do', () => {
+    const onToggleRail = vi.fn();
+    const { unmount } = wrap(
+      <NavBar account={account} railExpanded onToggleRail={onToggleRail} />,
+    );
 
-    const burger = screen.getByRole('button', { name: 'All destinations' });
-    expect(burger).toHaveAttribute('aria-expanded', 'false');
+    const collapse = screen.getByRole('button', { name: /collapse the sidebar/i });
+    expect(collapse).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(collapse);
+    expect(onToggleRail).toHaveBeenCalledTimes(1);
+    unmount();
 
-    fireEvent.click(burger);
-
-    expect(burger).toHaveAttribute('aria-expanded', 'true');
+    // Collapsed: the same control, reporting the opposite state and offering
+    // the opposite action. aria-expanded must track the rail, not the button.
+    wrap(<NavBar account={account} railExpanded={false} onToggleRail={() => {}} />);
+    const expand = screen.getByRole('button', { name: /(expand|show).*(sidebar|destinations)/i });
+    expect(expand).toHaveAttribute('aria-expanded', 'false');
   });
 
-  /**
-   * The drawer's whole added value over the flat row. The row drops Observe /
-   * Automate / Fleet / Govern because twelve items on one line will not fit;
-   * this is where the navbar operator gets the classification back.
-   */
-  it('opens a drawer carrying the group headings the row drops', () => {
-    wrap(<NavBar canAdmin account={account} />);
-
-    for (const label of ['Observe', 'Automate', 'Fleet', 'Govern']) {
-      expect(screen.queryByText(label)).not.toBeInTheDocument();
-    }
-
-    fireEvent.click(screen.getByRole('button', { name: 'All destinations' }));
-
-    const drawer = screen.getByRole('dialog', { name: 'All destinations' });
-    for (const label of ['Observe', 'Automate', 'Fleet', 'Govern']) {
-      expect(within(drawer).getByText(label)).toBeInTheDocument();
-    }
-  });
-
-  it('closes the drawer on Escape and hands focus back to the hamburger', () => {
-    wrap(<NavBar canAdmin account={account} />);
-
-    const burger = screen.getByRole('button', { name: 'All destinations' });
-    fireEvent.click(burger);
-    fireEvent.keyDown(document, { key: 'Escape' });
-
-    expect(screen.queryByRole('dialog')).toBeNull();
-    expect(burger).toHaveAttribute('aria-expanded', 'false');
-    expect(document.activeElement).toBe(burger);
-  });
-
-  it('closes the drawer when the scrim is clicked', () => {
-    wrap(<NavBar canAdmin account={account} />);
-
-    fireEvent.click(screen.getByRole('button', { name: 'All destinations' }));
-    fireEvent.mouseDown(document.querySelector('.navdrawer-scrim') as HTMLElement);
-
-    expect(screen.queryByRole('dialog')).toBeNull();
-  });
-
-  /** A drawer still covering the page it just opened is the bug. */
-  it('closes the drawer when one of its destinations is activated', () => {
-    wrap(<NavBar canAdmin account={account} />);
-
-    fireEvent.click(screen.getByRole('button', { name: 'All destinations' }));
-    const drawer = screen.getByRole('dialog', { name: 'All destinations' });
-    fireEvent.click(within(drawer).getByRole('link', { name: 'Schedules' }));
-
-    expect(screen.queryByRole('dialog')).toBeNull();
-  });
-
-  /** The gate is the item's, not the layout's, in the drawer as in the row. */
-  it('gates the drawer on admin_write too', () => {
-    wrap(<NavBar canAdmin={false} account={account} />);
-
-    fireEvent.click(screen.getByRole('button', { name: 'All destinations' }));
-    const drawer = screen.getByRole('dialog', { name: 'All destinations' });
-
-    expect(within(drawer).queryByText('Govern')).toBeNull();
-    expect(within(drawer).queryByRole('link', { name: 'Users' })).toBeNull();
-  });
-
-  // ── the search control ──────────────────────────────────────────────────
-
-  /**
-   * It ASKS for the palette and does nothing else. The one real search talks to
-   * the catalog endpoint and can tell "no matches" from "I could not ask"; a
-   * second input in the bar would either reimplement that badly or swallow
-   * keystrokes.
-   */
-  it('opens the command palette rather than searching on its own', () => {
+  it('asks for the palette rather than implementing a second search', () => {
     const onOpenSearch = vi.fn();
-    wrap(<NavBar canAdmin account={account} onOpenSearch={onOpenSearch} />);
+    wrap(<NavBar account={account} railExpanded onToggleRail={() => {}} onOpenSearch={onOpenSearch} />);
 
-    const search = screen.getByRole('button', {
-      name: 'Search runs, workflows and commands',
-    });
-    // Not a text field: there is nothing here to type into.
-    expect(screen.queryByRole('searchbox')).toBeNull();
-    expect(screen.queryByRole('combobox')).toBeNull();
-
-    fireEvent.click(search);
-
+    fireEvent.click(screen.getByRole('button', { name: /search/i }));
     expect(onOpenSearch).toHaveBeenCalledTimes(1);
   });
 
-  /** Discoverable from the control it replaces, not from documentation. */
-  it('advertises the keyboard route inside the control', () => {
-    wrap(<NavBar canAdmin account={account} onOpenSearch={() => {}} />);
-
-    expect(
-      screen.getByRole('button', { name: 'Search runs, workflows and commands' }),
-    ).toHaveAttribute('title', expect.stringMatching(/\+K\)$/));
-  });
-
-  /** A search field that opens nothing is the dead control this bar refuses. */
   it('omits the search control when there is no palette to open', () => {
-    wrap(<NavBar canAdmin account={account} />);
-
-    expect(screen.queryByRole('button', { name: /^Search/ })).toBeNull();
+    wrap(<NavBar account={account} railExpanded onToggleRail={() => {}} />);
+    expect(screen.queryByRole('button', { name: /search/i })).not.toBeInTheDocument();
   });
 
-  // ── the tool cluster ────────────────────────────────────────────────────
-
-  it('names its icon-only buttons and gives each a tooltip', () => {
-    wrap(<NavBar canAdmin account={account} onOpenSettings={() => {}} />);
-
-    for (const name of ['All destinations', 'Settings']) {
-      const button = screen.getByRole('button', { name });
-      expect(button).toHaveAttribute('title');
-      expect(button.getAttribute('title')).not.toBe('');
-    }
-  });
-
-  it('routes the gear to the settings page', () => {
+  it('routes the gear to settings, and omits it when there is nowhere to go', () => {
     const onOpenSettings = vi.fn();
-    wrap(<NavBar canAdmin account={account} onOpenSettings={onOpenSettings} />);
-
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-
+    const { unmount } = wrap(
+      <NavBar account={account} railExpanded onToggleRail={() => {}} onOpenSettings={onOpenSettings} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /settings/i }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
-  });
+    unmount();
 
-  it('omits the gear when it has nowhere to go', () => {
-    wrap(<NavBar canAdmin account={account} />);
-
-    expect(screen.queryByRole('button', { name: 'Settings' })).toBeNull();
+    wrap(<NavBar account={account} railExpanded onToggleRail={() => {}} />);
+    expect(screen.queryByRole('button', { name: /settings/i })).not.toBeInTheDocument();
   });
 
   /**
-   * The reference bar carries an assistant, a cloud shell, a notification bell
-   * and a feedback button. This console has nothing behind any of them, so they
-   * are absent rather than inert — and this is the test that stops the next
-   * person adding them back for visual fidelity. A dead control in the chrome
-   * is on screen on every page and teaches the operator not to trust the bar.
+   * Zero and unknown are different claims and the bell must not conflate them.
+   *
+   * A badge reading 0 because the request failed, or has not returned, is the
+   * bell asserting everything is fine at the moment it does not know — which is
+   * the one thing this console must never do.
+   */
+  it('badges a real count, and shows no number when the count is zero or unknown', () => {
+    const onOpenAttention = vi.fn();
+    const { unmount } = wrap(
+      <NavBar
+        account={account}
+        railExpanded
+        onToggleRail={() => {}}
+        attentionCount={3}
+        onOpenAttention={onOpenAttention}
+      />,
+    );
+    const bell = screen.getByRole('button', { name: /needs attention: 3 items/i });
+    expect(document.querySelector('.navbar-badge')!.textContent).toBe('3');
+    fireEvent.click(bell);
+    expect(onOpenAttention).toHaveBeenCalledTimes(1);
+    unmount();
+
+    // Zero: no VISUAL badge. The accessible name still states "0 items",
+    // which is correct and not the same claim — a screen-reader user needs the
+    // figure spoken, while a badge reading 0 is just visual noise.
+    const zero = wrap(
+      <NavBar
+        account={account}
+        railExpanded
+        onToggleRail={() => {}}
+        attentionCount={0}
+        onOpenAttention={() => {}}
+      />,
+    );
+    expect(document.querySelector('.navbar-badge')).toBeNull();
+    expect(screen.getByRole('button', { name: /needs attention: 0 items/i })).toBeInTheDocument();
+    zero.unmount();
+
+    // Unknown: no badge either, and the name must NOT state a count it does
+    // not have — "Needs attention: 0 items" here would be a fabrication.
+    wrap(<NavBar account={account} railExpanded onToggleRail={() => {}} onOpenAttention={() => {}} />);
+    expect(document.querySelector('.navbar-badge')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Needs attention' })).toBeInTheDocument();
+  });
+
+  it('omits the bell when there is nowhere to send the operator', () => {
+    wrap(<NavBar account={account} railExpanded onToggleRail={() => {}} attentionCount={5} />);
+    expect(screen.queryByRole('button', { name: /attention/i })).not.toBeInTheDocument();
+  });
+
+  /**
+   * The controls the reference design has and this console does not.
+   *
+   * Pinned as an absence so the next person matching a screenshot has to argue
+   * with a test rather than with a stylesheet.
    */
   it('invents no controls there is nothing behind', () => {
     wrap(
-      <NavBar canAdmin account={account} onOpenSearch={() => {}} onOpenSettings={() => {}} />,
+      <NavBar
+        account={account}
+        railExpanded
+        onToggleRail={() => {}}
+        onOpenSearch={() => {}}
+        onOpenSettings={() => {}}
+      />,
     );
 
-    for (const name of [/copilot/i, /assistant/i, /shell/i, /notification/i, /feedback/i, /help/i]) {
-      expect(screen.queryByRole('button', { name })).toBeNull();
+    for (const name of [/copilot/i, /shell/i, /feedback/i, /help/i]) {
+      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
     }
   });
 
-  /** The account control keeps its place at the end of the cluster. */
-  it('keeps the account control alongside the new buttons', () => {
-    wrap(<NavBar canAdmin account={account} onOpenSearch={() => {}} onOpenSettings={() => {}} />);
+  it('gives every icon-only button an accessible name and a tooltip', () => {
+    wrap(
+      <NavBar
+        account={account}
+        railExpanded
+        onToggleRail={() => {}}
+        onOpenSearch={() => {}}
+        onOpenSettings={() => {}}
+        onOpenAttention={() => {}}
+      />,
+    );
 
     const tools = document.querySelector('.navbar-tools') as HTMLElement;
-    expect(within(tools).getByRole('button', { name: 'Account slot' })).toBeInTheDocument();
+    const buttons = within(tools).getAllByRole('button');
+    expect(buttons.length).toBeGreaterThan(0);
+    for (const b of buttons) {
+      // The account slot is a stub supplied by this test; it has its own name.
+      expect(b).toHaveAccessibleName();
+      if (b.textContent === 'Account slot') continue;
+      expect(b).toHaveAttribute('title');
+    }
   });
 });
 
-/**
- * The reason navItems.ts exists. A destination added to one layout and
- * forgotten in the other is the specific way a two-chrome console rots, and it
- * rots invisibly — each layout looks finished on its own.
- */
-describe('the two layouts stay in step', () => {
-  it('offers identical destinations, in identical order, in both', () => {
+
+describe('the rail renders the whole destination list', () => {
+  it('offers every visible destination, in declaration order, at both gates', () => {
     for (const canAdmin of [false, true]) {
-      const side = wrap(<Sidebar canAdmin={canAdmin} namespace="n" account={account} />);
-      const sideLinks = within(screen.getByRole('navigation', { name: 'Primary' }))
+      const view = wrap(<Sidebar canAdmin={canAdmin} />);
+      const links = within(screen.getByRole('navigation', { name: 'Primary' }))
         .getAllByRole('link')
-        .map((a) => [a.textContent, a.getAttribute('href')]);
-      side.unmount();
+        .map((a) => a.getAttribute('href'));
+      view.unmount();
 
-      const top = wrap(<NavBar canAdmin={canAdmin} namespace="n" account={account} />);
-      const topLinks = within(screen.getByRole('navigation', { name: 'Primary' }))
-        .getAllByRole('link')
-        .map((a) => [a.textContent, a.getAttribute('href')]);
-      top.unmount();
+      expect(links).toEqual(visibleItems(canAdmin).map((i) => i.to));
+    }
+  });
 
-      expect(topLinks).toEqual(sideLinks);
-      expect(sideLinks).toHaveLength(visibleItems(canAdmin).length);
+  /**
+   * The navbar must carry NO destinations.
+   *
+   * Pinned as an absence because the links living in the bar was the previous
+   * design, and re-adding them would recreate the two-controls-for-one-job
+   * problem the rail was given sole ownership to solve.
+   */
+  it('leaves the navbar with no destination links', () => {
+    wrap(<NavBar account={account} railExpanded onToggleRail={() => {}} />);
+
+    for (const item of visibleItems(true)) {
+      expect(screen.queryByRole('link', { name: item.label })).not.toBeInTheDocument();
     }
   });
 });

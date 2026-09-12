@@ -259,6 +259,68 @@ export function summarizeDag(graph: DagGraph): string {
 
 
 /**
+ * Every node reachable from `id` by walking upstream, plus everything reachable
+ * by walking downstream, plus `id` itself.
+ *
+ * This is the set that answers "what does this node depend on, and what depends
+ * on it" — the question the graph view dims the rest of the graph to answer.
+ * TRANSITIVE rather than just the immediate neighbours, which is the whole
+ * point: in a cascade the node that actually broke is usually several hops from
+ * the node an operator clicked, and a one-hop highlight stops exactly short of
+ * showing them the thing they are looking for.
+ *
+ * Lives here rather than in the component because it is pure graph reachability
+ * over the same adjacency lists buildDagGraph already produced, and because a
+ * cycle must not hang the render: the visited set doubles as the cycle guard, so
+ * a graph the gateway should have rejected still draws.
+ *
+ * Returns a Set so the caller's per-node lookup while rendering is O(1); a
+ * linear scan per node would be quadratic over the graph.
+ */
+export function relatedSet(
+  id: string,
+  adjacency: { upstream: Record<string, string[]>; downstream: Record<string, string[]> },
+): Set<string> {
+  const seen = new Set<string>([id]);
+  const walk = (from: string, edges: Record<string, string[]>) => {
+    const stack = [from];
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      for (const next of edges[cur] ?? []) {
+        if (seen.has(next)) continue;
+        seen.add(next);
+        stack.push(next);
+      }
+    }
+  };
+  walk(id, adjacency.upstream);
+  walk(id, adjacency.downstream);
+  return seen;
+}
+
+/**
+ * Adjacency lists lifted back out of a built graph, in the shape relatedSet
+ * wants.
+ *
+ * DagNode already carries its own upstream/downstream arrays, so this is a
+ * reshape rather than a recomputation — which matters, because recomputing
+ * adjacency from `edges` at render time would be a second implementation of
+ * something buildDagGraph already did, free to disagree with it.
+ */
+export function adjacencyOf(nodes: Pick<DagNode, 'node_id' | 'upstream' | 'downstream'>[]): {
+  upstream: Record<string, string[]>;
+  downstream: Record<string, string[]>;
+} {
+  const upstream: Record<string, string[]> = {};
+  const downstream: Record<string, string[]> = {};
+  for (const n of nodes) {
+    upstream[n.node_id] = n.upstream;
+    downstream[n.node_id] = n.downstream;
+  }
+  return { upstream, downstream };
+}
+
+/**
  * Layer assignment shared by the run graph and the spec graph.
  *
  * Extracted from buildDagGraph rather than copied into the catalog: "which

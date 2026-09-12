@@ -1,0 +1,216 @@
+/*
+ * DAG canvas styling: the toolbar, the interactive viewport, and the relatedness
+ * dimming. Imported by DagCanvas.tsx.
+ *
+ * WHY THIS IS THE ONE COMPONENT-SCOPED STYLESHEET IN THE APP.
+ *
+ * Every other rule in this console lives in index.css, and that is correct:
+ * shared tokens in one place is what keeps FAILED and SUCCEEDED from drifting
+ * into looking alike, and a per-component sheet for ordinary UI would only
+ * fragment the cascade for no gain.
+ *
+ * The DAG canvas is a real exception rather than a preference. Its text sits at
+ * FIXED x/y offsets inside a fixed 196x64 SVG node box (see lib/dag NODE_W and
+ * NODE_H), which means those labels CANNOT REFLOW: raise the type scale and the
+ * sub row moves into the state row instead of the text getting bigger. So this
+ * sheet must declare literal font sizes and deliberately NOT reference
+ * --text-*, and a block of token-free declarations sitting in the middle of the
+ * token-based stylesheet reads as an oversight someone will eventually "fix"
+ * back into tokens — breaking the layout in a way that only shows on one
+ * screen. Isolating it makes the exception explicit, local, and commented at
+ * the point of use.
+ *
+ * The exception applies ONLY to sizes inside the SVG coordinate space. Every
+ * length outside the SVG — toolbar padding, gaps, radii — uses the shared
+ * tokens like everything else, and no rule here contains a hex value: colour
+ * that carries meaning comes from --tone-*, and --accent is brand only.
+ */
+
+/* ── Toolbar ───────────────────────────────────────────────────────────────
+   Above the canvas rather than floating over it: an overlay would sit on top
+   of whichever node happened to be in that corner, and on a fitted graph that
+   corner is content. */
+.dag-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+.dag-toolbar-spacer { margin-left: auto; }
+
+/* Counts. Mono so the numbers hold a column when they change on a poll. */
+.dag-stats {
+  display: flex;
+  gap: var(--space-4);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+/* Segmented control: the four zoom actions are one conceptual control, so they
+   share a border rather than reading as four unrelated buttons. */
+.dag-zoom-group,
+.dag-action-group {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.dag-zoom-group > button,
+.dag-action-group > button {
+  border: none;
+  border-radius: 0;
+  background: var(--bg-hover);
+  padding: var(--space-2) var(--space-5);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+.dag-zoom-group > button + button,
+.dag-action-group > button + button {
+  border-left: 1px solid var(--border);
+}
+.dag-zoom-group > button:hover:not(:disabled),
+.dag-action-group > button:hover:not(:disabled) {
+  background: var(--bg-inset);
+  border-color: var(--border);
+}
+.dag-zoom-group > button:disabled,
+.dag-action-group > button:disabled { opacity: 0.4; }
+
+/* The percentage readout. Fixed width so the toolbar does not reflow as the
+   number goes 100% → 87% → 100%; tabular figures for the same reason. */
+.dag-zoom-readout {
+  font-family: var(--mono);
+  min-width: 52px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+}
+
+/* Transient confirmations ("Link copied"). --tone-success, not --accent:
+   it reports an outcome, and outcome is state. */
+.dag-flash {
+  font-size: var(--text-xs);
+  color: var(--tone-success-fg);
+  border: 1px solid var(--tone-success-bd);
+  background: var(--tone-success-bg);
+  border-radius: var(--radius-pill);
+  padding: var(--space-1) var(--space-4);
+  white-space: nowrap;
+}
+
+/* "Part of the graph is outside the view". The honest minimum answer to the
+   overflow bug: an operator is told content exists off-screen instead of
+   inferring it from a node count that does not match what they can see.
+   --tone-warning because it qualifies what is being shown. */
+.dag-clip-hint {
+  font-size: var(--text-xs);
+  color: var(--tone-warning-fg);
+  white-space: nowrap;
+}
+
+/* Clipboard fallback row. Shown only when navigator.clipboard is absent or
+   denied, which is a real case (insecure context, embedded webview). */
+.dag-share-fallback {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--tone-warning-bg);
+  font-size: var(--text-sm);
+}
+.dag-share-fallback input {
+  flex: 1;
+  min-width: 220px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+
+/* ── Viewport ──────────────────────────────────────────────────────────────
+   A faint dotted ground, as before: it gives the orthogonal edges a plane to
+   read against so the graph looks laid out on a canvas rather than floating.
+   Sized in px because it must align with the SVG user-space grid, not with the
+   type scale.
+
+   overflow:hidden, NOT auto. This is the fix: the SVG now sizes to this
+   container and the zoom transform decides what is visible, so a scrollbar
+   would be a second, competing pan mechanism whose position the zoom readout
+   knows nothing about. Height is fixed in vh-with-a-floor so the panel does not
+   grow to 2000px for a deep graph — the graph scales to the box instead. */
+.dag-viewport {
+  position: relative;
+  overflow: hidden;
+  height: clamp(320px, 52vh, 640px);
+  touch-action: none;
+  cursor: grab;
+  background:
+    radial-gradient(var(--border) 1px, transparent 1px) 0 0 / 22px 22px,
+    var(--bg-inset);
+}
+/* Honest cursor: grab means "you can drag this", grabbing means "you are". */
+.dag-viewport.dragging { cursor: grabbing; }
+.dag-viewport svg { display: block; }
+
+/* The zoom transform is applied without transition during a gesture — a
+   transition on a drag would lag the content behind the cursor — but button
+   zoom gets a short one so the jump between two scales reads as a zoom rather
+   than as a redraw. */
+.dag-zoom { transition: transform 120ms ease-out; }
+.dag-viewport.dragging .dag-zoom { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .dag-zoom { transition: none; }
+}
+
+/* ── Relatedness dimming ──────────────────────────────────────────────────
+   Answering "what does this node depend on, and what depends on it" by dimming
+   everything that is neither. Deliberately the SAME vocabulary as the spec
+   graph's neighbour treatment (.spec-node-g.dimmed in index.css) rather than a
+   second invention: the question is identical in the catalog and in a run, so a
+   second visual language for it would mean an operator learning the answer
+   twice.
+
+   Opacity, not colour. The four state channels are the node's own; a dimming
+   treatment that changed a fill or a stroke would consume one of them and a
+   FAILED node outside the selected ancestry could stop reading as failed.
+   Opacity attenuates all four together and takes none of them. */
+.dag-node-g.unrelated,
+.dag-edge.unrelated { opacity: 0.22; }
+.dag-node-g.unrelated { pointer-events: none; }
+/* The ancestry itself is not brightened — it is already at full strength — but
+   its edges are pulled forward so the path through the graph is traceable. */
+.dag-edge.related { opacity: 1; stroke-width: 2px; }
+
+/* ── Legend ───────────────────────────────────────────────────────────────
+   Collapsed by default. It is a reference table read once, and it was taking
+   two permanent rows under every graph from the graph itself. */
+.dag-legend {
+  border-top: 1px solid var(--border);
+  font-size: var(--text-xs);
+}
+.dag-legend > summary {
+  padding: var(--space-4) var(--space-5);
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  list-style-position: inside;
+}
+.dag-legend > summary:hover { color: var(--fg); }
+.dag-legend[open] > summary { border-bottom: 1px solid var(--border); }
+/* The legend body reuses .legend/.legend-item from index.css, so an open
+   legend looks exactly like the old always-open one. Only the top border is
+   dropped: the <details> already owns it. */
+.dag-legend .legend { border-top: none; }
+
+/* ── Single-node and tiny graphs ──────────────────────────────────────────
+   A one-node graph drawn on a 640px canvas reads as a rendering failure. The
+   canvas keeps its ground and its toolbar — so the controls do not appear and
+   disappear between runs — and shrinks, which makes the small graph look
+   deliberate rather than lost. */
+.dag-viewport.sparse { height: clamp(200px, 26vh, 300px); }

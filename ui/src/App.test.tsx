@@ -95,14 +95,35 @@ describe('the application shell', () => {
     expect(screen.getByText('Observe')).toBeInTheDocument();
   });
 
-  it('renders the navbar when that layout is stored', () => {
-    window.localStorage.setItem('nexus.nav', 'navbar');
+  /**
+   * Both chromes, always. There is no stored layout to honour any more.
+   *
+   * The old test here set `nexus.nav` and asserted the navbar replaced the rail.
+   * That preference is gone: the bar and the rail are not alternatives, so the
+   * shell renders the bar's identity-and-tools row AND the rail's grouped
+   * destinations at the same time.
+   */
+  it('renders the bar and the rail together, with the groups on the rail', () => {
     renderApp();
 
     expect(screen.getByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
-    // Flattened: same destinations, no headings.
-    expect(screen.queryByText('Observe')).not.toBeInTheDocument();
+    expect(screen.getByText('Observe')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Runs' })).toBeInTheDocument();
+    // The bar's own contribution: the brand, which the rail no longer prints.
+    expect(screen.getByText('Nexus')).toBeInTheDocument();
+  });
+
+  /**
+   * Exactly one account menu.
+   *
+   * Worth its own assertion because the first wiring of this shell passed
+   * `account` to both the bar and the rail, putting two account menus — and so
+   * two sign-out buttons — on screen at once.
+   */
+  it('renders exactly one account control', () => {
+    renderApp();
+
+    expect(screen.getAllByRole('button', { name: /account menu/i })).toHaveLength(1);
   });
 
   /**
@@ -200,16 +221,40 @@ describe('the application shell', () => {
    * menu closed, and now re-reads it on navigation — the appearance controls
    * live on /settings, so leaving that page is the moment the change lands.
    */
-  it('switches the chrome when the layout is changed on the settings page', async () => {
-    renderApp('/settings');
+  /**
+   * The hamburger collapses the rail, and the choice is remembered.
+   *
+   * This is what replaced the layout setting: not a preference you navigate to
+   * configure, but a direct control in the bar, because collapsing the rail is
+   * something an operator does while working rather than a decision they make
+   * once. Collapsing must never REMOVE a destination — that is the property that
+   * makes it safe to offer — so the links are asserted present in both states.
+   */
+  it('collapses and expands the rail from the bar, and remembers which', async () => {
+    const first = renderApp();
 
-    expect(await screen.findByText('Observe')).toBeInTheDocument();
+    // Asserted on the rail's own class rather than on the headings being
+    // absent: the headings stay in the DOM when collapsed and are hidden by CSS,
+    // deliberately, so that collapsing does not add and remove nodes around the
+    // links and cost focus mid-navigation. jsdom applies no CSS, so the text is
+    // still findable here and testing for it would assert the wrong mechanism.
+    expect(document.querySelector('.sidebar')!.className).not.toContain('collapsed');
+    expect(screen.getByRole('link', { name: 'Runs' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Navbar' }));
-    // Navigating away is what tells App to re-read what was stamped on <html>.
-    fireEvent.click(screen.getByRole('link', { name: 'Runs' }));
+    fireEvent.click(screen.getByRole('button', { name: /collapse the sidebar/i }));
 
-    await waitFor(() => expect(screen.queryByText('Observe')).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(document.querySelector('.sidebar')!.className).toContain('collapsed'),
+    );
+    // Collapsing must never take a destination away. That is the property that
+    // makes it safe to offer as a display preference at all.
+    expect(screen.getByRole('link', { name: 'Runs' })).toBeInTheDocument();
+    expect(window.localStorage.getItem('nexus.railCollapsed')).toBe('true');
+    first.unmount();
+
+    // Remembered across a remount, which is the point of persisting it.
+    renderApp();
+    expect(document.querySelector('.sidebar')!.className).toContain('collapsed');
     expect(screen.getByRole('link', { name: 'Runs' })).toBeInTheDocument();
   });
 

@@ -196,7 +196,15 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
           </div>
         ) : null}
         {graph ? (
-          <DagView graph={graph} selectedNodeId={selectedNodeId} onSelect={selectNode} />
+          <DagView
+            graph={graph}
+            selectedNodeId={selectedNodeId}
+            onSelect={selectNode}
+            // Names the exported file and keys the graph's one-shot
+            // fit-to-view, so this page's polling cannot re-fit the view under
+            // an operator who has zoomed in on a node.
+            exportName={runId}
+          />
         ) : null}
       </div>
 

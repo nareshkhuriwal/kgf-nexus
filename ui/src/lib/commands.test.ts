@@ -68,16 +68,28 @@ describe('the command registry', () => {
     expect(root.getAttribute('data-accent')).toBe('plum');
   });
 
-  it('applies a theme and a nav layout through the shared setters', () => {
+  it('applies a theme through the shared setter', () => {
     const root = document.documentElement;
     COMMANDS.find((c) => c.id === 'theme.light')!.run(ctx());
     expect(root.getAttribute('data-theme')).toBe('light');
-    COMMANDS.find((c) => c.id === 'nav.navbar')!.run(ctx());
-    expect(root.getAttribute('data-nav')).toBe('navbar');
     // 'system' is the ABSENCE of a preference, so it must clear the attribute
     // rather than stamp a value the stylesheet does not know.
     COMMANDS.find((c) => c.id === 'theme.system')!.run(ctx());
     expect(root.hasAttribute('data-theme')).toBe(false);
+  });
+
+  /**
+   * The palette used to carry "Navigation: Sidebar" / "Navigation: Top bar".
+   *
+   * They are gone with the layout preference itself: the bar and the rail render
+   * together now, so both commands would have run a setter that changed nothing.
+   * Pinned as an absence rather than just deleted, because the palette is
+   * exactly where a removed preference tends to survive — nobody looks at the
+   * registry when they delete a settings control.
+   */
+  it('offers no navigation-layout command, since the shell has one layout', () => {
+    expect(COMMANDS.filter((c) => c.id.startsWith('nav.'))).toEqual([]);
+    expect(COMMANDS.map((c) => c.title).filter((t) => t.startsWith('Navigation:'))).toEqual([]);
   });
 });
 

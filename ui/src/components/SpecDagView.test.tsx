@@ -9,7 +9,7 @@
  * not carry any treatment an operator could read as live run information.
  */
 
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { SpecDagView } from './SpecDagView';
 import { buildSpecGraph } from '../lib/specgraph';
@@ -32,7 +32,15 @@ describe('the spec dependency graph', () => {
     render(<SpecDagView graph={buildSpecGraph(chain)} onSelect={() => {}} />);
 
     expect(screen.getByRole('img', { name: /3 tasks/i })).toBeInTheDocument();
-    expect(screen.getAllByRole('button')).toHaveLength(3);
+    // Scoped to the graph itself. The viewport now carries a toolbar of its own
+    // (zoom, fit, export, share), so an unscoped button count would conflate
+    // "one box per task" -- the thing this test is about -- with however many
+    // controls the toolbar happens to have, and would break every time one was
+    // added.
+    // querySelector types this as SVGSVGElement; within() wants HTMLElement.
+    // The cast is safe and the non-null assertion above it is the real check.
+    const canvas = document.querySelector('svg') as unknown as HTMLElement;
+    expect(within(canvas).getAllByRole('button')).toHaveLength(3);
   });
 
   it('names entry and exit points in the accessible label', () => {

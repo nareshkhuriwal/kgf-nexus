@@ -12,20 +12,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ACCENTS,
   applyAccent,
-  applyNavLayout,
   applyStoredAppearance,
   getAccent,
-  getNavLayout,
+  getRailCollapsed,
   isAccentName,
-  isNavLayout,
   setAccent,
-  setNavLayout,
+  setRailCollapsed,
 } from './appearance';
 
 beforeEach(() => {
   window.localStorage.clear();
   document.documentElement.removeAttribute('data-accent');
-  document.documentElement.removeAttribute('data-nav');
+  window.localStorage.removeItem('nexus.railCollapsed');
   document.documentElement.style.removeProperty('--accent');
   document.documentElement.style.removeProperty('--focus');
   document.documentElement.style.removeProperty('--accent-on');
@@ -41,14 +39,14 @@ describe('defaults', () => {
   // must render those rather than undefined.
   it('falls back to indigo and the sidebar when nothing is stored', () => {
     expect(getAccent()).toBe('indigo');
-    expect(getNavLayout()).toBe('sidebar');
+    expect(getRailCollapsed()).toBe(false);
   });
 
   it('ignores a stored value it does not recognise', () => {
     window.localStorage.setItem('nexus.accent', 'chartreuse');
     window.localStorage.setItem('nexus.nav', 'carousel');
     expect(getAccent()).toBe('indigo');
-    expect(getNavLayout()).toBe('sidebar');
+    expect(getRailCollapsed()).toBe(false);
   });
 });
 
@@ -88,17 +86,32 @@ describe('applying an accent', () => {
   });
 });
 
-describe('nav layout', () => {
-  it('stamps the root so the stylesheet can key on it', () => {
-    applyNavLayout('navbar');
-    expect(document.documentElement.getAttribute('data-nav')).toBe('navbar');
+describe('the collapsed rail preference', () => {
+  /**
+   * Stored, unlike the layout choice it replaced, but NOT stamped on <html>.
+   *
+   * The rail's collapsed state is read by React and rendered as a class on the
+   * shell, because the rail is a component that has to change what it renders --
+   * labels under icons rather than beside them -- not merely how it is painted.
+   * A data attribute would be a second copy of that fact for CSS to key on, and
+   * the two would eventually disagree.
+   */
+  it('defaults to expanded, which is the shape an operator has not chosen', () => {
+    expect(getRailCollapsed()).toBe(false);
   });
 
-  it('round-trips both layouts', () => {
-    expect(setNavLayout('navbar')).toBe(true);
-    expect(getNavLayout()).toBe('navbar');
-    expect(setNavLayout('sidebar')).toBe(true);
-    expect(getNavLayout()).toBe('sidebar');
+  it('round-trips both states', () => {
+    expect(setRailCollapsed(true)).toBe(true);
+    expect(getRailCollapsed()).toBe(true);
+    expect(setRailCollapsed(false)).toBe(true);
+    expect(getRailCollapsed()).toBe(false);
+  });
+
+  // Anything other than the exact stored 'true' is expanded, so a corrupted or
+  // half-written value fails toward the shape that shows every destination.
+  it('treats an unrecognised stored value as expanded', () => {
+    window.localStorage.setItem('nexus.railCollapsed', 'yes');
+    expect(getRailCollapsed()).toBe(false);
   });
 });
 
@@ -114,7 +127,7 @@ describe('storage that is unavailable', () => {
       throw new Error('SecurityError');
     });
     expect(getAccent()).toBe('indigo');
-    expect(getNavLayout()).toBe('sidebar');
+    expect(getRailCollapsed()).toBe(false);
   });
 
   /**
@@ -130,20 +143,19 @@ describe('storage that is unavailable', () => {
     expect(setAccent('plum')).toBe(false);
     expect(document.documentElement.style.getPropertyValue('--accent')).toBe(ACCENTS.plum.fg);
 
-    expect(setNavLayout('navbar')).toBe(false);
-    expect(document.documentElement.getAttribute('data-nav')).toBe('navbar');
+    // The rail preference has nowhere to "apply" to outside React, so the only
+    // contract here is the honest false.
+    expect(setRailCollapsed(true)).toBe(false);
   });
 });
 
 describe('applyStoredAppearance', () => {
-  it('applies both stored preferences together', () => {
+  it('applies the stored accent', () => {
     window.localStorage.setItem('nexus.accent', 'azure');
-    window.localStorage.setItem('nexus.nav', 'navbar');
 
     applyStoredAppearance();
 
     expect(document.documentElement.getAttribute('data-accent')).toBe('azure');
-    expect(document.documentElement.getAttribute('data-nav')).toBe('navbar');
   });
 });
 
@@ -152,8 +164,6 @@ describe('guards', () => {
     expect(isAccentName('indigo')).toBe(true);
     expect(isAccentName('mauve')).toBe(false);
     expect(isAccentName(null)).toBe(false);
-    expect(isNavLayout('sidebar')).toBe(true);
-    expect(isNavLayout('rail')).toBe(false);
   });
 
   // Every accent needs all three values, or a swatch renders a broken palette.

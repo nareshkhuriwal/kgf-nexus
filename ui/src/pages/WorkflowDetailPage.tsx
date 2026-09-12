@@ -221,6 +221,8 @@ function DefinitionPanels({
           graph={graph}
           selectedTaskId={selectedTaskId}
           onSelect={(id) => onSelectTask(id === selectedTaskId ? null : id)}
+          // Identifies the exported file and keys the one-shot fit-to-view.
+          exportName={`${spec.name ?? def.id}-v${def.version}`}
         />
       </div>
 

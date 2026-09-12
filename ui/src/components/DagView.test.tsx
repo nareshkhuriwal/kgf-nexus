@@ -279,9 +279,16 @@ describe('edges read as connections', () => {
     expect(cols.size).toBeGreaterThan(1);
     expect(rows.size).toBeGreaterThan(1);
     // Wider than tall, which is what distinguishes a grid from the old ribbon.
-    expect(Number(svg().getAttribute('width'))).toBeGreaterThan(
-      Number(svg().getAttribute('height')),
-    );
+    //
+    // Read off the viewBox rather than width/height. Those attributes are now
+    // 100%: the SVG sizes to its CONTAINER and the zoom transform decides how
+    // much of the graph is visible, which is the fix for the graph overflowing
+    // its panel with its first and last node off-screen. The viewBox is where
+    // the intrinsic layout extent lives, so it is what a layout assertion has
+    // to look at -- and asserting the rendered width would now be asserting
+    // the bug back into existence.
+    const [, , vbW, vbH] = (svg().getAttribute('viewBox') ?? '').split(/\s+/).map(Number);
+    expect(vbW).toBeGreaterThan(vbH!);
   });
 });
 

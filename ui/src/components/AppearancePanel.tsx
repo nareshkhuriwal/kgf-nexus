@@ -2,19 +2,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * The appearance choices: theme, accent, layout.
+ * The appearance choices: theme and accent.
  *
- * Together because they are one decision made three ways — "how should this
+ * Together because they are one decision made two ways — "how should this
  * console look to me" — and splitting them across surfaces would make the
- * operator hunt. They now live on the SETTINGS PAGE rather than in the account
- * menu: a swatch grid and a pair of layout miniatures are widgets, and a
+ * operator hunt.
+ *
+ * There was a third, LAYOUT, choosing between a sidebar and a navbar. It is
+ * gone because the shell no longer offers that choice: the bar and the rail
+ * render together now, so the control described nothing an operator could
+ * change. A radiogroup whose options both produce the same screen is worse than
+ * an absent one — it invites someone to toggle it and conclude the console is
+ * broken when nothing moves. They now live on the SETTINGS PAGE rather than in the account
+ * menu: a swatch grid is a widget, and a
  * floating dropdown is the worst place to operate one, because a stray click
  * outside it takes the surface away mid-choice. A page cannot be dismissed.
  *
  * What the menu keeps is the theme alone, as `ThemeSection`. Light-versus-dark
  * is the one appearance choice that is made reactively — the sun comes up, the
  * room lights change — so it has to be reachable without a navigation, while
- * accent and layout are decided once and then left alone for months.
+ * the accent is decided once and then left alone for months.
  *
  * NOTHING HERE HAS A SAVE BUTTON. Every control applies on click, because the
  * result is visible on the same screen the moment it is chosen: a preview IS
@@ -28,22 +35,15 @@ import { ThemeToggle } from './ThemeToggle';
 import {
   ACCENTS,
   getAccent,
-  getNavLayout,
   setAccent,
-  setNavLayout,
   type AccentName,
-  type NavLayout,
 } from '../lib/appearance';
 
 const ACCENT_NAMES = Object.keys(ACCENTS) as AccentName[];
 
-const LAYOUTS: { value: NavLayout; label: string; hint: string }[] = [
-  { value: 'sidebar', label: 'Sidebar', hint: 'Grouped rail on the left. More room for destinations.' },
-  { value: 'navbar', label: 'Navbar', hint: 'One top row. More vertical room for the page.' },
-];
 
 /**
- * The accent and layout state, and the honesty flag that goes with them.
+ * The accent state, and the honesty flag that goes with it.
  *
  * A hook rather than duplicated `useState` in two components: the panel and any
  * future partial view of it must agree on what "applied but not persisted"
@@ -58,7 +58,6 @@ const LAYOUTS: { value: NavLayout; label: string; hint: string }[] = [
  */
 function useAppearanceState() {
   const [accent, setAccentState] = useState<AccentName>(() => getAccent());
-  const [layout, setLayoutState] = useState<NavLayout>(() => getNavLayout());
   const [persisted, setPersisted] = useState(true);
 
   function chooseAccent(name: AccentName) {
@@ -67,13 +66,7 @@ function useAppearanceState() {
     setPersisted(ok);
   }
 
-  function chooseLayout(next: NavLayout) {
-    const ok = setNavLayout(next);
-    setLayoutState(next);
-    setPersisted(ok);
-  }
-
-  return { accent, layout, persisted, chooseAccent, chooseLayout };
+  return { accent, persisted, chooseAccent };
 }
 
 /**
@@ -111,7 +104,7 @@ export function ThemeSection() {
 
 /** The full set, for the settings page. */
 export function AppearancePanel() {
-  const { accent, layout, persisted, chooseAccent, chooseLayout } = useAppearanceState();
+  const { accent, persisted, chooseAccent } = useAppearanceState();
 
   return (
     <div className="appearance">
@@ -156,41 +149,6 @@ export function AppearancePanel() {
                     signal for which option is selected, least of all in a
                     control whose whole subject is colour. */}
                 <span className="accent-check" aria-hidden="true">
-                  {active ? '✓' : ''}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      <section className="appearance-group">
-        <h3 className="appearance-label" id="layout-label">
-          Layout
-        </h3>
-        <div className="layout-choices" role="radiogroup" aria-labelledby="layout-label">
-          {LAYOUTS.map((l) => {
-            const active = l.value === layout;
-            return (
-              <button
-                key={l.value}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                className={`layout-option${active ? ' active' : ''}`}
-                onClick={() => chooseLayout(l.value)}
-                title={l.hint}
-              >
-                {/* A miniature of the layout itself. Two rectangles say which
-                    shape you are choosing faster than either word does. */}
-                <span className={`layout-glyph ${l.value}`} aria-hidden="true">
-                  <span className="layout-glyph-chrome" />
-                  <span className="layout-glyph-body" />
-                </span>
-                <span className="layout-name">{l.label}</span>
-                {/* Same rule as the accent grid: the tick, not the tint, is
-                    what says "this one". */}
-                <span className="layout-check" aria-hidden="true">
                   {active ? '✓' : ''}
                 </span>
               </button>

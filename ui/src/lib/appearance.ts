@@ -2,12 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Appearance preferences beyond light/dark: the ACCENT hue and the NAV layout.
+ * Appearance preferences beyond light/dark: the ACCENT hue and whether the
+ * sidebar is collapsed.
  *
  * Separate from theme.ts because they answer different questions and change on
  * different clocks. theme.ts resolves "light or dark", which the OS also has an
  * opinion about; these are purely the operator's taste and have no system
  * equivalent to defer to.
+ *
+ * WHAT LEFT THIS FILE. There used to be a NavLayout — 'sidebar' | 'navbar' —
+ * stamped on <html> as data-nav, with App rendering one chrome or the other and
+ * a radiogroup on /settings to choose. The shell no longer offers that choice
+ * because it no longer has to: the navbar and the sidebar are now both present
+ * at once, the bar carrying identity and tools across the top and the rail
+ * carrying navigation down the left. With one shell the setting described
+ * nothing, and a control that changes nothing is worse than an absent one — it
+ * invites an operator to spend a click discovering that. The type, its storage
+ * key, its getter, its setter, its applier and the stylesheet rules that keyed
+ * on data-nav are all gone rather than left dormant.
+ *
+ * What replaced it is a narrower and honest preference: the rail's COLLAPSED
+ * state. That is not a layout choice between two shells, it is one shell
+ * remembering how wide the operator left its rail.
  *
  * WHY THE ACCENT IS SAFE TO CHANGE AT ALL. index.css already separates the
  * brand hue (--accent, --focus) from the STATE palette (--tone-*), and only
@@ -20,10 +36,9 @@
  */
 
 export type AccentName = 'indigo' | 'plum' | 'steel' | 'azure';
-export type NavLayout = 'sidebar' | 'navbar';
 
 const ACCENT_KEY = 'nexus.accent';
-const NAV_KEY = 'nexus.nav';
+const RAIL_KEY = 'nexus.railCollapsed';
 
 /**
  * The accents, as the values the CSS custom properties take.
@@ -71,10 +86,6 @@ export function isAccentName(v: unknown): v is AccentName {
   return typeof v === 'string' && Object.prototype.hasOwnProperty.call(ACCENTS, v);
 }
 
-export function isNavLayout(v: unknown): v is NavLayout {
-  return v === 'sidebar' || v === 'navbar';
-}
-
 /**
  * The stored accent, defaulting to indigo.
  *
@@ -93,21 +104,50 @@ export function getAccent(): AccentName {
 }
 
 /**
- * The stored nav layout, defaulting to the sidebar.
+ * Whether the sidebar was left collapsed to its icon rail. Defaults to FALSE —
+ * expanded.
  *
- * Sidebar by default because the destination count only grows -- the brief
- * names eight areas -- and a top bar that wraps is worse than a rail that
- * scrolls. The navbar remains available for operators who want the vertical
- * space back.
+ * Expanded by default because the labels are what make the rail readable
+ * without prior knowledge of this console: a new operator, or one on their
+ * first shift with it, should not have to learn eight icons before they can
+ * navigate. The collapse is for the operator who already knows them and wants
+ * the horizontal space back, and that is a preference they express rather than
+ * one imposed on them.
+ *
+ * Stored as the string 'true' and compared exactly, rather than coerced. The
+ * whole set of values that mean collapsed is one string, so anything else —
+ * '1', 'yes', a stale value from a previous encoding, JSON — falls through to
+ * expanded, which is the safe direction: an unreadable preference leaves the
+ * labels on rather than hiding them.
  */
-export function getNavLayout(): NavLayout {
+export function getRailCollapsed(): boolean {
   try {
-    const raw = window.localStorage.getItem(NAV_KEY);
-    if (isNavLayout(raw)) return raw;
+    return window.localStorage.getItem(RAIL_KEY) === 'true';
   } catch {
     /* storage unavailable; fall through to the default */
+    return false;
   }
-  return 'sidebar';
+}
+
+/**
+ * Persist the rail state. Returns whether it survived, like setAccent.
+ *
+ * There is no `apply` half to this pair, which is the difference from the
+ * accent and from the NavLayout this replaced. Those stamped the document —
+ * custom properties, a data attribute — because CSS had to react before React
+ * did. The rail's state is a class on the shell element that React owns and
+ * re-renders anyway, so stamping <html> as well would be a second copy of one
+ * boolean, and the two would disagree the first time one of them was set
+ * without the other.
+ */
+export function setRailCollapsed(collapsed: boolean): boolean {
+  try {
+    window.localStorage.setItem(RAIL_KEY, collapsed ? 'true' : 'false');
+    return true;
+  } catch {
+    /* storage unavailable; the choice still applies for this page */
+    return false;
+  }
 }
 
 /**
@@ -141,29 +181,21 @@ export function setAccent(name: AccentName, root?: HTMLElement): boolean {
   return stored;
 }
 
-/** Apply a nav layout by stamping the root, which the stylesheet keys on. */
-export function applyNavLayout(layout: NavLayout, root?: HTMLElement): void {
-  (root ?? document.documentElement).setAttribute('data-nav', layout);
-}
-
-/** Persist and apply. Returns whether it survived. */
-export function setNavLayout(layout: NavLayout, root?: HTMLElement): boolean {
-  let stored = false;
-  try {
-    window.localStorage.setItem(NAV_KEY, layout);
-    stored = true;
-  } catch {
-    /* storage unavailable; the choice still applies for this page */
-  }
-  applyNavLayout(layout, root);
-  return stored;
-}
-
 /**
- * Apply both stored preferences. Called once at startup, before first paint,
- * so the console does not flash the default accent and then correct itself.
+ * Apply the stored appearance to the document. Called once at startup, before
+ * first paint, so the console does not flash the default accent and then
+ * correct itself.
+ *
+ * The accent is now the only thing it applies, which is why it is still a
+ * function rather than a call to applyAccent at the one call site: this is the
+ * "everything that must be stamped before paint" hook, and the next preference
+ * that needs stamping belongs here rather than in main.tsx.
+ *
+ * The rail's collapsed state is deliberately NOT stamped here. It is React
+ * state read from storage when the shell mounts, and a class on the shell
+ * element rather than an attribute on <html> — so there is nothing to apply
+ * before paint and no second copy to keep in step. See setRailCollapsed.
  */
 export function applyStoredAppearance(root?: HTMLElement): void {
   applyAccent(getAccent(), root);
-  applyNavLayout(getNavLayout(), root);
 }

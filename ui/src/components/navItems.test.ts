@@ -57,12 +57,27 @@ describe('the shared destination list', () => {
     }
   });
 
-  it('gives every destination a distinct path and a label', () => {
+  it('gives every destination a distinct path, a label and an icon', () => {
     const items = NAV_GROUPS.flatMap((g) => g.items);
     expect(new Set(items.map((i) => i.to)).size).toBe(items.length);
     for (const i of items) {
       expect(i.label).not.toBe('');
-      expect(i.glyph).not.toBe('');
+      // An icon COMPONENT, not a text glyph. The collapsed rail shows the icon
+      // as the primary way a destination is recognised, so a missing one is not
+      // a cosmetic gap there — it is an unidentifiable row.
+      expect(typeof i.icon).toBe('function');
     }
+  });
+
+  /**
+   * Distinct icons, not merely present ones.
+   *
+   * The glyphs this replaced were abstract symbols reused loosely, and two
+   * destinations sharing an icon in a collapsed rail is worse than either
+   * having none: it actively asserts they are the same kind of thing.
+   */
+  it('gives no two destinations the same icon', () => {
+    const icons = NAV_GROUPS.flatMap((g) => g.items).map((i) => i.icon);
+    expect(new Set(icons).size).toBe(icons.length);
   });
 });

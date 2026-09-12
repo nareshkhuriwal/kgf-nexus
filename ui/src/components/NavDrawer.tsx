@@ -2,36 +2,48 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * The navbar's slide-out destination panel.
+ * The navigation as an off-canvas panel, for phone-width viewports.
  *
- * WHY IT EXISTS AT ALL, GIVEN THE BAR ALREADY LISTS EVERYTHING. The reference
- * top bar hides all navigation behind a hamburger, and that is the one thing
- * here that is deliberately NOT copied: making every navigation two clicks to
- * buy back horizontal space is a bad trade for a console whose operators live
- * on four of these pages. So the bar keeps its links and this drawer is an
- * ADDITION, and it has to justify itself on something the flat row cannot do.
+ * WHAT THIS FILE USED TO BE, AND WHY IT STILL EXISTS. It was the navbar
+ * layout's slide-out list, justified on one thing the flat link row could not
+ * do: carry the GROUP HEADINGS. That justification is gone — the link row is
+ * gone with it, and the rail renders the headings permanently — so the obvious
+ * move was to delete this file. It was kept instead, REPURPOSED, because the
+ * restructure created a new problem that this panel is the right answer to.
  *
- * It does: the row drops the GROUP HEADINGS. navItems.ts is explicit that the
- * grouping is editorial content rather than decoration — Observe is what
- * happened, Automate is what will happen without anyone asking, Fleet is what
- * it runs on, Govern is who may touch any of it — and the navbar layout throws
- * that classification away because eight labels plus four headings will not fit
- * on one line. The drawer is where the navbar operator gets it back. That is
- * the whole feature; without the headings this file would be a second copy of
- * the row and should not be merged.
+ * THE PROBLEM: at phone width the sidebar cannot be in the layout at all. Even
+ * collapsed it is an 80px column, and 80px out of a 360px viewport is a quarter
+ * of the screen spent on navigation while an operator is trying to read a run's
+ * attempt history. Collapsing further to icons-only was rejected for the reason
+ * Sidebar.tsx gives — a tooltip is not a label, and on touch there is no hover
+ * to produce one, so an icons-only rail on a PHONE is the least readable place
+ * it could possibly appear.
  *
- * WHY IT IS NOT IN THE SIDEBAR LAYOUT. The rail already renders these groups,
- * permanently, with the headings intact. A drawer there would be a second way
- * to reach a list that is already on screen and never scrolled off it — a
- * control whose only effect is to cover the identical control underneath. So
- * the hamburger is rendered by NavBar and nowhere else, and App does not thread
- * it into Sidebar.
+ * THE ANSWER: below the phone breakpoint the rail leaves the flow entirely and
+ * the hamburger opens this panel over the page instead. Navigation becomes two
+ * taps at the width where the page needs all of itself, and stays one click at
+ * every width where there is room for a rail. Nothing is unreachable at any
+ * width, which is the property that matters.
+ *
+ * WHY NOT JUST SLIDE THE SIDEBAR ITSELF OVER THE PAGE. Because a panel covering
+ * the page needs things a rail does not and must not have: a scrim that
+ * swallows clicks, a focus trap, an Escape binding, a close button, and a modal
+ * role that tells a screen-reader user the page behind is unavailable. That is
+ * this file's entire content and it is already written and already tested.
+ * Teaching the rail to be modal at one breakpoint would put all of it behind a
+ * media query — the hardest kind of behaviour to test and the easiest to get
+ * subtly wrong.
  *
  * WHY IT DOES NOT DUPLICATE THE DESTINATION LIST. visibleGroups() is the only
  * source, for the reason navItems.ts gives at length: the first thing to rot in
- * a multi-layout shell is a link added to one renderer and forgotten in the
- * other, and an operator who cannot reach Schedules because of a data-structure
- * decision has been failed by this file, not by a stylesheet.
+ * a multi-surface shell is a link added to one renderer and forgotten in
+ * another, and an operator who cannot reach Schedules because their window is
+ * narrow has been failed by this file, not by a stylesheet.
+ *
+ * It keeps the headings, unlike the collapsed rail that has no width for them:
+ * a full-width panel has room, and the grouping is editorial content — Observe
+ * is what happened, Automate is what will happen without anyone asking, Fleet
+ * is what it runs on, Govern is who may touch any of it.
  *
  * ── the accessibility shape, and why ──────────────────────────────────────
  *
@@ -65,6 +77,7 @@
 import { useEffect, useId, useRef } from 'react';
 import { NavLink } from 'react-router-dom';
 import { Logo } from './Logo';
+import { IconClose } from './icons';
 import { isEndMatch, visibleGroups } from './navItems';
 
 export interface NavDrawerProps {
@@ -83,7 +96,7 @@ export interface NavDrawerProps {
    */
   returnFocusTo?: React.RefObject<HTMLElement | null>;
   /** The gateway's answer on admin_write. Gates the Govern group, exactly as
-      both chrome layouts do; this file forms no authorization opinion. */
+      the rail does; this file forms no authorization opinion. */
   canAdmin: boolean;
 }
 
@@ -194,7 +207,7 @@ export function NavDrawer({ open, onClose, returnFocusTo, canAdmin }: NavDrawerP
             }}
             title="Close navigation"
           >
-            <span aria-hidden="true">✕</span>
+            <IconClose size={16} />
             <span className="sr-only">Close navigation</span>
           </button>
         </div>
@@ -214,24 +227,27 @@ export function NavDrawer({ open, onClose, returnFocusTo, canAdmin }: NavDrawerP
                 {group.label}
               </p>
               <ul className="nav-list">
-                {group.items.map((item) => (
-                  <li key={item.to}>
-                    <NavLink
-                      to={item.to}
-                      end={isEndMatch(item)}
-                      className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
-                      // Closed on activation, and focus is NOT restored: the
-                      // page that was just opened owns focus, and a drawer
-                      // still covering it is the defect this exists to avoid.
-                      onClick={onClose}
-                    >
-                      <span className="nav-glyph" aria-hidden="true">
-                        {item.glyph}
-                      </span>
-                      <span className="nav-label">{item.label}</span>
-                    </NavLink>
-                  </li>
-                ))}
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <li key={item.to}>
+                      <NavLink
+                        to={item.to}
+                        end={isEndMatch(item)}
+                        className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
+                        // Closed on activation, and focus is NOT restored: the
+                        // page that was just opened owns focus, and a drawer
+                        // still covering it is the defect this exists to avoid.
+                        onClick={onClose}
+                      >
+                        <span className="nav-icon" aria-hidden="true">
+                          <Icon />
+                        </span>
+                        <span className="nav-label">{item.label}</span>
+                      </NavLink>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           ))}

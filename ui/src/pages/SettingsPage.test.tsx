@@ -55,12 +55,24 @@ describe('the settings page', () => {
   });
 
   /** The whole point of the page: the widgets that left the dropdown are here. */
-  it('hosts theme, accent and layout', () => {
+  it('hosts theme and accent', () => {
     renderPage();
 
     expect(screen.getByRole('radiogroup', { name: /colour theme/i })).toBeInTheDocument();
     expect(screen.getByRole('radiogroup', { name: 'Accent' })).toBeInTheDocument();
-    expect(screen.getByRole('radiogroup', { name: 'Layout' })).toBeInTheDocument();
+  });
+
+  /**
+   * The layout radiogroup is gone with the preference itself: the bar and the
+   * rail render together now, so it offered two options producing one screen.
+   * What replaced it is not a setting at all but a direct control — the
+   * hamburger in the bar — because collapsing the rail is a thing an operator
+   * does while working, not a preference they go and configure.
+   */
+  it('hosts no layout choice', () => {
+    renderPage();
+
+    expect(screen.queryByRole('radiogroup', { name: 'Layout' })).not.toBeInTheDocument();
   });
 
   it('applies an appearance choice immediately, with no save step', () => {
@@ -69,8 +81,11 @@ describe('the settings page', () => {
     fireEvent.click(screen.getByRole('radio', { name: /plum/i }));
     expect(document.documentElement.getAttribute('data-accent')).toBe('plum');
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Navbar' }));
-    expect(document.documentElement.getAttribute('data-nav')).toBe('navbar');
+    // A second choice, to show the first was not a one-off: still no save step
+    // anywhere on the page.
+    fireEvent.click(screen.getByRole('radio', { name: /steel/i }));
+    expect(document.documentElement.getAttribute('data-accent')).toBe('steel');
+    expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument();
   });
 
   /** The accessibility work must survive the move out of the menu. */

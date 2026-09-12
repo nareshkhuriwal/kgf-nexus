@@ -16,22 +16,35 @@
  * What a task box shows instead is what a definition actually knows: the task
  * ref it dispatches, the queue it lands on, and its resource request — the
  * three things that decide whether it can be scheduled at all.
+ *
+ * What the two views DO share, beyond the layout, is the viewport: a catalog
+ * DAG is laid out by the same layoutLayers and therefore overflowed its panel
+ * for exactly the same reason a run DAG did — rendered at intrinsic size, so a
+ * deep definition had its first and last task off-screen by default. Both now
+ * draw inside DagCanvas, which means one set of zoom controls, one set of
+ * keyboard shortcuts and one fit-to-view rule for both screens rather than two
+ * that drift.
  */
 
 import { useMemo } from 'react';
-import { NODE_H, NODE_W, edgePath, layoutLayers } from '../lib/dag';
+import { NODE_H, NODE_W, edgePath, layoutLayers, relatedSet } from '../lib/dag';
 import type { SpecGraph, SpecGraphNode } from '../lib/specgraph';
 import { fmtResources } from '../lib/format';
 import { Empty } from './Status';
+import { DagCanvas } from './DagCanvas';
 
 export function SpecDagView({
   graph,
   selectedTaskId,
   onSelect,
+  exportName,
 }: {
   graph: SpecGraph;
   selectedTaskId?: string | null;
   onSelect: (taskId: string) => void;
+  /** Names the export file and keys the one-shot fit. Threaded from the page
+   *  rather than read from the router here, for the same reason as DagView's. */
+  exportName?: string;
 }) {
   const { places, width, height, byId } = useMemo(() => layoutLayers(graph.layers), [graph]);
 
@@ -44,12 +57,26 @@ export function SpecDagView({
     );
   }
 
-  // Highlighting the selected task's immediate neighbours is the catalog's
-  // equivalent of the run view's cascade path: the question here is "what does
-  // this depend on and what depends on it", which is unreadable in a wide fan.
+  // Highlighting the selected task's relatives is the catalog's equivalent of
+  // the run view's cascade path: the question here is "what does this depend on
+  // and what depends on it", which is unreadable in a wide fan.
+  //
+  // Now TRANSITIVE rather than one hop, via the same lib/dag relatedSet the run
+  // view uses. One hop answered a narrower question than the one being asked: a
+  // task's real dependency set in a chain of five is the whole chain, and
+  // dimming a grandparent alongside an unrelated task told the reader the two
+  // were equally irrelevant. Sharing the function with the run view is also
+  // what keeps the two diagrams' dimming from meaning two different things.
   const selected = selectedTaskId ? graph.byId[selectedTaskId] : undefined;
-  const related = new Set<string>(
-    selected ? [selected.id, ...selected.upstream, ...selected.downstream] : [],
+  const related = useMemo(
+    () =>
+      selected
+        ? relatedSet(selected.id, {
+            upstream: Object.fromEntries(graph.nodes.map((n) => [n.id, n.upstream])),
+            downstream: Object.fromEntries(graph.nodes.map((n) => [n.id, n.downstream])),
+          })
+        : new Set<string>(),
+    [selected, graph],
   );
 
   return (
@@ -84,15 +111,30 @@ export function SpecDagView({
         </div>
       )}
 
-      <div className="dag-viewport">
-        <svg
-          width={width}
-          height={height}
-          viewBox={`0 0 ${width} ${height}`}
-          role="img"
-          aria-label={`Workflow dependency graph, ${graph.nodes.length} tasks`}
-        >
-          <defs>
+      <DagCanvas
+        width={width}
+        height={height}
+        /* Layer and task counts, not a timestamp: a definition does not change
+           under the reader, so the identity is just its shape. */
+        graphKey={`${exportName ?? 'spec'}:${graph.nodes.length}:${graph.edges.length}`}
+        label={`Workflow dependency graph, ${graph.nodes.length} tasks`}
+        exportName={exportName}
+        stats={
+          <span className="dag-stats">
+            <span>
+              {graph.nodes.length} task{graph.nodes.length === 1 ? '' : 's'}
+            </span>
+            <span>
+              {graph.layers.filter((l) => l.length > 0).length} layer
+              {graph.layers.filter((l) => l.length > 0).length === 1 ? '' : 's'} deep
+            </span>
+            {related.size > 0 && <span>{related.size} on this path</span>}
+          </span>
+        }
+        legend={<SpecLegend />}
+        legendLabel="about this diagram"
+        defs={
+          <>
             <marker
               id="spec-arrow"
               viewBox="0 0 8 8"
@@ -115,48 +157,51 @@ export function SpecDagView({
             >
               <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--tone-active-bd)" />
             </marker>
-          </defs>
+          </>
+        }
+      >
+        {graph.edges.map((e) => {
+          const a = byId[e.from_node_id];
+          const b = byId[e.to_node_id];
+          if (!a || !b) return null;
+          // On the selected task's ancestry, not merely touching it: the edge
+          // treatment has to agree with the box dimming or the reader gets a
+          // full-strength box at the end of a dimmed line.
+          const onPath = related.has(e.from_node_id) && related.has(e.to_node_id);
+          return (
+            <path
+              key={`${e.from_node_id}->${e.to_node_id}`}
+              className={
+                'dag-edge' +
+                (related.size === 0 ? '' : onPath ? ' spec-related related' : ' unrelated')
+              }
+              d={edgePath(a, b)}
+              markerEnd={onPath && related.size > 0 ? 'url(#spec-arrow-related)' : 'url(#spec-arrow)'}
+            >
+              {/* The mapping is the contract between two tasks: which output
+                  of the parent becomes which input of the child. It is the
+                  one thing an edge carries that a line cannot show. */}
+              <title>{describeEdge(e)}</title>
+            </path>
+          );
+        })}
 
-          {graph.edges.map((e) => {
-            const a = byId[e.from_node_id];
-            const b = byId[e.to_node_id];
-            if (!a || !b) return null;
-            const onPath =
-              selected !== undefined &&
-              (e.from_node_id === selected.id || e.to_node_id === selected.id);
-            return (
-              <path
-                key={`${e.from_node_id}->${e.to_node_id}`}
-                className={`dag-edge${onPath ? ' spec-related' : ''}`}
-                d={edgePath(a, b)}
-                markerEnd={onPath ? 'url(#spec-arrow-related)' : 'url(#spec-arrow)'}
-              >
-                {/* The mapping is the contract between two tasks: which output
-                    of the parent becomes which input of the child. It is the
-                    one thing an edge carries that a line cannot show. */}
-                <title>{describeEdge(e)}</title>
-              </path>
-            );
-          })}
-
-          {places.map((p) => {
-            const node = graph.byId[p.id];
-            if (!node) return null;
-            return (
-              <SpecTaskBox
-                key={p.id}
-                node={node}
-                x={p.x}
-                y={p.y}
-                selected={p.id === selectedTaskId}
-                dimmed={related.size > 0 && !related.has(p.id)}
-                onSelect={onSelect}
-              />
-            );
-          })}
-        </svg>
-      </div>
-      <SpecLegend />
+        {places.map((p) => {
+          const node = graph.byId[p.id];
+          if (!node) return null;
+          return (
+            <SpecTaskBox
+              key={p.id}
+              node={node}
+              x={p.x}
+              y={p.y}
+              selected={p.id === selectedTaskId}
+              dimmed={related.size > 0 && !related.has(p.id)}
+              onSelect={onSelect}
+            />
+          );
+        })}
+      </DagCanvas>
     </>
   );
 }

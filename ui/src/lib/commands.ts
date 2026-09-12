@@ -20,7 +20,7 @@
  * the whole registry be unit-tested without rendering anything.
  */
 
-import { ACCENTS, setAccent, setNavLayout, type AccentName, type NavLayout } from './appearance';
+import { ACCENTS, setAccent, type AccentName } from './appearance';
 import { setThemeChoice, themeLabel, type ThemeChoice } from './theme';
 
 /** What a command is handed when it runs. */
@@ -85,17 +85,6 @@ function accentCommand(name: AccentName): Command {
   };
 }
 
-function navCommand(layout: NavLayout): Command {
-  return {
-    id: `nav.${layout}`,
-    title: `Navigation: ${layout === 'sidebar' ? 'Sidebar' : 'Top bar'}`,
-    group: 'Appearance',
-    keywords: ['nav', 'navigation', 'layout', layout, 'rail', 'menu'],
-    hint: layout === 'sidebar' ? 'Vertical rail' : 'Horizontal bar',
-    run: () => setNavLayout(layout),
-  };
-}
-
 /**
  * The registry.
  *
@@ -122,8 +111,6 @@ export const COMMANDS: Command[] = [
   // offered here automatically and the two cannot drift apart.
   ...(Object.keys(ACCENTS) as AccentName[]).map(accentCommand),
 
-  navCommand('sidebar'),
-  navCommand('navbar'),
 
   {
     id: 'account.signout',

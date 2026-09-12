@@ -70,8 +70,16 @@ const FAILURE_WINDOW = 5;
  * affordance is for. Asking for more than we render is what lets the server tell
  * us honestly that there IS more (`truncated`), instead of the page inferring it
  * from a count it would have to trust.
+ *
+ * EXPORTED because the navbar's bell asks for the same count and must ask for
+ * it with the same limit. AttentionList.count describes the items RETURNED, not
+ * a namespace total, so a bell querying a different limit would both display a
+ * different number than this panel and open a second cache entry — doubling the
+ * poll on the most expensive read here. Sharing the constant makes the two the
+ * same query. See BELL_ATTENTION_LIMIT's absence in App.tsx: there is one
+ * declaration, and it is this one.
  */
-const ATTENTION_LIMIT = 12;
+export const ATTENTION_LIMIT = 12;
 
 /**
  * How many of those rows are on screen before the operator asks for more.

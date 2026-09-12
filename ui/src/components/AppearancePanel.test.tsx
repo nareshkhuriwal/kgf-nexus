@@ -35,12 +35,28 @@ afterEach(() => {
 });
 
 describe('the appearance panel', () => {
-  it('offers theme, accent and layout together on the full panel', () => {
+  it('offers theme and accent together on the full panel', () => {
     render(<AppearancePanel />);
 
     expect(screen.getByRole('radiogroup', { name: /colour theme/i })).toBeInTheDocument();
     expect(screen.getByRole('radiogroup', { name: 'Accent' })).toBeInTheDocument();
-    expect(screen.getByRole('radiogroup', { name: 'Layout' })).toBeInTheDocument();
+  });
+
+  /**
+   * Layout is gone, and pinned as gone.
+   *
+   * It chose between a sidebar and a navbar, which the shell no longer treats
+   * as alternatives — both render together — so the radiogroup would have
+   * offered two options producing the same screen. That is worse than no
+   * control: it invites someone to toggle it and conclude the console is
+   * broken when nothing moves.
+   */
+  it('no longer offers a layout choice, since the shell has one layout', () => {
+    render(<AppearancePanel />);
+
+    expect(screen.queryByRole('radiogroup', { name: 'Layout' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: 'Navbar' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: 'Sidebar' })).not.toBeInTheDocument();
   });
 
   it('lists every accent with its label and its honest hint', () => {
@@ -84,30 +100,6 @@ describe('the appearance panel', () => {
     expect(window.localStorage.getItem('nexus.accent')).toBe('steel');
   });
 
-  it('applies and persists the layout on click', () => {
-    render(<AppearancePanel />);
-
-    fireEvent.click(screen.getByRole('radio', { name: 'Navbar' }));
-
-    expect(document.documentElement.getAttribute('data-nav')).toBe('navbar');
-    expect(window.localStorage.getItem('nexus.nav')).toBe('navbar');
-    expect(screen.getByRole('radio', { name: 'Navbar' })).toHaveAttribute('aria-checked', 'true');
-  });
-
-  it('switches back to the sidebar', () => {
-    render(<AppearancePanel />);
-    fireEvent.click(screen.getByRole('radio', { name: 'Navbar' }));
-    fireEvent.click(screen.getByRole('radio', { name: 'Sidebar' }));
-
-    expect(document.documentElement.getAttribute('data-nav')).toBe('sidebar');
-    expect(window.localStorage.getItem('nexus.nav')).toBe('sidebar');
-  });
-
-  /**
-   * The honesty requirement, in the same register as the API-key control: the
-   * choice still applies to this page, and the panel says only that it will not
-   * come back.
-   */
   it('says so when the browser refuses to store the preference', () => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('site data blocked');
@@ -147,27 +139,26 @@ describe('the appearance panel', () => {
   });
 
   /** Colour is never the only signal for which option is in effect. */
-  it('marks the selected accent and layout with a glyph as well as a fill', () => {
+  it('marks the selected accent with a glyph as well as a fill', () => {
     render(<AppearancePanel />);
 
     expect(screen.getByRole('radio', { name: /indigo/i }).textContent).toContain('✓');
     expect(screen.getByRole('radio', { name: /plum/i }).textContent).not.toContain('✓');
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Navbar' }));
-    expect(screen.getByRole('radio', { name: 'Navbar' }).textContent).toContain('✓');
-    expect(screen.getByRole('radio', { name: 'Sidebar' }).textContent).not.toContain('✓');
+    fireEvent.click(screen.getByRole('radio', { name: /plum/i }));
+    expect(screen.getByRole('radio', { name: /plum/i }).textContent).toContain('✓');
+    expect(screen.getByRole('radio', { name: /indigo/i }).textContent).not.toContain('✓');
   });
 });
 
 /**
- * The compact form for the account menu.
+ * The menu-sized view.
  *
- * The split exists so the dropdown stops being a settings screen, which means
- * the interesting assertion is what ThemeSection LACKS. Theme stays because it
- * is the one appearance choice made reactively — the room lights change — while
- * accent and layout are decided once and then left for months.
+ * Light-versus-dark is the one appearance choice made reactively, so it stays
+ * reachable without a navigation; the accent is decided once and left for
+ * months, so it does not.
  */
-describe('the theme-only section', () => {
+describe('the theme section alone', () => {
   it('offers the theme control', () => {
     render(<ThemeSection />);
     expect(screen.getByRole('radiogroup', { name: /colour theme/i })).toBeInTheDocument();
