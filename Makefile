@@ -98,7 +98,7 @@ up: ## Bring up the full stack (postgres, minio, migrations, 6 services, 2 agent
 	$(COMPOSE) up --build -d
 	@echo
 	@echo "UI      http://localhost:$${NEXUS_UI_PORT:-3000}"
-	@echo "API     http://localhost:$${NEXUS_API_PORT:-8080}/v1/namespaces/$(NAMESPACE)/runs"
+	@echo "API     http://localhost:$${NEXUS_API_PORT:-8090}/v1/namespaces/$(NAMESPACE)/runs"
 	@echo "MinIO   http://localhost:$${NEXUS_MINIO_CONSOLE_PORT:-9001}"
 	@echo
 	@echo "Next:   make seed   # create a dev API key"

@@ -1444,3 +1444,60 @@ stack under its own build tag. Criterion 1 has no automated equivalent — it is
 by running it by hand. **Running the examples in CI, not merely submitting them,
 is the single highest-value thing left undone here.**
 
+### F71. Nothing ran the examples, and nothing ran anything — FIXED
+**Severity:** high (process). The repo had NO CI at all: no `.github/workflows`,
+nothing that built, vetted, or tested on a push.
+
+That is how F63-F66 all shipped. Each blocked Phase 1 exit criterion 1, each was
+found by running an example by hand, and none was reachable by the tests that did
+exist:
+
+- **unit tests could not see them** — they construct `ResourceVector` directly,
+  so nothing noticed that no agent could advertise GPU memory (F64) or custom
+  resources (F66);
+- **spec validation could not see them** — F52 proved the examples were
+  ACCEPTED, which read as "the examples work" but is a far weaker claim. At that
+  moment not one example in the repo could reach SUCCEEDED, because none declared
+  a runtime block (F65).
+
+Only running the thing finds those. `.github/workflows/ci.yml` now does, in four
+jobs: `build` (build, vet, `go test -race`), `integration` (against a real
+Postgres service, migrations applied by a job as ADR-0011 rule 4 requires), `ui`,
+and `e2e` — which brings up the compose stack and runs `make chaos`.
+
+`TestEveryCommittedExampleActuallyRuns` is the new part, and it is criterion 1's
+first automated proof. It DISCOVERS `examples/*/compiled.yaml` from disk rather
+than listing them, so an example added later is covered without anyone
+remembering to register it. All five currently run to SUCCEEDED with every node
+executed:
+
+```
+chaos_effect        3/3   dispatch_storm  26/26   hello_dag  3/3
+idempotent_effect   4/4   ten_node_mixed  10/10
+```
+
+**Two things it needed before it proved anything**, both of which are the same
+mistake in different clothes — a test that passes while checking something
+weaker than it claims:
+
+1. *Addressing the run by workflow NAME made it untestable.* Specs are
+   content-addressed and immutable, so submitting an edited example returns the
+   id of whatever version matches its bytes, and `run create <name>` then uses
+   the LATEST registered version instead. Verified by stripping the runtime
+   blocks back out of `hello_dag`: the test still passed, because it ran the good
+   version registered earlier. It would never have caught a regression in an
+   example, which is its whole job. It now pins the run to the spec id the
+   submission returned.
+
+2. *A bare timeout is not a diagnosis.* The first failing version said only
+   "still RUNNING" after five minutes. It now waits a bounded two minutes and
+   prints the attempt states with their `pending_reason` and error — so the same
+   induced defect reports `runtime.command is empty`, which names F65 outright.
+
+Also fixed here: `make up` printed the API as port 8080 while compose publishes
+8090. Small, but it is the first thing the target tells a new developer to use.
+
+**Still worth doing.** `e2e` builds every service image on each run, which is the
+bulk of its wall clock; caching the compose build would pay for itself quickly.
+And the suite currently proves the examples run — it does not assert their
+OUTPUTS are correct, only that every node succeeded.

@@ -256,12 +256,11 @@ func createRun(t *testing.T, workflow string) string {
 		t.Skip("NEXUS_API_KEY is unset; the chaos suite creates runs through the gateway")
 	}
 	body := fmt.Sprintf(`{"spec_name":%q}`, workflow)
-	cmd := exec.Command("curl", "-s", "-X", "POST",
+	out, err := curl(t, "-X", "POST",
 		endpoint+"/v1/namespaces/default/runs",
 		"-H", "Authorization: Bearer "+key,
 		"-H", "Content-Type: application/json",
 		"--data", body)
-	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -270,13 +269,23 @@ func createRun(t *testing.T, workflow string) string {
 		Error   string `json:"error"`
 		Message string `json:"message"`
 	}
-	if err := json.Unmarshal(out, &resp); err != nil {
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		t.Fatalf("decode create-run response %q: %v", out, err)
 	}
 	if resp.ID == "" {
 		t.Fatalf("create run failed: %s %s (%s)", resp.Error, resp.Message, out)
 	}
 	return resp.ID
+}
+
+// curl runs one HTTP request against the gateway. The chaos package shells out
+// rather than using net/http so the request it makes is exactly the one an
+// operator would make from a terminal -- the same path the CLI takes, headers
+// included.
+func curl(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	out, err := exec.Command("curl", append([]string{"-s"}, args...)...).Output()
+	return string(out), err
 }
 
 // waitForRunningAttempt blocks until the node is genuinely executing, and
@@ -367,6 +376,21 @@ func waitForTerminalRun(t *testing.T, runID string) string {
 		"every run must terminate, and a stuck run is itself the bug",
 		runID, runBudget, runState(t, runID))
 	return ""
+}
+
+// waitForTerminalRunWithin is waitForTerminalRun with a caller-chosen budget
+// that reports rather than aborts. Returning the non-terminal state lets the
+// caller print why the run is stuck; Fatalf would end the test first.
+func waitForTerminalRunWithin(t *testing.T, runID string, budget time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		if s := runState(t, runID); isTerminal(s) {
+			return s
+		}
+		time.Sleep(pollEvery)
+	}
+	return runState(t, runID)
 }
 
 func attemptsForNode(t *testing.T, runID, node string) []attempt {
