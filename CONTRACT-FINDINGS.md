@@ -946,7 +946,8 @@ repo could reach SUCCEEDED. `hello_dag` had never completed a run either.
 
 All three now carry a `subprocess` runtime with a one-line `sh -c echo`, chosen
 so the examples demonstrate DAG shape and scheduling constraints without needing
-any toolchain on the host.
+any toolchain on the host. Verified against the default stack: `hello-dag`,
+`idempotent-effect` and `ten-node-mixed` all reach SUCCEEDED.
 
 **Worth noting for the exit criteria:** the gap between "the gateway accepts it"
 and "the fleet runs it" swallowed F60, F63, F64 and this one. An example that is
