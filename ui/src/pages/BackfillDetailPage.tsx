@@ -21,10 +21,12 @@ export function BackfillDetailPage({ namespace }: { namespace: string }) {
   const [actionError, setActionError] = useState<string | null>(null);
 
   const backfill = useBackfill(namespace, backfillId);
-  // The schedule name is not on the backfill payload (it carries schedule_id
-  // only), so the action hook is keyed on an empty name: it still invalidates
-  // this backfill's own query, which is what this page reads.
-  const action = useBackfillAction(namespace, '');
+  // The gateway resolves the owning schedule's name on this route, so the
+  // action hook can be keyed on it and invalidate that schedule's backfill
+  // list too -- not just this backfill's own query. It falls back to an empty
+  // name when the gateway could not resolve it, which still invalidates what
+  // this page reads.
+  const action = useBackfillAction(namespace, backfill.data?.schedule_name ?? '');
 
   if (backfill.error && backfill.data === undefined) {
     return (
@@ -58,9 +60,15 @@ export function BackfillDetailPage({ namespace }: { namespace: string }) {
       <div className="row" style={{ alignItems: 'flex-start' }}>
         <div style={{ minWidth: 0 }}>
           <div className="row" style={{ gap: 'var(--space-4)' }}>
-            <Link to="/schedules" className="sub">
-              ← all schedules
-            </Link>
+            {b.schedule_name ? (
+              <Link to={`/schedules/${encodeURIComponent(b.schedule_name)}`} className="sub">
+                ← {b.schedule_name}
+              </Link>
+            ) : (
+              <Link to="/schedules" className="sub">
+                ← all schedules
+              </Link>
+            )}
             <StateBadge kind="backfill" state={b.state} />
             <h1 style={{ margin: 0 }} className="mono">
               {b.id}
@@ -144,8 +152,18 @@ export function BackfillDetailPage({ namespace }: { namespace: string }) {
         </div>
         <div className="panel-body">
           <dl className="kv">
+            <dt>schedule</dt>
+            <dd>
+              {b.schedule_name ? (
+                <Link to={`/schedules/${encodeURIComponent(b.schedule_name)}`}>
+                  {b.schedule_name}
+                </Link>
+              ) : (
+                <span className="sub">unresolved</span>
+              )}
+            </dd>
             <dt>schedule id</dt>
-            <dd>{b.schedule_id}</dd>
+            <dd className="mono">{b.schedule_id}</dd>
             <dt>interval</dt>
             <dd>
               {fmtTs(b.from)} → {fmtTs(b.to)}

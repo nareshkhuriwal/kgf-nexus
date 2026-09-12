@@ -297,6 +297,12 @@ export interface CronPreview {
 export interface Backfill {
   id: string;
   schedule_id: string;
+  /**
+   * The owning schedule's name, when the gateway could resolve it. Absent
+   * rather than empty when it could not, so "not supplied" is distinguishable
+   * from a schedule genuinely named the empty string.
+   */
+  schedule_name?: string;
   namespace: string;
   from: string;
   to: string;
