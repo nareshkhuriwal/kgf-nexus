@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package nexus.v1;
+
+import "nexus/v1/task.proto";
+
+option go_package = "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1;nexusv1";
+
+// WorkflowSpec is the ONLY thing the control plane understands. The SDK is a
+// compiler that emits this document in the USER'S process; the control plane
+// parses data and never imports, executes, or evals user code (ADR-0004).
+// This is the single largest reliability divergence from Airflow.
+message WorkflowSpec {
+  string api_version = 1;
+  string namespace = 2;
+  string name = 3;
+  string description = 4;
+  repeated TaskSpec tasks = 5;
+  repeated Edge edges = 6;
+  // Workflow-level input declarations, bound at run creation.
+  map<string, ValueSpec> params = 7;
+  // Overall run wall-clock budget.
+  int64 run_timeout_ms = 8;
+  // Stop dispatching new work on first terminal failure.
+  bool fail_fast = 9;
+  // Cap on concurrent RUNS of this workflow.
+  int32 max_active_runs = 10;
+  int32 priority = 11;
+  map<string, string> labels = 12;
+}
+
+message Edge {
+  string from_node_id = 1;
+  string to_node_id = 2;
+  // Maps upstream outputs to downstream inputs: key = downstream input name,
+  // value = upstream output name. Type-checked at submit time.
+  map<string, string> output_to_input = 3;
+}
+
+enum RunState {
+  RUN_STATE_UNSPECIFIED = 0;
+  RUN_STATE_PENDING = 1;
+  RUN_STATE_RUNNING = 2;
+  // No NEW attempts dispatched; in-flight ones run to completion. Pausing does
+  // not kill work -- that is cancel. Conflating them makes pause useless for
+  // its main job: holding a pipeline while you investigate without losing
+  // hours of compute (§5.2).
+  RUN_STATE_PAUSING = 3;
+  RUN_STATE_PAUSED = 4;
+  RUN_STATE_SUCCEEDED = 5;
+  RUN_STATE_FAILED = 6;
+  RUN_STATE_CANCELLING = 7;
+  RUN_STATE_CANCELLED = 8;
+  RUN_STATE_TIMED_OUT = 9;
+}
+
+enum NodeState {
+  NODE_STATE_UNSPECIFIED = 0;
+  NODE_STATE_PENDING = 1;
+  NODE_STATE_READY = 2;
+  NODE_STATE_RUNNING = 3;
+  NODE_STATE_SUCCEEDED = 4;
+  NODE_STATE_FAILED = 5;
+  // Branch not taken, or trigger rule not satisfiable.
+  NODE_STATE_SKIPPED = 6;
+  // Distinct from FAILED: this node never ran because an ancestor failed.
+  // Keeping them separate means "what actually broke" is answerable at a glance.
+  NODE_STATE_UPSTREAM_FAILED = 7;
+  NODE_STATE_CANCELLED = 8;
+}

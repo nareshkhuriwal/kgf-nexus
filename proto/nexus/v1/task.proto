@@ -1,0 +1,150 @@
+syntax = "proto3";
+
+package nexus.v1;
+
+import "nexus/v1/common.proto";
+
+option go_package = "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1;nexusv1";
+
+// TaskSpec is the contract between the workflow author and the platform.
+// (Architecture §4.3.)
+message TaskSpec {
+  // Unique within the workflow. Stable across spec versions where possible,
+  // since it participates in the idempotency key.
+  string id = 1;
+  // Handler identity resolved by the worker, e.g. "ml.train:v3".
+  string task_ref = 2;
+  // Bumping version creates a new cache namespace AND a new logical effect
+  // (it participates in the idempotency key).
+  int32 version = 3;
+
+  // Typed interface. Enables static DAG validation at submit time: an edge
+  // whose types are incompatible is rejected before the run starts, not at
+  // 3am. (Flyte's typed-interface idea.)
+  map<string, ValueSpec> inputs = 4;
+  map<string, ValueSpec> outputs = 5;
+
+  ResourceRequest resources = 6;
+
+  // Routing: worker subscribes to queues. MVP is single-queue ("default") but
+  // the field exists from day one so routing is not a breaking change later.
+  string queue = 7;
+  // Hard constraints on worker labels.
+  map<string, string> node_selector = 8;
+  // Soft data-locality hint: prefer the worker that ran this node.
+  string prefer_same_worker_as = 9;
+
+  Timeouts timeouts = 10;
+  RetryPolicy retry = 11;
+
+  IdempotencyMode idempotency = 12;
+  CachePolicy cache = 13;
+  RuntimeSpec runtime = 14;
+
+  // Named global semaphore. Limits concurrent attempts sharing this key.
+  string concurrency_key = 15;
+  int32 concurrency_limit = 16;
+
+  // Trigger rule: when this node becomes eligible given upstream states.
+  // MVP supports all_success and all_done (architecture §11 Phase 1).
+  TriggerRule trigger_rule = 17;
+
+  int32 priority = 18;
+}
+
+message ValueSpec {
+  // "int" | "float" | "string" | "bool" | "json" | "file_ref"
+  string type = 1;
+  bool required = 2;
+  // JSON-encoded default, applied when the input is absent.
+  string default_json = 3;
+}
+
+// Airflow's trigger-rule taxonomy is well designed and worth adopting directly.
+enum TriggerRule {
+  TRIGGER_RULE_UNSPECIFIED = 0;
+  TRIGGER_RULE_ALL_SUCCESS = 1;
+  TRIGGER_RULE_ALL_DONE = 2;
+  TRIGGER_RULE_ONE_SUCCESS = 3;
+  TRIGGER_RULE_ONE_FAILED = 4;
+  TRIGGER_RULE_NONE_FAILED = 5;
+  TRIGGER_RULE_ALL_SKIPPED = 6;
+}
+
+message CachePolicy {
+  bool enabled = 1;
+  // cache_key = sha256(task_ref ‖ version ‖ canonical_hash(inputs))
+  int64 ttl_ms = 2;
+}
+
+message RuntimeSpec {
+  // "subprocess" | "docker" | "k8s". Worker advertises which it supports;
+  // the scheduler treats it as a placement constraint (ADR-0007).
+  string executor = 1;
+  // Digest-pinned image for reproducibility.
+  string image = 2;
+  repeated string command = 3;
+  repeated string args = 4;
+  map<string, string> env = 5;
+  // References only, e.g. "vault://kv/ml/s3". Resolved by the WORKER at
+  // execution time. Secret VALUES never enter the metadata store, so a
+  // metadata compromise leaks no credentials.
+  repeated SecretRef secrets = 6;
+  string working_dir = 7;
+}
+
+message SecretRef {
+  string name = 1;
+  string ref = 2;
+}
+
+// ── Attempt: the unit of execution ────────────────────────────────────────
+
+enum AttemptState {
+  ATTEMPT_STATE_UNSPECIFIED = 0;
+  ATTEMPT_STATE_PENDING = 1;
+  ATTEMPT_STATE_DISPATCHED = 2;
+  ATTEMPT_STATE_RUNNING = 3;
+  ATTEMPT_STATE_SUCCEEDED = 4;
+  ATTEMPT_STATE_FAILED = 5;
+  ATTEMPT_STATE_TIMED_OUT = 6;
+  // We do not know whether it ran, is still running, or had side effects.
+  // Distinct from FAILED because it carries different information and gets a
+  // different retry policy. This distinction is the crux of at-least-once
+  // and the thing naive designs get wrong. (§5.1, ADR-0006.)
+  ATTEMPT_STATE_LOST = 7;
+  ATTEMPT_STATE_CANCELLED = 8;
+}
+
+// The assignment handed to a worker by PollTask.
+message TaskAssignment {
+  string attempt_id = 1;
+  string run_id = 2;
+  string node_id = 3;
+  int32 attempt_number = 4;
+  TaskSpec spec = 5;
+  // Resolved inputs: literals and upstream ResultRefs.
+  map<string, ResultRef> inputs = 6;
+  // Platform-derived, stable across retries (excludes attempt_number).
+  // Handed to the handler as ctx.idempotency_key. (§6.2.)
+  string idempotency_key = 7;
+  // Opaque fencing token. MUST be presented on every subsequent RPC for this
+  // attempt; a stale token is rejected, which is what prevents a zombie
+  // worker from corrupting state. (ADR-0010.)
+  string lease_token = 8;
+  // Absolute deadlines computed from CONTROL-PLANE time. Worker clocks are
+  // never authoritative (architecture §10).
+  int64 lease_expires_at_unix_ms = 9;
+  int64 start_to_close_deadline_unix_ms = 10;
+}
+
+enum AttemptOutcome {
+  ATTEMPT_OUTCOME_UNSPECIFIED = 0;
+  ATTEMPT_OUTCOME_SUCCEEDED = 1;
+  ATTEMPT_OUTCOME_FAILED = 2;
+  ATTEMPT_OUTCOME_TIMED_OUT = 3;
+  // Reported by WAL replay after an agent restart: the agent knows it started
+  // the task but cannot determine the outcome. Control plane treats this as
+  // LOST and applies §6.5 policy.
+  ATTEMPT_OUTCOME_INDETERMINATE = 4;
+}

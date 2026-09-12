@@ -1,0 +1,149 @@
+syntax = "proto3";
+
+package nexus.v1;
+
+option go_package = "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1;nexusv1";
+
+// ResourceVector is the multi-dimensional resource model (ADR-0009: borrowed
+// from Ray's typed resource model, without the dependency). All scheduling
+// arithmetic operates on this type.
+message ResourceVector {
+  // Millicores. 1000 = one full core.
+  int64 cpu_millis = 1;
+  int64 memory_bytes = 2;
+  int32 gpu_count = 3;
+  // Optional GPU model constraint, e.g. "nvidia-a100". Empty = any GPU.
+  string gpu_kind = 4;
+  // Minimum per-device VRAM in bytes. 0 = unconstrained.
+  int64 gpu_memory_bytes = 5;
+  int64 disk_bytes = 6;
+  // Arbitrary countable constraints, e.g. {"license_token": 1}.
+  map<string, int64> custom = 7;
+}
+
+// ResourceRequest separates scheduling cost from enforcement ceiling.
+// `request` is subtracted from worker capacity by the scheduler; `limit` is
+// enforced by the executor via cgroups/container limits. limit >= request
+// permits opportunistic bursting; limit == request gives predictable
+// performance. (Architecture §4.3.)
+message ResourceRequest {
+  ResourceVector request = 1;
+  ResourceVector limit = 2;
+}
+
+// Temporal's four-timeout model (architecture §4.3). Four rather than one
+// because "it timed out" is operationally useless: distinguishing "never got
+// capacity" from "ran too long" from "went silent" tells you whether to fix
+// the cluster, the code, or the network.
+message Timeouts {
+  // Queued longer than this without starting => fail fast; signals a capacity
+  // problem, not a code problem.
+  int64 schedule_to_start_ms = 1;
+  // Wall clock for a SINGLE attempt.
+  int64 start_to_close_ms = 2;
+  // Total across ALL retries. The real end-to-end SLA.
+  int64 schedule_to_close_ms = 3;
+  // No progress signal within this window => presume wedged, retry.
+  int64 heartbeat_ms = 4;
+}
+
+enum BackoffStrategy {
+  BACKOFF_STRATEGY_UNSPECIFIED = 0;
+  BACKOFF_STRATEGY_FIXED = 1;
+  BACKOFF_STRATEGY_LINEAR = 2;
+  BACKOFF_STRATEGY_EXPONENTIAL = 3;
+}
+
+message RetryPolicy {
+  int32 max_attempts = 1;
+  BackoffStrategy strategy = 2;
+  int64 initial_ms = 3;
+  int64 max_ms = 4;
+  double multiplier = 5;
+  // "none" | "full" | "equal". Full jitter is the default: it prevents the
+  // retry thundering herd that synchronized backoff creates.
+  string jitter = 6;
+  // Allowlist of retryable error classes. Empty = platform default set.
+  repeated ErrorClass retry_on = 7;
+  // Always terminal, never retried; do not waste capacity on these.
+  repeated ErrorClass no_retry_on = 8;
+  // Exclude the worker that just failed this attempt (avoids a poisoned host).
+  bool retry_on_different_worker = 9;
+}
+
+// ErrorClass drives retry decisions. Classification happens on the worker
+// (which sees the real failure) and is reported to the control plane.
+enum ErrorClass {
+  ERROR_CLASS_UNSPECIFIED = 0;
+  // Retryable: network blip, 503, temporary resource exhaustion.
+  ERROR_CLASS_TRANSIENT = 1;
+  // Retryable: exceeded start_to_close or heartbeat timeout.
+  ERROR_CLASS_TIMEOUT = 2;
+  // Retryable: lease expired; outcome INDETERMINATE. See §6.5.
+  ERROR_CLASS_WORKER_LOST = 3;
+  // Terminal: bad input, schema violation. Retrying cannot help.
+  ERROR_CLASS_VALIDATION = 4;
+  // Terminal: authz failure.
+  ERROR_CLASS_PERMISSION_DENIED = 5;
+  // Terminal: task code raised. Retryable only if explicitly listed.
+  ERROR_CLASS_APPLICATION = 6;
+  // Retryable: OOM-killed. Retry may succeed on a larger worker.
+  ERROR_CLASS_OOM = 7;
+  // Terminal: task image/handler not found.
+  ERROR_CLASS_NOT_FOUND = 8;
+  // Infrastructure fault (result store down, executor failure). Retryable.
+  ERROR_CLASS_INFRASTRUCTURE = 9;
+}
+
+// IdempotencyMode drives how indeterminate (LOST) outcomes are handled.
+// This is the single most consequential field in the task spec (§6.5).
+enum IdempotencyMode {
+  IDEMPOTENCY_MODE_UNSPECIFIED = 0;
+  // Default. Handler is idempotent; LOST attempts are auto-retried.
+  IDEMPOTENCY_MODE_REQUIRED = 1;
+  // Auto-retry, but emit PossibleDuplicateExecution warning.
+  IDEMPOTENCY_MODE_BEST_EFFORT = 2;
+  // NOT auto-retried on LOST. Requires explicit human action, because we
+  // cannot safely re-run it. Refusing to silently retry non-idempotent work
+  // is the correct default failure mode.
+  IDEMPOTENCY_MODE_NONE = 3;
+}
+
+message TaskError {
+  ErrorClass class = 1;
+  string type = 2;
+  string message = 3;
+  // Whether the WORKER believes this is retryable. Advisory: the control
+  // plane's policy decides, using `class`.
+  bool retryable = 4;
+  // Reference into the result store for a full stack trace / diagnostic blob,
+  // rather than inlining unbounded text into the metadata store.
+  string detail_ref = 5;
+}
+
+// ResultRef discriminates inline from blob storage. Small results are inlined
+// to avoid two network round-trips for `{"rows": 42}`; large ones go to the
+// result store. Consumers see one uniform interface. (ADR-0008.)
+message ResultRef {
+  oneof kind {
+    bytes inline = 1;
+    BlobRef blob = 2;
+  }
+  string content_type = 3;
+  int64 size_bytes = 4;
+}
+
+message BlobRef {
+  string bucket = 1;
+  // Content-addressed: <namespace>/<sha256>. Self-verifying, dedup for free.
+  string key = 2;
+  string sha256 = 3;
+}
+
+message ExecutionMetrics {
+  int64 peak_memory_bytes = 1;
+  double cpu_seconds = 2;
+  int64 wall_ms = 3;
+  int32 oom_killed = 4;
+  int32 exit_code = 5;
+}

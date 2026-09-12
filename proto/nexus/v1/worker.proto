@@ -1,0 +1,184 @@
+syntax = "proto3";
+
+package nexus.v1;
+
+import "nexus/v1/common.proto";
+import "nexus/v1/task.proto";
+
+option go_package = "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1;nexusv1";
+
+// WorkerService is THE plane contract (architecture §8.1). Every RPC is
+// initiated by the worker; the control plane never dials a worker (ADR-0005).
+// This is what lets workers live behind NAT, in another VPC, or on a laptop,
+// and makes backpressure automatic: a saturated worker simply stops polling.
+service WorkerService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // Liveness + capacity reconciliation + control-directive delivery.
+  // Runs on its own thread, independent of task execution: a blocked task must
+  // never delay the heartbeat, or the control plane wrongly declares the
+  // worker dead and duplicates the work.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Long-polling. Returns empty after `wait_ms` if no work fits.
+  rpc PollTask(PollTaskRequest) returns (PollTaskResponse);
+
+  rpc ReportStarted(ReportStartedRequest) returns (Ack);
+  // Batched lease renewal for ALL of this worker's attempts. Batching collapses
+  // renewal cost from per-attempt to per-worker; at 10k concurrent tasks the
+  // per-attempt alternative is 2k RPS of pure overhead (ADR-0010).
+  rpc ExtendLease(ExtendLeaseRequest) returns (ExtendLeaseResponse);
+  // Task-level progress for long-running work; resets the heartbeat timeout.
+  // Distinct from worker liveness: a worker can be alive while one task is
+  // wedged, and distinguishing these lets us time out the task, not the worker.
+  rpc ReportProgress(ReportProgressRequest) returns (Ack);
+  rpc ReportResult(ReportResultRequest) returns (Ack);
+}
+
+message RegisterRequest {
+  string namespace = 1;
+  string hostname = 2;
+  repeated string queues = 3;
+  map<string, string> labels = 4;
+  // Advertised capacity; the scheduler's ledger is built from this.
+  ResourceVector capacity = 5;
+  // Which executors this worker can run; a placement constraint (ADR-0007).
+  repeated string executors = 6;
+  string agent_version = 7;
+}
+
+message RegisterResponse {
+  // Per-SESSION identity, not per-host. A restarted agent gets a NEW id and
+  // can never reclaim its predecessor's leases -- a genuinely nasty class of
+  // bug in systems that key worker identity on hostname (§5.5).
+  string worker_id = 1;
+  string session_token = 2;
+  int32 heartbeat_interval_ms = 3;
+  int32 lease_ttl_ms = 4;
+  ResultStoreConfig result_store = 5;
+}
+
+message ResultStoreConfig {
+  string endpoint = 1;
+  string bucket = 2;
+  string region = 3;
+  // Results at or below this size are returned inline instead of via the blob
+  // store, avoiding two round-trips for trivial outputs (ADR-0008).
+  int64 inline_threshold_bytes = 4;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  // GROUND TRUTH for reconciliation. The control plane compares its
+  // reservations against this and releases any the worker does not acknowledge.
+  // This is what keeps the capacity ledger from drifting when a worker
+  // restarts and forgets its work. Periodic reconciliation against ground
+  // truth is the only way to keep distributed accounting honest (§3.2).
+  repeated string running_attempt_ids = 2;
+  ResourceVector free_capacity = 3;
+  double cpu_utilization = 4;
+  double memory_utilization = 5;
+}
+
+message HeartbeatResponse {
+  // Control-plane -> worker commands ride on the heartbeat RESPONSE rather
+  // than a pushed connection. This is what keeps the design fully pull-based
+  // without losing the ability to command the fleet (ADR-0005).
+  repeated Directive directives = 1;
+  // Server-controlled: lets the control plane slow the fleet under load
+  // instead of being overwhelmed by a large number of workers.
+  int32 next_heartbeat_ms = 2;
+}
+
+message Directive {
+  DirectiveKind kind = 1;
+  // For CANCEL_ATTEMPT.
+  string attempt_id = 2;
+  // Grace period before SIGKILL follows SIGTERM.
+  int32 grace_ms = 3;
+}
+
+enum DirectiveKind {
+  DIRECTIVE_KIND_UNSPECIFIED = 0;
+  // Stop accepting new work, finish current, then exit.
+  DIRECTIVE_KIND_DRAIN = 1;
+  DIRECTIVE_KIND_CANCEL_ATTEMPT = 2;
+  // Worker's session is no longer valid; re-register.
+  DIRECTIVE_KIND_REREGISTER = 3;
+}
+
+message PollTaskRequest {
+  string worker_id = 1;
+  // Worker's own view of free capacity. The control plane re-checks against
+  // its ledger; the worker re-checks locally on receipt. Both sides verify,
+  // which catches momentary ledger staleness.
+  ResourceVector free_capacity = 2;
+  repeated string queues = 3;
+  // Long-poll duration. 0 = return immediately.
+  int32 wait_ms = 4;
+  // Max assignments to return in one call.
+  int32 max_tasks = 5;
+}
+
+message PollTaskResponse {
+  repeated TaskAssignment assignments = 1;
+  // Advisory backoff when nothing is available.
+  int32 poll_again_after_ms = 2;
+}
+
+message ReportStartedRequest {
+  string attempt_id = 1;
+  string lease_token = 2;
+  int64 started_at_unix_ms = 3;
+}
+
+message ExtendLeaseRequest {
+  string worker_id = 1;
+  // Batched: one RPC carries renewals for every attempt this worker holds.
+  repeated LeaseRenewal renewals = 2;
+}
+
+message LeaseRenewal {
+  string attempt_id = 1;
+  string lease_token = 2;
+}
+
+message ExtendLeaseResponse {
+  repeated LeaseGrant grants = 1;
+  // Attempts whose lease is gone (expired and reclaimed, or cancelled). The
+  // worker MUST stop work on these: another attempt may already be running,
+  // and any result it reports will be rejected on token mismatch.
+  repeated string revoked_attempt_ids = 2;
+}
+
+message LeaseGrant {
+  string attempt_id = 1;
+  int64 expires_at_unix_ms = 2;
+  int32 epoch = 3;
+}
+
+message ReportProgressRequest {
+  string attempt_id = 1;
+  string lease_token = 2;
+  string message = 3;
+  double fraction_complete = 4;
+}
+
+message ReportResultRequest {
+  string attempt_id = 1;
+  // Rejected if stale. Fencing does not stop a zombie from EXECUTING -- nothing
+  // can, over a network -- but it guarantees the stale result cannot corrupt
+  // our state. Idempotency handles the duplicate side effect (ADR-0006/0010).
+  string lease_token = 2;
+  AttemptOutcome outcome = 3;
+  map<string, ResultRef> outputs = 4;
+  TaskError error = 5;
+  ExecutionMetrics metrics = 6;
+  int64 ended_at_unix_ms = 7;
+}
+
+message Ack {
+  bool accepted = 1;
+  // Populated when accepted=false, e.g. "stale_lease_token".
+  string reason = 2;
+}

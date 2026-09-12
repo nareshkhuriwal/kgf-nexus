@@ -1,0 +1,24 @@
+# Go
+/bin/
+*.test
+*.out
+
+# Node
+node_modules/
+ui/dist/
+ui/.vite/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Local
+.env
+.env.local
+*.log
+.DS_Store
+gpt_architecture.zip
