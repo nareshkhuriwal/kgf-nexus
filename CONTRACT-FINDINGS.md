@@ -1805,3 +1805,42 @@ Verified live: the same expression previews 02:00 local in UTC, Europe/London an
 America/New_York with the right offsets; a minutely London schedule fired two runs to
 SUCCEEDED, with `next_fire_at` stored as the UTC instant and the preview rendered in the
 author's wall clock.
+
+### F91. The UI test suite ran against stale compiled JavaScript, not the sources — FIXED
+
+**Severity:** every UI test result before this was unevidence. Not wrong — unevidence.
+
+The old typecheck script (`tsc -b --noEmit false --emitDeclarationOnly false`, F-fixed
+in 29ab9a8) explicitly forced emission, leaving 37 `.js` files beside their `.ts`/`.tsx`
+sources under `ui/src/`. `.gitignore:15` matches `ui/src/**/*.js`, so `git status` never
+showed them. Vite resolves the extensionless import `./Status` to `Status.js` BEFORE
+`Status.tsx`, so every import in every test loaded the stale compile.
+
+Found the way this class of thing is always found: a break-verification refused to go
+red. Removing the stale-data guard from `Status.tsx` left all 14 of its tests passing.
+
+Reproduced deliberately to confirm the mechanism rather than infer it. With ONE stale
+`Status.js` restored and `StaleWarning` replaced by `return null`, the file's tests are
+14 passed. Delete the shadow, same breakage in place: 1 failed | 13 passed. Restore the
+source: 14 passed.
+
+`vite dev` resolves identically, so local development was serving stale code too.
+
+All 152 pre-existing tests still pass against the real sources, so no regression was
+being masked. That is luck, not a defense: the suite could not have caught one.
+
+**Fix:** the emitter was already gone — 29ab9a8 replaced that script while fixing a
+separate defect (it always failed its first command and passed via `||`, so it never
+checked tsconfig.node.json at all). The 37 residual artifacts are quarantined outside
+the repo. `tsconfig.app.json` sets `noEmit: true`, and `build` runs `tsc -b` against it,
+so nothing in the current scripts re-emits.
+
+**The generalisable part, and why this belongs next to F89.** F89 catalogued six checks
+that returned plausible answers while looking at the wrong thing. This is the same shape
+one level deeper: not a wrong check, but a correct check pointed at a stale copy of the
+subject. A suite that cannot fail is indistinguishable from a suite that passes, and the
+only thing that separated them here was someone insisting on watching a test go red
+before trusting it green.
+
+**Related:** [[F89]] — the check that lies. The discipline that caught this is the one
+F89 prescribes: prove the instrument fails when the thing is broken.
