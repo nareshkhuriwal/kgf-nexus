@@ -1712,3 +1712,47 @@ has `TestVersionNumbersAreUnique`. This file has nothing, and a duplicate here i
 cheaper (a confusing reference, not a mis-ordered schema change), so a gate may
 not be worth it -- but the next such namespace someone adds is worth checking
 before it has two authors.
+
+### F89. Verification-by-grep produced confident wrong answers, repeatedly — NOTE
+Not a defect in the system. A defect in how all three sessions were CHECKING the
+system, worth recording because it wasted more time today than any single bug and
+it is invisible by construction.
+
+Six instances across three sessions, all the same shape -- **a check that returns
+a plausible answer when it has actually failed to look at the right thing**:
+
+| # | Check | What it actually did |
+|---|---|---|
+| F82 | post-hoc `leases` count | table nearly empty by then; asked a question of one row |
+| F83 | `run create <name>` | ran the LATEST spec version, not the edited file |
+| F85 | CI integration job | four packages skipped; a skip reads as a pass |
+| F86 | `peakLeases` sampler | 100ms poll blind to sub-second work; red while fine |
+| — | `grep -oE '^### F[0-9]+'` | truncated `F52b` to `F52`, inventing a duplicate |
+| — | container `StartedAt`, a grep against a path that did not exist | plausible answers to unasked questions |
+
+The first four passed or failed for reasons unrelated to the system. The last two
+are the same error one level up: the instrument was wrong, so the ANSWER about
+the instrument was wrong.
+
+**Why this shape is expensive.** A broken check does not error. It returns
+something that looks like a result, so it is believed, and the belief is acted
+on. F82/F83/F85 were green while proving nothing -- discovered eventually. F86
+was red while nothing was wrong, which is worse: red-when-fine trains everyone to
+re-run, and a re-run is exactly how a real double-dispatch gets waved through.
+
+**What actually worked**, in every case: pick an instrument that CANNOT miss the
+thing, and prove it fails when the thing is broken. The sweep line over
+`(dispatched_at, ended_at)` cannot miss a dispatch because those rows are
+durable. `TestVersionNumbersAreUnique` was mutation-tested by reintroducing the
+duplicate. Both F82's and F84's guards were verified by deleting them and
+watching the negative cases fail. **A check nobody has seen fail is not yet
+evidence** -- it is an untested assertion about an untested assertion.
+
+**Adjacent inventory**, since F88's point generalises the same way. Concurrent
+append-only namespaces here: migration versions (gated by
+`TestVersionNumbersAreUnique`), finding numbers (F88 -- collided, cheap, left
+ungated), ADR numbers in `docs/adr` (0001-0011, contiguous, currently
+single-author), and `run_events.seq`. That last one is the model worth copying:
+it allocates with `UPDATE workflow_runs SET event_seq = event_seq + 1 RETURNING`,
+a single atomic statement. It got there by being the bug first -- `max(seq)+1`
+under an advisory lock, which drifted 31 runs apart before F79 fixed it.
