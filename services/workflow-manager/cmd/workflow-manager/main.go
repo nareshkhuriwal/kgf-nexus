@@ -31,6 +31,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/grpcapi"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/runs"
+	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/schedules"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/timers"
 )
 
@@ -169,6 +170,24 @@ func run() error {
 		}
 	}()
 
+	// The schedule fire loop, in this process for the same reason as the
+	// reconciler: several replicas may run it and correctness does not depend on
+	// there being one, because claiming a due schedule is FOR UPDATE SKIP LOCKED
+	// and a tick's identity is a unique constraint. No leader election.
+	schedSvc := schedules.New(db, schedules.NewRunsAdapter(runSvc), schedules.Config{
+		Interval:             cfg.ScheduleInterval,
+		BatchSize:            cfg.ScheduleBatchSize,
+		StalledSweepInterval: cfg.ScheduleSweepInterval,
+		MaxCatchupPerPass:    cfg.ScheduleMaxCatchup,
+	}, log)
+	schedDone := make(chan struct{})
+	go func() {
+		defer close(schedDone)
+		if err := schedSvc.Run(ctx); err != nil {
+			errCh <- fmt.Errorf("schedule fire loop: %w", err)
+		}
+	}()
+
 	select {
 	case err := <-errCh:
 		return err
@@ -267,7 +286,12 @@ type config struct {
 	TimerClaimTimeout    time.Duration
 	TimerBacklogAlert    int
 	TimerBacklogInterval time.Duration
-	ShutdownTimeout      time.Duration
+
+	ScheduleInterval      time.Duration
+	ScheduleBatchSize     int
+	ScheduleSweepInterval time.Duration
+	ScheduleMaxCatchup    int
+	ShutdownTimeout       time.Duration
 }
 
 func loadConfig() config {
@@ -290,7 +314,14 @@ func loadConfig() config {
 		// the whole timers table, so sampling it per poll would add a full scan of
 		// shared state every second for a number that moves slowly.
 		TimerBacklogInterval: time.Duration(envInt("NEXUS_TIMER_BACKLOG_INTERVAL_SEC", 15)) * time.Second,
-		ShutdownTimeout:      time.Duration(envInt("NEXUS_SHUTDOWN_TIMEOUT_SEC", 30)) * time.Second,
+
+		// Cron's resolution is a minute, so polling faster than this buys nothing;
+		// this bounds how late a tick can be to roughly one interval.
+		ScheduleInterval:      time.Duration(envInt("NEXUS_SCHEDULE_INTERVAL_SEC", 15)) * time.Second,
+		ScheduleBatchSize:     envInt("NEXUS_SCHEDULE_BATCH_SIZE", 20),
+		ScheduleSweepInterval: time.Duration(envInt("NEXUS_SCHEDULE_SWEEP_SEC", 300)) * time.Second,
+		ScheduleMaxCatchup:    envInt("NEXUS_SCHEDULE_MAX_CATCHUP", 10),
+		ShutdownTimeout:       time.Duration(envInt("NEXUS_SHUTDOWN_TIMEOUT_SEC", 30)) * time.Second,
 	}
 }
 
