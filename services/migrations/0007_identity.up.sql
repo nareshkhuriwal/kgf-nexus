@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Human identity: users, sessions, scoped tokens, audit log (ARCHITECTURE §3.2).
 --
 -- §3.2 promises "OIDC bearer tokens for humans, API keys (hashed at rest) for

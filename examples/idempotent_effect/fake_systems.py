@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """Stand-ins for the downstream systems in dag.py.
 
 Each one mimics the DEDUP BEHAVIOUR of the real thing, because that behaviour is

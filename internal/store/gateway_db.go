@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package store holds the pgx query layer. Each service owns its own files
 // here (CONTRACT.md); this file and its gateway_*/wfm_* siblings belong to the
 // api-gateway and workflow-manager services.

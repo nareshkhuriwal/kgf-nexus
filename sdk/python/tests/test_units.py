@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit parsing. Mundane code, but a wrong answer here silently mis-schedules.
 
 "8Gi" parsed as 8e9 instead of 2**33 is a 7% capacity error on every task, which

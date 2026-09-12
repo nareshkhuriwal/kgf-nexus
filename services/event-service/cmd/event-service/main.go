@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Command event-service serves the append-only run history (ADR-0011).
 package main
 

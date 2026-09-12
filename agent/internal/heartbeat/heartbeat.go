@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package heartbeat proves worker liveness and carries control-plane
 // directives back to the agent.
 //

@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * The theme control must behave correctly in all three states, including the
  * case index.css could not previously express: an explicit choice that

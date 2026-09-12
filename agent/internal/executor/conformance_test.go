@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // The EXECUTOR CONFORMANCE SUITE (ADR-0007).
 //
 // This file defines the contract EVERY executor must satisfy, and runs it against

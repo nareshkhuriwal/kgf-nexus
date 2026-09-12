@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Pure graph derivation for the DAG view: layout, root-cause attribution, and
  * the per-node summary the renderer draws.

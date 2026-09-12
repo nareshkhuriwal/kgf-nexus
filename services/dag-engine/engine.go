@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Command dag-engine is the Nexus DAG engine service (architecture §3.2).
 //
 // It owns the dependency decisions of a run: materializing the compiled graph,

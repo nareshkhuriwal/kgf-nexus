@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package spec loads a WorkflowSpec from JSON or YAML and canonicalizes it.
 //
 // YAML authoring is first-class (ADR-0004): it must produce the IDENTICAL

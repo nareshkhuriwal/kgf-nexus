@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Command nexus-agent is the Nexus worker agent (architecture §3.3).
 //
 // It is deliberately small: register, prove liveness, obtain leased work,

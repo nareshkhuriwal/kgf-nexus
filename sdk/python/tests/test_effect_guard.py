@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """The effect guard and idempotency key derivation.
 
 This is the correctness core of ADR-0006. The tests assert the SKIP PATH: that a

@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package eventservice owns the run_events table (ADR-0011) and serves the
 // append-only run history for the UI, the CLI, and external subscribers.
 //

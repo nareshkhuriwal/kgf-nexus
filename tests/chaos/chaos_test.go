@@ -1,5 +1,8 @@
 //go:build chaos
 
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package chaos is the suite architecture §11 names as a Phase 1 deliverable:
 // "a chaos suite that kills workers mid-task and asserts
 // exactly-one-logical-effect".

@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """The worker-side entrypoint: executing a registered handler by task_ref.
 
 This runs inside the task container. The assertions that matter are that a

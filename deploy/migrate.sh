@@ -1,4 +1,8 @@
 #!/bin/sh
+
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 # Applies services/migrations/*.up.sql in lexical order, then exits 0.
 #
 # Idempotence comes from a schema_migrations ledger table rather than from the

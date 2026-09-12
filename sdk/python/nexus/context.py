@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """TaskContext: what a handler is given at execution time, inside the worker.
 
 This module runs on the WORKER, not in the control plane and not at compile time.

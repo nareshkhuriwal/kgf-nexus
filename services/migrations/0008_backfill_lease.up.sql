@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Add a lease to schedule_backfills.
 --
 -- Renumbered 0007 -> 0008. It was written in parallel with 0007_identity on another

@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 DROP TABLE IF EXISTS concurrency_slots, api_keys, idempotency_keys, timers,
     run_events, reservations, leases, task_attempts, task_edges, task_nodes,
     workflow_runs, workflow_specs, workers CASCADE;

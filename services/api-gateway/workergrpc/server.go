@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package workergrpc implements proto/nexus/v1 WorkerService: the plane contract
 // between the control plane and every worker agent (architecture §8.1).
 //

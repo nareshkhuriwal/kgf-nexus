@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """Canonical JSON encoding and content addressing.
 
 The server content-addresses a submitted spec (`sha256` of canonical JSON,

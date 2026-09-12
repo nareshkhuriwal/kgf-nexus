@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Identity extensions to the MVP authenticator: human sessions and scoped
 // tokens, added ALONGSIDE static API keys rather than in place of them.
 //

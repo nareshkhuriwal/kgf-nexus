@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package health provides the /healthz and /readyz endpoints every service must
 // expose (ADR-0011 rule 3).
 package health

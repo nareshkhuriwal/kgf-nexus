@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """Prove the effect guard works, locally, with no control plane running.
 
 Retries here are simulated the way they actually happen: a NEW TaskContext with a

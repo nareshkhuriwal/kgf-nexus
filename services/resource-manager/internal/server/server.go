@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package server implements the Resource Manager's gRPC API: the capacity
 // ledger over workers.capacity (advertised at registration) and
 // workers.committed (the sum of active reservations).

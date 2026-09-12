@@ -1,5 +1,8 @@
 //go:build integration
 
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Integration tests for the result store. Behind the `integration` tag because
 // they need a live S3-compatible endpoint; run with:
 //

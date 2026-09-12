@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- F7: run_events.seq had no safe allocation mechanism.
 -- UNIQUE(run_id, seq) with a plain INT and no counter forces max(seq)+1, which
 -- races: concurrent event writers for one run collide on the unique constraint.

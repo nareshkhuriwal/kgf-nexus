@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package wal is the agent's local write-ahead log for attempt outcomes
 // (architecture §6.3).
 //

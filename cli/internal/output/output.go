@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package output renders results as a table, JSON, or YAML.
 //
 // Table is the default because the usual reader is a human at a terminal

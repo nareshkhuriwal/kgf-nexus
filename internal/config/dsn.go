@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package config resolves configuration that every control-plane service needs
 // to agree on.
 package config

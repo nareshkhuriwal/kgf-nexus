@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package store holds the pgx query layer. Each service owns only its own files
 // here; this one and its siblings (dagengine_*.go) belong to the DAG engine.
 package store

@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Drops the lease columns. Safe only once no replica is claiming: without them the
 -- driver cannot enforce its concurrency cap under concurrency, which is the defect
 -- 0007 exists to fix.

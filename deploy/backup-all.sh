@@ -1,4 +1,8 @@
 #!/bin/sh
+
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 # Takes a complete backup: result-store objects FIRST, then Postgres.
 #
 # This script exists for one reason: the ORDER of the two halves is a

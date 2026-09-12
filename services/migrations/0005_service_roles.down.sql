@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Revoke the per-service grants and drop the roles.
 --
 -- Safe to run only while no service is CONNECTED as one of these roles: Postgres

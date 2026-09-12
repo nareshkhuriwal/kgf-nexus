@@ -1,4 +1,8 @@
 #!/bin/sh
+
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 # Restores a backup-artifacts.sh mirror into a result-store bucket, then exits 0.
 #
 # Usage:

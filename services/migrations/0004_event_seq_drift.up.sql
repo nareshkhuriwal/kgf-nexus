@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Repair workflow_runs.event_seq where it drifted below the events that exist.
 --
 -- Two allocators wrote run_events concurrently: event-service allocated from the

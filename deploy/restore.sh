@@ -1,4 +1,8 @@
 #!/bin/sh
+
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 # Restores a backup.sh archive into a target database, then exits 0.
 #
 # Usage:

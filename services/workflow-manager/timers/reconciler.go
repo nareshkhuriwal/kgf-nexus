@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package timers implements the durable timer reconciler.
 //
 // EVERY deadline in the system is a row in the timers table rather than an

@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Command resource-manager is the Nexus capacity ledger service (§3.2).
 //
 // It owns the `workers` and `reservations` tables and is their only writer, with

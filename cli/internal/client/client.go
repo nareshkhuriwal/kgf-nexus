@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package client talks to the Nexus public REST API (architecture §8.2).
 //
 // The error handling here is the point. An orchestrator CLI that prints a bare

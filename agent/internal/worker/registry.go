@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package worker wires the agent's parts together: registration, the task
 // registry that is the heartbeat's ground truth, the long-polling puller, the
 // runner that drives an executor under a WAL, and the reporter.

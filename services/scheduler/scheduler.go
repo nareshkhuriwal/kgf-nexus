@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package main implements the Nexus scheduler service: the process that turns
 // PENDING attempts into leased work on live workers.
 //

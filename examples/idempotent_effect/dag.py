@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """idempotent_effect -- why retrying this DAG cannot double-charge anyone.
 
 THE PROBLEM THIS EXAMPLE EXISTS FOR

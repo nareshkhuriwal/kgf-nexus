@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """The REST client, exercised against a real local HTTP server.
 
 A stub server rather than mock patching, because the things worth testing here are

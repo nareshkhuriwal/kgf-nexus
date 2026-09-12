@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """ten_node_mixed -- the Phase 1 exit-criteria DAG.
 
 Architecture §11 states the Phase 1 exit criterion as: "a 10-node DAG with mixed

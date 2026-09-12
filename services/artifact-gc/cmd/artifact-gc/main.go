@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Command artifact-gc is the operator-run reachability-keyed garbage collector
 // for the result store (ADR-0008).
 //

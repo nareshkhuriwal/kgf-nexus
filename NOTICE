@@ -1,0 +1,53 @@
+KGF Nexus
+Copyright 2026 Khuriwal Group
+
+This product includes software developed at Khuriwal Group.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this file except in compliance with the License. You may obtain a copy of
+the License in the LICENSE file distributed alongside this file, or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------------------
+THIRD-PARTY ATTRIBUTIONS
+------------------------------------------------------------------------------
+
+This product depends on third-party software. The dependencies listed below
+are distributed under the Apache License, Version 2.0, and carry their own
+NOTICE or attribution requirements. Their full license texts are available in
+their respective source repositories.
+
+  - gRPC-Go (google.golang.org/grpc)
+    Copyright The gRPC Authors.
+
+  - Go support for Protocol Buffers (google.golang.org/protobuf)
+    Copyright Google Inc. -- distributed under a BSD 3-Clause license.
+
+  - Google API / genproto RPC bindings
+    (google.golang.org/genproto/googleapis/rpc)
+    Copyright Google LLC.
+
+  - MinIO Go Client SDK (github.com/minio/minio-go/v7)
+    Copyright MinIO, Inc.
+
+  - MinIO md5-simd (github.com/minio/md5-simd)
+    Copyright MinIO, Inc.
+
+  - MinIO crc64nvme (github.com/minio/crc64nvme)
+    Copyright MinIO, Inc.
+
+  - santhosh-tekuri/jsonschema (github.com/santhosh-tekuri/jsonschema/v6)
+    Copyright Santhosh Kumar Tekuri.
+
+  - ini (gopkg.in/ini.v1)
+    Copyright Unknwon and contributors.
+
+  - go-yaml (gopkg.in/yaml.v3)
+    Copyright 2011-2019 Canonical Ltd, and copyright 2006-2011 Kirill Simonov.
+    Dual-licensed: portions ported from libyaml remain under the MIT license;
+    the remainder is under the Apache License, Version 2.0.
+
+Additional dependencies are distributed under the MIT, ISC, and BSD 2-/3-Clause
+licenses, which are permissive and do not impose NOTICE requirements. See
+docs/THIRD-PARTY-LICENSES.md for the full inventory.

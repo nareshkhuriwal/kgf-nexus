@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package runs implements the WorkflowRun lifecycle: creation with idempotency
 // dedup, the §5.2 state machine, and run-level policy enforcement (run timeout,
 // max_active_runs, fail_fast).

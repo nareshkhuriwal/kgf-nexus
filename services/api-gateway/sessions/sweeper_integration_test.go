@@ -1,5 +1,8 @@
 //go:build integration
 
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Integration coverage for the sweeper against real Postgres. The unit tests
 // prove the LOOP is correct against a fake; this proves the statement the loop
 // issues actually removes expired rows and leaves live ones alone, which is the

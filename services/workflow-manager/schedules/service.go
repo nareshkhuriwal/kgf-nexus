@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package schedules turns cron schedules into runs, and runs bounded backfills.
 //
 // WHERE THIS LIVES AND WHY. The fire loop is in workflow-manager because it already

@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """The `@task` decorator: declares a task spec and registers its handler.
 
 Two things happen here and it is worth being precise about which process each one

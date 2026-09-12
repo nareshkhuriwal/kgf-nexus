@@ -1,4 +1,8 @@
 #!/bin/sh
+
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 # Mirrors the MinIO result bucket to a timestamped directory, then exits 0.
 #
 # Postgres is the system of record (ADR-0002), but it is not the whole story.

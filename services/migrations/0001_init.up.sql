@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Nexus MVP schema (architecture §4.2).
 -- Postgres is the single source of truth, INCLUDING the dispatch queue
 -- (ADR-0002). The constraints in this file ARE the design: they are what make

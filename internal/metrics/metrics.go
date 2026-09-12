@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package metrics is a minimal Prometheus-text-format exposition built on the
 // standard library only.
 //

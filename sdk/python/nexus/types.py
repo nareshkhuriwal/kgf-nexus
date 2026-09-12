@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """Author-facing spec types and their compilation to WorkflowSpec JSON.
 
 Every type here has one job: accept human-friendly author input, validate it in

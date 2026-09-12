@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Drops the schedule tables. Destructive: every schedule definition and every
 -- backfill's progress is in these rows, and nothing else records them.
 --

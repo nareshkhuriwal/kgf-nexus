@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package resultstore is the worker's DIRECT client for task inputs and
 // outputs (ADR-0008).
 //

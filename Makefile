@@ -20,7 +20,8 @@ MIGRATIONS    := services/migrations
 
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test seed submit-example chaos clean \
-        backup backup-artifacts backup-all restore-drill artifact-gc check-refs
+        backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
+        license-report license-check
 
 help: ## Show this help
 	@echo "Nexus — make targets"
@@ -216,3 +217,34 @@ check-refs: ## Report rows whose result object is MISSING; read-only (OPERATIONS
 clean: ## Remove build artefacts
 	rm -rf ui/dist ui/node_modules/.vite
 	$(GO) clean -cache -testcache
+
+# Licensing. The inventory in docs/THIRD-PARTY-LICENSES.md is generated, so it
+# can be re-checked against go.mod rather than trusted to stay current by hand.
+license-report: ## List the license of every module compiled into the binaries
+	@GOMODCACHE=$$($(GO) env GOMODCACHE); \
+	$(GO) list -deps ./... 2>/dev/null | grep -E '^[a-z0-9.-]+\.[a-z]+/' \
+	  | xargs $(GO) list -f '{{if .Module}}{{.Module.Path}} {{.Module.Version}}{{end}}' 2>/dev/null \
+	  | sort -u | grep -v khuriwalgroup | while read -r p v; do \
+	    [ -z "$$p" ] && continue; \
+	    d="$$GOMODCACHE/$$p@$$v"; \
+	    lic=$$(ls "$$d" 2>/dev/null | grep -iE '^(LICENSE|COPYING)' | head -1); \
+	    t="UNKNOWN"; \
+	    if [ -n "$$lic" ]; then \
+	      if grep -qi "Apache License" "$$d/$$lic"; then t="Apache-2.0"; \
+	      elif grep -qi "Permission is hereby granted, free of charge" "$$d/$$lic"; then t="MIT"; \
+	      elif grep -qi "Redistribution and use in source and binary" "$$d/$$lic"; then t="BSD"; fi; \
+	    fi; \
+	    printf '%-60s %-40s %s\n' "$$p" "$$v" "$$t"; \
+	  done
+
+# Fails when a first-party source file is missing its SPDX identifier. Generated
+# code is exempt: it is rewritten by protoc and would lose the header anyway.
+license-check: ## Assert every first-party source file carries an SPDX identifier
+	@missing=0; \
+	for f in $$(git ls-files '*.go' '*.ts' '*.tsx' '*.py' '*.sh' '*.sql' '*.proto' \
+	            | grep -v '/gen/' | grep -v '^gen/'); do \
+	  if ! head -5 "$$f" | grep -q 'SPDX-License-Identifier'; then \
+	    echo "missing SPDX header: $$f"; missing=1; \
+	  fi; \
+	done; \
+	if [ $$missing -eq 0 ]; then echo "SPDX headers: OK"; else exit 1; fi

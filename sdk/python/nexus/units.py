@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """Human-friendly unit parsing for resources and durations.
 
 Authors write "8Gi" and "4h"; the wire format (proto/nexus/v1/common.proto) is

@@ -1,5 +1,8 @@
 //go:build integration
 
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Integration tests for the artifact GC's reachability derivation.
 //
 // These cover the half the unit tests deliberately do not: the SQL that turns

@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package executor is the pluggable execution substrate inside the worker
 // agent (ADR-0007).
 //

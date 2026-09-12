@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package cmd implements the nexusctl command tree.
 //
 // Built on the standard library's flag package rather than cobra. The command

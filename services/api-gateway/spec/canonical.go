@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package spec implements the submission pipeline: parse (JSON or YAML) ->
 // validate structurally against the JSON Schema -> validate semantically via
 // internal/dag -> canonicalize -> content-address.

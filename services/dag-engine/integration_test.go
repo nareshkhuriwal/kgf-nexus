@@ -1,5 +1,8 @@
 //go:build integration
 
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Integration tests for the DAG engine's I/O layer. Run with:
 //
 //	go test -tags integration ./services/dag-engine/...

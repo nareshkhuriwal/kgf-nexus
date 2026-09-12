@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package lease keeps this worker's ownership of its running attempts alive.
 //
 // A lease is a FENCING token (ADR-0010), not a lock. It cannot stop a

@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """Compilation: determinism, edge inference, and spec shape.
 
 The determinism tests are the load-bearing ones. The server treats a

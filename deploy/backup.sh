@@ -1,4 +1,8 @@
 #!/bin/sh
+
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 # Dumps the nexus database to a timestamped custom-format archive, then exits 0.
 #
 # Postgres is the sole system of record: every run, attempt, lease, timer and API

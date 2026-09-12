@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package migrations analyses the SQL migration set for the properties ADR-0011
 // rule 5 requires, so a migration that would break a rolling deploy fails a test
 // instead of an upgrade.

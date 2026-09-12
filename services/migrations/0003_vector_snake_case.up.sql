@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- F47: ResourceVector JSONB was written by default protojson, which emits
 -- camelCase (cpuMillis), while the schema comments, proto source, docs and all
 -- operator SQL use snake_case (cpu_millis).

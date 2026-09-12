@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package store holds the pgx query layer. Each service adds only its own
 // file; these rm_*.go files belong to the RESOURCE MANAGER, which owns the
 // `workers` and `reservations` tables (ADR-0011).

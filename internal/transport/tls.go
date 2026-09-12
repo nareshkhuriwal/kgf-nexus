@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package transport resolves the TLS posture of inter-service gRPC from the
 // environment, so that enabling encryption is a deployment decision rather than a
 // code change in eight places.

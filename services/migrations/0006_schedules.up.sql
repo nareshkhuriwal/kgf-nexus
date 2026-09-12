@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Cron schedules and bounded backfill (ARCHITECTURE §3.2, §4; Phase 2).
 --
 -- The entity diagram in §4 names the fields (cron, tz, catchup, next_fire_at) but

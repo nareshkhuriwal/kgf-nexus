@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """hello_dag -- the smallest useful Nexus workflow: a 3-task linear DAG.
 
 Read this first. It shows the whole shape of the platform in thirty lines:

@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Command api-gateway is the ONLY ingress to the Nexus control plane
 // (architecture §3.2).
 //

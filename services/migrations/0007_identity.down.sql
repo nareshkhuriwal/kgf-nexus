@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Drops the identity tables. Destructive: every human account, every live session
 -- and the entire administrative audit trail is in these rows, and nothing else
 -- records them. Rolling this back logs every console user out and discards the

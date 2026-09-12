@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package store holds the pgx data access layer. There is no ORM (CONTRACT.md):
 // the dispatch claim is a hand-written transaction whose exact lock ordering and
 // SKIP LOCKED semantics ARE the correctness argument (§5.3), and no ORM

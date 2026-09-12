@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """Worker-side handler entrypoint: run one registered handler by task_ref.
 
 This is what the worker agent invokes inside the task container. The flow is:

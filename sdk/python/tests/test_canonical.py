@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """Canonical encoding. The server content-addresses this output (ADR-0004).
 
 These tests exist because an unstable encoding would mint a spurious spec version

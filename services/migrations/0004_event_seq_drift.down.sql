@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Deliberately a no-op.
 --
 -- Rolling this back would mean moving event_seq BACKWARD, below events that

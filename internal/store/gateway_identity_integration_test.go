@@ -1,5 +1,8 @@
 //go:build integration
 
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Integration coverage for the identity tables. These assert what a fake cannot:
 // that the SQL is valid, that the unique index on lower(email) really folds case,
 // that expiry and revocation are evaluated by the DATABASE clock inside the

@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package domain holds the shared, dependency-free vocabulary of the control
 // plane: state names that mirror the frozen DB enums, resource arithmetic,
 // idempotency/cache key derivation, backoff, and the retry decision.

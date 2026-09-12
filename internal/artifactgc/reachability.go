@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package artifactgc implements the reachability-keyed garbage-collection sweep
 // over the result store that ADR-0008 mandates and nobody had written.
 //

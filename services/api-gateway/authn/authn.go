@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package authn implements the MVP authentication and authorization for the
 // gateway: static API keys, hashed at rest, with three roles.
 //

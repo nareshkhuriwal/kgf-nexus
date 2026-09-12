@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Command workflow-manager owns the WorkflowRun lifecycle, the workflow_specs and
 // workflow_runs tables, and the durable timer table (ADR-0011).
 //

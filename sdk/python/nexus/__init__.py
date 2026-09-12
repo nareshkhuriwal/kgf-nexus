@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """Nexus Python SDK -- a COMPILER for workflow specs, not a runtime hook.
 
     from nexus import task, workflow, TaskContext, Resources, Retry

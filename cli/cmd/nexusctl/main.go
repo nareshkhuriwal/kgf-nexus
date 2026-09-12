@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Command nexusctl is the command line interface for the Nexus workflow
 // orchestration platform.
 //

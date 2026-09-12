@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package upstream holds the gateway's clients for the five other control-plane
 // services.
 //

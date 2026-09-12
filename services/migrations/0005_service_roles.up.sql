@@ -1,3 +1,6 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Per-service Postgres roles with table-level grants (ADR-0011 rule 1).
 --
 -- The ADR states the rule is "enforced by per-service Postgres roles with

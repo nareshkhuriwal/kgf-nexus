@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+
 """The `@workflow` decorator: traces task calls into a WorkflowSpec document.
 
 How tracing works, and why it works this way:

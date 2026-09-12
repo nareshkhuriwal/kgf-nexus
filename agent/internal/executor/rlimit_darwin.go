@@ -1,5 +1,8 @@
 //go:build darwin
 
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 package executor
 
 import (

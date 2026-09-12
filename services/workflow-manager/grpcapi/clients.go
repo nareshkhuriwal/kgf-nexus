@@ -1,3 +1,6 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
 // Package grpcapi is the workflow-manager's gRPC surface plus its clients for the
 // peer services it must call.
 //
