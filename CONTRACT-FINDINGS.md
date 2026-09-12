@@ -1757,7 +1757,7 @@ it allocates with `UPDATE workflow_runs SET event_seq = event_seq + 1 RETURNING`
 a single atomic statement. It got there by being the bug first -- `max(seq)+1`
 under an advisory lock, which drifted 31 runs apart before F79 fixed it.
 
-### F79. Schedules were UTC-only, which silently shifted every local schedule — FIXED
+### F90. Schedules were UTC-only, which silently shifted every local schedule — FIXED
 
 `schedules.timezone` was stored and never consulted, so every cron expression was
 evaluated in UTC. A "0 2 * * *" schedule created by an author thinking in London time
