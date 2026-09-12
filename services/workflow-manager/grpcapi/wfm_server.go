@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/runs"
 )
@@ -168,15 +169,83 @@ type GetSpecResponse struct {
 	SpecHash string `json:"spec_hash"`
 }
 
+// SetRunStateRequest is the DAG engine reporting a run-level transition it
+// DECIDED but does not own.
+//
+// The engine computes the frontier and therefore knows first when a run has
+// started or has gone terminal, but workflow_runs belongs to this service
+// (ADR-0011), so the write comes back through here. Only two transitions are
+// expressible, and that narrowness is the point: this is not a general
+// "set the run to whatever you like" endpoint, which would let a peer service
+// drive workflow_runs straight past its own state machine (§5.2).
+type SetRunStateRequest struct {
+	RunID string `json:"run_id"`
+	// State is the engine's conclusion: RUNNING when the first attempts exist, or
+	// one of the terminal states when every node is terminal. Anything else is
+	// refused.
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// SetRunStateResponse reports the state actually recorded.
+type SetRunStateResponse struct {
+	State string `json:"state"`
+	// Applied is false when the state machine legally refused the transition,
+	// which is a normal answer and not an error.
+	Applied bool `json:"applied"`
+}
+
 type specService interface {
 	PutSpec(context.Context, *PutSpecRequest) (*PutSpecResponse, error)
 	GetSpec(context.Context, *GetSpecRequest) (*GetSpecResponse, error)
+	SetRunState(context.Context, *SetRunStateRequest) (*SetRunStateResponse, error)
 }
 
-// SpecServer implements the spec half.
+// SpecServer implements the spec half plus the run-state callback.
 type SpecServer struct {
-	db  store.GWDB
-	log *slog.Logger
+	db   store.GWDB
+	runs RunService
+	log  *slog.Logger
+}
+
+// SetRunState applies a run-level transition the DAG engine detected.
+//
+// It routes to the lifecycle service's own methods rather than writing
+// workflow_runs directly, so the §5.2 state machine still adjudicates every
+// transition. A refused transition comes back as applied=false, because the
+// engine is at-least-once: it will report the same conclusion again, and the
+// second report legitimately has nothing to do.
+func (s *SpecServer) SetRunState(ctx context.Context, req *SetRunStateRequest) (*SetRunStateResponse, error) {
+	if req.RunID == "" {
+		return nil, status.Error(codes.InvalidArgument, "run_id is required")
+	}
+
+	var (
+		row store.RunRow
+		err error
+	)
+	switch domain.RunState(req.State) {
+	case domain.RunRunning:
+		row, err = s.runs.Start(ctx, req.RunID)
+	case domain.RunSucceeded, domain.RunFailed, domain.RunCancelled, domain.RunTimedOut:
+		// The engine does not get to NAME the terminal state. It reports that
+		// every node is terminal, and OnNodesTerminal re-derives which terminal
+		// state that implies from the node counts — so §5.2's rules, including the
+		// CANCELLED-without-failure case (CONTRACT-FINDINGS F3), live in exactly
+		// one place.
+		row, err = s.runs.OnNodesTerminal(ctx, req.RunID)
+	default:
+		return nil, status.Errorf(codes.InvalidArgument,
+			"run state %q is not a transition this endpoint accepts", req.State)
+	}
+	if err != nil {
+		// An illegal transition is the state machine working. Reported as
+		// not-applied so a repeated at-least-once report is not an error storm.
+		s.log.DebugContext(ctx, "run state transition refused",
+			"run_id", req.RunID, "requested", req.State, "err", err)
+		return &SetRunStateResponse{Applied: false}, nil
+	}
+	return &SetRunStateResponse{State: row.State, Applied: true}, nil
 }
 
 // PutSpec stores a new content-addressed version, or returns the existing one.
@@ -238,6 +307,7 @@ var SpecServiceDesc = grpc.ServiceDesc{
 	Methods: []grpc.MethodDesc{
 		{MethodName: "PutSpec", Handler: putSpecHandler},
 		{MethodName: "GetSpec", Handler: getSpecHandler},
+		{MethodName: "SetRunState", Handler: setRunStateHandler},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "services/workflow-manager/grpcapi/wfm_server.go",
@@ -273,6 +343,21 @@ func getSpecHandler(srv any, ctx context.Context, dec func(any) error, intercept
 	})
 }
 
+func setRunStateHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(SetRunStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(specService).SetRunState(ctx, in)
+	}
+	return interceptor(ctx, in, &grpc.UnaryServerInfo{
+		Server: srv, FullMethod: "/nexus.v1.WorkflowSpecService/SetRunState",
+	}, func(ctx context.Context, req any) (any, error) {
+		return srv.(specService).SetRunState(ctx, req.(*SetRunStateRequest))
+	})
+}
+
 // RegisterTyped wires both halves onto a gRPC server.
 //
 // db is the workflow-manager's own pool: it is the OWNER of workflow_specs, so
@@ -282,7 +367,7 @@ func RegisterTyped(srv *grpc.Server, runSvc RunService, db store.GWDB, log *slog
 		log = slog.Default()
 	}
 	nexusv1.RegisterWorkflowManagerServiceServer(srv, &RunServer{runs: runSvc, log: log})
-	srv.RegisterService(&SpecServiceDesc, &SpecServer{db: db, log: log})
+	srv.RegisterService(&SpecServiceDesc, &SpecServer{db: db, runs: runSvc, log: log})
 	log.Info("workflow-manager gRPC registered",
 		"services", []string{"nexus.v1.WorkflowManagerService", "nexus.v1.WorkflowSpecService"})
 }

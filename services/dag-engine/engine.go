@@ -309,6 +309,23 @@ func (e *Engine) Reconcile(ctx context.Context, runID string) (*ReconcileResult,
 		CASMisses:       applied.NodeCASMisses,
 	}
 
+	// A PENDING run with work in flight is RUNNING. The engine publishes this as
+	// well as the terminal states because it is the component that knows: the run
+	// becomes RUNNING exactly when the frontier first yields attempts, and only
+	// the engine computes the frontier.
+	//
+	// Without it a run stays PENDING for its whole life while its nodes succeed
+	// underneath it, and — worse than cosmetic — the scheduler's candidate query
+	// admits only runs in ('PENDING','RUNNING'), so the two states differ for
+	// pause and cancel handling downstream.
+	if run.State == domain.RunPending && len(applied.AttemptsCreated) > 0 {
+		if err := e.publishRunState(ctx, runID, domain.RunRunning); err != nil {
+			// Visibility, not correctness: the attempts are already durable and
+			// dispatchable, and the next reconcile republishes.
+			log.Error("could not publish RUNNING run state", "error", err)
+		}
+	}
+
 	switch decision.RunState {
 	case dag.RunSucceeded, dag.RunFailed, dag.RunCancelled, dag.RunTimedOut:
 		res.RunTerminal = true

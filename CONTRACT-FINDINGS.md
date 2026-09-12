@@ -549,3 +549,51 @@ with NEW worker ids, and returned to ACTIVE with full advertised capacity. The
 Without that path a healthy host would heartbeat forever against a row that is
 never updated and never run another task: idle, but looking perfectly healthy,
 which is the worst shape of failure because it is invisible.
+
+---
+
+## From end-to-end execution
+
+### F49. A DAG executes end to end — VERIFIED
+Runs `66b19b61`, `0e91724a` and `c6784714` all reached SUCCEEDED with attempts
+transitioning PENDING -> DISPATCHED -> RUNNING -> SUCCEEDED, real subprocesses
+executed on the agents, and the two nodes of the 2-task DAG landing on DIFFERENT
+workers -- so dispatch, leasing, edge dependencies and result reporting all work
+across a distributed fleet. Ledger afterwards: 0 reservations, 0 leases, 0
+unclaimed timers.
+
+### F50. Result-store env names mismatched, so NOTHING could reach MinIO — FIXED
+**Severity:** invariant 6 was silently unenforceable. Same root cause as F38.
+The gateway reads `NEXUS_RESULT_STORE_*` and the agent reads `NEXUS_S3_*`, but
+compose emitted only `RESULT_STORE_*`. The gateway therefore fell back to its
+default `http://localhost:9000` and advertised THAT to every worker in
+RegisterResponse -- so no agent could reach MinIO, and the failure was masked
+because small outputs are inlined. Compose now emits all three families.
+
+### F51. Task stdout is never captured as an output — OPEN, invariant 6 UNPROVEN
+**Severity:** real Phase 1 gap. **Status: open.**
+Verified empirically: a task emitting ~300KB (well above the 64KiB inline
+threshold) ran, SUCCEEDED, and left `task_attempts.output_ref` NULL with the
+MinIO bucket completely empty. The agent never attempted a store.
+So the result store is wired and reachable, but nothing currently produces a
+ResultRef for a plain command task: there is no convention by which a
+`runtime.executor: subprocess` task's stdout becomes a declared output.
+**Consequence:** ADR-0008 and invariant 6 (payloads never transit the control
+plane) remain UNPROVEN in practice. They are not violated -- no payload is
+moving through the control plane because no payload is being captured at all --
+but the guarantee is untested end to end.
+**Resolution needed:** define how a task emits outputs. The SDK's TaskContext
+has `ctx.store.put`, which is the intended path for SDK-authored tasks; a raw
+command task needs an explicit convention (a well-known output file or a
+stdout-capture opt-in in the task spec).
+
+### F52. JSON Schema and SDK disagree on enum spelling
+**Severity:** real interop defect, hit immediately on first hand-written spec.
+The gateway's JSON Schema requires SHORT enum forms (`required`, `exponential`,
+`all_success`) but the SDK emits PROTO names (`IDEMPOTENCY_MODE_REQUIRED`,
+`BACKOFF_STRATEGY_EXPONENTIAL`). SDK-generated specs and hand-written specs
+therefore need different spellings for the same field, which contradicts
+ADR-0004's "both surfaces produce the identical document".
+The examples' `compiled.yaml` files use proto names, so they would be REJECTED
+by the schema as written. **The schema should accept both**, exactly as the SDK
+already does for `validation`/`validation_error` (F20).

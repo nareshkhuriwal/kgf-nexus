@@ -39,6 +39,7 @@ func run() error {
 		grpcAddr = flag.String("grpc-addr", envOr("NEXUS_GRPC_ADDR", ":8092"), "gRPC listen address")
 		httpAddr = flag.String("http-addr", envOr("NEXUS_HTTP_ADDR", ":8082"), "address for /healthz and /readyz")
 		logLevel = flag.String("log-level", envOr("NEXUS_LOG_LEVEL", "info"), "debug|info|warn|error")
+		wfmAddr  = flag.String("workflow-manager-addr", envOr("NEXUS_WORKFLOW_MANAGER_ADDR", envOr("WORKFLOW_MANAGER_ADDR", "")), "workflow-manager gRPC address, for publishing run state")
 		// Phase 1 ships all_success and all_done (architecture §11). The pure
 		// engine implements all six rules, so enabling the rest is a policy flag
 		// rather than a rebuild -- which is what makes the Phase 2 rollout a
@@ -66,7 +67,25 @@ func run() error {
 	defer pool.Close()
 
 	st := store.NewDAGEngineStore(pool)
-	engine := NewEngine(st, nil, nil, log)
+	// Without a run-state writer the engine runs headless: it maintains
+	// task_nodes/task_edges and creates attempts, but a run never leaves PENDING
+	// and never reaches SUCCEEDED, because nothing else in the system decides
+	// those transitions. That is fine for tests and wrong for a deployment, so it
+	// is warned about loudly rather than defaulted into silently.
+	var runStates RunStateWriter
+	if *wfmAddr == "" {
+		log.Warn("workflow-manager address is unset; runs will stay PENDING forever because nothing will publish their state",
+			"remedy", "set NEXUS_WORKFLOW_MANAGER_ADDR")
+	} else {
+		c, derr := dialWFMRunState(*wfmAddr, log)
+		if derr != nil {
+			return fmt.Errorf("connect to workflow-manager: %w", derr)
+		}
+		defer func() { _ = c.close() }()
+		runStates = c
+	}
+
+	engine := NewEngine(st, runStates, nil, log)
 	if *allowAllRules {
 		opts := dag.DefaultValidationOptions()
 		opts.AllowDeferredTriggerRules = true
