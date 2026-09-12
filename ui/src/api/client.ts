@@ -198,6 +198,19 @@ function asList<T>(payload: unknown, ...keys: string[]): T[] {
 
 const ns = (namespace: string) => `/v1/namespaces/${encodeURIComponent(namespace)}`;
 
+/**
+ * What the run detail endpoint actually returns.
+ *
+ * The wire response carries attempts alongside the nodes and edges. RunDetail
+ * does not declare them because no consumer of a run object should reach for the
+ * attempt list through it — attempts have their own query, which is what keeps a
+ * node panel from re-rendering the whole page when one attempt transitions. The
+ * field is declared here so the one function that does read it is type-checked.
+ */
+interface RunDetailPayload extends RunDetail {
+  attempts?: Attempt[];
+}
+
 export interface RunListFilter {
   state?: string;
   spec?: string;
@@ -219,16 +232,28 @@ export const api = {
   },
 
   getRun(namespace: string, runId: string): Promise<RunDetail> {
-    return request<RunDetail>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}`);
+    return request<RunDetailPayload>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}`);
   },
 
+  /**
+   * Attempt history, read out of the run detail response.
+   *
+   * There is no `/runs/{id}/attempts` route: the gateway deliberately serves the
+   * run, its nodes and its attempts from one handler so a detail view costs one
+   * request instead of three. Asking for a separate collection got a 404, which
+   * the query layer correctly refuses to retry — so the DAG, the node panel and
+   * the log tail all rendered empty while the data was already on the wire.
+   */
   async listRunAttempts(namespace: string, runId: string): Promise<Attempt[]> {
-    const payload = await request<unknown>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}/attempts`);
+    const payload = await request<unknown>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}`);
     return asList<Attempt>(payload, 'attempts');
   },
 
-  async listEvents(namespace: string, runId: string, sinceSeq?: number): Promise<RunEvent[]> {
-    const q = sinceSeq !== undefined ? `?since_seq=${sinceSeq}` : '';
+  async listEvents(namespace: string, runId: string, afterSeq?: number): Promise<RunEvent[]> {
+    // after_seq, not since_seq: the gateway ignores an unknown parameter rather
+    // than rejecting it, so the wrong spelling silently replayed the whole
+    // history on every poll instead of erroring where anyone would notice.
+    const q = afterSeq !== undefined ? `?after_seq=${afterSeq}` : '';
     const payload = await request<unknown>(
       `${ns(namespace)}/runs/${encodeURIComponent(runId)}/events${q}`,
     );
@@ -312,10 +337,16 @@ export function parseLogPayload(text: string): LogLine[] {
   });
 }
 
-/** SSE URL for the live event tail (§8.2: the events endpoint serves both). */
-export function eventStreamUrl(namespace: string, runId: string, sinceSeq?: number): string {
-  const q = new URLSearchParams({ follow: 'true' });
-  if (sinceSeq !== undefined) q.set('since_seq', String(sinceSeq));
+/**
+ * SSE URL for the live event tail (§8.2: the events endpoint serves both).
+ *
+ * The mode is negotiated in the query string because EventSource cannot set an
+ * Accept header; without `stream=true` the gateway answers with the paged JSON
+ * history, which EventSource treats as a protocol error and retries forever.
+ */
+export function eventStreamUrl(namespace: string, runId: string, afterSeq?: number): string {
+  const q = new URLSearchParams({ stream: 'true' });
+  if (afterSeq !== undefined) q.set('after_seq', String(afterSeq));
   return apiUrl(`${ns(namespace)}/runs/${encodeURIComponent(runId)}/events?${q.toString()}`);
 }
 
