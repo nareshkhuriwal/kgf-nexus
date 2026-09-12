@@ -1,5 +1,18 @@
 -- Add a lease to schedule_backfills.
 --
+-- Renumbered 0007 -> 0008. It was written in parallel with 0007_identity on another
+-- branch and both landed, so two migrations claimed one version. Nothing broke --
+-- migrate.sh keys the ledger on the full filename and the two touch disjoint objects
+-- idempotently -- but a duplicated version stops the number expressing which ran
+-- first, and nothing else does. A deployment that already applied it under the old
+-- name needs its ledger row renamed, or this re-applies:
+--
+--   UPDATE schema_migrations SET version = '0008_backfill_lease'
+--    WHERE version = '0007_backfill_lease';
+--
+-- Re-applying is harmless in this specific case (every statement is IF NOT EXISTS),
+-- which is the only reason this is a note rather than a breaking change.
+--
 -- 0006 gave backfills no claim mechanism, and the driver's first version selected
 -- FOR UPDATE SKIP LOCKED on the pool and returned the rows. That does nothing: the
 -- lock is released when the query completes, and the driver then spends seconds

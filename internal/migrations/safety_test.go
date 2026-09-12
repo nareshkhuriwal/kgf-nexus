@@ -3,6 +3,7 @@ package migrations
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -234,4 +235,50 @@ func analyseString(t *testing.T, body string) []Finding {
 		t.Fatalf("analyse: %v", err)
 	}
 	return fs
+}
+
+// TestVersionNumbersAreUnique catches two migrations claiming one version.
+//
+// It happened: 0007_backfill_lease and 0007_identity were written in parallel
+// branches and merged, so both exist. Nothing BROKE, because migrate.sh keys the
+// ledger on the full filename and applies in lexical order, and those two touch
+// disjoint objects idempotently. But the version number stops being a total order,
+// and that is the property the whole scheme rests on:
+//
+//   - "apply everything after 0006" is no longer answerable;
+//   - a third migration numbered 0007 that DID depend on one of them would apply in
+//     whatever order the names happened to sort, which is not a decision anyone made;
+//   - and a reviewer reading `ls` can no longer tell what ran before what.
+//
+// Cheap to state, so it is stated here rather than left to be rediscovered by
+// whoever writes the migration that finally collides.
+func TestVersionNumbersAreUnique(t *testing.T) {
+	ups, err := filepath.Glob(filepath.Join(migrationsDir, "*.up.sql"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(ups) == 0 {
+		t.Fatal("no migrations found; the check would pass vacuously")
+	}
+
+	seen := map[string][]string{}
+	for _, up := range ups {
+		name := filepath.Base(up)
+		// The version is everything before the first underscore: 0007_identity -> 0007.
+		version := name
+		if i := strings.Index(name, "_"); i > 0 {
+			version = name[:i]
+		}
+		seen[version] = append(seen[version], name)
+	}
+
+	for version, files := range seen {
+		if len(files) > 1 {
+			sort.Strings(files)
+			t.Errorf("version %s is claimed by %d migrations: %v\n"+
+				"    Renumber all but one. Two migrations at one version means the "+
+				"version no longer expresses which ran first, and nothing else does.",
+				version, len(files), files)
+		}
+	}
 }
