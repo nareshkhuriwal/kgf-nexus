@@ -347,7 +347,75 @@ loops.
 At the time of writing, five versions are applied in the dev database
 (`0001_init` … `0005_service_roles`).
 
-### 6.2 Upgrade procedure
+### 6.2 What makes a migration safe to deploy
+
+[ADR-0011](adr/0011-microservice-decomposition.md) rule 5 promises a rolling deploy
+can run mixed versions against one schema, and requires additive migrations only:
+"a column is dropped a release *after* the last reader is gone."
+
+Nothing enforced that. `migrate.sh` applies whatever SQL it finds — it has no
+opinion about whether a statement is safe to run while the previous version of the
+fleet is still serving. `make test` now runs a gate
+(`internal/migrations`) that scans every `*.up.sql` and fails on the shapes that
+break a mixed-version deploy:
+
+| Rule | Severity | Why it breaks a rolling deploy |
+|---|---|---|
+| `DROP COLUMN` | blocking | an old replica still `SELECT`s it |
+| `DROP TABLE` | blocking | an old replica still reads it |
+| `RENAME` | blocking | a drop and an add at once; neither version sees the other's name |
+| `ALTER ... TYPE` | blocking | rewrites the table under `ACCESS EXCLUSIVE`, and can change what an old replica reads back |
+| `SET NOT NULL` | blocking | an old replica that `INSERT`s without the column starts failing |
+| `ADD COLUMN ... NOT NULL` with no `DEFAULT` | blocking | forces a rewrite and breaks inserts from an old replica |
+| `UPDATE` with no top-level `WHERE` | review | row locks across the whole table inside the migration's transaction |
+| `CREATE INDEX` without `CONCURRENTLY` | review | holds a write lock for the whole build |
+
+A finding names the file, line and reason, so the reviewer judges. Deliberate
+exceptions go in the `accepted` allowlist **with a reason** rather than by relaxing
+a rule, and a second test fails if an allowlist entry stops matching — a stale
+exemption is how a hazard gets silently re-admitted later.
+
+The checks are syntactic on purpose. A SQL parser would be more precise and also a
+dependency; these rules are about *shape* — "does this statement's blast radius
+extend to the whole table" — and the migration set is small and reviewed.
+
+#### The 0002 precedent, and why it was not rewritten
+
+`0002_event_seq.up.sql` is the statement the gate exists to catch:
+
+```sql
+ALTER TABLE workflow_runs ADD COLUMN event_seq INT NOT NULL DEFAULT 0;
+UPDATE workflow_runs r
+   SET event_seq = COALESCE((SELECT max(e.seq) FROM run_events e WHERE e.run_id = r.id), 0);
+```
+
+Two things are worth stating precisely, because the obvious reading of each is
+wrong:
+
+- **The `ADD COLUMN` does not rewrite the table.** On PostgreSQL 11+ a `NOT NULL
+  DEFAULT` addition is metadata-only. Verified on the PG 16 this stack runs:
+  `pg_relation_filenode` is unchanged across the statement. It still takes
+  `ACCESS EXCLUSIVE`, so it queues behind open transactions and then blocks
+  readers and writers behind it — but it is fast.
+- **The backfill is the real cost, and its `WHERE` does not bound it.** The `WHERE`
+  belongs to the *subquery*; the outer `UPDATE` touches every row in
+  `workflow_runs`, taking row locks across the table inside the migration's single
+  transaction. On an empty development database that is instant, which is exactly
+  why it was never noticed. Contrast `0003` and `0004`, which carry a genuine
+  top-level `WHERE` and are correctly not flagged — they are the safe shape of the
+  same statement.
+
+It was **not** rewritten. `migrate.sh` keys the ledger on the file name, so editing
+an applied migration changes nothing on any database that already ran it, while
+silently diverging the file from the schema it describes. The migration is applied
+on every existing database; the cost is historical and is recorded here instead.
+
+The mixed-version *allocator* hazard that used to accompany it is genuinely gone: an
+old replica allocating `max(seq)+1` alongside a new one allocating from `event_seq`
+would have reintroduced the collision F7 fixed, and there is no longer any
+`max(seq)+1` allocator in the tree (see F67).
+
+### 6.3 Upgrade procedure
 
 ```bash
 # 1. Back up FIRST, and verify the archive is readable. A migration is the most
@@ -366,7 +434,7 @@ Ordering is the whole procedure: back up, migrate, *then* deploy code. A
 migration is the change most likely to need the backup you took, and taking it
 afterwards is taking it too late.
 
-### 6.3 Rolling back
+### 6.4 Rolling back
 
 Honest limitations, in order of how much they will surprise you:
 

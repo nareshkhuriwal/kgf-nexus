@@ -1282,3 +1282,45 @@ before the next test starts (restarting the container is not the same as having
 a worker), and the effects must be read from whichever agent is alive rather than
 a hard-coded `agent-cpu` -- which is sometimes the container the test just killed.
 
+
+### F77. Nothing enforced ADR-0011 rule 5's additive-migration requirement — FIXED
+
+Rule 5 promises a rolling deploy can run mixed versions against one schema and
+requires additive migrations only, "a column is dropped a release *after* the last
+reader is gone". `migrate.sh` applies whatever SQL it finds: it has no opinion about
+whether a statement is safe while the previous version of the fleet is still
+serving. A `DROP COLUMN`, a rename or a `SET NOT NULL` lands fine on an empty
+development database and takes the fleet down mid-deploy.
+
+`internal/migrations` is now a gate in `go test ./...`. Eight syntactic rules,
+split into "blocking" (breaks a mixed-version fleet) and "review" (blast radius
+scales with table size), each finding naming the file, line and consequence.
+Deliberate exceptions go in an allowlist with a reason; a second test fails when an
+allowlist entry stops matching, because a stale exemption is how a hazard gets
+re-admitted later. Verified by adding a migration containing `DROP COLUMN` plus an
+unbounded `UPDATE` — both were caught with actionable messages.
+
+Two things about migration 0002 that the obvious reading gets wrong, and that are
+worth recording because they changed the conclusion:
+
+- **The `ADD COLUMN ... NOT NULL DEFAULT 0` does NOT rewrite the table.** On
+  PostgreSQL 11+ it is metadata-only. Measured on the PG 16 this stack runs:
+  `pg_relation_filenode` is unchanged across the statement. It does take
+  `ACCESS EXCLUSIVE`, so it queues behind open transactions, but it is fast — the
+  earlier assessment that it rewrites `workflow_runs` was wrong.
+- **The backfill's `WHERE` does not bound it.** It belongs to the subquery, so the
+  outer `UPDATE` touches every row and holds row locks across the table inside the
+  migration's transaction. A naive `/WHERE/` check would have exempted the exact
+  statement this package was written to catch, so the rule tests for a *top-level*
+  WHERE by parenthesis depth. 0003 and 0004 carry genuine top-level bounds and are
+  correctly not flagged — they are the safe shape of the same statement.
+
+0002 was deliberately NOT rewritten. `migrate.sh` keys the ledger on the file name,
+so editing an applied migration changes nothing on any database that already ran it
+while silently diverging the file from the schema it describes. The cost is
+historical and recorded in docs/OPERATIONS.md §6.2 instead.
+
+The mixed-version *allocator* hazard that used to accompany 0002 is genuinely gone:
+an old replica allocating `max(seq)+1` beside a new one allocating from `event_seq`
+would have reintroduced F7's collision, and F67 removed the last `max(seq)+1`
+allocator from the tree.
