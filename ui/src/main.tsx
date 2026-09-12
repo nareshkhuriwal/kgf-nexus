@@ -7,11 +7,15 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter } from 'react-router-dom';
 import { App } from './App';
 import { applyTheme, getThemeChoice } from './lib/theme';
+import { applyStoredAppearance } from './lib/appearance';
 import './index.css';
 
 // Applied BEFORE the first render so the page never paints in one theme and then
 // flips to the other, which reads as a broken load.
 applyTheme(getThemeChoice());
+// Same reasoning for the accent and the nav layout: applying them after the
+// first paint would show the default and then correct itself.
+applyStoredAppearance();
 
 // refetchOnWindowFocus is on: an operator who tabs back to this window expects
 // to see the current state, not whatever was true when they left.

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <!-- The Nexus mark: a hub with edges to satellite nodes, which is the
+       smallest honest drawing of what this platform is about -- a DAG.
+       Geometry matches ui/src/components/Logo.tsx exactly.
+
+       currentColor cannot resolve in a favicon, so the accent is pinned to
+       indigo (#818cf8), the console's default. It reads on both a light and a
+       dark browser chrome, which a favicon has to do because the tab strip
+       follows the OS theme rather than the page's. -->
+  <g stroke="#818cf8" stroke-width="1.6" stroke-linecap="round" opacity="0.55">
+    <path d="M12 12 L12 4.4"/>
+    <path d="M12 12 L18.6 15.8"/>
+    <path d="M12 12 L5.4 15.8"/>
+  </g>
+  <circle cx="12" cy="12" r="3.1" fill="#818cf8"/>
+  <g stroke="#818cf8" stroke-width="1.6" fill="none">
+    <circle cx="12" cy="3.4" r="2.1"/>
+    <circle cx="19.4" cy="16.3" r="2.1"/>
+    <circle cx="4.6" cy="16.3" r="2.1"/>
+  </g>
+</svg>
