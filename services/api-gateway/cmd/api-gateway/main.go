@@ -33,6 +33,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/rest"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/sessions"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/upstream"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/workergrpc"
 )
@@ -185,7 +186,20 @@ func run() error {
 		return fmt.Errorf("listen on %s for worker gRPC: %w", cfg.GRPCAddr, err)
 	}
 
-	errCh := make(chan error, 2)
+	// The sweeper derives from the same shutdown context as the listeners, so the
+	// signal that drains them ends it too and no goroutine outlives run().
+	sweeper := sessions.New(db, log)
+	sweeper.Interval = cfg.SessionSweepInterval
+	sweeper.BatchLimit = cfg.SessionSweepLimit
+
+	errCh := make(chan error, 3)
+	go func() {
+		log.Info("expired-session sweeper started",
+			"interval", sweeper.Interval, "limit", sweeper.BatchLimit)
+		if err := sweeper.Run(ctx); err != nil {
+			errCh <- fmt.Errorf("session sweeper: %w", err)
+		}
+	}()
 	go func() {
 		log.Info("REST listener started", "addr", cfg.RESTAddr)
 		if err := restSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -260,6 +274,12 @@ type config struct {
 	InlineThresholdBytes int64
 	ShutdownTimeout      time.Duration
 	DrainDelay           time.Duration
+	// SessionSweepInterval and SessionSweepLimit tune the expired-session sweep.
+	// Exposed because the right numbers depend on login volume, which only the
+	// deployment knows; the defaults suit a single console rather than an SSO
+	// front door minting thousands of sessions an hour.
+	SessionSweepInterval time.Duration
+	SessionSweepLimit    int
 }
 
 func loadConfig() config {
@@ -283,6 +303,9 @@ func loadConfig() config {
 		// A brief pause after failing readiness, so load balancers observe the
 		// change before connections start closing.
 		DrainDelay: time.Duration(envInt("NEXUS_DRAIN_DELAY_MS", 500)) * time.Millisecond,
+		SessionSweepInterval: time.Duration(envInt("NEXUS_SESSION_SWEEP_INTERVAL_SEC",
+			int(sessions.DefaultInterval/time.Second))) * time.Second,
+		SessionSweepLimit: envInt("NEXUS_SESSION_SWEEP_LIMIT", sessions.DefaultBatchLimit),
 	}
 }
 
