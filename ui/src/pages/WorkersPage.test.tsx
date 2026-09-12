@@ -1,0 +1,232 @@
+/**
+ * Render tests for the worker fleet view.
+ *
+ * This screen exists to answer one question — "why is nothing being
+ * dispatched?" — and the answer is either that no worker advertises the shape
+ * of resource the task needs, or that the capacity is already committed. So
+ * what is pinned here is that capacity is reported PER DIMENSION rather than as
+ * one aggregate percentage, that a missing /capacity endpoint degrades to a
+ * derived summary instead of hiding the fleet, and that a worker the control
+ * plane still calls ACTIVE while its heartbeat has gone stale is called out.
+ */
+
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ReactNode } from 'react';
+import { WorkersPage, deriveCapacity } from './WorkersPage';
+import type { Worker } from '../api/types';
+
+function wrap(ui: ReactNode) {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>{ui}</MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+function mockFetch(handler: (url: string, init?: RequestInit) => [number, unknown]) {
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    const [status, body] = handler(String(url), init);
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+  });
+}
+
+const worker = (over: Partial<Worker> = {}): Worker => ({
+  id: 'wk-11111111-2222',
+  namespace: 'default',
+  hostname: 'agent-cpu-1',
+  queues: ['default', 'batch'],
+  capacity: { cpu_millis: 8000, memory_bytes: 16 * 1024 ** 3, gpu_count: 0 },
+  committed: { cpu_millis: 2000, memory_bytes: 4 * 1024 ** 3, gpu_count: 0 },
+  state: 'ACTIVE',
+  agent_version: '0.1.0',
+  last_heartbeat_at: new Date().toISOString(),
+  ...over,
+});
+
+beforeEach(() => {
+  window.localStorage.clear();
+  window.localStorage.setItem('nexus.apiKey', 'nxs_test');
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('the fleet table', () => {
+  it('lists each worker with its state and the queues it serves', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity') ? [200, { advertised: {}, committed: {} }] : [200, { workers: [worker()] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+
+    expect(await screen.findByText('agent-cpu-1')).toBeInTheDocument();
+    // Queues are the routing key: a task lands on a worker only if the queues
+    // match, so this column is load-bearing for "why is nothing dispatched".
+    expect(screen.getByText('default, batch')).toBeInTheDocument();
+    expect(screen.getByText('ACTIVE', { selector: '[data-state]' })).toBeInTheDocument();
+  });
+
+  /**
+   * A fleet at 40% CPU with every GPU committed is 100% blocked for GPU work.
+   * One aggregate number hides exactly that, which is why committed/advertised
+   * is shown per dimension.
+   */
+  it('reports committed against advertised for each resource dimension', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity')
+        ? [200, { advertised: {}, committed: {} }]
+        : [
+            200,
+            {
+              workers: [
+                worker({
+                  capacity: { cpu_millis: 8000, memory_bytes: 16 * 1024 ** 3, gpu_count: 4, gpu_kind: 'a100' },
+                  committed: { cpu_millis: 2000, memory_bytes: 4 * 1024 ** 3, gpu_count: 4 },
+                }),
+              ],
+            },
+          ],
+    );
+    wrap(<WorkersPage namespace="default" />);
+
+    const row = (await screen.findByText('agent-cpu-1')).closest('tr')!;
+    // CPU has headroom while GPU is fully committed — the two must be legible
+    // as separate facts, not averaged into one bar.
+    expect(within(row).getByText('2 cpu / 8 cpu')).toBeInTheDocument();
+    expect(within(row).getByText('4 / 4')).toBeInTheDocument();
+  });
+
+  /**
+   * The interesting liveness case: the control plane still says ACTIVE but the
+   * heartbeat stopped, which means the liveness sweep has not caught up. A
+   * worker like this looks schedulable and is not.
+   */
+  it('flags a worker that is ACTIVE but has stopped heartbeating', async () => {
+    const stale = new Date(Date.now() - 60_000).toISOString();
+    mockFetch((url) =>
+      url.includes('/capacity')
+        ? [200, { advertised: {}, committed: {} }]
+        : [200, { workers: [worker({ last_heartbeat_at: stale })] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+
+    const row = (await screen.findByText('agent-cpu-1')).closest('tr')!;
+    expect(within(row).getByText(/stale/i)).toBeInTheDocument();
+  });
+
+  it('does not flag a freshly heartbeating worker', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity') ? [200, { advertised: {}, committed: {} }] : [200, { workers: [worker()] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+
+    const row = (await screen.findByText('agent-cpu-1')).closest('tr')!;
+    expect(within(row).queryByText(/stale/i)).not.toBeInTheDocument();
+  });
+
+  it('does not flag a DEAD worker as stale — its state already says so', async () => {
+    const old = new Date(Date.now() - 600_000).toISOString();
+    mockFetch((url) =>
+      url.includes('/capacity')
+        ? [200, { advertised: {}, committed: {} }]
+        : [200, { workers: [worker({ state: 'DEAD', last_heartbeat_at: old })] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+
+    const row = (await screen.findByText('agent-cpu-1')).closest('tr')!;
+    expect(within(row).getByText('DEAD', { selector: '[data-state]' })).toBeInTheDocument();
+    expect(within(row).queryByText(/stale/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * Nothing can be dispatched at all with an empty fleet, so this empty state
+   * carries the command that shows why no agent registered.
+   */
+  it('names the agent logs when no worker has registered', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity') ? [200, { advertised: {}, committed: {} }] : [200, { workers: [] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+
+    const empty = await screen.findByRole('status');
+    expect(empty).toHaveTextContent(/docker compose logs/);
+    expect(empty).toHaveTextContent(/Nothing can be dispatched/i);
+  });
+});
+
+describe('a missing /capacity endpoint degrades rather than hides', () => {
+  /**
+   * Phase 1 ships services that are still being written. The aggregate endpoint
+   * being absent must not cost the operator information already present in the
+   * worker rows — so the page sums them itself and SAYS that it did.
+   */
+  it('derives the summary from the worker rows and labels it as derived', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity')
+        ? [501, { message: 'not implemented' }]
+        : [200, { workers: [worker()] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+
+    await screen.findByText('agent-cpu-1');
+    // The disclosure matters as much as the number: an operator must not read a
+    // derived aggregate as the server's own answer.
+    // The note is split across text nodes by an inline <code>, so assert on the
+    // document's visible text rather than hunting a single element.
+    // useCapacity sets its own retry: shouldRetry, which retries a 501 twice
+    // before settling. Waiting it out asserts the REAL retry policy rather than
+    // a test-only one, exactly as the admin suite does for a 5xx.
+    await waitFor(
+      () => {
+        expect(document.body.textContent).toMatch(/Derived by summing the worker rows/i);
+      },
+      { timeout: 5000 },
+    );
+  });
+
+  it('falls back to an error only when the worker rows are missing too', async () => {
+    mockFetch(() => [500, { message: 'everything is down' }]);
+    wrap(<WorkersPage namespace="default" />);
+
+    await waitFor(
+      () => {
+        const alerts = screen.getAllByRole('alert');
+        expect(alerts.some((a) => /capacity summary/i.test(a.textContent ?? ''))).toBe(true);
+      },
+      { timeout: 5000 },
+    );
+  });
+});
+
+describe('deriveCapacity', () => {
+  /**
+   * Counting a DEAD worker's CPUs would claim headroom that does not exist,
+   * which is the opposite of what this screen is for.
+   */
+  it('excludes non-schedulable workers from advertised capacity', () => {
+    const summary = deriveCapacity([
+      worker({ id: 'a', state: 'ACTIVE', capacity: { cpu_millis: 4000 }, committed: { cpu_millis: 1000 } }),
+      worker({ id: 'b', state: 'DRAINING', capacity: { cpu_millis: 2000 }, committed: { cpu_millis: 500 } }),
+      worker({ id: 'c', state: 'DEAD', capacity: { cpu_millis: 8000 }, committed: { cpu_millis: 0 } }),
+    ]);
+
+    // ACTIVE + DRAINING only. A DRAINING worker still holds its current work,
+    // so its capacity is real even though it accepts nothing new.
+    expect(summary.advertised.cpu_millis).toBe(6000);
+    expect(summary.committed.cpu_millis).toBe(1500);
+    // The fleet counts still include the dead one: it exists, it just cannot run anything.
+    expect(summary.worker_count).toBe(3);
+    expect(summary.active_worker_count).toBe(1);
+  });
+});
