@@ -1,0 +1,362 @@
+package rest
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/cron"
+	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// The schedule surface. Reads are served locally, because ADR-0011 permits the
+// gateway to read every table and a schedule listing is a projection like any other.
+// Mutations go through workflow-manager, which owns the table.
+
+// ScheduleManager is the schedule-mutation surface the gateway needs.
+//
+// Separate from WorkflowManager rather than added to it, so a deployment running a
+// workflow-manager that predates schedules still satisfies the interface it
+// implements. The gateway then reports the feature as unavailable rather than
+// failing to start, which matters during a rolling upgrade (ADR-0011 rule 5).
+type ScheduleManager interface {
+	CreateSchedule(ctx context.Context, s store.Schedule, nextFireAt time.Time) (store.Schedule, error)
+	SetScheduleEnabled(ctx context.Context, namespace, name string, enabled bool, nextFireAt *time.Time) (store.Schedule, error)
+	DeleteSchedule(ctx context.Context, namespace, name string) error
+}
+
+// maxPreviewFires bounds the next-run preview.
+//
+// A preview is the only way an author can check that a cron expression means what
+// they think before it starts creating runs, so it is worth serving generously --
+// but each entry costs a grid walk, and an unbounded count would let one request
+// spend arbitrary CPU inside the gateway.
+const maxPreviewFires = 20
+
+// schedulePayload renders a schedule for the wire.
+//
+// next_fire_at is reported as stored, INCLUDING null. A null means the schedule is
+// not currently scheduled -- disabled, or claimed by a replica that is firing it
+// right now, or left unarmed by one that died mid-fire. Hiding that behind a
+// computed "next time it would fire" would make the third case invisible, and that
+// case is the one an operator needs to see.
+func schedulePayload(s store.Schedule) map[string]any {
+	out := map[string]any{
+		"id":        s.ID,
+		"namespace": s.Namespace,
+		"name":      s.Name,
+		"spec_name": s.SpecName,
+		"cron":      s.CronExpr,
+		// Reported so a caller is never in doubt about which zone the cron was
+		// evaluated in. It is always UTC in this release, and saying so beats
+		// omitting the field and letting a client assume local time.
+		"timezone":       s.Timezone,
+		"params":         s.Params,
+		"priority":       s.Priority,
+		"overlap_policy": s.OverlapPolicy,
+		"catchup_limit":  s.CatchupLimit,
+		"enabled":        s.Enabled,
+		"next_fire_at":   s.NextFireAt,
+		"last_fire_at":   s.LastFireAt,
+		"created_at":     s.CreatedAt,
+		"updated_at":     s.UpdatedAt,
+		"created_by":     s.CreatedBy,
+	}
+	if s.SpecVersion != nil {
+		out["spec_version"] = *s.SpecVersion
+	}
+	return out
+}
+
+// createScheduleRequest is the submission body.
+type createScheduleRequest struct {
+	Name          string         `json:"name"`
+	SpecName      string         `json:"spec_name"`
+	SpecVersion   *int32         `json:"spec_version"`
+	Cron          string         `json:"cron"`
+	Timezone      string         `json:"timezone"`
+	Params        map[string]any `json:"params"`
+	Priority      int32          `json:"priority"`
+	OverlapPolicy string         `json:"overlap_policy"`
+	CatchupLimit  int32          `json:"catchup_limit"`
+	// Enabled defaults to TRUE when absent, because a schedule submitted by an
+	// author who did not mention it is one they want running. A pointer
+	// distinguishes "absent" from an explicit false.
+	Enabled *bool `json:"enabled"`
+}
+
+func (a *API) createSchedule(w http.ResponseWriter, r *http.Request, p authn.Principal) {
+	if a.schedules == nil {
+		scheduleUnavailable(w)
+		return
+	}
+	body, err := readBody(r, maxSpecBytes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "unreadable_body", err.Error())
+		return
+	}
+	var req createScheduleRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed_json", "request body is not valid JSON")
+		return
+	}
+
+	if req.Name == "" || req.SpecName == "" || req.Cron == "" {
+		writeError(w, http.StatusBadRequest, "missing_field",
+			"name, spec_name and cron are all required")
+		return
+	}
+
+	// Parse the cron HERE, at submit time, and reject a bad one.
+	//
+	// The alternative is storing it and discovering the problem in the fire loop,
+	// where the only possible outcome is a schedule that looks active and never
+	// fires -- the failure an operator cannot diagnose. The error names the field
+	// and the token, because this is something a person has to fix.
+	expr, err := cron.Parse(req.Cron)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_cron", err.Error())
+		return
+	}
+	if req.Timezone != "" && req.Timezone != "UTC" {
+		// Refused rather than silently ignored. The column is stored and not yet
+		// consulted, so accepting "Europe/London" would tell the author their
+		// schedule runs at 02:00 local when it will actually run at 02:00 UTC --
+		// wrong by an hour for half the year, in a way nothing would report.
+		writeError(w, http.StatusBadRequest, "timezone_unsupported",
+			"only UTC is supported in this release; cron expressions are evaluated in UTC")
+		return
+	}
+	switch req.OverlapPolicy {
+	case "", store.OverlapSkip, store.OverlapAllow, store.OverlapQueueOne:
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_overlap_policy",
+			fmt.Sprintf("overlap_policy must be one of %q, %q, %q",
+				store.OverlapSkip, store.OverlapAllow, store.OverlapQueueOne))
+		return
+	}
+	if req.CatchupLimit < 0 {
+		writeError(w, http.StatusBadRequest, "invalid_catchup_limit",
+			"catchup_limit must be zero or positive; zero means fire only the tick that just came due")
+		return
+	}
+
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+
+	// The first fire time is computed from now, so a schedule created at 10:07 with
+	// "0 * * * *" first fires at 11:00 rather than immediately.
+	next, err := expr.Next(a.clock().UTC())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "unreachable_cron", err.Error())
+		return
+	}
+
+	created, err := a.schedules.CreateSchedule(r.Context(), store.Schedule{
+		Namespace:     r.PathValue("ns"),
+		Name:          req.Name,
+		SpecName:      req.SpecName,
+		SpecVersion:   req.SpecVersion,
+		CronExpr:      req.Cron,
+		Timezone:      "UTC",
+		Params:        req.Params,
+		Priority:      req.Priority,
+		OverlapPolicy: req.OverlapPolicy,
+		CatchupLimit:  req.CatchupLimit,
+		Enabled:       enabled,
+		CreatedBy:     p.Name,
+	}, next)
+	if err != nil {
+		a.failSchedule(w, r, "create schedule", err)
+		return
+	}
+
+	out := schedulePayload(created)
+	// The preview comes back on CREATE as well as on read, so an author sees
+	// immediately whether the expression they wrote means what they intended --
+	// before it has created anything.
+	out["next_fires"] = previewFires(expr, a.clock().UTC(), 5)
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (a *API) listSchedules(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	rows, err := store.WFMListSchedules(r.Context(), a.db, r.PathValue("ns"), intParam(r, "limit", 100))
+	if err != nil {
+		a.failSchedule(w, r, "list schedules", err)
+		return
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, s := range rows {
+		out = append(out, schedulePayload(s))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"schedules": out})
+}
+
+func (a *API) getSchedule(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	s, err := store.WFMGetSchedule(r.Context(), a.db, r.PathValue("ns"), r.PathValue("name"))
+	if err != nil {
+		a.failSchedule(w, r, "get schedule", err)
+		return
+	}
+	out := schedulePayload(s)
+	if expr, perr := cron.Parse(s.CronExpr); perr == nil {
+		out["next_fires"] = previewFires(expr, a.clock().UTC(), previewCount(r))
+	} else {
+		// A stored schedule whose cron no longer parses cannot fire at all, and the
+		// read is where an operator will look when it stops. Reporting the reason
+		// beats omitting the field and leaving them to guess.
+		out["cron_error"] = perr.Error()
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// setScheduleEnabled handles both enable and disable.
+func (a *API) setScheduleEnabled(enabled bool) func(http.ResponseWriter, *http.Request, authn.Principal) {
+	return func(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+		if a.schedules == nil {
+			scheduleUnavailable(w)
+			return
+		}
+		ns, name := r.PathValue("ns"), r.PathValue("name")
+
+		var next *time.Time
+		if enabled {
+			// Re-enabling must recompute the fire time rather than restore the old
+			// one: a schedule disabled for a week has a next_fire_at deep in the
+			// past, and restoring it would fire a burst of catch-up the operator
+			// did not ask for by pressing "enable".
+			s, err := store.WFMGetSchedule(r.Context(), a.db, ns, name)
+			if err != nil {
+				a.failSchedule(w, r, "get schedule", err)
+				return
+			}
+			expr, perr := cron.Parse(s.CronExpr)
+			if perr != nil {
+				writeError(w, http.StatusBadRequest, "invalid_cron",
+					"this schedule's cron expression no longer parses and it cannot be enabled: "+perr.Error())
+				return
+			}
+			t, nerr := expr.Next(a.clock().UTC())
+			if nerr != nil {
+				writeError(w, http.StatusBadRequest, "unreachable_cron", nerr.Error())
+				return
+			}
+			next = &t
+		}
+
+		s, err := a.schedules.SetScheduleEnabled(r.Context(), ns, name, enabled, next)
+		if err != nil {
+			a.failSchedule(w, r, "set schedule enabled", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, schedulePayload(s))
+	}
+}
+
+func (a *API) deleteSchedule(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	if a.schedules == nil {
+		scheduleUnavailable(w)
+		return
+	}
+	if err := a.schedules.DeleteSchedule(r.Context(), r.PathValue("ns"), r.PathValue("name")); err != nil {
+		a.failSchedule(w, r, "delete schedule", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// previewSchedule evaluates a cron expression WITHOUT creating anything.
+//
+// Exists so an author can check an expression before committing to it. Validating by
+// creating a disabled schedule and reading it back would leave a row behind on every
+// typo, and the whole point is to catch the typo first.
+func (a *API) previewSchedule(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	expr := r.URL.Query().Get("cron")
+	if expr == "" {
+		writeError(w, http.StatusBadRequest, "missing_cron", "the cron query parameter is required")
+		return
+	}
+	parsed, err := cron.Parse(expr)
+	if err != nil {
+		// 200 with a valid:false body, not 400. This endpoint's job is to ANSWER
+		// "is this expression good", so a bad expression is a successful answer --
+		// a 400 would make a UI treat it as a request failure.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"cron":  expr,
+			"valid": false,
+			"error": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cron":       parsed.Expr(),
+		"valid":      true,
+		"timezone":   "UTC",
+		"next_fires": previewFires(parsed, a.clock().UTC(), previewCount(r)),
+	})
+}
+
+// previewFires renders the next n fire times.
+func previewFires(expr *cron.Schedule, from time.Time, n int) []string {
+	times, _ := expr.NextN(from, n)
+	out := make([]string, 0, len(times))
+	for _, t := range times {
+		out = append(out, t.Format(time.RFC3339))
+	}
+	return out
+}
+
+func previewCount(r *http.Request) int {
+	n := intParam(r, "count", 5)
+	if n < 1 {
+		n = 1
+	}
+	if n > maxPreviewFires {
+		n = maxPreviewFires
+	}
+	return n
+}
+
+// failSchedule maps schedule errors, including the not-found the shared handler
+// does not know about.
+func (a *API) failSchedule(w http.ResponseWriter, r *http.Request, op string, err error) {
+	if errors.Is(err, store.ErrScheduleNotFound) {
+		writeError(w, http.StatusNotFound, "schedule_not_found", "no such schedule")
+		return
+	}
+	// The owner classifies a duplicate name as AlreadyExists, because a
+	// pgconn.PgError does not survive a gRPC hop as a typed error. Mapping the
+	// STATUS CODE here keeps the gateway out of the business of matching Postgres
+	// message text, which is not a stable contract.
+	if status.Code(err) == codes.AlreadyExists {
+		writeError(w, http.StatusConflict, "schedule_exists",
+			"a schedule with this name already exists in this namespace")
+		return
+	}
+	if status.Code(err) == codes.NotFound {
+		writeError(w, http.StatusNotFound, "schedule_not_found", "no such schedule")
+		return
+	}
+	if status.Code(err) == codes.InvalidArgument {
+		writeError(w, http.StatusBadRequest, "invalid_schedule", status.Convert(err).Message())
+		return
+	}
+	a.fail(w, r, op, err)
+}
+
+// scheduleUnavailable reports that this gateway has no schedule upstream.
+//
+// 501 rather than 500: the request was fine and the server simply cannot serve it,
+// which is what a client needs to distinguish a misconfiguration from an outage.
+func scheduleUnavailable(w http.ResponseWriter) {
+	writeError(w, http.StatusNotImplemented, "schedules_unavailable",
+		"this gateway has no schedule service configured")
+}

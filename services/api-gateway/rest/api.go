@@ -87,6 +87,11 @@ type API struct {
 	// limiter is nil when rate limiting is disabled, which is the zero-config
 	// default and what keeps dev and the existing tests unchanged.
 	limiter *rateLimiter
+	// schedules is nil when no schedule upstream is configured, in which case the
+	// schedule routes answer 501 rather than the gateway refusing to start. That
+	// keeps a gateway usable against a workflow-manager that predates schedules,
+	// which is what a rolling upgrade produces (ADR-0011 rule 5).
+	schedules ScheduleManager
 }
 
 // New builds the REST API.
@@ -104,6 +109,12 @@ func New(db store.GWDB, auth *authn.Authenticator, wfm WorkflowManager, rm Resou
 // depends on the fleet's size and the console's poll interval.
 func (a *API) WithRateLimit(cfg RateLimitConfig) *API {
 	a.limiter = newRateLimiter(cfg, a.clock)
+	return a
+}
+
+// WithSchedules wires the schedule-mutation upstream, enabling those routes.
+func (a *API) WithSchedules(m ScheduleManager) *API {
+	a.schedules = m
 	return a
 }
 
@@ -128,6 +139,17 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("POST /v1/namespaces/{ns}/runs/{id}/retry", a.guard(authn.ActionWrite, a.retryRun))
 
 	mux.Handle("GET /v1/namespaces/{ns}/attempts/{id}/logs", a.guard(authn.ActionRead, a.attemptLogs))
+
+	// Schedules. Creating one is a write because it creates runs on a timer; the
+	// enable/disable pair and delete are writes for the same reason. The preview is
+	// a read: it evaluates an expression and touches nothing.
+	mux.Handle("POST /v1/namespaces/{ns}/schedules", a.guard(authn.ActionWrite, a.createSchedule))
+	mux.Handle("GET /v1/namespaces/{ns}/schedules", a.guard(authn.ActionRead, a.listSchedules))
+	mux.Handle("GET /v1/namespaces/{ns}/schedules/preview", a.guard(authn.ActionRead, a.previewSchedule))
+	mux.Handle("GET /v1/namespaces/{ns}/schedules/{name}", a.guard(authn.ActionRead, a.getSchedule))
+	mux.Handle("DELETE /v1/namespaces/{ns}/schedules/{name}", a.guard(authn.ActionWrite, a.deleteSchedule))
+	mux.Handle("POST /v1/namespaces/{ns}/schedules/{name}/enable", a.guard(authn.ActionWrite, a.setScheduleEnabled(true)))
+	mux.Handle("POST /v1/namespaces/{ns}/schedules/{name}/disable", a.guard(authn.ActionWrite, a.setScheduleEnabled(false)))
 
 	mux.Handle("GET /v1/namespaces/{ns}/workers", a.guard(authn.ActionRead, a.listWorkers))
 	mux.Handle("POST /v1/namespaces/{ns}/workers/{id}/drain", a.guard(authn.ActionAdminWrite, a.drainWorker))
