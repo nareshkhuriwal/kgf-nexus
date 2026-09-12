@@ -419,8 +419,16 @@ type BackfillStartRequest struct {
 	CreatedBy  string
 }
 
-func backfillPayload(b store.Backfill) map[string]any {
-	return map[string]any{
+// backfillPayload renders one backfill.
+//
+// scheduleName is optional and rendered only when known. A backfill is addressed
+// by its own id for its whole life (it outlives the interval that named it), so
+// schedule_id alone leaves a client holding a uuid it cannot turn into a link
+// without listing every schedule and scanning for a match. The name is supplied
+// where it is already cheap to resolve and omitted elsewhere rather than making
+// every list query pay for a join it does not need.
+func backfillPayload(b store.Backfill, scheduleName ...string) map[string]any {
+	out := map[string]any{
 		"id":          b.ID,
 		"schedule_id": b.ScheduleID,
 		"namespace":   b.Namespace,
@@ -439,6 +447,10 @@ func backfillPayload(b store.Backfill) map[string]any {
 		"ended_at":     b.EndedAt,
 		"created_by":   b.CreatedBy,
 	}
+	if len(scheduleName) > 0 && scheduleName[0] != "" {
+		out["schedule_name"] = scheduleName[0]
+	}
+	return out
 }
 
 type startBackfillRequest struct {
@@ -490,7 +502,7 @@ func (a *API) startBackfill(w http.ResponseWriter, r *http.Request, p authn.Prin
 		a.failSchedule(w, r, "start backfill", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, backfillPayload(bf))
+	writeJSON(w, http.StatusCreated, backfillPayload(bf, sch.Name))
 }
 
 func (a *API) listBackfills(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
@@ -507,7 +519,7 @@ func (a *API) listBackfills(w http.ResponseWriter, r *http.Request, _ authn.Prin
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, b := range rows {
-		out = append(out, backfillPayload(b))
+		out = append(out, backfillPayload(b, sch.Name))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"backfills": out})
 }
@@ -518,7 +530,15 @@ func (a *API) getBackfill(w http.ResponseWriter, r *http.Request, _ authn.Princi
 		a.failBackfill(w, r, "get backfill", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, backfillPayload(b))
+	// Resolve the schedule's NAME here specifically: this route is reached by
+	// backfill id alone, so it is the one place a client has no other way to know
+	// which schedule it is looking at. A failure is not fatal -- the backfill is
+	// what was asked for, and answering without the link is better than a 500.
+	var name string
+	if sch, serr := store.WFMGetScheduleByID(r.Context(), a.db, b.ScheduleID); serr == nil {
+		name = sch.Name
+	}
+	writeJSON(w, http.StatusOK, backfillPayload(b, name))
 }
 
 // backfillAction handles pause, resume and cancel.

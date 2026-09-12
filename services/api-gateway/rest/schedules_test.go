@@ -434,3 +434,29 @@ func TestPreviewHonoursTheTimezone(t *testing.T) {
 		t.Errorf("unknown zone body = %v, want valid:false with an error", badBody)
 	}
 }
+
+// A backfill is addressed by its own id for its whole life, so a client that
+// followed a backfill link holds a schedule UUID and nothing a person can read.
+// The name is rendered where it is known and omitted where it is not, rather
+// than every list query paying for a join to carry it.
+func TestBackfillPayloadCarriesTheScheduleNameWhenKnown(t *testing.T) {
+	b := store.Backfill{ID: "bf-1", ScheduleID: "sch-1", Namespace: "team-ml"}
+
+	with := backfillPayload(b, "nightly-retrain")
+	if got := with["schedule_name"]; got != "nightly-retrain" {
+		t.Errorf("schedule_name = %v, want nightly-retrain", got)
+	}
+	// schedule_id stays regardless: the name is a convenience, the id is the
+	// identifier every other route is keyed on.
+	if got := with["schedule_id"]; got != "sch-1" {
+		t.Errorf("schedule_id = %v, want sch-1", got)
+	}
+
+	// Absent rather than present-and-empty, so a client can tell "not supplied"
+	// from "named the empty string" without a special case.
+	for _, p := range []map[string]any{backfillPayload(b), backfillPayload(b, "")} {
+		if _, ok := p["schedule_name"]; ok {
+			t.Errorf("schedule_name was rendered when no name was known: %v", p["schedule_name"])
+		}
+	}
+}
