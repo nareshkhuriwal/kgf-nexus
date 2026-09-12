@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -340,21 +341,51 @@ type SchedulerClient struct {
 	// because the two calls are one causal step: a result that is applied without
 	// a reconcile leaves the run stalled with no error anywhere.
 	dag *dagGRPC
+	// claimPeers are the ADDITIONAL scheduler replicas a worker poll is offered
+	// to, beyond grpc.
+	//
+	// A scheduler replica drains exactly ONE queue (NEXUS_QUEUE) and answers
+	// ClaimForWorker with nothing at all when the polling worker does not serve
+	// that queue. So a fleet with a `gpu` queue needs a replica bound to `gpu`,
+	// and the gateway must offer the poll to it: with a single upstream, every
+	// gpu-queue attempt sits PENDING forever with no pending_reason, which is
+	// indistinguishable from a capacity shortage. Configure with a
+	// comma-separated NEXUS_SCHEDULER_ADDR.
+	//
+	// Only the CLAIM is fanned out. Report paths (MarkStarted, ApplyResult, ...)
+	// stay on grpc, because any replica can apply a report — those queries are
+	// keyed on attempt_id, not on the replica's queue.
+	claimPeers []*schedGRPC
 }
 
 // DialScheduler creates the client.
+//
+// addr may be a comma-separated list. The first entry is the primary used for
+// every call; the rest are offered worker polls only (see claimPeers).
 func DialScheduler(ctx context.Context, addr, dagAddr string, log *slog.Logger) (*SchedulerClient, error) {
+	addrs := splitAddrs(addr)
 	c := &SchedulerClient{addr: addr, log: log}
-	if addr == "" {
+	if len(addrs) == 0 {
 		log.Warn("scheduler address is unset; PollTask will return no work and attempt reports will fail",
 			"remedy", "set NEXUS_SCHEDULER_ADDR")
 		return c, nil
 	}
-	g, err := dialScheduler(ctx, addr, log)
+	c.addr = addrs[0]
+	g, err := dialScheduler(ctx, addrs[0], log)
 	if err != nil {
 		return nil, err
 	}
 	c.grpc = g
+	for _, extra := range addrs[1:] {
+		pg, err := dialScheduler(ctx, extra, log)
+		if err != nil {
+			return nil, err
+		}
+		c.claimPeers = append(c.claimPeers, pg)
+		log.Info("additional scheduler replica wired for worker polls",
+			"addr", extra,
+			"why", "a replica serves one queue, so multi-queue fleets need one upstream per queue")
+	}
 
 	if dagAddr == "" {
 		log.Warn("dag-engine address is unset; runs will not advance past their first node",
@@ -399,7 +430,41 @@ func (c *SchedulerClient) ClaimForWorker(ctx context.Context, workerID string, f
 		// spinning on errors.
 		return nil, nil
 	}
-	return c.grpc.claimForWorker(ctx, workerID, free, queues, maxTasks)
+	asg, err := c.grpc.claimForWorker(ctx, workerID, free, queues, maxTasks)
+	if err != nil || len(asg) > 0 || len(c.claimPeers) == 0 {
+		return asg, err
+	}
+	// The primary had nothing for this worker. Offer the poll to the replicas
+	// bound to the other queues; "not my queue" is their routine answer, so an
+	// empty result from one peer says nothing about the next.
+	for _, peer := range c.claimPeers {
+		asg, err := peer.claimForWorker(ctx, workerID, free, queues, maxTasks)
+		if err != nil {
+			// One unreachable replica must not blind the worker to the queues the
+			// others still serve, so this is logged and skipped rather than
+			// returned. A total outage still surfaces: the fleet goes idle and the
+			// attempts stay PENDING, which is the same signal as no capacity.
+			c.log.WarnContext(ctx, "scheduler peer failed a worker claim; trying the next",
+				"worker_id", workerID, "error", err)
+			continue
+		}
+		if len(asg) > 0 {
+			return asg, nil
+		}
+	}
+	return nil, nil
+}
+
+// splitAddrs parses a comma-separated upstream list, tolerating spaces and
+// empty entries so a compose file can carry a trailing comma harmlessly.
+func splitAddrs(addr string) []string {
+	var out []string
+	for _, p := range strings.Split(addr, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // MarkStarted transitions DISPATCHED -> RUNNING.

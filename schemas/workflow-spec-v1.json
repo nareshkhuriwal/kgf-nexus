@@ -4,34 +4,54 @@
   "title": "WorkflowSpec v1",
   "description": "Structural contract for the ONLY document the control plane understands (ADR-0004). Mirrors proto/nexus/v1/workflow.proto and task.proto. YAML authoring is first-class: YAML is parsed to JSON and validated against THIS schema, so neither surface is second-class. Structural validation only -- acyclicity and cross-edge type compatibility are semantic checks performed after this schema passes, because JSON Schema cannot express graph reachability.",
   "type": "object",
-  "required": ["api_version", "namespace", "name", "tasks"],
+  "required": [
+    "api_version",
+    "namespace",
+    "name",
+    "tasks"
+  ],
   "additionalProperties": false,
   "properties": {
     "api_version": {
       "description": "Pinned so a future spec grammar can be introduced without reinterpreting existing stored documents.",
       "const": "nexus.dev/v1"
     },
-    "namespace": { "$ref": "#/$defs/identifier" },
-    "name": { "$ref": "#/$defs/identifier" },
-    "description": { "type": "string", "maxLength": 4096 },
+    "namespace": {
+      "$ref": "#/$defs/identifier"
+    },
+    "name": {
+      "$ref": "#/$defs/identifier"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 4096
+    },
     "tasks": {
       "description": "At least one task: an empty workflow is always an authoring error, never an intent.",
       "type": "array",
       "minItems": 1,
       "maxItems": 1000,
-      "items": { "$ref": "#/$defs/TaskSpec" }
+      "items": {
+        "$ref": "#/$defs/TaskSpec"
+      }
     },
     "edges": {
       "type": "array",
       "maxItems": 10000,
-      "items": { "$ref": "#/$defs/Edge" },
+      "items": {
+        "$ref": "#/$defs/Edge"
+      },
       "default": []
     },
     "params": {
       "description": "Workflow-level input declarations, bound at run creation.",
       "type": "object",
-      "propertyNames": { "$ref": "#/$defs/identifier" },
-      "additionalProperties": { "$ref": "#/$defs/ValueSpec" },
+      "propertyNames": {
+        "$ref": "#/$defs/identifier"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/ValueSpec"
+      },
       "default": {}
     },
     "run_timeout_ms": {
@@ -50,15 +70,17 @@
       "maximum": 100000,
       "default": 0
     },
-    "priority": { "$ref": "#/$defs/priority" },
-    "labels": { "$ref": "#/$defs/stringMap" }
+    "priority": {
+      "$ref": "#/$defs/priority"
+    },
+    "labels": {
+      "$ref": "#/$defs/stringMap"
+    }
   },
-
   "$defs": {
     "_enumSpellingNote": {
       "description": "NOT A TYPE -- documentation. Every enum-valued field below accepts TWO spellings of each value: the short authoring form (`exponential`, `all_success`, `required`) and the protobuf constant the SDK emits (`BACKOFF_STRATEGY_EXPONENTIAL`, `TRIGGER_RULE_ALL_SUCCESS`, `IDEMPOTENCY_MODE_REQUIRED`). Both normalize to one stored value at the gateway, so the document a Python author compiles and the document a YAML author hand-writes are the same document to the platform -- which is what ADR-0004 promises when it says both surfaces are first-class. Accepting only the short form made every SDK-generated spec, including the committed examples/*/compiled.yaml, unsubmittable (CONTRACT-FINDINGS.md F52); accepting only the proto form would leak protobuf encoding conventions into a user-facing YAML surface. Accepting both and canonicalizing once is the only option that does not make one surface second-class."
     },
-
     "identifier": {
       "description": "DNS-label-ish: safe in URLs, object-store keys, and container names without escaping.",
       "type": "string",
@@ -66,7 +88,6 @@
       "maxLength": 253,
       "pattern": "^[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$"
     },
-
     "nodeId": {
       "description": "Unique within the workflow. Participates in the idempotency key, so renaming a node changes its logical identity and de-duplication scope.",
       "type": "string",
@@ -74,13 +95,11 @@
       "maxLength": 128,
       "pattern": "^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
     },
-
     "durationMs": {
       "type": "integer",
       "minimum": 0,
       "maximum": 315360000000
     },
-
     "priority": {
       "description": "Higher dispatches first within a queue.",
       "type": "integer",
@@ -88,22 +107,35 @@
       "maximum": 1000000,
       "default": 100
     },
-
     "stringMap": {
       "type": "object",
-      "additionalProperties": { "type": "string", "maxLength": 4096 }
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 4096
+      }
     },
-
     "ValueSpec": {
       "description": "The typed interface that makes static DAG validation possible at submit time rather than at 3am (Flyte's typed-interface idea).",
       "type": "object",
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "additionalProperties": false,
       "properties": {
         "type": {
-          "enum": ["int", "float", "string", "bool", "json", "file_ref"]
+          "enum": [
+            "int",
+            "float",
+            "string",
+            "bool",
+            "json",
+            "file_ref"
+          ]
         },
-        "required": { "type": "boolean", "default": false },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
         "default_json": {
           "description": "JSON-ENCODED default (a string), matching proto ValueSpec.default_json. Encoding it as text keeps the wire type uniform regardless of the declared value type.",
           "type": "string",
@@ -112,11 +144,17 @@
       },
       "not": {
         "description": "A required input with a default is contradictory: the default can never apply.",
-        "required": ["required", "default_json"],
-        "properties": { "required": { "const": true } }
+        "required": [
+          "required",
+          "default_json"
+        ],
+        "properties": {
+          "required": {
+            "const": true
+          }
+        }
       }
     },
-
     "ResourceVector": {
       "description": "The multi-dimensional resource model (ADR-0009). Scalars only -- all quantities are already normalized to base units by the authoring surface, because the control plane must not depend on unit-parsing subtleties for scheduling arithmetic.",
       "type": "object",
@@ -128,8 +166,15 @@
           "minimum": 0,
           "maximum": 100000000
         },
-        "memory_bytes": { "type": "integer", "minimum": 0 },
-        "gpu_count": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "memory_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gpu_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4096
+        },
         "gpu_kind": {
           "description": "Optional GPU model constraint, e.g. \"nvidia-a100\". Empty/absent = any GPU.",
           "type": "string",
@@ -140,38 +185,56 @@
           "type": "integer",
           "minimum": 0
         },
-        "disk_bytes": { "type": "integer", "minimum": 0 },
+        "disk_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
         "custom": {
           "description": "Arbitrary countable constraints, e.g. {\"license_token\": 1}. Lets users express non-obvious constraints without a platform code change.",
           "type": "object",
-          "propertyNames": { "type": "string", "maxLength": 128 },
-          "additionalProperties": { "type": "integer", "minimum": 0 }
+          "propertyNames": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
         }
       }
     },
-
     "ResourceRequest": {
       "description": "request is what the scheduler subtracts from worker capacity; limit is what the executor enforces via cgroups. limit >= request permits bursting; limit == request gives predictable performance (Kubernetes got this right).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "request": { "$ref": "#/$defs/ResourceVector" },
-        "limit": { "$ref": "#/$defs/ResourceVector" }
+        "request": {
+          "$ref": "#/$defs/ResourceVector"
+        },
+        "limit": {
+          "$ref": "#/$defs/ResourceVector"
+        }
       }
     },
-
     "Timeouts": {
       "description": "Temporal's four-timeout model. Four rather than one because \"it timed out\" is operationally useless: distinguishing \"never got capacity\" from \"ran too long\" from \"went silent\" tells you whether to fix the cluster, the code, or the network. 0 on any field means that timeout is not enforced.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "schedule_to_start_ms": { "$ref": "#/$defs/durationMs" },
-        "start_to_close_ms": { "$ref": "#/$defs/durationMs" },
-        "schedule_to_close_ms": { "$ref": "#/$defs/durationMs" },
-        "heartbeat_ms": { "$ref": "#/$defs/durationMs" }
+        "schedule_to_start_ms": {
+          "$ref": "#/$defs/durationMs"
+        },
+        "start_to_close_ms": {
+          "$ref": "#/$defs/durationMs"
+        },
+        "schedule_to_close_ms": {
+          "$ref": "#/$defs/durationMs"
+        },
+        "heartbeat_ms": {
+          "$ref": "#/$defs/durationMs"
+        }
       }
     },
-
     "ErrorClass": {
       "description": "Classified on the worker, which sees the real failure; the control plane's retry policy consumes the class. Both spellings of the two classes that architecture 4.3 and common.proto disagree about are accepted (validation/validation_error, permission_denied) and normalized to the proto name on the way in -- rejecting an author for following the published YAML example would be our defect, not theirs (CONTRACT-FINDINGS.md F20).",
       "enum": [
@@ -185,7 +248,6 @@
         "oom",
         "not_found",
         "infrastructure",
-
         "ERROR_CLASS_TRANSIENT",
         "ERROR_CLASS_TIMEOUT",
         "ERROR_CLASS_WORKER_LOST",
@@ -197,7 +259,6 @@
         "ERROR_CLASS_INFRASTRUCTURE"
       ]
     },
-
     "RetryPolicy": {
       "type": "object",
       "additionalProperties": false,
@@ -221,24 +282,40 @@
           ],
           "default": "exponential"
         },
-        "initial_ms": { "$ref": "#/$defs/durationMs" },
-        "max_ms": { "$ref": "#/$defs/durationMs" },
-        "multiplier": { "type": "number", "minimum": 1, "maximum": 100 },
+        "initial_ms": {
+          "$ref": "#/$defs/durationMs"
+        },
+        "max_ms": {
+          "$ref": "#/$defs/durationMs"
+        },
+        "multiplier": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 100
+        },
         "jitter": {
           "description": "Full jitter is the default because synchronized backoff creates a retry thundering herd that can be worse than the original failure.",
-          "enum": ["none", "full", "equal"],
+          "enum": [
+            "none",
+            "full",
+            "equal"
+          ],
           "default": "full"
         },
         "retry_on": {
           "description": "Allowlist of retryable error classes. Absent/empty = platform default set.",
           "type": "array",
-          "items": { "$ref": "#/$defs/ErrorClass" },
+          "items": {
+            "$ref": "#/$defs/ErrorClass"
+          },
           "uniqueItems": true
         },
         "no_retry_on": {
           "description": "Always terminal; do not waste capacity retrying these. Takes precedence over retry_on.",
           "type": "array",
-          "items": { "$ref": "#/$defs/ErrorClass" },
+          "items": {
+            "$ref": "#/$defs/ErrorClass"
+          },
           "uniqueItems": true
         },
         "retry_on_different_worker": {
@@ -248,24 +325,34 @@
         }
       }
     },
-
     "CachePolicy": {
       "description": "cache_key = sha256(task_ref || version || canonical_hash(inputs)); bumping task version therefore creates a fresh cache namespace.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean", "default": false },
-        "ttl_ms": { "$ref": "#/$defs/durationMs" }
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "ttl_ms": {
+          "$ref": "#/$defs/durationMs"
+        }
       }
     },
-
     "SecretRef": {
       "description": "A REFERENCE ONLY. Resolved by the worker at execution time; secret VALUES never enter the metadata store, so a metadata compromise leaks no credentials.",
       "type": "object",
-      "required": ["name", "ref"],
+      "required": [
+        "name",
+        "ref"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
         "ref": {
           "description": "Provider URI such as vault://kv/ml/s3 or env://NAME. A bare literal is rejected by the pattern, which is the point: it stops a well-meaning author from pasting a credential into a stored spec.",
           "type": "string",
@@ -275,14 +362,17 @@
         }
       }
     },
-
     "RuntimeSpec": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "executor": {
           "description": "Worker advertises which executors it supports; the scheduler treats this as a placement constraint (ADR-0007).",
-          "enum": ["subprocess", "docker", "k8s"],
+          "enum": [
+            "subprocess",
+            "docker",
+            "k8s"
+          ],
           "default": "subprocess"
         },
         "image": {
@@ -290,41 +380,76 @@
           "type": "string",
           "maxLength": 1024
         },
-        "command": { "type": "array", "items": { "type": "string" } },
-        "args": { "type": "array", "items": { "type": "string" } },
-        "env": { "$ref": "#/$defs/stringMap" },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "$ref": "#/$defs/stringMap"
+        },
         "secrets": {
           "type": "array",
-          "items": { "$ref": "#/$defs/SecretRef" }
+          "items": {
+            "$ref": "#/$defs/SecretRef"
+          }
         },
-        "working_dir": { "type": "string", "maxLength": 4096 },
-        "stdout_output": {
-          "description": "Names the declared output in this task's `outputs` that receives the workload's STDOUT. Empty or absent captures nothing. The general convention is to write one file per output into $NEXUS_OUTPUT_DIR; this opt-in exists because requiring a trivial shell task to redirect into a file is hostile for the commonest task shape. A file of the same name WINS over stdout, since the file is the deliberate act while stdout also carries incidental chatter.",
+        "working_dir": {
           "type": "string",
-          "maxLength": 128
+          "maxLength": 4096
+        },
+        "stdout_output": {
+          "type": "string",
+          "description": "Name of a DECLARED output that receives the task's stdout. Empty or absent means stdout is not captured. A file of the same name written to $NEXUS_OUTPUT_DIR wins over stdout, since the file is the deliberate act while stdout also carries incidental chatter."
         }
       },
       "allOf": [
         {
           "description": "Container executors need an image; a subprocess executor must not carry one.",
           "if": {
-            "properties": { "executor": { "enum": ["docker", "k8s"] } },
-            "required": ["executor"]
+            "properties": {
+              "executor": {
+                "enum": [
+                  "docker",
+                  "k8s"
+                ]
+              }
+            },
+            "required": [
+              "executor"
+            ]
           },
           "then": {
-            "required": ["image"],
-            "properties": { "image": { "minLength": 1 } }
+            "required": [
+              "image"
+            ],
+            "properties": {
+              "image": {
+                "minLength": 1
+              }
+            }
           }
         }
       ]
     },
-
     "TaskSpec": {
       "type": "object",
-      "required": ["id", "task_ref"],
+      "required": [
+        "id",
+        "task_ref"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": { "$ref": "#/$defs/nodeId" },
+        "id": {
+          "$ref": "#/$defs/nodeId"
+        },
         "task_ref": {
           "description": "Handler identity resolved by the WORKER, e.g. \"ml.train:v3\". The control plane never resolves or loads it.",
           "type": "string",
@@ -341,15 +466,25 @@
         },
         "inputs": {
           "type": "object",
-          "propertyNames": { "$ref": "#/$defs/identifier" },
-          "additionalProperties": { "$ref": "#/$defs/ValueSpec" }
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/ValueSpec"
+          }
         },
         "outputs": {
           "type": "object",
-          "propertyNames": { "$ref": "#/$defs/identifier" },
-          "additionalProperties": { "$ref": "#/$defs/ValueSpec" }
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/ValueSpec"
+          }
         },
-        "resources": { "$ref": "#/$defs/ResourceRequest" },
+        "resources": {
+          "$ref": "#/$defs/ResourceRequest"
+        },
         "queue": {
           "description": "Routing: workers subscribe to queues.",
           "type": "string",
@@ -366,8 +501,12 @@
           "description": "SOFT data-locality hint naming another node id; never a correctness constraint.",
           "$ref": "#/$defs/nodeId"
         },
-        "timeouts": { "$ref": "#/$defs/Timeouts" },
-        "retry": { "$ref": "#/$defs/RetryPolicy" },
+        "timeouts": {
+          "$ref": "#/$defs/Timeouts"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy"
+        },
         "idempotency": {
           "description": "required is the platform default. A task declaring none is accepted but excluded from automatic retry of indeterminate (LOST) outcomes, because we cannot safely re-run it (ARCH 6.5).",
           "enum": [
@@ -380,8 +519,12 @@
           ],
           "default": "required"
         },
-        "cache": { "$ref": "#/$defs/CachePolicy" },
-        "runtime": { "$ref": "#/$defs/RuntimeSpec" },
+        "cache": {
+          "$ref": "#/$defs/CachePolicy"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeSpec"
+        },
         "concurrency_key": {
           "description": "Named GLOBAL semaphore; limits concurrent attempts sharing this key across all runs.",
           "type": "string",
@@ -410,45 +553,81 @@
           ],
           "default": "all_success"
         },
-        "priority": { "$ref": "#/$defs/priority" }
+        "priority": {
+          "$ref": "#/$defs/priority"
+        }
       },
       "allOf": [
         {
           "description": "A concurrency limit without a key names no semaphore, and a key with limit 0 would block the task forever; both are authoring mistakes worth rejecting at submit time.",
           "if": {
-            "properties": { "concurrency_limit": { "minimum": 1 } },
-            "required": ["concurrency_limit"]
+            "properties": {
+              "concurrency_limit": {
+                "minimum": 1
+              }
+            },
+            "required": [
+              "concurrency_limit"
+            ]
           },
           "then": {
-            "required": ["concurrency_key"],
-            "properties": { "concurrency_key": { "minLength": 1 } }
+            "required": [
+              "concurrency_key"
+            ],
+            "properties": {
+              "concurrency_key": {
+                "minLength": 1
+              }
+            }
           }
         },
         {
           "if": {
-            "properties": { "concurrency_key": { "minLength": 1 } },
-            "required": ["concurrency_key"]
+            "properties": {
+              "concurrency_key": {
+                "minLength": 1
+              }
+            },
+            "required": [
+              "concurrency_key"
+            ]
           },
           "then": {
-            "required": ["concurrency_limit"],
-            "properties": { "concurrency_limit": { "minimum": 1 } }
+            "required": [
+              "concurrency_limit"
+            ],
+            "properties": {
+              "concurrency_limit": {
+                "minimum": 1
+              }
+            }
           }
         }
       ]
     },
-
     "Edge": {
       "type": "object",
-      "required": ["from_node_id", "to_node_id"],
+      "required": [
+        "from_node_id",
+        "to_node_id"
+      ],
       "additionalProperties": false,
       "properties": {
-        "from_node_id": { "$ref": "#/$defs/nodeId" },
-        "to_node_id": { "$ref": "#/$defs/nodeId" },
+        "from_node_id": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "to_node_id": {
+          "$ref": "#/$defs/nodeId"
+        },
         "output_to_input": {
           "description": "key = DOWNSTREAM input name, value = UPSTREAM output name. Type-checked against both ValueSpecs at submit time.",
           "type": "object",
-          "propertyNames": { "$ref": "#/$defs/identifier" },
-          "additionalProperties": { "$ref": "#/$defs/identifier" }
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/identifier"
+          }
         }
       }
     }

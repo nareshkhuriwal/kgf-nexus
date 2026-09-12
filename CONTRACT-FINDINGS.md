@@ -580,8 +580,35 @@ default `http://localhost:9000` and advertised THAT to every worker in
 RegisterResponse -- so no agent could reach MinIO, and the failure was masked
 because small outputs are inlined. Compose now emits all three families.
 
-### F51. Task stdout is never captured as an output — OPEN, invariant 6 UNPROVEN
-**Severity:** real Phase 1 gap. **Status: open.**
+### F51. Task stdout is never captured as an output — FIXED, invariant 6 NOW PROVEN
+**Severity:** real Phase 1 gap. **Status: FIXED and verified end to end.**
+Resolution: `runtime.stdout_output` names a DECLARED output that receives the
+task's stdout, and `$NEXUS_OUTPUT_DIR/<name>` files are collected for every
+declared output. A file WINS over stdout, because writing the file is a
+deliberate act while stdout also carries incidental chatter. Only declared names
+are collected -- an undeclared file is ignored rather than inferred, since the
+DAG validated its edges against the declared interface at submit time. The
+gateway rejects a stdout_output naming an undeclared output at SUBMIT time,
+because the failure is otherwise silent and late: the task succeeds while
+producing nothing and every downstream edge resolves to an absent input.
+
+VERIFIED against the live stack:
+- 300,000-byte stdout -> blob in MinIO, `output_ref` holds only the reference
+  (`default/4c96aa0e...`, sha256-addressed, 293KiB object confirmed present in
+  the bucket). The agent wrote to MinIO DIRECTLY, so no payload transited the
+  control plane -- ADR-0008 and invariant 6 are now demonstrated, not assumed.
+- 5-byte stdout -> INLINE (`"inline": "dGlueQo="`), and the bucket object count
+  stayed at 1, so a trivial output still costs no round-trip.
+
+**A subtle failure found while verifying this** is worth recording: the field
+was correctly stored in `workflow_specs` but silently ABSENT from the
+materialized `task_nodes.spec_json`, so the agent never captured anything. Cause:
+dag-engine and workflow-manager containers were running binaries built before the
+proto change, and their `protojson.UnmarshalOptions{DiscardUnknown: true}`
+discarded the unknown field without error. DiscardUnknown is right for rolling
+upgrades, but it means a stale service silently DROPS new fields rather than
+failing. Rebuilding every service onto one generated contract fixed it. Worth a
+deployment rule: services sharing a proto must be rebuilt together.
 Verified empirically: a task emitting ~300KB (well above the 64KiB inline
 threshold) ran, SUCCEEDED, and left `task_attempts.output_ref` NULL with the
 MinIO bucket completely empty. The agent never attempted a store.
@@ -596,6 +623,13 @@ but the guarantee is untested end to end.
 has `ctx.store.put`, which is the intended path for SDK-authored tasks; a raw
 command task needs an explicit convention (a well-known output file or a
 stdout-capture opt-in in the task spec).
+
+### F52b. The JSON Schema lives in TWO places
+`schemas/workflow-spec-v1.json` is the canonical copy, but go:embed cannot reach
+outside a package directory, so `services/api-gateway/spec/workflow-spec-v1.json`
+is a duplicate. A test (`TestEmbeddedSchemaMatchesCanonical`) guards that they
+match, which is what caught the drift when only the canonical copy was edited.
+Both must be updated together.
 
 ### F52. JSON Schema and SDK disagree on enum spelling
 **Severity:** real interop defect, hit immediately on first hand-written spec.

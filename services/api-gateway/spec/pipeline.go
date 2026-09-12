@@ -70,6 +70,7 @@ func Compile(body []byte, format Format) (*Compiled, error) {
 	// property of a single task, not of the graph, and internal/dag is deliberately
 	// pure graph logic.
 	problems = append(problems, validateTimeoutCoherence(proto)...)
+	problems = append(problems, validateStdoutOutput(proto)...)
 
 	if len(problems) > 0 {
 		return nil, &ValidationFailure{Problems: problems}
@@ -170,6 +171,41 @@ func validateTimeoutCoherence(spec *nexusv1.WorkflowSpec) []Problem {
 				Stage: "semantic",
 			})
 		}
+	}
+	return out
+}
+
+// validateStdoutOutput rejects a stdout_output that names no declared output.
+//
+// Checked here rather than in internal/dag because it is a property of one task,
+// not of the graph — the same reason validateTimeoutCoherence lives here.
+//
+// It matters because the failure is otherwise SILENT and late. The agent
+// collects only DECLARED outputs, so a stdout_output naming an undeclared name
+// produces nothing: the task runs, exits 0, is recorded SUCCEEDED, and every
+// downstream edge that expected the value resolves to an absent input. The
+// author sees a green task and a broken pipeline, which is the hardest shape of
+// bug to trace back to a one-word typo in a spec. Rejecting at submit time puts
+// the error in front of the person who can fix it (ADR-0004).
+func validateStdoutOutput(spec *nexusv1.WorkflowSpec) []Problem {
+	var out []Problem
+	for _, task := range spec.GetTasks() {
+		name := task.GetRuntime().GetStdoutOutput()
+		if name == "" {
+			continue
+		}
+		if _, declared := task.GetOutputs()[name]; declared {
+			continue
+		}
+		out = append(out, Problem{
+			Path: "/tasks/" + task.GetId() + "/runtime/stdout_output",
+			Message: fmt.Sprintf(
+				"stdout_output names %q, which is not declared in this task's outputs; "+
+					"stdout would be captured under a name nothing can reference, so the task "+
+					"would succeed while producing no output at all",
+				name),
+			Stage: "semantic",
+		})
 	}
 	return out
 }
