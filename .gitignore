@@ -36,3 +36,7 @@ gpt_architecture.zip
 /nexusctl
 .venv-sdk/
 deploy/.env
+
+# Compiled service binaries: build output, not source. `scheduler` was
+# committed once at 24MB; it stays in history but must not accumulate.
+/scheduler
