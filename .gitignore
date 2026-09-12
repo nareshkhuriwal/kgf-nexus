@@ -40,3 +40,11 @@ deploy/.env
 # Compiled service binaries: build output, not source. `scheduler` was
 # committed once at 24MB; it stays in history but must not accumulate.
 /scheduler
+# Anchored to the repository root on purpose. Unanchored, `cmd` matches EVERY
+# directory named cmd at any depth -- which is every service's source entry
+# point (services/*/cmd/<name>, agent/cmd, cli/cmd). The already-tracked ones
+# kept working because .gitignore does not affect tracked files, so the breakage
+# was invisible: only NEWLY added commands silently failed to appear in
+# `git status`. The root `cmd` file this targets is a scratch credentials dump,
+# not a directory.
+/cmd

@@ -20,7 +20,7 @@ MIGRATIONS    := services/migrations
 
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test seed submit-example chaos clean \
-        backup backup-artifacts backup-all restore-drill
+        backup backup-artifacts backup-all restore-drill artifact-gc
 
 help: ## Show this help
 	@echo "Nexus — make targets"
@@ -189,6 +189,21 @@ backup-all: ## Back up BOTH stores in the correct order (use this one)
 # Uses scratch buckets and a scratch database; never touches live data.
 restore-drill: ## Prove a restore recovers artifacts byte-identically (needs `make up`)
 	deploy/restore-drill.sh
+
+# ── Artifact GC (ADR-0008) ────────────────────────────────────────────────
+# The restore procedure in OPERATIONS §7.2 deliberately produces orphan objects
+# -- objects no database row references -- and until now nothing reclaimed them.
+#
+# There is NO delete target here, and that is deliberate. `make artifact-gc`
+# reports; deleting requires typing the two flags out in full, so a destructive
+# run is always an explicit act and never something a tab-completed make target
+# can do by accident.
+ARTIFACT_GC_ENDPOINT ?= http://localhost:$(or $(NEXUS_MINIO_PORT),9010)
+ARTIFACT_GC_DSN      ?= postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable
+
+artifact-gc: ## Report orphaned result-store objects; deletes NOTHING (ADR-0008)
+	$(GO) run ./services/artifact-gc/cmd/artifact-gc \
+	  -database-url '$(ARTIFACT_GC_DSN)' -endpoint '$(ARTIFACT_GC_ENDPOINT)' $(ARTIFACT_GC_FLAGS)
 
 clean: ## Remove build artefacts
 	rm -rf ui/dist ui/node_modules/.vite

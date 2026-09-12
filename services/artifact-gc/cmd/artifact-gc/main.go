@@ -1,0 +1,248 @@
+// Command artifact-gc is the operator-run reachability-keyed garbage collector
+// for the result store (ADR-0008).
+//
+// It reports, and by default does not delete:
+//
+//	# what the default does: examine, report, change nothing
+//	artifact-gc
+//
+//	# the same, scoped to one namespace prefix, with a longer grace period
+//	artifact-gc -prefix default/ -grace 72h
+//
+//	# actually delete. Requires BOTH flags; neither alone is enough.
+//	artifact-gc -delete -i-understand-this-deletes-data
+//
+// The double flag is not theatre. ADR-0008 calls out that "a bug in an inline
+// delete path destroys data", and the same is true of a fat-fingered command.
+// `-delete` alone is the kind of flag that ends up in a shell history and then in
+// a cron entry; pairing it with a flag nobody types by accident means the
+// destructive mode cannot be reached without having read this paragraph.
+//
+// There is deliberately NO daemon mode here. artifactgc.Sweeper has a Run loop
+// for the day ADR-0008's background reconciler is turned on, but nothing in this
+// repository starts it, and this command runs exactly one pass and exits.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/artifactgc"
+	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+)
+
+var version = "dev"
+
+func main() {
+	var (
+		dsn = flag.String("database-url",
+			config.DSN("postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable"),
+			"Postgres DSN (the reference set is derived from here)")
+		endpoint = flag.String("endpoint",
+			firstEnv("RESULT_STORE_ENDPOINT", "NEXUS_RESULT_STORE_ENDPOINT", "NEXUS_S3_ENDPOINT"),
+			"result-store endpoint, e.g. http://localhost:9010")
+		bucket = flag.String("bucket",
+			envOr("RESULT_STORE_BUCKET", envOr("NEXUS_RESULT_BUCKET", "nexus-results")),
+			"result-store bucket")
+		region = flag.String("region", envOr("RESULT_STORE_REGION", "us-east-1"), "result-store region")
+		access = flag.String("access-key",
+			envOr("RESULT_STORE_ACCESS_KEY", envOr("NEXUS_S3_ACCESS_KEY_ID", envOr("MINIO_ROOT_USER", "nexusadmin"))),
+			"result-store access key")
+		secret = flag.String("secret-key",
+			envOr("RESULT_STORE_SECRET_KEY", envOr("NEXUS_S3_SECRET_ACCESS_KEY", envOr("MINIO_ROOT_PASSWORD", "nexus-dev-password"))),
+			"result-store secret key")
+		useTLS = flag.Bool("tls", envBool("NEXUS_S3_USE_TLS", false), "use TLS to reach the result store")
+
+		prefix = flag.String("prefix", "", "only sweep keys under this prefix, e.g. \"default/\"")
+		grace  = flag.Duration("grace", envDuration("ARTIFACT_GC_GRACE", artifactgc.DefaultGracePeriod),
+			"minimum object age before it may be collected; covers objects written by an attempt whose row has not committed")
+		maxObjects = flag.Int("max-objects", envInt("ARTIFACT_GC_MAX_OBJECTS", artifactgc.DefaultMaxObjects),
+			"maximum objects examined in this pass")
+
+		doDelete = flag.Bool("delete", false,
+			"actually delete orphans (requires -i-understand-this-deletes-data); the default reports only")
+		confirm = flag.Bool("i-understand-this-deletes-data", false,
+			"second confirmation required alongside -delete")
+
+		logLevel = flag.String("log-level", envOr("ARTIFACT_GC_LOG_LEVEL", "info"), "debug|info|warn|error")
+		showVer  = flag.Bool("version", false, "print the version and exit")
+	)
+	flag.Parse()
+	if *showVer {
+		fmt.Println(version)
+		return
+	}
+
+	log := newLogger(*logLevel).With("command", "artifact-gc", "version", version)
+	slog.SetDefault(log)
+
+	// Dry run is the default and stays the default unless BOTH flags are given.
+	dryRun := true
+	switch {
+	case *doDelete && *confirm:
+		dryRun = false
+	case *doDelete && !*confirm:
+		fmt.Fprintln(os.Stderr,
+			"artifact-gc: -delete also requires -i-understand-this-deletes-data.\n"+
+				"artifact-gc: this permanently removes objects from the result store.\n"+
+				"artifact-gc: run without -delete first and read the report.")
+		os.Exit(2)
+	case !*doDelete && *confirm:
+		log.Warn("-i-understand-this-deletes-data was given without -delete; staying in dry run")
+	}
+
+	if *endpoint == "" {
+		fmt.Fprintln(os.Stderr,
+			"artifact-gc: no result-store endpoint. Set RESULT_STORE_ENDPOINT or pass -endpoint\n"+
+				"artifact-gc: (the compose stack publishes MinIO on http://localhost:9010).")
+		os.Exit(2)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, log, runConfig{
+		dsn: *dsn, prefix: *prefix, grace: *grace, maxObjects: *maxObjects, dryRun: dryRun,
+		minio: artifactgc.MinIOConfig{
+			Endpoint: *endpoint, Bucket: *bucket, Region: *region,
+			AccessKeyID: *access, SecretAccessKey: *secret, UseTLS: *useTLS,
+		},
+	}); err != nil {
+		log.Error("artifact-gc failed", "error", err)
+		os.Exit(1)
+	}
+}
+
+type runConfig struct {
+	dsn        string
+	prefix     string
+	grace      time.Duration
+	maxObjects int
+	dryRun     bool
+	minio      artifactgc.MinIOConfig
+}
+
+func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
+	pool, err := store.NewPool(ctx, store.PoolConfig{
+		DSN: cfg.dsn, MaxConns: 4, MinConns: 1,
+		MaxConnLifetime: 5 * time.Minute, MaxConnIdleTime: time.Minute,
+	})
+	if err != nil {
+		return fmt.Errorf("connect to postgres: %w", err)
+	}
+	defer pool.Close()
+
+	objects, err := artifactgc.NewMinIOStore(ctx, cfg.minio)
+	if err != nil {
+		return err
+	}
+
+	sw := artifactgc.NewSweeper(pool, objects, log, artifactgc.Config{
+		DryRun:      cfg.dryRun,
+		GracePeriod: cfg.grace,
+		MaxObjects:  cfg.maxObjects,
+		Prefix:      cfg.prefix,
+	})
+
+	mode := "DRY RUN (nothing will be deleted)"
+	if !cfg.dryRun {
+		mode = "DELETE (orphans will be permanently removed)"
+	}
+	log.Info("artifact GC starting",
+		"mode", mode,
+		"endpoint", cfg.minio.Endpoint,
+		"bucket", objects.Bucket(),
+		"prefix", cfg.prefix,
+		"grace_period", sw.Config().GracePeriod,
+		"max_objects", sw.Config().MaxObjects,
+		"reference_sources", artifactgc.RefSources())
+
+	st, err := sw.Once(ctx)
+	if err != nil {
+		return err
+	}
+
+	// A human-readable summary on stdout as well as the structured log: this is a
+	// command an operator reads, not a service whose logs get shipped.
+	fmt.Printf("\nartifact-gc summary (%s)\n", mode)
+	fmt.Printf("  objects examined      %d\n", st.Listed)
+	fmt.Printf("  live references       %d  (from %v)\n", st.LiveRefs, artifactgc.RefSources())
+	fmt.Printf("  reachable (kept)      %d\n", st.Reachable)
+	fmt.Printf("  too young (kept)      %d  (grace %s)\n", st.TooYoung, sw.Config().GracePeriod)
+	fmt.Printf("  collectable orphans   %d  (%d bytes)\n", st.Orphans, st.OrphanBytes)
+	fmt.Printf("  deleted               %d\n", st.Deleted)
+	if st.DeleteErrors > 0 {
+		fmt.Printf("  delete errors         %d\n", st.DeleteErrors)
+	}
+	if st.DryRun && st.Orphans > 0 {
+		fmt.Printf("\n  Nothing was deleted. To collect these, re-run with:\n")
+		fmt.Printf("    -delete -i-understand-this-deletes-data\n")
+	}
+	return nil
+}
+
+func newLogger(level string) *slog.Logger {
+	var l slog.Level
+	switch level {
+	case "debug":
+		l = slog.LevelDebug
+	case "warn":
+		l = slog.LevelWarn
+	case "error":
+		l = slog.LevelError
+	default:
+		l = slog.LevelInfo
+	}
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l}))
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func firstEnv(keys ...string) string {
+	for _, k := range keys {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func envBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}

@@ -616,7 +616,9 @@ count.
 - **No consistent point in time.** See §7.2. The guarantee is directional
   (orphans, never dangling refs), not a snapshot.
 - **Orphan objects accumulate** after a restore, by design. The ADR-0008 GC sweep
-  that would reclaim them **is not implemented**; nothing here reclaims that space.
+  that reclaims them now exists — see §7.7 — but it is an operator-run command
+  that defaults to reporting, so nothing reclaims that space until someone runs
+  it in delete mode.
 - **No verification that a full production-sized mirror completes in useful time.**
   The drill uses a single 128 KiB object. `mc mirror` is incremental and
   content-addressed keys never change, so subsequent mirrors copy only new
@@ -626,7 +628,76 @@ count.
   are. A restore recreates the bucket with `anonymous set none`, matching
   `minio-init`; anything beyond that must be reapplied.
 - **`output_ref`s are not swept against the bucket outside the drill.** There is
-  no ongoing reconciler reporting dangling refs in the live system.
+  no ongoing reconciler reporting dangling refs in the live system. Note that the
+  GC sweep in §7.7 is the *opposite* direction — objects with no row, not rows
+  with no object — and does not close this gap.
+
+### 7.7 Reclaiming orphans: the GC sweep
+
+[ADR-0008](adr/0008-result-store-separation.md) requires "a garbage-collection
+sweep keyed on reachability from live `output_ref`s — deliberately a background
+reconciler, never an inline delete". §7.2 and §7.6 are where orphans come from:
+the backup ordering produces them on purpose, and a restore leaves them behind.
+
+```bash
+# Report only. Deletes NOTHING. This is the default.
+make artifact-gc
+
+# Same, scoped to one namespace prefix, with a longer grace period.
+go run ./services/artifact-gc/cmd/artifact-gc -prefix default/ -grace 72h
+
+# Actually delete. BOTH flags are required; neither alone does anything.
+go run ./services/artifact-gc/cmd/artifact-gc \
+  -delete -i-understand-this-deletes-data
+```
+
+**It is not wired to run automatically.** `artifactgc.Sweeper` has a `Run` loop
+for the day the background reconciler is turned on, but no service starts it and
+no compose entry references it. Collection happens when an operator decides it
+happens.
+
+**What "reachable" means.** The reference set is derived from the database by
+query, over **two** columns, not one:
+
+| Source | Why it counts |
+|---|---|
+| `task_attempts.output_ref` | the attempt that produced the object |
+| `task_attempts.input_refs` | a **downstream** attempt that consumed it |
+
+The second is easy to miss — ADR-0008 says "live `output_ref`s" — and missing it
+deletes live data. The DAG engine copies an upstream `output_ref` verbatim into
+the downstream attempt's `input_refs`, so once a producing run is pruned
+(`ON DELETE CASCADE`), a consuming attempt in another run can be the *only*
+row naming that object. A sweep over `output_ref` alone would collect it.
+
+Extraction is **shape-driven**, not path-driven: it looks for a `blob` object
+with a `key` member anywhere in the document. The restore drill's
+`output_ref->'result'->'blob'->>'key'` is right for a row the drill constructs,
+but wrong here — the top-level name is the task's declared *output name*, chosen
+by the workflow author, and this database already contains `result`, `out` and
+`features`. A fixed-path reader would see no reference in the others and report
+their objects as orphans.
+
+**The grace period** (default 24h, `-grace`) is what covers the window the
+reachability query cannot see: an object already uploaded by an in-flight attempt
+whose row has not committed. That window is not bounded by anything in the
+control plane — a worker can upload a checkpoint, keep running for hours, then
+buffer its report through a control-plane outage — so the threshold is chosen
+generously rather than derived. Raise it if your tasks checkpoint early; never
+lower it toward minutes.
+
+**Ordering.** The sweep lists objects **first**, then queries Postgres, and only
+considers the intersection. This is the same skew problem as §7.2 and the
+reasoning is the mirror image: reading the reference set strictly *later* than
+the candidate set means an object created during the window is simply not a
+candidate this pass. The reverse order — query, then list — deletes an object
+whose row was committed in between. See the comment on `artifactgc.Sweeper.Once`
+for the worked timeline.
+
+**Bounded and auditable.** One pass examines at most `-max-objects` (default
+10,000) rather than listing a whole bucket into memory, so a large backlog takes
+several runs. Every pass logs what it examined, kept as reachable, skipped as too
+young, and deleted, with counts.
 
 ---
 
