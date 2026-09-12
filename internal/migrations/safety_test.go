@@ -1,6 +1,7 @@
 package migrations
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,9 +16,9 @@ const migrationsDir = "../../services/migrations"
 // the line is deliberately excluded, because reformatting a migration must not
 // require editing this list.
 var accepted = map[string]string{
-	// 0001 IS the schema. Every CREATE INDEX runs against an empty table, and
-	// there is no previous version of the fleet to be compatible with.
-	"0001_init.up.sql/create-index-blocking": "initial schema: indexes are built on empty tables",
+	// 0001 needs no entry: the analyser recognises that an index on a table the
+	// same migration CREATEs builds on an empty table. That is the general rule, not
+	// an exception -- see TestIndexOnAFreshTableIsNotFlagged.
 
 	// 0002's backfill is the precedent this whole package exists to catch, and it
 	// is already applied everywhere. It cannot be rewritten now: migrate.sh keys
@@ -188,4 +189,49 @@ func firstMatch(stmt string) string {
 		return r.name
 	}
 	return ""
+}
+
+// TestIndexOnAFreshTableIsNotFlagged covers the distinction that keeps the
+// allowlist from growing for ordinary safe work.
+//
+// CREATE INDEX without CONCURRENTLY stalls writes only if the table has rows. An
+// index on a table the SAME migration just created is building on an empty table,
+// so the cost the rule warns about does not exist. Without this, every migration
+// that introduces a table with indexes would need an exemption, and an allowlist
+// that grows for routine work is one people stop reading.
+func TestIndexOnAFreshTableIsNotFlagged(t *testing.T) {
+	fresh := `CREATE TABLE schedules (id uuid PRIMARY KEY, next_fire_at timestamptz);
+CREATE INDEX idx_due ON schedules (next_fire_at);`
+	for _, f := range analyseString(t, fresh) {
+		if f.Rule == "create-index-blocking" {
+			t.Errorf("index on a table created in the same migration was flagged: %s", f)
+		}
+	}
+
+	// An index on a table that already exists IS the hazard, and must still fire.
+	existing := `CREATE INDEX idx_runs ON workflow_runs (namespace);`
+	var found bool
+	for _, f := range analyseString(t, existing) {
+		if f.Rule == "create-index-blocking" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("index on a pre-existing table was not flagged; the rule no longer protects anything")
+	}
+}
+
+// analyseString runs the real analyser over one migration body.
+func analyseString(t *testing.T, body string) []Finding {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "0999_probe.up.sql")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write probe migration: %v", err)
+	}
+	fs, err := Analyse(dir)
+	if err != nil {
+		t.Fatalf("analyse: %v", err)
+	}
+	return fs
 }

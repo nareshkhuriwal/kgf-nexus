@@ -156,6 +156,38 @@ var (
 	hasWhere = regexp.MustCompile(`(?i)\bWHERE\b`)
 )
 
+var (
+	createTableRe = regexp.MustCompile(`(?is)\bCREATE\s+TABLE\b(?:\s+IF\s+NOT\s+EXISTS)?\s+"?(\w+)"?`)
+	createIndexRe = regexp.MustCompile(`(?is)\bCREATE\s+(?:UNIQUE\s+)?INDEX\b[\s\S]*?\bON\s+"?(\w+)"?`)
+)
+
+// tablesCreatedIn lists the tables a migration creates itself.
+func tablesCreatedIn(stmts []statement) map[string]bool {
+	out := map[string]bool{}
+	for _, st := range stmts {
+		if m := createTableRe.FindStringSubmatch(st.text); m != nil {
+			out[strings.ToLower(m[1])] = true
+		}
+	}
+	return out
+}
+
+// indexTargetIsFresh reports whether a CREATE INDEX targets a table this same
+// migration created.
+//
+// Such an index builds on an empty table, so the lock it takes is uncontended and
+// instantaneous -- the cost the rule warns about does not exist. Without this
+// distinction every migration that introduces a table with indexes would need an
+// allowlist entry, and an allowlist that has to grow for ordinary safe work is one
+// people stop reading.
+func indexTargetIsFresh(stmt string, fresh map[string]bool) bool {
+	m := createIndexRe.FindStringSubmatch(stmt)
+	if m == nil {
+		return false
+	}
+	return fresh[strings.ToLower(m[1])]
+}
+
 // boundedUpdate reports whether an UPDATE restricts its write set at the TOP
 // level, ignoring any WHERE that belongs to a subquery.
 //
@@ -217,12 +249,20 @@ func Analyse(dir string) ([]Finding, error) {
 			return nil, fmt.Errorf("read %s: %w", path, rerr)
 		}
 		name := filepath.Base(path)
-		for _, st := range split(string(body)) {
+		stmts := split(string(body))
+		// Tables created by THIS migration are empty, so an index on one cannot
+		// stall anything. Collected up front because a CREATE INDEX may precede or
+		// follow the CREATE TABLE it belongs to.
+		fresh := tablesCreatedIn(stmts)
+		for _, st := range stmts {
 			for _, r := range rules {
 				if !r.re.MatchString(st.text) {
 					continue
 				}
 				if r.extra != nil && !r.extra(st.text) {
+					continue
+				}
+				if r.name == "create-index-blocking" && indexTargetIsFresh(st.text, fresh) {
 					continue
 				}
 				{
