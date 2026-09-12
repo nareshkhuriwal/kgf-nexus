@@ -7,7 +7,7 @@
  * output.
  */
 
-import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { API_BASE, DEFAULT_NAMESPACE, getApiKey, setApiKey } from './api/client';
@@ -24,11 +24,13 @@ import { SchedulesPage } from './pages/SchedulesPage';
 import { ScheduleDetailPage } from './pages/ScheduleDetailPage';
 import { BackfillDetailPage } from './pages/BackfillDetailPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { ProfileMenu, ProfileSection } from './components/ProfileMenu';
 
 const NS_KEY = 'nexus.namespace';
 
 export function App() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [namespace, setNamespace] = useState(
     () => window.localStorage.getItem(NS_KEY) ?? DEFAULT_NAMESPACE,
   );
@@ -134,73 +136,72 @@ export function App() {
           )}
         </nav>
         <div className="topbar-right">
-          <label className="row" style={{ gap: 6 }}>
-            <span className="sub">namespace</span>
-            <input
-              type="text"
-              value={namespace}
-              onChange={(e) => setNamespace(e.target.value)}
-              style={{ width: 120 }}
-              aria-label="namespace"
-            />
-          </label>
-          {keyOpen ? (
-            <form
-              className="row"
-              style={{ gap: 6 }}
-              onSubmit={(e) => {
-                e.preventDefault();
-                saveKey(keyDraft.trim());
-              }}
-            >
-              <input
-                type="password"
-                value={keyDraft}
-                onChange={(e) => setKeyDraft(e.target.value)}
-                placeholder="API key"
-                aria-label="API key"
-                style={{ width: 200 }}
-                autoFocus
-              />
-              <button type="submit">Save</button>
-              <button type="button" onClick={() => setKeyOpen(false)}>
-                Cancel
-              </button>
-            </form>
-          ) : (
-            <button
-              type="button"
-              onClick={() => {
-                setKeyDraft(apiKey);
-                setKeyOpen(true);
-              }}
-              title={
-                apiKey
-                  ? 'An API key is set for this browser. Click to change it.'
-                  : 'No API key set — every request will be refused with 401.'
-              }
-            >
-              {keyPersistFailed ? 'API key ✗ not saved' : apiKey ? 'API key ✓' : 'Set API key'}
-            </button>
-          )}
-          {session ? (
-            <div className="row" style={{ gap: 'var(--space-3)' }}>
-              <span className="chip" title={`Signed in as ${session.email} (${session.role})`}>
-                {session.email}
-              </span>
-              <button type="button" onClick={() => void signOut()}>
-                Sign out
-              </button>
-            </div>
-          ) : (
-            <NavLink to="/login" className="chip">
-              Sign in
-            </NavLink>
-          )}
-          <ThemeToggle />
+          {/* The API base stays OUTSIDE the menu: it says which deployment
+              this tab is pointed at, and mistaking staging for production is
+              exactly the error a hidden control would let you make. */}
           <span className="chip" title={`API base: ${API_BASE || 'same origin'}`}>
             {API_BASE || 'same origin'}
           </span>
+          <ProfileMenu
+            session={session}
+            principal={me.data}
+            organization="KhuriwalGroup IT Solutions"
+            onSignOut={() => void signOut()}
+            onSignIn={() => navigate('/login')}
+          >
+            <ProfileSection label="Namespace">
+              <input
+                type="text"
+                value={namespace}
+                onChange={(e) => setNamespace(e.target.value)}
+                aria-label="namespace"
+              />
+            </ProfileSection>
+
+            <ProfileSection label="API key">
+              {keyOpen ? (
+                <form
+                  className="row"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    saveKey(keyDraft.trim());
+                  }}
+                >
+                  <input
+                    type="password"
+                    value={keyDraft}
+                    onChange={(e) => setKeyDraft(e.target.value)}
+                    placeholder="API key"
+                    aria-label="API key"
+                    autoFocus
+                  />
+                  <button type="submit">Save</button>
+                  <button type="button" onClick={() => setKeyOpen(false)}>
+                    Cancel
+                  </button>
+                </form>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setKeyDraft(apiKey);
+                    setKeyOpen(true);
+                  }}
+                  title={
+                    apiKey
+                      ? 'An API key is set for this browser. Click to change it.'
+                      : 'No API key set — every request will be refused with 401.'
+                  }
+                >
+                  {keyPersistFailed ? 'API key ✗ not saved' : apiKey ? 'API key ✓' : 'Set API key'}
+                </button>
+              )}
+            </ProfileSection>
+
+            <ProfileSection label="Appearance">
+              <ThemeToggle />
+            </ProfileSection>
+          </ProfileMenu>
         </div>
       </header>
 

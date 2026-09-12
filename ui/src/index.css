@@ -654,3 +654,74 @@ button.primary:hover:not(:disabled) {
   font-size: var(--text-xs);
   color: var(--fg-faint);
 }
+
+/* ── Account menu ──────────────────────────────────────────────────────────
+   The top bar used to lay every account-scoped control out flat, which does
+   not survive the console growing more of them. These collapse behind the
+   avatar; the menu is positioned relative to its own root so it stays
+   anchored to the trigger rather than to the viewport. */
+.profile-menu { position: relative; }
+
+.profile-trigger {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-2); background: none; border: 1px solid transparent;
+  border-radius: var(--radius-pill); cursor: pointer; color: var(--fg-muted);
+}
+.profile-trigger:hover { background: var(--bg-hover); border-color: var(--border); }
+.profile-trigger[aria-expanded='true'] { background: var(--bg-hover); border-color: var(--border); }
+
+.avatar {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: var(--space-7); height: var(--space-7); border-radius: var(--radius-pill);
+  background: var(--bg-inset); border: 1px solid var(--border-strong);
+  color: var(--fg); font-size: var(--text-base); font-weight: 650; line-height: 1;
+}
+.profile-caret { font-size: var(--text-xs); }
+
+.profile-panel {
+  position: absolute; top: calc(100% + var(--space-3)); right: 0; z-index: 50;
+  min-width: 260px; max-width: min(320px, calc(100vw - var(--space-7)));
+  background: var(--bg-raised); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); overflow: hidden;
+}
+
+.profile-identity { padding: var(--space-6); }
+/* The organisation sits above the person: it is the answer to "which
+   deployment am I about to act on", which matters more than the name. */
+.profile-org { margin: 0 0 var(--space-4); font-size: var(--text-sm); color: var(--fg-muted); }
+.profile-name { margin: 0; font-size: var(--text-md); font-weight: 650; color: var(--fg); }
+/* An address is long and must not widen the panel or be silently truncated
+   without recourse -- the full value is on the element's title. */
+.profile-email {
+  margin: var(--space-1) 0 0; font-size: var(--text-sm); color: var(--fg-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.profile-role {
+  margin: var(--space-3) 0 0; font-size: var(--text-xs); color: var(--fg-faint);
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+
+/* Separators are borders on the groups rather than <hr>s, so a group that
+   renders nothing contributes no stray line. */
+.profile-sections > .profile-section { border-top: 1px solid var(--border); padding: var(--space-5) var(--space-6); }
+.profile-section-label {
+  margin: 0 0 var(--space-4); font-size: var(--text-xs); color: var(--fg-faint);
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.profile-section .row { gap: var(--space-4); }
+.profile-section input[type='text'],
+.profile-section input[type='password'] { width: 100%; }
+
+.profile-actions { border-top: 1px solid var(--border); padding: var(--space-3); }
+.profile-item {
+  display: block; width: 100%; text-align: left; background: none; border: none;
+  padding: var(--space-4) var(--space-5); border-radius: var(--radius-md);
+  color: var(--fg); font-size: var(--text-md); cursor: pointer;
+}
+.profile-item:hover { background: var(--bg-hover); }
+
+/* The panel is a floating layer, so on a narrow screen it is pinned to the
+   viewport edges instead of overflowing off-screen to the right. */
+@media (max-width: 560px) {
+  .profile-panel { right: calc(var(--space-5) * -1); min-width: 0; width: calc(100vw - var(--space-7)); }
+}
