@@ -555,6 +555,20 @@
         },
         "priority": {
           "$ref": "#/$defs/priority"
+        },
+        "input_literals": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Inputs bound to constants. Values are JSON-encoded so one field carries every ValueSpec type; the declared input type validates them. Precedence is edge > param > literal/default."
+        },
+        "input_params": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Inputs bound to run parameters. Key is this task's input name, value is the WorkflowSpec.params key."
         }
       },
       "allOf": [

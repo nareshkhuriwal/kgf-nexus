@@ -631,8 +631,17 @@ is a duplicate. A test (`TestEmbeddedSchemaMatchesCanonical`) guards that they
 match, which is what caught the drift when only the canonical copy was edited.
 Both must be updated together.
 
-### F52. JSON Schema and SDK disagree on enum spelling
+### F52. JSON Schema and SDK disagree on enum spelling — FIXED
 **Severity:** real interop defect, hit immediately on first hand-written spec.
+**Status: FIXED.** The schema now accepts BOTH spellings for every affected enum
+(idempotency, retry.strategy, trigger_rule, error classes). Verified: all three
+committed examples -- which use proto names -- are accepted by the live gateway.
+
+A SECOND cause was blocking the same examples: F18 added `input_literals` and
+`input_params` to TaskSpec, but the JSON Schema never learned them, so
+`additionalProperties: false` rejected every SDK-generated spec. Both fields are
+now declared. Without this, no SDK-authored workflow could be submitted at all,
+which is the very contradiction of ADR-0004 that F52 set out to close.
 The gateway's JSON Schema requires SHORT enum forms (`required`, `exponential`,
 `all_success`) but the SDK emits PROTO names (`IDEMPOTENCY_MODE_REQUIRED`,
 `BACKOFF_STRATEGY_EXPONENTIAL`). SDK-generated specs and hand-written specs
