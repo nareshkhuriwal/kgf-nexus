@@ -15,11 +15,16 @@
 
 import type {
   Attempt,
+  Backfill,
   CapacitySummary,
+  CreateScheduleRequest,
+  CronPreview,
   LogLine,
   RunDetail,
   RunEvent,
   RunSummary,
+  Schedule,
+  StartBackfillRequest,
   Worker,
 } from './types';
 
@@ -307,6 +312,112 @@ export const api = {
 
   getCapacity(namespace: string): Promise<CapacitySummary> {
     return request<CapacitySummary>(`${ns(namespace)}/capacity`);
+  },
+
+  async listSchedules(namespace: string, limit = 100): Promise<Schedule[]> {
+    const payload = await request<unknown>(`${ns(namespace)}/schedules?limit=${limit}`);
+    const schedules = asList<Schedule>(payload, 'schedules');
+    // Name order, not creation order. A schedule list is something an operator
+    // scans for a name they already have in mind, and the gateway does not
+    // promise an order -- so the console picks the one that is scannable.
+    return [...schedules].sort((a, b) => a.name.localeCompare(b.name));
+  },
+
+  getSchedule(namespace: string, name: string): Promise<Schedule> {
+    return request<Schedule>(`${ns(namespace)}/schedules/${encodeURIComponent(name)}`);
+  },
+
+  createSchedule(namespace: string, body: CreateScheduleRequest): Promise<Schedule> {
+    return request<Schedule>(`${ns(namespace)}/schedules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  },
+
+  deleteSchedule(namespace: string, name: string): Promise<void> {
+    return request<void>(`${ns(namespace)}/schedules/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  setScheduleEnabled(namespace: string, name: string, enabled: boolean): Promise<Schedule> {
+    const action = enabled ? 'enable' : 'disable';
+    return request<Schedule>(`${ns(namespace)}/schedules/${encodeURIComponent(name)}/${action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+  },
+
+  /**
+   * Evaluate a cron expression without creating anything.
+   *
+   * The endpoint answers 200 with `valid:false` for a bad expression rather than
+   * 400, because "that expression is wrong" IS the answer to the question asked.
+   * So a rejected expression must not be surfaced as a request failure here
+   * either -- the caller reads `valid`, and only a transport or auth problem
+   * throws.
+   */
+  previewCron(
+    namespace: string,
+    cron: string,
+    timezone: string,
+    count = 5,
+  ): Promise<CronPreview> {
+    const q = new URLSearchParams({ cron, count: String(count) });
+    // Sent only when set: an empty timezone parameter and an absent one both mean
+    // UTC to the gateway, and omitting it keeps the URL honest about what was asked.
+    if (timezone) q.set('timezone', timezone);
+    return request<CronPreview>(`${ns(namespace)}/schedules/preview?${q.toString()}`);
+  },
+
+  async listBackfills(namespace: string, scheduleName: string, limit = 50): Promise<Backfill[]> {
+    const payload = await request<unknown>(
+      `${ns(namespace)}/schedules/${encodeURIComponent(scheduleName)}/backfills?limit=${limit}`,
+    );
+    const backfills = asList<Backfill>(payload, 'backfills');
+    return [...backfills].sort(
+      (a, b) => Date.parse(b.created_at ?? '') - Date.parse(a.created_at ?? ''),
+    );
+  },
+
+  getBackfill(namespace: string, id: string): Promise<Backfill> {
+    return request<Backfill>(`${ns(namespace)}/backfills/${encodeURIComponent(id)}`);
+  },
+
+  startBackfill(
+    namespace: string,
+    scheduleName: string,
+    body: StartBackfillRequest,
+  ): Promise<Backfill> {
+    return request<Backfill>(
+      `${ns(namespace)}/schedules/${encodeURIComponent(scheduleName)}/backfills`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
+  },
+
+  /**
+   * pause / resume / cancel, which share a shape on the wire.
+   *
+   * Addressed by backfill ID rather than through its schedule: a backfill
+   * outlives the interval that named it, and the gateway routes these three the
+   * same way for the same reason.
+   */
+  backfillAction(
+    namespace: string,
+    id: string,
+    action: 'pause' | 'resume' | 'cancel',
+  ): Promise<Backfill> {
+    return request<Backfill>(`${ns(namespace)}/backfills/${encodeURIComponent(id)}/${action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
   },
 
   /**

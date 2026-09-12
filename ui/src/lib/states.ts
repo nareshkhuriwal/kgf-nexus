@@ -11,7 +11,7 @@
  * distinctness is enforced by test rather than by eyeballing.
  */
 
-import type { AttemptState, NodeState, RunState, WorkerState } from '../api/types';
+import type { AttemptState, BackfillState, NodeState, RunState, WorkerState } from '../api/types';
 
 /** Border style is the non-colour channel that survives a greyscale print. */
 export type BorderStyle = 'solid' | 'dashed' | 'dotted' | 'double';
@@ -210,6 +210,42 @@ const WORKER: Record<WorkerState, StateVisual> = {
   },
 };
 
+/**
+ * Backfill states.
+ *
+ * Deliberately rendered through the same table as everything else rather than
+ * with ad-hoc colours on the backfill screens: a PAUSED backfill and a PAUSED
+ * run mean the same thing to an operator, and they must not look different
+ * depending on which page they are read from.
+ */
+const BACKFILL: Record<BackfillState, StateVisual> = {
+  RUNNING: {
+    label: 'RUNNING', tone: 'active', glyph: '\u25b6', borderStyle: 'solid',
+    hint: 'Generating runs for each tick in the interval, up to max_active at once.',
+    terminal: false,
+  },
+  PAUSED: {
+    label: 'PAUSED', tone: 'warning', glyph: '\u2016', borderStyle: 'solid',
+    hint: 'Generation halted at the cursor. Runs already created keep going; resume continues from there.',
+    terminal: false,
+  },
+  COMPLETED: {
+    label: 'COMPLETED', tone: 'success', glyph: '\u2713', borderStyle: 'solid',
+    hint: 'Every tick in the interval was generated, or the run cap was reached.',
+    terminal: true,
+  },
+  CANCELLED: {
+    label: 'CANCELLED', tone: 'stopped', glyph: '\u2298', borderStyle: 'solid',
+    hint: 'Operator stopped the backfill. Runs it had already created are unaffected.',
+    terminal: true,
+  },
+  FAILED: {
+    label: 'FAILED', tone: 'danger', glyph: '\u2715', borderStyle: 'solid',
+    hint: 'The backfill could not continue; see its detail for the reason.',
+    terminal: true,
+  },
+};
+
 /** Shown when the backend sends a value this build does not know about. */
 export const UNKNOWN_VISUAL: StateVisual = {
   label: 'UNKNOWN',
@@ -220,7 +256,7 @@ export const UNKNOWN_VISUAL: StateVisual = {
   terminal: false,
 };
 
-export type StateKind = 'run' | 'node' | 'attempt' | 'worker';
+export type StateKind = 'run' | 'node' | 'attempt' | 'worker' | 'backfill';
 
 /**
  * Strips a protobuf enum prefix so the UI renders correctly whether the
@@ -243,6 +279,7 @@ const TABLES: Record<StateKind, Record<string, StateVisual>> = {
   node: NODE,
   attempt: ATTEMPT,
   worker: WORKER,
+  backfill: BACKFILL,
 };
 
 /**

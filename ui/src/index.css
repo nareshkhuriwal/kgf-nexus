@@ -359,10 +359,15 @@ button.link {
   text-decoration: underline; cursor: pointer;
 }
 
-select, input[type='text'], input[type='search'] {
+/* Every text-entry control, not just the two the first screens happened to use:
+   number, password and textarea were left unstyled and rendered as raw browser
+   widgets next to styled ones on the same form. */
+select, textarea,
+input[type='text'], input[type='search'], input[type='number'], input[type='password'] {
   font: inherit; padding: 4px 8px; border-radius: var(--radius);
   border: 1px solid var(--border); background: var(--bg-inset); color: var(--fg);
 }
+textarea { resize: vertical; }
 
 label.field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--fg-muted); }
 
@@ -615,4 +620,37 @@ button.primary:hover:not(:disabled) {
      ever shown, so truncating it would make the control useless. */
   word-break: break-all;
   user-select: all;
+}
+
+/* ── Cron preview ───────────────────────────────────────────────────────── */
+/* The upcoming fire times, listed so an author can read the schedule they just
+   wrote as instants rather than as five fields they have to parse in their head. */
+.cron-fires {
+  margin: 0;
+  padding-left: var(--space-7);
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+.cron-fires li::marker {
+  color: var(--fg-faint);
+}
+
+/* ── Backfill progress ──────────────────────────────────────────────────── */
+/* A backfill's progress is a fraction of an INTERVAL, not of a run count: the
+   cursor tells you how far through the window it has walked, which is the number
+   an operator uses to decide whether to wait or to cancel. */
+.backfill-window {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 200px;
+}
+.backfill-window-ends {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-5);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--fg-faint);
 }

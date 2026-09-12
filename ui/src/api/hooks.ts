@@ -15,7 +15,14 @@ import {
   type UseQueryOptions,
 } from '@tanstack/react-query';
 import { ApiError, api, type RunListFilter } from './client';
-import type { Attempt, RunEvent } from './types';
+import type {
+  Attempt,
+  Backfill,
+  CreateScheduleRequest,
+  RunEvent,
+  Schedule,
+  StartBackfillRequest,
+} from './types';
 import { isTerminal } from '../lib/states';
 import { pollInterval, type LiveTransport } from './live';
 
@@ -26,6 +33,11 @@ export const qk = {
   runEvents: (ns: string, id: string) => ['run-events', ns, id] as const,
   workers: (ns: string) => ['workers', ns] as const,
   capacity: (ns: string) => ['capacity', ns] as const,
+  schedules: (ns: string) => ['schedules', ns] as const,
+  schedule: (ns: string, name: string) => ['schedule', ns, name] as const,
+  cronPreview: (ns: string, cron: string, tz: string) => ['cron-preview', ns, cron, tz] as const,
+  backfills: (ns: string, name: string) => ['backfills', ns, name] as const,
+  backfill: (ns: string, id: string) => ['backfill', ns, id] as const,
 };
 
 export function shouldRetry(failureCount: number, error: unknown): boolean {
@@ -155,6 +167,175 @@ export function useInvalidateOnRevision(
     void qc.invalidateQueries({ queryKey: qk.runAttempts(namespace, runId) });
     void qc.invalidateQueries({ queryKey: qk.runEvents(namespace, runId) });
   }, [qc, revision, namespace, runId]);
+}
+
+
+// ── schedules ───────────────────────────────────────────────────────────────
+
+/**
+ * A schedule's next_fire_at advances on its own, without anyone touching the
+ * console, so the list is polled. 10s rather than the run list's 4s: the
+ * soonest anything can change is the next cron tick, and a schedule table is a
+ * management view, not an incident view.
+ */
+const SCHEDULE_POLL_MS = 10_000;
+
+export function useSchedules(namespace: string) {
+  return useQuery({
+    queryKey: qk.schedules(namespace),
+    queryFn: () => api.listSchedules(namespace),
+    refetchInterval: SCHEDULE_POLL_MS,
+    ...base,
+  });
+}
+
+export function useSchedule(namespace: string, name: string) {
+  return useQuery({
+    queryKey: qk.schedule(namespace, name),
+    queryFn: () => api.getSchedule(namespace, name),
+    enabled: name !== '',
+    refetchInterval: SCHEDULE_POLL_MS,
+    ...base,
+  });
+}
+
+/**
+ * Live cron feedback for the create form.
+ *
+ * Debounced by the CALLER passing a settled expression rather than here, so this
+ * hook stays a plain query: a half-typed "0 2 * *" is a valid request that
+ * answers valid:false, and firing one per keystroke would make the form flicker
+ * between "invalid" and "invalid" while someone types.
+ *
+ * retry is off entirely. A bad expression is a 200 with valid:false, so the only
+ * things left to retry are transport failures -- and a preview that silently
+ * retries for six seconds while the operator types is worse than one that says
+ * nothing yet.
+ */
+export function useCronPreview(namespace: string, cron: string, timezone: string, count = 5) {
+  return useQuery({
+    queryKey: qk.cronPreview(namespace, cron, timezone),
+    queryFn: () => api.previewCron(namespace, cron, timezone, count),
+    enabled: cron.trim() !== '',
+    retry: false,
+    // Preview answers are pure functions of (cron, timezone) apart from the
+    // clock they start from, so they are worth caching for the length of a form
+    // session -- flipping back to a previously-tried expression is instant.
+    staleTime: 30_000,
+  });
+}
+
+export function useCreateSchedule(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateScheduleRequest) => api.createSchedule(namespace, body),
+    onSuccess: (created: Schedule) => {
+      void qc.invalidateQueries({ queryKey: qk.schedules(namespace) });
+      void qc.invalidateQueries({ queryKey: qk.schedule(namespace, created.name) });
+    },
+    retry: false,
+  });
+}
+
+/**
+ * Enable and disable, which are one mutation with a flag on the wire.
+ *
+ * No optimistic update: enabling RECOMPUTES next_fire_at server-side (restoring
+ * a week-old fire time would fire a burst of catch-up nobody asked for), so the
+ * only honest next_fire_at is the one the server returns.
+ */
+export function useSetScheduleEnabled(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, enabled }: { name: string; enabled: boolean }) =>
+      api.setScheduleEnabled(namespace, name, enabled),
+    onSuccess: (updated: Schedule) => {
+      void qc.invalidateQueries({ queryKey: qk.schedules(namespace) });
+      void qc.invalidateQueries({ queryKey: qk.schedule(namespace, updated.name) });
+    },
+    retry: false,
+  });
+}
+
+export function useDeleteSchedule(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api.deleteSchedule(namespace, name),
+    onSuccess: (_data, name) => {
+      void qc.invalidateQueries({ queryKey: qk.schedules(namespace) });
+      qc.removeQueries({ queryKey: qk.schedule(namespace, name) });
+    },
+    retry: false,
+  });
+}
+
+// ── backfills ───────────────────────────────────────────────────────────────
+
+/**
+ * A backfill is long-running and has no event stream of its own, so progress is
+ * polled. 3s matches the polling-transport interval the run views use: this is
+ * the one schedule-side view an operator actually watches tick.
+ */
+const BACKFILL_POLL_MS = 3000;
+
+/** Terminal backfills never change again, so they stop costing requests. */
+function backfillInterval(rows: Backfill[] | undefined): number | false {
+  if (!rows) return BACKFILL_POLL_MS;
+  return rows.some((b) => !isTerminal('backfill', b.state)) ? BACKFILL_POLL_MS : false;
+}
+
+export function useBackfills(namespace: string, scheduleName: string) {
+  return useQuery({
+    queryKey: qk.backfills(namespace, scheduleName),
+    queryFn: () => api.listBackfills(namespace, scheduleName),
+    enabled: scheduleName !== '',
+    refetchInterval: (query) => backfillInterval(query.state.data),
+    ...base,
+  });
+}
+
+export function useBackfill(namespace: string, id: string) {
+  return useQuery({
+    queryKey: qk.backfill(namespace, id),
+    queryFn: () => api.getBackfill(namespace, id),
+    enabled: id !== '',
+    refetchInterval: (query) => backfillInterval(query.state.data ? [query.state.data] : undefined),
+    ...base,
+  });
+}
+
+export function useStartBackfill(namespace: string, scheduleName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: StartBackfillRequest) =>
+      api.startBackfill(namespace, scheduleName, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.backfills(namespace, scheduleName) });
+      // A backfill creates runs, so the run list is stale the moment it starts.
+      void qc.invalidateQueries({ queryKey: ['runs', namespace] });
+    },
+    retry: false,
+  });
+}
+
+/**
+ * pause / resume / cancel.
+ *
+ * Cancel stops GENERATING runs; it does not cancel the runs already created.
+ * The screens say so before the click rather than after, which is why this hook
+ * does not pretend the distinction away with an optimistic terminal state.
+ */
+export function useBackfillAction(namespace: string, scheduleName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, action }: { id: string; action: 'pause' | 'resume' | 'cancel' }) =>
+      api.backfillAction(namespace, id, action),
+    onSuccess: (updated: Backfill) => {
+      void qc.invalidateQueries({ queryKey: qk.backfills(namespace, scheduleName) });
+      void qc.invalidateQueries({ queryKey: qk.backfill(namespace, updated.id) });
+    },
+    retry: false,
+  });
 }
 
 export function errorMessage(error: unknown): string {

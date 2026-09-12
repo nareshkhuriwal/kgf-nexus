@@ -220,3 +220,115 @@ export interface Paged<T> {
   items: T[];
   next_page_token?: string;
 }
+
+/**
+ * Schedules and backfills.
+ *
+ * Field names come from the gateway's schedulePayload/backfillPayload
+ * (services/api-gateway/rest/schedules.go), not from the store structs: the
+ * payload renames a few columns on the way out (cron_expr → `cron`, from_time →
+ * `from`), and the wire name is the one the console has to speak.
+ */
+
+/**
+ * What a schedule does when its previous run is still going.
+ *
+ * Declared as a list rather than a bare union so the create form can render the
+ * options without a second copy of them drifting out of step with the type.
+ */
+export const OVERLAP_POLICIES = ['skip', 'allow', 'queue_one'] as const;
+export type OverlapPolicy = (typeof OVERLAP_POLICIES)[number];
+
+/** One-line explanation per policy, shown next to the control that sets it. */
+export const OVERLAP_POLICY_HINTS: Record<OverlapPolicy, string> = {
+  skip: 'If the previous run is still going, the tick is dropped. The safest default.',
+  allow: 'Fire regardless. Two runs of this workflow may execute concurrently.',
+  queue_one: 'Hold at most one tick back and fire it when the previous run ends.',
+};
+
+export const BACKFILL_STATES = ['RUNNING', 'PAUSED', 'COMPLETED', 'CANCELLED', 'FAILED'] as const;
+export type BackfillState = (typeof BACKFILL_STATES)[number];
+
+export interface Schedule {
+  id: string;
+  namespace: string;
+  name: string;
+  spec_name: string;
+  /** Absent means "always the latest version of the spec". */
+  spec_version?: number;
+  cron: string;
+  timezone: string;
+  params?: Record<string, unknown> | null;
+  priority: number;
+  overlap_policy: OverlapPolicy | string;
+  catchup_limit: number;
+  enabled: boolean;
+  /**
+   * Reported as stored, INCLUDING null. A null does not simply mean "disabled":
+   * it also covers a schedule claimed by a replica firing it right now, and one
+   * left unarmed by a replica that died mid-fire. The gateway deliberately does
+   * not paper over that, so neither does the console.
+   */
+  next_fire_at: string | null;
+  last_fire_at: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string;
+  /** Upcoming fire times, present on create and on detail reads. */
+  next_fires?: string[];
+  /**
+   * Set instead of next_fires when a STORED expression no longer parses — a
+   * schedule that looks armed and can never fire. It is the reason an operator
+   * came looking, so it is never hidden.
+   */
+  cron_error?: string;
+}
+
+/** GET /schedules/preview — answers "is this expression good" with a 200 either way. */
+export interface CronPreview {
+  cron: string;
+  timezone: string;
+  valid: boolean;
+  /** Present when valid is false: why the expression was rejected. */
+  error?: string;
+  next_fires?: string[];
+}
+
+export interface Backfill {
+  id: string;
+  schedule_id: string;
+  namespace: string;
+  from: string;
+  to: string;
+  /** Next logical tick to generate, or null once the interval is exhausted. */
+  cursor_at: string | null;
+  max_active: number;
+  max_runs: number;
+  runs_created: number;
+  state: BackfillState | string;
+  detail?: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  ended_at: string | null;
+  created_by: string;
+}
+
+export interface CreateScheduleRequest {
+  name: string;
+  spec_name: string;
+  spec_version?: number | null;
+  cron: string;
+  timezone: string;
+  params?: Record<string, unknown>;
+  priority?: number;
+  overlap_policy?: string;
+  catchup_limit?: number;
+  enabled?: boolean;
+}
+
+export interface StartBackfillRequest {
+  from: string;
+  to: string;
+  max_active: number;
+  max_runs: number;
+}

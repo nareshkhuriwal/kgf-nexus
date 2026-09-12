@@ -20,6 +20,9 @@ import { AuditPage } from './pages/admin/AuditPage';
 import { RunListPage } from './pages/RunListPage';
 import { RunDetailPage } from './pages/RunDetailPage';
 import { WorkersPage } from './pages/WorkersPage';
+import { SchedulesPage } from './pages/SchedulesPage';
+import { ScheduleDetailPage } from './pages/ScheduleDetailPage';
+import { BackfillDetailPage } from './pages/BackfillDetailPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
 const NS_KEY = 'nexus.namespace';
@@ -108,6 +111,9 @@ export function App() {
         <nav className="nav">
           <NavLink to="/runs" className={({ isActive }) => (isActive ? 'active' : '')}>
             Runs
+          </NavLink>
+          <NavLink to="/schedules" className={({ isActive }) => (isActive ? 'active' : '')}>
+            Schedules
           </NavLink>
           <NavLink to="/workers" className={({ isActive }) => (isActive ? 'active' : '')}>
             Workers
@@ -204,6 +210,15 @@ export function App() {
             <Route path="/" element={<Navigate to="/runs" replace />} />
             <Route path="/runs" element={<RunListPage namespace={namespace} />} />
             <Route path="/runs/:runId" element={<RunDetailPage namespace={namespace} />} />
+            <Route path="/schedules" element={<SchedulesPage namespace={namespace} />} />
+            <Route
+              path="/schedules/:name"
+              element={<ScheduleDetailPage namespace={namespace} />}
+            />
+            <Route
+              path="/backfills/:backfillId"
+              element={<BackfillDetailPage namespace={namespace} />}
+            />
             <Route path="/workers" element={<WorkersPage namespace={namespace} />} />
             <Route
               path="/login"
