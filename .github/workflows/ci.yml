@@ -73,10 +73,34 @@ jobs:
         run: make migrate-up
         env:
           DATABASE_URL: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
+      # BOTH spellings. Two conventions coexist in the tree -- the scheduler
+      # harness reads NEXUS_TEST_DSN, while internal/store, resource-manager and
+      # the schedules package read NEXUS_TEST_DATABASE_URL -- and every one of
+      # these suites SKIPS rather than fails when its variable is unset. Setting
+      # only one leaves four packages quietly not running, which looks exactly
+      # like passing.
       - name: Run integration suite
         run: go test -tags integration -count=1 ./...
         env:
           NEXUS_TEST_DSN: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
+          NEXUS_TEST_DATABASE_URL: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
+
+      # A skip is indistinguishable from a pass in `go test` output, and these
+      # suites are the ones that exercise real SQL. Fail loudly if the database
+      # was not reachable rather than shipping a green tick that proved nothing.
+      - name: Fail if integration tests skipped
+        run: |
+          set -euo pipefail
+          out=$(go test -tags integration -count=1 -v ./internal/store/ 2>&1)
+          if grep -q "skipping integration test" <<<"$out"; then
+            echo "integration tests SKIPPED -- the database was not reachable" >&2
+            grep "skipping integration test" <<<"$out" >&2
+            exit 1
+          fi
+          echo "integration tests ran against a real database"
+        env:
+          NEXUS_TEST_DSN: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
+          NEXUS_TEST_DATABASE_URL: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
 
   ui:
     name: ui tests

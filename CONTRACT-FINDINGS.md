@@ -1501,3 +1501,73 @@ Also fixed here: `make up` printed the API as port 8080 while compose publishes
 bulk of its wall clock; caching the compose build would pay for itself quickly.
 And the suite currently proves the examples run — it does not assert their
 OUTPUTS are correct, only that every node succeeded.
+
+### F72. Runs could stall forever with nothing to notice — FIXED
+**Severity:** high. Closes the backstop F67 explicitly left open.
+Observed live: run `0926cfe0` sat at PAUSING for **seven hours** with all three of
+its nodes terminal and nothing in flight. Nothing would ever have moved it.
+`MaybeFinalizePause` is reachable only from a DAG-engine report, a report needs a
+reconcile, and a reconcile needs an attempt to report — so a run with no live
+attempts can never produce one. The conclusion the engine had already computed
+was simply never applied.
+
+Three causes of this exact shape have now been fixed at their own call sites:
+
+- **F62** cancel wedged a run in CANCELLING;
+- **F67** a terminal publish was cancelled after the node work had committed;
+- **b97d1ac** a paused run never reached PAUSED.
+
+Each fix was right, and each was found only because someone noticed a stuck run.
+They share a shape, and the shape predicts a fourth. `sweepStalledRuns` in the
+workflow-manager reconciler is the backstop: every minute it looks for runs where
+every node is terminal, nothing is in flight, and the RUN is still non-terminal,
+then asks the engine to conclude them.
+
+**The detection is the point, not the repair.** A sweep that force-transitions
+runs can hide the bug that stranded them, so every run it touches is logged at
+WARN naming the run, and `nexus_stalled_runs_recovered_total` is an ALARM rather
+than a throughput metric. A quiet sweep means the point fixes are holding; a
+sweep that keeps finding work means something upstream is broken and this is
+papering over it. The repairer is also optional — a deployment that would rather
+alert than self-heal can leave it unset and still get the signal.
+
+Two guards make it safe, and both are proven load-bearing by deleting them and
+watching the test fail:
+
+- **an age threshold**, because a healthy run legitimately shows every node
+  terminal for the moment between its last attempt reporting and the engine
+  publishing the outcome. Sweeping that window would replace a correct conclusion
+  with a guessed one;
+- **a materialized-DAG check**, because a run whose graph does not exist yet also
+  has no live attempts, and concluding THAT run would kill it before it started.
+
+Verified end to end against the live stack: a run forced into the F67 shape
+(RUNNING, three SUCCEEDED nodes) was skipped while fresh and recovered once it
+aged past the threshold, reaching SUCCEEDED with the WARN logged.
+
+**A bug in the first cut, worth recording** because it is the failure mode this
+whole session keeps meeting. `main.go` builds the reconciler `Config` as a
+literal and never set the new fields, so `StalledRunAge` was zero and the race
+guard was disabled in production — the live log read
+`stalled_for_at_least: 0`. Zero is not "no minimum age" here; it is "sweep runs
+that settled a millisecond ago", the exact case the guard exists to prevent. `New`
+now normalizes it, so a caller who forgets the field gets the safe default rather
+than the dangerous one, and a test pins that.
+
+### F73. CI silently skipped four integration packages — FIXED
+Found while wiring F72's test into CI. Two DSN conventions coexist:
+`internal/store`, `resource-manager` and `schedules` read
+`NEXUS_TEST_DATABASE_URL`; the scheduler harness reads `NEXUS_TEST_DSN`. The
+`integration` job set only the latter, so four packages **skipped** — and a skip
+is indistinguishable from a pass in `go test` output. The job would have reported
+green having run almost none of the SQL it exists to exercise, including the new
+stalled-run query.
+
+Both spellings are now set, plus an explicit step that greps for
+`skipping integration test` and fails the job. Verified in both directions: it
+passes with the database reachable and fails without it.
+
+This is the third variant of one mistake in this session — a check that passes
+while testing less than it appears to (see F70's vacuous lease assertion and
+F71's name-addressed example runs). Worth watching for directly: **if a test can
+skip, CI must prove it did not.**

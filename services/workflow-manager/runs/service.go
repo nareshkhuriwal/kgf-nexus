@@ -328,6 +328,27 @@ func (s *Service) MaybeFinalizePause(ctx context.Context, runID string) (store.R
 	return run, err
 }
 
+// ReconcileStalled asks the engine to recompute a run that stopped progressing.
+//
+// Called only by the stalled-run sweep. It is a thin pass-through rather than a
+// transition of its own on purpose: the sweep must not DECIDE anything about the
+// run. Only the engine can say what a graph of terminal nodes means, and having
+// a second component guess would give two answers to a question that has to have
+// one -- exactly the split-brain OnNodesTerminal exists to prevent.
+//
+// Safe to call repeatedly and on a run that turns out to be healthy: the engine
+// recomputes from node state and publishes only when its conclusion differs from
+// what the run already says.
+func (s *Service) ReconcileStalled(ctx context.Context, runID string) error {
+	_, runState, terminal, err := s.dag.ReconcileRun(ctx, runID, "")
+	if err != nil {
+		return err
+	}
+	s.log.InfoContext(ctx, "reconciled a stalled run",
+		"run_id", runID, "run_state", runState, "terminal", terminal)
+	return nil
+}
+
 // RetryFromFailed restarts a terminally failed run from its failed nodes.
 //
 // Nodes that already SUCCEEDED are left alone, so a 50-node pipeline that failed

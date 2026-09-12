@@ -911,3 +911,127 @@ func mustUUID(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {
 	}
 	return id
 }
+
+// TestIntegrationListStalledRuns pins the backstop for the class of bug that put
+// a run at PAUSING for seven hours with all three of its nodes terminal.
+//
+// A run gets there when its conclusion is computed and lost, or never computed
+// because nothing triggered a reconcile. It is then unreachable: a reconcile
+// happens only when an attempt reports or an operator intervenes, and a run with
+// no live attempts will never produce either. Three separate causes have been
+// fixed at their own call sites (F62, F67, b97d1ac); this query is what notices
+// the fourth.
+//
+// The negative cases carry most of the weight. A sweep that force-transitions
+// runs is exactly the kind of thing that can destroy a healthy run, so each way
+// a run can legitimately look idle is asserted NOT to match.
+func TestIntegrationListStalledRuns(t *testing.T) {
+	ctx := context.Background()
+	pool := testPool(t)
+
+	// A stalled run: every node terminal, nothing in flight, still RUNNING.
+	stalled := newFixture(t, ctx, pool)
+	stalled.attempt("done", 1)
+	settleRun(t, ctx, pool, stalled.runID, "RUNNING", "SUCCEEDED", "SUCCEEDED", time.Hour)
+
+	found, err := WFMListStalledRuns(ctx, pool, time.Minute, 100)
+	if err != nil {
+		t.Fatalf("list stalled runs: %v", err)
+	}
+	if !contains(found, stalled.runID) {
+		t.Errorf("a run with every node terminal and nothing in flight was not reported stalled; "+
+			"nothing else will ever look at it again (run %s)", stalled.runID)
+	}
+
+	// ── Everything below must NOT be swept. ──────────────────────────────
+
+	// Still working. The obvious case, and the one that would be catastrophic
+	// to get wrong: concluding a running node's run would kill live work.
+	live := newFixture(t, ctx, pool)
+	live.attempt("busy", 1)
+	settleRun(t, ctx, pool, live.runID, "RUNNING", "RUNNING", "RUNNING", time.Hour)
+	assertNotStalled(t, ctx, pool, live.runID, "a run with a RUNNING attempt")
+
+	// Terminal nodes but an attempt still PENDING. The attempt may yet be
+	// dispatched, so the run is waiting for capacity, not stuck.
+	pending := newFixture(t, ctx, pool)
+	pending.attempt("queued", 1)
+	settleRun(t, ctx, pool, pending.runID, "RUNNING", "SUCCEEDED", "PENDING", time.Hour)
+	assertNotStalled(t, ctx, pool, pending.runID, "a run with a PENDING attempt")
+
+	// Recently settled. This is the race guard: a healthy run shows every node
+	// terminal for the moment between its last attempt reporting and the engine
+	// publishing the outcome, and sweeping THAT would replace a correct
+	// conclusion with a guessed one.
+	fresh := newFixture(t, ctx, pool)
+	fresh.attempt("justdone", 1)
+	settleRun(t, ctx, pool, fresh.runID, "RUNNING", "SUCCEEDED", "SUCCEEDED", 0)
+	assertNotStalled(t, ctx, pool, fresh.runID, "a run that settled seconds ago")
+
+	// No DAG yet. A run whose graph has not been materialized also has no live
+	// attempts; concluding it would kill it before it ever started.
+	empty := newFixture(t, ctx, pool)
+	mustExec(t, ctx, pool,
+		`UPDATE workflow_runs SET state='PENDING', created_at = now() - interval '1 hour' WHERE id=$1`,
+		empty.runID)
+	assertNotStalled(t, ctx, pool, empty.runID, "a run with no nodes materialized")
+
+	// Already terminal. Nothing to do, and re-reporting it would make the
+	// counter lie about how often this happens.
+	finished := newFixture(t, ctx, pool)
+	finished.attempt("old", 1)
+	settleRun(t, ctx, pool, finished.runID, "SUCCEEDED", "SUCCEEDED", "SUCCEEDED", time.Hour)
+	assertNotStalled(t, ctx, pool, finished.runID, "a run that already reached SUCCEEDED")
+}
+
+// settleRun forces a fixture run into a specific shape: run state, node state,
+// attempt state, and how long ago the attempt ended.
+func settleRun(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
+	runID, runState, nodeState, attemptState string, ago time.Duration) {
+	t.Helper()
+	mustExec(t, ctx, pool,
+		`UPDATE task_nodes SET state = $2::node_state WHERE run_id = $1`, runID, nodeState)
+	// ended_at is only set for a genuinely finished attempt; a PENDING or RUNNING
+	// one has not ended, and leaving it NULL is what the query's COALESCE expects.
+	if attemptState == "SUCCEEDED" || attemptState == "FAILED" || attemptState == "CANCELLED" {
+		mustExec(t, ctx, pool,
+			`UPDATE task_attempts SET state = $2::attempt_state, ended_at = now() - $3::interval
+			  WHERE run_id = $1`, runID, attemptState, ago.String())
+	} else {
+		mustExec(t, ctx, pool,
+			`UPDATE task_attempts SET state = $2::attempt_state, ended_at = NULL WHERE run_id = $1`,
+			runID, attemptState)
+	}
+	mustExec(t, ctx, pool,
+		`UPDATE workflow_runs SET state = $2::run_state,
+		        created_at = now() - $3::interval, started_at = now() - $3::interval
+		  WHERE id = $1`, runID, runState, ago.String())
+}
+
+func assertNotStalled(t *testing.T, ctx context.Context, pool *pgxpool.Pool, runID, what string) {
+	t.Helper()
+	found, err := WFMListStalledRuns(ctx, pool, time.Minute, 100)
+	if err != nil {
+		t.Fatalf("list stalled runs: %v", err)
+	}
+	if contains(found, runID) {
+		t.Errorf("%s was reported stalled; sweeping it would conclude a run that is "+
+			"still legitimately in progress (run %s)", what, runID)
+	}
+}
+
+func mustExec(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, sql, args...); err != nil {
+		t.Fatalf("exec %q: %v", sql, err)
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}

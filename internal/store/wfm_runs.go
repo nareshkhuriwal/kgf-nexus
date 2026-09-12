@@ -278,6 +278,83 @@ func WFMListRunsNeedingDeadline(ctx context.Context, q GWQuerier, limit int) ([]
 	return out, rows.Err()
 }
 
+// WFMListStalledRuns finds runs that have stopped progressing and will never be
+// looked at again: every node is terminal, nothing is in flight, and yet the RUN
+// is still non-terminal.
+//
+// Such a run is unreachable from every direction. A reconcile happens only when
+// an attempt reports or an operator intervenes, and a run with no live attempts
+// will never produce either -- so the conclusion the engine already computed is
+// simply never applied. Observed in the wild as a run sitting at PAUSING for
+// seven hours with all three of its nodes terminal, and as the F67 case where a
+// terminal publish was cancelled after the node work had committed.
+//
+// This is the BACKSTOP, not the fix. Each individual cause is worth fixing at its
+// own call site and several have been (F62, F67, b97d1ac). What this adds is the
+// guarantee those point fixes cannot give on their own: whatever the reason a run
+// stops being reconciled, something eventually notices. A nonzero result is
+// therefore a SIGNAL that an upstream path is broken, not routine housekeeping --
+// callers should say so loudly rather than repairing quietly.
+//
+// minAge exists so this never races a healthy run. A run mid-transition can
+// legitimately show every node terminal for the moment between the last attempt
+// reporting and the engine publishing the outcome; sweeping that would replace a
+// correct conclusion with a guessed one. Anything still in this state after a
+// grace period is genuinely stuck.
+func WFMListStalledRuns(ctx context.Context, q GWQuerier, minAge time.Duration, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := q.Query(ctx, `
+		SELECT r.id::text
+		  FROM workflow_runs r
+		 WHERE r.state IN ('PENDING','RUNNING','PAUSING','CANCELLING')
+		   -- Nothing is in flight. task_attempts is the scheduler's table but the
+		   -- workflow-manager may READ any table (ADR-0011); it is writes that must
+		   -- go through the owner, and this only reads.
+		   AND NOT EXISTS (
+		         SELECT 1 FROM task_attempts a
+		          WHERE a.run_id = r.id
+		            AND a.state IN ('PENDING','DISPATCHED','RUNNING'))
+		   -- The DAG is materialized and every node has settled. The nodes check
+		   -- must not be skipped: a run whose graph does not exist yet also has no
+		   -- live attempts, and concluding THAT run terminal would kill it before
+		   -- it ever started.
+		   AND EXISTS (SELECT 1 FROM task_nodes n WHERE n.run_id = r.id)
+		   AND NOT EXISTS (
+		         SELECT 1 FROM task_nodes n
+		          WHERE n.run_id = r.id
+		            AND n.state NOT IN
+		                ('SUCCEEDED','FAILED','SKIPPED','UPSTREAM_FAILED','CANCELLED'))
+		   -- Age from the last thing that HAPPENED, which is the most recent
+		   -- attempt ending. workflow_runs has no updated_at, and created_at is
+		   -- the wrong clock: a long healthy run would look stale the whole time
+		   -- it was working, while a run that stalls immediately after starting
+		   -- would look fresh. COALESCE covers the run whose attempts were all
+		   -- created but never ran.
+		   AND COALESCE(
+		         (SELECT max(a.ended_at) FROM task_attempts a WHERE a.run_id = r.id),
+		         r.started_at, r.created_at) < now() - $1::interval
+		 ORDER BY r.created_at
+		 LIMIT $2`,
+		minAge.String(), limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list stalled runs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan stalled run id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // WFMGetRunForUpdate loads a run's state and deadline inside the caller's
 // transaction, taking a row lock so a concurrent transition cannot interleave.
 func WFMGetRunForUpdate(ctx context.Context, q GWQuerier, runID string) (state string, namespace string, deadline *time.Time, err error) {

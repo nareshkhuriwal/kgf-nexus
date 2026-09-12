@@ -34,7 +34,40 @@ type timerDB struct {
 	// gauges at their last good value instead of zeroing them.
 	countErr error
 	released int64
+	// stalledRuns is what the stalled-run sweep's query returns.
+	stalledRuns []string
+	stalledErr  error
 }
+
+// stringRows is a minimal pgx.Rows over single-column string results, which is
+// the shape WFMListStalledRuns scans.
+type stringRows struct {
+	vals []any
+	i    int
+}
+
+func (r *stringRows) Close()                        {}
+func (r *stringRows) Err() error                    { return nil }
+func (r *stringRows) CommandTag() pgconn.CommandTag { return pgconn.CommandTag{} }
+func (r *stringRows) FieldDescriptions() []pgconn.FieldDescription {
+	return []pgconn.FieldDescription{{Name: "id"}}
+}
+func (r *stringRows) Next() bool { r.i++; return r.i <= len(r.vals) }
+func (r *stringRows) Scan(dest ...any) error {
+	if len(dest) != 1 {
+		return fmt.Errorf("stringRows: want 1 dest, got %d", len(dest))
+	}
+	p, ok := dest[0].(*string)
+	if !ok {
+		return fmt.Errorf("stringRows: dest is not *string")
+	}
+	*p = r.vals[r.i-1].(string)
+	return nil
+}
+func (r *stringRows) Values() ([]any, error) { return []any{r.vals[r.i-1]}, nil }
+func (r *stringRows) RawValues() [][]byte    { return nil }
+func (r *stringRows) Conn() *pgx.Conn        { return nil }
+func (r *stringRows) TypeMap() *pgtype.Map   { return nil }
 
 type timerRow struct {
 	id, kind, subject string
@@ -120,6 +153,16 @@ func (d *timerDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows,
 	defer d.mu.Unlock()
 	if d.claimErr != nil {
 		return nil, d.claimErr
+	}
+	if strings.Contains(sql, "FROM workflow_runs r") {
+		if d.stalledErr != nil {
+			return nil, d.stalledErr
+		}
+		rows := make([]any, 0, len(d.stalledRuns))
+		for _, id := range d.stalledRuns {
+			rows = append(rows, id)
+		}
+		return &stringRows{vals: rows}, nil
 	}
 	if !strings.Contains(sql, "FOR UPDATE SKIP LOCKED") {
 		return nil, fmt.Errorf("timerDB: unhandled Query: %s", sql)
@@ -710,5 +753,154 @@ func TestRunSamplesBacklogAtStartup(t *testing.T) {
 
 	if got := cfg.Metrics.BacklogTotal.Value(); got != 1 {
 		t.Errorf("BacklogTotal = %v after startup, want 1 sampled before the first tick", got)
+	}
+}
+
+// TestStalledRunSweepReportsBeforeItRepairs pins the property that makes this
+// sweep safe to have at all.
+//
+// A sweep that force-transitions runs can hide the bug that stranded them. Every
+// run it touches reached a state nothing else would ever have moved, so the
+// DETECTION is the valuable half and the repair is secondary: a quiet sweep means
+// the point fixes (F62, F67, b97d1ac) are holding, and a sweep that keeps finding
+// work means something upstream is broken. If it ever repaired silently, that
+// signal would be lost and the next such bug would be found by an operator
+// noticing a run that never finished -- seven hours, in the observed case.
+func TestStalledRunSweepReportsBeforeItRepairs(t *testing.T) {
+	db := newTimerDB()
+	db.stalledRuns = []string{"run-a", "run-b"}
+
+	var logs strings.Builder
+	reg := metrics.NewRegistry()
+	r := New(db, Config{
+		Claimant:      "test",
+		BatchSize:     10,
+		StalledRunAge: time.Minute,
+		Metrics:       NewMetrics(reg),
+	}, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	var reconciled []string
+	r.OnStalledRun(func(_ context.Context, runID string) error {
+		reconciled = append(reconciled, runID)
+		return nil
+	})
+
+	r.sweepStalledRuns(context.Background())
+
+	if len(reconciled) != 2 {
+		t.Errorf("reconciled %v, want both stalled runs", reconciled)
+	}
+	// WARN, not INFO or DEBUG: the whole point is that an operator sees this.
+	out := logs.String()
+	for _, id := range db.stalledRuns {
+		if !strings.Contains(out, id) {
+			t.Errorf("stalled run %s was repaired without being logged; "+
+				"a silent repair hides the upstream defect that stranded it", id)
+		}
+	}
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("stalled runs were not logged at WARN; got: %s", out)
+	}
+}
+
+// TestStalledRunSweepSurvivesAFailingRepair proves one unrecoverable run does not
+// block the rest. A sweep that aborted on the first error would leave every later
+// stalled run stranded, which is the failure it exists to prevent.
+func TestStalledRunSweepSurvivesAFailingRepair(t *testing.T) {
+	db := newTimerDB()
+	db.stalledRuns = []string{"bad", "good"}
+
+	r := New(db, Config{Claimant: "test", BatchSize: 10, StalledRunAge: time.Minute},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	var seen []string
+	r.OnStalledRun(func(_ context.Context, runID string) error {
+		seen = append(seen, runID)
+		if runID == "bad" {
+			return errors.New("engine unreachable")
+		}
+		return nil
+	})
+
+	r.sweepStalledRuns(context.Background())
+
+	if len(seen) != 2 {
+		t.Errorf("attempted %v; a failing repair must not stop the others", seen)
+	}
+}
+
+// TestStalledRunSweepDetectsWithoutARepairer proves detection stands alone. A
+// deployment that would rather alert than self-heal can leave the callback unset
+// and still get the signal, which is the half that matters.
+func TestStalledRunSweepDetectsWithoutARepairer(t *testing.T) {
+	db := newTimerDB()
+	db.stalledRuns = []string{"orphan"}
+
+	var logs strings.Builder
+	r := New(db, Config{Claimant: "test", BatchSize: 10, StalledRunAge: time.Minute},
+		slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	// No OnStalledRun.
+	r.sweepStalledRuns(context.Background())
+
+	if !strings.Contains(logs.String(), "orphan") {
+		t.Error("a stalled run went unreported when no repairer was registered; " +
+			"detection must not depend on being able to fix it")
+	}
+}
+
+// TestStalledRunSweepIsQuietWhenNothingIsStalled guards against alert fatigue: a
+// backstop that logs on every pass trains operators to ignore it, and this one is
+// only meaningful precisely because it is normally silent.
+func TestStalledRunSweepIsQuietWhenNothingIsStalled(t *testing.T) {
+	db := newTimerDB()
+
+	var logs strings.Builder
+	r := New(db, Config{Claimant: "test", BatchSize: 10, StalledRunAge: time.Minute},
+		slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	r.OnStalledRun(func(context.Context, string) error {
+		t.Error("the repairer was called with nothing stalled")
+		return nil
+	})
+
+	r.sweepStalledRuns(context.Background())
+
+	if logs.String() != "" {
+		t.Errorf("the sweep logged with nothing stalled: %s", logs.String())
+	}
+}
+
+// TestStalledRunSweepSurvivesAQueryFailure proves a database blip does not kill
+// the loop, matching how every other cycle in this reconciler behaves.
+func TestStalledRunSweepSurvivesAQueryFailure(t *testing.T) {
+	db := newTimerDB()
+	db.stalledErr = errors.New("connection reset")
+
+	r := New(db, Config{Claimant: "test", BatchSize: 10, StalledRunAge: time.Minute},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r.OnStalledRun(func(context.Context, string) error {
+		t.Error("the repairer ran despite the query failing")
+		return nil
+	})
+
+	r.sweepStalledRuns(context.Background()) // must not panic
+}
+
+// TestNewNormalizesStalledRunConfig pins the fix for a bug this code shipped
+// with: main.go built Config as a literal and never set these fields, so
+// StalledRunAge was zero and the race guard was disabled in production. The live
+// log said `stalled_for_at_least: 0`.
+//
+// Zero here is not "no minimum age" -- it is "sweep runs that settled a
+// millisecond ago", which is exactly the case the guard exists to prevent. A
+// caller that forgets the field must get the safe default, not the dangerous one.
+func TestNewNormalizesStalledRunConfig(t *testing.T) {
+	r := New(newTimerDB(), Config{Claimant: "test"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if r.cfg.StalledRunAge <= 0 {
+		t.Errorf("StalledRunAge = %v; a zero value disables the race guard and lets the "+
+			"sweep conclude runs that are only mid-conclusion", r.cfg.StalledRunAge)
+	}
+	if r.cfg.StalledRunInterval <= 0 {
+		t.Errorf("StalledRunInterval = %v, want a positive default", r.cfg.StalledRunInterval)
 	}
 }

@@ -68,6 +68,16 @@ type Config struct {
 	// an ALERTING threshold only — crossing it must never change whether this
 	// replica serves traffic, for the reason documented on Reconciler.Backlog.
 	BacklogAlert int64
+	// StalledRunAge is how long a run must have shown no activity before the
+	// stalled-run sweep will touch it. It is a RACE GUARD, not a tuning knob: a
+	// healthy run legitimately shows every node terminal for the moment between
+	// its last attempt reporting and the engine publishing the outcome, and
+	// sweeping that window would replace a correct conclusion with a guessed one.
+	StalledRunAge time.Duration
+	// StalledRunInterval is how often that sweep runs. Coarse on purpose -- it is
+	// a backstop for a condition that should never occur, so paying for it every
+	// second would be a strange trade.
+	StalledRunInterval time.Duration
 	// Metrics receives backlog, lateness and dispatch-outcome observations. Nil
 	// disables instrumentation, which keeps the reconciler usable in tests without
 	// a registry.
@@ -83,6 +93,10 @@ func DefaultConfig(claimant string) Config {
 		Claimant:        claimant,
 		BacklogInterval: 15 * time.Second,
 		BacklogAlert:    1000,
+		// Comfortably longer than a reconcile round trip, so the sweep can never
+		// race a run that is merely mid-conclusion.
+		StalledRunAge:      2 * time.Minute,
+		StalledRunInterval: time.Minute,
 	}
 }
 
@@ -112,6 +126,11 @@ type Metrics struct {
 	// StaleClaims counts timers returned to the pool by the sweeper: nonzero means a
 	// replica died holding claims, or a handler is persistently failing.
 	StaleClaims *metrics.Counter
+	// StalledRuns counts runs the sweep had to rescue. This is an ALARM, not a
+	// throughput metric: every increment means a run reached a state nothing else
+	// would ever have moved, so a steady nonzero rate points at a broken publish
+	// or reconcile path upstream and should be investigated rather than tuned.
+	StalledRuns *metrics.Counter
 }
 
 // NewMetrics registers the reconciler's instruments on a registry.
@@ -130,6 +149,8 @@ func NewMetrics(reg *metrics.Registry) *Metrics {
 			"Timer dispatch outcomes by kind and result.", "kind", "result"),
 		StaleClaims: reg.NewCounter("nexus_timer_stale_claims_total",
 			"Timers returned to the pool after a claimant stopped making progress.").Counter(),
+		StalledRuns: reg.NewCounter("nexus_stalled_runs_recovered_total",
+			"Runs reconciled by the stalled-run sweep. Any nonzero rate is a bug upstream.").Counter(),
 	}
 }
 
@@ -140,6 +161,11 @@ type Reconciler struct {
 	log      *slog.Logger
 	mu       sync.RWMutex
 	handlers map[string]Handler
+	// reconcileRun asks the DAG engine to recompute one run. A callback rather
+	// than a dependency because only the engine may write task_nodes (ADR-0011)
+	// and this package must not learn how to reach it -- the same reason the
+	// timer effects are injected as handlers.
+	reconcileRun func(ctx context.Context, runID string) error
 }
 
 // New builds a reconciler.
@@ -162,6 +188,17 @@ func New(db store.GWDB, cfg Config, log *slog.Logger) *Reconciler {
 	if cfg.BacklogAlert <= 0 {
 		cfg.BacklogAlert = 1000
 	}
+	// Normalized rather than left at zero, because zero here is not "no age
+	// requirement" -- it disables the guard that stops the sweep concluding a run
+	// that is merely mid-conclusion. A caller that forgets the field gets the
+	// safe default, not the dangerous one. (main.go built this Config literally
+	// and did exactly that.)
+	if cfg.StalledRunAge <= 0 {
+		cfg.StalledRunAge = 2 * time.Minute
+	}
+	if cfg.StalledRunInterval <= 0 {
+		cfg.StalledRunInterval = time.Minute
+	}
 	return &Reconciler{db: db, cfg: cfg, log: log, handlers: make(map[string]Handler)}
 }
 
@@ -170,6 +207,17 @@ func (r *Reconciler) Handle(kind string, h Handler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.handlers[kind] = h
+}
+
+// OnStalledRun registers the recovery action for the stalled-run sweep.
+//
+// Without it the sweep still runs and still reports what it finds, which is
+// deliberate: the DETECTION is the valuable half. A deployment that would rather
+// alert than self-heal can leave this unset and lose nothing but the repair.
+func (r *Reconciler) OnStalledRun(fn func(ctx context.Context, runID string) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reconcileRun = fn
 }
 
 // registeredKinds lists the kinds with a handler, for the claim filter.
@@ -202,6 +250,13 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	backlog := time.NewTicker(r.cfg.BacklogInterval)
 	defer backlog.Stop()
 
+	stalledEvery := r.cfg.StalledRunInterval
+	if stalledEvery <= 0 {
+		stalledEvery = time.Minute
+	}
+	stalled := time.NewTicker(stalledEvery)
+	defer stalled.Stop()
+
 	r.log.InfoContext(ctx, "timer reconciler started",
 		"claimant", r.cfg.Claimant, "interval", r.cfg.Interval, "batch_size", r.cfg.BatchSize)
 
@@ -220,6 +275,8 @@ func (r *Reconciler) Run(ctx context.Context) error {
 			r.SampleBacklog(ctx)
 		case <-sweep.C:
 			r.sweepStaleClaims(ctx)
+		case <-stalled.C:
+			r.sweepStalledRuns(ctx)
 		case <-ticker.C:
 			// A cycle that errors is logged and retried on the next tick rather
 			// than killing the loop. The reconciler is the only thing that makes
@@ -326,6 +383,61 @@ func (r *Reconciler) sweepStaleClaims(ctx context.Context) {
 		r.log.WarnContext(ctx, "returned stale timer claims to the pool", "count", n)
 		if m := r.cfg.Metrics; m != nil {
 			m.StaleClaims.Add(float64(n))
+		}
+	}
+}
+
+// sweepStalledRuns finds runs nothing will ever look at again and asks the engine
+// to conclude them.
+//
+// This is a BACKSTOP for a class of bug, not a feature. A run reaches this state
+// when its conclusion was computed and then lost, or never computed because
+// nothing triggered a reconcile: every node terminal, no attempt in flight, and
+// no future event that would cause anyone to look. Three separate causes have
+// been fixed at their own call sites (F62 cancel, F67 terminal publish, the pause
+// gap in b97d1ac) and each fix was correct -- but they share a shape, and the
+// shape says the next one will not be found until an operator notices a run that
+// never finished. Seven hours was the observed case.
+//
+// So it logs at WARN with the run id and reports a counter. A quiet sweep means
+// the point fixes are holding; a sweep that keeps finding work means something
+// upstream is broken and this is papering over it. The counter is the alarm, and
+// it is deliberately more important than the repair.
+func (r *Reconciler) sweepStalledRuns(ctx context.Context) {
+	stalled, err := store.WFMListStalledRuns(ctx, r.db, r.cfg.StalledRunAge, r.cfg.BatchSize)
+	if err != nil {
+		r.log.ErrorContext(ctx, "failed to sweep stalled runs", "error", err)
+		return
+	}
+	if len(stalled) == 0 {
+		return
+	}
+
+	r.mu.RLock()
+	fn := r.reconcileRun
+	r.mu.RUnlock()
+
+	for _, runID := range stalled {
+		// WARN even when the repair succeeds. The run should never have been
+		// here, and a silent fix would hide the upstream defect that put it here
+		// -- which is the bug actually worth finding.
+		r.log.WarnContext(ctx, "run stalled with every node terminal and nothing in flight; "+
+			"its conclusion was never applied, which means a publish or reconcile path failed upstream",
+			"run_id", runID, "stalled_for_at_least", r.cfg.StalledRunAge)
+		if m := r.cfg.Metrics; m != nil && m.StalledRuns != nil {
+			m.StalledRuns.Inc()
+		}
+		if fn == nil {
+			continue
+		}
+		// Reconciling is safe to repeat: the engine recomputes from node state
+		// and publishes only when the outcome differs from what the run already
+		// says. A run that another replica just fixed is a no-op here.
+		if err := fn(ctx, runID); err != nil {
+			// Logged and skipped, never fatal: one unrecoverable run must not
+			// stop the others being recovered, and the next sweep retries it.
+			r.log.ErrorContext(ctx, "could not reconcile a stalled run; will retry next sweep",
+				"run_id", runID, "error", err)
 		}
 	}
 }
