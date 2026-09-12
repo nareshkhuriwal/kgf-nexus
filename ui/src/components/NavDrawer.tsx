@@ -1,0 +1,258 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * The navbar's slide-out destination panel.
+ *
+ * WHY IT EXISTS AT ALL, GIVEN THE BAR ALREADY LISTS EVERYTHING. The reference
+ * top bar hides all navigation behind a hamburger, and that is the one thing
+ * here that is deliberately NOT copied: making every navigation two clicks to
+ * buy back horizontal space is a bad trade for a console whose operators live
+ * on four of these pages. So the bar keeps its links and this drawer is an
+ * ADDITION, and it has to justify itself on something the flat row cannot do.
+ *
+ * It does: the row drops the GROUP HEADINGS. navItems.ts is explicit that the
+ * grouping is editorial content rather than decoration — Observe is what
+ * happened, Automate is what will happen without anyone asking, Fleet is what
+ * it runs on, Govern is who may touch any of it — and the navbar layout throws
+ * that classification away because eight labels plus four headings will not fit
+ * on one line. The drawer is where the navbar operator gets it back. That is
+ * the whole feature; without the headings this file would be a second copy of
+ * the row and should not be merged.
+ *
+ * WHY IT IS NOT IN THE SIDEBAR LAYOUT. The rail already renders these groups,
+ * permanently, with the headings intact. A drawer there would be a second way
+ * to reach a list that is already on screen and never scrolled off it — a
+ * control whose only effect is to cover the identical control underneath. So
+ * the hamburger is rendered by NavBar and nowhere else, and App does not thread
+ * it into Sidebar.
+ *
+ * WHY IT DOES NOT DUPLICATE THE DESTINATION LIST. visibleGroups() is the only
+ * source, for the reason navItems.ts gives at length: the first thing to rot in
+ * a multi-layout shell is a link added to one renderer and forgotten in the
+ * other, and an operator who cannot reach Schedules because of a data-structure
+ * decision has been failed by this file, not by a stylesheet.
+ *
+ * ── the accessibility shape, and why ──────────────────────────────────────
+ *
+ * role="dialog" aria-modal="true", not a labelled complementary region. The
+ * deciding fact is the scrim: this panel covers the page and swallows clicks on
+ * everything behind it, so the content behind it is genuinely unavailable while
+ * it is open. A complementary region would tell a screen-reader user they may
+ * keep browsing the page they cannot actually touch, which is a lie about the
+ * interface's state. The <nav> with its own accessible name lives INSIDE the
+ * dialog, so the landmark still exists for anyone navigating by landmark.
+ *
+ * IT TRAPS FOCUS, unlike ProfileMenu and like CommandPalette, and for
+ * CommandPalette's stated reason rather than out of symmetry: it covers the
+ * page behind a modal scrim, and Tab reaching a control the operator cannot see
+ * and cannot click is worse than Tab doing nothing. The menu does not trap
+ * because it is a small layer you can still see around and dismiss by clicking
+ * anything; this is not that.
+ *
+ * Escape closes and returns focus to the hamburger, exactly as ProfileMenu
+ * does — a keyboard user dropped at the top of the document has lost their
+ * place. Activating a destination closes it WITHOUT restoring focus, exactly as
+ * CommandPalette does: the destination owns focus now, and yanking it back to
+ * the trigger would undo the navigation that was just asked for. A drawer left
+ * open over the page it just opened is the bug this is guarding.
+ *
+ * The scrim closes it, and is never the only way out: Escape does, every
+ * destination does, and the panel carries its own labelled close button, which
+ * is what a touch user with no keyboard and no obvious scrim reaches for.
+ */
+
+import { useEffect, useId, useRef } from 'react';
+import { NavLink } from 'react-router-dom';
+import { Logo } from './Logo';
+import { isEndMatch, visibleGroups } from './navItems';
+
+export interface NavDrawerProps {
+  open: boolean;
+  /** Told to close. Owned by the caller so the hamburger's aria-expanded and
+      the panel cannot disagree about whether it is open. */
+  onClose: () => void;
+  /**
+   * Where focus goes when Escape or the close button dismisses the drawer.
+   *
+   * Passed in rather than captured from document.activeElement on open,
+   * because the answer is known statically — it is the hamburger, which is the
+   * only thing that can open this — and reading activeElement would hand focus
+   * to whatever happened to be focused if the drawer were ever opened from
+   * code rather than from a click.
+   */
+  returnFocusTo?: React.RefObject<HTMLElement | null>;
+  /** The gateway's answer on admin_write. Gates the Govern group, exactly as
+      both chrome layouts do; this file forms no authorization opinion. */
+  canAdmin: boolean;
+}
+
+export function NavDrawer({ open, onClose, returnFocusTo, canAdmin }: NavDrawerProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const groups = visibleGroups(canAdmin);
+
+  /**
+   * Dismiss on Escape, and hand focus back.
+   *
+   * Bound to the document rather than to the panel so it fires wherever focus
+   * has ended up — including on the scrim itself, which is not a descendant of
+   * the panel and would therefore never see a panel-scoped handler.
+   */
+  useEffect(() => {
+    if (!open) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      onClose();
+      returnFocusTo?.current?.focus();
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [open, onClose, returnFocusTo]);
+
+  /**
+   * Move focus INTO the panel when it opens.
+   *
+   * Without this the drawer slides in while focus is still on the hamburger
+   * behind the scrim, so the first Tab walks the bar the operator can no longer
+   * see. The first focusable child is taken from the DOM rather than tracked,
+   * so a control added to the panel later is still the right landing spot.
+   */
+  useEffect(() => {
+    if (!open) return;
+    focusables(panelRef.current)[0]?.focus();
+  }, [open]);
+
+  if (!open) return null;
+
+  /**
+   * The focus trap.
+   *
+   * A real cycle rather than CommandPalette's collapse-to-one-field, because a
+   * drawer's whole content is a list of focusable links: pinning focus to one
+   * of them would make the other seven unreachable from the keyboard, which is
+   * the opposite of what this panel is for.
+   */
+  function onPanelKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key !== 'Tab') return;
+    const stops = focusables(panelRef.current);
+    if (stops.length === 0) return;
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    const here = document.activeElement;
+    // Only the edges are intercepted; in the middle of the list the browser's
+    // own Tab order is already correct and reimplementing it would be a way to
+    // get it subtly wrong.
+    if (e.shiftKey && here === first) {
+      e.preventDefault();
+      last?.focus();
+    } else if (!e.shiftKey && here === last) {
+      e.preventDefault();
+      first?.focus();
+    }
+  }
+
+  return (
+    <div
+      className="navdrawer-scrim"
+      // mousedown rather than click, matching the palette's backdrop: a drag
+      // that begins inside the panel and ends outside it is not a dismissal.
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="navdrawer"
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onKeyDown={onPanelKeyDown}
+      >
+        <div className="navdrawer-head">
+          {/* The brand repeats here rather than being omitted: at phone width
+              the scrim covers the bar entirely, so without it the panel is a
+              list of words floating over a dimmed page with nothing saying
+              which product it belongs to. */}
+          <span className="brand" aria-hidden="true">
+            <Logo size={20} className="brand-mark" />
+            <span className="brand-word">Nexus</span>
+          </span>
+          {/* The dialog's accessible name. Visually hidden because the brand
+              beside it is already the visible heading, and printing "All
+              destinations" as well would be a second title for one panel. */}
+          <h2 className="sr-only" id={titleId}>
+            All destinations
+          </h2>
+          <button
+            type="button"
+            className="navdrawer-close"
+            onClick={() => {
+              onClose();
+              returnFocusTo?.current?.focus();
+            }}
+            title="Close navigation"
+          >
+            <span aria-hidden="true">✕</span>
+            <span className="sr-only">Close navigation</span>
+          </button>
+        </div>
+
+        {/* Labelled distinctly from the bar's own "Primary" nav: both are in
+            the document while the drawer is open, and two landmarks with the
+            same name is a worse outcome than the duplication itself. */}
+        <nav className="navdrawer-nav" aria-label="All destinations">
+          {groups.map((group) => (
+            <div className="nav-group" key={group.label}>
+              {/* aria-hidden for the same reason the rail's headings are: each
+                  link's accessible name already carries its destination, and
+                  announcing "Observe" as a stray line before three links adds
+                  noise without adding navigation. The heading is here for the
+                  eye, which is precisely the value the flat row cannot offer. */}
+              <p className="nav-group-label" aria-hidden="true">
+                {group.label}
+              </p>
+              <ul className="nav-list">
+                {group.items.map((item) => (
+                  <li key={item.to}>
+                    <NavLink
+                      to={item.to}
+                      end={isEndMatch(item)}
+                      className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
+                      // Closed on activation, and focus is NOT restored: the
+                      // page that was just opened owns focus, and a drawer
+                      // still covering it is the defect this exists to avoid.
+                      onClick={onClose}
+                    >
+                      <span className="nav-glyph" aria-hidden="true">
+                        {item.glyph}
+                      </span>
+                      <span className="nav-label">{item.label}</span>
+                    </NavLink>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </nav>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The panel's tab stops, in document order.
+ *
+ * Queried rather than registered so the trap covers whatever the panel happens
+ * to contain; `:not([disabled])` and the tabindex guard keep it from parking
+ * focus on something the browser would itself skip.
+ */
+function focusables(root: HTMLElement | null): HTMLElement[] {
+  if (!root) return [];
+  return Array.from(
+    root.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  );
+}

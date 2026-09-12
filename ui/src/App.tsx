@@ -139,16 +139,47 @@ export function App() {
     queryClient.invalidateQueries();
   }
 
+  /**
+   * Sign out, THEN go to the login screen — in that order.
+   *
+   * The order is the whole point. The credential has to be gone and the cached
+   * queries invalidated BEFORE the route changes: navigate first and react-query
+   * spends the transition refetching every mounted panel with a token the
+   * gateway has just revoked, so a rack of 401s renders behind the login screen
+   * for no reason. Completing the logout first means the only thing left to do
+   * is leave.
+   *
+   * The navigation belongs HERE and not at either call site. Sign-out is
+   * reachable from two places — the account menu's row and the palette's
+   * sign-out command — and a shell that navigated from one of them would have a
+   * second path that clears the credential and then strands the operator on a
+   * page that has become entirely 401s. It replaces rather than pushes, so Back
+   * from the login screen does not return an unauthenticated browser to a
+   * signed-in page; LoginPage already replaces on the way in, so a sign-out and
+   * a sign-in leave one entry between them rather than a growing pair.
+   *
+   * The local clear is stated unconditionally here rather than left to the
+   * `finally` in authApi.logout(). It was previously only in the catch, which
+   * read as though the success path did NOT clear — the opposite of the truth —
+   * and made this function's correctness depend on an implementation detail of
+   * another module: move that clear out of auth.ts's `finally` and the success
+   * path would silently keep a usable token while the failure path went on
+   * working. The guarantee the operator asked for is "this browser no longer
+   * holds a credential", and it is cheap to assert it at the level that owns the
+   * credential state. A network blip must not leave a working token behind.
+   */
   async function signOut() {
     try {
       await authApi.logout();
     } catch {
-      // The local credential is cleared regardless: the operator asked to be
-      // signed out of this browser, and leaving a usable token behind because
-      // the network blipped is the opposite of what they asked for.
-      setSession(null);
+      // Swallowed on purpose: the server's opinion of the logout does not
+      // change what happens locally. The operator asked to be signed out of
+      // this browser, and refusing because the network blipped would be the
+      // opposite of what they asked for.
     }
+    setSession(null);
     credentialChanged();
+    navigate('/login', { replace: true });
   }
 
   function saveKey(next: string) {
@@ -161,6 +192,19 @@ export function App() {
     // than leave stale 401 panels on screen next to a now-valid key.
     credentialChanged();
   }
+
+  /**
+   * Whether the command palette is open.
+   *
+   * Lifted out of the palette ONLY because the navbar now carries a search
+   * control that has to open the same instance. The palette still owns every
+   * other part of its behaviour — the Cmd+K binding, the query, dismissal,
+   * focus restoration — and it is written to accept a controlled `open` for
+   * exactly this case, so the shell holds one boolean and nothing else. Mounting
+   * a second palette for the header button would have been two searches with two
+   * pieces of state that disagree the moment both are reachable.
+   */
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   /**
    * The account menu, built once and handed to whichever chrome is active.
@@ -216,11 +260,29 @@ export function App() {
           Deliberately inside the chrome layout and not above the router: on
           /login there is no catalog to search and no credential to search it
           with, so the palette would open onto a list of 401s. */}
-      <CommandPalette namespace={namespace} onNavigate={navigate} onSignOut={() => void signOut()} />
+      <CommandPalette
+        namespace={namespace}
+        onNavigate={navigate}
+        onSignOut={() => void signOut()}
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+      />
 
       {navLayout === 'navbar' ? (
         <header className="chrome chrome-navbar">
-          <NavBar canAdmin={canAdmin} account={account} />
+          {/* The search control and the gear are passed as callbacks rather
+              than rendered by NavBar itself, so the bar owns no route and no
+              palette state: App is the only thing here that has a router and a
+              palette to hand it. Sidebar gets neither — the rail already shows
+              the grouped destinations a drawer would duplicate, and the gear's
+              destination is already a row in the account menu it pins to its
+              own bottom edge. */}
+          <NavBar
+            canAdmin={canAdmin}
+            account={account}
+            onOpenSearch={() => setPaletteOpen(true)}
+            onOpenSettings={() => navigate('/settings')}
+          />
         </header>
       ) : (
         <header className="chrome chrome-sidebar">

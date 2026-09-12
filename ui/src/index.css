@@ -1338,24 +1338,41 @@ tr.version-current > td { background: var(--bg-hover); }
 .chrome-sidebar {
   color: var(--fg);
 }
+/* nowrap, which is a change: the bar used to be allowed to wrap onto a second
+   line, and with a search field and a tool cluster in it that escape hatch
+   becomes the failure mode rather than the fallback — a chrome that grows a
+   second row at some widths makes the page content jump. Everything in here is
+   now responsible for shrinking instead, which is what the min-width:0 on the
+   flexible children below is for. */
 .navbar {
   display: flex;
   align-items: center;
-  gap: var(--space-6);
+  gap: var(--space-5);
   padding: var(--space-4) var(--space-6);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
-.navbar .brand { display: flex; align-items: center; gap: var(--space-4); }
+.navbar .brand { display: flex; align-items: center; gap: var(--space-4); flex: 0 0 auto; }
 
-/* Horizontally the groups are dropped, so the row is the flat list. */
-.navbar-nav { flex: 1; min-width: 0; overflow-x: auto; }
+/* Horizontally the groups are dropped, so the row is the flat list. The
+   headings the row cannot carry are in the drawer; see NavDrawer.tsx. */
+.navbar-nav { flex: 0 1 auto; min-width: 0; overflow-x: auto; }
 .navbar-nav .nav-list { flex-direction: row; gap: var(--space-2); }
 .navbar .nav-item { padding: var(--space-3) var(--space-5); white-space: nowrap; }
 /* The glyph is redundant next to a visible label in a row, and dropping it
    buys the width that keeps the bar on one line. It returns below, where the
    labels are the thing that has to go. */
 .navbar .nav-glyph { display: none; }
-.navbar-account { margin-left: auto; }
+
+/* The right-hand cluster. margin-left:auto rather than a spacer element, and it
+   moved from .navbar-account to the cluster that now contains it — the account
+   control is no longer the only thing pinned to that end. */
+.navbar-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-left: auto;
+  flex: 0 0 auto;
+}
 
 /* ── Responsive ────────────────────────────────────────────────────────────
    Below 900px the rail collapses to an icon-only column: the destinations stay
@@ -1389,6 +1406,15 @@ tr.version-current > td { background: var(--bg-hover); }
   .navbar .nav-glyph { display: inline-flex; }
   .navbar .nav-item .nav-label { display: none; }
   .app-navbar .profile-ns { display: none; }
+
+  /* The search field collapses to its icon rather than being squeezed: a
+     150px-wide box containing a truncated sentence and a keyboard hint is
+     neither readable nor obviously a search, and the accessible name and the
+     title tooltip both survive the collapse because they are not the visible
+     text. */
+  .navsearch { flex: 0 0 auto; width: auto; max-width: none; }
+  .navsearch-text,
+  .navsearch-kbd { display: none; }
 }
 
 /* At phone width the page must not scroll sideways. min-width:0 on the flex
@@ -2741,4 +2767,232 @@ a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
   border-top: 1px solid var(--border);
   font-size: var(--text-sm);
   color: var(--fg-faint);
+}
+
+/* ── Navbar: hamburger, search and tool cluster ─────────────────────────────
+   The top bar adopted a cloud console's shape — a hamburger, the wordmark, a
+   prominent search field, a right-hand cluster of icon controls — and these are
+   the three new pieces. What is NOT here is as deliberate as what is: there are
+   no rules for an assistant button, a shell button, a notification bell or a
+   feedback button, because this console has nothing behind any of them and
+   NavBar.tsx refuses to render a control that does nothing.
+
+   Every colour below is structural — surfaces, hairlines, muted text — and not
+   one of them carries state. --accent appears only where it already did, on the
+   active nav item and the focus ring. A chrome control that encoded state in
+   colour would be competing with the run states the pages exist to show. */
+
+/* The hamburger and the gear are the same object: a square, quiet,
+   icon-sized button. Declared together rather than as two near-identical
+   blocks so they cannot drift into looking like different kinds of control. */
+.navbar-menu,
+.navbar-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* A touch target, not a spacing step: 32px is the smallest square that stays
+     comfortably tappable next to a 20px mark, which is why it is literal. */
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  padding: var(--space-0);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: var(--text-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+.navbar-menu:hover,
+.navbar-tool:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+/* The pressed hamburger keeps a visible state while the drawer is open, so the
+   button that produced the panel does not look untouched beneath its own
+   scrim. Surface and hairline rather than a tint, because "this menu is open"
+   is chrome state and not console state. */
+.navbar-menu[aria-expanded='true'] {
+  background: var(--bg-inset);
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+/* ── The search control ──────────────────────────────────────────────────── */
+/* A button that reads as a field. The tension is deliberate: it must look
+   typeable enough that an operator reaches for it instead of hunting for
+   search, while being a button so the one real search (CommandPalette, which
+   talks to the catalog endpoint and can tell "no matches" from "I could not
+   ask") stays the only implementation. See NavSearch.tsx.
+
+   flex: 1 1 auto with a max-width, so it takes the slack in the middle of the
+   bar and centres the way the reference does, but stops growing on a wide
+   monitor — a 900px search box is a target, not a field. 520px is a measure,
+   literal for the same reason .cmdk's max-width is. */
+.navsearch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 520px;
+  padding: var(--space-3) var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--fg-faint);
+  font-family: var(--sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-tight);
+  /* text, not pointer: the control is claiming to be a field, and a pointer
+     cursor over something shaped like an input reads as a mistake. */
+  cursor: text;
+  text-align: left;
+}
+.navsearch:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-raised);
+}
+.navsearch-icon {
+  color: var(--fg-faint);
+  font-size: var(--text-md);
+  line-height: 1;
+  flex: 0 0 auto;
+}
+/* Truncates rather than wrapping: the bar is nowrap, and a two-line
+   placeholder would be the one thing that forces it taller. */
+.navsearch-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The shortcut hint, inside the field the way the reference puts it there.
+   Borrows the palette's own key styling so the hint and the thing it opens
+   agree about what a key looks like. */
+.navsearch-kbd {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-3);
+}
+
+/* ── The slide-out drawer ────────────────────────────────────────────────── */
+/* --z-overlay, the same layer as the command palette: both cover the whole
+   console and neither should ever be above the other, since only one can be
+   open at a time. --z-modal stays reserved for something that must interrupt
+   an overlay. */
+.navdrawer-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay);
+  /* The palette's exact dim value, deliberately: two overlays dimming the page
+     by different amounts would read as two different depths of interruption
+     when they are the same depth. Dimmed rather than blurred for the palette's
+     reason too — a blur costs a compositor pass over a dashboard that is
+     already animating run states underneath. */
+  background: rgba(1, 4, 9, 0.55);
+  display: flex;
+}
+
+/* 300px is a layout measurement: the width at which the longest label plus its
+   glyph and the group headings all sit without wrapping, matching the rail's
+   240px plus the extra padding a floating panel needs to not feel clipped. */
+.navdrawer {
+  width: 300px;
+  max-width: 86vw;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-5);
+  background: var(--bg-raised);
+  border-right: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  overflow-y: auto;
+  /* Slides in from the left, which is the gesture the hamburger implies. Short
+     and eased-out so it reads as the panel arriving rather than as an
+     animation being played at the operator. */
+  animation: navdrawer-in 140ms ease-out;
+}
+
+@keyframes navdrawer-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+/* Respects the OS setting, because a panel that flies in is exactly the motion
+   someone disables it for; it still appears, it just does not travel. */
+@media (prefers-reduced-motion: reduce) {
+  .navdrawer {
+    animation: none;
+  }
+}
+
+.navdrawer-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-0) var(--space-3);
+}
+.navdrawer-head .brand { display: flex; align-items: center; gap: var(--space-4); }
+
+/* The close button. Present because the scrim must not be the only way out —
+   a touch user with no Escape key and no reason to believe the dimmed area is
+   clickable otherwise has to guess. */
+.navdrawer-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* A touch target like the bar's own buttons, one step smaller: it sits beside
+     the wordmark rather than among the destinations, and matching the
+     hamburger's 32px would make dismissing the panel look as important as the
+     navigation inside it. Literal for the same reason that one is. */
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: var(--space-0);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+  line-height: 1;
+  cursor: pointer;
+}
+.navdrawer-close:hover { background: var(--bg-hover); color: var(--fg); }
+
+/* The groups reuse .nav-group / .nav-group-label / .nav-list / .nav-item
+   wholesale rather than restyling them, so the drawer's rows and the rail's
+   rows are the same rows — including the active state. Only the column gap
+   differs, because the drawer is a transient panel rather than a rail looked at
+   all day and can afford to be slightly tighter. */
+.navdrawer-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+/* The glyph is kept here even though the navbar row hides it: in a vertical
+   list there is room, and the glyph is what makes the groups scannable as
+   blocks instead of as twelve lines of text. The rule is scoped rather than
+   relying on specificity, since .navbar .nav-glyph would otherwise reach these
+   rows — the drawer is rendered inside .navbar. */
+.navdrawer .nav-glyph { display: inline-flex; }
+
+/* At phone width the drawer IS the navigation: the bar's own labels are already
+   gone, leaving a row of glyphs, so the panel that names the destinations
+   should take the screen rather than leave a strip of dimmed page beside it. */
+@media (max-width: 560px) {
+  .navdrawer { width: 100%; max-width: none; border-right: 0; }
 }

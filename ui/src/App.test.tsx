@@ -213,6 +213,51 @@ describe('the application shell', () => {
     expect(screen.getByRole('link', { name: 'Runs' })).toBeInTheDocument();
   });
 
+  /**
+   * The bar's search control and the Cmd+K palette are ONE palette.
+   *
+   * Asserted at the shell because that is where it can go wrong: App holds the
+   * open boolean, and the failure mode is a second palette mounted for the
+   * header button, which looks identical until both are reachable and the two
+   * pieces of state disagree about whether search is open.
+   */
+  it('opens the one command palette from the navbar search control', async () => {
+    window.localStorage.setItem('nexus.nav', 'navbar');
+    renderApp();
+
+    expect(screen.queryByRole('dialog')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Search runs, workflows and commands' }));
+
+    const dialogs = screen.getAllByRole('dialog');
+    expect(dialogs).toHaveLength(1);
+    // The real palette, not a lookalike: its own field is the tell.
+    expect(within(screen.getByRole('dialog')).getByRole('combobox')).toBeInTheDocument();
+  });
+
+  /** The gear is a real destination, which is the only reason it is rendered. */
+  it('routes the navbar gear to the settings page', async () => {
+    window.localStorage.setItem('nexus.nav', 'navbar');
+    renderApp();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+
+    expect(await screen.findByRole('heading', { name: 'Settings' })).toBeInTheDocument();
+  });
+
+  /**
+   * The drawer belongs to the navbar and to nothing else.
+   *
+   * The rail already renders these groups permanently, so a drawer there would
+   * be a second way to reach a list that has not scrolled off the screen — a
+   * control whose only effect is to cover the identical control beneath it.
+   */
+  it('offers the drawer in the navbar layout only', () => {
+    renderApp();
+    expect(screen.queryByRole('button', { name: 'All destinations' })).toBeNull();
+    // The rail shows the headings outright, which is why it needs no drawer.
+    expect(screen.getByText('Observe')).toBeInTheDocument();
+  });
+
   it('still shows which deployment the tab is pointed at', () => {
     renderApp();
     fireEvent.click(screen.getByRole('button', { name: /account menu/i }));
@@ -309,5 +354,48 @@ describe('routing', () => {
     renderApp('/no/such/place');
 
     expect(screen.getByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
+  });
+});
+
+/**
+ * Signing out has to LAND somewhere.
+ *
+ * It used to clear the credential and leave the operator on whatever page they
+ * were on, which then had no credential to fetch with — so every panel on it
+ * turned into a 401 rather than into the login screen. The order pinned here is
+ * the one that is correct rather than merely the one that was asked for: the
+ * logout completes and the cached queries are invalidated BEFORE the route
+ * changes, because navigating first spends the transition refetching every
+ * mounted panel with a token the gateway has just revoked.
+ *
+ * Both entry points are covered. Sign-out is reachable from the account menu's
+ * row and from the palette's command, and the navigation lives in signOut()
+ * precisely so neither can be the path that forgets it.
+ */
+describe('signing out', () => {
+  it('clears the credential and then lands on the sign-in page', async () => {
+    signIn();
+    renderApp();
+
+    fireEvent.click(screen.getByRole('button', { name: /account menu/i }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Sign out' }));
+
+    // The sign-in screen, which is outside the chrome entirely.
+    await waitFor(() => expect(document.querySelector('.chrome')).toBeNull());
+    expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
+    // And the browser no longer holds a usable session.
+    expect(window.localStorage.getItem('nexus.session')).toBeNull();
+  });
+
+  it('lands there from the palette command as well', async () => {
+    signIn();
+    renderApp();
+
+    fireEvent.keyDown(document, { key: 'k', metaKey: true });
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'sign out' } });
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Enter' });
+
+    await waitFor(() => expect(document.querySelector('.chrome')).toBeNull());
+    expect(window.localStorage.getItem('nexus.session')).toBeNull();
   });
 });

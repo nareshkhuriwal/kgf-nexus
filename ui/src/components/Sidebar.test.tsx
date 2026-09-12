@@ -19,9 +19,9 @@
  * renders it actually lives.
  */
 
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import { Sidebar } from './Sidebar';
 import { NavBar } from './NavBar';
@@ -134,6 +134,186 @@ describe('the navbar', () => {
   it('marks the current destination as active', () => {
     wrap(<NavBar canAdmin={false} namespace="default" account={account} />, '/workers');
     expect(screen.getByRole('link', { name: 'Workers' }).className).toContain('active');
+  });
+});
+
+/**
+ * The top-bar controls the bar gained alongside its links.
+ *
+ * The links stayed on purpose — hiding every destination behind the hamburger
+ * the way the reference design does would make each navigation two clicks — so
+ * these tests are all about the ADDITIONS being honest: the hamburger reports
+ * its own state, the drawer supplies the headings the row cannot, the search
+ * control opens the one real search rather than being a second one, and every
+ * icon-only button has a name. The negative assertions matter as much: a
+ * control that renders with nothing behind it is worse in the chrome than
+ * anywhere else, because it is on screen on every page.
+ */
+describe('the navbar top-bar controls', () => {
+  it('reports the drawer state on the hamburger', () => {
+    wrap(<NavBar canAdmin account={account} />);
+
+    const burger = screen.getByRole('button', { name: 'All destinations' });
+    expect(burger).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(burger);
+
+    expect(burger).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  /**
+   * The drawer's whole added value over the flat row. The row drops Observe /
+   * Automate / Fleet / Govern because twelve items on one line will not fit;
+   * this is where the navbar operator gets the classification back.
+   */
+  it('opens a drawer carrying the group headings the row drops', () => {
+    wrap(<NavBar canAdmin account={account} />);
+
+    for (const label of ['Observe', 'Automate', 'Fleet', 'Govern']) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: 'All destinations' }));
+
+    const drawer = screen.getByRole('dialog', { name: 'All destinations' });
+    for (const label of ['Observe', 'Automate', 'Fleet', 'Govern']) {
+      expect(within(drawer).getByText(label)).toBeInTheDocument();
+    }
+  });
+
+  it('closes the drawer on Escape and hands focus back to the hamburger', () => {
+    wrap(<NavBar canAdmin account={account} />);
+
+    const burger = screen.getByRole('button', { name: 'All destinations' });
+    fireEvent.click(burger);
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(burger).toHaveAttribute('aria-expanded', 'false');
+    expect(document.activeElement).toBe(burger);
+  });
+
+  it('closes the drawer when the scrim is clicked', () => {
+    wrap(<NavBar canAdmin account={account} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'All destinations' }));
+    fireEvent.mouseDown(document.querySelector('.navdrawer-scrim') as HTMLElement);
+
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  /** A drawer still covering the page it just opened is the bug. */
+  it('closes the drawer when one of its destinations is activated', () => {
+    wrap(<NavBar canAdmin account={account} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'All destinations' }));
+    const drawer = screen.getByRole('dialog', { name: 'All destinations' });
+    fireEvent.click(within(drawer).getByRole('link', { name: 'Schedules' }));
+
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  /** The gate is the item's, not the layout's, in the drawer as in the row. */
+  it('gates the drawer on admin_write too', () => {
+    wrap(<NavBar canAdmin={false} account={account} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'All destinations' }));
+    const drawer = screen.getByRole('dialog', { name: 'All destinations' });
+
+    expect(within(drawer).queryByText('Govern')).toBeNull();
+    expect(within(drawer).queryByRole('link', { name: 'Users' })).toBeNull();
+  });
+
+  // ── the search control ──────────────────────────────────────────────────
+
+  /**
+   * It ASKS for the palette and does nothing else. The one real search talks to
+   * the catalog endpoint and can tell "no matches" from "I could not ask"; a
+   * second input in the bar would either reimplement that badly or swallow
+   * keystrokes.
+   */
+  it('opens the command palette rather than searching on its own', () => {
+    const onOpenSearch = vi.fn();
+    wrap(<NavBar canAdmin account={account} onOpenSearch={onOpenSearch} />);
+
+    const search = screen.getByRole('button', {
+      name: 'Search runs, workflows and commands',
+    });
+    // Not a text field: there is nothing here to type into.
+    expect(screen.queryByRole('searchbox')).toBeNull();
+    expect(screen.queryByRole('combobox')).toBeNull();
+
+    fireEvent.click(search);
+
+    expect(onOpenSearch).toHaveBeenCalledTimes(1);
+  });
+
+  /** Discoverable from the control it replaces, not from documentation. */
+  it('advertises the keyboard route inside the control', () => {
+    wrap(<NavBar canAdmin account={account} onOpenSearch={() => {}} />);
+
+    expect(
+      screen.getByRole('button', { name: 'Search runs, workflows and commands' }),
+    ).toHaveAttribute('title', expect.stringMatching(/\+K\)$/));
+  });
+
+  /** A search field that opens nothing is the dead control this bar refuses. */
+  it('omits the search control when there is no palette to open', () => {
+    wrap(<NavBar canAdmin account={account} />);
+
+    expect(screen.queryByRole('button', { name: /^Search/ })).toBeNull();
+  });
+
+  // ── the tool cluster ────────────────────────────────────────────────────
+
+  it('names its icon-only buttons and gives each a tooltip', () => {
+    wrap(<NavBar canAdmin account={account} onOpenSettings={() => {}} />);
+
+    for (const name of ['All destinations', 'Settings']) {
+      const button = screen.getByRole('button', { name });
+      expect(button).toHaveAttribute('title');
+      expect(button.getAttribute('title')).not.toBe('');
+    }
+  });
+
+  it('routes the gear to the settings page', () => {
+    const onOpenSettings = vi.fn();
+    wrap(<NavBar canAdmin account={account} onOpenSettings={onOpenSettings} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits the gear when it has nowhere to go', () => {
+    wrap(<NavBar canAdmin account={account} />);
+
+    expect(screen.queryByRole('button', { name: 'Settings' })).toBeNull();
+  });
+
+  /**
+   * The reference bar carries an assistant, a cloud shell, a notification bell
+   * and a feedback button. This console has nothing behind any of them, so they
+   * are absent rather than inert — and this is the test that stops the next
+   * person adding them back for visual fidelity. A dead control in the chrome
+   * is on screen on every page and teaches the operator not to trust the bar.
+   */
+  it('invents no controls there is nothing behind', () => {
+    wrap(
+      <NavBar canAdmin account={account} onOpenSearch={() => {}} onOpenSettings={() => {}} />,
+    );
+
+    for (const name of [/copilot/i, /assistant/i, /shell/i, /notification/i, /feedback/i, /help/i]) {
+      expect(screen.queryByRole('button', { name })).toBeNull();
+    }
+  });
+
+  /** The account control keeps its place at the end of the cluster. */
+  it('keeps the account control alongside the new buttons', () => {
+    wrap(<NavBar canAdmin account={account} onOpenSearch={() => {}} onOpenSettings={() => {}} />);
+
+    const tools = document.querySelector('.navbar-tools') as HTMLElement;
+    expect(within(tools).getByRole('button', { name: 'Account slot' })).toBeInTheDocument();
   });
 });
 
