@@ -194,6 +194,19 @@ describe('version history', () => {
     );
   });
 
+  /**
+   * The catalog crumb is navigation and sits above the workflow's name, not
+   * threaded through the sentence describing it. Pinned because it is easy to
+   * fold a link back into a subtitle and lose it among the prose.
+   */
+  it('offers the route back to the catalog as its own link', async () => {
+    healthy();
+    wrap(<WorkflowDetailPage namespace="default" />);
+
+    const crumb = await screen.findByRole('link', { name: /catalog/ });
+    expect(crumb).toHaveAttribute('href', '/workflows');
+  });
+
   it('opens on the latest version when the URL names none', async () => {
     const calls = healthy();
     wrap(<WorkflowDetailPage namespace="default" />);
@@ -347,6 +360,32 @@ describe('parameterised run submission', () => {
     ).toBeInTheDocument();
     // And it stays on the page: navigating away would lose the reason.
     expect(screen.queryByText('run page for test')).not.toBeInTheDocument();
+  });
+
+  /**
+   * The gateway now answers a missing required param with 422 and a message
+   * naming it. That message is the ONLY validation feedback the console offers,
+   * because a second copy of the rules living here would eventually disagree
+   * with the enforcement point — so it must arrive verbatim, status included.
+   */
+  it('renders a 422 naming the missing required params verbatim', async () => {
+    mockFetch((url, init) => {
+      if (url.includes('/versions')) return [200, { versions: VERSIONS }];
+      if (url.includes('/specdefs/')) return [200, definition()];
+      if (url.endsWith('/runs') && init?.method === 'POST') {
+        return [422, { message: 'missing required params: dataset_uri' }];
+      }
+      return [404, { message: 'unexpected url' }];
+    });
+    wrap(<WorkflowDetailPage namespace="default" />);
+
+    await openSubmitForm();
+    fireEvent.change(await screen.findByLabelText('run params'), { target: { value: '{}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Submit run' }));
+
+    expect(
+      await screen.findByText(/missing required params: dataset_uri \(HTTP 422\)/),
+    ).toBeInTheDocument();
   });
 
   it('refuses to submit unparseable params without spending a round trip', async () => {

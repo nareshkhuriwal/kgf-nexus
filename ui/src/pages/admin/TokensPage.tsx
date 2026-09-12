@@ -88,8 +88,11 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
           <div className="panel-head">
             <span>copy this token now</span>
           </div>
-          <div className="panel-body col" style={{ gap: 'var(--space-4)' }}>
-            <div className="notice" role="status">
+          <div className="token-reveal-body">
+            {/* Warning-toned, and role=alert rather than status: an operator who
+                scrolls past this panel has permanently lost the credential, so
+                it interrupts rather than waiting to be noticed. */}
+            <div className="notice login-warning" role="alert">
               <span className="notice-glyph" aria-hidden="true">
                 !
               </span>
@@ -101,8 +104,11 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
                 </div>
               </div>
             </div>
+            {/* The same single value, in the same element, revealed in the same
+                one moment. Nothing about this restyle widens what is shown: the
+                secret is never put in the table, in a title, or in a log. */}
             <code className="token-secret">{issued.token}</code>
-            <div className="row" style={{ gap: 'var(--space-3)' }}>
+            <div className="cell-actions">
               <button
                 type="button"
                 onClick={() => {
@@ -111,7 +117,7 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
               >
                 Copy
               </button>
-              <button type="button" onClick={() => setIssued(null)}>
+              <button type="button" className="primary" onClick={() => setIssued(null)}>
                 I have saved it
               </button>
             </div>
@@ -165,6 +171,8 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
                     <tr key={t.id}>
                       <td className="mono">{t.name}</td>
                       <td>
+                        {/* Role and scopes are capabilities, not states: neutral
+                            chips throughout, so only `status` carries a tone. */}
                         <span className="chip">{t.role}</span>
                       </td>
                       <td>
@@ -173,7 +181,7 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
                             none
                           </span>
                         ) : (
-                          <div className="row" style={{ gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+                          <div className="chip-set">
                             {t.scopes.map((s) => (
                               <span key={s} className="chip mono">
                                 {s}
@@ -207,14 +215,17 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
                         )}
                       </td>
                       <td>
-                        <button
-                          type="button"
-                          onClick={() => revoke.mutate(t)}
-                          disabled={revoke.isPending || t.revoked_at !== null}
-                          title="Stop this credential working immediately and permanently."
-                        >
-                          Revoke
-                        </button>
+                        <div className="cell-actions">
+                          <button
+                            type="button"
+                            className="danger"
+                            onClick={() => revoke.mutate(t)}
+                            disabled={revoke.isPending || t.revoked_at !== null}
+                            title="Stop this credential working immediately and permanently."
+                          >
+                            Revoke
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -264,43 +275,44 @@ function CreateToken({
         <span>new token</span>
       </div>
       <form
-        className="panel-body col"
-        style={{ gap: 'var(--space-5)' }}
+        className="panel-body form-body"
         onSubmit={(e) => {
           e.preventDefault();
           create.mutate();
         }}
       >
-        <div className="grid-2">
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">name</span>
+        <div className="form-row">
+          <label className="form-field">
+            <span className="form-label">name</span>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="ci-pipeline"
               required
             />
+            <span className="form-hint">
+              Names the integration, so an abandoned credential can be identified later.
+            </span>
           </label>
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">role</span>
+          <label className="form-field">
+            <span className="form-label">role</span>
             <select value={role} onChange={(e) => setRole(e.target.value)}>
               <option value="reader">reader</option>
               <option value="admin">admin</option>
               <option value="worker">worker</option>
             </select>
+            <span className="form-hint">The ceiling on what the scopes below can reach.</span>
           </label>
         </div>
 
-        <fieldset className="col" style={{ gap: 'var(--space-3)', border: 0, padding: 0, margin: 0 }}>
-          <legend className="sub" style={{ padding: 0 }}>
-            scopes
-          </legend>
-          <div className="sub">
+        <fieldset className="form-fieldset">
+          <legend>scopes</legend>
+          <div className="form-hint">
             Scopes <strong>narrow</strong> the role and never extend it. An action the role
             does not permit stays refused even if it is ticked here.
           </div>
           {SCOPES.map((s) => (
-            <label key={s.value} className="row" style={{ gap: 'var(--space-3)' }}>
+            <label key={s.value} className="form-check">
               <input
                 type="checkbox"
                 checked={scopes.includes(s.value)}
@@ -309,30 +321,38 @@ function CreateToken({
               <span className="mono">{s.label}</span>
             </label>
           ))}
+          {/* A verdict on what is selected, so it takes the danger tone the rest
+              of the console uses for one. It does not block submit: the gateway
+              is the enforcement point and its refusal is the honest one. */}
           {scopes.length === 0 && (
-            <div className="sub" role="alert">
+            <div className="form-hint invalid" role="alert">
               A token with no scopes can do nothing — the gateway will refuse to create it.
             </div>
           )}
         </fieldset>
 
-        <label className="col" style={{ gap: 'var(--space-2)', maxWidth: 320 }}>
-          <span className="sub">expires in (days)</span>
-          <input
-            type="number"
-            value={days}
-            min={-1}
-            onChange={(e) => setDays(Number(e.target.value))}
-          />
-          <span className="sub">
-            {days < 0
-              ? 'Never expires — an unbounded credential is what scoped tokens exist to replace. Use only for an integration that genuinely needs it.'
-              : `Expires ${days} days from now.`}
-          </span>
-        </label>
+        <div className="form-row">
+          <label className="form-field">
+            <span className="form-label">expires in (days)</span>
+            <input
+              type="number"
+              value={days}
+              min={-1}
+              onChange={(e) => setDays(Number(e.target.value))}
+            />
+            {/* A never-expiring token is the thing this screen exists to replace,
+                so choosing one reads as a warning. Warning and not danger: it is
+                a deliberate, sometimes-correct choice, not an error. */}
+            <span className={`form-hint${days < 0 ? ' caution' : ''}`}>
+              {days < 0
+                ? 'Never expires — an unbounded credential is what scoped tokens exist to replace. Use only for an integration that genuinely needs it.'
+                : `Expires ${days} days from now.`}
+            </span>
+          </label>
+        </div>
 
         {create.error && <ErrorBox error={create.error} what="the new token" />}
-        <div>
+        <div className="form-actions">
           <button type="submit" className="primary" disabled={create.isPending}>
             {create.isPending ? 'Creating…' : 'Create token'}
           </button>

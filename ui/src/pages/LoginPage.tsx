@@ -9,6 +9,12 @@
  * key, and an operator debugging at 3am with a key already in their clipboard
  * should not have to hunt for where to put it. The brief requires CLI parity,
  * and parity means the path is a real one, not a grudging fallback.
+ *
+ * It is also the only screen with no navigation, no namespace switcher and
+ * nothing else competing for the eye, so it is laid out as a centred column
+ * rather than as a panel dropped into the page grid: here the page IS the card.
+ * The accent appears once, on the mark — the same rule that governs the rest of
+ * the console, where colour that means something comes from --tone-* instead.
  */
 
 import { useState, type FormEvent } from 'react';
@@ -72,110 +78,121 @@ export function LoginPage({
   }
 
   return (
-    <div className="login-wrap">
-      <div className="panel login-card">
-        <div className="panel-body col" style={{ gap: 'var(--space-6)' }}>
-          <div>
-            <h1 style={{ margin: 0, fontSize: 'var(--text-xl)' }}>
-              <span className="brand-mark">◇</span> nexus
-            </h1>
-            <div className="sub" style={{ marginTop: 'var(--space-2)' }}>
-              operator console · namespace <code>{namespace}</code>
-            </div>
+    <div className="login-page">
+      <div className="login-col">
+        <div className="login-brand">
+          <span className="login-mark" aria-hidden="true">
+            ◇
+          </span>
+          <h1 className="login-title">nexus</h1>
+          <div className="login-sub">
+            operator console · namespace <code>{namespace}</code>
           </div>
+        </div>
 
-          <div className="seg" role="tablist" aria-label="Sign-in method">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === 'password'}
-              className={`seg-btn${mode === 'password' ? ' active' : ''}`}
-              onClick={() => setMode('password')}
-            >
-              Email &amp; password
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === 'key'}
-              className={`seg-btn${mode === 'key' ? ' active' : ''}`}
-              onClick={() => setMode('key')}
-            >
-              API key
-            </button>
-          </div>
-
-          {mode === 'password' ? (
-            <form className="col" style={{ gap: 'var(--space-5)' }} onSubmit={signIn}>
-              <label className="col" style={{ gap: 'var(--space-2)' }}>
-                <span className="sub">email</span>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  autoComplete="username"
-                  required
-                  autoFocus
-                />
-              </label>
-              <label className="col" style={{ gap: 'var(--space-2)' }}>
-                <span className="sub">password</span>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  autoComplete="current-password"
-                  required
-                />
-              </label>
-              <button type="submit" className="primary" disabled={busy}>
-                {busy ? 'Signing in…' : 'Sign in'}
+        <div className="panel">
+          <div className="panel-body col" style={{ gap: 'var(--space-6)' }}>
+            {/* Two methods of equal standing, so the control gives them equal
+                width rather than making the key a secondary tab. */}
+            <div className="seg login-seg" role="tablist" aria-label="Sign-in method">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mode === 'password'}
+                className={`seg-btn${mode === 'password' ? ' active' : ''}`}
+                onClick={() => setMode('password')}
+              >
+                Email &amp; password
               </button>
-            </form>
-          ) : (
-            <form className="col" style={{ gap: 'var(--space-5)' }} onSubmit={useKey}>
-              <label className="col" style={{ gap: 'var(--space-2)' }}>
-                <span className="sub">API key</span>
-                <input
-                  type="password"
-                  value={key}
-                  onChange={(e) => setKey(e.target.value)}
-                  placeholder="nxs_admin_…"
-                  aria-label="API key"
-                  autoFocus
-                />
-              </label>
-              <div className="sub">
-                The same credential the CLI and workers use. Stored in this browser only, never
-                sent anywhere but this gateway. Run <code>make seed</code> to mint one.
-              </div>
-              <button type="submit" className="primary">
-                Use this key
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mode === 'key'}
+                className={`seg-btn${mode === 'key' ? ' active' : ''}`}
+                onClick={() => setMode('key')}
+              >
+                API key
               </button>
-            </form>
-          )}
-
-          {error && (
-            <div className="notice error" role="alert">
-              <span className="notice-glyph" aria-hidden="true">
-                !
-              </span>
-              <div>
-                <div className="notice-title">Could not sign in</div>
-                <div className="notice-detail">{error}</div>
-              </div>
             </div>
-          )}
-          {warning && (
-            <div className="notice error" role="status">
-              <span className="notice-glyph" aria-hidden="true">
-                !
-              </span>
-              <div>
+
+            {mode === 'password' ? (
+              <form className="login-form" onSubmit={signIn}>
+                <label className="form-field">
+                  <span className="form-label">email</span>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    autoComplete="username"
+                    required
+                    autoFocus
+                  />
+                </label>
+                <label className="form-field">
+                  <span className="form-label">password</span>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    autoComplete="current-password"
+                    required
+                  />
+                </label>
+                <button type="submit" className="primary login-submit" disabled={busy}>
+                  {busy ? 'Signing in…' : 'Sign in'}
+                </button>
+              </form>
+            ) : (
+              <form className="login-form" onSubmit={useKey}>
+                <label className="form-field">
+                  <span className="form-label">API key</span>
+                  <input
+                    type="password"
+                    value={key}
+                    onChange={(e) => setKey(e.target.value)}
+                    placeholder="nxs_admin_…"
+                    aria-label="API key"
+                    autoFocus
+                  />
+                  <span className="form-hint">
+                    The same credential the CLI and workers use. Stored in this browser only, never
+                    sent anywhere but this gateway. Run <code>make seed</code> to mint one.
+                  </span>
+                </label>
+                <button type="submit" className="primary login-submit">
+                  Use this key
+                </button>
+              </form>
+            )}
+
+            {error && (
+              <div className="notice error" role="alert">
+                <span className="notice-glyph" aria-hidden="true">
+                  !
+                </span>
+                <div>
+                  <div className="notice-title">Could not sign in</div>
+                  <div className="notice-detail">{error}</div>
+                </div>
+              </div>
+            )}
+            {/* A warning, not a failure: the sign-in worked. It keeps role=status
+                so it is announced without interrupting, and takes the warning
+                tone rather than the danger tone the error above uses. */}
+            {warning && (
+              <div className="notice login-warning" role="status">
+                <span className="notice-glyph" aria-hidden="true">
+                  !
+                </span>
                 <div className="notice-detail">{warning}</div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
+        </div>
+
+        <div className="login-foot">
+          This console talks only to the gateway configured for it. Nothing you type here is sent
+          anywhere else.
         </div>
       </div>
     </div>

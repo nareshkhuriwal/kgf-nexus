@@ -100,8 +100,11 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
         }
       />
 
+      {/* An action that succeeded says so in the success tone. It reports the
+          CONSEQUENCE (sessions ended, and how many), which is the evidence an
+          offboarding actually needs — "done" is not evidence. */}
       {notice && (
-        <div className="notice" role="status">
+        <div className="notice admin-notice" role="status">
           <span className="notice-glyph" aria-hidden="true">
             ✓
           </span>
@@ -154,6 +157,8 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
                       <td className="mono">{u.email}</td>
                       <td>{u.display_name || <span className="faint">—</span>}</td>
                       <td>
+                        {/* A role is a capability, not a state, so it stays a
+                            neutral chip. Only `status` below is tone-coloured. */}
                         <span className="chip">{u.role}</span>
                       </td>
                       <td className="nowrap faint">{fmtTs(u.created_at)}</td>
@@ -165,7 +170,7 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
                         )}
                       </td>
                       <td>
-                        <div className="row" style={{ gap: 'var(--space-2)' }}>
+                        <div className="cell-actions">
                           <button
                             type="button"
                             onClick={() => {
@@ -243,33 +248,40 @@ function CreateUser({
         <span>new user</span>
       </div>
       <form
-        className="panel-body col"
-        style={{ gap: 'var(--space-5)' }}
+        className="panel-body form-body"
         onSubmit={(e) => {
           e.preventDefault();
           create.mutate();
         }}
       >
-        <div className="grid-2">
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">email</span>
+        <div className="form-row">
+          <label className="form-field">
+            <span className="form-label">email</span>
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+            <span className="form-hint">Also the sign-in identity. Unique in this namespace.</span>
           </label>
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">display name</span>
+          <label className="form-field">
+            <span className="form-label">display name</span>
             <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+            <span className="form-hint">Optional. Shown in the audit trail beside the address.</span>
           </label>
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">role</span>
+        </div>
+        <div className="form-row">
+          <label className="form-field">
+            <span className="form-label">role</span>
             <select value={role} onChange={(e) => setRole(e.target.value)}>
               <option value="reader">reader — read everything, change nothing</option>
               <option value="admin">admin — full control of this namespace</option>
             </select>
             {/* 'worker' is deliberately absent: it is a machine credential for an
                 execution host, and the gateway refuses it for a human anyway. */}
+            <span className="form-hint">
+              A worker role is not offered: it is a machine credential for an execution host, and
+              the gateway refuses it for a human account.
+            </span>
           </label>
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">password (min 12 characters)</span>
+          <label className="form-field">
+            <span className="form-label">password (min 12 characters)</span>
             <input
               type="password"
               value={password}
@@ -278,14 +290,14 @@ function CreateUser({
               minLength={12}
               required
             />
+            <span className="form-hint">
+              Length is the only rule. Composition rules push people toward predictable
+              substitutions and away from length, which is what actually resists an offline attack.
+            </span>
           </label>
         </div>
-        <div className="sub">
-          Length is the only rule. Composition rules push people toward predictable
-          substitutions and away from length, which is what actually resists an offline attack.
-        </div>
         {create.error && <ErrorBox error={create.error} what="the new user" />}
-        <div>
+        <div className="form-actions">
           <button type="submit" className="primary" disabled={create.isPending}>
             {create.isPending ? 'Creating…' : 'Create user'}
           </button>

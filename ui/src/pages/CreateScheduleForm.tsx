@@ -10,6 +10,10 @@
  * will fire at, in the schedule's own zone, BEFORE anything is saved. That is
  * also why the preview is a separate endpoint rather than "create it disabled
  * and read it back": validating by creating leaves a row behind on every typo.
+ *
+ * The layout puts the expression, its zone and the preview together as one
+ * block, above the policy fields: the preview is the answer to what was just
+ * typed, and an answer two screens away from its question does not get read.
  */
 
 import { useState } from 'react';
@@ -107,39 +111,40 @@ export function CreateScheduleForm({
         <span>new schedule</span>
       </div>
       <form
-        className="panel-body col"
-        style={{ gap: 'var(--space-5)' }}
+        className="panel-body form-body"
         onSubmit={(e) => {
           e.preventDefault();
           submit();
         }}
       >
-        <div className="grid-2">
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">name</span>
+        <div className="form-row">
+          <label className="form-field">
+            <span className="form-label">name</span>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="nightly-etl"
               required
             />
-            <span className="sub">Unique within the namespace, and how you address it later.</span>
+            <span className="form-hint">
+              Unique within the namespace, and how you address it later.
+            </span>
           </label>
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">spec name</span>
+          <label className="form-field">
+            <span className="form-label">spec name</span>
             <input
               value={specName}
               onChange={(e) => setSpecName(e.target.value)}
               placeholder="example-etl"
               required
             />
-            <span className="sub">The workflow this schedule creates runs of.</span>
+            <span className="form-hint">The workflow this schedule creates runs of.</span>
           </label>
         </div>
 
-        <div className="grid-2">
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">cron expression</span>
+        <div className="form-row">
+          <label className="form-field">
+            <span className="form-label">cron expression</span>
             <input
               value={cron}
               onChange={(e) => setCron(e.target.value)}
@@ -148,12 +153,12 @@ export function CreateScheduleForm({
               aria-label="cron expression"
               required
             />
-            <span className="sub">
+            <span className="form-hint">
               Five fields: minute hour day-of-month month day-of-week.
             </span>
           </label>
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">timezone</span>
+          <label className="form-field">
+            <span className="form-label">timezone</span>
             <input
               value={timezone}
               onChange={(e) => setTimezone(e.target.value)}
@@ -166,7 +171,7 @@ export function CreateScheduleForm({
                 <option key={z} value={z} />
               ))}
             </datalist>
-            <span className="sub">
+            <span className="form-hint">
               {/* The zone is part of the expression's meaning, not a display
                   preference: the same fields are different instants in each zone. */}
               The zone the expression is evaluated in — <code>0 2 * * *</code> is a different
@@ -175,21 +180,21 @@ export function CreateScheduleForm({
           </label>
         </div>
 
-        {/* The point of the whole form: what this will actually do, before it does it. */}
-        <div className="panel" style={{ background: 'var(--bg-inset)' }}>
-          <div className="panel-body">
-            <div className="attempt-section-title">preview</div>
-            <CronPreview
-              preview={preview.data}
-              loading={preview.isLoading || settledCron !== cron}
-              error={preview.error}
-            />
-          </div>
+        {/* The point of the whole form: what this will actually do, before it
+            does it. Inset rather than a nested panel — it is an answer computed
+            from the two fields above, not a sibling section. */}
+        <div className="form-inset">
+          <div className="form-inset-title">preview</div>
+          <CronPreview
+            preview={preview.data}
+            loading={preview.isLoading || settledCron !== cron}
+            error={preview.error}
+          />
         </div>
 
-        <div className="grid-2">
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">overlap policy</span>
+        <div className="form-row">
+          <label className="form-field">
+            <span className="form-label">overlap policy</span>
             <select
               value={overlapPolicy}
               onChange={(e) => setOverlapPolicy(e.target.value as OverlapPolicy)}
@@ -200,17 +205,17 @@ export function CreateScheduleForm({
                 </option>
               ))}
             </select>
-            <span className="sub">{OVERLAP_POLICY_HINTS[overlapPolicy]}</span>
+            <span className="form-hint">{OVERLAP_POLICY_HINTS[overlapPolicy]}</span>
           </label>
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">catchup limit</span>
+          <label className="form-field">
+            <span className="form-label">catchup limit</span>
             <input
               type="number"
               min={0}
               value={catchupLimit}
               onChange={(e) => setCatchupLimit(Number(e.target.value))}
             />
-            <span className="sub">
+            <span className="form-hint">
               {catchupLimit === 0
                 ? 'Zero: after an outage, fire only the tick that just came due — no catch-up burst.'
                 : `After an outage, fire at most ${catchupLimit} missed tick${catchupLimit === 1 ? '' : 's'} before resuming normally.`}
@@ -218,9 +223,9 @@ export function CreateScheduleForm({
           </label>
         </div>
 
-        <div className="grid-2">
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">spec version</span>
+        <div className="form-row">
+          <label className="form-field">
+            <span className="form-label">spec version</span>
             <input
               type="number"
               min={1}
@@ -228,21 +233,23 @@ export function CreateScheduleForm({
               onChange={(e) => setSpecVersion(e.target.value)}
               placeholder="latest"
             />
-            <span className="sub">Leave blank to always run the latest version of the spec.</span>
+            <span className="form-hint">
+              Leave blank to always run the latest version of the spec.
+            </span>
           </label>
-          <label className="col" style={{ gap: 'var(--space-2)' }}>
-            <span className="sub">priority</span>
+          <label className="form-field">
+            <span className="form-label">priority</span>
             <input
               type="number"
               value={priority}
               onChange={(e) => setPriority(Number(e.target.value))}
             />
-            <span className="sub">Priority carried by every run this schedule creates.</span>
+            <span className="form-hint">Priority carried by every run this schedule creates.</span>
           </label>
         </div>
 
-        <label className="col" style={{ gap: 'var(--space-2)' }}>
-          <span className="sub">params (JSON)</span>
+        <label className="form-field">
+          <span className="form-label">params (JSON)</span>
           <textarea
             value={paramsText}
             onChange={(e) => setParamsText(e.target.value)}
@@ -252,17 +259,19 @@ export function CreateScheduleForm({
             aria-label="params"
           />
           {paramsError ? (
-            <span className="sub" role="alert">
+            <span className="form-hint invalid" role="alert">
               Not valid JSON: {paramsError}
             </span>
           ) : (
-            <span className="sub">Passed to every run this schedule creates. Optional.</span>
+            <span className="form-hint">
+              Passed to every run this schedule creates. Optional.
+            </span>
           )}
         </label>
 
-        <label className="row" style={{ gap: 'var(--space-3)' }}>
+        <label className="form-check">
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-          <span className="sub">
+          <span>
             {enabled
               ? 'Armed on creation — it will fire at the first preview time above.'
               : 'Created disabled. Nothing fires until you enable it.'}
@@ -271,7 +280,7 @@ export function CreateScheduleForm({
 
         {create.error && <ErrorBox error={create.error} what="the new schedule" />}
 
-        <div className="row" style={{ gap: 'var(--space-3)' }}>
+        <div className="form-actions">
           <button
             type="submit"
             className="primary"

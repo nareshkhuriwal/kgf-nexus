@@ -54,24 +54,31 @@ export function WorkflowsPage({ namespace }: { namespace: string }) {
         <div className="panel-head">
           <span>catalog</span>
           <span className="spacer" />
-          <label className="row" style={{ gap: 'var(--space-3)' }}>
-            <span className="sub">search</span>
-            <input
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="name contains…"
-              aria-label="search workflows by name"
-            />
-          </label>
-          <span className="chip">
-            {settling ? 'searching…' : `${workflows.data?.length ?? 0}`}
+          {/* The field lives in the head rather than above the table: it is a
+              control ON this list, and a toolbar band of its own would put a
+              second horizontal rule between the title and the rows. */}
+          <span className="panel-tools">
+            <label className="row" style={{ gap: 'var(--space-3)' }}>
+              <span className="sub">search</span>
+              <input
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="name contains…"
+                aria-label="search workflows by name"
+              />
+            </label>
+            {/* While the debounce settles, the count belongs to the PREVIOUS
+                question — so it says so instead of showing a stale number. */}
+            <span className="chip">
+              {settling ? 'searching…' : `${workflows.data?.length ?? 0}`}
+            </span>
           </span>
         </div>
 
         {/* Stale rows plus a warning beat an error box that hides them. */}
         {workflows.error != null && workflows.data !== undefined ? (
-          <div style={{ padding: 'var(--space-5)', paddingBottom: 0 }}>
+          <div className="panel-notice" style={{ paddingBottom: 0 }}>
             <StaleWarning error={workflows.error} />
           </div>
         ) : null}
@@ -137,11 +144,13 @@ function WorkflowRow({ workflow, now }: { workflow: WorkflowSummary; now: number
         </Link>
       </td>
       <td className="mono">v{workflow.latest_version}</td>
-      <td>
+      <td className="nowrap">
         {/* One version is the common case and needs no comment; several means
-            the workflow has a history worth opening. */}
+            the workflow has a history worth opening. The distinction is carried
+            by weight and by being a link at all, never by colour — a version
+            count is not a state. */}
         {workflow.version_count > 1 ? (
-          <Link to={`/workflows/${encodeURIComponent(workflow.name)}`} className="mono">
+          <Link to={`/workflows/${encodeURIComponent(workflow.name)}`} className="wf-versions">
             {workflow.version_count} versions
           </Link>
         ) : (

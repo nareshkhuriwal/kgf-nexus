@@ -63,56 +63,55 @@ export function AuditPage({ namespace, canAdmin }: { namespace: string; canAdmin
         }
       />
 
-      <div className="panel">
-        <div className="panel-head">
-          <span>filters</span>
-        </div>
-        <div className="panel-body row" style={{ gap: 'var(--space-5)', flexWrap: 'wrap' }}>
-          <label className="row" style={{ gap: 'var(--space-3)' }}>
-            <span className="sub">outcome</span>
-            <select value={outcome} onChange={(e) => setOutcome(e.target.value)}>
-              <option value="">any</option>
-              <option value="success">success</option>
-              <option value="denied">denied</option>
-              <option value="error">error</option>
-            </select>
-          </label>
-          <label className="row" style={{ gap: 'var(--space-3)' }}>
-            <span className="sub">action</span>
-            <input
-              value={action}
-              onChange={(e) => setAction(e.target.value)}
-              placeholder="e.g. session.login"
-              className="mono"
-            />
-          </label>
-          {(outcome || action) && (
-            <button
-              type="button"
-              onClick={() => {
-                setOutcome('');
-                setAction('');
-              }}
-            >
-              Clear
-            </button>
-          )}
-          <span className="spacer" />
-          <button
-            type="button"
-            onClick={() => setOutcome('denied')}
-            title="Show refused attempts — a burst of these is what an attack looks like."
-          >
-            Show denials
-          </button>
-        </div>
-      </div>
-
+      {/* The filters live in the events panel rather than in a panel of their
+          own: they are controls ON this list, and a separate card put two
+          horizontal rules between the operator and the rows they came to read.
+          Filtering itself still happens in SQL — see the query key above. */}
       <div className="panel">
         <div className="panel-head">
           <span>events</span>
           <span className="spacer" />
-          <span className="chip">{audit.data?.length ?? 0}</span>
+          <span className="panel-tools">
+            <label className="row" style={{ gap: 'var(--space-3)' }}>
+              <span className="sub">outcome</span>
+              <select value={outcome} onChange={(e) => setOutcome(e.target.value)}>
+                <option value="">any</option>
+                <option value="success">success</option>
+                <option value="denied">denied</option>
+                <option value="error">error</option>
+              </select>
+            </label>
+            <label className="row" style={{ gap: 'var(--space-3)' }}>
+              <span className="sub">action</span>
+              <input
+                value={action}
+                onChange={(e) => setAction(e.target.value)}
+                placeholder="e.g. session.login"
+                className="mono"
+              />
+            </label>
+            {(outcome || action) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setOutcome('');
+                  setAction('');
+                }}
+              >
+                Clear
+              </button>
+            )}
+            {/* A one-click shortcut to the query that matters: a burst of
+                refusals is what an attack in progress looks like. */}
+            <button
+              type="button"
+              onClick={() => setOutcome('denied')}
+              title="Show refused attempts — a burst of these is what an attack looks like."
+            >
+              Show denials
+            </button>
+            <span className="chip">{audit.data?.length ?? 0}</span>
+          </span>
         </div>
         <AsyncPanel
           query={audit}
@@ -163,28 +162,28 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
         <span className={`badge ${outcomeTone(entry.outcome)}`}>{entry.outcome}</span>
       </td>
       <td>
-        <div className="mono">{entry.actor_label || <span className="faint">—</span>}</div>
+        <div className="mono audit-actor">{entry.actor_label || <span className="faint">—</span>}</div>
         {/*
           The credential KIND is shown, not just the name: an admin action taken
           from a browser session and the same action from a long-lived CI key are
           different facts during a review.
         */}
-        <div className="faint mono" style={{ fontSize: 'var(--text-xs)' }}>
+        <div className="cell-sub mono">
           {entry.actor_kind}
           {entry.client_ip ? ` · ${entry.client_ip}` : ''}
         </div>
       </td>
-      <td className="mono" style={{ fontSize: 'var(--text-xs)' }}>
+      <td className="mono audit-narrow">
         {entry.target_kind ? (
-          <>
-            <div>{entry.target_kind}</div>
-            <div className="faint">{entry.target_id}</div>
-          </>
+          <div className="cell-stack">
+            <span>{entry.target_kind}</span>
+            <span className="cell-sub">{entry.target_id}</span>
+          </div>
         ) : (
           <span className="faint">—</span>
         )}
       </td>
-      <td className="mono" style={{ fontSize: 'var(--text-xs)' }}>
+      <td className="mono audit-narrow">
         <AuditDetail detail={entry.detail} />
       </td>
     </tr>
@@ -199,7 +198,7 @@ function AuditDetail({ detail }: { detail: unknown }) {
   return (
     <>
       {entries.map(([k, v]) => (
-        <div key={k}>
+        <div key={k} className="audit-detail-row">
           <span className="faint">{k}=</span>
           {typeof v === 'object' ? JSON.stringify(v) : String(v)}
         </div>

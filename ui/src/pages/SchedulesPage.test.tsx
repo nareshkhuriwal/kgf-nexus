@@ -129,6 +129,21 @@ describe('the schedule list', () => {
     expect(within(row).getByText(/cron broken/i)).toBeInTheDocument();
   });
 
+  /**
+   * The zone is rendered as the qualifier under the expression rather than as a
+   * column of its own, so a restyle that dropped it would still pass a test
+   * asserting only on the cron. Pinning that both are in the SAME cell keeps
+   * them from drifting into separate columns, where the pairing is lost.
+   */
+  it('keeps the zone in the same cell as the expression it qualifies', async () => {
+    mockFetch(() => [200, { schedules: [schedule({ timezone: 'Asia/Kolkata' })] }]);
+    wrap(<SchedulesPage namespace="default" />);
+
+    const row = (await screen.findByText('nightly-etl')).closest('tr')!;
+    const cronCell = within(row).getByText('0 2 * * *').closest('td')!;
+    expect(within(cronCell).getByText('Asia/Kolkata')).toBeInTheDocument();
+  });
+
   it('teaches rather than blanking when the namespace has no schedules', async () => {
     mockFetch(() => [200, { schedules: [] }]);
     wrap(<SchedulesPage namespace="default" />);

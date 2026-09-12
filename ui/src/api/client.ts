@@ -26,6 +26,7 @@ import type {
   CronPreview,
   FleetHealth,
   LogLine,
+  RunAction,
   RunDetail,
   RunEvent,
   RunSummary,
@@ -335,9 +336,45 @@ export const api = {
     return asList<RunEvent>(payload, 'events');
   },
 
-  /** The only mutation in Phase 1 (architecture §11). */
+  /**
+   * One run lifecycle transition.
+   *
+   * All four share a route shape and a server-side handler, so they share one
+   * method rather than four near-copies that would drift. The server answers
+   * 409 with a REASON when the transition does not apply -- pausing a run that
+   * just failed, say -- and the ApiError carries that message through, so a
+   * caller can tell the operator what happened instead of a bare rejection.
+   */
+  runAction(namespace: string, runId: string, action: RunAction): Promise<RunSummary | void> {
+    return request<RunSummary | void>(
+      `${ns(namespace)}/runs/${encodeURIComponent(runId)}/${action}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      },
+    );
+  },
+
+  /** Kept as its own name: it is called from a list row as well as the detail page. */
   cancelRun(namespace: string, runId: string): Promise<void> {
     return request<void>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+  },
+
+  /**
+   * Ask a worker to stop taking new work and finish what it holds.
+   *
+   * admin_write, not write: draining removes capacity from the fleet, which is
+   * a fleet-shaping decision rather than a run-shaping one. The server answers
+   * 200 once the intent is RECORDED -- the worker drains asynchronously, so a
+   * 200 here means "asked", not "drained".
+   */
+  drainWorker(namespace: string, workerId: string): Promise<void> {
+    return request<void>(`${ns(namespace)}/workers/${encodeURIComponent(workerId)}/drain`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{}',

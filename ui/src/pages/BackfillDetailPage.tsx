@@ -34,7 +34,9 @@ export function BackfillDetailPage({ namespace }: { namespace: string }) {
   if (backfill.error && backfill.data === undefined) {
     return (
       <div className="col">
-        <Link to="/schedules">← all schedules</Link>
+        <Link to="/schedules" className="detail-crumb">
+          ← all schedules
+        </Link>
         <ErrorBox error={backfill.error} what="that backfill" onRetry={backfill.refetch} />
       </div>
     );
@@ -60,30 +62,32 @@ export function BackfillDetailPage({ namespace }: { namespace: string }) {
 
   return (
     <div className="col">
-      <div className="row" style={{ alignItems: 'flex-start' }}>
-        <div style={{ minWidth: 0 }}>
-          <div className="row" style={{ gap: 'var(--space-4)' }}>
-            {b.schedule_name ? (
-              <Link to={`/schedules/${encodeURIComponent(b.schedule_name)}`} className="sub">
-                ← {b.schedule_name}
-              </Link>
-            ) : (
-              <Link to="/schedules" className="sub">
-                ← all schedules
-              </Link>
-            )}
+      <div className="detail-head">
+        <div className="detail-head-text">
+          {/* The crumb points at the OWNING schedule when the gateway resolved
+              one: a backfill is always read in the context of what it replays. */}
+          {b.schedule_name ? (
+            <Link
+              to={`/schedules/${encodeURIComponent(b.schedule_name)}`}
+              className="detail-crumb"
+            >
+              ← {b.schedule_name}
+            </Link>
+          ) : (
+            <Link to="/schedules" className="detail-crumb">
+              ← all schedules
+            </Link>
+          )}
+          <div className="detail-title-row">
             <StateBadge kind="backfill" state={b.state} />
-            <h1 style={{ margin: 0 }} className="mono">
-              {b.id}
-            </h1>
+            <h1 className="detail-title mono">{b.id}</h1>
           </div>
-          <div className="sub" style={{ marginTop: 'var(--space-1)' }}>
+          <div className="detail-meta">
             {fmtTs(b.from)} → {fmtTs(b.to)} · started by {b.created_by} ·{' '}
             {terminal ? 'finished' : 'refreshes every 3s'}
           </div>
         </div>
-        <span className="spacer" style={{ marginLeft: 'auto' }} />
-        <div className="row" style={{ gap: 'var(--space-3)' }}>
+        <div className="detail-actions">
           {b.state === 'RUNNING' && (
             <button type="button" onClick={() => run('pause')} disabled={action.isPending}>
               Pause
@@ -119,9 +123,11 @@ export function BackfillDetailPage({ namespace }: { namespace: string }) {
             {b.runs_created} run{b.runs_created === 1 ? '' : 's'} created
           </span>
         </div>
-        <div className="panel-body col" style={{ gap: 'var(--space-4)' }}>
+        <div className="panel-body backfill-progress-body">
           {fraction === null ? (
-            <div className="sub">This backfill's interval is empty, so there is nothing to walk.</div>
+            <div className="backfill-progress-note">
+              This backfill&apos;s interval is empty, so there is nothing to walk.
+            </div>
           ) : (
             <>
               <div className="meter">
@@ -131,13 +137,25 @@ export function BackfillDetailPage({ namespace }: { namespace: string }) {
                 <span>{fmtTs(b.from)}</span>
                 <span>{fmtTs(b.to)}</span>
               </div>
-              <div className="sub">
-                {/* Progress is the CURSOR through the interval, not a run count:
-                    a year-long backfill that made 40 runs says nothing about how
-                    much is left, while "cursor at March" does. */}
+              {/* Progress is the CURSOR through the interval, not a run count:
+                  a year-long backfill that made 40 runs says nothing about how
+                  much is left, while "cursor at March" does. The percentage is
+                  the page's one central number, so it is sized like one — and
+                  it stays in the same sentence as the words that qualify it,
+                  because a bare "50%" is a percentage of nothing in particular. */}
+              <div className="backfill-progress-note">
                 {b.cursor_at ? (
                   <>
-                    {Math.round(fraction * 100)}% through the interval · next tick to generate{' '}
+                    {/* One text node, deliberately: the figure and the words
+                        that qualify it are a single claim, and splitting the
+                        number into its own element would let a reader (or a
+                        test) find a bare "50%" that is a percentage of nothing
+                        in particular. Emphasis comes from the class on the
+                        line, not from nesting. */}
+                    <span className="backfill-progress-figure">
+                      {`${Math.round(fraction * 100)}% through the interval`}
+                    </span>
+                    {' · next tick to generate '}
                     <span className="mono">{fmtTs(b.cursor_at)}</span>
                   </>
                 ) : (
@@ -208,10 +226,12 @@ export function BackfillDetailPage({ namespace }: { namespace: string }) {
         </div>
       </div>
 
-      <div className="sub">
+      {/* The distinction people get wrong when they cancel one to shed load.
+          Stated as a standing note rather than only inside the confirmation,
+          because it is true of a backfill that was cancelled an hour ago too. */}
+      <div className="ov-measures">
         Cancelling a backfill stops it generating runs; the runs it already created are ordinary
-        runs and continue. Find them on the{' '}
-        <Link to="/runs">runs</Link> page.
+        runs and continue. Find them on the <Link to="/runs">runs</Link> page.
       </div>
     </div>
   );

@@ -133,6 +133,27 @@ describe('the workflow catalog list', () => {
     expect(await screen.findByText(/No workflow name contains/)).toBeInTheDocument();
   });
 
+  /**
+   * While the debounce settles, the count beside the search field belongs to the
+   * PREVIOUS question. Showing a stale number there would claim the table has
+   * been filtered when it has not, so the chip says what it is doing instead.
+   */
+  it('says it is searching rather than showing a count for the old query', async () => {
+    mockFetch(() => [200, { workflows: [workflow()] }]);
+    wrap(<WorkflowsPage namespace="default" />);
+    await screen.findByText('ten-node-mixed');
+
+    fireEvent.change(screen.getByLabelText('search workflows by name'), {
+      target: { value: 'ten' },
+    });
+
+    expect(screen.getByText('searching…')).toBeInTheDocument();
+    // And it goes away once the term settles and the server has answered.
+    await waitFor(() => {
+      expect(screen.queryByText('searching…')).not.toBeInTheDocument();
+    });
+  });
+
   it('explains how workflows get here when the namespace has none', async () => {
     mockFetch(() => [200, { workflows: [] }]);
     wrap(<WorkflowsPage namespace="default" />);

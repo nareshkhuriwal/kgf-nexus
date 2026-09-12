@@ -616,3 +616,17 @@ export interface FleetHealth {
   upstreams: FleetUpstream[];
   measures?: string;
 }
+
+/**
+ * The run lifecycle transitions the gateway exposes.
+ *
+ * Written as a union rather than free strings because the value goes straight
+ * into a URL path: a typo would produce a 404 that reads like a missing run
+ * rather than a missing route.
+ *
+ * RETRY has semantics worth stating wherever it is offered: the
+ * workflow-manager restarts a FAILED run from its failed nodes, so successful
+ * work is not repeated. An operator who reads "retry" as "run the whole thing
+ * again" will make a different decision than the one this actually performs.
+ */
+export type RunAction = 'pause' | 'resume' | 'cancel' | 'retry';

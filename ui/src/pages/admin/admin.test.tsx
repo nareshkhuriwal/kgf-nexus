@@ -147,6 +147,45 @@ describe('UsersPage', () => {
     expect(calls).toBe(1);
   });
 
+  /**
+   * A successful administrative action is reported in the success tone, and it
+   * reports the CONSEQUENCE rather than the fact that a request returned. An
+   * offboarding needs "3 sessions ended" as evidence; "done" is not evidence.
+   */
+  it('reports the session count as evidence after signing an account out', async () => {
+    const { fireEvent } = await import('@testing-library/react');
+    mockFetch((url, init) => {
+      if (init?.method === 'POST' && url.includes('/sessions')) {
+        return [200, { sessions_revoked: 3 }];
+      }
+      return [
+        200,
+        {
+          users: [
+            {
+              id: 'u1',
+              namespace: 'default',
+              email: 'ops@example.com',
+              display_name: 'Ops',
+              role: 'admin',
+              created_at: '2026-09-12T10:00:00Z',
+              disabled_at: null,
+              disabled: false,
+            },
+          ],
+        },
+      ];
+    });
+    wrap(<UsersPage namespace="default" canAdmin />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /sign out everywhere/i }));
+
+    const notice = await screen.findByRole('status');
+    expect(notice).toHaveTextContent(/Ended 3 sessions/i);
+    // Success-toned from the state palette, not from the operator-chosen accent.
+    expect(notice).toHaveClass('admin-notice');
+  });
+
   it('warns that disabling also ends live sessions, before the click', async () => {
     mockFetch(() => [
       200,
@@ -239,6 +278,87 @@ describe('TokensPage', () => {
     mockFetch(() => [200, { tokens: [] }]);
     wrap(<TokensPage namespace="default" canAdmin />);
     expect(await screen.findByText(/No scoped tokens/i)).toBeInTheDocument();
+  });
+
+  /**
+   * The one-time reveal, and the reason it is the most dangerous panel in the
+   * console to restyle: only a hash is stored, so an operator who scrolls past
+   * this has permanently lost the credential.
+   *
+   * What is pinned is that the plaintext appears EXACTLY once, in the reveal
+   * panel, and that the listing renders nothing of it. A restyle that helpfully
+   * added the value to a table cell or a tooltip would pass every other test in
+   * this file.
+   */
+  it('reveals a new token exactly once and never in the listing', async () => {
+    const { fireEvent } = await import('@testing-library/react');
+    const SECRET = 'nxs_scoped_PLAINTEXT_ONLY_ONCE';
+    mockFetch((_url, init) => {
+      if (init?.method === 'POST') {
+        return [
+          201,
+          {
+            id: 't9',
+            namespace: 'default',
+            name: 'ci-pipeline',
+            scopes: ['read'],
+            role: 'reader',
+            expires_at: '2026-12-12T00:00:00Z',
+            last_used_at: null,
+            created_by: null,
+            created_at: '2026-09-12T10:00:00Z',
+            revoked_at: null,
+            live: true,
+            // The gateway returns the plaintext on CREATE and never again.
+            token: SECRET,
+          },
+        ];
+      }
+      // The listing is what a reload shows: no `token` field at all.
+      return [
+        200,
+        {
+          tokens: [
+            {
+              id: 't9',
+              namespace: 'default',
+              name: 'ci-pipeline',
+              scopes: ['read'],
+              role: 'reader',
+              expires_at: '2026-12-12T00:00:00Z',
+              last_used_at: null,
+              created_by: null,
+              created_at: '2026-09-12T10:00:00Z',
+              revoked_at: null,
+              live: true,
+            },
+          ],
+        },
+      ];
+    });
+
+    wrap(<TokensPage namespace="default" canAdmin />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /new token/i }));
+    fireEvent.change(screen.getByPlaceholderText('ci-pipeline'), {
+      target: { value: 'ci-pipeline' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create token/i }));
+
+    // Shown once, and the panel says so as an ALERT rather than a passive
+    // status: missing this message costs the credential permanently.
+    const reveal = await screen.findByText(SECRET);
+    expect(reveal).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Shown once and never again/i);
+
+    // Dismissed, and then it is gone from the document entirely — the listing
+    // beneath it never carried the value.
+    fireEvent.click(screen.getByRole('button', { name: /I have saved it/i }));
+    await waitFor(() => {
+      expect(screen.queryByText(SECRET)).not.toBeInTheDocument();
+    });
+    // Nor in any title/tooltip, which is the quiet way a secret leaks.
+    expect(document.body.innerHTML).not.toContain(SECRET);
   });
 });
 

@@ -23,6 +23,7 @@ import type {
   Backfill,
   CreateRunRequest,
   CreateScheduleRequest,
+  RunAction,
   RunEvent,
   RunSummary,
   Schedule,
@@ -156,6 +157,54 @@ export function useCancelRun(namespace: string) {
       void qc.invalidateQueries({ queryKey: qk.run(namespace, runId) });
       void qc.invalidateQueries({ queryKey: qk.runEvents(namespace, runId) });
       void qc.invalidateQueries({ queryKey: ['runs', namespace] });
+    },
+    retry: false,
+  });
+}
+
+/**
+ * One hook for every run lifecycle transition.
+ *
+ * The four share a cache-invalidation story exactly -- each changes the run,
+ * its events and its place in the list -- so they share a hook. Four copies
+ * would eventually invalidate three different sets.
+ *
+ * retry: false, like useCancelRun. These are not idempotent from the
+ * OPERATOR's point of view: a retry that silently fired twice because the
+ * first response was slow is a second execution of real work, and the
+ * automatic retry a query client does for reads is wrong for them.
+ */
+export function useRunAction(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ runId, action }: { runId: string; action: RunAction }) =>
+      api.runAction(namespace, runId, action),
+    onSuccess: (_data, { runId }) => {
+      void qc.invalidateQueries({ queryKey: qk.run(namespace, runId) });
+      void qc.invalidateQueries({ queryKey: qk.runEvents(namespace, runId) });
+      void qc.invalidateQueries({ queryKey: ['runs', namespace] });
+      // The triage panel counts failed and stalled runs, so a transition that
+      // resolves one must not leave it listed on the overview.
+      void qc.invalidateQueries({ queryKey: ['attention', namespace] });
+    },
+    retry: false,
+  });
+}
+
+/**
+ * Drain a worker.
+ *
+ * Invalidates capacity as well as the worker list: draining removes a worker
+ * from the schedulable pool, and a capacity panel still counting it would
+ * explain a queue that stops moving as a mystery.
+ */
+export function useDrainWorker(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (workerId: string) => api.drainWorker(namespace, workerId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.workers(namespace) });
+      void qc.invalidateQueries({ queryKey: qk.capacity(namespace) });
     },
     retry: false,
   });

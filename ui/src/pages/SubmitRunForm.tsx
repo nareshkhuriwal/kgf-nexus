@@ -83,14 +83,16 @@ export function SubmitRunForm({
 
   return (
     <form
-      className="panel-body col"
-      style={{ gap: 'var(--space-5)' }}
+      className="panel-body form-body"
       onSubmit={(e) => {
         e.preventDefault();
         submit();
       }}
     >
-      <div className="sub">
+      {/* The pin is the first thing stated, because it is the promise the form
+          makes: the version read is the version that runs. Neutral-toned — it
+          is a fact about the submission, not a warning about it. */}
+      <div className="ov-measures">
         Creates a run of <code className="mono">{definition.name}</code>{' '}
         <strong className="mono">v{definition.version}</strong>. Pinned to this version — a newer
         one published in the meantime will not be substituted.
@@ -98,7 +100,7 @@ export function SubmitRunForm({
 
       {declared.length > 0 ? (
         <div>
-          <div className="attempt-section-title">declared parameters</div>
+          <div className="form-inset-title">declared parameters</div>
           <dl className="kv">
             {declared.map(([name, p]) => (
               <ParamRow key={name} name={name} param={p} />
@@ -106,11 +108,11 @@ export function SubmitRunForm({
           </dl>
         </div>
       ) : (
-        <div className="sub">This workflow declares no parameters.</div>
+        <div className="form-hint">This workflow declares no parameters.</div>
       )}
 
-      <label className="col" style={{ gap: 'var(--space-2)' }}>
-        <span className="sub">params (JSON)</span>
+      <label className="form-field">
+        <span className="form-label">params (JSON)</span>
         <textarea
           value={paramsText}
           onChange={(e) => setParamsText(e.target.value)}
@@ -120,24 +122,25 @@ export function SubmitRunForm({
           placeholder="{}"
         />
         {parsed.error ? (
-          <span className="sub" role="alert">
+          <span className="form-hint invalid" role="alert">
             Not valid JSON: {parsed.error}
           </span>
         ) : missing.length > 0 ? (
-          <span className="sub" role="status">
-            {/* Named, not blocked: the server is the authority on what is
-                required, and it will say so precisely if this is wrong. */}
+          // Named, not blocked, and deliberately NOT danger-toned: the server
+          // is the authority on what is required, so this is a heads-up about
+          // what it is likely to say, not a verdict of its own.
+          <span className="form-hint" role="status">
             The definition marks <span className="mono">{missing.join(', ')}</span> required, and
             the body above does not set {missing.length === 1 ? 'it' : 'them'}. The gateway will
             reject the run if it agrees.
           </span>
         ) : (
-          <span className="sub">Passed to the run and resolved into task inputs.</span>
+          <span className="form-hint">Passed to the run and resolved into task inputs.</span>
         )}
       </label>
 
-      <label className="col" style={{ gap: 'var(--space-2)' }}>
-        <span className="sub">priority</span>
+      <label className="form-field">
+        <span className="form-label">priority</span>
         <input
           type="number"
           value={priority}
@@ -149,19 +152,20 @@ export function SubmitRunForm({
             workflows. Saying "may be overridden" is the honest description of
             what was observed; claiming the field decides dispatch order would
             not be. */}
-        <span className="sub">
-          Higher priority attempts are dispatched first when capacity is scarce. The workflow's own
-          declared priority may override this — the run detail shows the value that was actually
-          applied.
+        <span className="form-hint">
+          Higher priority attempts are dispatched first when capacity is scarce. The workflow&apos;s
+          own declared priority may override this — the run detail shows the value that was
+          actually applied.
         </span>
       </label>
 
       {/* The server's own words. This is the validation feedback: a rejected
           submission shows exactly what the gateway said, including its status,
-          rather than a message the console invented about it. */}
+          rather than a message the console invented about it. A 422 naming the
+          missing required params arrives here verbatim. */}
       {create.error != null && <ErrorBox error={create.error} what="the run" />}
 
-      <div className="row" style={{ gap: 'var(--space-3)' }}>
+      <div className="form-actions">
         <button type="submit" className="primary" disabled={create.isPending || parsed.error !== null}>
           {create.isPending ? 'Submitting…' : 'Submit run'}
         </button>
@@ -183,7 +187,7 @@ function ParamRow({ name, param }: { name: string; param: SpecParam }) {
       <dt className="mono">{name}</dt>
       <dd>
         {bits.join(' · ')}
-        {param.description && <div className="sub">{param.description}</div>}
+        {param.description && <div className="cell-sub">{param.description}</div>}
       </dd>
     </>
   );

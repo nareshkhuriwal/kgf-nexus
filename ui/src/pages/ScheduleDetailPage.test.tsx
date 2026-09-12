@@ -159,7 +159,16 @@ describe('the schedule detail view', () => {
     serve(schedule({ enabled: true, next_fire_at: null }));
     wrapScheduleDetail();
 
-    expect(await screen.findByText('not armed')).toBeInTheDocument();
+    const unarmed = await screen.findByText('not armed');
+    expect(unarmed).toBeInTheDocument();
+    // Warning-toned rather than plain text: "not armed" sitting bare in a
+    // definition list reads as a value, when it is the finding. The tone comes
+    // from the state palette, never from the operator-chosen accent, so a theme
+    // change cannot quieten it.
+    expect(unarmed).toHaveClass('warn');
+    // And it keeps the explanation of WHY on the element, which is the part that
+    // tells an operator whether to act or wait.
+    expect(unarmed).toHaveAttribute('title', expect.stringContaining('died mid-fire'));
   });
 
   /**
@@ -188,6 +197,24 @@ describe('the schedule detail view', () => {
         true,
       );
     });
+  });
+
+  /**
+   * The state badge leads the name in the identity row. On a page reached
+   * mid-incident "is this armed?" is read before "what is it called", so the
+   * order is deliberate and worth pinning against a reflow that reverses it.
+   */
+  it('puts the state badge before the schedule name in the identity row', async () => {
+    serve(schedule({ enabled: false }));
+    wrapScheduleDetail();
+
+    const heading = await screen.findByRole('heading', { name: 'nightly-etl' });
+    const badge = screen.getByText('disabled');
+    const row = heading.parentElement!;
+    expect(row).toContainElement(badge);
+    // DOCUMENT_POSITION_FOLLOWING: the badge precedes the heading in the DOM,
+    // which is also the order a screen reader announces them in.
+    expect(badge.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('backs out of a delete without calling the endpoint', async () => {

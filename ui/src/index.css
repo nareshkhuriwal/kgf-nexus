@@ -1597,3 +1597,754 @@ tr.version-current > td { background: var(--bg-hover); }
   .ov-attn-row { flex-wrap: wrap; padding: var(--space-5); }
   .ov-attn-link { align-self: flex-start; margin-left: calc(var(--space-4) + var(--space-5)); }
 }
+
+/* ── Runs + Workers ────────────────────────────────────────────────────────
+   The run explorer, the run detail view and the worker fleet, restyled onto
+   the same language as the shell and the overview: hairline separators rather
+   than stacks of bordered cards, one generous rhythm, and colour spent only on
+   state.
+
+   The rule that governs every colour below is the one the shell block states:
+   the ACCENT is brand and operator-switchable, so it appears here on links and
+   focus rings and NOWHERE that carries meaning. Severity, liveness and
+   utilisation are all drawn from --tone-*, the palette an operator cannot
+   reconfigure out from under themselves — if a theme swap could make a FAILED
+   run read as a SUCCEEDED one, the design is wrong.
+
+   Every length is a token. The exceptions are 1px hairlines and the layout
+   breakpoints/column floors, which are viewport measurements rather than steps
+   on a density scale, for the same reason .grid-2's 380px is literal. */
+
+/* ── A filter bar is not a panel header ──────────────────────────────────── */
+/* .panel-head is an uppercase, letter-spaced label band, which is the wrong
+   container for interactive controls: the run list previously had to undo the
+   transform and the tracking with an inline style on every label. This is that
+   band's sibling — same inset ground, ordinary sentence type, controls sized to
+   be clicked. */
+.filterbar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-6);
+  padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-inset);
+  flex-wrap: wrap;
+}
+.filterbar .spacer { margin-left: auto; }
+
+/* The label sits above its control rather than beside it: stacked, the two read
+   as one unit when the bar wraps, where a side-by-side pair splits across lines
+   and leaves an orphaned word. */
+.filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.filter-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--fg-muted);
+  line-height: var(--leading-tight);
+}
+/* A reading measure for a workflow name, not a density step. It shrinks on a
+   narrow screen rather than forcing the bar wider than the viewport. */
+.filter-field input[type='search'] { width: 100%; max-width: 220px; }
+.filter-field select { max-width: 220px; }
+
+/* The count of what the filters produced, and the one figure on this page worth
+   reading at a glance: "how much am I looking at". Tabular so it does not
+   jitter as the poll changes the digit count. */
+.filter-count {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  white-space: nowrap;
+}
+.filter-count-n {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-tight);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+.filter-count-label { font-size: var(--text-xs); color: var(--fg-muted); }
+
+/* A stale/error notice sits between the header and the data it qualifies, so it
+   needs the panel's horizontal inset without the panel's vertical one -- the
+   thing below it supplies that. */
+.panel-notice { padding: var(--space-5) var(--space-6) var(--space-0); }
+
+/* ── Table density ───────────────────────────────────────────────────────── */
+/* Operator tables are dense by necessity, but the base 7px/10px cell padding
+   put six columns of monospace hard against each other. These two classes
+   loosen the rhythm to the scale without touching the global table rule, which
+   other screens are tuned against.
+
+   `runs` also unpins the header row: a sticky header inside a panel that is
+   itself inside a scrolling page sticks to the wrong thing, leaving the labels
+   floating over the rows they name. */
+.table-runs th,
+.table-fleet th {
+  padding: var(--space-4) var(--space-5);
+  position: static;
+}
+.table-runs td,
+.table-fleet td {
+  padding: var(--space-5);
+  vertical-align: middle;
+}
+/* The fleet row stacks two or three lines per cell, so it keeps top alignment:
+   centred, a one-line cell would float against a three-line neighbour. */
+.table-fleet td { vertical-align: top; }
+
+/* A row is a click target for the run it names, so the whole row lights up and
+   the hairline between rows is what separates them -- no zebra, which on a
+   dense table competes with the state tint it sits next to. */
+.table-runs tbody tr,
+.table-fleet tbody tr {
+  border-left: var(--space-1) solid transparent;
+}
+
+/* The failure marker: a left rule in the danger tone on any row whose run or
+   worker is in trouble. Redundant with the badge that is already in the row's
+   first cell -- the point is that a screenful of runs can be triaged by edge
+   colour alone, without reading a single label. */
+.table-runs tbody tr.row-failed,
+.table-fleet tbody tr.row-failed { border-left-color: var(--tone-danger-bd); }
+.table-runs tbody tr.row-blocked { border-left-color: var(--tone-blocked-bd); }
+.table-fleet tbody tr.row-warning { border-left-color: var(--tone-warning-bd); }
+
+/* The spec cell: name on top, version beneath. Two lines rather than one
+   concatenated string, because the name is what you scan for and the version is
+   what you check once you have found it.
+   .cell-stack / .cell-sub are shared with the schedules and admin tables, which
+   stack the same way (a value over its qualifier) -- one name for one pattern,
+   so the two cannot drift apart. Declared idempotently for that reason. */
+.cell-stack { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.cell-sub { font-size: var(--text-xs); line-height: var(--leading-tight); color: var(--fg-faint); }
+
+/* The per-state node tally. Wraps rather than widening the column: a run with
+   six distinct node states must not push `created` off the screen. */
+.node-tally { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
+.node-tally-item { display: flex; align-items: center; gap: var(--space-2); }
+.node-tally-n {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+}
+
+/* ── Run detail header ───────────────────────────────────────────────────── */
+/* The identity block and the one destructive control, on one line until there is
+   no room for one line. The run id is the heading, so it gets heading weight at
+   a monospace size that keeps a 14-character id on one line. */
+.run-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-6);
+  flex-wrap: wrap;
+}
+.run-head-id { min-width: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.run-head-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+}
+.run-head-line h1 {
+  margin: var(--space-0);
+  font-family: var(--mono);
+  font-size: var(--text-lg);
+  line-height: var(--leading-tight);
+}
+.run-head-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  line-height: var(--leading-normal);
+}
+/* The state's own explanation of itself. Faint and on its own line: it is there
+   to be read once, by someone who does not already know what CANCELLING means,
+   and it must not compete with the identity above it. */
+.run-head-hint {
+  font-size: var(--text-sm);
+  color: var(--fg-faint);
+  line-height: var(--leading-normal);
+}
+.run-head-actions { margin-left: auto; text-align: right; }
+/* The confirmation replaces the button in place, so it is given room to wrap
+   under its own buttons rather than shoving the header's identity block. */
+.run-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+.run-confirm-prompt { font-size: var(--text-sm); color: var(--fg-muted); text-align: left; }
+.run-cancel-error { margin-top: var(--space-4); text-align: left; }
+
+/* A panel-head trailing note: the summary sentence, the provenance line, the
+   task ref. Sentence-cased against the band's uppercase label, and allowed to
+   wrap instead of being clipped. */
+.panel-note {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: var(--weight-normal);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  min-width: 0;
+}
+
+/* The upstream walk: the fastest route from collateral damage to the real
+   failure, so the links are a labelled row rather than a run-on sentence. */
+.upstream-walk {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+.upstream-walk button.link { font-family: var(--mono); font-size: var(--text-sm); }
+
+/* The run's identifiers, at the foot of the page. Long, rarely read, and
+   needed verbatim when they are -- so they get a definition list that wraps
+   instead of a sentence that overflows. */
+.run-ids {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-3) var(--space-6);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-sm);
+}
+.run-ids dt { color: var(--fg-muted); }
+.run-ids dd { margin: var(--space-0); font-family: var(--mono); word-break: break-all; color: var(--fg); }
+
+/* ── Worker fleet ────────────────────────────────────────────────────────── */
+/* The fleet's headline figures: active-of-registered, read across a room. The
+   numbers are --text-xl for the same reason the overview's are -- during an
+   incident this is a glance, not a read. */
+.fleet-figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-6);
+  padding: var(--space-6);
+  border-bottom: 1px solid var(--border);
+}
+.fleet-figure { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.fleet-figure-n {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-tight);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+/* Tone only where the figure IS a problem: workers the fleet has lost, and
+   workers that claim to be alive but have stopped saying so. A zero of either
+   takes the ordinary foreground, because "none dead" is not a warning. */
+.fleet-figure-n.alarm { color: var(--tone-danger-fg); }
+.fleet-figure-n.warn { color: var(--tone-warning-fg); }
+.fleet-figure-label {
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+/* The host cell: hostname, then the id nobody reads until they need it exactly.
+   --text-xs rather than the old inline 10.5px, which was below the documented
+   legibility floor for no reason -- the sub-scale sizes in this sheet are all
+   SVG labels pinned to fixed geometry, and a table cell reflows. */
+.fleet-host { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.fleet-host-name { font-family: var(--mono); color: var(--fg); }
+.fleet-host-id { font-family: var(--mono); font-size: var(--text-xs); color: var(--fg-faint); }
+
+/* One resource dimension: the exact numbers above the bar that summarises them.
+   The numbers are the answer to "can this fit"; the bar is only the shape of it,
+   which is why it is second and thin. */
+.dim { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.dim-numbers {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--fg);
+}
+.dim-kind { font-family: var(--mono); font-size: var(--text-xs); color: var(--fg-faint); }
+
+.fleet-util {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.fleet-beat { display: flex; align-items: center; gap: var(--space-3); white-space: nowrap; }
+.fleet-labels {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+.fleet-agent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--fg-faint);
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────────────
+   Down to ~400px. The tables scroll inside .table-scroll, which is what keeps
+   the PAGE from scrolling sideways; everything below is about the chrome around
+   them. 560px matches the breakpoint the shell already uses. */
+@media (max-width: 560px) {
+  .filterbar { gap: var(--space-5); padding: var(--space-5); }
+  /* The count stops being a right-aligned trailing item and becomes the first
+     thing on its own line, which is where it is legible once the bar wraps. */
+  .filterbar .spacer { display: none; }
+  .filter-count { width: 100%; }
+
+  .panel-notice { padding: var(--space-5) var(--space-5) var(--space-0); }
+
+  /* The cancel control drops below the run's identity rather than squeezing it
+     into a one-word-per-line column. */
+  .run-head-actions { margin-left: var(--space-0); text-align: left; width: 100%; }
+  .run-confirm { justify-content: flex-start; }
+  .run-cancel-error { text-align: left; }
+
+  .fleet-figures { gap: var(--space-5); padding: var(--space-5); }
+  /* Stacked, an identifier is the one thing that must not be truncated. */
+  .run-ids { grid-template-columns: minmax(0, 1fr); gap: var(--space-1) var(--space-0); }
+  .run-ids dd { margin-bottom: var(--space-3); }
+}
+
+/* ── Schedules + Workflows + Admin ─────────────────────────────────────────
+   Appended for the schedule, catalog and administration screens. They follow
+   the language the overview established: a hairline-separated list rather than
+   a stack of bordered cards, generous vertical rhythm, and the big number
+   spent only on the one fact a screen exists to state.
+
+   The accent appears nowhere in this block. It is operator-chosen in settings,
+   so it cannot carry meaning — an enabled schedule, a revoked token and a
+   denied audit entry all take their colour from --tone-*, which no theme change
+   can reassign. The two places a --focus-derived marker does appear (the
+   selected version row, already in the sheet) mark SELECTION, which is
+   interaction state and not a claim about the data.
+
+   Every length is a token. The exceptions, as elsewhere in this sheet, are 1px
+   hairlines and the documented layout breakpoints/measures. */
+
+/* ── Identity line ─────────────────────────────────────────────────────────
+   Schedules, backfills and workflows are all addressed by a name or an id, and
+   all three previously hand-rolled the same "back link · badge · h1" row with
+   inline styles. Named once, so the three pages cannot drift apart. */
+.detail-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+}
+.detail-head-text { min-width: 0; flex: 1; }
+.detail-crumb {
+  display: block;
+  margin-bottom: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+.detail-crumb:hover { color: var(--fg); }
+/* The identity row: the state badge sits BEFORE the name, because on a screen
+   an operator arrived at mid-incident "is this thing on?" is read before "what
+   is it called". */
+.detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.detail-title {
+  margin: var(--space-0);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-tight);
+  word-break: break-all;
+}
+.detail-meta {
+  margin-top: var(--space-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--fg-muted);
+}
+.detail-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+/* The confirm-in-place pattern, shared by delete-schedule and cancel-backfill.
+   The sentence stating what survives the action sits inline with the two
+   buttons rather than in a dialog, so it cannot be dismissed unread. */
+.confirm-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--tone-danger-bd);
+  border-radius: var(--radius-md);
+  background: var(--tone-danger-bg);
+}
+.confirm-inline-text {
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--fg);
+}
+
+/* ── Forms ─────────────────────────────────────────────────────────────────
+   Every form on these screens was a column of `style={{gap}}` labels. The
+   pattern named: a field is its label, its control and its hint, and the hint
+   is part of the field rather than a paragraph that happens to follow it. */
+.form-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-7);
+}
+/* A row of fields that folds to one column at the same 280px measure the rest
+   of the console uses for a narrow two-up. Narrower than .grid-2's 380px on
+   purpose: these are single inputs, not panels. */
+.form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-6);
+  align-items: start;
+}
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.form-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-muted);
+}
+/* Inputs fill their field. Without this a text input keeps its browser default
+   width and a two-column form ends up visibly ragged. */
+.form-field > input,
+.form-field > select,
+.form-field > textarea { width: 100%; }
+.form-hint {
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--fg-muted);
+}
+/* A hint that has become a verdict on what was typed. Tone-coloured rather than
+   accent-coloured: it is a statement about the value, which is state, and the
+   accent is a brand choice the operator can change.
+
+   Two strengths, because two different things happen. `invalid` is "this cannot
+   work" — unparseable JSON, a scope set the gateway will refuse. `caution` is
+   "this will work and you should mean it" — a credential that never expires. */
+.form-hint.invalid { color: var(--tone-danger-fg); }
+.form-hint.caution { color: var(--tone-warning-fg); }
+
+/* An administrative action that landed. Success-toned, because the console
+   reporting a consequence it caused is good news and should not look like the
+   neutral "here is some information" notice. */
+.admin-notice {
+  border-color: var(--tone-success-bd);
+  background: var(--tone-success-bg);
+}
+.admin-notice .notice-glyph { color: var(--tone-success-fg); }
+
+/* A checkbox field reads across, not down: the box and its sentence are one
+   thing. Alignment is to the first line so a two-line sentence does not drag
+   the box to its middle. */
+.form-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--fg-muted);
+}
+.form-check > input { margin: var(--space-1) var(--space-0) var(--space-0); flex: 0 0 auto; }
+
+/* The submit row, separated by a hairline rather than by a gap alone: on a long
+   form the rule is what says "the fields have ended". The .form-body gap already
+   supplies the space above it, so only the space below is set here. */
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--border);
+}
+
+/* A fieldset used as a group of checkboxes. Browsers give fieldset a default
+   border and padding that fight the panel it sits in. */
+.form-fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  border: 0;
+  padding: var(--space-0);
+  margin: var(--space-0);
+  min-width: 0;
+}
+.form-fieldset > legend {
+  padding: var(--space-0);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-muted);
+}
+
+/* The preview inside the create-schedule form. Inset rather than raised: it is
+   an answer computed from the fields above it, not a sibling panel. */
+.form-inset {
+  padding: var(--space-6);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.form-inset-title {
+  margin-bottom: var(--space-4);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-faint);
+}
+
+/* ── Panel filler ─────────────────────────────────────────────────────────
+   AsyncPanel's notice states are laid out for a padded body, but these panels
+   put a table straight against their own edges. Wrapping the notice gives it
+   the body's padding without giving the table any. */
+.panel-notice { padding: var(--space-5); }
+
+/* A toolbar inside a panel head — the search field, the audit filters. It
+   pushes to the right of the head's title and wraps under it when there is no
+   room, rather than squeezing the field to nothing. */
+.panel-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  /* The head is uppercase small-caps chrome; a control inside it is not. */
+  text-transform: none;
+  letter-spacing: normal;
+}
+.panel-tools input[type='search'],
+.panel-tools input[type='text'] { min-width: 0; }
+
+/* ── Table density ────────────────────────────────────────────────────────
+   Operator tables carry two facts per cell often enough — a cron and its zone,
+   an actor and its IP — that the pattern deserves a name instead of an inline
+   font-size. The second line is the qualifier, never the value. */
+.cell-stack { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.cell-sub {
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+  color: var(--fg-faint);
+}
+
+/* Action buttons in a table cell. nowrap so Pause/Resume/Cancel do not stack
+   into three rows and treble the row height mid-incident. */
+.cell-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+/* ── Sign-in ───────────────────────────────────────────────────────────────
+   The one unauthenticated screen, and the first thing anyone sees. It is given
+   a centred column of its own rather than a panel dropped in the page grid: at
+   sign-in there is no navigation, no namespace switcher and nothing else on
+   screen, so the page IS the card. */
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: var(--space-7);
+  padding: var(--space-8) var(--space-6);
+  background: var(--bg);
+}
+.login-col {
+  width: 100%;
+  /* A reading measure for a two-field form, not a density step. */
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-7);
+}
+/* The mark is the only accent on the page, which is what the accent is for. */
+.login-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  text-align: center;
+}
+.login-mark {
+  font-family: var(--mono);
+  font-size: var(--text-xl);
+  line-height: 1;
+  color: var(--accent);
+}
+.login-title {
+  margin: var(--space-0);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.2px;
+  line-height: var(--leading-tight);
+}
+.login-sub {
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  line-height: var(--leading-normal);
+}
+/* The method switch spans the card, because the two paths have equal standing:
+   a key is how the CLI and every worker authenticate, not a fallback. */
+.login-seg { display: flex; }
+.login-seg .seg-btn { flex: 1; justify-content: center; }
+.login-form { display: flex; flex-direction: column; gap: var(--space-6); }
+.login-form .form-field > input { width: 100%; }
+.login-submit { width: 100%; justify-content: center; padding-block: var(--space-4); }
+.login-foot {
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--fg-faint);
+  text-align: center;
+}
+/* The sign-in WORKED but will not survive a reload. Warning-toned, not danger:
+   it previously borrowed .notice.error, which contradicted its own text and its
+   role=status. The distinction matters — one means "you are not signed in", the
+   other means "you are, but only until you reload". */
+.login-warning {
+  border-color: var(--tone-warning-bd);
+  background: var(--tone-warning-bg);
+}
+.login-warning .notice-glyph { color: var(--tone-warning-fg); }
+
+/* ── One-time token reveal ─────────────────────────────────────────────────
+   The existing .token-reveal / .token-secret rules still carry the panel and
+   the value. What is added is the emphasis: this panel is the only moment the
+   secret exists outside the client that will use it, so it is warning-toned
+   throughout rather than a neutral panel with a warning inside it. */
+.token-reveal .panel-head {
+  color: var(--tone-warning-fg);
+  background: var(--tone-warning-bg);
+  border-bottom-color: var(--tone-warning-bd);
+}
+.token-reveal-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-6);
+}
+
+/* ── Scope chips ───────────────────────────────────────────────────────────
+   A token's scopes are a set, so they wrap as a set. Neutral: a scope is a
+   capability, not a state, and tinting them would imply some are worse. */
+.chip-set { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+/* ── Workflow catalog ─────────────────────────────────────────────────────
+   The version-count cell carries the page's one real signal: a workflow with a
+   history is worth opening, one without is not. Stated in weight, not colour. */
+.wf-versions { font-family: var(--mono); font-weight: var(--weight-medium); }
+
+/* ── Responsive ───────────────────────────────────────────────────────────
+   560px matches the breakpoint the shell already uses. Below it the header
+   actions drop under the identity rather than compressing the name to one word
+   per line, and the confirm row becomes a column so neither button is clipped. */
+@media (max-width: 560px) {
+  .detail-head { flex-direction: column; }
+  .detail-actions { width: 100%; }
+  .confirm-inline { align-items: stretch; }
+  .confirm-inline-text { width: 100%; }
+  .login-page { padding: var(--space-6) var(--space-5); justify-content: flex-start; }
+  .panel-tools { width: 100%; }
+  .panel-tools input[type='search'] { flex: 1; }
+}
+
+/* ── Backfill progress ────────────────────────────────────────────────────
+   The percentage through the interval is what an operator came to read, so it
+   is sized like the overview's stats. Deliberately NOT tone-coloured: a
+   backfill 12% of the way through is not a problem, and the STATE badge in the
+   header is where the verdict lives. */
+.backfill-progress-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.backfill-progress-note {
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--fg-muted);
+}
+/* The figure and the words qualifying it are one span, so the emphasis is on
+   the whole claim rather than on a bare number. */
+.backfill-progress-figure {
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+
+/* ── Workflow definition ──────────────────────────────────────────────────
+   The definition page reads as a document, so the per-task detail is a reading
+   grid rather than the attempt card it borrowed its layout from. */
+.spec-task-detail {
+  display: grid;
+  /* 240px matches .attempt-body: the minimum at which a kv pair's label and
+     value stay on one line. A layout measurement, not a density step. */
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-7);
+}
+.spec-section-gap { margin-top: var(--space-6); }
+/* A description is prose introducing the facts below it, so it takes the panel's
+   top edge rather than a browser default margin. */
+.spec-description {
+  margin: var(--space-0) var(--space-0) var(--space-6);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--fg);
+}
+
+/* ── Audit trail ──────────────────────────────────────────────────────────
+   Six columns of dense, mostly-monospace text. The two widest — a structured
+   detail blob and a target id — are held at the small size and given a wrapping
+   ceiling, so one long value cannot push the timestamp and the action (the two
+   columns an incident review scans by) off the visible width. */
+.audit-narrow {
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+/* A reading measure for a key=value blob, not a density step: past this the eye
+   loses the row it started on. */
+.audit-narrow .audit-detail-row {
+  max-width: 320px;
+  word-break: break-word;
+}
+.audit-actor { word-break: break-word; }

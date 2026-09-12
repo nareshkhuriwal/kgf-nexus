@@ -62,7 +62,7 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
 
         {/* Stale rows plus a warning beat an error box that hides them. */}
         {schedules.error != null && schedules.data !== undefined ? (
-          <div style={{ padding: 'var(--space-5)', paddingBottom: 0 }}>
+          <div className="panel-notice" style={{ paddingBottom: 0 }}>
             <StaleWarning error={schedules.error} />
           </div>
         ) : null}
@@ -140,6 +140,9 @@ function ScheduleRow({
   return (
     <tr>
       <td>
+        {/* Both states are badges, and neither is the accent: enabled/disabled
+            is the row's state, so it takes a --tone-*, which no theme change can
+            reassign. */}
         {schedule.enabled ? (
           <span className="badge tone-success" title="This schedule fires on its cron.">
             enabled
@@ -160,8 +163,13 @@ function ScheduleRow({
         {schedule.spec_version !== undefined && <span className="faint"> v{schedule.spec_version}</span>}
       </td>
       <td>
-        <div className="mono">{schedule.cron}</div>
-        <div className="faint" style={{ fontSize: 'var(--text-xs)' }}>{schedule.timezone}</div>
+        {/* The expression and the zone it is evaluated in are one fact split
+            over two lines: the zone qualifies the expression, it is not a
+            separate column's worth of value. */}
+        <div className="cell-stack">
+          <span className="mono">{schedule.cron}</span>
+          <span className="cell-sub mono">{schedule.timezone}</span>
+        </div>
       </td>
       <td className="nowrap">
         {/* A stored expression that no longer parses cannot fire at all, and this
@@ -188,9 +196,11 @@ function ScheduleRow({
       </td>
       <td className="mono faint">{schedule.overlap_policy}</td>
       <td>
-        <button type="button" onClick={onToggle} disabled={pending}>
-          {schedule.enabled ? 'Disable' : 'Enable'}
-        </button>
+        <div className="cell-actions">
+          <button type="button" onClick={onToggle} disabled={pending}>
+            {schedule.enabled ? 'Disable' : 'Enable'}
+          </button>
+        </div>
       </td>
     </tr>
   );

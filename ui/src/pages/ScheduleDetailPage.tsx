@@ -42,7 +42,9 @@ export function ScheduleDetailPage({ namespace }: { namespace: string }) {
   if (schedule.error && schedule.data === undefined) {
     return (
       <div className="col">
-        <Link to="/schedules">← all schedules</Link>
+        <Link to="/schedules" className="detail-crumb">
+          ← all schedules
+        </Link>
         <ErrorBox error={schedule.error} what={`schedule ${name}`} onRetry={schedule.refetch} />
       </div>
     );
@@ -53,29 +55,28 @@ export function ScheduleDetailPage({ namespace }: { namespace: string }) {
 
   return (
     <div className="col">
-      <div className="row" style={{ alignItems: 'flex-start' }}>
-        <div style={{ minWidth: 0 }}>
-          <div className="row" style={{ gap: 'var(--space-4)' }}>
-            <Link to="/schedules" className="sub">
-              ← all schedules
-            </Link>
+      <div className="detail-head">
+        <div className="detail-head-text">
+          <Link to="/schedules" className="detail-crumb">
+            ← all schedules
+          </Link>
+          {/* The state badge leads the name: on a schedule page reached
+              mid-incident, "is this armed?" is read before "what is it called". */}
+          <div className="detail-title-row">
             {s.enabled ? (
               <span className="badge tone-success">enabled</span>
             ) : (
               <span className="badge tone-stopped">disabled</span>
             )}
-            <h1 style={{ margin: 0 }} className="mono">
-              {s.name}
-            </h1>
+            <h1 className="detail-title mono">{s.name}</h1>
           </div>
-          <div className="sub" style={{ marginTop: 'var(--space-1)' }}>
+          <div className="detail-meta">
             <code>{s.spec_name}</code>
             {s.spec_version !== undefined ? ` v${s.spec_version}` : ' (latest version)'} ·{' '}
             <code>{s.cron}</code> in <code>{s.timezone}</code> · created by {s.created_by}
           </div>
         </div>
-        <span className="spacer" style={{ marginLeft: 'auto' }} />
-        <div className="row" style={{ gap: 'var(--space-3)' }}>
+        <div className="detail-actions">
           <button
             type="button"
             disabled={setEnabled.isPending}
@@ -165,9 +166,11 @@ export function ScheduleDetailPage({ namespace }: { namespace: string }) {
           <span>backfills</span>
           <span className="spacer" />
           <span className="chip">{backfills.data?.length ?? 0}</span>
-          <button type="button" onClick={() => setStartingBackfill((v) => !v)}>
-            {startingBackfill ? 'Cancel' : 'New backfill'}
-          </button>
+          <span className="panel-tools">
+            <button type="button" onClick={() => setStartingBackfill((v) => !v)}>
+              {startingBackfill ? 'Cancel' : 'New backfill'}
+            </button>
+          </span>
         </div>
 
         {startingBackfill && (
@@ -181,7 +184,7 @@ export function ScheduleDetailPage({ namespace }: { namespace: string }) {
         )}
 
         {backfills.error != null && backfills.data !== undefined ? (
-          <div style={{ padding: 'var(--space-5)', paddingBottom: 0 }}>
+          <div className="panel-notice" style={{ paddingBottom: 0 }}>
             <StaleWarning error={backfills.error} />
           </div>
         ) : null}
@@ -216,7 +219,13 @@ function ScheduleFacts({ schedule: s }: { schedule: Schedule }) {
         ) : s.enabled ? (
           // Enabled and unarmed: a replica is firing it right now, or one died
           // mid-fire. The gateway refuses to hide this, so neither does the UI.
-          <span title="Enabled but not armed. Either a replica is firing it at this instant, or one died mid-fire and left it unarmed.">
+          // Warning-toned rather than plain text: the fact that it is NOT armed
+          // is the finding, and a bare phrase in a definition list reads as a
+          // value rather than as a problem.
+          <span
+            className="chip warn"
+            title="Enabled but not armed. Either a replica is firing it at this instant, or one died mid-fire and left it unarmed."
+          >
             not armed
           </span>
         ) : (
@@ -272,8 +281,10 @@ function DeleteScheduleButton({
   }
 
   return (
-    <div className="row" style={{ gap: 'var(--space-3)' }}>
-      <span className="sub">
+    // Danger-toned and in place, so the sentence about what survives cannot be
+    // dismissed unread the way a dialog can.
+    <div className="confirm-inline">
+      <span className="confirm-inline-text">
         Delete <code>{name}</code> permanently? Runs it already created keep going.
       </span>
       <button type="button" className="danger" onClick={onDelete} disabled={pending}>

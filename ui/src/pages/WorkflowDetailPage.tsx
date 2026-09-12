@@ -59,16 +59,16 @@ export function WorkflowDetailPage({ namespace }: { namespace: string }) {
 
   return (
     <div className="col">
+      {/* The crumb sits ABOVE the name rather than inside the subtitle: going
+          back to the catalog is navigation, and threading it through the
+          sentence that describes the workflow made it read as prose. */}
+      <Link to="/workflows" className="detail-crumb">
+        ← catalog
+      </Link>
+
       <PageHeader
         title={name}
-        subtitle={
-          <>
-            <Link to="/workflows" className="sub">
-              ← catalog
-            </Link>{' '}
-            · workflow definition in <code>{namespace}</code>
-          </>
-        }
+        subtitle={<>workflow definition in <code>{namespace}</code></>}
         actions={
           <button
             type="button"
@@ -177,7 +177,7 @@ function DefinitionPanels({
           </span>
         </div>
         <div className="panel-body">
-          {spec.description && <p style={{ marginTop: 0 }}>{spec.description}</p>}
+          {spec.description && <p className="spec-description">{spec.description}</p>}
           <dl className="kv">
             <dt>spec id</dt>
             <dd>{def.id}</dd>
@@ -310,7 +310,7 @@ function TaskDetail({
   const inputs = Object.entries(task.inputs ?? {});
   const outputs = Object.entries(task.outputs ?? {});
   return (
-    <div className="attempt-body" style={{ padding: 0 }}>
+    <div className="spec-task-detail">
       <div>
         <div className="attempt-section-title">dispatch</div>
         <dl className="kv">
@@ -337,9 +337,7 @@ function TaskDetail({
           <dt>limit</dt>
           <dd>{task.resources?.limit ? fmtResources(task.resources.limit) : EMPTY}</dd>
         </dl>
-        <div className="attempt-section-title" style={{ marginTop: 'var(--space-5)' }}>
-          retry policy
-        </div>
+        <div className="attempt-section-title spec-section-gap">retry policy</div>
         <dl className="kv">
           <dt>max attempts</dt>
           <dd>{task.retry?.max_attempts ?? <span className="faint">not set</span>}</dd>
@@ -371,9 +369,7 @@ function TaskDetail({
         </dl>
         {inputs.length > 0 && (
           <>
-            <div className="attempt-section-title" style={{ marginTop: 'var(--space-5)' }}>
-              inputs
-            </div>
+            <div className="attempt-section-title spec-section-gap">inputs</div>
             <dl className="kv">
               {inputs.map(([k, v]) => (
                 <div key={k} style={{ display: 'contents' }}>
@@ -389,9 +385,7 @@ function TaskDetail({
         )}
         {outputs.length > 0 && (
           <>
-            <div className="attempt-section-title" style={{ marginTop: 'var(--space-5)' }}>
-              outputs
-            </div>
+            <div className="attempt-section-title spec-section-gap">outputs</div>
             <dl className="kv">
               {outputs.map(([k, v]) => (
                 <div key={k} style={{ display: 'contents' }}>
@@ -466,20 +460,22 @@ function VersionPanel({
                     onClick={() => onSelect(v.id)}
                   >
                     <td>
-                      {/* A real link, not just a row handler: the version an
-                          operator is reading has to be shareable. */}
-                      <Link
-                        to={`/workflows/${encodeURIComponent(name)}?spec=${encodeURIComponent(v.id)}`}
-                        className="mono"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        v{v.version}
-                      </Link>
-                      {v.id === latestId && (
-                        <span className="badge tone-success" style={{ marginLeft: 'var(--space-3)' }}>
-                          latest
-                        </span>
-                      )}
+                      <div className="cell-actions">
+                        {/* A real link, not just a row handler: the version an
+                            operator is reading has to be shareable. */}
+                        <Link
+                          to={`/workflows/${encodeURIComponent(name)}?spec=${encodeURIComponent(v.id)}`}
+                          className="mono"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          v{v.version}
+                        </Link>
+                        {v.id === latestId && (
+                          // Success-toned because "this is the one that runs" is
+                          // the closest thing a definition has to a live state.
+                          <span className="badge tone-success">latest</span>
+                        )}
+                      </div>
                     </td>
                     <td className="nowrap faint" title={fmtTs(v.created_at)}>
                       {fmtAge(v.created_at, now)}
