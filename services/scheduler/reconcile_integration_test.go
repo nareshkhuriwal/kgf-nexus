@@ -476,3 +476,88 @@ func contains(hay []string, needle string) bool {
 	}
 	return false
 }
+
+// attemptsUsed reads the node's charged retry budget.
+func (f *fixture) attemptsUsed(nodeID string) int32 {
+	f.t.Helper()
+	var n int32
+	if err := f.pool.QueryRow(context.Background(),
+		`SELECT attempts_used FROM task_nodes WHERE run_id = $1 AND node_id = $2`,
+		f.runID, nodeID).Scan(&n); err != nil {
+		f.t.Fatalf("read attempts_used for %s: %v", nodeID, err)
+	}
+	return n
+}
+
+// TestRetryChargesTheAttemptBudget covers the §5.1 RETRY predicate's counter.
+//
+// domain.ShouldRetry compares task_nodes.attempts_used against max_attempts, and
+// retries are created by CreatePendingRetry — not by the dag-engine, which is the
+// only other place that bumps the column. Without the increment inside the retry
+// transaction the counter stayed at its initial value no matter how many times a
+// node was retried, so max_attempts capped nothing and a task failing a retryable
+// class would be retried indefinitely.
+func TestRetryChargesTheAttemptBudget(t *testing.T) {
+	t.Parallel()
+	pool := newTestPool(t)
+	f := newFixture(t, pool)
+	ctx := context.Background()
+
+	f.addWorker(vec{CPUMillis: 4000, MemoryBytes: 8 << 30}, nil, nil)
+	spec := nodeSpec{
+		TaskRef: "test.task", Version: 1, MaxAttempts: 3,
+		Idempotency:    "required",
+		StartToCloseMs: 3600000,
+		Retry:          map[string]any{"strategy": "fixed", "initial_ms": 1, "max_ms": 1, "jitter": "none"},
+	}
+	attemptID := f.addAttempt("budgeted", 100, vec{CPUMillis: 1000, MemoryBytes: 1 << 30}, spec, time.Now().UTC())
+
+	st := f.newStore(nil)
+	dispatchOne(t, st)
+
+	before := f.attemptsUsed("budgeted")
+
+	// A lease expiry is the cheapest way to reach the retry path: it makes the
+	// attempt LOST, which idempotency=required retries (§6.5).
+	f.expireLease(attemptID)
+	lost, err := st.ReconcileExpiredLeases(ctx, time.Now().UTC(), 10)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(lost) != 1 || !lost[0].Decision.Retry {
+		t.Fatalf("expected one retryable LOST attempt, got %d", len(lost))
+	}
+
+	// Fire the backoff timer, which is what actually creates the retry attempt.
+	fired, err := st.ClaimDueTimers(ctx, time.Now().UTC().Add(time.Minute),
+		[]string{domain.TimerRetryBackoff}, 10)
+	if err != nil {
+		t.Fatalf("claim retry timer: %v", err)
+	}
+	if len(fired) != 1 {
+		t.Fatalf("claimed %d retry_backoff timers, want 1", len(fired))
+	}
+	created, err := st.CreatePendingRetry(ctx, time.Now().UTC(), fired[0])
+	if err != nil {
+		t.Fatalf("create retry: %v", err)
+	}
+	if created == nil {
+		t.Fatal("no retry attempt was created")
+	}
+
+	if got := f.attemptsUsed("budgeted"); got != before+1 {
+		t.Errorf("attempts_used = %d, want %d; the retry budget was not charged, "+
+			"so max_attempts would never cap retries", got, before+1)
+	}
+
+	// The new attempt is a NEW row, never a mutation of the terminal one
+	// (invariant 9), and it must share the idempotency key (invariant 1).
+	rows := f.attemptsForNode("budgeted")
+	if len(rows) != 2 {
+		t.Fatalf("node has %d attempts, want 2", len(rows))
+	}
+	if rows[0].IdemKey != rows[1].IdemKey {
+		t.Errorf("idempotency keys differ across retries (%q vs %q); invariant 1 broken",
+			rows[0].IdemKey, rows[1].IdemKey)
+	}
+}
