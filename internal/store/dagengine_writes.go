@@ -154,6 +154,27 @@ type NewAttempt struct {
 // the CAS is what makes the loser's write a no-op instead of a regression from
 // SUCCEEDED back to READY. A CAS miss is NOT an error: it means another replica
 // got there first, which is the expected outcome under concurrency.
+//
+// THE CAS IS ALSO THE DISPATCH GATE, and it must be: a node's PENDING->READY CAS
+// is the single serialization point that decides WHICH reconciler owns starting
+// that node. A reconciler whose CAS missed lost that race, so it must not create
+// the attempt either -- otherwise both replicas insert, and the node runs twice.
+//
+// That is not hypothetical. It was observed on a live chaos run: two attempts for
+// one node, created 0.7ms apart, sharing an idempotency key but holding two
+// distinct lease ids. The ON CONFLICT below could not catch it, because computing
+// attempt_number as MAX+1 INSIDE the insert is not atomic under READ COMMITTED
+// (the isolation level this pool uses): both statements read MAX=0, the second
+// blocks on the unique index, and on release it RE-EVALUATES the subquery against
+// the now-committed row, yielding 2. A conflict never fires; a second attempt
+// number is minted instead. So the attempt number is computed ONCE, before the
+// insert, and passed as a parameter -- which is what finally gives the unique
+// constraint something to conflict ON, as a backstop behind the CAS gate.
+//
+// The gate is keyed on nodes whose transition TO READY succeeded in THIS
+// transaction, because that is exactly the set this reconciler won the right to
+// dispatch. Propagation transitions (SKIPPED / UPSTREAM_FAILED) never carry
+// attempts, so they are irrelevant here.
 func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 	ctx context.Context, runID string, transitions []NodeTransition, attempts []NewAttempt,
 ) (Applied, error) {
@@ -168,6 +189,10 @@ func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 		UPDATE task_nodes SET state = $3::node_state
 		 WHERE run_id = $1::uuid AND node_id = $2 AND state = $4::node_state`
 
+	// The nodes this reconciler won the right to start: those whose PENDING->READY
+	// CAS it actually applied. Only these may have an attempt created below.
+	wonDispatch := make(map[string]bool, len(transitions))
+
 	for _, t := range transitions {
 		tag, uerr := tx.Exec(ctx, casNode, runID, t.NodeID, string(t.To), string(t.From))
 		if uerr != nil {
@@ -177,19 +202,29 @@ func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 			res.NodeCASMisses = append(res.NodeCASMisses, t.NodeID)
 			continue
 		}
+		if t.To == domain.NodeReady {
+			wonDispatch[t.NodeID] = true
+		}
 		res.NodesUpdated++
 	}
 
 	// attempts_used is incremented with the attempt row so the retry budget can
 	// never drift from the number of attempts that actually exist.
+	// Read in its own statement so the value is FIXED before the insert. Folding
+	// this subquery into the INSERT re-evaluates it after a unique-violation block
+	// releases, which mints a fresh number instead of conflicting -- see the
+	// function comment. Separated, a racing pair both compute the same number and
+	// exactly one survives the constraint.
+	const nextAttemptNum = `
+		SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM task_attempts
+		 WHERE run_id = $1::uuid AND node_id = $2`
+
 	const insAttempt = `
 		INSERT INTO task_attempts
 		  (run_id, node_id, attempt_number, state, queue, priority,
 		   resource_request, idempotency_key, cache_key, input_refs)
-		VALUES ($1::uuid, $2,
-		        (SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM task_attempts
-		          WHERE run_id = $1::uuid AND node_id = $2),
-		        'PENDING'::attempt_state, $3, $4, $5, $6, $7, $8)
+		VALUES ($1::uuid, $2, $3,
+		        'PENDING'::attempt_state, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (run_id, node_id, attempt_number) DO NOTHING
 		RETURNING id::text, attempt_number`
 
@@ -198,6 +233,14 @@ func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 		 WHERE run_id = $1::uuid AND node_id = $2`
 
 	for _, a := range attempts {
+		if !wonDispatch[a.NodeID] {
+			// Another reconciler won this node's READY CAS and is creating the
+			// attempt in its own transaction. Recorded as a conflict, not an error:
+			// under concurrency this is the expected outcome, and it is the same
+			// signal the ON CONFLICT path reports.
+			res.AttemptConflicts = append(res.AttemptConflicts, a.NodeID)
+			continue
+		}
 		resJSON, eerr := encodeVector(a.Resources)
 		if eerr != nil {
 			return res, fmt.Errorf("encode resources for %s/%s: %w", runID, a.NodeID, eerr)
@@ -213,9 +256,14 @@ func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 			// every worker rather than merely mis-routed.
 			queue = "default"
 		}
+		var next int32
+		if nerr := tx.QueryRow(ctx, nextAttemptNum, runID, a.NodeID).Scan(&next); nerr != nil {
+			return res, fmt.Errorf("next attempt number for %s/%s: %w", runID, a.NodeID, nerr)
+		}
+
 		var id string
 		var num int32
-		qerr := tx.QueryRow(ctx, insAttempt, runID, a.NodeID, queue, a.Priority,
+		qerr := tx.QueryRow(ctx, insAttempt, runID, a.NodeID, next, queue, a.Priority,
 			resJSON, a.IdempotencyKey, a.CacheKey, inputs).Scan(&id, &num)
 		if errors.Is(qerr, pgx.ErrNoRows) {
 			// The ON CONFLICT fired: this attempt number already exists, so a

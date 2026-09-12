@@ -790,3 +790,80 @@ func TestIntegration_StoredGraphMatchesTheInMemoryGraph(t *testing.T) {
 		t.Error("the stored graph and the in-memory graph disagree on the frontier")
 	}
 }
+
+// A reconciler that LOST the node's PENDING->READY CAS must not create the
+// attempt anyway. This is the store-level shape of the bug the test above aims
+// at but cannot reliably produce: eight in-process goroutines sharing one pool
+// almost always serialize, so the race window between the CAS and the insert
+// stays closed and the test passes over a broken implementation. Driving the
+// store directly opens that window deterministically.
+//
+// Observed in production on a live chaos run: node `notify` held two attempts
+// created 0.7ms apart, sharing one idempotency key but holding two distinct
+// lease ids, while the run had already been published SUCCEEDED.
+func TestIntegration_LosingReconcilerCreatesNoAttempt(t *testing.T) {
+	pool := testPool(t)
+	runID := seedRun(t, pool, linearSpec())
+	e := newTestEngine(t, pool)
+	ctx := context.Background()
+
+	if _, err := e.Materialize(ctx, runID); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	settleAttempt(t, pool, runID, "a", domain.AttemptSucceeded, nil)
+
+	s := store.NewDAGEngineStore(pool)
+	// Both reconcilers computed the same decision: b moves PENDING->READY and
+	// gets one attempt. This is precisely what two replicas hold after reading
+	// the same committed state.
+	transitions := []store.NodeTransition{
+		{NodeID: "b", From: domain.NodePending, To: domain.NodeReady},
+	}
+	newAttempts := []store.NewAttempt{{
+		RunID: runID, NodeID: "b", Queue: "default", Priority: 100,
+		IdempotencyKey: domain.IdempotencyKey(runID, "b", nil, 1),
+		InputRefs:      []byte(`{}`),
+	}}
+
+	first, err := s.ApplyNodeStateAndCreateAttempts(ctx, runID, transitions, newAttempts)
+	if err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	if len(first.AttemptsCreated) != 1 {
+		t.Fatalf("first apply created %d attempts, want 1", len(first.AttemptsCreated))
+	}
+
+	// The loser replays the SAME decision against state the winner has already
+	// moved on. Its CAS must miss, and that miss must suppress the insert.
+	second, err := s.ApplyNodeStateAndCreateAttempts(ctx, runID, transitions, newAttempts)
+	if err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if len(second.AttemptsCreated) != 0 {
+		t.Errorf("losing reconciler created %d attempts, want 0", len(second.AttemptsCreated))
+	}
+	if len(second.NodeCASMisses) != 1 {
+		t.Errorf("losing reconciler recorded %d CAS misses, want 1", len(second.NodeCASMisses))
+	}
+
+	var n int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM task_attempts WHERE run_id = $1::uuid AND node_id = 'b'`, runID).Scan(&n); err != nil {
+		t.Fatalf("count b's attempts: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("node b has %d attempts, want exactly 1", n)
+	}
+
+	// attempts_used must not have been bumped by the loser either: a drifted
+	// retry budget silently shortens how many times the node may legitimately
+	// retry later.
+	var used int
+	if err := pool.QueryRow(ctx, `
+		SELECT attempts_used FROM task_nodes WHERE run_id = $1::uuid AND node_id = 'b'`, runID).Scan(&used); err != nil {
+		t.Fatalf("read attempts_used: %v", err)
+	}
+	if used != 1 {
+		t.Errorf("node b attempts_used = %d, want 1", used)
+	}
+}
