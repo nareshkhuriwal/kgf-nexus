@@ -205,6 +205,13 @@ func reattachSentinel(err error) error {
 		return fmt.Errorf("%w: %s", store.ErrMaxActiveRuns, status.Convert(err).Message())
 	case codes.NotFound:
 		return fmt.Errorf("%w: %s", store.ErrNotFound, status.Convert(err).Message())
+	case codes.InvalidArgument:
+		// The owner rejected the DOCUMENT -- today, a run omitting a parameter
+		// its spec declares required. Same reasoning as the cases above: without
+		// re-attaching a sentinel this arrives as a bare status and answers 500,
+		// telling an operator the platform broke when their request was simply
+		// incomplete.
+		return fmt.Errorf("%w: %s", store.ErrInvalidRequest, status.Convert(err).Message())
 	default:
 		return err
 	}

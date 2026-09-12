@@ -16,6 +16,12 @@ import (
 // ErrNotFound is the gateway's generic miss for read projections, mapped to 404.
 var ErrNotFound = errors.New("not found")
 
+// ErrInvalidRequest means an owning service rejected the request DOCUMENT rather
+// than failing to process it: the HTTP and the JSON were fine, the content is
+// not. Mapped to 422, the same status submitSpec already uses for a spec that
+// parses but does not validate.
+var ErrInvalidRequest = errors.New("invalid request")
+
 // Every query in this file is READ-ONLY against tables the gateway does not own.
 // ADR-0011 permits exactly this: the gateway reads all tables as projections and
 // writes only api_keys and idempotency_keys. Anything mutating goes through the

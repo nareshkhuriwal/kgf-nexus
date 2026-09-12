@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
@@ -127,6 +129,13 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	policy, err := parsePolicy(spec.SpecJSON)
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("read run policy from spec %s: %w", spec.ID, err)
+	}
+
+	if missing := missingRequiredParams(spec.SpecJSON, req.Params); len(missing) > 0 {
+		// Rejected BEFORE the run row exists. Creating it and letting the task
+		// fail would burn the node's retry budget on a problem no retry can fix,
+		// and report a bad request as an execution failure.
+		return CreateResult{}, fmt.Errorf("%w: %s", ErrMissingParams, strings.Join(missing, ", "))
 	}
 
 	priority := req.Priority
@@ -548,6 +557,60 @@ func parsePolicy(specJSON []byte) (runPolicy, error) {
 		FailFast:      doc.FailFast,
 		Priority:      doc.Priority,
 	}, nil
+}
+
+// ErrMissingParams means the request omitted a parameter the spec declares
+// required. A distinct error so the API layer can answer 422 -- the request was
+// well-formed, the DOCUMENT is not -- rather than folding it into a 500.
+var ErrMissingParams = errors.New("required parameters are missing")
+
+// missingRequiredParams returns the names of params the spec declares required
+// and the request did not supply, in a stable order.
+//
+// WHY THIS IS CHECKED AT ALL. A spec declares `{"source": {"type": "string",
+// "required": true}}` and nothing enforced it, so a run omitting `source` was
+// accepted, dispatched, and failed inside the task -- burning a retry budget and
+// reporting the problem as an execution failure rather than a bad request. The
+// spec already says what is required; the only thing missing was reading it.
+//
+// A param with a default_json is NOT missing: the default is what makes it
+// optional in practice, and treating a defaulted param as required would reject
+// every run that relies on the spec's own fallback.
+//
+// The check is on PRESENCE, not type. Declaring "int" and passing a string is a
+// type error the task will surface with far better context than this layer can,
+// and a half-implemented type checker here would be a second, weaker opinion
+// about the same question.
+func missingRequiredParams(specJSON []byte, params map[string]any) []string {
+	if len(specJSON) == 0 {
+		return nil
+	}
+	var doc struct {
+		Params map[string]struct {
+			Required    bool   `json:"required"`
+			DefaultJSON string `json:"default_json"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(specJSON, &doc); err != nil {
+		// A spec whose JSON will not parse is a problem, but it is not THIS
+		// function's problem to report: parsePolicy already fails on it and the
+		// caller surfaces that. Returning "nothing missing" here keeps a single
+		// error path for a malformed spec.
+		return nil
+	}
+	var missing []string
+	for name, p := range doc.Params {
+		if !p.Required || p.DefaultJSON != "" {
+			continue
+		}
+		if _, ok := params[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	// Sorted so two identical requests produce identical messages; an error whose
+	// wording changes between attempts is one nobody can match against a log.
+	sort.Strings(missing)
+	return missing
 }
 
 // actorKey lets the API layer attribute a transition to the operator who caused

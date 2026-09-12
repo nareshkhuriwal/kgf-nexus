@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestEveryCommittedExampleActuallyRuns submits every examples/*/compiled.yaml
@@ -69,7 +71,7 @@ func TestEveryCommittedExampleActuallyRuns(t *testing.T) {
 			// caught a regression in an example, which is its entire job.
 			specID := submitSpec(t, ex.Path)
 
-			runID := createRunFromSpec(t, specID)
+			runID := createRunFromSpec(t, specID, requiredParamsFor(t, ex.Path))
 			// Bounded well under waitForTerminalRun's budget, and non-fatal, so
 			// a broken example reports WHY rather than just timing out. A CI
 			// failure that says only "still RUNNING" sends the next person
@@ -184,7 +186,69 @@ func submitSpec(t *testing.T, path string) string {
 }
 
 // createRunFromSpec starts a run against one exact spec version.
-func createRunFromSpec(t *testing.T, specID string) string {
+// requiredParamsFor reads the example's own declaration and binds a placeholder
+// for every param it marks required without a default.
+//
+// The examples declare required params and this test never supplied them, which
+// worked only because nothing enforced the declaration -- the runs executed with
+// the parameter absent. Now that run creation rejects that (422), supplying them
+// is what makes this test exercise the REAL contract rather than a path that
+// happened to be unchecked. Placeholder values are fine: these examples' tasks
+// echo their inputs, so the test asserts the platform ran the graph, not that
+// the payload meant anything.
+// createRunBody builds the request body, params included.
+func createRunBody(t *testing.T, specID string, params map[string]any) string {
+	t.Helper()
+	body := map[string]any{"spec_id": specID}
+	if len(params) > 0 {
+		body["params"] = params
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("encode create-run body: %v", err)
+	}
+	return string(raw)
+}
+
+func requiredParamsFor(t *testing.T, path string) map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read example %s: %v", path, err)
+	}
+	var doc struct {
+		Params map[string]struct {
+			Required    bool   `yaml:"required"`
+			Type        string `yaml:"type"`
+			DefaultJSON string `yaml:"default_json"`
+		} `yaml:"params"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse example %s: %v", path, err)
+	}
+	out := map[string]any{}
+	for name, p := range doc.Params {
+		if !p.Required || p.DefaultJSON != "" {
+			continue
+		}
+		// Typed placeholders, because a spec declaring "int" and receiving a
+		// string would fail inside the task for a reason that has nothing to do
+		// with what this test is checking.
+		switch p.Type {
+		case "int", "float":
+			out[name] = 1
+		case "bool":
+			out[name] = true
+		case "json":
+			out[name] = map[string]any{}
+		default:
+			out[name] = "chaos-test-" + name
+		}
+	}
+	return out
+}
+
+func createRunFromSpec(t *testing.T, specID string, params map[string]any) string {
 	t.Helper()
 	endpoint := envOr("NEXUS_ENDPOINT", "http://localhost:8090")
 	key := os.Getenv("NEXUS_API_KEY")
@@ -195,7 +259,7 @@ func createRunFromSpec(t *testing.T, specID string) string {
 		endpoint+"/v1/namespaces/default/runs",
 		"-H", "Authorization: Bearer "+key,
 		"-H", "Content-Type: application/json",
-		"--data", fmt.Sprintf(`{"spec_id":%q}`, specID))
+		"--data", createRunBody(t, specID, params))
 	if err != nil {
 		t.Fatalf("create run from spec %s: %v", specID, err)
 	}

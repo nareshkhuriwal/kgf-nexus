@@ -645,6 +645,12 @@ func (a *API) createRun(w http.ResponseWriter, r *http.Request, p authn.Principa
 			writeError(w, http.StatusNotFound, "spec_not_found", "no such spec")
 			return
 		}
+		if errors.Is(err, store.ErrInvalidRequest) {
+			// 422 rather than 400, matching submitSpec: the request was
+			// well-formed HTTP and well-formed JSON; the DOCUMENT is not valid.
+			writeError(w, http.StatusUnprocessableEntity, "invalid_run", err.Error())
+			return
+		}
 		a.fail(w, r, "create run", err)
 		return
 	}

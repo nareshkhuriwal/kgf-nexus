@@ -116,6 +116,10 @@ func runError(op string, err error) error {
 		return status.Errorf(codes.NotFound, "%s: %v", op, err)
 	case errors.Is(err, store.ErrMaxActiveRuns):
 		return status.Errorf(codes.ResourceExhausted, "%s: %v", op, err)
+	case errors.Is(err, runs.ErrMissingParams):
+		// InvalidArgument, not Internal: the caller's document is wrong, and no
+		// retry of the same request will ever succeed.
+		return status.Errorf(codes.InvalidArgument, "%s: %v", op, err)
 	default:
 		return status.Errorf(codes.Internal, "%s: %v", op, err)
 	}
