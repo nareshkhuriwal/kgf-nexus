@@ -262,6 +262,37 @@ export interface RunListFilter {
   state?: string;
   spec?: string;
   limit?: number;
+  /**
+   * The keyset cursor: "runs created strictly before this instant".
+   *
+   * An RFC3339 timestamp, and it is the gateway's own `next_before` echoed back
+   * untouched rather than a value this client formats. The gateway parses it
+   * with time.Parse(time.RFC3339) and 400s on anything it cannot read, so
+   * re-deriving it here — from a run's created_at, say, or by rounding — is how
+   * a page boundary silently moves and a run gets shown twice or skipped.
+   */
+  before?: string;
+}
+
+/**
+ * A page of runs, plus the cursor that reaches the next one.
+ *
+ * This returns an envelope rather than a bare array because /runs is the ONE
+ * endpoint in this gateway with real pagination, and the cursor was previously
+ * being thrown away at exactly this line. `asList` normalises the rows and
+ * discards everything around them, which is correct for the six endpoints that
+ * send nothing around them and was quietly wrong for this one: `next_before`
+ * arrived on every full page and never reached the UI, so the run list fetched
+ * a capped 100 and stopped.
+ *
+ * `nextBefore` is undefined when there is no next page. The gateway only sets
+ * the field when a FULL page came back (len(rows) == limit), so its absence is
+ * the server's own statement that the list is exhausted — not an inference this
+ * client draws from a short page.
+ */
+export interface RunPage {
+  runs: RunSummary[];
+  nextBefore?: string;
 }
 
 /**
@@ -278,17 +309,36 @@ export interface AttentionFilter {
 }
 
 export const api = {
-  async listRuns(namespace: string, filter: RunListFilter = {}): Promise<RunSummary[]> {
+  async listRuns(namespace: string, filter: RunListFilter = {}): Promise<RunPage> {
     const q = new URLSearchParams();
     if (filter.state) q.set('state', filter.state);
     if (filter.spec) q.set('spec', filter.spec);
     if (filter.limit) q.set('limit', String(filter.limit));
+    if (filter.before) q.set('before', filter.before);
     const qs = q.toString();
     const payload = await request<unknown>(`${ns(namespace)}/runs${qs ? `?${qs}` : ''}`);
     const runs = asList<RunSummary>(payload, 'runs');
     // Newest first is the operator default. Sorting client-side as well as
     // asking the server for it means an unsorted handler still reads correctly.
-    return [...runs].sort((a, b) => Date.parse(b.created_at ?? '') - Date.parse(a.created_at ?? ''));
+    const sorted = [...runs].sort(
+      (a, b) => Date.parse(b.created_at ?? '') - Date.parse(a.created_at ?? ''),
+    );
+    /**
+     * The cursor is read only off an OBJECT payload, and only as a string.
+     *
+     * A bare-array response (which asList above still accepts, and which the
+     * client's tolerance of unfrozen paging shapes exists for) has nowhere to
+     * carry one, so it correctly yields `undefined` — no next page, the list is
+     * what it is. Type-guarding rather than casting because a gateway that sent
+     * a number or null here would otherwise produce `before=null` in a query
+     * string and a 400 the operator sees as "the run list is broken".
+     */
+    let nextBefore: string | undefined;
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const raw = (payload as Record<string, unknown>).next_before;
+      if (typeof raw === 'string' && raw !== '') nextBefore = raw;
+    }
+    return { runs: sorted, nextBefore };
   },
 
   /**

@@ -266,54 +266,63 @@ export function DataTable<Row>({
           whole band on `search` would have silently dropped that disclosure
           from exactly the tables that have no other way to make it. */}
       <div className="dt-toolbar">
-      {toolbar}
+        {toolbar}
+        {/* The field and the sentence qualifying it, as ONE group.
+
+            They were siblings before, separated by the spacer that pushes the
+            count to the far edge — so the note explaining WHERE the search ran
+            was laid out as a peer of the search box rather than as part of it,
+            and on a band that wraps it could land on a different line from the
+            field it describes. aria-describedby already tied the two together
+            for a screen reader; this is that same relationship made visible,
+            which is why it is a grouping and not a second statement. */}
         {search && (
-          <label className="dt-search filter-field" htmlFor={`${searchId}-q`}>
-            <span className="filter-label">search</span>
-            <input
-              id={`${searchId}-q`}
-              type="search"
-              value={term}
-              onChange={(e) => {
-                if (search.mode === 'client') {
-                  setLocalTerm(e.target.value);
-                  // A narrower result set makes the current page index stale,
-                  // and clamping alone would leave the operator on the last
-                  // page of three matches. First page is what they meant.
-                  setPage(0);
-                } else {
-                  search.onChange(e.target.value);
+          <div className="dt-search-group">
+            <label className="dt-search filter-field" htmlFor={`${searchId}-q`}>
+              <span className="filter-label">search</span>
+              <input
+                id={`${searchId}-q`}
+                type="search"
+                value={term}
+                onChange={(e) => {
+                  if (search.mode === 'client') {
+                    setLocalTerm(e.target.value);
+                    // A narrower result set makes the current page index stale,
+                    // and clamping alone would leave the operator on the last
+                    // page of three matches. First page is what they meant.
+                    setPage(0);
+                  } else {
+                    search.onChange(e.target.value);
+                  }
+                }}
+                placeholder={
+                  search.mode === 'server' ? 'name contains…' : 'filter these rows…'
                 }
-              }}
-              placeholder={
-                search.mode === 'server' ? 'name contains…' : 'filter these rows…'
-              }
-              /**
-               * The accessible name says WHERE the search happens, because
-               * that is the difference an operator cannot see and it changes
-               * what the result means. Server: the whole table was matched.
-               * Client: only the rows already fetched were.
-               */
-              aria-label={
-                search.mode === 'server'
-                  ? `search ${noun} by name`
-                  : `filter the loaded ${noun}`
-              }
-              aria-describedby={`${searchId}-scope`}
-            />
-          </label>
+                /**
+                 * The accessible name says WHERE the search happens, because
+                 * that is the difference an operator cannot see and it changes
+                 * what the result means. Server: the whole table was matched.
+                 * Client: only the rows already fetched were.
+                 */
+                aria-label={
+                  search.mode === 'server'
+                    ? `search ${noun} by name`
+                    : `filter the loaded ${noun}`
+                }
+                aria-describedby={`${searchId}-scope`}
+              />
+            </label>
+            {/* Stated rather than implied, and present in both modes so neither
+                reads as the unqualified default. Visually quiet — it is a
+                qualifier on the field above, not a warning. */}
+            <span id={`${searchId}-scope`} className="dt-scope">
+              {search.mode === 'server'
+                ? 'searched on the server'
+                : 'filters the loaded rows only'}
+            </span>
+          </div>
         )}
         <span className="spacer" />
-        {search && (
-          // Stated rather than implied, and present in both modes so neither
-          // reads as the unqualified default. Visually quiet — it is a
-          // qualifier on the field above, not a warning.
-          <span id={`${searchId}-scope`} className="dt-scope">
-            {search.mode === 'server'
-              ? 'searched on the server'
-              : 'filters the loaded rows only'}
-          </span>
-        )}
         {/* The count. It renders what lib/table.ts says it may render and
             nothing more: the digits in hand, a "+" when there may be rows
             nobody fetched, and the full sentence on hover. */}

@@ -19,6 +19,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import { RunListPage } from './RunListPage';
 
+/**
+ * The two filter controls, addressed by their accessible names.
+ *
+ * A bare getByRole('combobox') was unambiguous only while the page had one
+ * <select>. The table contributes a rows-per-page select and its own search
+ * field, so the filters are now named and queried by name — which is also the
+ * assertion that they ARE named, and therefore distinguishable to a screen
+ * reader from the table's own controls.
+ */
+const stateFilter = () => screen.getByRole('combobox', { name: /filter runs by state/i });
+const findStateFilter = () => screen.findByRole('combobox', { name: /filter runs by state/i });
+const specFilter = () => screen.getByRole('searchbox', { name: /filter runs by workflow name/i });
+const findSpecFilter = () =>
+  screen.findByRole('searchbox', { name: /filter runs by workflow name/i });
+
 /** Publishes the live query string so a test can assert what the URL holds. */
 function LocationProbe() {
   const loc = useLocation();
@@ -125,9 +140,9 @@ describe('filters live in the URL', () => {
   it('writes the state filter to the query string', async () => {
     mockFetch(() => [200, { runs: [] }]);
     wrap(<RunListPage namespace="default" />);
-    await screen.findByRole('combobox');
+    await findStateFilter();
 
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'FAILED' } });
+    fireEvent.change(stateFilter(), { target: { value: 'FAILED' } });
 
     await waitFor(() => {
       expect(screen.getByTestId('search').textContent).toContain('state=FAILED');
@@ -137,9 +152,9 @@ describe('filters live in the URL', () => {
   it('writes the spec filter to the query string', async () => {
     mockFetch(() => [200, { runs: [] }]);
     wrap(<RunListPage namespace="default" />);
-    await screen.findByRole('searchbox');
+    await findSpecFilter();
 
-    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'daily-etl' } });
+    fireEvent.change(specFilter(), { target: { value: 'daily-etl' } });
 
     await waitFor(() => {
       expect(screen.getByTestId('search').textContent).toContain('spec=daily-etl');
@@ -151,8 +166,8 @@ describe('filters live in the URL', () => {
     wrap(<RunListPage namespace="default" />, '/runs?state=FAILED&spec=daily-etl');
 
     // The controls are populated from the URL, not from component state.
-    expect(await screen.findByRole('combobox')).toHaveValue('FAILED');
-    expect(screen.getByRole('searchbox')).toHaveValue('daily-etl');
+    expect(await findStateFilter()).toHaveValue('FAILED');
+    expect(specFilter()).toHaveValue('daily-etl');
   });
 
   it('sends the filters to the server rather than filtering in the browser', async () => {
@@ -176,14 +191,14 @@ describe('filters live in the URL', () => {
     await waitFor(() => {
       expect(screen.getByTestId('search').textContent).toBe('');
     });
-    expect(screen.getByRole('combobox')).toHaveValue('');
-    expect(screen.getByRole('searchbox')).toHaveValue('');
+    expect(stateFilter()).toHaveValue('');
+    expect(specFilter()).toHaveValue('');
   });
 
   it('offers no clear control when nothing is filtered', async () => {
     mockFetch(() => [200, { runs: [] }]);
     wrap(<RunListPage namespace="default" />);
-    await screen.findByRole('combobox');
+    await findStateFilter();
     expect(screen.queryByRole('button', { name: /clear filters/i })).not.toBeInTheDocument();
   });
 });
@@ -339,24 +354,213 @@ describe('rows needing attention are marked beyond their badge', () => {
   });
 });
 
+/**
+ * The result count moved from the page's own `.filter-count` into DataTable's
+ * count chip, and the CLAIM it makes changed with it — deliberately, and for
+ * the better.
+ *
+ * The old chip printed a bare number and labelled it "runs" or "matching runs".
+ * Both were over-claims: the run list is a PAGE of a keyset listing, so the
+ * number was only ever a count of what this page holds, and calling it "12
+ * matching runs" states a fact about the namespace that no response supports —
+ * /runs pages and never totals. The chip now renders `count: {kind:'unknown'}`,
+ * which is a "+" suffix and a sentence on hover saying exactly that.
+ *
+ * What is preserved is the assertion that actually mattered: a count of zero and
+ * a count we do not have yet are different claims, and the page must not assert
+ * "0 runs" while the first load is in flight.
+ */
 describe('the result count', () => {
-  /**
-   * A count of zero and a count we do not have yet are different claims. While
-   * the first load is in flight the page must not assert "0 runs".
-   */
+  const chip = () => document.querySelector('.dt-count');
+
   it('does not claim zero before the first response arrives', async () => {
     mockFetch(() => [200, { runs: [run()] }]);
-    const { container } = wrap(<RunListPage namespace="default" />);
-    expect(container.querySelector('.filter-count-n')!.textContent).not.toBe('0');
+    wrap(<RunListPage namespace="default" />);
+    // No chip at all yet: AsyncPanel is rendering the loading state, and the
+    // table that owns the count has not mounted. Absence is the honest form of
+    // "we do not know" — a rendered "0" would not be.
+    expect(chip()?.textContent ?? '').not.toMatch(/^0/);
     await screen.findByText('daily-etl');
-    expect(container.querySelector('.filter-count-n')!.textContent).toBe('1');
+    expect(chip()!.textContent).toBe('1+');
   });
 
-  /** With a filter on, the count is a count of MATCHES, and says so. */
-  it('labels the count as matches when a filter is applied', async () => {
+  /**
+   * The "+" is the load-bearing character. The runs endpoint sends no total, so
+   * the rows in hand are a page and the chip must not read as a namespace count.
+   */
+  it('marks the count as a page rather than a total', async () => {
     mockFetch(() => [200, { runs: [run()] }]);
-    const { container } = wrap(<RunListPage namespace="default" />, '/runs?state=FAILED');
+    wrap(<RunListPage namespace="default" />);
     await screen.findByText('daily-etl');
-    expect(container.querySelector('.filter-count')!.textContent).toMatch(/matching runs/);
+    expect(chip()!.textContent).toMatch(/\+$/);
+    expect(chip()!.getAttribute('title')).toMatch(/does not report a total/i);
+  });
+});
+
+/**
+ * Keyset pagination, which this page did not have at all until now.
+ *
+ * The gateway has always answered a `before` timestamp and returned
+ * `next_before`, and the API client has always thrown that cursor away — so the
+ * run list fetched a capped page and stopped, with no way to reach an older
+ * run than the cap allowed. These pin the whole loop.
+ *
+ * The asymmetry is the thing to hold onto: forward is a cursor the server just
+ * handed us, backward is only ever a cursor we have ALREADY SEEN. That is why
+ * the page holds a stack rather than a single "previous" value — with one
+ * variable, page 3 → 2 works and 2 → 1 does not.
+ */
+describe('keyset pagination', () => {
+  /** A page of runs whose ids say which page they came from. */
+  const pageOf = (tag: string, cursor?: string) => ({
+    runs: [
+      run({
+        id: `run-${tag}`,
+        spec_name: `spec-${tag}`,
+        created_at: '2026-09-12T10:00:00Z',
+      }),
+    ],
+    ...(cursor ? { next_before: cursor } : {}),
+  });
+
+  /**
+   * Serves a fixed sequence of pages keyed by the `before` cursor in the URL,
+   * which is exactly how the gateway behaves: the cursor IS the address.
+   */
+  function servePages(pages: Record<string, unknown>) {
+    const seen: string[] = [];
+    mockFetch((url) => {
+      seen.push(url);
+      const m = /[?&]before=([^&]*)/.exec(url);
+      const key = m?.[1] ? decodeURIComponent(m[1]) : '';
+      return [200, pages[key] ?? { runs: [] }];
+    });
+    return seen;
+  }
+
+  const next = () => screen.getByRole('button', { name: /next page of runs/i });
+  const prev = () => screen.getByRole('button', { name: /previous page of runs/i });
+
+  it('advances to the next page using the cursor the server sent', async () => {
+    const seen = servePages({
+      '': pageOf('p1', 'cursor-1'),
+      'cursor-1': pageOf('p2'),
+    });
+    wrap(<RunListPage namespace="default" />);
+
+    await screen.findByText('spec-p1');
+    fireEvent.click(next());
+
+    expect(await screen.findByText('spec-p2')).toBeInTheDocument();
+    // The cursor reached the wire verbatim. Re-deriving it from a row's
+    // created_at is how a page boundary silently moves.
+    expect(seen.some((u) => u.includes('before=cursor-1'))).toBe(true);
+    expect(screen.queryByText('spec-p1')).not.toBeInTheDocument();
+  });
+
+  /**
+   * The stack's reason for existing. Going back is a POP, so page 3 → 2 → 1 all
+   * work; a single stored cursor would strand the operator on page 2.
+   */
+  it('returns to the prior page, and keeps returning, by popping the cursor stack', async () => {
+    servePages({
+      '': pageOf('p1', 'cursor-1'),
+      'cursor-1': pageOf('p2', 'cursor-2'),
+      'cursor-2': pageOf('p3'),
+    });
+    wrap(<RunListPage namespace="default" />);
+
+    await screen.findByText('spec-p1');
+    fireEvent.click(next());
+    await screen.findByText('spec-p2');
+    fireEvent.click(next());
+    await screen.findByText('spec-p3');
+
+    fireEvent.click(prev());
+    expect(await screen.findByText('spec-p2')).toBeInTheDocument();
+
+    // The second pop is the one a single-cursor implementation cannot do.
+    fireEvent.click(prev());
+    expect(await screen.findByText('spec-p1')).toBeInTheDocument();
+  });
+
+  it('states the page number, and no denominator, because the endpoint sends no total', async () => {
+    servePages({ '': pageOf('p1', 'cursor-1'), 'cursor-1': pageOf('p2') });
+    wrap(<RunListPage namespace="default" />);
+
+    await screen.findByText('spec-p1');
+    const position = document.querySelector('.dt-page-of')!;
+    expect(position.textContent).toBe('page 1');
+    // Never "page 1 of N": there is no N to state and inventing one is the
+    // failure this whole count discipline exists to prevent.
+    expect(position.textContent).not.toMatch(/of/);
+
+    fireEvent.click(next());
+    await screen.findByText('spec-p2');
+    expect(document.querySelector('.dt-page-of')!.textContent).toBe('page 2');
+  });
+
+  it('disables previous on the first page, where the stack is empty', async () => {
+    servePages({ '': pageOf('p1', 'cursor-1') });
+    wrap(<RunListPage namespace="default" />);
+
+    await screen.findByText('spec-p1');
+    expect(prev()).toBeDisabled();
+  });
+
+  /**
+   * The gateway sets next_before ONLY when a full page came back, so its absence
+   * is the server's own statement that the list is exhausted. A next button that
+   * stayed live would fetch an empty page and read as "the runs vanished".
+   */
+  it('disables next when the response carried no cursor', async () => {
+    servePages({ '': pageOf('p1') });
+    wrap(<RunListPage namespace="default" />);
+
+    await screen.findByText('spec-p1');
+    expect(next()).toBeDisabled();
+  });
+
+  it('re-enables previous once the operator has moved forward', async () => {
+    servePages({ '': pageOf('p1', 'cursor-1'), 'cursor-1': pageOf('p2') });
+    wrap(<RunListPage namespace="default" />);
+
+    await screen.findByText('spec-p1');
+    fireEvent.click(next());
+    await screen.findByText('spec-p2');
+
+    expect(prev()).toBeEnabled();
+    // And forward is finished, because page 2 carried no cursor of its own.
+    expect(next()).toBeDisabled();
+  });
+
+  /**
+   * A cursor addresses a position within ONE result set. Changing the filters
+   * produces a different one, so carrying the cursor across would open the
+   * filtered list at a timestamp that means nothing there — usually on an empty
+   * page, which reads as "there are no failed runs" when there are simply none
+   * older than an arbitrary instant.
+   */
+  it('returns to page one when the filters change', async () => {
+    const seen = servePages({
+      '': pageOf('p1', 'cursor-1'),
+      'cursor-1': pageOf('p2', 'cursor-2'),
+    });
+    wrap(<RunListPage namespace="default" />);
+
+    await screen.findByText('spec-p1');
+    fireEvent.click(next());
+    await screen.findByText('spec-p2');
+    expect(document.querySelector('.dt-page-of')!.textContent).toBe('page 2');
+
+    fireEvent.change(stateFilter(), { target: { value: 'FAILED' } });
+
+    await waitFor(() => {
+      expect(document.querySelector('.dt-page-of')!.textContent).toBe('page 1');
+    });
+    // And the filtered request went out with no cursor at all.
+    const filteredCalls = seen.filter((u) => u.includes('state=FAILED'));
+    expect(filteredCalls.length).toBeGreaterThan(0);
+    expect(filteredCalls.every((u) => !u.includes('before='))).toBe(true);
   });
 });

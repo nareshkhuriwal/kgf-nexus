@@ -194,12 +194,51 @@ describe('the create form', () => {
   }
 
   /**
+   * The catalog fetch the workflow picker makes, which every test in this block
+   * now provokes. Answered with a real list rather than an empty one so the
+   * picker settles into its select and the form under test is the one an
+   * operator with workflows actually sees.
+   */
+  function catalog(): [number, unknown] {
+    return [
+      200,
+      {
+        workflows: [
+          {
+            id: 'sp-1',
+            namespace: 'default',
+            name: 'example-etl',
+            latest_version: 1,
+            spec_hash: 'abc',
+            created_by: 'ops',
+            updated_at: '2026-09-12T10:00:00Z',
+            version_count: 1,
+            first_created_at: '2026-09-01T10:00:00Z',
+          },
+          {
+            id: 'sp-2',
+            namespace: 'default',
+            name: 'ten-node-mixed',
+            latest_version: 3,
+            spec_hash: 'def',
+            created_by: 'ops',
+            updated_at: '2026-09-12T10:00:00Z',
+            version_count: 3,
+            first_created_at: '2026-09-01T10:00:00Z',
+          },
+        ],
+      },
+    ];
+  }
+
+  /**
    * The whole point of the preview endpoint: a cron expression is write-only to
    * most people, so the form must show the instants it will actually fire at
    * BEFORE anything is created.
    */
   it('previews real fire times for the expression being typed', async () => {
     mockFetch((url) => {
+      if (url.includes('/specs')) return catalog();
       if (url.includes('/schedules/preview')) {
         return [
           200,
@@ -228,6 +267,7 @@ describe('the create form', () => {
    */
   it('explains an invalid expression and refuses to submit it', async () => {
     mockFetch((url) => {
+      if (url.includes('/specs')) return catalog();
       if (url.includes('/schedules/preview')) {
         return [
           200,
@@ -253,9 +293,11 @@ describe('the create form', () => {
 
   it('refuses to submit params that are not a JSON object', async () => {
     mockFetch((url) =>
-      url.includes('/schedules/preview')
-        ? [200, { cron: '0 2 * * *', timezone: 'UTC', valid: true, next_fires: [] }]
-        : [200, { schedules: [] }],
+      url.includes('/specs')
+        ? catalog()
+        : url.includes('/schedules/preview')
+          ? [200, { cron: '0 2 * * *', timezone: 'UTC', valid: true, next_fires: [] }]
+          : [200, { schedules: [] }],
     );
     await openForm();
 
@@ -268,6 +310,7 @@ describe('the create form', () => {
   it('posts the expression, its zone and the overlap policy on create', async () => {
     let posted: Record<string, unknown> | null = null;
     mockFetch((url, init) => {
+      if (url.includes('/specs')) return catalog();
       if (url.includes('/schedules/preview')) {
         return [200, { cron: '0 2 * * *', timezone: 'UTC', valid: true, next_fires: [] }];
       }
@@ -282,9 +325,12 @@ describe('the create form', () => {
     fireEvent.change(await screen.findByPlaceholderText('nightly-etl'), {
       target: { value: 'from-form' },
     });
-    fireEvent.change(screen.getByPlaceholderText('example-etl'), {
-      target: { value: 'example-etl' },
-    });
+    // The spec is now CHOSEN from the catalog rather than typed. Waiting for the
+    // option rather than the select is deliberate: the select renders before the
+    // catalog lands, and selecting a value it has no option for silently sets
+    // nothing — which is exactly the bug a picker is supposed to end.
+    await screen.findByRole('option', { name: /example-etl/ });
+    fireEvent.change(screen.getByLabelText('workflow'), { target: { value: 'example-etl' } });
     fireEvent.click(screen.getByRole('button', { name: /create schedule/i }));
 
     await waitFor(() => expect(posted).not.toBeNull());
@@ -299,5 +345,166 @@ describe('the create form', () => {
     // Blank means "always the latest version of the spec", so the field must be
     // absent rather than sent as null or zero.
     expect(posted).not.toHaveProperty('spec_version');
+  });
+});
+
+/**
+ * Scheduling reachable from the WORKFLOW side.
+ *
+ * The bug this closes is that there was no route into scheduling from a
+ * workflow at all: an operator looking at a definition had to navigate to
+ * Schedules and retype the name they had just been reading, which is the trip
+ * that produces the typo the gateway does not catch. The form's open state and
+ * its chosen workflow therefore live in the URL, so a workflow's own page can
+ * link straight into a pre-filled form.
+ */
+describe('the create form as a deep link', () => {
+  function wrapAt(path: string) {
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[path]}>
+          <SchedulesPage namespace="default" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  function catalogOnly(url: string): [number, unknown] {
+    if (url.includes('/specs')) {
+      return [
+        200,
+        {
+          workflows: [
+            {
+              id: 'sp-1',
+              namespace: 'default',
+              name: 'example-etl',
+              latest_version: 1,
+              spec_hash: 'abc',
+              created_by: 'ops',
+              updated_at: '2026-09-12T10:00:00Z',
+              version_count: 1,
+              first_created_at: '2026-09-01T10:00:00Z',
+            },
+            {
+              id: 'sp-2',
+              namespace: 'default',
+              name: 'ten-node-mixed',
+              latest_version: 3,
+              spec_hash: 'def',
+              created_by: 'ops',
+              updated_at: '2026-09-12T10:00:00Z',
+              version_count: 3,
+              first_created_at: '2026-09-01T10:00:00Z',
+            },
+          ],
+        },
+      ];
+    }
+    if (url.includes('/schedules/preview')) {
+      return [200, { cron: '0 2 * * *', timezone: 'UTC', valid: true, next_fires: [] }];
+    }
+    return [200, { schedules: [] }];
+  }
+
+  it('opens the form already on the workflow the link named', async () => {
+    mockFetch(catalogOnly);
+    wrapAt('/schedules?new=1&spec=ten-node-mixed');
+
+    const select = (await screen.findByLabelText('workflow')) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe('ten-node-mixed'));
+  });
+
+  it('opens the form with nothing chosen when the link carries no spec', async () => {
+    mockFetch(catalogOnly);
+    wrapAt('/schedules?new=1');
+
+    const select = (await screen.findByLabelText('workflow')) as HTMLSelectElement;
+    // Explicitly unchosen rather than defaulted to the first workflow: a
+    // schedule created for the alphabetically-first spec in the namespace is
+    // one nobody asked for.
+    expect(select.value).toBe('');
+  });
+
+  /**
+   * A `spec` with no `new` must not open a form. The two parameters answer
+   * different questions — one opens the form, the other says which workflow it
+   * starts on — and a stale spec left in a URL should do nothing rather than
+   * popping open a form the operator did not ask for.
+   */
+  it('does not open the form for a spec parameter on its own', async () => {
+    mockFetch(catalogOnly);
+    wrapAt('/schedules?spec=ten-node-mixed');
+
+    await screen.findByRole('button', { name: /new schedule/i });
+    expect(screen.queryByLabelText('workflow')).not.toBeInTheDocument();
+  });
+
+  /**
+   * The end of the round trip. The gateway validates the cron at SUBMIT time
+   * and its rejection names the field and the offending token — far more use
+   * than "invalid cron" — so that message has to reach the screen verbatim
+   * rather than being flattened into a generic failure.
+   *
+   * This is a DIFFERENT path from the preview's valid:false, which the form
+   * catches before submission. Reached here by a preview that says the
+   * expression is fine and a gateway that rejects it anyway, which is exactly
+   * what a preview served by a different code path could produce.
+   */
+  it("shows the gateway's field-and-token message when it rejects the cron", async () => {
+    mockFetch((url, init) => {
+      if (init?.method === 'POST') {
+        return [400, { error: 'invalid_cron', message: 'hour field value 99 is out of range (0-23)' }];
+      }
+      return catalogOnly(url);
+    });
+    wrapAt('/schedules?new=1&spec=example-etl');
+
+    fireEvent.change(await screen.findByPlaceholderText('nightly-etl'), {
+      target: { value: 'from-link' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create schedule/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        /hour field value 99 is out of range/i,
+      );
+    });
+  });
+
+  it('sends the linked workflow as spec_name and shows the schedule it created', async () => {
+    let posted: Record<string, unknown> | null = null;
+    mockFetch((url, init) => {
+      if (init?.method === 'POST') {
+        posted = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return [201, schedule({ name: 'from-link', spec_name: 'ten-node-mixed' })];
+      }
+      if (url.includes('/schedules?') || url.endsWith('/schedules')) {
+        // After the create, the list is invalidated and refetched — the new row
+        // must actually appear, which is the operator's "did it take?".
+        return [200, { schedules: posted ? [schedule({ name: 'from-link' })] : [] }];
+      }
+      return catalogOnly(url);
+    });
+    wrapAt('/schedules?new=1&spec=ten-node-mixed');
+
+    fireEvent.change(await screen.findByPlaceholderText('nightly-etl'), {
+      target: { value: 'from-link' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create schedule/i }));
+
+    await waitFor(() => expect(posted).not.toBeNull());
+    // The whole point of the deep link: the workflow chosen on the OTHER page is
+    // the one that gets scheduled, with nobody retyping it.
+    expect(posted).toMatchObject({ name: 'from-link', spec_name: 'ten-node-mixed' });
+
+    // And it must actually turn up in the list, which is the operator's real
+    // question after pressing create. The create invalidates the schedules
+    // query, so the row arriving is the whole round trip working — not just the
+    // POST being accepted.
+    expect(await screen.findByText('from-link')).toBeInTheDocument();
   });
 });

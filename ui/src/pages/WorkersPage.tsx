@@ -16,6 +16,30 @@
  * two figures that answer it (dead workers, and workers whose heartbeat has gone
  * quiet while the control plane still calls them ACTIVE) are otherwise buried in
  * a ten-column table.
+ *
+ * ── THE TABLE IS <DataTable>, AND THE THREE THINGS THAT TOOK CARE ─────────
+ *
+ * PAGING IS `none`, AND THE COUNT IS `exact`. Both follow from one fact about
+ * the endpoint: GET /workers takes no parameters at all. There is no `limit` to
+ * cap the response, so what comes back IS the fleet — "12 workers" is a true
+ * statement rather than a count of a page, and this is one of only three lists
+ * in the console entitled to say so. And every worker must be on screen at once
+ * because the question being asked is about the fleet AS A WHOLE: a fleet split
+ * across pages cannot be scanned for the one dead row, which is the entire
+ * reading task this screen exists for.
+ *
+ * THE COLUMNS ARE REBUILT EVERY RENDER, not hoisted to a module constant. The
+ * heartbeat cells and the row rules close over `now`, which is captured per
+ * render — a hoisted array would freeze the first `now` it ever saw and a stale
+ * heartbeat would never come to look stale. UsersPage and TokensPage rebuild
+ * theirs for the same class of reason (they close over mutation state), so this
+ * follows a pattern rather than inventing one. The array is eleven objects; the
+ * cost of building it is not worth the chance of that bug.
+ *
+ * FleetFigures STAYS OUTSIDE THE TABLE. It is not a summary row and not a
+ * toolbar: it answers a different question from the one the rows answer, and it
+ * has to be readable across a room during an incident. Pushing it into the
+ * table's toolbar slot would have shrunk it to chip scale beside the count.
  */
 
 import { Link } from 'react-router-dom';
@@ -25,6 +49,8 @@ import { PageHeader } from '../components/PageHeader';
 import { StateBadge } from '../components/StateBadge';
 import { CapacityGrid, deriveCapacity } from '../components/CapacityGrid';
 import { AsyncPanel, ErrorBox, Loading, StaleWarning } from '../components/Status';
+import { DataTable } from '../components/DataTable';
+import type { Column, RowCountKind } from '../components/DataTable';
 import {
   EMPTY,
   fmtAge,
@@ -56,6 +82,15 @@ export { deriveCapacity };
 export const HEARTBEAT_STALE_MS = 15_000;
 
 /**
+ * GET /workers takes no `limit`, so the response IS the fleet.
+ *
+ * Pinned to the endpoint's shape, exactly as UsersPage pins its own: if paging
+ * is ever added to /workers, this constant is what has to change with it, and
+ * leaving it as `exact` would turn a true count into a silent over-claim.
+ */
+const FLEET_COUNT: RowCountKind = { kind: 'exact' };
+
+/**
  * A worker the control plane still calls ACTIVE while its heartbeat is stale.
  *
  * This is the interesting liveness case and the reason the check is a named
@@ -78,6 +113,146 @@ export function WorkersPage({ namespace }: { namespace: string }) {
   const workers = useWorkers(namespace);
   const capacity = useCapacity(namespace);
   const now = Date.now();
+
+  /**
+   * The fleet columns, rebuilt every render.
+   *
+   * They close over `now`, which is captured per render: hoisting this array to
+   * a module constant would freeze the first `now` it ever saw, and a worker
+   * whose heartbeat went quiet after mount would keep rendering a fresh age and
+   * never grow its stale chip. UsersPage and TokensPage rebuild theirs for the
+   * same class of reason and this follows them.
+   *
+   * Nothing here is sortable, and that is a decision rather than an omission.
+   * The fleet is read as a WHOLE — the eye is looking for the one row that is
+   * wrong, which the tone rules already surface — and reordering it by CPU
+   * would break the only ordering the rows have in common with the capacity
+   * summary above them.
+   */
+  const columns: Column<Worker>[] = [
+    {
+      key: 'state',
+      header: 'state',
+      cell: (w) => <StateBadge kind="worker" state={w.state} />,
+    },
+    {
+      key: 'host',
+      header: 'host',
+      /* A real <Link>, on the host cell, rather than a click handler on the
+         row. A row-wide onClick is unreachable by keyboard, cannot be
+         middle-clicked into a new tab, and offers no destination on hover — all
+         three of which an operator triaging a fleet actually uses. The host is
+         the anchor because it is what the eye lands on; the id beneath it stays
+         plain text so the two do not read as two links. */
+      cell: (w) => (
+        <Link
+          to={`/workers/${encodeURIComponent(w.id)}`}
+          className="fleet-host"
+          title={`${w.hostname} — what is running on it`}
+        >
+          <span className="fleet-host-name">{w.hostname}</span>
+          <span className="fleet-host-id">{shortId(w.id, 8)}</span>
+        </Link>
+      ),
+    },
+    {
+      key: 'running',
+      header: 'running',
+      /* The count the drill-down expands. Shown even when zero: "this worker is
+         running nothing" is the answer to "why is my queue not moving", and an
+         empty cell would leave it unsaid. */
+      cell: (w) => <RunningCell worker={w} />,
+    },
+    {
+      key: 'queues',
+      header: 'queues',
+      cellClass: 'mono',
+      cell: (w) => <>{w.queues?.join(', ') || EMPTY}</>,
+    },
+    {
+      key: 'cpu',
+      header: 'cpu',
+      cell: (w) => (
+        <DimensionCell
+          committed={w.committed?.cpu_millis}
+          advertised={w.capacity?.cpu_millis}
+          format={fmtCpu}
+        />
+      ),
+    },
+    {
+      key: 'memory',
+      header: 'memory',
+      cell: (w) => (
+        <DimensionCell
+          committed={w.committed?.memory_bytes}
+          advertised={w.capacity?.memory_bytes}
+          format={fmtBytes}
+        />
+      ),
+    },
+    {
+      key: 'gpu',
+      header: 'gpu',
+      cell: (w) =>
+        w.capacity?.gpu_count ? (
+          <div className="dim">
+            <DimensionCell
+              committed={w.committed?.gpu_count}
+              advertised={w.capacity.gpu_count}
+              format={(n) => String(n ?? 0)}
+            />
+            {w.capacity.gpu_kind && <span className="dim-kind">{w.capacity.gpu_kind}</span>}
+          </div>
+        ) : (
+          <span className="faint">none</span>
+        ),
+    },
+    {
+      key: 'util',
+      /* Reported by the agent, not measured here — the header says so, because a
+         utilisation an operator cannot act on must not read like the
+         committed/advertised figures beside it, which they can. */
+      header: 'util (reported)',
+      cell: (w) => (
+        <div className="fleet-util">
+          <span>cpu {fmtPercent(w.cpu_utilization)}</span>
+          <span>mem {fmtPercent(w.memory_utilization)}</span>
+        </div>
+      ),
+    },
+    {
+      key: 'heartbeat',
+      header: 'heartbeat',
+      cell: (w) => <HeartbeatCell worker={w} now={now} />,
+    },
+    {
+      key: 'labels',
+      header: 'labels',
+      cell: (w) =>
+        Object.entries(w.labels ?? {}).length === 0 ? (
+          <span className="faint">{EMPTY}</span>
+        ) : (
+          <div className="fleet-labels">
+            {Object.entries(w.labels ?? {}).map(([k, v]) => (
+              <span key={k}>
+                {k}={v}
+              </span>
+            ))}
+          </div>
+        ),
+    },
+    {
+      key: 'agent',
+      header: 'agent',
+      cell: (w) => (
+        <div className="fleet-agent">
+          <span>{w.agent_version ?? EMPTY}</span>
+          {w.executors && w.executors.length > 0 && <span>{w.executors.join(',')}</span>}
+        </div>
+      ),
+    },
+  ];
 
   return (
     <div className="col">
@@ -151,30 +326,31 @@ export function WorkersPage({ namespace }: { namespace: string }) {
           loadingRows={4}
         >
           {(list) => (
-            <div className="table-scroll">
-              <table className="table-fleet">
-                <thead>
-                  <tr>
-                    <th>state</th>
-                    <th>host</th>
-                    <th>running</th>
-                    <th>queues</th>
-                    <th>cpu</th>
-                    <th>memory</th>
-                    <th>gpu</th>
-                    <th>util (reported)</th>
-                    <th>heartbeat</th>
-                    <th>labels</th>
-                    <th>agent</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {list.map((w) => (
-                    <WorkerRow key={w.id} worker={w} now={now} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              rows={list}
+              columns={columns}
+              rowKey={(w) => w.id}
+              /* The row's left rule, from the worker's own state tone so it can
+                 never disagree with the badge in its first cell. A quiet
+                 heartbeat is a warning even while the state still claims ACTIVE
+                 — that disagreement IS the finding. Returns '' rather than
+                 undefined for a healthy worker so the class attribute stays a
+                 stable empty string. */
+              rowClass={(w) =>
+                w.state === 'DEAD' ? 'row-failed' : heartbeatStale(w, now) ? 'row-warning' : ''
+              }
+              noun="workers"
+              tableClass="table-fleet"
+              count={FLEET_COUNT}
+              /* Every worker on screen at once: the question is about the fleet
+                 as a whole, and a fleet split across pages cannot be scanned
+                 for the one dead row. */
+              paging={{ mode: 'none' }}
+              /* No search box. The fleet is small enough to read in one pass —
+                 it is bounded by how many agents an operator runs, not by a
+                 namespace's history — and a filter over eight rows hides more
+                 than it finds. */
+            />
           )}
         </AsyncPanel>
       </div>
@@ -231,106 +407,30 @@ function FleetFigures({ workers, now }: { workers: Worker[] | undefined; now: nu
   );
 }
 
-function WorkerRow({ worker, now }: { worker: Worker; now: number }) {
+/**
+ * The heartbeat cell: how long since the last beat, and whether that is a
+ * problem.
+ *
+ * A component rather than inline JSX in the column because it renders two
+ * things whose relationship matters — the pulse and the chip both derive from
+ * the SAME `heartbeatStale` call, so they cannot come to disagree about whether
+ * this worker has gone quiet. The chip appears only for the ACTIVE-but-quiet
+ * case; a DEAD worker's pulse goes dark instead, because its state already says
+ * what the chip would.
+ */
+function HeartbeatCell({ worker, now }: { worker: Worker; now: number }) {
   const stale = heartbeatStale(worker, now);
-  // The row's left rule, from the worker's own state tone so it can never
-  // disagree with the badge in its first cell. A quiet heartbeat is a warning
-  // even while the state still claims ACTIVE — that disagreement IS the finding.
-  const rowClass = worker.state === 'DEAD' ? 'row-failed' : stale ? 'row-warning' : '';
-
   return (
-    <tr className={rowClass}>
-      <td>
-        <StateBadge kind="worker" state={worker.state} />
-      </td>
-      <td>
-        {/* A real <Link>, on the host cell, rather than a click handler on the
-            <tr>. A row-wide onClick is unreachable by keyboard, cannot be
-            middle-clicked into a new tab, and offers no destination on hover —
-            all three of which an operator triaging a fleet actually uses. The
-            host is the anchor because it is what the eye lands on; the id
-            beneath it stays plain text so the two do not read as two links. */}
-        <Link to={`/workers/${encodeURIComponent(worker.id)}`} className="fleet-host" title={`${worker.hostname} — what is running on it`}>
-          <span className="fleet-host-name">{worker.hostname}</span>
-          <span className="fleet-host-id">{shortId(worker.id, 8)}</span>
-        </Link>
-      </td>
-      <td>
-        {/* The count the drill-down expands. Shown even when zero: "this worker
-            is running nothing" is the answer to "why is my queue not moving",
-            and an empty cell would leave it unsaid. */}
-        <RunningCell worker={worker} />
-      </td>
-      <td className="mono">{worker.queues?.join(', ') || EMPTY}</td>
-      <td>
-        <DimensionCell
-          committed={worker.committed?.cpu_millis}
-          advertised={worker.capacity?.cpu_millis}
-          format={fmtCpu}
+    <div title={fmtTs(worker.last_heartbeat_at)}>
+      <div className="fleet-beat">
+        <span
+          className={`pulse ${stale ? 'stale' : worker.state === 'DEAD' ? 'off' : ''}`}
+          aria-hidden="true"
         />
-      </td>
-      <td>
-        <DimensionCell
-          committed={worker.committed?.memory_bytes}
-          advertised={worker.capacity?.memory_bytes}
-          format={fmtBytes}
-        />
-      </td>
-      <td>
-        {worker.capacity?.gpu_count ? (
-          <div className="dim">
-            <DimensionCell
-              committed={worker.committed?.gpu_count}
-              advertised={worker.capacity.gpu_count}
-              format={(n) => String(n ?? 0)}
-            />
-            {worker.capacity.gpu_kind && <span className="dim-kind">{worker.capacity.gpu_kind}</span>}
-          </div>
-        ) : (
-          <span className="faint">none</span>
-        )}
-      </td>
-      <td>
-        {/* Reported by the agent, not measured here -- the column header says so,
-            because a utilisation an operator cannot act on must not read like
-            the committed/advertised figures beside it, which they can. */}
-        <div className="fleet-util">
-          <span>cpu {fmtPercent(worker.cpu_utilization)}</span>
-          <span>mem {fmtPercent(worker.memory_utilization)}</span>
-        </div>
-      </td>
-      <td title={fmtTs(worker.last_heartbeat_at)}>
-        <div className="fleet-beat">
-          <span
-            className={`pulse ${stale ? 'stale' : worker.state === 'DEAD' ? 'off' : ''}`}
-            aria-hidden="true"
-          />
-          <span>{fmtAge(worker.last_heartbeat_at, now)}</span>
-        </div>
-        {stale && <div className="chip warn">stale</div>}
-      </td>
-      <td>
-        {Object.entries(worker.labels ?? {}).length === 0 ? (
-          <span className="faint">{EMPTY}</span>
-        ) : (
-          <div className="fleet-labels">
-            {Object.entries(worker.labels ?? {}).map(([k, v]) => (
-              <span key={k}>
-                {k}={v}
-              </span>
-            ))}
-          </div>
-        )}
-      </td>
-      <td>
-        <div className="fleet-agent">
-          <span>{worker.agent_version ?? EMPTY}</span>
-          {worker.executors && worker.executors.length > 0 && (
-            <span>{worker.executors.join(',')}</span>
-          )}
-        </div>
-      </td>
-    </tr>
+        <span>{fmtAge(worker.last_heartbeat_at, now)}</span>
+      </div>
+      {stale && <div className="chip warn">stale</div>}
+    </div>
   );
 }
 

@@ -13,6 +13,12 @@
  * looks healthy and will never fire again, so this page calls it out rather than
  * rendering an em dash and moving on.
  *
+ * THE CREATE FORM IS URL-ADDRESSED: /schedules?new=1 opens it, and an optional
+ * &spec=<name> starts it on a workflow. That is what makes scheduling reachable
+ * from the WORKFLOW side of the console — a workflow's own page can link
+ * straight into a pre-filled form instead of leaving an operator to remember
+ * the spec name across a navigation, which is the trip that produces typos.
+ *
  * SEARCH HERE IS CLIENT-SIDE, and that is a statement about the gateway rather
  * than a shortcut. /schedules takes only `limit` — there is no `search`
  * parameter to send — so a search box on this page can only ever filter the
@@ -23,7 +29,7 @@
  */
 
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { errorMessage, useSchedules, useSetScheduleEnabled } from '../api/hooks';
 import type { Schedule } from '../api/types';
 import { AsyncPanel, ErrorBox, StaleWarning } from '../components/Status';
@@ -44,8 +50,50 @@ const SCHEDULE_LIMIT = 100;
 const SCHEDULE_COUNT: RowCountKind = { kind: 'capped', limit: SCHEDULE_LIMIT };
 
 export function SchedulesPage({ namespace }: { namespace: string }) {
-  const [creating, setCreating] = useState(false);
+  /**
+   * The create form's open state lives in the URL, not in useState.
+   *
+   * It has to, because scheduling is now reachable from a WORKFLOW: a "Schedule
+   * this workflow" button elsewhere in the console links to
+   * /schedules?new=1&spec=<name>, and that link can only open this form and
+   * pre-fill it if the form's state is addressable. The same choice RunDetailPage
+   * makes for `?node=`, and it pays the same dividends — the half-filled form
+   * survives a reload, and the link is something an operator can paste to a
+   * colleague rather than a sequence of clicks they have to describe.
+   *
+   * `new=1` and `spec=` are separate parameters rather than one, because they
+   * answer different questions: `new` opens the form, `spec` says which workflow
+   * it starts on. A link may carry the first without the second (the plain
+   * "create a schedule" entry point), and a stale `spec` with no `new` simply
+   * does nothing rather than opening a form nobody asked for.
+   */
+  const [params, setParams] = useSearchParams();
+  const creating = params.get('new') === '1';
+  const presetSpec = params.get('spec') ?? '';
+
   const [actionError, setActionError] = useState<string | null>(null);
+
+  function setCreating(open: boolean) {
+    // `replace` so opening and closing the form does not build a back-button
+    // history of the same page in two states; Back should leave the schedule
+    // list, not step through it.
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (open) {
+          next.set('new', '1');
+        } else {
+          next.delete('new');
+          // The preset goes with the form it belonged to. Leaving it behind
+          // would silently pre-fill the NEXT form an operator opened with a
+          // workflow they chose minutes ago and have since moved on from.
+          next.delete('spec');
+        }
+        return next;
+      },
+      { replace: true },
+    );
+  }
 
   const schedules = useSchedules(namespace);
   const setEnabled = useSetScheduleEnabled(namespace);
@@ -181,7 +229,7 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
           </>
         }
         actions={
-          <button type="button" className="primary" onClick={() => setCreating((v) => !v)}>
+          <button type="button" className="primary" onClick={() => setCreating(!creating)}>
             {creating ? 'Cancel' : 'New schedule'}
           </button>
         }
@@ -190,7 +238,16 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
       {actionError && <ErrorBox error={actionError} what="that action" />}
 
       {creating && (
-        <CreateScheduleForm namespace={namespace} onDone={() => setCreating(false)} />
+        <CreateScheduleForm
+          /* Keyed on the preset so following a second "Schedule this workflow"
+             link while the form is already open re-seeds it. Without the key
+             the form is already mounted, initialSpecName is only an INITIAL
+             value, and the new link would appear to do nothing at all. */
+          key={presetSpec}
+          namespace={namespace}
+          initialSpecName={presetSpec}
+          onDone={() => setCreating(false)}
+        />
       )}
 
       <div className="panel">

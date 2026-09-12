@@ -167,8 +167,8 @@ describe('listRuns', () => {
       { runs: [{ id: 'r1', created_at: '2026-01-01T00:00:00Z' }] },
     ]) {
       mockFetch(body);
-      const runs = await api.listRuns('default');
-      expect(runs.map((r) => r.id)).toEqual(['r1']);
+      const page = await api.listRuns('default');
+      expect(page.runs.map((r) => r.id)).toEqual(['r1']);
     }
   });
 
@@ -179,7 +179,71 @@ describe('listRuns', () => {
         { id: 'new', created_at: '2026-06-01T00:00:00Z' },
       ],
     });
-    const runs = await api.listRuns('default');
-    expect(runs.map((r) => r.id)).toEqual(['new', 'old']);
+    const page = await api.listRuns('default');
+    expect(page.runs.map((r) => r.id)).toEqual(['new', 'old']);
+  });
+});
+
+/**
+ * The keyset cursor.
+ *
+ * /runs is the only endpoint here with real pagination, and its cursor was
+ * being discarded: `asList` takes the rows out of the envelope and drops
+ * everything else, so `next_before` never reached the UI and the run list
+ * fetched one capped page and stopped. These pin the envelope's other half.
+ */
+describe('listRuns pagination', () => {
+  it('carries next_before back to the caller so a next page is reachable', async () => {
+    mockFetch({
+      runs: [{ id: 'r1', created_at: '2026-06-01T00:00:00Z' }],
+      next_before: '2026-06-01T00:00:00.123456789Z',
+    });
+    const page = await api.listRuns('default');
+    expect(page.nextBefore).toBe('2026-06-01T00:00:00.123456789Z');
+  });
+
+  /**
+   * The gateway sets next_before ONLY when a full page came back, so its
+   * absence is the server saying the list is exhausted. Inventing a cursor from
+   * the last row's created_at would page forever against a short final page.
+   */
+  it('reports no cursor when the gateway sent none', async () => {
+    mockFetch({ runs: [{ id: 'r1', created_at: '2026-06-01T00:00:00Z' }] });
+    const page = await api.listRuns('default');
+    expect(page.nextBefore).toBeUndefined();
+  });
+
+  it('reports no cursor for a bare-array response, which has nowhere to carry one', async () => {
+    mockFetch([{ id: 'r1', created_at: '2026-06-01T00:00:00Z' }]);
+    const page = await api.listRuns('default');
+    expect(page.nextBefore).toBeUndefined();
+  });
+
+  /**
+   * A non-string cursor is refused rather than coerced: `before=null` in the
+   * query string is a 400 from the gateway, which an operator reads as "the run
+   * list is broken" rather than as a gateway sending a field it should not.
+   */
+  it('ignores a next_before that is not a non-empty string', async () => {
+    for (const bad of [null, 0, '', { at: 'x' }]) {
+      mockFetch({ runs: [{ id: 'r1', created_at: '2026-06-01T00:00:00Z' }], next_before: bad });
+      const page = await api.listRuns('default');
+      expect(page.nextBefore).toBeUndefined();
+    }
+  });
+
+  it('sends the cursor as ?before= so the gateway can page from it', async () => {
+    mockFetch({ runs: [] });
+    await api.listRuns('default', { before: '2026-06-01T00:00:00.123456789Z' });
+    // Asserted on the URL rather than on a parsed filter object, for the reason
+    // this whole file exists: both sides type-check while disagreeing about the
+    // string, and `before` is precisely the parameter that was being dropped.
+    expect(urls[0]).toContain('before=2026-06-01T00%3A00%3A00.123456789Z');
+  });
+
+  it('omits before entirely on the first page, rather than sending an empty one', async () => {
+    mockFetch({ runs: [] });
+    await api.listRuns('default');
+    expect(urls[0]).not.toContain('before=');
   });
 });

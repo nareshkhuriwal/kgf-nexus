@@ -523,4 +523,43 @@ describe('table semantics', () => {
     expect(first).toHaveClass('row-failed');
     expect(second!.className).toBe('');
   });
+
+  /**
+   * The scope note explains WHERE the search ran, which is the one thing about
+   * a result an operator cannot see. It was previously a sibling of the field,
+   * separated from it by the spacer that pushes the count chip to the far edge —
+   * so on a band narrow enough to wrap it could be laid out under an unrelated
+   * control. Grouping them is a presentational fix, but the thing worth pinning
+   * is the RELATIONSHIP it makes visible, which must not be re-separated:
+   * aria-describedby names the note from the input, and the note must be inside
+   * the same group as the input it describes.
+   */
+  it('keeps the search field and the note describing its scope in one group', () => {
+    table(rows(2), { search: { mode: 'client', fields: (r) => [r.name] } });
+
+    const input = screen.getByLabelText('filter the loaded things');
+    const described = input.getAttribute('aria-describedby');
+    expect(described).toBeTruthy();
+
+    const note = document.getElementById(described!);
+    expect(note).toHaveTextContent(/filters the loaded rows only/i);
+
+    // The wiring and the layout agree: the element aria-describedby points at
+    // is a descendant of the same group as the field, not a loose sibling of it.
+    const group = input.closest('.dt-search-group');
+    expect(group).not.toBeNull();
+    expect(group!.contains(note!)).toBe(true);
+  });
+
+  /**
+   * A table with no search has no group to render, and must not render an empty
+   * one: a stray flex child in the toolbar collapses to a zero-width box that
+   * still eats a gap, which is how a control strip acquires a mystery hole.
+   */
+  it('renders no search group at all when the table has no search', () => {
+    table(rows(2));
+    expect(document.querySelector('.dt-search-group')).toBeNull();
+    // The count is still disclosed, which is why the toolbar is unconditional.
+    expect(chip()).toHaveTextContent('2');
+  });
 });

@@ -89,6 +89,14 @@
   --bg-raised: #151b23;
   --bg-inset: #010409;
   --bg-hover: #1c232c;
+  /* The hovered/focused table row's ground, as a token rather than an rgba()
+     written at each use site, because the two themes need OPPOSITE tints: a
+     white veil lifts this dark ground and would be invisible over the light
+     one's #f6f8fa, where ink is what reads. 7% is a measured ceiling, not a
+     taste: --fg-muted carries real values in these cells and must clear 4.5:1
+     on whatever ground it lands on, and lib/contrast.ts puts it at 4.90:1 over
+     this fill, 4.60:1 at 9% and 4.16:1 at 12%. See the tbody rules. */
+  --table-row-hover: rgba(255, 255, 255, 0.07);
   --border: #2f3742;
   --border-strong: #4a5563;
   --fg: #e6edf3;
@@ -286,6 +294,9 @@
     --bg-raised: #f6f8fa;
     --bg-inset: #f0f3f6;
     --bg-hover: #eaeef2;
+    /* Ink, not white: the dark theme's veil would be invisible on this ground.
+       Held to the same measured ceiling -- --fg-muted is 5.03:1 over it. */
+    --table-row-hover: rgba(31, 35, 40, 0.07);
     --border: #d1d9e0;
     --border-strong: #adb5bd;
     --fg: #1f2328;
@@ -339,6 +350,9 @@
     --bg-raised: #f6f8fa;
     --bg-inset: #f0f3f6;
     --bg-hover: #eaeef2;
+    /* Ink, not white: the dark theme's veil would be invisible on this ground.
+       Held to the same measured ceiling -- --fg-muted is 5.03:1 over it. */
+    --table-row-hover: rgba(31, 35, 40, 0.07);
     --border: #d1d9e0;
     --border-strong: #adb5bd;
     --fg: #1f2328;
@@ -568,34 +582,179 @@ textarea { resize: vertical; }
 label.field { display: flex; flex-direction: column; gap: var(--space-2); font-size: var(--text-xs); color: var(--fg-muted); }
 
 /* ── Tables ────────────────────────────────────────────────────────────── */
-/* 13.5px is half a step below --text-base (14px) and deliberately off-scale,
-   which is the same relationship the old 12.5px had to the old 13px base: the
-   table wants to be a touch quieter than body text without dropping to the
-   --text-sm used for secondary prose.
+/* --text-sm (13px), not the 13.5px literal that was here.
 
-   It moved WITH the base rather than staying put. The run list is the widest
-   table here — ten columns — and the reason a literal is used at all is that
-   this is the size at which its ids stop wrapping, so the value has to be
-   re-checked rather than merely re-derived. It holds: the ids in these columns
-   are fixed-width and rendered in --mono, whose stack is unchanged, so their
-   measured width tracks the font-size directly and one extra pixel of body size
-   does not change which of them fit. The columns that carry PROSE — a spec
-   name, a failure summary — were already free to wrap and still are.
+   That literal was justified as "half a step below --text-base", which was a
+   real relationship when the scale had no rung between 13 and 14. The scale now
+   HAS one — --text-sm is 13px — so the justification had become a description of
+   a gap the tokens already fill, and an off-scale value that agrees with no
+   token is exactly the thing a density change cannot reach. Its original job
+   was to keep the run list's ten monospace columns from wrapping; 13px is a
+   half-pixel NARROWER than what it replaces, so every id that fit still fits.
+   The direction of the change is what makes it safe to make.
 
-   If a future column count makes this wrap, the fix is the column set or a
-   per-table size, not a global shave: the sizes above are the readable floor
-   for text an operator reads for hours. */
-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+   The table is still deliberately quieter than body text: an operator reads a
+   hundred rows of ids by scanning, not by reading, and a table set at the full
+   base size competes with the prose around it for the same attention. */
+table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+
+/* THE COLUMN HEADER: a label, not a shout.
+
+   What was here was an uppercase, 0.4px-tracked --text-xs band on --bg-inset —
+   the .panel-head treatment applied to a row of column names. Three devices
+   (case change, tracking, a darker ground) all saying "this is a header" is two
+   more than the job needs, and the cost is real: uppercasing destroys word
+   shape, which is what makes "duration" and "destination" tell themselves apart
+   at a glance in a nine-column header an operator scans sideways.
+
+   One device remains, and it is the one that survives a theme swap and a
+   screen-reader alike: WEIGHT, at --text-xs against --fg-muted, on the table's
+   own ground. The header now reads as the quiet top of the column rather than
+   as a band bolted above it, and the RULE below it — the single horizontal line
+   left in this table — is what separates head from body.
+
+   Sticky is KEPT. It is genuinely load-bearing on a 200-row audit list, and it
+   is the one place a fixed position earns its complexity. --z-sticky rather
+   than a bare literal so it sits in the same stacking order as the rest of the
+   console's pinned chrome; without a z-index, a cell with its own stacking
+   context (a badge with a translucent fill) paints over the scrolled-under
+   header. The background is explicit and OPAQUE for the same reason: a sticky
+   header with a transparent ground shows the rows sliding beneath it. */
 th {
-  text-align: left; padding: 7px 10px; color: var(--fg-muted);
-  font-weight: var(--weight-bold); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.4px;
-  border-bottom: 1px solid var(--border); background: var(--bg-inset);
-  white-space: nowrap; position: sticky; top: 0;
+  text-align: left;
+  padding: var(--space-4) var(--space-5);
+  color: var(--fg-muted);
+  font-weight: var(--weight-bold);
+  font-size: var(--text-xs);
+  letter-spacing: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
 }
-td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
-tbody tr:hover { background: var(--bg-hover); }
+
+/* THE ROW.
+
+   Vertical padding moved 7px → --space-4 (8px) and horizontal 10px → --space-5
+   (12px), which is both on-scale and slightly roomier. The vertical step is one
+   pixel: this is a DENSE OPERATOR CONSOLE and the premise of the whole layout is
+   fitting a run's history on one screen during an incident, so a "modern"
+   redesign that doubled the padding would have halved the rows visible at
+   exactly the moment they matter most. The horizontal step is larger because
+   that is where the crowding actually was — six monospace columns hard against
+   each other, where the extra 2px per side costs no rows at all.
+
+   vertical-align: middle, not the top that was here. Top alignment is correct
+   only when a multi-line cell sits beside single-line ones, which is the
+   exception; in the common all-single-line row it pushed every value a pixel or
+   two above the optical centre of a row whose height is set by the badge in its
+   first cell. The tables that genuinely stack two lines per cell (.table-fleet)
+   restate `top` for themselves further down, where that decision is local and
+   visible. */
+td {
+  padding: var(--space-4) var(--space-5);
+  vertical-align: middle;
+}
+
+/* ROW SEPARATION: hover and a hairline under the HEAD only — no per-row rule.
+
+   The per-row `border-bottom` that was here is the single thing that made this
+   console look like a 2009 admin panel. A rule under every row draws a grid,
+   and a grid asks the eye to read cells; a table of runs is read by scanning
+   DOWN one column, and the horizontal lines cut across exactly that motion.
+   Rows are separated instead by the alignment of their own content plus the
+   whitespace the padding above provides, which is how every modern data table
+   does it, and the reason it works is that a row IS visually bounded — by the
+   left edge of its first cell and the baseline of its text.
+
+   WHY NOT ZEBRA. Considered and rejected on a specific interaction rather than
+   on taste: .table-runs and .table-fleet mark failed, blocked and warning rows
+   with a tone-coloured left rule, and several cells carry translucent tone
+   fills (.badge, the progress bars). A banded ground puts every one of those
+   against two different backgrounds depending on row parity, so a state tint
+   reads as two different tints down one column — the exact "paint chart" the
+   palette comment at the top of this file says translucent fills exist to
+   avoid. Zebra also spends the table's one remaining luminance channel on
+   something that carries NO information (row parity), when hover and the state
+   rules both need it.
+
+   WHY HOVER ALONE IS NOT ENOUGH, AND WHAT FILLS THE GAP. The hover fill is
+   capped by contrast, not by taste: --fg-muted carries real values in these
+   cells (timestamps, queue names) and must clear 4.5:1 on whatever ground it
+   lands on. Measured with lib/contrast.ts, a white-tint fill at 7% over
+   --bg-raised leaves --fg-muted at 4.90:1 in dark and 5.03:1 in light — safe —
+   while 9% drops dark to 4.60:1 and 12% to 4.16:1, an outright AA failure. So
+   7% is the ceiling, and 7% is only 1.21:1 against the row ground: perceptible,
+   but not on its own a strong enough "this row" during a 3am incident.
+
+   The rest of the signal therefore comes from GEOMETRY rather than luminance: a
+   hovered row also takes a left rule. That reuses the border-left channel the
+   state marks already occupy, which is deliberate — a hovered row and a failed
+   row speak in the same grammar, and the state colour always WINS the channel
+   because those rules are declared after this one. */
+tbody tr {
+  /* Declared on every row, transparent by default, so hovering or focusing
+     cannot change a row's width and shunt the whole table sideways. The state
+     marks in .table-runs/.table-fleet override only the COLOUR of this rule. */
+  border-left: var(--space-1) solid transparent;
+  /* Colour only. A transition on the fill makes a mouse dragged down a long
+     list read as one moving highlight rather than as a strobe; it is suppressed
+     wholesale by the prefers-reduced-motion block above. */
+  transition: background-color 0.08s ease-out;
+}
+tbody tr:hover {
+  /* 7% is the contrast ceiling derived above, expressed against both grounds:
+     a white tint lifts the dark theme, an ink tint deepens the light one. The
+     token is re-declared per theme rather than one rgba() being expected to
+     work on both, because a white veil over #f6f8fa is invisible. */
+  background: var(--table-row-hover);
+  border-left-color: var(--border-strong);
+}
+
+/* THE FOCUS STATE, which the old table had no answer for at all.
+
+   Rows here are keyboard-reachable: nearly every one holds a link to the entity
+   it names, and an operator tabbing a run list needs to know WHICH ROW they are
+   on, not merely which word. :focus-within is what makes that expressible — the
+   ring belongs to the link (the global :focus-visible rule draws it), and this
+   rule lights the row CONTAINING the focused thing so the two read as one
+   target.
+
+   It is deliberately STRONGER than hover rather than equal to it. A mouse
+   hover is ambient and follows the pointer; focus is a position the operator
+   navigated to deliberately and may be several keystrokes from where they were
+   looking. The left rule takes --focus — the one place in this table the
+   accent-derived token is correct, because a focus ring is CHROME, not state:
+   it says "the keyboard is here", which no theme swap can make mean something
+   else. Measured: --focus over the hovered ground is 7.16:1 in dark and 5.17:1
+   in light, both far past the 3:1 bar non-text UI has to clear. */
+tbody tr:focus-within {
+  background: var(--table-row-hover);
+  border-left-color: var(--focus);
+}
+
+/* The last row's rule is gone with every other row's, so what closed the table
+   before is now the panel's own border. Kept as an explicit reset because
+   .panel-body.tight puts a table straight against the panel edge and a stray
+   rule there would read as a second border. */
 tbody tr:last-child td { border-bottom: none; }
+
+/* Numeric columns keep tabular figures so digits align down the column, which
+   is the entire reason to right-align them in the first place. Restated
+   verbatim from before: this rule is load-bearing and must survive a
+   redesign. */
 td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); }
+
+/* Wide tables scroll horizontally rather than squeezing a ten-column run list
+   into a phone. The sticky header survives that scroll only because the
+   scroller is a plain overflow box with NO height cap: `position: sticky` on a
+   <th> resolves against the nearest scrolling ancestor, so giving this element
+   a max-height would pin the header to this box's top edge — correct — while
+   adding `overflow-y` anything-but-visible to an ancestor silently re-parents
+   it. Horizontal scrolling does not disturb it: the header scrolls sideways
+   WITH its columns, which is what keeps a label above the column it names. */
 .table-scroll { overflow-x: auto; }
 
 /* ── State badge ───────────────────────────────────────────────────────── */
@@ -2213,44 +2372,68 @@ tr.version-current > td { background: var(--bg-hover); }
 .panel-notice { padding: var(--space-5) var(--space-6) var(--space-0); }
 
 /* ── Table density ───────────────────────────────────────────────────────── */
-/* Operator tables are dense by necessity, but the base 7px/10px cell padding
-   put six columns of monospace hard against each other. These two classes
-   loosen the rhythm to the scale without touching the global table rule, which
-   other screens are tuned against.
+/* THE PADDING RESTATEMENTS THAT USED TO LIVE HERE ARE GONE.
 
-   `runs` also unpins the header row: a sticky header inside a panel that is
-   itself inside a scrolling page sticks to the wrong thing, leaving the labels
-   floating over the rows they name. */
-.table-runs th,
-.table-fleet th {
-  padding: var(--space-4) var(--space-5);
-  position: static;
-}
-.table-runs td,
-.table-fleet td {
-  padding: var(--space-5);
-  vertical-align: middle;
-}
+   These two classes existed to loosen "the base 7px/10px cell padding" that
+   "put six columns of monospace hard against each other". The base is no longer
+   7px/10px — it is --space-4/--space-5, the value this block was overriding TO
+   — so the override had become a restatement of its own target: two rules that
+   have to be edited together to stay identical, which is the shape of a rule
+   that drifts. The global table block now carries the density decision for
+   every table in the console, and a per-table exception has to justify itself
+   as an exception. The two below do.
+
+   `runs` and `fleet` also no longer unpin the header. That `position: static`
+   was there because a sticky header "inside a panel that is itself inside a
+   scrolling page sticks to the wrong thing" — which is a statement about a
+   scrolling ancestor that no longer exists: .table-scroll is the scroller and
+   it caps no height, so the header pins to the viewport top exactly as the
+   audit and catalog lists already relied on. Unpinning these two was the
+   inconsistency, not the fix. */
+
 /* The fleet row stacks two or three lines per cell, so it keeps top alignment:
-   centred, a one-line cell would float against a three-line neighbour. */
+   centred, a one-line cell would float against a three-line neighbour. This is
+   the exception the global `vertical-align: middle` is stated as a default
+   FOR — it is local, visible, and attached to the table that needs it. */
 .table-fleet td { vertical-align: top; }
 
-/* A row is a click target for the run it names, so the whole row lights up and
-   the hairline between rows is what separates them -- no zebra, which on a
-   dense table competes with the state tint it sits next to. */
-.table-runs tbody tr,
-.table-fleet tbody tr {
-  border-left: var(--space-1) solid transparent;
-}
+/* ── The state marks ─────────────────────────────────────────────────────── */
+/* A left rule in the danger/blocked/warning tone on any row whose run or worker
+   is in trouble. Redundant with the badge already in the row's first cell --
+   the point is that a screenful of runs can be triaged by EDGE COLOUR ALONE,
+   without reading a single label.
 
-/* The failure marker: a left rule in the danger tone on any row whose run or
-   worker is in trouble. Redundant with the badge that is already in the row's
-   first cell -- the point is that a screenful of runs can be triaged by edge
-   colour alone, without reading a single label. */
+   THIS IS MEANING-BEARING COLOUR AND IT OUTRANKS EVERY PRESENTATION STATE.
+   The row redesign above put hover and focus into the same border-left channel
+   these marks use, which is deliberate rather than a collision: one row can
+   only be hovered at a time, whereas a screenful can be failed, so the channel
+   is worth more to the state than to the pointer. Source order is what enforces
+   it -- these rules are declared after the tbody ones, at equal specificity for
+   hover and HIGHER for focus-within, so a failed row that happens to be under
+   the mouse still reads as failed. The hover FILL still lands, so the row does
+   not stop responding; it is only the colour of the rule that the state keeps.
+
+   The transparent default declaration these rows used to carry has moved to the
+   global `tbody tr` rule, so every table in the console reserves the same 2px
+   gutter and no row shifts sideways when it gains a mark. */
 .table-runs tbody tr.row-failed,
-.table-fleet tbody tr.row-failed { border-left-color: var(--tone-danger-bd); }
-.table-runs tbody tr.row-blocked { border-left-color: var(--tone-blocked-bd); }
-.table-fleet tbody tr.row-warning { border-left-color: var(--tone-warning-bd); }
+.table-fleet tbody tr.row-failed,
+.table-runs tbody tr.row-failed:hover,
+.table-fleet tbody tr.row-failed:hover { border-left-color: var(--tone-danger-bd); }
+.table-runs tbody tr.row-blocked,
+.table-runs tbody tr.row-blocked:hover { border-left-color: var(--tone-blocked-bd); }
+.table-fleet tbody tr.row-warning,
+.table-fleet tbody tr.row-warning:hover { border-left-color: var(--tone-warning-bd); }
+
+/* Focus is the ONE thing that takes the channel back from the state, and only
+   while the keyboard is actually in the row. A keyboard operator who cannot
+   tell which row they are on has lost their place entirely, which is a worse
+   failure than briefly not seeing a mark they can still read from the badge in
+   the same row. It reverts the moment focus leaves. */
+.table-runs tbody tr.row-failed:focus-within,
+.table-fleet tbody tr.row-failed:focus-within,
+.table-runs tbody tr.row-blocked:focus-within,
+.table-fleet tbody tr.row-warning:focus-within { border-left-color: var(--focus); }
 
 /* The spec cell: name on top, version beneath. Two lines rather than one
    concatenated string, because the name is what you scan for and the version is
@@ -3442,10 +3625,24 @@ a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
 
 /* The toolbar band. Sibling of .filterbar and deliberately the same surface and
    inset: a page that puts its own filters in a .filterbar and its search here
-   must not show two differently-shaded bands stacked on each other. */
+   must not show two differently-shaded bands stacked on each other.
+
+   ONE CONTROL STRIP, NOT FOUR WIDGETS. What was here was a flex row with a
+   margin-auto spacer, which is a layout and not a grouping: the search box, the
+   scope note and the count chip all sat at the same level, so the note that
+   QUALIFIES the search read as a peer of it and the eye had no way to tell
+   which of the three belonged together. The fix is grouping, not decoration —
+   the search field and its scope note are now one stacked unit (.dt-search-group
+   below) and the count sits alone against the far edge, so the strip reads as
+   "controls | …gap… | what they produced".
+
+   align-items moved flex-end → center. The band no longer holds controls of
+   different heights that need a shared baseline; it holds one stacked group and
+   one chip, and centring is what keeps the chip optically level with the input
+   rather than hanging off its bottom edge. */
 .dt-toolbar {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: var(--space-6);
   padding: var(--space-5) var(--space-6);
   border-bottom: 1px solid var(--border);
@@ -3453,6 +3650,17 @@ a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
   flex-wrap: wrap;
 }
 .dt-toolbar .spacer { margin-left: auto; }
+
+/* The search field and the sentence saying where it searched, as one unit.
+   Stacked for the same reason .filter-field stacks its own label: side by side,
+   a wrapping band splits the qualifier away from the thing it qualifies and
+   leaves an orphaned clause under an unrelated control. */
+.dt-search-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
 
 /* Reuses .filter-field for the label-over-control stack, so the search box in a
    DataTable and the one in the run list's filter bar are the same control. Only
@@ -3462,11 +3670,14 @@ a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
 /* "searched on the server" / "filters the loaded rows only".
    The one thing an operator cannot see and that changes what the result means,
    so it is on screen rather than in a tooltip. Quiet: it qualifies the field
-   above it, it is not a warning about it. */
+   above it, it is not a warning about it. It is inside the group now, so it no
+   longer needs the nowrap that was keeping it off its own line -- and dropping
+   it lets the sentence wrap on a narrow viewport instead of widening the
+   band. */
 .dt-scope {
   font-size: var(--text-xs);
   color: var(--fg-faint);
-  white-space: nowrap;
+  line-height: var(--leading-tight);
 }
 
 /* Tabular so a poll changing 97 to 103 does not shift the chip's neighbours. */
@@ -3476,9 +3687,12 @@ a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
 
    A real button filling the <th>, so the whole header cell is the target rather
    than just the word -- a 6-character header like "cron" is otherwise a tiny hit
-   area in a wide column. It inherits the <th>'s own type treatment (uppercase,
-   tracked, muted) instead of restating it, which is what keeps a sortable header
-   and a plain one looking like the same row. */
+   area in a wide column. It inherits the <th>'s own type treatment (weight,
+   size, muted colour) instead of restating it, which is what keeps a sortable
+   header and a plain one looking like the same row. The text-transform and
+   letter-spacing inheritances stay even though the header no longer uppercases
+   or tracks: they cost nothing, and they are what would carry a per-table
+   exception if one ever restated either. */
 .dt-sort {
   display: inline-flex;
   align-items: center;
@@ -3498,10 +3712,16 @@ a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
 /* The focus ring is the console's shared one. --focus IS derived from the
    accent, which is correct here and only here: a focus ring is chrome, not
    state -- it says "the keyboard is on this", which no theme change can make
-   mean something else. */
+   mean something else.
+
+   outline-offset is NEGATIVE, unlike the global rule's +1px. A <th> is clipped
+   by the table's own edge and by .table-scroll, so an outward ring on the first
+   or last column is drawn half outside the scroller and loses its outer edge.
+   Pulling it inside the cell keeps all four sides of the ring on screen, which
+   is the entire point of a ring. */
 .dt-sort:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 1px;
+  outline: var(--focus-ring) solid var(--focus);
+  outline-offset: -2px;
   border-radius: var(--radius-sm);
 }
 /* Dimmed on the columns that are sortable but not sorted: the affordance has to
@@ -3512,17 +3732,32 @@ th[aria-sort='ascending'] .dt-sort-glyph,
 th[aria-sort='descending'] .dt-sort-glyph { color: var(--fg); }
 /* The sorted column's header is weighted, not tinted. Weight reads at a glance
    in both themes and cannot be confused with the tone palette the cells below
-   are using for state. */
+   are using for state.
+
+   The header no longer uppercases, which REMOVED a device this state was
+   competing with and left room for a second one: the sorted column now also
+   takes a heavier rule beneath it, so the eye can find which column is ordered
+   without reading the arrows. Structure, not colour -- it survives a theme swap
+   and it is invisible to nobody. */
 th[aria-sort='ascending'],
-th[aria-sort='descending'] { color: var(--fg); }
+th[aria-sort='descending'] {
+  color: var(--fg);
+  border-bottom-color: var(--border-strong);
+}
 
 /* Right-aligned numeric columns, header and cell together so the digits line up
    under their own label. */
 .dt-end { text-align: right; }
 td.dt-end { font-variant-numeric: tabular-nums; }
+/* The sort button fills its <th>, so right-aligning the CELL is not enough --
+   the button is the box the label actually sits in, and without this the label
+   of a numeric column hangs at the left of a right-aligned header. */
+th.dt-end .dt-sort { justify-content: flex-end; }
 
 /* The pager. Below the rows, inside the panel, on the inset ground so it reads
-   as a footer to the table rather than as another row of it. */
+   as a footer to the table rather than as another row of it. Same padding and
+   ground as .dt-toolbar, so the table sits between two matching rails rather
+   than between a band and a strip. */
 .dt-pager {
   display: flex;
   align-items: center;
@@ -3533,6 +3768,9 @@ td.dt-end { font-variant-numeric: tabular-nums; }
   flex-wrap: wrap;
 }
 .dt-pager .spacer { margin-left: auto; }
+/* Beside its control rather than above it, unlike .filter-field: "rows 25" is
+   two words that read as one phrase, and stacking a one-word label over a
+   90px select wastes a whole line of the footer to say nothing. */
 .dt-pagesize {
   display: flex;
   align-items: center;
@@ -3548,16 +3786,24 @@ td.dt-end { font-variant-numeric: tabular-nums; }
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* Previous / position / Next as ONE segmented group rather than three loose
+   items. The position sits between the two buttons it moves between, and the
+   gap is tightened to --space-3 so the trio binds visually: at --space-4 the
+   page label floated equidistant between the buttons and the range label to its
+   left, and read as belonging to neither. */
 .dt-pager-buttons {
   display: flex;
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-3);
 }
 .dt-page-of {
   font-size: var(--text-xs);
   color: var(--fg-muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  /* Its own inset, so the label does not collide with the two buttons it sits
+     between once their gap tightened. */
+  padding: var(--space-0) var(--space-2);
 }
 
 /* Phone width. The same 560px the shell uses. The toolbar and the pager both
@@ -3567,6 +3813,7 @@ td.dt-end { font-variant-numeric: tabular-nums; }
 @media (max-width: 560px) {
   .dt-toolbar,
   .dt-pager { gap: var(--space-4); padding: var(--space-5); }
+  .dt-search-group { width: 100%; }
   .dt-search { width: 100%; }
   .dt-search input[type='search'] { max-width: none; }
   .dt-toolbar .spacer,

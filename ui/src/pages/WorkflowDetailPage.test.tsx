@@ -299,6 +299,49 @@ describe('the dependency graph', () => {
     expect(within(panel).getByText('ingest')).toBeInTheDocument();
     expect(within(panel).getByText('publish')).toBeInTheDocument();
   });
+
+  /**
+   * The tasks table selects through a real <button> in its first cell.
+   *
+   * It used to select through an onClick on the <tr>, which worked with a mouse
+   * and with nothing else: no keyboard route, no announced state, and no hint
+   * that the row did anything. Moving to the shared table forced the question
+   * and the answer is the one the fleet table already reached — the control is
+   * an element, not the row. So what is pinned is that the control IS focusable
+   * and DOES report its own selected state.
+   */
+  it('selects a task from the table with a keyboard-reachable control', async () => {
+    healthy();
+    wrap(<WorkflowDetailPage namespace="default" />);
+
+    const cell = within(await tasksTable()).getByRole('button', { name: 'train' });
+    expect(cell).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(cell);
+
+    const panel = (await screen.findByText('dependencies')).closest('.panel-body') as HTMLElement;
+    expect(within(panel).getByText('ingest')).toBeInTheDocument();
+    // The selection is announced, not merely coloured.
+    expect(within(await tasksTable()).getByRole('button', { name: 'train' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('clears the selection when the same task is chosen again', async () => {
+    healthy();
+    wrap(<WorkflowDetailPage namespace="default" />);
+
+    const task = async () => within(await tasksTable()).getByRole('button', { name: 'train' });
+    fireEvent.click(await task());
+    await screen.findByText('dependencies');
+
+    fireEvent.click(await task());
+    await waitFor(() => {
+      expect(screen.queryByText('dependencies')).not.toBeInTheDocument();
+    });
+    expect(await task()).toHaveAttribute('aria-pressed', 'false');
+  });
 });
 
 describe('parameterised run submission', () => {

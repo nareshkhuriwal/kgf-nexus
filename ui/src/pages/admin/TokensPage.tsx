@@ -17,7 +17,7 @@
  * not be.
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { authApi, type ScopedToken } from '../../api/auth';
 import { errorMessage, shouldRetry } from '../../api/hooks';
@@ -27,6 +27,7 @@ import type { Column, RowCountKind } from '../../components/DataTable';
 import { fmtAge, fmtTs } from '../../lib/format';
 import { PageHeader } from '../../components/PageHeader';
 import { Forbidden } from '../../components/Forbidden';
+import { BulkActionBar } from '../../components/BulkActionBar';
 
 /**
  * /tokens takes no `limit`, so the listing is every credential in the namespace
@@ -50,6 +51,20 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
   const [creating, setCreating] = useState(false);
   const [issued, setIssued] = useState<ScopedToken | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  /**
+   * Selection lives HERE, not in DataTable.
+   *
+   * DataTable has no selection support yet and is being restyled in parallel, so
+   * adding it there would be a conflict on the component every list depends on.
+   * The checkbox is therefore an ordinary column this page owns, and the exact
+   * props DataTable should grow are written up in the handoff — at which point
+   * this block collapses into `selection={{ selected, onChange, rowId }}` and the
+   * column below goes away.
+   *
+   * Held as a Set of ids rather than of rows, so a poll that replaces the row
+   * objects does not silently empty the selection.
+   */
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
 
   const tokens = useQuery({
     queryKey: ['tokens', namespace],
@@ -74,7 +89,72 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
    * `revoke.isPending`, and a stale memo would leave it clickable during a
    * request already in flight.
    */
+  const list = tokens.data ?? [];
+
+  /**
+   * Only LIVE credentials are selectable. A revoked token cannot be revoked
+   * again, so including it would let the operator build a selection whose count
+   * over-promises what the action will achieve — and then report failures for
+   * rows that were never actionable. Same honesty rule the count claims follow.
+   */
+  const revocable = useMemo(() => list.filter((t) => t.revoked_at === null), [list]);
+  const selectedTokens = useMemo(
+    () => revocable.filter((t) => selected.has(t.id)),
+    [revocable, selected],
+  );
+
+  /**
+   * Select-all covers the rows the CLIENT ACTUALLY HAS, and /tokens is
+   * uncapped, so here that genuinely is every credential in the namespace —
+   * which is why this table can offer it plainly. On a capped list it would have
+   * to say "all N loaded"; see the handoff for why that distinction is not
+   * optional.
+   */
+  const allSelected = revocable.length > 0 && selected.size === revocable.length;
+  const someSelected = selected.size > 0 && !allSelected;
+
+  function toggleAll() {
+    setSelected(allSelected ? new Set() : new Set(revocable.map((t) => t.id)));
+  }
+
+  function toggleOne(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
   const columns: Column<ScopedToken>[] = [
+    {
+      key: 'select',
+      /*
+        Blank, and the select-all control lives in the TOOLBAR instead.
+
+        Column.header is typed `string`, so the header cell cannot hold a
+        checkbox without changing DataTable — which this task deliberately does
+        not touch. The toolbar slot is a caller-owned region and takes arbitrary
+        nodes, so the control goes there and keeps its indeterminate state. When
+        DataTable grows the selection prop described in the handoff, the checkbox
+        moves back into the header where it belongs and this column disappears.
+      */
+      header: '',
+      cell: (t) =>
+        t.revoked_at ? (
+          // Not rendered at all rather than rendered disabled: a disabled
+          // checkbox invites the operator to work out why, and the status column
+          // beside it already says "revoked".
+          <span className="faint" aria-hidden="true" />
+        ) : (
+          <input
+            type="checkbox"
+            checked={selected.has(t.id)}
+            onChange={() => toggleOne(t.id)}
+            aria-label={`Select ${t.name}`}
+          />
+        ),
+    },
     {
       key: 'name',
       header: 'name',
@@ -282,9 +362,69 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
           emptyTitle="No scoped tokens"
           emptyDetail="Integrations here still use static API keys, which never expire and carry their role's full authority. A scoped token is the narrower alternative."
         >
-          {(list) => (
-            <DataTable
-              rows={list}
+          {(rows) => (
+            <>
+              {/*
+                REVOKE, not delete. The store has no delete for a token and must
+                not: the row is the audit evidence that the credential existed
+                and when it was last used, and destroying it would erase the
+                trail at the moment it matters. Revocation stops the credential
+                working immediately and permanently, which is the operator's
+                actual intent.
+              */}
+              <BulkActionBar<ScopedToken>
+                selected={selectedTokens}
+                rowId={(t) => t.id}
+                rowLabel={(t) => t.name}
+                noun={['token', 'tokens']}
+                actions={[
+                  {
+                    verb: 'Revoke',
+                    destructive: true,
+                    consequence:
+                      'Each credential stops working immediately and cannot be restored. Anything still using one will start failing to authenticate.',
+                    run: (t) => authApi.revokeToken(namespace, t.id),
+                  },
+                ]}
+                onClear={() => setSelected(new Set())}
+                onDone={() => {
+                  void qc.invalidateQueries({ queryKey: ['tokens', namespace] });
+                  void qc.invalidateQueries({ queryKey: ['audit', namespace] });
+                }}
+              />
+              <DataTable
+                /*
+                  The select-all control, with its INDETERMINATE state. Merely
+                  unchecked when some rows are selected would claim "nothing is
+                  selected" while the bar above says otherwise, and the operator
+                  would have to choose which control to believe.
+
+                  It says "all live tokens" and means it: /tokens is uncapped, so
+                  the client holds every credential in the namespace and the
+                  claim is true. On a capped list it would have to say "all N
+                  loaded" — selecting rows the client never received is the same
+                  dishonesty the count claims avoid.
+                */
+                toolbar={
+                  <label className="form-check">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      ref={(el) => {
+                        if (el) el.indeterminate = someSelected;
+                      }}
+                      onChange={toggleAll}
+                      disabled={revocable.length === 0}
+                      aria-label={
+                        allSelected ? 'Clear selection' : 'Select all live tokens'
+                      }
+                    />
+                    <span className="faint">
+                      select all {revocable.length} live
+                    </span>
+                  </label>
+                }
+                rows={rows}
               columns={columns}
               rowKey={(t) => t.id}
               noun="tokens"
@@ -295,8 +435,9 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
                  make an operator believe they had seen every token carrying a
                  scope when they had only seen the ones whose name mentioned
                  it. */
-              search={{ mode: 'client', fields: (t) => [t.name, t.role] }}
-            />
+                search={{ mode: 'client', fields: (t) => [t.name, t.role] }}
+              />
+            </>
           )}
         </AsyncPanel>
       </div>

@@ -25,10 +25,13 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useSpecDefinition, useSpecVersions } from '../api/hooks';
 import type { SpecDefinition, SpecTask, SpecVersion } from '../api/types';
 import { AsyncPanel, Empty, ErrorBox, Loading } from '../components/Status';
+import { DataTable } from '../components/DataTable';
+import type { Column, RowCountKind } from '../components/DataTable';
 import { PageHeader } from '../components/PageHeader';
 import { SpecDagView } from '../components/SpecDagView';
 import { SubmitRunForm } from './SubmitRunForm';
 import { buildSpecGraph, specQueues, summarizeSpecGraph } from '../lib/specgraph';
+import type { SpecGraph } from '../lib/specgraph';
 import { EMPTY, fmtAge, fmtDurationMs, fmtResources, fmtTs, shortId } from '../lib/format';
 
 export function WorkflowDetailPage({ namespace }: { namespace: string }) {
@@ -244,45 +247,15 @@ function DefinitionPanels({
       <div className="panel">
         <div className="panel-head">
           <span>tasks</span>
-          <span className="spacer" />
-          <span className="chip">{graph.nodes.length}</span>
         </div>
         {graph.nodes.length === 0 ? (
           <Empty title="This definition declares no tasks" />
         ) : (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">task</th>
-                  <th scope="col">task ref</th>
-                  <th scope="col">trigger rule</th>
-                  <th scope="col">queue</th>
-                  <th scope="col">requests</th>
-                  <th scope="col">retry</th>
-                </tr>
-              </thead>
-              <tbody>
-                {graph.nodes.map((n) => (
-                  <tr
-                    key={n.id}
-                    className="clickable"
-                    onClick={() => onSelectTask(n.id === selectedTaskId ? null : n.id)}
-                  >
-                    <td className="mono">{n.id}</td>
-                    <td className="mono">{n.task.task_ref || EMPTY}</td>
-                    {/* The trigger rule decides whether a task runs when a
-                        parent fails, so an unset one is worth showing as unset
-                        rather than as the engine's default. */}
-                    <td className="mono">{n.task.trigger_rule || <span className="faint">unset</span>}</td>
-                    <td className="mono">{n.task.queue || <span className="faint">unset</span>}</td>
-                    <td className="mono faint">{fmtResources(n.task.resources?.request)}</td>
-                    <td className="mono faint">{retrySummary(n.task)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <TaskTable
+            nodes={graph.nodes}
+            selectedTaskId={selectedTaskId}
+            onSelectTask={onSelectTask}
+          />
         )}
       </div>
 
@@ -444,57 +417,251 @@ function VersionPanel({
         loadingRows={3}
       >
         {(rows) => (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">version</th>
-                  <th scope="col">submitted</th>
-                  <th scope="col">author</th>
-                  <th scope="col">hash</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((v) => (
-                  <tr
-                    key={v.id}
-                    className={`clickable${v.id === selectedId ? ' version-current' : ''}`}
-                    onClick={() => onSelect(v.id)}
-                  >
-                    <td>
-                      <div className="cell-actions">
-                        {/* A real link, not just a row handler: the version an
-                            operator is reading has to be shareable. */}
-                        <Link
-                          to={`/workflows/${encodeURIComponent(name)}?spec=${encodeURIComponent(v.id)}`}
-                          className="mono"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          v{v.version}
-                        </Link>
-                        {v.id === latestId && (
-                          // Success-toned because "this is the one that runs" is
-                          // the closest thing a definition has to a live state.
-                          <span className="badge tone-success">latest</span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="nowrap faint" title={fmtTs(v.created_at)}>
-                      {fmtAge(v.created_at, now)}
-                    </td>
-                    <td className="mono faint truncate">{v.created_by}</td>
-                    <td className="mono faint" title={v.spec_hash}>
-                      {shortId(v.spec_hash, 8)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            rows={rows}
+            columns={versionColumns({ name, latestId, now, onSelect })}
+            rowKey={(v) => v.id}
+            /* The selected version is marked on the row, which is what the
+               `version-current` rule has always coloured. It is a SELECTION,
+               not a state, so it takes no tone from the state palette. No
+               `clickable`: the link in the first cell is the control now, and a
+               pointer cursor over the whole row would advertise an affordance
+               the row no longer has. */
+            rowClass={(v) => (v.id === selectedId ? 'version-current' : '')}
+            noun="versions"
+            count={VERSIONS_COUNT}
+            /* A workflow's history is short — one row per resubmit of changed
+               bytes — and it is read as a sequence, newest first, which paging
+               would cut in the middle of. No search either: the column that
+               would be searched is a version number already in view. */
+            paging={{ mode: 'none' }}
+          />
         )}
       </AsyncPanel>
     </div>
   );
+}
+
+/**
+ * THE TASK TABLE IS EXACT, AND IT IS THE ONLY TABLE IN THIS CONSOLE THAT IS
+ * EXACT FOR A REASON THAT HAS NOTHING TO DO WITH AN ENDPOINT.
+ *
+ * Every other count on these screens is a statement about a fetch — how many
+ * rows a capped request returned, how many a page holds. This one is not a
+ * fetch at all: the tasks are read out of the spec DOCUMENT already in hand,
+ * and that document is immutable and content-addressed. A definition declaring
+ * nine tasks declares nine tasks, permanently; there is no cap that could have
+ * truncated it and no later page that could hold a tenth. "9 tasks" is as close
+ * to a fact as anything in this UI gets.
+ */
+const TASKS_COUNT: RowCountKind = { kind: 'exact' };
+
+/**
+ * MUST MATCH api/client.ts listSpecVersions' default `limit` of 100.
+ *
+ * Capped rather than exact because the console sets that limit, so a full
+ * response is indistinguishable from a workflow with exactly 100 versions. In
+ * practice every workflow is far under it — a version exists only per resubmit
+ * of changed bytes — so the count reads exactly and the cap never binds, which
+ * is `countClaim`'s second half doing the work that stops a permanent "+".
+ */
+const VERSIONS_COUNT: RowCountKind = { kind: 'capped', limit: 100 };
+
+/**
+ * The tasks a definition declares.
+ *
+ * ── WHY THIS ONE GETS A DataTable AND KEEPS ALMOST NONE OF ITS CONTROLS ───
+ *
+ * It is an embedded list read alongside the diagram beside it, so `paging` is
+ * `none` and there is no `search`: a spec's task count is bounded by what a
+ * human wrote, the whole set is meant to be read at once against the graph, and
+ * paging it would put a task on page 2 while its box sits on screen in the
+ * diagram. What DataTable is here FOR is the other half — sortable headers with
+ * real `<th scope="col">` semantics, and a count that is entitled to its claim.
+ *
+ * Sorting IS offered here, unlike on the fleet or the run list, and the
+ * difference is that this list is COMPLETE. Sorting a complete set by queue
+ * answers "what runs on gpu" truthfully; sorting a page of an unknown number of
+ * runs by duration answers nothing. The default is left unset so the rows keep
+ * the graph's own topological order — the order in which the tasks actually
+ * run, which is the one order the diagram and the table must agree on.
+ */
+function TaskTable({
+  nodes,
+  selectedTaskId,
+  onSelectTask,
+}: {
+  nodes: SpecGraph['nodes'];
+  selectedTaskId: string | null;
+  onSelectTask: (id: string | null) => void;
+}) {
+  type Node = SpecGraph['nodes'][number];
+
+  const columns: Column<Node>[] = [
+    {
+      key: 'task',
+      header: 'task',
+      cellClass: 'mono',
+      sort: (a, b) => a.id.localeCompare(b.id),
+      /* THE SELECTION IS A REAL <button>, NOT AN onClick ON THE ROW.
+         It used to be the latter, and the move to a shared table is what forced
+         the question — DataTable has no row-click prop, deliberately, for the
+         same reason the fleet table links from a cell rather than a row: a
+         click handler on a <tr> is unreachable by keyboard, announces nothing,
+         and gives no hint that the row does anything at all. A button is
+         tab-reachable, activates on Enter and Space for free, and takes the
+         focus ring the rest of the console uses. aria-pressed carries the
+         selected state to a screen reader, which the `version-current` rule
+         only ever carried visually. */
+      cell: (n) => (
+        <button
+          type="button"
+          className="link mono"
+          aria-pressed={n.id === selectedTaskId}
+          onClick={() => onSelectTask(n.id === selectedTaskId ? null : n.id)}
+          title={
+            n.id === selectedTaskId
+              ? 'Clear this selection'
+              : `Show ${n.id} in the graph above and open its detail`
+          }
+        >
+          {n.id}
+        </button>
+      ),
+    },
+    {
+      key: 'task_ref',
+      header: 'task ref',
+      cellClass: 'mono',
+      sort: (a, b) => (a.task.task_ref || '').localeCompare(b.task.task_ref || ''),
+      cell: (n) => <>{n.task.task_ref || EMPTY}</>,
+    },
+    {
+      key: 'trigger_rule',
+      header: 'trigger rule',
+      cellClass: 'mono',
+      /* The trigger rule decides whether a task runs when a parent fails, so an
+         unset one is worth showing as unset rather than as the engine's
+         default. */
+      cell: (n) => n.task.trigger_rule || <span className="faint">unset</span>,
+    },
+    {
+      key: 'queue',
+      header: 'queue',
+      cellClass: 'mono',
+      /* Sortable because "which tasks land on the gpu queue" is a real question
+         about a definition, and this list is complete enough to answer it. */
+      sort: (a, b) => (a.task.queue || '').localeCompare(b.task.queue || ''),
+      cell: (n) => n.task.queue || <span className="faint">unset</span>,
+    },
+    {
+      key: 'requests',
+      header: 'requests',
+      cellClass: 'mono faint',
+      cell: (n) => <>{fmtResources(n.task.resources?.request)}</>,
+    },
+    {
+      key: 'retry',
+      header: 'retry',
+      cellClass: 'mono faint',
+      cell: (n) => <>{retrySummary(n.task)}</>,
+    },
+  ];
+
+  return (
+    <DataTable
+      rows={nodes}
+      columns={columns}
+      rowKey={(n) => n.id}
+      /* No `clickable` any more: the ROW is not the control, the button in its
+         first cell is, and a pointer cursor over the whole row would advertise
+         an affordance that no longer exists. The selected row still takes
+         `version-current`, which is a selection marker rather than a state tone
+         and borrows nothing from the state palette. */
+      rowClass={(n) => (n.id === selectedTaskId ? 'version-current' : '')}
+      noun="tasks"
+      count={TASKS_COUNT}
+      paging={{ mode: 'none' }}
+    />
+  );
+}
+
+/**
+ * The version history columns.
+ *
+ * A function rather than a constant because the "latest" badge and the relative
+ * ages both close over values that change — `latestId` arrives with the
+ * response, `now` is captured per render — and a hoisted array would freeze
+ * both. Same reason the fleet rebuilds its own.
+ */
+function versionColumns({
+  name,
+  latestId,
+  now,
+  onSelect,
+}: {
+  name: string;
+  latestId: string | undefined;
+  now: number;
+  onSelect: (id: string) => void;
+}): Column<SpecVersion>[] {
+  return [
+    {
+      key: 'version',
+      header: 'version',
+      sort: (a, b) => a.version - b.version,
+      cell: (v) => (
+        <div className="cell-actions">
+          {/* A real link, not just a row handler: the version an operator is
+              reading has to be shareable. */}
+          {/* THE LINK IS THE SELECTOR, and it is now the ONLY selector.
+              The row used to carry an onClick alongside this anchor, which made
+              the same action reachable two ways and only one of them by
+              keyboard. Selecting a version IS navigation — it writes ?spec= to
+              the URL, because the definition an operator is reading has to be
+              pasteable — so an anchor is the correct control and the row
+              handler was redundant with it. onSelect is called alongside the
+              navigation so the page can clear the task selection, which belongs
+              to the version being left. */}
+          <Link
+            to={`/workflows/${encodeURIComponent(name)}?spec=${encodeURIComponent(v.id)}`}
+            className="mono"
+            onClick={() => onSelect(v.id)}
+          >
+            v{v.version}
+          </Link>
+          {v.id === latestId && (
+            // Success-toned because "this is the one that runs" is the closest
+            // thing a definition has to a live state.
+            <span className="badge tone-success">latest</span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'submitted',
+      header: 'submitted',
+      cellClass: 'nowrap faint',
+      // Sorted on the raw timestamp rather than the rendered "3h ago": the cell
+      // shows an age and the comparator must agree with it.
+      sort: (a, b) => Date.parse(a.created_at) - Date.parse(b.created_at),
+      cell: (v) => <span title={fmtTs(v.created_at)}>{fmtAge(v.created_at, now)}</span>,
+    },
+    {
+      key: 'author',
+      header: 'author',
+      cellClass: 'mono faint truncate',
+      sort: (a, b) => a.created_by.localeCompare(b.created_by),
+      cell: (v) => v.created_by,
+    },
+    {
+      key: 'hash',
+      header: 'hash',
+      cellClass: 'mono faint',
+      // Not sortable: a hash has no order anyone would want to scan in.
+      cell: (v) => <span title={v.spec_hash}>{shortId(v.spec_hash, 8)}</span>,
+    },
+  ];
 }
 
 /** Compact retry description, or an honest blank when none is declared. */

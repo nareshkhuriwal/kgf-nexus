@@ -30,7 +30,7 @@
 
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useAttention, useCapacity, useFleetHealth, useRuns, useWorkers } from '../api/hooks';
+import { useAttention, useCapacity, useFleetHealth, useRunRows, useWorkers } from '../api/hooks';
 import type {
   AttentionItem,
   AttentionList,
@@ -102,8 +102,11 @@ const ACTIVE_PREVIEW = 6;
 const RECENT_PREVIEW = 6;
 
 export function OverviewPage({ namespace }: { namespace: string }) {
-  const runs = useRuns(namespace, { limit: RUN_WINDOW });
-  const failures = useRuns(namespace, { state: 'FAILED', limit: FAILURE_WINDOW });
+  // useRunRows, not useRuns: these are fixed windows rendered as previews, with
+  // no pager to drive, so the keyset cursor the run list needs would be a value
+  // this page could only ignore.
+  const runs = useRunRows(namespace, { limit: RUN_WINDOW });
+  const failures = useRunRows(namespace, { state: 'FAILED', limit: FAILURE_WINDOW });
   const workers = useWorkers(namespace);
   const capacity = useCapacity(namespace);
   const attention = useAttention(namespace, { limit: ATTENTION_LIMIT });

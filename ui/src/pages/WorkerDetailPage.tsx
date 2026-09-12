@@ -35,8 +35,35 @@ import type { WorkerAttempt, WorkerDetail } from '../api/types';
 import { StateBadge } from '../components/StateBadge';
 import { CapacityGrid } from '../components/CapacityGrid';
 import { AsyncPanel, Empty, ErrorBox, Loading, StaleWarning } from '../components/Status';
+import { DataTable } from '../components/DataTable';
+import type { Column, RowCountKind } from '../components/DataTable';
 import { HEARTBEAT_STALE_MS, heartbeatStale } from './WorkersPage';
 import { EMPTY, fmtAge, fmtDurationMs, fmtPercent, fmtTs, parseTs, shortId } from '../lib/format';
+
+/**
+ * What each embedded list may claim about its own completeness.
+ *
+ * THE TWO LISTS DIFFER, and pinning the difference is the whole reason these
+ * are constants rather than an inline `{kind:'unknown'}` on both.
+ *
+ * `running_attempts` is EXACT. GatewayWorkerRunningAttempts applies no LIMIT at
+ * all — the set is bounded by the worker's own capacity, so it is inherently
+ * small and what comes back IS everything the worker is executing. That is a
+ * real claim worth making: "3 attempts" on this page and the `3` in the fleet
+ * table's running column are the same number by construction, and downgrading
+ * this to a cautious "3+" would break that agreement in the reader's mind.
+ *
+ * `recent_attempts` is CAPPED at the gateway's `workerRecentLimit` of 25 (a
+ * `recent_limit` query parameter this page does not set). A tail that fills is
+ * indistinguishable from a worker that ran exactly 25 tasks, so it reads "25+"
+ * and says on hover that more were not fetched. The difference between "this
+ * worker ran 25 tasks" and "here are 25 of the tasks this worker ran" is
+ * exactly the claim an operator would otherwise make on our behalf.
+ *
+ * MUST MATCH `workerRecentLimit` in services/api-gateway/rest/api.go.
+ */
+const RUNNING_COUNT: RowCountKind = { kind: 'exact' };
+const RECENT_COUNT: RowCountKind = { kind: 'capped', limit: 25 };
 
 export function WorkerDetailPage({ namespace }: { namespace: string }) {
   const { workerId = '' } = useParams();
@@ -315,7 +342,15 @@ function RunningTasksPanel({
           }
           loadingRows={3}
         >
-          {(list) => <AttemptTable attempts={list} namespace={namespace} now={now} live />}
+          {(list) => (
+            <AttemptTable
+              attempts={list}
+              namespace={namespace}
+              now={now}
+              live
+              count={RUNNING_COUNT}
+            />
+          )}
         </AsyncPanel>
       )}
     </div>
@@ -358,7 +393,12 @@ function RecentTasksPanel({
           />
         </div>
       ) : (
-        <AttemptTable attempts={recent} namespace={namespace} now={Date.now()} />
+        <AttemptTable
+          attempts={recent}
+          namespace={namespace}
+          now={Date.now()}
+          count={RECENT_COUNT}
+        />
       )}
     </div>
   );
@@ -376,62 +416,110 @@ function RecentTasksPanel({
  * `live` switches the last column between elapsed-so-far and took: a running
  * task has no duration yet, and showing a blank there would read as missing
  * data rather than as work still in progress.
+ *
+ * ── WHY THIS ONE IS A DataTable, AND WHAT IS SWITCHED OFF ─────────────────
+ *
+ * This is an EMBEDDED list, not a top-level browser, so most of what DataTable
+ * offers would be noise on it: `paging: {mode:'none'}` and no `search`, because
+ * a page-size selector and a filter box over four rows are controls that cost
+ * more attention than they save. What is kept is the part that is not cosmetic
+ * — one set of header semantics (scope="col" on every `<th>`, which a nine-
+ * column operator table needs to be readable at all) and a count that states
+ * what it is entitled to state.
+ *
+ * BOTH LISTS ARE `capped`, NOT `exact`, AND THE CAPS DIFFER. The gateway bounds
+ * each of these server-side and sends no total, so neither may claim to be all
+ * there is. `running_attempts` is bounded by the worker's own concurrency and
+ * in practice never reaches its cap, so its count reads exactly — which is
+ * correct, and is `countClaim`'s second half doing its job. `recent_attempts`
+ * is a tail and routinely IS full, so it reads "10+" and says on hover that
+ * more were not fetched. Calling that one "10 attempts" would present a window
+ * as a history.
  */
 function AttemptTable({
   attempts,
   namespace,
   now,
   live = false,
+  count,
 }: {
   attempts: WorkerAttempt[];
   namespace: string;
   now: number;
   live?: boolean;
+  count: RowCountKind;
 }) {
+  /**
+   * Rebuilt per render: the duration column closes over `now`, so a hoisted
+   * array would freeze the clock and a running task's elapsed time would stop
+   * advancing. The same reason the fleet table rebuilds its own.
+   */
+  const columns: Column<WorkerAttempt>[] = [
+    {
+      key: 'state',
+      header: 'state',
+      cell: (a) => <StateBadge kind="attempt" state={a.state} />,
+    },
+    {
+      key: 'task',
+      header: 'task',
+      cell: (a) => (
+        <div className="cell-stack">
+          <span className="mono">{a.task_ref || a.node_id}</span>
+          <span className="cell-sub">
+            {a.node_id}
+            {a.attempt_number > 1 && ` · attempt ${a.attempt_number}`}
+          </span>
+        </div>
+      ),
+    },
+    {
+      key: 'run',
+      header: 'run',
+      cellClass: 'mono',
+      /* Straight to the run. The node is not addressable on its own in the
+         current route set — /runs/:runId is where the DAG lives, and the
+         node_id beside the task above is what the operator matches against it
+         once there. */
+      cell: (a) => (
+        <Link to={`/runs/${encodeURIComponent(a.run_id)}`} title={a.run_id}>
+          {shortId(a.run_id, 10)}
+        </Link>
+      ),
+    },
+    {
+      key: 'queue',
+      header: 'queue',
+      cellClass: 'mono',
+      cell: (a) => <>{a.queue || EMPTY}</>,
+    },
+    {
+      key: 'duration',
+      header: live ? 'running for' : 'took',
+      cell: (a) => (
+        <span title={fmtTs(live ? a.started_at : a.ended_at)}>
+          <AttemptDuration attempt={a} now={now} live={live} />
+        </span>
+      ),
+    },
+  ];
+
   return (
-    <div className="table-scroll worker-tasks">
-      <table className="table-fleet">
-        <thead>
-          <tr>
-            <th>state</th>
-            <th>task</th>
-            <th>run</th>
-            <th>queue</th>
-            <th>{live ? 'running for' : 'took'}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {attempts.map((a) => (
-            <tr key={a.id} className={a.state === 'FAILED' || a.state === 'LOST' ? 'row-failed' : ''}>
-              <td>
-                <StateBadge kind="attempt" state={a.state} />
-              </td>
-              <td>
-                <div className="cell-stack">
-                  <span className="mono">{a.task_ref || a.node_id}</span>
-                  <span className="cell-sub">
-                    {a.node_id}
-                    {a.attempt_number > 1 && ` · attempt ${a.attempt_number}`}
-                  </span>
-                </div>
-              </td>
-              <td className="mono">
-                {/* Straight to the run. The node is not addressable on its own
-                    in the current route set — /runs/:runId is where the DAG
-                    lives, and the node_id beside the task above is what the
-                    operator matches against it once there. */}
-                <Link to={`/runs/${encodeURIComponent(a.run_id)}`} title={a.run_id}>
-                  {shortId(a.run_id, 10)}
-                </Link>
-              </td>
-              <td className="mono">{a.queue || EMPTY}</td>
-              <td title={fmtTs(live ? a.started_at : a.ended_at)}>
-                <AttemptDuration attempt={a} now={now} live={live} />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="worker-tasks">
+      <DataTable
+        rows={attempts}
+        columns={columns}
+        rowKey={(a) => a.id}
+        /* A failed or lost attempt takes the danger rule, the same treatment
+           the fleet and run tables give a row that needs looking at. LOST is
+           included because an attempt whose worker vanished mid-flight is a
+           failure the run's own state may not yet reflect. */
+        rowClass={(a) => (a.state === 'FAILED' || a.state === 'LOST' ? 'row-failed' : '')}
+        noun="attempts"
+        tableClass="table-fleet"
+        count={count}
+        paging={{ mode: 'none' }}
+      />
       {/* Namespace is stated once, under the table, rather than per row: every
           attempt here belongs to the worker's own namespace by construction. */}
       <div className="worker-tasks-note">

@@ -60,9 +60,14 @@ export interface Column<Row> {
    */
   key: string;
   /**
-   * The `<th>` text. Lower case by convention here because the stylesheet
-   * upper-cases headers itself — passing "Name" would render "NAME" either way,
-   * and the existing tables all pass lower case.
+   * The `<th>` text. Lower case by convention here, and the convention now
+   * carries weight it did not before: the stylesheet USED TO upper-case every
+   * header, so the case a caller passed was discarded and "Name" and "name"
+   * were the same string on screen. It no longer does — uppercasing destroys
+   * the word shape that makes "duration" and "destination" tell themselves
+   * apart in a nine-column header — so what is passed here is what is rendered.
+   * Lower case remains the convention because every table already uses it and a
+   * single Capitalised header among nine would read as a mistake.
    */
   header: string;
   /** Renders the `<td>` contents for one row. */

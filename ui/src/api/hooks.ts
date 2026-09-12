@@ -12,12 +12,13 @@
 
 import { useEffect } from 'react';
 import {
+  keepPreviousData,
   useMutation,
   useQuery,
   useQueryClient,
   type UseQueryOptions,
 } from '@tanstack/react-query';
-import { ApiError, api, type AttentionFilter, type RunListFilter } from './client';
+import { ApiError, api, type AttentionFilter, type RunListFilter, type RunPage } from './client';
 import type {
   Attempt,
   Backfill,
@@ -33,7 +34,14 @@ import { isTerminal } from '../lib/states';
 import { pollInterval, type LiveTransport } from './live';
 
 export const qk = {
-  runs: (ns: string, f: RunListFilter) => ['runs', ns, f.state ?? '', f.spec ?? ''] as const,
+  // The cursor is part of the key: each page of a keyset listing is a DIFFERENT
+  // resource, not a refresh of the same one. Leaving `before` out would make
+  // page 2 overwrite page 1's cache entry, and the back button — which replays
+  // a cursor this client has already seen — would then re-fetch rather than
+  // read what it already holds. The limit joins it for the same reason: the
+  // page-size control changes what a page IS.
+  runs: (ns: string, f: RunListFilter) =>
+    ['runs', ns, f.state ?? '', f.spec ?? '', f.before ?? '', f.limit ?? 0] as const,
   run: (ns: string, id: string) => ['run', ns, id] as const,
   runAttempts: (ns: string, id: string) => ['run-attempts', ns, id] as const,
   runEvents: (ns: string, id: string) => ['run-events', ns, id] as const,
@@ -62,13 +70,53 @@ export function shouldRetry(failureCount: number, error: unknown): boolean {
 
 const base = { retry: shouldRetry, staleTime: 1000 } satisfies Partial<UseQueryOptions>;
 
+/**
+ * A page of runs, with the keyset cursor the caller needs to reach the next one.
+ *
+ * Returns the whole `RunPage` rather than unwrapping to rows, because the cursor
+ * is not incidental metadata — it is the only thing that makes the run list
+ * pageable at all, and a hook that dropped it would put every caller back to
+ * fetching a capped 100 and stopping. Callers that genuinely want only rows
+ * (the overview's fixed windows) use `useRunRows` below and say so.
+ *
+ * `placeholderData: keepPreviousData` is what stops a page turn from flashing
+ * the loading skeleton: moving to the next cursor is a new query key, so
+ * without it the table would unmount, AsyncPanel would render `Loading`, and
+ * the operator would watch the list they were reading disappear for a round
+ * trip. Keeping the previous page on screen while the next one arrives is the
+ * same stale-beats-blank rule the StaleWarning path applies.
+ */
 export function useRuns(namespace: string, filter: RunListFilter) {
   return useQuery({
     queryKey: qk.runs(namespace, filter),
     queryFn: () => api.listRuns(namespace, filter),
+    placeholderData: keepPreviousData,
     // The run list has no event stream of its own (events are per-run), so it
     // polls unconditionally. 4s keeps a busy list feeling live without turning
     // an idle dashboard into a load generator.
+    refetchInterval: 4000,
+    ...base,
+  });
+}
+
+/**
+ * The rows of a page of runs, for callers with no cursor to hold.
+ *
+ * The overview asks for a fixed window ("the most recent 40 runs") and renders
+ * a preview of it; there is no "next page" on a dashboard panel, so handing it
+ * a cursor it would have to ignore is worse than not handing it one. Shaped as
+ * a query whose `data` is `RunSummary[]` so it drops straight into AsyncPanel,
+ * which is what every consumer of it already does.
+ *
+ * `select` rather than a second queryFn on purpose: both hooks then share one
+ * cache entry per filter, so the overview's two run queries and any run list on
+ * the same key do not fetch twice.
+ */
+export function useRunRows(namespace: string, filter: RunListFilter) {
+  return useQuery({
+    queryKey: qk.runs(namespace, filter),
+    queryFn: () => api.listRuns(namespace, filter),
+    select: (page: RunPage) => page.runs,
     refetchInterval: 4000,
     ...base,
   });

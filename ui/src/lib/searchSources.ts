@@ -116,7 +116,14 @@ export const searchSources: SearchSources = {
     const perSpec = await Promise.allSettled(
       specs
         .slice(0, RUN_SPEC_FANOUT)
-        .map((s) => api.listRuns(namespace, { spec: s.name, limit: RUNS_PER_SPEC })),
+        // `.runs` off the page envelope: the palette shows a handful of hits per
+        // spec and has no pager, so the keyset cursor beside them is dropped
+        // deliberately rather than by the old accident of asList swallowing it.
+        .map((s) =>
+          api
+            .listRuns(namespace, { spec: s.name, limit: RUNS_PER_SPEC })
+            .then((page) => page.runs),
+        ),
     );
     const anyOk = perSpec.some((r) => r.status === 'fulfilled');
     if (!anyOk) {

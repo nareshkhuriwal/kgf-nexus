@@ -22,6 +22,7 @@ import { useCreateSchedule, useCronPreview } from '../api/hooks';
 import { OVERLAP_POLICIES, OVERLAP_POLICY_HINTS, type OverlapPolicy } from '../api/types';
 import { ErrorBox } from '../components/Status';
 import { CronPreview } from '../components/CronPreview';
+import { WorkflowPicker } from '../components/WorkflowPicker';
 import { useDebounced } from '../lib/useDebounced';
 
 /**
@@ -45,14 +46,26 @@ const COMMON_ZONES = [
 export function CreateScheduleForm({
   namespace,
   onDone,
+  initialSpecName = '',
 }: {
   namespace: string;
   onDone: () => void;
+  /**
+   * A workflow chosen BEFORE this form opened — "Schedule this workflow" from a
+   * workflow's own page, which arrives as /schedules?new=1&spec=<name>.
+   *
+   * Only the INITIAL value, which is why it is named that way and why there is
+   * no effect syncing it: once the form is open the operator owns the field,
+   * and a prop that kept writing to it would undo a change made a second after
+   * the page settled. The deep link answers "which workflow", not "which
+   * workflow, forever".
+   */
+  initialSpecName?: string;
 }) {
   const navigate = useNavigate();
 
   const [name, setName] = useState('');
-  const [specName, setSpecName] = useState('');
+  const [specName, setSpecName] = useState(initialSpecName);
   const [specVersion, setSpecVersion] = useState('');
   const [cron, setCron] = useState('0 2 * * *');
   const [timezone, setTimezone] = useState('UTC');
@@ -130,16 +143,11 @@ export function CreateScheduleForm({
               Unique within the namespace, and how you address it later.
             </span>
           </label>
-          <label className="form-field">
-            <span className="form-label">spec name</span>
-            <input
-              value={specName}
-              onChange={(e) => setSpecName(e.target.value)}
-              placeholder="example-etl"
-              required
-            />
-            <span className="form-hint">The workflow this schedule creates runs of.</span>
-          </label>
+          {/* Not a bare input any more. The gateway does not check spec_name,
+              so this control is the only thing standing between a typo and a
+              schedule that fires forever and resolves nothing — see
+              WorkflowPicker's header for the whole argument. */}
+          <WorkflowPicker namespace={namespace} value={specName} onChange={setSpecName} />
         </div>
 
         <div className="form-row">
