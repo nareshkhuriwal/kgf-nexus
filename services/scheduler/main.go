@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 )
 
@@ -28,7 +29,7 @@ func main() {
 
 func run() error {
 	var (
-		dsn       = flag.String("dsn", envOr("NEXUS_POSTGRES_DSN", "postgres://postgres:test@localhost:55432/nexus"), "Postgres DSN")
+		dsn       = flag.String("dsn", config.DSN("postgres://postgres:test@localhost:55432/nexus"), "Postgres DSN")
 		queue     = flag.String("queue", envOr("NEXUS_QUEUE", "default"), "queue this replica drains")
 		httpAddr  = flag.String("http-addr", envOr("NEXUS_HTTP_ADDR", ":8081"), "address for /healthz and /readyz")
 		logLevel  = flag.String("log-level", envOr("NEXUS_LOG_LEVEL", "info"), "debug|info|warn|error")

@@ -16,11 +16,22 @@ type GRPCClient struct {
 	conn *grpc.ClientConn
 	c    nexusv1.WorkerServiceClient
 
+	// apiKey is the BOOTSTRAP credential, read from NEXUS_API_KEY. Register has no
+	// session token yet -- obtaining one is the point of the call -- so without a
+	// separate bootstrap credential the very first RPC is unauthenticated and the
+	// gateway correctly refuses it. Every RPC carries the key; the session token
+	// is layered on once Register returns it.
+	apiKey string
+
 	// sessionToken is set after Register. Every subsequent RPC carries it so the
 	// control plane can reject calls from a session it has already invalidated —
 	// the per-session identity rule from §5.5.
 	sessionToken string
 }
+
+// WithAPIKey sets the bootstrap credential presented on every RPC, including
+// Register.
+func (g *GRPCClient) WithAPIKey(key string) *GRPCClient { g.apiKey = key; return g }
 
 // DialControlPlane connects to the worker gRPC endpoint.
 //
@@ -43,6 +54,12 @@ func DialControlPlane(ctx context.Context, target string, opts ...grpc.DialOptio
 func (g *GRPCClient) Close() error { return g.conn.Close() }
 
 func (g *GRPCClient) auth(ctx context.Context) context.Context {
+	// The API key authenticates the WORKER (is this host allowed to join?); the
+	// session token authenticates the SESSION (is this registration still valid?).
+	// They answer different questions, so both are sent once both exist.
+	if g.apiKey != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-api-key", g.apiKey)
+	}
 	if g.sessionToken == "" {
 		return ctx
 	}
@@ -50,7 +67,8 @@ func (g *GRPCClient) auth(ctx context.Context) context.Context {
 }
 
 func (g *GRPCClient) Register(ctx context.Context, req *nexusv1.RegisterRequest) (*nexusv1.RegisterResponse, error) {
-	resp, err := g.c.Register(ctx, req)
+	// auth() here carries the bootstrap API key only, since no session exists yet.
+	resp, err := g.c.Register(g.auth(ctx), req)
 	if err != nil {
 		return nil, fmt.Errorf("Register: %w", err)
 	}

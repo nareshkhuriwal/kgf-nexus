@@ -52,7 +52,16 @@ FROM alpine:3.21 AS runtime
 RUN apk add --no-cache ca-certificates tzdata \
  && adduser -D -u 10001 nexus
 
-COPY --from=build /out/service /usr/local/bin/nexus-service
+# --chmod is required: a plain COPY carries the build stage's mode bits, and the
+# binary is then not executable by the unprivileged runtime user, which fails at
+# container start with a bare "permission denied" that says nothing about why.
+COPY --from=build --chmod=0755 /out/service /usr/local/bin/nexus-service
+
+# The agent needs a writable WAL directory. Creating it in the image with the
+# right owner means a named volume mounted here inherits that ownership, so the
+# unprivileged user can write without the container needing root.
+RUN mkdir -p /var/lib/nexus/wal /var/lib/nexus-agent/wal \
+ && chown -R 10001:10001 /var/lib/nexus /var/lib/nexus-agent
 
 # Never run the control plane as root: a compromised service should not be able
 # to write outside its own container filesystem.

@@ -13,13 +13,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/khuriwalgroup/kgf-nexus/internal/config"
 	eventservice "github.com/khuriwalgroup/kgf-nexus/services/event-service"
 )
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	dsn := env("DATABASE_URL", "postgres://postgres:test@localhost:55432/nexus")
+	dsn := config.DSN("postgres://postgres:test@localhost:55432/nexus")
 	addr := env("HTTP_ADDR", ":8085")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

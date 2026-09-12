@@ -442,3 +442,84 @@ can start fine and then validate against a stale copy after a partial deploy), b
 `services/api-gateway/spec/`. `TestEmbeddedSchemaMatchesCanonical` asserts
 byte-equality so drift fails the build. A `go:generate` copy step in the Makefile
 would be tidier.
+
+---
+
+## From deployment (Docker Desktop bring-up)
+
+These were found by actually running the stack, not by review. Every one of them
+passed unit tests and `docker compose config` while still being broken at runtime.
+
+### F38. Six services invented six different env var names — FIXED
+**Severity:** the stack could not start. **Root cause of most of this section.**
+Built in parallel, each service chose its own spelling for the same values:
+`NEXUS_DATABASE_URL` / `DATABASE_URL` / `NEXUS_POSTGRES_DSN` for the DSN;
+`NEXUS_HTTP_ADDR` / `HTTP_ADDR` / `RM_HTTP_ADDR` / `NEXUS_WFM_HEALTH_ADDR` for the
+health listener; `NEXUS_CPU_MILLIS` vs compose's `AGENT_CAPACITY_CPU_MILLIS`.
+Compose emitted one generic set, so every service silently fell back to its
+compiled-in default — pointing at `localhost:55432` (the developer's test DB) and
+at ports the healthchecks were not probing. Workers registered with EMPTY
+capacity, so the scheduler could fit nothing.
+**Resolution:** `internal/config.DSN()` accepts every DSN spelling, and compose
+emits every listener/capacity name the services actually read. Services are
+unit-tested against their own names; compose is not, so compose adapts.
+**Lesson for Phase 2:** a shared config package should have been part of the
+frozen contract, not left to six independent choices.
+
+### F39. Dockerfile COPY did not preserve the exec bit — FIXED
+A plain `COPY --from=build` carries the build stage's mode bits, leaving the
+binary non-executable for the unprivileged runtime user. Failed at container
+start with a bare `permission denied` naming no cause. Now `COPY --chmod=0755`.
+
+### F40. event-service built the package dir, not its main package — FIXED
+`SERVICE_PATH: services/event-service` pointed at the library directory, so the
+build produced a non-executable object and the container died with
+`exec format error`. Now `services/event-service/cmd/event-service`.
+
+### F41. Agent WAL volume mounted at a path the agent does not use — FIXED
+Compose mounted the volume at `/var/lib/nexus/wal` but set `AGENT_WAL_DIR`, which
+the agent does not read, so the agent used its default `/var/lib/nexus-agent/wal`
+— outside the volume, where the unprivileged user cannot mkdir. Now sets
+`NEXUS_WAL_DIR`, and the image pre-creates both paths owned by the runtime user.
+
+### F42. The agent never sent a credential on any gRPC call — FIXED
+**Severity:** real gap, not just config.
+`GRPCClient` plumbed the post-Register session token but had no bootstrap
+credential, and `Register` itself sent nothing at all — so the very first RPC was
+unauthenticated and the gateway correctly refused it with `Unauthenticated`.
+Register cannot present a session token, because obtaining one is the purpose of
+the call, so a separate bootstrap credential is structurally required.
+**Resolution:** `WithAPIKey` reads `NEXUS_API_KEY` and attaches `x-api-key` to
+every RPC including Register. The two credentials answer different questions —
+the API key authenticates the WORKER (may this host join?), the session token
+authenticates the SESSION (is this registration still valid?) — so both are sent
+once both exist.
+
+### F43. No dev API keys were seeded — FIXED
+The migration job creates the `api_keys` table but no rows, so a fresh stack
+cannot authenticate anything. Seeded `dev-admin-key` (admin) and
+`dev-worker-key` (worker), sha256-hashed at rest.
+**Phase 2:** the migration or an init job should seed these, gated on a dev flag.
+
+### F44. REST and worker gRPC accept DIFFERENT auth headers
+**Severity:** works, but an avoidable trap. **Status: open, low priority.**
+REST reads `Authorization` (Bearer or bare); worker gRPC reads `x-api-key` or
+`authorization` metadata. Both are defensible, but an operator who learns one
+surface guesses wrong on the other. Worth unifying so both accept both.
+
+### F45. nginx cached the gateway's IP at startup — FIXED
+**Severity:** subtle and genuinely hard to debug.
+With a literal address in `proxy_pass`, nginx resolves the upstream ONCE at
+config load. Any `compose up` that recreates api-gateway gives it a new IP, after
+which nginx proxies to the dead one forever — presenting as a 404 from a gateway
+that is demonstrably healthy when called directly.
+**Resolution:** use Docker's embedded resolver (127.0.0.11) with the target in a
+variable, forcing per-request resolution. Verified by force-recreating
+api-gateway: previously permanent breakage, now HTTP 200.
+
+### F46. Scheduler had no gRPC service, so PollTask could not claim work — FIXED
+The gateway's PollTask and Heartbeat call `scheduler.ClaimForWorker` and
+`scheduler.PendingCancellations`, which returned "not wired yet" stubs because
+`services.proto` (added for F4/F23/F31) omitted SchedulerService. Added, with
+ClaimForWorker returning an EMPTY response rather than an error when nothing
+fits, since "no work available" is the normal steady state.

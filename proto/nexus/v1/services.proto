@@ -3,6 +3,7 @@ syntax = "proto3";
 package nexus.v1;
 
 import "nexus/v1/common.proto";
+import "nexus/v1/task.proto";
 import "nexus/v1/workflow.proto";
 
 option go_package = "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1;nexusv1";
@@ -222,4 +223,36 @@ message RunEvent {
   string payload_json = 7;
   string actor = 8;
   int64 occurred_at_unix_ms = 9;
+}
+
+// ─── Scheduler: dispatch and cancellation ─────────────────────────────────
+//
+// The gateway calls these on behalf of a polling worker. They are internal
+// because a worker must not be able to claim work for a DIFFERENT worker: the
+// gateway authenticates the session and passes the verified worker_id.
+service SchedulerService {
+  // Claim work that fits this worker. Returns empty rather than erroring when
+  // nothing fits -- "no work available" is the normal steady state, not a fault.
+  rpc ClaimForWorker(ClaimForWorkerRequest) returns (ClaimForWorkerResponse);
+  // Attempts this worker holds that the control plane wants stopped. Delivered
+  // on the heartbeat response so a pull-only fleet stays commandable (ADR-0005).
+  rpc PendingCancellations(PendingCancellationsRequest) returns (PendingCancellationsResponse);
+}
+
+message ClaimForWorkerRequest {
+  string worker_id = 1;
+  repeated string queues = 2;
+  ResourceVector free_capacity = 3;
+  int32 max_tasks = 4;
+}
+message ClaimForWorkerResponse {
+  repeated TaskAssignment assignments = 1;
+}
+
+message PendingCancellationsRequest {
+  string worker_id = 1;
+}
+message PendingCancellationsResponse {
+  repeated string attempt_ids = 1;
+  int32 grace_ms = 2;
 }

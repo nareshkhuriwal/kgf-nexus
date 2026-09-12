@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
@@ -225,7 +226,7 @@ func loadConfig() config {
 		// Separate ports, per §3.2: worker traffic must not contend with UI queries.
 		RESTAddr:            env("NEXUS_REST_ADDR", ":8080"),
 		GRPCAddr:            env("NEXUS_GRPC_ADDR", ":9090"),
-		DatabaseURL:         env("NEXUS_DATABASE_URL", "postgres://postgres:test@localhost:55432/nexus"),
+		DatabaseURL:         nexuscfg.DSN("postgres://postgres:test@localhost:55432/nexus"),
 		MaxConns:            int32(envInt("NEXUS_DB_MAX_CONNS", 20)),
 		WorkflowManagerAddr: env("NEXUS_WORKFLOW_MANAGER_ADDR", ""),
 		ResourceManagerAddr: env("NEXUS_RESOURCE_MANAGER_ADDR", ""),

@@ -119,6 +119,9 @@ func run(ctx context.Context, cfg worker.Config, target string, log *slog.Logger
 		if err != nil {
 			return err
 		}
+		// Bootstrap credential for Register, which cannot present a session token
+		// because obtaining one is the purpose of the call.
+		client.WithAPIKey(envOr("NEXUS_API_KEY", ""))
 
 		a, err := worker.New(cfg, client, log)
 		if err != nil {

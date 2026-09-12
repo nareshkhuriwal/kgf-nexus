@@ -873,3 +873,163 @@ var EventService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "nexus/v1/services.proto",
 }
+
+const (
+	SchedulerService_ClaimForWorker_FullMethodName       = "/nexus.v1.SchedulerService/ClaimForWorker"
+	SchedulerService_PendingCancellations_FullMethodName = "/nexus.v1.SchedulerService/PendingCancellations"
+)
+
+// SchedulerServiceClient is the client API for SchedulerService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ─── Scheduler: dispatch and cancellation ─────────────────────────────────
+//
+// The gateway calls these on behalf of a polling worker. They are internal
+// because a worker must not be able to claim work for a DIFFERENT worker: the
+// gateway authenticates the session and passes the verified worker_id.
+type SchedulerServiceClient interface {
+	// Claim work that fits this worker. Returns empty rather than erroring when
+	// nothing fits -- "no work available" is the normal steady state, not a fault.
+	ClaimForWorker(ctx context.Context, in *ClaimForWorkerRequest, opts ...grpc.CallOption) (*ClaimForWorkerResponse, error)
+	// Attempts this worker holds that the control plane wants stopped. Delivered
+	// on the heartbeat response so a pull-only fleet stays commandable (ADR-0005).
+	PendingCancellations(ctx context.Context, in *PendingCancellationsRequest, opts ...grpc.CallOption) (*PendingCancellationsResponse, error)
+}
+
+type schedulerServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewSchedulerServiceClient(cc grpc.ClientConnInterface) SchedulerServiceClient {
+	return &schedulerServiceClient{cc}
+}
+
+func (c *schedulerServiceClient) ClaimForWorker(ctx context.Context, in *ClaimForWorkerRequest, opts ...grpc.CallOption) (*ClaimForWorkerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimForWorkerResponse)
+	err := c.cc.Invoke(ctx, SchedulerService_ClaimForWorker_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *schedulerServiceClient) PendingCancellations(ctx context.Context, in *PendingCancellationsRequest, opts ...grpc.CallOption) (*PendingCancellationsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PendingCancellationsResponse)
+	err := c.cc.Invoke(ctx, SchedulerService_PendingCancellations_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SchedulerServiceServer is the server API for SchedulerService service.
+// All implementations must embed UnimplementedSchedulerServiceServer
+// for forward compatibility.
+//
+// ─── Scheduler: dispatch and cancellation ─────────────────────────────────
+//
+// The gateway calls these on behalf of a polling worker. They are internal
+// because a worker must not be able to claim work for a DIFFERENT worker: the
+// gateway authenticates the session and passes the verified worker_id.
+type SchedulerServiceServer interface {
+	// Claim work that fits this worker. Returns empty rather than erroring when
+	// nothing fits -- "no work available" is the normal steady state, not a fault.
+	ClaimForWorker(context.Context, *ClaimForWorkerRequest) (*ClaimForWorkerResponse, error)
+	// Attempts this worker holds that the control plane wants stopped. Delivered
+	// on the heartbeat response so a pull-only fleet stays commandable (ADR-0005).
+	PendingCancellations(context.Context, *PendingCancellationsRequest) (*PendingCancellationsResponse, error)
+	mustEmbedUnimplementedSchedulerServiceServer()
+}
+
+// UnimplementedSchedulerServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedSchedulerServiceServer struct{}
+
+func (UnimplementedSchedulerServiceServer) ClaimForWorker(context.Context, *ClaimForWorkerRequest) (*ClaimForWorkerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimForWorker not implemented")
+}
+func (UnimplementedSchedulerServiceServer) PendingCancellations(context.Context, *PendingCancellationsRequest) (*PendingCancellationsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PendingCancellations not implemented")
+}
+func (UnimplementedSchedulerServiceServer) mustEmbedUnimplementedSchedulerServiceServer() {}
+func (UnimplementedSchedulerServiceServer) testEmbeddedByValue()                          {}
+
+// UnsafeSchedulerServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to SchedulerServiceServer will
+// result in compilation errors.
+type UnsafeSchedulerServiceServer interface {
+	mustEmbedUnimplementedSchedulerServiceServer()
+}
+
+func RegisterSchedulerServiceServer(s grpc.ServiceRegistrar, srv SchedulerServiceServer) {
+	// If the following call panics, it indicates UnimplementedSchedulerServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&SchedulerService_ServiceDesc, srv)
+}
+
+func _SchedulerService_ClaimForWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimForWorkerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServiceServer).ClaimForWorker(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SchedulerService_ClaimForWorker_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServiceServer).ClaimForWorker(ctx, req.(*ClaimForWorkerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SchedulerService_PendingCancellations_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PendingCancellationsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServiceServer).PendingCancellations(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SchedulerService_PendingCancellations_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServiceServer).PendingCancellations(ctx, req.(*PendingCancellationsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// SchedulerService_ServiceDesc is the grpc.ServiceDesc for SchedulerService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var SchedulerService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "nexus.v1.SchedulerService",
+	HandlerType: (*SchedulerServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ClaimForWorker",
+			Handler:    _SchedulerService_ClaimForWorker_Handler,
+		},
+		{
+			MethodName: "PendingCancellations",
+			Handler:    _SchedulerService_PendingCancellations_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "nexus/v1/services.proto",
+}

@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/grpcapi"
@@ -240,7 +241,7 @@ func loadConfig() config {
 	return config{
 		GRPCAddr:         env("NEXUS_WFM_GRPC_ADDR", ":9091"),
 		HealthAddr:       env("NEXUS_WFM_HEALTH_ADDR", ":8081"),
-		DatabaseURL:      env("NEXUS_DATABASE_URL", "postgres://postgres:test@localhost:55432/nexus"),
+		DatabaseURL:      nexuscfg.DSN("postgres://postgres:test@localhost:55432/nexus"),
 		MaxConns:         int32(envInt("NEXUS_DB_MAX_CONNS", 20)),
 		DAGEngineAddr:    env("NEXUS_DAG_ENGINE_ADDR", ""),
 		SchedulerAddr:    env("NEXUS_SCHEDULER_ADDR", ""),

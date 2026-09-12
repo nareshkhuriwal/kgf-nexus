@@ -1722,11 +1722,219 @@ func (x *RunEvent) GetOccurredAtUnixMs() int64 {
 	return 0
 }
 
+type ClaimForWorkerRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkerId      string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	Queues        []string               `protobuf:"bytes,2,rep,name=queues,proto3" json:"queues,omitempty"`
+	FreeCapacity  *ResourceVector        `protobuf:"bytes,3,opt,name=free_capacity,json=freeCapacity,proto3" json:"free_capacity,omitempty"`
+	MaxTasks      int32                  `protobuf:"varint,4,opt,name=max_tasks,json=maxTasks,proto3" json:"max_tasks,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClaimForWorkerRequest) Reset() {
+	*x = ClaimForWorkerRequest{}
+	mi := &file_nexus_v1_services_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClaimForWorkerRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClaimForWorkerRequest) ProtoMessage() {}
+
+func (x *ClaimForWorkerRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_services_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClaimForWorkerRequest.ProtoReflect.Descriptor instead.
+func (*ClaimForWorkerRequest) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_services_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *ClaimForWorkerRequest) GetWorkerId() string {
+	if x != nil {
+		return x.WorkerId
+	}
+	return ""
+}
+
+func (x *ClaimForWorkerRequest) GetQueues() []string {
+	if x != nil {
+		return x.Queues
+	}
+	return nil
+}
+
+func (x *ClaimForWorkerRequest) GetFreeCapacity() *ResourceVector {
+	if x != nil {
+		return x.FreeCapacity
+	}
+	return nil
+}
+
+func (x *ClaimForWorkerRequest) GetMaxTasks() int32 {
+	if x != nil {
+		return x.MaxTasks
+	}
+	return 0
+}
+
+type ClaimForWorkerResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Assignments   []*TaskAssignment      `protobuf:"bytes,1,rep,name=assignments,proto3" json:"assignments,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClaimForWorkerResponse) Reset() {
+	*x = ClaimForWorkerResponse{}
+	mi := &file_nexus_v1_services_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClaimForWorkerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClaimForWorkerResponse) ProtoMessage() {}
+
+func (x *ClaimForWorkerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_services_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClaimForWorkerResponse.ProtoReflect.Descriptor instead.
+func (*ClaimForWorkerResponse) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_services_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *ClaimForWorkerResponse) GetAssignments() []*TaskAssignment {
+	if x != nil {
+		return x.Assignments
+	}
+	return nil
+}
+
+type PendingCancellationsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkerId      string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PendingCancellationsRequest) Reset() {
+	*x = PendingCancellationsRequest{}
+	mi := &file_nexus_v1_services_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PendingCancellationsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PendingCancellationsRequest) ProtoMessage() {}
+
+func (x *PendingCancellationsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_services_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PendingCancellationsRequest.ProtoReflect.Descriptor instead.
+func (*PendingCancellationsRequest) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_services_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *PendingCancellationsRequest) GetWorkerId() string {
+	if x != nil {
+		return x.WorkerId
+	}
+	return ""
+}
+
+type PendingCancellationsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AttemptIds    []string               `protobuf:"bytes,1,rep,name=attempt_ids,json=attemptIds,proto3" json:"attempt_ids,omitempty"`
+	GraceMs       int32                  `protobuf:"varint,2,opt,name=grace_ms,json=graceMs,proto3" json:"grace_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PendingCancellationsResponse) Reset() {
+	*x = PendingCancellationsResponse{}
+	mi := &file_nexus_v1_services_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PendingCancellationsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PendingCancellationsResponse) ProtoMessage() {}
+
+func (x *PendingCancellationsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_services_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PendingCancellationsResponse.ProtoReflect.Descriptor instead.
+func (*PendingCancellationsResponse) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_services_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *PendingCancellationsResponse) GetAttemptIds() []string {
+	if x != nil {
+		return x.AttemptIds
+	}
+	return nil
+}
+
+func (x *PendingCancellationsResponse) GetGraceMs() int32 {
+	if x != nil {
+		return x.GraceMs
+	}
+	return 0
+}
+
 var File_nexus_v1_services_proto protoreflect.FileDescriptor
 
 const file_nexus_v1_services_proto_rawDesc = "" +
 	"\n" +
-	"\x17nexus/v1/services.proto\x12\bnexus.v1\x1a\x15nexus/v1/common.proto\x1a\x17nexus/v1/workflow.proto\"\x84\x01\n" +
+	"\x17nexus/v1/services.proto\x12\bnexus.v1\x1a\x15nexus/v1/common.proto\x1a\x13nexus/v1/task.proto\x1a\x17nexus/v1/workflow.proto\"\x84\x01\n" +
 	"\x0eReserveRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x1d\n" +
 	"\n" +
@@ -1847,7 +2055,20 @@ const file_nexus_v1_services_proto_rawDesc = "" +
 	"\x04kind\x18\x06 \x01(\tR\x04kind\x12!\n" +
 	"\fpayload_json\x18\a \x01(\tR\vpayloadJson\x12\x14\n" +
 	"\x05actor\x18\b \x01(\tR\x05actor\x12-\n" +
-	"\x13occurred_at_unix_ms\x18\t \x01(\x03R\x10occurredAtUnixMs2\xad\x03\n" +
+	"\x13occurred_at_unix_ms\x18\t \x01(\x03R\x10occurredAtUnixMs\"\xa8\x01\n" +
+	"\x15ClaimForWorkerRequest\x12\x1b\n" +
+	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x16\n" +
+	"\x06queues\x18\x02 \x03(\tR\x06queues\x12=\n" +
+	"\rfree_capacity\x18\x03 \x01(\v2\x18.nexus.v1.ResourceVectorR\ffreeCapacity\x12\x1b\n" +
+	"\tmax_tasks\x18\x04 \x01(\x05R\bmaxTasks\"T\n" +
+	"\x16ClaimForWorkerResponse\x12:\n" +
+	"\vassignments\x18\x01 \x03(\v2\x18.nexus.v1.TaskAssignmentR\vassignments\":\n" +
+	"\x1bPendingCancellationsRequest\x12\x1b\n" +
+	"\tworker_id\x18\x01 \x01(\tR\bworkerId\"Z\n" +
+	"\x1cPendingCancellationsResponse\x12\x1f\n" +
+	"\vattempt_ids\x18\x01 \x03(\tR\n" +
+	"attemptIds\x12\x19\n" +
+	"\bgrace_ms\x18\x02 \x01(\x05R\agraceMs2\xad\x03\n" +
 	"\x16ResourceManagerService\x12>\n" +
 	"\aReserve\x12\x18.nexus.v1.ReserveRequest\x1a\x19.nexus.v1.ReserveResponse\x12T\n" +
 	"\x12ReleaseReservation\x12#.nexus.v1.ReleaseReservationRequest\x1a\x19.nexus.v1.ReleaseResponse\x12V\n" +
@@ -1867,7 +2088,10 @@ const file_nexus_v1_services_proto_rawDesc = "" +
 	"\fEventService\x12J\n" +
 	"\vAppendEvent\x12\x1c.nexus.v1.AppendEventRequest\x1a\x1d.nexus.v1.AppendEventResponse\x12G\n" +
 	"\n" +
-	"ListEvents\x12\x1b.nexus.v1.ListEventsRequest\x1a\x1c.nexus.v1.ListEventsResponseB9Z7github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1;nexusv1b\x06proto3"
+	"ListEvents\x12\x1b.nexus.v1.ListEventsRequest\x1a\x1c.nexus.v1.ListEventsResponse2\xce\x01\n" +
+	"\x10SchedulerService\x12S\n" +
+	"\x0eClaimForWorker\x12\x1f.nexus.v1.ClaimForWorkerRequest\x1a .nexus.v1.ClaimForWorkerResponse\x12e\n" +
+	"\x14PendingCancellations\x12%.nexus.v1.PendingCancellationsRequest\x1a&.nexus.v1.PendingCancellationsResponseB9Z7github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1;nexusv1b\x06proto3"
 
 var (
 	file_nexus_v1_services_proto_rawDescOnce sync.Once
@@ -1881,88 +2105,99 @@ func file_nexus_v1_services_proto_rawDescGZIP() []byte {
 	return file_nexus_v1_services_proto_rawDescData
 }
 
-var file_nexus_v1_services_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_nexus_v1_services_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_nexus_v1_services_proto_goTypes = []any{
-	(*ReserveRequest)(nil),            // 0: nexus.v1.ReserveRequest
-	(*ReserveResponse)(nil),           // 1: nexus.v1.ReserveResponse
-	(*ReleaseReservationRequest)(nil), // 2: nexus.v1.ReleaseReservationRequest
-	(*ReleaseResponse)(nil),           // 3: nexus.v1.ReleaseResponse
-	(*ReconcileWorkerRequest)(nil),    // 4: nexus.v1.ReconcileWorkerRequest
-	(*ReconcileWorkerResponse)(nil),   // 5: nexus.v1.ReconcileWorkerResponse
-	(*TransitionWorkerRequest)(nil),   // 6: nexus.v1.TransitionWorkerRequest
-	(*TransitionWorkerResponse)(nil),  // 7: nexus.v1.TransitionWorkerResponse
-	(*GetCapacityRequest)(nil),        // 8: nexus.v1.GetCapacityRequest
-	(*GetCapacityResponse)(nil),       // 9: nexus.v1.GetCapacityResponse
-	(*ValidateSpecRequest)(nil),       // 10: nexus.v1.ValidateSpecRequest
-	(*ValidateSpecResponse)(nil),      // 11: nexus.v1.ValidateSpecResponse
-	(*ValidationError)(nil),           // 12: nexus.v1.ValidationError
-	(*MaterializeRunRequest)(nil),     // 13: nexus.v1.MaterializeRunRequest
-	(*MaterializeRunResponse)(nil),    // 14: nexus.v1.MaterializeRunResponse
-	(*ReconcileRunRequest)(nil),       // 15: nexus.v1.ReconcileRunRequest
-	(*ReconcileRunResponse)(nil),      // 16: nexus.v1.ReconcileRunResponse
-	(*CreateRunRequest)(nil),          // 17: nexus.v1.CreateRunRequest
-	(*CreateRunResponse)(nil),         // 18: nexus.v1.CreateRunResponse
-	(*CancelRunRequest)(nil),          // 19: nexus.v1.CancelRunRequest
-	(*PauseRunRequest)(nil),           // 20: nexus.v1.PauseRunRequest
-	(*ResumeRunRequest)(nil),          // 21: nexus.v1.ResumeRunRequest
-	(*RetryRunRequest)(nil),           // 22: nexus.v1.RetryRunRequest
-	(*RunActionResponse)(nil),         // 23: nexus.v1.RunActionResponse
-	(*AppendEventRequest)(nil),        // 24: nexus.v1.AppendEventRequest
-	(*AppendEventResponse)(nil),       // 25: nexus.v1.AppendEventResponse
-	(*ListEventsRequest)(nil),         // 26: nexus.v1.ListEventsRequest
-	(*ListEventsResponse)(nil),        // 27: nexus.v1.ListEventsResponse
-	(*RunEvent)(nil),                  // 28: nexus.v1.RunEvent
-	nil,                               // 29: nexus.v1.CreateRunRequest.ParamsEntry
-	(*ResourceVector)(nil),            // 30: nexus.v1.ResourceVector
-	(*WorkflowSpec)(nil),              // 31: nexus.v1.WorkflowSpec
-	(RunState)(0),                     // 32: nexus.v1.RunState
+	(*ReserveRequest)(nil),               // 0: nexus.v1.ReserveRequest
+	(*ReserveResponse)(nil),              // 1: nexus.v1.ReserveResponse
+	(*ReleaseReservationRequest)(nil),    // 2: nexus.v1.ReleaseReservationRequest
+	(*ReleaseResponse)(nil),              // 3: nexus.v1.ReleaseResponse
+	(*ReconcileWorkerRequest)(nil),       // 4: nexus.v1.ReconcileWorkerRequest
+	(*ReconcileWorkerResponse)(nil),      // 5: nexus.v1.ReconcileWorkerResponse
+	(*TransitionWorkerRequest)(nil),      // 6: nexus.v1.TransitionWorkerRequest
+	(*TransitionWorkerResponse)(nil),     // 7: nexus.v1.TransitionWorkerResponse
+	(*GetCapacityRequest)(nil),           // 8: nexus.v1.GetCapacityRequest
+	(*GetCapacityResponse)(nil),          // 9: nexus.v1.GetCapacityResponse
+	(*ValidateSpecRequest)(nil),          // 10: nexus.v1.ValidateSpecRequest
+	(*ValidateSpecResponse)(nil),         // 11: nexus.v1.ValidateSpecResponse
+	(*ValidationError)(nil),              // 12: nexus.v1.ValidationError
+	(*MaterializeRunRequest)(nil),        // 13: nexus.v1.MaterializeRunRequest
+	(*MaterializeRunResponse)(nil),       // 14: nexus.v1.MaterializeRunResponse
+	(*ReconcileRunRequest)(nil),          // 15: nexus.v1.ReconcileRunRequest
+	(*ReconcileRunResponse)(nil),         // 16: nexus.v1.ReconcileRunResponse
+	(*CreateRunRequest)(nil),             // 17: nexus.v1.CreateRunRequest
+	(*CreateRunResponse)(nil),            // 18: nexus.v1.CreateRunResponse
+	(*CancelRunRequest)(nil),             // 19: nexus.v1.CancelRunRequest
+	(*PauseRunRequest)(nil),              // 20: nexus.v1.PauseRunRequest
+	(*ResumeRunRequest)(nil),             // 21: nexus.v1.ResumeRunRequest
+	(*RetryRunRequest)(nil),              // 22: nexus.v1.RetryRunRequest
+	(*RunActionResponse)(nil),            // 23: nexus.v1.RunActionResponse
+	(*AppendEventRequest)(nil),           // 24: nexus.v1.AppendEventRequest
+	(*AppendEventResponse)(nil),          // 25: nexus.v1.AppendEventResponse
+	(*ListEventsRequest)(nil),            // 26: nexus.v1.ListEventsRequest
+	(*ListEventsResponse)(nil),           // 27: nexus.v1.ListEventsResponse
+	(*RunEvent)(nil),                     // 28: nexus.v1.RunEvent
+	(*ClaimForWorkerRequest)(nil),        // 29: nexus.v1.ClaimForWorkerRequest
+	(*ClaimForWorkerResponse)(nil),       // 30: nexus.v1.ClaimForWorkerResponse
+	(*PendingCancellationsRequest)(nil),  // 31: nexus.v1.PendingCancellationsRequest
+	(*PendingCancellationsResponse)(nil), // 32: nexus.v1.PendingCancellationsResponse
+	nil,                                  // 33: nexus.v1.CreateRunRequest.ParamsEntry
+	(*ResourceVector)(nil),               // 34: nexus.v1.ResourceVector
+	(*WorkflowSpec)(nil),                 // 35: nexus.v1.WorkflowSpec
+	(RunState)(0),                        // 36: nexus.v1.RunState
+	(*TaskAssignment)(nil),               // 37: nexus.v1.TaskAssignment
 }
 var file_nexus_v1_services_proto_depIdxs = []int32{
-	30, // 0: nexus.v1.ReserveRequest.resources:type_name -> nexus.v1.ResourceVector
-	30, // 1: nexus.v1.ReconcileWorkerResponse.reclaimed:type_name -> nexus.v1.ResourceVector
-	30, // 2: nexus.v1.GetCapacityResponse.advertised:type_name -> nexus.v1.ResourceVector
-	30, // 3: nexus.v1.GetCapacityResponse.committed:type_name -> nexus.v1.ResourceVector
-	31, // 4: nexus.v1.ValidateSpecRequest.spec:type_name -> nexus.v1.WorkflowSpec
+	34, // 0: nexus.v1.ReserveRequest.resources:type_name -> nexus.v1.ResourceVector
+	34, // 1: nexus.v1.ReconcileWorkerResponse.reclaimed:type_name -> nexus.v1.ResourceVector
+	34, // 2: nexus.v1.GetCapacityResponse.advertised:type_name -> nexus.v1.ResourceVector
+	34, // 3: nexus.v1.GetCapacityResponse.committed:type_name -> nexus.v1.ResourceVector
+	35, // 4: nexus.v1.ValidateSpecRequest.spec:type_name -> nexus.v1.WorkflowSpec
 	12, // 5: nexus.v1.ValidateSpecResponse.errors:type_name -> nexus.v1.ValidationError
-	32, // 6: nexus.v1.ReconcileRunResponse.terminal_run_state:type_name -> nexus.v1.RunState
-	29, // 7: nexus.v1.CreateRunRequest.params:type_name -> nexus.v1.CreateRunRequest.ParamsEntry
-	32, // 8: nexus.v1.RunActionResponse.state:type_name -> nexus.v1.RunState
+	36, // 6: nexus.v1.ReconcileRunResponse.terminal_run_state:type_name -> nexus.v1.RunState
+	33, // 7: nexus.v1.CreateRunRequest.params:type_name -> nexus.v1.CreateRunRequest.ParamsEntry
+	36, // 8: nexus.v1.RunActionResponse.state:type_name -> nexus.v1.RunState
 	28, // 9: nexus.v1.ListEventsResponse.events:type_name -> nexus.v1.RunEvent
-	0,  // 10: nexus.v1.ResourceManagerService.Reserve:input_type -> nexus.v1.ReserveRequest
-	2,  // 11: nexus.v1.ResourceManagerService.ReleaseReservation:input_type -> nexus.v1.ReleaseReservationRequest
-	4,  // 12: nexus.v1.ResourceManagerService.ReconcileWorker:input_type -> nexus.v1.ReconcileWorkerRequest
-	6,  // 13: nexus.v1.ResourceManagerService.TransitionWorker:input_type -> nexus.v1.TransitionWorkerRequest
-	8,  // 14: nexus.v1.ResourceManagerService.GetCapacity:input_type -> nexus.v1.GetCapacityRequest
-	10, // 15: nexus.v1.DagEngineService.ValidateSpec:input_type -> nexus.v1.ValidateSpecRequest
-	13, // 16: nexus.v1.DagEngineService.MaterializeRun:input_type -> nexus.v1.MaterializeRunRequest
-	15, // 17: nexus.v1.DagEngineService.ReconcileRun:input_type -> nexus.v1.ReconcileRunRequest
-	17, // 18: nexus.v1.WorkflowManagerService.CreateRun:input_type -> nexus.v1.CreateRunRequest
-	19, // 19: nexus.v1.WorkflowManagerService.CancelRun:input_type -> nexus.v1.CancelRunRequest
-	20, // 20: nexus.v1.WorkflowManagerService.PauseRun:input_type -> nexus.v1.PauseRunRequest
-	21, // 21: nexus.v1.WorkflowManagerService.ResumeRun:input_type -> nexus.v1.ResumeRunRequest
-	22, // 22: nexus.v1.WorkflowManagerService.RetryRun:input_type -> nexus.v1.RetryRunRequest
-	24, // 23: nexus.v1.EventService.AppendEvent:input_type -> nexus.v1.AppendEventRequest
-	26, // 24: nexus.v1.EventService.ListEvents:input_type -> nexus.v1.ListEventsRequest
-	1,  // 25: nexus.v1.ResourceManagerService.Reserve:output_type -> nexus.v1.ReserveResponse
-	3,  // 26: nexus.v1.ResourceManagerService.ReleaseReservation:output_type -> nexus.v1.ReleaseResponse
-	5,  // 27: nexus.v1.ResourceManagerService.ReconcileWorker:output_type -> nexus.v1.ReconcileWorkerResponse
-	7,  // 28: nexus.v1.ResourceManagerService.TransitionWorker:output_type -> nexus.v1.TransitionWorkerResponse
-	9,  // 29: nexus.v1.ResourceManagerService.GetCapacity:output_type -> nexus.v1.GetCapacityResponse
-	11, // 30: nexus.v1.DagEngineService.ValidateSpec:output_type -> nexus.v1.ValidateSpecResponse
-	14, // 31: nexus.v1.DagEngineService.MaterializeRun:output_type -> nexus.v1.MaterializeRunResponse
-	16, // 32: nexus.v1.DagEngineService.ReconcileRun:output_type -> nexus.v1.ReconcileRunResponse
-	18, // 33: nexus.v1.WorkflowManagerService.CreateRun:output_type -> nexus.v1.CreateRunResponse
-	23, // 34: nexus.v1.WorkflowManagerService.CancelRun:output_type -> nexus.v1.RunActionResponse
-	23, // 35: nexus.v1.WorkflowManagerService.PauseRun:output_type -> nexus.v1.RunActionResponse
-	23, // 36: nexus.v1.WorkflowManagerService.ResumeRun:output_type -> nexus.v1.RunActionResponse
-	23, // 37: nexus.v1.WorkflowManagerService.RetryRun:output_type -> nexus.v1.RunActionResponse
-	25, // 38: nexus.v1.EventService.AppendEvent:output_type -> nexus.v1.AppendEventResponse
-	27, // 39: nexus.v1.EventService.ListEvents:output_type -> nexus.v1.ListEventsResponse
-	25, // [25:40] is the sub-list for method output_type
-	10, // [10:25] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	34, // 10: nexus.v1.ClaimForWorkerRequest.free_capacity:type_name -> nexus.v1.ResourceVector
+	37, // 11: nexus.v1.ClaimForWorkerResponse.assignments:type_name -> nexus.v1.TaskAssignment
+	0,  // 12: nexus.v1.ResourceManagerService.Reserve:input_type -> nexus.v1.ReserveRequest
+	2,  // 13: nexus.v1.ResourceManagerService.ReleaseReservation:input_type -> nexus.v1.ReleaseReservationRequest
+	4,  // 14: nexus.v1.ResourceManagerService.ReconcileWorker:input_type -> nexus.v1.ReconcileWorkerRequest
+	6,  // 15: nexus.v1.ResourceManagerService.TransitionWorker:input_type -> nexus.v1.TransitionWorkerRequest
+	8,  // 16: nexus.v1.ResourceManagerService.GetCapacity:input_type -> nexus.v1.GetCapacityRequest
+	10, // 17: nexus.v1.DagEngineService.ValidateSpec:input_type -> nexus.v1.ValidateSpecRequest
+	13, // 18: nexus.v1.DagEngineService.MaterializeRun:input_type -> nexus.v1.MaterializeRunRequest
+	15, // 19: nexus.v1.DagEngineService.ReconcileRun:input_type -> nexus.v1.ReconcileRunRequest
+	17, // 20: nexus.v1.WorkflowManagerService.CreateRun:input_type -> nexus.v1.CreateRunRequest
+	19, // 21: nexus.v1.WorkflowManagerService.CancelRun:input_type -> nexus.v1.CancelRunRequest
+	20, // 22: nexus.v1.WorkflowManagerService.PauseRun:input_type -> nexus.v1.PauseRunRequest
+	21, // 23: nexus.v1.WorkflowManagerService.ResumeRun:input_type -> nexus.v1.ResumeRunRequest
+	22, // 24: nexus.v1.WorkflowManagerService.RetryRun:input_type -> nexus.v1.RetryRunRequest
+	24, // 25: nexus.v1.EventService.AppendEvent:input_type -> nexus.v1.AppendEventRequest
+	26, // 26: nexus.v1.EventService.ListEvents:input_type -> nexus.v1.ListEventsRequest
+	29, // 27: nexus.v1.SchedulerService.ClaimForWorker:input_type -> nexus.v1.ClaimForWorkerRequest
+	31, // 28: nexus.v1.SchedulerService.PendingCancellations:input_type -> nexus.v1.PendingCancellationsRequest
+	1,  // 29: nexus.v1.ResourceManagerService.Reserve:output_type -> nexus.v1.ReserveResponse
+	3,  // 30: nexus.v1.ResourceManagerService.ReleaseReservation:output_type -> nexus.v1.ReleaseResponse
+	5,  // 31: nexus.v1.ResourceManagerService.ReconcileWorker:output_type -> nexus.v1.ReconcileWorkerResponse
+	7,  // 32: nexus.v1.ResourceManagerService.TransitionWorker:output_type -> nexus.v1.TransitionWorkerResponse
+	9,  // 33: nexus.v1.ResourceManagerService.GetCapacity:output_type -> nexus.v1.GetCapacityResponse
+	11, // 34: nexus.v1.DagEngineService.ValidateSpec:output_type -> nexus.v1.ValidateSpecResponse
+	14, // 35: nexus.v1.DagEngineService.MaterializeRun:output_type -> nexus.v1.MaterializeRunResponse
+	16, // 36: nexus.v1.DagEngineService.ReconcileRun:output_type -> nexus.v1.ReconcileRunResponse
+	18, // 37: nexus.v1.WorkflowManagerService.CreateRun:output_type -> nexus.v1.CreateRunResponse
+	23, // 38: nexus.v1.WorkflowManagerService.CancelRun:output_type -> nexus.v1.RunActionResponse
+	23, // 39: nexus.v1.WorkflowManagerService.PauseRun:output_type -> nexus.v1.RunActionResponse
+	23, // 40: nexus.v1.WorkflowManagerService.ResumeRun:output_type -> nexus.v1.RunActionResponse
+	23, // 41: nexus.v1.WorkflowManagerService.RetryRun:output_type -> nexus.v1.RunActionResponse
+	25, // 42: nexus.v1.EventService.AppendEvent:output_type -> nexus.v1.AppendEventResponse
+	27, // 43: nexus.v1.EventService.ListEvents:output_type -> nexus.v1.ListEventsResponse
+	30, // 44: nexus.v1.SchedulerService.ClaimForWorker:output_type -> nexus.v1.ClaimForWorkerResponse
+	32, // 45: nexus.v1.SchedulerService.PendingCancellations:output_type -> nexus.v1.PendingCancellationsResponse
+	29, // [29:46] is the sub-list for method output_type
+	12, // [12:29] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_nexus_v1_services_proto_init() }
@@ -1971,6 +2206,7 @@ func file_nexus_v1_services_proto_init() {
 		return
 	}
 	file_nexus_v1_common_proto_init()
+	file_nexus_v1_task_proto_init()
 	file_nexus_v1_workflow_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1978,9 +2214,9 @@ func file_nexus_v1_services_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nexus_v1_services_proto_rawDesc), len(file_nexus_v1_services_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   30,
+			NumMessages:   34,
 			NumExtensions: 0,
-			NumServices:   4,
+			NumServices:   5,
 		},
 		GoTypes:           file_nexus_v1_services_proto_goTypes,
 		DependencyIndexes: file_nexus_v1_services_proto_depIdxs,

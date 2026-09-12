@@ -35,10 +35,15 @@ x-service-env: &service-env
   # gRPC API (ADR-0011 rule 1), so every service needs to know where the owners
   # live.
   WORKFLOW_MANAGER_ADDR: workflow-manager:9090
+  NEXUS_WORKFLOW_MANAGER_ADDR: workflow-manager:9090
   DAG_ENGINE_ADDR: dag-engine:9090
+  NEXUS_DAG_ENGINE_ADDR: dag-engine:9090
   SCHEDULER_ADDR: scheduler:9090
+  NEXUS_SCHEDULER_ADDR: scheduler:9090
   RESOURCE_MANAGER_ADDR: resource-manager:9090
+  NEXUS_RESOURCE_MANAGER_ADDR: resource-manager:9090
   EVENT_SERVICE_ADDR: event-service:9090
+  NEXUS_EVENT_SERVICE_ADDR: event-service:9090
   API_GATEWAY_ADDR: api-gateway:9091
 
 x-minio-env: &minio-env
@@ -182,7 +187,14 @@ services:
     environment:
       <<: [*service-env, *minio-env]
       HTTP_ADDR: ":8080"        # REST for humans, CLI, UI (§8.2)
+      NEXUS_HTTP_ADDR: ":8080"
+      NEXUS_REST_ADDR: ":8080"
+      NEXUS_WFM_HEALTH_ADDR: ":8080"
+      RM_HTTP_ADDR: ":8080"
       GRPC_ADDR: ":9091"        # worker RPCs (§8.1) — deliberately a separate
+      NEXUS_GRPC_ADDR: ":9091"
+      NEXUS_WFM_GRPC_ADDR: ":9091"
+      RM_GRPC_ADDR: ":9091"
                                 # listener so chatty worker traffic never
                                 # contends with UI queries (§3.2)
       # Static API keys are the MVP authn story (§11). `make seed` inserts one.
@@ -203,7 +215,14 @@ services:
     environment:
       <<: *service-env
       HTTP_ADDR: ":8080"
+      NEXUS_HTTP_ADDR: ":8080"
+      NEXUS_REST_ADDR: ":8080"
+      NEXUS_WFM_HEALTH_ADDR: ":8080"
+      RM_HTTP_ADDR: ":8080"
       GRPC_ADDR: ":9090"
+      NEXUS_GRPC_ADDR: ":9090"
+      NEXUS_WFM_GRPC_ADDR: ":9090"
+      RM_GRPC_ADDR: ":9090"
       # A single reconciler polls timers WHERE fire_at <= now() FOR UPDATE SKIP
       # LOCKED (§3.2). Every deadline in the system is a row in that table.
       TIMER_POLL_INTERVAL_MS: "1000"
@@ -220,7 +239,14 @@ services:
     environment:
       <<: *service-env
       HTTP_ADDR: ":8080"
+      NEXUS_HTTP_ADDR: ":8080"
+      NEXUS_REST_ADDR: ":8080"
+      NEXUS_WFM_HEALTH_ADDR: ":8080"
+      RM_HTTP_ADDR: ":8080"
       GRPC_ADDR: ":9090"
+      NEXUS_GRPC_ADDR: ":9090"
+      NEXUS_WFM_GRPC_ADDR: ":9090"
+      RM_GRPC_ADDR: ":9090"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -234,7 +260,14 @@ services:
     environment:
       <<: *service-env
       HTTP_ADDR: ":8080"
+      NEXUS_HTTP_ADDR: ":8080"
+      NEXUS_REST_ADDR: ":8080"
+      NEXUS_WFM_HEALTH_ADDR: ":8080"
+      RM_HTTP_ADDR: ":8080"
       GRPC_ADDR: ":9090"
+      NEXUS_GRPC_ADDR: ":9090"
+      NEXUS_WFM_GRPC_ADDR: ":9090"
+      RM_GRPC_ADDR: ":9090"
       # best_fit reduces fragmentation; spread is available for
       # resilience-sensitive workloads (§3.2).
       SCHEDULER_BIN_PACKING: best_fit
@@ -261,7 +294,14 @@ services:
     environment:
       <<: *service-env
       HTTP_ADDR: ":8080"
+      NEXUS_HTTP_ADDR: ":8080"
+      NEXUS_REST_ADDR: ":8080"
+      NEXUS_WFM_HEALTH_ADDR: ":8080"
+      RM_HTTP_ADDR: ":8080"
       GRPC_ADDR: ":9090"
+      NEXUS_GRPC_ADDR: ":9090"
+      NEXUS_WFM_GRPC_ADDR: ":9090"
+      RM_GRPC_ADDR: ":9090"
       # Three missed heartbeats. Reconciliation against the worker's reported
       # running_attempt_ids is what stops the capacity ledger drifting (§3.2).
       WORKER_LIVENESS_TIMEOUT_MS: "15000"
@@ -274,12 +314,19 @@ services:
       <<: *go-build
       args:
         SERVICE: event-service
-        SERVICE_PATH: services/event-service
+        SERVICE_PATH: services/event-service/cmd/event-service
     depends_on: *depends-on-db
     environment:
       <<: *service-env
       HTTP_ADDR: ":8080"
+      NEXUS_HTTP_ADDR: ":8080"
+      NEXUS_REST_ADDR: ":8080"
+      NEXUS_WFM_HEALTH_ADDR: ":8080"
+      RM_HTTP_ADDR: ":8080"
       GRPC_ADDR: ":9090"
+      NEXUS_GRPC_ADDR: ":9090"
+      NEXUS_WFM_GRPC_ADDR: ":9090"
+      RM_GRPC_ADDR: ":9090"
       # run_events is append-only (invariant 8); this service is its sole writer.
       EVENT_SSE_KEEPALIVE_MS: "15000"
     healthcheck: *service-healthcheck
@@ -303,22 +350,22 @@ services:
       <<: *minio-env
       # Workers hold an API token and never database credentials: a compromised
       # worker cannot corrupt runs it never touched (§3.1 invariant 2).
-      NEXUS_CONTROL_PLANE_ADDR: api-gateway:9091
+      NEXUS_CONTROL_PLANE: api-gateway:9091
       NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:-dev-worker-key}
       NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
-      AGENT_QUEUES: default
-      AGENT_LABELS: "zone=local,accelerator=none"
-      AGENT_EXECUTORS: subprocess,docker
+      NEXUS_QUEUES: default
+      NEXUS_LABELS: "zone=local,accelerator=none"
+      NEXUS_EXECUTORS: subprocess,docker
       # 8 cores / 16 GiB / no GPU.
-      AGENT_CAPACITY_CPU_MILLIS: "8000"
-      AGENT_CAPACITY_MEMORY_BYTES: "17179869184"
-      AGENT_CAPACITY_GPU_COUNT: "0"
-      AGENT_CAPACITY_DISK_BYTES: "53687091200"
-      AGENT_HEARTBEAT_INTERVAL_MS: "5000"
+      NEXUS_CPU_MILLIS: "8000"
+      NEXUS_MEMORY_BYTES: "17179869184"
+      NEXUS_GPU_COUNT: "0"
+      NEXUS_DISK_BYTES: "53687091200"
+      NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
       # The local write-ahead log is what lets a restarted agent know it started
       # a task but not how it ended, and report INDETERMINATE rather than
       # guessing (§6.3).
-      AGENT_WAL_DIR: /var/lib/nexus/wal
+      NEXUS_WAL_DIR: /var/lib/nexus/wal
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     volumes:
       - agent-cpu-wal:/var/lib/nexus/wal
@@ -339,25 +386,25 @@ services:
         condition: service_healthy
     environment:
       <<: *minio-env
-      NEXUS_CONTROL_PLANE_ADDR: api-gateway:9091
+      NEXUS_CONTROL_PLANE: api-gateway:9091
       NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:-dev-worker-key}
       NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
       # Subscribes to BOTH queues so gpu work has somewhere to go while the
       # cpu-only agent still handles the default queue.
-      AGENT_QUEUES: default,gpu
-      AGENT_LABELS: "zone=local,accelerator=nvidia"
-      AGENT_EXECUTORS: subprocess,docker
+      NEXUS_QUEUES: default,gpu
+      NEXUS_LABELS: "zone=local,accelerator=nvidia"
+      NEXUS_EXECUTORS: subprocess,docker
       # 4 cores / 32 GiB / 2 simulated GPUs. Advertised capacity is a ledger
       # entry, not a hardware probe, so the scheduler's GPU matching is
       # exercisable on a machine with no GPU at all.
-      AGENT_CAPACITY_CPU_MILLIS: "4000"
-      AGENT_CAPACITY_MEMORY_BYTES: "34359738368"
-      AGENT_CAPACITY_GPU_COUNT: "2"
-      AGENT_CAPACITY_GPU_KIND: ${NEXUS_GPU_KIND:-nvidia-a100}
+      NEXUS_CPU_MILLIS: "4000"
+      NEXUS_MEMORY_BYTES: "34359738368"
+      NEXUS_GPU_COUNT: "2"
+      NEXUS_GPU_KIND: ${NEXUS_GPU_KIND:-nvidia-a100}
       AGENT_CAPACITY_GPU_MEMORY_BYTES: "42949672960"
-      AGENT_CAPACITY_DISK_BYTES: "53687091200"
-      AGENT_HEARTBEAT_INTERVAL_MS: "5000"
-      AGENT_WAL_DIR: /var/lib/nexus/wal
+      NEXUS_DISK_BYTES: "53687091200"
+      NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
+      NEXUS_WAL_DIR: /var/lib/nexus/wal
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     volumes:
       - agent-gpu-wal:/var/lib/nexus/wal

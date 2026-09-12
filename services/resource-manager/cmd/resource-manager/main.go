@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	rmv1 "github.com/khuriwalgroup/kgf-nexus/services/resource-manager/gen/nexus/rm/v1"
 	"github.com/khuriwalgroup/kgf-nexus/services/resource-manager/internal/server"
@@ -38,7 +39,7 @@ func main() {
 		grpcAddr = flag.String("grpc-addr", envOr("RM_GRPC_ADDR", ":50052"), "gRPC listen address")
 		httpAddr = flag.String("http-addr", envOr("RM_HTTP_ADDR", ":8082"), "health endpoint listen address")
 		dsn      = flag.String("database-url",
-			envOr("DATABASE_URL", "postgres://postgres:test@localhost:55432/nexus"),
+			config.DSN("postgres://postgres:test@localhost:55432/nexus"),
 			"Postgres DSN")
 		livenessWindow = flag.Duration("liveness-window",
 			envDuration("RM_LIVENESS_WINDOW", server.DefaultLivenessWindow),
