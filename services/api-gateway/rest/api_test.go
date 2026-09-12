@@ -706,3 +706,38 @@ func TestCreateRunByNameIsNotTreatedAsAMalformedID(t *testing.T) {
 		t.Errorf("a by-name creation was rejected as a malformed uuid: %s", rec.Body.String())
 	}
 }
+
+// ── worker drill-down authorisation ───────────────────────────────────────
+
+// TestWorkerDetailIsAReadNotAnAdminAction pins the permission choice on the new
+// drill-down: a reader must be able to open it. (`get` is the shared helper from
+// schedules_test.go.)
+//
+// The pairing is the assertion. "What is this worker running" is the question the
+// fleet table raises and cannot answer, and it exposes nothing /workers and
+// /runs/{id} do not already expose between them — so gating it on admin would
+// lock out exactly the dashboard-key operators who look at the fleet during an
+// incident. The drain beside it stays admin (TestAdminOnlyDrain), because that
+// one reshapes the fleet.
+//
+// The reader's request is asserted as "not 403" rather than 200 deliberately:
+// restDB models api_keys and idempotency_keys only, so the read reaches an
+// unmodelled table and 500s. That is the authorisation boundary under test here;
+// the SQL itself is covered against real Postgres in the store integration suite,
+// which is the only place it can be.
+func TestWorkerDetailIsAReadNotAnAdminAction(t *testing.T) {
+	h, _, _ := newTestAPI(t)
+
+	rec := get(t, h, "/v1/namespaces/team-ml/workers/w1", readerKey)
+	if rec.Code == http.StatusForbidden {
+		t.Errorf("a reader opening a worker's detail: status 403, want the route to admit a read")
+	}
+	if rec.Code == http.StatusNotFound {
+		t.Errorf("GET /workers/{id}: 404 — the route is not registered")
+	}
+
+	// Same route, another tenant's namespace: the boundary still holds.
+	if cross := get(t, h, "/v1/namespaces/other-team/workers/w1", adminKey); cross.Code != http.StatusForbidden {
+		t.Errorf("a team-ml key reading other-team's worker: status %d, want 403", cross.Code)
+	}
+}

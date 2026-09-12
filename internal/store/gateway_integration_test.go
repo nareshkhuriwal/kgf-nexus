@@ -1139,3 +1139,139 @@ func names(cs []CatalogEntry) []string {
 	}
 	return out
 }
+
+// TestIntegrationWorkerAttemptAttribution covers the two reads the worker
+// drill-down is built on.
+//
+// The whole feature rests on one claim about the schema — that task_attempts
+// carries the worker_id that answers "what is this worker running" — so the test
+// that matters is the one asserting the SQL against real Postgres. A fake would
+// only restate the assumption.
+//
+// Three properties are pinned:
+//
+//   - running covers DISPATCHED as well as RUNNING, matching the active_attempts
+//     count in the fleet listing. An attempt handed to a worker and never started
+//     is the symptom an operator opens this view to find, and dropping it would
+//     make the detail page contradict the count on the table it was reached from.
+//   - the two lists PARTITION the worker's attempts: nothing appears twice, and a
+//     terminal attempt only ever lands in recent. A row in both would read as two
+//     tasks.
+//   - task_ref comes through the join. node_id alone ("node-a") names a position
+//     in a DAG the reader is not looking at.
+func TestIntegrationWorkerAttemptAttribution(t *testing.T) {
+	ctx := context.Background()
+	pool := testPool(t)
+	f := newFixture(t, ctx, pool)
+
+	workerID := f.worker()
+	other := f.worker()
+
+	running := f.attempt("node-running", 1)
+	dispatched := f.attempt("node-dispatched", 1)
+	done := f.attempt("node-done", 1)
+	foreign := f.attempt("node-foreign", 1)
+	unassigned := f.attempt("node-unassigned", 1)
+
+	for _, tc := range []struct{ id, state, worker string }{
+		{running, "RUNNING", workerID},
+		{dispatched, "DISPATCHED", workerID},
+		{done, "SUCCEEDED", workerID},
+		{foreign, "RUNNING", other},
+	} {
+		if _, err := pool.Exec(ctx,
+			`UPDATE task_attempts SET state = $2::attempt_state, worker_id = $3,
+			        started_at = now(), ended_at = CASE WHEN $2 = 'SUCCEEDED' THEN now() END
+			  WHERE id = $1`,
+			tc.id, tc.state, tc.worker); err != nil {
+			t.Fatalf("assign %s: %v", tc.state, err)
+		}
+	}
+
+	got, err := GatewayWorkerRunningAttempts(ctx, pool, workerID)
+	if err != nil {
+		t.Fatalf("running attempts: %v", err)
+	}
+	ids := map[string]WorkerAttemptRow{}
+	for _, a := range got {
+		ids[a.ID] = a
+	}
+	if len(got) != 2 {
+		t.Errorf("running = %d attempts, want 2 (RUNNING + DISPATCHED); got %v", len(got), ids)
+	}
+	if _, ok := ids[dispatched]; !ok {
+		t.Error("a DISPATCHED attempt is missing: an attempt assigned but never started is exactly the stall this view exists to surface")
+	}
+	if _, ok := ids[foreign]; ok {
+		t.Error("another worker's RUNNING attempt was attributed to this worker")
+	}
+	if _, ok := ids[unassigned]; ok {
+		t.Error("an unassigned PENDING attempt was attributed to a worker; nothing is running it")
+	}
+	if _, ok := ids[done]; ok {
+		t.Error("a terminal attempt is reported as running")
+	}
+	if r := ids[running]; r.TaskRef != "test.task:v1" || r.RunID != f.runID {
+		t.Errorf("task_ref/run_id = %q/%q, want test.task:v1/%s — the join to task_nodes is what makes the row nameable", r.TaskRef, r.RunID, f.runID)
+	}
+
+	// active_attempts on the worker row must agree with the length of that list,
+	// or the fleet table and the page it links to disagree.
+	wk, err := GatewayGetWorker(ctx, pool, f.ns, workerID)
+	if err != nil {
+		t.Fatalf("get worker: %v", err)
+	}
+	if int(wk.ActiveAttempts) != len(got) {
+		t.Errorf("worker.active_attempts = %d but running list has %d; the count and the list must never disagree", wk.ActiveAttempts, len(got))
+	}
+
+	recent, err := GatewayWorkerRecentAttempts(ctx, pool, workerID, 25)
+	if err != nil {
+		t.Fatalf("recent attempts: %v", err)
+	}
+	if len(recent) != 1 || recent[0].ID != done {
+		t.Errorf("recent = %+v, want only the SUCCEEDED attempt %s", recent, done)
+	}
+	if recent[0].State != "SUCCEEDED" {
+		t.Errorf("recent[0].State = %q, want SUCCEEDED", recent[0].State)
+	}
+}
+
+// TestIntegrationWorkerRecentAttemptsAreBounded checks the LIMIT is applied.
+//
+// There is no index on worker_id for terminal states, so this read is an ordered
+// scan of a worker's whole history — which grows without ceiling over the
+// worker's lifetime. The bound is the only thing stopping a detail page from
+// becoming a history export, so it is asserted rather than trusted.
+func TestIntegrationWorkerRecentAttemptsAreBounded(t *testing.T) {
+	ctx := context.Background()
+	pool := testPool(t)
+	f := newFixture(t, ctx, pool)
+	workerID := f.worker()
+
+	for i := 1; i <= 6; i++ {
+		id := f.attempt(fmt.Sprintf("node-%d", i), 1)
+		// The offset is interpolated as a bound integer via make_interval rather
+		// than string-concatenated: pgx cannot encode an int into a text operand,
+		// and a fmt.Sprintf into the SQL would be the wrong habit to leave here.
+		if _, err := pool.Exec(ctx,
+			`UPDATE task_attempts SET state = 'SUCCEEDED', worker_id = $2,
+			        started_at = now(), ended_at = now() + make_interval(secs => $3)
+			  WHERE id = $1`,
+			id, workerID, i); err != nil {
+			t.Fatalf("finish attempt %d: %v", i, err)
+		}
+	}
+
+	recent, err := GatewayWorkerRecentAttempts(ctx, pool, workerID, 2)
+	if err != nil {
+		t.Fatalf("recent attempts: %v", err)
+	}
+	if len(recent) != 2 {
+		t.Fatalf("recent = %d rows, want the requested limit of 2", len(recent))
+	}
+	// Most recently ended first: the newest attempt (largest ended_at offset) leads.
+	if recent[0].NodeID != "node-6" || recent[1].NodeID != "node-5" {
+		t.Errorf("recent order = %s, %s; want node-6, node-5 (most recently ended first)", recent[0].NodeID, recent[1].NodeID)
+	}
+}

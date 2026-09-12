@@ -231,6 +231,11 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("POST /v1/namespaces/{ns}/backfills/{id}/cancel", a.guard(authn.ActionWrite, a.backfillAction("cancel")))
 
 	mux.Handle("GET /v1/namespaces/{ns}/workers", a.guard(authn.ActionRead, a.listWorkers))
+	// One worker plus the tasks attributed to it. A read, like the fleet listing
+	// it drills into — the drain below stays admin_write because it reshapes the
+	// fleet, but "what is this worker running" is the question the fleet table
+	// raises and cannot answer.
+	mux.Handle("GET /v1/namespaces/{ns}/workers/{id}", a.guard(authn.ActionRead, a.getWorker))
 	mux.Handle("POST /v1/namespaces/{ns}/workers/{id}/drain", a.guard(authn.ActionAdminWrite, a.drainWorker))
 	mux.Handle("GET /v1/namespaces/{ns}/capacity", a.guard(authn.ActionRead, a.capacity))
 
@@ -738,6 +743,11 @@ func (a *API) getRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) 
 		a.fail(w, r, "list run attempts", err)
 		return
 	}
+	edges, err := store.GatewayListRunEdges(r.Context(), a.db, id)
+	if err != nil {
+		a.fail(w, r, "list run edges", err)
+		return
+	}
 
 	nodeOut := make([]map[string]any, 0, len(nodes))
 	for _, n := range nodes {
@@ -747,6 +757,16 @@ func (a *API) getRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) 
 			"attempts_used": n.AttemptsUsed, "map_index": n.MapIndex,
 		})
 	}
+	// Always a list, never null, even when empty: the console distinguishes "a
+	// single-node run genuinely has no edges" from "this field was not returned",
+	// and a null collapses the two into the reading that hides a missing field.
+	edgeOut := make([]map[string]any, 0, len(edges))
+	for _, e := range edges {
+		edgeOut = append(edgeOut, map[string]any{
+			"from_node_id": e.From, "to_node_id": e.To,
+			"output_to_input": rawJSON(e.OutputToInput),
+		})
+	}
 	attemptOut := make([]map[string]any, 0, len(attempts))
 	for _, at := range attempts {
 		attemptOut = append(attemptOut, attemptPayload(at))
@@ -754,6 +774,7 @@ func (a *API) getRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) 
 
 	payload := runPayload(run)
 	payload["nodes"] = nodeOut
+	payload["edges"] = edgeOut
 	payload["attempts"] = attemptOut
 	writeJSON(w, http.StatusOK, payload)
 }
@@ -938,18 +959,72 @@ func (a *API) listWorkers(w http.ResponseWriter, r *http.Request, _ authn.Princi
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, wk := range rows {
-		out = append(out, map[string]any{
-			"id": wk.ID, "hostname": wk.Hostname, "queues": wk.Queues,
-			"executors": wk.Executors, "state": wk.State,
-			"labels": rawJSON(wk.Labels), "capacity": rawJSON(wk.Capacity),
-			"committed":     rawJSON(wk.Committed),
-			"agent_version": wk.AgentVersion,
-			"registered_at": wk.RegisteredAt, "last_heartbeat_at": wk.LastHeartbeatAt,
-			"active_attempts": wk.ActiveAttempts,
-		})
+		out = append(out, workerPayload(wk))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"workers": out})
 }
+
+// getWorker returns one worker plus the tasks attributed to it.
+//
+// Shaped after getRun, and for the same reason: the question this address exists
+// to answer is "what is this worker doing", and a worker row on its own cannot
+// answer it. Making the console issue a second request per worker — or worse,
+// walk every run in the namespace and filter attempts client-side, which is the
+// only thing the existing route set allows — would move a join the database does
+// with one partial index onto the browser.
+//
+// Two attempt lists, not one:
+//
+//   - `running` is DISPATCHED + RUNNING, the same predicate as the fleet row's
+//     active_attempts count, so the two can never disagree.
+//   - `recent` is the terminal tail, bounded. It exists because a DEAD worker's
+//     running set is necessarily empty, and "what was it doing when it went" is
+//     the whole question asked of a worker that just died.
+//
+// ActionRead, matching listWorkers: this exposes no tenant data /workers and
+// /runs/{id} do not already expose between them, and gating the drill-down on
+// admin would lock out exactly the operators who open it during an incident. The
+// drain action beside it stays ActionAdminWrite, because that one changes the
+// fleet.
+func (a *API) getWorker(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	ns, id := r.PathValue("ns"), r.PathValue("id")
+	// Namespace-scoped resolve FIRST, so a worker UUID from another tenant is a
+	// 404 before any attempt of theirs is read.
+	wk, err := store.GatewayGetWorker(r.Context(), a.db, ns, id)
+	if err != nil {
+		a.fail(w, r, "get worker", err)
+		return
+	}
+	running, err := store.GatewayWorkerRunningAttempts(r.Context(), a.db, id)
+	if err != nil {
+		a.fail(w, r, "list worker running attempts", err)
+		return
+	}
+	recent, err := store.GatewayWorkerRecentAttempts(r.Context(), a.db, id, intParam(r, "recent_limit", workerRecentLimit))
+	if err != nil {
+		a.fail(w, r, "list worker recent attempts", err)
+		return
+	}
+
+	runningOut := make([]map[string]any, 0, len(running))
+	for _, at := range running {
+		runningOut = append(runningOut, workerAttemptPayload(at))
+	}
+	recentOut := make([]map[string]any, 0, len(recent))
+	for _, at := range recent {
+		recentOut = append(recentOut, workerAttemptPayload(at))
+	}
+
+	payload := workerPayload(wk)
+	payload["running_attempts"] = runningOut
+	payload["recent_attempts"] = recentOut
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// workerRecentLimit bounds the historical tail. 25 fills a screen without
+// turning a detail page into a history export; the store clamps anything larger
+// because there is no index on worker_id for terminal attempt states.
+const workerRecentLimit = 25
 
 // drainWorker asks the worker to stop taking new work and finish what it has.
 //

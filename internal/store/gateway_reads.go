@@ -296,6 +296,48 @@ func GatewayListRunNodes(ctx context.Context, q GWQuerier, runID string) ([]Node
 	return out, rows.Err()
 }
 
+// EdgeRow is a dependency edge as the REST API reports it.
+type EdgeRow struct {
+	From          string
+	To            string
+	OutputToInput []byte
+}
+
+// GatewayListRunEdges returns the dependency edges of a run.
+//
+// The detail view cannot draw a graph from nodes alone: with no edges every node
+// has indegree zero, so the layered layout assigns them all to depth 0 and the
+// DAG renders as a single flat column of apparent roots. That failure mode is
+// silent -- it looks like a wide graph rather than a missing field -- which is
+// why this read exists next to the node read rather than being left to a second
+// round trip.
+//
+// Ordered so the layout is stable across polls; a graph that reshuffles on every
+// refresh is unusable during an incident.
+func GatewayListRunEdges(ctx context.Context, q GWQuerier, runID string) ([]EdgeRow, error) {
+	rows, err := q.Query(ctx, `
+		SELECT from_node_id, to_node_id, output_to_input::text
+		  FROM task_edges
+		 WHERE run_id = $1
+		 ORDER BY from_node_id, to_node_id`,
+		runID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list run edges: %w", err)
+	}
+	defer rows.Close()
+
+	var out []EdgeRow
+	for rows.Next() {
+		var e EdgeRow
+		if err := rows.Scan(&e.From, &e.To, &e.OutputToInput); err != nil {
+			return nil, fmt.Errorf("scan edge: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // AttemptRow is an attempt as the REST API reports it.
 type AttemptRow struct {
 	ID            string
@@ -466,14 +508,23 @@ func GatewayListWorkers(ctx context.Context, q GWQuerier, namespace string) ([]W
 }
 
 // GatewayGetWorker loads one worker, namespace-scoped.
+//
+// active_attempts is counted here with the SAME correlated subquery the fleet
+// listing uses, rather than the constant 0 this projection started with. The
+// count was harmless while the only caller was drainWorker's existence check,
+// which discards the row — but the worker detail view renders it, and a detail
+// page reporting 0 running tasks next to a fleet table reporting 3 would send an
+// operator looking for a bug in the scheduler instead of in this line.
 func GatewayGetWorker(ctx context.Context, q GWQuerier, namespace, workerID string) (WorkerRow, error) {
 	var w WorkerRow
 	err := q.QueryRow(ctx, `
-		SELECT id::text, namespace, hostname, queues, executors, labels::text,
-		       capacity::text, committed::text, state::text, agent_version,
-		       registered_at, last_heartbeat_at, 0
-		  FROM workers
-		 WHERE namespace = $1 AND id = $2`,
+		SELECT w.id::text, w.namespace, w.hostname, w.queues, w.executors, w.labels::text,
+		       w.capacity::text, w.committed::text, w.state::text, w.agent_version,
+		       w.registered_at, w.last_heartbeat_at,
+		       (SELECT count(*) FROM task_attempts a
+		         WHERE a.worker_id = w.id AND a.state IN ('DISPATCHED','RUNNING'))::int
+		  FROM workers w
+		 WHERE w.namespace = $1 AND w.id = $2`,
 		namespace, workerID,
 	).Scan(&w.ID, &w.Namespace, &w.Hostname, &w.Queues, &w.Executors, &w.Labels,
 		&w.Capacity, &w.Committed, &w.State, &w.AgentVersion,
@@ -485,4 +536,114 @@ func GatewayGetWorker(ctx context.Context, q GWQuerier, namespace, workerID stri
 		return WorkerRow{}, fmt.Errorf("get worker: %w", err)
 	}
 	return w, nil
+}
+
+// WorkerAttemptRow is one task attributed to a worker, as the worker detail view
+// reports it.
+//
+// It is not AttemptRow. AttemptRow is shaped for a RUN detail view, where the run
+// is the page and so `run_id` is ambient and `task_ref` already sits on the node
+// row beside it. Read from a worker, both of those facts are the answer rather
+// than the context: "this worker is running ml.train, in run 673321b5" is the
+// sentence an operator needs, and neither half of it is available from the
+// attempt row alone. Hence the join to task_nodes for task_ref, and hence a
+// distinct struct rather than widening AttemptRow with fields the run view would
+// carry unused.
+type WorkerAttemptRow struct {
+	ID            string
+	RunID         string
+	NodeID        string
+	TaskRef       string
+	AttemptNumber int32
+	State         string
+	Queue         string
+	ScheduledAt   time.Time
+	StartedAt     *time.Time
+	EndedAt       *time.Time
+}
+
+// workerAttemptSelect is shared by the active and the recent read below so the
+// two can never project different columns for the same struct — the failure mode
+// being a scan that compiles, runs, and silently fills TaskRef from Queue.
+const workerAttemptSelect = `
+	SELECT a.id::text, a.run_id::text, a.node_id, n.task_ref, a.attempt_number,
+	       a.state::text, a.queue, a.scheduled_at, a.started_at, a.ended_at
+	  FROM task_attempts a
+	  JOIN task_nodes n ON n.run_id = a.run_id AND n.node_id = a.node_id`
+
+func scanWorkerAttempts(rows pgx.Rows, op string) ([]WorkerAttemptRow, error) {
+	defer rows.Close()
+	out := make([]WorkerAttemptRow, 0)
+	for rows.Next() {
+		var a WorkerAttemptRow
+		if err := rows.Scan(&a.ID, &a.RunID, &a.NodeID, &a.TaskRef, &a.AttemptNumber,
+			&a.State, &a.Queue, &a.ScheduledAt, &a.StartedAt, &a.EndedAt); err != nil {
+			return nil, fmt.Errorf("scan %s: %w", op, err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// GatewayWorkerRunningAttempts lists what a worker is executing RIGHT NOW.
+//
+// DISPATCHED and RUNNING, matching GatewayListWorkers' active_attempts count
+// exactly, so the number in the fleet table and the length of this list can
+// never disagree and send an operator hunting for a task that is not there.
+// DISPATCHED is included deliberately: the attempt is the worker's
+// responsibility from the moment it is handed over, and an attempt stuck in
+// DISPATCHED — assigned but never started — is precisely the symptom an operator
+// opens this view to find.
+//
+// The predicate is served by idx_attempts_worker_active, the partial index on
+// worker_id WHERE state IN ('DISPATCHED','RUNNING') that the schema already
+// carries for the reconciliation path. No LIMIT: this set is bounded by the
+// worker's own capacity, so it is inherently small.
+//
+// Namespace is enforced through the worker rather than the run: the caller has
+// already resolved the worker inside the namespace, and a worker's attempts
+// cannot belong to another tenant — attempts are placed on workers registered in
+// the run's own namespace. Scoping again through workflow_runs would add a join
+// that can only ever be true.
+func GatewayWorkerRunningAttempts(ctx context.Context, q GWQuerier, workerID string) ([]WorkerAttemptRow, error) {
+	rows, err := q.Query(ctx, workerAttemptSelect+`
+	 WHERE a.worker_id = $1
+	   AND a.state IN ('DISPATCHED','RUNNING')
+	 ORDER BY a.started_at DESC NULLS FIRST, a.scheduled_at DESC`,
+		workerID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list worker running attempts: %w", err)
+	}
+	return scanWorkerAttempts(rows, "worker running attempt")
+}
+
+// GatewayWorkerRecentAttempts lists what a worker has finished, most recent first.
+//
+// This is what makes the view answer anything at all about a DEAD worker, whose
+// running set is necessarily empty: "what was this worker doing before it went"
+// is the question asked of a worker that just died, and an empty page would
+// answer it with silence.
+//
+// Bounded by a LIMIT, and the limit is not negotiable upward without an index:
+// there is no index on worker_id for terminal states (only the active partial
+// one), so this is an ordered scan of the worker's history. A busy worker in the
+// live fleet has hundreds of attempts (observed: 432 on one agent), which is
+// still trivial to sort — but an unbounded read here would grow without ceiling
+// over a worker's lifetime, and a detail page is not a history export.
+func GatewayWorkerRecentAttempts(ctx context.Context, q GWQuerier, workerID string, limit int) ([]WorkerAttemptRow, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := q.Query(ctx, workerAttemptSelect+`
+	 WHERE a.worker_id = $1
+	   AND a.state NOT IN ('DISPATCHED','RUNNING')
+	 ORDER BY coalesce(a.ended_at, a.started_at, a.scheduled_at) DESC
+	 LIMIT $2`,
+		workerID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list worker recent attempts: %w", err)
+	}
+	return scanWorkerAttempts(rows, "worker recent attempt")
 }

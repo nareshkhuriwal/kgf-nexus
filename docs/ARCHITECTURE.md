@@ -1226,6 +1226,7 @@ POST   /v1/namespaces/{ns}/runs/{id}/pause | /resume
 POST   /v1/namespaces/{ns}/runs/{id}/retry       retry from failed nodes
 GET    /v1/namespaces/{ns}/attempts/{id}/logs    stream
 GET    /v1/namespaces/{ns}/workers               fleet view
+GET    /v1/namespaces/{ns}/workers/{id}          detail + the tasks running on it
 POST   /v1/namespaces/{ns}/workers/{id}/drain
 GET    /v1/namespaces/{ns}/capacity              advertised vs committed
 ```

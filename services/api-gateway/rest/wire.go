@@ -177,3 +177,44 @@ func eventPayload(e store.EventRow) map[string]any {
 		"occurred_at": e.OccurredAt,
 	}
 }
+
+// workerPayload is the fleet row, shared by the listing and the detail read.
+//
+// Extracted rather than left inline in listWorkers because the detail handler
+// must not answer with a DIFFERENT shape for the same entity: the console's
+// Worker type is one type, and a detail response missing `executors` (or
+// spelling `labels` as an object where the list spells it raw) would be a bug
+// visible only on one of the two screens.
+func workerPayload(wk store.WorkerRow) map[string]any {
+	return map[string]any{
+		"id": wk.ID, "hostname": wk.Hostname, "queues": wk.Queues,
+		"executors": wk.Executors, "state": wk.State,
+		"labels": rawJSON(wk.Labels), "capacity": rawJSON(wk.Capacity),
+		"committed":     rawJSON(wk.Committed),
+		"agent_version": wk.AgentVersion,
+		"registered_at": wk.RegisteredAt, "last_heartbeat_at": wk.LastHeartbeatAt,
+		"active_attempts": wk.ActiveAttempts,
+	}
+}
+
+// workerAttemptPayload is one task attributed to a worker.
+//
+// Distinct from attemptPayload, which omits run_id: on a run page the run is
+// ambient, but read from a worker the run id IS the answer — it is the link an
+// operator follows from "this worker is busy" to "with what". task_ref comes
+// along for the same reason, since `node_id` alone ("step-3") names a position
+// in a DAG the reader is not currently looking at.
+func workerAttemptPayload(a store.WorkerAttemptRow) map[string]any {
+	return map[string]any{
+		"id":             a.ID,
+		"run_id":         a.RunID,
+		"node_id":        a.NodeID,
+		"task_ref":       a.TaskRef,
+		"attempt_number": a.AttemptNumber,
+		"state":          a.State,
+		"queue":          a.Queue,
+		"scheduled_at":   a.ScheduledAt,
+		"started_at":     a.StartedAt,
+		"ended_at":       a.EndedAt,
+	}
+}
