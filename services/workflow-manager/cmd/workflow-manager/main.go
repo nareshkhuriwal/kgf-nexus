@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/encoding"
 
 	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
@@ -80,8 +81,14 @@ func run() error {
 	registerTimerHandlers(rec, runSvc, schedClient, log)
 
 	// ── gRPC API ──────────────────────────────────────────────────────────
+	// The JSON codec must be registered before the server starts: the spec half of
+	// this service carries hand-written types rather than protobufs, for the
+	// contract-gap reason documented on SpecServiceDesc.
+	encoding.RegisterCodec(grpcapi.JSONCodec{})
+
 	grpcSrv := grpc.NewServer()
 	grpcapi.Register(grpcSrv, runSvc, log)
+	grpcapi.RegisterTyped(grpcSrv, runSvc, db, log)
 
 	grpcLis, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {

@@ -120,8 +120,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-nexusadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-nexus-dev-password}   # DEV ONLY
     ports:
-      - "${NEXUS_MINIO_PORT:-9000}:9000"
-      - "${NEXUS_MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${NEXUS_MINIO_PORT:-9010}:9000"
+      - "${NEXUS_MINIO_CONSOLE_PORT:-9011}:9001"
     volumes:
       - minio-data:/data
     healthcheck:
@@ -200,7 +200,7 @@ services:
       # Static API keys are the MVP authn story (§11). `make seed` inserts one.
       AUTH_MODE: api_key
     ports:
-      - "${NEXUS_API_PORT:-8080}:8080"
+      - "${NEXUS_API_PORT:-8090}:8080"
       - "${NEXUS_GRPC_PORT:-9091}:9091"
     healthcheck: *service-healthcheck
     restart: unless-stopped

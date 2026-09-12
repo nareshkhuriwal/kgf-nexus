@@ -8,6 +8,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 )
 
@@ -62,7 +65,7 @@ func decodeVector(b []byte) (*nexusv1.ResourceVector, error) {
 	if err := json.Unmarshal(b, &in); err != nil {
 		return nil, fmt.Errorf("decode resource vector %q: %w", string(b), err)
 	}
-	return &nexusv1.ResourceVector{
+	out := &nexusv1.ResourceVector{
 		CpuMillis:      in.CPUMillis,
 		MemoryBytes:    in.MemoryBytes,
 		GpuCount:       in.GPUCount,
@@ -70,7 +73,70 @@ func decodeVector(b []byte) (*nexusv1.ResourceVector, error) {
 		GpuMemoryBytes: in.GPUMemoryBytes,
 		DiskBytes:      in.DiskBytes,
 		Custom:         in.Custom,
-	}, nil
+	}
+
+	// The SAME columns are written in two dialects by two services, so the reader
+	// must accept both or silently read zeros.
+	//
+	// task_attempts.resource_request is written by this package in the snake_case
+	// shape vectorJSON declares. workers.capacity and workers.committed are
+	// written by the resource-manager with protojson (internal/store/rm_workers.go
+	// marshalVec), which is lowerCamelCase and renders int64 as a JSON STRING.
+	//
+	// Decoding protojson bytes with vectorJSON alone finds none of its fields and
+	// reports a zero-capacity worker WITHOUT any error, because json.Unmarshal
+	// does not complain about fields it cannot find. The visible symptom is every
+	// attempt stuck PENDING with "no ACTIVE worker matches queue/labels/executor"
+	// while a fleet of idle, healthy workers sits there — a capacity ledger that
+	// reads as empty is indistinguishable from a cluster with no workers.
+	//
+	// Fixing the writer instead would be a schema migration of live rows, and
+	// would still leave every row written before the fix unreadable. A tolerant
+	// reader heals both. This dialect split is reported rather than papered over:
+	// one encoder should own these columns.
+	applyProtoJSONVector(b, out)
+	return out, nil
+}
+
+// applyProtoJSONVector overlays the protojson spelling onto an already-decoded
+// vector. Only fields the snake_case pass did not find are filled in, so a
+// document in the documented dialect is untouched.
+func applyProtoJSONVector(b []byte, out *nexusv1.ResourceVector) {
+	var pj struct {
+		CPUMillis      *json.Number     `json:"cpuMillis"`
+		MemoryBytes    *json.Number     `json:"memoryBytes"`
+		GPUCount       *json.Number     `json:"gpuCount"`
+		GPUKind        string           `json:"gpuKind"`
+		GPUMemoryBytes *json.Number     `json:"gpuMemoryBytes"`
+		DiskBytes      *json.Number     `json:"diskBytes"`
+		Custom         map[string]int64 `json:"custom"`
+	}
+	// A document that is not this dialect simply yields no fields; that is the
+	// snake_case case, already handled above.
+	if err := json.Unmarshal(b, &pj); err != nil {
+		return
+	}
+	if v, ok := numInt64(pj.CPUMillis); ok && out.CpuMillis == 0 {
+		out.CpuMillis = v
+	}
+	if v, ok := numInt64(pj.MemoryBytes); ok && out.MemoryBytes == 0 {
+		out.MemoryBytes = v
+	}
+	if v, ok := numInt64(pj.GPUCount); ok && out.GpuCount == 0 {
+		out.GpuCount = int32(v)
+	}
+	if pj.GPUKind != "" && out.GpuKind == "" {
+		out.GpuKind = pj.GPUKind
+	}
+	if v, ok := numInt64(pj.GPUMemoryBytes); ok && out.GpuMemoryBytes == 0 {
+		out.GpuMemoryBytes = v
+	}
+	if v, ok := numInt64(pj.DiskBytes); ok && out.DiskBytes == 0 {
+		out.DiskBytes = v
+	}
+	if len(pj.Custom) > 0 && len(out.Custom) == 0 {
+		out.Custom = pj.Custom
+	}
 }
 
 // appendEvent appends to the run_events log.
@@ -169,4 +235,18 @@ func nullString(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// protojsonMarshal encodes a protobuf message for a JSONB column.
+//
+// protojson rather than encoding/json: a protobuf message's Go struct carries
+// unexported state fields, and encoding/json would either serialize garbage or
+// omit the real ones. These are REFERENCES (ResultRef, TaskError), not payloads —
+// the payload itself never transits the control plane (invariant 6).
+func protojsonMarshal(m proto.Message) ([]byte, error) {
+	b, err := protojson.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("marshal proto message: %w", err)
+	}
+	return b, nil
 }

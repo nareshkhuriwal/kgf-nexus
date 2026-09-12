@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 )
@@ -209,12 +210,24 @@ func (s *Server) Heartbeat(ctx context.Context, req *nexusv1.HeartbeatRequest) (
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read worker state: %v", err)
 	}
-	if !exists {
-		// The session is gone (the row was reaped as DEAD, or this is a stale id
-		// from before a control-plane data reset). REREGISTER rather than an error:
-		// the worker can recover on its own, and a hard error would leave a
-		// healthy host idle until someone restarted it by hand.
-		s.log.WarnContext(ctx, "heartbeat from unknown worker session; ordering re-register", "worker_id", workerID)
+	// DEAD is checked alongside "row is gone" because the liveness sweeper marks
+	// the row DEAD rather than deleting it, and a DEAD row is a session that can
+	// never come back: its leases have been expired and its work re-dispatched
+	// elsewhere, and the resource-manager's heartbeat update is deliberately
+	// scoped to ACTIVE/DRAINING so a resurrected zombie cannot reclaim them.
+	//
+	// Without this branch a worker that missed its liveness window — which a
+	// control-plane restart alone is enough to cause — heartbeats forever against
+	// a row that will never be updated, is never told to re-register, and never
+	// runs another task. The host looks healthy and is permanently idle, which is
+	// the worst shape of failure: invisible.
+	if !exists || state == string(domain.WorkerDead) {
+		// REREGISTER rather than an error: the worker recovers on its own, and a
+		// hard error would leave a healthy host idle until someone restarted it by
+		// hand. Re-registration mints a NEW session id, so it cannot inherit the
+		// dead session's leases (§5.5).
+		s.log.WarnContext(ctx, "heartbeat from a session that is gone or DEAD; ordering re-register",
+			"worker_id", workerID, "state", state, "exists", exists)
 		return &nexusv1.HeartbeatResponse{
 			Directives:      []*nexusv1.Directive{{Kind: nexusv1.DirectiveKind_DIRECTIVE_KIND_REREGISTER}},
 			NextHeartbeatMs: int32(s.cfg.HeartbeatInterval.Milliseconds()),

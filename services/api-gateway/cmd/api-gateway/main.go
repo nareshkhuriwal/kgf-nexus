@@ -70,7 +70,7 @@ func run() error {
 
 	// The gateway owns only api_keys and idempotency_keys (ADR-0011). Every other
 	// mutation travels through the owning service. These clients are that boundary.
-	wfmClient, err := upstream.DialWorkflowManager(ctx, cfg.WorkflowManagerAddr, log)
+	wfmClient, err := upstream.DialWorkflowManager(ctx, cfg.WorkflowManagerAddr, db, log)
 	if err != nil {
 		return fmt.Errorf("connect to workflow-manager: %w", err)
 	}
@@ -82,7 +82,7 @@ func run() error {
 	}
 	defer rmClient.Close()
 
-	schedClient, err := upstream.DialScheduler(ctx, cfg.SchedulerAddr, log)
+	schedClient, err := upstream.DialScheduler(ctx, cfg.SchedulerAddr, cfg.DAGEngineAddr, log)
 	if err != nil {
 		return fmt.Errorf("connect to scheduler: %w", err)
 	}
@@ -206,13 +206,17 @@ func run() error {
 }
 
 type config struct {
-	RESTAddr             string
-	GRPCAddr             string
-	DatabaseURL          string
-	MaxConns             int32
-	WorkflowManagerAddr  string
-	ResourceManagerAddr  string
-	SchedulerAddr        string
+	RESTAddr            string
+	GRPCAddr            string
+	DatabaseURL         string
+	MaxConns            int32
+	WorkflowManagerAddr string
+	ResourceManagerAddr string
+	SchedulerAddr       string
+	// DAGEngineAddr is needed on the RESULT path: the engine recomputes the
+	// frontier after an attempt goes terminal, which is what makes the next node
+	// start.
+	DAGEngineAddr        string
 	ResultStoreEndpoint  string
 	ResultStoreBucket    string
 	ResultStoreRegion    string
@@ -231,6 +235,7 @@ func loadConfig() config {
 		WorkflowManagerAddr: env("NEXUS_WORKFLOW_MANAGER_ADDR", ""),
 		ResourceManagerAddr: env("NEXUS_RESOURCE_MANAGER_ADDR", ""),
 		SchedulerAddr:       env("NEXUS_SCHEDULER_ADDR", ""),
+		DAGEngineAddr:       env("NEXUS_DAG_ENGINE_ADDR", env("DAG_ENGINE_ADDR", "")),
 		ResultStoreEndpoint: env("NEXUS_RESULT_STORE_ENDPOINT", "http://localhost:9000"),
 		ResultStoreBucket:   env("NEXUS_RESULT_STORE_BUCKET", "nexus-results"),
 		ResultStoreRegion:   env("NEXUS_RESULT_STORE_REGION", "us-east-1"),

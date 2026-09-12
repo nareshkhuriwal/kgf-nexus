@@ -523,3 +523,29 @@ The gateway's PollTask and Heartbeat call `scheduler.ClaimForWorker` and
 `services.proto` (added for F4/F23/F31) omitted SchedulerService. Added, with
 ClaimForWorker returning an EMPTY response rather than an error when nothing
 fits, since "no work available" is the normal steady state.
+
+### F47. ResourceVector is stored as protobuf camelCase JSON, not snake_case
+**Severity:** low, but a persistent trap. **Status: open.**
+`workers.capacity` and `task_attempts.resource_request` store protojson output,
+so keys are `cpuMillis` / `memoryBytes` / `gpuCount` — not the `cpu_millis`
+spelling used in the schema comments, the proto source, and CONTRACT.md. Any
+operator SQL written from the documentation (`capacity->>'cpu_millis'`) silently
+returns NULL rather than erroring, which reads as "this worker advertised no
+capacity" — a scary and completely wrong conclusion.
+**Resolution options:** marshal with protojson's `UseProtoNames` so stored JSON
+matches the documented spelling, or document the camelCase form prominently.
+The first is better: the database is an operator-facing surface and should speak
+the same names as the docs.
+
+### F48. A worker marked DEAD recovers only via REREGISTER — VERIFIED WORKING
+Not a defect; recorded because it was worth proving. Restarting api-gateway is
+enough to push workers past the liveness window, after which the sweeper marks
+them DEAD and the resource-manager's heartbeat update (deliberately scoped to
+ACTIVE/DRAINING) will never touch them again.
+Observed end to end: gateway logged "heartbeat from a session that is gone or
+DEAD; ordering re-register", both agents ended their sessions and re-registered
+with NEW worker ids, and returned to ACTIVE with full advertised capacity. The
+§5.5 rule held -- a new session cannot inherit the dead session's leases.
+Without that path a healthy host would heartbeat forever against a row that is
+never updated and never run another task: idle, but looking perfectly healthy,
+which is the worst shape of failure because it is invisible.

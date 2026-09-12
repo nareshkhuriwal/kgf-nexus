@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/grpc"
+
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 )
@@ -32,6 +35,7 @@ func run() error {
 		dsn       = flag.String("dsn", config.DSN("postgres://postgres:test@localhost:55432/nexus"), "Postgres DSN")
 		queue     = flag.String("queue", envOr("NEXUS_QUEUE", "default"), "queue this replica drains")
 		httpAddr  = flag.String("http-addr", envOr("NEXUS_HTTP_ADDR", ":8081"), "address for /healthz and /readyz")
+		grpcAddr  = flag.String("grpc-addr", envOr("NEXUS_GRPC_ADDR", envOr("GRPC_ADDR", ":9090")), "address for nexus.v1.SchedulerService")
 		logLevel  = flag.String("log-level", envOr("NEXUS_LOG_LEVEL", "info"), "debug|info|warn|error")
 		leaseTTL  = flag.Duration("lease-ttl", 30*time.Second, "initial lease lifetime (ADR-0010 default)")
 		liveness  = flag.Duration("liveness-window", 30*time.Second, "heartbeat staleness before a worker is DEAD")
@@ -90,6 +94,28 @@ func run() error {
 		srvErr <- nil
 	}()
 
+	// The gRPC API is how a POLLING worker reaches the claim. The background
+	// dispatch loop above places work on its own initiative, but a pull-only
+	// fleet (ADR-0005) has no way to be told about it, so the gateway calls
+	// ClaimForWorker on the worker's behalf. Both paths run the SAME store
+	// transaction; only the worker-selection step differs.
+	//
+	// The listener is bound BEFORE readiness flips, so a load balancer never
+	// routes a poll to a replica whose port is not yet accepting.
+	grpcLis, err := net.Listen("tcp", *grpcAddr)
+	if err != nil {
+		return fmt.Errorf("listen for grpc on %s: %w", *grpcAddr, err)
+	}
+	grpcSrv := grpc.NewServer()
+	Register(grpcSrv, NewGRPCServer(st, log))
+	RegisterReports(grpcSrv, NewReportServer(st, log))
+
+	grpcErr := make(chan error, 1)
+	go func() {
+		log.Info("grpc listening", "addr", *grpcAddr, "service", "nexus.v1.SchedulerService")
+		grpcErr <- grpcSrv.Serve(grpcLis)
+	}()
+
 	ready.Store(true)
 	log.Info("scheduler starting",
 		"lease_ttl", claimCfg.LeaseTTL, "liveness_window", claimCfg.LivenessWindow,
@@ -105,6 +131,10 @@ func run() error {
 	case err := <-srvErr:
 		if err != nil {
 			return fmt.Errorf("health server: %w", err)
+		}
+	case err := <-grpcErr:
+		if err != nil {
+			return fmt.Errorf("grpc server: %w", err)
 		}
 	case <-ctx.Done():
 		log.Info("shutdown signal received; draining")
@@ -124,6 +154,11 @@ func run() error {
 		// termination past the orchestrator's grace period.
 		log.Warn("loops did not drain within the grace period; exiting anyway")
 	}
+
+	// GracefulStop rather than Stop: an in-flight ClaimForWorker has a
+	// transaction open, and killing the connection mid-claim would roll back a
+	// dispatch the worker may already have been told about.
+	grpcSrv.GracefulStop()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

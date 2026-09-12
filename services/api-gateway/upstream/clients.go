@@ -59,65 +59,92 @@ func withCallTimeout(ctx context.Context) (context.Context, context.CancelFunc) 
 // workflow_runs, and timers.
 type WorkflowManagerClient struct {
 	addr string
+	db   store.GWQuerier
 	log  *slog.Logger
-	// conn will hold the gRPC connection once workflow-manager's service
-	// definition exists. Kept as a field so wiring it up does not change this
-	// type's shape or the interface the REST layer depends on.
-	closeFn func() error
+	// grpc is non-nil once an address is configured. Mutations go through it;
+	// reads the gateway is permitted to make stay local.
+	grpc *wfmGRPC
 }
 
 // DialWorkflowManager creates the client.
-func DialWorkflowManager(ctx context.Context, addr string, log *slog.Logger) (*WorkflowManagerClient, error) {
+//
+// db is used for READ-BACK only: the run lifecycle RPCs return a state and an id
+// rather than a full row, and re-reading the projection locally is cheaper and
+// more honest than teaching the proto to carry a denormalized row that would then
+// have two definitions.
+func DialWorkflowManager(ctx context.Context, addr string, db store.GWQuerier, log *slog.Logger) (*WorkflowManagerClient, error) {
+	c := &WorkflowManagerClient{addr: addr, db: db, log: log}
 	if addr == "" {
 		log.Warn("workflow-manager address is unset; spec and run MUTATIONS will fail with 502 rather than write tables the gateway does not own",
 			"remedy", "set NEXUS_WORKFLOW_MANAGER_ADDR")
+		return c, nil
 	}
-	return &WorkflowManagerClient{addr: addr, log: log}, nil
+	g, err := dialWFM(ctx, addr, log)
+	if err != nil {
+		return nil, err
+	}
+	c.grpc = g
+	return c, nil
 }
 
 // Close releases the connection.
 func (c *WorkflowManagerClient) Close() error {
-	if c.closeFn != nil {
-		return c.closeFn()
+	if c.grpc != nil {
+		return c.grpc.close()
 	}
 	return nil
 }
 
+// PutSpec stores a validated spec version through its owner.
 func (c *WorkflowManagerClient) PutSpec(ctx context.Context, namespace, name, hash string, canonicalJSON []byte, createdBy string) (store.SpecRow, bool, error) {
-	if c.addr == "" {
+	if c.grpc == nil {
 		return store.SpecRow{}, false, fmt.Errorf("put spec: %w (workflow-manager owns workflow_specs)", ErrUpstreamNotConfigured)
 	}
-	return store.SpecRow{}, false, fmt.Errorf("put spec: %w", errNotWired("workflow-manager", "PutSpec"))
+	return c.grpc.putSpec(ctx, namespace, name, hash, canonicalJSON, createdBy)
 }
 
+// CreateRun creates a run through its owner, which also materializes its DAG.
 func (c *WorkflowManagerClient) CreateRun(ctx context.Context, req rest.CreateRunRequest) (store.RunRow, bool, error) {
-	if c.addr == "" {
+	if c.grpc == nil {
 		return store.RunRow{}, false, fmt.Errorf("create run: %w (workflow-manager owns workflow_runs)", ErrUpstreamNotConfigured)
 	}
-	return store.RunRow{}, false, fmt.Errorf("create run: %w", errNotWired("workflow-manager", "CreateRun"))
+	row, created, err := c.grpc.createRun(ctx, req)
+	if err != nil {
+		return store.RunRow{}, false, err
+	}
+	// Read the full projection back so the REST response carries the same shape a
+	// GET would. A failure here is not fatal: the run IS created, and answering
+	// with the id alone beats reporting a failure for work that succeeded.
+	if full, rerr := store.GatewayGetRun(ctx, c.db, req.Namespace, row.ID); rerr == nil {
+		return full, created, nil
+	}
+	return row, created, nil
 }
 
 func (c *WorkflowManagerClient) CancelRun(ctx context.Context, namespace, runID string) (store.RunRow, error) {
-	return c.lifecycle(ctx, "CancelRun", runID)
+	return c.lifecycle(ctx, namespace, "CancelRun", runID)
 }
 
 func (c *WorkflowManagerClient) PauseRun(ctx context.Context, namespace, runID string) (store.RunRow, error) {
-	return c.lifecycle(ctx, "PauseRun", runID)
+	return c.lifecycle(ctx, namespace, "PauseRun", runID)
 }
 
 func (c *WorkflowManagerClient) ResumeRun(ctx context.Context, namespace, runID string) (store.RunRow, error) {
-	return c.lifecycle(ctx, "ResumeRun", runID)
+	return c.lifecycle(ctx, namespace, "ResumeRun", runID)
 }
 
 func (c *WorkflowManagerClient) RetryRun(ctx context.Context, namespace, runID string) (store.RunRow, error) {
-	return c.lifecycle(ctx, "RetryRun", runID)
+	return c.lifecycle(ctx, namespace, "RetryRun", runID)
 }
 
-func (c *WorkflowManagerClient) lifecycle(ctx context.Context, op, runID string) (store.RunRow, error) {
-	if c.addr == "" {
+func (c *WorkflowManagerClient) lifecycle(ctx context.Context, namespace, op, runID string) (store.RunRow, error) {
+	if c.grpc == nil {
 		return store.RunRow{}, fmt.Errorf("%s: %w (workflow-manager owns workflow_runs)", op, ErrUpstreamNotConfigured)
 	}
-	return store.RunRow{}, fmt.Errorf("%s: %w", op, errNotWired("workflow-manager", op))
+	if _, err := c.grpc.lifecycle(ctx, op, runID); err != nil {
+		return store.RunRow{}, err
+	}
+	return store.GatewayGetRun(ctx, c.db, namespace, runID)
 }
 
 // ── resource-manager ──────────────────────────────────────────────────────
@@ -304,69 +331,137 @@ func (c *ResourceManagerClient) Capacity(ctx context.Context, namespace string) 
 // boundary would replace a transaction with a saga on the one path where a
 // compensation bug means a double-dispatched task.
 type SchedulerClient struct {
-	addr    string
-	log     *slog.Logger
-	closeFn func() error
+	addr string
+	log  *slog.Logger
+	// grpc is non-nil once an address is configured.
+	grpc *schedGRPC
+	// dag is the DAG engine, called after a terminal attempt report so the run's
+	// frontier advances. It lives on this client rather than in the REST layer
+	// because the two calls are one causal step: a result that is applied without
+	// a reconcile leaves the run stalled with no error anywhere.
+	dag *dagGRPC
 }
 
 // DialScheduler creates the client.
-func DialScheduler(ctx context.Context, addr string, log *slog.Logger) (*SchedulerClient, error) {
+func DialScheduler(ctx context.Context, addr, dagAddr string, log *slog.Logger) (*SchedulerClient, error) {
+	c := &SchedulerClient{addr: addr, log: log}
 	if addr == "" {
 		log.Warn("scheduler address is unset; PollTask will return no work and attempt reports will fail",
 			"remedy", "set NEXUS_SCHEDULER_ADDR")
+		return c, nil
 	}
-	return &SchedulerClient{addr: addr, log: log}, nil
+	g, err := dialScheduler(ctx, addr, log)
+	if err != nil {
+		return nil, err
+	}
+	c.grpc = g
+
+	if dagAddr == "" {
+		log.Warn("dag-engine address is unset; runs will not advance past their first node",
+			"remedy", "set NEXUS_DAG_ENGINE_ADDR")
+		return c, nil
+	}
+	d, err := dialDAG(ctx, dagAddr, log)
+	if err != nil {
+		return nil, err
+	}
+	c.dag = d
+	return c, nil
 }
 
-// Close releases the connection.
+// Close releases the connections.
 func (c *SchedulerClient) Close() error {
-	if c.closeFn != nil {
-		return c.closeFn()
+	var firstErr error
+	if c.grpc != nil {
+		if err := c.grpc.close(); err != nil {
+			firstErr = err
+		}
 	}
-	return nil
+	if c.dag != nil {
+		if err := c.dag.close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // ClaimForWorker performs the atomic dispatch claim inside the scheduler.
+//
+// workerID is the id the gateway's authn interceptor established for this
+// session, not one read from the worker's request. The scheduler takes it as
+// given, so substituting it here is what stops a worker claiming another
+// worker's capacity.
 func (c *SchedulerClient) ClaimForWorker(ctx context.Context, workerID string, free *nexusv1.ResourceVector, queues []string, maxTasks int32) ([]*nexusv1.TaskAssignment, error) {
-	if c.addr == "" {
+	if c.grpc == nil {
 		// Returning NO WORK rather than an error is correct here and nowhere else
 		// in this file: an empty poll is a normal protocol outcome, so an
 		// unconfigured scheduler degrades to an idle fleet rather than a fleet
 		// spinning on errors.
 		return nil, nil
 	}
-	return nil, fmt.Errorf("claim for worker: %w", errNotWired("scheduler", "ClaimForWorker"))
+	return c.grpc.claimForWorker(ctx, workerID, free, queues, maxTasks)
 }
 
+// MarkStarted transitions DISPATCHED -> RUNNING.
+//
+// startedAt is the worker's claim and is deliberately not forwarded: the
+// scheduler stamps the transition with CONTROL-PLANE time, so a worker with a
+// skewed clock cannot move its own deadlines (invariant 7).
 func (c *SchedulerClient) MarkStarted(ctx context.Context, attemptID string, startedAt time.Time) error {
-	if c.addr == "" {
+	if c.grpc == nil {
 		return fmt.Errorf("mark started: %w (scheduler owns task_attempts)", ErrUpstreamNotConfigured)
 	}
-	return fmt.Errorf("mark started: %w", errNotWired("scheduler", "MarkStarted"))
+	return c.grpc.markStarted(ctx, attemptID)
 }
 
+// RecordProgress resets the task heartbeat deadline.
 func (c *SchedulerClient) RecordProgress(ctx context.Context, attemptID, message string, fraction float64) error {
-	if c.addr == "" {
+	if c.grpc == nil {
 		return fmt.Errorf("record progress: %w (scheduler owns task_attempts)", ErrUpstreamNotConfigured)
 	}
-	return fmt.Errorf("record progress: %w", errNotWired("scheduler", "RecordProgress"))
+	return c.grpc.recordProgress(ctx, attemptID, message, fraction)
 }
 
+// ApplyResult applies a terminal outcome, then asks the DAG engine to recompute
+// the run's frontier.
+//
+// The reconcile is what turns one finished task into the next one starting.
+// Nothing else in the system computes the frontier — only the engine owns the
+// graph — so without this call a run's first node succeeds and the run then sits
+// forever.
+//
+// It runs AFTER the terminal transition has committed, and its failure does not
+// fail the RPC. The attempt's outcome is already durable; refusing the worker's
+// report because the engine was briefly unavailable would make the worker retry a
+// report that already landed, and the engine's own reconcile is idempotent and
+// re-runnable, so a missed call costs latency rather than correctness.
 func (c *SchedulerClient) ApplyResult(ctx context.Context, req *nexusv1.ReportResultRequest) error {
-	if c.addr == "" {
+	if c.grpc == nil {
 		return fmt.Errorf("apply result: %w (scheduler owns task_attempts)", ErrUpstreamNotConfigured)
 	}
-	return fmt.Errorf("apply result: %w", errNotWired("scheduler", "ApplyResult"))
+	applied, err := c.grpc.applyResult(ctx, req)
+	if err != nil {
+		return err
+	}
+	if !applied.Applied || c.dag == nil {
+		return nil
+	}
+	if err := c.dag.reconcileRun(ctx, applied.RunID, applied.NodeID); err != nil {
+		c.log.ErrorContext(ctx, "attempt result committed but the run reconcile failed; the run will not advance until a later reconcile",
+			"run_id", applied.RunID, "node_id", applied.NodeID,
+			"attempt_id", req.GetAttemptId(), "err", err)
+	}
+	return nil
 }
 
 func (c *SchedulerClient) PendingCancellations(ctx context.Context, workerID string) ([]string, error) {
-	if c.addr == "" {
+	if c.grpc == nil {
 		// No directives rather than an error: a heartbeat must still deliver DRAIN
 		// and complete its capacity reconciliation even when the scheduler is
 		// unreachable.
 		return nil, nil
 	}
-	return nil, fmt.Errorf("pending cancellations: %w", errNotWired("scheduler", "PendingCancellations"))
+	return c.grpc.pendingCancellations(ctx, workerID)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────

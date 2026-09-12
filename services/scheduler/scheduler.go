@@ -61,6 +61,10 @@ type Scheduler struct {
 	// fails the worker's next poll or the reconciler picks the attempt up.
 	// Latency degrades; correctness does not.
 	notify func(context.Context, *store.DispatchResult)
+	// pushEnabled records whether a REAL notifier was supplied. See dispatchLoop:
+	// without one, a pushed dispatch is unreachable by a pull-only worker, so the
+	// push loop must not run.
+	pushEnabled bool
 
 	// healthy tracks whether the last loop iteration succeeded, for /readyz.
 	mu      sync.RWMutex
@@ -72,10 +76,11 @@ func NewScheduler(
 	st *store.SchedulerStore, log *slog.Logger, cfg LoopConfig,
 	notify func(context.Context, *store.DispatchResult),
 ) *Scheduler {
+	pushEnabled := notify != nil
 	if notify == nil {
 		notify = func(context.Context, *store.DispatchResult) {}
 	}
-	return &Scheduler{store: st, log: log, cfg: cfg, notify: notify}
+	return &Scheduler{store: st, log: log, cfg: cfg, notify: notify, pushEnabled: pushEnabled}
 }
 
 // Run starts every loop and blocks until ctx is cancelled and all loops have
@@ -121,8 +126,28 @@ func (s *Scheduler) setErr(err error) {
 	s.mu.Unlock()
 }
 
-// dispatchLoop drains the queue in bursts.
+// dispatchLoop drains the queue in bursts by PUSHING work onto workers of its own
+// choosing.
+//
+// It runs only when a notifier is configured, and that condition is load-bearing
+// rather than an optimization. Workers are PULL-ONLY (ADR-0005): the control
+// plane never dials a worker, so the only way a worker learns it has been given
+// an attempt is a notification telling it to poll, or its own next poll reaching
+// ClaimForWorker. A push dispatch with no notifier commits a lease and a
+// reservation for a worker that will never be told — the attempt sits DISPATCHED
+// until the lease expires, is declared LOST, burns a retry, and does the same
+// thing again. The cluster looks busy and executes nothing.
+//
+// With no bus configured, ClaimForWorker is therefore the ONLY correct dispatch
+// path, and a polling worker gets exactly the same §5.3 transaction. Nothing is
+// lost by not pushing: the worker's poll is already parked server-side in a long
+// poll, so dispatch latency is a poll interval either way.
 func (s *Scheduler) dispatchLoop(ctx context.Context) {
+	if !s.pushEnabled {
+		s.log.Info("push dispatch disabled: no notifier configured, so workers are served exclusively by ClaimForWorker",
+			"reason", "a pushed dispatch with no bus would never reach a pull-only worker (ADR-0005)")
+		return
+	}
 	for {
 		if ctx.Err() != nil {
 			return

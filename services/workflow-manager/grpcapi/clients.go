@@ -36,15 +36,39 @@ func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 type DAGEngineClient struct {
 	addr string
 	log  *slog.Logger
+	// conn is non-nil once an address is configured. dag-engine speaks a JSON
+	// codec over a hand-written descriptor, so the wire types and the codec live
+	// in dagengine_grpc.go rather than coming from generated stubs.
+	conn *deConn
 }
 
 // NewDAGEngineClient creates the client.
 func NewDAGEngineClient(addr string, log *slog.Logger) *DAGEngineClient {
+	c := &DAGEngineClient{addr: addr, log: log}
 	if addr == "" {
 		log.Warn("dag-engine address is unset; run creation will fail rather than create a run with no nodes",
 			"remedy", "set NEXUS_DAG_ENGINE_ADDR")
+		return c
 	}
-	return &DAGEngineClient{addr: addr, log: log}
+	conn, err := dialDAGEngine(addr, log)
+	if err != nil {
+		// A dial failure here is a configuration error, not a peer outage
+		// (grpc.NewClient does not connect eagerly), so it is logged and the
+		// client degrades to the not-configured path rather than killing a
+		// process that could still serve health and lifecycle reads.
+		log.Error("cannot construct dag-engine client", "addr", addr, "err", err)
+		return c
+	}
+	c.conn = conn
+	return c
+}
+
+// Close releases the connection.
+func (c *DAGEngineClient) Close() error {
+	if c.conn != nil {
+		return c.conn.close()
+	}
+	return nil
 }
 
 // MaterializeRun compiles the pinned spec into nodes and edges.
@@ -54,13 +78,47 @@ func NewDAGEngineClient(addr string, log *slog.Logger) *DAGEngineClient {
 // is why the failure propagates out of run creation rather than being logged and
 // swallowed.
 func (c *DAGEngineClient) MaterializeRun(ctx context.Context, runID, specID string, specJSON []byte) error {
-	if c.addr == "" {
+	if c.conn == nil {
 		return fmt.Errorf("materialize run %s: %w (dag-engine owns task_nodes)", runID, ErrPeerNotConfigured)
 	}
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	_ = ctx
-	return fmt.Errorf("materialize run %s: %w", runID, errNotWired("dag-engine", "MaterializeRun"))
+
+	// specID and specJSON are deliberately NOT sent. The engine re-reads the run's
+	// pinned spec from workflow_specs itself, so sending a copy would create a
+	// second source of truth for what a run executes — and if the two ever
+	// disagreed, the run would be materialized from bytes no one can reproduce
+	// from the run's own record (ADR-0004).
+	var resp deMaterializeRunResponse
+	if err := c.conn.invoke(ctx, "/nexus.v1.DagEngineService/MaterializeRun",
+		&deMaterializeRunRequest{RunID: runID}, &resp); err != nil {
+		return fmt.Errorf("materialize run %s: %w", runID, err)
+	}
+	c.log.InfoContext(ctx, "run materialized",
+		"run_id", runID, "nodes", resp.NodesInserted, "edges", resp.EdgesInserted,
+		"frontier", resp.Frontier, "already_existed", resp.AlreadyExisted)
+	return nil
+}
+
+// ReconcileRun asks the engine to recompute a run's frontier after an attempt
+// reached a terminal state.
+//
+// This is what turns one finished task into the next one starting. Without it a
+// run's first node succeeds and the run then sits forever: nothing else in the
+// system computes the frontier, because only the engine owns the graph.
+func (c *DAGEngineClient) ReconcileRun(ctx context.Context, runID, nodeID string) (frontier []string, runState string, terminal bool, err error) {
+	if c.conn == nil {
+		return nil, "", false, fmt.Errorf("reconcile run %s: %w (dag-engine owns task_nodes)", runID, ErrPeerNotConfigured)
+	}
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+
+	var resp deReconcileRunResponse
+	if err := c.conn.invoke(ctx, "/nexus.v1.DagEngineService/ReconcileRun",
+		&deReconcileRunRequest{RunID: runID, NodeID: nodeID}, &resp); err != nil {
+		return nil, "", false, fmt.Errorf("reconcile run %s: %w", runID, err)
+	}
+	return resp.Frontier, resp.RunState, resp.RunTerminal, nil
 }
 
 // ResetFailedNodes prepares a retry-from-failed.

@@ -29,8 +29,8 @@ Then:
 | What | Where |
 |---|---|
 | Operator console | <http://localhost:3000> |
-| REST API | <http://localhost:8080/v1/namespaces/default/runs> |
-| MinIO console | <http://localhost:9001> (`nexusadmin` / `nexus-dev-password`) |
+| REST API | <http://localhost:8090/v1/namespaces/default/runs> |
+| MinIO console | <http://localhost:9011> (`nexusadmin` / `nexus-dev-password`) |
 | Postgres | `postgres://nexus:nexus-dev-password@localhost:55433/nexus` |
 | Worker gRPC | `localhost:9091` |
 
@@ -69,7 +69,7 @@ no-op rather than a failure (the frozen `0001_init.up.sql` contains bare
 ```bash
 docker compose -f deploy/docker-compose.yml ps          # all services healthy?
 docker compose -f deploy/docker-compose.yml logs migrate # "migrate: done"
-curl -s localhost:8080/healthz
+curl -s localhost:8090/healthz
 ```
 
 ---
@@ -109,7 +109,7 @@ Use it:
 
 ```bash
 curl -s -H "Authorization: Bearer dev-admin-key" \
-  localhost:8080/v1/namespaces/default/runs | jq
+  localhost:8090/v1/namespaces/default/runs | jq
 ```
 
 The **worker** role deliberately cannot read the REST surface. A worker
@@ -133,7 +133,7 @@ user's process, and the control plane only ever parses data (ADR-0004).
 go build -o ./nexusctl ./cli/cmd/nexusctl
 
 export NEXUS_API_KEY=dev-admin-key
-export NEXUS_ADDR=http://localhost:8080
+export NEXUS_ADDR=http://localhost:8090
 
 # Start here: 3 tasks in a line.
 ./nexusctl workflow submit -f examples/hello_dag/compiled.yaml --namespace default
@@ -150,12 +150,12 @@ export NEXUS_ADDR=http://localhost:8080
 or, without the CLI:
 
 ```bash
-curl -s -X POST localhost:8080/v1/namespaces/default/specs \
+curl -s -X POST localhost:8090/v1/namespaces/default/specs \
   -H 'Authorization: Bearer dev-admin-key' \
   -H 'Content-Type: application/yaml' \
   --data-binary @examples/ten_node_mixed/compiled.yaml
 
-curl -s -X POST localhost:8080/v1/namespaces/default/runs \
+curl -s -X POST localhost:8090/v1/namespaces/default/runs \
   -H 'Authorization: Bearer dev-admin-key' \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: my-first-run' \
@@ -294,7 +294,7 @@ Override the port: `NEXUS_UI_PORT=3001 docker compose -f deploy/docker-compose.y
 
 **`mc ready local` healthcheck never passes**
 Older MinIO images lack `mc ready`. Pin a newer release or substitute
-`curl -f http://localhost:9000/minio/health/live`.
+`curl -f http://localhost:9010/minio/health/live`.
 
 **Docker socket permission denied on an agent**
 The agents bind-mount `/var/run/docker.sock` for the docker executor, which is

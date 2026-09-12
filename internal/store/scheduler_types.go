@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -240,4 +241,119 @@ type LostAttempt struct {
 	RetryAt time.Time
 	// NewAttemptID is set when a retry row was created in the same transaction.
 	NewAttemptID *uuid.UUID
+}
+
+// UnmarshalJSON decodes task_nodes.spec_json in EITHER dialect it can arrive in.
+//
+// This exists because the column has two producers writing two shapes, and the
+// scheduler must read both or silently mis-schedule:
+//
+//   - the DAG engine writes it with protojson (internal/store/dagengine_writes.go),
+//     which is lowerCamelCase, NESTS the timeout and runtime fields under
+//     `timeouts`/`runtime`, and — the part that makes a naive struct tag fail
+//     silently — encodes every int64 as a JSON STRING; and
+//   - the flat snake_case form above, which the scheduler's own tests and
+//     fixtures write.
+//
+// Reading only the flat form is not a cosmetic problem. Executor, NodeSelector
+// and StartToCloseMs would all decode as zero against a protojson document, so
+// dispatch would ignore executor compatibility and hard label constraints
+// entirely (§5.3 step 2) and set no start_to_close timer — a task would be placed
+// on a worker that cannot run it and would then never time out. json.Unmarshal
+// reports no error for a field it simply does not find, which is why this went
+// unnoticed: every spec looked like an empty spec.
+//
+// The flat form is applied first and the nested form second, so a protojson
+// document wins where both could match. Neither producer emits both.
+func (s *TaskSpecView) UnmarshalJSON(b []byte) error {
+	// A type alias sheds the method set, so this is the plain struct decode and
+	// not an infinite recursion back into here.
+	type flat TaskSpecView
+	var f flat
+	if err := json.Unmarshal(b, &f); err != nil {
+		return fmt.Errorf("decode task spec: %w", err)
+	}
+	*s = TaskSpecView(f)
+
+	// protojson's shape. Every numeric field is `json.Number` so it parses
+	// whether the producer wrote 60000 or "60000"; protojson writes the latter
+	// for 64-bit integers and a plain int for 32-bit ones.
+	var pj struct {
+		TaskRef      string            `json:"taskRef"`
+		Version      *json.Number      `json:"version"`
+		NodeSelector map[string]string `json:"nodeSelector"`
+		Timeouts     *struct {
+			ScheduleToStartMs *json.Number `json:"scheduleToStartMs"`
+			StartToCloseMs    *json.Number `json:"startToCloseMs"`
+			ScheduleToCloseMs *json.Number `json:"scheduleToCloseMs"`
+			HeartbeatMs       *json.Number `json:"heartbeatMs"`
+		} `json:"timeouts"`
+		Runtime *struct {
+			Executor string `json:"executor"`
+		} `json:"runtime"`
+		Idempotency      string          `json:"idempotency"`
+		ConcurrencyKey   string          `json:"concurrencyKey"`
+		ConcurrencyLimit *json.Number    `json:"concurrencyLimit"`
+		Retry            json.RawMessage `json:"retry"`
+	}
+	// A document that fails this second decode is not an error: it is simply the
+	// flat dialect, already decoded above. Tolerating it is ADR-0011 rule 5 —
+	// an additive change by the column's owner must not break dispatch.
+	if err := json.Unmarshal(b, &pj); err != nil {
+		return nil
+	}
+
+	if pj.TaskRef != "" {
+		s.TaskRef = pj.TaskRef
+	}
+	if v, ok := numInt64(pj.Version); ok {
+		s.Version = int32(v)
+	}
+	if len(pj.NodeSelector) > 0 {
+		s.NodeSelector = pj.NodeSelector
+	}
+	if pj.Runtime != nil && pj.Runtime.Executor != "" {
+		s.Executor = pj.Runtime.Executor
+	}
+	if t := pj.Timeouts; t != nil {
+		if v, ok := numInt64(t.ScheduleToStartMs); ok {
+			s.ScheduleToStartMs = v
+		}
+		if v, ok := numInt64(t.StartToCloseMs); ok {
+			s.StartToCloseMs = v
+		}
+		if v, ok := numInt64(t.ScheduleToCloseMs); ok {
+			s.ScheduleToCloseMs = v
+		}
+		if v, ok := numInt64(t.HeartbeatMs); ok {
+			s.HeartbeatMs = v
+		}
+	}
+	if pj.Idempotency != "" {
+		s.IdempotencyMode = pj.Idempotency
+	}
+	if pj.ConcurrencyKey != "" {
+		s.ConcurrencyKey = pj.ConcurrencyKey
+	}
+	if v, ok := numInt64(pj.ConcurrencyLimit); ok {
+		s.ConcurrencyLimit = int32(v)
+	}
+	if len(pj.Retry) > 0 {
+		s.RetryJSON = pj.Retry
+	}
+	return nil
+}
+
+// numInt64 reads a protojson integer, which may be a JSON number or a quoted
+// string depending on its width. A value we cannot parse is reported as absent
+// rather than as zero, so it leaves whatever the flat decode found in place.
+func numInt64(n *json.Number) (int64, bool) {
+	if n == nil || *n == "" {
+		return 0, false
+	}
+	v, err := n.Int64()
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
