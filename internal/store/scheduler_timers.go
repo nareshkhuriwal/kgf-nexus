@@ -190,6 +190,22 @@ RETURNING id`,
 		return nil, fmt.Errorf("insert retry attempt: %w", err)
 	}
 
+	// Charge the retry budget in the SAME transaction as the attempt row.
+	//
+	// task_nodes.attempts_used is what the §5.1 RETRY predicate compares against
+	// max_attempts (domain.ShouldRetry), and the dag-engine only bumps it for the
+	// attempts IT creates. Retries are created here, so without this the counter
+	// stayed at 1 however many times a node was retried and max_attempts capped
+	// nothing: a task failing a retryable class would be retried forever, held back
+	// only by whatever else happened to make the run terminal. Same transaction as
+	// the INSERT so the budget cannot drift from the attempts that actually exist,
+	// and ON CONFLICT above means a duplicated timer delivery charges it once.
+	if _, err := tx.Exec(ctx, `
+UPDATE task_nodes SET attempts_used = attempts_used + 1
+ WHERE run_id = $1 AND node_id = $2`, runID, nodeID); err != nil {
+		return nil, fmt.Errorf("charge retry budget for %s/%s: %w", runID, nodeID, err)
+	}
+
 	// retry_on_different_worker: the poison-host defence (§5.5). Recorded as
 	// pending_reason rather than enforced in the claim query because excluding a
 	// worker is a soft preference — if it is the only worker that fits, running

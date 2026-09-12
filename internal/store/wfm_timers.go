@@ -67,19 +67,38 @@ func WFMArmTimerAt(ctx context.Context, q GWQuerier, kind, subjectID string, fir
 // The claim marks claimed_by/claimed_at rather than deleting, so a crash between
 // claim and dispatch leaves an auditable record; WFMReleaseStaleTimerClaims
 // recovers those.
-func WFMClaimDueTimers(ctx context.Context, db GWDB, claimant string, limit int) ([]Timer, error) {
+// kinds restricts the claim to the timer kinds the caller can actually apply. An
+// empty slice means "every kind", which is what the tests and any single-reconciler
+// deployment want.
+//
+// Filtering matters because `timers` has TWO claimants: this reconciler and the
+// scheduler's own timer loop, which natively handles retry_backoff and
+// schedule_to_start. Both used to claim every due row, so whichever won the race
+// took the timer — and when this service won a retry_backoff it could only fail,
+// because applying it means writing task_attempts, which the scheduler owns. The
+// timer then sat claimed until the stale-claim sweeper released it, and the retry
+// the author asked for never materialized. Claiming only what we can apply leaves
+// the owner's rows for the owner (ADR-0011).
+func WFMClaimDueTimers(ctx context.Context, db GWDB, claimant string, limit int, kinds ...string) ([]Timer, error) {
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin claim timers: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// $3 = NULL selects every kind, so one query serves both the filtered and the
+	// unfiltered caller without a second code path to keep in step.
+	var kindFilter any
+	if len(kinds) > 0 {
+		kindFilter = kinds
+	}
 	rows, err := tx.Query(ctx, `
 		WITH due AS (
 		    SELECT id
 		      FROM timers
 		     WHERE fire_at <= now()
 		       AND claimed_by IS NULL
+		       AND ($3::text[] IS NULL OR kind = ANY($3::text[]))
 		     ORDER BY fire_at
 		     LIMIT $2
 		     FOR UPDATE SKIP LOCKED
@@ -89,7 +108,7 @@ func WFMClaimDueTimers(ctx context.Context, db GWDB, claimant string, limit int)
 		  FROM due
 		 WHERE t.id = due.id
 		RETURNING t.id::text, t.kind, t.subject_id::text, t.fire_at, t.payload::text`,
-		claimant, limit,
+		claimant, limit, kindFilter,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("claim due timers: %w", err)

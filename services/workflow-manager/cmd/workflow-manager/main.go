@@ -221,11 +221,16 @@ func registerTimerHandlers(rec *timers.Reconciler, runSvc *runs.Service, sched *
 			return nil
 		})
 	}
-	forward(timers.KindScheduleToStart, sched.OnScheduleToStart)
+	// NOT registered here: retry_backoff and schedule_to_start. The scheduler's own
+	// timer loop claims and applies those two natively, in the service that owns
+	// task_attempts, so registering them here would put two claimants on the same
+	// rows — and this one can only fail, because the forwarding RPCs below do not
+	// exist on the scheduler yet. A retry_backoff claimed here therefore stalled
+	// until the stale-claim sweeper released it, and the retry never materialized.
+	// Leave the owner's kinds to the owner until the forwarding RPCs are wired.
 	forward(timers.KindStartToClose, sched.OnStartToClose)
 	forward(timers.KindScheduleToClose, sched.OnScheduleToClose)
 	forward(timers.KindHeartbeat, sched.OnHeartbeatTimeout)
-	forward(timers.KindRetryBackoff, sched.OnRetryBackoff)
 	forward(timers.KindLeaseExpiry, sched.OnLeaseExpiry)
 }
 

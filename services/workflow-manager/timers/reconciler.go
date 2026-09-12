@@ -102,6 +102,21 @@ func (r *Reconciler) Handle(kind string, h Handler) {
 	r.handlers[kind] = h
 }
 
+// registeredKinds lists the kinds with a handler, for the claim filter.
+//
+// Derived from the handler map rather than from a separate constant so the two can
+// never disagree: a kind registered without being claimable would never fire, and a
+// kind claimed without a handler would be taken from its real owner.
+func (r *Reconciler) registeredKinds() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.handlers))
+	for k := range r.handlers {
+		out = append(out, k)
+	}
+	return out
+}
+
 // Run polls until the context is cancelled.
 //
 // Returns nil on cancellation rather than ctx.Err(): a graceful shutdown is a
@@ -141,7 +156,11 @@ func (r *Reconciler) Run(ctx context.Context) error {
 // Cycle claims and dispatches one batch. Exported so tests can drive the
 // reconciler deterministically instead of waiting on wall-clock ticks.
 func (r *Reconciler) Cycle(ctx context.Context) (int, error) {
-	claimed, err := store.WFMClaimDueTimers(ctx, r.db, r.cfg.Claimant, r.cfg.BatchSize)
+	// Claim only the kinds this reconciler has a handler for. The scheduler's timer
+	// loop claims the same table for the kinds IT owns (retry_backoff,
+	// schedule_to_start), and a row claimed by whoever cannot apply it is a row that
+	// stalls until the stale-claim sweeper releases it.
+	claimed, err := store.WFMClaimDueTimers(ctx, r.db, r.cfg.Claimant, r.cfg.BatchSize, r.registeredKinds()...)
 	if err != nil {
 		return 0, fmt.Errorf("claim due timers: %w", err)
 	}

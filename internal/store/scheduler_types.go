@@ -2,7 +2,6 @@ package store
 
 import (
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -90,24 +89,34 @@ func (s *TaskSpecView) RetryPolicy() *nexusv1.RetryPolicy {
 	if s == nil || len(s.RetryJSON) == 0 {
 		return &nexusv1.RetryPolicy{}
 	}
+	// The millisecond fields are json.Number, not int64, because this document has
+	// TWO producers with different renderings of the same value: the gateway writes
+	// a bare JSON number, and protojson (which the DAG engine marshals node specs
+	// with) renders 64-bit integers as QUOTED STRINGS. Declaring them int64 made
+	// Unmarshal fail on the whole struct for any protojson-written node, and the
+	// error path below returns an EMPTY policy -- so retry_on, no_retry_on and the
+	// backoff strategy were all silently discarded and every failure reported
+	// "error_class_not_in_retry_on" regardless of what the author allowed.
 	var raw struct {
-		MaxAttempts int32    `json:"max_attempts"`
-		Strategy    string   `json:"strategy"`
-		InitialMs   int64    `json:"initial_ms"`
-		MaxMs       int64    `json:"max_ms"`
-		Multiplier  float64  `json:"multiplier"`
-		Jitter      string   `json:"jitter"`
-		RetryOn     []string `json:"retry_on"`
-		NoRetryOn   []string `json:"no_retry_on"`
-		DiffWorker  bool     `json:"retry_on_different_worker"`
+		MaxAttempts int32        `json:"max_attempts"`
+		Strategy    string       `json:"strategy"`
+		InitialMs   *json.Number `json:"initial_ms"`
+		MaxMs       *json.Number `json:"max_ms"`
+		Multiplier  float64      `json:"multiplier"`
+		Jitter      string       `json:"jitter"`
+		RetryOn     []string     `json:"retry_on"`
+		NoRetryOn   []string     `json:"no_retry_on"`
+		DiffWorker  bool         `json:"retry_on_different_worker"`
 	}
 	if err := json.Unmarshal(s.RetryJSON, &raw); err != nil {
 		return &nexusv1.RetryPolicy{}
 	}
+	initialMs, _ := numInt64(raw.InitialMs)
+	maxMs, _ := numInt64(raw.MaxMs)
 	p := &nexusv1.RetryPolicy{
 		MaxAttempts:            raw.MaxAttempts,
-		InitialMs:              raw.InitialMs,
-		MaxMs:                  raw.MaxMs,
+		InitialMs:              initialMs,
+		MaxMs:                  maxMs,
 		Multiplier:             raw.Multiplier,
 		Jitter:                 raw.Jitter,
 		RetryOnDifferentWorker: raw.DiffWorker,
@@ -271,9 +280,79 @@ func (s *TaskSpecView) UnmarshalJSON(b []byte) error {
 	type flat TaskSpecView
 	var f flat
 	if err := json.Unmarshal(b, &f); err != nil {
-		return fmt.Errorf("decode task spec: %w", err)
+		// NOT fatal. The DAG engine marshals node specs with protojson
+		// UseProtoNames, which keeps these snake_case keys but renders every 64-bit
+		// integer as a QUOTED STRING, and a quoted "60000" fails to decode into
+		// int64 -- taking the whole struct with it, including the string and map
+		// fields that had parsed fine. Returning an error here made every such node
+		// look like an empty spec: no executor constraint, no timeouts, no retry
+		// policy. The snake_case pass below re-reads the same document with
+		// json.Number so either rendering works.
+		f = flat{}
 	}
 	*s = TaskSpecView(f)
+
+	// protojson + UseProtoNames: snake_case keys, 64-bit integers as strings.
+	// Applied before the camelCase pass because both are protojson dialects and
+	// only one producer writes each; neither emits both.
+	var sn struct {
+		TaskRef      string            `json:"task_ref"`
+		Version      *json.Number      `json:"version"`
+		NodeSelector map[string]string `json:"node_selector"`
+		Timeouts     *struct {
+			ScheduleToStartMs *json.Number `json:"schedule_to_start_ms"`
+			StartToCloseMs    *json.Number `json:"start_to_close_ms"`
+			ScheduleToCloseMs *json.Number `json:"schedule_to_close_ms"`
+			HeartbeatMs       *json.Number `json:"heartbeat_ms"`
+		} `json:"timeouts"`
+		Runtime *struct {
+			Executor string `json:"executor"`
+		} `json:"runtime"`
+		Idempotency      string          `json:"idempotency"`
+		ConcurrencyKey   string          `json:"concurrency_key"`
+		ConcurrencyLimit *json.Number    `json:"concurrency_limit"`
+		Retry            json.RawMessage `json:"retry"`
+	}
+	if err := json.Unmarshal(b, &sn); err == nil {
+		if sn.TaskRef != "" {
+			s.TaskRef = sn.TaskRef
+		}
+		if v, ok := numInt64(sn.Version); ok {
+			s.Version = int32(v)
+		}
+		if len(sn.NodeSelector) > 0 {
+			s.NodeSelector = sn.NodeSelector
+		}
+		if sn.Runtime != nil && sn.Runtime.Executor != "" {
+			s.Executor = sn.Runtime.Executor
+		}
+		if t := sn.Timeouts; t != nil {
+			if v, ok := numInt64(t.ScheduleToStartMs); ok {
+				s.ScheduleToStartMs = v
+			}
+			if v, ok := numInt64(t.StartToCloseMs); ok {
+				s.StartToCloseMs = v
+			}
+			if v, ok := numInt64(t.ScheduleToCloseMs); ok {
+				s.ScheduleToCloseMs = v
+			}
+			if v, ok := numInt64(t.HeartbeatMs); ok {
+				s.HeartbeatMs = v
+			}
+		}
+		if sn.Idempotency != "" {
+			s.IdempotencyMode = sn.Idempotency
+		}
+		if sn.ConcurrencyKey != "" {
+			s.ConcurrencyKey = sn.ConcurrencyKey
+		}
+		if v, ok := numInt64(sn.ConcurrencyLimit); ok {
+			s.ConcurrencyLimit = int32(v)
+		}
+		if len(sn.Retry) > 0 {
+			s.RetryJSON = sn.Retry
+		}
+	}
 
 	// protojson's shape. Every numeric field is `json.Number` so it parses
 	// whether the producer wrote 60000 or "60000"; protojson writes the latter

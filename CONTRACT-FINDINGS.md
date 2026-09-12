@@ -774,3 +774,36 @@ now makes visible instead of silent.
 It is also billed as the Phase 1 exit criterion, so it should be runnable against
 the stack the repo ships. Either lower its requests to fit the default fleet or
 raise the compose agents' advertised capacity to match the example.
+
+### F61. Multi-queue dispatch does not reach the gpu-queue scheduler — OPEN
+**Severity:** blocks Phase 1 exit criterion 1. **Status: OPEN, cause not yet isolated.**
+The 10-node mixed DAG runs its 7 CPU nodes to SUCCEEDED across BOTH workers, then
+stalls: `train_large` and `train_small` sit READY/PENDING on the `gpu` queue
+forever while `scheduler-gpu` records ZERO claim attempts.
+
+Everything checks out individually, which is what makes this interesting:
+- the attempts are PENDING on queue `gpu`, nodes READY, dependencies satisfied;
+- the GPU worker advertises `queues={default,gpu}`, `gpu_count=2`,
+  `gpu_kind=nvidia-a100` -- an exact match for both tasks;
+- `agent-gpu` polls with `NEXUS_QUEUES=default,gpu` and is executing other work;
+- the gateway logged `additional scheduler replica wired for worker polls
+  addr=scheduler-gpu:9090` at startup, so `claimPeers` is populated;
+- `scheduler-gpu` is healthy, listening on 9090, and reachable from the gateway
+  (`nc` OPEN);
+- the gateway logs NO `scheduler peer failed a worker claim` warning, so it is
+  not that the peer is erroring -- the peer loop appears never to be entered.
+
+The fallthrough is conditional: `if err != nil || len(asg) > 0 || len(claimPeers) == 0 { return }`.
+So the peer is only tried when the PRIMARY returns cleanly with zero assignments.
+The likely cause is that the primary is not returning an empty result the way
+that condition expects, but this has not been confirmed and should not be
+guessed at.
+
+**Next step:** add a debug log inside `SchedulerClient.ClaimForWorker` recording
+the primary's result and whether the peer loop ran. That single line will settle
+it; further inspection of correct-looking code will not.
+
+**Note for whoever picks this up:** the queue-per-scheduler-replica design is
+itself worth revisiting. A worker serving N queues needs the gateway to fan a
+poll across N replicas, and a miss on any of them is silent. An alternative is
+one scheduler draining several queues, which removes the fan-out entirely.
