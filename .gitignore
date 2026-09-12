@@ -7,6 +7,15 @@
 node_modules/
 ui/dist/
 ui/.vite/
+# `npm run typecheck` runs `tsc -b` first, which EMITS .js next to every source
+# before falling back to --noEmit. Those artifacts are not source and must never
+# be committed: a stale compiled copy alongside its .tsx is exactly the kind of
+# file someone later edits by mistake.
+ui/*.tsbuildinfo
+ui/src/**/*.js
+ui/src/**/*.js.map
+ui/vite.config.js
+ui/vitest.config.js
 
 # Python
 __pycache__/

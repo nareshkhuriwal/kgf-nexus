@@ -11,6 +11,7 @@ import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { API_BASE, DEFAULT_NAMESPACE, getApiKey, setApiKey } from './api/client';
+import { ThemeToggle } from './components/ThemeToggle';
 import { RunListPage } from './pages/RunListPage';
 import { RunDetailPage } from './pages/RunDetailPage';
 import { WorkersPage } from './pages/WorkersPage';
@@ -49,6 +50,11 @@ export function App() {
 
   return (
     <div className="app">
+      {/* First focusable element on the page: a keyboard user must be able to
+          reach the content without tabbing the whole nav on every navigation. */}
+      <a className="skip-link" href="#main">
+        Skip to content
+      </a>
       <header className="topbar">
         <span className="brand">
           <span className="brand-mark">◇</span> nexus
@@ -111,13 +117,14 @@ export function App() {
               {keyPersistFailed ? 'API key ✗ not saved' : apiKey ? 'API key ✓' : 'Set API key'}
             </button>
           )}
+          <ThemeToggle />
           <span className="chip" title={`API base: ${API_BASE || 'same origin'}`}>
             {API_BASE || 'same origin'}
           </span>
         </div>
       </header>
 
-      <main className="main">
+      <main className="main" id="main" tabIndex={-1}>
         <ErrorBoundary>
           <Routes>
             <Route path="/" element={<Navigate to="/runs" replace />} />
