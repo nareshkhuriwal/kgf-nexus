@@ -119,18 +119,18 @@ func (a *API) createSchedule(w http.ResponseWriter, r *http.Request, p authn.Pri
 	// where the only possible outcome is a schedule that looks active and never
 	// fires -- the failure an operator cannot diagnose. The error names the field
 	// and the token, because this is something a person has to fix.
-	expr, err := cron.Parse(req.Cron)
+	// The timezone is resolved BEFORE the cron, because the expression's meaning
+	// depends on it: "0 2 * * *" is a different set of instants in London than in UTC.
+	// An unknown zone is rejected here rather than stored, since a schedule that
+	// cannot be compiled is one that silently never fires.
+	loc, err := cron.LoadLocation(req.Timezone)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_cron", err.Error())
+		writeError(w, http.StatusBadRequest, "invalid_timezone", err.Error())
 		return
 	}
-	if req.Timezone != "" && req.Timezone != "UTC" {
-		// Refused rather than silently ignored. The column is stored and not yet
-		// consulted, so accepting "Europe/London" would tell the author their
-		// schedule runs at 02:00 local when it will actually run at 02:00 UTC --
-		// wrong by an hour for half the year, in a way nothing would report.
-		writeError(w, http.StatusBadRequest, "timezone_unsupported",
-			"only UTC is supported in this release; cron expressions are evaluated in UTC")
+	expr, err := cron.ParseIn(req.Cron, loc)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_cron", err.Error())
 		return
 	}
 	switch req.OverlapPolicy {
@@ -166,7 +166,7 @@ func (a *API) createSchedule(w http.ResponseWriter, r *http.Request, p authn.Pri
 		SpecName:      req.SpecName,
 		SpecVersion:   req.SpecVersion,
 		CronExpr:      req.Cron,
-		Timezone:      "UTC",
+		Timezone:      loc.String(),
 		Params:        req.Params,
 		Priority:      req.Priority,
 		OverlapPolicy: req.OverlapPolicy,
@@ -207,7 +207,7 @@ func (a *API) getSchedule(w http.ResponseWriter, r *http.Request, _ authn.Princi
 		return
 	}
 	out := schedulePayload(s)
-	if expr, perr := cron.Parse(s.CronExpr); perr == nil {
+	if expr, perr := parseScheduleCron(s); perr == nil {
 		out["next_fires"] = previewFires(expr, a.clock().UTC(), previewCount(r))
 	} else {
 		// A stored schedule whose cron no longer parses cannot fire at all, and the
@@ -238,10 +238,10 @@ func (a *API) setScheduleEnabled(enabled bool) func(http.ResponseWriter, *http.R
 				a.failSchedule(w, r, "get schedule", err)
 				return
 			}
-			expr, perr := cron.Parse(s.CronExpr)
+			expr, perr := parseScheduleCron(s)
 			if perr != nil {
 				writeError(w, http.StatusBadRequest, "invalid_cron",
-					"this schedule's cron expression no longer parses and it cannot be enabled: "+perr.Error())
+					"this schedule cannot be compiled and so cannot be enabled: "+perr.Error())
 				return
 			}
 			t, nerr := expr.Next(a.clock().UTC())
@@ -284,32 +284,65 @@ func (a *API) previewSchedule(w http.ResponseWriter, r *http.Request, _ authn.Pr
 		writeError(w, http.StatusBadRequest, "missing_cron", "the cron query parameter is required")
 		return
 	}
-	parsed, err := cron.Parse(expr)
+	// The zone is part of the question: the same expression previews different
+	// instants in different zones, and an author checking a London schedule needs to
+	// see London instants.
+	tz := r.URL.Query().Get("timezone")
+	loc, lerr := cron.LoadLocation(tz)
+	if lerr != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"cron":     expr,
+			"timezone": tz,
+			"valid":    false,
+			"error":    lerr.Error(),
+		})
+		return
+	}
+	parsed, err := cron.ParseIn(expr, loc)
 	if err != nil {
 		// 200 with a valid:false body, not 400. This endpoint's job is to ANSWER
 		// "is this expression good", so a bad expression is a successful answer --
 		// a 400 would make a UI treat it as a request failure.
 		writeJSON(w, http.StatusOK, map[string]any{
-			"cron":  expr,
-			"valid": false,
-			"error": err.Error(),
+			"cron":     expr,
+			"timezone": loc.String(),
+			"valid":    false,
+			"error":    err.Error(),
 		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"cron":       parsed.Expr(),
 		"valid":      true,
-		"timezone":   "UTC",
+		"timezone":   loc.String(),
 		"next_fires": previewFires(parsed, a.clock().UTC(), previewCount(r)),
 	})
 }
 
+// parseScheduleCron compiles a stored schedule's expression in its own timezone.
+//
+// Mirrors the workflow-manager's parseIn: the gateway must agree with the owner about
+// what a schedule means, and two places computing fire times from different zones is
+// the sort of disagreement that shows up as "the console says 02:00 and it ran at
+// 03:00".
+func parseScheduleCron(s store.Schedule) (*cron.Schedule, error) {
+	loc, err := cron.LoadLocation(s.Timezone)
+	if err != nil {
+		return nil, err
+	}
+	return cron.ParseIn(s.CronExpr, loc)
+}
+
 // previewFires renders the next n fire times.
+//
+// Formatted in the SCHEDULE's location, so the offset in each timestamp shows what the
+// author's wall clock will read. An author previewing a London schedule that sees
+// "02:00Z" has learned nothing about whether it runs at 02:00 for them.
 func previewFires(expr *cron.Schedule, from time.Time, n int) []string {
 	times, _ := expr.NextN(from, n)
 	out := make([]string, 0, len(times))
 	for _, t := range times {
-		out = append(out, t.Format(time.RFC3339))
+		out = append(out, t.In(expr.Location()).Format(time.RFC3339))
 	}
 	return out
 }

@@ -214,14 +214,13 @@ func (s *Service) FirePass(ctx context.Context, namespaces ...string) (int, erro
 // is deferred rather than written at each exit: an early return that forgot would
 // silently retire the schedule forever.
 func (s *Service) fire(ctx context.Context, sch store.Schedule, now time.Time) (int, error) {
-	expr, err := cron.Parse(sch.CronExpr)
+	expr, err := parseIn(sch)
 	if err != nil {
-		// Do NOT re-arm: an unparseable cron cannot produce a next fire time, and
-		// guessing one would busy-loop the schedule. It stays unscheduled and the
-		// stalled sweep will report it, which is the honest outcome -- the operator
-		// has to fix the expression.
-		return 0, fmt.Errorf("schedule %s/%s has an unparseable cron %q: %w",
-			sch.Namespace, sch.Name, sch.CronExpr, err)
+		// Do NOT re-arm: a cron that cannot be compiled -- bad expression or an
+		// unloadable timezone -- has no next fire time, and guessing one would
+		// busy-loop the schedule. It stays unscheduled and the stalled sweep reports
+		// it every pass, which is the honest outcome: the operator has to fix it.
+		return 0, err
 	}
 
 	// Re-arm on every path. Computed from `now` rather than from the tick just
@@ -445,13 +444,14 @@ func (s *Service) SweepStalled(ctx context.Context, namespaces ...string) (int, 
 	now := s.now().UTC()
 	armed := 0
 	for _, sch := range stalled {
-		expr, perr := cron.Parse(sch.CronExpr)
+		expr, perr := parseIn(sch)
 		if perr != nil {
-			// Left unscheduled deliberately: an unparseable cron has no next fire
-			// time, and the schedule is reported every sweep until someone fixes it.
-			s.log.WarnContext(ctx, "stalled schedule has an unparseable cron and cannot be re-armed",
+			// Left unscheduled deliberately: a cron that cannot be compiled has no
+			// next fire time, and the schedule is reported every sweep until someone
+			// fixes it.
+			s.log.WarnContext(ctx, "stalled schedule cannot be compiled and so cannot be re-armed",
 				"schedule_id", sch.ID, "namespace", sch.Namespace, "name", sch.Name,
-				"cron", sch.CronExpr, "error", perr)
+				"cron", sch.CronExpr, "timezone", sch.Timezone, "error", perr)
 			continue
 		}
 		next, nerr := expr.Next(now)

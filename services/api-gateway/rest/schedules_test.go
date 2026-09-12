@@ -134,31 +134,73 @@ func TestCreateScheduleRejectsBadCron(t *testing.T) {
 	}
 }
 
-// TestCreateScheduleRefusesNonUTCTimezone pins the honest-failure decision. Accepting
-// "Europe/London" while evaluating in UTC would tell the author their job runs at
-// 02:00 local when it runs at 02:00 UTC -- wrong by an hour for half the year, with
-// nothing reporting it.
-func TestCreateScheduleRefusesNonUTCTimezone(t *testing.T) {
+// TestCreateScheduleAcceptsAnIANATimezone covers what replaced the old
+// refuse-everything-but-UTC behaviour.
+//
+// Refusing non-UTC was the honest choice while the column was stored and unused --
+// accepting "Europe/London" and evaluating in UTC would have told the author their job
+// runs at 02:00 local when it ran at 02:00 UTC, wrong by an hour for half the year with
+// nothing reporting it. Now the zone is actually honoured, so it is accepted, and the
+// preview comes back with the author's own offset so they can see that it is.
+func TestCreateScheduleAcceptsAnIANATimezone(t *testing.T) {
 	h, fs := newScheduleAPI(t)
 
-	body := `{"name":"x","spec_name":"train","cron":"0 2 * * *","timezone":"Europe/London"}`
+	body := `{"name":"london","spec_name":"train","cron":"0 2 * * *","timezone":"Europe/London"}`
 	rec := post(t, h, "/v1/namespaces/team-ml/schedules", adminKey, "", body)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status %d, want 400 for an unsupported timezone. body=%s", rec.Code, rec.Body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status %d, want 201. body=%s", rec.Code, rec.Body)
 	}
-	if !strings.Contains(rec.Body.String(), "UTC") {
-		t.Errorf("the error should say only UTC is supported: %s", rec.Body)
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["timezone"] != "Europe/London" {
+		t.Errorf("timezone = %v, want Europe/London stored verbatim", got["timezone"])
+	}
+	if len(fs.created) != 1 || fs.created[0].Timezone != "Europe/London" {
+		t.Errorf("owner received timezone %q, want Europe/London", fs.created[0].Timezone)
+	}
+	// The preview must read in the AUTHOR's zone. A London schedule previewing "02:00Z"
+	// tells them nothing about whether it runs at 02:00 for them.
+	fires, _ := got["next_fires"].([]any)
+	if len(fires) == 0 {
+		t.Fatal("no preview returned")
+	}
+	first, _ := fires[0].(string)
+	if !strings.Contains(first, "T02:00:00") {
+		t.Errorf("first preview fire = %q, want a 02:00 local wall reading", first)
+	}
+	if strings.HasSuffix(first, "Z") {
+		t.Errorf("first preview fire = %q is rendered in UTC; it must carry the schedule's own offset", first)
+	}
+}
+
+// TestCreateScheduleRejectsUnknownTimezone: an unloadable zone must fail at submit
+// time. Storing it would produce a schedule that cannot be compiled and therefore
+// silently never fires, which is the failure mode an operator cannot diagnose.
+func TestCreateScheduleRejectsUnknownTimezone(t *testing.T) {
+	h, fs := newScheduleAPI(t)
+
+	for _, tz := range []string{"Mars/Olympus_Mons", "Not/AZone", "GMT+5"} {
+		body := `{"name":"x","spec_name":"train","cron":"0 2 * * *","timezone":"` + tz + `"}`
+		rec := post(t, h, "/v1/namespaces/team-ml/schedules", adminKey, "", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("timezone %q: status %d, want 400. body=%s", tz, rec.Code, rec.Body)
+		}
 	}
 	if len(fs.created) != 0 {
-		t.Error("a non-UTC schedule reached the owner")
+		t.Errorf("%d schedules reached the owner with an unknown timezone", len(fs.created))
 	}
 
-	// An explicit UTC is fine, and so is omitting it.
-	for _, tz := range []string{`,"timezone":"UTC"`, ``} {
-		rec := post(t, h, "/v1/namespaces/team-ml/schedules", adminKey, "",
-			`{"name":"ok","spec_name":"train","cron":"0 2 * * *"`+tz+`}`)
+	// Omitted and explicit UTC both mean UTC, so a client that never sets it is safe.
+	cases := map[string]string{
+		"omitted":      `{"name":"tz-omitted","spec_name":"train","cron":"0 2 * * *"}`,
+		"explicit UTC": `{"name":"tz-utc","spec_name":"train","cron":"0 2 * * *","timezone":"UTC"}`,
+	}
+	for name, body := range cases {
+		rec := post(t, h, "/v1/namespaces/team-ml/schedules", adminKey, "", body)
 		if rec.Code != http.StatusCreated {
-			t.Errorf("timezone %q: status %d, want 201. body=%s", tz, rec.Code, rec.Body)
+			t.Errorf("%s: status %d, want 201. body=%s", name, rec.Code, rec.Body)
 		}
 	}
 }
@@ -349,5 +391,46 @@ func TestScheduleErrorsMapFromStatusCodes(t *testing.T) {
 		if rec.Code != c.want {
 			t.Errorf("%v -> status %d, want %d. body=%s", c.err, rec.Code, c.want, rec.Body)
 		}
+	}
+}
+
+// TestPreviewHonoursTheTimezone: the same expression previews different instants in
+// different zones, and an author checking a London schedule needs London instants.
+func TestPreviewHonoursTheTimezone(t *testing.T) {
+	h, _ := newScheduleAPI(t)
+
+	rec := get(t, h, "/v1/namespaces/team-ml/schedules/preview?cron=0+2+*+*+*&timezone=Europe/London&count=2", adminKey)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200. body=%s", rec.Code, rec.Body)
+	}
+	var got map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["valid"] != true {
+		t.Fatalf("valid = %v, body=%s", got["valid"], rec.Body)
+	}
+	if got["timezone"] != "Europe/London" {
+		t.Errorf("timezone = %v, want Europe/London echoed back", got["timezone"])
+	}
+	fires, _ := got["next_fires"].([]any)
+	if len(fires) != 2 {
+		t.Fatalf("got %d fires, want 2", len(fires))
+	}
+	for _, f := range fires {
+		str, _ := f.(string)
+		if !strings.Contains(str, "T02:00:00") {
+			t.Errorf("preview fire %q is not 02:00 local", str)
+		}
+	}
+
+	// An unknown zone is answered, not errored, for the same reason a bad cron is: this
+	// endpoint's job is to say whether the input is usable.
+	bad := get(t, h, "/v1/namespaces/team-ml/schedules/preview?cron=0+2+*+*+*&timezone=Mars/Olympus", adminKey)
+	if bad.Code != http.StatusOK {
+		t.Errorf("unknown zone: status %d, want 200 with valid:false", bad.Code)
+	}
+	var badBody map[string]any
+	_ = json.Unmarshal(bad.Body.Bytes(), &badBody)
+	if badBody["valid"] != false || badBody["error"] == nil {
+		t.Errorf("unknown zone body = %v, want valid:false with an error", badBody)
 	}
 }

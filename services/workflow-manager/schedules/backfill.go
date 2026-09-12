@@ -79,10 +79,9 @@ func (s *Service) StartBackfill(ctx context.Context, req BackfillRequest) (store
 			req.To.Format(time.RFC3339), req.From.Format(time.RFC3339))
 	}
 
-	expr, err := cron.Parse(sch.CronExpr)
+	expr, err := parseIn(sch)
 	if err != nil {
-		return store.Backfill{}, fmt.Errorf("schedule %s/%s has an unparseable cron %q: %w",
-			sch.Namespace, sch.Name, sch.CronExpr, err)
+		return store.Backfill{}, err
 	}
 
 	maxActive := req.MaxActive
@@ -193,10 +192,9 @@ func (s *Service) advanceBackfill(ctx context.Context, bf store.Backfill) (int, 
 	if err != nil {
 		return 0, fmt.Errorf("load schedule %s: %w", bf.ScheduleID, err)
 	}
-	expr, err := cron.Parse(sch.CronExpr)
+	expr, err := parseIn(sch)
 	if err != nil {
-		return 0, fmt.Errorf("schedule %s/%s has an unparseable cron %q: %w",
-			sch.Namespace, sch.Name, sch.CronExpr, err)
+		return 0, err
 	}
 
 	// THE CAP. Checked before generating anything and re-checked after every tick,

@@ -6,13 +6,48 @@
 // finite test surface, which is exactly the kind of thing worth owning rather than
 // tracking CVEs for.
 //
-// UTC ONLY in this release. Schedule rows carry a timezone column that is stored
-// and not yet consulted, so every expression here is evaluated in UTC. That is a
-// real limitation an operator must know about, not an implementation detail: "0 2 *
-// * *" means 02:00 UTC, which is 03:00 in London for half the year. Local-time
-// semantics need an explicit DST policy for the spring gap (an hour that does not
-// exist) and the autumn fold (an hour that happens twice), and guessing at those
-// silently either skips a run or doubles it.
+// TIMEZONES AND DST. A schedule is evaluated in its own IANA location, so
+// "0 2 * * *" in Europe/London means 02:00 LOCAL every day -- which is what an
+// author writing a nightly job means, and it stays 02:00 local across the March and
+// October transitions rather than drifting an hour twice a year.
+//
+// That requires deciding two cases explicitly, because wall-clock time is neither
+// total nor unique:
+//
+//   - THE SPRING GAP. Clocks jump forward, so an hour of local time never occurs.
+//     On 2026-03-29 in London, 01:00-02:00 does not exist. A schedule for "0 1 * * *"
+//     has no instant to fire at that day.
+//   - THE AUTUMN FOLD. Clocks go back, so an hour occurs TWICE. On 2026-10-25 in
+//     London, 01:30 happens at both 00:30 UTC (BST) and 01:30 UTC (GMT). A schedule
+//     for "30 1 * * *" has two candidate instants.
+//
+// Go's time.Date does not solve this and silently does something surprising in both
+// cases -- measured, not assumed:
+//
+//   - in the gap it NORMALIZES FORWARD, so Date(01:30) returns 02:30. Local 01:30 and
+//     local 02:30 then map to the SAME instant, and a naive walk fires that instant
+//     twice.
+//   - in the fold it returns the SECOND occurrence, so the first 01:00 (BST) is never
+//     produced and an hourly schedule silently skips a tick.
+//
+// Both were verified against Go's tzdata before this was written, and both are
+// exactly the failures a scheduler must not have. So this package handles them
+// explicitly:
+//
+//   - A GAP TICK FIRES ONCE, at the first instant that exists after the skipped wall
+//     time. Skipping the day entirely is the other defensible choice and is worse for
+//     the common case: a nightly backup scheduled at 01:30 should still run on the
+//     day the clocks change, an hour late, rather than not run at all. Firing once is
+//     the part that matters -- the normalization collision is suppressed so it cannot
+//     double.
+//   - A FOLD TICK FIRES ONCE, on the FIRST occurrence. Firing twice would run the job
+//     twice for one logical time, which for anything that writes is a duplicate the
+//     platform promises not to manufacture; firing on the second occurrence would
+//     delay it an hour for no reason.
+//
+// Both rules are "exactly once per wall-clock time the author wrote", which is the
+// only reading that keeps a schedule's logical time meaningful. UTC remains available
+// and is the default: it has neither case by construction.
 package cron
 
 import (
@@ -26,7 +61,10 @@ import (
 // as a bitmask because the domains are tiny and membership is the only question
 // ever asked of them.
 type Schedule struct {
-	expr   string
+	expr string
+	// loc is the location the expression is evaluated in. Never nil: Parse defaults
+	// it to UTC, so no call site has to nil-check a location.
+	loc    *time.Location
 	minute uint64 // 0-59
 	hour   uint64 // 0-23
 	dom    uint64 // 1-31
@@ -74,17 +112,59 @@ var descriptors = map[string]string{
 	"@hourly":   "0 * * * *",
 }
 
-// Parse compiles a five-field expression, or one of the @ descriptors.
+// Parse compiles a five-field expression to be evaluated in UTC.
+//
+// Kept for callers that genuinely mean UTC, and because it is the safe default: UTC
+// has neither a gap nor a fold, so a schedule parsed this way cannot hit either case.
+func Parse(expr string) (*Schedule, error) {
+	return ParseIn(expr, time.UTC)
+}
+
+// ParseIn compiles an expression to be evaluated in loc.
+//
+// A nil loc means UTC rather than being an error, so a zero-value config is safe.
 //
 // Errors name the field and the offending token, because a rejected schedule is
 // something a person has to fix and "invalid cron expression" tells them nothing.
-func Parse(expr string) (*Schedule, error) {
+func ParseIn(expr string, loc *time.Location) (*Schedule, error) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	s, err := parseFields(expr)
+	if err != nil {
+		return nil, err
+	}
+	s.loc = loc
+	return s, nil
+}
+
+// LoadLocation resolves an IANA name, rejecting the empty string as UTC.
+//
+// Wrapped so every caller gets the same error shape, and so a missing tzdata is
+// reported as what it is rather than as a bad schedule: a deployment without zoneinfo
+// cannot evaluate a local schedule at all, and that is an operator problem, not an
+// authoring one.
+func LoadLocation(name string) (*time.Location, error) {
+	if name == "" || name == "UTC" {
+		return time.UTC, nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("unknown timezone %q: %w (it must be an IANA name such as Europe/London or America/New_York, and the host must have zoneinfo installed)", name, err)
+	}
+	return loc, nil
+}
+
+// Location reports the location this schedule is evaluated in.
+func (s *Schedule) Location() *time.Location { return s.loc }
+
+func parseFields(expr string) (*Schedule, error) {
 	raw := strings.TrimSpace(expr)
 	if raw == "" {
 		return nil, fmt.Errorf("cron expression is empty")
 	}
 	if expanded, ok := descriptors[strings.ToLower(raw)]; ok {
-		s, err := Parse(expanded)
+		s, err := parseFields(expanded)
 		if err != nil {
 			return nil, err
 		}
@@ -231,42 +311,139 @@ func isSet(mask uint64, v int) bool { return mask&(1<<uint(v)) != 0 }
 // an unbounded loop would spin forever inside a timer handler.
 const maxLookahead = 4 * 366 * 24 * time.Hour
 
-// Next returns the first fire time strictly after `after`, in UTC.
+// Next returns the first fire time strictly after `after`.
 //
-// Strictly after, so calling Next with a previous fire time always advances. An
-// inclusive boundary would make a schedule re-fire the tick it just ran every time
-// the loop re-read it.
+// The returned instant is in the schedule's location, so its wall-clock reading is
+// the one the author wrote. Strictly after, so calling Next with a previous fire time
+// always advances -- an inclusive boundary would make a schedule re-fire the tick it
+// just ran every time the loop re-read it.
+//
+// The walk is over LOCAL wall-clock minutes, because that is what a cron expression
+// describes. Each candidate wall time is then resolved to a real instant, which is
+// where the gap and the fold are handled (see the package comment).
 func (s *Schedule) Next(after time.Time) (time.Time, error) {
 	// Truncate to the minute and step once: cron's resolution is a minute, and any
 	// sub-minute remainder in `after` would otherwise make the first candidate the
 	// same minute it was called in.
-	t := after.UTC().Truncate(time.Minute).Add(time.Minute)
-	limit := t.Add(maxLookahead)
+	start := after.In(s.loc).Truncate(time.Minute).Add(time.Minute)
+	limit := start.Add(maxLookahead)
 
-	for t.Before(limit) {
-		if !isSet(s.month, int(t.Month())) {
+	// Walk wall-clock fields rather than adding durations. Adding an hour of real time
+	// across a transition lands on a different wall-clock hour than intended, which is
+	// precisely the drift local scheduling exists to avoid.
+	y, mo, d := start.Date()
+	h, mi := start.Hour(), start.Minute()
+
+	for {
+		cand := time.Date(y, mo, d, h, mi, 0, 0, s.loc)
+		if cand.After(limit) {
+			return time.Time{}, fmt.Errorf("cron expression %q has no fire time within %s of %s; it likely describes a date that never occurs (for example 30 February)",
+				s.expr, maxLookahead, after.In(s.loc).Format(time.RFC3339))
+		}
+
+		if !isSet(s.month, int(mo)) {
 			// Skip to the first instant of the next month rather than the next
 			// minute: a month that does not match cannot contain a fire time, and
 			// stepping through it a minute at a time is ~44,000 wasted iterations.
-			t = time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 1, 0)
+			y, mo, d, h, mi = nextMonth(y, mo)
 			continue
 		}
-		if !s.dayMatches(t) {
-			t = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
+		if !s.dayMatches(time.Date(y, mo, d, 12, 0, 0, 0, s.loc)) {
+			// Noon, deliberately: the day-of-week of a date is what is being tested,
+			// and midday is never inside a DST transition in any zone, so the weekday
+			// read is never distorted by one.
+			y, mo, d, h, mi = nextDay(y, mo, d)
 			continue
 		}
-		if !isSet(s.hour, t.Hour()) {
-			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, time.UTC).Add(time.Hour)
+		if !isSet(s.hour, h) {
+			h, mi = h+1, 0
+			if h > 23 {
+				y, mo, d, h, mi = nextDay(y, mo, d)
+			}
 			continue
 		}
-		if !isSet(s.minute, t.Minute()) {
-			t = t.Add(time.Minute)
+		if !isSet(s.minute, mi) {
+			mi++
+			if mi > 59 {
+				h, mi = h+1, 0
+				if h > 23 {
+					y, mo, d, h, mi = nextDay(y, mo, d)
+				}
+			}
 			continue
 		}
-		return t, nil
+
+		// The wall time matches. Resolve it to a real instant.
+		fire, ok := s.resolve(y, mo, d, h, mi)
+		if ok && fire.After(after) {
+			return fire, nil
+		}
+		// Either this wall time does not exist as its own instant (a gap minute that
+		// normalizes onto another matching minute -- suppressed so it fires once), or
+		// the resolved instant is not actually after `after`, which happens on a fold
+		// when the earlier occurrence has already passed. Advance a wall minute.
+		mi++
+		if mi > 59 {
+			h, mi = h+1, 0
+			if h > 23 {
+				y, mo, d, h, mi = nextDay(y, mo, d)
+			}
+		}
 	}
-	return time.Time{}, fmt.Errorf("cron expression %q has no fire time within %s of %s; it likely describes a date that never occurs (for example 30 February)",
-		s.expr, maxLookahead, after.UTC().Format(time.RFC3339))
+}
+
+// resolve turns a local wall-clock time into the instant it should fire at, reporting
+// false when this wall time must not fire in its own right.
+//
+// THE TWO DST CASES, both measured against Go's tzdata rather than assumed:
+//
+// A GAP. time.Date normalizes a nonexistent wall time FORWARD, so asking for 01:30 on
+// a spring-forward day returns 02:30. That is usable -- the job runs at the first
+// instant that exists, an hour late, which beats not running -- but it creates a
+// collision: local 01:30 and local 02:30 both resolve to 02:30. If both were allowed
+// to fire, an hourly schedule would fire that one instant twice. So a normalized time
+// fires only if the wall time it landed on is NOT itself a matching tick; otherwise the
+// later, genuine one owns the instant and this one is suppressed.
+//
+// A FOLD. time.Date returns the SECOND occurrence of a repeated wall time, so the
+// first (still in the pre-transition offset) is never produced and a tick is silently
+// skipped. This checks for an earlier instant with the same wall reading and prefers
+// it, so the tick fires once, on the first occurrence.
+func (s *Schedule) resolve(y int, mo time.Month, d, h, mi int) (time.Time, bool) {
+	cand := time.Date(y, mo, d, h, mi, 0, 0, s.loc)
+
+	if cand.Hour() != h || cand.Minute() != mi {
+		// Normalized: this wall time does not exist. It fires at the normalized
+		// instant only if that instant's own wall time is not also a tick -- if it is,
+		// that tick owns the instant and this one would be a duplicate.
+		if isSet(s.hour, cand.Hour()) && isSet(s.minute, cand.Minute()) &&
+			s.dayMatches(cand) && isSet(s.month, int(cand.Month())) {
+			return time.Time{}, false
+		}
+		return cand, true
+	}
+
+	// An hour earlier in real time with the SAME wall reading means cand is the second
+	// occurrence of a folded hour. Prefer the first.
+	if earlier := cand.Add(-time.Hour); earlier.Hour() == h && earlier.Minute() == mi {
+		return earlier, true
+	}
+	return cand, true
+}
+
+func nextMonth(y int, mo time.Month) (int, time.Month, int, int, int) {
+	if mo == time.December {
+		return y + 1, time.January, 1, 0, 0
+	}
+	return y, mo + 1, 1, 0, 0
+}
+
+func nextDay(y int, mo time.Month, d int) (int, time.Month, int, int, int) {
+	// Constructed in UTC purely to do calendar arithmetic: AddDate on a zoned time can
+	// shift the wall clock across a transition, and here only the DATE is wanted.
+	t := time.Date(y, mo, d, 12, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
+	ny, nmo, nd := t.Date()
+	return ny, nmo, nd, 0, 0
 }
 
 // dayMatches implements cron's one genuine oddity: when BOTH day-of-month and
