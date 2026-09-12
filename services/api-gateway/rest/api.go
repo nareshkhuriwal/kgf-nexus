@@ -95,6 +95,9 @@ type API struct {
 	// backfills is nil when no backfill upstream is configured, for the same reason
 	// as schedules.
 	backfills BackfillManager
+	// identity is nil unless WithIdentity was called, in which case the identity
+	// and admin routes are simply not registered. See admin.go.
+	identity IdentityAdmin
 }
 
 // New builds the REST API.
@@ -178,7 +181,56 @@ func (a *API) Routes() http.Handler {
 	// validate locally against the same grammar rather than a documented copy of it.
 	mux.HandleFunc("GET /v1/schemas/workflow-spec-v1.json", a.serveSchema)
 
+	a.registerIdentityRoutes(mux)
+
 	return mux
+}
+
+// registerIdentityRoutes adds the identity and administration surface.
+//
+// Registered only when identity is wired, so a deployment without it serves
+// exactly the route set it served before -- a 404 from a route that was never
+// enabled is clearer than a 501 from one that exists but cannot work.
+//
+// Every route here goes through guard() except login, which cannot: a caller
+// logging in has no credential to authorize. That single exception is written out
+// explicitly rather than hidden behind a helper, so the property "every route has
+// an authorization decision" stays auditable by reading this function.
+func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
+	if a.identity == nil {
+		return
+	}
+
+	// THE ONE UNGUARDED ROUTE. Rate-limited and fully audited inside the handler.
+	mux.HandleFunc("POST /v1/auth/login", a.login)
+
+	// Logout and whoami need only a valid credential of any kind, so they are
+	// guarded on read: every authenticated principal may ask who it is and end its
+	// own session.
+	mux.Handle("POST /v1/auth/logout", a.guard(authn.ActionRead, a.logout))
+	mux.Handle("GET /v1/auth/whoami", a.guard(authn.ActionRead, a.whoami))
+
+	// User administration. ActionAdminWrite throughout: creating, disabling and
+	// resetting accounts are the operations that can lock a tenant out or let an
+	// attacker in, so they sit behind the strongest grant the matrix has.
+	mux.Handle("GET /v1/namespaces/{ns}/users", a.guard(authn.ActionAdminWrite, a.listUsers))
+	mux.Handle("POST /v1/namespaces/{ns}/users", a.guard(authn.ActionAdminWrite, a.createUser))
+	mux.Handle("POST /v1/namespaces/{ns}/users/{id}/disable", a.guard(authn.ActionAdminWrite, a.setUserDisabled))
+	mux.Handle("POST /v1/namespaces/{ns}/users/{id}/enable", a.guard(authn.ActionAdminWrite, a.setUserDisabled))
+	mux.Handle("POST /v1/namespaces/{ns}/users/{id}/password", a.guard(authn.ActionAdminWrite, a.resetUserPassword))
+	mux.Handle("GET /v1/namespaces/{ns}/users/{id}/sessions", a.guard(authn.ActionAdminWrite, a.listUserSessions))
+	mux.Handle("POST /v1/namespaces/{ns}/users/{id}/sessions/revoke", a.guard(authn.ActionAdminWrite, a.revokeUserSessions))
+
+	// Scoped tokens. Listing is admin-only too: the list names every machine
+	// credential in the namespace and when each was last used, which is a map of
+	// the tenant's integrations.
+	mux.Handle("GET /v1/namespaces/{ns}/tokens", a.guard(authn.ActionAdminWrite, a.listTokens))
+	mux.Handle("POST /v1/namespaces/{ns}/tokens", a.guard(authn.ActionAdminWrite, a.createToken))
+	mux.Handle("POST /v1/namespaces/{ns}/tokens/{id}/revoke", a.guard(authn.ActionAdminWrite, a.revokeToken))
+
+	// The audit trail records who changed what. Admin-only: it names accounts and
+	// the actions taken against them.
+	mux.Handle("GET /v1/namespaces/{ns}/audit", a.guard(authn.ActionAdminWrite, a.listAudit))
 }
 
 // guard authenticates, authorizes for the path's namespace, and then dispatches.
@@ -194,7 +246,12 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 		if a.rateLimited(w, r) {
 			return
 		}
-		p, err := a.auth.Authenticate(r.Context(), authn.ExtractBearer(r.Header.Get("Authorization")))
+		// AuthenticateCredential, not Authenticate: it dispatches on the credential's
+		// prefix to sessions or scoped tokens and otherwise falls through to the
+		// unchanged api_keys lookup. Every credential kind therefore passes through
+		// this one enforcement point, which is what keeps "who may do what"
+		// answerable by reading this function.
+		p, err := a.auth.AuthenticateCredential(r.Context(), authn.ExtractBearer(r.Header.Get("Authorization")))
 		if errors.Is(err, authn.ErrUnauthenticated) {
 			// No detail about WHY. Distinguishing "no such key" from "revoked"
 			// would make this endpoint an oracle for probing valid keys.

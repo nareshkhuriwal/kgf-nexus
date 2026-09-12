@@ -111,9 +111,40 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The credential every request presents.
+ *
+ * A SESSION token takes precedence over a stored API key, because logging in is
+ * the more specific and more recent act: an operator who signs in means to act
+ * as themselves even on a browser that still has a key saved from before. When
+ * there is no session this is exactly the previous behaviour, which is what
+ * keeps the API-key escape hatch (and CLI parity) working unchanged.
+ *
+ * Read on every request rather than captured once, so logging in or out takes
+ * effect immediately without a reload.
+ *
+ * The session is read here directly rather than through api/auth.ts: that module
+ * imports this one, and routing the lookup back through it would be a cycle.
+ */
+function currentToken(): string {
+  try {
+    const raw = window.localStorage.getItem('nexus.session');
+    if (raw) {
+      const parsed = JSON.parse(raw) as { token?: string; expiresAt?: string };
+      // A locally-expired token is not presented: the server would refuse it, and
+      // a 401 on first load reads as "my login broke" rather than "it ended".
+      const live = !parsed.expiresAt || Date.parse(parsed.expiresAt) > Date.now();
+      if (parsed.token && live) return parsed.token;
+    }
+  } catch {
+    /* no session, unreadable storage, or malformed JSON: fall back to the key */
+  }
+  return getApiKey();
+}
+
 function authHeaders(): Record<string, string> {
-  const key = getApiKey();
-  return key ? { Authorization: `Bearer ${key}` } : {};
+  const token = currentToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 export function apiUrl(path: string): string {
@@ -166,9 +197,9 @@ function serverMessage(status: number, body: string): string {
   if (status === 401 || status === 403) {
     // Name the control that fixes it. "Check the API key" leaves an operator
     // hunting through config for something they can set in the header.
-    const key = getApiKey();
-    if (!key) {
-      return `Not authorised (HTTP ${status}). No API key is set — use “Set API key” in the header.`;
+    const token = currentToken();
+    if (!token) {
+      return `Not authorised (HTTP ${status}). You are not signed in — log in, or set an API key in the header.`;
     }
     // 403 means the key was RECOGNISED but lacks the role, which is a different
     // fix from 401 (key not recognised at all). Saying "check your key" for a
@@ -176,7 +207,7 @@ function serverMessage(status: number, body: string): string {
     if (status === 403) {
       return `Forbidden (HTTP 403). This key is valid but lacks permission — a worker key cannot read this; use an admin key.`;
     }
-    return `Not authorised (HTTP 401). The API key in this browser was refused (${key.length} chars). Use “API key” in the header to replace it.`;
+    return `Not authorised (HTTP 401). The credential in this browser was refused. Your session may have expired — log in again, or replace the API key in the header.`;
   }
   if (status === 404) return `Not found (HTTP 404). This endpoint may not be implemented yet.`;
   if (status === 501) return `Not implemented yet (HTTP 501).`;
