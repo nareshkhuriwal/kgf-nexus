@@ -41,6 +41,13 @@ tasks:
       max_ms: 600000
       multiplier: 2
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'extracting records from the source'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: hello.extract
     timeouts:
       heartbeat_ms: 300000
@@ -71,6 +78,13 @@ tasks:
       max_ms: 600000
       multiplier: 2
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'loading the transformed records'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: hello.load
     timeouts:
       heartbeat_ms: 300000
@@ -101,6 +115,13 @@ tasks:
       max_ms: 600000
       multiplier: 2
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'transforming the extracted records'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: hello.transform
     timeouts:
       heartbeat_ms: 300000

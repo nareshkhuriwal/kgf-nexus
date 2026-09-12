@@ -411,6 +411,11 @@ services:
       NEXUS_MEMORY_BYTES: "17179869184"
       NEXUS_GPU_COUNT: "0"
       NEXUS_DISK_BYTES: "53687091200"
+      # A countable pooled resource, exercised by ten_node_mixed's `register`
+      # node. The scheduler has always supported custom dimensions; without a
+      # worker advertising one, that half of the fit check was dead code in
+      # practice and the node could never be placed.
+      NEXUS_CUSTOM_RESOURCES: "license_token=2"
       NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
       # The local write-ahead log is what lets a restarted agent know it started
       # a task but not how it ended, and report INDETERMINATE rather than
@@ -442,7 +447,10 @@ services:
       # Subscribes to BOTH queues so gpu work has somewhere to go while the
       # cpu-only agent still handles the default queue.
       NEXUS_QUEUES: default,gpu
-      NEXUS_LABELS: "zone=local,accelerator=nvidia"
+      # gpu-interconnect is what ten_node_mixed's train_large selects on. A
+      # node_selector with no worker carrying the label is unsatisfiable, and the
+      # example is the Phase 1 exit criterion, so the label ships with the fleet.
+      NEXUS_LABELS: "zone=local,accelerator=nvidia,gpu-interconnect=nvlink"
       NEXUS_EXECUTORS: subprocess,docker
       # 4 cores / 32 GiB / 2 simulated GPUs. Advertised capacity is a ledger
       # entry, not a hardware probe, so the scheduler's GPU matching is
@@ -451,13 +459,54 @@ services:
       NEXUS_MEMORY_BYTES: "34359738368"
       NEXUS_GPU_COUNT: "2"
       NEXUS_GPU_KIND: ${NEXUS_GPU_KIND:-nvidia-a100}
-      AGENT_CAPACITY_GPU_MEMORY_BYTES: "42949672960"
+      NEXUS_GPU_MEMORY_BYTES: "42949672960"
       NEXUS_DISK_BYTES: "53687091200"
       NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
       NEXUS_WAL_DIR: /var/lib/nexus/wal
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     volumes:
       - agent-gpu-wal:/var/lib/nexus/wal
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  # A SECOND gpu agent, advertising nvidia-a10 rather than a100.
+  #
+  # It exists so gpu_kind matching is exercised by the shipped stack and not only
+  # in unit tests: ten_node_mixed asks for an a10 in train_small and an a100 in
+  # train_large, so a correct scheduler must send each to a different worker. With
+  # one gpu worker the a10 task is simply unplaceable, which is what made the
+  # example unrunnable on its own fleet (F60).
+  #
+  # No nvlink label and one GPU: it must NOT be able to take train_large.
+  agent-gpu-a10:
+    build:
+      <<: *go-build
+      args:
+        SERVICE: agent
+        SERVICE_PATH: agent/cmd/nexus-agent
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    environment:
+      <<: *minio-env
+      NEXUS_CONTROL_PLANE: api-gateway:9091
+      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
+      NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
+      NEXUS_QUEUES: default,gpu
+      NEXUS_LABELS: "zone=local,accelerator=nvidia"
+      NEXUS_EXECUTORS: subprocess,docker
+      NEXUS_CPU_MILLIS: "4000"
+      NEXUS_MEMORY_BYTES: "17179869184"
+      NEXUS_GPU_COUNT: "1"
+      NEXUS_GPU_KIND: nvidia-a10
+      NEXUS_GPU_MEMORY_BYTES: "25769803776"
+      NEXUS_DISK_BYTES: "53687091200"
+      NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
+      NEXUS_WAL_DIR: /var/lib/nexus/wal
+      LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
+      NEXUS_LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
+    volumes:
+      - agent-gpu-a10-wal:/var/lib/nexus/wal
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
@@ -492,3 +541,4 @@ volumes:
   minio-data:
   agent-cpu-wal:
   agent-gpu-wal:
+  agent-gpu-a10-wal:

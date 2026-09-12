@@ -76,7 +76,7 @@ tasks:
         memory_bytes: 25769803776
       request:
         cpu_millis: 4000
-        disk_bytes: 53687091200
+        disk_bytes: 25769803776
         memory_bytes: 17179869184
     retry:
       initial_ms: 10000
@@ -90,6 +90,13 @@ tasks:
         - ERROR_CLASS_TRANSIENT
         - ERROR_CLASS_WORKER_LOST
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'building features from the validated dataset'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: ml.build_features
     timeouts:
       heartbeat_ms: 600000
@@ -140,6 +147,13 @@ tasks:
         - ERROR_CLASS_WORKER_LOST
       retry_on_different_worker: true
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'evaluating both models on the holdout split'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: ml.evaluate
     timeouts:
       heartbeat_ms: 300000
@@ -164,7 +178,7 @@ tasks:
     resources:
       request:
         cpu_millis: 2000
-        disk_bytes: 107374182400
+        disk_bytes: 42949672960
         memory_bytes: 4294967296
     retry:
       initial_ms: 15000
@@ -173,6 +187,13 @@ tasks:
       max_ms: 600000
       multiplier: 2
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'ingesting the source dataset'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: ml.ingest
     timeouts:
       heartbeat_ms: 300000
@@ -203,6 +224,13 @@ tasks:
       max_ms: 600000
       multiplier: 2
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'notifying downstream consumers'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: ml.notify
     timeouts:
       heartbeat_ms: 300000
@@ -233,6 +261,13 @@ tasks:
       max_ms: 600000
       multiplier: 2
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'publishing the evaluation report'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: ml.publish_report
     timeouts:
       heartbeat_ms: 300000
@@ -269,6 +304,13 @@ tasks:
         - ERROR_CLASS_TRANSIENT
         - ERROR_CLASS_WORKER_LOST
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'registering the winning model'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: ml.register
     timeouts:
       heartbeat_ms: 300000
@@ -290,8 +332,8 @@ tasks:
     queue: default
     resources:
       request:
-        cpu_millis: 8000
-        memory_bytes: 34359738368
+        cpu_millis: 4000
+        memory_bytes: 12884901888
     retry:
       initial_ms: 10000
       jitter: full
@@ -299,6 +341,13 @@ tasks:
       max_ms: 600000
       multiplier: 2
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'training the cpu baseline model'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: ml.train_baseline
     timeouts:
       heartbeat_ms: 300000
@@ -326,12 +375,12 @@ tasks:
       limit:
         gpu_count: 2
       request:
-        cpu_millis: 8000
-        disk_bytes: 214748364800
+        cpu_millis: 4000
+        disk_bytes: 32212254720
         gpu_count: 2
         gpu_kind: nvidia-a100
         gpu_memory_bytes: 42949672960
-        memory_bytes: 68719476736
+        memory_bytes: 25769803776
     retry:
       initial_ms: 30000
       jitter: full
@@ -349,6 +398,13 @@ tasks:
         - ERROR_CLASS_WORKER_LOST
       retry_on_different_worker: true
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'training the large model on 2x a100 over nvlink'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: ml.train_large
     timeouts:
       heartbeat_ms: 600000
@@ -396,6 +452,13 @@ tasks:
         - ERROR_CLASS_WORKER_LOST
       retry_on_different_worker: true
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'training the small model on 1x a10'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: ml.train_small
     timeouts:
       heartbeat_ms: 300000
@@ -428,6 +491,13 @@ tasks:
       no_retry_on:
         - ERROR_CLASS_VALIDATION
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'validating the dataset schema'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: ml.validate_schema
     timeouts:
       heartbeat_ms: 300000

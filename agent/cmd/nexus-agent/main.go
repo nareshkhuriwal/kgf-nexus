@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -49,6 +50,19 @@ func main() {
 			"advertised GPU count")
 		gpuKind = flag.String("gpu-kind", envOr("NEXUS_GPU_KIND", ""),
 			"GPU model advertised, e.g. nvidia-a100")
+		// Per-device VRAM. The scheduler's fit check enforces a task's
+		// gpu_memory_bytes floor against this, so leaving it unset advertises 0
+		// and makes every task that names a VRAM requirement permanently
+		// unschedulable -- correctly refused, but for a reason no operator would
+		// guess from a worker that plainly has GPUs.
+		gpuMemoryBytes = flag.Int64("gpu-memory-bytes", envInt("NEXUS_GPU_MEMORY_BYTES", 0),
+			"advertised per-device GPU memory in bytes; required for tasks that set gpu_memory_bytes")
+		// Countable pooled resources the platform knows nothing about by name --
+		// license tokens, NIC slots. The scheduler treats them exactly like CPU
+		// (§5.3 fit check, decremented on dispatch), so a task requesting one it
+		// cannot get stays PENDING with a structured reason.
+		customFlag = flag.String("custom-resources", envOr("NEXUS_CUSTOM_RESOURCES", ""),
+			"comma-separated k=n countable custom capacity, e.g. license_token=2")
 		walDir = flag.String("wal-dir", envOr("NEXUS_WAL_DIR", "/var/lib/nexus-agent/wal"),
 			"local write-ahead log directory; MUST be on durable storage")
 		workDir = flag.String("work-dir", envOr("NEXUS_WORK_DIR", ""),
@@ -83,11 +97,13 @@ func main() {
 		Queues:    splitCSV(*queues),
 		Labels:    parseLabels(*labelsFlag),
 		Capacity: &nexusv1.ResourceVector{
-			CpuMillis:   *cpuMillis,
-			MemoryBytes: *memoryBytes,
-			DiskBytes:   advertisedDisk(*diskBytes, *workDir, log),
-			GpuCount:    int32(*gpuCount),
-			GpuKind:     *gpuKind,
+			CpuMillis:      *cpuMillis,
+			MemoryBytes:    *memoryBytes,
+			DiskBytes:      advertisedDisk(*diskBytes, *workDir, log),
+			GpuCount:       int32(*gpuCount),
+			GpuKind:        *gpuKind,
+			GpuMemoryBytes: *gpuMemoryBytes,
+			Custom:         parseCustom(*customFlag, log),
 		},
 		AgentVersion:     version,
 		WALDir:           *walDir,
@@ -230,6 +246,33 @@ func parseLabels(s string) map[string]string {
 			continue
 		}
 		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return out
+}
+
+// parseCustom reads "k=n,k2=n2" into the countable custom capacity map.
+//
+// A malformed entry is logged and skipped rather than fatal: dropping one
+// mis-typed dimension leaves the agent serving every other kind of work, while
+// refusing to start takes a whole worker out of the fleet over a typo.
+func parseCustom(s string, log *slog.Logger) map[string]int64 {
+	out := make(map[string]int64)
+	for _, kv := range splitCSV(s) {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			log.Warn("ignoring malformed custom resource; want k=n", "entry", kv)
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			log.Warn("ignoring custom resource with a non-numeric quantity",
+				"entry", kv, "error", err)
+			continue
+		}
+		out[strings.TrimSpace(k)] = n
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

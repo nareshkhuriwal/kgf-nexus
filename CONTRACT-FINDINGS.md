@@ -775,8 +775,8 @@ It is also billed as the Phase 1 exit criterion, so it should be runnable agains
 the stack the repo ships. Either lower its requests to fit the default fleet or
 raise the compose agents' advertised capacity to match the example.
 
-### F61. Multi-queue dispatch does not reach the gpu-queue scheduler — OPEN
-**Severity:** blocks Phase 1 exit criterion 1. **Status: OPEN, cause not yet isolated.**
+### F61. Multi-queue dispatch does not reach the gpu-queue scheduler — CLOSED (misdiagnosed)
+**Severity:** blocked Phase 1 exit criterion 1. **Status: CLOSED. The fan-out was never the bug.**
 The 10-node mixed DAG runs its 7 CPU nodes to SUCCEEDED across BOTH workers, then
 stalls: `train_large` and `train_small` sit READY/PENDING on the `gpu` queue
 forever while `scheduler-gpu` records ZERO claim attempts.
@@ -807,3 +807,171 @@ it; further inspection of correct-looking code will not.
 itself worth revisiting. A worker serving N queues needs the gateway to fan a
 poll across N replicas, and a miss on any of them is silent. An alternative is
 one scheduler draining several queues, which removes the fan-out entirely.
+
+---
+
+**RESOLUTION.** The diagnostic was added and the hypothesis above was WRONG. The
+peer loop runs on every idle poll:
+
+```
+worker claim fan-out  queues=[default gpu] primary_assignments=0
+                      peers=1 peer_loop_will_run=true
+scheduler peer answered a worker claim  peer_addr=scheduler-gpu:9090
+                                        assignments=0
+```
+
+`scheduler-gpu` IS offered every poll and answers empty, so the gateway fan-out is
+exonerated end to end. Both logs were kept: a silent miss on one of N replicas is
+what made this expensive, and the conditional is still conditional.
+
+The real cause is F60. `train_large` asks for 8 CPU / 64 GiB / 200 GiB disk /
+`gpu-interconnect=nvlink`, and `train_small` asks for `nvidia-a10`; the shipped
+fleet has neither. The gpu scheduler recorded zero claims because it was
+correctly refusing work that cannot be placed. Everything "checking out
+individually" was accurate — each component was fine, and the mismatch lived
+between the example and the fleet, which is the one place nothing was looking.
+
+Two real defects surfaced while proving this:
+
+1. **The idle-queue explanation was rolled back** (see F59, which was only
+   half-fixed). On the `ErrNoCandidate` branch `claimOneForWorker` called
+   `explainUnschedulable`, which writes `pending_reason`, and then returned
+   WITHOUT committing — so the deferred `Rollback` discarded every reason. The
+   success path commits, which is why F59 looked fixed: a poll that dispatched
+   something carried its explanations along, and only a poll that dispatched
+   NOTHING lost them. An idle queue is precisely the case the field exists for.
+   Fixed, and pinned by `TestUnschedulableAttemptIsExplainedOnAnIdleQueue`, which
+   drives a queue holding one unplaceable attempt so there is no dispatch to
+   piggyback a commit on. Nothing covered the store's `ClaimForWorker` at all
+   before this.
+
+2. **`LOG_LEVEL` vs `NEXUS_LOG_LEVEL`.** The compose env set only the former; the
+   gateway reads the latter, so `NEXUS_LOG_LEVEL=debug` silently did nothing there
+   and cost a cycle. Both spellings are now set.
+
+**The design note above still stands** and is now better evidenced: the fan-out
+worked, but proving it took a day precisely because a miss would have been
+silent. One scheduler draining several queues would remove the failure mode.
+
+### F62. A run with no RUNNING attempts wedges in CANCELLING — OPEN
+**Severity:** medium. Blocks the namespace via `max_active_runs`.
+Cancelling a run whose attempts are all PENDING leaves it in CANCELLING forever.
+`run cancel` reports "running attempts are being signalled; the run reaches
+CANCELLED once they stop" — but there are none to signal, so nothing ever drives
+the transition, and CANCELLING is not terminal. Two such runs then exhausted
+`max_active_runs: 2` and every subsequent create failed, which is how it was
+found.
+
+Reproduced with two runs holding one PENDING attempt each and zero RUNNING:
+both sat CANCELLING indefinitely and had to be cleared with a direct UPDATE.
+
+This is the same shape as the `MaybeFinalizePause` gap recorded in b97d1ac (a run
+stays PAUSING forever and never reaches PAUSED): a state whose exit is driven
+only by attempt reports has no path out when there are no attempts to report.
+Worth fixing both together — cancel and pause should finalize immediately when
+nothing is in flight.
+
+**Also:** `max_active_runs` exhaustion returns gRPC `ResourceExhausted`, which the
+gateway maps to **HTTP 500** and the CLI reports as "This is a control-plane
+fault." It is not a fault; it is the documented limit doing its job. It should be
+429 with the limit named, or an operator will chase a phantom outage.
+
+### F63. ten_node_mixed asked for hardware the shipped fleet does not have — FIXED
+**Severity:** blocked Phase 1 exit criterion 1 (this is F60, fully scoped).
+F60 recorded `ingest` (100 GiB disk) and a stray `nvidia-a10`. An audit of all ten
+tasks against both agents found FOUR unplaceable, not one:
+
+| task | asked for | fleet has |
+|---|---|---|
+| `ingest` | 100 GiB disk | 50 GiB |
+| `train_baseline` | 8 CPU + 32 GiB | cpu worker 8 CPU/16 GiB, gpu worker 4 CPU/32 GiB — fits neither |
+| `train_large` | 8 CPU, 64 GiB, 200 GiB disk, `nvlink` | 4 CPU, 32 GiB, 50 GiB, no such label |
+| `train_small` | `nvidia-a10` | only `nvidia-a100` |
+
+`build_features` asked for exactly 50 GiB — the worker's whole disk — so it fit
+only on a completely idle worker and any concurrent disk user blocked it.
+
+Fixed by shrinking the example rather than inflating the fleet, so
+`docker compose up` + `make submit-example` works out of the box, which is what
+an exit criterion needs. The scheduling FACTS each node exists to exercise were
+deliberately preserved: `train_large` keeps 2x a100 + the nvlink selector + the
+42 GiB VRAM floor, `train_small` keeps its a10. Only the scalars no laptop fleet
+can honestly advertise came down.
+
+Two fleet changes, because they are what make the example prove something:
+- `agent-gpu` gains `gpu-interconnect=nvlink` (an unsatisfiable node_selector
+  tests nothing);
+- a new `agent-gpu-a10` advertises 1x `nvidia-a10`, so gpu_kind matching is
+  exercised by the shipped stack instead of only in unit tests. The two trainers
+  must now land on DIFFERENT workers, and the a10 worker must NOT be able to take
+  `train_large`.
+
+All ten tasks are now placeable on the default stack.
+
+### F64. No agent could advertise GPU memory, so every VRAM floor was unsatisfiable — FIXED
+**Severity:** high. Silently made a documented scheduling feature unusable.
+`domain.Fits` enforces a task's `gpu_memory_bytes` against the worker's, and the
+scheduler reports shortfalls against it — but `nexus-agent` had no VRAM flag at
+all. It advertised `gpu_count` and `gpu_kind` and left `gpu_memory_bytes` at
+zero, so ANY task naming a VRAM requirement was permanently unschedulable on
+every fleet. Correctly refused, for a reason no operator would guess from a
+worker that plainly has GPUs:
+
+```
+waiting_for_resources: gpu_memory (need 42949672960, free 0)
+```
+
+Compounding it, the compose file set `AGENT_CAPACITY_GPU_MEMORY_BYTES`, which
+nothing has ever read — the stack looked configured for VRAM while advertising
+none. Fixed by adding `--gpu-memory-bytes` / `NEXUS_GPU_MEMORY_BYTES` to the
+agent and renaming the dead compose variable to match.
+
+This is only visible end to end: the unit tests pass because they construct
+capacity vectors directly, and the SQL pre-filter has no VRAM predicate, so the
+gap lives exactly where nothing was looking. Found by running the exit criterion.
+
+### F65. The committed examples were not executable — FIXED
+**Severity:** high. Blocked Phase 1 exit criterion 1.
+None of the three examples in `examples/` had a `runtime` block, so every task
+failed on dispatch:
+
+```
+InvalidSpec / ERROR_CLASS_VALIDATION:
+  prepare: executor: invalid task spec: runtime.command is empty
+```
+
+F52 established that all three are ACCEPTED by the live gateway. That is a
+weaker claim than it appeared: accepted is not runnable, and no example in the
+repo could reach SUCCEEDED. `hello_dag` had never completed a run either.
+
+All three now carry a `subprocess` runtime with a one-line `sh -c echo`, chosen
+so the examples demonstrate DAG shape and scheduling constraints without needing
+any toolchain on the host.
+
+**Worth noting for the exit criteria:** the gap between "the gateway accepts it"
+and "the fleet runs it" swallowed F60, F63, F64 and this one. An example that is
+never executed in CI decays into a document. Submitting and RUNNING all three
+examples against the default stack would have caught every one of them.
+
+### F66. No agent could advertise custom resources either — FIXED
+**Severity:** medium. Same shape as F64, found in the same run.
+`domain.Fits` treats custom dimensions as countable pooled capacity and its own
+comment names the use case ("license tokens, NIC slots"), but `nexus-agent` never
+populated `Custom`, so any task requesting one could never be placed:
+
+```
+waiting_for_resources: custom:license_token (need 1, free 0)
+```
+
+ten_node_mixed's `register` node requests `license_token: 1`, so that half of the
+fit check had never once been exercised against a real worker. Added
+`--custom-resources` / `NEXUS_CUSTOM_RESOURCES` ("k=n,k2=n2"), and `agent-cpu`
+now advertises `license_token=2`. A malformed entry is logged and skipped rather
+than fatal: one mis-typed dimension should not take a whole worker out of the
+fleet.
+
+F64 and F66 are the same defect twice — a scheduler dimension with no agent-side
+way to advertise it. Worth checking any dimension added to `ResourceVector` from
+here for an agent flag AND an end-to-end run that uses it, because unit tests
+construct the vector directly and cannot see the gap.
+

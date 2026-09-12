@@ -54,6 +54,13 @@ tasks:
         - ERROR_CLASS_TIMEOUT
         - ERROR_CLASS_TRANSIENT
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'archiving the invoice'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: billing.archive_invoice
     timeouts:
       heartbeat_ms: 300000
@@ -94,6 +101,13 @@ tasks:
         - ERROR_CLASS_TRANSIENT
         - ERROR_CLASS_WORKER_LOST
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'charging the customer exactly once'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: billing.charge_customer
     timeouts:
       heartbeat_ms: 60000
@@ -124,6 +138,13 @@ tasks:
       max_ms: 600000
       multiplier: 2
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'recording the ledger entry'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: billing.record_ledger
     timeouts:
       heartbeat_ms: 300000
@@ -157,6 +178,13 @@ tasks:
       max_ms: 600000
       multiplier: 2
       strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      args:
+      - echo 'sending the receipt'
+      command:
+      - sh
+      - -c
+      executor: subprocess
     task_ref: billing.send_receipt
     timeouts:
       heartbeat_ms: 300000
