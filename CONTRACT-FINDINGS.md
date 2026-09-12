@@ -1198,7 +1198,7 @@ defects were a doc asserting a mechanism in the present tense (grants enforcing
 ownership, Prometheus metrics, rate limiting) that no code implemented. Prefer the
 comments, and treat a doc's present tense as a claim to verify.
 
-### F67. A terminal run state could be computed and then dropped — FIXED
+### F79. A terminal run state could be computed and then dropped — FIXED
 **Severity:** high. Blocked Phase 1 exit criterion 2, intermittently.
 Found by the new chaos suite on its first real run, which is the entire argument
 for having one: the manual version of the same scenario had passed minutes
@@ -1237,7 +1237,7 @@ instant -- the run is stranded exactly as before, and only a sweep for
 removes the failure we actually hit; it does not make the announcement durable.
 The same reasoning applies to every other best-effort publish in this file.
 
-### F68. Chaos suite: exit criterion 2 is met — DONE
+### F80. Chaos suite: exit criterion 2 is met — DONE
 `tests/chaos` is the suite architecture §11 lists as a Phase 1 deliverable ("a
 chaos suite that kills workers mid-task and asserts exactly-one-logical-effect").
 It drives the real compose stack under its own `chaos` build tag so
@@ -1274,7 +1274,7 @@ last part directly -- a DEAD worker holding committed capacity shrinks the fleet
 permanently, one incident at a time, and every individual run still succeeds
 while it happens.
 
-Verified over five consecutive runs after F67 was fixed.
+Verified over five consecutive runs after F79 was fixed.
 
 **Two fixes the suite needed in itself**, both worth noting because each first
 looked like a platform bug: the killed container must be allowed to re-register
@@ -1322,10 +1322,10 @@ historical and recorded in docs/OPERATIONS.md §6.2 instead.
 
 The mixed-version *allocator* hazard that used to accompany 0002 is genuinely gone:
 an old replica allocating `max(seq)+1` beside a new one allocating from `event_seq`
-would have reintroduced F7's collision, and F67 removed the last `max(seq)+1`
+would have reintroduced F7's collision, and F79 removed the last `max(seq)+1`
 allocator from the tree.
 
-### F69. Scaling the scheduler added no dispatch capacity — FIXED
+### F81. Scaling the scheduler added no dispatch capacity — FIXED
 **Severity:** high. A documented operation was a no-op.
 The compose file tells operators exactly this:
 
@@ -1380,7 +1380,7 @@ than replacing it. That mechanism exists so a client re-resolves after an addres
 SWAP; round_robin is about using every address a name currently resolves to. Both
 are needed, for different failures.
 
-### F70. Criterion 3: two schedulers never double-dispatch under load — DONE
+### F82. Criterion 3: two schedulers never double-dispatch under load — DONE
 `TestSchedulerReplicasNeverDoubleDispatchUnderLoad` in `tests/chaos`.
 
 `TestConcurrentSchedulersNeverDoubleDispatch` already proved the claim
@@ -1411,7 +1411,7 @@ because each version passed while testing less than it appeared to:
    peak concurrent leases never exceeded 1 — i.e. if the storms never actually
    overlapped.
 
-2. *Counting `scheduler-gpu` as an active replica hid F69.* It drains a different
+2. *Counting `scheduler-gpu` as an active replica hid F81.* It drains a different
    queue and always claims a little, so "at least 2 replicas competed" passed
    with every default-queue replica but one sitting idle — the exact condition
    the assertion exists to detect. It now counts only `scheduler` replicas, and
@@ -1422,7 +1422,7 @@ the default single replica: a concurrency test that quietly skips when the
 environment is not prepared is a test that never runs, and this is the one
 criterion whose entire subject is having more than one of something.
 
-Verified by reverting F69: the test fails with `576/0/0` and names the cause.
+Verified by reverting F81: the test fails with `576/0/0` and names the cause.
 
 ---
 
@@ -1435,8 +1435,8 @@ schedulers never double-dispatch under load."*
 | # | Criterion | Evidence |
 |---|---|---|
 | 1 | 10-node mixed CPU/GPU DAG completes | `ten-node-mixed` SUCCEEDED, all 10 nodes, 36s, default stack (F63/F64/F65/F66) |
-| 2 | Killing a worker yields exactly one logical effect | `make chaos`: `slow effects=1 executions=2` after SIGKILL (F67/F68) |
-| 3 | Two schedulers never double-dispatch under load | 15 storms / 397 attempts, 3 replicas, zero duplicates (F69/F70) |
+| 2 | Killing a worker yields exactly one logical effect | `make chaos`: `slow effects=1 executions=2` after SIGKILL (F79/F80) |
+| 3 | Two schedulers never double-dispatch under load | 15 storms / 397 attempts, 3 replicas, zero duplicates (F81/F82) |
 
 Criteria 2 and 3 are pinned by `tests/chaos`, which runs on the real compose
 stack under its own build tag. Criterion 1 has no automated equivalent — it is a
@@ -1444,7 +1444,7 @@ stack under its own build tag. Criterion 1 has no automated equivalent — it is
 by running it by hand. **Running the examples in CI, not merely submitting them,
 is the single highest-value thing left undone here.**
 
-### F71. Nothing ran the examples, and nothing ran anything — FIXED
+### F83. Nothing ran the examples, and nothing ran anything — FIXED
 **Severity:** high (process). The repo had NO CI at all: no `.github/workflows`,
 nothing that built, vetted, or tested on a push.
 
@@ -1502,8 +1502,8 @@ bulk of its wall clock; caching the compose build would pay for itself quickly.
 And the suite currently proves the examples run — it does not assert their
 OUTPUTS are correct, only that every node succeeded.
 
-### F72. Runs could stall forever with nothing to notice — FIXED
-**Severity:** high. Closes the backstop F67 explicitly left open.
+### F84. Runs could stall forever with nothing to notice — FIXED
+**Severity:** high. Closes the backstop F79 explicitly left open.
 Observed live: run `0926cfe0` sat at PAUSING for **seven hours** with all three of
 its nodes terminal and nothing in flight. Nothing would ever have moved it.
 `MaybeFinalizePause` is reachable only from a DAG-engine report, a report needs a
@@ -1514,7 +1514,7 @@ was simply never applied.
 Three causes of this exact shape have now been fixed at their own call sites:
 
 - **F62** cancel wedged a run in CANCELLING;
-- **F67** a terminal publish was cancelled after the node work had committed;
+- **F79** a terminal publish was cancelled after the node work had committed;
 - **b97d1ac** a paused run never reached PAUSED.
 
 Each fix was right, and each was found only because someone noticed a stuck run.
@@ -1541,7 +1541,7 @@ watching the test fail:
 - **a materialized-DAG check**, because a run whose graph does not exist yet also
   has no live attempts, and concluding THAT run would kill it before it started.
 
-Verified end to end against the live stack: a run forced into the F67 shape
+Verified end to end against the live stack: a run forced into the F79 shape
 (RUNNING, three SUCCEEDED nodes) was skipped while fresh and recovered once it
 aged past the threshold, reaching SUCCEEDED with the WARN logged.
 
@@ -1554,8 +1554,8 @@ that settled a millisecond ago", the exact case the guard exists to prevent. `Ne
 now normalizes it, so a caller who forgets the field gets the safe default rather
 than the dangerous one, and a test pins that.
 
-### F73. CI silently skipped four integration packages — FIXED
-Found while wiring F72's test into CI. Two DSN conventions coexist:
+### F85. CI silently skipped four integration packages — FIXED
+Found while wiring F84's test into CI. Two DSN conventions coexist:
 `internal/store`, `resource-manager` and `schedules` read
 `NEXUS_TEST_DATABASE_URL`; the scheduler harness reads `NEXUS_TEST_DSN`. The
 `integration` job set only the latter, so four packages **skipped** — and a skip
@@ -1568,8 +1568,8 @@ Both spellings are now set, plus an explicit step that greps for
 passes with the database reachable and fails without it.
 
 This is the third variant of one mistake in this session — a check that passes
-while testing less than it appears to (see F70's vacuous lease assertion and
-F71's name-addressed example runs). Worth watching for directly: **if a test can
+while testing less than it appears to (see F82's vacuous lease assertion and
+F83's name-addressed example runs). Worth watching for directly: **if a test can
 skip, CI must prove it did not.**
 
 ### F78. ADR-0011 rule 5 demonstrated on a live stack, not just by inspection
@@ -1611,7 +1611,7 @@ rebuilt eight minutes after the merge and contained BOTH route sets — so the
 "pre-merge binary" was in fact post-merge. Verified here by checking route strings in
 the binary rather than by timestamps, which is the only reliable way to tell.
 
-### F74. The double-dispatch test was flaky in the worst direction — FIXED
+### F86. The double-dispatch test was flaky in the worst direction — FIXED
 Found by running `make chaos` against the identity merge (c6321ff) to check
 whether the new credential-dispatching `guard()` broke REST auth. It did not --
 all 40 routes work, every example still runs, dispatch still spreads evenly
@@ -1648,8 +1648,8 @@ it asserts.
 Verified over six consecutive runs of the test alone and two of the full suite.
 
 **The pattern this belongs to.** That is now the fourth variant in this session of
-one mistake: F70's vacuous post-hoc lease check, F71's name-addressed example
-runs, F73's silently-skipped CI packages, and this. Each was a check that did not
+one mistake: F82's vacuous post-hoc lease check, F83's name-addressed example
+runs, F85's silently-skipped CI packages, and this. Each was a check that did not
 measure what it claimed. The first three passed while proving nothing; this one
 failed while nothing was wrong. Same root cause -- **the instrument was chosen
 for convenience rather than for whether it can actually see the thing** -- and the
@@ -1657,7 +1657,7 @@ failing direction is the more expensive one, because a green test that proves
 nothing is discovered eventually, while a red test that means nothing gets
 re-run until it passes.
 
-### F75. Two migrations share version 0007 — OPEN (benign today)
+### F87. Two migrations share version 0007 — FIXED (by another session)
 `0007_backfill_lease` and `0007_identity` were authored on parallel branches and
 both landed. Harmless right now, verified rather than assumed: they touch
 disjoint tables (`schedule_backfills` vs the identity tables), neither depends on
@@ -1670,3 +1670,45 @@ version apply in whatever order the shell returns -- fine for independent
 migrations, wrong the moment a same-numbered pair has a dependency, and silent
 either way. A duplicate version should fail the migration job rather than be
 resolved by `ls`.
+
+**RESOLVED in a506ab4 by a parallel session**, which renumbered backfill_lease to
+0008 (rather than identity, because 0007_identity was already applied and
+referenced by merged commits while backfill_lease was newer). Three sessions
+found this independently and none assumed another had it, which is the outcome to
+want from parallel work.
+
+Verified here rather than taken on report: `services/migrations` now holds one
+migration per version 0001-0008 with no collision, and `TestVersionNumbersAreUnique`
+in `internal/migrations` guards it. Mutation-tested by renaming 0008 back to 0007
+-- the test fails naming both files, and passes again on restore.
+
+**Where the gate actually sits, which is worth knowing.** It is a Go test, not a
+check inside `deploy/migrate.sh`, and that script still applies `*.up.sql` in
+lexical glob order with no duplicate detection (confirmed by reading it). So a
+deployment path that applied migrations WITHOUT going through CI would still
+resolve a duplicate pair by `ls`. In practice CI runs `go test -race ./...`
+before anything deploys, so a duplicate breaks the build earlier than it could
+reach a migration job -- earlier and better than what F87 originally asked for.
+The residual gap is only for a deploy that bypasses CI entirely.
+
+### F88. This file had the same collision it was documenting — FIXED
+Closing F87 surfaced nine duplicate finding numbers: F67 through F75 were each
+used twice, by two sessions numbering in parallel from the same high-water mark.
+The findings file had reproduced, in its own headings, exactly the defect F87
+records about `services/migrations`.
+
+Renumbered mine to F79-F87 and left theirs at F67-F78, on the same reasoning e2
+used for the migrations: theirs are older and referenced by merged commit
+messages, so moving them would break references that already exist in history.
+Cross-references inside the renumbered sections were rewritten with them; the
+identical numbers appearing in earlier sections belong to the other session's
+findings and were deliberately left alone.
+
+**The general point, since it has now cost time twice in one day.** Any
+monotonically numbered namespace that several people append to concurrently will
+collide, and neither of ours failed loudly -- migrations resolved the tie by
+`ls`, this file just had two headings with one number. The migrations case now
+has `TestVersionNumbersAreUnique`. This file has nothing, and a duplicate here is
+cheaper (a confusing reference, not a mis-ordered schema change), so a gate may
+not be worth it -- but the next such namespace someone adds is worth checking
+before it has two authors.
