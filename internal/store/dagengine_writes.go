@@ -77,7 +77,7 @@ func (s *DAGEngineStore) InsertNodesAndEdges(
 		ON CONFLICT (run_id, node_id) DO NOTHING`
 
 	for _, n := range nodes {
-		specJSON, merr := protojson.Marshal(n.Spec)
+		specJSON, merr := protojson.MarshalOptions{UseProtoNames: true}.Marshal(n.Spec)
 		if merr != nil {
 			return 0, 0, fmt.Errorf("marshal spec for node %s/%s: %w", runID, n.NodeID, merr)
 		}

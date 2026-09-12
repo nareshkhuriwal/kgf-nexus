@@ -525,7 +525,17 @@ ClaimForWorker returning an EMPTY response rather than an error when nothing
 fits, since "no work available" is the normal steady state.
 
 ### F47. ResourceVector is stored as protobuf camelCase JSON, not snake_case
-**Severity:** low, but a persistent trap. **Status: open.**
+**Severity:** upgraded to HIGH once it was seen in production. **Status: FIXED.**
+Not merely an operator-SQL trap: the gateway's own capacity aggregation reads
+`capacity ->> 'cpu_millis'`, so it summed a key nothing had and reported
+**0 cpu / 0 cpu for a fleet with 12 cores and 2 GPUs**. The console showed an
+empty capacity summary and blank per-worker CPU/memory columns. A JSONB key that
+does not exist is SQL NULL rather than an error, so nothing failed loudly.
+**Resolution:** writers now use `protojson.MarshalOptions{UseProtoNames: true}`
+(rm_workers, scheduler_json, dagengine_writes), so stored JSON matches the
+documented spelling, and migration 0003 rewrites rows already written. The
+dual-dialect readers stay, since they cost nothing and tolerate old rows.
+Verified: /capacity now reports cpu_millis 12000, gpu_count 2 across 2 workers.
 `workers.capacity` and `task_attempts.resource_request` store protojson output,
 so keys are `cpuMillis` / `memoryBytes` / `gpuCount` — not the `cpu_millis`
 spelling used in the schema comments, the proto source, and CONTRACT.md. Any

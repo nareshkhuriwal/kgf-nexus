@@ -271,11 +271,20 @@ func scanWorker(r rowScanner) (*Worker, error) {
 // JSON shape only protojson renders in the canonical protobuf form. Mixing the
 // two encoders across services would produce rows that one service writes and
 // another cannot read.
+//
+// UseProtoNames is required, not cosmetic. Default protojson emits camelCase
+// (cpuMillis), while the schema comments, the proto source, the docs and every
+// hand-written operator query use snake_case (cpu_millis). A JSONB key that
+// does not exist yields SQL NULL rather than an error, so the mismatch is
+// silent: SUM((capacity ->> 'cpu_millis')::bigint) returned 0 for a fleet with
+// real capacity, which reads as "no workers advertise anything" -- a scary and
+// completely wrong conclusion. The database is an operator-facing surface and
+// should speak the same names as its documentation.
 func marshalVec(v *nexusv1.ResourceVector) ([]byte, error) {
 	if v == nil {
 		v = &nexusv1.ResourceVector{}
 	}
-	b, err := protojson.Marshal(v)
+	b, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(v)
 	if err != nil {
 		return nil, fmt.Errorf("store: marshal resource vector: %w", err)
 	}

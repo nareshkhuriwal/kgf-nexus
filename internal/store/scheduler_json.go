@@ -243,8 +243,12 @@ func nullString(s string) *string {
 // unexported state fields, and encoding/json would either serialize garbage or
 // omit the real ones. These are REFERENCES (ResultRef, TaskError), not payloads —
 // the payload itself never transits the control plane (invariant 6).
+// UseProtoNames keeps stored JSONB in snake_case, matching the proto source,
+// the schema comments and operator SQL. See marshalVec in rm_workers.go for why
+// the camelCase default is actively harmful here: a missing JSONB key is SQL
+// NULL, not an error, so the mismatch fails silently.
 func protojsonMarshal(m proto.Message) ([]byte, error) {
-	b, err := protojson.Marshal(m)
+	b, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(m)
 	if err != nil {
 		return nil, fmt.Errorf("marshal proto message: %w", err)
 	}
