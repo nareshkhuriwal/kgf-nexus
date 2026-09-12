@@ -259,7 +259,11 @@ func errorClass(s string) nexusv1.ErrorClass {
 		return nexusv1.ErrorClass_ERROR_CLASS_TIMEOUT
 	case "worker_lost":
 		return nexusv1.ErrorClass_ERROR_CLASS_WORKER_LOST
-	case "validation":
+	// Both spellings normalize to the one proto constant. Architecture 4.3's YAML
+	// writes validation_error while common.proto has ERROR_CLASS_VALIDATION, and an
+	// author who copied the published example must not be rejected for it
+	// (CONTRACT-FINDINGS.md F20).
+	case "validation", "validation_error":
 		return nexusv1.ErrorClass_ERROR_CLASS_VALIDATION
 	case "permission_denied":
 		return nexusv1.ErrorClass_ERROR_CLASS_PERMISSION_DENIED

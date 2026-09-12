@@ -461,3 +461,86 @@ func TestDetectFormat(t *testing.T) {
 		}
 	}
 }
+
+// TestTimeoutCoherenceRejections covers CONTRACT-FINDINGS.md F22 and its siblings:
+// timeout combinations that are individually valid but jointly impossible. These fail
+// SILENTLY at runtime rather than loudly, which is exactly why they must be caught at
+// submit time.
+func TestTimeoutCoherenceRejections(t *testing.T) {
+	build := func(timeouts string) string {
+		return `{"api_version":"nexus.dev/v1","namespace":"ns","name":"w",
+		  "tasks":[{"id":"a","task_ref":"x","timeouts":` + timeouts + `}]}`
+	}
+
+	cases := []struct {
+		name     string
+		timeouts string
+		want     string
+	}{
+		{
+			name:     "schedule_to_close below start_to_close",
+			timeouts: `{"start_to_close_ms":14400000,"schedule_to_close_ms":3600000}`,
+			want:     "not even one attempt can finish",
+		},
+		{
+			name:     "schedule_to_close below schedule_to_start",
+			timeouts: `{"schedule_to_start_ms":1800000,"schedule_to_close_ms":600000}`,
+			want:     "queueing allowance exceeds the total budget",
+		},
+		{
+			name:     "heartbeat longer than the attempt itself",
+			timeouts: `{"start_to_close_ms":60000,"heartbeat_ms":300000}`,
+			want:     "can never fire",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Compile([]byte(build(tc.timeouts)), FormatJSON)
+			if err == nil {
+				t.Fatal("an impossible timeout combination was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the rejection does not explain the problem (%q):\n%v", tc.want, err)
+			}
+		})
+	}
+}
+
+// TestCoherentTimeoutsAccepted guards against the check being over-eager: a sensible
+// four-timeout configuration from architecture §4.3 must pass.
+func TestCoherentTimeoutsAccepted(t *testing.T) {
+	body := `{"api_version":"nexus.dev/v1","namespace":"ns","name":"w",
+	  "tasks":[{"id":"a","task_ref":"x","timeouts":{
+	    "schedule_to_start_ms":1800000,
+	    "start_to_close_ms":14400000,
+	    "schedule_to_close_ms":21600000,
+	    "heartbeat_ms":300000}}]}`
+	if _, err := Compile([]byte(body), FormatJSON); err != nil {
+		t.Errorf("the §4.3 example timeout set was rejected: %v", err)
+	}
+
+	// Zero means "not enforced", so partial configurations must not trip the check.
+	partial := `{"api_version":"nexus.dev/v1","namespace":"ns","name":"w",
+	  "tasks":[{"id":"a","task_ref":"x","timeouts":{"start_to_close_ms":60000}}]}`
+	if _, err := Compile([]byte(partial), FormatJSON); err != nil {
+		t.Errorf("a partial timeout set was rejected: %v", err)
+	}
+}
+
+// TestErrorClassSpellingsBothAccepted covers F20: an author who copied the
+// architecture §4.3 YAML example must not be rejected for the doc's own spelling.
+func TestErrorClassSpellingsBothAccepted(t *testing.T) {
+	for _, spelling := range []string{"validation", "validation_error"} {
+		body := `{"api_version":"nexus.dev/v1","namespace":"ns","name":"w",
+		  "tasks":[{"id":"a","task_ref":"x","retry":{"max_attempts":3,"no_retry_on":["` + spelling + `"]}}]}`
+		c, err := Compile([]byte(body), FormatJSON)
+		if err != nil {
+			t.Fatalf("%q was rejected: %v", spelling, err)
+		}
+		got := c.Proto.GetTasks()[0].GetRetry().GetNoRetryOn()
+		if len(got) != 1 || got[0].String() != "ERROR_CLASS_VALIDATION" {
+			t.Errorf("%q normalized to %v, want ERROR_CLASS_VALIDATION", spelling, got)
+		}
+	}
+}

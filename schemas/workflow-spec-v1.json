@@ -169,12 +169,13 @@
     },
 
     "ErrorClass": {
-      "description": "Classified on the worker, which sees the real failure; the control plane's retry policy consumes the class.",
+      "description": "Classified on the worker, which sees the real failure; the control plane's retry policy consumes the class. Both spellings of the two classes that architecture 4.3 and common.proto disagree about are accepted (validation/validation_error, permission_denied) and normalized to the proto name on the way in -- rejecting an author for following the published YAML example would be our defect, not theirs (CONTRACT-FINDINGS.md F20).",
       "enum": [
         "transient",
         "timeout",
         "worker_lost",
         "validation",
+        "validation_error",
         "permission_denied",
         "application",
         "oom",

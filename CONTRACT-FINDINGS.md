@@ -250,3 +250,195 @@ A spec with `schedule_to_close < start_to_close` can never complete even one
 attempt. The SDK added a client-side rejection. The gateway's semantic
 validation should reject it server-side too, since the SDK is not the only
 submission path.
+
+---
+
+## From worker-agent + resource-manager workstream
+
+### F23. No `ResourceManagerService` exists in the frozen proto — BLOCKER for ADR-0011
+**Severity:** real gap; worked around, needs a contract decision.
+ADR-0011 requires every service to own a gRPC API, and makes resource-manager the
+owner of `workers` and `reservations`. But `proto/nexus/v1/` defines only
+`WorkerService` (the worker↔control-plane contract) — there is no RPC surface by
+which any other service can ask resource-manager to release a reservation,
+reconcile a worker, or transition a worker's state. The ownership matrix is
+therefore unimplementable as written: the only way to satisfy it is for other
+services to write resource-manager's tables directly, which is precisely what the
+matrix forbids.
+
+**Worked around** by defining `nexus.rm.v1.ResourceManagerService` in
+`services/resource-manager/proto/nexus/rm/v1/rm.proto`, generated into
+`services/resource-manager/gen/`. It imports `nexus/v1/common.proto`, so
+`ResourceVector` is literally the frozen type and there is no translation layer to
+drift. `CONTRACT.md` forbids editing `proto/nexus/v1/`, so this deliberately lives
+in the owning service's own directory.
+**Resolution needed:** promote it to `proto/nexus/v1/resource_manager.proto` (or
+bless the per-service proto pattern) in the reconciliation pass. Same gap almost
+certainly applies to every other service that is not api-gateway.
+
+### F24. `ATTEMPT_OUTCOME_INDETERMINATE` has no error class that means "unknown"
+**Severity:** minor, but it forces a small lie.
+§6.3 requires a restarted agent to report `INDETERMINATE` for a `STARTING` WAL
+entry. `ReportResultRequest` pairs an outcome with a `TaskError`, and the closest
+class is `ERROR_CLASS_WORKER_LOST` — documented as "lease expired". In the WAL
+replay case the lease has *not* necessarily expired; the agent simply cannot know
+the outcome. We report `WORKER_LOST` because it is the class §6.5 policy keys on
+for ambiguous outcomes, so behaviour is right, but the name misdescribes the
+cause. Either widen the `WORKER_LOST` comment to "outcome unknowable, including
+agent restart", or add `ERROR_CLASS_INDETERMINATE`.
+
+### F25. `HeartbeatRequest` has no reconcile-grace field, and reconciliation has no
+### documented grace period at all
+**Severity:** real correctness issue in the design as stated.
+§3.2 says any reservation the worker does not acknowledge "is a leak, and is
+released". Taken literally that is wrong: an attempt dispatched one millisecond
+ago has not reached the worker yet, so the very next heartbeat would release its
+reservation and the leak detector becomes a leak *generator* that cancels work the
+instant it is scheduled. A grace period is mandatory, and it must exceed one long
+poll plus one heartbeat interval.
+Implemented as `reconcile_grace_ms` on the RM's own request message, defaulting to
+60s (20s long poll + 5s beat + slack). §3.2 should state the grace requirement
+explicitly, since anyone implementing it from the doc alone writes the bug.
+
+### F26. Nothing in the contract says who calls `Release` on attempt completion
+**Severity:** ownership gap.
+Invariant 4 puts reservation *creation* inside the scheduler's dispatch
+transaction, and ADR-0011 blesses that as the one exception. The symmetric
+question — who releases the reservation when the attempt finishes — is unassigned.
+If the scheduler releases inline while applying `ReportResult`, that is a second
+undocumented exception; if resource-manager releases via its API, the release is
+not atomic with the attempt's terminal state, so a crash between them leaks until
+reconciliation. `Release` is implemented idempotently precisely so either choice
+is safe, but the contract should name the owner.
+
+### F27. `ExecutionMetrics.oom_killed` is `int32`, not `bool`
+**Severity:** cosmetic, but it invites divergence.
+Every other boolean in the protos is a `bool`. A tri-state int (0/1/unknown?) with
+no documented meaning for other values will eventually be filled in differently by
+two implementations. We write 0/1. Either document it as a 0/1 flag or change the
+type.
+
+### F28. `subprocess` resource enforcement is materially weaker than ADR-0007 implies
+**Severity:** honest-reporting item, not a defect.
+ADR-0007 says `subprocess` "cannot enforce memory limits as strictly as a
+container" and labels it development-grade. That is right but understates it, so
+the code states the specifics rather than leaving an operator to discover them:
+- Linux: enforcement is `ulimit -v` (RLIMIT_AS), which caps *virtual address
+  space*, not RSS. A process reserving without touching dies where a cgroup would
+  allow it; one that catches the allocation failure survives where a cgroup would
+  kill it. OOM detection is therefore inferential, not authoritative.
+- **macOS: there is NO memory enforcement.** Darwin accepts `RLIMIT_AS` and
+  ignores it. The executor refuses tasks declaring a memory limit unless
+  `AllowUnenforceableLimits` is set, rather than running them unconstrained.
+- CPU is `ulimit -t` (cumulative CPU-seconds), which cannot express "half a core";
+  it is a runaway backstop, not a share guarantee.
+- GPU isolation is impossible; `CUDA_VISIBLE_DEVICES` is a hint a task can
+  override.
+Reported through `LimitFidelity`, which the conformance suite asserts against, so
+each executor is held to what it actually claims instead of to a uniform fiction.
+Real cgroup-v2 enforcement (`memory.max` in a delegated subtree) is the Phase 2
+upgrade; it needs delegation that laptops and unprivileged CI containers lack.
+
+### F29. Go has no pre-exec hook, so subprocess limits go through a shell trampoline
+**Severity:** implementation note worth recording.
+There is no supported place in the Go stdlib to call `setrlimit` between fork and
+exec, and calling it in the agent would lower the *agent's* own limits — eventually
+killing the agent and turning one over-limit task into every sibling attempt
+becoming LOST. The portable mechanism that runs in the child after fork and before
+exec is the shell's own `ulimit` builtin followed by `exec`. Costs one short-lived
+`/bin/sh`; every argument is single-quote escaped so a workflow spec cannot inject
+shell commands.
+
+### F30. §5.5's liveness numbers leave only one missed beat of margin under load
+**Severity:** tuning observation.
+A 5s heartbeat against a 30s liveness window is six beats, which is comfortable.
+But `next_heartbeat_ms` lets the control plane slow the fleet under load, and
+nothing in the contract couples the two: a control plane that raises the interval
+to 20s while keeping a 30s window leaves margin for a single missed beat, and a
+brief blip then declares live workers dead and duplicates their work — the exact
+failure the independent heartbeat goroutine exists to prevent. Suggest the control
+plane derive the liveness window from the interval it hands out (e.g. `max(30s,
+6 × next_heartbeat_ms)`) rather than holding it fixed.
+
+---
+
+## From api-gateway / workflow-manager workstream
+
+### F31. No `WorkflowManagerService` in the frozen proto (same class as F4)
+**Severity:** real gap, blocks a required deliverable.
+ADR-0011 requires every service to expose a gRPC API, and the gateway is the ONLY
+ingress — so every run mutation must travel gateway → workflow-manager over gRPC.
+But `proto/nexus/v1` defines only `WorkerService`. There are no request/response
+messages for CreateRun / Cancel / Pause / Resume / RetryFromFailed, and
+CONTRACT.md forbids editing the protos.
+**What was built instead:** the run lifecycle is complete and fully tested behind
+the `grpcapi.RunService` interface, and the listener registers the standard gRPC
+health service so the process is genuinely deployable and probeable. Adding the
+generated stubs is then a transport-only change with no lifecycle logic to rewrite.
+**Resolution:** fold into F4's `proto/nexus/v1/services.proto`. The surface needed
+is exactly the `RunService` interface in
+`services/workflow-manager/grpcapi/server.go`.
+
+### F32. Invariant 4 vs the gateway's heartbeat reconciliation
+**Severity:** clarification; no divergence taken.
+§3.2 requires the control plane to release any reservation a worker does not
+acknowledge on heartbeat, and the heartbeat arrives at the **api-gateway** (it is
+a `WorkerService` RPC). But `reservations` is resource-manager's table, and
+ADR-0011 names only the *scheduler's dispatch claim* as an ownership exception.
+**Resolution taken:** the gateway calls `resource-manager.Release` per leak rather
+than deleting rows. That is correct per ADR-0011 and is what is implemented — but
+it means reconciliation is **not atomic**: N releases are N RPCs, and a crash
+midway leaves some leaks un-released. Benign, because reconciliation is
+idempotent and the next heartbeat retries, and worth stating explicitly so nobody
+"fixes" it later by writing the table directly.
+Note also that resource-manager's own `HeartbeatWorker` RPC reconciles internally
+if given `running_attempt_ids`. The gateway deliberately passes them EMPTY and
+reconciles itself, so two components do not both release the same reservation and
+double-log every leak. One owner of that decision, not two.
+
+### F33. §8.2 lists no spec-GET endpoint, only `/versions`
+**Severity:** minor gap in the sketch.
+§8.2 has `POST /specs` and `GET /specs/{name}/versions`, but nothing returns a
+stored spec DOCUMENT. Since specs are content-addressed and immutable and a run
+pins its version for life, "show me exactly what this run executes" is a question
+the REST surface cannot currently answer — which undercuts the reproducibility
+ADR-0004 claims as a benefit. Suggest `GET /specs/{name}/versions/{version}`
+returning the stored canonical JSON.
+
+### F34. §8.2's drain endpoint implies a synchronous result it cannot have
+**Severity:** doc precision.
+`POST /workers/{id}/drain` reads as though the worker is drained when it returns.
+It cannot be: the control plane never dials a worker (ADR-0005), so drain only
+marks the worker DRAINING and the directive rides the next heartbeat RESPONSE.
+Implemented as **202 Accepted** with the delivery mechanism stated in the body.
+§8.2 should say 202 so client authors do not wait on a completion that never comes.
+
+### F35. §5.2 does not say whether a PAUSED run keeps burning `run_timeout_ms`
+**Severity:** genuine gap; a judgement call the doc must settle.
+**Resolution adopted:** it does. `run_timeout_ms` is an end-to-end SLA, and a
+pause that silently suspended it would make the guarantee unfalsifiable — a run
+could sit PAUSED for a week and still claim it met a 1-hour budget. So
+`PAUSING`/`PAUSED` both accept the `run_deadline` trigger and move to `TIMED_OUT`.
+Operators who need to hold a pipeline longer than its SLA should cancel and re-run.
+Worth documenting either way, because the opposite choice is equally defensible
+and the two are indistinguishable from the outside until it matters.
+
+### F36. `timers` is workflow-manager's table but most timer EFFECTS are the scheduler's
+**Severity:** structural awkwardness, not a defect.
+The reconciler must live with the table (one sweeper, one backlog metric, one
+place to answer "what is overdue"), but `schedule_to_start`, `start_to_close`,
+`schedule_to_close`, `heartbeat`, `retry_backoff`, and `lease_expiry` all mutate
+`task_attempts`/`leases`. So the timer FIRES in workflow-manager and is APPLIED in
+scheduler, one RPC per fire. Accepted deliberately; the alternative — a timer table
+per service — multiplies reconcilers and sweepers and destroys the single overdue
+view. Worth noting that this makes the scheduler's timer RPCs hot.
+
+### F37. Schema duplication forced by `go:embed`
+**Severity:** tooling, no contract impact.
+The gateway must embed the JSON Schema (a validator that reads its rules from disk
+can start fine and then validate against a stale copy after a partial deploy), but
+`go:embed` cannot reach outside its package directory, so
+`schemas/workflow-spec-v1.json` is copied into
+`services/api-gateway/spec/`. `TestEmbeddedSchemaMatchesCanonical` asserts
+byte-equality so drift fails the build. A `go:generate` copy step in the Makefile
+would be tidier.

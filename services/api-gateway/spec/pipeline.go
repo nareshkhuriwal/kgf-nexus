@@ -57,8 +57,15 @@ func Compile(body []byte, format Format) (*Compiled, error) {
 	}
 
 	graph, verrs := dag.Validate(proto, dag.DefaultValidationOptions())
-	if len(verrs) > 0 {
-		return nil, &ValidationFailure{Problems: semanticProblems(verrs)}
+	problems := semanticProblems(verrs)
+
+	// Timeout coherence is checked here rather than in internal/dag because it is a
+	// property of a single task, not of the graph, and internal/dag is deliberately
+	// pure graph logic.
+	problems = append(problems, validateTimeoutCoherence(proto)...)
+
+	if len(problems) > 0 {
+		return nil, &ValidationFailure{Problems: problems}
 	}
 
 	canonical, err := Canonicalize(doc)
@@ -95,6 +102,67 @@ func semanticProblems(errs dag.ValidationErrors) []Problem {
 			Message: e.Error(),
 			Stage:   "semantic",
 		})
+	}
+	return out
+}
+
+// validateTimeoutCoherence rejects timeout combinations that can never succeed.
+//
+// JSON Schema can bound each of the four timeouts independently but cannot compare
+// them, so this is a semantic check. It matters because the failures are silent and
+// total rather than noisy: a task whose schedule_to_close is smaller than its
+// start_to_close can never complete even ONE attempt, so the run does not fail
+// loudly at submit time — it burns a retry budget at 3am and then reports a timeout
+// that looks like an infrastructure problem. Catching it here puts the error in front
+// of the author who can fix it, which is the entire premise of validating at
+// submission (ADR-0004). Raised as CONTRACT-FINDINGS.md F22 by the SDK workstream;
+// implemented server-side because the SDK is not the only submission path.
+func validateTimeoutCoherence(spec *nexusv1.WorkflowSpec) []Problem {
+	var out []Problem
+	for _, task := range spec.GetTasks() {
+		to := task.GetTimeouts()
+		if to == nil {
+			continue
+		}
+		base := "/tasks/" + task.GetId() + "/timeouts"
+
+		// Zero means "not enforced" on every field, so a comparison is only
+		// meaningful when both sides are actually set.
+		stc, s2c := to.GetStartToCloseMs(), to.GetScheduleToCloseMs()
+		if stc > 0 && s2c > 0 && s2c < stc {
+			out = append(out, Problem{
+				Path: base + "/schedule_to_close_ms",
+				Message: fmt.Sprintf(
+					"schedule_to_close_ms (%d) is less than start_to_close_ms (%d), so not even one attempt can finish within the end-to-end budget",
+					s2c, stc),
+				Stage: "semantic",
+			})
+		}
+
+		// schedule_to_start is time spent QUEUED, before the attempt begins, so it
+		// too must fit inside the end-to-end budget.
+		if s2s := to.GetScheduleToStartMs(); s2s > 0 && s2c > 0 && s2c < s2s {
+			out = append(out, Problem{
+				Path: base + "/schedule_to_close_ms",
+				Message: fmt.Sprintf(
+					"schedule_to_close_ms (%d) is less than schedule_to_start_ms (%d), so the attempt's own queueing allowance exceeds the total budget",
+					s2c, s2s),
+				Stage: "semantic",
+			})
+		}
+
+		// A heartbeat interval longer than the attempt's own wall clock can never
+		// fire, so the "went silent" signal is silently disabled — the operator
+		// believes they have wedged-task detection and they do not.
+		if hb := to.GetHeartbeatMs(); hb > 0 && stc > 0 && hb > stc {
+			out = append(out, Problem{
+				Path: base + "/heartbeat_ms",
+				Message: fmt.Sprintf(
+					"heartbeat_ms (%d) exceeds start_to_close_ms (%d), so the heartbeat timeout can never fire and wedged-task detection is disabled",
+					hb, stc),
+				Stage: "semantic",
+			})
+		}
 	}
 	return out
 }
