@@ -56,6 +56,18 @@ type TaskSpec struct {
 	// job because the payload must never transit the control plane (ADR-0008).
 	Inputs map[string]*nexusv1.ResultRef
 
+	// DeclaredOutputs are the output names from TaskSpec.outputs, sorted. The
+	// executor needs them because the output convention is name-driven: it
+	// exports NEXUS_OUTPUT_FILE for a single-output task and collects
+	// $NEXUS_OUTPUT_DIR/<name> for every declared name. Undeclared files in the
+	// output directory are IGNORED rather than guessed at, so a task cannot
+	// smuggle an output past the DAG's static type validation.
+	DeclaredOutputs []string
+
+	// StdoutOutput names the declared output that receives stdout, or is empty
+	// to capture nothing (RuntimeSpec.stdout_output).
+	StdoutOutput string
+
 	// StartToCloseDeadline is absolute and computed from CONTROL-PLANE time.
 	// Worker clocks are never authoritative, so the executor treats this as
 	// given rather than deriving it from a local duration.
@@ -119,15 +131,43 @@ type Outcome struct {
 	CPUSeconds      float64
 	WallMs          int64
 
-	// Output is the workload's declared result, read from the conventional
-	// output file in WorkDir. Raw bytes: the executor does not interpret it.
+	// Output is the workload's result under the SINGLE-output convention
+	// (output.json in WorkDir). Raw bytes: the executor does not interpret it.
+	// Retained because it predates named outputs and a task that writes only
+	// output.json must keep working.
 	Output      []byte
 	ContentType string
+
+	// Outputs are the workload's DECLARED, named results: one entry per name in
+	// TaskSpec.outputs that the workload actually produced. Keyed by output name
+	// because that is what an Edge binds (Edge.output_to_input) and what
+	// task_attempts.output_ref is keyed by — a positional or single-valued
+	// result could not express a task with two outputs at all.
+	//
+	// Absent names are simply absent, not empty: "the task produced no metrics"
+	// and "the task produced empty metrics" are different facts, and only the
+	// first should leave a downstream input unresolved.
+	Outputs map[string]NamedOutput
 
 	// Err is an executor-level failure (could not start, runtime broke), NOT a
 	// workload failure. A non-zero ExitCode is a successful execution of a
 	// failing task and leaves this nil.
 	Err error
+}
+
+// NamedOutput is one declared output's bytes as the workload produced them.
+//
+// Bytes rather than a path: the caller (which owns the result-store client)
+// decides inline-versus-blob and must hash the content, and the executor's work
+// directory is deleted by Cleanup before the caller could read a path.
+type NamedOutput struct {
+	Bytes       []byte
+	ContentType string
+	// FromStdout records that this came from the stdout opt-in rather than from a
+	// file, which is worth logging: a task that accidentally prints diagnostics
+	// to stdout gets them recorded as its result, and the operator needs to be
+	// able to see why.
+	FromStdout bool
 }
 
 // Succeeded is the single definition of workload success, so subprocess and
@@ -167,6 +207,10 @@ const (
 	// OutputFileName is where a workload writes its result. Absent means "no
 	// output", which is not an error: plenty of tasks are pure side effect.
 	OutputFileName = "output.json"
+	// OutputDirName holds DECLARED outputs, one file per output name. This is
+	// the general convention: it is the only one that can express a task with
+	// several outputs, and the only one that can carry binary data safely.
+	OutputDirName = "outputs"
 	// InputDirName holds staged inputs, one file per named input.
 	InputDirName = "inputs"
 	// LogFileName is the combined stdout+stderr capture. Combined rather than
@@ -183,6 +227,14 @@ const (
 	EnvIdempotencyKey = "NEXUS_IDEMPOTENCY_KEY"
 	EnvInputDir       = "NEXUS_INPUT_DIR"
 	EnvOutputFile     = "NEXUS_OUTPUT_FILE"
+	// EnvOutputDir points at the directory in which a workload writes one file
+	// per declared output name. Exported ALWAYS, even for a task that declares
+	// no outputs, so a handler can write unconditionally without probing.
+	EnvOutputDir = "NEXUS_OUTPUT_DIR"
+	// EnvOutputNames is the space-separated list of declared output names, so a
+	// shell task can loop over exactly what the platform will collect instead of
+	// discovering silently-dropped files at runtime.
+	EnvOutputNames    = "NEXUS_OUTPUT_NAMES"
 	EnvWorkDir        = "NEXUS_WORK_DIR"
 	EnvDeadlineUnixMs = "NEXUS_DEADLINE_UNIX_MS"
 )

@@ -136,10 +136,11 @@ func taskToProto(t map[string]any) (*nexusv1.TaskSpec, error) {
 
 	if rt, ok := obj(t, "runtime"); ok {
 		rs := &nexusv1.RuntimeSpec{
-			Executor:   strOr(rt, "executor", "subprocess"),
-			Image:      str(rt, "image"),
-			Env:        strMap(rt, "env"),
-			WorkingDir: str(rt, "working_dir"),
+			Executor:     strOr(rt, "executor", "subprocess"),
+			Image:        str(rt, "image"),
+			Env:          strMap(rt, "env"),
+			WorkingDir:   str(rt, "working_dir"),
+			StdoutOutput: str(rt, "stdout_output"),
 		}
 		for _, c := range arr(rt, "command") {
 			if s, ok := c.(string); ok {

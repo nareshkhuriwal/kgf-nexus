@@ -564,8 +564,23 @@ type RuntimeSpec struct {
 	// References only, e.g. "vault://kv/ml/s3". Resolved by the WORKER at
 	// execution time. Secret VALUES never enter the metadata store, so a
 	// metadata compromise leaks no credentials.
-	Secrets       []*SecretRef `protobuf:"bytes,6,rep,name=secrets,proto3" json:"secrets,omitempty"`
-	WorkingDir    string       `protobuf:"bytes,7,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
+	Secrets    []*SecretRef `protobuf:"bytes,6,rep,name=secrets,proto3" json:"secrets,omitempty"`
+	WorkingDir string       `protobuf:"bytes,7,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
+	// Names the declared output that receives the workload's STDOUT, or empty to
+	// capture nothing. Opt-in, and deliberately not a boolean: an output has a
+	// name in `TaskSpec.outputs`, and a downstream edge binds that name, so
+	// "stdout" with no name would be unroutable.
+	//
+	// The file convention (write $NEXUS_OUTPUT_DIR/<name>) is the general
+	// mechanism and the only one that can carry several outputs or binary data.
+	// This field exists because requiring a trivial `echo`/`jq` shell task to
+	// redirect into a file is hostile ergonomics for the single most common
+	// task shape, and an author who cannot express their result at all will
+	// instead express it as a side effect the platform cannot see.
+	//
+	// A file of the same name WINS over stdout: the file is the explicit,
+	// deliberate act, while stdout also carries incidental chatter.
+	StdoutOutput  string `protobuf:"bytes,8,opt,name=stdout_output,json=stdoutOutput,proto3" json:"stdout_output,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -645,6 +660,13 @@ func (x *RuntimeSpec) GetSecrets() []*SecretRef {
 func (x *RuntimeSpec) GetWorkingDir() string {
 	if x != nil {
 		return x.WorkingDir
+	}
+	return ""
+}
+
+func (x *RuntimeSpec) GetStdoutOutput() string {
+	if x != nil {
+		return x.StdoutOutput
 	}
 	return ""
 }
@@ -875,7 +897,7 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"\fdefault_json\x18\x03 \x01(\tR\vdefaultJson\">\n" +
 	"\vCachePolicy\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x15\n" +
-	"\x06ttl_ms\x18\x02 \x01(\x03R\x05ttlMs\"\xa7\x02\n" +
+	"\x06ttl_ms\x18\x02 \x01(\x03R\x05ttlMs\"\xcc\x02\n" +
 	"\vRuntimeSpec\x12\x1a\n" +
 	"\bexecutor\x18\x01 \x01(\tR\bexecutor\x12\x14\n" +
 	"\x05image\x18\x02 \x01(\tR\x05image\x12\x18\n" +
@@ -884,7 +906,8 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"\x03env\x18\x05 \x03(\v2\x1e.nexus.v1.RuntimeSpec.EnvEntryR\x03env\x12-\n" +
 	"\asecrets\x18\x06 \x03(\v2\x13.nexus.v1.SecretRefR\asecrets\x12\x1f\n" +
 	"\vworking_dir\x18\a \x01(\tR\n" +
-	"workingDir\x1a6\n" +
+	"workingDir\x12#\n" +
+	"\rstdout_output\x18\b \x01(\tR\fstdoutOutput\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"1\n" +

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -14,6 +15,14 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 )
+
+// LegacyOutputName is the output name given to a result produced under the
+// single-output convention (<workdir>/output.json).
+//
+// "result" and not the task's id: it is what the committed example workflows'
+// edges already bind (output_to_input: {data: result}), and renaming it would
+// break every spec written before named outputs existed.
+const LegacyOutputName = "result"
 
 // LeaseTracker is the slice of the lease keeper the runner needs.
 type LeaseTracker interface {
@@ -319,9 +328,31 @@ func (r *Runner) buildExecutorSpec(ctx context.Context, a *nexusv1.TaskAssignmen
 		Runtime:              spec.GetRuntime(),
 		Limit:                effectiveLimit(spec.GetResources()),
 		Inputs:               inputs,
+		DeclaredOutputs:      declaredOutputNames(spec),
+		StdoutOutput:         spec.GetRuntime().GetStdoutOutput(),
 		StartToCloseDeadline: deadline,
 		GraceAfterTerm:       executor.DefaultGraceAfterTerm,
 	}, nil
+}
+
+// declaredOutputNames lists TaskSpec.outputs in a STABLE order.
+//
+// Sorted because Go map iteration is randomized and the order reaches the
+// workload through NEXUS_OUTPUT_NAMES: a shell task that loops over that
+// variable would otherwise produce its outputs in a different order on every
+// attempt, which makes a task's own logs non-comparable between retries for no
+// reason.
+func declaredOutputNames(spec *nexusv1.TaskSpec) []string {
+	outs := spec.GetOutputs()
+	if len(outs) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(outs))
+	for name := range outs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // effectiveLimit picks the enforcement ceiling.
@@ -367,18 +398,16 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 	switch {
 	case o.Succeeded():
 		req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED
-		if len(o.Output) > 0 {
-			ref, err := r.storeOutput(reportCtx, a, o)
-			if err != nil {
-				// We cannot persist the output, so we cannot honestly claim
-				// success: a downstream task would read a reference to nothing.
-				// INFRASTRUCTURE + retryable is the truthful report.
-				log.Error("could not store the task output; reporting INFRASTRUCTURE failure", "error", err)
-				req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED
-				req.Error = executor.ClassifyError(fmt.Errorf("%w: %v", executor.ErrResultStore, err)).ToProto()
-			} else {
-				req.Outputs = map[string]*nexusv1.ResultRef{"result": ref}
-			}
+		refs, err := r.storeOutputs(reportCtx, a, o, log)
+		if err != nil {
+			// We cannot persist an output, so we cannot honestly claim success: a
+			// downstream task would read a reference to nothing. INFRASTRUCTURE +
+			// retryable is the truthful report.
+			log.Error("could not store the task outputs; reporting INFRASTRUCTURE failure", "error", err)
+			req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED
+			req.Error = executor.ClassifyError(fmt.Errorf("%w: %v", executor.ErrResultStore, err)).ToProto()
+		} else if len(refs) > 0 {
+			req.Outputs = refs
 		}
 	case o.TimedOut:
 		req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_TIMED_OUT
@@ -397,18 +426,80 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 	}
 }
 
-// storeOutput writes the workload's output, inlining small payloads.
-func (r *Runner) storeOutput(ctx context.Context, a *nexusv1.TaskAssignment, o executor.Outcome) (*nexusv1.ResultRef, error) {
+// storeOutputs writes every output the workload produced and returns the refs
+// that become task_attempts.output_ref.
+//
+// The upload goes DIRECTLY from this agent to object storage (ADR-0008,
+// invariant 6). Only the resulting ResultRef — a bucket, a key and a digest —
+// travels to the control plane, so a 300 MiB result costs the control plane a
+// few hundred bytes. Routing the payload through the API gateway instead would
+// contend with heartbeats on the same path, and a starved heartbeat is a
+// wrongly-declared-dead worker, which is duplicated work: a data-path shortcut
+// with a correctness consequence.
+//
+// The named outputs take precedence over the legacy single output. A task that
+// declares outputs and writes them by name gets exactly those names; a task that
+// declares none and writes the legacy output.json still gets "result", which is
+// the name the pre-existing edges in examples/ bind.
+func (r *Runner) storeOutputs(ctx context.Context, a *nexusv1.TaskAssignment,
+	o executor.Outcome, log *slog.Logger) (map[string]*nexusv1.ResultRef, error) {
+
+	produced := o.Outputs
+	if len(produced) == 0 && len(o.Output) > 0 {
+		produced = map[string]executor.NamedOutput{
+			LegacyOutputName: {Bytes: o.Output, ContentType: o.ContentType},
+		}
+	}
+	if len(produced) == 0 {
+		// No outputs is not a failure. Plenty of tasks are pure side effect, and
+		// failing them would make the whole class unrunnable.
+		return nil, nil
+	}
+
+	refs := make(map[string]*nexusv1.ResultRef, len(produced))
+	for name, out := range produced {
+		ref, err := r.putOutput(ctx, out)
+		if err != nil {
+			return nil, fmt.Errorf("store output %q: %w", name, err)
+		}
+		refs[name] = ref
+		if _, isBlob := ref.GetKind().(*nexusv1.ResultRef_Blob); isBlob {
+			log.Info("stored task output as a blob",
+				"output", name, "size_bytes", ref.GetSizeBytes(),
+				"bucket", ref.GetBlob().GetBucket(), "key", ref.GetBlob().GetKey(),
+				"from_stdout", out.FromStdout)
+		} else {
+			log.Debug("stored task output inline",
+				"output", name, "size_bytes", ref.GetSizeBytes(), "from_stdout", out.FromStdout)
+		}
+	}
+	return refs, nil
+}
+
+// putOutput inlines a small payload and writes a large one to object storage.
+func (r *Runner) putOutput(ctx context.Context, out executor.NamedOutput) (*nexusv1.ResultRef, error) {
+	ct := out.ContentType
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
 	if r.store == nil {
 		// No store configured (a development agent). Inline regardless: it is
-		// better than failing a task that produced a small, valid result.
+		// better than failing a task that produced a small, valid result. A
+		// payload above the threshold is NOT inlined here — that would push a
+		// large payload through the control plane, which is the one thing
+		// invariant 6 forbids.
+		if int64(len(out.Bytes)) > resultstore.DefaultInlineThresholdBytes {
+			return nil, fmt.Errorf("%w: output is %d bytes and no result store is configured, "+
+				"so it cannot be stored without routing the payload through the control plane",
+				executor.ErrResultStore, len(out.Bytes))
+		}
 		return &nexusv1.ResultRef{
-			Kind:        &nexusv1.ResultRef_Inline{Inline: o.Output},
-			ContentType: o.ContentType,
-			SizeBytes:   int64(len(o.Output)),
+			Kind:        &nexusv1.ResultRef_Inline{Inline: out.Bytes},
+			ContentType: ct,
+			SizeBytes:   int64(len(out.Bytes)),
 		}, nil
 	}
-	return r.store.Put(ctx, o.Output, o.ContentType)
+	return r.store.Put(ctx, out.Bytes, ct)
 }
 
 func (r *Runner) reportFailure(ctx context.Context, a *nexusv1.TaskAssignment,

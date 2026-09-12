@@ -33,6 +33,10 @@ type LoopConfig struct {
 	// MaxClaimsPerBurst bounds one dispatch burst so the loop yields to
 	// shutdown and so a single replica cannot monopolize the queue.
 	MaxClaimsPerBurst int
+	// DeadWorkerRetention is how long a DEAD worker row survives before being
+	// pruned. It is the window in which an operator can still ask what happened
+	// to a worker; past it, the row is only noise in the fleet view.
+	DeadWorkerRetention time.Duration
 }
 
 // DefaultLoopConfig returns cadences matched to the ADR-0010 defaults: a 30s
@@ -46,6 +50,7 @@ func DefaultLoopConfig() LoopConfig {
 		LivenessInterval:    5 * time.Second,
 		TimerInterval:       1 * time.Second,
 		MaxClaimsPerBurst:   64,
+		DeadWorkerRetention: 1 * time.Hour,
 	}
 }
 
@@ -253,6 +258,21 @@ func (s *Scheduler) livenessLoop(ctx context.Context) {
 			for _, l := range w.ExpiredAttempts {
 				s.logLost(l, "worker_dead")
 			}
+		}
+
+		// Prune long-dead rows so the fleet view keeps showing the live fleet.
+		// Retention is generous because a DEAD row is the evidence an operator
+		// needs right after a worker dies; it is only noise once nobody is still
+		// asking what happened.
+		if n, err := s.store.ReapDeadWorkers(
+			ctx, time.Now().UTC(), s.cfg.DeadWorkerRetention, 100,
+		); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				s.log.Warn("reaping dead workers failed", "err", err)
+			}
+		} else if n > 0 {
+			s.log.Info("reaped dead worker rows", "count", n,
+				"retention", s.cfg.DeadWorkerRetention)
 		}
 	}
 }

@@ -290,6 +290,39 @@ services:
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
+  # A scheduler replica drains exactly ONE queue (NEXUS_QUEUE), and it also
+  # refuses a worker's poll unless that queue is among the worker's queues. So
+  # the `gpu` queue needs its own replica: without it, every gpu-queue attempt
+  # sits PENDING forever with no pending_reason, which is indistinguishable
+  # from a capacity shortage. The Phase 1 exit criterion ("a 10-node DAG with
+  # mixed CPU/GPU tasks completes correctly") cannot be met without this.
+  scheduler-gpu:
+    build:
+      <<: *go-build
+      args:
+        SERVICE: scheduler
+        SERVICE_PATH: services/scheduler
+    depends_on: *depends-on-db
+    environment:
+      <<: *service-env
+      HTTP_ADDR: ":8080"
+      NEXUS_HTTP_ADDR: ":8080"
+      NEXUS_REST_ADDR: ":8080"
+      NEXUS_WFM_HEALTH_ADDR: ":8080"
+      RM_HTTP_ADDR: ":8080"
+      GRPC_ADDR: ":9090"
+      NEXUS_GRPC_ADDR: ":9090"
+      NEXUS_WFM_GRPC_ADDR: ":9090"
+      RM_GRPC_ADDR: ":9090"
+      NEXUS_QUEUE: gpu
+      SCHEDULER_BIN_PACKING: best_fit
+      SCHEDULER_LOOKAHEAD: "32"
+      SCHEDULER_AGING_MS: "30000"
+      SCHEDULER_POLL_INTERVAL_MS: "500"
+      LEASE_TTL_MS: "30000"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
+
   resource-manager:
     build:
       <<: *go-build

@@ -194,3 +194,42 @@ func (s *SchedulerStore) Ready(ctx context.Context) error {
 	}
 	return nil
 }
+
+// ReapDeadWorkers deletes DEAD worker rows whose last heartbeat is older than
+// retain, returning how many were removed.
+//
+// DEAD rows are kept for a while on purpose: immediately after a worker dies,
+// its row is the evidence an operator needs to understand why attempts were
+// reclaimed, and run_events reference the worker id. But the row is retained
+// forever today, so every deploy, restart or scale-down leaves another one and
+// the fleet view fills with corpses — the console showed 6 DEAD rows against 2
+// live workers after a single afternoon, which buries the signal that matters.
+//
+// Deletion is deliberately conditional on the worker holding NOTHING. A DEAD
+// row with a surviving lease or reservation means the capacity ledger has not
+// finished unwinding, and deleting it would cascade those rows away and lose
+// the accounting rather than settle it. Such a row is left for the next sweep,
+// by which time lease expiry will have released it.
+func (s *SchedulerStore) ReapDeadWorkers(
+	ctx context.Context, now time.Time, retain time.Duration, limit int,
+) (int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM workers w
+		 WHERE w.id IN (
+		       SELECT id FROM workers
+		        WHERE state = 'DEAD'
+		          AND last_heartbeat_at < $1
+		          AND NOT EXISTS (SELECT 1 FROM leases       l WHERE l.worker_id = workers.id)
+		          AND NOT EXISTS (SELECT 1 FROM reservations r WHERE r.worker_id = workers.id)
+		        ORDER BY last_heartbeat_at
+		        LIMIT $2
+		       )`,
+		now.Add(-retain), limit)
+	if err != nil {
+		return 0, fmt.Errorf("reap dead workers: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}

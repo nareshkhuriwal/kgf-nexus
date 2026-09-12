@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
@@ -34,6 +35,13 @@ func makeWorkDir(root, attemptID string) (string, error) {
 	dir := filepath.Join(root, sanitizeID(attemptID))
 	if err := os.MkdirAll(filepath.Join(dir, InputDirName), 0o700); err != nil {
 		return "", fmt.Errorf("create workdir %s: %w", dir, err)
+	}
+	// The output directory is created by the PLATFORM, not by the task. A task
+	// that has to mkdir its own drop point will sometimes get the mode or the
+	// path wrong and lose its result after doing all the work, and the failure
+	// looks like "the platform dropped my output".
+	if err := os.MkdirAll(filepath.Join(dir, OutputDirName), 0o700); err != nil {
+		return "", fmt.Errorf("create output dir under %s: %w", dir, err)
 	}
 	return dir, nil
 }
@@ -88,7 +96,7 @@ func stageInputs(workDir string, inputs map[string]*nexusv1.ResultRef) error {
 // buildEnv assembles the workload environment. Task env is applied FIRST and
 // the platform variables LAST, so a task cannot override NEXUS_* and lie to
 // itself about its own idempotency key.
-func buildEnv(spec TaskSpec, workDir, inputDir, outputFile string) []string {
+func buildEnv(spec TaskSpec, workDir, inputDir, outputFile, outputDir string) []string {
 	env := os.Environ()
 	for k, v := range spec.Runtime.GetEnv() {
 		env = append(env, k+"="+v)
@@ -101,6 +109,8 @@ func buildEnv(spec TaskSpec, workDir, inputDir, outputFile string) []string {
 		EnvWorkDir+"="+workDir,
 		EnvInputDir+"="+inputDir,
 		EnvOutputFile+"="+outputFile,
+		EnvOutputDir+"="+outputDir,
+		EnvOutputNames+"="+strings.Join(spec.DeclaredOutputs, " "),
 	)
 	if !spec.StartToCloseDeadline.IsZero() {
 		env = append(env, EnvDeadlineUnixMs+"="+
@@ -167,4 +177,80 @@ func checkSubprocessLimitFidelity(limit *nexusv1.ResourceVector) error {
 			ErrLimitUnenforceable, runtimeName())
 	}
 	return nil
+}
+
+// OutputFilePath decides what NEXUS_OUTPUT_FILE points at.
+//
+// With exactly ONE declared output it points INTO the output directory, at that
+// output's name, so the trivial single-output task can write to
+// $NEXUS_OUTPUT_FILE and have its result land under the name a downstream edge
+// actually binds. With zero or several declared outputs there is no single
+// correct target, so it falls back to the legacy <workdir>/output.json — which
+// the runner maps to the conventional name "result".
+//
+// The alternative (always pointing at output.json) was rejected because it makes
+// the ergonomic path produce an output under a name the author did not declare,
+// so the DAG's typed-edge validation passes at submit time and the edge then
+// silently resolves to nothing at run time. A guarantee that only holds for
+// authors who read the convention twice is not a guarantee.
+func OutputFilePath(spec TaskSpec, workDir string) string {
+	if len(spec.DeclaredOutputs) == 1 {
+		return filepath.Join(workDir, OutputDirName, sanitizeID(spec.DeclaredOutputs[0]))
+	}
+	return filepath.Join(workDir, OutputFileName)
+}
+
+// CollectOutputs gathers the workload's declared outputs after it has exited.
+//
+// Precedence, in order, and deliberately so:
+//
+//  1. A file at <workDir>/outputs/<name>. Explicit and unambiguous.
+//  2. STDOUT, for the single name in RuntimeSpec.stdout_output. A FILE of that
+//     name wins over stdout, because writing the file is a deliberate act while
+//     stdout also carries whatever the task happened to print.
+//  3. The legacy <workDir>/output.json, surfaced under the name "result" only
+//     when "result" is declared (or nothing is). It predates named outputs.
+//
+// Only DECLARED names are collected. A stray file in the output directory is
+// ignored rather than inferred as an output: the DAG validated its edges against
+// the declared interface at submit time, and honouring an undeclared output would
+// let a task produce something no edge can reference and no validation checked.
+//
+// A missing output is NOT an error here. Whether an absent required output should
+// fail the attempt is the caller's policy call, and it needs the spec to decide.
+func CollectOutputs(spec TaskSpec, workDir string, stdout []byte) map[string]NamedOutput {
+	out := map[string]NamedOutput{}
+	dir := filepath.Join(workDir, OutputDirName)
+
+	for _, name := range spec.DeclaredOutputs {
+		b, err := os.ReadFile(filepath.Join(dir, sanitizeID(name)))
+		if err != nil {
+			continue // absent is legitimate; see the doc comment
+		}
+		out[name] = NamedOutput{Bytes: b, ContentType: sniffContentType(b)}
+	}
+
+	if n := spec.StdoutOutput; n != "" && stdout != nil {
+		if _, fromFile := out[n]; !fromFile {
+			out[n] = NamedOutput{
+				Bytes:       stdout,
+				ContentType: sniffContentType(stdout),
+				FromStdout:  true,
+			}
+		}
+	}
+	return out
+}
+
+// sniffContentType labels a payload as JSON when it parses as JSON.
+//
+// The label is advisory — the platform never interprets an output's bytes — but
+// it is what lets a UI render a small result instead of showing a hex dump, and
+// getting it from the content rather than from a declaration means it cannot
+// disagree with the bytes.
+func sniffContentType(b []byte) string {
+	if json.Valid(b) {
+		return "application/json"
+	}
+	return "application/octet-stream"
 }

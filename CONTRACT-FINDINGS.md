@@ -669,3 +669,21 @@ form, which is evaluated for EVERY compose invocation -- so `build ui` and even
 in `deploy/.env` (gitignored, written by `make seed`), which compose reads
 automatically. This keeps the no-weak-default property without making every
 command depend on an agent credential.
+
+### F58. DEAD worker rows accumulated forever — FIXED
+**Severity:** operational noise that buries the signal.
+Nothing ever deleted DEAD rows, and every deploy, restart or scale-down leaves
+another one: after a single afternoon the console showed 6 DEAD rows against 2
+live workers, which is exactly the wrong ratio for a fleet view an operator
+scans for problems.
+**Resolution:** `ReapDeadWorkers` prunes DEAD rows past
+`DeadWorkerRetention` (default 1h), called from the scheduler's existing
+liveness loop. Retention is generous on purpose: immediately after a worker
+dies its row is the evidence needed to explain why attempts were reclaimed, and
+run_events reference the worker id. Deletion is conditional on the row holding
+NO leases and NO reservations -- a DEAD row still holding either means the
+capacity ledger has not finished unwinding, and deleting it would cascade those
+rows away and lose the accounting rather than settle it. Such rows are left for
+a later sweep, by which time lease expiry has released them.
+Verified: the guard selects exactly the 6 orphaned rows and excludes both ACTIVE
+workers.

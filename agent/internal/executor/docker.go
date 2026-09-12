@@ -61,6 +61,11 @@ type dockerState struct {
 	deadline    time.Time
 	grace       time.Duration
 	name        string
+	// declaredOutputs and stdoutOutput are copied from the spec at Prepare so
+	// inspectOutcome can collect outputs without the spec, which Wait does not
+	// receive.
+	declaredOutputs []string
+	stdoutOutput    string
 
 	containerID string
 
@@ -145,14 +150,16 @@ func (e *DockerExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepared, 
 
 	const containerWD = "/nexus"
 	st := &dockerState{
-		image:       image,
-		argv:        append(append([]string{}, spec.Runtime.GetCommand()...), spec.Runtime.GetArgs()...),
-		env:         dockerEnv(spec, containerWD),
-		workDir:     workDir,
-		containerWD: containerWD,
-		limit:       spec.Limit,
-		deadline:    spec.StartToCloseDeadline,
-		grace:       orDefaultGrace(spec.GraceAfterTerm),
+		image:           image,
+		argv:            append(append([]string{}, spec.Runtime.GetCommand()...), spec.Runtime.GetArgs()...),
+		env:             dockerEnv(spec, containerWD),
+		workDir:         workDir,
+		containerWD:     containerWD,
+		limit:           spec.Limit,
+		deadline:        spec.StartToCloseDeadline,
+		grace:           orDefaultGrace(spec.GraceAfterTerm),
+		declaredOutputs: spec.DeclaredOutputs,
+		stdoutOutput:    spec.StdoutOutput,
 		// Deterministic name derived from the attempt id: it makes an orphan
 		// findable after an agent restart (`docker ps --filter name=nexus-`),
 		// which is what turns "no orphaned workload" into something we can
@@ -375,12 +382,54 @@ func (e *DockerExecutor) inspectOutcome(st *dockerState, timedOut bool) Outcome 
 		o.PeakMemoryBytes = st.limit.GetMemoryBytes()
 	}
 
-	// The container wrote into the bind-mounted work directory, so the output is
-	// readable from the host with no docker cp round-trip.
+	// The container wrote into the bind-mounted work directory, so the outputs
+	// are readable from the host with no docker cp round-trip.
 	if out, ct, err := ReadOutputFile(st.workDir); err == nil {
 		o.Output, o.ContentType = out, ct
 	}
+	var stdout []byte
+	if st.stdoutOutput != "" {
+		// `docker logs` keeps the two streams distinguishable on the wire, so
+		// stdout can be read back WITHOUT stderr spliced into it. That separation
+		// is required, not merely tidy: an output with a warning line in the
+		// middle of it is corrupt data, and the failure would surface far
+		// downstream as a parse error in a different task.
+		stdout = e.containerStdout(st)
+	}
+	o.Outputs = CollectOutputs(
+		TaskSpec{DeclaredOutputs: st.declaredOutputs, StdoutOutput: st.stdoutOutput},
+		st.workDir, stdout)
 	return o
+}
+
+// containerStdout reads the exited container's stdout stream only.
+//
+// It reads after exit rather than streaming during the run because the container
+// is already gone by the time an output is needed, and because a streaming reader
+// on the result path could apply backpressure to the workload's stdout and wedge
+// the task — the log tail deliberately avoids that and so does this.
+func (e *DockerExecutor) containerStdout(st *dockerState) []byte {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, e.bin(), "logs", st.containerID)
+	var buf boundedBuffer
+	buf.limit = MaxStdoutOutputBytes
+	cmd.Stdout = &buf
+	// stderr of the docker CLI itself is discarded: mixing the CLI's own
+	// diagnostics into the task's result would corrupt it exactly as the
+	// container's stderr would.
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		e.logger().Warn("could not read container stdout for the declared output",
+			"container", shortID(st.containerID), "error", err)
+		return nil
+	}
+	if buf.Truncated() {
+		e.logger().Warn("stdout output truncated at the agent cap",
+			"container", shortID(st.containerID), "limit_bytes", MaxStdoutOutputBytes)
+	}
+	return buf.Bytes()
 }
 
 // Signal maps the neutral signal vocabulary onto docker kill.
@@ -531,7 +580,9 @@ func dockerEnv(spec TaskSpec, containerWD string) []string {
 		EnvIdempotencyKey+"="+spec.IdempotencyKey,
 		EnvWorkDir+"="+containerWD,
 		EnvInputDir+"="+containerWD+"/"+InputDirName,
-		EnvOutputFile+"="+containerWD+"/"+OutputFileName,
+		EnvOutputFile+"="+containerOutputFile(spec, containerWD),
+		EnvOutputDir+"="+containerWD+"/"+OutputDirName,
+		EnvOutputNames+"="+strings.Join(spec.DeclaredOutputs, " "),
 	)
 	if !spec.StartToCloseDeadline.IsZero() {
 		env = append(env, EnvDeadlineUnixMs+"="+strconv.FormatInt(spec.StartToCloseDeadline.UnixMilli(), 10))
@@ -579,4 +630,17 @@ func (c *cmdReadCloser) Close() error {
 	}
 	_ = c.cmd.Wait()
 	return err
+}
+
+// containerOutputFile mirrors OutputFilePath in the CONTAINER's path namespace.
+//
+// It cannot reuse OutputFilePath: that builds a host path with filepath, which on
+// a Windows or Darwin agent would produce separators the Linux container cannot
+// resolve. The convention must be identical from the task's point of view on
+// every substrate, so the rule is shared and only the path rendering differs.
+func containerOutputFile(spec TaskSpec, containerWD string) string {
+	if len(spec.DeclaredOutputs) == 1 {
+		return containerWD + "/" + OutputDirName + "/" + sanitizeID(spec.DeclaredOutputs[0])
+	}
+	return containerWD + "/" + OutputFileName
 }

@@ -68,10 +68,21 @@ type subprocState struct {
 	deadline  time.Time
 	grace     time.Duration
 
-	cmd    *exec.Cmd
-	logF   *os.File
-	pgid   int
-	waitMu sync.Mutex
+	// declaredOutputs and stdoutOutput are copied from the spec at Prepare so
+	// buildOutcome can collect outputs without the spec being threaded through
+	// Wait, which takes only a Handle.
+	declaredOutputs []string
+	stdoutOutput    string
+
+	cmd  *exec.Cmd
+	logF *os.File
+	// stdoutBuf captures stdout SEPARATELY from the combined log when the task
+	// opted into stdout capture. Separately because the combined log interleaves
+	// stderr, and a result with a stray warning spliced into it is corrupt: an
+	// output is data, while the log is a diagnostic.
+	stdoutBuf *boundedBuffer
+	pgid      int
+	waitMu    sync.Mutex
 	// waited memoises the wait result so Wait is safe to call twice (the
 	// deadline enforcer and the caller can race).
 	waited   bool
@@ -130,12 +141,18 @@ func (e *SubprocessExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepar
 	st := &subprocState{
 		argv:      argv,
 		outputDir: workDir,
-		env:       buildEnv(spec, workDir, filepath.Join(workDir, InputDirName), filepath.Join(workDir, OutputFileName)),
-		workDir:   workDir,
-		limit:     spec.Limit,
-		deadline:  spec.StartToCloseDeadline,
-		grace:     orDefaultGrace(spec.GraceAfterTerm),
-		waitDone:  make(chan struct{}),
+		env: buildEnv(spec, workDir, filepath.Join(workDir, InputDirName),
+			OutputFilePath(spec, workDir), filepath.Join(workDir, OutputDirName)),
+		workDir:         workDir,
+		declaredOutputs: spec.DeclaredOutputs,
+		stdoutOutput:    spec.StdoutOutput,
+		limit:           spec.Limit,
+		deadline:        spec.StartToCloseDeadline,
+		grace:           orDefaultGrace(spec.GraceAfterTerm),
+		waitDone:        make(chan struct{}),
+	}
+	if spec.StdoutOutput != "" {
+		st.stdoutBuf = newBoundedBuffer(MaxStdoutOutputBytes)
 	}
 	if wd := spec.Runtime.GetWorkingDir(); wd != "" {
 		st.workDir = wd
@@ -172,8 +189,15 @@ func (e *SubprocessExecutor) Start(ctx context.Context, p Prepared) (Handle, err
 	cmd := exec.CommandContext(context.Background(), st.argv[0], st.argv[1:]...)
 	cmd.Dir = st.workDir
 	cmd.Env = st.env
-	cmd.Stdout = logF
 	cmd.Stderr = logF
+	if st.stdoutBuf != nil {
+		// Tee, not redirect: stdout is still the operator's log. Losing the log
+		// because the task opted into stdout capture would make the feature cost
+		// debuggability, which is not a trade anyone asked for.
+		cmd.Stdout = io.MultiWriter(logF, st.stdoutBuf)
+	} else {
+		cmd.Stdout = logF
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	setPdeathsig(cmd.SysProcAttr)
 
@@ -339,12 +363,26 @@ func (e *SubprocessExecutor) buildOutcome(st *subprocState, waitErr error, timed
 		o.OOMKilled = true
 	}
 
-	// Output is read from the attempt work directory, which is NOT necessarily
+	// Outputs are read from the attempt work directory, which is NOT necessarily
 	// cmd.Dir: a task may declare its own working_dir, and the output drop must
 	// stay where the agent put it.
 	if out, ct, err := ReadOutputFile(st.outputDir); err == nil {
 		o.Output, o.ContentType = out, ct
 	}
+	var stdout []byte
+	if st.stdoutBuf != nil {
+		stdout = st.stdoutBuf.Bytes()
+		if st.stdoutBuf.Truncated() {
+			// Said out loud rather than silently: a truncated result is still
+			// reported as a SUCCESS, so the only signal an operator gets that
+			// their output is incomplete is this line.
+			e.logger().Warn("stdout output truncated at the agent cap",
+				"output", st.stdoutOutput, "limit_bytes", MaxStdoutOutputBytes)
+		}
+	}
+	o.Outputs = CollectOutputs(
+		TaskSpec{DeclaredOutputs: st.declaredOutputs, StdoutOutput: st.stdoutOutput},
+		st.outputDir, stdout)
 	return o
 }
 

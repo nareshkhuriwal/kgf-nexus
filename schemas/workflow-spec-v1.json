@@ -55,6 +55,10 @@
   },
 
   "$defs": {
+    "_enumSpellingNote": {
+      "description": "NOT A TYPE -- documentation. Every enum-valued field below accepts TWO spellings of each value: the short authoring form (`exponential`, `all_success`, `required`) and the protobuf constant the SDK emits (`BACKOFF_STRATEGY_EXPONENTIAL`, `TRIGGER_RULE_ALL_SUCCESS`, `IDEMPOTENCY_MODE_REQUIRED`). Both normalize to one stored value at the gateway, so the document a Python author compiles and the document a YAML author hand-writes are the same document to the platform -- which is what ADR-0004 promises when it says both surfaces are first-class. Accepting only the short form made every SDK-generated spec, including the committed examples/*/compiled.yaml, unsubmittable (CONTRACT-FINDINGS.md F52); accepting only the proto form would leak protobuf encoding conventions into a user-facing YAML surface. Accepting both and canonicalizing once is the only option that does not make one surface second-class."
+    },
+
     "identifier": {
       "description": "DNS-label-ish: safe in URLs, object-store keys, and container names without escaping.",
       "type": "string",
@@ -180,7 +184,17 @@
         "application",
         "oom",
         "not_found",
-        "infrastructure"
+        "infrastructure",
+
+        "ERROR_CLASS_TRANSIENT",
+        "ERROR_CLASS_TIMEOUT",
+        "ERROR_CLASS_WORKER_LOST",
+        "ERROR_CLASS_VALIDATION",
+        "ERROR_CLASS_PERMISSION_DENIED",
+        "ERROR_CLASS_APPLICATION",
+        "ERROR_CLASS_OOM",
+        "ERROR_CLASS_NOT_FOUND",
+        "ERROR_CLASS_INFRASTRUCTURE"
       ]
     },
 
@@ -196,7 +210,15 @@
           "default": 3
         },
         "strategy": {
-          "enum": ["fixed", "linear", "exponential"],
+          "description": "Both spellings are accepted and normalized to the short form on the way in: see the note on enum spelling at the top of $defs.",
+          "enum": [
+            "fixed",
+            "linear",
+            "exponential",
+            "BACKOFF_STRATEGY_FIXED",
+            "BACKOFF_STRATEGY_LINEAR",
+            "BACKOFF_STRATEGY_EXPONENTIAL"
+          ],
           "default": "exponential"
         },
         "initial_ms": { "$ref": "#/$defs/durationMs" },
@@ -275,7 +297,12 @@
           "type": "array",
           "items": { "$ref": "#/$defs/SecretRef" }
         },
-        "working_dir": { "type": "string", "maxLength": 4096 }
+        "working_dir": { "type": "string", "maxLength": 4096 },
+        "stdout_output": {
+          "description": "Names the declared output in this task's `outputs` that receives the workload's STDOUT. Empty or absent captures nothing. The general convention is to write one file per output into $NEXUS_OUTPUT_DIR; this opt-in exists because requiring a trivial shell task to redirect into a file is hostile for the commonest task shape. A file of the same name WINS over stdout, since the file is the deliberate act while stdout also carries incidental chatter.",
+          "type": "string",
+          "maxLength": 128
+        }
       },
       "allOf": [
         {
@@ -343,7 +370,14 @@
         "retry": { "$ref": "#/$defs/RetryPolicy" },
         "idempotency": {
           "description": "required is the platform default. A task declaring none is accepted but excluded from automatic retry of indeterminate (LOST) outcomes, because we cannot safely re-run it (ARCH 6.5).",
-          "enum": ["required", "best_effort", "none"],
+          "enum": [
+            "required",
+            "best_effort",
+            "none",
+            "IDEMPOTENCY_MODE_REQUIRED",
+            "IDEMPOTENCY_MODE_BEST_EFFORT",
+            "IDEMPOTENCY_MODE_NONE"
+          ],
           "default": "required"
         },
         "cache": { "$ref": "#/$defs/CachePolicy" },
@@ -366,7 +400,13 @@
             "one_success",
             "one_failed",
             "none_failed",
-            "all_skipped"
+            "all_skipped",
+            "TRIGGER_RULE_ALL_SUCCESS",
+            "TRIGGER_RULE_ALL_DONE",
+            "TRIGGER_RULE_ONE_SUCCESS",
+            "TRIGGER_RULE_ONE_FAILED",
+            "TRIGGER_RULE_NONE_FAILED",
+            "TRIGGER_RULE_ALL_SKIPPED"
           ],
           "default": "all_success"
         },

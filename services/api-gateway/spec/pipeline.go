@@ -49,6 +49,13 @@ func Compile(body []byte, format Format) (*Compiled, error) {
 		return nil, err
 	}
 
+	// Enum spellings are normalized BEFORE ToProto and before canonicalization,
+	// so the SDK's proto constants and a hand-written short form become the same
+	// stored bytes and therefore the same content address. Doing it after
+	// canonicalization would be too late: the hash is the document's identity,
+	// and two spellings of one workflow would already have become two workflows.
+	NormalizeEnums(doc)
+
 	proto, err := ToProto(doc)
 	if err != nil {
 		// A conversion failure after the schema passed is OUR bug, not the

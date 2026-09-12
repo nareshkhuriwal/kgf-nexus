@@ -33,6 +33,25 @@ type vectorJSON struct {
 	Custom         map[string]int64 `json:"custom"`
 }
 
+// vectorJSONLoose is the READ shape of the same columns.
+//
+// It exists because protojson renders every int64 as a JSON STRING
+// ("cpu_millis": "8000") while this package writes them as JSON numbers, and
+// both encoders write these columns. Unmarshalling a string into an int64 field
+// is a hard error, so a strict read of a resource-manager-written
+// workers.capacity row fails the whole claim transaction — the observed symptom
+// was every PollTask returning Internal and a healthy fleet doing no work at
+// all. json.Number accepts both spellings, so one reader covers both writers.
+type vectorJSONLoose struct {
+	CPUMillis      json.Number            `json:"cpu_millis"`
+	MemoryBytes    json.Number            `json:"memory_bytes"`
+	GPUCount       json.Number            `json:"gpu_count"`
+	GPUKind        string                 `json:"gpu_kind"`
+	GPUMemoryBytes json.Number            `json:"gpu_memory_bytes"`
+	DiskBytes      json.Number            `json:"disk_bytes"`
+	Custom         map[string]json.Number `json:"custom"`
+}
+
 // encodeVector serializes a ResourceVector for a JSONB column. A nil vector
 // encodes as an all-zero object rather than SQL NULL, because the schema
 // declares these columns NOT NULL and a zero request is meaningful ("costs
@@ -61,34 +80,44 @@ func decodeVector(b []byte) (*nexusv1.ResourceVector, error) {
 	if len(b) == 0 || string(b) == "null" {
 		return &nexusv1.ResourceVector{}, nil
 	}
-	var in vectorJSON
+	var in vectorJSONLoose
 	if err := json.Unmarshal(b, &in); err != nil {
 		return nil, fmt.Errorf("decode resource vector %q: %w", string(b), err)
 	}
 	out := &nexusv1.ResourceVector{
-		CpuMillis:      in.CPUMillis,
-		MemoryBytes:    in.MemoryBytes,
-		GpuCount:       in.GPUCount,
+		CpuMillis:      looseInt64(in.CPUMillis),
+		MemoryBytes:    looseInt64(in.MemoryBytes),
+		GpuCount:       int32(looseInt64(in.GPUCount)),
 		GpuKind:        in.GPUKind,
-		GpuMemoryBytes: in.GPUMemoryBytes,
-		DiskBytes:      in.DiskBytes,
-		Custom:         in.Custom,
+		GpuMemoryBytes: looseInt64(in.GPUMemoryBytes),
+		DiskBytes:      looseInt64(in.DiskBytes),
+	}
+	if len(in.Custom) > 0 {
+		out.Custom = make(map[string]int64, len(in.Custom))
+		for k, v := range in.Custom {
+			out.Custom[k] = looseInt64(v)
+		}
 	}
 
 	// The SAME columns are written in two dialects by two services, so the reader
 	// must accept both or silently read zeros.
 	//
 	// task_attempts.resource_request is written by this package in the snake_case
-	// shape vectorJSON declares. workers.capacity and workers.committed are
-	// written by the resource-manager with protojson (internal/store/rm_workers.go
-	// marshalVec), which is lowerCamelCase and renders int64 as a JSON STRING.
+	// shape vectorJSON declares, with int64 as JSON numbers. workers.capacity and
+	// workers.committed are written by the resource-manager with protojson
+	// (internal/store/rm_workers.go marshalVec), which is snake_case under
+	// UseProtoNames but renders every int64 as a JSON STRING, and which is
+	// camelCase without it.
 	//
-	// Decoding protojson bytes with vectorJSON alone finds none of its fields and
-	// reports a zero-capacity worker WITHOUT any error, because json.Unmarshal
-	// does not complain about fields it cannot find. The visible symptom is every
-	// attempt stuck PENDING with "no ACTIVE worker matches queue/labels/executor"
-	// while a fleet of idle, healthy workers sits there — a capacity ledger that
-	// reads as empty is indistinguishable from a cluster with no workers.
+	// Both number spellings are handled above by reading through json.Number;
+	// this overlay covers the camelCase spelling, which a protojson writer that
+	// forgets UseProtoNames would produce. Decoding such bytes with the
+	// snake_case shape alone finds none of its fields and reports a
+	// zero-capacity worker WITHOUT any error, because json.Unmarshal does not
+	// complain about fields it cannot find. The visible symptom is every attempt
+	// stuck PENDING with "no ACTIVE worker matches queue/labels/executor" while a
+	// fleet of idle, healthy workers sits there — a capacity ledger that reads as
+	// empty is indistinguishable from a cluster with no workers.
 	//
 	// Fixing the writer instead would be a schema migration of live rows, and
 	// would still leave every row written before the fix unreadable. A tolerant
@@ -96,6 +125,24 @@ func decodeVector(b []byte) (*nexusv1.ResourceVector, error) {
 	// one encoder should own these columns.
 	applyProtoJSONVector(b, out)
 	return out, nil
+}
+
+// looseInt64 reads an int64 that may have been written as a JSON number or, by
+// protojson, as a JSON string. An unparseable value yields 0 rather than an
+// error: the alternative is failing a whole claim transaction over one
+// malformed dimension, and a zero dimension is already the meaning of an absent
+// one.
+func looseInt64(n json.Number) int64 {
+	if n == "" {
+		return 0
+	}
+	if v, err := n.Int64(); err == nil {
+		return v
+	}
+	if f, err := n.Float64(); err == nil {
+		return int64(f)
+	}
+	return 0
 }
 
 // applyProtoJSONVector overlays the protojson spelling onto an already-decoded
