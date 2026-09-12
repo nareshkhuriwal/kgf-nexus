@@ -227,6 +227,13 @@ func (s *SpecServer) SetRunState(ctx context.Context, req *SetRunStateRequest) (
 	switch domain.RunState(req.State) {
 	case domain.RunRunning:
 		row, err = s.runs.Start(ctx, req.RunID)
+	case domain.RunPaused:
+		// The engine reports that a PAUSING run has finished draining; the run
+		// service decides whether that is legal and fires TriggerDrained. Routed
+		// through MaybeFinalizePause rather than a direct transition so the
+		// in-flight recount happens on this side of the boundary, where
+		// workflow_runs is owned.
+		row, err = s.runs.MaybeFinalizePause(ctx, req.RunID)
 	case domain.RunSucceeded, domain.RunFailed, domain.RunCancelled, domain.RunTimedOut:
 		// The engine does not get to NAME the terminal state. It reports that
 		// every node is terminal, and OnNodesTerminal re-derives which terminal

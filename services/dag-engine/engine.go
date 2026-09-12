@@ -339,6 +339,25 @@ func (e *Engine) Reconcile(ctx context.Context, runID string) (*ReconcileResult,
 					"state", string(decision.RunState))
 			}
 		}
+
+	// PAUSED is not terminal, but it is just as much a conclusion only this
+	// component can reach. internal/dag decides PAUSING -> PAUSED once nothing is
+	// in flight, and for the same reason it decides everything else: it is the only
+	// component that can see whether any attempt is still running.
+	//
+	// Publishing it was missing, so the decision was computed and thrown away on
+	// every reconcile: a paused run's last attempt would finish and the run would
+	// sit at PAUSING forever, with nothing in flight and nothing left to trigger
+	// another look. An operator could not tell "still draining" from "drained", and
+	// PAUSING is what §5.2 uses to mean the first.
+	case dag.RunPaused:
+		if domain.RunState(decision.RunState) != run.State {
+			log.Info("run finished draining and is now paused",
+				"previous_state", string(run.State))
+			if err := e.publishRunState(ctx, runID, domain.RunPaused); err != nil {
+				log.Error("could not publish PAUSED run state", "error", err)
+			}
+		}
 	}
 	return res, nil
 }

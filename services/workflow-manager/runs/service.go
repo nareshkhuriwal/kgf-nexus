@@ -39,6 +39,9 @@ type DAGEngine interface {
 	// ResetFailedNodes prepares a retry-from-failed by returning failed nodes and
 	// everything downstream of them to PENDING.
 	ResetFailedNodes(ctx context.Context, runID string) (resetNodes []string, err error)
+	// ReconcileRun recomputes a run's frontier. Only the engine owns the graph, so
+	// nothing else in the system can work out which node became ready.
+	ReconcileRun(ctx context.Context, runID, nodeID string) (frontier []string, runState string, terminal bool, err error)
 }
 
 // Scheduler is the scheduler's API as this package needs it.
@@ -218,9 +221,30 @@ func (s *Service) Pause(ctx context.Context, runID string) (store.RunRow, error)
 	return run, nil
 }
 
-// Resume releases a hold, reopening the dispatch gate.
+// Resume releases a hold, reopening the dispatch gate and recomputing the frontier.
+//
+// The reconcile is not optional bookkeeping — without it a resumed run is wedged.
+// Reopening the gate only makes READY nodes dispatchable again; it does not make
+// any node READY. An attempt that completed DURING the pause window reported into
+// a run that was no longer RUNNING, so the frontier advance that normally follows
+// a terminal attempt never happened, and its successor stayed PENDING. The run
+// then sat at RUNNING with a SUCCEEDED node and nothing in flight, forever,
+// because only the engine computes readiness and nothing else would ask it to.
 func (s *Service) Resume(ctx context.Context, runID string) (store.RunRow, error) {
-	return s.transition(ctx, runID, statemachine.TriggerResume, statemachine.Outcome{})
+	run, err := s.transition(ctx, runID, statemachine.TriggerResume, statemachine.Outcome{})
+	if err != nil {
+		return store.RunRow{}, err
+	}
+
+	// Logged and swallowed rather than returned: the resume itself is committed and
+	// durable, so failing the operator's call would misreport a state change that
+	// already happened. A missed reconcile costs latency, not correctness — the next
+	// terminal attempt triggers one anyway.
+	if _, _, _, rerr := s.dag.ReconcileRun(ctx, runID, ""); rerr != nil {
+		s.log.ErrorContext(ctx, "run resumed but the frontier could not be recomputed; nodes that became ready during the pause may not dispatch until the next attempt reports",
+			"run_id", runID, "error", rerr)
+	}
+	return run, nil
 }
 
 // Cancel stops a run AND its in-flight work.
