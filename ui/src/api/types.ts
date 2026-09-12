@@ -208,6 +208,20 @@ export interface CapacitySummary {
   committed: ResourceVector;
   worker_count?: number;
   active_worker_count?: number;
+  /**
+   * The shape the gateway actually serialises today: a flat `workers` count and
+   * a queue depth, rather than the worker_count/active_worker_count pair above.
+   * Both spellings are declared because the console must read the deployed
+   * gateway without waiting for the contract to be reconciled, and a field that
+   * silently arrives as undefined renders as a confident em dash.
+   *
+   * `pending_attempts` is the only queue-depth number the platform exposes. It
+   * counts attempts admitted and not yet dispatched; there is no queue-age
+   * endpoint, so anything time-shaped about the queue has to be derived
+   * client-side and labelled as such.
+   */
+  workers?: number;
+  pending_attempts?: number;
 }
 
 export interface LogLine {

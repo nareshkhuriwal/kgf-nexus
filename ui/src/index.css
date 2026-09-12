@@ -725,3 +725,67 @@ button.primary:hover:not(:disabled) {
 @media (max-width: 560px) {
   .profile-panel { right: calc(var(--space-5) * -1); min-width: 0; width: calc(100vw - var(--space-7)); }
 }
+
+/* ── Overview ───────────────────────────────────────────────────────────────
+   The landing page composes existing primitives (.panel, .grid-2, .meter), so
+   what is added here is only the stat typography and the two markers that carry
+   the page's central claim: that some of its numbers are derived rather than
+   measured, and must not read as authoritative. */
+
+/* Big enough to be read across a room during an incident, still a token. */
+.ov-stat {
+  display: block;
+  font-size: var(--text-xl);
+  line-height: var(--leading-tight);
+  color: var(--fg);
+}
+
+/* auto-fit rather than a fixed pair, so a tile folds to one column at ~400px
+   instead of forcing the page to scroll sideways. */
+.ov-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-6);
+}
+
+/* The provenance marker. Deliberately warning-toned and not dismissible: a
+   derived number that stops announcing itself is indistinguishable from a
+   measured one, which is the failure this whole treatment exists to prevent. */
+.ov-derived-note {
+  margin-top: var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  border-left: var(--space-1) solid var(--tone-warning-bd);
+  background: var(--tone-warning-bg);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+.ov-derived-note strong { color: var(--tone-warning-fg); }
+
+.ov-health-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  color: var(--fg);
+  text-decoration: none;
+  font-size: var(--text-sm);
+}
+.ov-health-row:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.ov-health-row .spacer { margin-left: auto; }
+
+.ov-count-link { text-decoration: none; color: inherit; }
+
+.ov-divider {
+  height: 1px;
+  background: var(--border);
+  margin: var(--space-6) var(--space-0);
+}
+
+/* Tone-carrying text, so a panel can mark a value without a hardcoded colour. */
+.tone-text-danger { color: var(--tone-danger-fg); }
+.tone-text-warning { color: var(--tone-warning-fg); }

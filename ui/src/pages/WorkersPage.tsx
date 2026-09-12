@@ -10,8 +10,9 @@
  */
 
 import { useCapacity, useWorkers } from '../api/hooks';
-import type { CapacitySummary, ResourceVector, Worker } from '../api/types';
+import type { Worker } from '../api/types';
 import { StateBadge } from '../components/StateBadge';
+import { CapacityGrid, deriveCapacity } from '../components/CapacityGrid';
 import { AsyncPanel, ErrorBox, StaleWarning } from '../components/Status';
 import {
   EMPTY,
@@ -24,6 +25,13 @@ import {
   shortId,
   utilization,
 } from '../lib/format';
+
+/**
+ * Re-exported because the capacity summary now also feeds the overview, so it
+ * lives in components/. Callers that already import it from the fleet page keep
+ * working rather than being churned for a move.
+ */
+export { deriveCapacity };
 
 /** Heartbeat is every 5s (§11); 3 missed beats is the conventional liveness cut. */
 const HEARTBEAT_STALE_MS = 15_000;
@@ -222,68 +230,4 @@ function DimensionCell({
       </div>
     </div>
   );
-}
-
-function CapacityGrid({ summary, derived = false }: { summary: CapacitySummary; derived?: boolean }) {
-  const dims: { label: string; c?: number; a?: number; fmt: (n: number | null | undefined) => string }[] = [
-    { label: 'cpu', c: summary.committed?.cpu_millis, a: summary.advertised?.cpu_millis, fmt: fmtCpu },
-    { label: 'memory', c: summary.committed?.memory_bytes, a: summary.advertised?.memory_bytes, fmt: fmtBytes },
-    {
-      label: 'gpu',
-      c: summary.committed?.gpu_count,
-      a: summary.advertised?.gpu_count,
-      fmt: (n) => String(n ?? 0),
-    },
-  ];
-  return (
-    <div>
-      {derived && (
-        <div className="sub" style={{ marginBottom: 9 }}>
-          Derived by summing the worker rows — the <code>/capacity</code> endpoint did not answer.
-        </div>
-      )}
-      <div className="grid-2">
-        {dims.map((d) => (
-          <div key={d.label} className="panel" style={{ background: 'var(--bg-inset)' }}>
-            <div className="panel-body">
-              <div className="attempt-section-title">{d.label}</div>
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <strong className="mono">
-                  {d.fmt(d.c ?? 0)} / {d.fmt(d.a)}
-                </strong>
-                <span className="mono">{fmtPercent(utilization(d.c, d.a))}</span>
-              </div>
-              <div className="meter" style={{ marginTop: 6 }}>
-                <span style={{ width: `${(utilization(d.c, d.a) ?? 0) * 100}%` }} />
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-      {(summary.worker_count !== undefined || summary.active_worker_count !== undefined) && (
-        <div className="sub" style={{ marginTop: 9 }}>
-          {summary.active_worker_count ?? EMPTY} active of {summary.worker_count ?? EMPTY} workers
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Client-side aggregate used when the /capacity endpoint is unavailable. */
-export function deriveCapacity(workers: Worker[]): CapacitySummary {
-  const add = (acc: ResourceVector, v: ResourceVector | undefined): ResourceVector => ({
-    cpu_millis: (acc.cpu_millis ?? 0) + (v?.cpu_millis ?? 0),
-    memory_bytes: (acc.memory_bytes ?? 0) + (v?.memory_bytes ?? 0),
-    gpu_count: (acc.gpu_count ?? 0) + (v?.gpu_count ?? 0),
-    disk_bytes: (acc.disk_bytes ?? 0) + (v?.disk_bytes ?? 0),
-  });
-  // Only schedulable workers contribute advertised capacity: counting a DEAD
-  // worker's CPUs would claim headroom that does not exist.
-  const schedulable = workers.filter((w) => w.state === 'ACTIVE' || w.state === 'DRAINING');
-  return {
-    advertised: schedulable.reduce<ResourceVector>((a, w) => add(a, w.capacity), {}),
-    committed: schedulable.reduce<ResourceVector>((a, w) => add(a, w.committed), {}),
-    worker_count: workers.length,
-    active_worker_count: workers.filter((w) => w.state === 'ACTIVE').length,
-  };
 }

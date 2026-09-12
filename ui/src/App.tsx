@@ -7,7 +7,7 @@
  * output.
  */
 
-import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import { NavLink, Route, Routes, useNavigate } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { API_BASE, DEFAULT_NAMESPACE, getApiKey, setApiKey } from './api/client';
@@ -17,6 +17,7 @@ import { LoginPage } from './pages/LoginPage';
 import { UsersPage } from './pages/admin/UsersPage';
 import { TokensPage } from './pages/admin/TokensPage';
 import { AuditPage } from './pages/admin/AuditPage';
+import { OverviewPage } from './pages/OverviewPage';
 import { RunListPage } from './pages/RunListPage';
 import { RunDetailPage } from './pages/RunDetailPage';
 import { WorkersPage } from './pages/WorkersPage';
@@ -111,6 +112,11 @@ export function App() {
           <span className="brand-mark">◇</span> nexus
         </span>
         <nav className="nav">
+          {/* `end` so the overview link is only active on "/" itself, rather
+              than lighting up on every nested route beneath it. */}
+          <NavLink to="/" end className={({ isActive }) => (isActive ? 'active' : '')}>
+            Overview
+          </NavLink>
           <NavLink to="/runs" className={({ isActive }) => (isActive ? 'active' : '')}>
             Runs
           </NavLink>
@@ -208,7 +214,7 @@ export function App() {
       <main className="main" id="main" tabIndex={-1}>
         <ErrorBoundary>
           <Routes>
-            <Route path="/" element={<Navigate to="/runs" replace />} />
+            <Route path="/" element={<OverviewPage namespace={namespace} />} />
             <Route path="/runs" element={<RunListPage namespace={namespace} />} />
             <Route path="/runs/:runId" element={<RunDetailPage namespace={namespace} />} />
             <Route path="/schedules" element={<SchedulesPage namespace={namespace} />} />
@@ -245,7 +251,7 @@ export function App() {
                   <div>
                     <div className="notice-title">No such page</div>
                     <div className="notice-detail">
-                      <NavLink to="/runs">Go to runs</NavLink>
+                      <NavLink to="/">Go to the overview</NavLink>
                     </div>
                   </div>
                 </div>
