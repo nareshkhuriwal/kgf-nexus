@@ -32,7 +32,7 @@ import type { ReactNode } from 'react';
 
 export interface ProfileMenuProps {
   /** The signed-in person, or null when only an API key (or nothing) is held. */
-  session: { email: string; role: string; namespace: string } | null;
+  session: { email: string; role: string; namespace: string; displayName?: string } | null;
   /**
    * What the gateway says this credential is. Preferred over the stored session
    * for the displayed role: whoami is the enforcement point's own answer, while
@@ -75,15 +75,30 @@ export interface ProfileMenuProps {
 }
 
 /**
- * The avatar's letter.
+ * The avatar's initials.
  *
- * Taken from the email rather than a display name because `sessions` stores no
- * display name — deriving it here keeps the avatar truthful about the only
- * identity the browser actually holds. A non-alphanumeric leading character
- * (a quoted local part, say) falls back to a neutral glyph rather than
- * rendering punctuation in a circle.
+ * Prefers a real name and takes TWO letters from it — "NK" for Naresh Khuriwal
+ * — because two initials identify a person while one letter is a coincidence.
+ * The name was always available from the login response; the session simply
+ * threw it away, which is why this used to be documented as "sessions store no
+ * display name" and derived a single letter from the email instead.
+ *
+ * Falls back through the email's local part when there is no name, and to a
+ * neutral glyph when the leading character is punctuation (a quoted local part,
+ * say) rather than rendering a bracket in a circle. A machine credential has no
+ * name at all and lands on the glyph, which is correct: it is not a person.
+ *
+ * Only the first and last words are used, so a middle name does not produce
+ * three letters and a name with a trailing title does not produce the title's.
  */
-export function avatarInitial(email: string | undefined): string {
+export function avatarInitial(email: string | undefined, displayName?: string): string {
+  const words = (displayName ?? '').trim().split(/\s+/).filter((w) => /[a-z0-9]/i.test(w));
+  if (words.length > 0) {
+    const first = words[0]!;
+    const last = words[words.length - 1]!;
+    const letters = words.length === 1 ? first.slice(0, 1) : `${first[0]}${last[0]}`;
+    return letters.replace(/[^a-z0-9]/gi, '').toUpperCase() || '·';
+  }
   const first = (email ?? '').trim().charAt(0);
   return /[a-z0-9]/i.test(first) ? first.toUpperCase() : '·';
 }
@@ -216,18 +231,16 @@ export function ProfileMenu({
         }
       >
         <span className="avatar" aria-hidden="true">
-          {avatarInitial(email)}
+          {avatarInitial(email, session?.displayName)}
         </span>
-        {/* The namespace beside the avatar, at the END of the bar and well away
-            from the logo. It was removed from the brand cluster for being
-            noise there, but it cannot simply go: an operator on the wrong
-            namespace otherwise reads an empty dashboard as "nothing is
-            running". */}
-        {namespace && (
-          <span className="profile-ns" aria-hidden="true">
-            {namespace}
-          </span>
-        )}
+        {/* The namespace is NOT printed beside the avatar.
+            It was moved here from the brand cluster and read no better: a
+            mono-spaced "default" next to a circle of initials looks like the
+            account's name, which is the one thing an identity control must not
+            get wrong. It keeps both of the places where it is unambiguous --
+            this trigger's tooltip, and a labelled row inside the panel -- so
+            the property that mattered survives: an operator on the wrong
+            namespace can still find out why their dashboard is empty. */}
         <span className="profile-caret" aria-hidden="true">
           ▾
         </span>

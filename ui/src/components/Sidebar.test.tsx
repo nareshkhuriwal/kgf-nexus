@@ -46,7 +46,7 @@ describe('the sidebar', () => {
   it('leaves the brand to the navbar above it', () => {
     wrap(<Sidebar canAdmin={false} />);
 
-    expect(screen.queryByText('Nexus')).not.toBeInTheDocument();
+    expect(screen.queryByText('KGF Nexus')).not.toBeInTheDocument();
   });
 
   /**
@@ -127,7 +127,7 @@ describe('the navbar', () => {
   it('carries the brand and the account slot, and no namespace chip', () => {
     wrap(<NavBar account={account} railExpanded onToggleRail={() => {}} />);
 
-    expect(screen.getByText('Nexus')).toBeInTheDocument();
+    expect(screen.getByText('KGF Nexus')).toBeInTheDocument();
     expect(screen.queryByText('payments')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Account slot' })).toBeInTheDocument();
   });

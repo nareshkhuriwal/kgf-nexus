@@ -190,7 +190,7 @@ export function NavDrawer({ open, onClose, returnFocusTo, canAdmin }: NavDrawerP
               which product it belongs to. */}
           <span className="brand" aria-hidden="true">
             <Logo size={20} className="brand-mark" />
-            <span className="brand-word">Nexus</span>
+            <span className="brand-word">KGF Nexus</span>
           </span>
           {/* The dialog's accessible name. Visually hidden because the brand
               beside it is already the visible heading, and printing "All

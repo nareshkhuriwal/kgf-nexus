@@ -81,12 +81,17 @@
  * string from abutting the wordmark and reading as part of the product name.
  */
 
-import { useState } from 'react';
-import type { ReactNode } from 'react';
-import { Logo } from './Logo';
-import { NavSearch } from './NavSearch';
-import { IconBell, IconContrast, IconGear, IconMenu } from './icons';
-import { getThemeChoice, nextTheme, setThemeChoice, themeLabel } from '../lib/theme';
+import { useState } from "react";
+import type { ReactNode } from "react";
+import { Logo } from "./Logo";
+import { NavSearch } from "./NavSearch";
+import { IconBell, IconContrast, IconGear, IconMenu } from "./icons";
+import {
+  getThemeChoice,
+  nextTheme,
+  setThemeChoice,
+  themeLabel,
+} from "../lib/theme";
 
 export interface NavBarProps {
   /**
@@ -143,6 +148,22 @@ export interface NavBarProps {
       without it — a bell that goes nowhere is the inert control. */
   onOpenAttention?: () => void;
   /**
+   * The namespace every page's data is scoped to, shown as a labelled chip.
+   *
+   * It has moved twice and this is why. Beside the wordmark it read as part of
+   * the product name; bare beside the avatar it read as the account's name,
+   * which is worse — an identity control must not display something that is not
+   * the identity. Here it is prefixed with "ns" and sits before the tools,
+   * which makes it unambiguously a SCOPE.
+   *
+   * It cannot simply move into the panel, which was the other option. Every
+   * endpoint is namespace-scoped, so an operator on the wrong one reads a
+   * plausible empty dashboard as "nothing is running" — the most misleading
+   * output this console can produce — and a value behind a click is a value
+   * they will not check.
+   */
+  namespace?: string;
+  /**
    * The hamburger, handed up so the shell can return focus to it.
    *
    * The off-canvas drawer at narrow widths is dismissed with Escape and with
@@ -164,6 +185,7 @@ export function NavBar({
   onOpenSettings,
   attentionCount,
   onOpenAttention,
+  namespace,
   hamburgerRef,
 }: NavBarProps) {
   /**
@@ -197,44 +219,59 @@ export function NavBar({
           anything. It controls the RAIL now rather than a drawer of links:
           collapsing the rail is the reason this button exists at all, and at
           narrow widths the shell points it at the off-canvas panel instead. */}
-      <button
-        type="button"
-        ref={hamburgerRef}
-        className="navbar-menu"
-        // The rail is what it expands and collapses, so it reports the rail's
-        // state. aria-controls is deliberately absent: the rail is a sibling
-        // rendered by the shell, and pointing at an id this component does not
-        // own is how that reference goes stale.
-        aria-expanded={railExpanded}
-        onClick={onToggleRail}
-        title={
-          railIsOverlay
-            ? 'Show the destinations'
-            : railExpanded
-              ? 'Collapse the sidebar to icons'
-              : 'Expand the sidebar'
-        }
-      >
-        <IconMenu />
-        <span className="sr-only">
-          {railIsOverlay
-            ? 'Show the destinations'
-            : railExpanded
-              ? 'Collapse the sidebar'
-              : 'Expand the sidebar'}
-        </span>
-      </button>
+      {/* The hamburger and the wordmark are one cluster, sized in CSS to exactly
+          the rail's width, so the search field beside it starts on the same
+          vertical line as the page content below. Without the wrapper the
+          cluster sized to its contents and the field began a hamburger's width
+          to the left of everything beneath it. */}
+      <div className="navbar-lead">
+        <button
+          type="button"
+          ref={hamburgerRef}
+          className="navbar-menu"
+          // The rail is what it expands and collapses, so it reports the rail's
+          // state. aria-controls is deliberately absent: the rail is a sibling
+          // rendered by the shell, and pointing at an id this component does not
+          // own is how that reference goes stale.
+          aria-expanded={railExpanded}
+          onClick={onToggleRail}
+          title={
+            railIsOverlay
+              ? "Show the destinations"
+              : railExpanded
+                ? "Collapse the sidebar to icons"
+                : "Expand the sidebar"
+          }
+        >
+          <IconMenu />
+          <span className="sr-only">
+            {railIsOverlay
+              ? "Show the destinations"
+              : railExpanded
+                ? "Collapse the sidebar"
+                : "Expand the sidebar"}
+          </span>
+        </button>
 
-      <span className="brand" aria-hidden="true">
-        <Logo size={22} className="brand-mark" />
-        <span className="brand-word">Nexus</span>
-      </span>
+        <span className="brand" aria-hidden="true">
+          <Logo size={22} className="brand-mark" />
+          <span className="brand-word">KGF Nexus</span>
+        </span>
+      </div>
 
       {onOpenSearch && <NavSearch onOpen={onOpenSearch} />}
 
       {/* The right-side cluster: three tools that each go somewhere real, then
           the account control. Nothing invented to pad it out. */}
       <div className="navbar-tools">
+        {namespace && (
+          <span className="navbar-ns" title={`Namespace: ${namespace}`}>
+            <span className="navbar-ns-label" aria-hidden="true">
+              ns
+            </span>
+            <span className="navbar-ns-value">{namespace}</span>
+          </span>
+        )}
         {onOpenAttention && (
           <button
             type="button"
@@ -242,11 +279,11 @@ export function NavBar({
             onClick={onOpenAttention}
             title={
               attentionCount === undefined
-                ? 'Needs attention'
+                ? "Needs attention"
                 : attentionCount === 0
-                  ? 'Nothing needs attention'
-                  : `${attentionCount} item${attentionCount === 1 ? '' : 's'} need${
-                      attentionCount === 1 ? 's' : ''
+                  ? "Nothing needs attention"
+                  : `${attentionCount} item${attentionCount === 1 ? "" : "s"} need${
+                      attentionCount === 1 ? "s" : ""
                     } attention`
             }
           >
@@ -257,7 +294,7 @@ export function NavBar({
                  below carries the real figure, because "99+" is a layout
                  concession and not the fact. */
               <span className="navbar-badge" aria-hidden="true">
-                {attentionCount > 99 ? '99+' : attentionCount}
+                {attentionCount > 99 ? "99+" : attentionCount}
               </span>
             )}
             {/* Icon-only, so the name lives here. It states the count rather
@@ -265,8 +302,8 @@ export function NavBar({
                 badge is invisible and the count is the entire content. */}
             <span className="sr-only">
               {attentionCount === undefined
-                ? 'Needs attention'
-                : `Needs attention: ${attentionCount} item${attentionCount === 1 ? '' : 's'}`}
+                ? "Needs attention"
+                : `Needs attention: ${attentionCount} item${attentionCount === 1 ? "" : "s"}`}
             </span>
           </button>
         )}

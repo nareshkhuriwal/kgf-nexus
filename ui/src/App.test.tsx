@@ -110,7 +110,7 @@ describe('the application shell', () => {
     expect(screen.getByText('Observe')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Runs' })).toBeInTheDocument();
     // The bar's own contribution: the brand, which the rail no longer prints.
-    expect(screen.getByText('Nexus')).toBeInTheDocument();
+    expect(screen.getByText('KGF Nexus')).toBeInTheDocument();
   });
 
   /**

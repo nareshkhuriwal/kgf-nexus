@@ -27,6 +27,17 @@ export interface StoredSession {
   token: string;
   expiresAt: string;
   email: string;
+  /**
+   * The person's name as the gateway knows it, when it sent one.
+   *
+   * Kept because the avatar wants real initials: "NK" from "Naresh Khuriwal"
+   * identifies a person, while a letter derived from an email's local part is a
+   * guess that happens to be right often enough to look deliberate. Optional
+   * because it is the server's to supply and a session stored by an older build
+   * will not have it -- getSession parses whatever is in localStorage, so every
+   * field added here has to tolerate being absent.
+   */
+  displayName?: string;
   namespace: string;
   role: string;
 }
@@ -246,7 +257,7 @@ export const authApi = {
     const res = await authRequest<{
       token: string;
       expires_at: string;
-      user: { email: string; namespace: string; role: string };
+      user: { email: string; namespace: string; role: string; display_name?: string };
     }>('/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -256,6 +267,9 @@ export const authApi = {
       token: res.token,
       expiresAt: res.expires_at,
       email: res.user.email,
+      // Dropped on the floor until now, which is why the avatar had only an
+      // email to work from.
+      displayName: res.user.display_name,
       namespace: res.user.namespace,
       role: res.user.role,
     };

@@ -441,6 +441,7 @@ export function App() {
       <header className="chrome chrome-navbar">
         <NavBar
           account={account}
+          namespace={namespace}
           railExpanded={!railCollapsed}
           railIsOverlay={narrow}
           onToggleRail={toggleRail}

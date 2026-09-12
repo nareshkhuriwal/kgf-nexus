@@ -244,16 +244,28 @@ describe('the menu navigates instead of embedding controls', () => {
  * running". So it has to remain on screen somewhere, and this is somewhere.
  */
 describe('the namespace and the deployment stay visible', () => {
-  it('shows the namespace on the trigger, before the menu is even opened', () => {
+  /**
+   * The trigger CARRIES the namespace in its tooltip but does not print it.
+   *
+   * It was printed beside the avatar for a while and read as the account's
+   * name — a circle of initials followed by "default" looks like an identity,
+   * and displaying something that is not the identity is the one mistake an
+   * account control must not make. The visible chip moved to the bar, labelled
+   * "ns" so it is unambiguously a scope; see NavBar.tsx. The tooltip stays,
+   * because the trigger is on screen when the panel is not.
+   */
+  it('carries the namespace in the trigger tooltip without printing it beside the avatar', () => {
     render(
       <ProfileMenu session={session} namespace="payments" onSignOut={vi.fn()} onSignIn={vi.fn()} />,
     );
 
-    expect(screen.getByText('payments')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /account menu/i })).toHaveAttribute(
+    const trigger = screen.getByRole('button', { name: /account menu/i });
+    expect(trigger).toHaveAttribute(
       'title',
       expect.stringContaining('payments') as unknown as string,
     );
+    // Not rendered as visible text next to the initials.
+    expect(trigger.textContent).not.toContain('payments');
   });
 
   it('states both as read-only facts inside the panel, not as controls', () => {
@@ -382,15 +394,37 @@ describe('deciding whether anyone is signed in', () => {
   });
 });
 
-describe('the avatar letter', () => {
-  it('is the first letter of the address, capitalised', () => {
+describe('the avatar initials', () => {
+  /**
+   * Two letters from a real name, because two identify a person and one is a
+   * coincidence. The name was always in the login response; the stored session
+   * discarded it, which is why this used to derive a single letter from the
+   * email and document that as the only identity available.
+   */
+  it('takes the first and last initials of a display name', () => {
+    expect(avatarInitial('naresh@khuriwalgroup.com', 'Naresh Khuriwal')).toBe('NK');
+    expect(avatarInitial('ada@example.com', 'Ada Lovelace')).toBe('AL');
+  });
+
+  /** First and LAST, so a middle name does not produce three letters. */
+  it('ignores middle names', () => {
+    expect(avatarInitial('a@b.com', 'Naresh Kumar Khuriwal')).toBe('NK');
+  });
+
+  it('gives one letter for a single-word name', () => {
+    expect(avatarInitial('a@b.com', 'Naresh')).toBe('N');
+  });
+
+  /** The email is the fallback, not the preference. */
+  it('falls back to the address when no name was supplied', () => {
     expect(avatarInitial('naresh@khuriwalgroup.com')).toBe('N');
-    expect(avatarInitial('ada@example.com')).toBe('A');
+    expect(avatarInitial('ada@example.com', '   ')).toBe('A');
   });
 
   it('falls back to a neutral glyph rather than rendering punctuation', () => {
     expect(avatarInitial('"quoted"@example.com')).toBe('·');
     expect(avatarInitial('')).toBe('·');
+    // A machine credential names no person, so there is no initial to show.
     expect(avatarInitial(undefined)).toBe('·');
   });
 });

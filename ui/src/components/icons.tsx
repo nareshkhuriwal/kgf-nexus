@@ -317,8 +317,19 @@ export function IconMenu(props: IconProps) {
 export function IconGear(props: IconProps) {
   return (
     <Icon {...props}>
-      <circle cx="12" cy="12" r="3.1" />
-      <path d="M12 2.6v3M12 18.4v3M4.35 7.3l2.6 1.5M17.05 15.2l2.6 1.5M4.35 16.7l2.6-1.5M17.05 8.8l2.6-1.5" />
+      {/* A COG SILHOUETTE, not a hub with spokes.
+          The previous drawing was a small circle with six short radial ticks
+          around it, which at 18px is indistinguishable from a sun -- and it sat
+          next to the theme control, so the bar appeared to offer two brightness
+          buttons. A closed toothed outline with a hole in the middle reads as
+          machinery at any size, because the teeth are part of the silhouette
+          rather than detached marks near it. */}
+      <path
+        d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z"
+      />
+      <path
+        d="M19.4 14.6a7.7 7.7 0 0 0 0-5.2l-2.1-.4a5.6 5.6 0 0 0-.8-1.4l.7-2A7.7 7.7 0 0 0 12.6 4l-1 1.9a5.6 5.6 0 0 0-1.6 0L9 4a7.7 7.7 0 0 0-4.6 1.6l.7 2a5.6 5.6 0 0 0-.8 1.4l-2.1.4a7.7 7.7 0 0 0 0 5.2l2.1.4a5.6 5.6 0 0 0 .8 1.4l-.7 2A7.7 7.7 0 0 0 9 20l1-1.9a5.6 5.6 0 0 0 1.6 0l1 1.9a7.7 7.7 0 0 0 4.6-1.6l-.7-2a5.6 5.6 0 0 0 .8-1.4z"
+      />
     </Icon>
   );
 }
@@ -336,10 +347,15 @@ export function IconGear(props: IconProps) {
 export function IconBell(props: IconProps) {
   return (
     <Icon {...props}>
-      <path d="M6.2 10a5.8 5.8 0 0 1 11.6 0c0 3.4.9 5 1.7 5.9H4.5c.8-.9 1.7-2.5 1.7-5.9" />
+      {/* A CLOSED body, which the outline-only version was not: its bottom edge
+          was a separate stroke, so at 18px the shape read as an arch with a
+          line under it rather than as a bell. Closing the path also lets the
+          silhouette hold its own beside the count badge, which is the thing
+          that has to be legible first. */}
+      <path d="M12 3.4a5.9 5.9 0 0 0-5.9 5.9c0 3.3-.8 4.9-1.6 5.8a.6.6 0 0 0 .45 1h14.1a.6.6 0 0 0 .45-1c-.8-.9-1.6-2.5-1.6-5.8A5.9 5.9 0 0 0 12 3.4z" />
       {/* The clapper, as an arc rather than a closed shape: a filled blob below
           the bell reads as a second badge at rail size. */}
-      <path d="M10 19a2.2 2.2 0 0 0 4 0" />
+      <path d="M9.9 18.8a2.3 2.3 0 0 0 4.2 0" />
     </Icon>
   );
 }

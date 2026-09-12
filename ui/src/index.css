@@ -257,6 +257,17 @@
   */
   --navbar-h: 52px;
 
+  /*
+     The rail's width, and therefore where the page's content column begins.
+     Declared here because the NAVBAR needs it too: the bar's hamburger-plus-
+     wordmark cluster is sized to exactly this, so the search field starts on
+     the same vertical line as the page beneath it rather than floating a
+     hamburger's width to its left. Two elements agreeing on one measurement is
+     the whole reason it is a token.
+  */
+  --rail-w: 240px;
+  --rail-w-collapsed: 72px;
+
   /* A stacking order stated once, so a new overlay cannot land arbitrarily
      above or below an existing one. */
   --z-base: 0;
@@ -1415,8 +1426,8 @@ tr.version-current > td { background: var(--bg-hover); }
 /* 240px is a layout measurement, not a spacing step: it is the width at which
    the longest label plus its glyph stops wrapping. */
 .chrome-sidebar {
-  flex: 0 0 240px;
-  width: 240px;
+  flex: 0 0 var(--rail-w);
+  width: var(--rail-w);
   /*
      Sticky BELOW the bar, not at the viewport top.
 
@@ -1568,8 +1579,8 @@ tr.version-current > td { background: var(--bg-hover); }
    that with :has() makes the rail's layout contingent on selector support for
    the one property that must never be wrong. */
 .chrome-sidebar.collapsed {
-  flex-basis: 72px;
-  width: 72px;
+  flex-basis: var(--rail-w-collapsed);
+  width: var(--rail-w-collapsed);
 }
 .sidebar.collapsed {
   padding-inline: var(--space-2);
@@ -1652,13 +1663,63 @@ tr.version-current > td { background: var(--bg-hover); }
   flex-wrap: nowrap;
   box-sizing: border-box;
 }
-.navbar .brand { display: flex; align-items: center; gap: var(--space-4); flex: 0 0 auto; }
+/*
+   The hamburger and the wordmark together occupy exactly the rail's width, so
+   the search field begins on the same vertical line the page content does. The
+   alternative — letting the cluster size to its contents — left the field
+   starting a hamburger's width left of everything below it, which read as a
+   misalignment rather than as a choice.
+
+   The two are wrapped in .navbar-lead for this; the gap between them stays the
+   bar's own, and the wordmark takes the slack so the pairing does not stretch.
+*/
+.navbar-lead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  flex: 0 0 var(--rail-w);
+  width: var(--rail-w);
+  min-width: 0;
+  box-sizing: border-box;
+}
+.navbar .brand { display: flex; align-items: center; gap: var(--space-4); flex: 0 0 auto; min-width: 0; }
+.navbar .brand-word { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Horizontally the groups are dropped, so the row is the flat list. The
    headings the row cannot carry are in the drawer; see NavDrawer.tsx. */
 .navbar-nav { flex: 0 1 auto; min-width: 0; overflow-x: auto; }
 .navbar-nav .nav-list { flex-direction: row; gap: var(--space-2); }
 .navbar .nav-item { padding: var(--space-3) var(--space-5); white-space: nowrap; }
+/* The namespace chip: a labelled scope, not an identity.
+   The "ns" prefix is what stops it being read as the account's name, which is
+   what happened when it sat bare beside the avatar. Muted and mono, so it reads
+   as a value rather than as a control. */
+.navbar-ns {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  max-width: 180px;
+  flex: 0 0 auto;
+}
+.navbar-ns-label { color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+.navbar-ns-value {
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Below the drawer threshold the bar has no room for it. The panel's own
+   labelled row carries it there, and the trigger's tooltip still does. */
+@media (max-width: 720px) {
+  .navbar-ns { display: none; }
+}
+
 /* The right-hand cluster. margin-left:auto rather than a spacer element, and it
    moved from .navbar-account to the cluster that now contains it — the account
    control is no longer the only thing pinned to that end. */
