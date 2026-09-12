@@ -284,7 +284,14 @@ func createRun(t *testing.T, workflow string) string {
 // included.
 func curl(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	out, err := exec.Command("curl", append([]string{"-s"}, args...)...).Output()
+	// --retry covers the transient connection reset (curl exit 56) seen when a
+	// burst of requests races the gateway rotating a connection: PeerServerOptions
+	// caps connection age deliberately, so a reset is expected behaviour rather
+	// than a fault, and a test that treats it as one is flaky for a reason that
+	// has nothing to do with what it asserts. --retry-connrefused covers the same
+	// during a rolling restart.
+	base := []string{"-s", "--retry", "3", "--retry-delay", "1", "--retry-connrefused"}
+	out, err := exec.Command("curl", append(base, args...)...).Output()
 	return string(out), err
 }
 
@@ -617,11 +624,25 @@ func TestSchedulerReplicasNeverDoubleDispatchUnderLoad(t *testing.T) {
 	<-watcherDone
 	t.Logf("sampled the ledger %d times under load; peak concurrent leases %d", samples, peakLeases)
 
-	// A peak of one lease means the storms never actually overlapped and the
-	// fleet was never concurrently loaded, so nothing raced.
-	if peakLeases < 2 {
-		t.Errorf("peak concurrent leases was %d: the storms did not overlap, "+
-			"so no two dispatches were ever in flight at once", peakLeases)
+	// Prove the storms overlapped, from the EVENT LOG rather than the sampler.
+	//
+	// peakLeases is a sampled quantity and cannot carry this assertion. Leases are
+	// deleted the instant an attempt completes, and these tasks are sub-second, so
+	// a 100ms poll routinely lands between them and reports a peak of 1 on a fleet
+	// that was demonstrably busy -- observed failing about half the time while
+	// three replicas each claimed 70+ attempts. Asserting on it made the test
+	// flaky in the one direction a concurrency test must never be: red when the
+	// system is fine.
+	//
+	// AttemptDispatched events are durable and cannot be missed. Counting
+	// dispatches that overlap in time answers the same question -- were two
+	// dispatches ever in flight at once -- without depending on when we happened
+	// to look.
+	if overlaps := concurrentDispatchPeak(t, runIDs); overlaps < 2 {
+		t.Errorf("no two dispatches ever overlapped in time (peak %d): the storms did not "+
+			"contend, so the guarantee under test was never exercised", overlaps)
+	} else {
+		t.Logf("peak overlapping dispatches: %d", overlaps)
 	}
 
 	// ── Guarantee 1: no attempt was ever dispatched twice. ────────────────
@@ -717,6 +738,32 @@ func liveOverCommittedWorkers(t *testing.T) int {
 		  WHERE state='ACTIVE'
 		    AND coalesce((committed->>'cpu_millis')::bigint,0)
 		      > coalesce((capacity->>'cpu_millis')::bigint,0)`))
+	return n
+}
+
+// concurrentDispatchPeak reports the largest number of attempts that were
+// dispatched but not yet ended at the same instant, computed from the durable
+// event log and the attempts table rather than from sampling.
+//
+// A sweep line over (dispatched_at, ended_at): every dispatch is +1, every end is
+// -1, and the running maximum is the true concurrency peak. Nothing here depends
+// on the test being awake at the right moment.
+func concurrentDispatchPeak(t *testing.T, runIDs []string) int {
+	t.Helper()
+	n, _ := strconv.Atoi(psql(t, fmt.Sprintf(
+		`WITH events AS (
+		   SELECT dispatched_at AS at, 1 AS delta
+		     FROM task_attempts
+		    WHERE run_id IN (%[1]s) AND dispatched_at IS NOT NULL
+		   UNION ALL
+		   SELECT COALESCE(ended_at, now()) AS at, -1 AS delta
+		     FROM task_attempts
+		    WHERE run_id IN (%[1]s) AND dispatched_at IS NOT NULL
+		 )
+		 SELECT COALESCE(max(running), 0)::int FROM (
+		   SELECT sum(delta) OVER (ORDER BY at, delta DESC
+		                           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running
+		     FROM events) x`, inList(runIDs))))
 	return n
 }
 

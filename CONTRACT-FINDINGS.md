@@ -1610,3 +1610,63 @@ state was first reported from the container's start time, but the image had been
 rebuilt eight minutes after the merge and contained BOTH route sets — so the
 "pre-merge binary" was in fact post-merge. Verified here by checking route strings in
 the binary rather than by timestamps, which is the only reliable way to tell.
+
+### F74. The double-dispatch test was flaky in the worst direction — FIXED
+Found by running `make chaos` against the identity merge (c6321ff) to check
+whether the new credential-dispatching `guard()` broke REST auth. It did not --
+all 40 routes work, every example still runs, dispatch still spreads evenly
+across replicas. But the suite went red anyway, roughly half the time, on my own
+assertion:
+
+```
+sampled the ledger 18 times under load; peak concurrent leases 1
+peak concurrent leases was 1: the storms did not overlap
+```
+
+...while the same run showed three replicas claiming 73, 64 and 76 attempts. The
+fleet was demonstrably busy; the measurement was wrong.
+
+`peakLeases` is a SAMPLED quantity and could not carry that assertion. Leases are
+deleted the instant an attempt completes and these tasks are sub-second, so a
+100ms poll routinely lands between them. That makes the test red when the system
+is fine -- the one direction a concurrency test must never fail, because it
+trains everyone to re-run it, and a re-run is exactly how a real double-dispatch
+would get waved through.
+
+Replaced with a sweep line over `(dispatched_at, ended_at)` from `task_attempts`:
+every dispatch +1, every end -1, running maximum. Durable, cannot be missed, and
+does not care when the test happens to look. The same runs that reported a peak
+of 1 now report **9 and 12** overlapping dispatches -- so the storms were always
+contending and the sampler was simply blind to it.
+
+Also made the suite's `curl` retry (`--retry 3 --retry-connrefused`). A burst of
+requests occasionally hits curl exit 56 when it races the gateway rotating a
+connection, which `PeerServerOptions` caps deliberately -- expected behaviour, not
+a fault, and a test that treats it as one is flaky for a reason unrelated to what
+it asserts.
+
+Verified over six consecutive runs of the test alone and two of the full suite.
+
+**The pattern this belongs to.** That is now the fourth variant in this session of
+one mistake: F70's vacuous post-hoc lease check, F71's name-addressed example
+runs, F73's silently-skipped CI packages, and this. Each was a check that did not
+measure what it claimed. The first three passed while proving nothing; this one
+failed while nothing was wrong. Same root cause -- **the instrument was chosen
+for convenience rather than for whether it can actually see the thing** -- and the
+failing direction is the more expensive one, because a green test that proves
+nothing is discovered eventually, while a red test that means nothing gets
+re-run until it passes.
+
+### F75. Two migrations share version 0007 — OPEN (benign today)
+`0007_backfill_lease` and `0007_identity` were authored on parallel branches and
+both landed. Harmless right now, verified rather than assumed: they touch
+disjoint tables (`schedule_backfills` vs the identity tables), neither depends on
+the other, and `schema_migrations` keys on the full filename so both applied
+cleanly in glob order.
+
+The hazard is that the number no longer orders anything. `make migrate-up`
+iterates `services/migrations/*.up.sql` in glob order, so two files at the same
+version apply in whatever order the shell returns -- fine for independent
+migrations, wrong the moment a same-numbered pair has a dependency, and silent
+either way. A duplicate version should fail the migration job rather than be
+resolved by `ls`.
