@@ -1028,3 +1028,172 @@ way to advertise it. Worth checking any dimension added to `ResourceVector` from
 here for an agent flag AND an end-to-end run that uses it, because unit tests
 construct the vector directly and cannot see the gap.
 
+
+### F67. Two allocators for `run_events.seq` collided — FIXED
+
+`run_events` has two writers and they numbered rows differently. event-service
+allocates from `workflow_runs.event_seq` (migration 0002, and the EVENT SEQ rule in
+CONTRACT.md). The shared `appendEvent` helper used `max(seq)+1` under a
+`pg_advisory_xact_lock`, which serializes only the callers that TAKE that lock —
+and event-service does not. Observed live:
+
+```
+duplicate key value violates unique constraint "run_events_run_id_seq_key"
+```
+
+Worse than the race: `max(seq)+1` never advanced the counter, so every run written
+by the helper left `event_seq` stale and its next owner-API append was *guaranteed*
+to collide. One run's counter read 2 while its actual `max(seq)` was 11; 31 runs on
+the dev fleet had drifted. `appendEvent` now allocates from the counter, so the
+UPDATE's row lock serializes every writer on one mechanism. Migration 0004 repairs
+the already-drifted rows — without it those runs can never record another event.
+
+Worth noting for any future writer of `run_events`: the advisory lock LOOKED
+sufficient and was not, because a lock only constrains the code that takes it.
+
+### F68. The workflow-manager's event and scheduler clients were stubs — FIXED
+
+`EventClient.Publish` returned `"event-service gRPC is not wired yet"` and never
+sent anything, so no `RunCreated` and no `RunStateChanged` was ever recorded for any
+run — the run-level half of the audit trail `run_events` exists to provide was
+simply empty. The stub's message also misled: event-service serves plain JSON REST
+(`POST /v1/runs/{runID}/events`) and registers no gRPC service at all, so the
+"pending proto" everyone was waiting for was never the plan.
+
+A second defect was stacked behind it: every peer is configured `host:9090` because
+that is the gRPC convention across the fleet, but event-service binds **8080 only**
+— so even a real client would have failed with "connection refused". The client now
+adapts that one well-known wrong port and respects any other.
+
+### F69. A peer that MOVED left clients calling the wrong service — FIXED
+
+Recreating several services together makes two of them swap IPs. A client holding an
+open connection to the address it remembers then reaches a *different* service:
+
+```
+rpc error: code = Unimplemented desc = unknown service nexus.v1.SchedulerService
+```
+
+which reads like version skew or a missing registration and is neither. Reproduced
+deterministically: recreating dag-engine, scheduler and workflow-manager together
+swapped the latter two, after which the gateway held a connection to the
+scheduler's address while sending `WorkflowSpecService` over it — 43 errors and
+every run creation failing, with all six services healthy.
+
+It cannot be fixed client-side alone, which is the trap. gRPC re-resolves a name
+only when a connection BREAKS, and a swapped peer breaks nothing: the TCP session
+stays healthy, it just terminates at the wrong process. The fix is
+`MaxConnectionAge` on each internal server (`internal/config.PeerServerOptions`), so
+connections rotate and each reconnect re-resolves.
+
+### F70. ADR-0011 rule 1's grant enforcement did not exist — FIXED
+
+The ADR states ownership is "enforced by per-service Postgres roles with table-level
+grants, so a violation fails at the database, not at code review." There was not one
+`GRANT` or `CREATE ROLE` in the repository; every service connected as the owning
+superuser. Migration 0005 creates the six roles and the matrix, with the dispatch
+exception granted explicitly and column-scoped where possible (`workers.committed`,
+`workers.state`, `workflow_runs.event_seq`), and `run_events` INSERT-only for both
+its writers so invariant 8 is enforced rather than merely asserted.
+
+Adopting a role is a deployment change (a DSN per service), not a schema change, so
+the migration is safe to apply ahead of that work.
+
+### F71. The timer-backlog readiness gate was an availability hazard — FIXED
+
+workflow-manager failed `/readyz` when overdue timers exceeded
+`NEXUS_TIMER_BACKLOG_ALERT`. The backlog is a property of the SHARED `timers` table,
+so every replica computes the same number and they would all fail readiness
+together — emptying the tier out of the load balancer precisely when deadlines were
+already firing late, and removing the very replicas that drain the backlog. The
+comment claimed it "sheds traffic from this replica", which a global condition
+cannot do. An operator who set the threshold low, reasonably believing it an alert,
+was configuring an outage.
+
+Now a gauge plus a log warning (`internal/metrics`). On a database error the gauges
+keep their last value rather than zeroing, because a zero is indistinguishable from
+"the backlog just drained".
+
+### F72. Pause killed the work it exists to preserve — FIXED
+
+`PendingCancellations` included `PAUSING` in its run-state filter, and the gateway
+turns every id that query returns into a `CANCEL_ATTEMPT` directive, which the agent
+implements as SIGTERM/grace/SIGKILL. Pausing a run therefore killed its in-flight
+attempts:
+
+```
+{"type":"Signalled","class":"ERROR_CLASS_APPLICATION",
+ "message":"workload terminated by signal terminated"}
+```
+
+The retry budget was charged for a failure the task never caused, and an operator
+pausing to investigate destroyed exactly the compute they were protecting. Draining
+needs no directive at all: `PAUSING` already closes the dispatch gate, because the
+claim query admits only `PENDING`/`RUNNING` runs.
+
+Two adjacent defects, also fixed: `MaybeFinalizePause` was implemented and had no
+caller, so a run never left `PAUSING`; and `Resume` only flipped the state without
+asking the dag-engine to reconcile, so a node that became ready during the pause
+window stayed `PENDING` and the resumed run was silently wedged.
+
+### F73. `max_attempts` capped nothing — FIXED
+
+`domain.ShouldRetry` compares `task_nodes.attempts_used` against `max_attempts`, but
+only the dag-engine's attempt-creation path incremented it. Retries are created by
+the scheduler's `CreatePendingRetry`, which never charged the budget, so the counter
+stayed at 1 however many times a node was retried and a retryable failure would be
+retried indefinitely — bounded only by whatever else happened to make the run
+terminal.
+
+### F74. Author-spelled enums were silently discarded — FIXED
+
+`$defs/ErrorClass` accepts both the short authoring spellings and the proto enum
+names, so a spec using either passes validation. Three separate places then dropped
+them:
+
+- the gateway's `errorClass()` knew only the short form, returning `UNSPECIFIED`
+  for every `ERROR_CLASS_*` value;
+- `protojson` discards the short form WITHOUT error (`"application"` →
+  `retry_on: []`), so the stored node spec carried no policy;
+- `TaskSpecView.RetryPolicy()` typed the millisecond fields as `int64`, but
+  protojson renders 64-bit integers as quoted strings — so `json.Unmarshal` failed
+  on the whole struct and returned an EMPTY policy, discarding `retry_on`,
+  `strategy` and the backoff together. The same failure silently erased executor
+  constraints and all four timeouts.
+
+Net effect: every `retry_on` in the system was inert, and failures reported
+`error_class_not_in_retry_on` naming the exact class the author had allowed.
+
+### F75. The console called endpoints that do not exist — FIXED
+
+`GET /runs/{id}/attempts` is not a registered route and returned 404 (the data is
+already inline in `GET /runs/{id}`), so the DAG, node panel and log tail rendered
+empty while the data sat on the wire. The events cursor was spelled `since_seq`
+where the gateway reads `after_seq`, and an unknown query parameter is ignored
+rather than rejected, so the cursor silently replayed the whole history. SSE sent
+`follow=true`, which the gateway never reads — it negotiates on `stream=true` or an
+`Accept` header `EventSource` cannot set, so live updates always "fell back" to
+polling. `client.ts` had no tests at all, which is why three URL-level bugs went
+unnoticed while 45 tests passed on pure helpers.
+
+### F76. No backup existed, and rate limiting was claimed but absent — FIXED
+
+Postgres is the sole system of record and had no backup of any kind: no `pg_dump`,
+no PITR, no procedure, no RPO/RTO — while `make migrate-down` is a
+`DROP TABLE CASCADE` behind a three-second sleep. `deploy/backup.sh` and
+`deploy/restore.sh` now exist, with a drill verified against the live stack (all
+eleven tables matched exactly), and `docs/OPERATIONS.md` records what the drill does
+NOT prove: no service was pointed at the restored database, in-flight leases and
+timers referring to vanished workers were not exercised, and MinIO artifacts still
+have no backup at all.
+
+Separately, ARCHITECTURE.md §3.2 listed "rate limit" among the gateway's
+responsibilities with nothing implementing it, and the CLI already carried a hint
+for a 429 the server could never send. Now a per-credential token bucket, off unless
+`NEXUS_RATE_LIMIT_RPS` is set.
+
+A pattern across F67–F76 worth stating plainly: in this codebase the inline
+comments are consistently more accurate than the design documents. Several of these
+defects were a doc asserting a mechanism in the present tense (grants enforcing
+ownership, Prometheus metrics, rate limiting) that no code implemented. Prefer the
+comments, and treat a doc's present tense as a claim to verify.
