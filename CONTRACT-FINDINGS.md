@@ -1197,3 +1197,88 @@ comments are consistently more accurate than the design documents. Several of th
 defects were a doc asserting a mechanism in the present tense (grants enforcing
 ownership, Prometheus metrics, rate limiting) that no code implemented. Prefer the
 comments, and treat a doc's present tense as a claim to verify.
+
+### F67. A terminal run state could be computed and then dropped — FIXED
+**Severity:** high. Blocked Phase 1 exit criterion 2, intermittently.
+Found by the new chaos suite on its first real run, which is the entire argument
+for having one: the manual version of the same scenario had passed minutes
+earlier.
+
+The DAG engine correctly concluded a run was SUCCEEDED and then lost it:
+
+```
+dag-engine  "run reached a terminal state"  state=SUCCEEDED
+dag-engine  "could not publish terminal run state"
+            error=... rpc error: code = Canceled
+                     desc = context canceled while waiting for connections to become ready
+```
+
+All three nodes SUCCEEDED; the run sat at RUNNING forever.
+
+The publish used the INBOUND request's context. `ReconcileRun` is called at the
+tail of an attempt report, behind the gateway's per-call timeout, so a slow final
+reconcile cancels the publish *after* the node work has already committed.
+
+What made it permanent was the comment above it: *"The next reconcile
+republishes."* That is true of the RUNNING publish a few lines earlier and false
+here. A reconcile happens only when an attempt reports or an operator intervenes
+-- and a run whose every node is terminal will never have another attempt. There
+is no next reconcile. The engine computed the answer, dropped it, and nothing
+would ever ask again.
+
+Fixed by detaching that one publish (`context.WithoutCancel` + its own 30s
+budget). The asymmetry with the RUNNING publish above it is deliberate and
+commented: that one really is retried, this one is the last word.
+
+**Not fixed, and worth a decision:** there is still no durable backstop. If the
+detached publish itself fails -- workflow-manager genuinely down for 30s at that
+instant -- the run is stranded exactly as before, and only a sweep for
+"non-terminal runs whose nodes are all terminal" would recover it. Detaching
+removes the failure we actually hit; it does not make the announcement durable.
+The same reasoning applies to every other best-effort publish in this file.
+
+### F68. Chaos suite: exit criterion 2 is met — DONE
+`tests/chaos` is the suite architecture §11 lists as a Phase 1 deliverable ("a
+chaos suite that kills workers mid-task and asserts exactly-one-logical-effect").
+It drives the real compose stack under its own `chaos` build tag so
+`go test ./...` can never trip over it: submit a run through the gateway, wait
+until a task is genuinely RUNNING, `docker kill` that worker's container, then
+assert on the recovery. `make chaos`.
+
+SIGKILL rather than a graceful stop is the point. A SIGTERM starts the agent's
+drain and it reports its attempts honestly, which tests the happy path; SIGKILL
+means no report ever arrives and the control plane must work out on its own,
+from the lease alone, that the work is gone.
+
+The counting is what makes the assertion meaningful. Nexus is at-least-once
+(ADR-0006), so "the task ran once" is the wrong claim -- it would be
+exactly-once, which the system does not promise. The workflow separates the two
+counts physically: each task appends one line per EXECUTION to a file named after
+`NEXUS_IDEMPOTENCY_KEY`, which excludes `attempt_number`.
+
+```
+node seed    effects=1 executions=1
+node slow    effects=1 executions=2   <- killed mid-task
+node settle  effects=1 executions=1
+```
+
+Two executions, one effect. Two *effects* would mean two idempotency keys for one
+logical unit of work, which is the double-dispatch this design exists to prevent.
+The test also fails if `slow` executed only once -- a suite that passes without
+exercising the path it names is worse than none.
+
+Observed recovery, unprompted and correct: attempt 1 -> LOST (`lease_expired`,
+`retry_indeterminate_idempotent`), retried as attempt 2 on a surviving worker,
+dead worker declared DEAD with its capacity released. A second test asserts that
+last part directly -- a DEAD worker holding committed capacity shrinks the fleet
+permanently, one incident at a time, and every individual run still succeeds
+while it happens.
+
+Verified over five consecutive runs after F67 was fixed.
+
+**Two fixes the suite needed in itself**, both worth noting because each first
+looked like a platform bug: the killed container must be allowed to re-register
+before the next test starts (restarting the container is not the same as having
+a worker), and the effects must be read from whichever agent is alive rather than
+a hard-coded `agent-cpu` -- which is sometimes the container the test just killed.
+

@@ -19,7 +19,7 @@ DATABASE_URL  ?= postgres://postgres:test@localhost:55432/nexus?sslmode=disable
 MIGRATIONS    := services/migrations
 
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
-        ui-dev ui-build ui-test seed submit-example clean
+        ui-dev ui-build ui-test seed submit-example chaos clean
 
 help: ## Show this help
 	@echo "Nexus — make targets"
@@ -52,6 +52,15 @@ test: ## Run Go tests and UI tests
 
 lint: ## go vet over the whole module
 	$(GO) vet ./...
+
+# The chaos suite drives the REAL compose stack: it submits a run, waits for a
+# task to be executing, SIGKILLs that worker's container and asserts the platform
+# recovered with exactly one logical effect. It needs the stack up and an admin
+# key, takes minutes, and deliberately breaks the fleet -- hence its own build
+# tag, so `go test ./...` can never trip over it.
+chaos: ## Kill workers mid-task and assert exactly-one-logical-effect (needs `make up` + NEXUS_API_KEY)
+	@test -n "$$NEXUS_API_KEY" || { echo "NEXUS_API_KEY is unset; run 'make seed' and export it"; exit 1; }
+	$(GO) test -tags chaos -count=1 -v -timeout 20m ./tests/chaos/
 
 # ── Migrations ────────────────────────────────────────────────────────────
 # Applied by a job, never by a service at startup (ADR-0011 rule 4). These

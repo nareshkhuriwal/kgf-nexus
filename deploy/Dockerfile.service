@@ -60,7 +60,7 @@ COPY --from=build --chmod=0755 /out/service /usr/local/bin/nexus-service
 # The agent needs a writable WAL directory. Creating it in the image with the
 # right owner means a named volume mounted here inherits that ownership, so the
 # unprivileged user can write without the container needing root.
-RUN mkdir -p /var/lib/nexus/wal /var/lib/nexus-agent/wal \
+RUN mkdir -p /var/lib/nexus/wal /var/lib/nexus-agent/wal /var/lib/nexus/effects \
  && chown -R 10001:10001 /var/lib/nexus /var/lib/nexus-agent
 
 # Never run the control plane as root: a compromised service should not be able

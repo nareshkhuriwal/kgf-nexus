@@ -424,6 +424,7 @@ services:
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     volumes:
       - agent-cpu-wal:/var/lib/nexus/wal
+      - chaos-effects:/var/lib/nexus/effects
       # The docker executor runs tasks as sibling containers. Mounting the host
       # socket is effectively root on the host — acceptable on a laptop, never
       # in production, where the k8s executor (ADR-0007) is the answer.
@@ -466,6 +467,7 @@ services:
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     volumes:
       - agent-gpu-wal:/var/lib/nexus/wal
+      - chaos-effects:/var/lib/nexus/effects
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
@@ -507,6 +509,7 @@ services:
       NEXUS_LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     volumes:
       - agent-gpu-a10-wal:/var/lib/nexus/wal
+      - chaos-effects:/var/lib/nexus/effects
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
@@ -542,3 +545,7 @@ volumes:
   agent-cpu-wal:
   agent-gpu-wal:
   agent-gpu-a10-wal:
+  # Shared by every agent so a task's recorded side effect OUTLIVES the worker
+  # that produced it. The chaos suite kills a worker mid-task and then counts the
+  # effects; a per-agent volume would lose exactly the evidence under test.
+  chaos-effects:

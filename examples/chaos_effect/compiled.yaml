@@ -1,0 +1,149 @@
+# A workflow built for ONE purpose: to be interrupted.
+#
+# Phase 1 exit criterion 2 is "killing a worker mid-run yields exactly one
+# logical effect per task". Proving that needs a task whose effect is durable,
+# countable, and attributable to a specific logical unit of work rather than to
+# a specific attempt -- so the task appends one line per EXECUTION but names the
+# file after NEXUS_IDEMPOTENCY_KEY, which is derived from
+# (run_id, node_id, map_index, task_version) and deliberately excludes
+# attempt_number.
+#
+# That split is what makes the assertion meaningful:
+#   - executions  = lines across all files for the node   (may exceed 1: at-least-once)
+#   - effects     = files for the node                    (must be exactly 1)
+#
+# A platform that double-dispatched would produce two DIFFERENT keys and two
+# files. A platform that retried correctly after a kill produces more lines in
+# the SAME file. The first is a correctness bug; the second is the documented
+# at-least-once contract (ADR-0006) working as designed.
+#
+# `slow` sleeps well past the point where the harness kills its worker, so the
+# kill lands mid-execution rather than in the gap between tasks.
+api_version: nexus.dev/v1
+name: chaos-effect
+namespace: default
+description: A run designed to be interrupted, to prove exactly-one-logical-effect.
+max_active_runs: 8
+run_timeout_ms: 600000
+params: {}
+labels: {}
+
+edges:
+- from_node_id: seed
+  output_to_input:
+    upstream: result
+  to_node_id: slow
+- from_node_id: slow
+  output_to_input:
+    upstream: result
+  to_node_id: settle
+
+tasks:
+- id: seed
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: chaos.seed
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'mkdir -p /var/lib/nexus/effects/$NEXUS_RUN_ID/seed && echo "$NEXUS_ATTEMPT_ID" >> /var/lib/nexus/effects/$NEXUS_RUN_ID/seed/$NEXUS_IDEMPOTENCY_KEY && echo seeded'
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 134217728
+  retry:
+    max_attempts: 4
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+
+# The node the kill lands on. It records its effect FIRST and sleeps second, so
+# an interrupted execution has already left its evidence behind -- otherwise a
+# kill would prove only that the task never ran.
+- id: slow
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: chaos.slow
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'mkdir -p /var/lib/nexus/effects/$NEXUS_RUN_ID/slow && echo "$NEXUS_ATTEMPT_ID" >> /var/lib/nexus/effects/$NEXUS_RUN_ID/slow/$NEXUS_IDEMPOTENCY_KEY && sleep 25 && echo done'
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 134217728
+  retry:
+    max_attempts: 4
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+
+# Proves the run made it PAST the interrupted node rather than merely surviving
+# it. Without a successor, a stalled `slow` and a recovered one look alike.
+- id: settle
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: chaos.settle
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'mkdir -p /var/lib/nexus/effects/$NEXUS_RUN_ID/settle && echo "$NEXUS_ATTEMPT_ID" >> /var/lib/nexus/effects/$NEXUS_RUN_ID/settle/$NEXUS_IDEMPOTENCY_KEY && echo settled'
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 134217728
+  retry:
+    max_attempts: 4
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000

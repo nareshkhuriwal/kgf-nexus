@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"log/slog"
 
+	"time"
+
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/dag"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
@@ -331,12 +333,32 @@ func (e *Engine) Reconcile(ctx context.Context, runID string) (*ReconcileResult,
 		res.RunTerminal = true
 		if domain.RunState(decision.RunState) != run.State {
 			log.Info("run reached a terminal state", "state", string(decision.RunState))
-			if err := e.publishRunState(ctx, runID, domain.RunState(decision.RunState)); err != nil {
-				// The node state is already correct and durable, so a failure to
-				// publish is a visibility problem, not a correctness one. The next
-				// reconcile republishes.
-				log.Error("could not publish terminal run state", "error", err,
-					"state", string(decision.RunState))
+			// DETACHED from the caller's context, unlike the RUNNING publish
+			// above, and the asymmetry is the point.
+			//
+			// "The next reconcile republishes" is true for RUNNING and false
+			// here. A reconcile only happens when an attempt reports or an
+			// operator intervenes -- and for a run whose every node is terminal
+			// there will never be another attempt, so there is no next reconcile.
+			// A publish that fails here is not retried by anything: the engine
+			// computes SUCCEEDED, drops it, and the run sits at RUNNING forever
+			// with all of its nodes SUCCEEDED underneath it.
+			//
+			// The caller's context is exactly the one likely to be gone at this
+			// moment: this call runs at the tail of an attempt report, behind the
+			// gateway's per-call timeout, so a slow final reconcile cancels the
+			// publish AFTER the node work has been committed. Observed exactly
+			// that way -- "context canceled while waiting for connections to
+			// become ready" -- on a chaos run whose nodes had all SUCCEEDED.
+			//
+			// So this one write gets a context of its own. The work it records is
+			// already durable; only the announcement was being lost.
+			pubCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), terminalPublishTimeout)
+			err := e.publishRunState(pubCtx, runID, domain.RunState(decision.RunState))
+			cancel()
+			if err != nil {
+				log.Error("could not publish terminal run state; the run will stay non-terminal because nothing will reconcile it again",
+					"error", err, "state", string(decision.RunState))
 			}
 		}
 
@@ -578,6 +600,11 @@ func triggerRuleToProto(s string) nexusv1.TriggerRule {
 		return nexusv1.TriggerRule_TRIGGER_RULE_ALL_SUCCESS
 	}
 }
+
+// terminalPublishTimeout bounds the detached terminal-state publish. It is
+// generous because this write has no second chance: nothing reconciles a run
+// whose nodes are all terminal, so giving up early strands the run at RUNNING.
+const terminalPublishTimeout = 30 * time.Second
 
 func (e *Engine) publishRunState(ctx context.Context, runID string, s domain.RunState) error {
 	if e.runs == nil {
