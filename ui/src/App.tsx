@@ -9,9 +9,14 @@
 
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { useEffect, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { API_BASE, DEFAULT_NAMESPACE, getApiKey, setApiKey } from './api/client';
 import { ThemeToggle } from './components/ThemeToggle';
+import { authApi, currentCredential, getSession, setSession } from './api/auth';
+import { LoginPage } from './pages/LoginPage';
+import { UsersPage } from './pages/admin/UsersPage';
+import { TokensPage } from './pages/admin/TokensPage';
+import { AuditPage } from './pages/admin/AuditPage';
 import { RunListPage } from './pages/RunListPage';
 import { RunDetailPage } from './pages/RunDetailPage';
 import { WorkersPage } from './pages/WorkersPage';
@@ -36,6 +41,47 @@ export function App() {
   const [keyOpen, setKeyOpen] = useState(false);
   const [keyPersistFailed, setKeyPersistFailed] = useState(false);
 
+  // Bumped whenever the credential changes, so whoami re-runs rather than
+  // serving a cached answer for a credential that is no longer presented.
+  const [credRevision, setCredRevision] = useState(0);
+  const credential = currentCredential();
+
+  /**
+   * Who the gateway says we are.
+   *
+   * The SERVER decides what this credential may do; the console never re-derives
+   * the authorization matrix from a role name, because a second copy of it is a
+   * second opinion that will eventually disagree with the enforcement point.
+   * Rendering an admin link that 403s is worse than not rendering it.
+   */
+  const me = useQuery({
+    queryKey: ['whoami', credRevision, credential.token],
+    queryFn: () => authApi.whoami(),
+    enabled: credential.kind !== 'none',
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  const canAdmin = me.data?.permissions?.admin_write === true;
+  const session = getSession();
+
+  function credentialChanged() {
+    setCredRevision((n) => n + 1);
+    queryClient.invalidateQueries();
+  }
+
+  async function signOut() {
+    try {
+      await authApi.logout();
+    } catch {
+      // The local credential is cleared regardless: the operator asked to be
+      // signed out of this browser, and leaving a usable token behind because
+      // the network blipped is the opposite of what they asked for.
+      setSession(null);
+    }
+    credentialChanged();
+  }
+
   function saveKey(next: string) {
     const stored = setApiKey(next);
     // Reflect what is actually READABLE, not what was typed: if persistence
@@ -45,7 +91,7 @@ export function App() {
     setKeyOpen(false);
     // Every page's data was fetched with the old credential, so re-fetch rather
     // than leave stale 401 panels on screen next to a now-valid key.
-    queryClient.invalidateQueries();
+    credentialChanged();
   }
 
   return (
@@ -66,6 +112,20 @@ export function App() {
           <NavLink to="/workers" className={({ isActive }) => (isActive ? 'active' : '')}>
             Workers
           </NavLink>
+          {/* Shown only when the gateway says this credential may use them. */}
+          {canAdmin && (
+            <>
+              <NavLink to="/admin/users" className={({ isActive }) => (isActive ? 'active' : '')}>
+                Users
+              </NavLink>
+              <NavLink to="/admin/tokens" className={({ isActive }) => (isActive ? 'active' : '')}>
+                Tokens
+              </NavLink>
+              <NavLink to="/admin/audit" className={({ isActive }) => (isActive ? 'active' : '')}>
+                Audit
+              </NavLink>
+            </>
+          )}
         </nav>
         <div className="topbar-right">
           <label className="row" style={{ gap: 6 }}>
@@ -117,6 +177,20 @@ export function App() {
               {keyPersistFailed ? 'API key ✗ not saved' : apiKey ? 'API key ✓' : 'Set API key'}
             </button>
           )}
+          {session ? (
+            <div className="row" style={{ gap: 'var(--space-3)' }}>
+              <span className="chip" title={`Signed in as ${session.email} (${session.role})`}>
+                {session.email}
+              </span>
+              <button type="button" onClick={() => void signOut()}>
+                Sign out
+              </button>
+            </div>
+          ) : (
+            <NavLink to="/login" className="chip">
+              Sign in
+            </NavLink>
+          )}
           <ThemeToggle />
           <span className="chip" title={`API base: ${API_BASE || 'same origin'}`}>
             {API_BASE || 'same origin'}
@@ -131,6 +205,22 @@ export function App() {
             <Route path="/runs" element={<RunListPage namespace={namespace} />} />
             <Route path="/runs/:runId" element={<RunDetailPage namespace={namespace} />} />
             <Route path="/workers" element={<WorkersPage namespace={namespace} />} />
+            <Route
+              path="/login"
+              element={<LoginPage namespace={namespace} onAuthenticated={credentialChanged} />}
+            />
+            <Route
+              path="/admin/users"
+              element={<UsersPage namespace={namespace} canAdmin={canAdmin} />}
+            />
+            <Route
+              path="/admin/tokens"
+              element={<TokensPage namespace={namespace} canAdmin={canAdmin} />}
+            />
+            <Route
+              path="/admin/audit"
+              element={<AuditPage namespace={namespace} canAdmin={canAdmin} />}
+            />
             <Route
               path="*"
               element={

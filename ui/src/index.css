@@ -559,3 +559,60 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
   white-space: nowrap;
   border: 0;
 }
+
+/* ── Page chrome ────────────────────────────────────────────────────────── */
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+}
+.page-head h1 {
+  margin: 0;
+}
+.page-head-actions {
+  gap: var(--space-3);
+}
+
+/* The affirmative action in a form or header. One per view: if everything is
+   primary, nothing is. */
+button.primary {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: var(--weight-bold);
+}
+button.primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+  border-color: var(--accent);
+}
+
+/* ── Sign-in ────────────────────────────────────────────────────────────── */
+.login-wrap {
+  display: flex;
+  justify-content: center;
+  padding-block: var(--space-9);
+}
+.login-card {
+  width: 100%;
+  max-width: 460px;
+}
+
+/* ── One-time token reveal ──────────────────────────────────────────────── */
+.token-reveal {
+  border-color: var(--tone-warning-bd);
+}
+.token-secret {
+  display: block;
+  padding: var(--space-5);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  /* The value must be selectable and fully visible: this is the only time it is
+     ever shown, so truncating it would make the control useless. */
+  word-break: break-all;
+  user-select: all;
+}
