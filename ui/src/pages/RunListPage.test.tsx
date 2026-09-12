@@ -279,3 +279,84 @@ describe('run rows', () => {
     expect(within(row).getByText('PENDING', { selector: '[data-state]' })).toBeInTheDocument();
   });
 });
+
+/**
+ * The redesign added a tone-coloured left rule to rows that need attention.
+ *
+ * It is REDUNDANT with the state badge already in the row — the point is that a
+ * screenful can be triaged by edge colour without reading a label. So what is
+ * pinned here is the rule the design rests on: the marker is derived from the
+ * state's own tone, and it is never the accent, because the accent is
+ * operator-switchable and would make a FAILED run restyleable into a calm one.
+ */
+describe('rows needing attention are marked beyond their badge', () => {
+  const rowOf = async (name: RegExp) =>
+    (await screen.findByRole('link', { name })).closest('tr')!;
+
+  it('marks a FAILED run with the danger rule', async () => {
+    mockFetch(() => [200, { runs: [run({ state: 'FAILED', node_counts: {} })] }]);
+    wrap(<RunListPage namespace="default" />);
+    expect(await rowOf(/run-aaaa/)).toHaveClass('row-failed');
+  });
+
+  it('marks a TIMED_OUT run too, because it shares the danger tone', async () => {
+    // Derived from lib/states rather than a second list of names in the page, so
+    // a state added there cannot end up with no rule.
+    mockFetch(() => [200, { runs: [run({ state: 'TIMED_OUT', node_counts: {} })] }]);
+    wrap(<RunListPage namespace="default" />);
+    expect(await rowOf(/run-aaaa/)).toHaveClass('row-failed');
+  });
+
+  it('separates a stopped run from a failed one', async () => {
+    // CANCELLED did not do what was asked, but it is not the thing to look at
+    // first; collapsing the two would waste the one marker that means "start here".
+    mockFetch(() => [200, { runs: [run({ state: 'CANCELLED', node_counts: {} })] }]);
+    wrap(<RunListPage namespace="default" />);
+    const row = await rowOf(/run-aaaa/);
+    expect(row).toHaveClass('row-blocked');
+    expect(row).not.toHaveClass('row-failed');
+  });
+
+  /**
+   * The case the marker earns its keep on: the run's own badge says SUCCEEDED,
+   * so the edge is the ONLY thing on the row saying a node inside it failed.
+   */
+  it('marks a succeeded run that contains a failed node', async () => {
+    mockFetch(() => [
+      200,
+      { runs: [run({ state: 'SUCCEEDED', node_counts: { SUCCEEDED: 7, FAILED: 1 } })] },
+    ]);
+    wrap(<RunListPage namespace="default" />);
+    expect(await rowOf(/run-aaaa/)).toHaveClass('row-failed');
+  });
+
+  it('leaves a healthy run unmarked, so the marker still means something', async () => {
+    mockFetch(() => [200, { runs: [run({ state: 'SUCCEEDED', node_counts: { SUCCEEDED: 8 } })] }]);
+    wrap(<RunListPage namespace="default" />);
+    const row = await rowOf(/run-aaaa/);
+    expect(row).not.toHaveClass('row-failed');
+    expect(row).not.toHaveClass('row-blocked');
+  });
+});
+
+describe('the result count', () => {
+  /**
+   * A count of zero and a count we do not have yet are different claims. While
+   * the first load is in flight the page must not assert "0 runs".
+   */
+  it('does not claim zero before the first response arrives', async () => {
+    mockFetch(() => [200, { runs: [run()] }]);
+    const { container } = wrap(<RunListPage namespace="default" />);
+    expect(container.querySelector('.filter-count-n')!.textContent).not.toBe('0');
+    await screen.findByText('daily-etl');
+    expect(container.querySelector('.filter-count-n')!.textContent).toBe('1');
+  });
+
+  /** With a filter on, the count is a count of MATCHES, and says so. */
+  it('labels the count as matches when a filter is applied', async () => {
+    mockFetch(() => [200, { runs: [run()] }]);
+    const { container } = wrap(<RunListPage namespace="default" />, '/runs?state=FAILED');
+    await screen.findByText('daily-etl');
+    expect(container.querySelector('.filter-count')!.textContent).toMatch(/matching runs/);
+  });
+});

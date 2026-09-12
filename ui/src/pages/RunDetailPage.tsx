@@ -90,12 +90,42 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
   if (runQuery.error && runQuery.data === undefined) {
     return (
       <div className="col">
-        <Link to="/runs">← all runs</Link>
+        <div className="run-head">
+          <div className="run-head-id">
+            <div className="run-head-line">
+              <Link to="/runs" className="sub">
+                ← all runs
+              </Link>
+              <h1>{shortId(runId, 14)}</h1>
+            </div>
+          </div>
+        </div>
         <ErrorBox error={runQuery.error} what={`run ${shortId(runId, 12)}`} onRetry={runQuery.refetch} />
       </div>
     );
   }
-  if (!runQuery.data) return <Loading rows={8} label="Loading run" />;
+  // The way back is part of the loading state, not something that appears once
+  // the run arrives: a run that is slow to load is exactly when an operator
+  // wants to give up and go back to the list.
+  if (!runQuery.data) {
+    return (
+      <div className="col">
+        <div className="run-head">
+          <div className="run-head-id">
+            <div className="run-head-line">
+              <Link to="/runs" className="sub">
+                ← all runs
+              </Link>
+              <h1>{shortId(runId, 14)}</h1>
+            </div>
+          </div>
+        </div>
+        <div className="panel">
+          <Loading rows={8} label="Loading run" />
+        </div>
+      </div>
+    );
+  }
 
   const run = runQuery.data;
   const canCancel = !isTerminal('run', run.state) && run.state !== 'CANCELLING';
@@ -107,35 +137,45 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
 
   return (
     <div className="col">
-      <div className="row" style={{ alignItems: 'flex-start' }}>
-        <div style={{ minWidth: 0 }}>
-          <div className="row" style={{ gap: 9 }}>
+      <div className="run-head">
+        <div className="run-head-id">
+          <div className="run-head-line">
             <Link to="/runs" className="sub">
               ← all runs
             </Link>
             <StateBadge kind="run" state={run.state} />
-            <h1 style={{ margin: 0 }} className="mono">
-              {shortId(run.id, 14)}
-            </h1>
+            <h1>{shortId(run.id, 14)}</h1>
           </div>
-          <div className="sub" style={{ marginTop: 3 }}>
-            {run.spec_name ?? shortId(run.spec_id, 10)}
-            {run.spec_version !== undefined && ` v${run.spec_version}`} · created {fmtTs(run.created_at)} ·{' '}
-            {fmtDurationMs(duration)}
-            {run.deadline_at && ` · deadline ${fmtTs(run.deadline_at)}`}
+          {/* The identity facts as discrete items rather than one run-on
+              sentence: at phone width they wrap into a short list instead of a
+              paragraph with interpuncts stranded at line ends. */}
+          <div className="run-head-meta">
+            <span>
+              {run.spec_name ?? shortId(run.spec_id, 10)}
+              {run.spec_version !== undefined && ` v${run.spec_version}`}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span className="nowrap">created {fmtTs(run.created_at)}</span>
+            <span aria-hidden="true">·</span>
+            <span className="nowrap">{fmtDurationMs(duration)}</span>
+            {run.deadline_at && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="nowrap">deadline {fmtTs(run.deadline_at)}</span>
+              </>
+            )}
           </div>
-          <div className="sub" title={stateVisual('run', run.state).hint}>
-            {stateVisual('run', run.state).hint}
-          </div>
+          <div className="run-head-hint">{stateVisual('run', run.state).hint}</div>
         </div>
-        <span className="spacer" style={{ marginLeft: 'auto' }} />
-        <CancelButton
-          canCancel={canCancel}
-          state={run.state}
-          pending={cancel.isPending}
-          error={cancel.error}
-          onCancel={() => cancel.mutate(run.id)}
-        />
+        <div className="run-head-actions">
+          <CancelButton
+            canCancel={canCancel}
+            state={run.state}
+            pending={cancel.isPending}
+            error={cancel.error}
+            onCancel={() => cancel.mutate(run.id)}
+          />
+        </div>
       </div>
 
       {runQuery.error != null ? <StaleWarning error={runQuery.error} /> : null}
@@ -148,12 +188,10 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
             <span className="chip warn">root cause: {graph.rootCauses.join(', ')}</span>
           )}
           <span className="spacer" />
-          <span className="sub" style={{ textTransform: 'none', letterSpacing: 0 }}>
-            {graph ? summarizeDag(graph) : ''}
-          </span>
+          <span className="panel-note">{graph ? summarizeDag(graph) : ''}</span>
         </div>
         {attemptsQuery.error != null && attemptsQuery.data === undefined ? (
-          <div style={{ padding: 'var(--space-5)', paddingBottom: 0 }}>
+          <div className="panel-notice">
             <ErrorBox error={attemptsQuery.error} what="attempts (node states still shown below)" />
           </div>
         ) : null}
@@ -169,7 +207,7 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
           {selectedNode?.isRootCause && <span className="chip warn">root cause</span>}
           <span className="spacer" />
           {selectedNode && (
-            <span className="sub" style={{ textTransform: 'none', letterSpacing: 0 }}>
+            <span className="panel-note">
               <code>{selectedNode.task_ref}</code> · trigger {selectedNode.trigger_rule ?? 'all_success'} ·{' '}
               {selectedNode.attempts_used ?? selectedNode.attempts.length}/{selectedNode.max_attempts ?? '?'}{' '}
               attempts used
@@ -191,10 +229,10 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
           ) : (
             <>
               {selectedNode.upstream.length > 0 && (
-                <div className="sub" style={{ marginBottom: 9 }}>
-                  upstream:{' '}
+                <div className="upstream-walk">
+                  <span>upstream</span>
                   {selectedNode.upstream.map((id) => (
-                    <button key={id} className="link" onClick={() => selectNode(id)} style={{ marginRight: 7 }}>
+                    <button key={id} className="link" onClick={() => selectNode(id)}>
                       {id}
                     </button>
                   ))}
@@ -222,7 +260,7 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
         <div className="panel-head">
           <span>event timeline</span>
           <span className="spacer" />
-          <span className="sub" style={{ textTransform: 'none', letterSpacing: 0 }}>
+          <span className="panel-note">
             append-only; the projections above are derived from this
           </span>
         </div>
@@ -238,14 +276,22 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
         </AsyncPanel>
       </div>
 
-      <div className="sub">
-        run id <code>{run.id}</code> · spec id <code>{run.spec_id}</code> ·{' '}
-        {run.params && Object.keys(run.params).length > 0 ? (
-          <>params <code>{JSON.stringify(run.params)}</code></>
-        ) : (
-          <>no params</>
-        )}
-      </div>
+      {/* The identifiers, verbatim. Needed in full when they are needed at all --
+          pasted into a nexusctl invocation -- so they wrap rather than truncate. */}
+      <dl className="run-ids">
+        <dt>run id</dt>
+        <dd>{run.id}</dd>
+        <dt>spec id</dt>
+        <dd>{run.spec_id}</dd>
+        <dt>params</dt>
+        <dd>
+          {run.params && Object.keys(run.params).length > 0 ? (
+            JSON.stringify(run.params)
+          ) : (
+            <span className="faint">none</span>
+          )}
+        </dd>
+      </dl>
     </div>
   );
 }
@@ -272,19 +318,20 @@ function CancelButton({
 
   if (!canCancel) {
     return (
-      <div className="row" style={{ gap: 'var(--space-4)' }}>
-        <button disabled title={`A ${state} run cannot be cancelled.`}>
-          cancel run
-        </button>
-      </div>
+      <button disabled title={`A ${state} run cannot be cancelled.`}>
+        cancel run
+      </button>
     );
   }
 
   return (
-    <div style={{ textAlign: 'right' }}>
+    <>
       {confirming ? (
-        <div className="row" style={{ gap: 7, justifyContent: 'flex-end' }}>
-          <span className="sub">Cancel kills in-flight attempts. Sure?</span>
+        // The prompt and both choices stay together: an operator must be able to
+        // read what cancel costs without leaving the button they are about to
+        // press, so this replaces the button in place rather than opening a modal.
+        <div className="run-confirm">
+          <span className="run-confirm-prompt">Cancel kills in-flight attempts. Sure?</span>
           <button className="danger" onClick={onCancel} disabled={pending}>
             {pending ? 'cancelling…' : 'yes, cancel'}
           </button>
@@ -298,14 +345,16 @@ function CancelButton({
         </button>
       )}
       {error !== null && error !== undefined && (
-        <div className="notice error" style={{ marginTop: 'var(--space-4)', textAlign: 'left' }} role="alert">
-          <span className="notice-glyph">!</span>
+        <div className="notice error run-cancel-error" role="alert">
+          <span className="notice-glyph" aria-hidden="true">
+            !
+          </span>
           <div>
             <div className="notice-title">Cancel failed</div>
             <div className="notice-detail">{errorMessage(error)}</div>
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }

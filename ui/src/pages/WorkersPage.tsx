@@ -10,13 +10,20 @@
  * So advertised-vs-committed is shown per dimension per worker, not as a single
  * percentage — a fleet at 40% CPU with every GPU committed is 100% blocked for
  * GPU work, and one aggregate number hides exactly that.
+ *
+ * The fleet's headline figures sit above the table because the second question,
+ * once dispatch has stalled, is "how much of the fleet is even there" — and the
+ * two figures that answer it (dead workers, and workers whose heartbeat has gone
+ * quiet while the control plane still calls them ACTIVE) are otherwise buried in
+ * a ten-column table.
  */
 
 import { useCapacity, useWorkers } from '../api/hooks';
 import type { Worker } from '../api/types';
+import { PageHeader } from '../components/PageHeader';
 import { StateBadge } from '../components/StateBadge';
 import { CapacityGrid, deriveCapacity } from '../components/CapacityGrid';
-import { AsyncPanel, ErrorBox, StaleWarning } from '../components/Status';
+import { AsyncPanel, ErrorBox, Loading, StaleWarning } from '../components/Status';
 import {
   EMPTY,
   fmtAge,
@@ -39,6 +46,21 @@ export { deriveCapacity };
 /** Heartbeat is every 5s (§11); 3 missed beats is the conventional liveness cut. */
 const HEARTBEAT_STALE_MS = 15_000;
 
+/**
+ * A worker the control plane still calls ACTIVE while its heartbeat is stale.
+ *
+ * This is the interesting liveness case and the reason the check is a named
+ * function rather than an inline condition: it means the liveness sweep has not
+ * caught up, so the worker looks schedulable and is not. A DEAD worker is
+ * deliberately excluded — its state already says so, and flagging it twice would
+ * dilute the flag on the workers whose state does NOT.
+ */
+function heartbeatStale(worker: Worker, now: number): boolean {
+  const hb = parseTs(worker.last_heartbeat_at);
+  if (hb === null) return false;
+  return now - hb > HEARTBEAT_STALE_MS && worker.state === 'ACTIVE';
+}
+
 export function WorkersPage({ namespace }: { namespace: string }) {
   const workers = useWorkers(namespace);
   const capacity = useCapacity(namespace);
@@ -46,51 +68,63 @@ export function WorkersPage({ namespace }: { namespace: string }) {
 
   return (
     <div className="col">
-      <div>
-        <h1>Worker fleet</h1>
-        <div className="sub">
-          namespace <code>{namespace}</code> · refreshes every 5s, matching the agent heartbeat interval
-        </div>
-      </div>
+      <PageHeader
+        title="Worker fleet"
+        subtitle={
+          <>
+            namespace <code>{namespace}</code> · refreshes every 5s, matching the agent heartbeat
+            interval
+          </>
+        }
+      />
 
       <div className="panel">
         <div className="panel-head">
           <span>capacity summary</span>
           <span className="spacer" />
-          <span className="sub" style={{ textTransform: 'none', letterSpacing: 0 }}>
+          <span className="panel-note">
             advertised = registered capacity · committed = sum of active reservations
           </span>
         </div>
         {capacity.error && capacity.data === undefined ? (
           <div className="panel-body">
             {/* Fall back to summing the worker rows: the aggregate endpoint being
-                absent should not hide information we already have. */}
+                absent should not hide information we already have. CapacityGrid
+                takes `derived` as part of its contract, so the fallback cannot be
+                presented as the server's own answer. */}
             {workers.data ? (
               <CapacityGrid summary={deriveCapacity(workers.data)} derived />
             ) : (
               <ErrorBox error={capacity.error} what="capacity summary" onRetry={capacity.refetch} />
             )}
           </div>
-        ) : (
-          <div className="panel-body">
-            {capacity.data ? (
+        ) : capacity.data ? (
+          <>
+            {/* Numbers on screen plus a warning beats an error box that hides
+                them, the same rule the run list follows. */}
+            {capacity.error != null ? (
+              <div className="panel-notice">
+                <StaleWarning error={capacity.error} />
+              </div>
+            ) : null}
+            <div className="panel-body">
               <CapacityGrid summary={capacity.data} />
-            ) : (
-              <div className="sub">loading…</div>
-            )}
-          </div>
+            </div>
+          </>
+        ) : (
+          <Loading rows={2} label="Loading capacity summary" />
         )}
       </div>
 
       <div className="panel">
         <div className="panel-head">
           <span>workers</span>
-          <span className="spacer" />
-          <span className="chip">{workers.data?.length ?? 0} registered</span>
         </div>
 
+        <FleetFigures workers={workers.data} now={now} />
+
         {workers.error != null && workers.data !== undefined ? (
-          <div style={{ padding: 'var(--space-5)', paddingBottom: 0 }}>
+          <div className="panel-notice">
             <StaleWarning error={workers.error} />
           </div>
         ) : null}
@@ -105,7 +139,7 @@ export function WorkersPage({ namespace }: { namespace: string }) {
         >
           {(list) => (
             <div className="table-scroll">
-              <table>
+              <table className="table-fleet">
                 <thead>
                   <tr>
                     <th>state</th>
@@ -134,22 +168,73 @@ export function WorkersPage({ namespace }: { namespace: string }) {
   );
 }
 
-function WorkerRow({ worker, now }: { worker: Worker; now: number }) {
-  const hb = parseTs(worker.last_heartbeat_at);
-  const hbAge = hb === null ? null : now - hb;
-  // A worker the control plane still calls ACTIVE while its heartbeat is stale
-  // is the interesting case: it means the liveness sweep has not caught up.
-  const stale = hbAge !== null && hbAge > HEARTBEAT_STALE_MS && worker.state === 'ACTIVE';
+/**
+ * The fleet at a glance.
+ *
+ * Four counts, large enough to read across a room during an incident. Only the
+ * two that can BE a problem are ever toned, and only when they are non-zero: a
+ * fleet with no dead workers has not achieved anything worth colouring, and a
+ * dashboard where a figure is always red teaches operators to stop seeing it.
+ *
+ * The tones are --tone-danger-* and --tone-warning-*, never the accent. The
+ * accent is operator-switchable brand, so a figure coloured with it would stop
+ * meaning anything the moment someone changed their theme.
+ *
+ * Rendered only once the rows have arrived: a count of zero and a count we do
+ * not have yet are different claims, and AsyncPanel below owns the second one.
+ */
+function FleetFigures({ workers, now }: { workers: Worker[] | undefined; now: number }) {
+  if (workers === undefined || workers.length === 0) return null;
+
+  const active = workers.filter((w) => w.state === 'ACTIVE').length;
+  const dead = workers.filter((w) => w.state === 'DEAD').length;
+  const quiet = workers.filter((w) => heartbeatStale(w, now)).length;
 
   return (
-    <tr>
+    <div className="fleet-figures">
+      <div className="fleet-figure">
+        <span className="fleet-figure-n">{workers.length}</span>
+        <span className="fleet-figure-label">registered</span>
+      </div>
+      <div className="fleet-figure">
+        <span className="fleet-figure-n">{active}</span>
+        <span className="fleet-figure-label">active</span>
+      </div>
+      <div className="fleet-figure">
+        <span className={`fleet-figure-n${dead > 0 ? ' alarm' : ''}`}>{dead}</span>
+        <span className="fleet-figure-label">dead</span>
+      </div>
+      <div className="fleet-figure">
+        <span
+          className={`fleet-figure-n${quiet > 0 ? ' warn' : ''}`}
+          title="ACTIVE according to the control plane, but the heartbeat has stopped — the liveness sweep has not caught up."
+        >
+          {quiet}
+        </span>
+        <span className="fleet-figure-label">gone quiet</span>
+      </div>
+    </div>
+  );
+}
+
+function WorkerRow({ worker, now }: { worker: Worker; now: number }) {
+  const stale = heartbeatStale(worker, now);
+  // The row's left rule, from the worker's own state tone so it can never
+  // disagree with the badge in its first cell. A quiet heartbeat is a warning
+  // even while the state still claims ACTIVE — that disagreement IS the finding.
+  const rowClass = worker.state === 'DEAD' ? 'row-failed' : stale ? 'row-warning' : '';
+
+  return (
+    <tr className={rowClass}>
       <td>
         <StateBadge kind="worker" state={worker.state} />
       </td>
       <td>
-        <div className="mono">{worker.hostname}</div>
-        <div className="faint mono" style={{ fontSize: 10.5 }} title={worker.id}>
-          {shortId(worker.id, 8)}
+        <div className="fleet-host">
+          <span className="fleet-host-name">{worker.hostname}</span>
+          <span className="fleet-host-id" title={worker.id}>
+            {shortId(worker.id, 8)}
+          </span>
         </div>
       </td>
       <td className="mono">{worker.queues?.join(', ') || EMPTY}</td>
@@ -169,42 +254,57 @@ function WorkerRow({ worker, now }: { worker: Worker; now: number }) {
       </td>
       <td>
         {worker.capacity?.gpu_count ? (
-          <>
+          <div className="dim">
             <DimensionCell
               committed={worker.committed?.gpu_count}
               advertised={worker.capacity.gpu_count}
               format={(n) => String(n ?? 0)}
             />
-            {worker.capacity.gpu_kind && <div className="faint mono">{worker.capacity.gpu_kind}</div>}
-          </>
+            {worker.capacity.gpu_kind && <span className="dim-kind">{worker.capacity.gpu_kind}</span>}
+          </div>
         ) : (
           <span className="faint">none</span>
         )}
       </td>
-      <td className="nowrap">
-        <div className="faint" style={{ fontSize: 'var(--text-xs)' }}>
-          cpu {fmtPercent(worker.cpu_utilization)} · mem {fmtPercent(worker.memory_utilization)}
+      <td>
+        {/* Reported by the agent, not measured here -- the column header says so,
+            because a utilisation an operator cannot act on must not read like
+            the committed/advertised figures beside it, which they can. */}
+        <div className="fleet-util">
+          <span>cpu {fmtPercent(worker.cpu_utilization)}</span>
+          <span>mem {fmtPercent(worker.memory_utilization)}</span>
         </div>
       </td>
-      <td className="nowrap" title={fmtTs(worker.last_heartbeat_at)}>
-        <span className={`pulse ${stale ? 'stale' : worker.state === 'DEAD' ? 'off' : ''}`} />{' '}
-        {fmtAge(worker.last_heartbeat_at, now)}
+      <td title={fmtTs(worker.last_heartbeat_at)}>
+        <div className="fleet-beat">
+          <span
+            className={`pulse ${stale ? 'stale' : worker.state === 'DEAD' ? 'off' : ''}`}
+            aria-hidden="true"
+          />
+          <span>{fmtAge(worker.last_heartbeat_at, now)}</span>
+        </div>
         {stale && <div className="chip warn">stale</div>}
       </td>
-      <td className="mono" style={{ fontSize: 'var(--text-xs)' }}>
+      <td>
         {Object.entries(worker.labels ?? {}).length === 0 ? (
           <span className="faint">{EMPTY}</span>
         ) : (
-          Object.entries(worker.labels ?? {}).map(([k, v]) => (
-            <div key={k}>
-              {k}={v}
-            </div>
-          ))
+          <div className="fleet-labels">
+            {Object.entries(worker.labels ?? {}).map(([k, v]) => (
+              <span key={k}>
+                {k}={v}
+              </span>
+            ))}
+          </div>
         )}
       </td>
-      <td className="faint mono" style={{ fontSize: 'var(--text-xs)' }}>
-        {worker.agent_version ?? EMPTY}
-        {worker.executors && worker.executors.length > 0 && <div>{worker.executors.join(',')}</div>}
+      <td>
+        <div className="fleet-agent">
+          <span>{worker.agent_version ?? EMPTY}</span>
+          {worker.executors && worker.executors.length > 0 && (
+            <span>{worker.executors.join(',')}</span>
+          )}
+        </div>
       </td>
     </tr>
   );
@@ -224,10 +324,10 @@ function DimensionCell({
   const frac = utilization(committed, advertised);
   const cls = frac === null ? '' : frac >= 1 ? 'full' : frac >= 0.8 ? 'hot' : '';
   return (
-    <div>
-      <div className="mono nowrap" style={{ fontSize: 11.5 }}>
+    <div className="dim">
+      <span className="dim-numbers">
         {format(committed ?? 0)} / {format(advertised)}
-      </div>
+      </span>
       <div className={`meter ${cls}`} title={`${fmtPercent(frac)} committed`}>
         <span style={{ width: `${(frac ?? 0) * 100}%` }} />
       </div>

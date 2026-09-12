@@ -6,15 +6,21 @@
  *
  * Filters live in the URL query string so an operator can paste "the failed runs
  * of daily-etl" into a chat window and have the recipient see the same view.
+ *
+ * The filters sit in a bar of their own rather than in the panel's label band:
+ * .panel-head is uppercase and letter-spaced, which is the wrong container for
+ * controls people read and click, and fighting it needed an inline override on
+ * every label.
  */
 
 import { Link, useSearchParams } from 'react-router-dom';
 import { RUN_STATES, type NodeState, type RunSummary } from '../api/types';
 import { useRuns } from '../api/hooks';
+import { PageHeader } from '../components/PageHeader';
 import { StateBadge } from '../components/StateBadge';
 import { AsyncPanel, StaleWarning } from '../components/Status';
 import { EMPTY, durationBetween, fmtAge, fmtDurationMs, fmtTs, shortId } from '../lib/format';
-import { isTerminal } from '../lib/states';
+import { isTerminal, stateVisual } from '../lib/states';
 
 export function RunListPage({ namespace }: { namespace: string }) {
   const [params, setParams] = useSearchParams();
@@ -23,6 +29,7 @@ export function RunListPage({ namespace }: { namespace: string }) {
 
   const query = useRuns(namespace, { state: state || undefined, spec: spec || undefined });
   const now = Date.now();
+  const filtered = Boolean(state || spec);
 
   const setParam = (key: string, value: string) => {
     const next = new URLSearchParams(params);
@@ -33,17 +40,19 @@ export function RunListPage({ namespace }: { namespace: string }) {
 
   return (
     <div className="col">
-      <div>
-        <h1>Runs</h1>
-        <div className="sub">
-          namespace <code>{namespace}</code> · newest first · refreshes every 4s
-        </div>
-      </div>
+      <PageHeader
+        title="Runs"
+        subtitle={
+          <>
+            namespace <code>{namespace}</code> · newest first · refreshes every 4s
+          </>
+        }
+      />
 
       <div className="panel">
-        <div className="panel-head">
-          <label className="row" style={{ gap: 'var(--space-3)' }}>
-            <span style={{ textTransform: 'none', letterSpacing: 0 }}>state</span>
+        <div className="filterbar">
+          <label className="filter-field">
+            <span className="filter-label">state</span>
             <select value={state} onChange={(e) => setParam('state', e.target.value)}>
               <option value="">any</option>
               {RUN_STATES.map((s) => (
@@ -53,18 +62,16 @@ export function RunListPage({ namespace }: { namespace: string }) {
               ))}
             </select>
           </label>
-          <label className="row" style={{ gap: 'var(--space-3)' }}>
-            <span style={{ textTransform: 'none', letterSpacing: 0 }}>spec</span>
+          <label className="filter-field">
+            <span className="filter-label">spec</span>
             <input
               type="search"
               placeholder="workflow name"
               value={spec}
               onChange={(e) => setParam('spec', e.target.value)}
-              style={{ width: 190 }}
             />
           </label>
-          <span className="spacer" />
-          {(state || spec) && (
+          {filtered && (
             <button
               onClick={() => {
                 setParams(new URLSearchParams(), { replace: true });
@@ -73,12 +80,20 @@ export function RunListPage({ namespace }: { namespace: string }) {
               clear filters
             </button>
           )}
-          <span className="chip">{query.data?.length ?? 0} runs</span>
+          <span className="spacer" />
+          {/* The count is the page's one figure worth reading at a glance: how
+              much the current filters actually produced. */}
+          <span className="filter-count">
+            <span className="filter-count-n">{query.data?.length ?? EMPTY}</span>
+            <span className="filter-count-label">
+              {filtered ? 'matching runs' : 'runs'}
+            </span>
+          </span>
         </div>
 
         {/* Stale data plus a warning beats an error box that hides the data. */}
         {query.error != null && query.data !== undefined ? (
-          <div style={{ padding: 'var(--space-5)', paddingBottom: 0 }}>
+          <div className="panel-notice">
             <StaleWarning error={query.error} />
           </div>
         ) : null}
@@ -87,9 +102,9 @@ export function RunListPage({ namespace }: { namespace: string }) {
           query={query}
           what="runs"
           isEmpty={(runs) => runs.length === 0}
-          emptyTitle={state || spec ? 'No runs match these filters' : 'No runs yet'}
+          emptyTitle={filtered ? 'No runs match these filters' : 'No runs yet'}
           emptyDetail={
-            state || spec ? (
+            filtered ? (
               'Loosen the filters, or check that the run you expect is in this namespace.'
             ) : (
               <>
@@ -101,7 +116,7 @@ export function RunListPage({ namespace }: { namespace: string }) {
         >
           {(runs) => (
             <div className="table-scroll">
-              <table>
+              <table className="table-runs">
                 <thead>
                   <tr>
                     <th>state</th>
@@ -127,6 +142,33 @@ export function RunListPage({ namespace }: { namespace: string }) {
   );
 }
 
+/**
+ * Which rows carry a tone-coloured left rule.
+ *
+ * The rule is redundant with the badge in the same row — it exists so a
+ * screenful can be triaged by edge colour without reading a label. It is derived
+ * from the run's own tone rather than from a second list of state names here,
+ * which is what stops the edge and the badge from ever disagreeing: adding a run
+ * state to lib/states.ts gives it the right edge for free.
+ *
+ * Only the two tones that mean "something is wrong" get a rule. An in-flight or
+ * succeeded run gets none, because a rule on every row is a rule on no row. And
+ * neither tone is the accent: the accent is operator-switchable, so spending it
+ * here would let a theme change make a FAILED run read as a finished one.
+ */
+function rowTone(run: RunSummary): string {
+  const tone = stateVisual('run', run.state).tone;
+  if (tone === 'danger') return 'row-failed';
+  // A run that succeeded overall while a node inside it failed: the row's own
+  // badge says SUCCEEDED, so this edge is the only thing that flags it.
+  if ((run.node_counts?.FAILED ?? 0) > 0) return 'row-failed';
+  // Stopped and ambiguous outcomes did not do what was asked, but they are not
+  // the failure to look at first, so they take the blocked tone rather than
+  // competing with it.
+  if (tone === 'stopped' || tone === 'warning') return 'row-blocked';
+  return '';
+}
+
 function RunRow({ run, now }: { run: RunSummary; now: number }) {
   const terminal = isTerminal('run', run.state);
   // A running run's duration is measured against now, so the column ticks.
@@ -137,7 +179,7 @@ function RunRow({ run, now }: { run: RunSummary; now: number }) {
       : null;
 
   return (
-    <tr>
+    <tr className={rowTone(run)}>
       <td>
         <StateBadge kind="run" state={run.state} />
       </td>
@@ -147,8 +189,12 @@ function RunRow({ run, now }: { run: RunSummary; now: number }) {
         </Link>
       </td>
       <td>
-        <div>{run.spec_name ?? <span className="faint">{shortId(run.spec_id, 10)}</span>}</div>
-        {run.spec_version !== undefined && <div className="faint">v{run.spec_version}</div>}
+        <div className="cell-stack">
+          <span>{run.spec_name ?? <span className="faint">{shortId(run.spec_id, 10)}</span>}</span>
+          {run.spec_version !== undefined && (
+            <span className="cell-sub">v{run.spec_version}</span>
+          )}
+        </div>
       </td>
       <td>
         <NodeCounts counts={run.node_counts} />
@@ -183,11 +229,11 @@ function NodeCounts({ counts }: { counts: Partial<Record<NodeState, number>> | u
   };
   entries.sort((a, b) => (rank[a[0]] ?? 9) - (rank[b[0]] ?? 9));
   return (
-    <span className="row" style={{ gap: 'var(--space-2)' }}>
+    <span className="node-tally">
       {entries.map(([s, n]) => (
-        <span key={s} className="row" style={{ gap: 3 }}>
+        <span key={s} className="node-tally-item">
           <StateBadge kind="node" state={s} small showGlyph={false} />
-          <span className="mono faint">{n}</span>
+          <span className="node-tally-n">{n}</span>
         </span>
       ))}
     </span>

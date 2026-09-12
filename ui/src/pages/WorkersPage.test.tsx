@@ -233,3 +233,133 @@ describe('deriveCapacity', () => {
     expect(summary.active_worker_count).toBe(1);
   });
 });
+
+/**
+ * The redesign added the fleet's headline figures above the table.
+ *
+ * They exist for the second question an operator asks once dispatch has stalled
+ * — "how much of the fleet is even there" — and the two figures that answer it
+ * were previously buried in a ten-column table. What is pinned here is that the
+ * two which can BE a problem are toned only when they are non-zero (a figure
+ * that is always coloured is a figure nobody sees any more), and that the tone
+ * comes from the state palette rather than the operator-switchable accent.
+ */
+describe('the fleet figures', () => {
+  const figure = (label: string) => {
+    const el = [...document.querySelectorAll('.fleet-figure')].find((f) =>
+      new RegExp(label, 'i').test(f.querySelector('.fleet-figure-label')?.textContent ?? ''),
+    )!;
+    return el.querySelector('.fleet-figure-n')!;
+  };
+
+  it('counts registered, active, dead and gone-quiet workers', async () => {
+    const stale = new Date(Date.now() - 60_000).toISOString();
+    mockFetch((url) =>
+      url.includes('/capacity')
+        ? [200, { advertised: {}, committed: {} }]
+        : [
+            200,
+            {
+              workers: [
+                worker({ id: 'a', hostname: 'agent-cpu-1' }),
+                worker({ id: 'b', hostname: 'agent-cpu-2', state: 'DEAD' }),
+                worker({ id: 'c', hostname: 'agent-cpu-3', last_heartbeat_at: stale }),
+              ],
+            },
+          ],
+    );
+    wrap(<WorkersPage namespace="default" />);
+    await screen.findByText('agent-cpu-1');
+
+    expect(figure('registered').textContent).toBe('3');
+    // c is ACTIVE-but-quiet, so it still counts as active: the control plane says
+    // it is, and the "gone quiet" figure beside it is what contradicts that.
+    expect(figure('active').textContent).toBe('2');
+    expect(figure('dead').textContent).toBe('1');
+    expect(figure('gone quiet').textContent).toBe('1');
+  });
+
+  /**
+   * A fleet with nothing wrong has not achieved anything worth colouring. If
+   * zero were toned, the tone would stop meaning "look here".
+   */
+  it('does not tone a zero', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity') ? [200, { advertised: {}, committed: {} }] : [200, { workers: [worker()] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+    await screen.findByText('agent-cpu-1');
+
+    expect(figure('dead').textContent).toBe('0');
+    expect(figure('dead').className).not.toMatch(/alarm|warn/);
+    expect(figure('gone quiet').className).not.toMatch(/alarm|warn/);
+  });
+
+  it('tones a non-zero dead count with state colour, never the accent', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity')
+        ? [200, { advertised: {}, committed: {} }]
+        : [200, { workers: [worker({ state: 'DEAD' })] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+    await screen.findByText('agent-cpu-1');
+
+    // `alarm` resolves to --tone-danger-fg in index.css. The assertion that
+    // matters is the negative one: nothing here may reach for the accent, which
+    // an operator can change in settings.
+    expect(figure('dead').className).toMatch(/alarm/);
+    expect(figure('dead').className).not.toMatch(/accent/);
+  });
+
+  /**
+   * Rendering the figures before the rows arrive would put "0 registered" on
+   * screen as though it were an answer. It is not: it is the absence of one.
+   */
+  it('states no figures at all until the fleet has been fetched', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity') ? [200, { advertised: {}, committed: {} }] : [200, { workers: [] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+    await screen.findByRole('status');
+    // The empty state speaks for an empty fleet; a row of zeroes would not.
+    expect(document.querySelectorAll('.fleet-figure').length).toBe(0);
+  });
+});
+
+describe('the worker row is marked beyond its badge', () => {
+  it('rules a DEAD worker in the danger tone', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity')
+        ? [200, { advertised: {}, committed: {} }]
+        : [200, { workers: [worker({ state: 'DEAD' })] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+    expect((await screen.findByText('agent-cpu-1')).closest('tr')).toHaveClass('row-failed');
+  });
+
+  /**
+   * The disagreement between "ACTIVE" and a stopped heartbeat IS the finding, so
+   * the row carries a warning rule even though its state badge looks healthy.
+   */
+  it('rules an ACTIVE-but-quiet worker in the warning tone', async () => {
+    const stale = new Date(Date.now() - 60_000).toISOString();
+    mockFetch((url) =>
+      url.includes('/capacity')
+        ? [200, { advertised: {}, committed: {} }]
+        : [200, { workers: [worker({ last_heartbeat_at: stale })] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+    const row = (await screen.findByText('agent-cpu-1')).closest('tr')!;
+    expect(row).toHaveClass('row-warning');
+    expect(row).not.toHaveClass('row-failed');
+  });
+
+  it('leaves a healthy worker unruled', async () => {
+    mockFetch((url) =>
+      url.includes('/capacity') ? [200, { advertised: {}, committed: {} }] : [200, { workers: [worker()] }],
+    );
+    wrap(<WorkersPage namespace="default" />);
+    const row = (await screen.findByText('agent-cpu-1')).closest('tr')!;
+    expect(row.className).toBe('');
+  });
+});

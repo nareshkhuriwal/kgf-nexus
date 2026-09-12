@@ -352,3 +352,62 @@ describe('partial backends degrade rather than blank', () => {
     expect(empties.some((e) => /No attempts yet/i.test(e.textContent ?? ''))).toBe(true);
   });
 });
+
+/**
+ * The way back is part of every state, not just the loaded one.
+ *
+ * The redesign fixed a real gap here: the loading branch rendered a bare
+ * skeleton with no navigation, so a run that was slow to load — exactly when an
+ * operator wants to give up and go back to the list — left them with no way out
+ * but the browser's back button.
+ */
+describe('the way out survives every state', () => {
+  it('offers the route back while the run is still loading', async () => {
+    // A fetch that never settles holds the page in its loading branch.
+    vi.stubGlobal('fetch', () => new Promise(() => {}));
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    expect(await screen.findByRole('link', { name: /all runs/i })).toHaveAttribute('href', '/runs');
+    // Still genuinely loading, not silently empty.
+    expect(document.querySelector('[aria-busy="true"]')).toBeInTheDocument();
+  });
+
+  it('offers the route back when the run could not be loaded at all', async () => {
+    mockFetch(() => [500, { message: 'gateway down' }]);
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    await screen.findByRole('alert', {}, { timeout: 5000 });
+    expect(screen.getByRole('link', { name: /all runs/i })).toHaveAttribute('href', '/runs');
+    // The id is named even though the run behind it never arrived, so the
+    // operator can tell WHICH run failed to load.
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('run-aaaa');
+  });
+});
+
+describe('the run identifiers', () => {
+  /**
+   * These are needed verbatim when they are needed at all — pasted into a
+   * nexusctl invocation — so the full value is present, not a shortened one.
+   */
+  it('states the full run and spec ids, not the shortened forms', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    await screen.findByText(/daily-etl/);
+    const ids = document.querySelector('.run-ids')!;
+    expect(within(ids as HTMLElement).getByText('run-aaaaaaaaaaaa')).toBeInTheDocument();
+    expect(within(ids as HTMLElement).getByText('spec-1')).toBeInTheDocument();
+  });
+
+  it('says a run has no params rather than omitting the row', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    await screen.findByText(/daily-etl/);
+    const ids = document.querySelector('.run-ids')!;
+    // "params: none" is an answer; a missing row would leave the operator
+    // wondering whether the console simply failed to show them.
+    expect(ids.textContent).toMatch(/params/);
+    expect(ids.textContent).toMatch(/none/);
+  });
+});
