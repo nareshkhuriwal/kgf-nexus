@@ -246,3 +246,233 @@ export function workflowPath(name: string): string {
 export function runPath(id: string): string {
   return `/runs/${encodeURIComponent(id)}`;
 }
+
+/** The route a schedule row opens. */
+export function schedulePath(name: string): string {
+  return `/schedules/${encodeURIComponent(name)}`;
+}
+
+/** The route a worker row opens. */
+export function workerPath(id: string): string {
+  return `/workers/${encodeURIComponent(id)}`;
+}
+
+/**
+ * The route a USER row opens.
+ *
+ * There is no per-user page, so this is the admin list rather than a detail
+ * view, and the row's hint says so. Inventing /admin/users/{id} to make the
+ * five groups symmetrical would route the operator to the console's 404 page --
+ * the group is worth having because finding out that a colleague exists, with
+ * what role, and whether they are disabled is the actual question; landing on
+ * the list that shows exactly that is a real answer.
+ */
+export function usersPath(): string {
+  return '/admin/users';
+}
+
+// ── global search ───────────────────────────────────────────────────────────
+
+/**
+ * WHY THIS LIVES HERE AND NOT IN THE COMPONENT.
+ *
+ * The palette's search used to be one call to the workflow catalog, so it fit
+ * in a `useEffect`. A GLOBAL search is a fan-out across five endpoints with
+ * three different capability levels between them, and the interesting rules --
+ * which endpoint can filter server-side, which must be filtered here, which one
+ * an ordinary credential is not allowed to read at all -- are decisions about
+ * the BACKEND, not about rendering. Keeping them in this module means they can
+ * be tested without a DOM, and means the component is left holding only the
+ * things a component should hold: debounce, out-of-order guard, and roles.
+ *
+ * WHY THE GROUPS ARE DECLARED RATHER THAN DERIVED. Group order is fixed here,
+ * not taken from whichever response happened to resolve first. A search panel
+ * whose headings reshuffle between keystrokes cannot be used with muscle
+ * memory, and Enter is pressed before the list is read.
+ */
+export type SearchGroup = 'Workflows' | 'Runs' | 'Schedules' | 'Workers' | 'Users';
+
+/** Rendered top to bottom in this order, always. */
+export const SEARCH_GROUPS: SearchGroup[] = [
+  'Workflows',
+  'Runs',
+  'Schedules',
+  'Workers',
+  'Users',
+];
+
+/** One result, independent of which endpoint produced it. */
+export interface SearchHit {
+  /** Unique across every group, because it keys an option element. */
+  id: string;
+  label: string;
+  hint?: string;
+  /** Where activating the row goes. */
+  path: string;
+}
+
+/**
+ * What became of ONE group's search.
+ *
+ * The three outcomes are deliberately distinct rather than collapsed into
+ * `hits: SearchHit[]`, because an empty array would then mean both "there is no
+ * schedule called that" and "I was not allowed to look" -- the confusion this
+ * palette has a paragraph about at the top of its component. `truncated` is the
+ * third honest fact: a client-side filter over a capped fetch cannot claim it
+ * saw every row, so it does not.
+ */
+export type GroupResult =
+  | { status: 'ok'; hits: SearchHit[]; truncated: boolean }
+  | { status: 'forbidden' }
+  | { status: 'failed'; message: string };
+
+export type SearchResults = Partial<Record<SearchGroup, GroupResult>>;
+
+/**
+ * How many rows of any one group are offered.
+ *
+ * Small on purpose. Five groups at eight rows each is forty options behind one
+ * cursor, which is a list nobody arrows through -- the point of grouping is
+ * that the operator can see they are in the wrong group and retype, so each
+ * group only has to carry enough rows to prove that.
+ */
+export const PER_GROUP = 5;
+
+/**
+ * How many rows are FETCHED for the groups that cannot be searched server-side.
+ *
+ * The users and schedules endpoints accept `limit` and nothing else, and the
+ * worker endpoint accepts nothing at all, so matching happens in the browser
+ * over whatever the cap returned. The cap exists so a large namespace cannot
+ * turn one keystroke into a multi-megabyte response; the consequence is that a
+ * match beyond it is invisible, which is why those groups report `truncated`
+ * and the panel says the list was capped instead of implying completeness.
+ */
+export const CLIENT_FILTER_CAP = 200;
+
+/**
+ * Does this haystack match the query well enough to offer?
+ *
+ * A plain case-insensitive substring test, NOT the subsequence matcher the
+ * command registry uses. The registry matches a closed set of fifteen titles an
+ * operator half-remembers, where "sgo" finding "Sign out" is a feature. Entity
+ * names are open-ended and there can be hundreds of them, and a subsequence
+ * match over hundreds of workflow names returns almost all of them -- which
+ * would bury the real match under coincidences and make the group heading a
+ * lie. A substring is also what the workflow catalog does SERVER-side, so the
+ * client-filtered groups behave like the server-filtered one rather than
+ * matching on different rules depending on which endpoint answered.
+ */
+export function matchesText(haystack: string | null | undefined, query: string): boolean {
+  if (!haystack) return false;
+  return haystack.toLowerCase().includes(query.trim().toLowerCase());
+}
+
+/**
+ * Everything the fan-out needs from the backend, as five functions.
+ *
+ * Injected rather than imported so this module stays free of the API clients
+ * (it already deliberately avoids React and the router), and so a test can make
+ * one source hang or 403 without a fetch mock that has to guess which URL
+ * belongs to which group. Production wires it to `api` and `authApi` in one
+ * place, below.
+ */
+export interface SearchSources {
+  workflows: (namespace: string, query: string) => Promise<SearchHit[]>;
+  runs: (namespace: string, query: string) => Promise<SearchHit[]>;
+  /** Resolves to `null` hits plus truncated, because these three filter here. */
+  schedules: (namespace: string, query: string) => Promise<CappedHits>;
+  workers: (namespace: string, query: string) => Promise<CappedHits>;
+  users: (namespace: string, query: string) => Promise<CappedHits>;
+}
+
+/** A client-filtered group's answer: what matched, and whether the fetch was capped. */
+export interface CappedHits {
+  hits: SearchHit[];
+  /** True when the fetch hit its cap, so a match beyond it could not be seen. */
+  truncated: boolean;
+}
+
+/**
+ * Turn a rejection into the right KIND of bad news.
+ *
+ * 403 is separated from every other failure because it is not a failure of the
+ * console or the network: the credential is working and is being told no. That
+ * distinction is what lets the users group say "you cannot search users with
+ * this credential" -- true, actionable, and not alarming -- instead of the
+ * red "search failed" banner an ordinary operator would see on every keystroke
+ * simply for not being an admin. 401 rides along with it for the same reason:
+ * "sign in" is a different instruction from "it broke".
+ */
+export function classifyGroupError(err: unknown): GroupResult {
+  const status = (err as { status?: unknown })?.status;
+  if (status === 401 || status === 403) return { status: 'forbidden' };
+  return {
+    status: 'failed',
+    message: err instanceof Error ? err.message : 'The search request failed.',
+  };
+}
+
+/**
+ * The fan-out: every group asked AT ONCE, each answering for itself.
+ *
+ * `Promise.allSettled`, not a sequence of awaits and not `Promise.all`. The two
+ * failure modes being avoided are specific:
+ *
+ *  - AWAITING IN SEQUENCE would make the total latency the SUM of five
+ *    endpoints, and would put the slowest one (users, which reads a table
+ *    nobody indexed for this) in front of the fastest (the workflow catalog,
+ *    which has a server-side search). The operator would wait on a group they
+ *    did not ask about to see the group they did.
+ *  - `Promise.all` REJECTS ON THE FIRST REJECTION, which here means one 403
+ *    from the admin-gated users endpoint deletes the workflow matches that had
+ *    already arrived. Every group must be allowed to fail alone.
+ *
+ * Nothing is thrown out of this function. A group that failed is REPORTED as
+ * failed, in the results, because the caller has to render that difference --
+ * "no matches" and "I could not ask" are opposite facts, and an operator who
+ * acts on the confusion during an incident goes looking for something they were
+ * just told does not exist.
+ */
+export async function searchEverything(
+  namespace: string,
+  query: string,
+  sources: SearchSources,
+): Promise<SearchResults> {
+  const q = query.trim();
+
+  // Named and settled together. The order of the array does not decide render
+  // order -- SEARCH_GROUPS does -- so a fast group cannot promote itself.
+  const [workflows, runs, schedules, workers, users] = await Promise.allSettled([
+    sources.workflows(namespace, q),
+    sources.runs(namespace, q),
+    sources.schedules(namespace, q),
+    sources.workers(namespace, q),
+    sources.users(namespace, q),
+  ]);
+
+  function server(settled: PromiseSettledResult<SearchHit[]>): GroupResult {
+    if (settled.status === 'rejected') return classifyGroupError(settled.reason);
+    // A server-side search saw the whole table, so it is never truncated: the
+    // cap it was given applies to how many matches come back, not to how many
+    // rows were considered.
+    return { status: 'ok', hits: settled.value.slice(0, PER_GROUP), truncated: false };
+  }
+
+  function client(settled: PromiseSettledResult<CappedHits>): GroupResult {
+    if (settled.status === 'rejected') return classifyGroupError(settled.reason);
+    return {
+      status: 'ok',
+      hits: settled.value.hits.slice(0, PER_GROUP),
+      truncated: settled.value.truncated,
+    };
+  }
+
+  return {
+    Workflows: server(workflows),
+    Runs: server(runs),
+    Schedules: client(schedules),
+    Workers: client(workers),
+    Users: client(users),
+  };
+}

@@ -268,7 +268,7 @@ describe('the namespace and the deployment stay visible', () => {
     expect(trigger.textContent).not.toContain('payments');
   });
 
-  it('states both as read-only facts inside the panel, not as controls', () => {
+  it('states the namespace as a read-only fact inside the panel, not a control', () => {
     render(
       <ProfileMenu
         session={session}
@@ -282,10 +282,40 @@ describe('the namespace and the deployment stay visible', () => {
     const menu = screen.getByRole('menu');
 
     expect(within(menu).getByText('Namespace')).toBeInTheDocument();
-    expect(within(menu).getByText('Connected to')).toBeInTheDocument();
-    expect(within(menu).getByText('https://nexus.example')).toBeInTheDocument();
-    // Neither is a menuitem: nothing that cannot be changed here pretends it can.
+    expect(within(menu).getByText('payments')).toBeInTheDocument();
+    // Not a menuitem: nothing that cannot be changed here pretends it can.
     expect(within(menu).queryByRole('menuitem', { name: /payments/ })).not.toBeInTheDocument();
+  });
+
+  /**
+   * The deployment lost its ROW but not its visibility.
+   *
+   * It had one for a real reason — mistaking staging for production is the error
+   * a hidden value invites — but the common case renders "same origin", which
+   * tells an operator nothing while taking a labelled row in an identity card.
+   * The tooltip keeps it, so a cross-origin base that IS worth naming still
+   * appears and the uninformative case costs no space.
+   */
+  it('keeps the deployment on the trigger tooltip rather than in a panel row', () => {
+    render(
+      <ProfileMenu
+        session={session}
+        namespace="payments"
+        connectedTo="https://nexus.example"
+        onSignOut={vi.fn()}
+        onSignIn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: /account menu/i })).toHaveAttribute(
+      'title',
+      expect.stringContaining('https://nexus.example') as unknown as string,
+    );
+
+    open();
+    const menu = screen.getByRole('menu');
+    expect(within(menu).queryByText('Connected to')).not.toBeInTheDocument();
+    expect(within(menu).queryByText('https://nexus.example')).not.toBeInTheDocument();
   });
 });
 

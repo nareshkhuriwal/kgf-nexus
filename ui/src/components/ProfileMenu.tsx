@@ -19,12 +19,17 @@
  * What remains inline is only what is a FACT rather than a control: who you
  * are, which namespace you are scoped to, which deployment you are pointed at.
  *
- * Two of those facts are load-bearing rather than decorative. The namespace is
- * here because every endpoint is namespace-scoped and an operator reading the
- * wrong one sees a plausible empty dashboard — the most misleading output the
- * console can produce — and the brand cluster no longer carries it. The API
- * base is here for the same reason in the deployment axis: mistaking staging
- * for production is exactly the error a hidden value invites.
+ * The DEPLOYMENT no longer gets a row. It was here for a real reason -- mistaking
+ * staging for production is exactly the error a hidden value invites -- but when
+ * the console is served by its own gateway the value reads "same origin", which
+ * tells an operator nothing while occupying a labelled row in an identity card.
+ * It survives on the trigger's tooltip, where a deployment that IS worth naming
+ * (a cross-origin base URL) still appears and the uninformative case costs no
+ * space.
+ *
+ * The namespace keeps its row, and the asymmetry is deliberate: its value is
+ * never uninformative and getting it wrong produces a plausible empty dashboard,
+ * which an operator reads as "nothing is running" rather than as "wrong scope".
  */
 
 import { useEffect, useId, useRef, useState } from 'react';
@@ -225,7 +230,11 @@ export function ProfileMenu({
           // The namespace rides along on the trigger's tooltip as well as
           // living in the panel: it is the one value whose being wrong is
           // invisible, and the trigger is on screen when the panel is not.
-          [email ? `Signed in as ${email}` : 'Account', namespace && `Namespace: ${namespace}`]
+          [
+            email ? `Signed in as ${email}` : 'Account',
+            namespace && `Namespace: ${namespace}`,
+            connectedTo && `API: ${connectedTo}`,
+          ]
             .filter(Boolean)
             .join(' · ')
         }
@@ -292,20 +301,12 @@ export function ProfileMenu({
           {/* Facts, not controls, so they are rows of text and not buttons:
               nothing here is clickable because nothing here can be changed from
               a dropdown. Both are editable on the settings page. */}
-          {(namespace || connectedTo) && (
+          {namespace && (
             <div className="profile-group">
-              {namespace && (
-                <p className="profile-fact">
-                  <span className="profile-fact-label">Namespace</span>
-                  <span className="profile-fact-value">{namespace}</span>
-                </p>
-              )}
-              {connectedTo && (
-                <p className="profile-fact" title={`API base: ${connectedTo}`}>
-                  <span className="profile-fact-label">Connected to</span>
-                  <span className="profile-fact-value">{connectedTo}</span>
-                </p>
-              )}
+              <p className="profile-fact">
+                <span className="profile-fact-label">Namespace</span>
+                <span className="profile-fact-value">{namespace}</span>
+              </p>
             </div>
           )}
 

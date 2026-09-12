@@ -1659,7 +1659,12 @@ tr.version-current > td { background: var(--bg-hover); }
      describing the bar rather than defining it, and the two would drift the
      next time the type scale moved. */
   height: var(--navbar-h);
-  padding-inline: var(--space-6);
+  /* RIGHT padding only. The left edge belongs to .navbar-lead, which is exactly
+     --rail-w wide so its trailing edge falls on the rail's border below: a
+     symmetric padding-inline pushed the lead 16px in, and the gap after it
+     another 12px, so the search field started 28px past the rail's edge -- the
+     misalignment that was reported. The lead supplies its own inset instead. */
+  padding-inline: var(--space-0) var(--space-6);
   flex-wrap: nowrap;
   box-sizing: border-box;
 }
@@ -1681,6 +1686,15 @@ tr.version-current > td { background: var(--bg-hover); }
   width: var(--rail-w);
   min-width: 0;
   box-sizing: border-box;
+  /* The bar's left inset lives here rather than on .navbar, so the cluster's
+     own box ends on --rail-w and the next child starts flush with the rail's
+     right border. Matches .sidebar's inline padding, so the hamburger sits on
+     the same left margin as the destinations below it. */
+  padding-inline-start: var(--space-5);
+  /* Absorbs .navbar's gap, which would otherwise reappear between this cluster
+     and the search field and re-introduce the offset this rule exists to
+     remove. */
+  margin-inline-end: calc(var(--space-5) * -1);
 }
 .navbar .brand { display: flex; align-items: center; gap: var(--space-4); flex: 0 0 auto; min-width: 0; }
 .navbar .brand-word { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

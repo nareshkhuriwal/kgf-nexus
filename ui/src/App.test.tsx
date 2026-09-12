@@ -325,11 +325,23 @@ describe('the application shell', () => {
     expect(screen.getByText('Observe')).toBeInTheDocument();
   });
 
-  it('still shows which deployment the tab is pointed at', () => {
+  /**
+   * The deployment is still reachable, on the trigger rather than in a row.
+   *
+   * It had a labelled row in the panel, and the reason was sound: mistaking
+   * staging for production is exactly the error a hidden value invites. But the
+   * console is normally served by its own gateway, so the row read "same
+   * origin" — a labelled line in an identity card that tells an operator
+   * nothing. The tooltip keeps the fact without spending the space, and a base
+   * URL that IS worth naming still appears there.
+   */
+  it('still reports which deployment the tab is pointed at, on the trigger', () => {
     renderApp();
-    fireEvent.click(screen.getByRole('button', { name: /account menu/i }));
 
-    expect(screen.getByText(/same origin/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /account menu/i })).toHaveAttribute(
+      'title',
+      expect.stringMatching(/same origin/i) as unknown as string,
+    );
   });
 });
 

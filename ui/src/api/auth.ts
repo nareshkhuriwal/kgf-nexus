@@ -294,8 +294,20 @@ export const authApi = {
     return authRequest<Principal>('/v1/auth/whoami');
   },
 
-  async listUsers(namespace: string): Promise<User[]> {
-    return list<User>(await authRequest<unknown>(`${ns(namespace)}/users`), 'users');
+  /**
+   * The namespace's users.
+   *
+   * `limit` is the ONLY knob this endpoint has -- there is no search parameter
+   * on the wire -- so a caller that wants to find a person by name or email has
+   * to fetch a capped page and match in the browser. The parameter is optional
+   * and unsent when absent, so the admin page keeps asking for exactly what it
+   * asked for before (the server's own default) and only the global search
+   * imposes a cap. Sending a cap matters there because the caller needs to KNOW
+   * it was capped, and the only way to know is to have chosen the number.
+   */
+  async listUsers(namespace: string, limit?: number): Promise<User[]> {
+    const q = limit !== undefined ? `?limit=${limit}` : '';
+    return list<User>(await authRequest<unknown>(`${ns(namespace)}/users${q}`), 'users');
   },
 
   createUser(
