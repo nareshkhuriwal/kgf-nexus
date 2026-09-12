@@ -1,0 +1,351 @@
+/**
+ * Render tests for the run detail page.
+ *
+ * During an incident the operator moves between four questions in seconds —
+ * what broke, why, what did it say, who did what when — so the selected run,
+ * node and attempt live in the URL rather than in component state. That is
+ * what makes the view shareable and what stops a refresh from dropping the
+ * operator back at the top of the graph. Pinned here: the selection
+ * round-trips through the query string, a failed run opens on its root cause,
+ * and cancel is confirmed before it kills in-flight work.
+ */
+
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { RunDetailPage } from './RunDetailPage';
+
+/** Publishes the live query string so a test can assert what the URL holds. */
+function LocationProbe() {
+  const loc = useLocation();
+  return <div data-testid="search">{loc.search}</div>;
+}
+
+function wrap(entry: string) {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[entry]}>
+        <LocationProbe />
+        <Routes>
+          <Route path="/runs/:runId" element={<RunDetailPage namespace="default" />} />
+          <Route path="/runs" element={<div>run list</div>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+function mockFetch(handler: (url: string, init?: RequestInit) => [number, unknown]) {
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    const [status, body] = handler(String(url), init);
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+  });
+}
+
+/**
+ * A failed run: extract broke, transform and load never ran. The run detail
+ * endpoint serves nodes, edges AND attempts from one handler.
+ */
+const failedRun = {
+  id: 'run-aaaaaaaaaaaa',
+  namespace: 'default',
+  spec_id: 'spec-1',
+  spec_name: 'daily-etl',
+  spec_version: 2,
+  state: 'FAILED',
+  created_at: '2026-09-12T10:00:00Z',
+  started_at: '2026-09-12T10:00:01Z',
+  ended_at: '2026-09-12T10:05:00Z',
+  nodes: [
+    { run_id: 'run-aaaaaaaaaaaa', node_id: 'extract', task_ref: 'tasks/extract', state: 'FAILED' },
+    { run_id: 'run-aaaaaaaaaaaa', node_id: 'transform', task_ref: 'tasks/transform', state: 'UPSTREAM_FAILED' },
+    { run_id: 'run-aaaaaaaaaaaa', node_id: 'load', task_ref: 'tasks/load', state: 'UPSTREAM_FAILED' },
+  ],
+  edges: [
+    { from_node_id: 'extract', to_node_id: 'transform' },
+    { from_node_id: 'transform', to_node_id: 'load' },
+  ],
+  attempts: [
+    {
+      id: 'a1-extract',
+      run_id: 'run-aaaaaaaaaaaa',
+      node_id: 'extract',
+      attempt_number: 1,
+      state: 'FAILED',
+      error: { class: 'APPLICATION', message: 'source table missing' },
+    },
+    {
+      id: 'a2-extract',
+      run_id: 'run-aaaaaaaaaaaa',
+      node_id: 'extract',
+      attempt_number: 2,
+      state: 'FAILED',
+      error: { class: 'APPLICATION', message: 'source table missing' },
+    },
+  ],
+};
+
+/** Serves the run detail, and an empty event list, for any URL. */
+function serveRun(run: unknown = failedRun) {
+  mockFetch((url) => {
+    if (url.includes('/events')) return [200, { events: [] }];
+    if (url.includes('/logs')) return [200, { lines: [] }];
+    return [200, run];
+  });
+}
+
+beforeEach(() => {
+  window.localStorage.clear();
+  window.localStorage.setItem('nexus.apiKey', 'nxs_test');
+  // EventSource is not implemented in jsdom; the live hook falls back to
+  // polling when it is absent, which is the path under test here.
+  vi.stubGlobal('EventSource', undefined);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('the run header', () => {
+  it('identifies the run, its spec and its state', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    expect(await screen.findByText(/daily-etl/)).toBeInTheDocument();
+    expect(screen.getAllByText('FAILED', { selector: '[data-state]' }).length).toBeGreaterThan(0);
+  });
+
+  it('offers a route back to the list', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa');
+    expect(await screen.findByRole('link', { name: /all runs/i })).toHaveAttribute('href', '/runs');
+  });
+
+  it('surfaces an unreachable backend instead of a blank page', async () => {
+    mockFetch(() => [500, { message: 'gateway down' }]);
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    expect(await screen.findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(
+      /Could not load run/i,
+    );
+  });
+});
+
+describe('deep links: the selection lives in the URL', () => {
+  /**
+   * The first thing an operator opening a failed run wants is the node that
+   * actually broke, so the page defaults the selection to the root cause —
+   * and writes it to the URL, so what they then share points at it.
+   */
+  it('defaults the selection to the root cause and records it in the URL', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('search').textContent).toContain('node=extract');
+    });
+  });
+
+  it('honours a node named in the URL rather than overriding it', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa?node=load');
+
+    // A pasted link must land where it says, even though `extract` is the root
+    // cause the page would otherwise have picked.
+    await waitFor(() => {
+      expect(screen.getByText(/node · load/)).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('search').textContent).toContain('node=load');
+  });
+
+  it('writes the selected node to the URL when one is picked in the graph', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    await screen.findByRole('button', { name: /^transform,/ });
+    fireEvent.click(screen.getByRole('button', { name: /^transform,/ }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('search').textContent).toContain('node=transform');
+    });
+  });
+
+  /**
+   * Picking a new node must drop the old node's attempt from the URL: an
+   * attempt id belongs to one node, and carrying it across would deep-link to
+   * an attempt that is not in the panel being shown.
+   */
+  it('clears the selected attempt when the node changes', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa?node=extract&attempt=a1-extract');
+
+    await screen.findByRole('button', { name: /^transform,/ });
+    fireEvent.click(screen.getByRole('button', { name: /^transform,/ }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('search').textContent).toContain('node=transform');
+    });
+    expect(screen.getByTestId('search').textContent).not.toContain('attempt=');
+  });
+
+  it('writes the selected attempt to the URL', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa?node=extract');
+
+    // The older attempt: picking it must be what lands in the URL.
+    const card = (await screen.findByText('attempt #1')).closest('section')!;
+    fireEvent.click(within(card).getByRole('button', { name: /logs/i }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('search').textContent).toContain('attempt=a1-extract');
+    });
+  });
+
+  it('honours an attempt named in the URL over the latest one', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa?node=extract&attempt=a1-extract');
+
+    // attempt #2 is the latest and would be the fallback, so naming #1 in the
+    // URL must visibly win — otherwise the deep link is decorative.
+    expect(await screen.findByText(/logs · attempt a1-extra/)).toBeInTheDocument();
+    expect(screen.queryByText(/logs · attempt a2-extra/)).not.toBeInTheDocument();
+  });
+});
+
+describe('the node panel follows the selection', () => {
+  it('shows the selected node with its full attempt history', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa?node=extract');
+
+    expect(await screen.findByText('attempt #2')).toBeInTheDocument();
+    // Both tries are present: collapsing them would hide that it was retried.
+    expect(screen.getByText('attempt #1')).toBeInTheDocument();
+  });
+
+  it('explains what to do when nothing is selected', async () => {
+    // A healthy run has no root cause, so nothing is auto-selected.
+    serveRun({
+      ...failedRun,
+      state: 'RUNNING',
+      nodes: [
+        { run_id: 'run-aaaaaaaaaaaa', node_id: 'extract', task_ref: 'tasks/extract', state: 'RUNNING' },
+      ],
+      edges: [],
+      attempts: [],
+    });
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    expect(await screen.findByText(/Pick a node in the graph/i)).toBeInTheDocument();
+  });
+
+  it('lets an operator walk upstream from the selected node', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa?node=transform');
+
+    // Walking up the dependency chain is how you get from collateral damage to
+    // the real failure.
+    fireEvent.click(await screen.findByRole('button', { name: 'extract' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('search').textContent).toContain('node=extract');
+    });
+  });
+});
+
+describe('cancel', () => {
+  /**
+   * Cancel is the only Phase 1 mutation and it kills in-flight work, so an
+   * accidental click costs real compute. It is confirmed, and the confirmation
+   * says what will happen.
+   */
+  it('does not cancel on the first click', async () => {
+    const posts: string[] = [];
+    mockFetch((url, init) => {
+      if (init?.method === 'POST') posts.push(url);
+      if (url.includes('/events')) return [200, { events: [] }];
+      return [200, { ...failedRun, state: 'RUNNING' }];
+    });
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    fireEvent.click(await screen.findByRole('button', { name: /cancel run/i }));
+
+    // The first click asks; it must not have killed anything yet.
+    expect(await screen.findByText(/kills in-flight attempts/i)).toBeInTheDocument();
+    expect(posts).toEqual([]);
+  });
+
+  it('cancels once confirmed', async () => {
+    const posts: string[] = [];
+    mockFetch((url, init) => {
+      if (init?.method === 'POST') {
+        posts.push(url);
+        return [204, null];
+      }
+      if (url.includes('/events')) return [200, { events: [] }];
+      return [200, { ...failedRun, state: 'RUNNING' }];
+    });
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    fireEvent.click(await screen.findByRole('button', { name: /cancel run/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /yes, cancel/i }));
+
+    await waitFor(() => {
+      expect(posts.some((u) => u.endsWith('/cancel'))).toBe(true);
+    });
+  });
+
+  it('backs out without cancelling', async () => {
+    const posts: string[] = [];
+    mockFetch((url, init) => {
+      if (init?.method === 'POST') posts.push(url);
+      if (url.includes('/events')) return [200, { events: [] }];
+      return [200, { ...failedRun, state: 'RUNNING' }];
+    });
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    fireEvent.click(await screen.findByRole('button', { name: /cancel run/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /keep running/i }));
+
+    expect(screen.queryByText(/kills in-flight attempts/i)).not.toBeInTheDocument();
+    expect(posts).toEqual([]);
+  });
+
+  /**
+   * A terminal run cannot be cancelled, and the control says why rather than
+   * silently doing nothing.
+   */
+  it('disables cancel on a run that has already finished', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    const button = await screen.findByRole('button', { name: /cancel run/i });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('title', expect.stringContaining('cannot be cancelled'));
+  });
+});
+
+describe('partial backends degrade rather than blank', () => {
+  /**
+   * The node states come from the run endpoint and the attempts come from the
+   * same handler; if the attempts are missing the graph must still render,
+   * because node state alone already answers "what broke".
+   */
+  it('still renders the graph when the run carries no attempts', async () => {
+    serveRun({ ...failedRun, attempts: [] });
+    wrap('/runs/run-aaaaaaaaaaaa?node=extract');
+
+    expect(await screen.findByRole('button', { name: /^extract, FAILED/ })).toBeInTheDocument();
+    // Several empty panels are on screen (events is empty too), so this asks
+    // for the attempts one by what it says rather than by being the only status.
+    const empties = screen.getAllByRole('status');
+    expect(empties.some((e) => /No attempts yet/i.test(e.textContent ?? ''))).toBe(true);
+  });
+});
