@@ -219,21 +219,31 @@ func appendEvent(
 	if err != nil {
 		return fmt.Errorf("marshal event payload for %s: %w", kind, err)
 	}
-	// hashtextextended gives a stable 64-bit key from the run id. A hash
-	// collision between two runs costs a little needless serialization of their
-	// event appends and nothing else, which is a fine price for never taking a
-	// lock on a table another service owns.
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, runID,
-	); err != nil {
-		return fmt.Errorf("lock run event sequence: %w", err)
+	// Allocate from workflow_runs.event_seq, per CONTRACT.md's EVENT SEQ rule.
+	//
+	// This used to be `max(seq)+1` under an advisory lock, which looked safe and
+	// was not. The lock serializes only the callers that TAKE it, and this is not
+	// the only writer: event-service appends through its own owner API, which
+	// allocates from the event_seq counter and takes no advisory lock. The two
+	// allocators then collided outright -- observed live as
+	//
+	//   duplicate key value violates unique constraint "run_events_run_id_seq_key"
+	//
+	// on a run whose counter read 2 while its actual max(seq) was 11, because
+	// max(seq)+1 never advanced event_seq. 31 runs had drifted apart this way.
+	// The UPDATE takes a row lock on the run for the rest of the transaction,
+	// which serializes every allocator on one mechanism instead of two.
+	var seq int32
+	if err := tx.QueryRow(ctx,
+		`UPDATE workflow_runs SET event_seq = event_seq + 1 WHERE id = $1 RETURNING event_seq`,
+		runID,
+	).Scan(&seq); err != nil {
+		return fmt.Errorf("allocate run event seq for %s: %w", kind, err)
 	}
 	if _, err := tx.Exec(ctx, `
 INSERT INTO run_events (run_id, seq, node_id, attempt_id, kind, payload, actor)
-VALUES ($1,
-        COALESCE((SELECT max(seq)+1 FROM run_events WHERE run_id = $1), 1),
-        $2, $3, $4, $5, $6)`,
-		runID, nullString(nodeID), attemptID, kind, body, actor,
+VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		runID, seq, nullString(nodeID), attemptID, kind, body, actor,
 	); err != nil {
 		return fmt.Errorf("append run_event %s: %w", kind, err)
 	}
