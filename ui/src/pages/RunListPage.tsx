@@ -63,13 +63,16 @@
  * number and the rows on it. See lib/table.ts, which holds that rule.
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { RUN_STATES, type NodeState, type RunSummary } from '../api/types';
 import { useRuns } from '../api/hooks';
+import { api } from '../api/client';
 import { PageHeader } from '../components/PageHeader';
 import { StateBadge } from '../components/StateBadge';
 import { AsyncPanel, StaleWarning } from '../components/Status';
+import { BulkActionBar } from '../components/BulkActionBar';
 import { DataTable } from '../components/DataTable';
 import type { Column, RowCountKind } from '../components/DataTable';
 import { EMPTY, durationBetween, fmtAge, fmtDurationMs, fmtTs, shortId } from '../lib/format';
@@ -103,6 +106,7 @@ const RUNS_COUNT: RowCountKind = { kind: 'unknown' };
 const RUNS_PAGE_SIZE = 50;
 
 export function RunListPage({ namespace }: { namespace: string }) {
+  const qc = useQueryClient();
   const [params, setParams] = useSearchParams();
   const state = params.get('state') ?? '';
   const spec = params.get('spec') ?? '';
@@ -170,6 +174,35 @@ export function RunListPage({ namespace }: { namespace: string }) {
 
   const nextBefore = query.data?.nextBefore;
   const rows = query.data?.runs;
+
+  /**
+   * The selected run IDS.
+   *
+   * This list polls every 4s and its rows transition constantly, so ids are the
+   * only identity that survives — and unlike the other tables, a row here can
+   * become INELIGIBLE while selected: a RUNNING run the operator ticked may be
+   * SUCCEEDED by the time they press the button. `selectedRuns` below re-applies
+   * the eligibility test against the latest rows for exactly that reason, so the
+   * bar's count is a statement about what is still cancellable NOW rather than
+   * about what was cancellable when the box was ticked.
+   */
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+
+  /**
+   * A run can only be cancelled while it is not terminal.
+   *
+   * The same predicate feeds `isSelectable` on the table and this list, so the
+   * checkbox an operator sees and the rows the action runs over can never
+   * disagree — which is what keeps "Cancel 8 runs" from including a SUCCEEDED
+   * run that would refuse. isTerminal is lib/states.ts's own table, not a
+   * hand-written state list here: a console with two opinions about which states
+   * are final is a console where one of them is wrong.
+   */
+  const cancellable = (r: RunSummary) => !isTerminal('run', r.state);
+  const selectedRuns = useMemo(
+    () => (rows ?? []).filter((r) => selected.has(r.id) && cancellable(r)),
+    [rows, selected],
+  );
 
   const columns: Column<RunSummary>[] = [
     {
@@ -289,7 +322,45 @@ export function RunListPage({ namespace }: { namespace: string }) {
           loadingRows={6}
         >
           {(runs) => (
-            <DataTable
+            <>
+              {/*
+                CANCEL, and never delete. A run is immutable execution history
+                that the audit trail references — there is no DELETE for one and
+                there must not be. Cancel is the lifecycle action that actually
+                exists, and it is what an operator selecting a page of stuck runs
+                wants: stop them, keep the record of what happened.
+
+                Destructive, because it cannot be undone: a cancelled run does
+                not resume. The confirmation says so rather than letting "cancel"
+                read as the reversible word it is in most other interfaces.
+              */}
+              <BulkActionBar<RunSummary>
+                selected={selectedRuns}
+                rowId={(r) => r.id}
+                rowLabel={(r) => shortId(r.id, 12)}
+                noun={['run', 'runs']}
+                actions={[
+                  {
+                    verb: 'Cancel',
+                    destructive: true,
+                    consequence:
+                      'In-flight attempts are stopped and the runs end as CANCELLED. This cannot be undone — a cancelled run does not resume, and the work already done is not repeated on a new one. The runs themselves stay as history.',
+                    run: (r) => api.cancelRun(namespace, r.id),
+                  },
+                ]}
+                onClear={() => setSelected(new Set())}
+                onDone={() => {
+                  /* Refetch rather than mutate the rows in place: a run that
+                     reached a terminal state between the tick and the request
+                     refuses the cancel, and it must still be on screen showing
+                     what it actually is. Prefix-invalidated so every cursor and
+                     filter combination in the cache is refreshed — the operator
+                     may page back to one of them. */
+                  void qc.invalidateQueries({ queryKey: ['runs', namespace] });
+                  void qc.invalidateQueries({ queryKey: ['attention', namespace] });
+                }}
+              />
+              <DataTable
               rows={runs}
               columns={columns}
               rowKey={(r) => r.id}
@@ -297,6 +368,24 @@ export function RunListPage({ namespace }: { namespace: string }) {
               noun="runs"
               tableClass="table-runs"
               count={RUNS_COUNT}
+              /* Selection, with the eligibility rule applied at the CHECKBOX
+                 rather than at the action. A SUCCEEDED or FAILED run gets no
+                 checkbox at all, so it cannot be selected for a cancel that
+                 would certainly be refused — reporting that refusal afterwards
+                 would read as the platform breaking rather than as a row that
+                 was never a candidate.
+
+                 The count kind is `unknown` — /runs pages and never totals — so
+                 select-all says "loaded runs", which here means the rows of this
+                 page. There is deliberately no control that reaches the pages
+                 the client has not fetched. */
+              selection={{
+                selected,
+                onChange: setSelected,
+                rowId: (r) => r.id,
+                isSelectable: cancellable,
+                label: (r) => `run ${shortId(r.id, 12)}`,
+              }}
               /* No `search`. The gateway matches runs by SPEC NAME, which the
                  spec filter in the toolbar already is; a second box beside it
                  that filtered only the 50 rows on this page would answer a
@@ -315,7 +404,8 @@ export function RunListPage({ namespace }: { namespace: string }) {
                    is passed and DataTable disables the control. */
                 onPrev: stack.length > 0 ? popCursor : undefined,
               }}
-            />
+              />
+            </>
           )}
         </AsyncPanel>
       </div>

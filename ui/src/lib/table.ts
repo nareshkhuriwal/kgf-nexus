@@ -60,7 +60,7 @@ export interface Column<Row> {
    */
   key: string;
   /**
-   * The `<th>` text. Lower case by convention here, and the convention now
+   * The `<th>` contents. Lower case by convention here, and the convention now
    * carries weight it did not before: the stylesheet USED TO upper-case every
    * header, so the case a caller passed was discarded and "Name" and "name"
    * were the same string on screen. It no longer does — uppercasing destroys
@@ -68,8 +68,24 @@ export interface Column<Row> {
    * apart in a nine-column header — so what is passed here is what is rendered.
    * Lower case remains the convention because every table already uses it and a
    * single Capitalised header among nine would read as a mistake.
+   *
+   * ReactNode rather than `string`, and the widening is load-bearing rather
+   * than a convenience. The selection column's header cell holds a CHECKBOX —
+   * the select-all — and while it was typed `string` that control had nowhere
+   * to live but the caller-owned `toolbar` slot, which TokensPage used as a
+   * documented stopgap. A select-all sitting beside the search box instead of
+   * above the column of checkboxes it governs is a control detached from what
+   * it acts on: the operator has to infer the relationship rather than see it,
+   * and on a table whose toolbar also carries filters it reads as one more
+   * filter. Widening the type is what lets the control go where its meaning is.
+   *
+   * Every existing column passes a string, and a string IS a ReactNode, so the
+   * widening breaks nothing. What it gives up is the ability to sort on the
+   * header's text — nothing did — and the compiler's guarantee that a header is
+   * flat text, which was never what made these headers readable; the lower-case
+   * convention above is.
    */
-  header: string;
+  header: React.ReactNode;
   /** Renders the `<td>` contents for one row. */
   cell: (row: Row) => React.ReactNode;
   /**

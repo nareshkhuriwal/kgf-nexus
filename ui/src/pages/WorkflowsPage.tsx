@@ -26,12 +26,15 @@
  * message), and the table draws whatever it is given.
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { useWorkflows } from '../api/hooks';
+import { api } from '../api/client';
 import type { WorkflowSummary } from '../api/types';
 import { AsyncPanel, StaleWarning } from '../components/Status';
 import { PageHeader } from '../components/PageHeader';
+import { BulkActionBar } from '../components/BulkActionBar';
 import { DataTable } from '../components/DataTable';
 import type { Column, RowCountKind } from '../components/DataTable';
 import { useDebounced } from '../lib/useDebounced';
@@ -52,7 +55,18 @@ const CATALOG_LIMIT = 200;
 const CATALOG_COUNT: RowCountKind = { kind: 'capped', limit: CATALOG_LIMIT };
 
 export function WorkflowsPage({ namespace }: { namespace: string }) {
+  const qc = useQueryClient();
   const [search, setSearch] = useState('');
+  /**
+   * The selected workflow NAMES.
+   *
+   * A workflow's identity on this screen is its name — the catalog is one row
+   * per name, and DELETE addresses it by name — so the name is both the React
+   * key and the selection id. That is the case DataTable's separate `rowId`
+   * exists to allow rather than to require: they coincide here and are still
+   * declared separately, because they answer different questions.
+   */
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   // Debounced for the same reason the cron preview is: one request per
   // keystroke would spend a round trip per character of a name being typed.
   const settled = useDebounced(search);
@@ -62,6 +76,17 @@ export function WorkflowsPage({ namespace }: { namespace: string }) {
   // "Searching" covers the gap between the last keystroke and the settled term,
   // during which the table below is answering an older question.
   const settling = settled !== search;
+
+  /**
+   * The selected rows the bar can still resolve. An id whose row has gone — the
+   * search narrowed, or a refetch dropped it — is simply absent, so it is
+   * neither counted nor actioned.
+   */
+  const list = workflows.data ?? [];
+  const selectedWorkflows = useMemo(
+    () => list.filter((w) => selected.has(w.name)),
+    [list, selected],
+  );
 
   const columns: Column<WorkflowSummary>[] = [
     {
@@ -190,12 +215,64 @@ export function WorkflowsPage({ namespace }: { namespace: string }) {
           loadingRows={6}
         >
           {(rows) => (
-            <DataTable
+            <>
+              {/*
+                DELETE, and it is the one action here that the gateway may
+                REFUSE — which is the case this bar exists to render well.
+
+                A workflow with run history or a live schedule pointing at it
+                cannot be deleted: the gateway answers 409 `workflow_referenced`
+                and names the blockers. api.deleteSpec folds those into the
+                rejection's message, so a bulk delete of ten workflows where
+                three are referenced reports three DIFFERENT reasons — "still
+                referenced by 29 runs", "still referenced by 1 schedule
+                (nightly-etl)" — against the three names, rather than three
+                identical "failed" lines the operator has to go and investigate.
+                runBulk needs no special casing for it; the message is already
+                operator-readable by the time it arrives.
+              */}
+              <BulkActionBar<WorkflowSummary>
+                selected={selectedWorkflows}
+                rowId={(w) => w.name}
+                rowLabel={(w) => w.name}
+                noun={['workflow', 'workflows']}
+                actions={[
+                  {
+                    verb: 'Delete',
+                    destructive: true,
+                    consequence:
+                      'Every version of each workflow is removed permanently, definitions included. A workflow still referenced by runs or by a schedule is refused and stays — you will be told which, and by what.',
+                    run: (w) => api.deleteSpec(namespace, w.name),
+                  },
+                ]}
+                onClear={() => setSelected(new Set())}
+                onDone={() => {
+                  /* Refetch, never an optimistic removal. A workflow the
+                     gateway REFUSED to delete must still be on screen: dropping
+                     it locally would show an empty row where the failure report
+                     directly above says it is still there. Invalidated by
+                     prefix so every cached search term is refreshed, not only
+                     the one in the box. */
+                  void qc.invalidateQueries({ queryKey: ['workflows', namespace] });
+                }}
+              />
+              <DataTable
               rows={rows}
               columns={columns}
               rowKey={(w) => w.name}
               noun="workflows"
               count={CATALOG_COUNT}
+              /* Selection. The count kind is `capped`, so select-all says
+                 "loaded workflows" — /specs takes a `limit` of 200 and the
+                 client cannot select what it never received. With a search term
+                 in the box the label says "matching" instead, because that is
+                 what the control then covers. */
+              selection={{
+                selected,
+                onChange: setSelected,
+                rowId: (w) => w.name,
+                label: (w) => w.name,
+              }}
               /* Server mode, because the gateway matches the whole spec table.
                  `pending` is the debounce gap: while it is true the rows on
                  screen answer the PREVIOUS term, so the count says what it is
@@ -207,7 +284,8 @@ export function WorkflowsPage({ namespace }: { namespace: string }) {
                 onChange: setSearch,
                 pending: settling,
               }}
-            />
+              />
+            </>
           )}
         </AsyncPanel>
       </div>

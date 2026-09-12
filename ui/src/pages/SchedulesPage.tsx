@@ -28,12 +28,20 @@
  * is one word here and the label follows.
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { errorMessage, useSchedules, useSetScheduleEnabled } from '../api/hooks';
+import { useQueryClient } from '@tanstack/react-query';
+import {
+  errorMessage,
+  qk,
+  useSchedules,
+  useSetScheduleEnabled,
+} from '../api/hooks';
+import { api } from '../api/client';
 import type { Schedule } from '../api/types';
 import { AsyncPanel, ErrorBox, StaleWarning } from '../components/Status';
 import { PageHeader } from '../components/PageHeader';
+import { BulkActionBar } from '../components/BulkActionBar';
 import { DataTable } from '../components/DataTable';
 import type { Column, RowCountKind } from '../components/DataTable';
 import { CreateScheduleForm } from './CreateScheduleForm';
@@ -73,6 +81,12 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
 
   const [actionError, setActionError] = useState<string | null>(null);
 
+  /**
+   * The selected schedule IDS. Ids rather than rows because this list polls
+   * every 10s and a selection of row objects would empty itself on each refetch.
+   */
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+
   function setCreating(open: boolean) {
     // `replace` so opening and closing the form does not build a back-button
     // history of the same page in two states; Back should leave the schedule
@@ -95,9 +109,29 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
     );
   }
 
+  const qc = useQueryClient();
   const schedules = useSchedules(namespace);
   const setEnabled = useSetScheduleEnabled(namespace);
   const now = Date.now();
+
+  /**
+   * The rows the bulk bar may act on: the selected ones it can still RESOLVE.
+   *
+   * Resolved against the fetched list rather than carried as a parallel array,
+   * so an id whose row has gone (deleted by someone else, or dropped by a
+   * refetch) is simply absent here — not counted, not actioned, and not reported
+   * as a phantom failure. The bar never claims to act on a row the page cannot
+   * hand it.
+   *
+   * Every schedule is deletable, so there is no eligibility filter to apply:
+   * unlike a revoked token or a terminal run, a disabled schedule is still a
+   * stored row that DELETE removes.
+   */
+  const list = schedules.data ?? [];
+  const selectedSchedules = useMemo(
+    () => list.filter((s) => selected.has(s.id)),
+    [list, selected],
+  );
 
   const columns: Column<Schedule>[] = [
     {
@@ -111,11 +145,17 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
         // the row's state, so it takes a --tone-*, which no theme change can
         // reassign.
         s.enabled ? (
-          <span className="badge tone-success" title="This schedule fires on its cron.">
+          <span
+            className="badge tone-success"
+            title="This schedule fires on its cron."
+          >
             enabled
           </span>
         ) : (
-          <span className="badge tone-stopped" title="Disabled: it will not fire until re-enabled.">
+          <span
+            className="badge tone-stopped"
+            title="Disabled: it will not fire until re-enabled."
+          >
             disabled
           </span>
         ),
@@ -138,7 +178,9 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
       cell: (s) => (
         <>
           {s.spec_name}
-          {s.spec_version !== undefined && <span className="faint"> v{s.spec_version}</span>}
+          {s.spec_version !== undefined && (
+            <span className="faint"> v{s.spec_version}</span>
+          )}
         </>
       ),
     },
@@ -210,7 +252,9 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
                 { onError: (e) => setActionError(errorMessage(e)) },
               );
             }}
-            disabled={setEnabled.isPending && setEnabled.variables?.name === s.name}
+            disabled={
+              setEnabled.isPending && setEnabled.variables?.name === s.name
+            }
           >
             {s.enabled ? 'Disable' : 'Enable'}
           </button>
@@ -225,11 +269,16 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
         title="Schedules"
         subtitle={
           <>
-            cron-triggered workflows in <code>{namespace}</code> · refreshes every 10s
+            cron-triggered workflows in <code>{namespace}</code> · refreshes
+            every 10s
           </>
         }
         actions={
-          <button type="button" className="primary" onClick={() => setCreating(!creating)}>
+          <button
+            type="button"
+            className="primary"
+            onClick={() => setCreating(!creating)}
+          >
             {creating ? 'Cancel' : 'New schedule'}
           </button>
         }
@@ -269,30 +318,82 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
           emptyTitle="No schedules in this namespace"
           emptyDetail={
             <>
-              Nothing here fires on a timer yet. Create one above, or from the CLI:{' '}
-              <code>nexusctl schedule create --spec example-etl --cron &quot;0 2 * * *&quot;</code>
+              Nothing here fires on a timer yet. Create one above, or from the
+              CLI:{' '}
+              <code>
+                nexusctl schedule create --spec example-etl --cron &quot;0 2 * *
+                *&quot;
+              </code>
             </>
           }
           loadingRows={5}
         >
           {(rows) => (
-            <DataTable
-              rows={rows}
-              columns={columns}
-              rowKey={(s) => s.id}
-              noun="schedules"
-              count={SCHEDULE_COUNT}
-              /* Client mode: /schedules has no `search` parameter, so this can
+            <>
+              {/*
+                DELETE, and the word is exact. A schedule is a stored rule, not
+                a record of anything that happened: removing it stops future
+                fires and takes its own tick history with it, which the
+                confirmation says because "Delete 3 schedules" does not.
+
+                The runs it already CREATED are untouched — they are their own
+                immutable rows and are never reachable from here. That is worth
+                stating in the consequence too, because an operator hesitating
+                over this button is usually hesitating about exactly that.
+              */}
+              <BulkActionBar<Schedule>
+                selected={selectedSchedules}
+                rowId={(s) => s.id}
+                rowLabel={(s) => s.name}
+                noun={['schedule', 'schedules']}
+                actions={[
+                  {
+                    verb: 'Delete',
+                    destructive: true,
+                    consequence:
+                      'Each schedule stops firing and is removed permanently, along with its own fire history. Runs it has already created are not affected.',
+                    run: (s) => api.deleteSchedule(namespace, s.name),
+                  },
+                ]}
+                onClear={() => setSelected(new Set())}
+                onDone={() => {
+                  /* Refetch rather than remove the rows optimistically. A
+                     delete the gateway refused must still be on screen —
+                     dropping it locally would show the operator a table that
+                     disagrees with the failure report directly above it. */
+                  void qc.invalidateQueries({
+                    queryKey: qk.schedules(namespace),
+                  });
+                }}
+              />
+              <DataTable
+                rows={rows}
+                columns={columns}
+                rowKey={(s) => s.id}
+                noun="schedules"
+                count={SCHEDULE_COUNT}
+                /* Selection. The count kind is `capped`, so DataTable's select-all
+                 says "loaded" rather than claiming the namespace: /schedules
+                 takes a `limit` and the client cannot speak for rows it was
+                 never sent. */
+                selection={{
+                  selected,
+                  onChange: setSelected,
+                  rowId: (s) => s.id,
+                  label: (s) => s.name,
+                }}
+                /* Client mode: /schedules has no `search` parameter, so this can
                  only filter what was fetched — and the table says so rather
                  than letting the filtered count read as a namespace total. The
                  spec name is in the haystack alongside the schedule's own name
                  because "which schedules fire example-etl" is the second thing
                  anyone asks on this page. */
-              search={{
-                mode: 'client',
-                fields: (s) => [s.name, s.spec_name, s.cron, s.timezone],
-              }}
-            />
+                search={{
+                  mode: 'client',
+                  fields: (s) => [s.name, s.spec_name, s.cron, s.timezone],
+                }}
+              />
+            </>
           )}
         </AsyncPanel>
       </div>
@@ -323,7 +424,11 @@ function NextFire({ schedule }: { schedule: Schedule }) {
     );
   }
   if (schedule.next_fire_at) {
-    return <span title={fmtTs(schedule.next_fire_at)}>{fmtTs(schedule.next_fire_at)}</span>;
+    return (
+      <span title={fmtTs(schedule.next_fire_at)}>
+        {fmtTs(schedule.next_fire_at)}
+      </span>
+    );
   }
   if (unarmed) {
     return (

@@ -42,26 +42,34 @@ const TOKENS_COUNT: RowCountKind = { kind: 'exact' };
 const SCOPES = [
   { value: 'read', label: 'read — list and view runs, workers, logs' },
   { value: 'write', label: 'write — submit specs, create and control runs' },
-  { value: 'admin_write', label: 'admin_write — drain workers, manage identity' },
+  {
+    value: 'admin_write',
+    label: 'admin_write — drain workers, manage identity',
+  },
   { value: 'worker_rpc', label: 'worker_rpc — speak the worker protocol' },
 ];
 
-export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmin: boolean }) {
+export function TokensPage({
+  namespace,
+  canAdmin,
+}: {
+  namespace: string;
+  canAdmin: boolean;
+}) {
   const qc = useQueryClient();
   const [creating, setCreating] = useState(false);
   const [issued, setIssued] = useState<ScopedToken | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   /**
-   * Selection lives HERE, not in DataTable.
+   * Selection lives HERE, in the page, and DataTable renders it.
    *
-   * DataTable has no selection support yet and is being restyled in parallel, so
-   * adding it there would be a conflict on the component every list depends on.
-   * The checkbox is therefore an ordinary column this page owns, and the exact
-   * props DataTable should grow are written up in the handoff — at which point
-   * this block collapses into `selection={{ selected, onChange, rowId }}` and the
-   * column below goes away.
+   * The page is what performs the revoke and what refetches afterwards, so the
+   * page is what has to be able to read the selection; DataTable takes it as a
+   * prop rather than owning it. This was a hand-rolled checkbox column and a
+   * toolbar select-all while DataTable had no selection support — both are gone
+   * now, and the control sits in the header cell above the column it governs.
    *
-   * Held as a Set of ids rather than of rows, so a poll that replaces the row
+   * Held as a Set of IDS rather than of rows, so a poll that replaces the row
    * objects does not silently empty the selection.
    */
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
@@ -97,64 +105,16 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
    * over-promises what the action will achieve — and then report failures for
    * rows that were never actionable. Same honesty rule the count claims follow.
    */
-  const revocable = useMemo(() => list.filter((t) => t.revoked_at === null), [list]);
+  const revocable = useMemo(
+    () => list.filter((t) => t.revoked_at === null),
+    [list],
+  );
   const selectedTokens = useMemo(
     () => revocable.filter((t) => selected.has(t.id)),
     [revocable, selected],
   );
 
-  /**
-   * Select-all covers the rows the CLIENT ACTUALLY HAS, and /tokens is
-   * uncapped, so here that genuinely is every credential in the namespace —
-   * which is why this table can offer it plainly. On a capped list it would have
-   * to say "all N loaded"; see the handoff for why that distinction is not
-   * optional.
-   */
-  const allSelected = revocable.length > 0 && selected.size === revocable.length;
-  const someSelected = selected.size > 0 && !allSelected;
-
-  function toggleAll() {
-    setSelected(allSelected ? new Set() : new Set(revocable.map((t) => t.id)));
-  }
-
-  function toggleOne(id: string) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
   const columns: Column<ScopedToken>[] = [
-    {
-      key: 'select',
-      /*
-        Blank, and the select-all control lives in the TOOLBAR instead.
-
-        Column.header is typed `string`, so the header cell cannot hold a
-        checkbox without changing DataTable — which this task deliberately does
-        not touch. The toolbar slot is a caller-owned region and takes arbitrary
-        nodes, so the control goes there and keeps its indeterminate state. When
-        DataTable grows the selection prop described in the handoff, the checkbox
-        moves back into the header where it belongs and this column disappears.
-      */
-      header: '',
-      cell: (t) =>
-        t.revoked_at ? (
-          // Not rendered at all rather than rendered disabled: a disabled
-          // checkbox invites the operator to work out why, and the status column
-          // beside it already says "revoked".
-          <span className="faint" aria-hidden="true" />
-        ) : (
-          <input
-            type="checkbox"
-            checked={selected.has(t.id)}
-            onChange={() => toggleOne(t.id)}
-            aria-label={`Select ${t.name}`}
-          />
-        ),
-    },
     {
       key: 'name',
       header: 'name',
@@ -177,7 +137,10 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
       // its size would be sorting by something the column does not show.
       cell: (t) =>
         t.scopes.length === 0 ? (
-          <span className="faint" title="A token with no scopes can do nothing.">
+          <span
+            className="faint"
+            title="A token with no scopes can do nothing."
+          >
             none
           </span>
         ) : (
@@ -230,7 +193,9 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
         t.last_used_at ? (
           <>{fmtAge(t.last_used_at, Date.now())}</>
         ) : (
-          <span title="This token has never authenticated a request.">never</span>
+          <span title="This token has never authenticated a request.">
+            never
+          </span>
         ),
     },
     {
@@ -279,12 +244,16 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
         title="Tokens"
         subtitle={
           <>
-            scoped machine credentials in <code>{namespace}</code> · narrower and expiring, unlike
-            a static API key
+            scoped machine credentials in <code>{namespace}</code> · narrower
+            and expiring, unlike a static API key
           </>
         }
         actions={
-          <button type="button" className="primary" onClick={() => setCreating((v) => !v)}>
+          <button
+            type="button"
+            className="primary"
+            onClick={() => setCreating((v) => !v)}
+          >
             {creating ? 'Cancel' : 'New token'}
           </button>
         }
@@ -311,8 +280,8 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
               <div>
                 <div className="notice-title">Shown once and never again</div>
                 <div className="notice-detail">
-                  Only a hash is stored, so this value cannot be recovered. If you lose it,
-                  revoke this token and create another.
+                  Only a hash is stored, so this value cannot be recovered. If
+                  you lose it, revoke this token and create another.
                 </div>
               </div>
             </div>
@@ -329,7 +298,11 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
               >
                 Copy
               </button>
-              <button type="button" className="primary" onClick={() => setIssued(null)}>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => setIssued(null)}
+              >
                 I have saved it
               </button>
             </div>
@@ -388,53 +361,52 @@ export function TokensPage({ namespace, canAdmin }: { namespace: string; canAdmi
                 ]}
                 onClear={() => setSelected(new Set())}
                 onDone={() => {
-                  void qc.invalidateQueries({ queryKey: ['tokens', namespace] });
+                  void qc.invalidateQueries({
+                    queryKey: ['tokens', namespace],
+                  });
                   void qc.invalidateQueries({ queryKey: ['audit', namespace] });
                 }}
               />
               <DataTable
-                /*
-                  The select-all control, with its INDETERMINATE state. Merely
-                  unchecked when some rows are selected would claim "nothing is
-                  selected" while the bar above says otherwise, and the operator
-                  would have to choose which control to believe.
-
-                  It says "all live tokens" and means it: /tokens is uncapped, so
-                  the client holds every credential in the namespace and the
-                  claim is true. On a capped list it would have to say "all N
-                  loaded" — selecting rows the client never received is the same
-                  dishonesty the count claims avoid.
-                */
-                toolbar={
-                  <label className="form-check">
-                    <input
-                      type="checkbox"
-                      checked={allSelected}
-                      ref={(el) => {
-                        if (el) el.indeterminate = someSelected;
-                      }}
-                      onChange={toggleAll}
-                      disabled={revocable.length === 0}
-                      aria-label={
-                        allSelected ? 'Clear selection' : 'Select all live tokens'
-                      }
-                    />
-                    <span className="faint">
-                      select all {revocable.length} live
-                    </span>
-                  </label>
-                }
                 rows={rows}
-              columns={columns}
-              rowKey={(t) => t.id}
-              noun="tokens"
-              count={TOKENS_COUNT}
-              /* The name and the role are the haystack. The SCOPES are
-                 deliberately not: "read" is a substring of a dozen unrelated
-                 names, and a filter that quietly matched on capability would
-                 make an operator believe they had seen every token carrying a
-                 scope when they had only seen the ones whose name mentioned
-                 it. */
+                columns={columns}
+                rowKey={(t) => t.id}
+                noun="tokens"
+                count={TOKENS_COUNT}
+                /*
+                  Selection, rendered by the table: a checkbox column prepended
+                  to the caller's own, with the select-all in its HEADER CELL
+                  rather than beside the search box. It was in the toolbar while
+                  Column.header was typed `string`; that type is now ReactNode
+                  and the control sits above the column it governs, where the
+                  relationship is visible rather than inferred.
+
+                  Select-all here says "all N tokens" plainly, with no "loaded"
+                  qualifier, and that claim is TRUE only because /tokens takes no
+                  `limit`: the client holds every credential in the namespace, so
+                  the count kind is `exact` and DataTable words the label from
+                  it. On a capped list the same control says "loaded". Selecting
+                  rows the client never received is the same dishonesty the count
+                  claims avoid, and neither control is allowed to commit it.
+                */
+                selection={{
+                  selected,
+                  onChange: setSelected,
+                  rowId: (t) => t.id,
+                  /* Only LIVE credentials. A revoked token cannot be revoked
+                     again, so offering it would let the operator build a
+                     selection whose count over-promises what the action will
+                     achieve — and then report failures for rows that were never
+                     candidates. */
+                  isSelectable: (t) => t.revoked_at === null,
+                  label: (t) => t.name,
+                }}
+                /* The name and the role are the haystack. The SCOPES are
+                   deliberately not: "read" is a substring of a dozen unrelated
+                   names, and a filter that quietly matched on capability would
+                   make an operator believe they had seen every token carrying a
+                   scope when they had only seen the ones whose name mentioned
+                   it. */
                 search={{ mode: 'client', fields: (t) => [t.name, t.role] }}
               />
             </>
@@ -497,7 +469,8 @@ function CreateToken({
               required
             />
             <span className="form-hint">
-              Names the integration, so an abandoned credential can be identified later.
+              Names the integration, so an abandoned credential can be
+              identified later.
             </span>
           </label>
           <label className="form-field">
@@ -507,15 +480,18 @@ function CreateToken({
               <option value="admin">admin</option>
               <option value="worker">worker</option>
             </select>
-            <span className="form-hint">The ceiling on what the scopes below can reach.</span>
+            <span className="form-hint">
+              The ceiling on what the scopes below can reach.
+            </span>
           </label>
         </div>
 
         <fieldset className="form-fieldset">
           <legend>scopes</legend>
           <div className="form-hint">
-            Scopes <strong>narrow</strong> the role and never extend it. An action the role
-            does not permit stays refused even if it is ticked here.
+            Scopes <strong>narrow</strong> the role and never extend it. An
+            action the role does not permit stays refused even if it is ticked
+            here.
           </div>
           {SCOPES.map((s) => (
             <label key={s.value} className="form-check">
@@ -532,7 +508,8 @@ function CreateToken({
               is the enforcement point and its refusal is the honest one. */}
           {scopes.length === 0 && (
             <div className="form-hint invalid" role="alert">
-              A token with no scopes can do nothing — the gateway will refuse to create it.
+              A token with no scopes can do nothing — the gateway will refuse to
+              create it.
             </div>
           )}
         </fieldset>
@@ -549,7 +526,7 @@ function CreateToken({
             {/* A never-expiring token is the thing this screen exists to replace,
                 so choosing one reads as a warning. Warning and not danger: it is
                 a deliberate, sometimes-correct choice, not an error. */}
-            <span className={`form-hint${days < 0 ? ' caution' : ''}`}>
+            <span className={`form-hint${days < 0 ? " caution" : ""}`}>
               {days < 0
                 ? 'Never expires — an unbounded credential is what scoped tokens exist to replace. Use only for an integration that genuinely needs it.'
                 : `Expires ${days} days from now.`}

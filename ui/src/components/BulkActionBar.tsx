@@ -35,8 +35,6 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-import './bulkbar.css';
-
 /**
  * The outcome of one row's operation.
  *

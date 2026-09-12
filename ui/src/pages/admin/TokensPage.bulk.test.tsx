@@ -132,9 +132,18 @@ describe('selecting tokens', () => {
     wrap(<TokensPage namespace="default" canAdmin />);
     await screen.findByText('dead');
 
-    const all = await screen.findByRole('checkbox', { name: 'Select all live tokens' });
-    // Two live of three rows: the label must not claim the revoked one.
-    expect(screen.getByText('select all 2 live')).toBeInTheDocument();
+    /*
+      Two live of three rows, and the accessible name carries BOTH the number
+      and its scope. "2" rather than "3" is the eligibility rule: a revoked
+      credential is not selectable, so select-all must not count it.
+
+      "tokens" with no "loaded" qualifier is the honesty rule, and it is true
+      here for a specific reason — /tokens takes no `limit`, so the page passes
+      count `exact` and the client genuinely holds every credential in the
+      namespace. A capped table's control says "loaded" instead; see the
+      schedules and runs tests.
+    */
+    const all = await screen.findByRole('checkbox', { name: 'Select all 2 tokens' });
 
     fireEvent.click(all);
     expect(await screen.findByRole('button', { name: 'Revoke 2 tokens' })).toBeInTheDocument();
@@ -149,7 +158,9 @@ describe('selecting tokens', () => {
 
     // Unchecked would claim "nothing is selected" while the bar below says
     // otherwise, leaving the operator to choose which control to believe.
-    const all = screen.getByRole('checkbox', { name: 'Select all live tokens' }) as HTMLInputElement;
+    const all = screen.getByRole('checkbox', {
+      name: 'Select all 2 tokens',
+    }) as HTMLInputElement;
     await waitFor(() => expect(all.indeterminate).toBe(true));
     expect(all.checked).toBe(false);
   });
@@ -161,7 +172,7 @@ describe('bulk revoking', () => {
     wrap(<TokensPage namespace="default" canAdmin />);
     await screen.findByText('ci-pipeline');
 
-    fireEvent.click(await screen.findByRole('checkbox', { name: 'Select all live tokens' }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Select all 2 tokens' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Revoke 2 tokens' }));
     // Confirmation first: a destructive bulk action that fired on the first
     // click would give no chance to notice a mis-click in the table.

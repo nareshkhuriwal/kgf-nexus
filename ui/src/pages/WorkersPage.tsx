@@ -42,13 +42,17 @@
  * table's toolbar slot would have shrunk it to chip scale beside the count.
  */
 
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useCapacity, useWorkers } from '../api/hooks';
+import { useQueryClient } from '@tanstack/react-query';
+import { qk, useCapacity, useWorkers } from '../api/hooks';
+import { api } from '../api/client';
 import type { Worker } from '../api/types';
 import { PageHeader } from '../components/PageHeader';
 import { StateBadge } from '../components/StateBadge';
 import { CapacityGrid, deriveCapacity } from '../components/CapacityGrid';
 import { AsyncPanel, ErrorBox, Loading, StaleWarning } from '../components/Status';
+import { BulkActionBar } from '../components/BulkActionBar';
 import { DataTable } from '../components/DataTable';
 import type { Column, RowCountKind } from '../components/DataTable';
 import {
@@ -110,9 +114,38 @@ export function heartbeatStale(worker: Worker, now: number): boolean {
 }
 
 export function WorkersPage({ namespace }: { namespace: string }) {
+  const qc = useQueryClient();
   const workers = useWorkers(namespace);
   const capacity = useCapacity(namespace);
   const now = Date.now();
+
+  /**
+   * The selected worker IDS. This list polls every 5s, matching the agent
+   * heartbeat, so ids are the only identity that survives a refetch.
+   */
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+
+  /**
+   * A DEAD worker cannot be drained.
+   *
+   * Draining asks a live agent to stop taking new work; an agent the control
+   * plane has already declared DEAD is not listening, so the request would be
+   * recorded against nothing. Excluding it at the checkbox keeps "Drain 6
+   * workers" from counting a row where the action is meaningless — the same
+   * rule the runs table applies to terminal runs, and the tokens table to
+   * revoked credentials.
+   *
+   * A worker whose heartbeat has merely gone QUIET is still selectable: it is
+   * still ACTIVE as far as the control plane is concerned, draining it is
+   * exactly what an operator suspicious of it would want, and the gateway is
+   * the honest place for that request to fail if the agent is truly gone.
+   */
+  const drainable = (w: Worker) => w.state !== 'DEAD';
+  const list = workers.data ?? [];
+  const selectedWorkers = useMemo(
+    () => list.filter((w) => selected.has(w.id) && drainable(w)),
+    [list, selected],
+  );
 
   /**
    * The fleet columns, rebuilt every render.
@@ -326,10 +359,65 @@ export function WorkersPage({ namespace }: { namespace: string }) {
           loadingRows={4}
         >
           {(list) => (
-            <DataTable
+            <>
+              {/*
+                DRAIN, not delete. A worker row is a LIVE AGENT, not a stored
+                record: deleting it would be meaningless because the agent
+                re-registers on its very next heartbeat, five seconds later, and
+                the row an operator thought they had removed would reappear.
+                Drain is the action that actually changes something — the worker
+                stops taking new work and finishes what it holds.
+
+                NOT destructive, and the flag is deliberately absent rather than
+                false-by-oversight: a drain is undone by the worker's own next
+                heartbeat cycle. A confirmation dialog in front of something
+                reversible is how operators learn to click through the dialogs
+                that matter, so this one asks nothing and simply runs.
+              */}
+              <BulkActionBar<Worker>
+                selected={selectedWorkers}
+                rowId={(w) => w.id}
+                rowLabel={(w) => w.hostname}
+                noun={['worker', 'workers']}
+                actions={[
+                  {
+                    verb: 'Drain',
+                    run: (w) => api.drainWorker(namespace, w.id),
+                  },
+                ]}
+                onClear={() => setSelected(new Set())}
+                onDone={() => {
+                  /* Refetch both: draining removes capacity from the fleet, so
+                     the summary above the table is as stale as the rows are. A
+                     200 means the intent was RECORDED, not that the worker has
+                     drained — the state change arrives on a later heartbeat,
+                     which is another reason not to touch the rows optimistically. */
+                  void qc.invalidateQueries({ queryKey: qk.workers(namespace) });
+                  void qc.invalidateQueries({ queryKey: qk.capacity(namespace) });
+                }}
+              />
+              <DataTable
               rows={list}
               columns={columns}
               rowKey={(w) => w.id}
+              /* Selection. The count kind is `exact` — /workers takes no
+                 `limit`, so the rows ARE the fleet — which is why select-all
+                 here says "all N workers" with no "loaded" qualifier and is
+                 telling the truth. Paging is `none` for the same reason, so
+                 there is no page whose rows could differ from the set the
+                 control covers.
+
+                 Each row's host cell is a <Link> to the worker's detail view.
+                 The checkbox stops click propagation so ticking it selects the
+                 row without navigating away from the table — see DataTable's
+                 selection column. */
+              selection={{
+                selected,
+                onChange: setSelected,
+                rowId: (w) => w.id,
+                isSelectable: drainable,
+                label: (w) => w.hostname,
+              }}
               /* The row's left rule, from the worker's own state tone so it can
                  never disagree with the badge in its first cell. A quiet
                  heartbeat is a warning even while the state still claims ACTIVE
@@ -350,7 +438,8 @@ export function WorkersPage({ namespace }: { namespace: string }) {
                  it is bounded by how many agents an operator runs, not by a
                  namespace's history — and a filter over eight rows hides more
                  than it finds. */
-            />
+              />
+            </>
           )}
         </AsyncPanel>
       </div>

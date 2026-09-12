@@ -538,6 +538,33 @@ export function useSpecDefinition(namespace: string, specId: string) {
 }
 
 /**
+ * Delete a workflow and every version of it.
+ *
+ * retry: false, and here that is not merely the house rule. The gateway refuses
+ * a referenced workflow with a 409 naming the blockers, which `shouldRetry`
+ * would correctly decline to retry anyway — but a 5xx partway through a delete
+ * is exactly the case where a second attempt could land on a half-removed
+ * workflow, so the console asks once and reports what happened.
+ *
+ * Invalidates the catalog under EVERY search term, not just the current one:
+ * the key carries the term (`qk.workflows(ns, search)`), so a targeted
+ * invalidation would leave the operator's other tabs — and their own back
+ * button — showing a workflow that no longer exists. `['workflows', ns]` is the
+ * prefix every one of those keys starts with.
+ */
+export function useDeleteSpec(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api.deleteSpec(namespace, name),
+    onSuccess: (_data, name) => {
+      void qc.invalidateQueries({ queryKey: ['workflows', namespace] });
+      qc.removeQueries({ queryKey: qk.specVersions(namespace, name) });
+    },
+    retry: false,
+  });
+}
+
+/**
  * Submit a run from the catalog.
  *
  * retry is off, as with every other mutation here: a run submission is not

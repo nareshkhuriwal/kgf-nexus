@@ -3754,6 +3754,62 @@ td.dt-end { font-variant-numeric: tabular-nums; }
    of a numeric column hangs at the left of a right-aligned header. */
 th.dt-end .dt-sort { justify-content: flex-end; }
 
+/* ── The selection column ──────────────────────────────────────────────────
+   The checkbox column DataTable prepends when it is given a `selection` prop.
+
+   NO COLOUR AT ALL, and that is the decision worth recording. A selected row is
+   a transient statement about what the OPERATOR is pointing at, not a state of
+   the entity — and the row's colour channels are already spoken for by things
+   that are: .table-runs and .table-fleet paint a left rule from the run's or
+   worker's own tone, and the table restyle spends the remaining luminance on
+   hover (--table-row-hover) and focus (--focus on the same left rule). Tinting
+   a selected row would put a fourth claim into two channels that already carry
+   three, and the first casualty would be the failed-row rule, which is the one
+   an operator is scanning for at 3am. The checkbox IS the indicator; it is a
+   native control with a native checked state that survives a theme swap, a
+   greyscale print and a screen reader, and it needs no help.
+
+   Nothing here is a per-row rule either, for the reason the row-separation
+   block above gives at length: a grid asks the eye to read cells, and this
+   table is read by scanning down a column. */
+.dt-select-cell,
+th:has(> .dt-select-all) {
+  /* The narrowest the padding scale goes on the outer edge: the checkbox is
+     ~13px of control in a cell whose data-column neighbours are set for
+     monospace ids, and the full --space-5 inset either side would spend more
+     width on whitespace than on the control. */
+  padding-left: var(--space-4);
+  padding-right: var(--space-2);
+  /* A checkbox has no baseline worth aligning to, and .table-fleet restates
+     vertical-align: top for its two-line cells — which would hang this one off
+     the top of a tall row. Centred against the row it belongs to, everywhere. */
+  vertical-align: middle;
+  width: 2.5rem;
+}
+
+/* Both checkboxes get the console's focus ring rather than the platform's
+   default outline, so tabbing INTO the table looks like tabbing anywhere else
+   in it. --focus is chrome, not state: it says "the keyboard is here", which is
+   exactly what it says on a row, a sort button and a text field. */
+.dt-select-cell input[type='checkbox'],
+.dt-select-all {
+  /* The control sits on the cell's own ground. accent-color is the one property
+     that tints a native checkbox without replacing it with a div, and it takes
+     --focus for the same reason the ring does: "checked" here is the operator's
+     pointer, not the entity's state, so it must not borrow a --tone-*. */
+  accent-color: var(--focus);
+  cursor: pointer;
+  margin: var(--space-0);
+}
+.dt-select-cell input[type='checkbox']:focus-visible,
+.dt-select-all:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+/* Nothing left to select. Dimmed rather than hidden, so the column does not
+   appear and disappear as rows poll in and out of eligibility. */
+.dt-select-all:disabled { cursor: default; opacity: 0.4; }
+
 /* The pager. Below the rows, inside the panel, on the inset ground so it reads
    as a footer to the table rather than as another row of it. Same padding and
    ground as .dt-toolbar, so the table sits between two matching rails rather
@@ -3819,6 +3875,96 @@ th.dt-end .dt-sort { justify-content: flex-end; }
   .dt-toolbar .spacer,
   .dt-pager .spacer { display: none; }
   .dt-pager-buttons { width: 100%; justify-content: space-between; }
+}
+
+/* ── Bulk action bar ───────────────────────────────────────────────────────
+   The bar that appears above a table when rows are selected.
+
+   THESE RULES WERE IN components/bulkbar.css AND HAVE MOVED HERE. That file
+   existed for one reason, stated in its own header: the bar was built while
+   this stylesheet was being restyled in parallel, and dropping new selectors
+   into the middle of the one sheet every screen depends on would have been a
+   merge conflict rather than a design decision. The restyle has landed, so the
+   isolation has served its purpose and the split is now just a second place to
+   look — which is exactly what dag.css's header argues against. Folded in here,
+   directly under the table it belongs to, because the bar is not an independent
+   component: it is the other half of the selection column above.
+
+   WHAT CHANGED IN THE FOLD, and why. The bar is now coherent with the restyled
+   table rather than merely adjacent to it:
+
+   - It sits on --bg-raised via .panel, the table's own ground, and takes the
+     table's hairline --border rather than floating on an undifferentiated
+     surface. The band above the rows and the rows themselves now read as one
+     object.
+   - HOVER AND FOCUS ARE SEPARATED the same way the rows separate them. The
+     table's rule is that hover is ambient and focus is deliberate, so focus
+     gets the stronger treatment and takes --focus; the bar's buttons inherit
+     the console's global button treatment, which already follows it, and this
+     block adds nothing that would contradict it.
+   - No per-row rules, matching the table: the failure list below is separated
+     by its own gap, not by lines between its items.
+
+   TOKENS ONLY. Every colour resolves through --tone-* or a surface token, so
+   light and dark both follow without a second definition — and the destructive
+   tone is --tone-danger-*, never --accent. --accent is operator-switchable
+   brand; painting a delete confirmation with it would make destruction look
+   like the happy path, and there is a test asserting it does not. */
+.bulk-bar {
+  /* Sticky rather than fixed: it rides above the table it belongs to and
+     scrolls out with the panel, so it never floats over an unrelated screen
+     after the operator has navigated away from the selection. --z-sticky, the
+     same rung the sticky <th> uses, so the two cannot fight: the bar is
+     declared before the table in the DOM and would otherwise be painted under
+     a header that scrolled up to meet it. */
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  padding: var(--space-4) var(--space-5);
+  /* A left rule in the danger tone, matching .errbox's vocabulary and the
+     table's own state rules, so a bar offering a destructive action is
+     recognisable in the same grammar as a failed row before it is read. A
+     hairline measure, so a literal px. */
+  border-left: 3px solid var(--tone-danger-bd);
+}
+
+.bulk-bar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* Wraps rather than overflowing: at phone width the count and the buttons
+     stack instead of the action row being pushed off the edge where it cannot
+     be reached. */
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.bulk-bar-confirm,
+.bulk-bar-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.bulk-count {
+  color: var(--fg);
+  font-size: var(--text-sm);
+}
+
+.bulk-bar-failures {
+  margin: 0;
+  /* Bounded and scrollable: fifty failed rows must not push the table out of
+     view entirely, and an operator needs the table and the report together to
+     act on what failed. */
+  max-height: 12rem;
+  overflow-y: auto;
+  padding-left: var(--space-6);
+  font-size: var(--text-sm);
+  display: flex;
+  flex-direction: column;
+  /* The gap is what separates one failure from the next — no rules between
+     them, the same decision the table rows make and for the same reason. */
+  gap: var(--space-2);
 }
 
 /* ── Command palette: per-group notices ────────────────────────────────────

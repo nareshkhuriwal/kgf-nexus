@@ -296,6 +296,79 @@ export interface RunPage {
 }
 
 /**
+ * What a successful workflow delete removed.
+ *
+ * `versions_deleted` is carried rather than dropped because it is the only
+ * remaining evidence of the size of what was destroyed — deleting a workflow
+ * with nine versions and one with a single version are different acts, and
+ * afterwards nothing can tell them apart.
+ */
+export interface SpecDeletion {
+  namespace: string;
+  name: string;
+  versions_deleted: number;
+  deleted: true;
+}
+
+/**
+ * Turns a 409 `workflow_referenced` body into the sentence an operator acts on.
+ *
+ * The gateway names the blockers — `referencing_runs` as a count,
+ * `referencing_schedules` as names — and the whole value of the refusal is
+ * those two numbers: they say whether this is fixable (delete the schedule
+ * first) or final (the run history is immutable and the workflow stays). A
+ * message that said only "workflow is still referenced" would be a correct
+ * refusal rendered useless, and in a bulk delete of ten it would be ten
+ * identical useless lines.
+ *
+ * The schedules are NAMED, up to a few, rather than counted: "still referenced
+ * by nightly-etl" is a destination, "still referenced by 1 schedule" is a
+ * second search. Beyond three the list is elided, because a failure line in a
+ * bounded report must stay one line.
+ *
+ * Falls back to the server's own message whenever the counts are absent — the
+ * handler omits them when it cannot re-read the blockers, and it says so: the
+ * REFUSAL is the answer, and a less detailed 409 beats turning it into a 500.
+ */
+function specReferencedMessage(e: ApiError): string {
+  let runs: number | undefined;
+  let schedules: string[] = [];
+  let message = e.message;
+  try {
+    const parsed = JSON.parse(e.body) as {
+      message?: string;
+      referencing_runs?: unknown;
+      referencing_schedules?: unknown;
+    };
+    if (typeof parsed.message === 'string' && parsed.message) message = parsed.message;
+    if (typeof parsed.referencing_runs === 'number') runs = parsed.referencing_runs;
+    if (Array.isArray(parsed.referencing_schedules)) {
+      schedules = parsed.referencing_schedules.filter((s): s is string => typeof s === 'string');
+    }
+  } catch {
+    /* Not JSON, or not the shape documented: the server's message stands. */
+  }
+
+  const blockers: string[] = [];
+  // Only non-zero blockers are named. "0 runs" in a refusal reads as a
+  // contradiction and sends the operator looking for the real reason.
+  if (runs !== undefined && runs > 0) {
+    blockers.push(`${runs} run${runs === 1 ? '' : 's'}`);
+  }
+  if (schedules.length > 0) {
+    const named = schedules.slice(0, 3).join(', ');
+    const rest = schedules.length - 3;
+    blockers.push(
+      `${schedules.length} schedule${schedules.length === 1 ? '' : 's'} (${named}${
+        rest > 0 ? `, +${rest} more` : ''
+      })`,
+    );
+  }
+  if (blockers.length === 0) return message;
+  return `still referenced by ${blockers.join(' and ')} — delete those first, or the workflow stays`;
+}
+
+/**
  * Triage query knobs. The three windows are Go duration strings on the wire
  * ("15m", "1h") and are passed through untouched: the gateway owns the defaults
  * and the parsing, and a console that pre-formatted them would drift from it.
@@ -640,6 +713,61 @@ export const api = {
     // Name order. A catalog is scanned for a name already in mind, and the
     // gateway does not promise an order -- same reasoning as the schedule list.
     return [...rows].sort((a, b) => a.name.localeCompare(b.name));
+  },
+
+  /**
+   * Delete a workflow and every version of it.
+   *
+   * admin_write, and 200-with-a-count rather than 204: `versions_deleted` is
+   * the only remaining evidence of how much was destroyed, and the gateway
+   * declines to throw it away. This client returns it for the same reason.
+   *
+   * ── THE 409 IS THE INTERESTING CASE, AND IT IS WHY THIS METHOD IS NOT
+   *    THREE LINES LIKE deleteSchedule ──────────────────────────────────────
+   *
+   * A workflow with run history or a live schedule pointing at it CANNOT be
+   * deleted, and the gateway refuses with `workflow_referenced` plus the
+   * blockers: `referencing_runs` (a count) and `referencing_schedules` (names).
+   * That refusal is not a failure of the platform — it is the answer — and the
+   * operator's next action depends entirely on WHICH blocker it is: a schedule
+   * can be deleted first, run history cannot and means the workflow stays.
+   *
+   * The generic error path would lose that. `serverMessage` lifts only
+   * `message` out of an error body, so a bulk delete of ten workflows where
+   * three are referenced would report three identical sentences with no way to
+   * tell which one is blocked by what — and the operator would go back to the
+   * table to work it out, which is the report that gets ignored. So the
+   * blockers are folded INTO the message here, at the one place that knows the
+   * shape of this particular body, and everything downstream (runBulk's
+   * per-row `error`, the bulk bar's failure list, an ErrorBox on a detail page)
+   * renders an operator-readable reason with no special casing of its own.
+   */
+  async deleteSpec(namespace: string, name: string): Promise<SpecDeletion> {
+    try {
+      const payload = await request<Partial<SpecDeletion>>(
+        `${ns(namespace)}/specs/${encodeURIComponent(name)}`,
+        { method: 'DELETE' },
+      );
+      return {
+        namespace,
+        name,
+        // Defaulted rather than trusted: a gateway that answered 204, or one
+        // predating the count, must not surface "undefined versions deleted".
+        versions_deleted: typeof payload?.versions_deleted === 'number'
+          ? payload.versions_deleted
+          : 0,
+        deleted: true,
+      };
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        throw new ApiError(specReferencedMessage(e), {
+          status: e.status,
+          url: e.url,
+          body: e.body,
+        });
+      }
+      throw e;
+    }
   },
 
   /** Version history for one workflow name, newest first. */

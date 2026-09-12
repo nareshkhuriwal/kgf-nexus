@@ -25,6 +25,7 @@
  */
 
 import { fireEvent, render, screen, within } from '@testing-library/react';
+import { useState } from 'react';
 import { describe, expect, it } from 'vitest';
 import { DataTable } from './DataTable';
 import type { Column } from './DataTable';
@@ -561,5 +562,305 @@ describe('table semantics', () => {
     expect(document.querySelector('.dt-search-group')).toBeNull();
     // The count is still disclosed, which is why the toolbar is unconditional.
     expect(chip()).toHaveTextContent('2');
+  });
+});
+
+/**
+ * Row selection.
+ *
+ * What is pinned here is, again, the HONESTY plus the two traps that fail
+ * SILENTLY — the ones that produce a wrong UI rather than a broken one:
+ *
+ *   - select-all covers the rows the client actually HAS, and the control's
+ *     accessible name says which rows those are. A capped or paged fetch says
+ *     "loaded"; only an uncapped one may say the bare noun.
+ *   - `indeterminate` is a DOM property with no HTML attribute behind it, so a
+ *     JSX prop would be dropped in silence and the header would render
+ *     plain-unchecked while rows were selected — claiming "nothing is selected"
+ *     next to a bulk bar saying otherwise.
+ *   - an ineligible row gets no checkbox, so a selection can never over-promise
+ *     what the action will achieve.
+ *   - a checkbox inside a row that is also a link must not navigate.
+ */
+describe('selection', () => {
+  /** Renders a selectable table whose selection is held the way a page holds it. */
+  function Selectable({
+    rowData,
+    isSelectable,
+    count,
+    search,
+    onSelect,
+  }: {
+    rowData: Row[];
+    isSelectable?: (r: Row) => boolean;
+    count?: Parameters<typeof DataTable<Row>>[0]['count'];
+    search?: Parameters<typeof DataTable<Row>>[0]['search'];
+    onSelect?: (next: ReadonlySet<string>) => void;
+  }) {
+    const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+    return (
+      <DataTable
+        rows={rowData}
+        columns={columns}
+        rowKey={(r) => r.id}
+        noun="things"
+        count={count}
+        search={search}
+        selection={{
+          selected,
+          onChange: (next) => {
+            onSelect?.(next);
+            setSelected(next);
+          },
+          rowId: (r) => r.id,
+          isSelectable,
+          label: (r) => r.name,
+        }}
+      />
+    );
+  }
+
+  function selectAll(): HTMLInputElement {
+    return document.querySelector('.dt-select-all')!;
+  }
+
+  it('renders no selection column at all when no selection prop is given', () => {
+    table(rows(3));
+    expect(document.querySelectorAll('input[type=checkbox]')).toHaveLength(0);
+    // Every existing caller keeps its own column count, untouched.
+    expect(document.querySelectorAll('thead th')).toHaveLength(columns.length);
+  });
+
+  it('prepends one checkbox column rather than making the caller declare it', () => {
+    render(<Selectable rowData={rows(3)} />);
+    expect(document.querySelectorAll('thead th')).toHaveLength(columns.length + 1);
+    // One per row, plus the select-all in the header.
+    expect(screen.getAllByRole('checkbox')).toHaveLength(4);
+  });
+
+  it('names every row checkbox after the row, not "select row"', () => {
+    render(<Selectable rowData={rows(2)} />);
+    expect(screen.getByRole('checkbox', { name: 'Select row-001' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Select row-002' })).toBeInTheDocument();
+  });
+
+  /**
+   * THE HONESTY RULE, in the place an operator actually meets it.
+   *
+   * A capped fetch means the client holds a page, so the control must say
+   * "loaded" — it cannot select rows it never received, and a bare "Select all"
+   * would be claiming authority over them.
+   */
+  it('says "loaded" in select-all when the fetch was capped', () => {
+    render(<Selectable rowData={rows(5)} count={{ kind: 'capped', limit: 5 }} />);
+    expect(
+      screen.getByRole('checkbox', { name: 'Select all 5 loaded things' }),
+    ).toBeInTheDocument();
+  });
+
+  it('says "loaded" in select-all when no total is knowable', () => {
+    render(<Selectable rowData={rows(4)} count={{ kind: 'unknown' }} />);
+    expect(
+      screen.getByRole('checkbox', { name: 'Select all 4 loaded things' }),
+    ).toBeInTheDocument();
+  });
+
+  /** Only an uncapped endpoint may drop the qualifier, because only it is telling the truth. */
+  it('drops the qualifier only when the endpoint returned everything', () => {
+    render(<Selectable rowData={rows(3)} count={{ kind: 'exact' }} />);
+    expect(screen.getByRole('checkbox', { name: 'Select all 3 things' })).toBeInTheDocument();
+  });
+
+  it('selects only the rows the client holds, never a page beyond them', () => {
+    const seen: ReadonlySet<string>[] = [];
+    render(
+      <Selectable
+        rowData={rows(60)}
+        count={{ kind: 'capped', limit: 60 }}
+        onSelect={(n) => seen.push(n)}
+      />,
+    );
+
+    // 60 rows loaded, 25 on the page. Select-all takes all 60 — the filtered
+    // set in hand, not the visible slice — and emphatically not more.
+    fireEvent.click(selectAll());
+    expect(seen[0]!.size).toBe(60);
+  });
+
+  it('offers no control that reaches beyond the loaded rows', () => {
+    render(<Selectable rowData={rows(60)} count={{ kind: 'capped', limit: 60 }} />);
+    // There is deliberately no "select all N across all pages" affordance: the
+    // client cannot select what it never received.
+    expect(screen.queryByText(/across all pages/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/all \d+ matching in the namespace/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * THE INDETERMINATE TRAP. Setting it as a JSX prop does nothing; this asserts
+   * the property on the live node, which is the only place the state exists.
+   */
+  it('renders the header checkbox indeterminate when only some rows are selected', () => {
+    render(<Selectable rowData={rows(3)} />);
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select row-002' }));
+
+    const all = selectAll();
+    expect(all.indeterminate).toBe(true);
+    // Unchecked AND indeterminate: "some", which is a different claim from
+    // "none" and must not be collapsed into it.
+    expect(all.checked).toBe(false);
+  });
+
+  it('is checked and not indeterminate once every selectable row is selected', () => {
+    render(<Selectable rowData={rows(2)} />);
+    fireEvent.click(selectAll());
+
+    const all = selectAll();
+    expect(all.checked).toBe(true);
+    expect(all.indeterminate).toBe(false);
+  });
+
+  it('is neither checked nor indeterminate when nothing is selected', () => {
+    render(<Selectable rowData={rows(2)} />);
+    const all = selectAll();
+    expect(all.checked).toBe(false);
+    expect(all.indeterminate).toBe(false);
+  });
+
+  /**
+   * An ineligible row gets NO checkbox — not a disabled one. Selecting it would
+   * let the count over-promise what the action can achieve, and then report a
+   * failure for a row that was never a candidate.
+   */
+  it('excludes ineligible rows from selection entirely', () => {
+    render(<Selectable rowData={rows(3)} isSelectable={(r) => r.name !== 'row-002'} />);
+
+    expect(screen.queryByRole('checkbox', { name: 'Select row-002' })).not.toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Select row-001' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Select row-003' })).toBeInTheDocument();
+  });
+
+  it('counts only the eligible rows in the select-all claim', () => {
+    const seen: ReadonlySet<string>[] = [];
+    render(
+      <Selectable
+        rowData={rows(4)}
+        count={{ kind: 'exact' }}
+        isSelectable={(r) => r.name !== 'row-002'}
+        onSelect={(n) => seen.push(n)}
+      />,
+    );
+
+    // Three of four rows are eligible, and the label says three.
+    const all = screen.getByRole('checkbox', { name: 'Select all 3 things' });
+    fireEvent.click(all);
+    expect(seen[0]!.size).toBe(3);
+    expect(seen[0]!.has('r1')).toBe(false);
+  });
+
+  it('disables select-all when no row can be selected', () => {
+    render(<Selectable rowData={rows(2)} isSelectable={() => false} />);
+    expect(selectAll()).toBeDisabled();
+  });
+
+  /**
+   * SELECTION DOES NOT SURVIVE A FILTER CHANGE.
+   *
+   * Carrying ids across a filter means the bar can say "3 selected" over a table
+   * that does not contain those three — and the operator then presses a
+   * destructive button against rows they cannot see. Re-selecting costs clicks;
+   * deleting unseen rows costs a restore.
+   */
+  it('clears the selection when the filter changes', () => {
+    render(
+      <Selectable
+        rowData={rows(5)}
+        search={{ mode: 'client', fields: (r) => [r.name] }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select row-001' }));
+    expect((screen.getByRole('checkbox', { name: 'Select row-001' }) as HTMLInputElement).checked)
+      .toBe(true);
+
+    fireEvent.change(screen.getByLabelText('filter the loaded things'), {
+      target: { value: 'row-00' },
+    });
+
+    // Every box is clear again: the selection belonged to the previous view.
+    const boxes = screen
+      .getAllByRole('checkbox')
+      .filter((b) => b !== selectAll()) as HTMLInputElement[];
+    expect(boxes.every((b) => !b.checked)).toBe(true);
+  });
+
+  /**
+   * A SORT is not a filter. It shows the same rows in a different order, so
+   * every selected row is still on screen and still means what it meant.
+   */
+  it('keeps the selection across a sort, which reorders rather than replaces', () => {
+    render(<Selectable rowData={rows(3)} />);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select row-001' }));
+
+    fireEvent.click(screen.getByRole('button', { name: /name/ }));
+
+    expect(
+      (screen.getByRole('checkbox', { name: 'Select row-001' }) as HTMLInputElement).checked,
+    ).toBe(true);
+  });
+
+  /**
+   * A checkbox inside a row that is ALSO a link is a known trap: the click
+   * bubbles to the row and the operator is navigated away from the table they
+   * were selecting in.
+   */
+  it('does not trigger the row’s link when the checkbox is clicked', () => {
+    let navigations = 0;
+    const linked: Column<Row>[] = [
+      {
+        key: 'name',
+        header: 'name',
+        cell: (r) => (
+          <a href={`/things/${r.id}`} onClick={() => (navigations += 1)}>
+            {r.name}
+          </a>
+        ),
+      },
+    ];
+
+    function Linked() {
+      const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+      return (
+        <DataTable
+          rows={rows(2)}
+          columns={linked}
+          rowKey={(r) => r.id}
+          noun="things"
+          selection={{
+            selected,
+            onChange: setSelected,
+            rowId: (r) => r.id,
+            label: (r) => r.name,
+          }}
+        />
+      );
+    }
+    render(<Linked />);
+
+    const box = screen.getByRole('checkbox', { name: 'Select row-001' }) as HTMLInputElement;
+    fireEvent.click(box);
+
+    // The row was selected and nothing navigated.
+    expect(box.checked).toBe(true);
+    expect(navigations).toBe(0);
+  });
+
+  /** Native checkboxes, so Tab and Space work with no extra code. */
+  it('uses real checkbox inputs rather than styled divs', () => {
+    render(<Selectable rowData={rows(2)} />);
+    for (const box of screen.getAllByRole('checkbox')) {
+      expect(box.tagName).toBe('INPUT');
+      expect(box).toHaveAttribute('type', 'checkbox');
+    }
   });
 });
