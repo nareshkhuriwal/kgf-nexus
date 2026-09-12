@@ -1324,3 +1324,123 @@ The mixed-version *allocator* hazard that used to accompany 0002 is genuinely go
 an old replica allocating `max(seq)+1` beside a new one allocating from `event_seq`
 would have reintroduced F7's collision, and F67 removed the last `max(seq)+1`
 allocator from the tree.
+
+### F69. Scaling the scheduler added no dispatch capacity — FIXED
+**Severity:** high. A documented operation was a no-op.
+The compose file tells operators exactly this:
+
+```
+# Correctness comes from the atomic claim (§5.3), not leader election, so
+# replicas can be scaled up freely: `docker compose up --scale scheduler=3`.
+```
+
+Correctness-wise that is true, and the criterion-3 test confirms it. Capacity-wise
+it was false: `--scale scheduler=3` produced three replicas of which ONE did all
+the work.
+
+```
+replica nexus-scheduler-1  claimed 576 attempts
+replica nexus-scheduler-2  claimed 0
+replica nexus-scheduler-3  claimed 0
+```
+
+Two things combine. gRPC defaults to `pick_first`, so the gateway's connection to
+`scheduler:9090` binds ONE address and stays there — no load-balancing policy was
+set anywhere in the codebase. And a scheduler's background dispatch loop is
+disabled when no notifier is configured (the compose default), which the replica
+says on startup:
+
+```
+push dispatch disabled: no notifier configured, so workers are served
+exclusively by ClaimForWorker
+loop stopped  loop=dispatch
+```
+
+So worker polls arriving over that pinned connection are the ONLY way a replica
+ever dispatches. Pin the connection and the other replicas have no path to work
+at all.
+
+Load did eventually spread, which is what made this easy to miss: `MaxConnectionAge`
+(60s) forces a reconnect and each reconnect re-resolves DNS, so over minutes the
+claims drifted across replicas. Balance was a side effect of connection rotation,
+not a property of the design — and on any run shorter than the rotation window,
+scaling bought nothing.
+
+Fixed with `round_robin` in `PeerDialOptions`, so it applies to every
+control-plane peer rather than the scheduler alone. Same fleet, after:
+
+```
+replica nexus-scheduler-1  claimed 365 attempts
+replica nexus-scheduler-3  claimed  89
+replica nexus-scheduler-2  claimed  53
+```
+
+**Worth noting:** this composes with the `MaxConnectionAge` design above it rather
+than replacing it. That mechanism exists so a client re-resolves after an address
+SWAP; round_robin is about using every address a name currently resolves to. Both
+are needed, for different failures.
+
+### F70. Criterion 3: two schedulers never double-dispatch under load — DONE
+`TestSchedulerReplicasNeverDoubleDispatchUnderLoad` in `tests/chaos`.
+
+`TestConcurrentSchedulersNeverDoubleDispatch` already proved the claim
+transaction is safe, and proves it harder in some ways — 8 concurrent claimers,
+deliberate over-subscription, three cross-checked ledgers. The gap is what it
+cannot reach: it runs 8 goroutines in ONE process against `store.Claim`, the
+background dispatch loop. The fleet does not dispatch that way. Real work arrives
+through `ClaimForWorker`, from separate scheduler PROCESSES with separate
+connection pools, over gRPC through the gateway. Different code path (which had
+no integration coverage at all until F61) and a different concurrency model —
+and "no leader election is needed" is a claim about processes, not goroutines.
+
+The new test asserts the same invariant one layer out: real replicas, the real
+poll path, 8 concurrent 24-wide storms, assertions read from the database rather
+than from any replica's own accounting — which is precisely what a
+double-dispatch bug would corrupt.
+
+Result over 15 storm runs / 397 attempts: zero attempts dispatched twice, zero
+over-commit, no ledger drift, no orphaned reservations.
+
+**Two things the test needed before it proved anything**, both worth recording
+because each version passed while testing less than it appeared to:
+
+1. *Sampling only after the runs finish is nearly vacuous.* Leases are DELETED as
+   attempts complete, so by the time every run is terminal the table is almost
+   empty and "no attempt holds two leases" asks a question of one row. A watcher
+   now samples the ledger every 100ms DURING the storms, and the test fails if
+   peak concurrent leases never exceeded 1 — i.e. if the storms never actually
+   overlapped.
+
+2. *Counting `scheduler-gpu` as an active replica hid F69.* It drains a different
+   queue and always claims a little, so "at least 2 replicas competed" passed
+   with every default-queue replica but one sitting idle — the exact condition
+   the assertion exists to detect. It now counts only `scheduler` replicas, and
+   fails with an explanation naming pick_first.
+
+The test scales the schedulers itself rather than skipping when the stack runs
+the default single replica: a concurrency test that quietly skips when the
+environment is not prepared is a test that never runs, and this is the one
+criterion whose entire subject is having more than one of something.
+
+Verified by reverting F69: the test fails with `576/0/0` and names the cause.
+
+---
+
+## Phase 1 exit criteria — all three met
+
+*Architecture §11: "a 10-node DAG with mixed CPU/GPU tasks completes correctly;
+killing a worker mid-run yields exactly one logical effect per task; two
+schedulers never double-dispatch under load."*
+
+| # | Criterion | Evidence |
+|---|---|---|
+| 1 | 10-node mixed CPU/GPU DAG completes | `ten-node-mixed` SUCCEEDED, all 10 nodes, 36s, default stack (F63/F64/F65/F66) |
+| 2 | Killing a worker yields exactly one logical effect | `make chaos`: `slow effects=1 executions=2` after SIGKILL (F67/F68) |
+| 3 | Two schedulers never double-dispatch under load | 15 storms / 397 attempts, 3 replicas, zero duplicates (F69/F70) |
+
+Criteria 2 and 3 are pinned by `tests/chaos`, which runs on the real compose
+stack under its own build tag. Criterion 1 has no automated equivalent — it is a
+`make submit-example` away, and the four defects that blocked it were all found
+by running it by hand. **Running the examples in CI, not merely submitting them,
+is the single highest-value thing left undone here.**
+

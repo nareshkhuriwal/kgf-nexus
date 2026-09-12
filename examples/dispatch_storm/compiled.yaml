@@ -1,0 +1,1194 @@
+# A workflow built to create dispatch contention.
+#
+# Phase 1 exit criterion 3 is "two schedulers never double-dispatch under load".
+# Proving that needs load of a specific shape: many attempts becoming eligible
+# at the SAME INSTANT, competing for capacity that is deliberately scarcer than
+# demand. A deep chain would serialise and never contend; a wide fan-out of
+# short tasks puts every replica on the same rows simultaneously.
+#
+# The tasks do almost nothing (a sub-second echo) on purpose. Long tasks would
+# spend the run idle-waiting rather than dispatching, and dispatch is the thing
+# under test. Short tasks also RECYCLE capacity fast, which keeps the claim path
+# hot for the whole run instead of saturating once and going quiet -- the
+# limitation of the in-process test this one exists to close.
+api_version: nexus.dev/v1
+name: dispatch-storm
+namespace: default
+description: A wide fan-out that makes scheduler replicas race for the same attempts.
+# High, because the harness runs several of these CONCURRENTLY to sustain
+# pressure. The cap exists to protect a namespace, not this test.
+max_active_runs: 64
+run_timeout_ms: 600000
+params: {}
+labels: {}
+
+edges:
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w00
+- from_node_id: w00
+  output_to_input:
+    up00: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w01
+- from_node_id: w01
+  output_to_input:
+    up01: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w02
+- from_node_id: w02
+  output_to_input:
+    up02: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w03
+- from_node_id: w03
+  output_to_input:
+    up03: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w04
+- from_node_id: w04
+  output_to_input:
+    up04: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w05
+- from_node_id: w05
+  output_to_input:
+    up05: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w06
+- from_node_id: w06
+  output_to_input:
+    up06: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w07
+- from_node_id: w07
+  output_to_input:
+    up07: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w08
+- from_node_id: w08
+  output_to_input:
+    up08: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w09
+- from_node_id: w09
+  output_to_input:
+    up09: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w10
+- from_node_id: w10
+  output_to_input:
+    up10: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w11
+- from_node_id: w11
+  output_to_input:
+    up11: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w12
+- from_node_id: w12
+  output_to_input:
+    up12: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w13
+- from_node_id: w13
+  output_to_input:
+    up13: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w14
+- from_node_id: w14
+  output_to_input:
+    up14: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w15
+- from_node_id: w15
+  output_to_input:
+    up15: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w16
+- from_node_id: w16
+  output_to_input:
+    up16: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w17
+- from_node_id: w17
+  output_to_input:
+    up17: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w18
+- from_node_id: w18
+  output_to_input:
+    up18: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w19
+- from_node_id: w19
+  output_to_input:
+    up19: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w20
+- from_node_id: w20
+  output_to_input:
+    up20: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w21
+- from_node_id: w21
+  output_to_input:
+    up21: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w22
+- from_node_id: w22
+  output_to_input:
+    up22: result
+  to_node_id: fan_in
+- from_node_id: fan_out
+  output_to_input:
+    upstream: result
+  to_node_id: w23
+- from_node_id: w23
+  output_to_input:
+    up23: result
+  to_node_id: fan_in
+
+tasks:
+- id: fan_out
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.fan_out
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo storm-start'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w00
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w00
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w00'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w01
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w01
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w01'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w02
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w02
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w02'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w03
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w03
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w03'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w04
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w04
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w04'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w05
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w05
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w05'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w06
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w06
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w06'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w07
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w07
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w07'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w08
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w08
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w08'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w09
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w09
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w09'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w10
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w10
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w10'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w11
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w11
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w11'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w12
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w12
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w12'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w13
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w13
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w13'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w14
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w14
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w14'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w15
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w15
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w15'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w16
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w16
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w16'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w17
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w17
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w17'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w18
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w18
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w18'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w19
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w19
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w19'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w20
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w20
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w20'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w21
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w21
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w21'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w22
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w22
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w22'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: w23
+  inputs:
+    upstream:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.w23
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo w23'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+- id: fan_in
+  inputs:
+    up00:
+      required: false
+      type: json
+    up01:
+      required: false
+      type: json
+    up02:
+      required: false
+      type: json
+    up03:
+      required: false
+      type: json
+    up04:
+      required: false
+      type: json
+    up05:
+      required: false
+      type: json
+    up06:
+      required: false
+      type: json
+    up07:
+      required: false
+      type: json
+    up08:
+      required: false
+      type: json
+    up09:
+      required: false
+      type: json
+    up10:
+      required: false
+      type: json
+    up11:
+      required: false
+      type: json
+    up12:
+      required: false
+      type: json
+    up13:
+      required: false
+      type: json
+    up14:
+      required: false
+      type: json
+    up15:
+      required: false
+      type: json
+    up16:
+      required: false
+      type: json
+    up17:
+      required: false
+      type: json
+    up18:
+      required: false
+      type: json
+    up19:
+      required: false
+      type: json
+    up20:
+      required: false
+      type: json
+    up21:
+      required: false
+      type: json
+    up22:
+      required: false
+      type: json
+    up23:
+      required: false
+      type: json
+  outputs:
+    result:
+      required: false
+      type: json
+  queue: default
+  task_ref: storm.fan_in
+  version: 1
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  runtime:
+    executor: subprocess
+    command:
+    - sh
+    - -c
+    args:
+    - 'echo storm-end'
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 67108864
+  retry:
+    max_attempts: 3
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    initial_ms: 1000
+    multiplier: 2
+    max_ms: 10000
+    jitter: full
+  timeouts:
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000

@@ -495,3 +495,333 @@ func orphanedReservations(t *testing.T) int {
 		  WHERE a.state IN ('SUCCEEDED','FAILED','CANCELLED','LOST','TIMED_OUT')`))
 	return n
 }
+
+// TestSchedulerReplicasNeverDoubleDispatchUnderLoad is Phase 1 exit criterion 3.
+//
+// TestConcurrentSchedulersNeverDoubleDispatch in services/scheduler already
+// proves the claim transaction is safe, and proves it harder than this does: 8
+// concurrent claimers, deliberate over-subscription, three cross-checked
+// ledgers. This test exists because of what that one cannot reach.
+//
+// It runs 8 goroutines in ONE process against store.Claim -- the background
+// dispatch loop. The fleet does not dispatch that way. Real work arrives through
+// ClaimForWorker, from separate scheduler PROCESSES with separate connection
+// pools, reached over gRPC through the gateway. Those are different code paths
+// (ClaimForWorker pins the worker and had no integration coverage at all until
+// F61) and a different concurrency model, and "no leader election is needed"
+// is a claim about processes, not goroutines.
+//
+// So this asserts the same invariant one layer out: real replicas, the real
+// poll path, sustained load, and the assertions read from the database rather
+// than from what any replica believes -- because a replica's own accounting is
+// exactly what a double-dispatch bug would corrupt.
+func TestSchedulerReplicasNeverDoubleDispatchUnderLoad(t *testing.T) {
+	requireStack(t)
+
+	// Scale up if the stack is running the default single replica. Doing it here
+	// rather than skipping matters: a concurrency test that quietly skips when
+	// the environment is not set up is a test that never runs, and this is the
+	// one criterion whose whole subject is having more than one of something.
+	replicas := runningReplicas(t, "scheduler")
+	if replicas < 2 {
+		t.Logf("only %d scheduler replica running; scaling to %d", replicas, wantReplicas)
+		if _, err := composeOut(t, "up", "-d", "--scale",
+			fmt.Sprintf("scheduler=%d", wantReplicas), "scheduler"); err != nil {
+			t.Skipf("could not scale schedulers (%v); "+
+				"start them with `docker compose -f deploy/docker-compose.yml up -d --scale scheduler=%d scheduler`",
+				err, wantReplicas)
+		}
+		waitForReplicas(t, "scheduler", wantReplicas)
+		replicas = runningReplicas(t, "scheduler")
+	}
+	if replicas < 2 {
+		t.Skipf("only %d scheduler replica available; two are needed to race", replicas)
+	}
+	t.Logf("%d scheduler replicas are running", replicas)
+
+	// Several storms at once. One is not enough: its 24-wide fan-out saturates
+	// the fleet in a single burst and then waits, so the claim path goes quiet
+	// exactly when the test wants it hot. Overlapping runs keep attempts becoming
+	// eligible while others are completing and releasing capacity, which is the
+	// state where a claim race is actually possible.
+	const storms = 8
+	var runIDs []string
+	for i := 0; i < storms; i++ {
+		runIDs = append(runIDs, createRun(t, "dispatch-storm"))
+	}
+	t.Logf("created %d concurrent dispatch storms", storms)
+
+	// Sample the ledger WHILE the storms run, not only after.
+	//
+	// The post-hoc checks below are necessary but not sufficient on their own:
+	// leases are deleted as attempts complete, so by the time every run is
+	// terminal the leases table is nearly empty and "no attempt holds two
+	// leases" is close to vacuous. A transient double-dispatch or over-commit
+	// would appear and be cleaned up entirely between the storm and the
+	// assertion. This watcher is what actually looks at the fleet under load.
+	stop := make(chan struct{})
+	watcherDone := make(chan struct{})
+	var peakLeases, samples int
+	go func() {
+		defer close(watcherDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			samples++
+			if n := liveDuplicateLeases(t); n != 0 {
+				t.Errorf("while under load, %d attempts held more than one lease", n)
+			}
+			if n := liveOverCommittedWorkers(t); n != 0 {
+				t.Errorf("while under load, %d workers were over-committed", n)
+			}
+			if n := liveLeaseCount(t); n > peakLeases {
+				peakLeases = n
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
+	for _, id := range runIDs {
+		if state := waitForTerminalRun(t, id); state != "SUCCEEDED" {
+			t.Errorf("run %s reached %s, want SUCCEEDED", id, state)
+		}
+	}
+	close(stop)
+	<-watcherDone
+	t.Logf("sampled the ledger %d times under load; peak concurrent leases %d", samples, peakLeases)
+
+	// A peak of one lease means the storms never actually overlapped and the
+	// fleet was never concurrently loaded, so nothing raced.
+	if peakLeases < 2 {
+		t.Errorf("peak concurrent leases was %d: the storms did not overlap, "+
+			"so no two dispatches were ever in flight at once", peakLeases)
+	}
+
+	// ── Guarantee 1: no attempt was ever dispatched twice. ────────────────
+	// UNIQUE(attempt_id) on leases is the enforcement, so a duplicate cannot
+	// normally persist -- which is precisely why the interesting evidence is
+	// counted from the database rather than trusted from a replica.
+	if n := attemptsWithMultipleLeases(t, runIDs); n != 0 {
+		t.Errorf("%d attempts hold more than one lease: two replicas dispatched the same work", n)
+	}
+
+	// A second dispatch of an already-dispatched attempt would show up as a
+	// second AttemptDispatched event even where the lease constraint stopped the
+	// write, so this catches the race the constraint merely survived.
+	if dupes := attemptsDispatchedTwice(t, runIDs); len(dupes) != 0 {
+		t.Errorf("%d attempts recorded more than one dispatch event: %v", len(dupes), dupes)
+	}
+
+	// ── Guarantee 2: the capacity ledger is exact. ────────────────────────
+	// Over-commit is the other half of the claim's job and it fails silently:
+	// a fleet that over-commits still completes every run, just by running more
+	// work than it has capacity for.
+	for _, w := range workerLedger(t) {
+		if w.CommittedCPU > w.CapacityCPU {
+			t.Errorf("worker %s OVER-COMMITTED: committed %d > capacity %d millicores",
+				w.ID, w.CommittedCPU, w.CapacityCPU)
+		}
+		// Every run has finished, so every reservation should have been
+		// released. A non-zero balance here is a leak that would accumulate
+		// across runs until the worker looked full while doing nothing.
+		if w.CommittedCPU != w.ReservedCPU {
+			t.Errorf("worker %s ledger drift: committed %d, reservations sum to %d",
+				w.ID, w.CommittedCPU, w.ReservedCPU)
+		}
+	}
+	if n := orphanedReservations(t); n != 0 {
+		t.Errorf("%d reservations outlived their terminal attempts", n)
+	}
+
+	// ── The load was real. ────────────────────────────────────────────────
+	// Without this the test could pass having dispatched nothing concurrently,
+	// which is the failure mode of every concurrency test that stops asserting
+	// too early.
+	claims := claimsPerReplica(t)
+	var active, total int
+	for name, n := range claims {
+		t.Logf("replica %-22s claimed %d attempts", name, n)
+		total += n
+		// Count only replicas of the `scheduler` service. scheduler-gpu drains a
+		// different queue and always claims a little, so including it let this
+		// assertion pass with every default-queue replica but one sitting idle --
+		// which is the exact condition it exists to detect.
+		if n > 0 && isDefaultQueueReplica(name) {
+			active++
+		}
+	}
+	if total == 0 {
+		t.Fatal("no replica logged a single claim; the load never reached the schedulers")
+	}
+	if active < 2 {
+		t.Errorf("only %d default-queue replica dispatched anything, so no two replicas ever "+
+			"competed and the guarantee under test was never exercised. A pinned client "+
+			"connection does this: gRPC's default pick_first sends every poll to one replica, "+
+			"and the scheduler's background dispatch loop is off when no notifier is "+
+			"configured, so the others have no other way to get work", active)
+	}
+}
+
+// isDefaultQueueReplica distinguishes `scheduler` containers from
+// `scheduler-gpu`, which is a separate service on its own queue.
+func isDefaultQueueReplica(container string) bool {
+	return strings.HasPrefix(container, "nexus-scheduler-") &&
+		!strings.Contains(container, "-gpu-")
+}
+
+// liveDuplicateLeases counts attempts holding more than one lease RIGHT NOW,
+// across the whole fleet rather than one run: a double-dispatch caused by these
+// storms could land on any attempt the fleet is running.
+func liveDuplicateLeases(t *testing.T) int {
+	t.Helper()
+	n, _ := strconv.Atoi(psql(t,
+		`SELECT count(*)::int FROM (
+		   SELECT attempt_id FROM leases GROUP BY attempt_id HAVING count(*) > 1) x`))
+	return n
+}
+
+// liveOverCommittedWorkers counts workers whose ledger currently exceeds their
+// capacity -- the over-commit FOR UPDATE exists to prevent, caught in the act
+// rather than inferred afterwards.
+func liveOverCommittedWorkers(t *testing.T) int {
+	t.Helper()
+	n, _ := strconv.Atoi(psql(t,
+		`SELECT count(*)::int FROM workers
+		  WHERE state='ACTIVE'
+		    AND coalesce((committed->>'cpu_millis')::bigint,0)
+		      > coalesce((capacity->>'cpu_millis')::bigint,0)`))
+	return n
+}
+
+func liveLeaseCount(t *testing.T) int {
+	t.Helper()
+	n, _ := strconv.Atoi(psql(t, `SELECT count(*)::int FROM leases`))
+	return n
+}
+
+// wantReplicas is how many schedulers this test scales up to when the stack is
+// running the compose default of one. Three rather than two so a replica that
+// happens to lose every race still leaves two that competed.
+const wantReplicas = 3
+
+func waitForReplicas(t *testing.T, service string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		if runningReplicas(t, service) >= want {
+			// Running is not the same as ready: a replica that has not yet
+			// opened its database pool cannot claim, and the test would then
+			// conclude the replicas never competed.
+			time.Sleep(3 * time.Second)
+			return
+		}
+		time.Sleep(pollEvery)
+	}
+	t.Logf("warning: %s did not reach %d replicas", service, want)
+}
+
+func runningReplicas(t *testing.T, service string) int {
+	t.Helper()
+	out, err := composeOut(t, "ps", "--format", "{{.Service}}", "--filter", "status=running")
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Fields(out) {
+		if line == service {
+			n++
+		}
+	}
+	return n
+}
+
+func inList(ids []string) string {
+	quoted := make([]string, 0, len(ids))
+	for _, id := range ids {
+		quoted = append(quoted, "'"+id+"'")
+	}
+	return strings.Join(quoted, ",")
+}
+
+func attemptsWithMultipleLeases(t *testing.T, runIDs []string) int {
+	t.Helper()
+	n, _ := strconv.Atoi(psql(t, fmt.Sprintf(
+		`SELECT count(*)::int FROM (
+		   SELECT l.attempt_id FROM leases l
+		     JOIN task_attempts a ON a.id = l.attempt_id
+		    WHERE a.run_id IN (%s)
+		    GROUP BY l.attempt_id HAVING count(*) > 1) x`, inList(runIDs))))
+	return n
+}
+
+func attemptsDispatchedTwice(t *testing.T, runIDs []string) []string {
+	t.Helper()
+	out := psql(t, fmt.Sprintf(
+		`SELECT e.attempt_id::text FROM run_events e
+		   JOIN task_attempts a ON a.id = e.attempt_id
+		  WHERE a.run_id IN (%s) AND e.kind = 'AttemptDispatched'
+		  GROUP BY e.attempt_id HAVING count(*) > 1`, inList(runIDs)))
+	var got []string
+	for _, line := range strings.Fields(out) {
+		got = append(got, line)
+	}
+	return got
+}
+
+type ledgerRow struct {
+	ID           string
+	CapacityCPU  int64
+	CommittedCPU int64
+	ReservedCPU  int64
+}
+
+func workerLedger(t *testing.T) []ledgerRow {
+	t.Helper()
+	out := psql(t,
+		`SELECT w.id::text||' '||
+		        coalesce((w.capacity->>'cpu_millis')::bigint,0)||' '||
+		        coalesce((w.committed->>'cpu_millis')::bigint,0)||' '||
+		        coalesce((SELECT sum((r.resources->>'cpu_millis')::bigint)
+		                    FROM reservations r WHERE r.worker_id = w.id),0)
+		   FROM workers w WHERE w.state = 'ACTIVE'`)
+	var got []ledgerRow
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.Fields(line)
+		if len(parts) != 4 {
+			continue
+		}
+		cap, _ := strconv.ParseInt(parts[1], 10, 64)
+		com, _ := strconv.ParseInt(parts[2], 10, 64)
+		res, _ := strconv.ParseInt(parts[3], 10, 64)
+		got = append(got, ledgerRow{ID: parts[0], CapacityCPU: cap, CommittedCPU: com, ReservedCPU: res})
+	}
+	return got
+}
+
+// claimsPerReplica counts dispatch log lines per scheduler container. The logs
+// are the only place the ORIGIN of a dispatch is recorded -- task_attempts says
+// which worker ran the work, never which replica placed it -- and origin is the
+// whole question here.
+func claimsPerReplica(t *testing.T) map[string]int {
+	t.Helper()
+	out, err := composeOut(t, "ps", "--format", "{{.Name}}\t{{.Service}}", "--filter", "status=running")
+	if err != nil {
+		t.Fatalf("list containers: %v", err)
+	}
+	got := map[string]int{}
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.Split(strings.TrimSpace(line), "\t")
+		if len(parts) != 2 || !strings.HasPrefix(parts[1], "scheduler") {
+			continue
+		}
+		logs, err := exec.Command("docker", "logs", parts[0], "--since", "10m").CombinedOutput()
+		if err != nil {
+			continue
+		}
+		got[parts[0]] = bytes.Count(logs, []byte("attempt claimed by polling worker"))
+	}
+	return got
+}

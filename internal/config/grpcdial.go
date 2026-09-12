@@ -41,6 +41,24 @@ import (
 // guarantees it eventually drops. Both halves are needed.
 func PeerDialOptions() []grpc.DialOption {
 	return []grpc.DialOption{
+		// Spread calls across every address the name resolves to.
+		//
+		// gRPC defaults to pick_first, which connects to ONE address and stays
+		// there for the life of the connection. For a replicated peer that means
+		// every call lands on whichever replica happened to answer first, and
+		// scaling that peer adds no capacity at all -- the extra replicas sit
+		// idle. It shows up most sharply on the scheduler: its background
+		// dispatch loop is disabled when no notifier is configured, so worker
+		// polls arriving over this connection are the ONLY way a replica ever
+		// dispatches anything. A pinned connection makes `--scale scheduler=N`
+		// a no-op, which is exactly what the compose file tells operators they
+		// can do.
+		//
+		// Load did eventually spread before this, but only because
+		// MaxConnectionAge forces a reconnect and each reconnect re-resolves --
+		// so balance was a side effect of connection rotation, on the order of a
+		// minute, rather than anything the design guaranteed.
+		grpc.WithDefaultServiceConfig(`{"loadBalancingConfig":[{"round_robin":{}}]}`),
 		// Detect a peer that went away without a clean close, which is the normal
 		// shape of a container being replaced.
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
