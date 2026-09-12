@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc/encoding"
 
 	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/grpcapi"
@@ -71,11 +72,19 @@ func run() error {
 	// like its predecessor, so the stale-claim sweeper correctly reclaims what the
 	// dead process was holding.
 	claimant := fmt.Sprintf("%s/%d", hostname(), os.Getpid())
+	// One registry per process, served on the health listener below. The
+	// reconciler's instruments are what REPLACED the timer_backlog readiness
+	// check: see the health block for why that check was an availability hazard.
+	reg := metrics.NewRegistry()
+
 	rec := timers.New(db, timers.Config{
-		Interval:     cfg.TimerInterval,
-		BatchSize:    cfg.TimerBatchSize,
-		ClaimTimeout: cfg.TimerClaimTimeout,
-		Claimant:     claimant,
+		Interval:        cfg.TimerInterval,
+		BatchSize:       cfg.TimerBatchSize,
+		ClaimTimeout:    cfg.TimerClaimTimeout,
+		Claimant:        claimant,
+		BacklogInterval: cfg.TimerBacklogInterval,
+		BacklogAlert:    int64(cfg.TimerBacklogAlert),
+		Metrics:         timers.NewMetrics(reg),
 	}, log)
 
 	registerTimerHandlers(rec, runSvc, schedClient, log)
@@ -99,26 +108,27 @@ func run() error {
 	}
 
 	// ── health ────────────────────────────────────────────────────────────
+	// Readiness checks ONLY what this replica needs to serve. The timer backlog is
+	// deliberately not here, though it used to be.
+	//
+	// The backlog is a property of the SHARED timers table, so every replica
+	// computes the same number and they would all fail readiness together --
+	// emptying the whole tier out of the load balancer precisely when deadlines
+	// were already firing late, and removing the very replicas whose job is to
+	// drain the backlog. A global condition evaluated per-replica cannot shed load
+	// the way the old comment claimed; it can only cause an outage.
+	//
+	// The signal is not lost: the reconciler samples it into nexus_timer_backlog
+	// and logs above NEXUS_TIMER_BACKLOG_ALERT. That threshold is now an alerting
+	// threshold rather than a traffic gate, which is what it should always have
+	// been -- an operator who set it low was previously configuring an outage.
 	hc := health.New(map[string]health.Check{
 		"postgres": func(ctx context.Context) error { return pool.Ping(ctx) },
-		// Readiness includes the timer BACKLOG, because a reconciler that is
-		// falling behind is a silent correctness problem: deadlines still fire,
-		// just too late to mean what they promised. Surfacing it as
-		// not-ready sheds traffic from this replica and makes the condition
-		// visible instead of merely slow.
-		"timer_backlog": func(ctx context.Context) error {
-			due, _, err := rec.Backlog(ctx)
-			if err != nil {
-				return err
-			}
-			if due > int64(cfg.TimerBacklogAlert) {
-				return fmt.Errorf("%d timers are overdue (threshold %d)", due, cfg.TimerBacklogAlert)
-			}
-			return nil
-		},
 	})
 	mux := http.NewServeMux()
 	hc.Routes(mux)
+	// Scraped on the health address; no extra port and no new scrape target.
+	reg.Routes(mux)
 	healthSrv := &http.Server{
 		Addr:              cfg.HealthAddr,
 		Handler:           mux,
@@ -238,18 +248,19 @@ func registerTimerHandlers(rec *timers.Reconciler, runSvc *runs.Service, sched *
 }
 
 type config struct {
-	GRPCAddr          string
-	HealthAddr        string
-	DatabaseURL       string
-	MaxConns          int32
-	DAGEngineAddr     string
-	SchedulerAddr     string
-	EventServiceAddr  string
-	TimerInterval     time.Duration
-	TimerBatchSize    int
-	TimerClaimTimeout time.Duration
-	TimerBacklogAlert int
-	ShutdownTimeout   time.Duration
+	GRPCAddr             string
+	HealthAddr           string
+	DatabaseURL          string
+	MaxConns             int32
+	DAGEngineAddr        string
+	SchedulerAddr        string
+	EventServiceAddr     string
+	TimerInterval        time.Duration
+	TimerBatchSize       int
+	TimerClaimTimeout    time.Duration
+	TimerBacklogAlert    int
+	TimerBacklogInterval time.Duration
+	ShutdownTimeout      time.Duration
 }
 
 func loadConfig() config {
@@ -268,7 +279,11 @@ func loadConfig() config {
 		TimerBatchSize:    envInt("NEXUS_TIMER_BATCH_SIZE", 100),
 		TimerClaimTimeout: time.Duration(envInt("NEXUS_TIMER_CLAIM_TIMEOUT_SEC", 120)) * time.Second,
 		TimerBacklogAlert: envInt("NEXUS_TIMER_BACKLOG_ALERT", 1000),
-		ShutdownTimeout:   time.Duration(envInt("NEXUS_SHUTDOWN_TIMEOUT_SEC", 30)) * time.Second,
+		// Much coarser than TimerInterval on purpose: the backlog count aggregates
+		// the whole timers table, so sampling it per poll would add a full scan of
+		// shared state every second for a number that moves slowly.
+		TimerBacklogInterval: time.Duration(envInt("NEXUS_TIMER_BACKLOG_INTERVAL_SEC", 15)) * time.Second,
+		ShutdownTimeout:      time.Duration(envInt("NEXUS_SHUTDOWN_TIMEOUT_SEC", 30)) * time.Second,
 	}
 }
 

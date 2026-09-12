@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 )
 
@@ -57,15 +58,78 @@ type Config struct {
 	ClaimTimeout time.Duration
 	// Claimant identifies this replica in claimed_by, for debugging a stuck batch.
 	Claimant string
+	// BacklogInterval is how often the backlog is sampled into the metrics gauges
+	// and, past BacklogAlert, logged. It is deliberately much coarser than Interval:
+	// the sample is an aggregate over the whole timers table, so one query per
+	// replica per second would add real load to the database precisely when the
+	// backlog is large and the database is already the bottleneck.
+	BacklogInterval time.Duration
+	// BacklogAlert is the overdue count past which the sampler logs a warning. It is
+	// an ALERTING threshold only — crossing it must never change whether this
+	// replica serves traffic, for the reason documented on Reconciler.Backlog.
+	BacklogAlert int64
+	// Metrics receives backlog, lateness and dispatch-outcome observations. Nil
+	// disables instrumentation, which keeps the reconciler usable in tests without
+	// a registry.
+	Metrics *Metrics
 }
 
 // DefaultConfig is a sane starting point.
 func DefaultConfig(claimant string) Config {
 	return Config{
-		Interval:     time.Second,
-		BatchSize:    100,
-		ClaimTimeout: 2 * time.Minute,
-		Claimant:     claimant,
+		Interval:        time.Second,
+		BatchSize:       100,
+		ClaimTimeout:    2 * time.Minute,
+		Claimant:        claimant,
+		BacklogInterval: 15 * time.Second,
+		BacklogAlert:    1000,
+	}
+}
+
+// Metrics holds the reconciler's instruments.
+//
+// The backlog lives here, as a GAUGE an operator alerts on, rather than in the
+// readiness probe. Timer backlog is a GLOBAL property of the timers table: every
+// replica queries the same rows and computes the same number, so failing readiness
+// on it fails EVERY replica at once and empties the tier from the load balancer —
+// and since this reconciler is what DRAINS the backlog, shedding replicas makes
+// recovery strictly slower. Readiness answers "can I serve", and a replica with a
+// healthy database connection can serve regardless of how far behind the fleet is.
+type Metrics struct {
+	// BacklogDue is the overdue-and-unclaimed count: the number that says deadlines
+	// are firing late right now.
+	BacklogDue *metrics.Gauge
+	// BacklogTotal is every pending timer, due or not. Due alone cannot distinguish
+	// "a burst is about to land" from "nothing is armed".
+	BacklogTotal *metrics.Gauge
+	// Lateness is how far past fire_at a timer actually fired, which is the signal
+	// that the reconciler is falling behind. A deadline that fires late still fires,
+	// so this is the only place the degradation is visible.
+	Lateness *metrics.Histogram
+	// Fired counts dispatch outcomes by kind and result, so an operator can tell a
+	// failing handler apart from an idle one.
+	Fired *metrics.CounterVec
+	// StaleClaims counts timers returned to the pool by the sweeper: nonzero means a
+	// replica died holding claims, or a handler is persistently failing.
+	StaleClaims *metrics.Counter
+}
+
+// NewMetrics registers the reconciler's instruments on a registry.
+func NewMetrics(reg *metrics.Registry) *Metrics {
+	return &Metrics{
+		BacklogDue:   reg.NewGauge("nexus_timer_backlog_due", "Timers past fire_at and unclaimed.").Gauge(),
+		BacklogTotal: reg.NewGauge("nexus_timer_backlog_total", "Pending timers, due or not.").Gauge(),
+		// The buckets run out to five minutes because the interesting question is
+		// not "is it a few milliseconds late" but "is a 30s lease expiring minutes
+		// after it should have" — the default latency buckets top out too early to
+		// show that at all.
+		Lateness: reg.NewHistogram("nexus_timer_lateness_seconds",
+			"Seconds between a timer's fire_at and its dispatch.",
+			[]float64{0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 300}).Histogram(),
+		Fired: reg.NewCounter("nexus_timers_fired_total",
+			"Timer dispatch outcomes by kind and result.", "kind", "result"),
+		StaleClaims: reg.NewCounter("nexus_timer_stale_claims_total",
+			"Timers returned to the pool after a claimant stopped making progress.").Counter(),
 	}
 }
 
@@ -91,6 +155,12 @@ func New(db store.GWDB, cfg Config, log *slog.Logger) *Reconciler {
 	}
 	if cfg.ClaimTimeout <= 0 {
 		cfg.ClaimTimeout = 2 * time.Minute
+	}
+	if cfg.BacklogInterval <= 0 {
+		cfg.BacklogInterval = 15 * time.Second
+	}
+	if cfg.BacklogAlert <= 0 {
+		cfg.BacklogAlert = 1000
 	}
 	return &Reconciler{db: db, cfg: cfg, log: log, handlers: make(map[string]Handler)}
 }
@@ -129,14 +199,25 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	sweep := time.NewTicker(r.cfg.ClaimTimeout / 2)
 	defer sweep.Stop()
 
+	backlog := time.NewTicker(r.cfg.BacklogInterval)
+	defer backlog.Stop()
+
 	r.log.InfoContext(ctx, "timer reconciler started",
 		"claimant", r.cfg.Claimant, "interval", r.cfg.Interval, "batch_size", r.cfg.BatchSize)
+
+	// Sampled once at startup so a replica that comes up into an existing backlog
+	// reports it immediately, instead of exposing a zero gauge for the first
+	// BacklogInterval — which reads as "healthy" on a dashboard at the exact moment
+	// an operator is looking for the truth.
+	r.SampleBacklog(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			r.log.InfoContext(ctx, "timer reconciler stopped")
 			return nil
+		case <-backlog.C:
+			r.SampleBacklog(ctx)
 		case <-sweep.C:
 			r.sweepStaleClaims(ctx)
 		case <-ticker.C:
@@ -196,11 +277,20 @@ func (r *Reconciler) dispatch(ctx context.Context, t store.Timer) error {
 		// version than this replica understands). Returning an error leaves it
 		// claimed and then re-pooled, so a rolling deploy's newer replica picks it
 		// up rather than this one silently discarding a real deadline.
+		r.countFired(t.Kind, "no_handler")
 		return fmt.Errorf("no handler registered for timer kind %q", t.Kind)
 	}
 
 	log := r.log.With("timer_id", t.ID, "kind", t.Kind, "subject_id", t.SubjectID)
-	if lateness := time.Since(t.FireAt); lateness > 5*r.cfg.Interval {
+	lateness := time.Since(t.FireAt)
+	if m := r.cfg.Metrics; m != nil {
+		// Recorded for EVERY timer, not only the late ones: a distribution that
+		// contains only the samples past a warning threshold cannot show a
+		// reconciler drifting from "always prompt" towards "usually prompt", which
+		// is the shape of the problem an operator wants to catch early.
+		m.Lateness.Observe(lateness.Seconds())
+	}
+	if lateness > 5*r.cfg.Interval {
 		// Lateness is the metric that reveals a reconciler falling behind, which
 		// is a silent correctness problem: deadlines still fire, just too late to
 		// mean what they promised.
@@ -208,9 +298,20 @@ func (r *Reconciler) dispatch(ctx context.Context, t store.Timer) error {
 	}
 
 	if err := h(ctx, t); err != nil {
+		r.countFired(t.Kind, "error")
 		return fmt.Errorf("handle %s timer for %s: %w", t.Kind, t.SubjectID, err)
 	}
+	r.countFired(t.Kind, "ok")
 	return nil
+}
+
+func (r *Reconciler) countFired(kind, result string) {
+	if m := r.cfg.Metrics; m != nil {
+		// kind and result are both from closed sets (the Kind constants, and ok /
+		// error / no_handler), so the label cardinality is bounded by construction.
+		// Putting subject_id here instead would be one series per run, forever.
+		m.Fired.With(metrics.Labels{"kind": kind, "result": result}).Inc()
+	}
 }
 
 func (r *Reconciler) sweepStaleClaims(ctx context.Context) {
@@ -223,13 +324,52 @@ func (r *Reconciler) sweepStaleClaims(ctx context.Context) {
 		// A nonzero sweep means a replica died holding claims, or a handler is
 		// persistently failing. Either is worth an operator's attention.
 		r.log.WarnContext(ctx, "returned stale timer claims to the pool", "count", n)
+		if m := r.cfg.Metrics; m != nil {
+			m.StaleClaims.Add(float64(n))
+		}
 	}
 }
 
-// Backlog reports the due-but-unclaimed count and the total, for readiness and
-// metrics. A growing due count means deadlines are firing late.
+// Backlog reports the due-but-unclaimed count and the total. A growing due count
+// means deadlines are firing late.
+//
+// This must NOT be used as a readiness check. The backlog is a property of the
+// shared timers table, so every replica computes the same number and would fail
+// readiness together — draining the whole workflow-manager tier from the load
+// balancer at the exact moment deadlines are already firing late. Worse, this
+// reconciler is what drains the backlog: removing its replicas from service cannot
+// help and makes recovery slower. Readiness must answer "can I serve", which for
+// this service means "is my database connection healthy" (see health.Handler).
+//
+// The backlog is exposed as a gauge by SampleBacklog instead, where an operator
+// alerts on it without it being able to take the tier down.
 func (r *Reconciler) Backlog(ctx context.Context) (due int64, total int64, err error) {
 	return store.WFMCountPendingTimers(ctx, r.db)
+}
+
+// SampleBacklog reads the backlog once and publishes it to the gauges and, past
+// BacklogAlert, the log.
+//
+// A failed sample is logged and the gauges are LEFT ALONE rather than zeroed. A zero
+// reads identically to "the backlog just drained", so zeroing on a database error
+// would make an unreachable database look like a recovery on every dashboard.
+func (r *Reconciler) SampleBacklog(ctx context.Context) {
+	due, total, err := r.Backlog(ctx)
+	if err != nil {
+		r.log.ErrorContext(ctx, "failed to sample timer backlog; gauges keep their last value", "error", err)
+		return
+	}
+	if m := r.cfg.Metrics; m != nil {
+		m.BacklogDue.Set(float64(due))
+		m.BacklogTotal.Set(float64(total))
+	}
+	if due > r.cfg.BacklogAlert {
+		// Logged as well as gauged so the condition is visible without a scraper
+		// configured. This is the whole replacement for the old readiness check: the
+		// operator learns the same fact, and the tier stays in service to drain it.
+		r.log.WarnContext(ctx, "timer backlog exceeds the alert threshold; deadlines are firing late",
+			"due", due, "total", total, "threshold", r.cfg.BacklogAlert)
+	}
 }
 
 // DecodePayload reads a timer's payload into a typed value.

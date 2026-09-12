@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 )
 
@@ -29,6 +30,9 @@ type timerDB struct {
 	// claimErr makes the claim fail, to prove a transient database error does not
 	// kill the loop.
 	claimErr error
+	// countErr makes the backlog count fail, to prove a failed sample leaves the
+	// gauges at their last good value instead of zeroing them.
+	countErr error
 	released int64
 }
 
@@ -97,6 +101,9 @@ func (d *timerDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 		return valueRow{[]any{id}}
 	}
 	if strings.Contains(sql, "count(*) FILTER") {
+		if d.countErr != nil {
+			return errRow{d.countErr}
+		}
 		var due int64
 		for id, r := range d.rows {
 			if !d.claimed[id] && !r.fireAt.After(time.Now()) {
@@ -471,5 +478,237 @@ func TestDecodePayload(t *testing.T) {
 	// An empty payload is not an error: most timers carry none.
 	if err := DecodePayload(store.Timer{ID: "t2"}, &into); err != nil {
 		t.Errorf("an empty payload should decode to a no-op, got %v", err)
+	}
+}
+
+// ── backlog observability ─────────────────────────────────────────────────
+
+// TestSampleBacklogPublishesGauges: the backlog must remain visible to an operator
+// after being removed from the readiness probe. If this signal disappears, a
+// reconciler falling behind becomes silent again.
+func TestSampleBacklogPublishesGauges(t *testing.T) {
+	db := newTimerDB()
+	past := time.Now().Add(-time.Second)
+	db.add("t1", KindRunDeadline, "run-1", past)
+	db.add("t2", KindRunDeadline, "run-2", past)
+	db.add("t3", KindRunDeadline, "run-3", time.Now().Add(time.Hour))
+
+	cfg := DefaultConfig("test")
+	cfg.Metrics = NewMetrics(metrics.NewRegistry())
+	rec := New(db, cfg, quietLogger())
+
+	rec.SampleBacklog(context.Background())
+
+	if got := cfg.Metrics.BacklogDue.Value(); got != 2 {
+		t.Errorf("BacklogDue = %v, want 2", got)
+	}
+	if got := cfg.Metrics.BacklogTotal.Value(); got != 3 {
+		t.Errorf("BacklogTotal = %v, want 3; due alone cannot distinguish an incoming burst from an idle table", got)
+	}
+}
+
+// TestSampleBacklogKeepsLastValueOnError: zeroing the gauges on a database error
+// would render identically to "the backlog just drained", turning an unreachable
+// database into an apparent recovery on every dashboard.
+func TestSampleBacklogKeepsLastValueOnError(t *testing.T) {
+	db := newTimerDB()
+	db.add("t1", KindRunDeadline, "run-1", time.Now().Add(-time.Second))
+
+	cfg := DefaultConfig("test")
+	cfg.Metrics = NewMetrics(metrics.NewRegistry())
+	rec := New(db, cfg, quietLogger())
+	rec.SampleBacklog(context.Background())
+
+	db.mu.Lock()
+	db.countErr = errors.New("connection refused")
+	db.mu.Unlock()
+	rec.SampleBacklog(context.Background())
+
+	if got := cfg.Metrics.BacklogDue.Value(); got != 1 {
+		t.Errorf("BacklogDue = %v after a failed sample, want the last good value of 1", got)
+	}
+}
+
+// TestBacklogIsNotAReadinessSignal documents the availability hazard structurally:
+// every replica reads the SAME shared table and computes the SAME number, so a
+// readiness check on it would fail the whole tier at once — and this reconciler is
+// what drains the backlog, so shedding its replicas makes recovery strictly slower.
+func TestBacklogIsNotAReadinessSignal(t *testing.T) {
+	db := newTimerDB()
+	past := time.Now().Add(-time.Second)
+	for i := 0; i < 5; i++ {
+		db.add(fmt.Sprintf("t%d", i), KindRunDeadline, fmt.Sprintf("run-%d", i), past)
+	}
+
+	// Two replicas, as in production.
+	a := New(db, DefaultConfig("replica-a"), quietLogger())
+	b := New(db, DefaultConfig("replica-b"), quietLogger())
+
+	dueA, _, err := a.Backlog(context.Background())
+	if err != nil {
+		t.Fatalf("Backlog: %v", err)
+	}
+	dueB, _, err := b.Backlog(context.Background())
+	if err != nil {
+		t.Fatalf("Backlog: %v", err)
+	}
+	if dueA != dueB {
+		t.Fatalf("replicas disagree (%d vs %d); the premise of this test is wrong", dueA, dueB)
+	}
+	if dueA == 0 {
+		t.Fatal("expected a nonzero backlog to reason about")
+	}
+
+	// Both replicas still serve: the backlog is reported, never gated on.
+	cfgA := DefaultConfig("replica-a")
+	cfgA.Metrics = NewMetrics(metrics.NewRegistry())
+	withMetrics := New(db, cfgA, quietLogger())
+	withMetrics.SampleBacklog(context.Background())
+	if got := cfgA.Metrics.BacklogDue.Value(); got != float64(dueA) {
+		t.Errorf("BacklogDue = %v, want %d: the backlog must still be observable", got, dueA)
+	}
+}
+
+// TestLatenessIsRecordedForEveryTimer: a distribution containing only the samples
+// past the warning threshold cannot show a reconciler drifting from "always prompt"
+// to "usually prompt", which is the early shape of the problem.
+func TestLatenessIsRecordedForEveryTimer(t *testing.T) {
+	db := newTimerDB()
+	db.add("t1", KindRunDeadline, "run-1", time.Now().Add(-2*time.Second))
+	db.add("t2", KindRunDeadline, "run-2", time.Now())
+
+	cfg := DefaultConfig("test")
+	cfg.Metrics = NewMetrics(metrics.NewRegistry())
+	rec := New(db, cfg, quietLogger())
+	rec.Handle(KindRunDeadline, func(ctx context.Context, tm store.Timer) error { return nil })
+
+	if _, err := rec.Cycle(context.Background()); err != nil {
+		t.Fatalf("Cycle: %v", err)
+	}
+
+	_, sum, count := cfg.Metrics.Lateness.Snapshot()
+	if count != 2 {
+		t.Errorf("lateness count = %d, want 2 (both timers, not only the late one)", count)
+	}
+	if sum < 2 {
+		t.Errorf("lateness sum = %v, want at least the 2s the first timer was late", sum)
+	}
+}
+
+// TestFiredCounterSeparatesOutcomes: an operator must be able to tell a failing
+// handler from an idle reconciler, which one undifferentiated counter cannot do.
+func TestFiredCounterSeparatesOutcomes(t *testing.T) {
+	db := newTimerDB()
+	past := time.Now().Add(-time.Second)
+	db.add("t1", KindRunDeadline, "run-1", past)
+	db.add("t2", KindStartToClose, "attempt-1", past)
+	db.add("t3", "some_future_kind", "subject-1", past)
+
+	cfg := DefaultConfig("test")
+	cfg.Metrics = NewMetrics(metrics.NewRegistry())
+	rec := New(db, cfg, quietLogger())
+	rec.Handle(KindRunDeadline, func(ctx context.Context, tm store.Timer) error { return nil })
+	rec.Handle(KindStartToClose, func(ctx context.Context, tm store.Timer) error {
+		return errors.New("scheduler is down")
+	})
+
+	if _, err := rec.Cycle(context.Background()); err != nil {
+		t.Fatalf("Cycle: %v", err)
+	}
+
+	fired := cfg.Metrics.Fired
+	if got := fired.With(metrics.Labels{"kind": KindRunDeadline, "result": "ok"}).Value(); got != 1 {
+		t.Errorf("run_deadline/ok = %v, want 1", got)
+	}
+	if got := fired.With(metrics.Labels{"kind": KindStartToClose, "result": "error"}).Value(); got != 1 {
+		t.Errorf("start_to_close/error = %v, want 1", got)
+	}
+	if got := fired.With(metrics.Labels{"kind": "some_future_kind", "result": "no_handler"}).Value(); got != 1 {
+		t.Errorf("some_future_kind/no_handler = %v, want 1; a missing registration must be distinguishable", got)
+	}
+}
+
+// TestStaleClaimsAreCounted: a nonzero sweep means a replica died holding claims or
+// a handler is persistently failing, and a counter makes the rate alertable rather
+// than something an operator must grep the logs for.
+func TestStaleClaimsAreCounted(t *testing.T) {
+	db := newTimerDB()
+	db.add("t1", KindRunDeadline, "run-1", time.Now().Add(-time.Second))
+
+	cfg := DefaultConfig("test")
+	cfg.Metrics = NewMetrics(metrics.NewRegistry())
+	rec := New(db, cfg, quietLogger())
+	rec.Handle(KindRunDeadline, func(ctx context.Context, tm store.Timer) error {
+		return errors.New("downstream is down")
+	})
+
+	if _, err := rec.Cycle(context.Background()); err != nil {
+		t.Fatalf("Cycle: %v", err)
+	}
+	rec.sweepStaleClaims(context.Background())
+
+	if got := cfg.Metrics.StaleClaims.Value(); got != 1 {
+		t.Errorf("StaleClaims = %v, want 1", got)
+	}
+}
+
+// TestReconcilerWorksWithoutMetrics: a nil Metrics must be a no-op, so the
+// reconciler stays usable in tests and in any process that has not wired a registry.
+func TestReconcilerWorksWithoutMetrics(t *testing.T) {
+	db := newTimerDB()
+	db.add("t1", KindRunDeadline, "run-1", time.Now().Add(-time.Second))
+
+	rec := New(db, DefaultConfig("test"), quietLogger())
+	rec.Handle(KindRunDeadline, func(ctx context.Context, tm store.Timer) error { return nil })
+
+	if _, err := rec.Cycle(context.Background()); err != nil {
+		t.Fatalf("Cycle with nil Metrics: %v", err)
+	}
+	rec.SampleBacklog(context.Background())
+	rec.sweepStaleClaims(context.Background())
+}
+
+func TestDefaultConfigHasBacklogDefaults(t *testing.T) {
+	cfg := DefaultConfig("test")
+	// The backlog query aggregates over the whole timers table, so sampling it at
+	// the dispatch interval would add real load to the database exactly when a large
+	// backlog already has it as the bottleneck.
+	if cfg.BacklogInterval <= cfg.Interval {
+		t.Errorf("BacklogInterval %v is not coarser than the dispatch interval %v", cfg.BacklogInterval, cfg.Interval)
+	}
+	if cfg.BacklogAlert <= 0 {
+		t.Errorf("BacklogAlert = %d, want a positive threshold", cfg.BacklogAlert)
+	}
+}
+
+// TestRunSamplesBacklogAtStartup: a replica coming up into an existing backlog must
+// report it immediately. A zero gauge for the first sampling interval reads as
+// "healthy" at exactly the moment an operator is looking for the truth.
+func TestRunSamplesBacklogAtStartup(t *testing.T) {
+	db := newTimerDB()
+	db.add("t1", "some_unregistered_kind", "subject-1", time.Now().Add(-time.Second))
+
+	cfg := DefaultConfig("test")
+	cfg.Interval = time.Hour
+	cfg.BacklogInterval = time.Hour
+	cfg.Metrics = NewMetrics(metrics.NewRegistry())
+	rec := New(db, cfg, quietLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = rec.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for cfg.Metrics.BacklogTotal.Value() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if got := cfg.Metrics.BacklogTotal.Value(); got != 1 {
+		t.Errorf("BacklogTotal = %v after startup, want 1 sampled before the first tick", got)
 	}
 }
