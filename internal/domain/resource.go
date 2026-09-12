@@ -76,6 +76,28 @@ func SubVec(a, b *nexusv1.ResourceVector) *nexusv1.ResourceVector {
 		GpuKind:        a.GetGpuKind(),
 		GpuMemoryBytes: a.GetGpuMemoryBytes(),
 	}
+	// AddVec LATCHES gpu_kind and gpu_memory_bytes onto an empty committed
+	// vector, so SubVec must be able to un-latch them or the pair is not
+	// reversible: releasing everything a worker held would leave committed
+	// reading {gpu_memory_bytes: 42949672960} with no reservation behind it.
+	//
+	// Observed exactly that way on a live fleet -- both GPU workers sat at 100%
+	// of capacity committed against ZERO reservation rows, permanently. It is
+	// invisible to placement (Fits compares VRAM against capacity, never free,
+	// because per-device VRAM is a floor and not a pool) which is precisely why
+	// it went unnoticed: the ledger lies, and only an operator reading the
+	// column or the chaos suite's drift assertion ever sees it.
+	//
+	// Released only when the operands MATCH. These are constraints, not
+	// quantities, so subtracting a different kind or a smaller VRAM figure is
+	// meaningless -- and clearing on a mismatch would let one release drop a
+	// constraint another reservation still relies on.
+	if b.GetGpuKind() != "" && a.GetGpuKind() == b.GetGpuKind() {
+		out.GpuKind = ""
+	}
+	if b.GetGpuMemoryBytes() != 0 && a.GetGpuMemoryBytes() == b.GetGpuMemoryBytes() {
+		out.GpuMemoryBytes = 0
+	}
 	out.Custom = mergeCustom(a.GetCustom(), b.GetCustom(), -1)
 	return out
 }

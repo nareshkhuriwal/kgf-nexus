@@ -278,7 +278,40 @@ func (s *RMStore) ReleaseAllForWorker(ctx context.Context, workerID string) ([]*
 	// Reconciling against an EMPTY running list with no grace period is exactly
 	// "release everything", so the dead path reuses the leak detector rather than
 	// duplicating its locking and arithmetic.
-	return s.ReconcileWorker(ctx, workerID, nil, 0)
+	leaked, err := s.ReconcileWorker(ctx, workerID, nil, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	// Then ZERO the ledger outright, which is what the doc comment above actually
+	// promises and what ReconcileWorker alone cannot deliver.
+	//
+	// ReconcileWorker subtracts the reservations it FINDS. If committed has
+	// drifted above the sum of its reservations, the excess is unreachable: every
+	// repair path in this file works by finding rows to release, so once the rows
+	// are gone the arithmetic has nothing left to correct and the balance is
+	// stranded forever. Observed on a live fleet as workers sitting at a
+	// permanent 1000 millicores committed against zero reservations, which
+	// silently shrinks the schedulable capacity of the whole cluster.
+	//
+	// Assigning zero rather than subtracting is safe here for the reason the doc
+	// comment gives: this is the DEAD path, the worker is running nothing, and
+	// every reservation it held has just been released in the call above. There
+	// is nothing legitimate left for the ledger to be counting.
+	if err := s.inTx(ctx, func(tx pgx.Tx) error {
+		if _, _, _, err := lockWorker(ctx, tx, workerID); err != nil {
+			// A worker reaped between the two transactions has no ledger left to
+			// correct, which is the outcome we wanted anyway.
+			if errors.Is(err, ErrWorkerNotFound) {
+				return nil
+			}
+			return err
+		}
+		return writeCommitted(ctx, tx, workerID, &nexusv1.ResourceVector{})
+	}); err != nil {
+		return nil, err
+	}
+	return leaked, nil
 }
 
 // ListReservations returns everything a worker holds, for debugging and for

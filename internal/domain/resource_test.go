@@ -384,3 +384,53 @@ func assertCustom(t *testing.T, got, want map[string]int64) {
 		}
 	}
 }
+
+// Releasing everything a worker held must return the ledger to zero on EVERY
+// dimension. AddVec latches gpu_kind and gpu_memory_bytes onto an empty
+// committed vector, so SubVec has to un-latch them or the pair is not
+// reversible and the constraint is committed forever.
+//
+// The live symptom this pins: both GPU workers sat at 100% of capacity
+// committed with ZERO reservation rows behind it, and no reconciler could
+// correct it — every repair path works by finding reservations to release, and
+// there were none left to find.
+func TestSubVecReturnsTheLedgerToZero(t *testing.T) {
+	req := rv(1000, 1<<30, 1, "nvidia-a100", 42949672960, 0, nil)
+
+	got := SubVec(AddVec(&nexusv1.ResourceVector{}, req), req)
+
+	assertScalars(t, got, &nexusv1.ResourceVector{})
+}
+
+// The constraint is released only when the operands MATCH. A release carrying a
+// different kind, or no kind at all, must not clear a constraint that some
+// other live reservation still depends on.
+func TestSubVecKeepsAConstraintItDidNotCommit(t *testing.T) {
+	committed := rv(2000, 0, 2, "nvidia-a100", 42949672960, 0, nil)
+
+	// A release that names no GPU constraint at all leaves both in place.
+	cpuOnly := SubVec(committed, rv(1000, 0, 0, "", 0, 0, nil))
+	if cpuOnly.GetGpuKind() != "nvidia-a100" || cpuOnly.GetGpuMemoryBytes() != 42949672960 {
+		t.Errorf("a CPU-only release dropped a GPU constraint: %v", cpuOnly)
+	}
+
+	// A release naming a DIFFERENT kind leaves the committed one alone.
+	otherKind := SubVec(committed, rv(0, 0, 1, "nvidia-a10", 25769803776, 0, nil))
+	if otherKind.GetGpuKind() != "nvidia-a100" || otherKind.GetGpuMemoryBytes() != 42949672960 {
+		t.Errorf("a mismatched release dropped the committed constraint: %v", otherKind)
+	}
+}
+
+// Fits computes free as SubVec(capacity, committed), so un-latching must not
+// make an occupied worker stop matching VRAM requirements: per-device VRAM is a
+// floor on the hardware, compared against capacity and never against free.
+func TestGPUWorkerStillTakesASecondTaskAfterTheFix(t *testing.T) {
+	capacity := rv(4000, 34359738368, 2, "nvidia-a100", 42949672960, 0, nil)
+	one := rv(1000, 1<<30, 1, "nvidia-a100", 42949672960, 0, nil)
+
+	committed := AddVec(&nexusv1.ResourceVector{}, one)
+
+	if ok, short := Fits(capacity, committed, one); !ok {
+		t.Errorf("a second GPU task no longer fits an idle-enough worker: %v", dims(short))
+	}
+}
