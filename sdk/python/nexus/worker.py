@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.util
 import json
 import os
 import sys
@@ -56,8 +57,12 @@ def import_modules(modules: Sequence[str]) -> None:
         if name.endswith(".py") and os.path.exists(name):
             # A file path, for the subprocess executor running straight off a
             # mounted workspace rather than an installed package.
-            import importlib.util
-
+            #
+            # `importlib.util` is imported at MODULE scope, not here. A local
+            # `import importlib.util` binds the name `importlib` as a function
+            # local, so the `else` branch below raises UnboundLocalError before
+            # it can run -- breaking every package-style --module argument,
+            # which is the common case.
             spec = importlib.util.spec_from_file_location(
                 os.path.splitext(os.path.basename(name))[0], name
             )
