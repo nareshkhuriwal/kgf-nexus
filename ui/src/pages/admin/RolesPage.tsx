@@ -1,3 +1,5 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
 import { DetailDrawer } from '../../components/DetailDrawer';
 import { ActionIcon } from '../../components/RowAction';
 import { Link } from 'react-router-dom';

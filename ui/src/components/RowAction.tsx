@@ -1,3 +1,5 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
 import { DetailDrawer } from './DetailDrawer';
 import { usePermission } from './Permissions';
 import { useState } from 'react';

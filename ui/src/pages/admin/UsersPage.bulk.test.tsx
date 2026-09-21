@@ -1,3 +1,5 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
 import {PermissionContext} from '../../components/Permissions';
 import {render,screen,fireEvent} from '@testing-library/react';
 import {QueryClient,QueryClientProvider} from '@tanstack/react-query';

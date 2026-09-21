@@ -1,3 +1,5 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
 import { createContext, useContext, type ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 

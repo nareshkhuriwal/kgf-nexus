@@ -1,3 +1,5 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
 import { fireEvent, render, screen, cleanup } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DetailDrawer } from './DetailDrawer';
