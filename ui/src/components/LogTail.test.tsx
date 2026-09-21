@@ -16,7 +16,7 @@
  * which is the fallback the component is built around.
  */
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LogTail } from './LogTail';
 
@@ -167,4 +167,20 @@ describe('a missing log endpoint is not an emergency', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/Could not load logs/i);
   });
+});
+
+
+it('combines text and stream filters over loaded log lines', async () => {
+  mockFetch(() => [200, { lines: [
+    { message: 'request complete', stream: 'stdout' },
+    { message: 'request failed', stream: 'stderr' },
+  ] }]);
+  render(<LogTail namespace="default" attemptId="att-filter" live={false} />);
+  await screen.findByText('request complete');
+  fireEvent.change(screen.getByLabelText('Stream'), { target: { value: 'stderr' } });
+  expect(screen.queryByText('request complete')).not.toBeInTheDocument();
+  expect(screen.getByText('request failed')).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('Search logs'), { target: { value: 'missing' } });
+  expect(screen.getByText('No loaded lines match these filters.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Download loaded logs' })).toBeDisabled();
 });

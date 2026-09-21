@@ -35,7 +35,8 @@
  * by default.
  */
 
-import { useMemo } from 'react';
+import { useTaskLayout } from './useTaskLayout';
+import { useMemo, useState } from 'react';
 import {
   NODE_H,
   NODE_W,
@@ -91,12 +92,10 @@ export function DagView({
    */
   exportName?: string;
 }) {
-  const { placed, width, height } = useMemo(() => layout(graph), [graph]);
-  const byId = useMemo(() => {
-    const m: Record<string, Placed> = {};
-    for (const p of placed) m[p.node.node_id] = p;
-    return m;
-  }, [placed]);
+  const [focusTarget, setFocusTarget] = useState<{ x: number; y: number }>();
+  const base = useMemo(() => layout(graph), [graph]);
+  const taskLayout = useTaskLayout(base.placed, `run:${window.location.pathname}:${exportName ?? 'run'}`);
+  const { places: placed, width, height, byId } = taskLayout;
 
   /**
    * The selected node's full ancestry and descendancy. Everything outside it is
@@ -118,7 +117,7 @@ export function DagView({
    * fit; a poll that returns the same 30 nodes is not and must leave the
    * operator's zoom alone.
    */
-  const graphKey = `${exportName ?? 'run'}:${graph.nodes.length}:${graph.edges.length}`;
+  const graphKey = `${exportName ?? 'run'}:${graph.nodes.length}:${graph.edges.length}:${taskLayout.revision}`;
 
   if (graph.nodes.length === 0) {
     return (
@@ -149,7 +148,26 @@ export function DagView({
           </div>
         </div>
       )}
+      <div className="dag-state-summary" aria-label="Task state summary">
+        <span className="dag-flow-label">Execution flow <span aria-hidden="true">→</span></span>
+        {Object.entries(graph.counts).filter(([, count]) => count > 0).map(([state, count]) =>
+          <span className="dag-state-count" key={state}><StateBadge kind="node" state={state} small /><strong>{count}</strong></span>)}
+      </div>
+      <div className="dag-layout-note" role="status">{taskLayout.message}</div>
       <DagCanvas
+        viewportHeight={base.height}
+        focusTarget={focusTarget}
+        toolbarExtra={<><button type="button" onClick={taskLayout.reset}>Reset layout</button><label className="dag-jump">Jump to task
+          <select aria-label="Jump to task" value={selectedNodeId ?? ''} onChange={event => {
+            const target = byId[event.target.value];
+            if (!target) return;
+            onSelect(event.target.value);
+            setFocusTarget({ x: target.x + NODE_W / 2, y: target.y + NODE_H / 2 });
+          }}>
+            <option value="" disabled>Select a task…</option>
+            {placed.map(({ node }) => <option key={node.node_id} value={node.node_id}>{node.node_id} · {stateVisual('node', node.state).label}</option>)}
+          </select>
+        </label></>}
         width={width}
         height={height}
         graphKey={graphKey}
@@ -234,6 +252,7 @@ export function DagView({
           const unrelated = related !== null && !related.has(node.node_id);
           return (
             <g
+              {...taskLayout.bindings(node.node_id)}
               key={node.node_id}
               transform={`translate(${x},${y})`}
               className={`dag-node-g tone-${v.tone}${selected ? ' selected' : ''}${
@@ -246,6 +265,7 @@ export function DagView({
                   onSelect(node.node_id);
                 }
               }}
+              aria-pressed={selected}
               tabIndex={0}
               role="button"
               aria-label={`${node.node_id}, ${v.label}${
@@ -284,37 +304,38 @@ export function DagView({
                 rx={12}
                 strokeDasharray={dashFor(v.borderStyle)}
               />
+              <line className="dag-card-divider" x1={14} x2={NODE_W - 14} y1={57} y2={57} />
               {/*
                 Channel 4, the glyph, now sits in its own tinted chip. A bare
                 glyph at 13px was the weakest of the four channels; a filled
                 square around it survives both a thumbnail and a greyscale
                 print, which is the whole point of the redundancy.
               */}
-              <rect className="dag-glyph-chip" x={10} y={11} width={22} height={22} rx={7} />
-              <text className="dag-glyph" x={21} y={26} textAnchor="middle" fill="var(--tone-bd)">
+              <rect className="dag-glyph-chip" x={14} y={15} width={26} height={26} rx={7} />
+              <text className="dag-glyph" x={27} y={33} textAnchor="middle" fill="var(--tone-bd)">
                 {v.glyph}
               </text>
               {/* The node id is the thing an operator searches for, so it is
                   the only element at full foreground weight and colour. */}
-              <text className="dag-node-label" x={40} y={26}>
-                {truncate(node.node_id, 18)}
+              <text className="dag-node-label" x={50} y={30}>
+                {truncate(node.node_id, 23)}
               </text>
-              <text className="dag-node-sub" x={40} y={39}>
-                {truncate(node.task_ref, 24)}
+              <text className="dag-node-sub" x={50} y={47}>
+                {truncate(node.task_ref, 27)}
               </text>
               {/* The state name is repeated as text under the glyph because a
                   colour plus a symbol still leaves an operator guessing which
                   of two symbols they are looking at. */}
-              <text className="dag-node-state" x={11} y={55} fill="var(--tone-bd)">
+              <text className="dag-node-state" x={14} y={73} fill="var(--tone-bd)">
                 {v.label}
               </text>
               {attemptCount > 1 && (
-                <text className="dag-node-sub" x={NODE_W - 11} y={55} textAnchor="end">
+                <text className="dag-node-sub" x={NODE_W - 14} y={73} textAnchor="end">
                   {attemptCount} attempts
                 </text>
               )}
               {node.pendingReason && attemptCount <= 1 && (
-                <text className="dag-node-sub" x={NODE_W - 11} y={55} textAnchor="end" fill="var(--tone-warning-fg)">
+                <text className="dag-node-sub" x={NODE_W - 14} y={73} textAnchor="end" fill="var(--tone-warning-fg)">
                   stalled
                 </text>
               )}

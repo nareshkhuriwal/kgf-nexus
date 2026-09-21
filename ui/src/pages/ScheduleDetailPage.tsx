@@ -1,3 +1,4 @@
+import { Permit, usePermission } from '../components/Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -22,6 +23,7 @@ import {
   useSchedule,
   useSetScheduleEnabled,
 } from '../api/hooks';
+import { CreateScheduleForm } from './CreateScheduleForm';
 import type { Schedule } from '../api/types';
 import { AsyncPanel, ErrorBox, Loading, StaleWarning } from '../components/Status';
 import { CronPreview } from '../components/CronPreview';
@@ -31,25 +33,25 @@ import { EMPTY, fmtTs } from '../lib/format';
 export function ScheduleDetailPage({ namespace }: { namespace: string }) {
   const { name = '' } = useParams();
   const navigate = useNavigate();
+  const can=usePermission();
   const [actionError, setActionError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Schedule | null>(null);
   const [startingBackfill, setStartingBackfill] = useState(false);
 
   const schedule = useSchedule(namespace, name);
-  const backfills = useBackfills(namespace, name);
+  const backfills = useBackfills(namespace, can("backfills.view") ? name : "");
   const setEnabled = useSetScheduleEnabled(namespace);
   const remove = useDeleteSchedule(namespace);
 
   if (schedule.error && schedule.data === undefined) {
     return (
       <div className="col">
-        <Link to="/schedules" className="detail-crumb">
-          ← all schedules
-        </Link>
+        <div className="detail-actions detail-back-only"><Link to="/schedules" className="btn">← Back to schedules</Link></div>
         <ErrorBox error={schedule.error} what={`schedule ${name}`} onRetry={schedule.refetch} />
       </div>
     );
   }
-  if (!schedule.data) return <Loading rows={8} label="Loading schedule" />;
+  if (!schedule.data) return <div className="col"><div className="detail-actions detail-back-only"><Link to="/schedules" className="btn">← Back to schedules</Link></div><Loading rows={8} label="Loading schedule" /></div>;
 
   const s = schedule.data;
 
@@ -57,9 +59,6 @@ export function ScheduleDetailPage({ namespace }: { namespace: string }) {
     <div className="col">
       <div className="detail-head">
         <div className="detail-head-text">
-          <Link to="/schedules" className="detail-crumb">
-            ← all schedules
-          </Link>
           {/* The state badge leads the name: on a schedule page reached
               mid-incident, "is this armed?" is read before "what is it called". */}
           <div className="detail-title-row">
@@ -77,9 +76,11 @@ export function ScheduleDetailPage({ namespace }: { namespace: string }) {
           </div>
         </div>
         <div className="detail-actions">
-          <button
+          <Link to="/schedules" className="btn">← Back to schedules</Link>
+          <Permit permission="schedules.update"><button type="button" disabled={!!editing || setEnabled.isPending} onClick={() => setEditing(s)}>Edit schedule</button></Permit>
+          <Permit permission="schedules.update"><button
             type="button"
-            disabled={setEnabled.isPending}
+            disabled={setEnabled.isPending || !!editing}
             onClick={() => {
               setActionError(null);
               setEnabled.mutate(
@@ -94,10 +95,10 @@ export function ScheduleDetailPage({ namespace }: { namespace: string }) {
             }
           >
             {s.enabled ? 'Disable' : 'Enable'}
-          </button>
-          <DeleteScheduleButton
+          </button></Permit>
+          <Permit permission="schedules.delete"><DeleteScheduleButton
             name={s.name}
-            pending={remove.isPending}
+            pending={remove.isPending || !!editing}
             onDelete={() => {
               setActionError(null);
               remove.mutate(s.name, {
@@ -105,10 +106,11 @@ export function ScheduleDetailPage({ namespace }: { namespace: string }) {
                 onError: (e) => setActionError(errorMessage(e)),
               });
             }}
-          />
+          /></Permit>
         </div>
       </div>
 
+      {editing && <Permit permission="schedules.update"><CreateScheduleForm key={editing.id} namespace={namespace} schedule={editing} onDone={() => setEditing(null)} /></Permit>}
       {actionError && <ErrorBox error={actionError} what="that action" />}
       {schedule.error != null ? <StaleWarning error={schedule.error} /> : null}
 
@@ -142,7 +144,7 @@ export function ScheduleDetailPage({ namespace }: { namespace: string }) {
                   <div className="notice-detail">{s.cron_error}</div>
                   <div className="notice-hint">
                     Its stored expression no longer compiles, so it will never fire again — and
-                    enabling it will be refused. Delete it and create a replacement with a valid
+                    enabling it will be refused. Edit this schedule to use a valid
                     expression.
                   </div>
                 </div>
@@ -161,15 +163,15 @@ export function ScheduleDetailPage({ namespace }: { namespace: string }) {
         </div>
       </div>
 
-      <div className="panel">
+      <Permit permission="backfills.view"><div className="panel">
         <div className="panel-head">
           <span>backfills</span>
           <span className="spacer" />
           <span className="chip">{backfills.data?.length ?? 0}</span>
           <span className="panel-tools">
-            <button type="button" onClick={() => setStartingBackfill((v) => !v)}>
+            <Permit permission="backfills.create"><button type="button" onClick={() => setStartingBackfill((v) => !v)}>
               {startingBackfill ? 'Cancel' : 'New backfill'}
-            </button>
+            </button></Permit>
           </span>
         </div>
 
@@ -201,7 +203,7 @@ export function ScheduleDetailPage({ namespace }: { namespace: string }) {
             <BackfillTable namespace={namespace} scheduleName={s.name} backfills={rows} />
           )}
         </AsyncPanel>
-      </div>
+      </div></Permit>
     </div>
   );
 }

@@ -1,3 +1,5 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
 ALTER TABLE tenants DROP CONSTRAINT tenants_owner_tenant_fk;
 ALTER TABLE workflow_specs DROP COLUMN tenant_id CASCADE;
 DROP TRIGGER IF EXISTS tenant_assignment ON workflow_specs;

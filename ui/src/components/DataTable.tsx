@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -100,6 +101,11 @@ export type Paging =
   | { mode: 'client' }
   | {
       mode: 'server';
+      /** Filtered server total, separate from the rows on this page. */
+      totalRows?: number;
+      pageSize?: number;
+      onPageSize?: (size: number) => void;
+      onFirst?: () => void;
       /** Fetches the next page. Absent/undefined means there is no next. */
       onNext?: () => void;
       /** Returns to the previous page. Absent means this is the first. */
@@ -162,6 +168,22 @@ export interface TableSelection<Row> {
    * Absent means every row is selectable.
    */
   isSelectable?: (row: Row) => boolean;
+  /**
+   * Why NO row on this page can be selected, phrased for the operator.
+   *
+   * Rendered only when `isSelectable` rejects every row, which is the one case
+   * the per-row rule cannot cover: the checkbox is reasoned away because "the
+   * row's own status cell already says", and that holds for a row sitting among
+   * eligible ones. When EVERY row is ineligible there is no contrast to read —
+   * just a disabled control above a column of blanks — and an operator cannot
+   * tell a finished page from a broken feature. Not hypothetical: a namespace
+   * whose recent runs have all SUCCEEDED shows exactly this, and it was
+   * reported as bulk actions not working.
+   *
+   * A sentence, not a tooltip, because the question is asked by someone who has
+   * already concluded the control is broken and will not hover it.
+   */
+  emptyHint?: string;
   /**
    * Accessible-name fragment for each row's checkbox, rendered as
    * `Select ${label(row)}`. Without it every checkbox in the column is named
@@ -242,6 +264,7 @@ export interface DataTableProps<Row> {
    * table where it silently does not.
    */
   selection?: TableSelection<Row>;
+  controlsTarget?: HTMLElement | null;
 }
 
 export function DataTable<Row>({
@@ -260,6 +283,7 @@ export function DataTable<Row>({
   noMatchTitle,
   noMatchDetail,
   selection,
+  controlsTarget,
 }: DataTableProps<Row>) {
   const [sort, setSort] = useState<SortState | undefined>(defaultSort);
   const [pageSize, setPageSize] = useState<number>(defaultPageSize);
@@ -271,6 +295,9 @@ export function DataTable<Row>({
    * reads `search.value` instead, so the two can never disagree.
    */
   const [localTerm, setLocalTerm] = useState('');
+  const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set());
+  const [compact, setCompact] = useState(false);
+  const [columnsOpen, setColumnsOpen] = useState(false);
 
   const searchId = useId();
 
@@ -316,7 +343,9 @@ export function DataTable<Row>({
     search?.mode === 'client' && term.trim() !== ''
       ? { kind: 'unknown' }
       : count;
-  const claim = countClaim(sorted.length, claimKind, noun);
+  const claim = paging.mode === 'server' && paging.totalRows !== undefined
+    ? { n: paging.totalRows, more: false, title: `${paging.totalRows} matching ${noun}` }
+    : countClaim(sorted.length, claimKind, noun);
 
   const searching = search?.mode === 'server' && search.pending === true;
 
@@ -517,6 +546,16 @@ export function DataTable<Row>({
   const selectAllLabel = allSelected
     ? `Clear the selected ${noun}`
     : `Select all ${selectable.length} ${selectAllScope}`;
+  /**
+   * Shown only when there ARE rows and not one of them can be selected.
+   * `sorted.length > 0` matters: on an empty table the select-all is inert for
+   * the ordinary reason that there is nothing there, and AsyncPanel's empty
+   * state already says so.
+   */
+  const emptyHintText =
+    selection && sorted.length > 0 && selectable.length === 0
+      ? selection.emptyHint
+      : undefined;
 
   function toggleSort(key: string) {
     setSort((prev) => {
@@ -603,6 +642,55 @@ export function DataTable<Row>({
       ]
     : columns;
 
+  const displayedColumns = allColumns.filter((column) => column.key === '__select' || !hiddenColumns.has(column.key));
+
+  const viewControls = <>
+        <div className="dt-view-controls">
+          {term && <button type="button" onClick={() => {
+            if (search?.mode === 'server') search.onChange('');
+            else setLocalTerm('');
+            setPage(0);
+          }}>Clear search</button>}
+          <button type="button" aria-pressed={compact} onClick={() => setCompact(!compact)}
+            aria-label={`Compact ${noun} table`}>Compact</button>
+          <details className="dt-columns" open={columnsOpen} onKeyDown={event => {
+            if (event.key === 'Escape') {
+              setColumnsOpen(false);
+              event.currentTarget.querySelector('summary')?.focus();
+            }
+          }} onBlur={event => {
+            if (!event.currentTarget.contains(event.relatedTarget)) setColumnsOpen(false);
+          }}>
+            <summary onClick={event => { event.preventDefault(); setColumnsOpen(open => !open); }}>Columns</summary>
+            {columnsOpen && <div className="dt-columns-menu" role="group" aria-label={`Visible ${noun} columns`}>
+              <strong>Visible columns</strong>
+              {columns.map((column) => (
+                <label key={column.key}>
+                  <input type="checkbox" checked={!hiddenColumns.has(column.key)}
+                    disabled={!hiddenColumns.has(column.key) && columns.filter(c => !hiddenColumns.has(c.key)).length === 1}
+                    onChange={() => setHiddenColumns(previous => {
+                      const next = new Set(previous);
+                      if (next.has(column.key)) next.delete(column.key); else next.add(column.key);
+                      return next;
+                    })} />
+                  {typeof column.header === 'string' ? column.header : column.key}
+                </label>
+              ))}
+              <button type="button" onClick={() => setHiddenColumns(new Set())}>Show all columns</button>
+            </div>}
+          </details>
+        </div>
+        {/* The count. It renders what lib/table.ts says it may render and
+            nothing more: the digits in hand, a "+" when there may be rows
+            nobody fetched, and the full sentence on hover. */}
+        <span
+          className="chip dt-count"
+          title={searching ? undefined : claim.title}
+        >
+          {searching ? 'searching…' : `${claim.n}${claim.more ? "+" : ""}`}
+        </span>
+  </>;
+
   return (
     <>
       {/* The toolbar is UNCONDITIONAL, because the count chip inside it is.
@@ -611,7 +699,8 @@ export function DataTable<Row>({
           many rows it is showing and whether that number is a total. Gating the
           whole band on `search` would have silently dropped that disclosure
           from exactly the tables that have no other way to make it. */}
-      <div className="dt-toolbar">
+      {controlsTarget && createPortal(viewControls, controlsTarget)}
+      <div className="dt-toolbar" hidden={Boolean(controlsTarget && !toolbar && !search && !emptyHintText)}>
         {toolbar}
         {/* The field and the sentence qualifying it, as ONE group.
 
@@ -670,16 +759,17 @@ export function DataTable<Row>({
             </span>
           </div>
         )}
+        {/* Why the select-all above the rows is inert. Shown only when the
+            table offers selection, has rows, and NONE of them is a candidate —
+            the one case the per-row "the status cell already says it" rule
+            cannot speak to, because there is no eligible row to contrast
+            against. Sits beside the count rather than in the empty-state slot:
+            the page is not empty, it is full of rows that are all finished. */}
+        {selection && emptyHintText ? (
+          <span className="dt-selection-hint faint">{emptyHintText}</span>
+        ) : null}
         <span className="spacer" />
-        {/* The count. It renders what lib/table.ts says it may render and
-            nothing more: the digits in hand, a "+" when there may be rows
-            nobody fetched, and the full sentence on hover. */}
-        <span
-          className="chip dt-count"
-          title={searching ? undefined : claim.title}
-        >
-          {searching ? 'searching…' : `${claim.n}${claim.more ? "+" : ""}`}
-        </span>
+        {!controlsTarget && viewControls}
       </div>
 
       {/* The one empty state that is this component's to own: rows arrived and
@@ -704,10 +794,10 @@ export function DataTable<Row>({
         />
       ) : (
         <div className="table-scroll">
-          <table className={tableClass}>
+          <table className={[tableClass, compact ? 'dt-compact' : ''].filter(Boolean).join(' ') || undefined}>
             <thead>
               <tr>
-                {allColumns.map((c) => (
+                {[...displayedColumns.filter(c => c.key !== 'actions'), ...displayedColumns.filter(c => c.key === 'actions')].map((c) => (
                   <HeaderCell
                     key={c.key}
                     column={c}
@@ -720,7 +810,7 @@ export function DataTable<Row>({
             <tbody>
               {visible.map((row) => (
                 <tr key={rowKey(row)} className={rowClass?.(row)}>
-                  {allColumns.map((c) => (
+                  {[...displayedColumns.filter(c => c.key !== 'actions'), ...displayedColumns.filter(c => c.key === 'actions')].map((c) => (
                     <td
                       key={c.key}
                       className={
@@ -933,8 +1023,9 @@ function Pager({
         <span className="filter-label">rows</span>
         <select
           id={`${sizeId}-size`}
-          value={pageSize}
-          onChange={(e) => onPageSize(Number(e.target.value))}
+          value={serverMode ? paging.pageSize ?? pageSize : pageSize}
+          disabled={serverMode && !paging.onPageSize}
+          onChange={(e) => serverMode ? paging.onPageSize?.(Number(e.target.value)) : onPageSize(Number(e.target.value))}
           aria-label={`${noun} per page`}
         >
           {PAGE_SIZES.map((n) => (
@@ -949,9 +1040,11 @@ function Pager({
 
       {/* What is on screen, phrased so it never implies a total the endpoint
           cannot supply. */}
-      <span className="dt-range">{rangeLabel(from, to, total, count)}</span>
+      <span className="dt-range">{serverMode ? `${total === 0 ? 0 : (paging.pageNumber - 1) * (paging.pageSize ?? pageSize) + 1}–${(paging.pageNumber - 1) * (paging.pageSize ?? pageSize) + total} ${paging.totalRows !== undefined ? `of ${paging.totalRows}` : `· ${total} loaded`}` : rangeLabel(from, to, total, count)}</span>
 
       <div className="dt-pager-buttons">
+        <button type="button" disabled={atFirst || (serverMode && !paging.onFirst)} onClick={()=>serverMode ? paging.onFirst?.() : onPage(0)} aria-label={`first page of ${noun}`}>First</button>
+        {!serverMode && <label className="dt-jump">Page <select aria-label={`Go to page of ${noun}`} value={page} onChange={e=>onPage(Number(e.target.value))}>{Array.from({length:pages},(_,i)=><option key={i} value={i}>{i+1}</option>)}</select></label>}
         <button
           type="button"
           disabled={atFirst}
@@ -968,7 +1061,7 @@ function Pager({
             printed rather than one being guessed. */}
         <span className="dt-page-of" aria-live="polite">
           {serverMode
-            ? `page ${paging.pageNumber}`
+            ? `page ${paging.pageNumber}${paging.totalRows !== undefined ? ` of ${Math.max(1, Math.ceil(paging.totalRows / (paging.pageSize ?? pageSize)))}` : ""}`
             : `page ${page + 1} of ${pages}`}
         </span>
         <button
@@ -982,6 +1075,7 @@ function Pager({
         >
           Next
         </button>
+        {!serverMode && <button type="button" disabled={atLast} onClick={()=>onPage(pages-1)} aria-label={`last page of ${noun}`}>Last</button>}
       </div>
     </div>
   );

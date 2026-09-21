@@ -1,3 +1,5 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
 CREATE TABLE run_deletions (
  run_id UUID PRIMARY KEY REFERENCES workflow_runs(id) ON DELETE CASCADE,
  namespace TEXT NOT NULL,

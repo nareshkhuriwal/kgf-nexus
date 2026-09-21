@@ -1,6 +1,9 @@
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
-
+import { RegisterPage } from './pages/RegisterPage';
+import { CustomerPage } from './pages/CustomerPage';
+import { PermissionContext, PermissionBoundary } from './components/Permissions';
+import { RolesPage } from './pages/admin/RolesPage';
 /**
  * Shell and routing.
  *
@@ -43,12 +46,14 @@
  * state cannot leak onto a screen that has no session yet.
  */
 
+import { ConsoleContext } from './components/ConsoleContext';
 import { NavLink, Outlet, Route, Routes, useNavigate } from 'react-router-dom';
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { API_BASE, DEFAULT_NAMESPACE, getApiKey, setApiKey } from './api/client';
+import { API_BASE, DEFAULT_NAMESPACE } from './api/client';
 import { authApi, currentCredential, getSession, setSession } from './api/auth';
 import { LoginPage } from './pages/LoginPage';
+import { InfrastructurePage } from './pages/admin/InfrastructurePage';
 import { UsersPage } from './pages/admin/UsersPage';
 import { TokensPage } from './pages/admin/TokensPage';
 import { AuditPage } from './pages/admin/AuditPage';
@@ -130,7 +135,7 @@ export function App() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [namespace, setNamespace] = useState(
-    () => window.localStorage.getItem(NS_KEY) ?? DEFAULT_NAMESPACE,
+    () => getSession()?.namespace ?? window.localStorage.getItem(NS_KEY) ?? DEFAULT_NAMESPACE,
   );
 
   useEffect(() => {
@@ -233,8 +238,6 @@ export function App() {
   // build time is readable by everyone who loads the page. The state stays here
   // rather than moving to /settings because the value outlives that page — every
   // request the shell's children make is authenticated with it.
-  const [apiKey, setApiKeyState] = useState(() => getApiKey());
-  const [keyPersistFailed, setKeyPersistFailed] = useState(false);
 
   // Bumped whenever the credential changes, so whoami re-runs rather than
   // serving a cached answer for a credential that is no longer presented.
@@ -254,10 +257,12 @@ export function App() {
     queryFn: () => authApi.whoami(),
     enabled: credential.kind !== 'none',
     retry: false,
-    staleTime: 60_000,
+    staleTime: 10_000,
+    refetchInterval: 10_000,
   });
 
-  const canAdmin = me.data?.permissions?.admin_write === true;
+  const grants = me.isError ? [] : me.data?.effective_permissions ?? [];
+  const canAdmin = grants.includes("roles.manage");
 
   /**
    * How many items need attention, for the bar's bell.
@@ -274,7 +279,7 @@ export function App() {
    * everything is fine at the exact moment it does not know — which is the one
    * lie this console must not tell.
    */
-  const attention = useAttention(namespace, { limit: BELL_ATTENTION_LIMIT });
+  const attention = useAttention(namespace, { limit: BELL_ATTENTION_LIMIT }, ["overview.view","runs.view","workers.view"].every(p => grants.includes(p)));
   const bellCount = attention.data?.items?.length;
 
   /**
@@ -292,7 +297,10 @@ export function App() {
   const [session, setSessionState] = useState(() => getSession());
 
   function credentialChanged() {
-    setSessionState(getSession());
+    const nextSession=getSession();
+    setSessionState(nextSession);
+    if(nextSession)setNamespace(nextSession.namespace);
+    queryClient.clear();
     setCredRevision((n) => n + 1);
     queryClient.invalidateQueries();
   }
@@ -340,16 +348,6 @@ export function App() {
     navigate('/login', { replace: true });
   }
 
-  function saveKey(next: string) {
-    const stored = setApiKey(next);
-    // Reflect what is actually READABLE, not what was typed: if persistence
-    // failed, the header must not claim a key is set.
-    setApiKeyState(getApiKey());
-    setKeyPersistFailed(!stored && next.trim() !== '');
-    // Every page's data was fetched with the old credential, so re-fetch rather
-    // than leave stale 401 panels on screen next to a now-valid key.
-    credentialChanged();
-  }
 
   /**
    * Whether the command palette is open.
@@ -391,7 +389,7 @@ export function App() {
       onSignOut={() => void signOut()}
       onSignIn={() => navigate('/login')}
       onOpenSettings={() => navigate('/settings')}
-      onOpenApiKeys={() => navigate('/admin/tokens')}
+      onOpenApiKeys={grants.includes("tokens.view") ? () => navigate('/admin/tokens') : undefined}
       onOpenUsers={() => navigate('/admin/users')}
     />
   );
@@ -476,8 +474,9 @@ export function App() {
         )}
 
         <main className="main" id="main" tabIndex={-1}>
+          <ConsoleContext />
           <ErrorBoundary>
-            <Outlet />
+            <PermissionBoundary pending={me.isPending && credential.kind !== "none"}><Outlet /></PermissionBoundary>
           </ErrorBoundary>
         </main>
       </div>
@@ -485,7 +484,7 @@ export function App() {
   );
 
   return (
-    <Routes>
+    <PermissionContext.Provider value={grants}><Routes><Route path="/register" element={<RegisterPage />} />
       {/* Outside the chrome: no nav, no namespace control, no account menu. */}
       <Route
         path="/login"
@@ -500,7 +499,7 @@ export function App() {
         <Route path="/" element={<OverviewPage namespace={namespace} />} />
         <Route path="/workflows" element={<WorkflowsPage namespace={namespace} />} />
         <Route path="/workflows/:name" element={<WorkflowDetailPage namespace={namespace} />} />
-        <Route path="/runs" element={<RunListPage namespace={namespace} />} />
+        <Route path="/runs" element={<RunListPage key={namespace} namespace={namespace} canAdmin={grants.includes("runs.delete")} />} />
         <Route path="/runs/:runId" element={<RunDetailPage namespace={namespace} />} />
         <Route path="/schedules" element={<SchedulesPage namespace={namespace} />} />
         <Route path="/schedules/:name" element={<ScheduleDetailPage namespace={namespace} />} />
@@ -517,25 +516,26 @@ export function App() {
           path="/settings"
           element={
             <SettingsPage
+              principal={me.isError ? undefined : me.data}
               namespace={namespace}
               onNamespaceChange={setNamespace}
-              apiKey={apiKey}
-              onApiKeyChange={saveKey}
-              apiKeyPersistFailed={keyPersistFailed}
             />
           }
         />
+        <Route path="/customer" element={<CustomerPage />} />
+        <Route path="/admin/roles" element={<RolesPage namespace={namespace} />} />
+        <Route path="/admin/infrastructure" element={<InfrastructurePage key={namespace} namespace={namespace} canAdmin={grants.includes("infrastructure.view")} />} />
         <Route
           path="/admin/users"
-          element={<UsersPage namespace={namespace} canAdmin={canAdmin} />}
+          element={<UsersPage namespace={namespace} canAdmin={grants.includes("users.view")} />}
         />
         <Route
           path="/admin/tokens"
-          element={<TokensPage namespace={namespace} canAdmin={canAdmin} />}
+          element={<TokensPage namespace={namespace} canAdmin={grants.includes("tokens.view")} />}
         />
         <Route
           path="/admin/audit"
-          element={<AuditPage namespace={namespace} canAdmin={canAdmin} />}
+          element={<AuditPage namespace={namespace} canAdmin={grants.includes("audit.view")} />}
         />
         {/* Inside the chrome on purpose: a mistyped URL from a signed-in
             operator is a navigation error, and stripping the nav from the one
@@ -555,6 +555,6 @@ export function App() {
           }
         />
       </Route>
-    </Routes>
+    </Routes></PermissionContext.Provider>
   );
 }

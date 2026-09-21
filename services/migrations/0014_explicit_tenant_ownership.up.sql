@@ -1,3 +1,5 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
 -- Explicit customer ownership on all tenant-owned tables.
 -- Existing namespace and parent references remain compatible with service writes.
 CREATE FUNCTION public.assign_namespace_tenant() RETURNS trigger

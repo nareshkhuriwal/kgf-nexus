@@ -1,3 +1,5 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
 -- Customer identity is separate from tenant-local Administrator permissions.
 CREATE TABLE tenants (
  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

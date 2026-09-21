@@ -1,0 +1,25 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, expect, it, vi } from 'vitest';
+import { UsersPage } from './UsersPage';
+import { PermissionContext } from '../../components/Permissions';
+import { authApi, authRequest } from '../../api/auth';
+vi.mock('../../api/auth',()=>({authApi:{listUsers:vi.fn(),createUser:vi.fn()},authRequest:vi.fn()}));
+afterEach(()=>{cleanup();vi.resetAllMocks();});
+it('loads every catalog role and submits the selected custom role on creation', async()=>{
+ vi.mocked(authApi.listUsers).mockResolvedValue([]);
+ vi.mocked(authRequest).mockResolvedValue({roles:['Administrator','Viewer','Workflow Operator','Workflow Developer','Infrastructure Operator','Auditor','Finance monitor'].map(name=>({name,builtin:name!=='Finance monitor',permissions:[]}))});
+ vi.mocked(authApi.createUser).mockResolvedValue({email:'user@example.test'} as never);
+ const client=new QueryClient({defaultOptions:{queries:{retry:false},mutations:{retry:false}}});
+ render(<MemoryRouter><PermissionContext.Provider value={['users.view','users.manage','roles.manage']}><QueryClientProvider client={client}><UsersPage namespace="default" canAdmin/></QueryClientProvider></PermissionContext.Provider></MemoryRouter>);
+ fireEvent.click(screen.getByRole('button',{name:'New user'}));
+ expect(await screen.findByRole('option',{name:'Finance monitor — custom'})).toBeTruthy();
+ expect(screen.getByRole('option',{name:'Administrator — all permissions (protected)'})).toBeTruthy();
+ expect(screen.getByRole('option',{name:'Workflow Operator'})).toBeTruthy();
+ fireEvent.change(screen.getByLabelText(/^email/i),{target:{value:'user@example.test'}});
+ fireEvent.change(screen.getByLabelText(/^password/i),{target:{value:'test-password-12345'}});
+ fireEvent.change(screen.getByLabelText(/^role/i),{target:{value:'Finance monitor'}});
+ fireEvent.click(screen.getByRole('button',{name:'Create user'}));
+ await waitFor(()=>expect(authApi.createUser).toHaveBeenCalledWith('default',expect.objectContaining({role:'reader',role_name:'Finance monitor'})));
+});

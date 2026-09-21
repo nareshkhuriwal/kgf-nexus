@@ -344,3 +344,11 @@ describe('the four redundant state channels survive the restyle', () => {
     ).toContain('dag-node');
   });
 });
+
+it('jumps to a task from the graph toolbar', () => {
+  const onSelect = vi.fn();
+  render(<DagView graph={cascade()} onSelect={onSelect} />);
+  fireEvent.change(screen.getByRole('combobox', { name: 'Jump to task' }), { target: { value: 'load' } });
+  expect(onSelect).toHaveBeenCalledWith('load');
+  expect(document.querySelector('.dag-zoom')?.getAttribute('transform')).toContain('scale(1)');
+});

@@ -1,3 +1,4 @@
+import { Permit } from '../components/Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -87,7 +88,7 @@ export function BackfillDetailPage({ namespace }: { namespace: string }) {
             {terminal ? 'finished' : 'refreshes every 3s'}
           </div>
         </div>
-        <div className="detail-actions">
+        <Permit permission="backfills.update"><div className="detail-actions">
           {b.state === 'RUNNING' && (
             <button type="button" onClick={() => run('pause')} disabled={action.isPending}>
               Pause
@@ -109,7 +110,7 @@ export function BackfillDetailPage({ namespace }: { namespace: string }) {
               Cancel
             </button>
           )}
-        </div>
+        </div></Permit>
       </div>
 
       {actionError && <ErrorBox error={actionError} what="that backfill action" />}

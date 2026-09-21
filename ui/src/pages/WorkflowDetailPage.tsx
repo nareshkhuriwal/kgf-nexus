@@ -1,3 +1,6 @@
+import { authRequest } from '../api/auth';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { usePermission } from '../components/Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -36,6 +39,11 @@ import { EMPTY, fmtAge, fmtDurationMs, fmtResources, fmtTs, shortId } from '../l
 
 export function WorkflowDetailPage({ namespace }: { namespace: string }) {
   const { name = '' } = useParams();
+  const can = usePermission();
+  const qc = useQueryClient();
+  const [publishing, setPublishing] = useState(false);
+  const [document, setDocument] = useState('');
+  const publish = useMutation({mutationFn: async () => { const spec = JSON.parse(document); if(spec.name !== name && spec.metadata?.name !== name) throw new Error('The workflow name must match ' + name); return authRequest('/v1/namespaces/' + encodeURIComponent(namespace) + '/specs', {method:'POST', headers:{'Content-Type':'application/json'}, body:document}); }, onSuccess: () => { setPublishing(false); void qc.invalidateQueries(); }});
   const [params, setParams] = useSearchParams();
   const versions = useSpecVersions(namespace, name);
 
@@ -62,18 +70,15 @@ export function WorkflowDetailPage({ namespace }: { namespace: string }) {
 
   return (
     <div className="col">
-      {/* The crumb sits ABOVE the name rather than inside the subtitle: going
-          back to the catalog is navigation, and threading it through the
-          sentence that describes the workflow made it read as prose. */}
-      <Link to="/workflows" className="detail-crumb">
-        ← catalog
-      </Link>
-
       <PageHeader
         title={name}
         subtitle={<>workflow definition in <code>{namespace}</code></>}
         actions={
-          <button
+          <>
+          <Link to="/workflows" className="btn">← Back to workflows</Link>
+          {can('workflows.publish') && <button disabled={!definition.data} onClick={() => { setDocument(JSON.stringify(definition.data?.spec, null, 2)); setPublishing(v => !v); }}>Publish version</button>}
+          {can('schedules.create') && can('runs.create') && <Link className="btn" to={'/schedules?new=1&spec=' + encodeURIComponent(name)}>Schedule</Link>}
+          {can('runs.create') && <button
             type="button"
             className="primary"
             onClick={() => setSubmitting((v) => !v)}
@@ -81,10 +86,12 @@ export function WorkflowDetailPage({ namespace }: { namespace: string }) {
             disabled={definition.data === undefined}
           >
             {submitting ? 'Cancel' : 'Run this workflow'}
-          </button>
+          </button>}
+          </>
         }
       />
 
+      {publishing && <form className="panel" onSubmit={e => { e.preventDefault(); publish.mutate(); }}><div className="panel-head">Publish a workflow version</div><div className="col" style={{padding:20}}><p>Edit the definition below. Publishing validates and stores an immutable workflow version.</p><label htmlFor="publish-definition">Workflow definition (JSON)</label><textarea id="publish-definition" rows={18} value={document} onChange={e => setDocument(e.target.value)} spellCheck={false} style={{fontFamily:'monospace',width:'100%'}} />{publish.error && <ErrorBox error={publish.error} what="publish" />}<div className="detail-actions"><button type="button" onClick={() => setPublishing(false)}>Cancel</button><button className="primary" disabled={publish.isPending}>{publish.isPending ? 'Publishing…' : 'Publish version'}</button></div></div></form>}
       {submitting && definition.data && (
         <div className="panel">
           <div className="panel-head">

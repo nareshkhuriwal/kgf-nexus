@@ -1,3 +1,5 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
 CREATE TABLE rbac_roles (
  namespace TEXT NOT NULL, name TEXT NOT NULL, permissions JSONB NOT NULL CHECK(jsonb_typeof(permissions)='array'),
  revision BIGINT NOT NULL DEFAULT 1, PRIMARY KEY(namespace,name)

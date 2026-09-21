@@ -141,10 +141,10 @@ describe('email and password is the only way in', () => {
     expect(password).toBeRequired();
   });
 
-  it('shows which namespace it will authenticate against', () => {
+  it('resolves the tenant without asking for a namespace', () => {
     renderLogin();
 
-    expect(screen.getByText('payments')).toBeInTheDocument();
+    expect(screen.queryByLabelText(/tenant|namespace/i)).toBeNull();
   });
 });
 

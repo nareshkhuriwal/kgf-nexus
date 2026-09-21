@@ -1,3 +1,5 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
 package rest
 
 var routePermissions = map[string][]string{

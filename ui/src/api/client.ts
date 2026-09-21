@@ -293,6 +293,7 @@ export interface RunListFilter {
 export interface RunPage {
   runs: RunSummary[];
   nextBefore?: string;
+  total?: number;
 }
 
 /**
@@ -411,7 +412,10 @@ export const api = {
       const raw = (payload as Record<string, unknown>).next_before;
       if (typeof raw === 'string' && raw !== '') nextBefore = raw;
     }
-    return { runs: sorted, nextBefore };
+    const rawTotal = payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>).total : undefined;
+    const total = typeof rawTotal === 'number' && Number.isSafeInteger(rawTotal) && rawTotal >= 0 ? rawTotal : undefined;
+    return { runs: sorted, nextBefore, ...(total !== undefined ? { total } : {}) };
   },
 
   /**
@@ -481,6 +485,10 @@ export const api = {
   },
 
   /** Kept as its own name: it is called from a list row as well as the detail page. */
+  deleteRun(namespace: string, runId: string): Promise<void> {
+    return request<void>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}`, {method: "DELETE"});
+  },
+
   cancelRun(namespace: string, runId: string): Promise<void> {
     return request<void>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}/cancel`, {
       method: 'POST',
@@ -601,6 +609,12 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+    });
+  },
+
+  updateSchedule(namespace: string, body: CreateScheduleRequest): Promise<Schedule> {
+    return request<Schedule>(`${ns(namespace)}/schedules/${encodeURIComponent(body.name)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
   },
 

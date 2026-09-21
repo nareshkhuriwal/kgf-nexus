@@ -63,7 +63,6 @@ const COVERS: { title: string; detail: string }[] = [
 ];
 
 export function LoginPage({
-  namespace,
   onAuthenticated,
 }: {
   namespace: string;
@@ -84,7 +83,7 @@ export function LoginPage({
     setError(null);
     setWarning(null);
     try {
-      const session = await authApi.login(namespace, email.trim(), password);
+      const session = await authApi.login("", email.trim(), password);
       if (!setSession(session)) {
         // Honest rather than silent: the login worked, but it will not survive a
         // reload, and an operator should know that before they close the tab.
@@ -143,7 +142,7 @@ export function LoginPage({
             <Logo size={36} className="login-mark" />
             <h1 className="login-title">Nexus</h1>
             <div className="login-sub">
-              operator console · namespace <code>{namespace}</code>
+              Sign in to your customer workspace
             </div>
           </div>
 
@@ -174,7 +173,7 @@ export function LoginPage({
                 <button type="submit" className="primary login-submit" disabled={busy}>
                   {busy ? 'Signing in…' : 'Sign in'}
                 </button>
-              </form>
+              </form><p className="login-signup">New customer? <a href="/register">Create your workspace</a></p>
 
               {error && (
                 <div className="notice error" role="alert">

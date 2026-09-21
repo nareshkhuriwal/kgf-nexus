@@ -1,3 +1,4 @@
+import { IconGear, IconKey, IconUsers } from './icons';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -272,10 +273,11 @@ export function ProfileMenu({
             {organization && <p className="profile-org">{organization}</p>}
             {email ? (
               <>
-                <p className="profile-name">{email.split('@')[0]}</p>
+                <p className="profile-name">{session?.displayName || (signedIn ? email.split('@')[0] : principal?.name || email)}</p>
                 <p className="profile-email" title={email}>
-                  {email}
+                  {signedIn ? email : 'Token authentication'}
                 </p>
+                {principal?.role && <span className="profile-role">{principal.role}</span>}
               </>
             ) : (
               // An API key is a machine credential: it names no person, so the
@@ -288,13 +290,13 @@ export function ProfileMenu({
               or a control absent from it entirely. */}
           <div className="profile-group">
             {onOpenSettings && (
-              <ProfileMenuItem onSelect={onOpenSettings}>Settings</ProfileMenuItem>
+              <ProfileMenuItem onSelect={() => { setOpen(false); onOpenSettings?.(); }}><IconGear />Settings</ProfileMenuItem>
             )}
             {onOpenApiKeys && (
-              <ProfileMenuItem onSelect={onOpenApiKeys}>API keys</ProfileMenuItem>
+              <ProfileMenuItem onSelect={() => { setOpen(false); onOpenApiKeys?.(); }}><IconKey />Tokens</ProfileMenuItem>
             )}
             {canAdmin && onOpenUsers && (
-              <ProfileMenuItem onSelect={onOpenUsers}>Users &amp; IAM</ProfileMenuItem>
+              <ProfileMenuItem onSelect={() => { setOpen(false); onOpenUsers?.(); }}><IconUsers />Users &amp; IAM</ProfileMenuItem>
             )}
           </div>
 
@@ -314,9 +316,9 @@ export function ProfileMenu({
 
           <div className="profile-group">
             {signedIn ? (
-              <ProfileMenuItem onSelect={onSignOut}>Sign out</ProfileMenuItem>
+              <ProfileMenuItem onSelect={() => { setOpen(false); onSignOut?.(); }}>Sign out</ProfileMenuItem>
             ) : (
-              <ProfileMenuItem onSelect={onSignIn}>Sign in</ProfileMenuItem>
+              <ProfileMenuItem onSelect={() => { setOpen(false); onSignIn?.(); }}>Sign in</ProfileMenuItem>
             )}
           </div>
         </div>

@@ -1,36 +1,16 @@
+import type { Principal } from '../api/auth';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * Console settings: everything that is per-BROWSER or per-ACCOUNT rather than
- * per-SCREEN.
- *
- * WHY THIS PAGE EXISTS. All of this used to live inside the account dropdown —
- * an accent swatch grid, two layout miniatures, a namespace field and an
- * API-key form, stacked in a 280px floating layer. A dropdown is the wrong
- * container for any of it for one concrete reason: it is dismissed by a click
- * anywhere outside itself, so a half-typed API key or a mis-aimed click during
- * a comparison of four hues loses the surface. A page cannot be dismissed, has
- * room to explain each choice, and can be linked to — which is what lets the
- * menu shrink to a list of plain rows that merely point here.
- *
- * WHAT IS NOT HERE. Anything scoped to what is on screen: a run's filters, a
- * table's sort, a DAG's zoom. Those belong to the view that shows them, and
- * moving them here would put a control on one page that changes another.
- *
- * The namespace and the API key are on this page but stay READ-ONLY in the
- * chrome, which is the same separation as before: the VALUE is always visible
- * where an operator cannot miss it, while the INPUT that changes it sits
- * somewhere it cannot be nudged by accident. Both are reachable in one click
- * from the account menu, which is how often they are actually changed.
- */
-
-import { useState } from 'react';
+/** Browser appearance, workspace scope, and account information. */
+import { useQuery } from '@tanstack/react-query';
+import { authRequest } from '../api/auth';
 import { PageHeader } from '../components/PageHeader';
 import { AppearancePanel } from '../components/AppearancePanel';
-import { API_BASE } from '../api/client';
+import { ErrorBox } from '../components/Status';
 
 export interface SettingsPageProps {
+  principal?: Principal;
   /** The namespace every page's data is scoped to. */
   namespace: string;
   /**
@@ -39,43 +19,40 @@ export interface SettingsPageProps {
    * confirmation. App owns the value and its persistence.
    */
   onNamespaceChange: (next: string) => void;
-  /** The API key currently readable from browser storage, or ''. */
-  apiKey?: string;
-  /**
-   * Stores a key and re-fetches with it. Optional so the page renders in a
-   * deployment (or a test) that does not offer key entry at all, rather than
-   * showing a control that does nothing.
-   */
-  onApiKeyChange?: (next: string) => void;
-  /** Whether the LAST key save failed to persist. Reported, never assumed. */
-  apiKeyPersistFailed?: boolean;
+
 }
 
 export function SettingsPage({
   namespace,
+  principal,
   onNamespaceChange,
-  apiKey = '',
-  onApiKeyChange,
-  apiKeyPersistFailed = false,
 }: SettingsPageProps) {
-  /**
-   * The key is drafted rather than applied per keystroke, which is the one
-   * place this page departs from "no save button".
-   *
-   * A credential is not previewable: every keystroke of a half-typed key would
-   * be presented to the gateway and refused, filling the console with 401
-   * panels that say nothing about the key being wrong. So the draft is local
-   * and submitting it is the act.
-   */
-  const [keyDraft, setKeyDraft] = useState('');
-  const [keyOpen, setKeyOpen] = useState(false);
-
+  const account = useQuery({
+    queryKey: ['current-tenant', principal?.namespace, principal?.name],
+    queryFn: () => authRequest<{tenant:{id:string;name:string;namespace:string;contact_email:string}}>('/v1/account/tenant'),
+    enabled: !!principal,
+    retry: false,
+  });
   return (
     <div className="col">
       <PageHeader
         title="Settings"
-        subtitle="Appearance is stored in this browser. Namespace and credential scope every request this tab makes."
+        subtitle="Manage your appearance preferences and view your account details."
       />
+      <a className="btn" href="/customer">Customer account & tenant details →</a>
+      <section className="panel credential-card">
+        <div className="panel-head">Current authentication <span className="chip">{principal ? 'Verified by gateway' : 'Not verified'}</span></div>
+        <div className="panel-body">
+          {principal ? <><dl className="credential-facts">
+            <div><dt>{principal.kind === 'session' || principal.kind === 'user' ? 'Signed-in account' : 'Active token alias'}</dt><dd>{principal.name || 'Unnamed credential'}</dd></div>
+            <div><dt>Authentication</dt><dd>{principal.kind === 'session' || principal.kind === 'user' ? 'User session' : 'Token'}</dd></div>
+            <div><dt>Role</dt><dd>{principal.roles?.length ? principal.roles.join(", ") : principal.role}</dd></div>
+            <div><dt>Credential namespace</dt><dd>{principal.namespace}</dd></div>
+          </dl><details className="permission-disclosure"><summary>View effective permissions</summary><div className="credential-permissions">{(principal.effective_permissions ?? Object.entries(principal.permissions ?? {}).filter(([,allowed])=>allowed).map(([name])=>name)).map(name=><span className="chip" key={name}>{name.replaceAll('_',' ')}</span>)}</div></details>
+          <p className="settings-hint">This is the credential currently used for requests. Token secrets are never displayed here.</p></> : <p className="settings-hint">Current credential details are unavailable. Connect a valid token or sign in to verify your identity.</p>}
+        </div>
+      </section>
+
 
       <div className="panel">
         <div className="panel-head">
@@ -108,6 +85,7 @@ export function SettingsPage({
               id="settings-namespace"
               type="text"
               value={namespace}
+              readOnly={!!principal}
               onChange={(e) => onNamespaceChange(e.target.value)}
               aria-label="namespace"
             />
@@ -122,78 +100,19 @@ export function SettingsPage({
         </div>
       </div>
 
-      <div className="panel">
-        <div className="panel-head">
-          <span>credential</span>
-          <span className="spacer" />
-          <span className="panel-note">held in this browser, never in the bundle</span>
-        </div>
+      <section className="panel">
+        <div className="panel-head">Account details</div>
         <div className="panel-body">
-          <div className="settings-field">
-            <span className="settings-label">Connected to</span>
-            {/* Outside every collapsible control, as it was in the menu: this
-                says which deployment the tab is pointed at, and mistaking
-                staging for production is the error a hidden value invites. */}
-            <p className="settings-value">
-              <code>{API_BASE || 'same origin'}</code>
-            </p>
-          </div>
-
-          {onApiKeyChange && (
-            <div className="settings-field">
-              <span className="settings-label">API key</span>
-              {keyOpen ? (
-                <form
-                  className="row"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    onApiKeyChange(keyDraft.trim());
-                    setKeyOpen(false);
-                  }}
-                >
-                  <input
-                    type="password"
-                    value={keyDraft}
-                    onChange={(e) => setKeyDraft(e.target.value)}
-                    placeholder="API key"
-                    aria-label="API key"
-                  />
-                  <button type="submit" className="primary">
-                    Save
-                  </button>
-                  <button type="button" onClick={() => setKeyOpen(false)}>
-                    Cancel
-                  </button>
-                </form>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setKeyDraft(apiKey);
-                    setKeyOpen(true);
-                  }}
-                  title={
-                    apiKey
-                      ? 'An API key is set for this browser. Click to change it.'
-                      : 'No API key set — every request will be refused with 401.'
-                  }
-                >
-                  {apiKeyPersistFailed
-                    ? 'API key ✗ not saved'
-                    : apiKey
-                      ? 'API key ✓'
-                      : 'Set API key'}
-                </button>
-              )}
-              <p className="settings-hint">
-                The CLI-parity escape hatch. A session from signing in takes
-                precedence over a key stored here, so pasting one does not
-                silently change who you are acting as.
-              </p>
-            </div>
-          )}
+          {account.isLoading && <p>Loading account details…</p>}
+          {account.error && <ErrorBox error={account.error} what="account details" onRetry={account.refetch} />}
+          {account.data ? <dl className="credential-facts">
+            <div><dt>Organization</dt><dd>{account.data.tenant.name}</dd></div>
+            <div><dt>Tenant ID</dt><dd><code>{account.data.tenant.id}</code></dd></div>
+            <div><dt>Namespace</dt><dd>{account.data.tenant.namespace}</dd></div>
+            <div><dt>Contact email</dt><dd>{account.data.tenant.contact_email || 'Not configured'}</dd></div>
+          </dl> : !principal && <p>Sign in to view your account details.</p>}
         </div>
-      </div>
+      </section>
     </div>
   );
 }

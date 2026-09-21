@@ -57,7 +57,6 @@ import {
   exportFileName,
   fitScale,
   inlineComputedStyles,
-  overflows,
   svgDocument,
   zoomAbout,
   zoomIn,
@@ -120,6 +119,8 @@ export interface DagCanvasProps {
   /** Collapsible legend content, rendered under the canvas. */
   legend?: ReactNode;
   legendLabel?: string;
+  viewportHeight?: number;
+  focusTarget?: { x: number; y: number };
 }
 
 export function DagCanvas({
@@ -134,6 +135,8 @@ export function DagCanvas({
   stats,
   legend,
   legendLabel = 'legend',
+  focusTarget,
+  viewportHeight,
 }: DagCanvasProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -142,6 +145,7 @@ export function DagCanvas({
   const [notice, setNotice] = useState<string | null>(null);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [legendOpen, setLegendOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   /**
    * Container measurement. ResizeObserver rather than a window resize
@@ -172,26 +176,24 @@ export function DagCanvas({
     setView({ scale, ...centerOffset({ width, height }, v, scale) });
   }, [width, height, box.width, box.height]);
 
-  /**
-   * Fit once per graph identity, and only when the graph actually overflows.
-   *
-   * Two conditions, both load-bearing. "Once per identity" is what stops the
-   * poll from fighting the operator. "Only when it overflows" is what stops a
-   * three-node graph from being centred at some fractional scale for no reason:
-   * a graph that already fits is already correct at 100%, and re-centring it
-   * would make the default view of a small run look arbitrary.
-   */
+  // Fit on graph or viewport size changes, never on ordinary status polling.
   const fittedFor = useRef<string | null>(null);
   useEffect(() => {
-    if (fittedFor.current === graphKey) return;
-    // Wait for a real measurement before deciding; an unmeasured container
-    // cannot answer "does it fit" and guessing would either skip the fit the
-    // operator needs or apply one they do not.
     if (box.width <= 0 || box.height <= 0) return;
-    fittedFor.current = graphKey;
-    if (overflows({ width, height }, box)) fit();
-    else setView(IDENTITY);
-  }, [graphKey, box, width, height, fit]);
+    const identity = `${graphKey}:${box.width}:${box.height}`;
+    if (fittedFor.current === identity) return;
+    fittedFor.current = identity;
+    fit();
+  }, [graphKey, box.width, box.height, fit]);
+
+  useEffect(() => {
+    if (!focusTarget) return;
+    const el = viewportRef.current;
+    if (!el) return;
+    setView({ scale: 1, x: el.clientWidth / 2 - focusTarget.x, y: el.clientHeight / 2 - focusTarget.y });
+  }, [focusTarget]);
+
+  const reset = () => setView({ scale: 1, ...centerOffset({ width, height }, box, 1) });
 
   const setScale = useCallback(
     (next: number) => {
@@ -294,7 +296,7 @@ export function DagCanvas({
         break;
       case '0':
         e.preventDefault();
-        setView(IDENTITY);
+        reset();
         break;
       case 'f':
         e.preventDefault();
@@ -496,7 +498,7 @@ export function DagCanvas({
           <button
             type="button"
             className="dag-zoom-readout"
-            onClick={() => setView(IDENTITY)}
+            onClick={reset}
             title="Reset to 100%"
             aria-label={`Zoom ${zoomLabel(view.scale)}, reset to 100%`}
           >
@@ -509,6 +511,9 @@ export function DagCanvas({
             Fit
           </button>
         </div>
+        <button type="button" className="dag-expand" aria-pressed={expanded} onClick={() => setExpanded(value => !value)}>
+          {expanded ? 'Compact view' : 'Expand view'}
+        </button>
         <div className="dag-action-group" role="group" aria-label="graph actions">
           {exportName && (
             <>
@@ -551,7 +556,10 @@ export function DagCanvas({
 
       <div
         ref={viewportRef}
-        className={`dag-viewport${dragging ? ' dragging' : ''}`}
+        className={`dag-viewport${dragging ? ' dragging' : ''}${expanded ? ' expanded' : ''}`}
+        style={{ height: expanded ? 'min(72vh, 850px)' : `${Math.min(540, Math.max(280, (viewportHeight ?? height) + 80))}px` }}
+        tabIndex={0}
+        aria-label="Interactive graph canvas. Drag to pan, plus or minus to zoom, F to fit."
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
@@ -559,24 +567,46 @@ export function DagCanvas({
         onKeyDown={onKeyDown}
       >
         {/*
-          width/height 100% with the viewBox left at the graph's intrinsic
-          extent: THIS is the fix for the reported bug. The element now sizes to
-          its container instead of to the graph, so the container decides what
-          is visible and the zoom transform decides how much of the graph that
-          is — rather than a 2048px-wide element overflowing a 1500px panel and
-          hiding its first and last node behind a horizontal scrollbar.
+          width/height 100%, and the viewBox is the CONTAINER's pixel box — not
+          the graph's extent.
+
+          It used to be the graph's extent with preserveAspectRatio="none", on
+          the reasoning that the zoom group owns scale so the SVG must not also
+          fit content. The first half was right and the second half is what the
+          attribute actually did: mapping a `0 0 width height` viewBox onto a
+          100%-sized element IS a fit, and disabling preserveAspectRatio made it
+          a non-uniform one. A single 196x64 node in a 1700x700 panel was
+          therefore stretched about 9x across and 11x down — rendering as a
+          full-width box with enormous text while the readout still said 100%,
+          because the zoom group genuinely was at 1. The readout was not lying;
+          the coordinate space underneath it was.
+
+          With the viewBox set to the container, one user unit is one CSS pixel
+          at every size, so scale belongs to the zoom group alone and "100%"
+          means a node is drawn at its intrinsic 196x64. Nothing about panning,
+          fitting or hit-testing changes: those are all computed in the same
+          pixel space the viewBox now declares.
+
+          The fallback to the graph extent covers the pre-measurement render
+          (and jsdom, which has no ResizeObserver): a zero-area viewBox would
+          blank the canvas, so an unmeasured container keeps the old behaviour
+          for the one frame before the measurement lands.
         */}
         <svg
           ref={svgRef}
           width="100%"
           height="100%"
-          viewBox={`0 0 ${width} ${height}`}
+          viewBox={
+            box.width > 0 && box.height > 0
+              ? `0 0 ${box.width} ${box.height}`
+              : `0 0 ${width} ${height}`
+          }
           role="img"
           aria-label={label}
-          // preserveAspectRatio is disabled because the zoom group already owns
-          // scale and position; letting the SVG also fit content would compose
-          // two transforms and make the readout a lie.
-          preserveAspectRatio="none"
+          // Uniform now that the viewBox matches the element's own aspect ratio:
+          // there is nothing left for it to distort, and leaving it at "none"
+          // would re-introduce the stretch during the pre-measurement frame.
+          preserveAspectRatio="xMidYMid meet"
         >
           {/* Markers live outside the zoomed group: a marker inherits the
               referencing path's user space, so putting the defs inside would
@@ -595,6 +625,7 @@ export function DagCanvas({
         </svg>
       </div>
 
+      <div className="dag-guidance"><span>Select a task to inspect its details</span><span>Drag to pan · Ctrl/⌘ + scroll to zoom · F to fit</span></div>
       {legend && (
         /*
           The legend was two permanently-open rows under every graph — a

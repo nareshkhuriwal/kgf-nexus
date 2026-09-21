@@ -1,3 +1,5 @@
+import { Permit } from '../../components/Permissions';
+import { ActionIcon, RowDetails } from '../../components/RowAction';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -57,6 +59,7 @@ export function TokensPage({
   canAdmin: boolean;
 }) {
   const qc = useQueryClient();
+  const [tableControls,setTableControls] = useState<HTMLDivElement|null>(null);
   const [creating, setCreating] = useState(false);
   const [issued, setIssued] = useState<ScopedToken | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -214,16 +217,16 @@ export function TokensPage({
       key: 'actions',
       header: 'actions',
       cell: (t) => (
-        <div className="cell-actions">
-          <button
+        <div className="cell-actions"><RowDetails label={`View token ${t.id}`} value={t}/>
+          <Permit permission="tokens.manage"><button
             type="button"
-            className="danger"
+            className="danger icon-action" aria-label="Revoke token"
             onClick={() => revoke.mutate(t)}
             disabled={revoke.isPending || t.revoked_at !== null}
             title="Stop this credential working immediately and permanently."
           >
-            Revoke
-          </button>
+            <ActionIcon name="delete"/>
+          </button></Permit>
         </div>
       ),
     },
@@ -249,13 +252,13 @@ export function TokensPage({
           </>
         }
         actions={
-          <button
+          <Permit permission="tokens.manage"><button
             type="button"
             className="primary"
             onClick={() => setCreating((v) => !v)}
           >
             {creating ? 'Cancel' : 'New token'}
-          </button>
+          </button></Permit>
         }
       />
 
@@ -290,21 +293,21 @@ export function TokensPage({
                 secret is never put in the table, in a title, or in a log. */}
             <code className="token-secret">{issued.token}</code>
             <div className="cell-actions">
-              <button
+              <Permit permission="tokens.manage"><button
                 type="button"
                 onClick={() => {
                   void navigator.clipboard?.writeText(issued.token ?? '');
                 }}
               >
                 Copy
-              </button>
-              <button
+              </button></Permit>
+              <Permit permission="tokens.manage"><button
                 type="button"
                 className="primary"
                 onClick={() => setIssued(null)}
               >
                 I have saved it
-              </button>
+              </button></Permit>
             </div>
           </div>
         </div>
@@ -326,7 +329,7 @@ export function TokensPage({
 
       <div className="panel">
         <div className="panel-head">
-          <span>tokens</span>
+          <span>Tokens</span><div className="panel-head-controls" ref={setTableControls} />
         </div>
         <AsyncPanel
           query={tokens}
@@ -352,7 +355,7 @@ export function TokensPage({
                 noun={['token', 'tokens']}
                 actions={[
                   {
-                    verb: 'Revoke',
+                    permission: "tokens.manage", verb: 'Revoke',
                     destructive: true,
                     consequence:
                       'Each credential stops working immediately and cannot be restored. Anything still using one will start failing to authenticate.',
@@ -368,6 +371,7 @@ export function TokensPage({
                 }}
               />
               <DataTable
+              controlsTarget={tableControls}
                 rows={rows}
                 columns={columns}
                 rowKey={(t) => t.id}
@@ -399,6 +403,12 @@ export function TokensPage({
                      achieve — and then report failures for rows that were never
                      candidates. */
                   isSelectable: (t) => t.revoked_at === null,
+                  /* Every credential here is already revoked, so none can be
+                     revoked again and the select-all is inert. Said out loud
+                     for the same reason as the run list: with no live token on
+                     the page to contrast against, an empty checkbox column
+                     reads as a broken control rather than a finished one. */
+                  emptyHint: 'These credentials are already revoked — only a live token can be revoked.',
                   label: (t) => t.name,
                 }}
                 /* The name and the role are the haystack. The SCOPES are

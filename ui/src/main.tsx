@@ -34,6 +34,7 @@ import { applyStoredAppearance } from './lib/appearance';
  */
 import interLatin from './assets/fonts/inter-latin-wght-normal.woff2?url';
 import './index.css';
+import './console.css';
 
 /**
  * Ask for the font as early as the module graph allows.

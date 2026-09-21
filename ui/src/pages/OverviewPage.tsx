@@ -128,6 +128,20 @@ export function OverviewPage({ namespace }: { namespace: string }) {
         }
       />
 
+      <section className="ops-summary" aria-label="Execution summary">
+        <div className="ops-summary-heading">
+          <div><span className="ops-eyebrow">Execution snapshot</span><h2>Your orchestration workspace</h2>
+            <p className="sub">Run counts reflect the latest {RUN_WINDOW} loaded runs in this namespace.</p></div>
+          <div className="row"><Link className="ops-link" to="/workflows">Browse workflows ↗</Link><Link className="ops-link" to="/schedules">Manage schedules ↗</Link></div>
+        </div>
+        <div className="ops-metrics">
+          <Link to="/runs" className="ops-metric"><span>In flight</span><strong>{runs.data ? active.length : '—'}</strong><small>Includes paused and cancelling runs</small></Link>
+          <Link to="/runs?state=SUCCEEDED" className="ops-metric"><span>Succeeded</span><strong>{runs.data ? runs.data.filter(r => r.state === 'SUCCEEDED').length : '—'}</strong><small>Within the loaded run window</small></Link>
+          <Link to="/runs?state=FAILED" className="ops-metric"><span>Failed</span><strong>{runs.data ? runs.data.filter(r => r.state === 'FAILED').length : '—'}</strong><small>Inspect errors and attempts</small></Link>
+          <Link to="/workers" className="ops-metric"><span>Active workers</span><strong>{workers.data ? workers.data.filter(w => w.state === 'ACTIVE').length : '—'}</strong><small>Registered in this namespace</small></Link>
+        </div>
+      </section>
+
       <AttentionPanel query={attention} now={now} />
 
       <FleetPanel query={fleet} workers={workers} />
@@ -495,12 +509,12 @@ function FleetPanel({
           <Loading rows={3} label="Loading fleet connectivity" />
         ) : (
           <>
-            <div className="ov-measures">
+            <details className="ov-measures"><summary>What connectivity status means</summary><div>
               <strong>Connectivity, not readiness.</strong>{' '}
               {fleet.measures ??
                 'gRPC connectivity from this gateway, read without a network round trip; not each service’s own /readyz'}
               . A dialled channel does not prove the service behind it is serving.
-            </div>
+            </div></details>
 
             {fleet.upstreams.length === 0 ? (
               <Empty
@@ -678,12 +692,12 @@ function QueuePanel({
           </div>
         </div>
 
-        <div className="ov-derived-note">
+        <details className="ov-derived-note"><summary>How queue wait time is calculated</summary><div>
           <strong>Derived, not measured.</strong> There is no queue-age endpoint. The age above is
           this console subtracting the oldest non-terminal run’s <code>created_at</code> from the
           browser clock, so it is an upper bound on wait time — a long-running run is old without
           being starved. Only <code>pending_attempts</code> is reported by the platform.
-        </div>
+        </div></details>
       </div>
     </div>
   );

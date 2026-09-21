@@ -1,3 +1,5 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
 """Provision the explicitly scoped dev AKS, smoke test it, and always request stop.
 Run manually; never schedules automatic starts. Budget is tracking, not a hard cap.
 """

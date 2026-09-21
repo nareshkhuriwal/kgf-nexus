@@ -1,3 +1,5 @@
+import { Permit } from '../components/Permissions';
+import { ActionIcon, RowAction, RowDetails } from '../components/RowAction';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -110,6 +112,7 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
   }
 
   const qc = useQueryClient();
+  const [tableControls,setTableControls] = useState<HTMLDivElement|null>(null);
   const schedules = useSchedules(namespace);
   const setEnabled = useSetScheduleEnabled(namespace);
   const now = Date.now();
@@ -242,9 +245,9 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
       // Not sortable: a column of buttons has no order, and offering one would
       // be a control that does nothing legible.
       cell: (s) => (
-        <div className="cell-actions">
-          <button
-            type="button"
+        <div className="cell-actions"><RowDetails label={`View schedule ${s.name}`} value={s}/><RowAction permission="schedules.delete" label={`Delete schedule ${s.name}`} icon="delete" confirm={`Delete schedule ${s.name}? This stops future runs.`} onAction={async()=>{await api.deleteSchedule(namespace,s.name);await qc.invalidateQueries({queryKey:qk.schedules(namespace)})}}/>
+          <Permit permission="schedules.update"><button
+            type="button" className="icon-action" aria-label={s.enabled ? "Disable schedule" : "Enable schedule"} title={s.enabled ? "Disable schedule" : "Enable schedule"}
             onClick={() => {
               setActionError(null);
               setEnabled.mutate(
@@ -256,8 +259,8 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
               setEnabled.isPending && setEnabled.variables?.name === s.name
             }
           >
-            {s.enabled ? 'Disable' : 'Enable'}
-          </button>
+            <ActionIcon name={s.enabled ? "disable" : "enable"}/>
+          </button></Permit>
         </div>
       ),
     },
@@ -274,20 +277,20 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
           </>
         }
         actions={
-          <button
+          <Permit permission="schedules.create"><button
             type="button"
             className="primary"
             onClick={() => setCreating(!creating)}
           >
             {creating ? 'Cancel' : 'New schedule'}
-          </button>
+          </button></Permit>
         }
       />
 
       {actionError && <ErrorBox error={actionError} what="that action" />}
 
       {creating && (
-        <CreateScheduleForm
+        <Permit permission="schedules.create"><CreateScheduleForm
           /* Keyed on the preset so following a second "Schedule this workflow"
              link while the form is already open re-seeds it. Without the key
              the form is already mounted, initialSpecName is only an INITIAL
@@ -296,12 +299,12 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
           namespace={namespace}
           initialSpecName={presetSpec}
           onDone={() => setCreating(false)}
-        />
+        /></Permit>
       )}
 
       <div className="panel">
         <div className="panel-head">
-          <span>schedules</span>
+          <span>Schedules</span><div className="panel-head-controls" ref={setTableControls} />
         </div>
 
         {/* Stale rows plus a warning beat an error box that hides them. */}
@@ -348,7 +351,7 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
                 noun={['schedule', 'schedules']}
                 actions={[
                   {
-                    verb: 'Delete',
+                    permission: "schedules.delete", verb: 'Delete',
                     destructive: true,
                     consequence:
                       'Each schedule stops firing and is removed permanently, along with its own fire history. Runs it has already created are not affected.',
@@ -367,6 +370,7 @@ export function SchedulesPage({ namespace }: { namespace: string }) {
                 }}
               />
               <DataTable
+              controlsTarget={tableControls}
                 rows={rows}
                 columns={columns}
                 rowKey={(s) => s.id}

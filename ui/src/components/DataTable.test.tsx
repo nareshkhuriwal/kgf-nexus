@@ -864,3 +864,29 @@ describe('selection', () => {
     }
   });
 });
+
+
+describe('operator table views', () => {
+  it('hides a column, prevents hiding the final column and restores the view', () => {
+    render(<DataTable rows={rows(2)} columns={columns} rowKey={r => r.id} noun="records" />);
+    fireEvent.click(screen.getByText('Columns'));
+    const menu = screen.getByRole('group', { name: 'Visible records columns' });
+    fireEvent.click(within(menu).getByLabelText('size'));
+    expect(screen.queryByRole('columnheader', { name: /size/ })).not.toBeInTheDocument();
+    fireEvent.click(within(menu).getByLabelText('note'));
+    expect(within(menu).getByLabelText('name')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Show all columns' }));
+    expect(screen.getAllByRole('columnheader')).toHaveLength(3);
+  });
+});
+
+it('places row actions last without moving the audit action data column', () => {
+ render(<DataTable rows={rows(1)} noun="records" rowKey={r=>r.id} columns={[
+ {key:'actions',header:'Actions',cell:()=> <button aria-label="View record">◉</button>},
+ {key:'action',header:'Event action',cell:()=> 'run.create'},
+ ...columns,
+ ]}/>);
+ const heads=screen.getAllByRole('columnheader');
+ expect(heads.at(-1)).toHaveTextContent('Actions');
+ expect(heads[0]).toHaveTextContent('Event action');
+});

@@ -1,3 +1,4 @@
+import { PermissionContext } from '../components/Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -23,9 +24,9 @@ function wrap(ui: ReactNode) {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={qc}>
+    <PermissionContext.Provider value={["runs.view","runs.create","runs.cancel","runs.retry","workflows.view","workflows.publish","workflows.delete","schedules.create","tasks.logs.view","tasks.results.view"]}><QueryClientProvider client={qc}>
       <MemoryRouter>{ui}</MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider></PermissionContext.Provider>,
   );
 }
 

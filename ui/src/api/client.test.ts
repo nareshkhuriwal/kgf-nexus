@@ -193,6 +193,15 @@ describe('listRuns', () => {
  * fetched one capped page and stopped. These pin the envelope's other half.
  */
 describe('listRuns pagination', () => {
+  it('preserves a valid total and ignores malformed totals', async () => {
+    mockFetch({ runs: [], total: 63 });
+    expect((await api.listRuns('default')).total).toBe(63);
+    for (const total of [-1, '63', null, 1.5]) {
+      mockFetch({ runs: [], total });
+      expect((await api.listRuns('default')).total).toBeUndefined();
+    }
+  });
+
   it('carries next_before back to the caller so a next page is reachable', async () => {
     mockFetch({
       runs: [{ id: 'r1', created_at: '2026-06-01T00:00:00Z' }],

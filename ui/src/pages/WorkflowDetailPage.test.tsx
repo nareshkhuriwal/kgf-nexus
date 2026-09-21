@@ -1,3 +1,4 @@
+import { PermissionContext } from '../components/Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -43,7 +44,7 @@ function wrap(ui: ReactNode, path = '/workflows/ten-node-mixed') {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={qc}>
+    <PermissionContext.Provider value={["runs.view","runs.create","runs.cancel","runs.retry","workflows.view","workflows.publish","workflows.delete","schedules.create","tasks.logs.view","tasks.results.view"]}><QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/workflows/:name" element={ui} />
@@ -52,7 +53,7 @@ function wrap(ui: ReactNode, path = '/workflows/ten-node-mixed') {
           <Route path="/runs/:runId" element={<div>run page for test</div>} />
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider></PermissionContext.Provider>,
   );
 }
 
@@ -203,7 +204,7 @@ describe('version history', () => {
     healthy();
     wrap(<WorkflowDetailPage namespace="default" />);
 
-    const crumb = await screen.findByRole('link', { name: /catalog/ });
+    const crumb = await screen.findByRole('link', { name: /Back to workflows/ });
     expect(crumb).toHaveAttribute('href', '/workflows');
   });
 

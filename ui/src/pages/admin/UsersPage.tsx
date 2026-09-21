@@ -1,6 +1,11 @@
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
-
+import { EditUser } from './EditUser';
+import { authRequest } from '../../api/auth';
+import { Link } from 'react-router-dom';
+import { Permit } from '../../components/Permissions';
+import { BulkActionBar } from '../../components/BulkActionBar';
+import { ActionIcon, RowDetails } from '../../components/RowAction';
 /**
  * User administration.
  *
@@ -35,7 +40,10 @@ import { Forbidden } from '../../components/Forbidden';
 const USERS_COUNT: RowCountKind = { kind: 'exact' };
 
 export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin: boolean }) {
+  const [selected,setSelected] = useState<ReadonlySet<string>>(new Set());
   const qc = useQueryClient();
+  const [tableControls,setTableControls] = useState<HTMLDivElement|null>(null);
+  const [editing, setEditing] = useState<User | null>(null);
   const [creating, setCreating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -146,33 +154,33 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
       key: 'actions',
       header: 'actions',
       cell: (u) => (
-        <div className="cell-actions">
-          <button
+        <div className="cell-actions"><Permit permission="users.manage"><button type="button" className="icon-action" aria-label={`Edit user ${u.email}`} title="Edit user" onClick={() => setEditing(u)}><ActionIcon name="edit"/></button></Permit><RowDetails label={`View user ${u.email}`} value={u}/>
+          <Permit permission="users.manage"><button
             type="button"
             onClick={() => {
               setNotice(null);
               disable.mutate(u);
             }}
-            disabled={disable.isPending}
+            className="icon-action" aria-label={u.disabled ? "Enable user" : "Disable user"} disabled={disable.isPending}
             title={
               u.disabled
                 ? 'Allow this account to sign in again.'
                 : 'Block sign-in AND end every session this account currently holds.'
             }
           >
-            {u.disabled ? 'Enable' : 'Disable'}
-          </button>
-          <button
+            <ActionIcon name={u.disabled ? "enable" : "disable"}/>
+          </button></Permit>
+          <Permit permission="users.manage"><button
             type="button"
             onClick={() => {
               setNotice(null);
               revoke.mutate(u);
             }}
-            disabled={revoke.isPending || u.disabled}
+            className="icon-action" aria-label="Sign out everywhere" disabled={revoke.isPending || u.disabled}
             title="End every session this account holds, without disabling it."
           >
-            Sign out everywhere
-          </button>
+            <ActionIcon name="logout"/>
+          </button></Permit>
         </div>
       ),
     },
@@ -196,10 +204,11 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
             human accounts in namespace <code>{namespace}</code>
           </>
         }
-        actions={
-          <button type="button" className="primary" onClick={() => setCreating((v) => !v)}>
+        actions={<>
+          <Permit permission="roles.manage"><Link className="btn" to="/admin/roles">Manage role assignments</Link></Permit>
+          <Permit permission="users.manage"><button type="button" className="primary" onClick={() => setCreating((v) => !v)}>
             {creating ? 'Cancel' : 'New user'}
-          </button>
+          </button></Permit></>
         }
       />
 
@@ -216,6 +225,7 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
       )}
       {actionError && <ErrorBox error={actionError} what="that action" />}
 
+      {editing && <EditUser key={editing.id} namespace={namespace} user={editing} onClose={() => setEditing(null)} />}
       {creating && (
         <CreateUser
           namespace={namespace}
@@ -230,7 +240,7 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
 
       <div className="panel">
         <div className="panel-head">
-          <span>accounts</span>
+          <span>Accounts</span><div className="panel-head-controls" ref={setTableControls} />
         </div>
         <AsyncPanel
           query={users}
@@ -240,8 +250,15 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
           emptyDetail="Only API keys can authenticate here so far. Create a user to sign in with an email and password."
         >
           {(list) => (
+            <>
+            <BulkActionBar<User> selected={list.filter(u=>selected.has(u.id))} rowId={u=>u.id} rowLabel={u=>u.email} noun={['user','users']} actions={[
+              {permission: "users.manage", verb:'Disable',destructive:true,consequence:'Block sign-in and end existing sessions for selected accounts.',run:u=>authApi.setUserDisabled(namespace,u.id,true)},
+              {permission: "users.manage", verb:'Enable',run:u=>authApi.setUserDisabled(namespace,u.id,false)}
+            ]} onClear={()=>setSelected(new Set())} onDone={()=>{void qc.invalidateQueries({queryKey:['users',namespace]})}}/>
             <DataTable
+              controlsTarget={tableControls}
               rows={list}
+              selection={{selected,onChange:setSelected,rowId:u=>u.id,label:u=>u.email}}
               columns={columns}
               rowKey={(u) => u.id}
               noun="accounts"
@@ -256,6 +273,7 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
                  it has, never one that claims less. */
               search={{ mode: 'client', fields: (u) => [u.email, u.display_name, u.role] }}
             />
+            </>
           )}
         </AsyncPanel>
       </div>
@@ -279,7 +297,9 @@ function CreateUser({
 }) {
   const [email, setEmail] = useState('');
   const [displayName, setDisplayName] = useState('');
-  const [role, setRole] = useState('reader');
+  const [role, setRole] = useState('Viewer');
+  const roles = useQuery({queryKey:['roles',namespace],queryFn:()=>authRequest<{roles:{name:string;builtin:boolean;permissions:string[]}[]}>('/v1/namespaces/'+encodeURIComponent(namespace)+'/roles')});
+  const validRole = roles.data?.roles.some(r=>r.name===role) === true;
   const [password, setPassword] = useState('');
 
   const create = useMutation({
@@ -287,7 +307,8 @@ function CreateUser({
       authApi.createUser(namespace, {
         email: email.trim(),
         display_name: displayName.trim(),
-        role,
+        role: role === "Administrator" ? "admin" : "reader",
+        role_name: role,
         password,
       }),
     onSuccess: (u) => onDone(u.email),
@@ -303,7 +324,7 @@ function CreateUser({
         className="panel-body form-body"
         onSubmit={(e) => {
           e.preventDefault();
-          create.mutate();
+          if(validRole) create.mutate();
         }}
       >
         <div className="form-row">
@@ -321,15 +342,14 @@ function CreateUser({
         <div className="form-row">
           <label className="form-field">
             <span className="form-label">role</span>
-            <select value={role} onChange={(e) => setRole(e.target.value)}>
-              <option value="reader">reader — read everything, change nothing</option>
-              <option value="admin">admin — full control of this namespace</option>
+            <select value={role} disabled={roles.isPending || roles.isError} onChange={(e) => setRole(e.target.value)}>
+              {!roles.data && <option value="Viewer">{roles.isError ? "Unable to load roles" : "Loading roles…"}</option>}
+              {roles.data?.roles.map(r=><option key={r.name} value={r.name}>{r.name}{r.name === "Administrator" ? " — all permissions (protected)" : r.builtin ? "" : " — custom"}</option>)}
             </select>
             {/* 'worker' is deliberately absent: it is a machine credential for an
                 execution host, and the gateway refuses it for a human anyway. */}
             <span className="form-hint">
-              A worker role is not offered: it is a machine credential for an execution host, and
-              the gateway refuses it for a human account.
+              The selected role is applied when the account is created. Administrator has all permissions and its definition cannot be changed.
             </span>
           </label>
           <label className="form-field">
@@ -348,9 +368,10 @@ function CreateUser({
             </span>
           </label>
         </div>
+        {roles.error && <><ErrorBox error={roles.error} what="role catalog" /><button type="button" onClick={()=>void roles.refetch()}>Reload roles</button></>}
         {create.error && <ErrorBox error={create.error} what="the new user" />}
         <div className="form-actions">
-          <button type="submit" className="primary" disabled={create.isPending}>
+          <button type="submit" className="primary" disabled={create.isPending || !validRole}>
             {create.isPending ? 'Creating…' : 'Create user'}
           </button>
         </div>

@@ -18,8 +18,8 @@
 
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useCreateSchedule, useCronPreview } from '../api/hooks';
-import { OVERLAP_POLICIES, OVERLAP_POLICY_HINTS, type OverlapPolicy } from '../api/types';
+import { useCreateSchedule, useUpdateSchedule, useCronPreview } from '../api/hooks';
+import { OVERLAP_POLICIES, OVERLAP_POLICY_HINTS, type Schedule, type OverlapPolicy } from '../api/types';
 import { ErrorBox } from '../components/Status';
 import { CronPreview } from '../components/CronPreview';
 import { WorkflowPicker } from '../components/WorkflowPicker';
@@ -47,6 +47,7 @@ export function CreateScheduleForm({
   namespace,
   onDone,
   initialSpecName = '',
+  schedule,
 }: {
   namespace: string;
   onDone: () => void;
@@ -61,26 +62,29 @@ export function CreateScheduleForm({
    * workflow, forever".
    */
   initialSpecName?: string;
+  schedule?: Schedule;
 }) {
   const navigate = useNavigate();
 
-  const [name, setName] = useState('');
-  const [specName, setSpecName] = useState(initialSpecName);
-  const [specVersion, setSpecVersion] = useState('');
-  const [cron, setCron] = useState('0 2 * * *');
-  const [timezone, setTimezone] = useState('UTC');
-  const [priority, setPriority] = useState(0);
-  const [overlapPolicy, setOverlapPolicy] = useState<OverlapPolicy>('skip');
-  const [catchupLimit, setCatchupLimit] = useState(0);
-  const [enabled, setEnabled] = useState(true);
-  const [paramsText, setParamsText] = useState('');
+  const [name, setName] = useState(schedule?.name ?? '');
+  const [specName, setSpecName] = useState(schedule?.spec_name ?? initialSpecName);
+  const [specVersion, setSpecVersion] = useState(schedule?.spec_version?.toString() ?? '');
+  const [cron, setCron] = useState(schedule?.cron ?? '0 2 * * *');
+  const [timezone, setTimezone] = useState(schedule?.timezone ?? 'UTC');
+  const [priority, setPriority] = useState(schedule?.priority ?? 0);
+  const [overlapPolicy, setOverlapPolicy] = useState<OverlapPolicy>((schedule?.overlap_policy as OverlapPolicy) ?? 'skip');
+  const [catchupLimit, setCatchupLimit] = useState(schedule?.catchup_limit ?? 0);
+  const [enabled, setEnabled] = useState(schedule?.enabled ?? true);
+  const [paramsText, setParamsText] = useState(schedule?.params ? JSON.stringify(schedule.params, null, 2) : '');
 
   // Debounced so the preview does not fire per keystroke and flash "invalid" at
   // an operator who is still typing the expression.
   const settledCron = useDebounced(cron);
   const preview = useCronPreview(namespace, settledCron, timezone);
 
-  const create = useCreateSchedule(namespace);
+  const createMutation = useCreateSchedule(namespace);
+  const updateMutation = useUpdateSchedule(namespace);
+  const create = schedule ? updateMutation : createMutation;
 
   // Params are free-form JSON, so they are parsed HERE and the error shown
   // beside the field. Posting unparseable JSON to find out it is unparseable
@@ -121,7 +125,7 @@ export function CreateScheduleForm({
   return (
     <div className="panel">
       <div className="panel-head">
-        <span>new schedule</span>
+        <span>{schedule ? 'Edit schedule' : 'new schedule'}</span>
       </div>
       <form
         className="panel-body form-body"
@@ -135,6 +139,7 @@ export function CreateScheduleForm({
             <span className="form-label">name</span>
             <input
               value={name}
+              readOnly={!!schedule}
               onChange={(e) => setName(e.target.value)}
               placeholder="nightly-etl"
               required
@@ -283,12 +288,12 @@ export function CreateScheduleForm({
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
           <span>
             {enabled
-              ? 'Armed on creation — it will fire at the first preview time above.'
-              : 'Created disabled. Nothing fires until you enable it.'}
+              ? 'When saved, it will fire at the first preview time above.'
+              : 'Nothing fires until you enable it.'}
           </span>
         </label>
 
-        {create.error && <ErrorBox error={create.error} what="the new schedule" />}
+        {create.error && <ErrorBox error={create.error} what={schedule ? 'schedule changes' : 'the new schedule'} />}
 
         <div className="form-actions">
           <button
@@ -298,7 +303,7 @@ export function CreateScheduleForm({
             // gateway would reject it anyway, and the reason is already on screen.
             disabled={create.isPending || paramsError !== null || preview.data?.valid === false}
           >
-            {create.isPending ? 'Creating…' : 'Create schedule'}
+            {create.isPending ? 'Saving…' : schedule ? 'Save changes' : 'Create schedule'}
           </button>
           <button type="button" onClick={onDone} disabled={create.isPending}>
             Cancel

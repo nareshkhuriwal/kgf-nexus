@@ -1,3 +1,4 @@
+import { usePermission } from './Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -68,7 +69,8 @@ export interface SidebarProps {
 }
 
 export function Sidebar({ canAdmin, collapsed = false }: SidebarProps) {
-  const groups = visibleGroups(canAdmin);
+  const can = usePermission();
+  const groups = visibleGroups(canAdmin, can);
 
   return (
     <div className={`sidebar${collapsed ? ' collapsed' : ''}`}>

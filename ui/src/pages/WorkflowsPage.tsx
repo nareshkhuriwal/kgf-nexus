@@ -1,3 +1,4 @@
+import { ActionIcon, RowAction } from '../components/RowAction';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -56,6 +57,7 @@ const CATALOG_COUNT: RowCountKind = { kind: 'capped', limit: CATALOG_LIMIT };
 
 export function WorkflowsPage({ namespace }: { namespace: string }) {
   const qc = useQueryClient();
+  const [controlsTarget, setControlsTarget] = useState<HTMLDivElement | null>(null);
   const [search, setSearch] = useState('');
   /**
    * The selected workflow NAMES.
@@ -164,6 +166,7 @@ export function WorkflowsPage({ namespace }: { namespace: string }) {
       // — a hash has no order anyone would want to scan in.
       cell: (w) => <span title={w.spec_hash}>{shortId(w.spec_hash, 12)}</span>,
     },
+    {key:'actions',header:'Actions',cell:w=><div className="cell-actions"><Link className="icon-action" aria-label={`View workflow ${w.name}`} title="View workflow" to={`/workflows/${encodeURIComponent(w.name)}`}><ActionIcon name="view"/></Link><RowAction permission="workflows.delete" label={`Delete workflow ${w.name}`} icon="delete" confirm={`Delete all versions of ${w.name}? Referenced workflows cannot be deleted.`} onAction={async()=>{await api.deleteSpec(namespace,w.name);await qc.invalidateQueries({queryKey:['workflows',namespace]})}}/></div>},
   ];
 
   return (
@@ -180,7 +183,7 @@ export function WorkflowsPage({ namespace }: { namespace: string }) {
 
       <div className="panel">
         <div className="panel-head">
-          <span>catalog</span>
+          <span>Catalog</span><span className="spacer" /><div ref={setControlsTarget} className="runs-title-controls" />
         </div>
 
         {/* Stale rows plus a warning beat an error box that hides them. */}
@@ -238,7 +241,7 @@ export function WorkflowsPage({ namespace }: { namespace: string }) {
                 noun={['workflow', 'workflows']}
                 actions={[
                   {
-                    verb: 'Delete',
+                    permission: "workflows.delete", verb: 'Delete',
                     destructive: true,
                     consequence:
                       'Every version of each workflow is removed permanently, definitions included. A workflow still referenced by runs or by a schedule is refused and stays — you will be told which, and by what.',
@@ -257,6 +260,7 @@ export function WorkflowsPage({ namespace }: { namespace: string }) {
                 }}
               />
               <DataTable
+              controlsTarget={controlsTarget}
               rows={rows}
               columns={columns}
               rowKey={(w) => w.name}

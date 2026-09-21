@@ -1,3 +1,4 @@
+import { PermissionContext } from '../components/Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -25,9 +26,9 @@ function wrap(ui: ReactNode) {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={qc}>
+    <PermissionContext.Provider value={["schedules.view","schedules.create","schedules.update","schedules.delete","backfills.view","backfills.create","backfills.update","backfills.cancel","runs.create","workflows.view"]}><QueryClientProvider client={qc}>
       <MemoryRouter>{ui}</MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider></PermissionContext.Provider>,
   );
 }
 
@@ -179,7 +180,7 @@ describe('the schedule list', () => {
     });
     wrap(<SchedulesPage namespace="default" />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Disable' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Disable schedule' }));
 
     await waitFor(() => {
       expect(calls.some((u) => u.endsWith('/schedules/nightly-etl/disable'))).toBe(true);
@@ -364,11 +365,11 @@ describe('the create form as a deep link', () => {
       defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
     });
     return render(
-      <QueryClientProvider client={qc}>
+      <PermissionContext.Provider value={["schedules.view","schedules.create","schedules.update","schedules.delete","backfills.view","backfills.create","backfills.update","backfills.cancel","runs.create","workflows.view"]}><QueryClientProvider client={qc}>
         <MemoryRouter initialEntries={[path]}>
           <SchedulesPage namespace="default" />
         </MemoryRouter>
-      </QueryClientProvider>,
+      </QueryClientProvider></PermissionContext.Provider>,
     );
   }
 

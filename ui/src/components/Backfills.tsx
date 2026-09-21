@@ -1,3 +1,4 @@
+import { Permit } from './Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -114,7 +115,7 @@ function BackfillRow({
         {fmtTs(b.created_at)}
       </td>
       <td>
-        <div className="row" style={{ gap: 'var(--space-3)' }}>
+        <Permit permission="backfills.update"><div className="row" style={{ gap: 'var(--space-3)' }}>
           {b.state === 'RUNNING' && (
             <button
               type="button"
@@ -143,7 +144,7 @@ function BackfillRow({
             />
           )}
           {terminal && <span className="faint">{EMPTY}</span>}
-        </div>
+        </div></Permit>
       </td>
     </tr>
   );

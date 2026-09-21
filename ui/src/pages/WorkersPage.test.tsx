@@ -385,7 +385,7 @@ describe('a row drills into the worker', () => {
     wrap(<WorkersPage namespace="default" />);
 
     const row = (await screen.findByText('agent-cpu-1')).closest('tr')!;
-    const link = within(row).getByRole('link');
+    const link = within(row).getByText('agent-cpu-1').closest('a')!;
     // An href, not an onClick: keyboard and middle-click must both work.
     expect(link).toHaveAttribute('href', '/workers/wk-abc123');
     expect(link).toContainElement(screen.getByText('agent-cpu-1'));
@@ -400,7 +400,7 @@ describe('a row drills into the worker', () => {
     wrap(<WorkersPage namespace="default" />);
 
     const row = (await screen.findByText('agent-cpu-1')).closest('tr')!;
-    expect(within(row).getByRole('link')).toHaveAttribute('href', '/workers/wk%2Fodd%20id');
+    expect(within(row).getByText('agent-cpu-1').closest('a')!).toHaveAttribute('href', '/workers/wk%2Fodd%20id');
   });
 
   /**

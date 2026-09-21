@@ -214,3 +214,41 @@
    disappear between runs — and shrinks, which makes the small graph look
    deliberate rather than lost. */
 .dag-viewport.sparse { height: clamp(200px, 26vh, 300px); }
+
+/* A compact graph workspace with task cards that share the console surfaces. */
+.dag-state-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; padding: 15px 20px; background: var(--bg-raised); border-bottom: 1px solid var(--border); }
+.dag-flow-label { font-size: 12px; font-weight: 600; color: var(--fg); margin-right: auto; }
+.dag-flow-label > span { color: var(--fg-muted); margin-left: 8px; }
+.dag-state-count { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; }
+.dag-state-count strong { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.dag-toolbar { padding: 12px 20px; gap: 12px; }
+.dag-stats { font-family: var(--sans); gap: 12px; }
+.dag-jump { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--fg-muted); }
+.dag-jump select { max-width: 260px; font-size: 12px; }
+.dag-viewport { background: radial-gradient(var(--border) .7px, transparent .7px) 0 0 / 24px 24px, var(--bg); }
+.dag-viewport .dag-node { fill: var(--bg-raised); stroke-width: 1.4px; }
+.dag-node-g .dag-node-label { font-size: 13px; font-weight: 650; letter-spacing: -.2px; }
+.dag-node-g .dag-node-sub { font-size: 10px; fill: var(--fg-muted); }
+.dag-node-g .dag-node-state { font-size: 10px; letter-spacing: .6px; }
+.dag-card-divider { stroke: var(--border); stroke-width: 1px; }
+.dag-node-g .dag-node-shadow { fill: var(--border); opacity: .28; }
+.dag-node-g.selected .dag-node { stroke-width: 2.5px; }
+.dag-node-g:hover .dag-node { stroke-width: 2.5px; }
+.dag-node-g.unrelated { opacity: .45; pointer-events: auto; }
+.dag-node-g.unrelated:hover, .dag-node-g.unrelated:focus { opacity: 1; }
+.dag-viewport .dag-edge { stroke-width: 1.6px; }
+.dag-viewport .dag-edge.related { stroke-width: 2.4px; }
+.dag-guidance { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--border); color: var(--fg-muted); font-size: 11px; background: var(--bg-raised); }
+.dag-legend > summary { font-family: var(--sans); }
+.dag-clip-hint { white-space: normal; }
+@media (max-width: 700px) {
+  .dag-toolbar, .dag-state-summary { padding: 12px; }
+  .dag-jump { width: 100%; }
+  .dag-jump select { flex: 1; max-width: none; min-width: 0; }
+  .dag-toolbar-spacer { display: none; }
+  .dag-guidance { padding: 12px; }
+}
+.dag-node-g, .spec-node-g { cursor: grab; touch-action: none; }
+.dag-node-g:active, .spec-node-g:active { cursor: grabbing; }
+.dag-layout-note { padding: 8px 20px; color: var(--fg-muted); background: var(--bg-raised); font-size: 11px; border-bottom: 1px solid var(--border); }
+.spec-node-g.dimmed { pointer-events: auto; }

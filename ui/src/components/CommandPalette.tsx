@@ -1,3 +1,5 @@
+import { useContext } from 'react';
+import { PermissionContext, permissionForPath } from './Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -137,6 +139,8 @@ export function CommandPalette({
   // Uncontrolled by default: the shell should not have to own state for a thing
   // that opens on a global key. A controlled `open` is accepted so a header
   // button can drive the same instance.
+  const permissions = useContext(PermissionContext) ?? [];
+  const allowed = (permission: string) => permissions.includes(permission);
   const [openState, setOpenState] = useState(false);
   const open = openProp ?? openState;
 
@@ -222,7 +226,13 @@ export function CommandPalette({
     // nothing and opened that window.
     let live = true;
     setSearch({ status: 'loading' });
-    searchEverything(namespace, debounced, sources)
+    searchEverything(namespace, debounced, {
+      workflows: (...args) => allowed('workflows.view') ? sources.workflows(...args) : Promise.resolve([]),
+      runs: (...args) => allowed('runs.view') ? sources.runs(...args) : Promise.resolve([]),
+      schedules: (...args) => allowed('schedules.view') ? sources.schedules(...args) : Promise.resolve({hits:[],truncated:false}),
+      workers: (...args) => allowed('workers.view') ? sources.workers(...args) : Promise.resolve({hits:[],truncated:false}),
+      users: (...args) => allowed('users.view') ? sources.users(...args) : Promise.resolve({hits:[],truncated:false}),
+    })
       .then((results) => {
         if (!live) return;
         setSearch({ status: 'ok', results });
@@ -245,7 +255,7 @@ export function CommandPalette({
     return () => {
       live = false;
     };
-  }, [open, debounced, namespace, sources]);
+  }, [open, debounced, namespace, sources, permissions]);
 
   const ctx: CommandContext = useMemo(
     () => ({ navigate: onNavigate, signOut: onSignOut }),
@@ -276,7 +286,7 @@ export function CommandPalette({
     // instruction -- the operator has the id, they want the run -- and it must
     // never wait behind a network round trip to appear.
     const runId = asRunId(query);
-    if (runId) {
+    if (runId && allowed('runs.view')) {
       out.push({
         heading: 'Run',
         rows: [
@@ -293,6 +303,7 @@ export function CommandPalette({
 
     if (search.status === 'ok') {
       for (const group of SEARCH_GROUPS) {
+        if (!allowed(group.toLowerCase()+'.view')) continue;
         const result = search.results[group];
         if (!result) continue;
 
@@ -347,7 +358,7 @@ export function CommandPalette({
 
     // Commands last, grouped as the registry groups them, which is what the
     // list has always done when nothing is typed.
-    const matched = filterCommands(query, commands);
+    const matched = filterCommands(query, commands.filter(command => { const required = command.hint?.startsWith('/') ? permissionForPath(command.hint) : undefined; return !required || allowed(required); }));
     let currentGroup = '';
     for (const { command } of matched) {
       const row: Row = {
@@ -365,7 +376,7 @@ export function CommandPalette({
       }
     }
     return out;
-  }, [query, search, commands, ctx, onNavigate]);
+  }, [query, search, commands, ctx, onNavigate, permissions]);
 
   const rows: Row[] = useMemo(() => sections.flatMap((s) => s.rows), [sections]);
 
@@ -388,7 +399,8 @@ export function CommandPalette({
   const canClaimNoMatches = useMemo(() => {
     if (search.status !== 'ok') return true;
     return SEARCH_GROUPS.every((group) => {
-      const result = search.results[group];
+      if (!allowed(group.toLowerCase()+'.view')) return true;
+        const result = search.results[group];
       if (!result) return true;
       if (result.status !== 'ok') return false;
       return !(result.truncated && result.hits.length === 0);

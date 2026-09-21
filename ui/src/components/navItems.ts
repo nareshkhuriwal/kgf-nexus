@@ -1,3 +1,4 @@
+import { permissionForPath } from './Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -20,6 +21,8 @@
 
 import {
   IconAudit,
+  IconCluster,
+  IconShield,
   IconClock,
   IconDag,
   IconGauge,
@@ -91,6 +94,8 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Govern',
     items: [
+      { to: '/admin/infrastructure', label: 'Infrastructure', icon: IconCluster, adminOnly: true },
+      { to: '/admin/roles', label: 'Roles & permissions', icon: IconShield, adminOnly: true },
       { to: '/admin/users', label: 'Users', icon: IconUsers, adminOnly: true },
       { to: '/admin/tokens', label: 'Tokens', icon: IconKey, adminOnly: true },
       { to: '/admin/audit', label: 'Audit', icon: IconAudit, adminOnly: true },
@@ -106,10 +111,10 @@ export const NAV_GROUPS: NavGroup[] = [
  * contributes no heading, so a non-admin never sees an empty "Govern" label
  * hinting at what they are missing.
  */
-export function visibleGroups(canAdmin: boolean): NavGroup[] {
+export function visibleGroups(canAdmin: boolean, can?: (permission: string) => boolean): NavGroup[] {
   return NAV_GROUPS.map((g) => ({
     ...g,
-    items: g.items.filter((i) => !i.adminOnly || canAdmin),
+    items: g.items.filter((i) => can ? can(permissionForPath(i.to) ?? "") : (!i.adminOnly || canAdmin)),
   })).filter((g) => g.items.length > 0);
 }
 

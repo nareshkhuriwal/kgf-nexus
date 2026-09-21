@@ -365,8 +365,8 @@ export function assignLayers(
  * viewBox, not CSS lengths, so the spacing tokens do not apply to them and a
  * token indirection would only hide that.
  */
-export const NODE_W = 196;
-export const NODE_H = 64;
+export const NODE_W = 248;
+export const NODE_H = 88;
 /**
  * The horizontal gap is deliberately wide relative to the node: it is the only
  * space an edge has to make its turn, and a route that has to elbow inside a
@@ -482,6 +482,14 @@ export function edgePath(a: Placement, b: Placement): string {
   const y1 = a.y + NODE_H / 2;
   const x2 = b.x;
   const y2 = b.y + NODE_H / 2;
+
+  // Custom layouts may put a child behind its parent. Route above the cards
+  // instead of drawing a backwards arrow through their bodies.
+  if (x2 < x1 + 16) {
+    const start = a.x + NODE_W / 2, end = b.x + NODE_W / 2;
+    const top = Math.max(4, Math.min(a.y, b.y) - 28);
+    return `M ${start} ${a.y} C ${start} ${top} ${end} ${top} ${end} ${b.y}`;
+  }
 
   // Same row: a straight line is both the clearest route and the only one
   // without a spurious jog.

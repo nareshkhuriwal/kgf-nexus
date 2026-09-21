@@ -1,3 +1,5 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
 /**
  * The Nexus mark.
  *
@@ -67,16 +69,9 @@ export function Logo({ size = 20, className, title }: LogoProps) {
  * The mark as a standalone data-URI, for anywhere a string is required instead
  * of a component -- an <img src>, a canvas, an email.
  *
- * NOT the favicon. The favicon is a static file at public/favicon.svg, because
- * the browser asks for it by URL before any of this JavaScript has run. That
- * file also carries DIFFERENT geometry on purpose: it is cut for 16px, where
- * this component's 1.6 strokes at 0.55 opacity fall below one device pixel and
- * grey out. See the comment there.
- *
- * This function keeps the SMALL-SIZE cut rather than the component's, since a
- * data-URI mark is almost always being dropped somewhere small and fixed. The
- * geometry matching public/favicon.svg is what stops a third variant existing.
- * `currentColor` cannot resolve outside a document, so the colour is pinned.
+ * The browser favicon uses this component's geometry in public/nexus-logo.svg.
+ * This helper retains a compact variant for small embedded images, with a
+ * pinned colour because currentColor cannot inherit from an external document.
  */
 export function logoDataUri(color = '#818cf8'): string {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">

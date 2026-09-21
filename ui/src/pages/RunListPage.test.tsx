@@ -441,6 +441,28 @@ describe('keyset pagination', () => {
   const next = () => screen.getByRole('button', { name: /next page of runs/i });
   const prev = () => screen.getByRole('button', { name: /previous page of runs/i });
 
+  it('renders 25 rows per page while showing the full filtered total', async () => {
+    const fullPage = (tag: string) => Array.from({ length: 25 }, (_, i) => run({
+      id: `${tag}-${i}`, spec_name: `spec-${tag}-${i}`,
+      created_at: '2026-09-12T10:00:00Z',
+    }));
+    servePages({
+      '': { runs: fullPage('p1'), next_before: 'cursor-1', total: 63 },
+      'cursor-1': { runs: fullPage('p2'), next_before: 'cursor-2', total: 63 },
+    });
+    wrap(<RunListPage namespace="default" />);
+    await screen.findByText('spec-p1-0');
+    expect(document.querySelectorAll('tbody tr')).toHaveLength(25);
+    expect(document.querySelector('.dt-range')).toHaveTextContent('1–25 of 63');
+    expect(document.querySelector('.dt-page-of')).toHaveTextContent('page 1 of 3');
+    expect(screen.getByTitle('63 matching runs')).toHaveTextContent('63');
+    fireEvent.click(next());
+    await screen.findByText('spec-p2-0');
+    expect(document.querySelectorAll('tbody tr')).toHaveLength(25);
+    expect(document.querySelector('.dt-range')).toHaveTextContent('26–50 of 63');
+    expect(document.querySelector('.dt-page-of')).toHaveTextContent('page 2 of 3');
+  });
+
   it('advances to the next page using the cursor the server sent', async () => {
     const seen = servePages({
       '': pageOf('p1', 'cursor-1'),
