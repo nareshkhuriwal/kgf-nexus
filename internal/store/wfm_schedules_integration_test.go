@@ -321,3 +321,61 @@ func (f *fixture) newRun(t *testing.T) string {
 func isTickAlreadyFired(err error) bool {
 	return err != nil && err.Error() == ErrTickAlreadyFired.Error()
 }
+
+func TestScheduleUpdatePreservesHistoryAndWinsOverOldRearm(t *testing.T) {
+	ctx := context.Background()
+	tx, err := testPool(t).Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	ns := uniqueNS(t)
+	if _, err := tx.Exec(ctx, `INSERT INTO tenants(namespace,name) VALUES($1,'schedule edit test')`, ns); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO workflow_specs(namespace,name,version,spec_hash,spec_json,created_by) VALUES($1,'fixture',1,'test','{}','test')`, ns); err != nil {
+		t.Fatal(err)
+	}
+	next := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Microsecond)
+	original, err := WFMCreateSchedule(ctx, tx, Schedule{Namespace: ns, Name: "editable", SpecName: "fixture", CronExpr: "0 2 * * *", Enabled: false, CreatedBy: "original"}, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed := original
+	changed.Enabled = true
+	changed.CronExpr = "0 4 * * *"
+	changed.CreatedBy = "should-not-replace-author"
+	updated, err := WFMUpdateSchedule(ctx, tx, changed, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ID != original.ID || updated.CreatedBy != original.CreatedBy || !updated.CreatedAt.Equal(original.CreatedAt) {
+		t.Fatal("identity/history changed")
+	}
+	// An older claimed scheduler task must not overwrite an edit's next fire.
+	if err := WFMArmSchedule(ctx, tx, original.ID, next.Add(-time.Hour), nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := WFMGetSchedule(ctx, tx, ns, "editable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NextFireAt == nil || !got.NextFireAt.Equal(next) {
+		t.Fatal("old rearm overwrote edit")
+	}
+	changed.Enabled = false
+	if _, err := WFMUpdateSchedule(ctx, tx, changed, next); err != nil {
+		t.Fatal(err)
+	}
+	if err := WFMArmSchedule(ctx, tx, original.ID, next, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err = WFMGetSchedule(ctx, tx, ns, "editable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Enabled || got.NextFireAt != nil {
+		t.Fatal("old rearm re-enabled disabled schedule")
+	}
+}

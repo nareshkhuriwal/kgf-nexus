@@ -46,6 +46,7 @@ var ErrDAGEngineRunNotFound = errors.New("run not found")
 // writes this table (workflow-manager owns it); it reads the pinned spec and the
 // current state so it can respect operator interventions it does not own.
 type DERunRow struct {
+	Params       []byte
 	ID           string
 	SpecID       string
 	Namespace    string
@@ -93,12 +94,12 @@ type DEAttemptRow struct {
 // would serialize every reconcile of the same run across replicas for no
 // correctness gain.
 func (s *DAGEngineStore) LoadRun(ctx context.Context, runID string) (*DERunRow, error) {
-	const q = `SELECT id::text, spec_id::text, namespace, state::text, priority, state_version
+	const q = `SELECT id::text, spec_id::text, namespace, state::text, priority, state_version, params
 	             FROM workflow_runs WHERE id = $1::uuid`
 	var r DERunRow
 	var state string
 	err := s.pool.QueryRow(ctx, q, runID).Scan(
-		&r.ID, &r.SpecID, &r.Namespace, &state, &r.Priority, &r.StateVersion)
+		&r.ID, &r.SpecID, &r.Namespace, &state, &r.Priority, &r.StateVersion, &r.Params)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("load run %s: %w", runID, ErrDAGEngineRunNotFound)
 	}

@@ -110,6 +110,29 @@ func (a *API) createSchedule(w http.ResponseWriter, r *http.Request, p authn.Pri
 		return
 	}
 
+	save := a.schedules.CreateSchedule
+	responseStatus := http.StatusCreated
+	if r.Method == http.MethodPut {
+		if req.Name != "" && req.Name != r.PathValue("name") {
+			writeError(w, 400, "immutable_name", "schedule name cannot be changed")
+			return
+		}
+		req.Name = r.PathValue("name")
+		if req.Enabled == nil {
+			writeError(w, 400, "missing_field", "enabled is required when updating a schedule")
+			return
+		}
+		updater, ok := a.schedules.(interface {
+			UpdateSchedule(context.Context, store.Schedule, time.Time) (store.Schedule, error)
+		})
+		if !ok {
+			scheduleUnavailable(w)
+			return
+		}
+		save = updater.UpdateSchedule
+		responseStatus = http.StatusOK
+	}
+
 	if req.Name == "" || req.SpecName == "" || req.Cron == "" {
 		writeError(w, http.StatusBadRequest, "missing_field",
 			"name, spec_name and cron are all required")
@@ -211,7 +234,7 @@ func (a *API) createSchedule(w http.ResponseWriter, r *http.Request, p authn.Pri
 		return
 	}
 
-	created, err := a.schedules.CreateSchedule(r.Context(), store.Schedule{
+	created, err := save(r.Context(), store.Schedule{
 		Namespace:     ns,
 		Name:          req.Name,
 		SpecName:      req.SpecName,
@@ -226,7 +249,7 @@ func (a *API) createSchedule(w http.ResponseWriter, r *http.Request, p authn.Pri
 		CreatedBy:     p.Name,
 	}, next)
 	if err != nil {
-		a.failSchedule(w, r, "create schedule", err)
+		a.failSchedule(w, r, "save schedule", err)
 		return
 	}
 
@@ -235,7 +258,7 @@ func (a *API) createSchedule(w http.ResponseWriter, r *http.Request, p authn.Pri
 	// immediately whether the expression they wrote means what they intended --
 	// before it has created anything.
 	out["next_fires"] = previewFires(expr, a.clock().UTC(), 5)
-	writeJSON(w, http.StatusCreated, out)
+	writeJSON(w, responseStatus, out)
 }
 
 func (a *API) listSchedules(w http.ResponseWriter, r *http.Request, _ authn.Principal) {

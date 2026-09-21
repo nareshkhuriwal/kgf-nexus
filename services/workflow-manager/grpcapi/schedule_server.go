@@ -341,3 +341,54 @@ func backfillActionHandler(srv any, ctx context.Context, dec func(any) error, in
 		return srv.(specService).BackfillAction(ctx, req.(*BackfillActionRequest))
 	})
 }
+
+func (s *SpecServer) UpdateSchedule(ctx context.Context, req *CreateScheduleRequest) (*ScheduleResponse, error) {
+	if req.Namespace == "" || req.Name == "" || req.SpecName == "" || req.CronExpr == "" {
+		return nil, status.Error(codes.InvalidArgument, "namespace, name, spec_name and cron_expr are required")
+	}
+	if req.NextFireAt.IsZero() {
+		// Refused rather than defaulted: a zero fire time would make the schedule
+		// due at the Unix epoch, and the fire loop would immediately claim it and
+		// fire a tick the author never asked for.
+		return nil, status.Error(codes.InvalidArgument, "next_fire_at is required; the caller computes it from the cron expression")
+	}
+	row, err := store.WFMUpdateSchedule(ctx, s.db, store.Schedule{
+		Namespace:     req.Namespace,
+		Name:          req.Name,
+		SpecName:      req.SpecName,
+		SpecVersion:   req.SpecVersion,
+		CronExpr:      req.CronExpr,
+		Timezone:      req.Timezone,
+		Params:        req.Params,
+		Priority:      req.Priority,
+		OverlapPolicy: req.OverlapPolicy,
+		CatchupLimit:  req.CatchupLimit,
+		Enabled:       req.Enabled,
+		CreatedBy:     req.CreatedBy,
+	}, req.NextFireAt)
+	if err != nil {
+		if errors.Is(err, store.ErrScheduleNotFound) {
+			return nil, status.Error(codes.NotFound, "schedule not found")
+		}
+		return nil, status.Errorf(codes.Internal, "update schedule: %v", err)
+	}
+	s.log.InfoContext(ctx, "schedule updated",
+		"schedule_id", row.ID, "namespace", row.Namespace, "name", row.Name,
+		"cron", row.CronExpr, "enabled", row.Enabled, "next_fire_at", row.NextFireAt)
+	return &ScheduleResponse{Schedule: row}, nil
+}
+
+func updateScheduleHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(CreateScheduleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(specService).UpdateSchedule(ctx, in)
+	}
+	return interceptor(ctx, in, &grpc.UnaryServerInfo{
+		Server: srv, FullMethod: "/nexus.v1.WorkflowSpecService/UpdateSchedule",
+	}, func(ctx context.Context, req any) (any, error) {
+		return srv.(specService).UpdateSchedule(ctx, req.(*CreateScheduleRequest))
+	})
+}

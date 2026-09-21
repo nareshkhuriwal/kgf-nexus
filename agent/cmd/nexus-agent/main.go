@@ -113,6 +113,7 @@ func main() {
 		WorkDir:          *workDir,
 		DrainGracePeriod: *drainGrace,
 		ResultStore: worker.ResultStoreCredentials{
+			Endpoint:        os.Getenv("NEXUS_RESULT_STORE_ENDPOINT"),
 			AccessKeyID:     os.Getenv("NEXUS_S3_ACCESS_KEY_ID"),
 			SecretAccessKey: os.Getenv("NEXUS_S3_SECRET_ACCESS_KEY"),
 			SessionToken:    os.Getenv("NEXUS_S3_SESSION_TOKEN"),

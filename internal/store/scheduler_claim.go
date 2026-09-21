@@ -276,7 +276,7 @@ func (s *SchedulerStore) placeCandidate(
 	// task that cannot fit anywhere should report the resource shortfall, which
 	// is the actionable problem, rather than a semaphore it never reached.
 	if key := cand.Spec.ConcurrencyKey; key != "" && cand.Spec.ConcurrencyLimit > 0 {
-		ok, held, err := s.concurrencyAdmit(ctx, tx, key, cand.Spec.ConcurrencyLimit)
+		ok, held, err := s.concurrencyAdmit(ctx, tx, key, cand.Spec.ConcurrencyLimit, cand.ID)
 		if err != nil {
 			return ClaimReport{}, err
 		}
@@ -337,11 +337,12 @@ SELECT id, hostname, capacity, committed
    AND last_heartbeat_at > $2
    AND labels @> $3::jsonb
    AND ($4 = '' OR $4 = ANY(executors))
+   AND tenant_id = (SELECT tenant_id FROM task_attempts WHERE id=$5)
  ORDER BY id
  FOR UPDATE SKIP LOCKED`
 
 	rows, err := tx.Query(ctx, q,
-		s.cfg.Queue, now.Add(-s.cfg.LivenessWindow), selJSON, cand.Spec.Executor)
+		s.cfg.Queue, now.Add(-s.cfg.LivenessWindow), selJSON, cand.Spec.Executor, cand.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("select candidate workers: %w", err)
 	}
@@ -432,6 +433,7 @@ SELECT a.id, a.resource_request,
  WHERE a.state = 'PENDING'
    AND a.queue = $3
    AND a.id <> $4
+   AND a.tenant_id = (SELECT tenant_id FROM task_attempts WHERE id=$4)
    AND a.pending_reason LIKE 'waiting_for_resources:%'
    AND r.state IN ('PENDING','RUNNING')
    AND a.priority + (EXTRACT(EPOCH FROM ($1::timestamptz - a.scheduled_at)) * $2) >= $5
@@ -504,7 +506,7 @@ SELECT a.id, a.resource_request,
 // the attempt is not enough for this — the contending attempts are different
 // rows — so the count and the insert must share a transaction, which they do.
 func (s *SchedulerStore) concurrencyAdmit(
-	ctx context.Context, tx pgx.Tx, key string, limit int32,
+	ctx context.Context, tx pgx.Tx, key string, limit int32, attemptID uuid.UUID,
 ) (bool, int32, error) {
 	// Only slots belonging to attempts that are genuinely still active count.
 	// A slot whose attempt is terminal is garbage the release path missed (a
@@ -514,9 +516,10 @@ SELECT count(*)
   FROM concurrency_slots c
   JOIN task_attempts a ON a.id = c.attempt_id
  WHERE c.key = $1
+   AND c.tenant_id = (SELECT tenant_id FROM task_attempts WHERE id=$2)
    AND a.state IN ('DISPATCHED','RUNNING')`
 	var held int32
-	if err := tx.QueryRow(ctx, q, key).Scan(&held); err != nil {
+	if err := tx.QueryRow(ctx, q, key, attemptID).Scan(&held); err != nil {
 		return false, 0, fmt.Errorf("count concurrency slots for %q: %w", key, err)
 	}
 	return held < limit, held, nil

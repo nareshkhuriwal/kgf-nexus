@@ -206,10 +206,28 @@ func GatewayGetRun(ctx context.Context, q GWQuerier, namespace, runID string) (R
 
 // RunFilter narrows a run listing.
 type RunFilter struct {
-	States   []string
-	SpecName string
-	Limit    int
-	Before   *time.Time
+	Lookahead bool // Fetch one extra row to determine whether another page exists.
+	States    []string
+	SpecName  string
+	Limit     int
+	Before    *time.Time
+}
+
+// GatewayCountRuns counts the matching visible namespace, independent of the cursor.
+func GatewayCountRuns(ctx context.Context, q GWQuerier, namespace string, f RunFilter) (int64, error) {
+	conds := []string{"r.namespace = $1", "NOT EXISTS (SELECT 1 FROM run_deletions d WHERE d.run_id=r.id)"}
+	args := []any{namespace}
+	if len(f.States) > 0 {
+		args = append(args, f.States)
+		conds = append(conds, fmt.Sprintf("r.state::text = ANY($%d)", len(args)))
+	}
+	if f.SpecName != "" {
+		args = append(args, f.SpecName)
+		conds = append(conds, fmt.Sprintf("s.name = $%d", len(args)))
+	}
+	var total int64
+	err := q.QueryRow(ctx, "SELECT count(*) FROM workflow_runs r JOIN workflow_specs s ON s.id=r.spec_id WHERE "+strings.Join(conds, " AND "), args...).Scan(&total)
+	return total, err
 }
 
 // GatewayListRuns lists runs newest-first, keyset-paginated on created_at.
@@ -219,7 +237,7 @@ type RunFilter struct {
 // when new runs arrive mid-pagination.
 func GatewayListRuns(ctx context.Context, q GWQuerier, namespace string, f RunFilter) ([]RunRow, error) {
 	var (
-		conds = []string{"r.namespace = $1"}
+		conds = []string{"r.namespace = $1", "NOT EXISTS (SELECT 1 FROM run_deletions d WHERE d.run_id=r.id)"}
 		args  = []any{namespace}
 	)
 	if len(f.States) > 0 {
@@ -237,6 +255,9 @@ func GatewayListRuns(ctx context.Context, q GWQuerier, namespace string, f RunFi
 	limit := f.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 100
+	}
+	if f.Lookahead {
+		limit++
 	}
 	args = append(args, limit)
 

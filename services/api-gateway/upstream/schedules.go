@@ -83,6 +83,27 @@ func (c *WorkflowManagerClient) CreateSchedule(ctx context.Context, s store.Sche
 	return resp.Schedule, nil
 }
 
+func (c *WorkflowManagerClient) UpdateSchedule(ctx context.Context, s store.Schedule, nextFireAt time.Time) (store.Schedule, error) {
+	if c.grpc == nil {
+		return store.Schedule{}, fmt.Errorf("update schedule: %w (workflow-manager owns schedules)", ErrUpstreamNotConfigured)
+	}
+	ctx, cancel := withCallTimeout(ctx)
+	defer cancel()
+
+	var resp wfmScheduleResponse
+	if err := c.grpc.conn.Invoke(ctx, "/nexus.v1.WorkflowSpecService/UpdateSchedule",
+		&wfmCreateScheduleRequest{
+			Namespace: s.Namespace, Name: s.Name, SpecName: s.SpecName,
+			SpecVersion: s.SpecVersion, CronExpr: s.CronExpr, Timezone: s.Timezone,
+			Params: s.Params, Priority: s.Priority, OverlapPolicy: s.OverlapPolicy,
+			CatchupLimit: s.CatchupLimit, Enabled: s.Enabled, CreatedBy: s.CreatedBy,
+			NextFireAt: nextFireAt,
+		}, &resp, grpc.ForceCodec(wfmJSONCodec{})); err != nil {
+		return store.Schedule{}, fmt.Errorf("update schedule %s/%s: %w", s.Namespace, s.Name, err)
+	}
+	return resp.Schedule, nil
+}
+
 // SetScheduleEnabled toggles a schedule through its owner.
 func (c *WorkflowManagerClient) SetScheduleEnabled(ctx context.Context, namespace, name string, enabled bool, nextFireAt *time.Time) (store.Schedule, error) {
 	if c.grpc == nil {

@@ -76,7 +76,7 @@ func run() error {
 	// request is authenticated. API keys are unaffected: WithIdentity only adds
 	// credential kinds, dispatched by prefix, and an unprefixed credential still
 	// takes the original api_keys path.
-	auth := authn.New(db).
+	auth := authn.New(db).WithRBAC().
 		WithIdentity(authn.StoreIdentity{DB: db}).
 		WithLogger(log)
 

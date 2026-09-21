@@ -293,14 +293,15 @@ func WFMClaimDueSchedules(ctx context.Context, db GWDB, now time.Time, limit int
 }
 
 // WFMArmSchedule sets a schedule's next fire time and records the tick it last
-// fired, in one write so the two cannot disagree.
+// fired, in one write so the two cannot disagree. A concurrent edit or disable
+// takes precedence over the old claimed configuration.
 func WFMArmSchedule(ctx context.Context, db GWDB, id string, nextFireAt time.Time, lastFireAt *time.Time) error {
 	_, err := db.Exec(ctx, `
 		UPDATE schedules
 		   SET next_fire_at = $2,
 		       last_fire_at = COALESCE($3, last_fire_at),
 		       updated_at = now()
-		 WHERE id = $1::uuid`, id, nextFireAt, lastFireAt)
+		 WHERE id = $1::uuid AND enabled AND next_fire_at IS NULL`, id, nextFireAt, lastFireAt)
 	if err != nil {
 		return fmt.Errorf("arm schedule %s: %w", id, err)
 	}
@@ -667,4 +668,23 @@ func WFMBackfillActiveRunCount(ctx context.Context, db GWDB, backfillID string) 
 		return 0, fmt.Errorf("count active runs for backfill %s: %w", backfillID, err)
 	}
 	return n, nil
+}
+
+// WFMUpdateSchedule replaces configuration while retaining identity and fire history.
+func WFMUpdateSchedule(ctx context.Context, db GWDB, s Schedule, nextFireAt time.Time) (Schedule, error) {
+	params, err := json.Marshal(emptyIfNil(s.Params))
+	if err != nil {
+		return Schedule{}, err
+	}
+	out, err := scanSchedule(db.QueryRow(ctx, `UPDATE schedules SET
+ spec_name=$3, spec_version=$4, cron_expr=$5, timezone=$6, params=$7,
+ priority=$8, overlap_policy=$9, catchup_limit=$10, enabled=$11,
+ next_fire_at=CASE WHEN $11 THEN $12::timestamptz ELSE NULL END, updated_at=now()
+ WHERE namespace=$1 AND name=$2 RETURNING `+scheduleCols,
+		s.Namespace, s.Name, s.SpecName, s.SpecVersion, s.CronExpr, orDefault(s.Timezone, "UTC"), params,
+		s.Priority, orDefault(s.OverlapPolicy, OverlapSkip), s.CatchupLimit, s.Enabled, nextFireAt))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Schedule{}, ErrScheduleNotFound
+	}
+	return out, err
 }

@@ -417,6 +417,10 @@ func (e *Engine) buildAttempts(
 		if err != nil {
 			return nil, fmt.Errorf("resolve inputs for node %q: %w", nodeID, err)
 		}
+		inputRefs, err = resolveRunInputs(g, nodeID, run.Params, inputRefs)
+		if err != nil {
+			return nil, fmt.Errorf("resolve run inputs for node %q: %w", nodeID, err)
+		}
 		priority := n.Spec.GetPriority()
 		if priority == 0 {
 			// Inherit the run's priority so a spec that does not set a per-task
@@ -641,3 +645,67 @@ func (e *Engine) ValidateSpec(spec *nexusv1.WorkflowSpec) error {
 
 // ErrNotMaterialized is returned when a run has no nodes yet.
 var ErrNotMaterialized = errors.New("run has no materialized nodes")
+
+// resolveRunInputs delivers literals, run parameters and defaults through the
+// same ResultRefs as edge inputs. Agents do not receive the run document and
+// worker credentials intentionally cannot read it through the REST API.
+func resolveRunInputs(g *dag.Graph, nodeID string, rawParams, rawRefs []byte) ([]byte, error) {
+	params := map[string]json.RawMessage{}
+	refs := map[string]json.RawMessage{}
+	if len(rawParams) > 0 {
+		if err := json.Unmarshal(rawParams, &params); err != nil {
+			return nil, err
+		}
+	}
+	if err := json.Unmarshal(rawRefs, &refs); err != nil {
+		return nil, err
+	}
+	node := g.Node(nodeID)
+	plan, err := dag.InputPlan(g, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, binding := range plan {
+		name := binding.InputName
+		if binding.Source() == dag.FromEdge {
+			continue
+		}
+		var value json.RawMessage
+		if literal, ok := node.Spec.GetInputLiterals()[name]; ok {
+			value = json.RawMessage(literal)
+		} else {
+			paramName := node.Spec.GetInputParams()[name]
+			if paramName == "" {
+				paramName = name
+			}
+			value = params[paramName]
+			// The workflow-manager RPC stores non-string parameters as JSON
+			// text inside its string map. Decode that transport layer according
+			// to the declared type, without changing actual string parameters.
+			if ps := g.Params[paramName]; ps != nil && ps.GetType() != "string" {
+				var encoded string
+				if json.Unmarshal(value, &encoded) == nil && json.Valid([]byte(encoded)) {
+					value = json.RawMessage(encoded)
+				}
+			}
+			if len(value) == 0 && g.Params[paramName] != nil {
+				value = json.RawMessage(g.Params[paramName].GetDefaultJson())
+			}
+			if len(value) == 0 {
+				value = json.RawMessage(binding.DefaultJSON)
+			}
+		}
+		if len(value) == 0 {
+			continue
+		}
+		if !json.Valid(value) {
+			return nil, fmt.Errorf("invalid JSON for input %q", name)
+		}
+		// ResultRef.inline is protobuf bytes, hence base64 in its JSON wire form.
+		refs[name], err = json.Marshal(map[string]any{"inline": []byte(value), "content_type": "application/json"})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(refs)
+}

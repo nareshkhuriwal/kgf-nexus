@@ -625,3 +625,38 @@ func TestScheduleCreationAndSpecDeletionAgreeOnExistence(t *testing.T) {
 		t.Errorf("the refused create still reached the owner: %+v", fs.created)
 	}
 }
+
+func (f *fakeSchedules) UpdateSchedule(ctx context.Context, s store.Schedule, next time.Time) (store.Schedule, error) {
+	return f.CreateSchedule(ctx, s, next)
+}
+
+func TestUpdateSchedule(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, key string
+		want            int
+	}{
+		{"valid", `{"name":"nightly","spec_name":"train","cron":"0 4 * * *","enabled":false}`, adminKey, 200},
+		{"rename", `{"name":"other","spec_name":"train","cron":"0 4 * * *","enabled":false}`, adminKey, 400},
+		{"bad cron", `{"spec_name":"train","cron":"bad","enabled":false}`, adminKey, 400},
+		{"missing enabled", `{"spec_name":"train","cron":"0 4 * * *"}`, adminKey, 400},
+		{"unknown workflow", `{"spec_name":"missing","cron":"0 4 * * *","enabled":false}`, adminKey, 400},
+		{"reader", `{"spec_name":"train","cron":"0 4 * * *","enabled":false}`, readerKey, 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, fs := newScheduleAPI(t)
+			req := httptest.NewRequest(http.MethodPut, "/v1/namespaces/team-ml/schedules/nightly", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer "+tc.key)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
+			}
+			if tc.want == 200 && (len(fs.created) != 1 || fs.created[0].Name != "nightly" || fs.created[0].Enabled) {
+				t.Fatalf("incorrect update: %+v", fs.created)
+			}
+			if tc.want != 200 && len(fs.created) != 0 {
+				t.Fatal("invalid update reached owner")
+			}
+		})
+	}
+}

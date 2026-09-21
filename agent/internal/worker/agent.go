@@ -66,6 +66,8 @@ type Config struct {
 // only the credentials are local, because credentials must never be in the
 // metadata store (ADR-0008).
 type ResultStoreCredentials struct {
+	// Endpoint overrides the advertised address for workers outside its network.
+	Endpoint        string
 	AccessKeyID     string
 	SecretAccessKey string
 	SessionToken    string
@@ -304,12 +306,16 @@ func (a *Agent) buildExecutors() map[string]executor.Executor {
 }
 
 func (a *Agent) initResultStore(cfg *nexusv1.ResultStoreConfig) {
-	if cfg.GetEndpoint() == "" {
+	endpoint := a.cfg.ResultStore.Endpoint
+	if endpoint == "" {
+		endpoint = cfg.GetEndpoint()
+	}
+	if endpoint == "" {
 		a.log.Warn("control plane supplied no result store; outputs will be inlined only")
 		return
 	}
 	c, err := resultstore.New(resultstore.Config{
-		Endpoint:        cfg.GetEndpoint(),
+		Endpoint:        endpoint,
 		Bucket:          cfg.GetBucket(),
 		Region:          cfg.GetRegion(),
 		Namespace:       a.cfg.Namespace,

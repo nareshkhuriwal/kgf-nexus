@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -375,4 +376,32 @@ func TestAttemptIdempotencyKeyExcludesAttemptNumber(t *testing.T) {
 // integration tests via the package-level build.
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestRunInputsReachWorkerWithoutRESTAccess(t *testing.T) {
+	spec := &nexusv1.WorkflowSpec{
+		Params: map[string]*nexusv1.ValueSpec{
+			"target": {Type: "json", Required: true},
+			"config": {Type: "json", DefaultJson: `{"seed":3}`},
+		},
+		Tasks: []*nexusv1.TaskSpec{{Id: "resolve", TaskRef: "resolve", Inputs: map[string]*nexusv1.ValueSpec{
+			"target": {Type: "json", Required: true},
+			"config": {Type: "json"},
+			"rounds": {Type: "int", DefaultJson: "2"},
+		}}},
+	}
+	raw, err := resolveRunInputs(dag.Build(spec), "resolve", []byte(`{"target":"{\"n\":72}"}`), []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refs map[string]map[string]string
+	if err := json.Unmarshal(raw, &refs); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"target": `{"n":72}`, "config": `{"seed":3}`, "rounds": "2"} {
+		got, err := base64.StdEncoding.DecodeString(refs[name]["inline"])
+		if err != nil || string(got) != want {
+			t.Fatalf("%s = %s, %v; want %s", name, got, err, want)
+		}
+	}
 }

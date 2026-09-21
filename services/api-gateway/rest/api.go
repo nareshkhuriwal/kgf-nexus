@@ -216,6 +216,7 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("GET /v1/namespaces/{ns}/runs", a.guard(authn.ActionRead, a.listRuns))
 	mux.Handle("GET /v1/namespaces/{ns}/runs/{id}", a.guard(authn.ActionRead, a.getRun))
 	mux.Handle("GET /v1/namespaces/{ns}/runs/{id}/events", a.guard(authn.ActionRead, a.getRunEvents))
+	mux.Handle("DELETE /v1/namespaces/{ns}/runs/{id}", a.guard(authn.ActionAdminWrite, a.deleteRun))
 	mux.Handle("POST /v1/namespaces/{ns}/runs/{id}/cancel", a.guard(authn.ActionWrite, a.cancelRun))
 	mux.Handle("POST /v1/namespaces/{ns}/runs/{id}/pause", a.guard(authn.ActionWrite, a.pauseRun))
 	mux.Handle("POST /v1/namespaces/{ns}/runs/{id}/resume", a.guard(authn.ActionWrite, a.resumeRun))
@@ -229,6 +230,7 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("POST /v1/namespaces/{ns}/schedules", a.guard(authn.ActionWrite, a.createSchedule))
 	mux.Handle("GET /v1/namespaces/{ns}/schedules", a.guard(authn.ActionRead, a.listSchedules))
 	mux.Handle("GET /v1/namespaces/{ns}/schedules/preview", a.guard(authn.ActionRead, a.previewSchedule))
+	mux.Handle("PUT /v1/namespaces/{ns}/schedules/{name}", a.guard(authn.ActionWrite, a.createSchedule))
 	mux.Handle("GET /v1/namespaces/{ns}/schedules/{name}", a.guard(authn.ActionRead, a.getSchedule))
 	mux.Handle("DELETE /v1/namespaces/{ns}/schedules/{name}", a.guard(authn.ActionWrite, a.deleteSchedule))
 	mux.Handle("POST /v1/namespaces/{ns}/schedules/{name}/enable", a.guard(authn.ActionWrite, a.setScheduleEnabled(true)))
@@ -270,6 +272,10 @@ func (a *API) Routes() http.Handler {
 	// validate locally against the same grammar rather than a documented copy of it.
 	mux.HandleFunc("GET /v1/schemas/workflow-spec-v1.json", a.serveSchema)
 
+	mux.Handle("GET /v1/namespaces/{ns}/platform/config", a.guard(authn.ActionAdminWrite, a.platformGet))
+	mux.Handle("PUT /v1/namespaces/{ns}/platform/config", a.guard(authn.ActionAdminWrite, a.platformPut))
+	mux.Handle("GET /v1/namespaces/{ns}/platform/plan", a.guard(authn.ActionAdminWrite, a.platformPlan))
+	a.registerRBACRoutes(mux)
 	a.registerIdentityRoutes(mux)
 
 	return mux
@@ -292,6 +298,10 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 
 	// THE ONE UNGUARDED ROUTE. Rate-limited and fully audited inside the handler.
 	mux.HandleFunc("POST /v1/auth/login", a.login)
+	mux.HandleFunc("POST /v1/auth/register", a.registerCustomer)
+	mux.Handle("GET /v1/account/tenant", a.guard(authn.ActionRead, a.currentTenant))
+	mux.Handle("GET /v1/platform/tenants", a.guard(authn.ActionRead, a.listTenants))
+	mux.Handle("POST /v1/platform/tenants", a.guard(authn.ActionRead, a.createTenant))
 
 	// Logout and whoami need only a valid credential of any kind, so they are
 	// guarded on read: every authenticated principal may ask who it is and end its
@@ -304,6 +314,7 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 	// attacker in, so they sit behind the strongest grant the matrix has.
 	mux.Handle("GET /v1/namespaces/{ns}/users", a.guard(authn.ActionAdminWrite, a.listUsers))
 	mux.Handle("POST /v1/namespaces/{ns}/users", a.guard(authn.ActionAdminWrite, a.createUser))
+	mux.Handle("PUT /v1/namespaces/{ns}/users/{id}", a.guard(authn.ActionAdminWrite, a.updateUser))
 	mux.Handle("POST /v1/namespaces/{ns}/users/{id}/disable", a.guard(authn.ActionAdminWrite, a.setUserDisabled))
 	mux.Handle("POST /v1/namespaces/{ns}/users/{id}/enable", a.guard(authn.ActionAdminWrite, a.setUserDisabled))
 	mux.Handle("POST /v1/namespaces/{ns}/users/{id}/password", a.guard(authn.ActionAdminWrite, a.resetUserPassword))
@@ -361,6 +372,26 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 			return
 		}
 
+		required, mapped := routePermissions[r.Pattern]
+		if !mapped {
+			writeError(w, 403, "forbidden", "Route has no permission mapping")
+			return
+		}
+		for _, permission := range required {
+			if !p.Allows(permission) {
+				writeError(w, 403, "forbidden", "Missing permission: "+permission)
+				return
+			}
+		}
+		// Identity mutation and delegation remain restricted to unbound administrators.
+		if p.Grants != nil {
+			for _, permission := range required {
+				if permission == "users.manage" || permission == "tokens.manage" || permission == "roles.manage" {
+					writeError(w, 403, "forbidden", "Delegation requires a namespace administrator")
+					return
+				}
+			}
+		}
 		h(w, r.WithContext(authn.WithPrincipal(r.Context(), p)), p)
 	})
 }
@@ -809,19 +840,32 @@ func (a *API) listRuns(w http.ResponseWriter, r *http.Request, _ authn.Principal
 		f.Before = &t
 	}
 
+	if f.Limit <= 0 || f.Limit > 500 {
+		f.Limit = 100
+	}
+	f.Lookahead = true
 	rows, err := store.GatewayListRuns(r.Context(), a.db, r.PathValue("ns"), f)
 	if err != nil {
 		a.fail(w, r, "list runs", err)
 		return
 	}
+	hasMore := len(rows) > f.Limit
+	if hasMore {
+		rows = rows[:f.Limit]
+	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, run := range rows {
 		out = append(out, runPayload(run))
 	}
-	resp := map[string]any{"runs": out}
+	total, err := store.GatewayCountRuns(r.Context(), a.db, r.PathValue("ns"), f)
+	if err != nil {
+		a.fail(w, r, "count runs", err)
+		return
+	}
+	resp := map[string]any{"runs": out, "total": total}
 	// Keyset cursor, so deep pagination neither degrades nor skips rows as new
 	// runs arrive mid-listing.
-	if len(rows) == f.Limit && len(rows) > 0 {
+	if hasMore {
 		resp["next_before"] = rows[len(rows)-1].CreatedAt.Format(time.RFC3339Nano)
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -830,7 +874,7 @@ func (a *API) listRuns(w http.ResponseWriter, r *http.Request, _ authn.Principal
 // getRun returns the run plus its node and attempt states, which is what a detail
 // view needs; making the UI issue three requests to render one page would just
 // move the joins to the client.
-func (a *API) getRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+func (a *API) getRun(w http.ResponseWriter, r *http.Request, p authn.Principal) {
 	ns, id := r.PathValue("ns"), r.PathValue("id")
 	run, err := store.GatewayGetRun(r.Context(), a.db, ns, id)
 	if err != nil {
@@ -877,6 +921,17 @@ func (a *API) getRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) 
 	}
 
 	payload := runPayload(run)
+	if !p.Allows("tasks.view") {
+		nodeOut = []map[string]any{}
+		edgeOut = []map[string]any{}
+		attemptOut = []map[string]any{}
+	}
+	if !p.Allows("tasks.results.view") {
+		for _, at := range attemptOut {
+			delete(at, "error")
+			delete(at, "metrics")
+		}
+	}
 	payload["nodes"] = nodeOut
 	payload["edges"] = edgeOut
 	payload["attempts"] = attemptOut
@@ -924,7 +979,7 @@ func (a *API) lifecycle(w http.ResponseWriter, r *http.Request, op string, fn fu
 // ties and no clock dependency — which is exactly what a live tail needs in order
 // to resume across a reconnect without gaps or duplicates. A timestamp cursor
 // would drop or repeat events written in the same millisecond.
-func (a *API) getRunEvents(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+func (a *API) getRunEvents(w http.ResponseWriter, r *http.Request, p authn.Principal) {
 	ns, id := r.PathValue("ns"), r.PathValue("id")
 	// Namespace-scoped existence check first: without it, event history would be
 	// readable across tenants by guessing a run UUID.
@@ -954,7 +1009,7 @@ func (a *API) getRunEvents(w http.ResponseWriter, r *http.Request, _ authn.Princ
 	}
 	out := make([]map[string]any, 0, len(events))
 	for _, e := range events {
-		out = append(out, eventPayload(e))
+		out = append(out, permittedEventPayload(e, p))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": out})
 }
@@ -990,6 +1045,10 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request, runID string,
 
 	ctx := r.Context()
 	for {
+		current, authErr := a.auth.AuthenticateCredential(ctx, authn.ExtractBearer(r.Header.Get("Authorization")))
+		if authErr != nil || !current.Allows("runs.view") {
+			return
+		}
 		events, err := store.GatewayListRunEvents(ctx, a.db, runID, after, sseBatch)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -1001,7 +1060,7 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request, runID string,
 			return
 		}
 		for _, e := range events {
-			payload, err := json.Marshal(eventPayload(e))
+			payload, err := json.Marshal(permittedEventPayload(e, current))
 			if err != nil {
 				continue
 			}

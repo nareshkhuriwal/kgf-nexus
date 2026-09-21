@@ -215,6 +215,7 @@ type specService interface {
 	// come here, because `schedules` is this service's table and migration 0005's
 	// grants refuse a write from anyone else at the database.
 	CreateSchedule(context.Context, *CreateScheduleRequest) (*ScheduleResponse, error)
+	UpdateSchedule(context.Context, *CreateScheduleRequest) (*ScheduleResponse, error)
 	SetScheduleEnabled(context.Context, *SetScheduleEnabledRequest) (*ScheduleResponse, error)
 	DeleteSchedule(context.Context, *DeleteScheduleRequest) (*DeleteScheduleResponse, error)
 	StartBackfill(context.Context, *StartBackfillRequest) (*BackfillResponse, error)
@@ -347,6 +348,7 @@ var SpecServiceDesc = grpc.ServiceDesc{
 		{MethodName: "SetRunState", Handler: setRunStateHandler},
 		{MethodName: "DeleteSpec", Handler: deleteSpecHandler},
 		{MethodName: "CreateSchedule", Handler: createScheduleHandler},
+		{MethodName: "UpdateSchedule", Handler: updateScheduleHandler},
 		{MethodName: "SetScheduleEnabled", Handler: setScheduleEnabledHandler},
 		{MethodName: "DeleteSchedule", Handler: deleteScheduleHandler},
 		{MethodName: "StartBackfill", Handler: startBackfillHandler},
