@@ -114,7 +114,11 @@ func (a *Authenticator) AuthenticateCredential(ctx context.Context, presented st
 
 	switch {
 	case strings.HasPrefix(presented, "nxsess_"):
-		return a.authenticateSession(ctx, presented)
+		p, err := a.authenticateSession(ctx, presented)
+		if err != nil {
+			return p, err
+		}
+		return a.resolveRBAC(ctx, p)
 	case strings.HasPrefix(presented, "nxtok_"):
 		return a.authenticateScopedToken(ctx, presented)
 	default:

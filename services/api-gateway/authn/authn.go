@@ -55,6 +55,8 @@ const (
 // and are ZERO for an API key, which is what makes the addition invisible to
 // every existing caller and handler.
 type Principal struct {
+	Grants    map[string]bool
+	RoleNames []string
 	KeyID     string
 	Namespace string
 	Name      string
@@ -122,6 +124,18 @@ func (p Principal) Can(a Action) bool {
 // namespaces are the tenancy and quota boundary (architecture §3.2), and a
 // boundary that is not checked on every request is not a boundary.
 func (p Principal) Authorize(namespace string, a Action) error {
+	if p.Kind == KindSession && a == ActionWorkerRPC {
+		return ErrForbidden
+	}
+	if p.Grants != nil {
+		if namespace != "" && namespace != p.Namespace {
+			return ErrForbidden
+		}
+		if a != ActionRead && a != ActionWrite && a != ActionAdminWrite {
+			return ErrForbidden
+		}
+		return nil // Exact REST permission requirements are checked by the route guard.
+	}
 	if !p.Can(a) {
 		return fmt.Errorf("%w: role %s may not %s", ErrForbidden, p.Role, a)
 	}
@@ -142,7 +156,8 @@ func (p Principal) Authorize(namespace string, a Action) error {
 // Authenticator resolves credentials against the api_keys table, and — when
 // identity is wired via WithIdentity — against sessions and scoped tokens too.
 type Authenticator struct {
-	db store.GWQuerier
+	rbac bool
+	db   store.GWQuerier
 	// identity is nil unless WithIdentity was called. Nil means this gateway
 	// accepts API keys only, which is precisely the behaviour before identity
 	// existed and is what makes the feature safe to wire incrementally.
