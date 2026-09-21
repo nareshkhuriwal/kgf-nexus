@@ -110,54 +110,38 @@ CREATE TRIGGER tenant_assignment BEFORE INSERT OR UPDATE ON sessions FOR EACH RO
 UPDATE timers t SET tenant_id=r.tenant_id FROM workflow_runs r WHERE t.kind='run_deadline' AND r.id=t.subject_id;
 UPDATE timers t SET tenant_id=a.tenant_id FROM task_attempts a WHERE t.kind IN ('schedule_to_start','start_to_close','schedule_to_close','heartbeat','retry_backoff','lease_expiry') AND a.id=t.subject_id;
 CREATE TRIGGER tenant_assignment BEFORE INSERT OR UPDATE ON timers FOR EACH ROW EXECUTE FUNCTION public.assign_timer_tenant();
-ALTER TABLE workflow_specs ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT workflow_specs_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX workflow_specs_tenant_idx ON workflow_specs(tenant_id);
-ALTER TABLE workflow_runs ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT workflow_runs_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX workflow_runs_tenant_idx ON workflow_runs(tenant_id);
-ALTER TABLE workers ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT workers_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX workers_tenant_idx ON workers(tenant_id);
-ALTER TABLE idempotency_keys ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT idempotency_keys_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX idempotency_keys_tenant_idx ON idempotency_keys(tenant_id);
-ALTER TABLE api_keys ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT api_keys_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX api_keys_tenant_idx ON api_keys(tenant_id);
-ALTER TABLE schedules ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT schedules_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX schedules_tenant_idx ON schedules(tenant_id);
-ALTER TABLE schedule_backfills ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT schedule_backfills_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX schedule_backfills_tenant_idx ON schedule_backfills(tenant_id);
-ALTER TABLE users ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT users_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX users_tenant_idx ON users(tenant_id);
-ALTER TABLE scoped_tokens ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT scoped_tokens_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX scoped_tokens_tenant_idx ON scoped_tokens(tenant_id);
-ALTER TABLE audit_log ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT audit_log_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX audit_log_tenant_idx ON audit_log(tenant_id);
-ALTER TABLE platform_config ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT platform_config_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX platform_config_tenant_idx ON platform_config(tenant_id);
-ALTER TABLE rbac_roles ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT rbac_roles_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX rbac_roles_tenant_idx ON rbac_roles(tenant_id);
-ALTER TABLE rbac_user_access ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT rbac_user_access_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX rbac_user_access_tenant_idx ON rbac_user_access(tenant_id);
-ALTER TABLE run_deletions ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT run_deletions_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX run_deletions_tenant_idx ON run_deletions(tenant_id);
-ALTER TABLE task_nodes ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT task_nodes_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX task_nodes_tenant_idx ON task_nodes(tenant_id);
-ALTER TABLE task_edges ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT task_edges_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX task_edges_tenant_idx ON task_edges(tenant_id);
-ALTER TABLE task_attempts ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT task_attempts_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX task_attempts_tenant_idx ON task_attempts(tenant_id);
-ALTER TABLE leases ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT leases_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX leases_tenant_idx ON leases(tenant_id);
-ALTER TABLE reservations ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT reservations_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX reservations_tenant_idx ON reservations(tenant_id);
-ALTER TABLE run_events ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT run_events_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX run_events_tenant_idx ON run_events(tenant_id);
-ALTER TABLE concurrency_slots ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT concurrency_slots_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX concurrency_slots_tenant_idx ON concurrency_slots(tenant_id);
-ALTER TABLE schedule_runs ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT schedule_runs_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX schedule_runs_tenant_idx ON schedule_runs(tenant_id);
-ALTER TABLE sessions ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT sessions_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX sessions_tenant_idx ON sessions(tenant_id);
-ALTER TABLE timers ALTER COLUMN tenant_id SET NOT NULL, ADD CONSTRAINT timers_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
-CREATE INDEX timers_tenant_idx ON timers(tenant_id);
+-- The foreign key is additive and safe to apply here: it constrains new writes
+-- and validates existing rows, which the backfill above has already populated.
+--
+-- SET NOT NULL and the tenant indexes are deliberately NOT here. Both are
+-- rolling-deploy hazards on a populated table -- NOT NULL rejects an INSERT
+-- from a replica that predates the column, and a non-CONCURRENT index holds a
+-- write lock for the whole build -- so they are enforced a release later, in
+-- 0015, once every replica is writing tenant_id. ADR-0011 rule 5.
+ALTER TABLE workflow_specs ADD CONSTRAINT workflow_specs_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE workflow_runs ADD CONSTRAINT workflow_runs_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE workers ADD CONSTRAINT workers_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE idempotency_keys ADD CONSTRAINT idempotency_keys_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE api_keys ADD CONSTRAINT api_keys_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE schedules ADD CONSTRAINT schedules_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE schedule_backfills ADD CONSTRAINT schedule_backfills_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE users ADD CONSTRAINT users_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE scoped_tokens ADD CONSTRAINT scoped_tokens_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE audit_log ADD CONSTRAINT audit_log_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE platform_config ADD CONSTRAINT platform_config_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE rbac_roles ADD CONSTRAINT rbac_roles_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE rbac_user_access ADD CONSTRAINT rbac_user_access_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE run_deletions ADD CONSTRAINT run_deletions_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE task_nodes ADD CONSTRAINT task_nodes_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE task_edges ADD CONSTRAINT task_edges_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE task_attempts ADD CONSTRAINT task_attempts_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE leases ADD CONSTRAINT leases_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE reservations ADD CONSTRAINT reservations_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE run_events ADD CONSTRAINT run_events_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE concurrency_slots ADD CONSTRAINT concurrency_slots_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE schedule_runs ADD CONSTRAINT schedule_runs_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE sessions ADD CONSTRAINT sessions_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
+ALTER TABLE timers ADD CONSTRAINT timers_tenant_fk FOREIGN KEY(tenant_id) REFERENCES tenants(id);
 ALTER TABLE workflow_specs ADD CONSTRAINT workflow_specs_tenant_identity UNIQUE(tenant_id,id);
 ALTER TABLE workflow_runs ADD CONSTRAINT workflow_runs_tenant_identity UNIQUE(tenant_id,id);
 ALTER TABLE workers ADD CONSTRAINT workers_tenant_identity UNIQUE(tenant_id,id);

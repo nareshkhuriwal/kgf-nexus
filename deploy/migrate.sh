@@ -54,7 +54,24 @@ for file in "$MIGRATIONS_DIR"/*.up.sql; do
   echo "migrate: applying $version"
   # Single transaction per migration: a failure leaves the schema untouched
   # rather than half-migrated, so a retry starts from a known state.
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -q -f "$file"
+  #
+  # A migration may opt out by declaring `-- migrate: no-transaction` on a line
+  # of its own. Some statements CANNOT run inside a transaction block at all --
+  # CREATE INDEX CONCURRENTLY is the one this exists for -- and without an
+  # opt-out such a migration simply cannot be applied by this job, which is a
+  # trap: it is written, it is committed, and it fails the first time it runs.
+  #
+  # The cost is real and belongs to the migration that opts in: a failure part
+  # way through leaves the earlier statements applied. Such a migration must be
+  # written so re-running it is safe -- IF NOT EXISTS, IF EXISTS -- because a
+  # retry is what recovers it. The ledger is only written on success, so a
+  # partial application is retried rather than recorded as done.
+  if grep -qiE '^[[:space:]]*--[[:space:]]*migrate:[[:space:]]*no-transaction[[:space:]]*$' "$file"; then
+    echo "migrate: $version declares no-transaction; applying without --single-transaction"
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$file"
+  else
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -q -f "$file"
+  fi
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
     "INSERT INTO schema_migrations (version) VALUES ('$version')"
   applied=$((applied + 1))

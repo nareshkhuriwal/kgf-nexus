@@ -160,8 +160,9 @@ var (
 )
 
 var (
-	createTableRe = regexp.MustCompile(`(?is)\bCREATE\s+TABLE\b(?:\s+IF\s+NOT\s+EXISTS)?\s+"?(\w+)"?`)
-	createIndexRe = regexp.MustCompile(`(?is)\bCREATE\s+(?:UNIQUE\s+)?INDEX\b[\s\S]*?\bON\s+"?(\w+)"?`)
+	createTableRe  = regexp.MustCompile(`(?is)\bCREATE\s+TABLE\b(?:\s+IF\s+NOT\s+EXISTS)?\s+"?(\w+)"?`)
+	createIndexRe  = regexp.MustCompile(`(?is)\bCREATE\s+(?:UNIQUE\s+)?INDEX\b[\s\S]*?\bON\s+"?(\w+)"?`)
+	updateTargetRe = regexp.MustCompile(`(?is)^\s*UPDATE\s+(?:ONLY\s+)?"?(\w+)"?`)
 )
 
 // tablesCreatedIn lists the tables a migration creates itself.
@@ -185,6 +186,27 @@ func tablesCreatedIn(stmts []statement) map[string]bool {
 // people stop reading.
 func indexTargetIsFresh(stmt string, fresh map[string]bool) bool {
 	m := createIndexRe.FindStringSubmatch(stmt)
+	if m == nil {
+		return false
+	}
+	return fresh[strings.ToLower(m[1])]
+}
+
+// updateTargetIsFresh reports whether an UPDATE targets a table this same
+// migration created.
+//
+// The same reasoning as indexTargetIsFresh, applied to the other rule that
+// measures cost by how many rows already exist. A backfill of a table created
+// a few statements earlier can only touch rows this migration just inserted:
+// no other session can have written to it, so the row locks are uncontended
+// and there is no stall to warn about.
+//
+// 0013 is exactly this shape -- it CREATEs tenants, populates it from the
+// namespaces already in use, then sets owner_user_id on what it just inserted.
+// Reporting that as an unbounded backfill of a populated table describes a
+// migration nobody wrote.
+func updateTargetIsFresh(stmt string, fresh map[string]bool) bool {
+	m := updateTargetRe.FindStringSubmatch(stmt)
 	if m == nil {
 		return false
 	}
@@ -266,6 +288,9 @@ func Analyse(dir string) ([]Finding, error) {
 					continue
 				}
 				if r.name == "create-index-blocking" && indexTargetIsFresh(st.text, fresh) {
+					continue
+				}
+				if r.name == "unbounded-update" && updateTargetIsFresh(st.text, fresh) {
 					continue
 				}
 				{
