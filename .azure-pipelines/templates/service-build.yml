@@ -1,0 +1,125 @@
+# Builds and publishes one Nexus image. Both pipelines instantiate this once per
+# image, so a build that stops working names the image in its own failed job
+# rather than in a log line a thousand lines down.
+#
+# Nexus differs from kgf-cloud in two ways that shape this file:
+#
+#   1. ONE module at the repository root, not one per service. So there is no
+#      per-service `go mod download`; the unit tests ran once in the UnitTest
+#      stage and are not repeated here. This template compiles and packages.
+#
+#   2. ONE parameterised Dockerfile (deploy/Dockerfile.service) selects the main
+#      package through SERVICE_PATH. That path is passed explicitly for every
+#      service because the mains are not all in the same place -- api-gateway is
+#      at services/api-gateway/cmd/api-gateway, dag-engine is at
+#      services/dag-engine -- and an implicit convention half the repo violates
+#      is worse than none. The same reasoning as deploy/docker-compose.yml.
+#
+# The build context is the REPOSITORY ROOT for every image, because the module
+# and the shared internal/ and gen/ packages live there.
+#
+# The registry service connection authenticates with workload identity
+# federation, so no registry credential is stored anywhere.
+#
+# Sets publishedImage_<name> (dashes replaced by underscores, since a dash is
+# not legal in a variable name) to the digest-pinned reference, which the
+# release pipeline's collect_digests job reads.
+#
+# With push: false the registry steps are not emitted at all, so
+# acrServiceConnection is never resolved and may be empty. That is how the PR
+# pipeline builds every image without referencing a service connection -- and it
+# is why a PR from a fork can never acquire registry credentials here.
+
+parameters:
+  # Identity of the image. `name` is the job-and-variable key; `dockerfile` and
+  # `servicePath` say what to build.
+  - name: name               # api-gateway, scheduler, agent, ui, migrate
+    type: string
+  - name: imageName          # repository under the registry, e.g. nexus/api-gateway
+    type: string
+  - name: dockerfile
+    type: string
+    default: deploy/Dockerfile.service
+  # Empty for the ui and migrate images, which are not Go builds.
+  - name: servicePath
+    type: string
+    default: ''
+
+  - name: acrLoginServer
+    type: string
+  - name: acrServiceConnection  # may be empty when push is false
+    type: string
+  - name: imageTag
+    type: string
+  - name: environmentTag     # dev-latest, test-latest, prod-latest
+    type: string
+    default: ''
+  - name: push
+    type: boolean
+    default: true
+
+steps:
+  # Compile the main package before building the image. `docker build` would
+  # catch a compile error too, but it reports it from inside a build stage with
+  # no Go toolchain annotations and no cached module graph, which turns a
+  # one-line type error into a slow and much less readable failure.
+  - ${{ if ne(parameters.servicePath, '') }}:
+    - script: |
+        set -euo pipefail
+        echo "=== Compile ./${{ parameters.servicePath }} ==="
+        go build -o /dev/null ./${{ parameters.servicePath }}
+      displayName: 'Compile ${{ parameters.name }}'
+
+  - script: |
+      set -euo pipefail
+      # --build-arg VERSION reaches the binary through -ldflags -X main.version,
+      # so `nexus-service --version` in a running container names the build that
+      # produced it. GO_VERSION is pinned to the toolchain CI validated against
+      # rather than left to the Dockerfile default drifting independently.
+      docker build \
+        --file '${{ parameters.dockerfile }}' \
+        --build-arg GO_VERSION=$(GO_VERSION) \
+        --build-arg SERVICE='${{ parameters.name }}' \
+        --build-arg SERVICE_PATH='${{ parameters.servicePath }}' \
+        --build-arg VERSION='${{ parameters.imageTag }}' \
+        --tag '${{ parameters.acrLoginServer }}/${{ parameters.imageName }}:${{ parameters.imageTag }}' \
+        .
+    displayName: 'Build image ${{ parameters.imageName }}'
+
+  - ${{ if parameters.push }}:
+    - task: Docker@2
+      displayName: 'Sign in to ACR'
+      inputs:
+        command: login
+        containerRegistry: '${{ parameters.acrServiceConnection }}'
+
+    - script: |
+        set -euo pipefail
+        ref='${{ parameters.acrLoginServer }}/${{ parameters.imageName }}'
+        docker push "$ref:${{ parameters.imageTag }}"
+        if [ -n '${{ parameters.environmentTag }}' ]; then
+          docker tag "$ref:${{ parameters.imageTag }}" "$ref:${{ parameters.environmentTag }}"
+          docker push "$ref:${{ parameters.environmentTag }}"
+        fi
+        # Read the digest back from the registry's own response rather than
+        # computing it locally: this is the reference the cluster will pull, and
+        # it is the only value that proves the push landed.
+        digest="$(docker image inspect "$ref:${{ parameters.imageTag }}" \
+          --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep "^$ref@" | head -n 1)"
+        test -n "$digest" || { echo "Could not determine the pushed image digest" >&2; exit 1; }
+        name="$(echo '${{ parameters.name }}' | tr '-' '_')"
+        echo "Published $digest"
+        echo "##vso[task.setvariable variable=publishedImage_${name};isOutput=true]$digest"
+      name: push_${{ replace(parameters.name, '-', '_') }}
+      displayName: 'Push ${{ parameters.imageName }}'
+
+    # The agent is shared. Remove only the tags this job pushed, and always log
+    # out so a later job on the same agent cannot inherit this one's session.
+    - script: |
+        docker rmi '${{ parameters.acrLoginServer }}/${{ parameters.imageName }}:${{ parameters.imageTag }}' || true
+        if [ -n '${{ parameters.environmentTag }}' ]; then
+          docker rmi '${{ parameters.acrLoginServer }}/${{ parameters.imageName }}:${{ parameters.environmentTag }}' || true
+        fi
+        docker logout '${{ parameters.acrLoginServer }}' || true
+      displayName: 'Clean up local image'
+      condition: always()

@@ -1,0 +1,83 @@
+# The canonical list of every Nexus image, in one file because both pipelines
+# need it and two copies of a service list drift the moment someone adds a
+# service to one of them.
+#
+# Both pipelines consume this through `- template: templates/images.yml` in a
+# parameter default, so the PR gate and the release build exactly the same set.
+#
+# servicePath is the main package, passed explicitly for every Go image. The
+# mains are not all in the same place -- api-gateway and workflow-manager,
+# resource-manager and event-service use cmd/<name>/, while dag-engine and
+# scheduler put main at the package root -- so there is nothing to infer. This
+# mirrors deploy/docker-compose.yml, which passes SERVICE_PATH for the same
+# reason. When a main package moves, it moves in both files.
+#
+# scheduler appears ONCE even though compose runs two of it (scheduler and
+# scheduler-gpu). They are the same image with different environment; an image
+# list is not a topology.
+#
+# ADDING A SERVICE means an entry here and a service in deploy/docker-compose.yml.
+# Nothing validates that those two agree yet -- kgf-cloud has
+# scripts/platform_release.py plan for this, Nexus has no equivalent -- so it is
+# worth checking by hand until it does.
+
+# EVERY entry carries all three keys -- name, dockerfile, servicePath -- even
+# where a value is empty or the default. A template expression that reads an
+# ABSENT object key is a compile-time error that fails the entire run, build
+# included, so the list states everything rather than relying on a fallback
+# expression to supply it. servicePath is empty for the two images that are not
+# Go builds.
+parameters:
+  - name: images
+    type: object
+    default:
+      # ── Control plane: the six services of ADR-0011 ──────────────────────
+      - name: api-gateway
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/api-gateway/cmd/api-gateway
+      - name: workflow-manager
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/workflow-manager/cmd/workflow-manager
+      - name: dag-engine
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/dag-engine
+      - name: scheduler
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/scheduler
+      - name: resource-manager
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/resource-manager/cmd/resource-manager
+      - name: event-service
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/event-service/cmd/event-service
+
+      # ── Worker agent ────────────────────────────────────────────────────
+      # One image for every agent flavour; compose runs agent-cpu, agent-gpu and
+      # agent-gpu-a10 from it, differing only in advertised capacity.
+      - name: agent
+        dockerfile: deploy/Dockerfile.service
+        servicePath: agent/cmd/nexus-agent
+
+      # ── Artifact GC (ADR-0008) ──────────────────────────────────────────
+      # Reports orphaned result-store objects. Shipped as an image so it can run
+      # as a scheduled job rather than from someone's laptop.
+      - name: artifact-gc
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/artifact-gc/cmd/artifact-gc
+
+      # ── Operator console ────────────────────────────────────────────────
+      # nginx serving the built bundle and proxying /v1 to the gateway, so the
+      # browser sees one origin and the gateway needs no CORS configuration.
+      # Its Dockerfile runs npm ci and vite build itself, so there is no
+      # servicePath and no separate front-end build step in the pipeline.
+      - name: ui
+        dockerfile: deploy/Dockerfile.ui
+        servicePath: ''
+
+      # ── Migration job (ADR-0011 rule 4) ─────────────────────────────────
+      # Schema migrations are applied by a dedicated job, never by a service at
+      # startup, because concurrent replicas must not race to migrate. A plain
+      # postgres-client image running psql: no Go build, so no servicePath.
+      - name: migrate
+        dockerfile: deploy/Dockerfile.migrate
+        servicePath: ''
