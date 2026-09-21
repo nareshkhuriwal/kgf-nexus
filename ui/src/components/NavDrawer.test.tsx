@@ -25,13 +25,20 @@
 
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { ADMIN_PERMISSIONS, NON_ADMIN_PERMISSIONS, WithPermissions } from '../test/permissions';
 import { createRef } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { NavDrawer } from './NavDrawer';
 import { visibleItems } from './navItems';
 
-function wrap(ui: React.ReactNode, route = '/') {
-  return render(<MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>);
+function wrap(ui: React.ReactNode, route = '/', permissions: readonly string[] = ADMIN_PERMISSIONS) {
+  // The drawer renders the same destination list as the rail and reads the same
+  // PermissionContext, so it needs the same provider to render anything at all.
+  return render(
+    <MemoryRouter initialEntries={[route]}>
+      <WithPermissions permissions={permissions}>{ui}</WithPermissions>
+    </MemoryRouter>,
+  );
 }
 
 function panel() {
@@ -86,7 +93,7 @@ describe('the navigation drawer', () => {
    * so a reader never sees a "Govern" heading hinting at what they are missing.
    */
   it('omits the Govern group and its heading without admin_write', () => {
-    wrap(<NavDrawer open onClose={() => {}} canAdmin={false} />);
+    wrap(<NavDrawer open onClose={() => {}} canAdmin={false} />, '/', NON_ADMIN_PERMISSIONS);
 
     expect(within(panel()).queryByText('Govern')).toBeNull();
     expect(screen.queryByRole('link', { name: 'Users' })).toBeNull();

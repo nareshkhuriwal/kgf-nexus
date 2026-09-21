@@ -16,6 +16,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { WithPermissions } from '../../test/permissions';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -28,7 +29,7 @@ function wrap(ui: ReactNode) {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>{ui}</MemoryRouter>
+      <WithPermissions><MemoryRouter>{ui}</MemoryRouter></WithPermissions>
     </QueryClientProvider>,
   );
 }

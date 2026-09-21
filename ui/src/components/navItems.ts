@@ -1,6 +1,6 @@
-import { permissionForPath } from './Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
+import { permissionForPath } from './Permissions';
 
 /**
  * The console's destinations, declared ONCE.

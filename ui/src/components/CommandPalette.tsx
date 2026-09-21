@@ -127,6 +127,9 @@ type SearchState =
   | { status: 'loading' }
   | { status: 'ok'; results: SearchResults };
 
+/** Frozen and shared: see the note where this is read. */
+const NO_PERMISSIONS: readonly string[] = Object.freeze([]);
+
 export function CommandPalette({
   namespace,
   onNavigate,
@@ -139,7 +142,14 @@ export function CommandPalette({
   // Uncontrolled by default: the shell should not have to own state for a thing
   // that opens on a global key. A controlled `open` is accepted so a header
   // button can drive the same instance.
-  const permissions = useContext(PermissionContext) ?? [];
+  // NO_PERMISSIONS is a module-level constant, not a `?? []` fallback written
+  // inline. An inline literal allocates a NEW array on every render, and
+  // `permissions` is a dependency of the search effect below -- so with no
+  // provider above this component, every render produced a new identity, the
+  // effect reran, it called setSearch, and that rendered again: a synchronous
+  // loop that pins a core and never yields. It cannot be interrupted by a test
+  // timeout, because the event loop never gets a turn.
+  const permissions = useContext(PermissionContext) ?? NO_PERMISSIONS;
   const allowed = (permission: string) => permissions.includes(permission);
   const [openState, setOpenState] = useState(false);
   const open = openProp ?? openState;

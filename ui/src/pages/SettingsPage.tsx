@@ -105,7 +105,14 @@ export function SettingsPage({
         <div className="panel-body">
           {account.isLoading && <p>Loading account details…</p>}
           {account.error && <ErrorBox error={account.error} what="account details" onRetry={account.refetch} />}
-          {account.data ? <dl className="credential-facts">
+          {/* `account.data?.tenant`, not `account.data`: the response is
+              {tenant: {...}}, and a 200 whose body is shaped differently -- an
+              older gateway, a proxy returning something else -- made every field
+              below throw on `.name` and took the WHOLE settings page down with
+              it, including the API-key control that is the one thing an
+              operator comes here to fix. Rendering nothing is the right failure
+              for a details panel; crashing the page is not. */}
+          {account.data?.tenant ? <dl className="credential-facts">
             <div><dt>Organization</dt><dd>{account.data.tenant.name}</dd></div>
             <div><dt>Tenant ID</dt><dd><code>{account.data.tenant.id}</code></dd></div>
             <div><dt>Namespace</dt><dd>{account.data.tenant.namespace}</dd></div>
