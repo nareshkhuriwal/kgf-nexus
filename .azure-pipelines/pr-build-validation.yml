@@ -67,10 +67,6 @@ parameters:
     type: boolean
     default: false
 
-  # Every image with a Dockerfile, shared with the release pipeline so the PR
-  # gate and the release can never build different sets.
-  - template: templates/images.yml
-
 variables:
   - name: dockerImageTag
     value: 'pr-$(Build.BuildId)'
@@ -365,50 +361,28 @@ stages:
   dependsOn: UnitTest
   condition: succeeded('UnitTest')  # Only run if the unit gate passed.
   jobs:
-  # One job per image, so a Dockerfile that stops building names the image in
-  # the failed job rather than in a log line. Nothing is pushed: no registry
-  # service connection is referenced anywhere in this pipeline, which is also
-  # why a PR from a fork cannot acquire registry credentials here.
-  - ${{ each image in parameters.images }}:
-    - job: build_${{ replace(image.name, '-', '_') }}
-      displayName: 'Build nexus/${{ image.name }}'
+  # The image set and the loop live in templates/images.yml, so the gate and the
+  # release cannot build different sets. push: false means the registry steps
+  # are never emitted and no service connection is referenced anywhere in this
+  # pipeline -- which is also why a PR from a fork cannot acquire credentials.
+  - template: templates/images.yml
+    parameters:
+      acrLoginServer: 'localhost'
+      imageTag: $(dockerImageTag)
+      push: false
       timeoutInMinutes: 25
-      workspace:
-        clean: all
-      steps:
-      - checkout: self
-        persistCredentials: false
-
-      - task: GoTool@0
-        displayName: 'Install Go'
-        inputs:
-          version: $(GO_VERSION)
-
-      # The release pipeline's build template with push turned off, so the PR
-      # gate exercises the same build path a release will take.
-      - template: templates/service-build.yml
-        parameters:
-          name: ${{ image.name }}
-          imageName: nexus/${{ image.name }}
-          dockerfile: ${{ image.dockerfile }}
-          servicePath: ${{ image.servicePath }}
-          acrLoginServer: 'localhost'
-          acrServiceConnection: ''
-          imageTag: $(dockerImageTag)
-          push: false
-
-      - script: |
-          echo "=== Docker Build Validation Complete ==="
-          echo "✅ nexus/${{ image.name }}:$(dockerImageTag) built"
-          echo "Note: this is PR validation only - the image is not pushed"
-        displayName: 'Build Validation Summary'
-
-      # Remove only this project's tags. The agent may be shared.
-      - script: |
-          docker rmi "localhost/nexus/${{ image.name }}:$(dockerImageTag)" || true
-          echo "✅ Local image cleaned up"
-        displayName: 'Cleanup Local Image'
-        condition: always()
+      # The agent is shared and nothing pushed these anywhere, so the tag this
+      # job created is removed rather than left to accumulate across runs.
+      # Keyed on the build id, so a concurrent run's images are untouched.
+      postBuildSteps:
+        - script: |
+            docker image prune -f --filter "label=stage=build" >/dev/null 2>&1 || true
+            docker images --format '{{.Repository}}:{{.Tag}}' \
+              | grep "^localhost/nexus/.*:$(dockerImageTag)$" \
+              | xargs -r docker rmi || true
+            echo "✅ image built and the local tag cleaned up; PR validation does not push"
+          displayName: 'Summary and Local Image Cleanup'
+          condition: always()
 
 - ${{ if parameters.runEndToEnd }}:
   - stage: EndToEnd
