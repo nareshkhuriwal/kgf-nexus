@@ -76,6 +76,36 @@ parameters:
     type: string
     default: nexus
 
+  # ── Portainer-managed Docker host ─────────────────────────────────────
+  # The deploy target that exists TODAY. The AKS stages further down need a
+  # Helm chart that does not exist yet; this one needs only a VM running Docker
+  # with Portainer on it, which is what is actually deployed to.
+  #
+  # Turning it on needs, in this project:
+  #   - an SSH service connection to the host (the name below)
+  #   - an Azure Resource Manager connection that can mint an ACR token
+  #   - <stackDir>/.env on the host, holding NEXUS_WORKER_API_KEY and the four
+  #     RESULT_STORE_* values; the deploy refuses to start without it
+  # See deploy/portainer/README.md.
+  - name: deployToDockerHost
+    type: boolean
+    default: false
+  - name: dockerHostSshConnection
+    type: string
+    default: kgf-nexus-docker-host
+  - name: dockerHostAzureSubscription
+    type: string
+    default: kgf-nexus-arm
+  - name: dockerHostStackDir
+    type: string
+    default: /opt/kgf-nexus
+  - name: dockerHostStackName
+    type: string
+    default: nexus
+  - name: dockerHostEnvironment
+    type: string
+    default: kgf-nexus-docker-host
+
   # ── Dev environment ───────────────────────────────────────────────────
   - name: deployToDev
     type: boolean
@@ -189,6 +219,44 @@ stages:
           push: true
           timeoutInMinutes: 40
 
+
+  # ── Deploy to the Portainer-managed Docker host ─────────────────────────
+  #
+  # Runs after `build`, so it deploys the digest map that stage validated. It is
+  # a `deployment` job rather than a plain one so the run appears against an
+  # Azure DevOps environment, which is where an approval check is attached --
+  # the same gate the AKS stages use.
+  - ${{ if parameters.deployToDockerHost }}:
+    - stage: deploy_to_docker_host
+      displayName: 'Deploy to the Docker host (Portainer)'
+      dependsOn: build
+      condition: succeeded()
+      variables:
+        - name: imageDigests
+          value: $[ stageDependencies.build.collect_digests.outputs['collect.imageDigests'] ]
+      jobs:
+        - deployment: DeployToDockerHost
+          displayName: 'Pull and start the stack'
+          timeoutInMinutes: 45
+          environment: ${{ parameters.dockerHostEnvironment }}
+          workspace:
+            clean: all
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - checkout: self
+                    persistCredentials: false
+                    fetchDepth: 1
+
+                  - template: templates/deploy-portainer-host.yml
+                    parameters:
+                      environment: 'docker-host'
+                      sshServiceConnection: ${{ parameters.dockerHostSshConnection }}
+                      azureSubscription: ${{ parameters.dockerHostAzureSubscription }}
+                      acrLoginServer: ${{ parameters.acrLoginServer }}
+                      stackDir: ${{ parameters.dockerHostStackDir }}
+                      stackName: ${{ parameters.dockerHostStackName }}
 
   # ── Deploy to Dev ───────────────────────────────────────────────────────
   - ${{ if parameters.deployToDev }}:
