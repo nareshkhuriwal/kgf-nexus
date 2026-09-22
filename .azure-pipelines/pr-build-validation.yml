@@ -21,7 +21,24 @@
 # edit to its parameter default, or a checkbox at queue time. They are written
 # out in full so that turning one on is a decision, not an authoring job.
 
-trigger: none  # Disable CI triggers; this pipeline runs on PRs only.
+# Runs on pull requests AND on main.
+#
+# The main-branch run is what the release pipeline waits for: it declares this
+# pipeline as a `resources: pipelines:` source, so the release only starts once
+# these checks have passed on the merged commit. With `trigger: none` this
+# pipeline never ran on main at all, so that dependency could never be
+# satisfied and the release would simply never fire.
+#
+# The same paths are excluded from both: a docs-only commit should not occupy
+# an agent building ten images.
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - "docs/**"
+      - "**/*.md"
 
 pr:
   branches:

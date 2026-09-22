@@ -33,12 +33,33 @@
 # publishes a complete digest map. Those images are what any deploy -- Helm,
 # compose on a VM, or a human running `docker run` -- will pull.
 
-trigger:
-  branches:
-    include:
-      - main
-
+# NOT a branch trigger.
+#
+# A `trigger: branches: [main]` here would start this pipeline on the merge
+# commit at the same moment the validation pipeline started on it -- the two
+# would race, and the release would build and push images for a commit whose
+# tests had not finished, sometimes publishing a digest for a commit that was
+# about to go red. Which of the two won would depend on agent availability.
+#
+# Declaring the gate as a pipeline RESOURCE inverts that: this pipeline does not
+# start until "kgf-nexus-pr-validation" has completed successfully on main, so
+# a push to the registry always follows a green gate on the same commit.
+#
+# The `trigger:` inside the resource is what makes it automatic; without it the
+# resource would only be a version to download artifacts from. `stages` is left
+# unset so completion of the WHOLE run is what starts this one, rather than one
+# stage of it.
+trigger: none
 pr: none
+
+resources:
+  pipelines:
+    - pipeline: validation          # the name this run refers to it by
+      source: kgf-nexus-pr-validation   # the pipeline's name in Azure DevOps
+      trigger:
+        branches:
+          include:
+            - main
 
 parameters:
   # ── Registry ──────────────────────────────────────────────────────────
