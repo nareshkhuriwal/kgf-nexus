@@ -88,9 +88,12 @@ variables:
   # marks them DEV ONLY.
   - name: PG_IMAGE
     value: 'postgres:16-alpine'
-  - name: PG_PORT
-    value: '55434'   # not 5432, 55432 or 55433: those three are taken by a
-                     # local PostgreSQL, CONTRACT.md's dev database and compose.
+  # No fixed host port. `docker run -P` lets the kernel allocate an unused one
+  # and the job reads it back, because a hardcoded port is a hard collision the
+  # moment two runs share an agent pool: the second `docker run -p 55434:5432`
+  # fails to bind and the stage dies before a single test runs. The port is
+  # published (not just container-internal) because `make migrate-up` shells out
+  # to psql on the AGENT, not inside the container.
   # Deliberately OUTSIDE $(Pipeline.Workspace): Go marks every file in the module
   # cache read-only, and `workspace: clean: all` cannot delete those, which fails
   # the job before any step runs. $(Agent.ToolsDirectory) is not cleaned between
@@ -255,7 +258,11 @@ stages:
         # NEXUS_TEST_DATABASE_URL -- and every one of these suites SKIPS rather
         # than fails when its variable is unset. Setting only one leaves four
         # packages quietly not running, which looks exactly like passing.
-        DSN: 'postgres://nexus:nexus-dev-password@localhost:$(PG_PORT)/nexus?sslmode=disable'
+        # Deliberately NOT set here: the host port is not known until the
+        # container is running, and a job-level variable is fixed at compile
+        # time. The 'Start Throwaway PostgreSQL' step sets DSN with
+        # ##vso[task.setvariable], so every later step reads $(DSN) as usual.
+        PGDATABASE: 'nexus'
       steps:
       - checkout: self
         persistCredentials: false
@@ -269,12 +276,31 @@ stages:
           set -euo pipefail
           echo "=== Start a throwaway PostgreSQL ==="
           docker rm -f nexus-ci-pg-$(Build.BuildId) >/dev/null 2>&1 || true
+          # -P, not -p <fixed>:5432: the kernel picks a free ephemeral port, so
+          # two concurrent runs on the same agent pool cannot fight over one.
           docker run -d --name nexus-ci-pg-$(Build.BuildId) \
             -e POSTGRES_USER=nexus \
             -e POSTGRES_PASSWORD=nexus-dev-password \
             -e POSTGRES_DB=nexus \
-            -p $(PG_PORT):5432 \
+            -P \
             $(PG_IMAGE)
+
+          # Read back whatever the kernel assigned. `docker port` prints e.g.
+          # "0.0.0.0:49154" and may print one line per address family, so take
+          # the first and keep only what follows the last colon.
+          PG_PORT=$(docker port nexus-ci-pg-$(Build.BuildId) 5432/tcp | head -1 | sed 's/.*://')
+          if [ -z "${PG_PORT:-}" ]; then
+            echo "could not determine the published port for 5432/tcp" >&2
+            docker port nexus-ci-pg-$(Build.BuildId) >&2
+            exit 1
+          fi
+          echo "PostgreSQL published on host port $PG_PORT"
+
+          # Every later step in this job reads $(DSN); this is where it is born.
+          DSN="postgres://nexus:nexus-dev-password@localhost:$PG_PORT/nexus?sslmode=disable"
+          echo "##vso[task.setvariable variable=PG_PORT]$PG_PORT"
+          echo "##vso[task.setvariable variable=DSN]$DSN"
+
           # -d nexus matters: pg_isready with no database succeeds while the
           # initdb bootstrap database is still being replaced, so a migration
           # can start against a database that is about to be dropped.
@@ -418,6 +444,27 @@ stages:
       timeoutInMinutes: 60
       workspace:
         clean: all
+      variables:
+        # ── Why this job is namespaced per run ────────────────────────────
+        # deploy/docker-compose.yml pins `name: nexus`, so every run of this
+        # stage would otherwise drive THE SAME stack: two concurrent builds
+        # would share one set of containers, and whichever finished first would
+        # run `make down -v` underneath the other -- destroying its database
+        # mid-test. The failure looks like a flaky chaos suite, not a
+        # collision, which is the worst kind of CI bug to chase.
+        #
+        # COMPOSE_PROJECT_NAME namespaces containers, networks AND volumes, so
+        # each run gets its own stack and its own `down -v`. The chaos suite
+        # reads this same variable to build its container-name prefix.
+        COMPOSE_PROJECT_NAME: 'nexus-ci-$(Build.BuildId)'
+        # Namespacing containers is not enough: published host ports are a
+        # single machine-wide resource, so the compose defaults (3000, 8090,
+        # 9091, 55433, 9010, 9011) collide even between namespaced stacks.
+        # Every one of these is an override compose already honours, and the
+        # 'Allocate Host Ports' step below picks a free block and sets them.
+        # Not computed here: pipeline expressions have no arithmetic, and a
+        # port derived from the build id can still be occupied by something
+        # else on a long-lived self-hosted agent. Only a bind test proves free.
       steps:
       - checkout: self
         persistCredentials: false
@@ -429,9 +476,57 @@ stages:
 
       - script: |
           set -euo pipefail
+          echo "=== Allocate a Free Block of Host Ports ==="
+          # Ask the kernel for six ports nothing is listening on, rather than
+          # deriving them from the build id: this agent is self-hosted and
+          # long-lived, so a developer's own stack, a leaked container from an
+          # earlier run, or the other agent on this machine may already hold
+          # any given port. Python's bind-to-0 asks the kernel for one it knows
+          # is free, and SO_REUSEADDR lets compose take it immediately after.
+          read -r UI API GRPC PG MINIO MINIO_CONSOLE <<<"$(python3 - <<'PY'
+          import socket
+          ports = []
+          socks = []
+          for _ in range(6):
+              s = socket.socket()
+              s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+              s.bind(("127.0.0.1", 0))
+              ports.append(s.getsockname()[1])
+              socks.append(s)   # held open until every port is chosen, so the
+                                # kernel cannot hand out the same one twice
+          for s in socks:
+              s.close()
+          print(" ".join(map(str, ports)))
+          PY
+          )"
+          for name in UI API GRPC PG MINIO MINIO_CONSOLE; do
+            [ -n "${!name:-}" ] || { echo "failed to allocate a port for $name" >&2; exit 1; }
+          done
+          echo "UI=$UI API=$API GRPC=$GRPC PG=$PG MINIO=$MINIO CONSOLE=$MINIO_CONSOLE"
+
+          # The names compose reads (see deploy/docker-compose.yml `ports:`).
+          echo "##vso[task.setvariable variable=NEXUS_UI_PORT]$UI"
+          echo "##vso[task.setvariable variable=NEXUS_API_PORT]$API"
+          echo "##vso[task.setvariable variable=NEXUS_GRPC_PORT]$GRPC"
+          echo "##vso[task.setvariable variable=NEXUS_POSTGRES_PORT]$PG"
+          echo "##vso[task.setvariable variable=NEXUS_MINIO_PORT]$MINIO"
+          echo "##vso[task.setvariable variable=NEXUS_MINIO_CONSOLE_PORT]$MINIO_CONSOLE"
+        displayName: 'Allocate Host Ports'
+
+      - script: |
+          set -euo pipefail
           echo "=== Bring Up the Full Stack ==="
+          echo "compose project: $COMPOSE_PROJECT_NAME"
           make up
         displayName: 'Bring Up the Stack (make up)'
+        env:
+          # Exported so compose substitutes them into its `ports:` defaults.
+          NEXUS_UI_PORT: $(NEXUS_UI_PORT)
+          NEXUS_API_PORT: $(NEXUS_API_PORT)
+          NEXUS_GRPC_PORT: $(NEXUS_GRPC_PORT)
+          NEXUS_POSTGRES_PORT: $(NEXUS_POSTGRES_PORT)
+          NEXUS_MINIO_PORT: $(NEXUS_MINIO_PORT)
+          NEXUS_MINIO_CONSOLE_PORT: $(NEXUS_MINIO_CONSOLE_PORT)
 
       - script: |
           set -euo pipefail
@@ -477,7 +572,11 @@ stages:
           make chaos
         displayName: 'Run Examples and Chaos Suite (make chaos)'
         env:
-          NEXUS_ENDPOINT: http://localhost:8090
+          # The allocated port, NOT the compose default 8090: this job publishes
+          # the gateway on whatever 'Allocate Host Ports' obtained, so a
+          # hardcoded 8090 would point the suite at another run's stack, or at
+          # nothing at all.
+          NEXUS_ENDPOINT: http://localhost:$(NEXUS_API_PORT)
           NEXUS_API_KEY: $(NEXUS_API_KEY)
 
       # Logs are worth far more than the exit code when this fails: the whole
@@ -489,6 +588,12 @@ stages:
         condition: failed()
 
       - script: |
+          # COMPOSE_PROJECT_NAME is a job variable, so it is already exported
+          # here and `make down` destroys THIS run's stack, not another run's.
+          # Echoed because a teardown that silently targets the wrong project
+          # is the one failure mode that would be invisible in the log.
+          echo "tearing down compose project: ${COMPOSE_PROJECT_NAME:-<unset>}"
+          test -n "${COMPOSE_PROJECT_NAME:-}" || echo "WARNING: COMPOSE_PROJECT_NAME is unset; this would target the default 'nexus' stack" >&2
           make down || true
           echo "Stack torn down"
         displayName: 'Tear Down the Stack (make down)'

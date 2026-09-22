@@ -64,6 +64,12 @@ const (
 
 var composeFile = envOr("NEXUS_COMPOSE_FILE", "deploy/docker-compose.yml")
 
+// Compose derives every container name from the project name, which
+// docker-compose.yml pins to `nexus` and COMPOSE_PROJECT_NAME overrides. CI
+// sets that per run so two concurrent builds get their own stack, so the
+// container-name prefix cannot be assumed to be `nexus-`.
+var composeProject = envOr("COMPOSE_PROJECT_NAME", "nexus")
+
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
@@ -716,7 +722,7 @@ func TestSchedulerReplicasNeverDoubleDispatchUnderLoad(t *testing.T) {
 // isDefaultQueueReplica distinguishes `scheduler` containers from
 // `scheduler-gpu`, which is a separate service on its own queue.
 func isDefaultQueueReplica(container string) bool {
-	return strings.HasPrefix(container, "nexus-scheduler-") &&
+	return strings.HasPrefix(container, composeProject+"-scheduler-") &&
 		!strings.Contains(container, "-gpu-")
 }
 

@@ -246,6 +246,28 @@ stages:
           displayName: 'Pull and start the stack'
           timeoutInMinutes: 45
           environment: ${{ parameters.dockerHostEnvironment }}
+          # Pinned to the agent carrying `role=deploy` (a user capability set on
+          # the agent in the pool's web UI), rather than taking whichever agent
+          # is free like every other job here.
+          #
+          # Worth being clear about what this does and does not buy, because the
+          # steps below are SSH: the agent renders a compose file, mints an ACR
+          # token and sends both to the Portainer host, which pulls the images
+          # and runs the stack. NOTHING of Nexus runs on the agent. So this pins
+          # WHICH AGENT DRIVES THE DEPLOY -- useful because a release then does
+          # not sit behind a 10-image build on a busy agent -- and it does not
+          # change where Nexus lands.
+          #
+          # A demand is a hard constraint, not a preference: if no agent in the
+          # pool advertises role=deploy, this job QUEUES rather than falling
+          # back to another agent. That is the intended behaviour for a deploy
+          # (better to wait than to run somewhere unintended), but it does mean
+          # removing that capability, or losing that agent, blocks releases
+          # until another agent advertises it.
+          pool:
+            name: Default
+            demands:
+              - role -equals deploy
           workspace:
             clean: all
           strategy:
