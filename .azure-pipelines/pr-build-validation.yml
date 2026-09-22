@@ -91,6 +91,13 @@ variables:
   - name: PG_PORT
     value: '55434'   # not 5432, 55432 or 55433: those three are taken by a
                      # local PostgreSQL, CONTRACT.md's dev database and compose.
+  # Deliberately OUTSIDE $(Pipeline.Workspace): Go marks every file in the module
+  # cache read-only, and `workspace: clean: all` cannot delete those, which fails
+  # the job before any step runs. $(Agent.ToolsDirectory) is not cleaned between
+  # jobs, so the cache also survives to be reused.
+  - name: GOMODCACHE
+    value: '$(Agent.ToolsDirectory)/go-mod-cache'
+
   # Test reports are written OUTSIDE the source tree, so the generated-file
   # synchronisation check (git diff --exit-code) does not see them.
   - name: reportDir
@@ -126,18 +133,33 @@ stages:
         docker --version
       displayName: 'Check Toolchain Versions'
 
+    # NOT under $(Pipeline.Workspace). Go makes every file in its module cache
+    # READ-ONLY, and every job here declares `workspace: clean: all` -- so with
+    # the cache inside the workspace the agent cannot delete it, and the job
+    # fails in under a second at "Prepare build directory" with
+    #
+    #   Access to the path '.../.cache/go-mod/github.com/...' is denied
+    #
+    # before a single step runs. $(Agent.ToolsDirectory) survives the clean,
+    # which is the whole point of caching the modules at all.
     - task: Cache@2
       displayName: 'Cache Go modules'
       inputs:
         key: 'go | "$(Agent.OS)" | go.sum'
         restoreKeys: |
           go | "$(Agent.OS)"
-        path: $(Pipeline.Workspace)/.cache/go-mod
+        path: $(GOMODCACHE)
 
     - script: |
         set -euo pipefail
         echo "=== Installing Locked Dependencies ==="
-        go env -w GOMODCACHE=$(Pipeline.Workspace)/.cache/go-mod
+        # An environment variable for THIS process tree, not `go env -w`, which
+        # writes the agent's global Go config and would silently redirect the
+        # module cache for every other pipeline and every manual build on this
+        # machine long after this run finished.
+        export GOMODCACHE='$(GOMODCACHE)'
+        mkdir -p "$GOMODCACHE"
+        go env GOMODCACHE
         go mod download
         # verify checks the downloaded modules against go.sum: it is what turns
         # a tampered module cache into a failure rather than a silent build.

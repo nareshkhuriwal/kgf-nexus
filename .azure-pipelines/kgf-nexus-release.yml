@@ -168,6 +168,13 @@ parameters:
 
 variables:
   tag: 'v-$(Build.BuildId)'
+  # Explicit, and deliberately OUTSIDE $(Pipeline.Workspace). Go marks every
+  # file in its module cache read-only, and these jobs use `workspace: clean:
+  # all`, which cannot delete read-only files -- a cache under the workspace
+  # fails the job at "Prepare build directory" before any step runs. Naming it
+  # here also keeps every job on one cache rather than Go's per-user default,
+  # so ten parallel image builds share one download.
+  GOMODCACHE: '$(Agent.ToolsDirectory)/go-mod-cache'
   CI: 'true'
   # CI pins the toolchain rather than following the older minimum language
   # version in go.mod. Passed to `docker build` too, so the image and the agent
