@@ -81,6 +81,10 @@ func run() error {
 	// reconciler's instruments are what REPLACED the timer_backlog readiness
 	// check: see the health block for why that check was an availability hazard.
 	reg := metrics.NewRegistry()
+	// Certificate expiry and reload outcomes (docs/TLS.md §5.4). Safe to call
+	// before the credentials below are resolved: values are replayed into the
+	// registry whenever they appear.
+	transport.RegisterMetrics(reg)
 
 	rec := timers.New(db, timers.Config{
 		Interval:        cfg.TimerInterval,
