@@ -48,3 +48,7 @@ deploy/.env
 # `git status`. The root `cmd` file this targets is a scratch credentials dump,
 # not a directory.
 /cmd
+
+# Locally generated TLS material (`make dev-certs`, deploy/nexus-certs.sh). It
+# holds a CA private key: never commit it, and never copy it off the laptop.
+/.dev-certs/

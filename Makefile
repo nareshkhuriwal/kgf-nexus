@@ -21,7 +21,7 @@ MIGRATIONS    := services/migrations
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
-        license-report license-check
+        license-report license-check dev-certs up-tls certs-check
 
 help: ## Show this help
 	@echo "Nexus — make targets"
@@ -113,6 +113,22 @@ logs: ## Tail logs for all services
 
 ps: ## Show container status
 	$(COMPOSE) ps
+
+# ── TLS (docs/TLS.md §5) ──────────────────────────────────────────────────
+# Opt-in. `make up` stays plaintext; `make up-tls` layers the mTLS override on
+# top. The generated material, including a CA private key, lands in .dev-certs/
+# which is gitignored -- nothing here is ever committed.
+COMPOSE_TLS   ?= $(COMPOSE) -f deploy/docker-compose.tls.yml
+
+dev-certs: ## Generate a local CA + per-service TLS leaves into .dev-certs/ (gitignored)
+	NEXUS_CERT_DIR=.dev-certs deploy/nexus-certs.sh dev
+
+up-tls: ## Bring up the stack with mTLS between every gRPC hop (run dev-certs first)
+	@test -f .dev-certs/ca-bundle.pem || { echo "no certificates yet; run 'make dev-certs' first"; exit 1; }
+	$(COMPOSE_TLS) up --build -d
+
+certs-check: ## Show expiry of every cert in .dev-certs; nonzero if any is within 7 days
+	deploy/nexus-certs.sh check .dev-certs
 
 # ── UI ────────────────────────────────────────────────────────────────────
 ui-dev: ## Run the Vite dev server against a local gateway
