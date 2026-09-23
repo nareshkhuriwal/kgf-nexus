@@ -110,6 +110,10 @@ type API struct {
 	// identity is nil unless WithIdentity was called, in which case the identity
 	// and admin routes are simply not registered. See admin.go.
 	identity IdentityAdmin
+	// email is nil unless WithEmailFlows was called; then the verification and
+	// recovery routes exist and login consults verification state. See
+	// email_flows.go.
+	email *emailFlows
 }
 
 // New builds the REST API.
@@ -299,6 +303,15 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 	// THE ONE UNGUARDED ROUTE. Rate-limited and fully audited inside the handler.
 	mux.HandleFunc("POST /v1/auth/login", a.login)
 	mux.HandleFunc("POST /v1/auth/register", a.registerCustomer)
+	// Email verification and password recovery: unguarded for the same reason as
+	// login (the caller has no credential), rate limited per IP and per address
+	// inside the handlers. Registered only when the flows are wired.
+	if a.email != nil {
+		mux.HandleFunc("POST /v1/auth/email/verification", a.requestVerificationEmail)
+		mux.HandleFunc("POST /v1/auth/email/verify", a.verifyEmail)
+		mux.HandleFunc("POST /v1/auth/password/forgot", a.forgotPassword)
+		mux.HandleFunc("POST /v1/auth/password/reset", a.resetPasswordWithLink)
+	}
 	mux.Handle("GET /v1/account/tenant", a.guard(authn.ActionRead, a.currentTenant))
 	mux.Handle("GET /v1/platform/tenants", a.guard(authn.ActionRead, a.listTenants))
 	mux.Handle("POST /v1/platform/tenants", a.guard(authn.ActionRead, a.createTenant))

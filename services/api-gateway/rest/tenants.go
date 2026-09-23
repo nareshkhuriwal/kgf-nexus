@@ -113,6 +113,14 @@ func (a *API) onboardTenant(w http.ResponseWriter, r *http.Request, p authn.Prin
 		a.fail(w, r, "create customer administrator", err)
 		return
 	}
+	// The owner's verification link is minted in THIS transaction and delivered
+	// after commit, so a registration never exists without its link and a link
+	// never outlives a rolled-back registration.
+	verification, err := a.issueRegistrationVerification(r.Context(), tx, u, r)
+	if err != nil {
+		a.fail(w, r, "create customer verification", err)
+		return
+	}
 	if _, err = tx.Exec(r.Context(), `UPDATE tenants SET owner_user_id=$1 WHERE id=$2`, u.ID, t.ID); err != nil {
 		a.fail(w, r, "set customer owner", err)
 		return
@@ -135,7 +143,11 @@ func (a *API) onboardTenant(w http.ResponseWriter, r *http.Request, p authn.Prin
 		a.fail(w, r, "commit onboarding", err)
 		return
 	}
-	writeJSON(w, 201, map[string]any{"tenant": t, "administrator_id": u.ID})
+	out := map[string]any{"tenant": t, "administrator_id": u.ID}
+	if ev := a.dispatchRegistrationVerification(r.Context(), verification); ev != nil {
+		out["email_verification"] = ev
+	}
+	writeJSON(w, 201, out)
 }
 
 func (a *API) currentTenant(w http.ResponseWriter, r *http.Request, p authn.Principal) {

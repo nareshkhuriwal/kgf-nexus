@@ -137,6 +137,12 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// After the password check, never before: only someone who knows the
+	// password learns the account is unverified.
+	if a.blockUnverifiedLogin(w, r, user) {
+		return
+	}
+
 	token, session, err := a.identity.CreateSession(r.Context(), user.ID,
 		authn.SessionTTL, r.UserAgent(), clientIP(r))
 	if err != nil {
@@ -490,6 +496,9 @@ func userPayload(u store.UserRow) map[string]any {
 		// Derived rather than left to the client, so "is this person active" has one
 		// definition. A null disabled_at is easy to misread as "unknown".
 		"disabled": u.DisabledAt != nil,
+		// Whether the address is proven (migration 0017). Derived for the same
+		// reason as "disabled"; an admin needs to see why a person cannot sign in.
+		"email_verified": u.EmailVerifiedAt != nil,
 	}
 }
 
