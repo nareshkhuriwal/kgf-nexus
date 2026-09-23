@@ -11,7 +11,7 @@ import { PageHeader } from '../../components/PageHeader';
 import { Forbidden } from '../../components/Forbidden';
 import { ErrorBox } from '../../components/Status';
 
-type Scheduler = { min_replicas:number; max_replicas:number; target_cpu_percent:number; scale_down_seconds:number };
+type Scheduler = { min_replicas:number; max_replicas:number; target_cpu_percent:number; scale_down_seconds:number; fair_share_weight?:number };
 type Profile = { name:string; cloud:string; kubernetes_namespace:string; service_account:string; image:string; cpu_millis:number; memory_mib:number; gpu_count:number; ephemeral_storage_mib:number; node_selector:Record<string,string>; tolerations:{key:string;value:string;effect:string}[]; deadline_seconds:number; grace_seconds:number };
 type Pool = { name:string; queue:string; profile:string; min_workers:number; max_workers:number; tasks_per_worker:number; idle_seconds:number; max_scale_up_step:number; enabled:boolean };
 type Config = {revision:number;scheduler:Scheduler;profiles:Profile[];pools:Pool[]};
@@ -55,7 +55,11 @@ export function InfrastructurePage({namespace,canAdmin}:{namespace:string;canAdm
     <NumberField label="Maximum replicas" value={draft.scheduler.max_replicas} min={1} max={100} onChange={v=>setScheduler('max_replicas',v)}/>
     <NumberField label="Target CPU (%)" value={draft.scheduler.target_cpu_percent} min={10} max={90} onChange={v=>setScheduler('target_cpu_percent',v)}/>
     <NumberField label="Scale-down stabilization (seconds)" value={draft.scheduler.scale_down_seconds} min={60} max={3600} onChange={v=>setScheduler('scale_down_seconds',v)}/>
-   </div></div></section>
+   </div>
+   {/* ADR-0017. The weight is shown to every admin but only a platform operator can change it: raising it takes dispatch share from every other namespace on the queue, so the gateway refuses the change (403) for a namespace admin. Saying so here avoids a save that looks broken. */}
+   <div className="infra-fields"><NumberField label="Fair-share weight" value={draft.scheduler.fair_share_weight ?? 1} min={1} max={100} onChange={v=>setScheduler('fair_share_weight',v)}/></div>
+   <p className="sub">Dispatch across namespaces sharing a queue is weighted fair share: a namespace with weight 3 is served three times as often as one with weight 1 when both have a backlog. Priority and aging order work only within this namespace. Changing the weight requires a platform operator.</p>
+   </div></section>
    <section hidden={tab!=='tasks'} className="panel"><div className="panel-head">Task pod profiles <span className="spacer"/><button onClick={()=>setDraft({...draft,profiles:[...draft.profiles,{...profileDefaults,name:`profile-${draft.profiles.length+1}`}]})}>Add pod profile</button></div><div className="panel-body col">
     {!draft.profiles.length&&<p className="sub">Create an approved runtime profile for each CPU/GPU and cloud environment. The generated Job templates are deployment artifacts; they do not yet change the worker executor.</p>}
     {draft.profiles.map((p,i)=><fieldset className="infra-card" key={i}><legend>Profile {i+1}</legend><div className="infra-fields">

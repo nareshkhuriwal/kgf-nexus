@@ -46,3 +46,15 @@ it('keeps linked pools synchronized when a profile is renamed and protects refer
  fireEvent.click(screen.getByRole('button',{name:'Worker pools'}));
  expect(screen.getByRole('combobox',{name:'Pod profile'})).toHaveValue('aks-dev-small');
 });
+it('shows the fair-share weight, defaulting to 1 for a policy saved before the field existed',async()=>{
+ setup();await screen.findByText('test-host');fireEvent.click(screen.getByRole('button',{name:'Scheduler'}));
+ expect(screen.getByRole('spinbutton',{name:'Fair-share weight'})).toHaveValue(1);
+ expect(screen.getByText(/Changing the weight requires a platform operator/)).toBeTruthy();
+});
+it('shows a stored fair-share weight',async()=>{
+ vi.mocked(authRequest).mockImplementation(async path=>path.endsWith('/config')?{revision:2,scheduler:{min_replicas:1,max_replicas:4,target_cpu_percent:65,scale_down_seconds:300,fair_share_weight:3},profiles:[],pools:[]}:{revision:2,decisions:[],task_job_templates:{}} as never);
+ vi.mocked(api.listWorkers).mockResolvedValue([]);
+ render(<MemoryRouter><PermissionContext.Provider value={['infrastructure.view','infrastructure.configure']}><QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false}}})}><InfrastructurePage namespace="default" canAdmin/></QueryClientProvider></PermissionContext.Provider></MemoryRouter>);
+ fireEvent.click(await screen.findByRole('button',{name:'Scheduler'}));
+ expect(await screen.findByRole('spinbutton',{name:'Fair-share weight'})).toHaveValue(3);
+});

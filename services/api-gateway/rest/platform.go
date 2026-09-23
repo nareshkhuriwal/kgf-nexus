@@ -37,10 +37,30 @@ func (a *API) platformPut(w http.ResponseWriter, r *http.Request, p authn.Princi
 		}
 	}
 	if err == nil {
+		// A client that predates the field (the console before ADR-0017, or a
+		// scripted PUT) omits it and decodes to 0. That means "leave the
+		// default", not "take this namespace out of service", so it is
+		// normalised rather than rejected.
+		if c.Scheduler.FairShareWeight == 0 {
+			c.Scheduler.FairShareWeight = platform.DefaultFairShareWeight
+		}
 		err = c.Validate()
 	}
 	if err != nil {
 		writeError(w, 400, "invalid_policy", err.Error())
+		return
+	}
+	// The weight is the one field in this document that is NOT only the
+	// namespace's own business: raising it takes dispatch share from every
+	// other namespace on the queue. A namespace admin may save the rest of the
+	// policy freely but only a platform operator may change the weight
+	// (ADR-0017).
+	cur, err := store.GatewayPlatformGet(r.Context(), a.db, p.Namespace)
+	if err != nil {
+		a.fail(w, r, "load platform config", err)
+		return
+	}
+	if cur.Scheduler.FairShareWeight != c.Scheduler.FairShareWeight && !a.platformOperator(w, r, p) {
 		return
 	}
 	c, err = store.GatewayPlatformPut(r.Context(), a.db, p.Namespace, c, store.AuditEntry{ActorKind: string(p.Kind), ActorLabel: p.Name, ClientIP: clientIP(r)})

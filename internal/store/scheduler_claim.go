@@ -41,6 +41,16 @@ type ClaimConfig struct {
 	// giving up, so one unplaceable task does not stall the whole queue while
 	// aging accrues.
 	LookAhead int
+	// FairShare orders the push-path candidate scan by each namespace's
+	// in-flight attempts divided by its weight BEFORE priority, so one
+	// namespace flooding a shared queue cannot monopolise dispatch (ADR-0017).
+	// Priority and aging still order work WITHIN a namespace.
+	FairShare bool
+	// FairShareMaxNamespaces bounds how many namespaces one cycle may give up
+	// on (each after LookAhead blocked candidates) before returning. It is the
+	// cost ceiling of a cycle in which every namespace is blocked:
+	// LookAhead x FairShareMaxNamespaces candidate reads, never more.
+	FairShareMaxNamespaces int
 }
 
 // DefaultClaimConfig returns the ADR-0010 recommended lease settings.
@@ -55,6 +65,11 @@ func DefaultClaimConfig(queue string) ClaimConfig {
 		AgingRate:           1.0,
 		AgingBlockThreshold: 60,
 		LookAhead:           8,
+		// On by default: with a single namespace per queue it orders exactly
+		// as before, and the case it exists for -- a flood from one tenant --
+		// is the one nobody enables a flag for in advance.
+		FairShare:              true,
+		FairShareMaxNamespaces: 4,
 	}
 }
 
@@ -150,8 +165,31 @@ func (s *SchedulerStore) claimInTx(ctx context.Context, tx pgx.Tx, now time.Time
 	var skipped []uuid.UUID
 	var firstBlocked *ClaimReport
 
-	for i := 0; i < lookAhead; i++ {
-		cand, err := s.selectCandidate(ctx, tx, now, skipped)
+	// Fair share turns the flat look-ahead into a per-namespace one. Without
+	// the exclusion, a namespace whose head is blocked -- its workers full --
+	// sits at the lowest share (nothing of it is in flight) and would absorb
+	// every look-ahead slot of every cycle, starving the namespaces behind it:
+	// the very flood fair share exists to contain. So a namespace that has
+	// used its LookAhead is set aside for the rest of THIS cycle only.
+	budget := lookAhead
+	maxNS := 1
+	if s.cfg.FairShare {
+		maxNS = s.cfg.FairShareMaxNamespaces
+		if maxNS < 1 {
+			maxNS = 1
+		}
+		budget = lookAhead * maxNS
+	}
+	var excluded []uuid.UUID
+	blockedIn := map[uuid.UUID]int{}
+	// The salt rotates namespaces that tie on share (typically several at
+	// zero in flight) from cycle to cycle, so a tie is never broken the same
+	// way forever. Per-namespace, not per-row: a per-row random() would
+	// scramble priority order inside a namespace.
+	salt := fairShareSalt(now)
+
+	for i := 0; i < budget; i++ {
+		cand, err := s.selectCandidate(ctx, tx, now, skipped, excluded, salt)
 		if errors.Is(err, ErrNoCandidate) {
 			break
 		}
@@ -174,6 +212,13 @@ func (s *SchedulerStore) claimInTx(ctx context.Context, tx pgx.Tx, now time.Time
 			firstBlocked = &r
 		}
 		skipped = append(skipped, cand.ID)
+		blockedIn[cand.TenantID]++
+		if blockedIn[cand.TenantID] >= lookAhead {
+			excluded = append(excluded, cand.TenantID)
+			if len(excluded) >= maxNS {
+				break
+			}
+		}
 	}
 
 	if firstBlocked != nil {
@@ -195,36 +240,68 @@ func (s *SchedulerStore) claimInTx(ctx context.Context, tx pgx.Tx, now time.Time
 // It also filters on the RUN's state, because a PAUSING/PAUSED/CANCELLING run
 // must receive no NEW dispatch (§5.2). The scheduler READS workflow_runs; it
 // never writes it (ADR-0011).
+//
+// With FairShare on, the namespace's share -- in-flight attempts on this queue
+// divided by its configured weight -- is the FIRST sort key, ahead of priority
+// (ADR-0017). Two consequences are deliberate. Priority is compared only
+// within a namespace, so a tenant cannot jump the whole queue by declaring
+// priority 1000 on everything. And the share is computed inside this same READ
+// COMMITTED transaction from committed rows, so it is at worst one concurrent
+// dispatch stale; nothing about the SKIP LOCKED + CAS argument changes, because
+// the share only decides which unlocked PENDING row is tried first.
 func (s *SchedulerStore) selectCandidate(
-	ctx context.Context, tx pgx.Tx, now time.Time, skip []uuid.UUID,
+	ctx context.Context, tx pgx.Tx, now time.Time, skip, excludeTenants []uuid.UUID, salt string,
 ) (*Candidate, error) {
+	// The in-flight count is a CTE, not a join-and-aggregate in the main query:
+	// FOR UPDATE is not allowed alongside GROUP BY, and it must lock only the
+	// attempt row. idx_attempts_inflight_by_tenant (migration 0022) makes the
+	// CTE an index-only walk over the active rows of this queue.
 	const q = `
+WITH inflight AS (
+  SELECT tenant_id, count(*) AS n
+    FROM task_attempts
+   WHERE queue = $1 AND state IN ('DISPATCHED','RUNNING')
+   GROUP BY tenant_id
+)
 SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.queue, a.priority,
        a.resource_request, a.scheduled_at,
        a.priority + (EXTRACT(EPOCH FROM ($2::timestamptz - a.scheduled_at)) * $3) AS effective_priority,
-       n.spec_json
+       n.spec_json, a.tenant_id,
+       CASE WHEN $6::bool
+            THEN COALESCE(i.n, 0)::float8 / COALESCE(w.weight, 1)
+            ELSE 0 END AS share
   FROM task_attempts a
   JOIN task_nodes    n ON n.run_id = a.run_id AND n.node_id = a.node_id
   JOIN workflow_runs r ON r.id = a.run_id
+  LEFT JOIN inflight i ON i.tenant_id = a.tenant_id
+  LEFT JOIN scheduler_namespace_weights w ON w.tenant_id = a.tenant_id
  WHERE a.state = 'PENDING'
    AND a.queue = $1
    AND a.scheduled_at <= $2
    AND r.state IN ('PENDING','RUNNING')
    AND NOT (a.id = ANY($4::uuid[]))
- ORDER BY effective_priority DESC, a.scheduled_at ASC
+   AND NOT (a.tenant_id = ANY($5::uuid[]))
+ ORDER BY share ASC,
+          CASE WHEN $6::bool THEN hashtext(a.tenant_id::text || $7) ELSE 0 END,
+          effective_priority DESC, a.scheduled_at ASC
  LIMIT 1
  FOR UPDATE OF a SKIP LOCKED`
 
 	if skip == nil {
 		skip = []uuid.UUID{}
 	}
-	row := tx.QueryRow(ctx, q, s.cfg.Queue, now, s.cfg.AgingRate, skip)
+	if excludeTenants == nil {
+		excludeTenants = []uuid.UUID{}
+	}
+	row := tx.QueryRow(ctx, q, s.cfg.Queue, now, s.cfg.AgingRate, skip,
+		excludeTenants, s.cfg.FairShare, salt)
 
 	var c Candidate
 	var reqJSON, specJSON []byte
 	if err := row.Scan(
 		&c.ID, &c.RunID, &c.NodeID, &c.AttemptNumber, &c.Queue, &c.Priority,
 		&reqJSON, &c.ScheduledAt, &c.EffectivePriority, &specJSON,
+		&c.TenantID, &c.FairShare,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNoCandidate

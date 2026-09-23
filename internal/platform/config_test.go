@@ -73,3 +73,22 @@ func TestPodIsolationAndRetryOwnership(t *testing.T) {
 		t.Fatal("default API credential leaked")
 	}
 }
+
+// TestFairShareWeightBounds pins ADR-0017's range: 0 would take a namespace
+// out of dispatch entirely and an unbounded weight would make one namespace
+// effectively exclusive, so both ends are rejected; the default is neutral.
+func TestFairShareWeightBounds(t *testing.T) {
+	if Default().Scheduler.FairShareWeight != DefaultFairShareWeight {
+		t.Fatalf("default weight = %d, want %d", Default().Scheduler.FairShareWeight, DefaultFairShareWeight)
+	}
+	for _, tc := range []struct {
+		w  int
+		ok bool
+	}{{0, false}, {1, true}, {100, true}, {101, false}, {-3, false}} {
+		c := valid()
+		c.Scheduler.FairShareWeight = tc.w
+		if err := c.Validate(); (err == nil) != tc.ok {
+			t.Errorf("weight %d: err=%v, want ok=%v", tc.w, err, tc.ok)
+		}
+	}
+}
