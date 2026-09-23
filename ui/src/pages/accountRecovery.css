@@ -1,0 +1,34 @@
+/* Copyright 2026 Khuriwal Group
+   SPDX-License-Identifier: Apache-2.0 */
+
+/* Account pages reached from an email: one column, the sign-in form's scale.
+   Kept in its own file so the shared stylesheets are not edited for three
+   screens; every value is an existing token. */
+
+.login-page.auth-single { grid-template-columns: 1fr; }
+
+/* Success uses the success tone, as the error notice uses danger. The glyph
+   carries the colour; the body text stays at muted contrast like every notice. */
+.notice.auth-ok { border-color: var(--tone-success-bd); background: var(--tone-success-bg); }
+.notice.auth-ok .notice-glyph { color: var(--tone-success-fg); }
+
+.auth-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+.auth-hint { margin: 0; font-size: var(--text-sm); color: var(--fg-muted); line-height: var(--leading-normal); }
+
+/* Result headings take focus programmatically (tabIndex=-1). The ring is shown
+   only for keyboard focus, so a mouse user does not see a stray outline. */
+.auth-result:focus { outline: none; }
+.auth-result:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.auth-result { margin: 0; font-size: var(--text-lg); font-weight: var(--weight-bold); }
+
+/* A button-styled router link for the one next step after success. */
+.login-submit.as-link { display: inline-flex; text-decoration: none; }
