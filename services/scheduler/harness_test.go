@@ -58,14 +58,36 @@ type fixture struct {
 
 func newFixture(t *testing.T, pool *pgxpool.Pool) *fixture {
 	t.Helper()
+	return newFixtureOnQueue(t, pool, "")
+}
+
+// newFixtureOnQueue is newFixture with a caller-chosen queue, so several
+// namespaces -- each its own fixture, tenant, run and workers -- can share ONE
+// queue. That sharing is the whole subject of the fair-share tests: namespaces
+// on different queues never compete for a claim. An empty queue gets a unique
+// one, which is what every single-namespace test wants.
+func newFixtureOnQueue(t *testing.T, pool *pgxpool.Pool, queue string) *fixture {
+	t.Helper()
 	ctx := context.Background()
 	id := uuid.NewString()[:8]
+	if queue == "" {
+		queue = "q-" + id
+	}
 	f := &fixture{
 		t: t, pool: pool,
 		ns:    "test-" + id,
-		queue: "q-" + id,
+		queue: queue,
 	}
 
+	// Migration 0015 makes tenant ownership mandatory: a namespace with no
+	// tenants row is rejected by the ownership trigger. The fixture registers
+	// its own throwaway tenant so the suite runs against a freshly migrated
+	// database rather than only against one seeded before 0015 landed.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO tenants (namespace, name) VALUES ($1,$1) ON CONFLICT (namespace) DO NOTHING`,
+		f.ns); err != nil {
+		t.Fatalf("insert tenant: %v", err)
+	}
 	if err := pool.QueryRow(ctx, `
 INSERT INTO workflow_specs (namespace, name, version, spec_hash, spec_json, created_by)
 VALUES ($1,'wf',1,$2,'{}','test') RETURNING id`,
@@ -89,6 +111,8 @@ VALUES ($1,$2,'RUNNING','test') RETURNING id`,
 		_, _ = pool.Exec(cctx, `DELETE FROM workflow_runs WHERE id = $1`, f.runID)
 		_, _ = pool.Exec(cctx, `DELETE FROM workflow_specs WHERE id = $1`, f.specID)
 		_, _ = pool.Exec(cctx, `DELETE FROM workers WHERE namespace = $1`, f.ns)
+		_, _ = pool.Exec(cctx, `DELETE FROM platform_config WHERE namespace = $1`, f.ns)
+		_, _ = pool.Exec(cctx, `DELETE FROM tenants WHERE namespace = $1`, f.ns)
 	})
 	return f
 }
