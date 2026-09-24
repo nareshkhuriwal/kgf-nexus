@@ -761,3 +761,42 @@ the object durable strictly before the row is written, an object that existed at
 T1 still exists at T2. A false *negative* (an object deleted after the check) is
 acceptable and shows up next run; a false *positive* would send someone hunting
 for data loss that never happened.
+
+## 9. Email: SMTP delivery for verification and password recovery
+
+The api-gateway sends two kinds of mail: address-verification links and password-reset links. Both links are credentials. Configure delivery before exposing self-service registration (docs/MULTITENANCY.md).
+
+### 9.1 Settings (api-gateway)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NEXUS_SMTP_HOST` | unset | SMTP server. **Unset disables email delivery** (see 9.2). |
+| `NEXUS_SMTP_PORT` | 587 (465 when TLS is `implicit`) | |
+| `NEXUS_SMTP_TLS` | `starttls` | `starttls` upgrades before any command and never falls back to plain text if the server does not offer it. `implicit` uses TLS from the first byte (SMTPS). `none` sends in plain text and is for a local relay or Mailpit only. |
+| `NEXUS_SMTP_USERNAME` / `NEXUS_SMTP_PASSWORD` | unset | AUTH PLAIN. Credentials with `NEXUS_SMTP_TLS=none` to a non-loopback host stop startup. |
+| `NEXUS_SMTP_PASSWORD_FILE` | unset | Read the password from a mounted secret instead of the environment. Setting it together with `NEXUS_SMTP_PASSWORD` is an error. |
+| `NEXUS_SMTP_FROM` | required with a host | e.g. `KGF Nexus <no-reply@example.com>` |
+| `NEXUS_SMTP_HELO` | `localhost` | EHLO name. Set it to the host's real name if your relay checks it. |
+| `NEXUS_SMTP_TIMEOUT_SEC` | 10 | Bounds one whole delivery: dial, TLS, AUTH and DATA. |
+| `NEXUS_PUBLIC_URL` | required with a host | External console origin. Links are `<url>/verify-email#token=…` and `<url>/reset-password#token=…`. |
+| `NEXUS_EMAIL_VERIFY_TTL_SEC` | 86400 | Verification link lifetime. Allowed range: 5 minutes to 7 days. |
+| `NEXUS_PASSWORD_RESET_TTL_SEC` | 1800 | Reset link lifetime. Allowed range: 5 minutes to 24 hours. |
+| `NEXUS_EMAIL_VERIFICATION_REQUIRED` | `true` | `false` lets unverified accounts sign in. The gateway logs a WARN at startup when it is `false`. |
+
+The gateway refuses to start on any invalid combination, such as a bad port or TLS mode, a malformed From address, credentials over plain text, or a host without `NEXUS_PUBLIC_URL`. When a host is configured, the gateway also probes SMTP at startup (connect, TLS, AUTH, QUIT, no message). A failed probe logs `SMTP server probe failed` at ERROR but does not stop startup.
+
+### 9.2 Running without a mail server is explicit, not silent
+
+With `NEXUS_SMTP_HOST` unset, the gateway logs `email delivery is DISABLED` at WARN on startup, including the effect on sign-in. The link-request routes then answer `503 email_unavailable` instead of pretending to have sent mail, and registration reports `email_verification.delivery: "mail_disabled"`. With verification required (the default), accounts created while mail is disabled cannot sign in until mail is configured and they request a new link from the sign-in page. Existing accounts are unaffected. Readiness (`/readyz`) does not depend on SMTP. An unreachable mail server must not remove the gateway from the load balancer, so check the startup log and the `user.*` audit outcomes instead.
+
+### 9.3 Delivery and retries
+
+Mail is sent after the database transaction commits, on a bounded background queue: 2 workers, 256 jobs. Each message is retried up to 4 times with exponential backoff, starting at 2 seconds and capped at 30 seconds. 5xx replies are not retried. Every attempt ends in an audit row (`user.email_verification_sent` / `user.password_reset_requested`) with outcome `success` or `error`, and failures are logged with the user id and recipient domain only. Tokens, links and full addresses are never logged. On shutdown, the gateway drains the queue within `NEXUS_SHUTDOWN_TIMEOUT_SEC`. Mail still queued when the process dies is lost, and the person can request another link. Tokens more than a day past expiry are deleted hourly.
+
+### 9.4 Local development: Mailpit
+
+`deploy/docker-compose.yml` runs `axllent/mailpit:v1.27.0` and points the gateway at it (`mailpit:1025`, TLS `none`). Every message appears at http://localhost:8025. That UI binds to loopback because it shows live reset links. **`render_compose.py` deploys the same file**, so a real host must override `NEXUS_SMTP_HOST`, `NEXUS_SMTP_PORT`, `NEXUS_SMTP_TLS`, `NEXUS_SMTP_USERNAME`, `NEXUS_SMTP_PASSWORD`, `NEXUS_SMTP_FROM` and `NEXUS_PUBLIC_URL`. Otherwise reset mail lands in a catcher nobody reads.
+
+### 9.5 Upgrade
+
+Apply migration 0017 before the new gateway. Every existing account is marked verified by the migration itself. Deploy the console together with the gateway: the new pages are `/verify-email`, `/forgot-password` and `/reset-password`. Rolling back 0017 discards which accounts are verified, and re-applying it marks every account that exists at that moment as verified. Export `SELECT id FROM users WHERE email_verified_at IS NULL` first if that matters.
