@@ -59,6 +59,12 @@ var (
 	ErrLimitUnenforceable = errors.New("executor: resource limit not enforceable")
 	// ErrValidation is a malformed spec (no command, bad image ref) — terminal.
 	ErrValidation = errors.New("executor: invalid task spec")
+	// ErrEvicted means the substrate took the workload away (Kubernetes
+	// eviction under node pressure, preemption, node loss). The task did
+	// nothing wrong, so it is INFRASTRUCTURE and retryable, and it is kept
+	// distinct from ErrRuntimeUnavailable so an operator can tell "the cluster
+	// is under pressure" from "the executor is broken".
+	ErrEvicted = errors.New("executor: workload evicted by the substrate")
 )
 
 // ClassifyOutcome maps a completed execution to an error class. This is the
@@ -118,6 +124,10 @@ func ClassifyError(err error) Classified {
 
 	case errors.Is(err, ErrResultStore):
 		return Classified{nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE, "ResultStoreFailure",
+			err.Error(), true}
+
+	case errors.Is(err, ErrEvicted):
+		return Classified{nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE, "Evicted",
 			err.Error(), true}
 
 	case errors.Is(err, ErrLimitUnenforceable), errors.Is(err, ErrRuntimeUnavailable):
