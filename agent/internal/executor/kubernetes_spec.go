@@ -77,7 +77,7 @@ const (
 // container log at containerLogMaxSize (10 MiB by default); a transfer that
 // straddles a rotation can lose its head. 4 MiB raw is ~5.4 MiB encoded, which
 // stays clear of the default rotation with margin. A task with a larger result
-// must be run on the docker executor today; see CONTRACT-FINDINGS F92.
+// must be run on the docker executor today; see CONTRACT-FINDINGS F96.
 const k8sMaxOutputBytes = 4 << 20
 
 // k8sMaxInputBytes bounds staged inputs, which travel in a Secret. The API

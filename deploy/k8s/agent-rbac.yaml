@@ -21,7 +21,7 @@
 #
 # Known limit of RBAC here: "delete pods" cannot be narrowed by label, so the
 # role could delete a sibling agent pod in the same namespace. The executor only
-# ever deletes pods selected by its own owner + attempt labels; see F92.
+# ever deletes pods selected by its own owner + attempt labels; see F96.
 ---
 apiVersion: v1
 kind: ServiceAccount

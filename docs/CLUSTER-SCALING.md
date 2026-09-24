@@ -144,7 +144,7 @@ a controller in the wrong mode or pointed at the wrong cluster cannot drain.
    shows a recent report, the observed UID and the scheduler HPA.
 4. Bind worker Deployments; watch plan-only events for a representative period.
 5. To apply: enter the kube-system UID the controller reports, confirm apply,
-   and install `deploy/k8s/cluster-controller/apply`. See docs/OPERATIONS.md §9.
+   and install `deploy/k8s/cluster-controller/apply`. See docs/OPERATIONS.md §12.
 
 ## What is verified, and what is not
 

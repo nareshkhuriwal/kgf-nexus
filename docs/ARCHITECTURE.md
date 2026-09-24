@@ -997,7 +997,7 @@ worker, not just the task, is the fix.
 - **manually**, by an operator (`POST …/workers/{id}/quarantine {reason, duration_ms}`, permission `workers.quarantine`); `duration_ms: 0` is indefinite;
 - **by inheritance**: a new session from a host with an open episode starts QUARANTINED, because worker identity is per session and a restart must not launder a poison host back into the pool.
 
-It ends on expiry, or by `POST …/workers/{id}/release`, which closes every open episode for the host. Every episode is a `worker_quarantines` row (trigger, reason, evidence, actor, expiry, release); operator actions are also in `audit_log`. A quarantined worker is no longer sent `DRAIN`, which the agent treats as permanent. All thresholds are `NEXUS_QUARANTINE_*` settings (OPERATIONS §9).
+It ends on expiry, or by `POST …/workers/{id}/release`, which closes every open episode for the host. Every episode is a `worker_quarantines` row (trigger, reason, evidence, actor, expiry, release); operator actions are also in `audit_log`. A quarantined worker is no longer sent `DRAIN`, which the agent treats as permanent. All thresholds are `NEXUS_QUARANTINE_*` settings (OPERATIONS §14).
 
 ---
 
@@ -1367,7 +1367,7 @@ Explicitly deferred: dynamic expansion, cron schedules, backfill, NATS, k8s exec
 NATS JetStream for sub-second dispatch and UI live updates. Cron schedules with timezone and catchup. Backfill with its own concurrency cap. Full trigger-rule set and conditional edges (sandboxed CEL). Memoization. Worker quarantine. Namespaces, RBAC, quotas. OpenTelemetry traces and the full Prometheus metric set. Retention and partition pruning. Multi-replica control plane with rolling upgrade and N-1 agent compatibility.
 
 ### Phase 3 — Scale and expressiveness
-Dynamic expansion with `max_fanout`. Sub-workflows and workflow-of-workflows. Event-driven triggers (webhook, bus, sensor tasks). Kubernetes executor via the `Executor` interface (**delivered**: `agent/internal/executor/kubernetes*.go`, one Job per attempt, conformance-tested against a local cluster; see ADR-0007 "Implementation notes" and CONTRACT-FINDINGS F92 for what it does not yet do). Fair-share and preemption. Typed interface validation and lineage. Additional SDKs (TypeScript, Go) generated from `proto/`.
+Dynamic expansion with `max_fanout`. Sub-workflows and workflow-of-workflows. Event-driven triggers (webhook, bus, sensor tasks). Kubernetes executor via the `Executor` interface (**delivered**: `agent/internal/executor/kubernetes*.go`, one Job per attempt, conformance-tested against a local cluster; see ADR-0007 "Implementation notes" and CONTRACT-FINDINGS F96 for what it does not yet do). Fair-share and preemption. Typed interface validation and lineage. Additional SDKs (TypeScript, Go) generated from `proto/`.
 
 ### Phase 4 — Platform maturity
 Asset/lineage layer over the task core (the Dagster idea, added without rewriting the core — the reason the task layer is kept clean). Pluggable capacity providers for autoscaling. Multi-region control plane. Durable-execution programming model as an *optional* second authoring mode for users who need Temporal-style semantics.

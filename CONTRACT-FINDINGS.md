@@ -1028,7 +1028,6 @@ way to advertise it. Worth checking any dimension added to `ResourceVector` from
 here for an agent flag AND an end-to-end run that uses it, because unit tests
 construct the vector directly and cannot see the gap.
 
-
 ### F67. Two allocators for `run_events.seq` collided — FIXED
 
 `run_events` has two writers and they numbered rows differently. event-service
@@ -1281,7 +1280,6 @@ looked like a platform bug: the killed container must be allowed to re-register
 before the next test starts (restarting the container is not the same as having
 a worker), and the effects must be read from whichever agent is alive rather than
 a hard-coded `agent-cpu` -- which is sometimes the container the test just killed.
-
 
 ### F77. Nothing enforced ADR-0011 rule 5's additive-migration requirement — FIXED
 
@@ -1847,8 +1845,8 @@ F89 prescribes: prove the instrument fails when the thing is broken.
 
 ### F92. Certificates could not rotate without a restart, and TLS.md said NEXUS_ENV armed a guard it does not — FIXED
 
-(Number chosen by the certificate workstream on a parallel branch; renumber on merge
-if another F92 lands first — see F88.)
+(F92–F97 were written on six parallel branches that each chose F92; they were
+renumbered in merge order when the branches were integrated — see F88.)
 
 **What was wrong.** `internal/transport` read the key pair and CA bundle once, at
 startup. A renewed certificate on disk did nothing to a running process, so every
@@ -1894,11 +1892,11 @@ brought up end to end. `TestServerNameOverrideFixesTheComposeNameMismatch` takes
 1–9s under `-race` in a full package run (0.06s alone) — measured identical on the
 pre-change code, so not introduced here, but within reach of its 10s deadline.
 
-### F92. Registration accepted any email address, and there was no password recovery — FIXED
+### F93. Registration accepted any email address, and there was no password recovery — FIXED
 
 Self-service registration (0013) created a tenant owner for any address typed in, and nothing proved the registrant controlled it. There was also no recovery path: a forgotten password needed an administrator of the same tenant, and the registrant was usually the only administrator. MULTITENANCY.md listed both as prerequisites for public registration.
 
-**Fix:** migration 0017 (`users.email_verified_at`, `email_tokens`), `internal/mail` (SMTP with STARTTLS or implicit TLS, timeouts and retry), four unguarded and rate-limited gateway routes, and console pages. The policy, the no-oracle design and the limits are in docs/MULTITENANCY.md; configuration is in docs/OPERATIONS.md §9. Decisions worth recording here:
+**Fix:** migration 0017 (`users.email_verified_at`, `email_tokens`), `internal/mail` (SMTP with STARTTLS or implicit TLS, timeouts and retry), four unguarded and rate-limited gateway routes, and console pages. The policy, the no-oracle design and the limits are in docs/MULTITENANCY.md; configuration is in docs/OPERATIONS.md §10. Decisions worth recording here:
 
 - **Existing accounts are verified by the migration, without a backfill.** `ADD COLUMN … DEFAULT now()` followed by `DROP DEFAULT` stores the value as the column's missing value for existing rows. New rows, including rows an old replica inserts mid-deploy, are unverified. This was verified on Postgres 16 and passes the migration safety gate unmodified.
 - **Unverified accounts cannot sign in**, and the 403 is returned only after the password is verified. Admin-created and address-changed accounts are unverified too; a trigger clears verification when the address changes.
@@ -1913,7 +1911,7 @@ Self-service registration (0013) created a tenant owner for any address typed in
 - The default integration DSN `localhost:55432` is, on at least one developer machine, a different product's Postgres (`polaris-postgres`). Always set `NEXUS_TEST_DATABASE_URL`.
 - `deploy/render_compose.py` deploys the development compose file, so development defaults (now including Mailpit as the SMTP host) reach deployed hosts unless they are overridden.
 
-### F92. NATS was designed as publish-after-commit, which loses messages; built as an outbox instead — DONE
+### F94. NATS was designed as publish-after-commit, which loses messages; built as an outbox instead — DONE
 
 ADR-0003 and §5.3 step 5 said: commit the claim, then publish the notification.
 That is correct about *where not to publish* (never inside the transaction) and
@@ -1975,10 +1973,7 @@ they predate migration 0014 and never create a tenant row. CI applies migrations
 too, so this is worth checking there. The NATS tests register their tenants.
 Not fixed here (out of scope).
 
-### F92. Cluster scaling needed two grants nobody had exercised, and an ownership decision — FIXED / DECIDED
-
-(Number chosen from this branch's tail; parallel branches may also have taken F92 --
-renumber on merge, see F88.)
+### F95. Cluster scaling needed two grants nobody had exercised, and an ownership decision — FIXED / DECIDED
 
 **Ownership (ADR-0011), decided, not yet in the ADR table.** Migration 0018 adds
 seven tables. The registry (`clusters`, `cluster_namespace_bindings`) is operator
@@ -2017,10 +2012,7 @@ cluster-admin.
 `go 1.26`, and `deploy/Dockerfile.service` builds with `golang:1.25`. Another branch
 adding client-go must agree on the version.
 
-### F92. The Kubernetes executor exists; what it enforces, and what it cannot yet do — NOTE
-
-*(Numbered F92 on the branch that added it. If a parallel branch also took F92,
-renumber on merge; F88 records the last time this collided.)*
+### F96. The Kubernetes executor exists; what it enforces, and what it cannot yet do — NOTE
 
 The `kubernetes` executor (ADR-0007, Implementation notes) runs each attempt as a
 Job. It passes the shared conformance suite against a local Docker Desktop
@@ -2114,10 +2106,7 @@ than handled silently:
   `"subprocess" | "docker" | "k8s"`. It was left unchanged so the executor did
   not need a proto regeneration. The schema and SDK accept both spellings.
 
-### F92. Dynamic expansion, memoization and worker quarantine — IMPLEMENTED
-
-(Numbered from this branch's high-water mark, F91. Parallel branches may also have
-taken F92 -- see F88; renumber on merge, this entry references no other F92.)
+### F97. Dynamic expansion, memoization and worker quarantine — IMPLEMENTED
 
 Three deferred features landed together because they share the attempt-creation and
 placement paths. Decisions a reviewer should know, each with its reason:

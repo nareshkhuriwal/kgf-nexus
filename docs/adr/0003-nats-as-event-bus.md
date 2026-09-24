@@ -36,7 +36,7 @@ What was built, and where it deliberately differs from the decision above:
 - **Subjects carry the namespace**: `nexus.task.dispatch.<ns>.<queue>`, `nexus.run.events.<ns>.<run_id>`, `nexus.run.state.<ns>.<run_id>` (stream `NEXUS_RUNS`, 7 days, 10-minute duplicate window). Tokens are escaped so a name cannot become a wildcard.
 - **The hint means "work may exist", not "attempt X was dispatched to you".** Dispatch is pull (ADR-0005): the worker that claims an attempt receives it in the same `PollTask` response, so the useful signal is that dispatchable work appeared. It is written when an attempt becomes `PENDING` (published at its `scheduled_at`), and the relay re-announces every queue with pending work every 10s so transitions no outbox row covers are still hinted. The scheduler's push dispatch loop stays disabled.
 - **Delivery is effectively-once into the stream, at-least-once beyond it, unordered.** Consumers order run events by `seq` and run state by `state_version`.
-- `NEXUS_NATS_URL` empty disables the bus; nothing needs NATS to start. Operating it: docs/OPERATIONS.md §9.
+- `NEXUS_NATS_URL` empty disables the bus; nothing needs NATS to start. Operating it: docs/OPERATIONS.md §11.
 
 ## Consequences
 

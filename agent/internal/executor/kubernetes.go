@@ -41,7 +41,7 @@ const KubernetesKindAlias = "k8s"
 // (backoffLimit 0). Kubernetes is the substrate; Nexus remains the only
 // retry policy, the only source of error classes, and the system of record.
 //
-// What the cluster enforces, precisely (see also KubernetesFidelity and F92):
+// What the cluster enforces, precisely (see also KubernetesFidelity and F96):
 //   - memory: cgroup memory.max from limits.memory; an over-limit task is
 //     OOM-killed by the kernel and the runtime reports reason OOMKilled.
 //   - cpu: CFS quota from limits.cpu (throttling, never a kill).

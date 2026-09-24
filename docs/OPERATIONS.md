@@ -5,7 +5,7 @@
 **Scope:** Postgres backup and restore, the artifact (MinIO result store) backup
 and restore and the ordering between the two stores, the restore drills and their
 measured results, what these procedures do *not* cover, the RPO/RTO the approach
-actually delivers, the schema-migration procedure, and TLS certificate rotation (§9).
+actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), and dynamic expansion, memoization and quarantine (§14).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -927,11 +927,11 @@ Renewal, monthly (leaves are 30 days): repeat the `issue` loop and the `install`
 The services reload by themselves. Put `deploy/nexus-certs.sh check /secure/nexus-ca`
 in the CA machine's cron so that an overdue renewal emails someone.
 
-## 9. Email: SMTP delivery for verification and password recovery
+## 10. Email: SMTP delivery for verification and password recovery
 
 The api-gateway sends two kinds of mail: address-verification links and password-reset links. Both links are credentials. Configure delivery before exposing self-service registration (docs/MULTITENANCY.md).
 
-### 9.1 Settings (api-gateway)
+### 10.1 Settings (api-gateway)
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -950,30 +950,30 @@ The api-gateway sends two kinds of mail: address-verification links and password
 
 The gateway refuses to start on any invalid combination, such as a bad port or TLS mode, a malformed From address, credentials over plain text, or a host without `NEXUS_PUBLIC_URL`. When a host is configured, the gateway also probes SMTP at startup (connect, TLS, AUTH, QUIT, no message). A failed probe logs `SMTP server probe failed` at ERROR but does not stop startup.
 
-### 9.2 Running without a mail server is explicit, not silent
+### 10.2 Running without a mail server is explicit, not silent
 
 With `NEXUS_SMTP_HOST` unset, the gateway logs `email delivery is DISABLED` at WARN on startup, including the effect on sign-in. The link-request routes then answer `503 email_unavailable` instead of pretending to have sent mail, and registration reports `email_verification.delivery: "mail_disabled"`. With verification required (the default), accounts created while mail is disabled cannot sign in until mail is configured and they request a new link from the sign-in page. Existing accounts are unaffected. Readiness (`/readyz`) does not depend on SMTP. An unreachable mail server must not remove the gateway from the load balancer, so check the startup log and the `user.*` audit outcomes instead.
 
-### 9.3 Delivery and retries
+### 10.3 Delivery and retries
 
 Mail is sent after the database transaction commits, on a bounded background queue: 2 workers, 256 jobs. Each message is retried up to 4 times with exponential backoff, starting at 2 seconds and capped at 30 seconds. 5xx replies are not retried. Every attempt ends in an audit row (`user.email_verification_sent` / `user.password_reset_requested`) with outcome `success` or `error`, and failures are logged with the user id and recipient domain only. Tokens, links and full addresses are never logged. On shutdown, the gateway drains the queue within `NEXUS_SHUTDOWN_TIMEOUT_SEC`. Mail still queued when the process dies is lost, and the person can request another link. Tokens more than a day past expiry are deleted hourly.
 
-### 9.4 Local development: Mailpit
+### 10.4 Local development: Mailpit
 
 `deploy/docker-compose.yml` runs `axllent/mailpit:v1.27.0` and points the gateway at it (`mailpit:1025`, TLS `none`). Every message appears at http://localhost:8025. That UI binds to loopback because it shows live reset links. **`render_compose.py` deploys the same file**, so a real host must override `NEXUS_SMTP_HOST`, `NEXUS_SMTP_PORT`, `NEXUS_SMTP_TLS`, `NEXUS_SMTP_USERNAME`, `NEXUS_SMTP_PASSWORD`, `NEXUS_SMTP_FROM` and `NEXUS_PUBLIC_URL`. Otherwise reset mail lands in a catcher nobody reads.
 
-### 9.5 Upgrade
+### 10.5 Upgrade
 
 Apply migration 0017 before the new gateway. Every existing account is marked verified by the migration itself. Deploy the console together with the gateway: the new pages are `/verify-email`, `/forgot-password` and `/reset-password`. Rolling back 0017 discards which accounts are verified, and re-applying it marks every account that exists at that moment as verified. Export `SELECT id FROM users WHERE email_verified_at IS NULL` first if that matters.
 
-## 9. The event bus (NATS JetStream)
+## 11. The event bus (NATS JetStream)
 
 NATS is **optional** and **never authoritative** ([ADR-0003](adr/0003-nats-as-event-bus.md)).
 Everything on it is either a hint that work may exist or a projection of a
 fact Postgres already holds. Losing it, emptying it, or never running it costs
 latency and live-update freshness, never correctness.
 
-### 9.1 Running it
+### 11.1 Running it
 
 - Compose ships `nats:2.14.7-alpine` with JetStream on the `nats-data` volume
   and a `/healthz?js-enabled-only=true` healthcheck. Monitoring is on port 8222
@@ -995,7 +995,7 @@ latency and live-update freshness, never correctness.
   event-service publish rights on `nexus.>`; give each agent subscribe-only
   rights on `nexus.task.dispatch.<its namespace>.>` and nothing else.
 
-### 9.2 Relay tuning (event-service)
+### 11.2 Relay tuning (event-service)
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -1010,7 +1010,7 @@ latency and live-update freshness, never correctness.
 With `NEXUS_NATS_URL` empty the relay only prunes, so the table holds at most
 `NEXUS_OUTBOX_MAX_AGE` worth of writes.
 
-### 9.3 Monitoring (event-service `/metrics`)
+### 11.3 Monitoring (event-service `/metrics`)
 
 | Metric | Alert on |
 |---|---|
@@ -1026,7 +1026,7 @@ With `NEXUS_NATS_URL` empty the relay only prunes, so the table holds at most
 Inspect the backlog directly:
 `SELECT topic, count(*), min(created_at), max(attempts) FROM outbox WHERE published_at IS NULL GROUP BY topic;`
 
-### 9.4 Outage behaviour
+### 11.4 Outage behaviour
 
 - **Broker down:** writers are unaffected (they write Postgres). The relay stops
   opening transactions, backs off (jittered, capped), and the backlog waits in
@@ -1045,14 +1045,14 @@ Inspect the backlog directly:
   restart) re-sends the batch; de-duplication absorbs it.
 - Ordering is not guaranteed in any of these cases.
 
-### 9.5 Upgrading
+### 11.5 Upgrading
 
 Apply migration 0016 **before** rolling any service that writes outbox rows: a
 new scheduler against a schema without `outbox` fails its claim transactions.
 Rolling the migration back requires first rolling back those services (see the
 comment in `0016_outbox.down.sql`).
 
-### 9.6 Testing
+### 11.6 Testing
 
 `make test-nats` runs the relay, outbox and hint suites against a real
 JetStream and a real Postgres in throwaway containers (`nexus-nats-agent-*`,
@@ -1060,11 +1060,11 @@ ports 55511/55512), including stopping and restarting the broker.
 
 ---
 
-## 9. Cluster controller: installing, enabling apply, and backing out
+## 12. Cluster controller: installing, enabling apply, and backing out
 
 Design and safety argument: docs/CLUSTER-SCALING.md. This section is the runbook.
 
-### 9.1 Prerequisites
+### 12.1 Prerequisites
 
 - Migration `0018_cluster_registry` applied (additive; safe before the new
   gateway and resource-manager are deployed).
@@ -1078,7 +1078,7 @@ Design and safety argument: docs/CLUSTER-SCALING.md. This section is the runbook
   `docker build -f deploy/Dockerfile.service --build-arg SERVICE=cluster-controller .`
   and pinned by digest (`kustomize edit set image`).
 
-### 9.2 Plan mode (default)
+### 12.2 Plan mode (default)
 
 ```sh
 kubectl apply -k deploy/k8s/cluster-controller/base   # after setting NEXUS_CLUSTER_NAME
@@ -1091,7 +1091,7 @@ the scheduler HPA with `ScalingActive`, and plan-only events that match what you
 would have done by hand. `/readyz` is `standby` on the follower and fails on the
 leader after four intervals without a successful cycle -- alert on that.
 
-### 9.3 Enabling apply
+### 12.3 Enabling apply
 
 1. `kubectl get namespace kube-system -o jsonpath='{.metadata.uid}'` against the
    intended cluster; enter it in the console and confirm apply mode.
@@ -1102,7 +1102,7 @@ leader after four intervals without a successful cycle -- alert on that.
 Keep registry ceilings (`max_replicas`) at what the budget allows: there is no
 provider cost estimate, and budget alerts are not hard caps.
 
-### 9.4 Backing out
+### 12.4 Backing out
 
 Fastest to slowest, all safe at any moment:
 
@@ -1116,7 +1116,7 @@ Backing out never un-drains a worker: DRAINING is terminal by design. A drained
 pod that is no longer going to be removed can simply be deleted
 (`kubectl delete pod`); its agent registers afresh in the replacement pod.
 
-### 9.5 Diagnosing a pool that does not scale
+### 12.5 Diagnosing a pool that does not scale
 
 The Live cluster tab shows the last decision and its holds per Deployment. The
 common ones: `scale-in cooldown`, `removal of drained pods held: pod … is not
@@ -1125,7 +1125,7 @@ intended -- it is removed when the work finishes), `namespace quota: …` (raise
 quota or the pod requests are undeclared), and `deployment changed since it was
 read` (someone else is writing replicas -- find the second writer).
 
-### 9.6 Testing locally
+### 12.6 Testing locally
 
 The end-to-end test only runs against `docker-desktop` or `kind-*` contexts, in
 namespace `nexus-scaling-test`, which it creates and deletes:
@@ -1139,7 +1139,7 @@ NEXUS_TEST_DATABASE_URL=postgres://postgres:test@localhost:55531/nexus \
   go test -tags integration -run TestIntegrationClusterRegistry ./internal/store/
 ```
 
-## 9. Kubernetes executor
+## 13. Kubernetes executor
 
 An agent that runs its attempts as Kubernetes Jobs (ADR-0007, Implementation
 notes). It is opt-in per agent: setting `NEXUS_K8S_NAMESPACE` enables it, and
@@ -1150,7 +1150,7 @@ agent holds the RBAC verbs the executor uses. If the probe fails, the agent logs
 `kubernetes executor configured but not usable; not advertising it` with the
 reason and keeps serving its other executors.
 
-### 9.1 Deploying
+### 13.1 Deploying
 
 ```bash
 kubectl apply -f deploy/k8s/executor-namespace.yaml   # nexus-exec, Pod Security "restricted" ENFORCED
@@ -1176,7 +1176,7 @@ Kubernetes places the pod. If you over-advertise, attempts sit with pods Pending
 retryable INFRASTRUCTURE. Each attempt pod also carries a collector sidecar that
 requests 50m CPU and 32Mi of memory, on top of the task's own request.
 
-### 9.2 Configuration
+### 13.2 Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -1196,7 +1196,7 @@ requests 50m CPU and 32Mi of memory, on top of the task's own request.
 | `NEXUS_K8S_IMAGE_PULL_TIMEOUT` | `10m` | How long a **transient** pull failure may last. A pull that fails as not-found or unauthorised fails immediately. |
 | `NEXUS_K8S_START_TIMEOUT` | `10m` | How long an attempt may go unscheduled or unstarted before it fails as retryable. |
 
-### 9.3 What happens to attempts when things fail
+### 13.3 What happens to attempts when things fail
 
 | Event | Outcome |
 |---|---|
@@ -1209,7 +1209,7 @@ requests 50m CPU and 32Mi of memory, on top of the task's own request.
 | Agent **container** restarts | The WAL (an emptyDir) survives the restart. A Job that finished meanwhile is harvested and reported for real. A Job still running is killed, because this session cannot renew its lease and a retry is coming. Its STARTING entry is then replayed as INDETERMINATE. |
 | Agent **pod** deleted | The garbage collector deletes its Jobs. The WAL is lost, so those attempts become LOST through lease expiry and are retried. |
 
-### 9.4 Inspecting
+### 13.4 Inspecting
 
 ```bash
 kubectl -n nexus-exec get jobs,pods -l app.kubernetes.io/managed-by=nexus-agent
@@ -1221,9 +1221,9 @@ kubectl -n nexus-exec logs job/nexus-<attempt_id> -c task          # the task's 
 Attempt ids that are not valid DNS labels are hashed into the Job name. The
 exact id is always in the `nexus.dev/attempt-id` annotation.
 
-### 9.5 Limits you will hit
+### 13.5 Limits you will hit
 
-See CONTRACT-FINDINGS F92 for detail. In short:
+See CONTRACT-FINDINGS F96 for detail. In short:
 
 - Inputs are limited to about 1 MiB in total, because they are staged through a
   Secret.
@@ -1234,7 +1234,7 @@ See CONTRACT-FINDINGS F92 for detail. In short:
 - The pending reason sent through ReportProgress is not yet stored by the
   scheduler.
 
-### 9.6 Running the executor's cluster tests
+### 13.6 Running the executor's cluster tests
 
 ```bash
 kubectl config current-context        # MUST be a local cluster (docker-desktop, kind-*, minikube, ...)
@@ -1251,9 +1251,9 @@ Check that the subtests actually ran (F89). Each `…/kubernetes` line should ta
 seconds, not `0.00s`. A `-run` pattern that does not match the three-level
 subtest names skips them silently, and the run still passes.
 
-## 9. Dynamic expansion, memoization and worker quarantine
+## 14. Dynamic expansion, memoization and worker quarantine
 
-### 9.1 Dynamic expansion (§5.4)
+### 14.1 Dynamic expansion (§5.4)
 
 - **Operator ceiling on `max_fanout`.** Submit-time validation rejects a template whose
   `max_fanout` exceeds 10,000 (`dag.DefaultMaxFanoutCeiling`).
@@ -1271,7 +1271,7 @@ subtest names skips them silently, and the run still passes.
   `collection_not_inline`.
 - The console folds a template's children into the template; unfold is offered up to 50.
 
-### 9.2 Memoization (§6.4)
+### 14.2 Memoization (§6.4)
 
 - **Invalidate** when a memoized task's results must not be reused (bad input data, a
   handler bug fixed without a version bump):
@@ -1288,7 +1288,7 @@ subtest names skips them silently, and the run still passes.
 - **Which nodes were cached?** `SELECT node_id, cache_hit_of FROM task_attempts WHERE run_id =
   '<run>' AND cache_hit_of IS NOT NULL`; `CacheHit` events name the source attempt.
 
-### 9.3 Worker quarantine (§5.5)
+### 14.3 Worker quarantine (§5.5)
 
 Detector settings (resource-manager environment), with defaults:
 
