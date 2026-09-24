@@ -1,0 +1,1066 @@
+api_version: nexus.dev/v1
+description: 'Credit-default model: clean, engineer, 50-trial CV search (logreg +
+  neural net), final fit, bootstrap CI, permutation importance, calibration, gated
+  model card.'
+edges:
+- from_node_id: bootstrap_auc
+  output_to_input:
+    replicates: auc
+  to_node_id: confidence_interval
+- from_node_id: calibrate
+  output_to_input:
+    threshold: threshold
+  to_node_id: model_card
+- from_node_id: clean
+  output_to_input:
+    clean: clean
+  to_node_id: features
+- from_node_id: clean
+  output_to_input:
+    profile: profile
+  to_node_id: model_card
+- from_node_id: confidence_interval
+  output_to_input:
+    interval: interval
+  to_node_id: model_card
+- from_node_id: cv_trial
+  output_to_input:
+    trials: metrics
+  to_node_id: select_config
+- from_node_id: features
+  output_to_input:
+    train_pool: train_pool
+  to_node_id: cv_trial
+- from_node_id: features
+  output_to_input:
+    schema: schema
+  to_node_id: importance_report
+- from_node_id: features
+  output_to_input:
+    holdout: holdout
+  to_node_id: permutation_importance
+- from_node_id: features
+  output_to_input:
+    schema: schema
+  to_node_id: plan_experiments
+- from_node_id: features
+  output_to_input:
+    holdout: holdout
+  to_node_id: score_holdout
+- from_node_id: features
+  output_to_input:
+    train_pool: train_pool
+  to_node_id: train_final
+- from_node_id: importance_report
+  output_to_input:
+    importance: report
+  to_node_id: model_card
+- from_node_id: ingest
+  output_to_input:
+    raw: raw
+  to_node_id: clean
+- from_node_id: permutation_importance
+  output_to_input:
+    importances: importance
+  to_node_id: importance_report
+- from_node_id: plan_experiments
+  output_to_input: {}
+  to_node_id: cv_trial
+- from_node_id: score_holdout
+  output_to_input:
+    scores: scores
+  to_node_id: bootstrap_auc
+- from_node_id: score_holdout
+  output_to_input:
+    scores: scores
+  to_node_id: calibrate
+- from_node_id: score_holdout
+  output_to_input:
+    holdout_metrics: holdout_metrics
+  to_node_id: model_card
+- from_node_id: score_holdout
+  output_to_input:
+    holdout_metrics: holdout_metrics
+  to_node_id: permutation_importance
+- from_node_id: select_config
+  output_to_input:
+    selection: selection
+  to_node_id: model_card
+- from_node_id: select_config
+  output_to_input:
+    selection: selection
+  to_node_id: train_final
+- from_node_id: train_final
+  output_to_input:
+    model: model
+  to_node_id: model_card
+- from_node_id: train_final
+  output_to_input:
+    model: model
+  to_node_id: permutation_importance
+- from_node_id: train_final
+  output_to_input:
+    model: model
+  to_node_id: score_holdout
+name: credit-risk-ml
+namespace: default
+params:
+  epochs:
+    default_json: '10'
+    type: int
+  min_auc:
+    default_json: '0.75'
+    type: float
+  rows:
+    default_json: '60000'
+    type: int
+  seed:
+    default_json: '2026'
+    type: int
+run_timeout_ms: 10800000
+tasks:
+- id: bootstrap_auc
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    replicate:
+      required: true
+      type: json
+    scores:
+      required: true
+      type: string
+  map:
+    item_input: replicate
+    max_fanout: 200
+    over_node_id: score_holdout
+    over_output: bootstrap_plan
+  outputs:
+    auc:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; auc() { sort -k2,2g \"$1\" | awk\
+      \ '\n{ lab[NR] = $1; sc[NR] = $2 }\nEND { n = NR; i = 1\n  while (i <= n) {\
+      \ j = i; while (j < n && sc[j + 1] == sc[i]) j++\n    r = (i + j) / 2; for (k\
+      \ = i; k <= j; k++) if (lab[k] == 1) { sum += r; pos++ }\n    i = j + 1 }\n\
+      \  neg = n - pos; if (pos == 0 || neg == 0) { print 0.5; exit }\n  printf \"\
+      %.6f\\n\", (sum - pos * (pos + 1) / 2) / (pos * neg) }'; }; r=$(tr -d \" \\\
+      n\" < \"$NEXUS_INPUT_DIR/replicate\"); awk -v r=\"$r\" '\n{ n++; L[n] = $0 }\n\
+      END { srand(1000 + r); for (i = 1; i <= n; i++) print L[int(rand() * n) + 1]\
+      \ }' \"$NEXUS_INPUT_DIR/scores\" > \"$T/bs\" && printf '{\"replicate\":%s,\"\
+      auc\":%s}' \"$r\" \"$(auc \"$T/bs\")\" > \"$NEXUS_OUTPUT_DIR/auc\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.bootstrap_auc
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 600000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: calibrate
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    scores:
+      required: true
+      type: string
+  outputs:
+    threshold:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk  '\n{ n++; Y[n] = $1; S[n] = $2; b = int($2 * 10); if (b > 9) b = 9; bn[b]++;\
+      \ bp[b] += $2; by[b] += $1 }\nEND {\n  for (k = 1; k <= 99; k++) { th = k /\
+      \ 100; fn = fp = tp = 0\n    for (i = 1; i <= n; i++) { d = (S[i] >= th); if\
+      \ (d && Y[i]) tp++; else if (d) fp++; else if (Y[i]) fn++ }\n    cost = 5 *\
+      \ fn + fp; if (best == \"\" || cost < bc) { bc = cost; best = th; btp = tp;\
+      \ bfp = fp; bfn = fn } }\n  printf \"{\\\"threshold\\\":%.2f,\\\"expected_cost_per_1000\\\
+      \":%.1f,\\\"recall\\\":%.4f,\\\"precision\\\":%.4f,\\\"reliability\\\":[\",\
+      \ best, 1000 * bc / n, btp / (btp + bfn), (btp + bfp ? btp / (btp + bfp) : 0)\n\
+      \  for (b = 0; b <= 9; b++) if (bn[b]) printf \"%s{\\\"bin\\\":%d,\\\"predicted\\\
+      \":%.3f,\\\"observed\\\":%.3f,\\\"n\\\":%d}\", (s++ ? \",\" : \"\"), b, bp[b]\
+      \ / bn[b], by[b] / bn[b], bn[b]\n  printf \"]}\" }' \"$NEXUS_INPUT_DIR/scores\"\
+      \ > \"$NEXUS_OUTPUT_DIR/threshold\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.calibrate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: clean
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    raw:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    profile:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "in=\"$NEXUS_INPUT_DIR/raw\"; q() { cut -d, -f\"$1\" \"$in\" | sed 1d | grep\
+      \ -v '^$' | sort -g | awk -v p=\"$2\" '{ a[NR] = $1 } END { print a[int(NR *\
+      \ p) > 0 ? int(NR * p) : 1] }'; }; med_age=$(q 2 0.5); med_inc=$(q 3 0.5); p99_inc=$(q\
+      \ 3 0.99); awk -v ma=\"$med_age\" -v mi=\"$med_inc\" -v p99=\"$p99_inc\" -v\
+      \ prof=\"$NEXUS_OUTPUT_DIR/profile\" '\nBEGIN { FS = OFS = \",\" }\nNR == 1\
+      \ { print \"age,income,debt_ratio,credit_lines,late_payments,utilization,r_north,r_south,r_east,r_west,p_basic,p_plus,p_premium,default\"\
+      ; next }\n{ n++\n  if ($2 == \"\") { $2 = ma; imp_age++ }\n  if ($3 == \"\"\
+      ) { $3 = mi; imp_inc++ }\n  if ($3 > p99) { $3 = p99; clip_inc++ }\n  if ($7\
+      \ > 1.2) { $7 = 1.2; clip_util++ }\n  print $2, $3, $4, $5, $6, $7, ($8 == \"\
+      north\"), ($8 == \"south\"), ($8 == \"east\"), ($8 == \"west\"), ($9 == \"basic\"\
+      ), ($9 == \"plus\"), ($9 == \"premium\"), $10\n  pos += $10 }\nEND { printf\
+      \ \"{\\\"rows\\\":%d,\\\"default_rate\\\":%.4f,\\\"imputed_age\\\":%d,\\\"imputed_income\\\
+      \":%d,\\\"clipped_income\\\":%d,\\\"clipped_utilization\\\":%d,\\\"median_age\\\
+      \":%s,\\\"median_income\\\":%s,\\\"p99_income\\\":%s}\", n, pos / n, imp_age,\
+      \ imp_inc, clip_inc, clip_util, ma, mi, p99 > prof }' \"$in\" > \"$NEXUS_OUTPUT_DIR/clean\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.clean
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 600000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: confidence_interval
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    replicates:
+      required: true
+      type: json
+  outputs:
+    interval:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "tr -d '\\n' < \"$NEXUS_INPUT_DIR/replicates\" | sed 's/},/}\\n/g' | grep -o\
+      \ '\"auc\":[0-9.]*' | cut -d: -f2 | sort -g | awk  '\n{ a[++n] = $1; s += $1\
+      \ }\nEND { if (n < 10) { print \"too few bootstrap replicates\" > \"/dev/stderr\"\
+      ; exit 1 }\n  lo = a[int(n * 0.025) + 1]; hi = a[int(n * 0.975) > 0 ? int(n\
+      \ * 0.975) : n]\n  printf \"{\\\"replicates\\\":%d,\\\"mean_auc\\\":%.5f,\\\"\
+      ci95_low\\\":%.5f,\\\"ci95_high\\\":%.5f}\", n, s / n, lo, hi }'  > \"$NEXUS_OUTPUT_DIR/interval\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.confidence_interval
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- cache:
+    enabled: true
+    ttl_ms: 86400000
+  id: cv_trial
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    experiment:
+      required: true
+      type: json
+    train_pool:
+      required: true
+      type: string
+  map:
+    item_input: experiment
+    max_fanout: 200
+    over_node_id: plan_experiments
+    over_output: experiments
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; auc() { sort -k2,2g \"$1\" | awk\
+      \ '\n{ lab[NR] = $1; sc[NR] = $2 }\nEND { n = NR; i = 1\n  while (i <= n) {\
+      \ j = i; while (j < n && sc[j + 1] == sc[i]) j++\n    r = (i + j) / 2; for (k\
+      \ = i; k <= j; k++) if (lab[k] == 1) { sum += r; pos++ }\n    i = j + 1 }\n\
+      \  neg = n - pos; if (pos == 0 || neg == 0) { print 0.5; exit }\n  printf \"\
+      %.6f\\n\", (sum - pos * (pos + 1) / 2) / (pos * neg) }'; }; e=$(tr -d \"\\n\"\
+      \ < \"$NEXUS_INPUT_DIR/experiment\"); awk -v e=\"$e\" -v tv=\"$T/val\" '\nfunction\
+      \ get(s, k,   m) {\n  if (match(s, \"\\\"\" k \"\\\":-?[0-9.eE+-]+\")) { m =\
+      \ substr(s, RSTART, RLENGTH); sub(/^\"[^\"]+\":/, \"\", m); return m + 0 }\n\
+      \  if (match(s, \"\\\"\" k \"\\\":\\\"[^\\\"]*\\\"\")) { m = substr(s, RSTART,\
+      \ RLENGTH); sub(/^\"[^\"]+\":\"/, \"\", m); sub(/\"$/, \"\", m); return m }\n\
+      \  return \"\" }\n\nfunction sigm(z) { if (z > 30) return 1; if (z < -30) return\
+      \ 0; return 1 / (1 + exp(-z)) }\nfunction tanh_(z,   e) { if (z > 15) return\
+      \ 1; if (z < -15) return -1; e = exp(2 * z); return (e - 1) / (e + 1) }\nfunction\
+      \ init(m, h, k,   i, j) {\n  MODEL = m; H = h; K = k; B2 = 0\n  for (i = 1;\
+      \ i <= K; i++) W[i] = 0\n  if (MODEL == \"mlp\") for (j = 1; j <= H; j++) {\
+      \ B1[j] = 0; W2[j] = (rand() - 0.5) * 0.5\n    for (i = 1; i <= K; i++) W1[j,\
+      \ i] = (rand() - 0.5) * 2 / sqrt(K) }\n}\nfunction score(x,   i, j, z, a) {\n\
+      \  if (MODEL == \"logreg\") { z = B2; for (i = 1; i <= K; i++) z += W[i] * x[i];\
+      \ return sigm(z) }\n  z = B2\n  for (j = 1; j <= H; j++) { a = B1[j]; for (i\
+      \ = 1; i <= K; i++) a += W1[j, i] * x[i]; HID[j] = tanh_(a); z += W2[j] * HID[j]\
+      \ }\n  return sigm(z)\n}\nfunction train_row(x, y, lr, l2,   p, d, i, j, dh)\
+      \ {\n  p = score(x); d = p - y\n  if (MODEL == \"logreg\") { for (i = 1; i <=\
+      \ K; i++) W[i] -= lr * (d * x[i] + l2 * W[i]); B2 -= lr * d; return }\n  for\
+      \ (j = 1; j <= H; j++) {\n    dh = d * W2[j] * (1 - HID[j] * HID[j])\n    W2[j]\
+      \ -= lr * (d * HID[j] + l2 * W2[j])\n    for (i = 1; i <= K; i++) W1[j, i] -=\
+      \ lr * (dh * x[i] + l2 * W1[j, i])\n    B1[j] -= lr * dh\n  }\n  B2 -= lr *\
+      \ d\n}\nfunction dump(   i, j, s) {\n  s = sprintf(\"{\\\"model\\\":\\\"%s\\\
+      \",\\\"hidden\\\":%d,\\\"K\\\":%d,\\\"b2\\\":%.8g,\\\"w\\\":[\", MODEL, H, K,\
+      \ B2)\n  if (MODEL == \"logreg\") { for (i = 1; i <= K; i++) s = s (i > 1 ?\
+      \ \",\" : \"\") sprintf(\"%.8g\", W[i]) }\n  else { for (j = 1; j <= H; j++)\
+      \ { s = s (j > 1 ? \",\" : \"\") sprintf(\"%.8g\", W2[j]); for (i = 1; i <=\
+      \ K; i++) s = s \",\" sprintf(\"%.8g\", W1[j, i]); s = s \",\" sprintf(\"%.8g\"\
+      , B1[j]) } }\n  return s \"]}\"\n}\nfunction load(js,   body, n, v, i, j, t)\
+      \ {\n  MODEL = get(js, \"model\"); H = get(js, \"hidden\"); K = get(js, \"K\"\
+      ); B2 = get(js, \"b2\")\n  body = js; sub(/^.*\"w\":\\[/, \"\", body); sub(/\\\
+      ].*$/, \"\", body); n = split(body, v, \",\")\n  if (MODEL == \"logreg\") {\
+      \ for (i = 1; i <= K; i++) W[i] = v[i] + 0; return }\n  t = 0; for (j = 1; j\
+      \ <= H; j++) { W2[j] = v[++t] + 0; for (i = 1; i <= K; i++) W1[j, i] = v[++t]\
+      \ + 0; B1[j] = v[++t] + 0 }\n}\n\nBEGIN { FS = \",\"; srand(7 + get(e, \"fold\"\
+      ))\n  fold = get(e, \"fold\"); epochs = get(e, \"epochs\"); lr0 = get(e, \"\
+      lr\"); l2 = get(e, \"l2\")\n  init(get(e, \"model\"), get(e, \"hidden\"), 16)\
+      \ }\n{ if ($2 == fold) { v++; VY[v] = $1; for (i = 1; i <= 16; i++) VX[v, i]\
+      \ = $(i + 2) }\n  else { t++; TY[t] = $1; for (i = 1; i <= 16; i++) TX[t, i]\
+      \ = $(i + 2); ORD[t] = t } }\nEND {\n  for (ep = 1; ep <= epochs; ep++) {\n\
+      \    for (a = t; a > 1; a--) { b = int(rand() * a) + 1; tmp = ORD[a]; ORD[a]\
+      \ = ORD[b]; ORD[b] = tmp }\n    lr = lr0 / (1 + 0.15 * (ep - 1))\n    for (a\
+      \ = 1; a <= t; a++) { r = ORD[a]; for (i = 1; i <= 16; i++) x[i] = TX[r, i];\
+      \ train_row(x, TY[r], lr, l2) } }\n  for (a = 1; a <= v; a++) { for (i = 1;\
+      \ i <= 16; i++) x[i] = VX[a, i]; p = score(x)\n    pc = (p < 1e-7 ? 1e-7 : (p\
+      \ > 1 - 1e-7 ? 1 - 1e-7 : p)); ll -= VY[a] * log(pc) + (1 - VY[a]) * log(1 -\
+      \ pc)\n    acc += ((p >= 0.5) == VY[a]); print VY[a], p > tv }\n  printf \"\
+      {\\\"cfg\\\":\\\"%s\\\",\\\"model\\\":\\\"%s\\\",\\\"hidden\\\":%d,\\\"lr\\\"\
+      :%s,\\\"l2\\\":%s,\\\"fold\\\":%d,\\\"train_rows\\\":%d,\\\"val_rows\\\":%d,\\\
+      \"logloss\\\":%.6f,\\\"accuracy\\\":%.6f\", get(e, \"cfg\"), MODEL, H, lr0,\
+      \ l2, fold, t, v, ll / v, acc / v }' \"$NEXUS_INPUT_DIR/train_pool\" > \"$T/m\"\
+      \ && printf ',\"auc\":%s}' \"$(auc \"$T/val\")\" >> \"$T/m\" && cp \"$T/m\"\
+      \ \"$NEXUS_OUTPUT_DIR/metrics\" && cat \"$T/m\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.cv_trial
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 2700000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: features
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    seed: seed
+  inputs:
+    clean:
+      required: true
+      type: string
+    seed:
+      required: true
+      type: json
+  outputs:
+    holdout:
+      required: true
+      type: string
+    schema:
+      required: true
+      type: json
+    train_pool:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v seed=\"$(v seed)\"\
+      \ -v folds=5 -v dir=\"$NEXUS_OUTPUT_DIR\" '\nBEGIN { FS = \",\" }\nNR == 1 {\
+      \ next }\n{ n++; R[n] = $0\n  v[1] = $1; v[2] = log($2 + 1); v[3] = $3; v[4]\
+      \ = $4; v[5] = $5; v[6] = $6\n  v[7] = $3 * $6; v[8] = $5 * $5; v[9] = $6 *\
+      \ $6\n  for (i = 1; i <= 9; i++) { s[i] += v[i]; ss[i] += v[i] * v[i]; X[n,\
+      \ i] = v[i] }\n  for (i = 7; i <= 13; i++) X[n, i + 3] = $i\n  Y[n] = $14 }\n\
+      END { srand(seed)\n  for (i = 1; i <= 9; i++) { mu[i] = s[i] / n; sd[i] = sqrt(ss[i]\
+      \ / n - mu[i] * mu[i]); if (sd[i] < 1e-9) sd[i] = 1 }\n  for (r = 1; r <= n;\
+      \ r++) {\n    line = \"\"\n    for (i = 1; i <= 9; i++) line = line \",\" sprintf(\"\
+      %.5f\", (X[r, i] - mu[i]) / sd[i])\n    for (i = 10; i <= 16; i++) line = line\
+      \ \",\" X[r, i]\n    if (rand() < 0.15) print Y[r] line > (dir \"/holdout\"\
+      )\n    else print Y[r] \",\" int(rand() * folds) line > (dir \"/train_pool\"\
+      )\n  }\n  printf \"{\\\"features\\\":16,\\\"names\\\":[\\\"age\\\",\\\"log_income\\\
+      \",\\\"debt_ratio\\\",\\\"credit_lines\\\",\\\"late_payments\\\",\\\"utilization\\\
+      \",\\\"debt_x_util\\\",\\\"late_sq\\\",\\\"util_sq\\\",\\\"r_north\\\",\\\"\
+      r_south\\\",\\\"r_east\\\",\\\"r_west\\\",\\\"p_basic\\\",\\\"p_plus\\\",\\\"\
+      p_premium\\\"],\\\"rows\\\":%d}\", n > (dir \"/schema\") }' \"$NEXUS_INPUT_DIR/clean\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.features
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 600000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: importance_report
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    importances:
+      required: true
+      type: json
+    schema:
+      required: true
+      type: json
+  outputs:
+    report:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "names=$(tr -d '\\n' < \"$NEXUS_INPUT_DIR/schema\" | sed 's/.*\"names\":\\[//;\
+      \ s/\\].*//; s/\"//g'); tr -d '\\n' < \"$NEXUS_INPUT_DIR/importances\" | sed\
+      \ 's/},/}\\n/g' | awk -v names=\"$names\" '\nfunction get(s, k,   m) {\n  if\
+      \ (match(s, \"\\\"\" k \"\\\":-?[0-9.eE+-]+\")) { m = substr(s, RSTART, RLENGTH);\
+      \ sub(/^\"[^\"]+\":/, \"\", m); return m + 0 }\n  if (match(s, \"\\\"\" k \"\
+      \\\":\\\"[^\\\"]*\\\"\")) { m = substr(s, RSTART, RLENGTH); sub(/^\"[^\"]+\"\
+      :\"/, \"\", m); sub(/\"$/, \"\", m); return m }\n  return \"\" }\n\nBEGIN {\
+      \ split(names, NM, \",\") }\n/\"importance\"/ { f = get($0, \"feature\"); imp[f]\
+      \ = get($0, \"importance\"); n++ }\nEND { # rank descending by importance\n\
+      \  for (i = 1; i <= 16; i++) ord[i] = i\n  for (i = 1; i <= 16; i++) for (j\
+      \ = i + 1; j <= 16; j++) if (imp[ord[j]] > imp[ord[i]]) { t = ord[i]; ord[i]\
+      \ = ord[j]; ord[j] = t }\n  printf \"{\\\"features\\\":%d,\\\"ranking\\\":[\"\
+      , n\n  for (i = 1; i <= 16; i++) printf \"%s{\\\"feature\\\":\\\"%s\\\",\\\"\
+      auc_drop\\\":%.5f}\", (i > 1 ? \",\" : \"\"), NM[ord[i]], imp[ord[i]]\n  printf\
+      \ \"]}\" }'  > \"$NEXUS_OUTPUT_DIR/report\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.importance_report
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: ingest
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    rows: rows
+    seed: seed
+  inputs:
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    raw:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v rows=\"$(v rows)\"\
+      \ -v seed=\"$(v seed)\" '\nBEGIN { srand(seed)\n  split(\"north south east west\"\
+      , REG, \" \"); split(\"basic plus premium\", PLAN, \" \")\n  reff[\"north\"\
+      ] = 0.0; reff[\"south\"] = 0.35; reff[\"east\"] = -0.2; reff[\"west\"] = 0.1\n\
+      \  peff[\"basic\"] = 0.3; peff[\"plus\"] = 0.0; peff[\"premium\"] = -0.4\n \
+      \ print \"id,age,income,debt_ratio,credit_lines,late_payments,utilization,region,plan,default\"\
+      \n  for (i = 1; i <= rows; i++) {\n    age = 18 + rand() * 62\n    u1 = rand();\
+      \ if (u1 < 1e-12) u1 = 1e-12\n    income = exp(10.4 + 0.55 * sqrt(-2 * log(u1))\
+      \ * cos(6.2831853 * rand()))\n    debt = rand() ^ 1.6\n    lines = int(rand()\
+      \ * 21)\n    u2 = rand(); if (u2 < 1e-12) u2 = 1e-12\n    late = int(-log(u2)\
+      \ * 0.9)\n    util = rand() * 1.05; if (rand() < 0.01) util = 1.5 + rand() *\
+      \ 3\n    reg = REG[int(rand() * 4) + 1]; plan = PLAN[int(rand() * 3) + 1]\n\
+      \    uc = (util > 1.2 ? 1.2 : util)\n    z = -2.2 + 1.6 * uc + 2.4 * uc * debt\
+      \ + 0.55 * late - 0.9 * (log(income) - 10.4) - 0.012 * (age - 45) + 0.04 * (lines\
+      \ - 10) + reff[reg] + peff[plan]\n    y = (rand() < 1 / (1 + exp(-z))) ? 1 :\
+      \ 0\n    sa = sprintf(\"%.1f\", age); si = sprintf(\"%.0f\", income)\n    if\
+      \ (rand() < 0.03) si = \"\"\n    if (rand() < 0.01) sa = \"\"\n    printf \"\
+      c%06d,%s,%s,%.4f,%d,%d,%.4f,%s,%s,%d\\n\", i, sa, si, debt, lines, late, util,\
+      \ reg, plan, y\n  } }'  > \"$NEXUS_OUTPUT_DIR/raw\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.ingest
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 600000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: model_card
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    min_auc: min_auc
+  inputs:
+    holdout_metrics:
+      required: true
+      type: json
+    importance:
+      required: true
+      type: json
+    interval:
+      required: true
+      type: json
+    min_auc:
+      required: true
+      type: json
+    model:
+      required: true
+      type: json
+    profile:
+      required: true
+      type: json
+    selection:
+      required: true
+      type: json
+    threshold:
+      required: true
+      type: json
+  outputs:
+    model_card:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - 'v() { tr -d ''"\n '' < "$NEXUS_INPUT_DIR/$1"; }; d="$NEXUS_INPUT_DIR"; j()
+      { tr -d "\n" < "$d/$1"; }; best=$(j selection | sed ''s/.*"best":\({[^}]*}\).*/\1/'');
+      hash=$(sha256sum "$d/model" | cut -c1-16); lo=$(j interval | grep -o ''"ci95_low":[0-9.]*''
+      | cut -d: -f2); min=$(v min_auc); status=$(awk -v lo="$lo" -v min="$min" ''BEGIN
+      { print (lo >= min) ? "approved" : "rejected" }''); top=$(j importance | sed
+      ''s/.*"ranking":\[//; s/\].*//'' | sed ''s/},{/}\n{/g'' | head -n 3 | grep -o
+      ''"feature":"[a-z_]*"'' | cut -d\" -f4 | tr "\n" , | sed "s/,$//"); printf ''{"status":"%s","model_sha256_prefix":"%s","min_auc":%s,"selected":%s,"holdout":%s,"auc_ci95":%s,"top_features":"%s","decision":%s,"data":%s}\n''
+      "$status" "$hash" "$min" "$best" "$(j holdout_metrics)" "$(j interval)" "$top"
+      "$(j threshold)" "$(j profile)" > "$NEXUS_OUTPUT_DIR/model_card" && cat "$NEXUS_OUTPUT_DIR/model_card"
+      && [ "$status" = approved ] || { echo "model rejected: AUC 95% CI lower bound
+      $lo < $min" >&2; exit 1; }'
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.model_card
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: permutation_importance
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    feature:
+      required: true
+      type: json
+    holdout:
+      required: true
+      type: string
+    holdout_metrics:
+      required: true
+      type: json
+    model:
+      required: true
+      type: json
+  map:
+    item_input: feature
+    max_fanout: 64
+    over_node_id: score_holdout
+    over_output: features_plan
+  outputs:
+    importance:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; auc() { sort -k2,2g \"$1\" | awk\
+      \ '\n{ lab[NR] = $1; sc[NR] = $2 }\nEND { n = NR; i = 1\n  while (i <= n) {\
+      \ j = i; while (j < n && sc[j + 1] == sc[i]) j++\n    r = (i + j) / 2; for (k\
+      \ = i; k <= j; k++) if (lab[k] == 1) { sum += r; pos++ }\n    i = j + 1 }\n\
+      \  neg = n - pos; if (pos == 0 || neg == 0) { print 0.5; exit }\n  printf \"\
+      %.6f\\n\", (sum - pos * (pos + 1) / 2) / (pos * neg) }'; }; f=$(tr -d \" \\\
+      n\" < \"$NEXUS_INPUT_DIR/feature\"); m=$(tr -d \"\\n\" < \"$NEXUS_INPUT_DIR/model\"\
+      ); base=$(grep -o '\"auc\":[0-9.]*' \"$NEXUS_INPUT_DIR/holdout_metrics\" | cut\
+      \ -d: -f2); awk -v m=\"$m\" -v f=\"$f\" '\nfunction get(s, k,   m) {\n  if (match(s,\
+      \ \"\\\"\" k \"\\\":-?[0-9.eE+-]+\")) { m = substr(s, RSTART, RLENGTH); sub(/^\"\
+      [^\"]+\":/, \"\", m); return m + 0 }\n  if (match(s, \"\\\"\" k \"\\\":\\\"\
+      [^\\\"]*\\\"\")) { m = substr(s, RSTART, RLENGTH); sub(/^\"[^\"]+\":\"/, \"\"\
+      , m); sub(/\"$/, \"\", m); return m }\n  return \"\" }\n\nfunction sigm(z) {\
+      \ if (z > 30) return 1; if (z < -30) return 0; return 1 / (1 + exp(-z)) }\n\
+      function tanh_(z,   e) { if (z > 15) return 1; if (z < -15) return -1; e = exp(2\
+      \ * z); return (e - 1) / (e + 1) }\nfunction init(m, h, k,   i, j) {\n  MODEL\
+      \ = m; H = h; K = k; B2 = 0\n  for (i = 1; i <= K; i++) W[i] = 0\n  if (MODEL\
+      \ == \"mlp\") for (j = 1; j <= H; j++) { B1[j] = 0; W2[j] = (rand() - 0.5) *\
+      \ 0.5\n    for (i = 1; i <= K; i++) W1[j, i] = (rand() - 0.5) * 2 / sqrt(K)\
+      \ }\n}\nfunction score(x,   i, j, z, a) {\n  if (MODEL == \"logreg\") { z =\
+      \ B2; for (i = 1; i <= K; i++) z += W[i] * x[i]; return sigm(z) }\n  z = B2\n\
+      \  for (j = 1; j <= H; j++) { a = B1[j]; for (i = 1; i <= K; i++) a += W1[j,\
+      \ i] * x[i]; HID[j] = tanh_(a); z += W2[j] * HID[j] }\n  return sigm(z)\n}\n\
+      function train_row(x, y, lr, l2,   p, d, i, j, dh) {\n  p = score(x); d = p\
+      \ - y\n  if (MODEL == \"logreg\") { for (i = 1; i <= K; i++) W[i] -= lr * (d\
+      \ * x[i] + l2 * W[i]); B2 -= lr * d; return }\n  for (j = 1; j <= H; j++) {\n\
+      \    dh = d * W2[j] * (1 - HID[j] * HID[j])\n    W2[j] -= lr * (d * HID[j] +\
+      \ l2 * W2[j])\n    for (i = 1; i <= K; i++) W1[j, i] -= lr * (dh * x[i] + l2\
+      \ * W1[j, i])\n    B1[j] -= lr * dh\n  }\n  B2 -= lr * d\n}\nfunction dump(\
+      \   i, j, s) {\n  s = sprintf(\"{\\\"model\\\":\\\"%s\\\",\\\"hidden\\\":%d,\\\
+      \"K\\\":%d,\\\"b2\\\":%.8g,\\\"w\\\":[\", MODEL, H, K, B2)\n  if (MODEL == \"\
+      logreg\") { for (i = 1; i <= K; i++) s = s (i > 1 ? \",\" : \"\") sprintf(\"\
+      %.8g\", W[i]) }\n  else { for (j = 1; j <= H; j++) { s = s (j > 1 ? \",\" :\
+      \ \"\") sprintf(\"%.8g\", W2[j]); for (i = 1; i <= K; i++) s = s \",\" sprintf(\"\
+      %.8g\", W1[j, i]); s = s \",\" sprintf(\"%.8g\", B1[j]) } }\n  return s \"]}\"\
+      \n}\nfunction load(js,   body, n, v, i, j, t) {\n  MODEL = get(js, \"model\"\
+      ); H = get(js, \"hidden\"); K = get(js, \"K\"); B2 = get(js, \"b2\")\n  body\
+      \ = js; sub(/^.*\"w\":\\[/, \"\", body); sub(/\\].*$/, \"\", body); n = split(body,\
+      \ v, \",\")\n  if (MODEL == \"logreg\") { for (i = 1; i <= K; i++) W[i] = v[i]\
+      \ + 0; return }\n  t = 0; for (j = 1; j <= H; j++) { W2[j] = v[++t] + 0; for\
+      \ (i = 1; i <= K; i++) W1[j, i] = v[++t] + 0; B1[j] = v[++t] + 0 }\n}\n\nBEGIN\
+      \ { FS = \",\"; load(m); srand(500 + f) }\n{ n++; Y[n] = $1; for (i = 1; i <=\
+      \ 16; i++) X[n, i] = $(i + 1); P[n] = X[n, f] }\nEND { for (a = n; a > 1; a--)\
+      \ { b = int(rand() * a) + 1; t = P[a]; P[a] = P[b]; P[b] = t }\n  for (r = 1;\
+      \ r <= n; r++) { for (i = 1; i <= 16; i++) x[i] = X[r, i]; x[f] = P[r]; print\
+      \ Y[r], score(x) } }' \"$NEXUS_INPUT_DIR/holdout\" > \"$T/perm\" && p=$(auc\
+      \ \"$T/perm\") && awk -v f=\"$f\" -v b=\"$base\" -v p=\"$p\" 'BEGIN { printf\
+      \ \"{\\\"feature\\\":%d,\\\"auc_permuted\\\":%s,\\\"importance\\\":%.5f}\",\
+      \ f, p, b - p }' > \"$NEXUS_OUTPUT_DIR/importance\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.permutation_importance
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 600000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: plan_experiments
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    epochs: epochs
+  inputs:
+    epochs:
+      required: true
+      type: json
+    schema:
+      required: true
+      type: json
+  outputs:
+    experiments:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v epochs=\"$(v epochs)\"\
+      \ -v folds=5 '\nBEGIN {\n  # config id | model | hidden | lr | l2\n  n = split(\"\
+      lr_a|logreg|0|0.05|0 lr_b|logreg|0|0.05|0.001 lr_c|logreg|0|0.1|0.0001 lr_d|logreg|0|0.02|0\
+      \ lr_e|logreg|0|0.1|0.01 lr_f|logreg|0|0.2|0.001 nn_a|mlp|4|0.05|0.0001 nn_b|mlp|8|0.05|0.0001\
+      \ nn_c|mlp|8|0.1|0.0001 nn_d|mlp|12|0.03|0.0001\", C, \" \")\n  printf \"[\"\
+      \n  for (c = 1; c <= n; c++) { split(C[c], p, \"|\")\n    for (f = 0; f < folds;\
+      \ f++) {\n      printf \"%s{\\\"cfg\\\":\\\"%s\\\",\\\"model\\\":\\\"%s\\\"\
+      ,\\\"hidden\\\":%s,\\\"lr\\\":%s,\\\"l2\\\":%s,\\\"epochs\\\":%d,\\\"fold\\\"\
+      :%d}\", (t++ ? \",\" : \"\"), p[1], p[2], p[3], p[4], p[5], epochs, f } }\n\
+      \  printf \"]\" }'  > \"$NEXUS_OUTPUT_DIR/experiments\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.plan_experiments
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: score_holdout
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    holdout:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    bootstrap_plan:
+      required: true
+      type: json
+    features_plan:
+      required: true
+      type: json
+    holdout_metrics:
+      required: true
+      type: json
+    scores:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "auc() { sort -k2,2g \"$1\" | awk '\n{ lab[NR] = $1; sc[NR] = $2 }\nEND { n\
+      \ = NR; i = 1\n  while (i <= n) { j = i; while (j < n && sc[j + 1] == sc[i])\
+      \ j++\n    r = (i + j) / 2; for (k = i; k <= j; k++) if (lab[k] == 1) { sum\
+      \ += r; pos++ }\n    i = j + 1 }\n  neg = n - pos; if (pos == 0 || neg == 0)\
+      \ { print 0.5; exit }\n  printf \"%.6f\\n\", (sum - pos * (pos + 1) / 2) / (pos\
+      \ * neg) }'; }; m=$(tr -d \"\\n\" < \"$NEXUS_INPUT_DIR/model\"); awk -v m=\"\
+      $m\" '\nfunction get(s, k,   m) {\n  if (match(s, \"\\\"\" k \"\\\":-?[0-9.eE+-]+\"\
+      )) { m = substr(s, RSTART, RLENGTH); sub(/^\"[^\"]+\":/, \"\", m); return m\
+      \ + 0 }\n  if (match(s, \"\\\"\" k \"\\\":\\\"[^\\\"]*\\\"\")) { m = substr(s,\
+      \ RSTART, RLENGTH); sub(/^\"[^\"]+\":\"/, \"\", m); sub(/\"$/, \"\", m); return\
+      \ m }\n  return \"\" }\n\nfunction sigm(z) { if (z > 30) return 1; if (z < -30)\
+      \ return 0; return 1 / (1 + exp(-z)) }\nfunction tanh_(z,   e) { if (z > 15)\
+      \ return 1; if (z < -15) return -1; e = exp(2 * z); return (e - 1) / (e + 1)\
+      \ }\nfunction init(m, h, k,   i, j) {\n  MODEL = m; H = h; K = k; B2 = 0\n \
+      \ for (i = 1; i <= K; i++) W[i] = 0\n  if (MODEL == \"mlp\") for (j = 1; j <=\
+      \ H; j++) { B1[j] = 0; W2[j] = (rand() - 0.5) * 0.5\n    for (i = 1; i <= K;\
+      \ i++) W1[j, i] = (rand() - 0.5) * 2 / sqrt(K) }\n}\nfunction score(x,   i,\
+      \ j, z, a) {\n  if (MODEL == \"logreg\") { z = B2; for (i = 1; i <= K; i++)\
+      \ z += W[i] * x[i]; return sigm(z) }\n  z = B2\n  for (j = 1; j <= H; j++) {\
+      \ a = B1[j]; for (i = 1; i <= K; i++) a += W1[j, i] * x[i]; HID[j] = tanh_(a);\
+      \ z += W2[j] * HID[j] }\n  return sigm(z)\n}\nfunction train_row(x, y, lr, l2,\
+      \   p, d, i, j, dh) {\n  p = score(x); d = p - y\n  if (MODEL == \"logreg\"\
+      ) { for (i = 1; i <= K; i++) W[i] -= lr * (d * x[i] + l2 * W[i]); B2 -= lr *\
+      \ d; return }\n  for (j = 1; j <= H; j++) {\n    dh = d * W2[j] * (1 - HID[j]\
+      \ * HID[j])\n    W2[j] -= lr * (d * HID[j] + l2 * W2[j])\n    for (i = 1; i\
+      \ <= K; i++) W1[j, i] -= lr * (dh * x[i] + l2 * W1[j, i])\n    B1[j] -= lr *\
+      \ dh\n  }\n  B2 -= lr * d\n}\nfunction dump(   i, j, s) {\n  s = sprintf(\"\
+      {\\\"model\\\":\\\"%s\\\",\\\"hidden\\\":%d,\\\"K\\\":%d,\\\"b2\\\":%.8g,\\\"\
+      w\\\":[\", MODEL, H, K, B2)\n  if (MODEL == \"logreg\") { for (i = 1; i <= K;\
+      \ i++) s = s (i > 1 ? \",\" : \"\") sprintf(\"%.8g\", W[i]) }\n  else { for\
+      \ (j = 1; j <= H; j++) { s = s (j > 1 ? \",\" : \"\") sprintf(\"%.8g\", W2[j]);\
+      \ for (i = 1; i <= K; i++) s = s \",\" sprintf(\"%.8g\", W1[j, i]); s = s \"\
+      ,\" sprintf(\"%.8g\", B1[j]) } }\n  return s \"]}\"\n}\nfunction load(js,  \
+      \ body, n, v, i, j, t) {\n  MODEL = get(js, \"model\"); H = get(js, \"hidden\"\
+      ); K = get(js, \"K\"); B2 = get(js, \"b2\")\n  body = js; sub(/^.*\"w\":\\[/,\
+      \ \"\", body); sub(/\\].*$/, \"\", body); n = split(body, v, \",\")\n  if (MODEL\
+      \ == \"logreg\") { for (i = 1; i <= K; i++) W[i] = v[i] + 0; return }\n  t =\
+      \ 0; for (j = 1; j <= H; j++) { W2[j] = v[++t] + 0; for (i = 1; i <= K; i++)\
+      \ W1[j, i] = v[++t] + 0; B1[j] = v[++t] + 0 }\n}\n\nBEGIN { FS = \",\"; load(m)\
+      \ }\n{ for (i = 1; i <= 16; i++) x[i] = $(i + 2 - 1); print $1, score(x) }'\
+      \ \"$NEXUS_INPUT_DIR/holdout\" > \"$NEXUS_OUTPUT_DIR/scores\" && a=$(auc \"\
+      $NEXUS_OUTPUT_DIR/scores\") && awk -v a=\"$a\" '\n{ n++; pos += $1; p = $2;\
+      \ pc = (p < 1e-7 ? 1e-7 : (p > 1 - 1e-7 ? 1 - 1e-7 : p)); ll -= $1 * log(pc)\
+      \ + (1 - $1) * log(1 - pc) }\nEND { printf \"{\\\"rows\\\":%d,\\\"default_rate\\\
+      \":%.4f,\\\"auc\\\":%s,\\\"logloss\\\":%.6f}\", n, pos / n, a, ll / n }' \"\
+      $NEXUS_OUTPUT_DIR/scores\" > \"$NEXUS_OUTPUT_DIR/holdout_metrics\" && awk -v\
+      \ b=30 'BEGIN { printf \"[\"; for (i = 1; i <= b; i++) printf \"%s%d\", (i >\
+      \ 1 ? \",\" : \"\"), i; printf \"]\" }' > \"$NEXUS_OUTPUT_DIR/bootstrap_plan\"\
+      \ && awk -v k=16 'BEGIN { printf \"[\"; for (i = 1; i <= k; i++) printf \"%s%d\"\
+      , (i > 1 ? \",\" : \"\"), i; printf \"]\" }' > \"$NEXUS_OUTPUT_DIR/features_plan\"\
+      \ && cat \"$NEXUS_OUTPUT_DIR/holdout_metrics\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.score_holdout
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 600000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: select_config
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    epochs: epochs
+  inputs:
+    epochs:
+      required: true
+      type: json
+    trials:
+      required: true
+      type: json
+  outputs:
+    selection:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; tr -d '\\n' < \"$NEXUS_INPUT_DIR/trials\"\
+      \ | sed 's/},/}\\n/g' | awk -v epochs=\"$(v epochs)\" '\nfunction get(s, k,\
+      \   m) {\n  if (match(s, \"\\\"\" k \"\\\":-?[0-9.eE+-]+\")) { m = substr(s,\
+      \ RSTART, RLENGTH); sub(/^\"[^\"]+\":/, \"\", m); return m + 0 }\n  if (match(s,\
+      \ \"\\\"\" k \"\\\":\\\"[^\\\"]*\\\"\")) { m = substr(s, RSTART, RLENGTH); sub(/^\"\
+      [^\"]+\":\"/, \"\", m); sub(/\"$/, \"\", m); return m }\n  return \"\" }\n\n\
+      /\"auc\"/ { c = get($0, \"cfg\"); a = get($0, \"auc\"); n[c]++; s[c] += a; ss[c]\
+      \ += a * a; ok++\n  model[c] = get($0, \"model\"); hid[c] = get($0, \"hidden\"\
+      ); lr[c] = get($0, \"lr\"); l2[c] = get($0, \"l2\") }\n/null/ { failed++ }\n\
+      END {\n  if (!ok) { print \"no trial succeeded\" > \"/dev/stderr\"; exit 1 }\n\
+      \  for (c in n) { m = s[c] / n[c]; sd = sqrt(ss[c] / n[c] - m * m); if (best\
+      \ == \"\" || m > bm) { bm = m; best = c }\n    lb = lb sprintf(\"%s{\\\"cfg\\\
+      \":\\\"%s\\\",\\\"model\\\":\\\"%s\\\",\\\"hidden\\\":%d,\\\"mean_auc\\\":%.5f,\\\
+      \"std_auc\\\":%.5f,\\\"folds\\\":%d}\", (lb == \"\" ? \"\" : \",\\n\"), c, model[c],\
+      \ hid[c], m, sd, n[c]) }\n  printf \"{\\\"best\\\":{\\\"cfg\\\":\\\"%s\\\",\\\
+      \"model\\\":\\\"%s\\\",\\\"hidden\\\":%d,\\\"lr\\\":%s,\\\"l2\\\":%s,\\\"epochs\\\
+      \":%d,\\\"mean_cv_auc\\\":%.5f},\\\"trials_ok\\\":%d,\\\"trials_failed\\\":%d,\\\
+      \"leaderboard\\\":[\\n%s\\n]}\\n\", best, model[best], hid[best], lr[best],\
+      \ l2[best], epochs, bm, ok, failed, lb }'  > \"$NEXUS_OUTPUT_DIR/selection\"\
+      \ && cat \"$NEXUS_OUTPUT_DIR/selection\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.select_config
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_DONE
+  version: 1
+- id: train_final
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    selection:
+      required: true
+      type: json
+    train_pool:
+      required: true
+      type: string
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "sel=$(tr -d '\\n' < \"$NEXUS_INPUT_DIR/selection\" | sed 's/.*\"best\":{//;\
+      \ s/}.*//'); awk -v sel=\"$sel\" '\nfunction get(s, k,   m) {\n  if (match(s,\
+      \ \"\\\"\" k \"\\\":-?[0-9.eE+-]+\")) { m = substr(s, RSTART, RLENGTH); sub(/^\"\
+      [^\"]+\":/, \"\", m); return m + 0 }\n  if (match(s, \"\\\"\" k \"\\\":\\\"\
+      [^\\\"]*\\\"\")) { m = substr(s, RSTART, RLENGTH); sub(/^\"[^\"]+\":\"/, \"\"\
+      , m); sub(/\"$/, \"\", m); return m }\n  return \"\" }\n\nfunction sigm(z) {\
+      \ if (z > 30) return 1; if (z < -30) return 0; return 1 / (1 + exp(-z)) }\n\
+      function tanh_(z,   e) { if (z > 15) return 1; if (z < -15) return -1; e = exp(2\
+      \ * z); return (e - 1) / (e + 1) }\nfunction init(m, h, k,   i, j) {\n  MODEL\
+      \ = m; H = h; K = k; B2 = 0\n  for (i = 1; i <= K; i++) W[i] = 0\n  if (MODEL\
+      \ == \"mlp\") for (j = 1; j <= H; j++) { B1[j] = 0; W2[j] = (rand() - 0.5) *\
+      \ 0.5\n    for (i = 1; i <= K; i++) W1[j, i] = (rand() - 0.5) * 2 / sqrt(K)\
+      \ }\n}\nfunction score(x,   i, j, z, a) {\n  if (MODEL == \"logreg\") { z =\
+      \ B2; for (i = 1; i <= K; i++) z += W[i] * x[i]; return sigm(z) }\n  z = B2\n\
+      \  for (j = 1; j <= H; j++) { a = B1[j]; for (i = 1; i <= K; i++) a += W1[j,\
+      \ i] * x[i]; HID[j] = tanh_(a); z += W2[j] * HID[j] }\n  return sigm(z)\n}\n\
+      function train_row(x, y, lr, l2,   p, d, i, j, dh) {\n  p = score(x); d = p\
+      \ - y\n  if (MODEL == \"logreg\") { for (i = 1; i <= K; i++) W[i] -= lr * (d\
+      \ * x[i] + l2 * W[i]); B2 -= lr * d; return }\n  for (j = 1; j <= H; j++) {\n\
+      \    dh = d * W2[j] * (1 - HID[j] * HID[j])\n    W2[j] -= lr * (d * HID[j] +\
+      \ l2 * W2[j])\n    for (i = 1; i <= K; i++) W1[j, i] -= lr * (dh * x[i] + l2\
+      \ * W1[j, i])\n    B1[j] -= lr * dh\n  }\n  B2 -= lr * d\n}\nfunction dump(\
+      \   i, j, s) {\n  s = sprintf(\"{\\\"model\\\":\\\"%s\\\",\\\"hidden\\\":%d,\\\
+      \"K\\\":%d,\\\"b2\\\":%.8g,\\\"w\\\":[\", MODEL, H, K, B2)\n  if (MODEL == \"\
+      logreg\") { for (i = 1; i <= K; i++) s = s (i > 1 ? \",\" : \"\") sprintf(\"\
+      %.8g\", W[i]) }\n  else { for (j = 1; j <= H; j++) { s = s (j > 1 ? \",\" :\
+      \ \"\") sprintf(\"%.8g\", W2[j]); for (i = 1; i <= K; i++) s = s \",\" sprintf(\"\
+      %.8g\", W1[j, i]); s = s \",\" sprintf(\"%.8g\", B1[j]) } }\n  return s \"]}\"\
+      \n}\nfunction load(js,   body, n, v, i, j, t) {\n  MODEL = get(js, \"model\"\
+      ); H = get(js, \"hidden\"); K = get(js, \"K\"); B2 = get(js, \"b2\")\n  body\
+      \ = js; sub(/^.*\"w\":\\[/, \"\", body); sub(/\\].*$/, \"\", body); n = split(body,\
+      \ v, \",\")\n  if (MODEL == \"logreg\") { for (i = 1; i <= K; i++) W[i] = v[i]\
+      \ + 0; return }\n  t = 0; for (j = 1; j <= H; j++) { W2[j] = v[++t] + 0; for\
+      \ (i = 1; i <= K; i++) W1[j, i] = v[++t] + 0; B1[j] = v[++t] + 0 }\n}\n\nBEGIN\
+      \ { FS = \",\"; srand(99); s = \"{\" sel \"}\"\n  epochs = int(get(s, \"epochs\"\
+      ) * 1.5); lr0 = get(s, \"lr\"); l2 = get(s, \"l2\")\n  init(get(s, \"model\"\
+      ), get(s, \"hidden\"), 16) }\n{ t++; TY[t] = $1; for (i = 1; i <= 16; i++) TX[t,\
+      \ i] = $(i + 2); ORD[t] = t }\nEND {\n  for (ep = 1; ep <= epochs; ep++) {\n\
+      \    for (a = t; a > 1; a--) { b = int(rand() * a) + 1; tmp = ORD[a]; ORD[a]\
+      \ = ORD[b]; ORD[b] = tmp }\n    lr = lr0 / (1 + 0.15 * (ep - 1))\n    for (a\
+      \ = 1; a <= t; a++) { r = ORD[a]; for (i = 1; i <= 16; i++) x[i] = TX[r, i];\
+      \ train_row(x, TY[r], lr, l2) } }\n  print dump() }' \"$NEXUS_INPUT_DIR/train_pool\"\
+      \ > \"$NEXUS_OUTPUT_DIR/model\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: credit.train_final
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 2700000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+

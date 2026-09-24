@@ -34,6 +34,27 @@ On a laptop the GPUs are **simulated** (the dev agents advertise capacity and
 are labelled `simulated=true`): `gpu_scheduling` tests the scheduler's GPU
 accounting, queueing and device assignment, not CUDA.
 
+### Long-running workloads
+
+Two bigger pipelines that take minutes of real computation (no sleeps):
+
+| Example | What it does | Runtime* |
+|---|---|---|
+| [`credit_risk_ml/`](credit_risk_ml/) | A credit-default classifier end to end: 60k messy customer rows → cleaning → feature engineering → a 50-trial cross-validated search over logistic regression and a small neural network → final fit → 30-way bootstrap AUC confidence interval → permutation feature importance → cost-weighted threshold → a model card that fails the run if the AUC interval's lower bound is below `min_auc` | ~11 min at the default `epochs=10` |
+| [`image_processing_gpu/`](image_processing_gpu/) | 8 shards of images: CPU acquisition → denoise + contrast stretch on an **A10** → Sobel edges, Otsu threshold and connected-component object counting on an **A100** → a contact sheet of every edge map → an accuracy gate against the known object counts | ~7 min |
+
+\* Measured on a 10-CPU Docker Desktop cluster. Scale with `epochs`/`rows` and
+`images`/`size`.
+
+```bash
+make k8s-dev-test-long                                   # both
+examples/image_processing_gpu/fetch-contact-sheet.sh     # open the resulting image
+```
+
+The image workflow's GPU stages reserve real (simulated) GPU slots and are
+assigned distinct device indices, but the pixel math itself runs on the CPU in
+`awk`. On real GPU nodes, swap each stage's runtime for a CUDA/OpenCV image.
+
 ## Setup (once)
 
 ```bash

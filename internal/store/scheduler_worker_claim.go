@@ -468,6 +468,19 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.queue, a.priority,
    AND COALESCE((a.resource_request ->> 'memory_bytes')::bigint, 0)  <= $8
    AND COALESCE((a.resource_request ->> 'gpu_count')::bigint, 0)     <= $9
    AND COALESCE((a.resource_request ->> 'disk_bytes')::bigint, 0)    <= $10
+   -- GPU model and per-device memory: what THIS worker's GPUs are, not what
+   -- is free right now. A task the worker can never run must not be its
+   -- candidate at all. Before this, a queue whose oldest task wanted an A10
+   -- stopped every A100 worker's claim at that task (the fit check below
+   -- treats a non-fit as "wait your turn"), so two A100s sat idle behind one
+   -- busy A10 while A100 work waited. Waiting stays correct for a capacity
+   -- shortage; it was never correct for a model this worker does not have.
+   AND (COALESCE((a.resource_request ->> 'gpu_count')::bigint, 0) = 0
+        OR COALESCE(a.resource_request ->> 'gpu_kind', '') = ''
+        OR a.resource_request ->> 'gpu_kind' =
+           (SELECT capacity ->> 'gpu_kind' FROM workers WHERE id = $11))
+   AND COALESCE((a.resource_request ->> 'gpu_memory_bytes')::bigint, 0) <=
+       COALESCE((SELECT (capacity ->> 'gpu_memory_bytes')::bigint FROM workers WHERE id = $11), 0)
    ` + extraWhere + `
  ORDER BY ` + orderBy + `
  LIMIT 1

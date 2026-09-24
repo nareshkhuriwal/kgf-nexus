@@ -1,0 +1,2313 @@
+api_version: nexus.dev/v1
+description: '8 shards of images: CPU acquire, GPU (A10) denoise+contrast stretch,
+  GPU (A100) edges+object counting, contact sheet, accuracy gate.'
+edges:
+- from_node_id: acquire_00
+  output_to_input:
+    raw: raw
+  to_node_id: enhance_00
+- from_node_id: acquire_01
+  output_to_input:
+    raw: raw
+  to_node_id: enhance_01
+- from_node_id: acquire_02
+  output_to_input:
+    raw: raw
+  to_node_id: enhance_02
+- from_node_id: acquire_03
+  output_to_input:
+    raw: raw
+  to_node_id: enhance_03
+- from_node_id: acquire_04
+  output_to_input:
+    raw: raw
+  to_node_id: enhance_04
+- from_node_id: acquire_05
+  output_to_input:
+    raw: raw
+  to_node_id: enhance_05
+- from_node_id: acquire_06
+  output_to_input:
+    raw: raw
+  to_node_id: enhance_06
+- from_node_id: acquire_07
+  output_to_input:
+    raw: raw
+  to_node_id: enhance_07
+- from_node_id: detect_00
+  output_to_input:
+    edges_00: edges
+  to_node_id: contact_sheet
+- from_node_id: detect_00
+  output_to_input:
+    detections_00: detections
+  to_node_id: quality_report
+- from_node_id: detect_01
+  output_to_input:
+    edges_01: edges
+  to_node_id: contact_sheet
+- from_node_id: detect_01
+  output_to_input:
+    detections_01: detections
+  to_node_id: quality_report
+- from_node_id: detect_02
+  output_to_input:
+    edges_02: edges
+  to_node_id: contact_sheet
+- from_node_id: detect_02
+  output_to_input:
+    detections_02: detections
+  to_node_id: quality_report
+- from_node_id: detect_03
+  output_to_input:
+    edges_03: edges
+  to_node_id: contact_sheet
+- from_node_id: detect_03
+  output_to_input:
+    detections_03: detections
+  to_node_id: quality_report
+- from_node_id: detect_04
+  output_to_input:
+    edges_04: edges
+  to_node_id: contact_sheet
+- from_node_id: detect_04
+  output_to_input:
+    detections_04: detections
+  to_node_id: quality_report
+- from_node_id: detect_05
+  output_to_input:
+    edges_05: edges
+  to_node_id: contact_sheet
+- from_node_id: detect_05
+  output_to_input:
+    detections_05: detections
+  to_node_id: quality_report
+- from_node_id: detect_06
+  output_to_input:
+    edges_06: edges
+  to_node_id: contact_sheet
+- from_node_id: detect_06
+  output_to_input:
+    detections_06: detections
+  to_node_id: quality_report
+- from_node_id: detect_07
+  output_to_input:
+    edges_07: edges
+  to_node_id: contact_sheet
+- from_node_id: detect_07
+  output_to_input:
+    detections_07: detections
+  to_node_id: quality_report
+- from_node_id: enhance_00
+  output_to_input:
+    enhanced: enhanced
+  to_node_id: detect_00
+- from_node_id: enhance_00
+  output_to_input:
+    stats_00: stats
+  to_node_id: quality_report
+- from_node_id: enhance_01
+  output_to_input:
+    enhanced: enhanced
+  to_node_id: detect_01
+- from_node_id: enhance_01
+  output_to_input:
+    stats_01: stats
+  to_node_id: quality_report
+- from_node_id: enhance_02
+  output_to_input:
+    enhanced: enhanced
+  to_node_id: detect_02
+- from_node_id: enhance_02
+  output_to_input:
+    stats_02: stats
+  to_node_id: quality_report
+- from_node_id: enhance_03
+  output_to_input:
+    enhanced: enhanced
+  to_node_id: detect_03
+- from_node_id: enhance_03
+  output_to_input:
+    stats_03: stats
+  to_node_id: quality_report
+- from_node_id: enhance_04
+  output_to_input:
+    enhanced: enhanced
+  to_node_id: detect_04
+- from_node_id: enhance_04
+  output_to_input:
+    stats_04: stats
+  to_node_id: quality_report
+- from_node_id: enhance_05
+  output_to_input:
+    enhanced: enhanced
+  to_node_id: detect_05
+- from_node_id: enhance_05
+  output_to_input:
+    stats_05: stats
+  to_node_id: quality_report
+- from_node_id: enhance_06
+  output_to_input:
+    enhanced: enhanced
+  to_node_id: detect_06
+- from_node_id: enhance_06
+  output_to_input:
+    stats_06: stats
+  to_node_id: quality_report
+- from_node_id: enhance_07
+  output_to_input:
+    enhanced: enhanced
+  to_node_id: detect_07
+- from_node_id: enhance_07
+  output_to_input:
+    stats_07: stats
+  to_node_id: quality_report
+name: image-processing-gpu
+namespace: default
+params:
+  denoise_passes:
+    default_json: '2'
+    type: int
+  images:
+    default_json: '4'
+    type: int
+  min_accuracy:
+    default_json: '0.9'
+    type: float
+  seed:
+    default_json: '5'
+    type: int
+  size:
+    default_json: '384'
+    type: int
+run_timeout_ms: 10800000
+tasks:
+- id: acquire_00
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    shard: '0'
+  input_params:
+    images: images
+    seed: seed
+    size: size
+  inputs:
+    images:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+    shard:
+      required: true
+      type: json
+    size:
+      required: true
+      type: json
+  outputs:
+    raw:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v shard=\"$(v shard)\"\
+      \ -v images=\"$(v images)\" -v size=\"$(v size)\" -v seed=\"$(v seed)\" '\n\
+      function emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta; print\
+      \ W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x = 0; x\
+      \ < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line }\n\
+      }\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nBEGIN { srand(seed\
+      \ * 1000 + shard * 17); W = size; HH = size\n  for (im = 1; im <= images; im++)\
+      \ {\n    nobj = 3 + int(rand() * 7); placed = 0; tries = 0\n    while (placed\
+      \ < nobj && tries < 500) { tries++\n      r = int(size * (0.035 + rand() * 0.055));\
+      \ cx = r + 4 + int(rand() * (size - 2 * r - 8)); cy = r + 4 + int(rand() * (size\
+      \ - 2 * r - 8))\n      ok = 1; for (k = 1; k <= placed; k++) { dx = cx - OX[k];\
+      \ dy = cy - OY[k]; if (sqrt(dx * dx + dy * dy) < r + OR[k] + 10) { ok = 0; break\
+      \ } }\n      if (ok) { placed++; OX[placed] = cx; OY[placed] = cy; OR[placed]\
+      \ = r; OS[placed] = (rand() < 0.5); OI[placed] = 200 + int(rand() * 40) } }\n\
+      \    for (y = 0; y < HH; y++) for (x = 0; x < W; x++) {\n      v = 40 + 70 *\
+      \ x / W + 20 * y / HH\n      for (k = 1; k <= placed; k++) { dx = x - OX[k];\
+      \ dy = y - OY[k]\n        if (OS[k] ? (dx * dx + dy * dy <= OR[k] * OR[k]) :\
+      \ (dx >= -OR[k] && dx <= OR[k] && dy >= -OR[k] * 0.7 && dy <= OR[k] * 0.7))\
+      \ { v = OI[k]; break } }\n      Q[x, y] = clamp(v + (rand() - 0.5) * 60) }\n\
+      \    emit(Q, sprintf(\"id=s%02d-i%02d objects=%d\", shard, im, placed)) } }'\
+      \  > \"$NEXUS_OUTPUT_DIR/raw\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.acquire
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: acquire_01
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    shard: '1'
+  input_params:
+    images: images
+    seed: seed
+    size: size
+  inputs:
+    images:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+    shard:
+      required: true
+      type: json
+    size:
+      required: true
+      type: json
+  outputs:
+    raw:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v shard=\"$(v shard)\"\
+      \ -v images=\"$(v images)\" -v size=\"$(v size)\" -v seed=\"$(v seed)\" '\n\
+      function emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta; print\
+      \ W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x = 0; x\
+      \ < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line }\n\
+      }\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nBEGIN { srand(seed\
+      \ * 1000 + shard * 17); W = size; HH = size\n  for (im = 1; im <= images; im++)\
+      \ {\n    nobj = 3 + int(rand() * 7); placed = 0; tries = 0\n    while (placed\
+      \ < nobj && tries < 500) { tries++\n      r = int(size * (0.035 + rand() * 0.055));\
+      \ cx = r + 4 + int(rand() * (size - 2 * r - 8)); cy = r + 4 + int(rand() * (size\
+      \ - 2 * r - 8))\n      ok = 1; for (k = 1; k <= placed; k++) { dx = cx - OX[k];\
+      \ dy = cy - OY[k]; if (sqrt(dx * dx + dy * dy) < r + OR[k] + 10) { ok = 0; break\
+      \ } }\n      if (ok) { placed++; OX[placed] = cx; OY[placed] = cy; OR[placed]\
+      \ = r; OS[placed] = (rand() < 0.5); OI[placed] = 200 + int(rand() * 40) } }\n\
+      \    for (y = 0; y < HH; y++) for (x = 0; x < W; x++) {\n      v = 40 + 70 *\
+      \ x / W + 20 * y / HH\n      for (k = 1; k <= placed; k++) { dx = x - OX[k];\
+      \ dy = y - OY[k]\n        if (OS[k] ? (dx * dx + dy * dy <= OR[k] * OR[k]) :\
+      \ (dx >= -OR[k] && dx <= OR[k] && dy >= -OR[k] * 0.7 && dy <= OR[k] * 0.7))\
+      \ { v = OI[k]; break } }\n      Q[x, y] = clamp(v + (rand() - 0.5) * 60) }\n\
+      \    emit(Q, sprintf(\"id=s%02d-i%02d objects=%d\", shard, im, placed)) } }'\
+      \  > \"$NEXUS_OUTPUT_DIR/raw\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.acquire
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: acquire_02
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    shard: '2'
+  input_params:
+    images: images
+    seed: seed
+    size: size
+  inputs:
+    images:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+    shard:
+      required: true
+      type: json
+    size:
+      required: true
+      type: json
+  outputs:
+    raw:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v shard=\"$(v shard)\"\
+      \ -v images=\"$(v images)\" -v size=\"$(v size)\" -v seed=\"$(v seed)\" '\n\
+      function emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta; print\
+      \ W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x = 0; x\
+      \ < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line }\n\
+      }\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nBEGIN { srand(seed\
+      \ * 1000 + shard * 17); W = size; HH = size\n  for (im = 1; im <= images; im++)\
+      \ {\n    nobj = 3 + int(rand() * 7); placed = 0; tries = 0\n    while (placed\
+      \ < nobj && tries < 500) { tries++\n      r = int(size * (0.035 + rand() * 0.055));\
+      \ cx = r + 4 + int(rand() * (size - 2 * r - 8)); cy = r + 4 + int(rand() * (size\
+      \ - 2 * r - 8))\n      ok = 1; for (k = 1; k <= placed; k++) { dx = cx - OX[k];\
+      \ dy = cy - OY[k]; if (sqrt(dx * dx + dy * dy) < r + OR[k] + 10) { ok = 0; break\
+      \ } }\n      if (ok) { placed++; OX[placed] = cx; OY[placed] = cy; OR[placed]\
+      \ = r; OS[placed] = (rand() < 0.5); OI[placed] = 200 + int(rand() * 40) } }\n\
+      \    for (y = 0; y < HH; y++) for (x = 0; x < W; x++) {\n      v = 40 + 70 *\
+      \ x / W + 20 * y / HH\n      for (k = 1; k <= placed; k++) { dx = x - OX[k];\
+      \ dy = y - OY[k]\n        if (OS[k] ? (dx * dx + dy * dy <= OR[k] * OR[k]) :\
+      \ (dx >= -OR[k] && dx <= OR[k] && dy >= -OR[k] * 0.7 && dy <= OR[k] * 0.7))\
+      \ { v = OI[k]; break } }\n      Q[x, y] = clamp(v + (rand() - 0.5) * 60) }\n\
+      \    emit(Q, sprintf(\"id=s%02d-i%02d objects=%d\", shard, im, placed)) } }'\
+      \  > \"$NEXUS_OUTPUT_DIR/raw\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.acquire
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: acquire_03
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    shard: '3'
+  input_params:
+    images: images
+    seed: seed
+    size: size
+  inputs:
+    images:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+    shard:
+      required: true
+      type: json
+    size:
+      required: true
+      type: json
+  outputs:
+    raw:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v shard=\"$(v shard)\"\
+      \ -v images=\"$(v images)\" -v size=\"$(v size)\" -v seed=\"$(v seed)\" '\n\
+      function emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta; print\
+      \ W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x = 0; x\
+      \ < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line }\n\
+      }\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nBEGIN { srand(seed\
+      \ * 1000 + shard * 17); W = size; HH = size\n  for (im = 1; im <= images; im++)\
+      \ {\n    nobj = 3 + int(rand() * 7); placed = 0; tries = 0\n    while (placed\
+      \ < nobj && tries < 500) { tries++\n      r = int(size * (0.035 + rand() * 0.055));\
+      \ cx = r + 4 + int(rand() * (size - 2 * r - 8)); cy = r + 4 + int(rand() * (size\
+      \ - 2 * r - 8))\n      ok = 1; for (k = 1; k <= placed; k++) { dx = cx - OX[k];\
+      \ dy = cy - OY[k]; if (sqrt(dx * dx + dy * dy) < r + OR[k] + 10) { ok = 0; break\
+      \ } }\n      if (ok) { placed++; OX[placed] = cx; OY[placed] = cy; OR[placed]\
+      \ = r; OS[placed] = (rand() < 0.5); OI[placed] = 200 + int(rand() * 40) } }\n\
+      \    for (y = 0; y < HH; y++) for (x = 0; x < W; x++) {\n      v = 40 + 70 *\
+      \ x / W + 20 * y / HH\n      for (k = 1; k <= placed; k++) { dx = x - OX[k];\
+      \ dy = y - OY[k]\n        if (OS[k] ? (dx * dx + dy * dy <= OR[k] * OR[k]) :\
+      \ (dx >= -OR[k] && dx <= OR[k] && dy >= -OR[k] * 0.7 && dy <= OR[k] * 0.7))\
+      \ { v = OI[k]; break } }\n      Q[x, y] = clamp(v + (rand() - 0.5) * 60) }\n\
+      \    emit(Q, sprintf(\"id=s%02d-i%02d objects=%d\", shard, im, placed)) } }'\
+      \  > \"$NEXUS_OUTPUT_DIR/raw\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.acquire
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: acquire_04
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    shard: '4'
+  input_params:
+    images: images
+    seed: seed
+    size: size
+  inputs:
+    images:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+    shard:
+      required: true
+      type: json
+    size:
+      required: true
+      type: json
+  outputs:
+    raw:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v shard=\"$(v shard)\"\
+      \ -v images=\"$(v images)\" -v size=\"$(v size)\" -v seed=\"$(v seed)\" '\n\
+      function emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta; print\
+      \ W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x = 0; x\
+      \ < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line }\n\
+      }\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nBEGIN { srand(seed\
+      \ * 1000 + shard * 17); W = size; HH = size\n  for (im = 1; im <= images; im++)\
+      \ {\n    nobj = 3 + int(rand() * 7); placed = 0; tries = 0\n    while (placed\
+      \ < nobj && tries < 500) { tries++\n      r = int(size * (0.035 + rand() * 0.055));\
+      \ cx = r + 4 + int(rand() * (size - 2 * r - 8)); cy = r + 4 + int(rand() * (size\
+      \ - 2 * r - 8))\n      ok = 1; for (k = 1; k <= placed; k++) { dx = cx - OX[k];\
+      \ dy = cy - OY[k]; if (sqrt(dx * dx + dy * dy) < r + OR[k] + 10) { ok = 0; break\
+      \ } }\n      if (ok) { placed++; OX[placed] = cx; OY[placed] = cy; OR[placed]\
+      \ = r; OS[placed] = (rand() < 0.5); OI[placed] = 200 + int(rand() * 40) } }\n\
+      \    for (y = 0; y < HH; y++) for (x = 0; x < W; x++) {\n      v = 40 + 70 *\
+      \ x / W + 20 * y / HH\n      for (k = 1; k <= placed; k++) { dx = x - OX[k];\
+      \ dy = y - OY[k]\n        if (OS[k] ? (dx * dx + dy * dy <= OR[k] * OR[k]) :\
+      \ (dx >= -OR[k] && dx <= OR[k] && dy >= -OR[k] * 0.7 && dy <= OR[k] * 0.7))\
+      \ { v = OI[k]; break } }\n      Q[x, y] = clamp(v + (rand() - 0.5) * 60) }\n\
+      \    emit(Q, sprintf(\"id=s%02d-i%02d objects=%d\", shard, im, placed)) } }'\
+      \  > \"$NEXUS_OUTPUT_DIR/raw\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.acquire
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: acquire_05
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    shard: '5'
+  input_params:
+    images: images
+    seed: seed
+    size: size
+  inputs:
+    images:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+    shard:
+      required: true
+      type: json
+    size:
+      required: true
+      type: json
+  outputs:
+    raw:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v shard=\"$(v shard)\"\
+      \ -v images=\"$(v images)\" -v size=\"$(v size)\" -v seed=\"$(v seed)\" '\n\
+      function emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta; print\
+      \ W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x = 0; x\
+      \ < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line }\n\
+      }\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nBEGIN { srand(seed\
+      \ * 1000 + shard * 17); W = size; HH = size\n  for (im = 1; im <= images; im++)\
+      \ {\n    nobj = 3 + int(rand() * 7); placed = 0; tries = 0\n    while (placed\
+      \ < nobj && tries < 500) { tries++\n      r = int(size * (0.035 + rand() * 0.055));\
+      \ cx = r + 4 + int(rand() * (size - 2 * r - 8)); cy = r + 4 + int(rand() * (size\
+      \ - 2 * r - 8))\n      ok = 1; for (k = 1; k <= placed; k++) { dx = cx - OX[k];\
+      \ dy = cy - OY[k]; if (sqrt(dx * dx + dy * dy) < r + OR[k] + 10) { ok = 0; break\
+      \ } }\n      if (ok) { placed++; OX[placed] = cx; OY[placed] = cy; OR[placed]\
+      \ = r; OS[placed] = (rand() < 0.5); OI[placed] = 200 + int(rand() * 40) } }\n\
+      \    for (y = 0; y < HH; y++) for (x = 0; x < W; x++) {\n      v = 40 + 70 *\
+      \ x / W + 20 * y / HH\n      for (k = 1; k <= placed; k++) { dx = x - OX[k];\
+      \ dy = y - OY[k]\n        if (OS[k] ? (dx * dx + dy * dy <= OR[k] * OR[k]) :\
+      \ (dx >= -OR[k] && dx <= OR[k] && dy >= -OR[k] * 0.7 && dy <= OR[k] * 0.7))\
+      \ { v = OI[k]; break } }\n      Q[x, y] = clamp(v + (rand() - 0.5) * 60) }\n\
+      \    emit(Q, sprintf(\"id=s%02d-i%02d objects=%d\", shard, im, placed)) } }'\
+      \  > \"$NEXUS_OUTPUT_DIR/raw\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.acquire
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: acquire_06
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    shard: '6'
+  input_params:
+    images: images
+    seed: seed
+    size: size
+  inputs:
+    images:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+    shard:
+      required: true
+      type: json
+    size:
+      required: true
+      type: json
+  outputs:
+    raw:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v shard=\"$(v shard)\"\
+      \ -v images=\"$(v images)\" -v size=\"$(v size)\" -v seed=\"$(v seed)\" '\n\
+      function emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta; print\
+      \ W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x = 0; x\
+      \ < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line }\n\
+      }\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nBEGIN { srand(seed\
+      \ * 1000 + shard * 17); W = size; HH = size\n  for (im = 1; im <= images; im++)\
+      \ {\n    nobj = 3 + int(rand() * 7); placed = 0; tries = 0\n    while (placed\
+      \ < nobj && tries < 500) { tries++\n      r = int(size * (0.035 + rand() * 0.055));\
+      \ cx = r + 4 + int(rand() * (size - 2 * r - 8)); cy = r + 4 + int(rand() * (size\
+      \ - 2 * r - 8))\n      ok = 1; for (k = 1; k <= placed; k++) { dx = cx - OX[k];\
+      \ dy = cy - OY[k]; if (sqrt(dx * dx + dy * dy) < r + OR[k] + 10) { ok = 0; break\
+      \ } }\n      if (ok) { placed++; OX[placed] = cx; OY[placed] = cy; OR[placed]\
+      \ = r; OS[placed] = (rand() < 0.5); OI[placed] = 200 + int(rand() * 40) } }\n\
+      \    for (y = 0; y < HH; y++) for (x = 0; x < W; x++) {\n      v = 40 + 70 *\
+      \ x / W + 20 * y / HH\n      for (k = 1; k <= placed; k++) { dx = x - OX[k];\
+      \ dy = y - OY[k]\n        if (OS[k] ? (dx * dx + dy * dy <= OR[k] * OR[k]) :\
+      \ (dx >= -OR[k] && dx <= OR[k] && dy >= -OR[k] * 0.7 && dy <= OR[k] * 0.7))\
+      \ { v = OI[k]; break } }\n      Q[x, y] = clamp(v + (rand() - 0.5) * 60) }\n\
+      \    emit(Q, sprintf(\"id=s%02d-i%02d objects=%d\", shard, im, placed)) } }'\
+      \  > \"$NEXUS_OUTPUT_DIR/raw\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.acquire
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: acquire_07
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    shard: '7'
+  input_params:
+    images: images
+    seed: seed
+    size: size
+  inputs:
+    images:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+    shard:
+      required: true
+      type: json
+    size:
+      required: true
+      type: json
+  outputs:
+    raw:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v shard=\"$(v shard)\"\
+      \ -v images=\"$(v images)\" -v size=\"$(v size)\" -v seed=\"$(v seed)\" '\n\
+      function emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta; print\
+      \ W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x = 0; x\
+      \ < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line }\n\
+      }\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nBEGIN { srand(seed\
+      \ * 1000 + shard * 17); W = size; HH = size\n  for (im = 1; im <= images; im++)\
+      \ {\n    nobj = 3 + int(rand() * 7); placed = 0; tries = 0\n    while (placed\
+      \ < nobj && tries < 500) { tries++\n      r = int(size * (0.035 + rand() * 0.055));\
+      \ cx = r + 4 + int(rand() * (size - 2 * r - 8)); cy = r + 4 + int(rand() * (size\
+      \ - 2 * r - 8))\n      ok = 1; for (k = 1; k <= placed; k++) { dx = cx - OX[k];\
+      \ dy = cy - OY[k]; if (sqrt(dx * dx + dy * dy) < r + OR[k] + 10) { ok = 0; break\
+      \ } }\n      if (ok) { placed++; OX[placed] = cx; OY[placed] = cy; OR[placed]\
+      \ = r; OS[placed] = (rand() < 0.5); OI[placed] = 200 + int(rand() * 40) } }\n\
+      \    for (y = 0; y < HH; y++) for (x = 0; x < W; x++) {\n      v = 40 + 70 *\
+      \ x / W + 20 * y / HH\n      for (k = 1; k <= placed; k++) { dx = x - OX[k];\
+      \ dy = y - OY[k]\n        if (OS[k] ? (dx * dx + dy * dy <= OR[k] * OR[k]) :\
+      \ (dx >= -OR[k] && dx <= OR[k] && dy >= -OR[k] * 0.7 && dy <= OR[k] * 0.7))\
+      \ { v = OI[k]; break } }\n      Q[x, y] = clamp(v + (rand() - 0.5) * 60) }\n\
+      \    emit(Q, sprintf(\"id=s%02d-i%02d objects=%d\", shard, im, placed)) } }'\
+      \  > \"$NEXUS_OUTPUT_DIR/raw\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.acquire
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: contact_sheet
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    edges_00:
+      required: true
+      type: string
+    edges_01:
+      required: true
+      type: string
+    edges_02:
+      required: true
+      type: string
+    edges_03:
+      required: true
+      type: string
+    edges_04:
+      required: true
+      type: string
+    edges_05:
+      required: true
+      type: string
+    edges_06:
+      required: true
+      type: string
+    edges_07:
+      required: true
+      type: string
+  outputs:
+    contact_sheet:
+      required: true
+      type: string
+    sheet_info:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "cd \"$NEXUS_INPUT_DIR\" && cat edges_* | awk -v ts=96 -v cols=\"$(grep -c \"\
+      ^P2\" edges_00)\" -v info=\"$NEXUS_OUTPUT_DIR/sheet_info\" '\nfunction process(\
+      \   x, y, sx, sy, row, col) {\n  row = int((NIMG - 1) / cols); col = (NIMG -\
+      \ 1) % cols\n  for (y = 0; y < ts; y++) for (x = 0; x < ts; x++) { sx = int(x\
+      \ * W / ts); sy = int(y * HH / ts)\n    S[col * (ts + 4) + 2 + x, row * (ts\
+      \ + 4) + 2 + y] = P[sx, sy] }\n}\n\n$1 == \"P2\" { st = 1; META = \"\"; next\
+      \ }\nst == 1 && /^#/ { META = substr($0, 3); next }\nst == 1 { W = $1; HH =\
+      \ $2; st = 2; next }\nst == 2 { st = 3; y = 0; next }\nst == 3 { for (x = 1;\
+      \ x <= NF; x++) P[x - 1, y] = $x + 0; y++; if (y == HH) { NIMG++; process();\
+      \ st = 0 } }\n\nEND { rows = int((NIMG + cols - 1) / cols); SW = cols * (ts\
+      \ + 4); SH = rows * (ts + 4)\n  print \"P2\"; print \"# nexus contact sheet:\
+      \ \" NIMG \" edge maps\"; print SW, SH; print 255\n  for (y = 0; y < SH; y++)\
+      \ { line = \"\"; for (x = 0; x < SW; x++) line = line (x ? \" \" : \"\") int(S[x,\
+      \ y] + 0); print line }\n  printf \"{\\\"images\\\":%d,\\\"columns\\\":%d,\\\
+      \"width\\\":%d,\\\"height\\\":%d,\\\"format\\\":\\\"PGM (P2)\\\"}\", NIMG, cols,\
+      \ SW, SH > info }'  > \"$NEXUS_OUTPUT_DIR/contact_sheet\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.contact_sheet
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: detect_00
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    enhanced:
+      required: true
+      type: string
+  outputs:
+    detections:
+      required: true
+      type: json
+    edges:
+      required: true
+      type: string
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a100
+      gpu_memory_bytes: 42949672960
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "place=\"\\\"worker\\\":\\\"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\
+      \"\"; awk -v place=\"$place\" -v minarea=60 -v dets=\"$NEXUS_OUTPUT_DIR/detections\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   x, y, gx, gy, m, i, h, tot, sumall, wb, sb, best, t, mb, mf, bw,\
+      \ thr, ne, comps, sp, cx, cy, area, id, truth) {\n  # Sobel gradient magnitude\
+      \ -> the edge map.\n  ne = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W;\
+      \ x++) {\n    if (x == 0 || y == 0 || x == W - 1 || y == HH - 1) { E[x, y] =\
+      \ 0; continue }\n    gx = P[x + 1, y - 1] + 2 * P[x + 1, y] + P[x + 1, y + 1]\
+      \ - P[x - 1, y - 1] - 2 * P[x - 1, y] - P[x - 1, y + 1]\n    gy = P[x - 1, y\
+      \ + 1] + 2 * P[x, y + 1] + P[x + 1, y + 1] - P[x - 1, y - 1] - 2 * P[x, y -\
+      \ 1] - P[x + 1, y - 1]\n    m = sqrt(gx * gx + gy * gy) / 4; E[x, y] = clamp(m);\
+      \ if (m > 60) ne++ }\n  emit(E, META \" edges=sobel\")\n  # Otsu: the intensity\
+      \ threshold that best separates two classes.\n  for (i = 0; i < 256; i++) h[i]\
+      \ = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n\
+      \  tot = W * HH; sumall = 0; for (i = 0; i < 256; i++) sumall += i * h[i]\n\
+      \  wb = 0; sb = 0; best = -1; thr = 128\n  for (t = 0; t < 256; t++) { wb +=\
+      \ h[t]; if (wb == 0) continue; if (wb == tot) break\n    sb += t * h[t]; mb\
+      \ = sb / wb; mf = (sumall - sb) / (tot - wb); bw = wb * (tot - wb) * (mb - mf)\
+      \ * (mb - mf)\n    if (bw > best) { best = bw; thr = t } }\n  # Connected components\
+      \ (4-neighbour) over the bright class, via an explicit stack.\n  for (y = 0;\
+      \ y < HH; y++) for (x = 0; x < W; x++) L[x, y] = 0\n  comps = 0\n  for (y =\
+      \ 0; y < HH; y++) for (x = 0; x < W; x++) {\n    if (P[x, y] <= thr || L[x,\
+      \ y]) continue\n    id++; area = 0; sp = 1; SX[1] = x; SY[1] = y; L[x, y] =\
+      \ id\n    while (sp > 0) { cx = SX[sp]; cy = SY[sp]; sp--; area++\n      if\
+      \ (cx > 0 && !L[cx - 1, cy] && P[cx - 1, cy] > thr) { L[cx - 1, cy] = id; sp++;\
+      \ SX[sp] = cx - 1; SY[sp] = cy }\n      if (cx < W - 1 && !L[cx + 1, cy] &&\
+      \ P[cx + 1, cy] > thr) { L[cx + 1, cy] = id; sp++; SX[sp] = cx + 1; SY[sp] =\
+      \ cy }\n      if (cy > 0 && !L[cx, cy - 1] && P[cx, cy - 1] > thr) { L[cx, cy\
+      \ - 1] = id; sp++; SX[sp] = cx; SY[sp] = cy - 1 }\n      if (cy < HH - 1 &&\
+      \ !L[cx, cy + 1] && P[cx, cy + 1] > thr) { L[cx, cy + 1] = id; sp++; SX[sp]\
+      \ = cx; SY[sp] = cy + 1 } }\n    if (area >= minarea) comps++ }\n  truth = META;\
+      \ sub(/.*objects=/, \"\", truth); sub(/ .*/, \"\", truth)\n  tag = META; sub(/^id=/,\
+      \ \"\", tag); sub(/ .*/, \"\", tag)\n  DT = DT sprintf(\"%s{\\\"image\\\":\\\
+      \"%s\\\",\\\"true_objects\\\":%d,\\\"detected\\\":%d,\\\"otsu_threshold\\\"\
+      :%d,\\\"edge_density\\\":%.4f}\", (NIMG > 1 ? \",\" : \"\"), tag, truth, comps,\
+      \ thr, ne / tot)\n}\n\n$1 == \"P2\" { st = 1; META = \"\"; next }\nst == 1 &&\
+      \ /^#/ { META = substr($0, 3); next }\nst == 1 { W = $1; HH = $2; st = 2; next\
+      \ }\nst == 2 { st = 3; y = 0; next }\nst == 3 { for (x = 1; x <= NF; x++) P[x\
+      \ - 1, y] = $x + 0; y++; if (y == HH) { NIMG++; process(); st = 0 } }\n\nEND\
+      \ { printf \"{\\\"stage\\\":\\\"detect\\\",\\\"images\\\":%d,%s,\\\"per_image\\\
+      \":[%s]}\", NIMG, place, DT > dets }' \"$NEXUS_INPUT_DIR/enhanced\" > \"$NEXUS_OUTPUT_DIR/edges\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.detect
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: detect_01
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    enhanced:
+      required: true
+      type: string
+  outputs:
+    detections:
+      required: true
+      type: json
+    edges:
+      required: true
+      type: string
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a100
+      gpu_memory_bytes: 42949672960
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "place=\"\\\"worker\\\":\\\"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\
+      \"\"; awk -v place=\"$place\" -v minarea=60 -v dets=\"$NEXUS_OUTPUT_DIR/detections\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   x, y, gx, gy, m, i, h, tot, sumall, wb, sb, best, t, mb, mf, bw,\
+      \ thr, ne, comps, sp, cx, cy, area, id, truth) {\n  # Sobel gradient magnitude\
+      \ -> the edge map.\n  ne = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W;\
+      \ x++) {\n    if (x == 0 || y == 0 || x == W - 1 || y == HH - 1) { E[x, y] =\
+      \ 0; continue }\n    gx = P[x + 1, y - 1] + 2 * P[x + 1, y] + P[x + 1, y + 1]\
+      \ - P[x - 1, y - 1] - 2 * P[x - 1, y] - P[x - 1, y + 1]\n    gy = P[x - 1, y\
+      \ + 1] + 2 * P[x, y + 1] + P[x + 1, y + 1] - P[x - 1, y - 1] - 2 * P[x, y -\
+      \ 1] - P[x + 1, y - 1]\n    m = sqrt(gx * gx + gy * gy) / 4; E[x, y] = clamp(m);\
+      \ if (m > 60) ne++ }\n  emit(E, META \" edges=sobel\")\n  # Otsu: the intensity\
+      \ threshold that best separates two classes.\n  for (i = 0; i < 256; i++) h[i]\
+      \ = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n\
+      \  tot = W * HH; sumall = 0; for (i = 0; i < 256; i++) sumall += i * h[i]\n\
+      \  wb = 0; sb = 0; best = -1; thr = 128\n  for (t = 0; t < 256; t++) { wb +=\
+      \ h[t]; if (wb == 0) continue; if (wb == tot) break\n    sb += t * h[t]; mb\
+      \ = sb / wb; mf = (sumall - sb) / (tot - wb); bw = wb * (tot - wb) * (mb - mf)\
+      \ * (mb - mf)\n    if (bw > best) { best = bw; thr = t } }\n  # Connected components\
+      \ (4-neighbour) over the bright class, via an explicit stack.\n  for (y = 0;\
+      \ y < HH; y++) for (x = 0; x < W; x++) L[x, y] = 0\n  comps = 0\n  for (y =\
+      \ 0; y < HH; y++) for (x = 0; x < W; x++) {\n    if (P[x, y] <= thr || L[x,\
+      \ y]) continue\n    id++; area = 0; sp = 1; SX[1] = x; SY[1] = y; L[x, y] =\
+      \ id\n    while (sp > 0) { cx = SX[sp]; cy = SY[sp]; sp--; area++\n      if\
+      \ (cx > 0 && !L[cx - 1, cy] && P[cx - 1, cy] > thr) { L[cx - 1, cy] = id; sp++;\
+      \ SX[sp] = cx - 1; SY[sp] = cy }\n      if (cx < W - 1 && !L[cx + 1, cy] &&\
+      \ P[cx + 1, cy] > thr) { L[cx + 1, cy] = id; sp++; SX[sp] = cx + 1; SY[sp] =\
+      \ cy }\n      if (cy > 0 && !L[cx, cy - 1] && P[cx, cy - 1] > thr) { L[cx, cy\
+      \ - 1] = id; sp++; SX[sp] = cx; SY[sp] = cy - 1 }\n      if (cy < HH - 1 &&\
+      \ !L[cx, cy + 1] && P[cx, cy + 1] > thr) { L[cx, cy + 1] = id; sp++; SX[sp]\
+      \ = cx; SY[sp] = cy + 1 } }\n    if (area >= minarea) comps++ }\n  truth = META;\
+      \ sub(/.*objects=/, \"\", truth); sub(/ .*/, \"\", truth)\n  tag = META; sub(/^id=/,\
+      \ \"\", tag); sub(/ .*/, \"\", tag)\n  DT = DT sprintf(\"%s{\\\"image\\\":\\\
+      \"%s\\\",\\\"true_objects\\\":%d,\\\"detected\\\":%d,\\\"otsu_threshold\\\"\
+      :%d,\\\"edge_density\\\":%.4f}\", (NIMG > 1 ? \",\" : \"\"), tag, truth, comps,\
+      \ thr, ne / tot)\n}\n\n$1 == \"P2\" { st = 1; META = \"\"; next }\nst == 1 &&\
+      \ /^#/ { META = substr($0, 3); next }\nst == 1 { W = $1; HH = $2; st = 2; next\
+      \ }\nst == 2 { st = 3; y = 0; next }\nst == 3 { for (x = 1; x <= NF; x++) P[x\
+      \ - 1, y] = $x + 0; y++; if (y == HH) { NIMG++; process(); st = 0 } }\n\nEND\
+      \ { printf \"{\\\"stage\\\":\\\"detect\\\",\\\"images\\\":%d,%s,\\\"per_image\\\
+      \":[%s]}\", NIMG, place, DT > dets }' \"$NEXUS_INPUT_DIR/enhanced\" > \"$NEXUS_OUTPUT_DIR/edges\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.detect
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: detect_02
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    enhanced:
+      required: true
+      type: string
+  outputs:
+    detections:
+      required: true
+      type: json
+    edges:
+      required: true
+      type: string
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a100
+      gpu_memory_bytes: 42949672960
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "place=\"\\\"worker\\\":\\\"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\
+      \"\"; awk -v place=\"$place\" -v minarea=60 -v dets=\"$NEXUS_OUTPUT_DIR/detections\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   x, y, gx, gy, m, i, h, tot, sumall, wb, sb, best, t, mb, mf, bw,\
+      \ thr, ne, comps, sp, cx, cy, area, id, truth) {\n  # Sobel gradient magnitude\
+      \ -> the edge map.\n  ne = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W;\
+      \ x++) {\n    if (x == 0 || y == 0 || x == W - 1 || y == HH - 1) { E[x, y] =\
+      \ 0; continue }\n    gx = P[x + 1, y - 1] + 2 * P[x + 1, y] + P[x + 1, y + 1]\
+      \ - P[x - 1, y - 1] - 2 * P[x - 1, y] - P[x - 1, y + 1]\n    gy = P[x - 1, y\
+      \ + 1] + 2 * P[x, y + 1] + P[x + 1, y + 1] - P[x - 1, y - 1] - 2 * P[x, y -\
+      \ 1] - P[x + 1, y - 1]\n    m = sqrt(gx * gx + gy * gy) / 4; E[x, y] = clamp(m);\
+      \ if (m > 60) ne++ }\n  emit(E, META \" edges=sobel\")\n  # Otsu: the intensity\
+      \ threshold that best separates two classes.\n  for (i = 0; i < 256; i++) h[i]\
+      \ = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n\
+      \  tot = W * HH; sumall = 0; for (i = 0; i < 256; i++) sumall += i * h[i]\n\
+      \  wb = 0; sb = 0; best = -1; thr = 128\n  for (t = 0; t < 256; t++) { wb +=\
+      \ h[t]; if (wb == 0) continue; if (wb == tot) break\n    sb += t * h[t]; mb\
+      \ = sb / wb; mf = (sumall - sb) / (tot - wb); bw = wb * (tot - wb) * (mb - mf)\
+      \ * (mb - mf)\n    if (bw > best) { best = bw; thr = t } }\n  # Connected components\
+      \ (4-neighbour) over the bright class, via an explicit stack.\n  for (y = 0;\
+      \ y < HH; y++) for (x = 0; x < W; x++) L[x, y] = 0\n  comps = 0\n  for (y =\
+      \ 0; y < HH; y++) for (x = 0; x < W; x++) {\n    if (P[x, y] <= thr || L[x,\
+      \ y]) continue\n    id++; area = 0; sp = 1; SX[1] = x; SY[1] = y; L[x, y] =\
+      \ id\n    while (sp > 0) { cx = SX[sp]; cy = SY[sp]; sp--; area++\n      if\
+      \ (cx > 0 && !L[cx - 1, cy] && P[cx - 1, cy] > thr) { L[cx - 1, cy] = id; sp++;\
+      \ SX[sp] = cx - 1; SY[sp] = cy }\n      if (cx < W - 1 && !L[cx + 1, cy] &&\
+      \ P[cx + 1, cy] > thr) { L[cx + 1, cy] = id; sp++; SX[sp] = cx + 1; SY[sp] =\
+      \ cy }\n      if (cy > 0 && !L[cx, cy - 1] && P[cx, cy - 1] > thr) { L[cx, cy\
+      \ - 1] = id; sp++; SX[sp] = cx; SY[sp] = cy - 1 }\n      if (cy < HH - 1 &&\
+      \ !L[cx, cy + 1] && P[cx, cy + 1] > thr) { L[cx, cy + 1] = id; sp++; SX[sp]\
+      \ = cx; SY[sp] = cy + 1 } }\n    if (area >= minarea) comps++ }\n  truth = META;\
+      \ sub(/.*objects=/, \"\", truth); sub(/ .*/, \"\", truth)\n  tag = META; sub(/^id=/,\
+      \ \"\", tag); sub(/ .*/, \"\", tag)\n  DT = DT sprintf(\"%s{\\\"image\\\":\\\
+      \"%s\\\",\\\"true_objects\\\":%d,\\\"detected\\\":%d,\\\"otsu_threshold\\\"\
+      :%d,\\\"edge_density\\\":%.4f}\", (NIMG > 1 ? \",\" : \"\"), tag, truth, comps,\
+      \ thr, ne / tot)\n}\n\n$1 == \"P2\" { st = 1; META = \"\"; next }\nst == 1 &&\
+      \ /^#/ { META = substr($0, 3); next }\nst == 1 { W = $1; HH = $2; st = 2; next\
+      \ }\nst == 2 { st = 3; y = 0; next }\nst == 3 { for (x = 1; x <= NF; x++) P[x\
+      \ - 1, y] = $x + 0; y++; if (y == HH) { NIMG++; process(); st = 0 } }\n\nEND\
+      \ { printf \"{\\\"stage\\\":\\\"detect\\\",\\\"images\\\":%d,%s,\\\"per_image\\\
+      \":[%s]}\", NIMG, place, DT > dets }' \"$NEXUS_INPUT_DIR/enhanced\" > \"$NEXUS_OUTPUT_DIR/edges\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.detect
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: detect_03
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    enhanced:
+      required: true
+      type: string
+  outputs:
+    detections:
+      required: true
+      type: json
+    edges:
+      required: true
+      type: string
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a100
+      gpu_memory_bytes: 42949672960
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "place=\"\\\"worker\\\":\\\"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\
+      \"\"; awk -v place=\"$place\" -v minarea=60 -v dets=\"$NEXUS_OUTPUT_DIR/detections\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   x, y, gx, gy, m, i, h, tot, sumall, wb, sb, best, t, mb, mf, bw,\
+      \ thr, ne, comps, sp, cx, cy, area, id, truth) {\n  # Sobel gradient magnitude\
+      \ -> the edge map.\n  ne = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W;\
+      \ x++) {\n    if (x == 0 || y == 0 || x == W - 1 || y == HH - 1) { E[x, y] =\
+      \ 0; continue }\n    gx = P[x + 1, y - 1] + 2 * P[x + 1, y] + P[x + 1, y + 1]\
+      \ - P[x - 1, y - 1] - 2 * P[x - 1, y] - P[x - 1, y + 1]\n    gy = P[x - 1, y\
+      \ + 1] + 2 * P[x, y + 1] + P[x + 1, y + 1] - P[x - 1, y - 1] - 2 * P[x, y -\
+      \ 1] - P[x + 1, y - 1]\n    m = sqrt(gx * gx + gy * gy) / 4; E[x, y] = clamp(m);\
+      \ if (m > 60) ne++ }\n  emit(E, META \" edges=sobel\")\n  # Otsu: the intensity\
+      \ threshold that best separates two classes.\n  for (i = 0; i < 256; i++) h[i]\
+      \ = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n\
+      \  tot = W * HH; sumall = 0; for (i = 0; i < 256; i++) sumall += i * h[i]\n\
+      \  wb = 0; sb = 0; best = -1; thr = 128\n  for (t = 0; t < 256; t++) { wb +=\
+      \ h[t]; if (wb == 0) continue; if (wb == tot) break\n    sb += t * h[t]; mb\
+      \ = sb / wb; mf = (sumall - sb) / (tot - wb); bw = wb * (tot - wb) * (mb - mf)\
+      \ * (mb - mf)\n    if (bw > best) { best = bw; thr = t } }\n  # Connected components\
+      \ (4-neighbour) over the bright class, via an explicit stack.\n  for (y = 0;\
+      \ y < HH; y++) for (x = 0; x < W; x++) L[x, y] = 0\n  comps = 0\n  for (y =\
+      \ 0; y < HH; y++) for (x = 0; x < W; x++) {\n    if (P[x, y] <= thr || L[x,\
+      \ y]) continue\n    id++; area = 0; sp = 1; SX[1] = x; SY[1] = y; L[x, y] =\
+      \ id\n    while (sp > 0) { cx = SX[sp]; cy = SY[sp]; sp--; area++\n      if\
+      \ (cx > 0 && !L[cx - 1, cy] && P[cx - 1, cy] > thr) { L[cx - 1, cy] = id; sp++;\
+      \ SX[sp] = cx - 1; SY[sp] = cy }\n      if (cx < W - 1 && !L[cx + 1, cy] &&\
+      \ P[cx + 1, cy] > thr) { L[cx + 1, cy] = id; sp++; SX[sp] = cx + 1; SY[sp] =\
+      \ cy }\n      if (cy > 0 && !L[cx, cy - 1] && P[cx, cy - 1] > thr) { L[cx, cy\
+      \ - 1] = id; sp++; SX[sp] = cx; SY[sp] = cy - 1 }\n      if (cy < HH - 1 &&\
+      \ !L[cx, cy + 1] && P[cx, cy + 1] > thr) { L[cx, cy + 1] = id; sp++; SX[sp]\
+      \ = cx; SY[sp] = cy + 1 } }\n    if (area >= minarea) comps++ }\n  truth = META;\
+      \ sub(/.*objects=/, \"\", truth); sub(/ .*/, \"\", truth)\n  tag = META; sub(/^id=/,\
+      \ \"\", tag); sub(/ .*/, \"\", tag)\n  DT = DT sprintf(\"%s{\\\"image\\\":\\\
+      \"%s\\\",\\\"true_objects\\\":%d,\\\"detected\\\":%d,\\\"otsu_threshold\\\"\
+      :%d,\\\"edge_density\\\":%.4f}\", (NIMG > 1 ? \",\" : \"\"), tag, truth, comps,\
+      \ thr, ne / tot)\n}\n\n$1 == \"P2\" { st = 1; META = \"\"; next }\nst == 1 &&\
+      \ /^#/ { META = substr($0, 3); next }\nst == 1 { W = $1; HH = $2; st = 2; next\
+      \ }\nst == 2 { st = 3; y = 0; next }\nst == 3 { for (x = 1; x <= NF; x++) P[x\
+      \ - 1, y] = $x + 0; y++; if (y == HH) { NIMG++; process(); st = 0 } }\n\nEND\
+      \ { printf \"{\\\"stage\\\":\\\"detect\\\",\\\"images\\\":%d,%s,\\\"per_image\\\
+      \":[%s]}\", NIMG, place, DT > dets }' \"$NEXUS_INPUT_DIR/enhanced\" > \"$NEXUS_OUTPUT_DIR/edges\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.detect
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: detect_04
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    enhanced:
+      required: true
+      type: string
+  outputs:
+    detections:
+      required: true
+      type: json
+    edges:
+      required: true
+      type: string
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a100
+      gpu_memory_bytes: 42949672960
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "place=\"\\\"worker\\\":\\\"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\
+      \"\"; awk -v place=\"$place\" -v minarea=60 -v dets=\"$NEXUS_OUTPUT_DIR/detections\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   x, y, gx, gy, m, i, h, tot, sumall, wb, sb, best, t, mb, mf, bw,\
+      \ thr, ne, comps, sp, cx, cy, area, id, truth) {\n  # Sobel gradient magnitude\
+      \ -> the edge map.\n  ne = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W;\
+      \ x++) {\n    if (x == 0 || y == 0 || x == W - 1 || y == HH - 1) { E[x, y] =\
+      \ 0; continue }\n    gx = P[x + 1, y - 1] + 2 * P[x + 1, y] + P[x + 1, y + 1]\
+      \ - P[x - 1, y - 1] - 2 * P[x - 1, y] - P[x - 1, y + 1]\n    gy = P[x - 1, y\
+      \ + 1] + 2 * P[x, y + 1] + P[x + 1, y + 1] - P[x - 1, y - 1] - 2 * P[x, y -\
+      \ 1] - P[x + 1, y - 1]\n    m = sqrt(gx * gx + gy * gy) / 4; E[x, y] = clamp(m);\
+      \ if (m > 60) ne++ }\n  emit(E, META \" edges=sobel\")\n  # Otsu: the intensity\
+      \ threshold that best separates two classes.\n  for (i = 0; i < 256; i++) h[i]\
+      \ = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n\
+      \  tot = W * HH; sumall = 0; for (i = 0; i < 256; i++) sumall += i * h[i]\n\
+      \  wb = 0; sb = 0; best = -1; thr = 128\n  for (t = 0; t < 256; t++) { wb +=\
+      \ h[t]; if (wb == 0) continue; if (wb == tot) break\n    sb += t * h[t]; mb\
+      \ = sb / wb; mf = (sumall - sb) / (tot - wb); bw = wb * (tot - wb) * (mb - mf)\
+      \ * (mb - mf)\n    if (bw > best) { best = bw; thr = t } }\n  # Connected components\
+      \ (4-neighbour) over the bright class, via an explicit stack.\n  for (y = 0;\
+      \ y < HH; y++) for (x = 0; x < W; x++) L[x, y] = 0\n  comps = 0\n  for (y =\
+      \ 0; y < HH; y++) for (x = 0; x < W; x++) {\n    if (P[x, y] <= thr || L[x,\
+      \ y]) continue\n    id++; area = 0; sp = 1; SX[1] = x; SY[1] = y; L[x, y] =\
+      \ id\n    while (sp > 0) { cx = SX[sp]; cy = SY[sp]; sp--; area++\n      if\
+      \ (cx > 0 && !L[cx - 1, cy] && P[cx - 1, cy] > thr) { L[cx - 1, cy] = id; sp++;\
+      \ SX[sp] = cx - 1; SY[sp] = cy }\n      if (cx < W - 1 && !L[cx + 1, cy] &&\
+      \ P[cx + 1, cy] > thr) { L[cx + 1, cy] = id; sp++; SX[sp] = cx + 1; SY[sp] =\
+      \ cy }\n      if (cy > 0 && !L[cx, cy - 1] && P[cx, cy - 1] > thr) { L[cx, cy\
+      \ - 1] = id; sp++; SX[sp] = cx; SY[sp] = cy - 1 }\n      if (cy < HH - 1 &&\
+      \ !L[cx, cy + 1] && P[cx, cy + 1] > thr) { L[cx, cy + 1] = id; sp++; SX[sp]\
+      \ = cx; SY[sp] = cy + 1 } }\n    if (area >= minarea) comps++ }\n  truth = META;\
+      \ sub(/.*objects=/, \"\", truth); sub(/ .*/, \"\", truth)\n  tag = META; sub(/^id=/,\
+      \ \"\", tag); sub(/ .*/, \"\", tag)\n  DT = DT sprintf(\"%s{\\\"image\\\":\\\
+      \"%s\\\",\\\"true_objects\\\":%d,\\\"detected\\\":%d,\\\"otsu_threshold\\\"\
+      :%d,\\\"edge_density\\\":%.4f}\", (NIMG > 1 ? \",\" : \"\"), tag, truth, comps,\
+      \ thr, ne / tot)\n}\n\n$1 == \"P2\" { st = 1; META = \"\"; next }\nst == 1 &&\
+      \ /^#/ { META = substr($0, 3); next }\nst == 1 { W = $1; HH = $2; st = 2; next\
+      \ }\nst == 2 { st = 3; y = 0; next }\nst == 3 { for (x = 1; x <= NF; x++) P[x\
+      \ - 1, y] = $x + 0; y++; if (y == HH) { NIMG++; process(); st = 0 } }\n\nEND\
+      \ { printf \"{\\\"stage\\\":\\\"detect\\\",\\\"images\\\":%d,%s,\\\"per_image\\\
+      \":[%s]}\", NIMG, place, DT > dets }' \"$NEXUS_INPUT_DIR/enhanced\" > \"$NEXUS_OUTPUT_DIR/edges\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.detect
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: detect_05
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    enhanced:
+      required: true
+      type: string
+  outputs:
+    detections:
+      required: true
+      type: json
+    edges:
+      required: true
+      type: string
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a100
+      gpu_memory_bytes: 42949672960
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "place=\"\\\"worker\\\":\\\"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\
+      \"\"; awk -v place=\"$place\" -v minarea=60 -v dets=\"$NEXUS_OUTPUT_DIR/detections\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   x, y, gx, gy, m, i, h, tot, sumall, wb, sb, best, t, mb, mf, bw,\
+      \ thr, ne, comps, sp, cx, cy, area, id, truth) {\n  # Sobel gradient magnitude\
+      \ -> the edge map.\n  ne = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W;\
+      \ x++) {\n    if (x == 0 || y == 0 || x == W - 1 || y == HH - 1) { E[x, y] =\
+      \ 0; continue }\n    gx = P[x + 1, y - 1] + 2 * P[x + 1, y] + P[x + 1, y + 1]\
+      \ - P[x - 1, y - 1] - 2 * P[x - 1, y] - P[x - 1, y + 1]\n    gy = P[x - 1, y\
+      \ + 1] + 2 * P[x, y + 1] + P[x + 1, y + 1] - P[x - 1, y - 1] - 2 * P[x, y -\
+      \ 1] - P[x + 1, y - 1]\n    m = sqrt(gx * gx + gy * gy) / 4; E[x, y] = clamp(m);\
+      \ if (m > 60) ne++ }\n  emit(E, META \" edges=sobel\")\n  # Otsu: the intensity\
+      \ threshold that best separates two classes.\n  for (i = 0; i < 256; i++) h[i]\
+      \ = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n\
+      \  tot = W * HH; sumall = 0; for (i = 0; i < 256; i++) sumall += i * h[i]\n\
+      \  wb = 0; sb = 0; best = -1; thr = 128\n  for (t = 0; t < 256; t++) { wb +=\
+      \ h[t]; if (wb == 0) continue; if (wb == tot) break\n    sb += t * h[t]; mb\
+      \ = sb / wb; mf = (sumall - sb) / (tot - wb); bw = wb * (tot - wb) * (mb - mf)\
+      \ * (mb - mf)\n    if (bw > best) { best = bw; thr = t } }\n  # Connected components\
+      \ (4-neighbour) over the bright class, via an explicit stack.\n  for (y = 0;\
+      \ y < HH; y++) for (x = 0; x < W; x++) L[x, y] = 0\n  comps = 0\n  for (y =\
+      \ 0; y < HH; y++) for (x = 0; x < W; x++) {\n    if (P[x, y] <= thr || L[x,\
+      \ y]) continue\n    id++; area = 0; sp = 1; SX[1] = x; SY[1] = y; L[x, y] =\
+      \ id\n    while (sp > 0) { cx = SX[sp]; cy = SY[sp]; sp--; area++\n      if\
+      \ (cx > 0 && !L[cx - 1, cy] && P[cx - 1, cy] > thr) { L[cx - 1, cy] = id; sp++;\
+      \ SX[sp] = cx - 1; SY[sp] = cy }\n      if (cx < W - 1 && !L[cx + 1, cy] &&\
+      \ P[cx + 1, cy] > thr) { L[cx + 1, cy] = id; sp++; SX[sp] = cx + 1; SY[sp] =\
+      \ cy }\n      if (cy > 0 && !L[cx, cy - 1] && P[cx, cy - 1] > thr) { L[cx, cy\
+      \ - 1] = id; sp++; SX[sp] = cx; SY[sp] = cy - 1 }\n      if (cy < HH - 1 &&\
+      \ !L[cx, cy + 1] && P[cx, cy + 1] > thr) { L[cx, cy + 1] = id; sp++; SX[sp]\
+      \ = cx; SY[sp] = cy + 1 } }\n    if (area >= minarea) comps++ }\n  truth = META;\
+      \ sub(/.*objects=/, \"\", truth); sub(/ .*/, \"\", truth)\n  tag = META; sub(/^id=/,\
+      \ \"\", tag); sub(/ .*/, \"\", tag)\n  DT = DT sprintf(\"%s{\\\"image\\\":\\\
+      \"%s\\\",\\\"true_objects\\\":%d,\\\"detected\\\":%d,\\\"otsu_threshold\\\"\
+      :%d,\\\"edge_density\\\":%.4f}\", (NIMG > 1 ? \",\" : \"\"), tag, truth, comps,\
+      \ thr, ne / tot)\n}\n\n$1 == \"P2\" { st = 1; META = \"\"; next }\nst == 1 &&\
+      \ /^#/ { META = substr($0, 3); next }\nst == 1 { W = $1; HH = $2; st = 2; next\
+      \ }\nst == 2 { st = 3; y = 0; next }\nst == 3 { for (x = 1; x <= NF; x++) P[x\
+      \ - 1, y] = $x + 0; y++; if (y == HH) { NIMG++; process(); st = 0 } }\n\nEND\
+      \ { printf \"{\\\"stage\\\":\\\"detect\\\",\\\"images\\\":%d,%s,\\\"per_image\\\
+      \":[%s]}\", NIMG, place, DT > dets }' \"$NEXUS_INPUT_DIR/enhanced\" > \"$NEXUS_OUTPUT_DIR/edges\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.detect
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: detect_06
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    enhanced:
+      required: true
+      type: string
+  outputs:
+    detections:
+      required: true
+      type: json
+    edges:
+      required: true
+      type: string
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a100
+      gpu_memory_bytes: 42949672960
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "place=\"\\\"worker\\\":\\\"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\
+      \"\"; awk -v place=\"$place\" -v minarea=60 -v dets=\"$NEXUS_OUTPUT_DIR/detections\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   x, y, gx, gy, m, i, h, tot, sumall, wb, sb, best, t, mb, mf, bw,\
+      \ thr, ne, comps, sp, cx, cy, area, id, truth) {\n  # Sobel gradient magnitude\
+      \ -> the edge map.\n  ne = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W;\
+      \ x++) {\n    if (x == 0 || y == 0 || x == W - 1 || y == HH - 1) { E[x, y] =\
+      \ 0; continue }\n    gx = P[x + 1, y - 1] + 2 * P[x + 1, y] + P[x + 1, y + 1]\
+      \ - P[x - 1, y - 1] - 2 * P[x - 1, y] - P[x - 1, y + 1]\n    gy = P[x - 1, y\
+      \ + 1] + 2 * P[x, y + 1] + P[x + 1, y + 1] - P[x - 1, y - 1] - 2 * P[x, y -\
+      \ 1] - P[x + 1, y - 1]\n    m = sqrt(gx * gx + gy * gy) / 4; E[x, y] = clamp(m);\
+      \ if (m > 60) ne++ }\n  emit(E, META \" edges=sobel\")\n  # Otsu: the intensity\
+      \ threshold that best separates two classes.\n  for (i = 0; i < 256; i++) h[i]\
+      \ = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n\
+      \  tot = W * HH; sumall = 0; for (i = 0; i < 256; i++) sumall += i * h[i]\n\
+      \  wb = 0; sb = 0; best = -1; thr = 128\n  for (t = 0; t < 256; t++) { wb +=\
+      \ h[t]; if (wb == 0) continue; if (wb == tot) break\n    sb += t * h[t]; mb\
+      \ = sb / wb; mf = (sumall - sb) / (tot - wb); bw = wb * (tot - wb) * (mb - mf)\
+      \ * (mb - mf)\n    if (bw > best) { best = bw; thr = t } }\n  # Connected components\
+      \ (4-neighbour) over the bright class, via an explicit stack.\n  for (y = 0;\
+      \ y < HH; y++) for (x = 0; x < W; x++) L[x, y] = 0\n  comps = 0\n  for (y =\
+      \ 0; y < HH; y++) for (x = 0; x < W; x++) {\n    if (P[x, y] <= thr || L[x,\
+      \ y]) continue\n    id++; area = 0; sp = 1; SX[1] = x; SY[1] = y; L[x, y] =\
+      \ id\n    while (sp > 0) { cx = SX[sp]; cy = SY[sp]; sp--; area++\n      if\
+      \ (cx > 0 && !L[cx - 1, cy] && P[cx - 1, cy] > thr) { L[cx - 1, cy] = id; sp++;\
+      \ SX[sp] = cx - 1; SY[sp] = cy }\n      if (cx < W - 1 && !L[cx + 1, cy] &&\
+      \ P[cx + 1, cy] > thr) { L[cx + 1, cy] = id; sp++; SX[sp] = cx + 1; SY[sp] =\
+      \ cy }\n      if (cy > 0 && !L[cx, cy - 1] && P[cx, cy - 1] > thr) { L[cx, cy\
+      \ - 1] = id; sp++; SX[sp] = cx; SY[sp] = cy - 1 }\n      if (cy < HH - 1 &&\
+      \ !L[cx, cy + 1] && P[cx, cy + 1] > thr) { L[cx, cy + 1] = id; sp++; SX[sp]\
+      \ = cx; SY[sp] = cy + 1 } }\n    if (area >= minarea) comps++ }\n  truth = META;\
+      \ sub(/.*objects=/, \"\", truth); sub(/ .*/, \"\", truth)\n  tag = META; sub(/^id=/,\
+      \ \"\", tag); sub(/ .*/, \"\", tag)\n  DT = DT sprintf(\"%s{\\\"image\\\":\\\
+      \"%s\\\",\\\"true_objects\\\":%d,\\\"detected\\\":%d,\\\"otsu_threshold\\\"\
+      :%d,\\\"edge_density\\\":%.4f}\", (NIMG > 1 ? \",\" : \"\"), tag, truth, comps,\
+      \ thr, ne / tot)\n}\n\n$1 == \"P2\" { st = 1; META = \"\"; next }\nst == 1 &&\
+      \ /^#/ { META = substr($0, 3); next }\nst == 1 { W = $1; HH = $2; st = 2; next\
+      \ }\nst == 2 { st = 3; y = 0; next }\nst == 3 { for (x = 1; x <= NF; x++) P[x\
+      \ - 1, y] = $x + 0; y++; if (y == HH) { NIMG++; process(); st = 0 } }\n\nEND\
+      \ { printf \"{\\\"stage\\\":\\\"detect\\\",\\\"images\\\":%d,%s,\\\"per_image\\\
+      \":[%s]}\", NIMG, place, DT > dets }' \"$NEXUS_INPUT_DIR/enhanced\" > \"$NEXUS_OUTPUT_DIR/edges\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.detect
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: detect_07
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    enhanced:
+      required: true
+      type: string
+  outputs:
+    detections:
+      required: true
+      type: json
+    edges:
+      required: true
+      type: string
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a100
+      gpu_memory_bytes: 42949672960
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "place=\"\\\"worker\\\":\\\"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\
+      \"\"; awk -v place=\"$place\" -v minarea=60 -v dets=\"$NEXUS_OUTPUT_DIR/detections\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   x, y, gx, gy, m, i, h, tot, sumall, wb, sb, best, t, mb, mf, bw,\
+      \ thr, ne, comps, sp, cx, cy, area, id, truth) {\n  # Sobel gradient magnitude\
+      \ -> the edge map.\n  ne = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W;\
+      \ x++) {\n    if (x == 0 || y == 0 || x == W - 1 || y == HH - 1) { E[x, y] =\
+      \ 0; continue }\n    gx = P[x + 1, y - 1] + 2 * P[x + 1, y] + P[x + 1, y + 1]\
+      \ - P[x - 1, y - 1] - 2 * P[x - 1, y] - P[x - 1, y + 1]\n    gy = P[x - 1, y\
+      \ + 1] + 2 * P[x, y + 1] + P[x + 1, y + 1] - P[x - 1, y - 1] - 2 * P[x, y -\
+      \ 1] - P[x + 1, y - 1]\n    m = sqrt(gx * gx + gy * gy) / 4; E[x, y] = clamp(m);\
+      \ if (m > 60) ne++ }\n  emit(E, META \" edges=sobel\")\n  # Otsu: the intensity\
+      \ threshold that best separates two classes.\n  for (i = 0; i < 256; i++) h[i]\
+      \ = 0\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n\
+      \  tot = W * HH; sumall = 0; for (i = 0; i < 256; i++) sumall += i * h[i]\n\
+      \  wb = 0; sb = 0; best = -1; thr = 128\n  for (t = 0; t < 256; t++) { wb +=\
+      \ h[t]; if (wb == 0) continue; if (wb == tot) break\n    sb += t * h[t]; mb\
+      \ = sb / wb; mf = (sumall - sb) / (tot - wb); bw = wb * (tot - wb) * (mb - mf)\
+      \ * (mb - mf)\n    if (bw > best) { best = bw; thr = t } }\n  # Connected components\
+      \ (4-neighbour) over the bright class, via an explicit stack.\n  for (y = 0;\
+      \ y < HH; y++) for (x = 0; x < W; x++) L[x, y] = 0\n  comps = 0\n  for (y =\
+      \ 0; y < HH; y++) for (x = 0; x < W; x++) {\n    if (P[x, y] <= thr || L[x,\
+      \ y]) continue\n    id++; area = 0; sp = 1; SX[1] = x; SY[1] = y; L[x, y] =\
+      \ id\n    while (sp > 0) { cx = SX[sp]; cy = SY[sp]; sp--; area++\n      if\
+      \ (cx > 0 && !L[cx - 1, cy] && P[cx - 1, cy] > thr) { L[cx - 1, cy] = id; sp++;\
+      \ SX[sp] = cx - 1; SY[sp] = cy }\n      if (cx < W - 1 && !L[cx + 1, cy] &&\
+      \ P[cx + 1, cy] > thr) { L[cx + 1, cy] = id; sp++; SX[sp] = cx + 1; SY[sp] =\
+      \ cy }\n      if (cy > 0 && !L[cx, cy - 1] && P[cx, cy - 1] > thr) { L[cx, cy\
+      \ - 1] = id; sp++; SX[sp] = cx; SY[sp] = cy - 1 }\n      if (cy < HH - 1 &&\
+      \ !L[cx, cy + 1] && P[cx, cy + 1] > thr) { L[cx, cy + 1] = id; sp++; SX[sp]\
+      \ = cx; SY[sp] = cy + 1 } }\n    if (area >= minarea) comps++ }\n  truth = META;\
+      \ sub(/.*objects=/, \"\", truth); sub(/ .*/, \"\", truth)\n  tag = META; sub(/^id=/,\
+      \ \"\", tag); sub(/ .*/, \"\", tag)\n  DT = DT sprintf(\"%s{\\\"image\\\":\\\
+      \"%s\\\",\\\"true_objects\\\":%d,\\\"detected\\\":%d,\\\"otsu_threshold\\\"\
+      :%d,\\\"edge_density\\\":%.4f}\", (NIMG > 1 ? \",\" : \"\"), tag, truth, comps,\
+      \ thr, ne / tot)\n}\n\n$1 == \"P2\" { st = 1; META = \"\"; next }\nst == 1 &&\
+      \ /^#/ { META = substr($0, 3); next }\nst == 1 { W = $1; HH = $2; st = 2; next\
+      \ }\nst == 2 { st = 3; y = 0; next }\nst == 3 { for (x = 1; x <= NF; x++) P[x\
+      \ - 1, y] = $x + 0; y++; if (y == HH) { NIMG++; process(); st = 0 } }\n\nEND\
+      \ { printf \"{\\\"stage\\\":\\\"detect\\\",\\\"images\\\":%d,%s,\\\"per_image\\\
+      \":[%s]}\", NIMG, place, DT > dets }' \"$NEXUS_INPUT_DIR/enhanced\" > \"$NEXUS_OUTPUT_DIR/edges\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.detect
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: enhance_00
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    passes: denoise_passes
+  inputs:
+    passes:
+      required: true
+      type: json
+    raw:
+      required: true
+      type: string
+  outputs:
+    enhanced:
+      required: true
+      type: string
+    stats:
+      required: true
+      type: json
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a10
+      gpu_memory_bytes: 21474836480
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; place=\"\\\"worker\\\":\\\
+      \"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\"\"; awk -v\
+      \ passes=\"$(v passes)\" -v place=\"$place\" -v stats=\"$NEXUS_OUTPUT_DIR/stats\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   p, x, y, dx, dy, s, n, h, c, i, m0, m1, v0, v1, lo, hi) {\n  for\
+      \ (y = 0; y < HH; y++) for (x = 0; x < W; x++) { m0 += P[x, y]; v0 += P[x, y]\
+      \ * P[x, y] }\n  for (p = 1; p <= passes; p++) {\n    for (y = 0; y < HH; y++)\
+      \ for (x = 0; x < W; x++) { s = 0; n = 0\n      for (dy = -1; dy <= 1; dy++)\
+      \ for (dx = -1; dx <= 1; dx++) {\n        if (x + dx < 0 || x + dx >= W || y\
+      \ + dy < 0 || y + dy >= HH) continue\n        wgt = (dx == 0 && dy == 0) ? 4\
+      \ : ((dx == 0 || dy == 0) ? 2 : 1); s += wgt * P[x + dx, y + dy]; n += wgt }\n\
+      \      B[x, y] = s / n }\n    for (y = 0; y < HH; y++) for (x = 0; x < W; x++)\
+      \ P[x, y] = B[x, y] }\n  # Percentile contrast stretch: the 1st..99th percentile\
+      \ onto 0..255.\n  # Deliberately NOT histogram equalization, which spreads the\
+      \ lit background\n  # across the whole range so a global threshold splits the\
+      \ BACKGROUND and\n  # counts its bright half as objects. A stretch keeps the\
+      \ two classes apart.\n  for (i = 0; i < 256; i++) h[i] = 0\n  for (y = 0; y\
+      \ < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n  c = 0; lo = -1; hi\
+      \ = 255\n  for (i = 0; i < 256; i++) { c += h[i]; if (lo < 0 && c >= 0.01 *\
+      \ W * HH) lo = i; if (c <= 0.99 * W * HH) hi = i }\n  if (hi <= lo) hi = lo\
+      \ + 1\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) { Q[x, y] = clamp((P[x,\
+      \ y] - lo) * 255 / (hi - lo)); m1 += Q[x, y]; v1 += Q[x, y] * Q[x, y] }\n  emit(Q,\
+      \ META \" enhanced=1\")\n  m0 /= W * HH; m1 /= W * HH\n  ST = ST sprintf(\"\
+      %s{\\\"image\\\":%d,\\\"mean_before\\\":%.1f,\\\"std_before\\\":%.1f,\\\"mean_after\\\
+      \":%.1f,\\\"std_after\\\":%.1f}\", (NIMG > 1 ? \",\" : \"\"), NIMG, m0, sqrt(v0\
+      \ / (W * HH) - m0 * m0), m1, sqrt(v1 / (W * HH) - m1 * m1))\n}\n\n$1 == \"P2\"\
+      \ { st = 1; META = \"\"; next }\nst == 1 && /^#/ { META = substr($0, 3); next\
+      \ }\nst == 1 { W = $1; HH = $2; st = 2; next }\nst == 2 { st = 3; y = 0; next\
+      \ }\nst == 3 { for (x = 1; x <= NF; x++) P[x - 1, y] = $x + 0; y++; if (y ==\
+      \ HH) { NIMG++; process(); st = 0 } }\n\nEND { printf \"{\\\"stage\\\":\\\"\
+      enhance\\\",\\\"images\\\":%d,%s,\\\"per_image\\\":[%s]}\", NIMG, place, ST\
+      \ > stats }' \"$NEXUS_INPUT_DIR/raw\" > \"$NEXUS_OUTPUT_DIR/enhanced\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.enhance
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: enhance_01
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    passes: denoise_passes
+  inputs:
+    passes:
+      required: true
+      type: json
+    raw:
+      required: true
+      type: string
+  outputs:
+    enhanced:
+      required: true
+      type: string
+    stats:
+      required: true
+      type: json
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a10
+      gpu_memory_bytes: 21474836480
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; place=\"\\\"worker\\\":\\\
+      \"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\"\"; awk -v\
+      \ passes=\"$(v passes)\" -v place=\"$place\" -v stats=\"$NEXUS_OUTPUT_DIR/stats\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   p, x, y, dx, dy, s, n, h, c, i, m0, m1, v0, v1, lo, hi) {\n  for\
+      \ (y = 0; y < HH; y++) for (x = 0; x < W; x++) { m0 += P[x, y]; v0 += P[x, y]\
+      \ * P[x, y] }\n  for (p = 1; p <= passes; p++) {\n    for (y = 0; y < HH; y++)\
+      \ for (x = 0; x < W; x++) { s = 0; n = 0\n      for (dy = -1; dy <= 1; dy++)\
+      \ for (dx = -1; dx <= 1; dx++) {\n        if (x + dx < 0 || x + dx >= W || y\
+      \ + dy < 0 || y + dy >= HH) continue\n        wgt = (dx == 0 && dy == 0) ? 4\
+      \ : ((dx == 0 || dy == 0) ? 2 : 1); s += wgt * P[x + dx, y + dy]; n += wgt }\n\
+      \      B[x, y] = s / n }\n    for (y = 0; y < HH; y++) for (x = 0; x < W; x++)\
+      \ P[x, y] = B[x, y] }\n  # Percentile contrast stretch: the 1st..99th percentile\
+      \ onto 0..255.\n  # Deliberately NOT histogram equalization, which spreads the\
+      \ lit background\n  # across the whole range so a global threshold splits the\
+      \ BACKGROUND and\n  # counts its bright half as objects. A stretch keeps the\
+      \ two classes apart.\n  for (i = 0; i < 256; i++) h[i] = 0\n  for (y = 0; y\
+      \ < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n  c = 0; lo = -1; hi\
+      \ = 255\n  for (i = 0; i < 256; i++) { c += h[i]; if (lo < 0 && c >= 0.01 *\
+      \ W * HH) lo = i; if (c <= 0.99 * W * HH) hi = i }\n  if (hi <= lo) hi = lo\
+      \ + 1\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) { Q[x, y] = clamp((P[x,\
+      \ y] - lo) * 255 / (hi - lo)); m1 += Q[x, y]; v1 += Q[x, y] * Q[x, y] }\n  emit(Q,\
+      \ META \" enhanced=1\")\n  m0 /= W * HH; m1 /= W * HH\n  ST = ST sprintf(\"\
+      %s{\\\"image\\\":%d,\\\"mean_before\\\":%.1f,\\\"std_before\\\":%.1f,\\\"mean_after\\\
+      \":%.1f,\\\"std_after\\\":%.1f}\", (NIMG > 1 ? \",\" : \"\"), NIMG, m0, sqrt(v0\
+      \ / (W * HH) - m0 * m0), m1, sqrt(v1 / (W * HH) - m1 * m1))\n}\n\n$1 == \"P2\"\
+      \ { st = 1; META = \"\"; next }\nst == 1 && /^#/ { META = substr($0, 3); next\
+      \ }\nst == 1 { W = $1; HH = $2; st = 2; next }\nst == 2 { st = 3; y = 0; next\
+      \ }\nst == 3 { for (x = 1; x <= NF; x++) P[x - 1, y] = $x + 0; y++; if (y ==\
+      \ HH) { NIMG++; process(); st = 0 } }\n\nEND { printf \"{\\\"stage\\\":\\\"\
+      enhance\\\",\\\"images\\\":%d,%s,\\\"per_image\\\":[%s]}\", NIMG, place, ST\
+      \ > stats }' \"$NEXUS_INPUT_DIR/raw\" > \"$NEXUS_OUTPUT_DIR/enhanced\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.enhance
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: enhance_02
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    passes: denoise_passes
+  inputs:
+    passes:
+      required: true
+      type: json
+    raw:
+      required: true
+      type: string
+  outputs:
+    enhanced:
+      required: true
+      type: string
+    stats:
+      required: true
+      type: json
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a10
+      gpu_memory_bytes: 21474836480
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; place=\"\\\"worker\\\":\\\
+      \"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\"\"; awk -v\
+      \ passes=\"$(v passes)\" -v place=\"$place\" -v stats=\"$NEXUS_OUTPUT_DIR/stats\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   p, x, y, dx, dy, s, n, h, c, i, m0, m1, v0, v1, lo, hi) {\n  for\
+      \ (y = 0; y < HH; y++) for (x = 0; x < W; x++) { m0 += P[x, y]; v0 += P[x, y]\
+      \ * P[x, y] }\n  for (p = 1; p <= passes; p++) {\n    for (y = 0; y < HH; y++)\
+      \ for (x = 0; x < W; x++) { s = 0; n = 0\n      for (dy = -1; dy <= 1; dy++)\
+      \ for (dx = -1; dx <= 1; dx++) {\n        if (x + dx < 0 || x + dx >= W || y\
+      \ + dy < 0 || y + dy >= HH) continue\n        wgt = (dx == 0 && dy == 0) ? 4\
+      \ : ((dx == 0 || dy == 0) ? 2 : 1); s += wgt * P[x + dx, y + dy]; n += wgt }\n\
+      \      B[x, y] = s / n }\n    for (y = 0; y < HH; y++) for (x = 0; x < W; x++)\
+      \ P[x, y] = B[x, y] }\n  # Percentile contrast stretch: the 1st..99th percentile\
+      \ onto 0..255.\n  # Deliberately NOT histogram equalization, which spreads the\
+      \ lit background\n  # across the whole range so a global threshold splits the\
+      \ BACKGROUND and\n  # counts its bright half as objects. A stretch keeps the\
+      \ two classes apart.\n  for (i = 0; i < 256; i++) h[i] = 0\n  for (y = 0; y\
+      \ < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n  c = 0; lo = -1; hi\
+      \ = 255\n  for (i = 0; i < 256; i++) { c += h[i]; if (lo < 0 && c >= 0.01 *\
+      \ W * HH) lo = i; if (c <= 0.99 * W * HH) hi = i }\n  if (hi <= lo) hi = lo\
+      \ + 1\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) { Q[x, y] = clamp((P[x,\
+      \ y] - lo) * 255 / (hi - lo)); m1 += Q[x, y]; v1 += Q[x, y] * Q[x, y] }\n  emit(Q,\
+      \ META \" enhanced=1\")\n  m0 /= W * HH; m1 /= W * HH\n  ST = ST sprintf(\"\
+      %s{\\\"image\\\":%d,\\\"mean_before\\\":%.1f,\\\"std_before\\\":%.1f,\\\"mean_after\\\
+      \":%.1f,\\\"std_after\\\":%.1f}\", (NIMG > 1 ? \",\" : \"\"), NIMG, m0, sqrt(v0\
+      \ / (W * HH) - m0 * m0), m1, sqrt(v1 / (W * HH) - m1 * m1))\n}\n\n$1 == \"P2\"\
+      \ { st = 1; META = \"\"; next }\nst == 1 && /^#/ { META = substr($0, 3); next\
+      \ }\nst == 1 { W = $1; HH = $2; st = 2; next }\nst == 2 { st = 3; y = 0; next\
+      \ }\nst == 3 { for (x = 1; x <= NF; x++) P[x - 1, y] = $x + 0; y++; if (y ==\
+      \ HH) { NIMG++; process(); st = 0 } }\n\nEND { printf \"{\\\"stage\\\":\\\"\
+      enhance\\\",\\\"images\\\":%d,%s,\\\"per_image\\\":[%s]}\", NIMG, place, ST\
+      \ > stats }' \"$NEXUS_INPUT_DIR/raw\" > \"$NEXUS_OUTPUT_DIR/enhanced\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.enhance
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: enhance_03
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    passes: denoise_passes
+  inputs:
+    passes:
+      required: true
+      type: json
+    raw:
+      required: true
+      type: string
+  outputs:
+    enhanced:
+      required: true
+      type: string
+    stats:
+      required: true
+      type: json
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a10
+      gpu_memory_bytes: 21474836480
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; place=\"\\\"worker\\\":\\\
+      \"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\"\"; awk -v\
+      \ passes=\"$(v passes)\" -v place=\"$place\" -v stats=\"$NEXUS_OUTPUT_DIR/stats\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   p, x, y, dx, dy, s, n, h, c, i, m0, m1, v0, v1, lo, hi) {\n  for\
+      \ (y = 0; y < HH; y++) for (x = 0; x < W; x++) { m0 += P[x, y]; v0 += P[x, y]\
+      \ * P[x, y] }\n  for (p = 1; p <= passes; p++) {\n    for (y = 0; y < HH; y++)\
+      \ for (x = 0; x < W; x++) { s = 0; n = 0\n      for (dy = -1; dy <= 1; dy++)\
+      \ for (dx = -1; dx <= 1; dx++) {\n        if (x + dx < 0 || x + dx >= W || y\
+      \ + dy < 0 || y + dy >= HH) continue\n        wgt = (dx == 0 && dy == 0) ? 4\
+      \ : ((dx == 0 || dy == 0) ? 2 : 1); s += wgt * P[x + dx, y + dy]; n += wgt }\n\
+      \      B[x, y] = s / n }\n    for (y = 0; y < HH; y++) for (x = 0; x < W; x++)\
+      \ P[x, y] = B[x, y] }\n  # Percentile contrast stretch: the 1st..99th percentile\
+      \ onto 0..255.\n  # Deliberately NOT histogram equalization, which spreads the\
+      \ lit background\n  # across the whole range so a global threshold splits the\
+      \ BACKGROUND and\n  # counts its bright half as objects. A stretch keeps the\
+      \ two classes apart.\n  for (i = 0; i < 256; i++) h[i] = 0\n  for (y = 0; y\
+      \ < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n  c = 0; lo = -1; hi\
+      \ = 255\n  for (i = 0; i < 256; i++) { c += h[i]; if (lo < 0 && c >= 0.01 *\
+      \ W * HH) lo = i; if (c <= 0.99 * W * HH) hi = i }\n  if (hi <= lo) hi = lo\
+      \ + 1\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) { Q[x, y] = clamp((P[x,\
+      \ y] - lo) * 255 / (hi - lo)); m1 += Q[x, y]; v1 += Q[x, y] * Q[x, y] }\n  emit(Q,\
+      \ META \" enhanced=1\")\n  m0 /= W * HH; m1 /= W * HH\n  ST = ST sprintf(\"\
+      %s{\\\"image\\\":%d,\\\"mean_before\\\":%.1f,\\\"std_before\\\":%.1f,\\\"mean_after\\\
+      \":%.1f,\\\"std_after\\\":%.1f}\", (NIMG > 1 ? \",\" : \"\"), NIMG, m0, sqrt(v0\
+      \ / (W * HH) - m0 * m0), m1, sqrt(v1 / (W * HH) - m1 * m1))\n}\n\n$1 == \"P2\"\
+      \ { st = 1; META = \"\"; next }\nst == 1 && /^#/ { META = substr($0, 3); next\
+      \ }\nst == 1 { W = $1; HH = $2; st = 2; next }\nst == 2 { st = 3; y = 0; next\
+      \ }\nst == 3 { for (x = 1; x <= NF; x++) P[x - 1, y] = $x + 0; y++; if (y ==\
+      \ HH) { NIMG++; process(); st = 0 } }\n\nEND { printf \"{\\\"stage\\\":\\\"\
+      enhance\\\",\\\"images\\\":%d,%s,\\\"per_image\\\":[%s]}\", NIMG, place, ST\
+      \ > stats }' \"$NEXUS_INPUT_DIR/raw\" > \"$NEXUS_OUTPUT_DIR/enhanced\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.enhance
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: enhance_04
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    passes: denoise_passes
+  inputs:
+    passes:
+      required: true
+      type: json
+    raw:
+      required: true
+      type: string
+  outputs:
+    enhanced:
+      required: true
+      type: string
+    stats:
+      required: true
+      type: json
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a10
+      gpu_memory_bytes: 21474836480
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; place=\"\\\"worker\\\":\\\
+      \"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\"\"; awk -v\
+      \ passes=\"$(v passes)\" -v place=\"$place\" -v stats=\"$NEXUS_OUTPUT_DIR/stats\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   p, x, y, dx, dy, s, n, h, c, i, m0, m1, v0, v1, lo, hi) {\n  for\
+      \ (y = 0; y < HH; y++) for (x = 0; x < W; x++) { m0 += P[x, y]; v0 += P[x, y]\
+      \ * P[x, y] }\n  for (p = 1; p <= passes; p++) {\n    for (y = 0; y < HH; y++)\
+      \ for (x = 0; x < W; x++) { s = 0; n = 0\n      for (dy = -1; dy <= 1; dy++)\
+      \ for (dx = -1; dx <= 1; dx++) {\n        if (x + dx < 0 || x + dx >= W || y\
+      \ + dy < 0 || y + dy >= HH) continue\n        wgt = (dx == 0 && dy == 0) ? 4\
+      \ : ((dx == 0 || dy == 0) ? 2 : 1); s += wgt * P[x + dx, y + dy]; n += wgt }\n\
+      \      B[x, y] = s / n }\n    for (y = 0; y < HH; y++) for (x = 0; x < W; x++)\
+      \ P[x, y] = B[x, y] }\n  # Percentile contrast stretch: the 1st..99th percentile\
+      \ onto 0..255.\n  # Deliberately NOT histogram equalization, which spreads the\
+      \ lit background\n  # across the whole range so a global threshold splits the\
+      \ BACKGROUND and\n  # counts its bright half as objects. A stretch keeps the\
+      \ two classes apart.\n  for (i = 0; i < 256; i++) h[i] = 0\n  for (y = 0; y\
+      \ < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n  c = 0; lo = -1; hi\
+      \ = 255\n  for (i = 0; i < 256; i++) { c += h[i]; if (lo < 0 && c >= 0.01 *\
+      \ W * HH) lo = i; if (c <= 0.99 * W * HH) hi = i }\n  if (hi <= lo) hi = lo\
+      \ + 1\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) { Q[x, y] = clamp((P[x,\
+      \ y] - lo) * 255 / (hi - lo)); m1 += Q[x, y]; v1 += Q[x, y] * Q[x, y] }\n  emit(Q,\
+      \ META \" enhanced=1\")\n  m0 /= W * HH; m1 /= W * HH\n  ST = ST sprintf(\"\
+      %s{\\\"image\\\":%d,\\\"mean_before\\\":%.1f,\\\"std_before\\\":%.1f,\\\"mean_after\\\
+      \":%.1f,\\\"std_after\\\":%.1f}\", (NIMG > 1 ? \",\" : \"\"), NIMG, m0, sqrt(v0\
+      \ / (W * HH) - m0 * m0), m1, sqrt(v1 / (W * HH) - m1 * m1))\n}\n\n$1 == \"P2\"\
+      \ { st = 1; META = \"\"; next }\nst == 1 && /^#/ { META = substr($0, 3); next\
+      \ }\nst == 1 { W = $1; HH = $2; st = 2; next }\nst == 2 { st = 3; y = 0; next\
+      \ }\nst == 3 { for (x = 1; x <= NF; x++) P[x - 1, y] = $x + 0; y++; if (y ==\
+      \ HH) { NIMG++; process(); st = 0 } }\n\nEND { printf \"{\\\"stage\\\":\\\"\
+      enhance\\\",\\\"images\\\":%d,%s,\\\"per_image\\\":[%s]}\", NIMG, place, ST\
+      \ > stats }' \"$NEXUS_INPUT_DIR/raw\" > \"$NEXUS_OUTPUT_DIR/enhanced\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.enhance
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: enhance_05
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    passes: denoise_passes
+  inputs:
+    passes:
+      required: true
+      type: json
+    raw:
+      required: true
+      type: string
+  outputs:
+    enhanced:
+      required: true
+      type: string
+    stats:
+      required: true
+      type: json
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a10
+      gpu_memory_bytes: 21474836480
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; place=\"\\\"worker\\\":\\\
+      \"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\"\"; awk -v\
+      \ passes=\"$(v passes)\" -v place=\"$place\" -v stats=\"$NEXUS_OUTPUT_DIR/stats\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   p, x, y, dx, dy, s, n, h, c, i, m0, m1, v0, v1, lo, hi) {\n  for\
+      \ (y = 0; y < HH; y++) for (x = 0; x < W; x++) { m0 += P[x, y]; v0 += P[x, y]\
+      \ * P[x, y] }\n  for (p = 1; p <= passes; p++) {\n    for (y = 0; y < HH; y++)\
+      \ for (x = 0; x < W; x++) { s = 0; n = 0\n      for (dy = -1; dy <= 1; dy++)\
+      \ for (dx = -1; dx <= 1; dx++) {\n        if (x + dx < 0 || x + dx >= W || y\
+      \ + dy < 0 || y + dy >= HH) continue\n        wgt = (dx == 0 && dy == 0) ? 4\
+      \ : ((dx == 0 || dy == 0) ? 2 : 1); s += wgt * P[x + dx, y + dy]; n += wgt }\n\
+      \      B[x, y] = s / n }\n    for (y = 0; y < HH; y++) for (x = 0; x < W; x++)\
+      \ P[x, y] = B[x, y] }\n  # Percentile contrast stretch: the 1st..99th percentile\
+      \ onto 0..255.\n  # Deliberately NOT histogram equalization, which spreads the\
+      \ lit background\n  # across the whole range so a global threshold splits the\
+      \ BACKGROUND and\n  # counts its bright half as objects. A stretch keeps the\
+      \ two classes apart.\n  for (i = 0; i < 256; i++) h[i] = 0\n  for (y = 0; y\
+      \ < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n  c = 0; lo = -1; hi\
+      \ = 255\n  for (i = 0; i < 256; i++) { c += h[i]; if (lo < 0 && c >= 0.01 *\
+      \ W * HH) lo = i; if (c <= 0.99 * W * HH) hi = i }\n  if (hi <= lo) hi = lo\
+      \ + 1\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) { Q[x, y] = clamp((P[x,\
+      \ y] - lo) * 255 / (hi - lo)); m1 += Q[x, y]; v1 += Q[x, y] * Q[x, y] }\n  emit(Q,\
+      \ META \" enhanced=1\")\n  m0 /= W * HH; m1 /= W * HH\n  ST = ST sprintf(\"\
+      %s{\\\"image\\\":%d,\\\"mean_before\\\":%.1f,\\\"std_before\\\":%.1f,\\\"mean_after\\\
+      \":%.1f,\\\"std_after\\\":%.1f}\", (NIMG > 1 ? \",\" : \"\"), NIMG, m0, sqrt(v0\
+      \ / (W * HH) - m0 * m0), m1, sqrt(v1 / (W * HH) - m1 * m1))\n}\n\n$1 == \"P2\"\
+      \ { st = 1; META = \"\"; next }\nst == 1 && /^#/ { META = substr($0, 3); next\
+      \ }\nst == 1 { W = $1; HH = $2; st = 2; next }\nst == 2 { st = 3; y = 0; next\
+      \ }\nst == 3 { for (x = 1; x <= NF; x++) P[x - 1, y] = $x + 0; y++; if (y ==\
+      \ HH) { NIMG++; process(); st = 0 } }\n\nEND { printf \"{\\\"stage\\\":\\\"\
+      enhance\\\",\\\"images\\\":%d,%s,\\\"per_image\\\":[%s]}\", NIMG, place, ST\
+      \ > stats }' \"$NEXUS_INPUT_DIR/raw\" > \"$NEXUS_OUTPUT_DIR/enhanced\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.enhance
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: enhance_06
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    passes: denoise_passes
+  inputs:
+    passes:
+      required: true
+      type: json
+    raw:
+      required: true
+      type: string
+  outputs:
+    enhanced:
+      required: true
+      type: string
+    stats:
+      required: true
+      type: json
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a10
+      gpu_memory_bytes: 21474836480
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; place=\"\\\"worker\\\":\\\
+      \"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\"\"; awk -v\
+      \ passes=\"$(v passes)\" -v place=\"$place\" -v stats=\"$NEXUS_OUTPUT_DIR/stats\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   p, x, y, dx, dy, s, n, h, c, i, m0, m1, v0, v1, lo, hi) {\n  for\
+      \ (y = 0; y < HH; y++) for (x = 0; x < W; x++) { m0 += P[x, y]; v0 += P[x, y]\
+      \ * P[x, y] }\n  for (p = 1; p <= passes; p++) {\n    for (y = 0; y < HH; y++)\
+      \ for (x = 0; x < W; x++) { s = 0; n = 0\n      for (dy = -1; dy <= 1; dy++)\
+      \ for (dx = -1; dx <= 1; dx++) {\n        if (x + dx < 0 || x + dx >= W || y\
+      \ + dy < 0 || y + dy >= HH) continue\n        wgt = (dx == 0 && dy == 0) ? 4\
+      \ : ((dx == 0 || dy == 0) ? 2 : 1); s += wgt * P[x + dx, y + dy]; n += wgt }\n\
+      \      B[x, y] = s / n }\n    for (y = 0; y < HH; y++) for (x = 0; x < W; x++)\
+      \ P[x, y] = B[x, y] }\n  # Percentile contrast stretch: the 1st..99th percentile\
+      \ onto 0..255.\n  # Deliberately NOT histogram equalization, which spreads the\
+      \ lit background\n  # across the whole range so a global threshold splits the\
+      \ BACKGROUND and\n  # counts its bright half as objects. A stretch keeps the\
+      \ two classes apart.\n  for (i = 0; i < 256; i++) h[i] = 0\n  for (y = 0; y\
+      \ < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n  c = 0; lo = -1; hi\
+      \ = 255\n  for (i = 0; i < 256; i++) { c += h[i]; if (lo < 0 && c >= 0.01 *\
+      \ W * HH) lo = i; if (c <= 0.99 * W * HH) hi = i }\n  if (hi <= lo) hi = lo\
+      \ + 1\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) { Q[x, y] = clamp((P[x,\
+      \ y] - lo) * 255 / (hi - lo)); m1 += Q[x, y]; v1 += Q[x, y] * Q[x, y] }\n  emit(Q,\
+      \ META \" enhanced=1\")\n  m0 /= W * HH; m1 /= W * HH\n  ST = ST sprintf(\"\
+      %s{\\\"image\\\":%d,\\\"mean_before\\\":%.1f,\\\"std_before\\\":%.1f,\\\"mean_after\\\
+      \":%.1f,\\\"std_after\\\":%.1f}\", (NIMG > 1 ? \",\" : \"\"), NIMG, m0, sqrt(v0\
+      \ / (W * HH) - m0 * m0), m1, sqrt(v1 / (W * HH) - m1 * m1))\n}\n\n$1 == \"P2\"\
+      \ { st = 1; META = \"\"; next }\nst == 1 && /^#/ { META = substr($0, 3); next\
+      \ }\nst == 1 { W = $1; HH = $2; st = 2; next }\nst == 2 { st = 3; y = 0; next\
+      \ }\nst == 3 { for (x = 1; x <= NF; x++) P[x - 1, y] = $x + 0; y++; if (y ==\
+      \ HH) { NIMG++; process(); st = 0 } }\n\nEND { printf \"{\\\"stage\\\":\\\"\
+      enhance\\\",\\\"images\\\":%d,%s,\\\"per_image\\\":[%s]}\", NIMG, place, ST\
+      \ > stats }' \"$NEXUS_INPUT_DIR/raw\" > \"$NEXUS_OUTPUT_DIR/enhanced\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.enhance
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: enhance_07
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    passes: denoise_passes
+  inputs:
+    passes:
+      required: true
+      type: json
+    raw:
+      required: true
+      type: string
+  outputs:
+    enhanced:
+      required: true
+      type: string
+    stats:
+      required: true
+      type: json
+  queue: gpu
+  resources:
+    limit:
+      gpu_count: 1
+    request:
+      cpu_millis: 1000
+      gpu_count: 1
+      gpu_kind: nvidia-a10
+      gpu_memory_bytes: 21474836480
+      memory_bytes: 1073741824
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; place=\"\\\"worker\\\":\\\
+      \"$HOSTNAME\\\",\\\"devices\\\":\\\"${CUDA_VISIBLE_DEVICES:-}\\\"\"; awk -v\
+      \ passes=\"$(v passes)\" -v place=\"$place\" -v stats=\"$NEXUS_OUTPUT_DIR/stats\"\
+      \ '\nfunction emit(Q, meta,   x, y, line) {\n  print \"P2\"; print \"# \" meta;\
+      \ print W, HH; print 255\n  for (y = 0; y < HH; y++) { line = \"\"; for (x =\
+      \ 0; x < W; x++) line = line (x ? \" \" : \"\") int(Q[x, y] + 0.5); print line\
+      \ }\n}\nfunction clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }\n\nfunction\
+      \ process(   p, x, y, dx, dy, s, n, h, c, i, m0, m1, v0, v1, lo, hi) {\n  for\
+      \ (y = 0; y < HH; y++) for (x = 0; x < W; x++) { m0 += P[x, y]; v0 += P[x, y]\
+      \ * P[x, y] }\n  for (p = 1; p <= passes; p++) {\n    for (y = 0; y < HH; y++)\
+      \ for (x = 0; x < W; x++) { s = 0; n = 0\n      for (dy = -1; dy <= 1; dy++)\
+      \ for (dx = -1; dx <= 1; dx++) {\n        if (x + dx < 0 || x + dx >= W || y\
+      \ + dy < 0 || y + dy >= HH) continue\n        wgt = (dx == 0 && dy == 0) ? 4\
+      \ : ((dx == 0 || dy == 0) ? 2 : 1); s += wgt * P[x + dx, y + dy]; n += wgt }\n\
+      \      B[x, y] = s / n }\n    for (y = 0; y < HH; y++) for (x = 0; x < W; x++)\
+      \ P[x, y] = B[x, y] }\n  # Percentile contrast stretch: the 1st..99th percentile\
+      \ onto 0..255.\n  # Deliberately NOT histogram equalization, which spreads the\
+      \ lit background\n  # across the whole range so a global threshold splits the\
+      \ BACKGROUND and\n  # counts its bright half as objects. A stretch keeps the\
+      \ two classes apart.\n  for (i = 0; i < 256; i++) h[i] = 0\n  for (y = 0; y\
+      \ < HH; y++) for (x = 0; x < W; x++) h[int(P[x, y])]++\n  c = 0; lo = -1; hi\
+      \ = 255\n  for (i = 0; i < 256; i++) { c += h[i]; if (lo < 0 && c >= 0.01 *\
+      \ W * HH) lo = i; if (c <= 0.99 * W * HH) hi = i }\n  if (hi <= lo) hi = lo\
+      \ + 1\n  for (y = 0; y < HH; y++) for (x = 0; x < W; x++) { Q[x, y] = clamp((P[x,\
+      \ y] - lo) * 255 / (hi - lo)); m1 += Q[x, y]; v1 += Q[x, y] * Q[x, y] }\n  emit(Q,\
+      \ META \" enhanced=1\")\n  m0 /= W * HH; m1 /= W * HH\n  ST = ST sprintf(\"\
+      %s{\\\"image\\\":%d,\\\"mean_before\\\":%.1f,\\\"std_before\\\":%.1f,\\\"mean_after\\\
+      \":%.1f,\\\"std_after\\\":%.1f}\", (NIMG > 1 ? \",\" : \"\"), NIMG, m0, sqrt(v0\
+      \ / (W * HH) - m0 * m0), m1, sqrt(v1 / (W * HH) - m1 * m1))\n}\n\n$1 == \"P2\"\
+      \ { st = 1; META = \"\"; next }\nst == 1 && /^#/ { META = substr($0, 3); next\
+      \ }\nst == 1 { W = $1; HH = $2; st = 2; next }\nst == 2 { st = 3; y = 0; next\
+      \ }\nst == 3 { for (x = 1; x <= NF; x++) P[x - 1, y] = $x + 0; y++; if (y ==\
+      \ HH) { NIMG++; process(); st = 0 } }\n\nEND { printf \"{\\\"stage\\\":\\\"\
+      enhance\\\",\\\"images\\\":%d,%s,\\\"per_image\\\":[%s]}\", NIMG, place, ST\
+      \ > stats }' \"$NEXUS_INPUT_DIR/raw\" > \"$NEXUS_OUTPUT_DIR/enhanced\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.enhance
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 3600000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: quality_report
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    min_accuracy: min_accuracy
+  inputs:
+    detections_00:
+      required: true
+      type: json
+    detections_01:
+      required: true
+      type: json
+    detections_02:
+      required: true
+      type: json
+    detections_03:
+      required: true
+      type: json
+    detections_04:
+      required: true
+      type: json
+    detections_05:
+      required: true
+      type: json
+    detections_06:
+      required: true
+      type: json
+    detections_07:
+      required: true
+      type: json
+    min_accuracy:
+      required: true
+      type: json
+    stats_00:
+      required: true
+      type: json
+    stats_01:
+      required: true
+      type: json
+    stats_02:
+      required: true
+      type: json
+    stats_03:
+      required: true
+      type: json
+    stats_04:
+      required: true
+      type: json
+    stats_05:
+      required: true
+      type: json
+    stats_06:
+      required: true
+      type: json
+    stats_07:
+      required: true
+      type: json
+  outputs:
+    report:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 100
+      memory_bytes: 67108864
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; cd \"$NEXUS_INPUT_DIR\"\
+      \ && cat detections_* stats_* | sed 's/}{/}\\n{/g; s/},{/}\\n{/g' | awk -v min=\"\
+      $(v min_accuracy)\" '\n/\"true_objects\"/ { n++; t = $0; sub(/.*\"true_objects\"\
+      :/, \"\", t); t += 0; d = $0; sub(/.*\"detected\":/, \"\", d); d += 0\n  if\
+      \ (t == d) hit++; err += (t > d ? t - d : d - t); objs += t }\n/\"worker\"/\
+      \ { w = $0; sub(/.*\"worker\":\"/, \"\", w); sub(/\".*/, \"\", w); dev = $0;\
+      \ sub(/.*\"devices\":\"/, \"\", dev); sub(/\".*/, \"\", dev)\n  st = ($0 ~ /\"\
+      stage\":\"enhance\"/) ? \"enhance\" : \"detect\"; used[st \"@\" w \" gpu\" dev]++\
+      \ }\nEND { acc = hit / n\n  printf \"{\\\"images\\\":%d,\\\"objects\\\":%d,\\\
+      \"exact_count_accuracy\\\":%.4f,\\\"mean_abs_count_error\\\":%.3f,\\\"min_accuracy\\\
+      \":%s,\\\"gpu_tasks\\\":{\", n, objs, acc, err / n, min\n  for (k in used) printf\
+      \ \"%s\\\"%s\\\":%d\", (s++ ? \",\" : \"\"), k, used[k]\n  printf \"}}\\n\"\n\
+      \  if (acc < min) { printf \"detection accuracy %.3f < %s\\n\", acc, min > \"\
+      /dev/stderr\"; exit 1 } }'  > \"$NEXUS_OUTPUT_DIR/report\" && cat \"$NEXUS_OUTPUT_DIR/report\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: img.quality_report
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+

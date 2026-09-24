@@ -33,7 +33,7 @@ MIGRATIONS    := services/migrations
         ui-dev ui-build ui-test seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
         license-report license-check dev-certs up-tls certs-check \
-        k8s-dev-images k8s-dev-up k8s-dev-test k8s-dev-status k8s-dev-down bench-pg bench-dispatch bench-inline
+        k8s-dev-images k8s-dev-up k8s-dev-test k8s-dev-test-long k8s-dev-status k8s-dev-down bench-pg bench-dispatch bench-inline
 
 help: ## Show this help
 	@echo "Nexus — make targets"
@@ -185,6 +185,9 @@ k8s-dev-up: ## Build + load images, then terraform apply the dev environment on 
 
 k8s-dev-test: ## Run the workload suite (CSV ETL, ML training, GPU scheduling, fan-out) on the dev environment
 	examples/run-suite.sh
+
+k8s-dev-test-long: ## Run the long workloads: credit-risk ML (~11 min) and GPU image processing (~7 min)
+	SUITE=long examples/run-suite.sh
 
 k8s-dev-status: ## Show the dev environment's pods and URLs
 	kubectl -n nexus-dev get pods,svc
