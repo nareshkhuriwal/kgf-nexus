@@ -37,6 +37,15 @@ type GRPCServer struct {
 	// always uses the real clock: deadlines are computed from CONTROL-PLANE time
 	// (invariant 7) and nothing a worker sends may influence it.
 	timeNow func() time.Time
+
+	// metrics is optional; nil records nothing.
+	metrics *Metrics
+}
+
+// WithMetrics attaches the service instruments and returns g.
+func (g *GRPCServer) WithMetrics(m *Metrics) *GRPCServer {
+	g.metrics = m
+	return g
 }
 
 // NewGRPCServer builds the adapter.
@@ -74,12 +83,21 @@ func (g *GRPCServer) ClaimForWorker(
 	}
 
 	now := g.timeNow()
+	claimStart := time.Now()
 	assignments, err := g.store.ClaimForWorker(ctx, now, store.WorkerClaimRequest{
 		WorkerID:     workerID,
 		Queues:       req.GetQueues(),
 		FreeCapacity: req.GetFreeCapacity(),
 		MaxTasks:     req.GetMaxTasks(),
 	})
+	outcome := "empty"
+	switch {
+	case err != nil:
+		outcome = "error"
+	case len(assignments) > 0:
+		outcome = "dispatched"
+	}
+	g.metrics.observeClaim("poll", outcome, time.Since(claimStart), len(assignments))
 	if err != nil {
 		// Assignments committed before the error are still returned: each is a
 		// real lease on a real attempt, and discarding them here would strand

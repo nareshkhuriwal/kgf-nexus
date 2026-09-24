@@ -26,6 +26,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	rmv1 "github.com/khuriwalgroup/kgf-nexus/services/resource-manager/gen/nexus/rm/v1"
@@ -110,19 +111,29 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	}
 	log.Info("connected to the metadata store")
 
+	// Metrics, served on the health listener (docs/OPERATIONS.md).
+	reg := metrics.NewServiceRegistry("resource-manager", version)
+	transport.RegisterMetrics(reg)
+	store.RegisterPoolMetrics(reg, pool)
+	rmMetrics := server.NewMetrics(reg)
+	grpcMetrics := metrics.NewGRPCServerMetrics(reg)
+
 	st := store.NewRMStore(pool)
 	svc := server.New(st, log)
 	svc.ReconcileGrace = cfg.reconcileGrace
+	svc.Metrics = rmMetrics
 
 	sweeper := server.NewSweeper(st, log)
 	sweeper.LivenessWindow = cfg.livenessWindow
 	sweeper.Interval = cfg.sweepInterval
+	sweeper.Metrics = rmMetrics
 
 	qcfg, err := server.QuarantineConfigFromEnv()
 	if err != nil {
 		return fmt.Errorf("quarantine config: %w", err)
 	}
 	detector := server.NewQuarantineDetector(st, log, qcfg)
+	detector.Metrics = rmMetrics
 
 	// PeerServerOptions bounds how long one connection lives. Without it a client
 	// that connected before an address swap keeps using a healthy connection to
@@ -133,7 +144,8 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 		// incompletely must not quietly serve plaintext instead.
 		return fmt.Errorf("resolve TLS server options: %w", terr)
 	}
-	gs := grpc.NewServer(append(config.PeerServerOptions(), sopts...)...)
+	grpcOpts := append(grpcMetrics.ServerOptions(), config.PeerServerOptions()...)
+	gs := grpc.NewServer(append(grpcOpts, sopts...)...)
 	rmv1.RegisterResourceManagerServiceServer(gs, svc)
 	// The in-cluster scaling controller's only path to Nexus state; it holds no
 	// database credential (docs/CLUSTER-SCALING.md, migration 0018).
@@ -152,7 +164,7 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	// ready is flipped only once the gRPC listener is actually serving, so a load
 	// balancer cannot route traffic to a replica that is still starting.
 	var ready atomic.Bool
-	httpSrv := healthServer(cfg.httpAddr, pool, &ready)
+	httpSrv := healthServer(cfg.httpAddr, pool, &ready, reg)
 
 	errs := make(chan error, 4)
 	go func() {
@@ -225,8 +237,10 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 // Kubernetes restart every replica and turn a recoverable outage into a
 // cold-start stampede. /readyz answers "should traffic come here" and DOES check
 // the database, because a replica that cannot reach Postgres can serve nothing.
-func healthServer(addr string, pool *pgxpool.Pool, ready *atomic.Bool) *http.Server {
+func healthServer(addr string, pool *pgxpool.Pool, ready *atomic.Bool, reg *metrics.Registry) *http.Server {
 	mux := http.NewServeMux()
+	// Scraped on the health listener: no extra port and no new scrape target.
+	reg.Routes(mux)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))

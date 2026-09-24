@@ -215,11 +215,13 @@ func (c *Controller) reconcilePool(ctx context.Context, a *rmv1.ClusterAssignmen
 	if mode.Apply {
 		if err := c.apply(ctx, a, b, dep, &st, pods, uid); err != nil {
 			c.record(ctx, a, b, st, mode, false, idleUpdate, idleSince, "refused", err.Error())
+			c.metrics.step(b.GetPool(), st, mode, false, "refused")
 			return err
 		}
 		applied = true
 	}
 	c.record(ctx, a, b, st, mode, applied, idleUpdate, idleSince, "", "")
+	c.metrics.step(b.GetPool(), st, mode, applied && st.Action() != "hold", st.Action())
 	if st.Action() != "" {
 		log.InfoContext(ctx, "scaling decision", "action", st.Action(), "from", st.From, "to", st.To,
 			"drain", st.Drain, "remove", st.Remove, "reason", st.Reason(), "applied", applied)

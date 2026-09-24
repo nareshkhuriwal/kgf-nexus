@@ -50,7 +50,16 @@ type Client struct {
 	namespace string
 	inlineMax int64
 	log       *slog.Logger
+	onPut     func(result string, bytes int64, d time.Duration)
 }
+
+// PutResult values passed to Config.OnPut.
+const (
+	PutInline       = "inline"       // at or below the threshold; never left the agent
+	PutUploaded     = "uploaded"     // written to object storage
+	PutDeduplicated = "deduplicated" // identical content already present; nothing transferred
+	PutError        = "error"        // stat or upload failed
+)
 
 // Config is what the agent needs to reach the store. Endpoint, bucket and the
 // inline threshold all arrive from RegisterResponse.result_store, so the control
@@ -67,6 +76,10 @@ type Config struct {
 	UseTLS          bool
 	InlineThreshold int64
 	Log             *slog.Logger
+	// OnPut, when set, is told the outcome, payload size and duration of every
+	// Put. It is how the agent's metrics see upload bytes and latency without
+	// this package depending on them. It must not block.
+	OnPut func(result string, bytes int64, d time.Duration)
 }
 
 // New builds a client. It does NOT verify the bucket exists: a worker that
@@ -95,7 +108,8 @@ func New(cfg Config) (*Client, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Client{mc: mc, bucket: cfg.Bucket, namespace: cfg.Namespace, inlineMax: inline, log: log}, nil
+	return &Client{mc: mc, bucket: cfg.Bucket, namespace: cfg.Namespace, inlineMax: inline, log: log,
+		onPut: cfg.OnPut}, nil
 }
 
 // InlineThreshold reports the configured inline cutoff, for tests and logs.
@@ -113,6 +127,15 @@ func (c *Client) InlineThreshold() int64 { return c.inlineMax }
 // and a cache key over mutable content is a correctness bug waiting for a
 // deadline.
 func (c *Client) Put(ctx context.Context, payload []byte, contentType string) (*nexusv1.ResultRef, error) {
+	start := time.Now()
+	ref, result, err := c.put(ctx, payload, contentType)
+	if c.onPut != nil {
+		c.onPut(result, int64(len(payload)), time.Since(start))
+	}
+	return ref, err
+}
+
+func (c *Client) put(ctx context.Context, payload []byte, contentType string) (*nexusv1.ResultRef, string, error) {
 	size := int64(len(payload))
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -122,7 +145,7 @@ func (c *Client) Put(ctx context.Context, payload []byte, contentType string) (*
 			Kind:        &nexusv1.ResultRef_Inline{Inline: payload},
 			ContentType: contentType,
 			SizeBytes:   size,
-		}, nil
+		}, PutInline, nil
 	}
 
 	sum := sha256.Sum256(payload)
@@ -135,18 +158,18 @@ func (c *Client) Put(ctx context.Context, payload []byte, contentType string) (*
 	if _, err := c.mc.StatObject(ctx, c.bucket, key, minio.StatObjectOptions{}); err == nil {
 		c.log.Debug("result already present; skipping upload",
 			"bucket", c.bucket, "key", key, "size_bytes", size)
-		return blobRef(c.bucket, key, digest, contentType, size), nil
+		return blobRef(c.bucket, key, digest, contentType, size), PutDeduplicated, nil
 	} else if !isNotFound(err) {
-		return nil, fmt.Errorf("resultstore: stat %s/%s: %w", c.bucket, key, err)
+		return nil, PutError, fmt.Errorf("resultstore: stat %s/%s: %w", c.bucket, key, err)
 	}
 
 	_, err := c.mc.PutObject(ctx, c.bucket, key, bytes.NewReader(payload), size,
 		minio.PutObjectOptions{ContentType: contentType})
 	if err != nil {
-		return nil, fmt.Errorf("resultstore: put %s/%s: %w", c.bucket, key, err)
+		return nil, PutError, fmt.Errorf("resultstore: put %s/%s: %w", c.bucket, key, err)
 	}
 	c.log.Debug("result stored", "bucket", c.bucket, "key", key, "size_bytes", size)
-	return blobRef(c.bucket, key, digest, contentType, size), nil
+	return blobRef(c.bucket, key, digest, contentType, size), PutUploaded, nil
 }
 
 // Get resolves a ResultRef to bytes, VERIFYING the digest for blob refs.

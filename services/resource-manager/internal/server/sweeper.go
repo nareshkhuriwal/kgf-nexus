@@ -33,6 +33,9 @@ type Sweeper struct {
 	// Interval is the sweep period. Meaningfully shorter than the window so a
 	// dead worker's capacity comes back promptly rather than a window later.
 	Interval time.Duration
+
+	// Metrics is optional; nil records nothing.
+	Metrics *Metrics
 }
 
 // NewSweeper builds a sweeper with the §5.5 defaults.
@@ -60,7 +63,9 @@ func (sw *Sweeper) Run(ctx context.Context) error {
 			sw.log.Info("liveness sweeper stopping", "reason", ctx.Err())
 			return nil
 		case <-t.C:
-			sw.sweepOnce(ctx)
+			dead, released := sw.sweepOnce(ctx)
+			sw.Metrics.workersDead(dead)
+			sw.Metrics.leak("dead_worker", released)
 		}
 	}
 }

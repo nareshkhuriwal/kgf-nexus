@@ -62,7 +62,13 @@ type Engine struct {
 	validation dag.ValidationOptions
 	// fanInLimit bounds an assembled fan-in array (§5.4); 0 = the default.
 	fanInLimit int64
+
+	// metrics is optional; nil records nothing.
+	metrics *Metrics
 }
+
+// SetMetrics attaches the service instruments. Called once, before serving.
+func (e *Engine) SetMetrics(m *Metrics) { e.metrics = m }
 
 // NewEngine wires the engine. runs and ev may be nil, in which case the engine
 // runs "headless": it still maintains task_nodes/task_edges and creates attempts,
@@ -116,6 +122,13 @@ type MaterializeResult struct {
 // called twice (CONTRACT.md invariant: at-least-once + idempotency). Re-calling it
 // on an already-materialized run reconciles instead of duplicating.
 func (e *Engine) Materialize(ctx context.Context, runID string) (*MaterializeResult, error) {
+	start := time.Now()
+	res, err := e.materialize(ctx, runID)
+	e.metrics.observeOp("materialize", start, err)
+	return res, err
+}
+
+func (e *Engine) materialize(ctx context.Context, runID string) (*MaterializeResult, error) {
 	log := e.log.With("run_id", runID)
 
 	run, err := e.store.LoadRun(ctx, runID)
@@ -219,6 +232,13 @@ type ReconcileResult struct {
 // not look again, nothing would: a run of fully-memoized tasks would stop after
 // its first node, with no attempt ever reporting to trigger the next reconcile.
 func (e *Engine) Reconcile(ctx context.Context, runID string) (*ReconcileResult, error) {
+	start := time.Now()
+	res, err := e.reconcile(ctx, runID)
+	e.metrics.observeOp("reconcile", start, err)
+	return res, err
+}
+
+func (e *Engine) reconcile(ctx context.Context, runID string) (*ReconcileResult, error) {
 	var total *ReconcileResult
 	for pass := 0; pass < maxReconcilePasses; pass++ {
 		res, again, err := e.reconcilePass(ctx, runID)
@@ -426,6 +446,14 @@ func (e *Engine) reconcilePass(ctx context.Context, runID string) (res *Reconcil
 		// rates mean replicas are fighting, which is worth noticing.
 		log.Debug("node cas misses", "nodes", applied.NodeCASMisses)
 	}
+
+	refused := 0
+	for _, r := range refusals {
+		if !containsString(applied.NodeCASMisses, r.NodeID) {
+			refused++
+		}
+	}
+	e.metrics.observeApplied(writes, applied.NodeCASMisses, applied.AttemptsCreated, refused, len(expanded))
 
 	res = &ReconcileResult{
 		Expanded:        expanded,
@@ -789,7 +817,9 @@ func (e *Engine) publishRunState(ctx context.Context, runID string, s domain.Run
 	if e.runs == nil {
 		return nil
 	}
-	if err := e.runs.SetRunState(ctx, runID, s, "dag_engine_terminal_detection"); err != nil {
+	err := e.runs.SetRunState(ctx, runID, s, "dag_engine_terminal_detection")
+	e.metrics.observeRunState(string(s), err)
+	if err != nil {
 		return fmt.Errorf("publish run state %s for %s: %w", s, runID, err)
 	}
 	return nil

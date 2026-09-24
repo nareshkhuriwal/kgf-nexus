@@ -85,6 +85,13 @@ func main() {
 		maxRefs = flag.Int("max-refs", envInt("ARTIFACT_GC_MAX_REFS", artifactgc.DefaultMaxRefs),
 			"maximum distinct object keys checked by -check-refs")
 
+		// Batch-job metrics (see metrics.go): push at the end, and/or serve
+		// while the pass runs. Both off by default.
+		metricsAddr = flag.String("metrics-addr", envOr("ARTIFACT_GC_METRICS_ADDR", ""),
+			"serve /metrics on this address while the pass runs (e.g. 127.0.0.1:9469); empty = off")
+		pushURL = flag.String("metrics-pushgateway", envOr("ARTIFACT_GC_PUSHGATEWAY_URL", ""),
+			"push final metrics to this Prometheus Pushgateway URL under job=artifact-gc; empty = off")
+
 		logLevel = flag.String("log-level", envOr("ARTIFACT_GC_LOG_LEVEL", "info"), "debug|info|warn|error")
 		showVer  = flag.Bool("version", false, "print the version and exit")
 	)
@@ -122,15 +129,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, log, runConfig{
+	gm := newGCMetrics()
+	stopMetrics, err := gm.serve(*metricsAddr, log)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "artifact-gc: %v\n", err)
+		os.Exit(2)
+	}
+	runErr := run(ctx, log, runConfig{
 		dsn: *dsn, prefix: *prefix, grace: *grace, maxObjects: *maxObjects, dryRun: dryRun,
 		checkRefs: *checkRefs, maxRefs: *maxRefs,
 		minio: artifactgc.MinIOConfig{
 			Endpoint: *endpoint, Bucket: *bucket, Region: *region,
 			AccessKeyID: *access, SecretAccessKey: *secret, UseTLS: *useTLS,
 		},
-	}); err != nil {
-		log.Error("artifact-gc failed", "error", err)
+		metrics: gm,
+	})
+	gm.finish(runErr)
+	gm.push(*pushURL, log)
+	stopMetrics()
+	if runErr != nil {
+		log.Error("artifact-gc failed", "error", runErr)
 		os.Exit(1)
 	}
 }
@@ -144,6 +162,7 @@ type runConfig struct {
 	checkRefs  bool
 	maxRefs    int
 	minio      artifactgc.MinIOConfig
+	metrics    *gcMetrics
 }
 
 func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
@@ -189,6 +208,7 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	if err != nil {
 		return err
 	}
+	cfg.metrics.sweep(st)
 
 	// A human-readable summary on stdout as well as the structured log: this is a
 	// command an operator reads, not a service whose logs get shipped.
@@ -286,6 +306,7 @@ func checkDangling(
 	if err != nil {
 		return err
 	}
+	cfg.metrics.check(rep)
 
 	fmt.Printf("\nartifact-gc dangling-reference check (READ-ONLY)\n")
 	fmt.Printf("  rows scanned          %d  (from %v)\n", rep.RowsScanned, artifactgc.RefSources())
