@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../api/client';
 import { ClusterInventory } from '../../components/ClusterInventory';
+import { ClusterControllerPanel } from '../../components/ClusterControllerPanel';
 import { useQuery } from '@tanstack/react-query';
 import { authRequest } from '../../api/auth';
 import { PageHeader } from '../../components/PageHeader';
@@ -42,13 +43,14 @@ export function InfrastructurePage({namespace,canAdmin}:{namespace:string;canAdm
   {error!=null&&<ErrorBox error={error} what="save configuration"/>}
   {notice&&<p role="status">{notice}</p>}
   {!draft&&!config.error&&<p role="status">Loading configuration…</p>}
-  <div className="cluster-tabs" aria-label="Cluster sections">{[['cluster','Cluster overview'],['scheduler','Scheduler'],['workers','Worker pools'],['tasks','Task runtime'],['plan','Scaling plan']].map(([id,label])=><button key={id} aria-pressed={tab===id} onClick={()=>setTab(id!)}>{label}</button>)}</div>
+  <div className="cluster-tabs" aria-label="Cluster sections">{[['cluster','Cluster overview'],['live','Live cluster'],['scheduler','Scheduler'],['workers','Worker pools'],['tasks','Task runtime'],['plan','Scaling plan']].map(([id,label])=><button key={id} aria-pressed={tab===id} onClick={()=>setTab(id!)}>{label}</button>)}</div>
   {tab==='cluster'&&<><section className="panel"><div className="panel-head">{namespace} <span className="chip">Namespace view</span><span className="spacer"/><Link to="/workers">Open worker fleet →</Link></div><div className="panel-body"><div className="cluster-topology">
-   <button onClick={()=>setTab('scheduler')}><span>01 · CONTROL PLANE</span><strong>Scheduler</strong><p>{draft ? `${draft.scheduler.min_replicas}–${draft.scheduler.max_replicas} replicas configured` : 'Loading policy…'}</p><small>Live replica count not reported</small></button>
+   <button onClick={()=>setTab('scheduler')}><span>01 · CONTROL PLANE</span><strong>Scheduler</strong><p>{draft ? `${draft.scheduler.min_replicas}–${draft.scheduler.max_replicas} replicas configured` : 'Loading policy…'}</p><small>Live replicas: see Live cluster (reported only by a registered controller)</small></button>
    <button onClick={()=>setTab('workers')}><span>02 · EXECUTION PLANE</span><strong>Worker agents</strong><p>{workers.data ? `${workers.data.filter(w=>w.state==='ACTIVE').length} active / ${workers.data.length} registered` : 'Inventory unavailable'}</p><small>Heartbeat and resource advertisements</small></button>
    <button onClick={()=>setTab('tasks')}><span>03 · TASK EXECUTION</span><strong>Task runtimes</strong><p>{draft?.profiles.length ?? 0} approved pod profiles</p><small>Select an agent below to inspect task placement</small></button>
-  </div><p className="sub">Agents execute tasks using their registered executors. Kubernetes nodes and scheduler health are not reported by the current gateway. AWS/Azure profile labels identify intended placement, not connected clusters.</p></div></section>
+  </div><p className="sub">Agents execute tasks using their registered executors. Kubernetes nodes, scheduler replicas and task Jobs are reported only by a registered cluster controller — see Live cluster. AWS/Azure profile labels identify intended placement, not connected clusters.</p></div></section>
   {can('workers.view')?<ClusterInventory namespace={namespace} workers={workers.data} error={workers.error}/>:<p>Worker inventory requires workers.view permission.</p>}</>}
+  {tab==='live'&&<ClusterControllerPanel namespace={namespace} pools={(draft??config.data)?.pools.map(p=>p.name)??[]} scheduler={config.data?.scheduler}/>}
   {draft&&<fieldset className="col" style={{border:0,padding:0,margin:0}} disabled={!can("infrastructure.configure")}>
    <section hidden={tab!=='scheduler'} className="panel"><div className="panel-head">Scheduler capacity <span className="chip">Revision {draft.revision}</span></div><div className="panel-body"><p className="sub">Replica bounds for a Kubernetes HPA. Scheduler pods require CPU requests and a working metrics server. Database capacity remains a separate limit.</p><div className="infra-fields">
     <NumberField label="Minimum replicas" value={draft.scheduler.min_replicas} min={1} max={100} onChange={v=>setScheduler('min_replicas',v)}/>

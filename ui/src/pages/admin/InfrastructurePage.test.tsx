@@ -12,7 +12,7 @@ vi.mock('../../api/auth',()=>({authRequest:vi.fn()}));
 vi.mock('../../api/client',()=>({api:{listWorkers:vi.fn(),getWorker:vi.fn()}}));
 afterEach(()=>{cleanup();vi.resetAllMocks()});
 function setup(grants=['infrastructure.view','infrastructure.configure','workers.view']) {
- vi.mocked(authRequest).mockImplementation(async path=>path.endsWith('/config')?{revision:1,scheduler:{min_replicas:1,max_replicas:4,target_cpu_percent:65,scale_down_seconds:300},profiles:[],pools:[]}:{revision:1,decisions:[],task_job_templates:{}} as never);
+ vi.mocked(authRequest).mockImplementation(async path=>path.endsWith('/config')?{revision:1,scheduler:{min_replicas:1,max_replicas:4,target_cpu_percent:65,scale_down_seconds:300},profiles:[],pools:[]}:path.endsWith('/clusters')?{clusters:[]}:{revision:1,decisions:[],task_job_templates:{}} as never);
  vi.mocked(api.listWorkers).mockResolvedValue([{id:'worker-1',hostname:'test-host',namespace:'default',state:'ACTIVE',queues:['default'],capacity:{cpu_millis:2000},last_heartbeat_at:new Date().toISOString(),active_attempts:1}]);
  vi.mocked(api.getWorker).mockResolvedValue({id:'worker-1',hostname:'test-host',running_attempts:[{id:'attempt-1',node_id:'extract',run_id:'run-1',task_ref:'etl.extract',attempt_number:1,state:'RUNNING'}]} as never);
  render(<MemoryRouter><PermissionContext.Provider value={grants}><QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false}}})}><InfrastructurePage namespace="default" canAdmin/></QueryClientProvider></PermissionContext.Provider></MemoryRouter>);
