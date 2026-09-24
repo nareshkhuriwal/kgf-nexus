@@ -1,0 +1,3171 @@
+api_version: nexus.dev/v1
+description: 16-way ML training/evaluation stress test with measurable CPU, memory,
+  artifact fan-out, scheduler concurrency and aggregate throughput.
+edges:
+- from_node_id: evaluate_00
+  output_to_input:
+    metrics_00: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_01
+  output_to_input:
+    metrics_01: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_02
+  output_to_input:
+    metrics_02: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_03
+  output_to_input:
+    metrics_03: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_04
+  output_to_input:
+    metrics_04: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_05
+  output_to_input:
+    metrics_05: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_06
+  output_to_input:
+    metrics_06: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_07
+  output_to_input:
+    metrics_07: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_08
+  output_to_input:
+    metrics_08: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_09
+  output_to_input:
+    metrics_09: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_10
+  output_to_input:
+    metrics_10: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_11
+  output_to_input:
+    metrics_11: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_12
+  output_to_input:
+    metrics_12: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_13
+  output_to_input:
+    metrics_13: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_14
+  output_to_input:
+    metrics_14: metrics
+  to_node_id: capacity_report
+- from_node_id: evaluate_15
+  output_to_input:
+    metrics_15: metrics
+  to_node_id: capacity_report
+- from_node_id: generate_data
+  output_to_input:
+    manifest: manifest
+  to_node_id: capacity_report
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_00
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_01
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_02
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_03
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_04
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_05
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_06
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_07
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_08
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_09
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_10
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_11
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_12
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_13
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_14
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: evaluate_15
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_00
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_01
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_02
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_03
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_04
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_05
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_06
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_07
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_08
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_09
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_10
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_11
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_12
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_13
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_14
+- from_node_id: generate_data
+  output_to_input:
+    dataset: dataset
+  to_node_id: train_15
+- from_node_id: train_00
+  output_to_input:
+    model: model
+  to_node_id: evaluate_00
+- from_node_id: train_01
+  output_to_input:
+    model: model
+  to_node_id: evaluate_01
+- from_node_id: train_02
+  output_to_input:
+    model: model
+  to_node_id: evaluate_02
+- from_node_id: train_03
+  output_to_input:
+    model: model
+  to_node_id: evaluate_03
+- from_node_id: train_04
+  output_to_input:
+    model: model
+  to_node_id: evaluate_04
+- from_node_id: train_05
+  output_to_input:
+    model: model
+  to_node_id: evaluate_05
+- from_node_id: train_06
+  output_to_input:
+    model: model
+  to_node_id: evaluate_06
+- from_node_id: train_07
+  output_to_input:
+    model: model
+  to_node_id: evaluate_07
+- from_node_id: train_08
+  output_to_input:
+    model: model
+  to_node_id: evaluate_08
+- from_node_id: train_09
+  output_to_input:
+    model: model
+  to_node_id: evaluate_09
+- from_node_id: train_10
+  output_to_input:
+    model: model
+  to_node_id: evaluate_10
+- from_node_id: train_11
+  output_to_input:
+    model: model
+  to_node_id: evaluate_11
+- from_node_id: train_12
+  output_to_input:
+    model: model
+  to_node_id: evaluate_12
+- from_node_id: train_13
+  output_to_input:
+    model: model
+  to_node_id: evaluate_13
+- from_node_id: train_14
+  output_to_input:
+    model: model
+  to_node_id: evaluate_14
+- from_node_id: train_15
+  output_to_input:
+    model: model
+  to_node_id: evaluate_15
+name: ml-capacity-test
+namespace: default
+params:
+  epochs:
+    default_json: '8'
+    type: int
+  features:
+    default_json: '24'
+    type: int
+  rows:
+    default_json: '60000'
+    type: int
+  seed:
+    default_json: '7'
+    type: int
+run_timeout_ms: 7200000
+tasks:
+- id: capacity_report
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    manifest:
+      required: true
+      type: json
+    metrics_00:
+      required: true
+      type: json
+    metrics_01:
+      required: true
+      type: json
+    metrics_02:
+      required: true
+      type: json
+    metrics_03:
+      required: true
+      type: json
+    metrics_04:
+      required: true
+      type: json
+    metrics_05:
+      required: true
+      type: json
+    metrics_06:
+      required: true
+      type: json
+    metrics_07:
+      required: true
+      type: json
+    metrics_08:
+      required: true
+      type: json
+    metrics_09:
+      required: true
+      type: json
+    metrics_10:
+      required: true
+      type: json
+    metrics_11:
+      required: true
+      type: json
+    metrics_12:
+      required: true
+      type: json
+    metrics_13:
+      required: true
+      type: json
+    metrics_14:
+      required: true
+      type: json
+    metrics_15:
+      required: true
+      type: json
+  outputs:
+    report:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport glob\nimport json\nimport math\nimport os\nimport statistics\n\ninp\
+      \ = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\n\
+      manifest = json.load(open(os.path.join(inp, \"manifest\")))\nmetrics = [json.load(open(p))\
+      \ for p in sorted(glob.glob(os.path.join(inp, \"metrics_*\")))]\n\nif not metrics:\n\
+      \    raise SystemExit(\"no model metrics received\")\n\nexpected = 16\nif len(metrics)\
+      \ != expected:\n    raise SystemExit(f\"expected {expected} model metrics, got\
+      \ {len(metrics)}\")\n\ndef overlap(items, start_key, end_key):\n    events =\
+      \ []\n    for m in items:\n        events.append((float(m[start_key]), 1))\n\
+      \        events.append((float(m[end_key]), -1))\n    # End (-1) before start\
+      \ (+1) at identical timestamps.\n    events.sort(key=lambda x: (x[0], x[1]))\n\
+      \    current = best = 0\n    for _, delta in events:\n        current += delta\n\
+      \        best = max(best, current)\n    return best\n\ntrain_start = min(m[\"\
+      train_start_epoch\"] for m in metrics)\ntrain_end = max(m[\"train_end_epoch\"\
+      ] for m in metrics)\neval_start = min(m[\"eval_start_epoch\"] for m in metrics)\n\
+      eval_end = max(m[\"eval_end_epoch\"] for m in metrics)\ntrain_wave = max(0.000001,\
+      \ train_end - train_start)\neval_wave = max(0.000001, eval_end - eval_start)\n\
+      \nbest = min(metrics, key=lambda m: (m[\"log_loss\"], -m[\"accuracy\"], m[\"\
+      candidate\"]))\ntrain_seconds = [float(m[\"train_seconds\"]) for m in metrics]\n\
+      eval_seconds = [float(m[\"eval_seconds\"]) for m in metrics]\ntotal_row_passes\
+      \ = sum(int(m[\"train_row_passes\"]) for m in metrics)\ntotal_eval_rows = sum(int(m[\"\
+      eval_rows\"]) for m in metrics)\n\nsorted_train = sorted(train_seconds)\np95_index\
+      \ = max(0, math.ceil(0.95 * len(sorted_train)) - 1)\n\nreport = {\n    \"status\"\
+      : \"ok\",\n    \"configured_model_candidates\": expected,\n    \"completed_model_candidates\"\
+      : len(metrics),\n    \"dataset\": manifest,\n    \"capacity\": {\n        \"\
+      max_observed_parallel_trainers\": overlap(metrics, \"train_start_epoch\", \"\
+      train_end_epoch\"),\n        \"max_observed_parallel_evaluators\": overlap(metrics,\
+      \ \"eval_start_epoch\", \"eval_end_epoch\"),\n        \"training_wave_seconds\"\
+      : round(train_wave, 6),\n        \"evaluation_wave_seconds\": round(eval_wave,\
+      \ 6),\n        \"mean_train_seconds\": round(statistics.mean(train_seconds),\
+      \ 6),\n        \"p95_train_seconds\": round(sorted_train[p95_index], 6),\n \
+      \       \"slowest_train_seconds\": round(max(train_seconds), 6),\n        \"\
+      mean_eval_seconds\": round(statistics.mean(eval_seconds), 6),\n        \"aggregate_train_row_passes\"\
+      : total_row_passes,\n        \"aggregate_training_row_passes_per_second\": round(total_row_passes\
+      \ / train_wave, 3),\n        \"aggregate_eval_rows\": total_eval_rows,\n   \
+      \     \"aggregate_eval_rows_per_second\": round(total_eval_rows / eval_wave,\
+      \ 3),\n    },\n    \"best_model\": {\n        \"candidate\": best[\"candidate\"\
+      ],\n        \"learning_rate\": best[\"learning_rate\"],\n        \"l2\": best[\"\
+      l2\"],\n        \"accuracy\": best[\"accuracy\"],\n        \"log_loss\": best[\"\
+      log_loss\"],\n        \"f1\": best[\"f1\"],\n    },\n    \"models\": [\n   \
+      \     {\n            \"candidate\": m[\"candidate\"],\n            \"learning_rate\"\
+      : m[\"learning_rate\"],\n            \"l2\": m[\"l2\"],\n            \"accuracy\"\
+      : m[\"accuracy\"],\n            \"log_loss\": m[\"log_loss\"],\n           \
+      \ \"f1\": m[\"f1\"],\n            \"train_seconds\": m[\"train_seconds\"],\n\
+      \            \"eval_seconds\": m[\"eval_seconds\"],\n        }\n        for\
+      \ m in sorted(metrics, key=lambda x: x[\"candidate\"])\n    ],\n}\n\nwith open(os.path.join(out,\
+      \ \"report\"), \"w\") as f:\n    json.dump(report, f, separators=(\",\", \"\
+      :\"))\nprint(json.dumps(report, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.capacity_report
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_00
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_01
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_02
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_03
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_04
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_05
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_06
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_07
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_08
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_09
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_10
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_11
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_12
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_13
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_14
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: evaluate_15
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    dataset:
+      required: true
+      type: string
+    model:
+      required: true
+      type: json
+  outputs:
+    metrics:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport time\n\ninp = os.environ[\"\
+      NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"]\nmodel = json.load(open(os.path.join(inp,\
+      \ \"model\")))\nweights = model[\"weights\"]\nbias = float(model[\"bias\"])\n\
+      \nstarted_epoch = time.time()\nstarted_perf = time.perf_counter()\n\ncount =\
+      \ correct = tp = tn = fp = fn = 0\nloss = 0.0\n\nwith open(os.path.join(inp,\
+      \ \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n    next(r)\n  \
+      \  for idx, row in enumerate(r):\n        if idx % 5 != 0:\n            continue\n\
+      \        x = [float(v) for v in row[1:-1]]\n        target = int(row[-1])\n\
+      \        z = bias + sum(a * b for a, b in zip(weights, x))\n        z = max(-30.0,\
+      \ min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n        pred = 1 if\
+      \ p >= 0.5 else 0\n        p_clip = min(1.0 - 1e-12, max(1e-12, p))\n      \
+      \  loss += -(target * math.log(p_clip) + (1 - target) * math.log(1 - p_clip))\n\
+      \        count += 1\n        correct += int(pred == target)\n        if pred\
+      \ == 1 and target == 1:\n            tp += 1\n        elif pred == 0 and target\
+      \ == 0:\n            tn += 1\n        elif pred == 1:\n            fp += 1\n\
+      \        else:\n            fn += 1\n\nif count == 0:\n    raise SystemExit(\"\
+      evaluation set is empty\")\n\nended_perf = time.perf_counter()\nended_epoch\
+      \ = time.time()\neval_seconds = ended_perf - started_perf\nprecision = tp /\
+      \ (tp + fp) if (tp + fp) else 0.0\nrecall = tp / (tp + fn) if (tp + fn) else\
+      \ 0.0\nf1 = 2 * precision * recall / (precision + recall) if (precision + recall)\
+      \ else 0.0\n\nmetrics = {\n    \"candidate\": model[\"candidate\"],\n    \"\
+      learning_rate\": model[\"learning_rate\"],\n    \"l2\": model[\"l2\"],\n   \
+      \ \"epochs\": model[\"epochs\"],\n    \"train_rows\": model[\"train_rows\"],\n\
+      \    \"train_row_passes\": model[\"train_row_passes\"],\n    \"train_loss\"\
+      : model[\"train_loss\"],\n    \"train_seconds\": model[\"train_seconds\"],\n\
+      \    \"train_start_epoch\": model[\"train_start_epoch\"],\n    \"train_end_epoch\"\
+      : model[\"train_end_epoch\"],\n    \"eval_rows\": count,\n    \"accuracy\":\
+      \ round(correct / count, 8),\n    \"log_loss\": round(loss / count, 8),\n  \
+      \  \"precision\": round(precision, 8),\n    \"recall\": round(recall, 8),\n\
+      \    \"f1\": round(f1, 8),\n    \"tp\": tp,\n    \"tn\": tn,\n    \"fp\": fp,\n\
+      \    \"fn\": fn,\n    \"eval_seconds\": round(eval_seconds, 6),\n    \"eval_rows_per_second\"\
+      : round(count / eval_seconds, 3) if eval_seconds > 0 else 0.0,\n    \"eval_start_epoch\"\
+      : round(started_epoch, 6),\n    \"eval_end_epoch\": round(ended_epoch, 6),\n\
+      }\nwith open(os.path.join(out, \"metrics\"), \"w\") as f:\n    json.dump(metrics,\
+      \ f, separators=(\",\", \":\"))\nprint(json.dumps(metrics, separators=(\",\"\
+      , \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.evaluate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_data
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    features: features
+    rows: rows
+    seed: seed
+  inputs:
+    features:
+      required: true
+      type: json
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    dataset:
+      required: true
+      type: string
+    manifest:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 500
+      memory_bytes: 536870912
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\nrows = int(json.load(open(os.path.join(inp, \"rows\"))))\nfeatures = int(json.load(open(os.path.join(inp,\
+      \ \"features\"))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\
+      \nif rows < 1000:\n    raise SystemExit(\"rows must be >= 1000\")\nif features\
+      \ < 2 or features > 128:\n    raise SystemExit(\"features must be between 2\
+      \ and 128\")\n\nrng = random.Random(seed)\ntruth = [rng.uniform(-2.0, 2.0) for\
+      \ _ in range(features)]\nbias = rng.uniform(-0.5, 0.5)\n\npath = os.path.join(out,\
+      \ \"dataset\")\nstarted = time.time()\npositives = 0\n\nwith open(path, \"w\"\
+      , newline=\"\") as f:\n    w = csv.writer(f)\n    w.writerow([\"row_id\", *[f\"\
+      x{i:02d}\" for i in range(features)], \"label\"])\n    for row_id in range(rows):\n\
+      \        x = [rng.uniform(-1.0, 1.0) for _ in range(features)]\n        z =\
+      \ bias + sum(a * b for a, b in zip(truth, x)) + rng.gauss(0.0, 0.35)\n     \
+      \   p = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z))))\n        y = 1 if\
+      \ rng.random() < p else 0\n        positives += y\n        w.writerow([row_id,\
+      \ *[f\"{v:.6f}\" for v in x], y])\n\nmanifest = {\n    \"rows\": rows,\n   \
+      \ \"features\": features,\n    \"positive_rows\": positives,\n    \"negative_rows\"\
+      : rows - positives,\n    \"dataset_bytes\": os.path.getsize(path),\n    \"generate_seconds\"\
+      : round(time.time() - started, 6),\n    \"seed\": seed,\n}\nwith open(os.path.join(out,\
+      \ \"manifest\"), \"w\") as f:\n    json.dump(manifest, f, separators=(\",\"\
+      , \":\"))\nprint(json.dumps(manifest, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.generate_data
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_00
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '0'
+    l2: '0'
+    learning_rate: '0.005'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_01
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '1'
+    l2: '0.0001'
+    learning_rate: '0.005'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_02
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '2'
+    l2: '0.001'
+    learning_rate: '0.005'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_03
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '3'
+    l2: '0.005'
+    learning_rate: '0.005'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_04
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '4'
+    l2: '0'
+    learning_rate: '0.01'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_05
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '5'
+    l2: '0.0001'
+    learning_rate: '0.01'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_06
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '6'
+    l2: '0.001'
+    learning_rate: '0.01'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_07
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '7'
+    l2: '0.005'
+    learning_rate: '0.01'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_08
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '8'
+    l2: '0'
+    learning_rate: '0.02'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_09
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '9'
+    l2: '0.0001'
+    learning_rate: '0.02'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_10
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '10'
+    l2: '0.001'
+    learning_rate: '0.02'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_11
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '11'
+    l2: '0.005'
+    learning_rate: '0.02'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_12
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '12'
+    l2: '0'
+    learning_rate: '0.04'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_13
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '13'
+    l2: '0.0001'
+    learning_rate: '0.04'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_14
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '14'
+    l2: '0.001'
+    learning_rate: '0.04'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: train_15
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    candidate: '15'
+    l2: '0.005'
+    learning_rate: '0.04'
+  input_params:
+    epochs: epochs
+    seed: seed
+  inputs:
+    candidate:
+      required: true
+      type: json
+    dataset:
+      required: true
+      type: string
+    epochs:
+      required: true
+      type: json
+    l2:
+      required: true
+      type: json
+    learning_rate:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    model:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 1000
+      memory_bytes: 805306368
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "\nimport csv\nimport json\nimport math\nimport os\nimport random\nimport time\n\
+      \ninp = os.environ[\"NEXUS_INPUT_DIR\"]\nout = os.environ[\"NEXUS_OUTPUT_DIR\"\
+      ]\n\ncandidate = int(json.load(open(os.path.join(inp, \"candidate\"))))\nepochs\
+      \ = int(json.load(open(os.path.join(inp, \"epochs\"))))\nlr = float(json.load(open(os.path.join(inp,\
+      \ \"learning_rate\"))))\nl2 = float(json.load(open(os.path.join(inp, \"l2\"\
+      ))))\nseed = int(json.load(open(os.path.join(inp, \"seed\"))))\n\nstarted_epoch\
+      \ = time.time()\nstarted_perf = time.perf_counter()\n\n# Materialize the full\
+      \ data set to create realistic per-trainer memory pressure.\nX = []\ny = []\n\
+      with open(os.path.join(inp, \"dataset\"), newline=\"\") as f:\n    r = csv.reader(f)\n\
+      \    next(r)\n    for idx, row in enumerate(r):\n        # Keep 20% for evaluate;\
+      \ training uses the remaining 80%.\n        if idx % 5 == 0:\n            continue\n\
+      \        X.append([float(v) for v in row[1:-1]])\n        y.append(int(row[-1]))\n\
+      \nif not X:\n    raise SystemExit(\"training set is empty\")\n\nfeatures = len(X[0])\n\
+      rng = random.Random(seed * 1000 + candidate)\nweights = [rng.uniform(-0.01,\
+      \ 0.01) for _ in range(features)]\nbias = 0.0\nindices = list(range(len(X)))\n\
+      last_loss = 0.0\n\nfor epoch in range(epochs):\n    # Stable deterministic shuffle\
+      \ for each candidate/epoch.\n    rng.shuffle(indices)\n    loss = 0.0\n    for\
+      \ j in indices:\n        row = X[j]\n        target = y[j]\n        z = bias\n\
+      \        for k, value in enumerate(row):\n            z += weights[k] * value\n\
+      \        z = max(-30.0, min(30.0, z))\n        p = 1.0 / (1.0 + math.exp(-z))\n\
+      \        err = p - target\n        # Logistic loss for observability.\n    \
+      \    p_clip = min(1.0 - 1e-12, max(1e-12, p))\n        loss += -(target * math.log(p_clip)\
+      \ + (1 - target) * math.log(1 - p_clip))\n        for k, value in enumerate(row):\n\
+      \            weights[k] -= lr * (err * value + l2 * weights[k])\n        bias\
+      \ -= lr * err\n    last_loss = loss / len(X)\n\nended_perf = time.perf_counter()\n\
+      ended_epoch = time.time()\n\nmodel = {\n    \"candidate\": candidate,\n    \"\
+      learning_rate\": lr,\n    \"l2\": l2,\n    \"epochs\": epochs,\n    \"features\"\
+      : features,\n    \"train_rows\": len(X),\n    \"train_row_passes\": len(X) *\
+      \ epochs,\n    \"train_loss\": round(last_loss, 8),\n    \"train_seconds\":\
+      \ round(ended_perf - started_perf, 6),\n    \"train_start_epoch\": round(started_epoch,\
+      \ 6),\n    \"train_end_epoch\": round(ended_epoch, 6),\n    \"weight_norm\"\
+      : round(math.sqrt(sum(v * v for v in weights)), 8),\n    \"bias\": bias,\n \
+      \   \"weights\": weights,\n}\nwith open(os.path.join(out, \"model\"), \"w\"\
+      ) as f:\n    json.dump(model, f, separators=(\",\", \":\"))\nprint(json.dumps({k:\
+      \ model[k] for k in model if k != \"weights\"}, separators=(\",\", \":\")))\n"
+    command:
+    - python3
+    - -c
+    executor: subprocess
+  task_ref: ml.train_logistic
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 1800000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+
