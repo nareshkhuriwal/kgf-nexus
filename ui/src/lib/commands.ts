@@ -13,25 +13,25 @@
  * would start lying about what the console can do.
  *
  * WHY THE SIDE EFFECTS ARE INJECTED. A command's `run` receives a context
- * rather than importing `navigate` or calling the appearance setters through a
- * module-level singleton, because navigation belongs to the router instance the
- * shell created and sign-out belongs to the shell's credential state. Injecting
- * them keeps this file free of React and free of the router, which is what lets
- * the whole registry be unit-tested without rendering anything.
+ * rather than importing `navigate` through a module-level singleton, because
+ * navigation belongs to the router instance the shell created. Injecting it
+ * keeps this file free of React and free of the router, which is what lets the
+ * whole registry be unit-tested without rendering anything.
+ *
+ * WHY THERE ARE ONLY DESTINATIONS. The palette opens from the navbar's search
+ * field, so it has to behave as search: type, find, go. Theme, accent and
+ * sign-out used to sit under it as extra groups, which made the search field
+ * open onto a settings menu. They live where an operator looks for them instead
+ * -- appearance on the Settings page, sign-out in the account menu.
  */
-
-import { ACCENTS, setAccent, type AccentName } from './appearance';
-import { setThemeChoice, themeLabel, type ThemeChoice } from './theme';
 
 /** What a command is handed when it runs. */
 export interface CommandContext {
   /** Router navigation. Supplied by the shell so the palette has no router of its own. */
   navigate: (to: string) => void;
-  /** Clears the credential. Owned by the shell, which holds the session state. */
-  signOut: () => void;
 }
 
-export type CommandGroup = 'Go to' | 'Appearance' | 'Account';
+export type CommandGroup = 'Go to';
 
 export interface Command {
   /** Stable across renames of the title, because it keys the option elements. */
@@ -40,7 +40,7 @@ export interface Command {
   group: CommandGroup;
   /**
    * Extra words that should match but need not be shown. The point is that an
-   * operator who thinks "dag" or "specs" or "dark mode" lands on the right row
+   * operator who thinks "dag" or "specs" or "cron" lands on the right row
    * without the title having to contain every synonym anyone might try.
    */
   keywords?: string[];
@@ -61,37 +61,11 @@ function goTo(id: string, title: string, path: string, keywords: string[] = []):
   };
 }
 
-function themeCommand(choice: ThemeChoice): Command {
-  return {
-    id: `theme.${choice}`,
-    title: `Theme: ${themeLabel(choice)}`,
-    group: 'Appearance',
-    keywords: ['theme', 'colour', 'color', choice, choice === 'system' ? 'auto' : 'mode'],
-    // Named rather than described, so the row reads as an outcome and not as a
-    // toggle whose current state the operator has to infer.
-    hint: choice === 'system' ? 'Follow the OS' : `Always ${choice}`,
-    run: () => setThemeChoice(choice),
-  };
-}
-
-function accentCommand(name: AccentName): Command {
-  return {
-    id: `accent.${name}`,
-    title: `Accent: ${ACCENTS[name].label}`,
-    group: 'Appearance',
-    keywords: ['accent', 'hue', 'brand', name],
-    hint: ACCENTS[name].hint,
-    run: () => setAccent(name),
-  };
-}
-
 /**
  * The registry.
  *
- * Order is the order rows appear when nothing is typed, so the eight
- * destinations from the brief come first -- they are what an operator opening
- * the palette almost always wants, and preferences are what they want once a
- * quarter.
+ * Order is the order rows appear when nothing is typed: the eight
+ * destinations from the brief.
  */
 export const COMMANDS: Command[] = [
   goTo('overview', 'Overview', '/', ['home', 'dashboard', 'start']),
@@ -102,24 +76,6 @@ export const COMMANDS: Command[] = [
   goTo('users', 'Users', '/admin/users', ['admin', 'people', 'accounts', 'roles']),
   goTo('tokens', 'Tokens', '/admin/tokens', ['admin', 'api key', 'credentials', 'scopes']),
   goTo('audit', 'Audit', '/admin/audit', ['admin', 'log', 'trail', 'history']),
-
-  themeCommand('light'),
-  themeCommand('dark'),
-  themeCommand('system'),
-
-  // Generated from ACCENTS rather than listed, so an accent added there is
-  // offered here automatically and the two cannot drift apart.
-  ...(Object.keys(ACCENTS) as AccentName[]).map(accentCommand),
-
-
-  {
-    id: 'account.signout',
-    title: 'Sign out',
-    group: 'Account',
-    keywords: ['logout', 'log out', 'leave', 'exit', 'session'],
-    hint: 'Clear this browser’s credential',
-    run: (ctx) => ctx.signOut(),
-  },
 ];
 
 // ── matching ────────────────────────────────────────────────────────────────

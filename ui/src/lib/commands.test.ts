@@ -32,7 +32,7 @@ import {
 } from './commands';
 
 function ctx(): CommandContext & { navigate: ReturnType<typeof vi.fn> } {
-  return { navigate: vi.fn(), signOut: vi.fn() };
+  return { navigate: vi.fn() };
 }
 
 describe('the command registry', () => {
@@ -61,31 +61,16 @@ describe('the command registry', () => {
     expect(c.navigate).toHaveBeenCalledWith('/runs');
   });
 
-  it('signs out through the shell, which owns the credential', () => {
-    const c = ctx();
-    COMMANDS.find((x) => x.id === 'account.signout')!.run(c);
-    expect(c.signOut).toHaveBeenCalled();
-  });
-
-  it('offers every accent defined in appearance.ts, so the two cannot drift', () => {
-    const accents = COMMANDS.filter((c) => c.id.startsWith('accent.')).map((c) => c.id);
-    expect(accents).toEqual(['accent.indigo', 'accent.plum', 'accent.steel', 'accent.azure']);
-  });
-
-  it('applies an accent through the shared setter', () => {
-    const root = document.documentElement;
-    COMMANDS.find((c) => c.id === 'accent.plum')!.run(ctx());
-    expect(root.getAttribute('data-accent')).toBe('plum');
-  });
-
-  it('applies a theme through the shared setter', () => {
-    const root = document.documentElement;
-    COMMANDS.find((c) => c.id === 'theme.light')!.run(ctx());
-    expect(root.getAttribute('data-theme')).toBe('light');
-    // 'system' is the ABSENCE of a preference, so it must clear the attribute
-    // rather than stamp a value the stylesheet does not know.
-    COMMANDS.find((c) => c.id === 'theme.system')!.run(ctx());
-    expect(root.hasAttribute('data-theme')).toBe(false);
+  /**
+   * The palette is the navbar's search, so it offers destinations and nothing
+   * else. Theme, accent and sign-out were removed from it: they turned the
+   * search field into a settings menu. Pinned as an absence so they do not creep
+   * back -- appearance lives on the Settings page, sign-out in the account menu.
+   */
+  it('offers only destinations: no appearance or account commands', () => {
+    expect(COMMANDS.every((c) => c.group === 'Go to')).toBe(true);
+    const ids = COMMANDS.map((c) => c.id);
+    expect(ids.some((id) => /^(theme|accent|account)\./.test(id))).toBe(false);
   });
 
   /**

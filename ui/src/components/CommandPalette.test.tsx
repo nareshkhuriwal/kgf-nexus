@@ -61,12 +61,10 @@ const fixture: Command[] = [
     hint: '/workers',
     run: (c) => c.navigate('/workers'),
   },
-  { id: 'account.signout', title: 'Sign out', group: 'Account', run: (c) => c.signOut() },
 ];
 
 function setup(over: Partial<React.ComponentProps<typeof CommandPalette>> = {}) {
   const onNavigate = vi.fn();
-  const onSignOut = vi.fn();
   // The palette filters commands and search groups by permission, so without a
   // provider the list is empty except for the commands that require none.
   const utils = render(
@@ -74,13 +72,12 @@ function setup(over: Partial<React.ComponentProps<typeof CommandPalette>> = {}) 
       <CommandPalette
         namespace="default"
         onNavigate={onNavigate}
-        onSignOut={onSignOut}
         commands={fixture}
         {...over}
       />
     </WithPermissions>,
   );
-  return { onNavigate, onSignOut, ...utils };
+  return { onNavigate, ...utils };
 }
 
 /** Records requested URLs, so "the search reached the server" is testable. */
@@ -198,7 +195,6 @@ describe('the list', () => {
       'Overview',
       'Runs',
       'Workers',
-      'Sign out',
     ]);
   });
 
@@ -221,7 +217,7 @@ describe('the list', () => {
     setup();
     open();
     fireEvent.keyDown(dialog(), { key: 'ArrowUp' });
-    expect(activeLabel()).toContain('Sign out');
+    expect(activeLabel()).toContain('Workers');
     fireEvent.keyDown(dialog(), { key: 'ArrowDown' });
     expect(activeLabel()).toContain('Overview');
   });
@@ -248,10 +244,10 @@ describe('the list', () => {
   });
 
   it('runs a command the mouse clicks', () => {
-    const { onSignOut } = setup();
+    const { onNavigate } = setup();
     open();
-    fireEvent.click(screen.getByText('Sign out'));
-    expect(onSignOut).toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Workers'));
+    expect(onNavigate).toHaveBeenCalledWith('/workers');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
@@ -262,7 +258,7 @@ describe('the list', () => {
 
     const labels = optionLabels().join(' ');
     expect(labels).toContain('Runs');
-    expect(labels).not.toContain('Sign out');
+    expect(labels).not.toContain('Workers');
   });
 
   it('says so when nothing matches, rather than showing a blank panel', () => {

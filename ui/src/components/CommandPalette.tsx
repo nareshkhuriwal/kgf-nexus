@@ -70,8 +70,6 @@ export interface CommandPaletteProps {
   namespace: string;
   /** Router navigation, owned by the shell. */
   onNavigate: (to: string) => void;
-  /** Clears the credential, owned by the shell's session state. */
-  onSignOut: () => void;
   /**
    * Commands, injectable only so tests can exercise the list mechanics against
    * a small fixture. Production always gets the registry.
@@ -133,7 +131,6 @@ const NO_PERMISSIONS: readonly string[] = Object.freeze([]);
 export function CommandPalette({
   namespace,
   onNavigate,
-  onSignOut,
   commands = COMMANDS,
   open: openProp,
   onOpenChange,
@@ -268,8 +265,8 @@ export function CommandPalette({
   }, [open, debounced, namespace, sources, permissions]);
 
   const ctx: CommandContext = useMemo(
-    () => ({ navigate: onNavigate, signOut: onSignOut }),
-    [onNavigate, onSignOut],
+    () => ({ navigate: onNavigate }),
+    [onNavigate],
   );
 
   // ── the one list, in sections ─────────────────────────────────────────────
@@ -508,7 +505,7 @@ export function CommandPalette({
         onKeyDown={onDialogKeyDown}
       >
         <label className="sr-only" id={labelId} htmlFor={`${listId}-input`}>
-          Search workflows, runs, schedules, workers, users and commands
+          Search workflows, runs, schedules, workers, users and pages
         </label>
         <div className="cmdk-field">
           <span className="cmdk-icon" aria-hidden="true">

@@ -422,7 +422,6 @@ export function App() {
       <CommandPalette
         namespace={namespace}
         onNavigate={navigate}
-        onSignOut={() => void signOut()}
         open={paletteOpen}
         onOpenChange={setPaletteOpen}
       />
