@@ -36,9 +36,20 @@ out="nexus-contact-sheet-${run:0:8}.pgm"
 # The credentials go in as the throwaway pod's environment, not its command
 # line. They are still visible in the pod spec to anyone who can read pods in
 # this namespace for the few seconds it exists -- acceptable for a dev cluster.
-kubectl -n "$ns" run "fetch-sheet-$$" --rm -i --quiet --restart=Never --image="$mc_image" \
-  --env="MC_HOST_nexus=http://${user}:${pass}@minio:9000" --env="MC_CONFIG_DIR=/tmp/mc" \
-  --command -- mc cat "nexus/${bucket}/${key}" > "$out"
+# The pod meets the "restricted" Pod Security profile like everything else in
+# the namespace: non-root, no privilege escalation, no capabilities.
+pod="fetch-sheet-$$"
+overrides=$(POD="$pod" IMG="$mc_image" SRC="nexus/${bucket}/${key}" HOSTVAR="http://${user}:${pass}@minio:9000" python3 -c '
+import json, os
+print(json.dumps({"spec": {
+  "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "seccompProfile": {"type": "RuntimeDefault"}},
+  "containers": [{
+    "name": os.environ["POD"], "image": os.environ["IMG"], "stdin": True, "stdinOnce": True,
+    "command": ["mc", "cat", os.environ["SRC"]],
+    "env": [{"name": "MC_HOST_nexus", "value": os.environ["HOSTVAR"]}, {"name": "MC_CONFIG_DIR", "value": "/tmp/mc"}],
+    "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}}]}}))')
+kubectl -n "$ns" run "$pod" --rm -i --quiet --restart=Never --image="$mc_image" \
+  --overrides="$overrides" > "$out"
 
 echo "run $run -> $out ($(wc -c < "$out" | tr -d ' ') bytes, $(sed -n 3p "$out") pixels)"
 if command -v sips >/dev/null 2>&1; then
