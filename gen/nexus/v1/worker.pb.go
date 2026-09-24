@@ -182,8 +182,11 @@ type RegisterResponse struct {
 	HeartbeatIntervalMs int32              `protobuf:"varint,3,opt,name=heartbeat_interval_ms,json=heartbeatIntervalMs,proto3" json:"heartbeat_interval_ms,omitempty"`
 	LeaseTtlMs          int32              `protobuf:"varint,4,opt,name=lease_ttl_ms,json=leaseTtlMs,proto3" json:"lease_ttl_ms,omitempty"`
 	ResultStore         *ResultStoreConfig `protobuf:"bytes,5,opt,name=result_store,json=resultStore,proto3" json:"result_store,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Absent (or enabled=false) from a gateway that cannot index logs; the agent
+	// then ships nothing rather than uploading objects nobody can read (ADR-0020).
+	LogShipping   *LogShippingConfig `protobuf:"bytes,6,opt,name=log_shipping,json=logShipping,proto3" json:"log_shipping,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RegisterResponse) Reset() {
@@ -251,6 +254,90 @@ func (x *RegisterResponse) GetResultStore() *ResultStoreConfig {
 	return nil
 }
 
+func (x *RegisterResponse) GetLogShipping() *LogShippingConfig {
+	if x != nil {
+		return x.LogShipping
+	}
+	return nil
+}
+
+// LogShippingConfig is the control plane's log policy for this session. The
+// control plane owns it for the same reason it owns the lease TTL: a per-host
+// cap would make the retention an operator sized for depend on which worker a
+// task happened to land on.
+type LogShippingConfig struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Enabled bool                   `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	// Cap on encoded log bytes shipped per attempt. Past it the agent keeps a
+	// bounded tail and records the omission explicitly. 0 = agent default.
+	MaxBytesPerAttempt int64 `protobuf:"varint,2,opt,name=max_bytes_per_attempt,json=maxBytesPerAttempt,proto3" json:"max_bytes_per_attempt,omitempty"`
+	// Seal a chunk once it reaches this many bytes. 0 = agent default.
+	ChunkBytes int64 `protobuf:"varint,3,opt,name=chunk_bytes,json=chunkBytes,proto3" json:"chunk_bytes,omitempty"`
+	// Seal a non-empty chunk at least this often, which bounds live-tail latency.
+	// 0 = agent default.
+	FlushIntervalMs int32 `protobuf:"varint,4,opt,name=flush_interval_ms,json=flushIntervalMs,proto3" json:"flush_interval_ms,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *LogShippingConfig) Reset() {
+	*x = LogShippingConfig{}
+	mi := &file_nexus_v1_worker_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LogShippingConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LogShippingConfig) ProtoMessage() {}
+
+func (x *LogShippingConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_worker_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LogShippingConfig.ProtoReflect.Descriptor instead.
+func (*LogShippingConfig) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *LogShippingConfig) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *LogShippingConfig) GetMaxBytesPerAttempt() int64 {
+	if x != nil {
+		return x.MaxBytesPerAttempt
+	}
+	return 0
+}
+
+func (x *LogShippingConfig) GetChunkBytes() int64 {
+	if x != nil {
+		return x.ChunkBytes
+	}
+	return 0
+}
+
+func (x *LogShippingConfig) GetFlushIntervalMs() int32 {
+	if x != nil {
+		return x.FlushIntervalMs
+	}
+	return 0
+}
+
 type ResultStoreConfig struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Endpoint string                 `protobuf:"bytes,1,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
@@ -265,7 +352,7 @@ type ResultStoreConfig struct {
 
 func (x *ResultStoreConfig) Reset() {
 	*x = ResultStoreConfig{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[2]
+	mi := &file_nexus_v1_worker_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -277,7 +364,7 @@ func (x *ResultStoreConfig) String() string {
 func (*ResultStoreConfig) ProtoMessage() {}
 
 func (x *ResultStoreConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[2]
+	mi := &file_nexus_v1_worker_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -290,7 +377,7 @@ func (x *ResultStoreConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResultStoreConfig.ProtoReflect.Descriptor instead.
 func (*ResultStoreConfig) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{2}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ResultStoreConfig) GetEndpoint() string {
@@ -339,7 +426,7 @@ type HeartbeatRequest struct {
 
 func (x *HeartbeatRequest) Reset() {
 	*x = HeartbeatRequest{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[3]
+	mi := &file_nexus_v1_worker_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -351,7 +438,7 @@ func (x *HeartbeatRequest) String() string {
 func (*HeartbeatRequest) ProtoMessage() {}
 
 func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[3]
+	mi := &file_nexus_v1_worker_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -364,7 +451,7 @@ func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{3}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *HeartbeatRequest) GetWorkerId() string {
@@ -417,7 +504,7 @@ type HeartbeatResponse struct {
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[4]
+	mi := &file_nexus_v1_worker_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -429,7 +516,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[4]
+	mi := &file_nexus_v1_worker_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -442,7 +529,7 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{4}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *HeartbeatResponse) GetDirectives() []*Directive {
@@ -472,7 +559,7 @@ type Directive struct {
 
 func (x *Directive) Reset() {
 	*x = Directive{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[5]
+	mi := &file_nexus_v1_worker_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -484,7 +571,7 @@ func (x *Directive) String() string {
 func (*Directive) ProtoMessage() {}
 
 func (x *Directive) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[5]
+	mi := &file_nexus_v1_worker_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -497,7 +584,7 @@ func (x *Directive) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Directive.ProtoReflect.Descriptor instead.
 func (*Directive) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{5}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Directive) GetKind() DirectiveKind {
@@ -539,7 +626,7 @@ type PollTaskRequest struct {
 
 func (x *PollTaskRequest) Reset() {
 	*x = PollTaskRequest{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[6]
+	mi := &file_nexus_v1_worker_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -551,7 +638,7 @@ func (x *PollTaskRequest) String() string {
 func (*PollTaskRequest) ProtoMessage() {}
 
 func (x *PollTaskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[6]
+	mi := &file_nexus_v1_worker_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -564,7 +651,7 @@ func (x *PollTaskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PollTaskRequest.ProtoReflect.Descriptor instead.
 func (*PollTaskRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{6}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *PollTaskRequest) GetWorkerId() string {
@@ -613,7 +700,7 @@ type PollTaskResponse struct {
 
 func (x *PollTaskResponse) Reset() {
 	*x = PollTaskResponse{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[7]
+	mi := &file_nexus_v1_worker_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -625,7 +712,7 @@ func (x *PollTaskResponse) String() string {
 func (*PollTaskResponse) ProtoMessage() {}
 
 func (x *PollTaskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[7]
+	mi := &file_nexus_v1_worker_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -638,7 +725,7 @@ func (x *PollTaskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PollTaskResponse.ProtoReflect.Descriptor instead.
 func (*PollTaskResponse) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{7}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *PollTaskResponse) GetAssignments() []*TaskAssignment {
@@ -666,7 +753,7 @@ type ReportStartedRequest struct {
 
 func (x *ReportStartedRequest) Reset() {
 	*x = ReportStartedRequest{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[8]
+	mi := &file_nexus_v1_worker_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -678,7 +765,7 @@ func (x *ReportStartedRequest) String() string {
 func (*ReportStartedRequest) ProtoMessage() {}
 
 func (x *ReportStartedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[8]
+	mi := &file_nexus_v1_worker_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -691,7 +778,7 @@ func (x *ReportStartedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportStartedRequest.ProtoReflect.Descriptor instead.
 func (*ReportStartedRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{8}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ReportStartedRequest) GetAttemptId() string {
@@ -726,7 +813,7 @@ type ExtendLeaseRequest struct {
 
 func (x *ExtendLeaseRequest) Reset() {
 	*x = ExtendLeaseRequest{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[9]
+	mi := &file_nexus_v1_worker_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -738,7 +825,7 @@ func (x *ExtendLeaseRequest) String() string {
 func (*ExtendLeaseRequest) ProtoMessage() {}
 
 func (x *ExtendLeaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[9]
+	mi := &file_nexus_v1_worker_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -751,7 +838,7 @@ func (x *ExtendLeaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExtendLeaseRequest.ProtoReflect.Descriptor instead.
 func (*ExtendLeaseRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{9}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ExtendLeaseRequest) GetWorkerId() string {
@@ -778,7 +865,7 @@ type LeaseRenewal struct {
 
 func (x *LeaseRenewal) Reset() {
 	*x = LeaseRenewal{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[10]
+	mi := &file_nexus_v1_worker_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -790,7 +877,7 @@ func (x *LeaseRenewal) String() string {
 func (*LeaseRenewal) ProtoMessage() {}
 
 func (x *LeaseRenewal) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[10]
+	mi := &file_nexus_v1_worker_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -803,7 +890,7 @@ func (x *LeaseRenewal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LeaseRenewal.ProtoReflect.Descriptor instead.
 func (*LeaseRenewal) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{10}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *LeaseRenewal) GetAttemptId() string {
@@ -833,7 +920,7 @@ type ExtendLeaseResponse struct {
 
 func (x *ExtendLeaseResponse) Reset() {
 	*x = ExtendLeaseResponse{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[11]
+	mi := &file_nexus_v1_worker_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -845,7 +932,7 @@ func (x *ExtendLeaseResponse) String() string {
 func (*ExtendLeaseResponse) ProtoMessage() {}
 
 func (x *ExtendLeaseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[11]
+	mi := &file_nexus_v1_worker_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -858,7 +945,7 @@ func (x *ExtendLeaseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExtendLeaseResponse.ProtoReflect.Descriptor instead.
 func (*ExtendLeaseResponse) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{11}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ExtendLeaseResponse) GetGrants() []*LeaseGrant {
@@ -886,7 +973,7 @@ type LeaseGrant struct {
 
 func (x *LeaseGrant) Reset() {
 	*x = LeaseGrant{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[12]
+	mi := &file_nexus_v1_worker_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -898,7 +985,7 @@ func (x *LeaseGrant) String() string {
 func (*LeaseGrant) ProtoMessage() {}
 
 func (x *LeaseGrant) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[12]
+	mi := &file_nexus_v1_worker_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -911,7 +998,7 @@ func (x *LeaseGrant) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LeaseGrant.ProtoReflect.Descriptor instead.
 func (*LeaseGrant) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{12}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *LeaseGrant) GetAttemptId() string {
@@ -947,7 +1034,7 @@ type ReportProgressRequest struct {
 
 func (x *ReportProgressRequest) Reset() {
 	*x = ReportProgressRequest{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[13]
+	mi := &file_nexus_v1_worker_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -959,7 +1046,7 @@ func (x *ReportProgressRequest) String() string {
 func (*ReportProgressRequest) ProtoMessage() {}
 
 func (x *ReportProgressRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[13]
+	mi := &file_nexus_v1_worker_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -972,7 +1059,7 @@ func (x *ReportProgressRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportProgressRequest.ProtoReflect.Descriptor instead.
 func (*ReportProgressRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{13}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ReportProgressRequest) GetAttemptId() string {
@@ -1021,7 +1108,7 @@ type ReportResultRequest struct {
 
 func (x *ReportResultRequest) Reset() {
 	*x = ReportResultRequest{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[14]
+	mi := &file_nexus_v1_worker_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1033,7 +1120,7 @@ func (x *ReportResultRequest) String() string {
 func (*ReportResultRequest) ProtoMessage() {}
 
 func (x *ReportResultRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[14]
+	mi := &file_nexus_v1_worker_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1046,7 +1133,7 @@ func (x *ReportResultRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportResultRequest.ProtoReflect.Descriptor instead.
 func (*ReportResultRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{14}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ReportResultRequest) GetAttemptId() string {
@@ -1109,7 +1196,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[15]
+	mi := &file_nexus_v1_worker_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1121,7 +1208,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[15]
+	mi := &file_nexus_v1_worker_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1134,7 +1221,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{15}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Ack) GetAccepted() bool {
@@ -1149,6 +1236,298 @@ func (x *Ack) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+type ReportLogsRequest struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	AttemptId  string                 `protobuf:"bytes,1,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
+	LeaseToken string                 `protobuf:"bytes,2,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	// Chunks in seq order. Every key must be under <namespace>/logs/<attempt_id>/.
+	Chunks []*LogChunk `protobuf:"bytes,3,rep,name=chunks,proto3" json:"chunks,omitempty"`
+	// Set exactly once, on the last report for the attempt, before ReportResult.
+	Final         *LogFinal `protobuf:"bytes,4,opt,name=final,proto3" json:"final,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportLogsRequest) Reset() {
+	*x = ReportLogsRequest{}
+	mi := &file_nexus_v1_worker_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportLogsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportLogsRequest) ProtoMessage() {}
+
+func (x *ReportLogsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_worker_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportLogsRequest.ProtoReflect.Descriptor instead.
+func (*ReportLogsRequest) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ReportLogsRequest) GetAttemptId() string {
+	if x != nil {
+		return x.AttemptId
+	}
+	return ""
+}
+
+func (x *ReportLogsRequest) GetLeaseToken() string {
+	if x != nil {
+		return x.LeaseToken
+	}
+	return ""
+}
+
+func (x *ReportLogsRequest) GetChunks() []*LogChunk {
+	if x != nil {
+		return x.Chunks
+	}
+	return nil
+}
+
+func (x *ReportLogsRequest) GetFinal() *LogFinal {
+	if x != nil {
+		return x.Final
+	}
+	return nil
+}
+
+// LogChunk describes one NDJSON object the agent wrote. Records inside carry a
+// line number that is contiguous from 1 per attempt, so (first_line,
+// line_count) locates any line without reading other chunks.
+type LogChunk struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 0-based, contiguous per attempt.
+	Seq int64  `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	Key string `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	// 1-based number of the chunk's first record.
+	FirstLine int64 `protobuf:"varint,3,opt,name=first_line,json=firstLine,proto3" json:"first_line,omitempty"`
+	LineCount int64 `protobuf:"varint,4,opt,name=line_count,json=lineCount,proto3" json:"line_count,omitempty"`
+	// Offset of this chunk within the concatenation of all chunks in seq order,
+	// which is exactly the compacted object's layout -- so the index stays valid
+	// after compaction and a read becomes a range request.
+	ByteOffset int64  `protobuf:"varint,5,opt,name=byte_offset,json=byteOffset,proto3" json:"byte_offset,omitempty"`
+	SizeBytes  int64  `protobuf:"varint,6,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	Sha256     string `protobuf:"bytes,7,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	// Agent clock; informational only (invariant 7).
+	FirstTsUnixMs int64 `protobuf:"varint,8,opt,name=first_ts_unix_ms,json=firstTsUnixMs,proto3" json:"first_ts_unix_ms,omitempty"`
+	LastTsUnixMs  int64 `protobuf:"varint,9,opt,name=last_ts_unix_ms,json=lastTsUnixMs,proto3" json:"last_ts_unix_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LogChunk) Reset() {
+	*x = LogChunk{}
+	mi := &file_nexus_v1_worker_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LogChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LogChunk) ProtoMessage() {}
+
+func (x *LogChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_worker_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LogChunk.ProtoReflect.Descriptor instead.
+func (*LogChunk) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *LogChunk) GetSeq() int64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *LogChunk) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *LogChunk) GetFirstLine() int64 {
+	if x != nil {
+		return x.FirstLine
+	}
+	return 0
+}
+
+func (x *LogChunk) GetLineCount() int64 {
+	if x != nil {
+		return x.LineCount
+	}
+	return 0
+}
+
+func (x *LogChunk) GetByteOffset() int64 {
+	if x != nil {
+		return x.ByteOffset
+	}
+	return 0
+}
+
+func (x *LogChunk) GetSizeBytes() int64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
+}
+
+func (x *LogChunk) GetSha256() string {
+	if x != nil {
+		return x.Sha256
+	}
+	return ""
+}
+
+func (x *LogChunk) GetFirstTsUnixMs() int64 {
+	if x != nil {
+		return x.FirstTsUnixMs
+	}
+	return 0
+}
+
+func (x *LogChunk) GetLastTsUnixMs() int64 {
+	if x != nil {
+		return x.LastTsUnixMs
+	}
+	return 0
+}
+
+type LogFinal struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The compacted object, or empty when compaction could not be uploaded (the
+	// chunks remain the source of truth then).
+	CompactedKey    string `protobuf:"bytes,1,opt,name=compacted_key,json=compactedKey,proto3" json:"compacted_key,omitempty"`
+	CompactedSha256 string `protobuf:"bytes,2,opt,name=compacted_sha256,json=compactedSha256,proto3" json:"compacted_sha256,omitempty"`
+	TotalLines      int64  `protobuf:"varint,3,opt,name=total_lines,json=totalLines,proto3" json:"total_lines,omitempty"`
+	TotalBytes      int64  `protobuf:"varint,4,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
+	// Lines/bytes omitted by the per-attempt cap.
+	TruncatedLines int64 `protobuf:"varint,5,opt,name=truncated_lines,json=truncatedLines,proto3" json:"truncated_lines,omitempty"`
+	TruncatedBytes int64 `protobuf:"varint,6,opt,name=truncated_bytes,json=truncatedBytes,proto3" json:"truncated_bytes,omitempty"`
+	// Lines lost to shipping backpressure (object store or control plane
+	// unreachable for long enough that the bounded buffer filled).
+	DroppedLines  int64 `protobuf:"varint,7,opt,name=dropped_lines,json=droppedLines,proto3" json:"dropped_lines,omitempty"`
+	ChunkCount    int64 `protobuf:"varint,8,opt,name=chunk_count,json=chunkCount,proto3" json:"chunk_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LogFinal) Reset() {
+	*x = LogFinal{}
+	mi := &file_nexus_v1_worker_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LogFinal) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LogFinal) ProtoMessage() {}
+
+func (x *LogFinal) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_worker_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LogFinal.ProtoReflect.Descriptor instead.
+func (*LogFinal) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *LogFinal) GetCompactedKey() string {
+	if x != nil {
+		return x.CompactedKey
+	}
+	return ""
+}
+
+func (x *LogFinal) GetCompactedSha256() string {
+	if x != nil {
+		return x.CompactedSha256
+	}
+	return ""
+}
+
+func (x *LogFinal) GetTotalLines() int64 {
+	if x != nil {
+		return x.TotalLines
+	}
+	return 0
+}
+
+func (x *LogFinal) GetTotalBytes() int64 {
+	if x != nil {
+		return x.TotalBytes
+	}
+	return 0
+}
+
+func (x *LogFinal) GetTruncatedLines() int64 {
+	if x != nil {
+		return x.TruncatedLines
+	}
+	return 0
+}
+
+func (x *LogFinal) GetTruncatedBytes() int64 {
+	if x != nil {
+		return x.TruncatedBytes
+	}
+	return 0
+}
+
+func (x *LogFinal) GetDroppedLines() int64 {
+	if x != nil {
+		return x.DroppedLines
+	}
+	return 0
+}
+
+func (x *LogFinal) GetChunkCount() int64 {
+	if x != nil {
+		return x.ChunkCount
+	}
+	return 0
 }
 
 var File_nexus_v1_worker_proto protoreflect.FileDescriptor
@@ -1166,14 +1545,21 @@ const file_nexus_v1_worker_proto_rawDesc = "" +
 	"\ragent_version\x18\a \x01(\tR\fagentVersion\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xea\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xaa\x02\n" +
 	"\x10RegisterResponse\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12#\n" +
 	"\rsession_token\x18\x02 \x01(\tR\fsessionToken\x122\n" +
 	"\x15heartbeat_interval_ms\x18\x03 \x01(\x05R\x13heartbeatIntervalMs\x12 \n" +
 	"\flease_ttl_ms\x18\x04 \x01(\x05R\n" +
 	"leaseTtlMs\x12>\n" +
-	"\fresult_store\x18\x05 \x01(\v2\x1b.nexus.v1.ResultStoreConfigR\vresultStore\"\x95\x01\n" +
+	"\fresult_store\x18\x05 \x01(\v2\x1b.nexus.v1.ResultStoreConfigR\vresultStore\x12>\n" +
+	"\flog_shipping\x18\x06 \x01(\v2\x1b.nexus.v1.LogShippingConfigR\vlogShipping\"\xad\x01\n" +
+	"\x11LogShippingConfig\x12\x18\n" +
+	"\aenabled\x18\x01 \x01(\bR\aenabled\x121\n" +
+	"\x15max_bytes_per_attempt\x18\x02 \x01(\x03R\x12maxBytesPerAttempt\x12\x1f\n" +
+	"\vchunk_bytes\x18\x03 \x01(\x03R\n" +
+	"chunkBytes\x12*\n" +
+	"\x11flush_interval_ms\x18\x04 \x01(\x05R\x0fflushIntervalMs\"\x95\x01\n" +
 	"\x11ResultStoreConfig\x12\x1a\n" +
 	"\bendpoint\x18\x01 \x01(\tR\bendpoint\x12\x16\n" +
 	"\x06bucket\x18\x02 \x01(\tR\x06bucket\x12\x16\n" +
@@ -1249,12 +1635,45 @@ const file_nexus_v1_worker_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\v2\x13.nexus.v1.ResultRefR\x05value:\x028\x01\"9\n" +
 	"\x03Ack\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason*\x8b\x01\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"\xa9\x01\n" +
+	"\x11ReportLogsRequest\x12\x1d\n" +
+	"\n" +
+	"attempt_id\x18\x01 \x01(\tR\tattemptId\x12\x1f\n" +
+	"\vlease_token\x18\x02 \x01(\tR\n" +
+	"leaseToken\x12*\n" +
+	"\x06chunks\x18\x03 \x03(\v2\x12.nexus.v1.LogChunkR\x06chunks\x12(\n" +
+	"\x05final\x18\x04 \x01(\v2\x12.nexus.v1.LogFinalR\x05final\"\x94\x02\n" +
+	"\bLogChunk\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\x03R\x03seq\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\x12\x1d\n" +
+	"\n" +
+	"first_line\x18\x03 \x01(\x03R\tfirstLine\x12\x1d\n" +
+	"\n" +
+	"line_count\x18\x04 \x01(\x03R\tlineCount\x12\x1f\n" +
+	"\vbyte_offset\x18\x05 \x01(\x03R\n" +
+	"byteOffset\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\x06 \x01(\x03R\tsizeBytes\x12\x16\n" +
+	"\x06sha256\x18\a \x01(\tR\x06sha256\x12'\n" +
+	"\x10first_ts_unix_ms\x18\b \x01(\x03R\rfirstTsUnixMs\x12%\n" +
+	"\x0flast_ts_unix_ms\x18\t \x01(\x03R\flastTsUnixMs\"\xb4\x02\n" +
+	"\bLogFinal\x12#\n" +
+	"\rcompacted_key\x18\x01 \x01(\tR\fcompactedKey\x12)\n" +
+	"\x10compacted_sha256\x18\x02 \x01(\tR\x0fcompactedSha256\x12\x1f\n" +
+	"\vtotal_lines\x18\x03 \x01(\x03R\n" +
+	"totalLines\x12\x1f\n" +
+	"\vtotal_bytes\x18\x04 \x01(\x03R\n" +
+	"totalBytes\x12'\n" +
+	"\x0ftruncated_lines\x18\x05 \x01(\x03R\x0etruncatedLines\x12'\n" +
+	"\x0ftruncated_bytes\x18\x06 \x01(\x03R\x0etruncatedBytes\x12#\n" +
+	"\rdropped_lines\x18\a \x01(\x03R\fdroppedLines\x12\x1f\n" +
+	"\vchunk_count\x18\b \x01(\x03R\n" +
+	"chunkCount*\x8b\x01\n" +
 	"\rDirectiveKind\x12\x1e\n" +
 	"\x1aDIRECTIVE_KIND_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14DIRECTIVE_KIND_DRAIN\x10\x01\x12!\n" +
 	"\x1dDIRECTIVE_KIND_CANCEL_ATTEMPT\x10\x02\x12\x1d\n" +
-	"\x19DIRECTIVE_KIND_REREGISTER\x10\x032\xe7\x03\n" +
+	"\x19DIRECTIVE_KIND_REREGISTER\x10\x032\xa1\x04\n" +
 	"\rWorkerService\x12A\n" +
 	"\bRegister\x12\x19.nexus.v1.RegisterRequest\x1a\x1a.nexus.v1.RegisterResponse\x12D\n" +
 	"\tHeartbeat\x12\x1a.nexus.v1.HeartbeatRequest\x1a\x1b.nexus.v1.HeartbeatResponse\x12A\n" +
@@ -1262,7 +1681,9 @@ const file_nexus_v1_worker_proto_rawDesc = "" +
 	"\rReportStarted\x12\x1e.nexus.v1.ReportStartedRequest\x1a\r.nexus.v1.Ack\x12J\n" +
 	"\vExtendLease\x12\x1c.nexus.v1.ExtendLeaseRequest\x1a\x1d.nexus.v1.ExtendLeaseResponse\x12@\n" +
 	"\x0eReportProgress\x12\x1f.nexus.v1.ReportProgressRequest\x1a\r.nexus.v1.Ack\x12<\n" +
-	"\fReportResult\x12\x1d.nexus.v1.ReportResultRequest\x1a\r.nexus.v1.AckB9Z7github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1;nexusv1b\x06proto3"
+	"\fReportResult\x12\x1d.nexus.v1.ReportResultRequest\x1a\r.nexus.v1.Ack\x128\n" +
+	"\n" +
+	"ReportLogs\x12\x1b.nexus.v1.ReportLogsRequest\x1a\r.nexus.v1.AckB9Z7github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1;nexusv1b\x06proto3"
 
 var (
 	file_nexus_v1_worker_proto_rawDescOnce sync.Once
@@ -1277,69 +1698,78 @@ func file_nexus_v1_worker_proto_rawDescGZIP() []byte {
 }
 
 var file_nexus_v1_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_nexus_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_nexus_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_nexus_v1_worker_proto_goTypes = []any{
 	(DirectiveKind)(0),            // 0: nexus.v1.DirectiveKind
 	(*RegisterRequest)(nil),       // 1: nexus.v1.RegisterRequest
 	(*RegisterResponse)(nil),      // 2: nexus.v1.RegisterResponse
-	(*ResultStoreConfig)(nil),     // 3: nexus.v1.ResultStoreConfig
-	(*HeartbeatRequest)(nil),      // 4: nexus.v1.HeartbeatRequest
-	(*HeartbeatResponse)(nil),     // 5: nexus.v1.HeartbeatResponse
-	(*Directive)(nil),             // 6: nexus.v1.Directive
-	(*PollTaskRequest)(nil),       // 7: nexus.v1.PollTaskRequest
-	(*PollTaskResponse)(nil),      // 8: nexus.v1.PollTaskResponse
-	(*ReportStartedRequest)(nil),  // 9: nexus.v1.ReportStartedRequest
-	(*ExtendLeaseRequest)(nil),    // 10: nexus.v1.ExtendLeaseRequest
-	(*LeaseRenewal)(nil),          // 11: nexus.v1.LeaseRenewal
-	(*ExtendLeaseResponse)(nil),   // 12: nexus.v1.ExtendLeaseResponse
-	(*LeaseGrant)(nil),            // 13: nexus.v1.LeaseGrant
-	(*ReportProgressRequest)(nil), // 14: nexus.v1.ReportProgressRequest
-	(*ReportResultRequest)(nil),   // 15: nexus.v1.ReportResultRequest
-	(*Ack)(nil),                   // 16: nexus.v1.Ack
-	nil,                           // 17: nexus.v1.RegisterRequest.LabelsEntry
-	nil,                           // 18: nexus.v1.ReportResultRequest.OutputsEntry
-	(*ResourceVector)(nil),        // 19: nexus.v1.ResourceVector
-	(*TaskAssignment)(nil),        // 20: nexus.v1.TaskAssignment
-	(AttemptOutcome)(0),           // 21: nexus.v1.AttemptOutcome
-	(*TaskError)(nil),             // 22: nexus.v1.TaskError
-	(*ExecutionMetrics)(nil),      // 23: nexus.v1.ExecutionMetrics
-	(*ResultRef)(nil),             // 24: nexus.v1.ResultRef
+	(*LogShippingConfig)(nil),     // 3: nexus.v1.LogShippingConfig
+	(*ResultStoreConfig)(nil),     // 4: nexus.v1.ResultStoreConfig
+	(*HeartbeatRequest)(nil),      // 5: nexus.v1.HeartbeatRequest
+	(*HeartbeatResponse)(nil),     // 6: nexus.v1.HeartbeatResponse
+	(*Directive)(nil),             // 7: nexus.v1.Directive
+	(*PollTaskRequest)(nil),       // 8: nexus.v1.PollTaskRequest
+	(*PollTaskResponse)(nil),      // 9: nexus.v1.PollTaskResponse
+	(*ReportStartedRequest)(nil),  // 10: nexus.v1.ReportStartedRequest
+	(*ExtendLeaseRequest)(nil),    // 11: nexus.v1.ExtendLeaseRequest
+	(*LeaseRenewal)(nil),          // 12: nexus.v1.LeaseRenewal
+	(*ExtendLeaseResponse)(nil),   // 13: nexus.v1.ExtendLeaseResponse
+	(*LeaseGrant)(nil),            // 14: nexus.v1.LeaseGrant
+	(*ReportProgressRequest)(nil), // 15: nexus.v1.ReportProgressRequest
+	(*ReportResultRequest)(nil),   // 16: nexus.v1.ReportResultRequest
+	(*Ack)(nil),                   // 17: nexus.v1.Ack
+	(*ReportLogsRequest)(nil),     // 18: nexus.v1.ReportLogsRequest
+	(*LogChunk)(nil),              // 19: nexus.v1.LogChunk
+	(*LogFinal)(nil),              // 20: nexus.v1.LogFinal
+	nil,                           // 21: nexus.v1.RegisterRequest.LabelsEntry
+	nil,                           // 22: nexus.v1.ReportResultRequest.OutputsEntry
+	(*ResourceVector)(nil),        // 23: nexus.v1.ResourceVector
+	(*TaskAssignment)(nil),        // 24: nexus.v1.TaskAssignment
+	(AttemptOutcome)(0),           // 25: nexus.v1.AttemptOutcome
+	(*TaskError)(nil),             // 26: nexus.v1.TaskError
+	(*ExecutionMetrics)(nil),      // 27: nexus.v1.ExecutionMetrics
+	(*ResultRef)(nil),             // 28: nexus.v1.ResultRef
 }
 var file_nexus_v1_worker_proto_depIdxs = []int32{
-	17, // 0: nexus.v1.RegisterRequest.labels:type_name -> nexus.v1.RegisterRequest.LabelsEntry
-	19, // 1: nexus.v1.RegisterRequest.capacity:type_name -> nexus.v1.ResourceVector
-	3,  // 2: nexus.v1.RegisterResponse.result_store:type_name -> nexus.v1.ResultStoreConfig
-	19, // 3: nexus.v1.HeartbeatRequest.free_capacity:type_name -> nexus.v1.ResourceVector
-	6,  // 4: nexus.v1.HeartbeatResponse.directives:type_name -> nexus.v1.Directive
-	0,  // 5: nexus.v1.Directive.kind:type_name -> nexus.v1.DirectiveKind
-	19, // 6: nexus.v1.PollTaskRequest.free_capacity:type_name -> nexus.v1.ResourceVector
-	20, // 7: nexus.v1.PollTaskResponse.assignments:type_name -> nexus.v1.TaskAssignment
-	11, // 8: nexus.v1.ExtendLeaseRequest.renewals:type_name -> nexus.v1.LeaseRenewal
-	13, // 9: nexus.v1.ExtendLeaseResponse.grants:type_name -> nexus.v1.LeaseGrant
-	21, // 10: nexus.v1.ReportResultRequest.outcome:type_name -> nexus.v1.AttemptOutcome
-	18, // 11: nexus.v1.ReportResultRequest.outputs:type_name -> nexus.v1.ReportResultRequest.OutputsEntry
-	22, // 12: nexus.v1.ReportResultRequest.error:type_name -> nexus.v1.TaskError
-	23, // 13: nexus.v1.ReportResultRequest.metrics:type_name -> nexus.v1.ExecutionMetrics
-	24, // 14: nexus.v1.ReportResultRequest.OutputsEntry.value:type_name -> nexus.v1.ResultRef
-	1,  // 15: nexus.v1.WorkerService.Register:input_type -> nexus.v1.RegisterRequest
-	4,  // 16: nexus.v1.WorkerService.Heartbeat:input_type -> nexus.v1.HeartbeatRequest
-	7,  // 17: nexus.v1.WorkerService.PollTask:input_type -> nexus.v1.PollTaskRequest
-	9,  // 18: nexus.v1.WorkerService.ReportStarted:input_type -> nexus.v1.ReportStartedRequest
-	10, // 19: nexus.v1.WorkerService.ExtendLease:input_type -> nexus.v1.ExtendLeaseRequest
-	14, // 20: nexus.v1.WorkerService.ReportProgress:input_type -> nexus.v1.ReportProgressRequest
-	15, // 21: nexus.v1.WorkerService.ReportResult:input_type -> nexus.v1.ReportResultRequest
-	2,  // 22: nexus.v1.WorkerService.Register:output_type -> nexus.v1.RegisterResponse
-	5,  // 23: nexus.v1.WorkerService.Heartbeat:output_type -> nexus.v1.HeartbeatResponse
-	8,  // 24: nexus.v1.WorkerService.PollTask:output_type -> nexus.v1.PollTaskResponse
-	16, // 25: nexus.v1.WorkerService.ReportStarted:output_type -> nexus.v1.Ack
-	12, // 26: nexus.v1.WorkerService.ExtendLease:output_type -> nexus.v1.ExtendLeaseResponse
-	16, // 27: nexus.v1.WorkerService.ReportProgress:output_type -> nexus.v1.Ack
-	16, // 28: nexus.v1.WorkerService.ReportResult:output_type -> nexus.v1.Ack
-	22, // [22:29] is the sub-list for method output_type
-	15, // [15:22] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	21, // 0: nexus.v1.RegisterRequest.labels:type_name -> nexus.v1.RegisterRequest.LabelsEntry
+	23, // 1: nexus.v1.RegisterRequest.capacity:type_name -> nexus.v1.ResourceVector
+	4,  // 2: nexus.v1.RegisterResponse.result_store:type_name -> nexus.v1.ResultStoreConfig
+	3,  // 3: nexus.v1.RegisterResponse.log_shipping:type_name -> nexus.v1.LogShippingConfig
+	23, // 4: nexus.v1.HeartbeatRequest.free_capacity:type_name -> nexus.v1.ResourceVector
+	7,  // 5: nexus.v1.HeartbeatResponse.directives:type_name -> nexus.v1.Directive
+	0,  // 6: nexus.v1.Directive.kind:type_name -> nexus.v1.DirectiveKind
+	23, // 7: nexus.v1.PollTaskRequest.free_capacity:type_name -> nexus.v1.ResourceVector
+	24, // 8: nexus.v1.PollTaskResponse.assignments:type_name -> nexus.v1.TaskAssignment
+	12, // 9: nexus.v1.ExtendLeaseRequest.renewals:type_name -> nexus.v1.LeaseRenewal
+	14, // 10: nexus.v1.ExtendLeaseResponse.grants:type_name -> nexus.v1.LeaseGrant
+	25, // 11: nexus.v1.ReportResultRequest.outcome:type_name -> nexus.v1.AttemptOutcome
+	22, // 12: nexus.v1.ReportResultRequest.outputs:type_name -> nexus.v1.ReportResultRequest.OutputsEntry
+	26, // 13: nexus.v1.ReportResultRequest.error:type_name -> nexus.v1.TaskError
+	27, // 14: nexus.v1.ReportResultRequest.metrics:type_name -> nexus.v1.ExecutionMetrics
+	19, // 15: nexus.v1.ReportLogsRequest.chunks:type_name -> nexus.v1.LogChunk
+	20, // 16: nexus.v1.ReportLogsRequest.final:type_name -> nexus.v1.LogFinal
+	28, // 17: nexus.v1.ReportResultRequest.OutputsEntry.value:type_name -> nexus.v1.ResultRef
+	1,  // 18: nexus.v1.WorkerService.Register:input_type -> nexus.v1.RegisterRequest
+	5,  // 19: nexus.v1.WorkerService.Heartbeat:input_type -> nexus.v1.HeartbeatRequest
+	8,  // 20: nexus.v1.WorkerService.PollTask:input_type -> nexus.v1.PollTaskRequest
+	10, // 21: nexus.v1.WorkerService.ReportStarted:input_type -> nexus.v1.ReportStartedRequest
+	11, // 22: nexus.v1.WorkerService.ExtendLease:input_type -> nexus.v1.ExtendLeaseRequest
+	15, // 23: nexus.v1.WorkerService.ReportProgress:input_type -> nexus.v1.ReportProgressRequest
+	16, // 24: nexus.v1.WorkerService.ReportResult:input_type -> nexus.v1.ReportResultRequest
+	18, // 25: nexus.v1.WorkerService.ReportLogs:input_type -> nexus.v1.ReportLogsRequest
+	2,  // 26: nexus.v1.WorkerService.Register:output_type -> nexus.v1.RegisterResponse
+	6,  // 27: nexus.v1.WorkerService.Heartbeat:output_type -> nexus.v1.HeartbeatResponse
+	9,  // 28: nexus.v1.WorkerService.PollTask:output_type -> nexus.v1.PollTaskResponse
+	17, // 29: nexus.v1.WorkerService.ReportStarted:output_type -> nexus.v1.Ack
+	13, // 30: nexus.v1.WorkerService.ExtendLease:output_type -> nexus.v1.ExtendLeaseResponse
+	17, // 31: nexus.v1.WorkerService.ReportProgress:output_type -> nexus.v1.Ack
+	17, // 32: nexus.v1.WorkerService.ReportResult:output_type -> nexus.v1.Ack
+	17, // 33: nexus.v1.WorkerService.ReportLogs:output_type -> nexus.v1.Ack
+	26, // [26:34] is the sub-list for method output_type
+	18, // [18:26] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_nexus_v1_worker_proto_init() }
@@ -1355,7 +1785,7 @@ func file_nexus_v1_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nexus_v1_worker_proto_rawDesc), len(file_nexus_v1_worker_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   18,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

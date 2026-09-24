@@ -29,6 +29,7 @@ const (
 	WorkerService_ExtendLease_FullMethodName    = "/nexus.v1.WorkerService/ExtendLease"
 	WorkerService_ReportProgress_FullMethodName = "/nexus.v1.WorkerService/ReportProgress"
 	WorkerService_ReportResult_FullMethodName   = "/nexus.v1.WorkerService/ReportResult"
+	WorkerService_ReportLogs_FullMethodName     = "/nexus.v1.WorkerService/ReportLogs"
 )
 
 // WorkerServiceClient is the client API for WorkerService service.
@@ -58,6 +59,14 @@ type WorkerServiceClient interface {
 	// wedged, and distinguishing these lets us time out the task, not the worker.
 	ReportProgress(ctx context.Context, in *ReportProgressRequest, opts ...grpc.CallOption) (*Ack, error)
 	ReportResult(ctx context.Context, in *ReportResultRequest, opts ...grpc.CallOption) (*Ack, error)
+	// Indexes log chunks the agent has ALREADY written to the result store under
+	// <namespace>/logs/<attempt_id>/ (ADR-0020). Carries metadata only: chunk
+	// bytes never transit the control plane (ADR-0008). Fenced like every other
+	// attempt RPC, so a stale lease cannot add to an attempt's log. Idempotent by
+	// (attempt_id, seq): a redelivered chunk is a no-op. A gateway that predates
+	// this RPC answers UNIMPLEMENTED; agents only call it when RegisterResponse
+	// advertised log_shipping.enabled.
+	ReportLogs(ctx context.Context, in *ReportLogsRequest, opts ...grpc.CallOption) (*Ack, error)
 }
 
 type workerServiceClient struct {
@@ -138,6 +147,16 @@ func (c *workerServiceClient) ReportResult(ctx context.Context, in *ReportResult
 	return out, nil
 }
 
+func (c *workerServiceClient) ReportLogs(ctx context.Context, in *ReportLogsRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, WorkerService_ReportLogs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // WorkerServiceServer is the server API for WorkerService service.
 // All implementations must embed UnimplementedWorkerServiceServer
 // for forward compatibility.
@@ -165,6 +184,14 @@ type WorkerServiceServer interface {
 	// wedged, and distinguishing these lets us time out the task, not the worker.
 	ReportProgress(context.Context, *ReportProgressRequest) (*Ack, error)
 	ReportResult(context.Context, *ReportResultRequest) (*Ack, error)
+	// Indexes log chunks the agent has ALREADY written to the result store under
+	// <namespace>/logs/<attempt_id>/ (ADR-0020). Carries metadata only: chunk
+	// bytes never transit the control plane (ADR-0008). Fenced like every other
+	// attempt RPC, so a stale lease cannot add to an attempt's log. Idempotent by
+	// (attempt_id, seq): a redelivered chunk is a no-op. A gateway that predates
+	// this RPC answers UNIMPLEMENTED; agents only call it when RegisterResponse
+	// advertised log_shipping.enabled.
+	ReportLogs(context.Context, *ReportLogsRequest) (*Ack, error)
 	mustEmbedUnimplementedWorkerServiceServer()
 }
 
@@ -195,6 +222,9 @@ func (UnimplementedWorkerServiceServer) ReportProgress(context.Context, *ReportP
 }
 func (UnimplementedWorkerServiceServer) ReportResult(context.Context, *ReportResultRequest) (*Ack, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportResult not implemented")
+}
+func (UnimplementedWorkerServiceServer) ReportLogs(context.Context, *ReportLogsRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportLogs not implemented")
 }
 func (UnimplementedWorkerServiceServer) mustEmbedUnimplementedWorkerServiceServer() {}
 func (UnimplementedWorkerServiceServer) testEmbeddedByValue()                       {}
@@ -343,6 +373,24 @@ func _WorkerService_ReportResult_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkerService_ReportLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportLogsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).ReportLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_ReportLogs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).ReportLogs(ctx, req.(*ReportLogsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // WorkerService_ServiceDesc is the grpc.ServiceDesc for WorkerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -377,6 +425,10 @@ var WorkerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReportResult",
 			Handler:    _WorkerService_ReportResult_Handler,
+		},
+		{
+			MethodName: "ReportLogs",
+			Handler:    _WorkerService_ReportLogs_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
