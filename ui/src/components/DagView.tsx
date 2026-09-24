@@ -51,6 +51,12 @@ import {
 import { STATE_TABLES, stateVisual } from '../lib/states';
 import { StateBadge } from './StateBadge';
 import { DagCanvas } from './DagCanvas';
+import { describeGroup, type ExpansionGroup } from '../lib/expansion';
+
+/** The expansion summary groupExpansions attached, if this node is a template. */
+function groupOf(node: DagNode): ExpansionGroup | undefined {
+  return (node as DagNode & { group?: ExpansionGroup }).group;
+}
 
 /**
  * Box geometry and placement come from lib/dag: the catalog's spec graph draws
@@ -76,8 +82,14 @@ export function DagView({
   selectedNodeId,
   onSelect,
   exportName,
+  onToggleGroup,
 }: {
   graph: DagGraph;
+  /**
+   * Fold/unfold a map template's children (§5.4). Absent means the view offers
+   * no toggle -- the catalog and tests draw the graph as given.
+   */
+  onToggleGroup?: (templateId: string) => void;
   selectedNodeId?: string | null;
   onSelect: (nodeId: string) => void;
   /**
@@ -250,6 +262,8 @@ export function DagView({
           const selected = node.node_id === selectedNodeId;
           const attemptCount = node.attempts.length;
           const unrelated = related !== null && !related.has(node.node_id);
+          const group = groupOf(node);
+          const cached = !!node.latestAttempt?.cache_hit_of;
           return (
             <g
               {...taskLayout.bindings(node.node_id)}
@@ -275,8 +289,15 @@ export function DagView({
               <title>
                 {`${node.node_id} — ${v.label}\n${v.hint}` +
                   (node.isRootCause ? '\nROOT CAUSE: the earliest failure on this path.' : '') +
-                  (node.pendingReason ? `\n${node.pendingReason}` : '')}
+                  (node.pendingReason ? `\n${node.pendingReason}` : '') +
+                  (group ? `\nMAP TEMPLATE: ${describeGroup(group)}` : '') +
+                  (cached ? `\nCACHED: reused the result of attempt ${node.latestAttempt?.cache_hit_of}` : '')}
               </title>
+              {group && (
+                // A stacked second outline reads as "several of these" before any
+                // text is read, which is the point of a folded fan-out.
+                <rect className="dag-node-shadow dag-group-stack" x={6} y={-6} width={NODE_W} height={NODE_H} rx={12} />
+              )}
               {node.isRootCause && (
                 <rect
                   className="dag-rootcause-halo"
@@ -329,12 +350,46 @@ export function DagView({
               <text className="dag-node-state" x={14} y={73} fill="var(--tone-bd)">
                 {v.label}
               </text>
-              {attemptCount > 1 && (
+              {group && (
+                <text className="dag-node-sub dag-group-summary" x={NODE_W - 14} y={73} textAnchor="end">
+                  {truncate(describeGroup(group), 26)}
+                </text>
+              )}
+              {group && onToggleGroup && group.unfoldable && (
+                <text
+                  className="dag-node-sub dag-group-toggle"
+                  x={NODE_W - 14}
+                  y={30}
+                  textAnchor="end"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${group.unfolded ? 'Fold' : 'Unfold'} the ${group.total} items of ${node.node_id}`}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    onToggleGroup(node.node_id);
+                  }}
+                  onKeyDown={(ev) => {
+                    if (ev.key === 'Enter' || ev.key === ' ') {
+                      ev.preventDefault();
+                      ev.stopPropagation();
+                      onToggleGroup(node.node_id);
+                    }
+                  }}
+                >
+                  {group.unfolded ? '− fold' : '+ unfold'}
+                </text>
+              )}
+              {!group && cached && (
+                <text className="dag-node-sub dag-cached" x={NODE_W - 14} y={73} textAnchor="end">
+                  cached
+                </text>
+              )}
+              {!group && !cached && attemptCount > 1 && (
                 <text className="dag-node-sub" x={NODE_W - 14} y={73} textAnchor="end">
                   {attemptCount} attempts
                 </text>
               )}
-              {node.pendingReason && attemptCount <= 1 && (
+              {!group && node.pendingReason && attemptCount <= 1 && (
                 <text className="dag-node-sub" x={NODE_W - 14} y={73} textAnchor="end" fill="var(--tone-warning-fg)">
                   stalled
                 </text>

@@ -34,6 +34,7 @@ import { Link, useParams } from 'react-router-dom';
 import { errorMessage, useDrainWorker, useWorker } from '../api/hooks';
 import type { WorkerAttempt, WorkerDetail } from '../api/types';
 import { StateBadge } from '../components/StateBadge';
+import { QuarantinePanel } from '../components/QuarantinePanel';
 import { CapacityGrid } from '../components/CapacityGrid';
 import { AsyncPanel, Empty, ErrorBox, Loading, StaleWarning } from '../components/Status';
 import { DataTable } from '../components/DataTable';
@@ -96,6 +97,8 @@ export function WorkerDetailPage({ namespace }: { namespace: string }) {
       <WorkerHead worker={w} namespace={namespace} stale={stale} now={now} />
 
       {worker.error != null ? <StaleWarning error={worker.error} /> : null}
+
+      <QuarantinePanel namespace={namespace} workerId={w.id} state={w.state} />
 
       {/* The liveness contradiction leads the page when it applies. A worker the
           control plane calls ACTIVE while its heartbeat has stopped looks
