@@ -21,7 +21,7 @@ MIGRATIONS    := services/migrations
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
-        license-report license-check
+        license-report license-check bench-pg bench-dispatch bench-inline
 
 help: ## Show this help
 	@echo "Nexus — make targets"
@@ -63,6 +63,40 @@ lint: ## go vet over the whole module
 chaos: ## Kill workers mid-task and assert exactly-one-logical-effect (needs `make up` + NEXUS_API_KEY)
 	@test -n "$$NEXUS_API_KEY" || { echo "NEXUS_API_KEY is unset; run 'make seed' and export it"; exit 1; }
 	$(GO) test -tags chaos -count=1 -v -timeout 20m ./tests/chaos/
+
+# ── Benchmarks (ADR-0016, ADR-0018) ───────────────────────────────────────
+# The benchmarks write hundreds of thousands of rows, so they never default to a
+# database: BENCH_DSN must be set explicitly, and `make bench-pg` provides a
+# disposable Postgres (+ MinIO for bench-inline) in containers named
+# $(BENCH_NAME)-*. Numbers from a laptop locate the knee of the curve; they are
+# not production capacity figures.
+BENCH_NAME        ?= nexus-bench
+BENCH_PG_PORT     ?= 55541
+BENCH_MINIO_PORT  ?= 55542
+BENCH_DSN         ?=
+BENCH_MINIO       ?= localhost:$(BENCH_MINIO_PORT)
+
+bench-pg: ## Start a disposable, migrated Postgres + MinIO for the benchmarks
+	@docker inspect $(BENCH_NAME)-pg >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-pg \
+	  -e POSTGRES_PASSWORD=bench -e POSTGRES_DB=nexus -p 127.0.0.1:$(BENCH_PG_PORT):5432 \
+	  postgres:16-alpine -c max_connections=300 -c shared_buffers=512MB >/dev/null
+	@docker inspect $(BENCH_NAME)-minio >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-minio \
+	  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin -p 127.0.0.1:$(BENCH_MINIO_PORT):9000 \
+	  quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data >/dev/null
+	@for i in $$(seq 1 30); do docker exec $(BENCH_NAME)-pg pg_isready -U postgres -d nexus >/dev/null 2>&1 && break; sleep 1; done
+	DATABASE_URL=postgres://postgres:bench@localhost:$(BENCH_PG_PORT)/nexus?sslmode=disable \
+	  MIGRATIONS_DIR=$(MIGRATIONS) sh deploy/migrate.sh
+	@echo "export BENCH_DSN=postgres://postgres:bench@localhost:$(BENCH_PG_PORT)/nexus?sslmode=disable"
+
+bench-dispatch: ## Claims/sec and p50/p99 claim latency vs replicas and backlog (needs BENCH_DSN)
+	@test -n "$(BENCH_DSN)" || { echo "BENCH_DSN is unset; run 'make bench-pg' and export what it prints"; exit 1; }
+	NEXUS_BENCH_DSN='$(BENCH_DSN)' $(GO) test -tags bench -count=1 -v -timeout 120m \
+	  -run TestDispatchCeiling ./tests/bench/
+
+bench-inline: ## Postgres-inline vs MinIO round trip by payload size (needs BENCH_DSN)
+	@test -n "$(BENCH_DSN)" || { echo "BENCH_DSN is unset; run 'make bench-pg' and export what it prints"; exit 1; }
+	NEXUS_BENCH_DSN='$(BENCH_DSN)' NEXUS_BENCH_MINIO='$(BENCH_MINIO)' $(GO) test -tags bench -count=1 -v \
+	  -timeout 30m -run TestInlineVersusBlob ./tests/bench/
 
 # ── Migrations ────────────────────────────────────────────────────────────
 # Applied by a job, never by a service at startup (ADR-0011 rule 4). These
