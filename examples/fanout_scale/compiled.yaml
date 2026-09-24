@@ -1,0 +1,153 @@
+api_version: nexus.dev/v1
+description: Fan out to hundreds of tiny tasks and check the fan-in against an exact
+  closed form.
+edges:
+- from_node_id: numbers
+  output_to_input: {}
+  to_node_id: square
+- from_node_id: square
+  output_to_input:
+    squares: square
+  to_node_id: verify
+name: fanout-scale
+namespace: default
+params:
+  count:
+    default_json: '500'
+    type: int
+run_timeout_ms: 3600000
+tasks:
+- id: numbers
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    count: count
+  inputs:
+    count:
+      required: true
+      type: json
+  outputs:
+    numbers:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 50
+      memory_bytes: 33554432
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - 'v() { tr -d ''"\n '' < "$NEXUS_INPUT_DIR/$1"; }; awk -v n="$(v count)" ''BEGIN
+      { printf "["; for (i = 1; i <= n; i++) printf "%s%d", (i > 1 ? "," : ""), i;
+      printf "]" }'' > "$NEXUS_OUTPUT_DIR/numbers"'
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: scale.numbers
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: square
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    n:
+      required: true
+      type: json
+  map:
+    item_input: n
+    max_fanout: 2000
+    over_node_id: numbers
+    over_output: numbers
+  outputs:
+    square:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 50
+      memory_bytes: 33554432
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - v() { tr -d '"\n ' < "$NEXUS_INPUT_DIR/$1"; }; n=$(v n); echo $((n * n)) > "$NEXUS_OUTPUT_DIR/square"
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: scale.square
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: verify
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    count: count
+  inputs:
+    count:
+      required: true
+      type: json
+    squares:
+      required: true
+      type: json
+  outputs:
+    result:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 50
+      memory_bytes: 33554432
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; tr -d '[] \\n' < \"$NEXUS_INPUT_DIR/squares\"\
+      \ | tr ',' '\\n' | awk -v n=\"$(v count)\" '\n$0 == \"null\" { missing++; next\
+      \ }\nNF { sum += $0; got++ }\nEND {\n  want = n * (n + 1) * (2 * n + 1) / 6;\n\
+      \  printf \"{\\\"count\\\":%d,\\\"results\\\":%d,\\\"missing\\\":%d,\\\"sum\\\
+      \":%d,\\\"expected\\\":%d,\\\"ok\\\":%s}\\n\", n, got, missing, sum, want, (sum\
+      \ == want && got == n) ? \"true\" : \"false\";\n  if (sum != want || got !=\
+      \ n) { printf \"fan-in mismatch: %d results summing to %d, expected %d summing\
+      \ to %d\\n\", got, sum, n, want > \"/dev/stderr\"; exit 1 }\n}' > \"$NEXUS_OUTPUT_DIR/result\"\
+      \ && cat \"$NEXUS_OUTPUT_DIR/result\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: scale.verify
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+
