@@ -216,6 +216,21 @@ export interface Attempt {
   ended_at?: string | null;
   /** Set when this attempt reused a memoized result instead of executing (§6.4). */
   cache_hit_of?: string | null;
+  /**
+   * The latest status line the WORKER's executor reported through
+   * ReportProgress (F96), e.g. "pod Pending: Unschedulable: 0/3 nodes are
+   * available: insufficient cpu". Not the same thing as pending_reason, which
+   * is the SCHEDULER's reason for not placing the attempt. Sanitized by the
+   * scheduler (one line, bounded); null when the worker never sent one, and
+   * absent from gateways that predate the field.
+   */
+  progress_message?: string | null;
+  /** Latest reported completion in [0, 1]; null when none was reported. */
+  progress_fraction?: number | null;
+  /** Control-plane time of the latest progress report. */
+  progress_at?: string | null;
+  /** Control-plane time the progress message last changed. */
+  progress_message_at?: string | null;
 }
 
 export interface RunEvent {

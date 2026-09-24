@@ -305,12 +305,16 @@ export function DagView({
               role="button"
               aria-label={`${node.node_id}, ${v.label}${
                 node.isRootCause ? ', root cause of the failure' : ''
-              }`}
+              }${node.executorWaiting ? ', executor reports pod pending' : ''}`}
             >
               <title>
                 {`${node.node_id} — ${v.label}\n${v.hint}` +
                   (node.isRootCause ? '\nROOT CAUSE: the earliest failure on this path.' : '') +
-                  (node.pendingReason ? `\n${node.pendingReason}` : '') +
+                  // Labelled by SOURCE, because the two explanations come from
+                  // different schedulers: Nexus's placement reason, and the
+                  // executor's own status for an attempt Nexus already placed.
+                  (node.pendingReason ? `\nscheduler: ${node.pendingReason}` : '') +
+                  (node.executorStatus ? `\nexecutor: ${node.executorStatus}` : '') +
                   (node.failure_reason ? `\n${node.failure_reason}` : '') +
                   (group ? `\nMAP TEMPLATE: ${describeGroup(group)}` : '') +
                   (cached ? `\nCACHED: reused the result of attempt ${node.latestAttempt?.cache_hit_of}` : '')}
@@ -438,6 +442,20 @@ export function DagView({
               {!group && !cached && attemptCount > 1 && (
                 <text className="dag-node-sub" x={NODE_W - 12} y={workerLabel(node) ? 41 : 75.5} textAnchor="end">
                   {attemptCount} attempts
+                </text>
+              )}
+              {/* RUNNING to Nexus, still Pending to Kubernetes: the nested
+                  scheduling stall (ADR-0007). Without this badge the node
+                  reads as healthy work in progress. */}
+              {!group && node.executorWaiting && !cached && !node.failure_reason && attemptCount <= 1 && (
+                <text
+                  className="dag-node-sub dag-executor-waiting"
+                  x={NODE_W - 12}
+                  y={workerLabel(node) ? 41 : 75.5}
+                  textAnchor="end"
+                  fill="var(--tone-warning-fg)"
+                >
+                  pod pending
                 </text>
               )}
               {!group && node.pendingReason && attemptCount <= 1 && (
