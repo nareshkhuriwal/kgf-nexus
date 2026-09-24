@@ -55,18 +55,25 @@ const (
 // kubelet's grace period had SIGKILLed the collector with nothing printed.
 const k8sCollectorScript = `
 cap="${NEXUS_K8S_OUTPUT_CAP:-4194304}"
+work="${NEXUS_K8S_COLLECT_WORK:-/collect/work}"
+outs="${NEXUS_K8S_COLLECT_OUTPUTS:-/collect/outputs}"
 dump() {
   total=0
-  for f in /nexus/output.json /nexus/outputs/*; do
+  for f in "$work/output.json" "$outs"/*; do
     [ -f "$f" ] || continue
     size=$(wc -c < "$f")
     size=$((size + 0))
-    rel="${f#/nexus/}"
-    total=$((total + size))
-    if [ "$total" -gt "$cap" ]; then
+    case "$f" in
+      "$work/output.json") rel="output.json" ;;
+      *) rel="outputs/${f##*/}" ;;
+    esac
+    # Only bytes actually SENT count toward the cap: a refused file must not
+    # also get every later, smaller output refused.
+    if [ $((total + size)) -gt "$cap" ]; then
       echo "NEXUS-OUTPUT-TOOBIG $size $rel"
       continue
     fi
+    total=$((total + size))
     echo "NEXUS-OUTPUT-BEGIN $size $rel"
     base64 < "$f"
     echo ""

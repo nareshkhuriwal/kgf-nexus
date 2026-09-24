@@ -64,6 +64,10 @@ const (
 	// k8sWorkDir is the workload's view of the attempt directory, identical to
 	// the docker executor's so one handler runs unchanged on both substrates.
 	k8sWorkDir = "/nexus"
+
+	// The collector's view of the same two volumes (see buildJob).
+	k8sCollectorWorkDir    = "/collect/work"
+	k8sCollectorOutputsDir = "/collect/outputs"
 )
 
 // k8sMaxOutputBytes caps the TOTAL raw bytes of outputs moved out of the pod.
@@ -316,9 +320,12 @@ func (e *KubernetesExecutor) buildJob(spec TaskSpec, workerID string) (*batchv1.
 		{Name: "inputs", MountPath: k8sWorkDir + "/" + InputDirName, ReadOnly: true},
 		{Name: "tmp", MountPath: "/tmp"},
 	}
+	// The collector mounts the two volumes SIDE BY SIDE, not nested as the
+	// task does: a read-only volume cannot host the mountpoint of another, and
+	// the collector starts before the task has created /nexus/outputs.
 	collectorMounts := []corev1.VolumeMount{
-		{Name: "work", MountPath: k8sWorkDir, ReadOnly: true},
-		{Name: "outputs", MountPath: k8sWorkDir + "/" + OutputDirName, ReadOnly: true},
+		{Name: "work", MountPath: k8sCollectorWorkDir, ReadOnly: true},
+		{Name: "outputs", MountPath: k8sCollectorOutputsDir, ReadOnly: true},
 	}
 
 	workingDir := spec.Runtime.GetWorkingDir()

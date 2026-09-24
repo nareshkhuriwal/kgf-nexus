@@ -56,9 +56,20 @@ func jobFinished(job *batchv1.Job) bool {
 }
 
 // jobDeadlineExceeded is the cluster-side start_to_close enforcement firing.
+//
+// FailureTarget is checked as well as Failed: since Kubernetes 1.31 the Job
+// controller first sets FailureTarget (reason DeadlineExceeded), terminates the
+// pod, and only sets Failed once the pod is gone. At the moment the pod is
+// observed terminal, FailureTarget is usually the only evidence — reading only
+// Failed misclassified every cluster-enforced timeout as APPLICATION (caught by
+// the conformance suite's sigkill test against a 1.34 cluster).
 func jobDeadlineExceeded(job *batchv1.Job) bool {
-	c := jobCondition(job, batchv1.JobFailed)
-	return c != nil && c.Reason == batchv1.JobReasonDeadlineExceeded
+	for _, t := range []batchv1.JobConditionType{batchv1.JobFailed, batchv1.JobFailureTarget} {
+		if c := jobCondition(job, t); c != nil && c.Reason == batchv1.JobReasonDeadlineExceeded {
+			return true
+		}
+	}
+	return false
 }
 
 func podTerminal(pod *corev1.Pod) bool {
@@ -124,6 +135,18 @@ func startVerdict(job *batchv1.Job, pod *corev1.Pod) k8sStartObs {
 		if w := cs.State.Waiting; w != nil && isImagePullReason(w.Reason) {
 			return k8sStartObs{Verdict: k8sStartWaiting, Pulling: true,
 				Cause: fmt.Sprintf("collector helper image %s: %s: %s", cs.Image, w.Reason, w.Message)}
+		}
+		// A collector that keeps dying will never let the task start (native
+		// sidecars gate the regular containers). Fail fast and retryably
+		// instead of burning the whole start timeout: it is our fault, and
+		// another worker may be configured correctly.
+		if cs.RestartCount >= 3 {
+			msg := "restarting"
+			if cs.LastTerminationState.Terminated != nil {
+				msg = cs.LastTerminationState.Terminated.Reason + ": " + cs.LastTerminationState.Terminated.Message
+			}
+			return k8sStartObs{Verdict: k8sStartFailed, Err: fmt.Errorf(
+				"%w: output collector sidecar failed %d times: %s", ErrRuntimeUnavailable, cs.RestartCount, msg)}
 		}
 	}
 

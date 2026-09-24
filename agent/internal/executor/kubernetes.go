@@ -635,6 +635,18 @@ loop:
 		}
 	}
 
+	if !st.deadline.IsZero() && !time.Now().Before(st.deadline) && !jobDeadlineExceeded(snap.Job) {
+		// The pod and Job informers are not ordered relative to each other, so
+		// the pod's terminal event can arrive before the Job update carrying
+		// DeadlineExceeded. Past the deadline, one direct read settles whether
+		// the cluster killed it for time — the difference between TIMED_OUT
+		// (retryable) and APPLICATION (terminal).
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		if j, err := e.Client.BatchV1().Jobs(e.Config.Namespace).Get(rctx, st.jobName, metav1.GetOptions{}); err == nil {
+			snap.Job = j
+		}
+		rcancel()
+	}
 	o := outcomeFromStatus(snap.Job, snap.Pod, st.wasSignalled())
 	o.TimedOut = o.TimedOut || timedOut
 	if gaveUp && o.Err == nil && !o.TimedOut && !podTerminal(snap.Pod) {
