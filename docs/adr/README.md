@@ -18,6 +18,16 @@ full system design, data model, state machines, and phased plan.
 | [0009](0009-no-ray-dependency.md) | No Ray dependency; borrow its resource-vector model only | We build the agent ourselves, for polyglot support and one scheduler |
 | [0010](0010-lease-based-task-ownership.md) | Time-bounded leases with fencing tokens | Renewal overhead and TTL tuning, for no stuck attempts and no state corruption |
 | [0011](0011-microservice-decomposition.md) | Six deployable control-plane services, shared schema with table ownership | Shared-schema coupling, for independent deploy without losing atomic dispatch |
+| [0012](0012-module-permissions-and-role-bindings.md) | Namespace-scoped roles and module permissions | Migration and UI rollout cost, for least-privilege administration |
+| [0013](0013-go-control-plane-and-agent.md) | Go stays the control-plane and agent language (§12 Q1) | A larger agent binary than Rust, for one toolchain and team velocity |
+| [0014](0014-worker-transport-grpc-without-json-fallback.md) | Worker transport stays gRPC; proxy requirements documented, no JSON fallback yet (§12 Q2) | HTTP/1.1-only networks unsupported, for one auth and fencing path |
+| [0015](0015-bounded-uninterruptible-tasks.md) | Tasks may declare `uninterruptible`, bounded by min(spec, platform ceiling) (§12 Q3) | Cancel is no longer prompt for those tasks, for no half-applied side effects |
+| [0016](0016-inline-result-threshold.md) | Inline-vs-blob threshold stays 64 KiB, configurable within [1 B, 1 MiB] (§12 Q4) | Payload bytes in Postgres, for no object-store round trip on small results |
+| [0017](0017-weighted-fair-share-across-namespaces.md) | Weighted fair share across namespaces; priority + aging within one (§12 Q5) | An extra index walk per claim, for no cross-tenant starvation |
+| [0018](0018-postgres-dispatch-ceiling.md) | Postgres stays the dispatch queue; measured ceiling, trigger and migration path (§12 Q6) | A known, backlog-dependent ceiling, for keeping atomic dispatch |
+
+ADRs 0013–0018 close the six open questions of ARCHITECTURE.md §12 and are
+**Proposed — pending owner sign-off**.
 
 ## Conventions
 
