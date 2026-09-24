@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -27,8 +28,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/yaml"
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor/k8stest"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
@@ -370,6 +373,92 @@ func TestK8sIntegrationEvictionIsInfrastructure(t *testing.T) {
 	if c.Class != nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE || !c.Retryable {
 		t.Errorf("evicted attempt classified %v retryable=%v (%+v, err=%v), want INFRASTRUCTURE retryable",
 			c.Class, c.Retryable, o, o.Err)
+	}
+}
+
+// The SHIPPED least-privilege Role (deploy/k8s/agent-rbac.yaml) must be enough
+// for the executor's whole lifecycle — probe, inputs Secret, Job, informers,
+// logs, outputs, cleanup — when the executor acts AS the agent's service
+// account. Applying the real file, not a copy of its rules, is the point: a
+// verb dropped from the manifest must fail this test.
+func TestK8sIntegrationShippedRoleIsSufficient(t *testing.T) {
+	requireK8s(t)
+	ctx := context.Background()
+	admin, _ := k8stest.Client()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "k8s", "agent-rbac.yaml"))
+	if err != nil {
+		t.Fatalf("read shipped RBAC: %v", err)
+	}
+	for _, doc := range strings.Split(string(raw), "\n---\n") {
+		var meta struct{ Kind string }
+		if err := yaml.Unmarshal([]byte(doc), &meta); err != nil || meta.Kind == "" {
+			continue
+		}
+		var obj interface {
+			metav1.Object
+		}
+		switch meta.Kind {
+		case "ServiceAccount":
+			sa := &corev1.ServiceAccount{}
+			must(t, yaml.Unmarshal([]byte(doc), sa))
+			obj = sa
+			sa.Namespace = k8stest.Namespace
+			_, err = admin.CoreV1().ServiceAccounts(k8stest.Namespace).Create(ctx, sa, metav1.CreateOptions{})
+		case "Role":
+			r := &rbacv1.Role{}
+			must(t, yaml.Unmarshal([]byte(doc), r))
+			obj = r
+			r.Namespace = k8stest.Namespace
+			_, err = admin.RbacV1().Roles(k8stest.Namespace).Create(ctx, r, metav1.CreateOptions{})
+		case "RoleBinding":
+			b := &rbacv1.RoleBinding{}
+			must(t, yaml.Unmarshal([]byte(doc), b))
+			obj = b
+			b.Namespace = k8stest.Namespace
+			for i := range b.Subjects {
+				b.Subjects[i].Namespace = k8stest.Namespace
+			}
+			_, err = admin.RbacV1().RoleBindings(k8stest.Namespace).Create(ctx, b, metav1.CreateOptions{})
+		default:
+			t.Fatalf("unexpected kind %q in agent-rbac.yaml", meta.Kind)
+		}
+		if err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("apply %s %s: %v", meta.Kind, obj.GetName(), err)
+		}
+	}
+
+	sa, err := k8stest.ImpersonatingClient("system:serviceaccount:" + k8stest.Namespace + ":nexus-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := NewKubernetesExecutor(KubernetesConfig{
+		Namespace: k8stest.Namespace, Owner: "nexus-it-rbac", ServiceAccount: "nexus-task",
+		ImagePullPolicy: corev1.PullIfNotPresent, StartTimeout: 3 * time.Minute,
+	}, sa, t.TempDir(), discardLog())
+	t.Cleanup(e.Close)
+	if err := e.Probe(ctx); err != nil {
+		t.Fatalf("Probe as the agent's service account: %v", err)
+	}
+	spec := k8sSpec(uniqueAttempt("rbac"), `cat "$NEXUS_INPUT_DIR/in" > "$NEXUS_OUTPUT_FILE"; echo logged`)
+	spec.Inputs = map[string]*nexusv1.ResultRef{"in": {Kind: &nexusv1.ResultRef_Inline{Inline: []byte("via-role")}}}
+	o, h := runToCompletion(t, e, spec)
+	if !o.Succeeded() || string(o.Output) != "via-role" {
+		t.Fatalf("lifecycle under the shipped Role failed: %+v (err=%v)", o, o.Err)
+	}
+	rc, err := e.Logs(ctx, h)
+	if err != nil {
+		t.Fatalf("Logs under the shipped Role: %v", err)
+	}
+	rc.Close()
+	if err := e.Cleanup(ctx, h); err != nil {
+		t.Fatalf("Cleanup under the shipped Role: %v", err)
+	}
+	if err := k8sWaitForAttemptGone(e, h.AttemptID, 60*time.Second); err != nil {
+		t.Error(err)
+	}
+	// And it must NOT be able to read Secrets — including this attempt's inputs.
+	if _, err := sa.CoreV1().Secrets(k8stest.Namespace).List(ctx, metav1.ListOptions{}); !apierrors.IsForbidden(err) {
+		t.Errorf("the agent's service account can list Secrets (err=%v); the Role must be create/delete only", err)
 	}
 }
 

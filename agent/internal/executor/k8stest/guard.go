@@ -181,6 +181,22 @@ func ensureNamespace(ctx context.Context, cs kubernetes.Interface) error {
 	return fmt.Errorf("default service account never appeared in %s", Namespace)
 }
 
+// ImpersonatingClient returns a client for the same verified local cluster
+// that acts AS the given user (e.g. a service account), so a test can prove
+// that a Role is sufficient rather than assume it.
+func ImpersonatingClient(user string) (kubernetes.Interface, error) {
+	if _, why := Client(); why != "" {
+		return nil, fmt.Errorf("%s", why)
+	}
+	rc, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(clientcmd.NewDefaultClientConfigLoadingRules(),
+		&clientcmd.ConfigOverrides{CurrentContext: ctxName}).ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+	rc.Impersonate.UserName = user
+	return kubernetes.NewForConfig(rc)
+}
+
 // Teardown deletes the test namespace if this process created (or adopted) it.
 // NEXUS_K8S_KEEP_NAMESPACE=1 keeps it for post-mortem debugging.
 func Teardown() {

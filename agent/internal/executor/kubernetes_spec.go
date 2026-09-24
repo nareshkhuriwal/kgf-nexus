@@ -463,7 +463,10 @@ func (e *KubernetesExecutor) buildJob(spec TaskSpec, workerID string) (*batchv1.
 		}
 		job.Spec.ActiveDeadlineSeconds = &remaining
 	}
-	if cfg.OwnerPodName != "" && cfg.OwnerPodUID != "" {
+	// Only within ONE namespace: owner references cannot cross namespaces, and
+	// the garbage collector treats a cross-namespace owner as ABSENT and
+	// deletes the dependent at once -- every Job would vanish on creation.
+	if cfg.OwnerPodName != "" && cfg.OwnerPodUID != "" && cfg.OwnerPodNamespace == cfg.Namespace {
 		// Owned by the agent's own Pod: if the agent pod is deleted, the
 		// garbage collector deletes its Jobs. That is lease fencing done by the
 		// cluster — a dead agent's session can never renew these leases, so

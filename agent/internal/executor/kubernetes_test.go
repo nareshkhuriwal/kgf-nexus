@@ -48,9 +48,9 @@ func newFakeExecutor(t *testing.T, objs ...runtime.Object) (*KubernetesExecutor,
 	e := NewKubernetesExecutor(KubernetesConfig{
 		Namespace: fakeNS, Owner: "agent-0",
 		GPUResourceName: "nvidia.com/gpu", GPUKindLabel: "nvidia.com/gpu.product",
-		NodeSelector:     map[string]string{"pool": "tasks"},
-		Tolerations:      []corev1.Toleration{{Key: "dedicated", Operator: corev1.TolerationOpExists}},
-		OwnerPodName:     "nexus-agent-abc", OwnerPodUID: "uid-agent",
+		NodeSelector: map[string]string{"pool": "tasks"},
+		Tolerations:  []corev1.Toleration{{Key: "dedicated", Operator: corev1.TolerationOpExists}},
+		OwnerPodName: "nexus-agent-abc", OwnerPodUID: "uid-agent", OwnerPodNamespace: fakeNS,
 		StartTimeout:     10 * time.Second,
 		ImagePullTimeout: 5 * time.Second,
 	}, cs, t.TempDir(), discardLog())

@@ -1,0 +1,41 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Guard rails for task pods in the executor namespace.
+
+# Deny ALL network traffic to and from task pods by default -- the same default
+# the docker executor applies (--network none). A task that has not declared a
+# need for the network should not have one, and the pod network is the quiet
+# path by which a task reaches the control plane or the cluster API.
+# Requires a CNI that enforces NetworkPolicy. Open specific egress with an
+# additional policy selecting the same labels.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nexus-task-default-deny
+  namespace: nexus-exec
+  labels:
+    app.kubernetes.io/part-of: nexus
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: nexus-agent
+      app.kubernetes.io/component: task-attempt
+  policyTypes: ["Ingress", "Egress"]
+---
+# A task that declares no cpu/memory would otherwise run UNBOUNDED on a node
+# (the executor sets limits only for declared dimensions). The LimitRange gives
+# such containers a ceiling so one undeclared task cannot starve its node.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: nexus-task-defaults
+  namespace: nexus-exec
+  labels:
+    app.kubernetes.io/part-of: nexus
+spec:
+  limits:
+    - type: Container
+      default: {cpu: "1", memory: 1Gi}
+      defaultRequest: {cpu: "1", memory: 1Gi}

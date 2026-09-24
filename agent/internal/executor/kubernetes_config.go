@@ -51,6 +51,9 @@ type KubernetesConfig struct {
 	// pod, so deleting the agent pod garbage-collects its workloads.
 	OwnerPodName string
 	OwnerPodUID  string
+	// OwnerPodNamespace must equal Namespace for the owner reference to be
+	// set; see buildJob.
+	OwnerPodNamespace string
 
 	// HelperImage runs the output-collector sidecar. It needs only /bin/sh,
 	// base64, wc and sleep. Pin it; mirror it for air-gapped clusters.
@@ -135,6 +138,7 @@ func LoadKubernetesConfigFromEnv(getenv func(string) string) (cfg KubernetesConf
 	cfg.Owner = getenv("NEXUS_K8S_OWNER")
 	cfg.OwnerPodName = getenv("NEXUS_K8S_OWNER_POD_NAME")
 	cfg.OwnerPodUID = getenv("NEXUS_K8S_OWNER_POD_UID")
+	cfg.OwnerPodNamespace = getenv("NEXUS_K8S_OWNER_POD_NAMESPACE")
 	cfg.HelperImage = getenv("NEXUS_K8S_HELPER_IMAGE")
 	cfg.GPUResourceName = getenv("NEXUS_K8S_GPU_RESOURCE")
 	cfg.GPUKindLabel = getenv("NEXUS_K8S_GPU_KIND_LABEL")
