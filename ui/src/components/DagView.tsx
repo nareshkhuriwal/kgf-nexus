@@ -169,6 +169,7 @@ export function DagView({
       <DagCanvas
         viewportHeight={base.height}
         focusTarget={focusTarget}
+        places={placed.map(({ node, x, y }) => ({ id: node.node_id, x, y, tone: stateVisual('node', node.state).tone }))}
         toolbarExtra={<><button type="button" onClick={taskLayout.reset}>Reset layout</button><label className="dag-jump">Jump to task
           <select aria-label="Jump to task" value={selectedNodeId ?? ''} onChange={event => {
             const target = byId[event.target.value];
@@ -214,20 +215,26 @@ export function DagView({
               refX places the tip at the marker's leading edge so the head lands
               exactly on the target's border instead of overlapping into it.
             */}
-            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-              <path d="M 0 1 L 9 5 L 0 9 z" fill="var(--border-strong)" />
-            </marker>
-            <marker
-              id="arrow-failed"
-              viewBox="0 0 10 10"
-              refX="9"
-              refY="5"
-              markerWidth="6"
-              markerHeight="6"
-              orient="auto"
-            >
-              <path d="M 0 1 L 9 5 L 0 9 z" fill="var(--tone-danger-bd)" />
-            </marker>
+            {/*
+              One arrowhead per edge treatment, because a marker cannot inherit
+              the path's stroke colour: a blue "related" edge ending in a grey
+              head reads as two different lines. Small (5 units) and with a
+              notched tail so it reads as a chevron rather than a wedge; the
+              tip is refX=9 so it lands on the target's port, which is drawn
+              over it -- the line plugs into the socket.
+            */}
+            {(
+              [
+                ['arrow', 'var(--border-strong)'],
+                ['arrow-failed', 'var(--tone-danger-bd)'],
+                ['arrow-live', 'var(--tone-active-bd)'],
+                ['arrow-done', 'var(--tone-success-bd)'],
+              ] as const
+            ).map(([id, fill]) => (
+              <marker key={id} id={id} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+                <path d="M 0 0.5 L 9.5 5 L 0 9.5 L 2.4 5 z" fill={fill} />
+              </marker>
+            ))}
           </>
         }
       >
@@ -244,15 +251,29 @@ export function DagView({
           // treatment: a cascade edge that is also on the selected ancestry
           // must keep reading as a cascade, so dimming never replaces it.
           const onPath = related ? related.has(e.from_node_id) && related.has(e.to_node_id) : null;
+          // Progress reads along the edges: an edge whose target is RUNNING
+          // flows (an animated dash, stilled under reduced-motion), and an
+          // edge between two SUCCEEDED nodes is tinted so the completed part
+          // of the graph reads as a completed path. Pure styling on top of
+          // the same route; the cascade treatment still wins.
+          const live = !propagates && b.node.state === 'RUNNING';
+          const done = !propagates && a.node.state === 'SUCCEEDED' && b.node.state === 'SUCCEEDED';
+          const marker = propagates
+            ? 'url(#arrow-failed)'
+            : onPath || live
+              ? 'url(#arrow-live)'
+              : done
+                ? 'url(#arrow-done)'
+                : 'url(#arrow)';
           return (
             <path
               key={`${e.from_node_id}->${e.to_node_id}`}
               className={
-                `dag-edge${propagates ? ' failed-path' : ''}` +
+                `dag-edge${propagates ? ' failed-path' : ''}${live ? ' live' : ''}${done ? ' done' : ''}` +
                 (onPath === null ? '' : onPath ? ' related' : ' unrelated')
               }
               d={edgePath(a, b)}
-              markerEnd={propagates ? 'url(#arrow-failed)' : 'url(#arrow)'}
+              markerEnd={marker}
             />
           );
         })}
@@ -297,7 +318,7 @@ export function DagView({
               {group && (
                 // A stacked second outline reads as "several of these" before any
                 // text is read, which is the point of a folded fan-out.
-                <rect className="dag-node-shadow dag-group-stack" x={6} y={-6} width={NODE_W} height={NODE_H} rx={12} />
+                <rect className="dag-node-shadow dag-group-stack" x={6} y={-6} width={NODE_W} height={NODE_H} rx={14} />
               )}
               {node.isRootCause && (
                 <rect
@@ -306,54 +327,67 @@ export function DagView({
                   y={-6}
                   width={NODE_W + 12}
                   height={NODE_H + 12}
-                  rx={16}
+                  rx={18}
                 />
               )}
               {/*
-                The vertex is built from three stacked rects rather than one.
-                The shadow rect sits a pixel low to read as elevation, the ring
-                is a separate inset stroke so the selected state can thicken it
-                WITHOUT touching the state border (channel 2), and the body
-                carries fill (channel 1), border colour (channel 2) and border
-                dash (channel 3). Collapsing these into one rect is what would
-                force selection and state to share a stroke and lose a channel.
+                The card. The four state channels are unchanged from the
+                previous design -- fill tint on the chip and pill (1), border
+                colour (2), border dash (3) and glyph (4) -- and a fifth,
+                redundant one is added: a status stripe down the left edge,
+                the convention every workflow designer an operator has used
+                (Prefect, Dagster, n8n, Airflow) shares, so the state is read
+                from the card's silhouette before any text.
+
+                Selection is its own ring OUTSIDE the card in the focus colour,
+                so it never borrows the border, which belongs to state.
               */}
-              <rect className="dag-node-shadow" y={2} width={NODE_W} height={NODE_H} rx={12} />
+              <rect className="dag-node-shadow" y={3} width={NODE_W} height={NODE_H} rx={14} />
+              {selected && (
+                <rect className="dag-select-ring" x={-4} y={-4} width={NODE_W + 8} height={NODE_H + 8} rx={18} />
+              )}
               <rect
                 className={`dag-node${selected ? ' selected' : ''}`}
                 width={NODE_W}
                 height={NODE_H}
-                rx={12}
+                rx={14}
                 strokeDasharray={dashFor(v.borderStyle)}
               />
-              <line className="dag-card-divider" x1={14} x2={NODE_W - 14} y1={57} y2={57} />
-              {/*
-                Channel 4, the glyph, now sits in its own tinted chip. A bare
-                glyph at 13px was the weakest of the four channels; a filled
-                square around it survives both a thumbnail and a greyscale
-                print, which is the whole point of the redundancy.
-              */}
-              <rect className="dag-glyph-chip" x={14} y={15} width={26} height={26} rx={7} />
-              <text className="dag-glyph" x={27} y={33} textAnchor="middle" fill="var(--tone-bd)">
+              <rect className="dag-node-stripe" x={0} y={16} width={4} height={NODE_H - 32} rx={2} />
+              {/* Ports: where an edge leaves and where one arrives. Drawn over
+                  the arrowheads (nodes render after edges) so a line plugs
+                  into a socket instead of stabbing a border. */}
+              {node.upstream.length > 0 && <circle className="dag-port" cx={0} cy={NODE_H / 2} r={4} />}
+              {node.downstream.length > 0 && <circle className="dag-port" cx={NODE_W} cy={NODE_H / 2} r={4} />}
+              {/* Channel 4, the glyph, in a tinted disc. A RUNNING node's disc
+                  emits a slow pulse: the one animation on the canvas, on the
+                  one state that means "something is happening right now". */}
+              {v.tone === 'active' && !isTerminalNode(node.state) && (
+                <circle className="dag-node-pulse" cx={31} cy={28} r={13} />
+              )}
+              <circle className="dag-glyph-chip" cx={31} cy={28} r={13} />
+              <text className="dag-glyph" x={31} y={32.5} textAnchor="middle" fill="var(--tone-fg)">
                 {v.glyph}
               </text>
               {/* The node id is the thing an operator searches for, so it is
                   the only element at full foreground weight and colour. */}
-              <text className="dag-node-label" x={50} y={30}>
-                {truncate(node.node_id, 23)}
+              <text className="dag-node-label" x={53} y={25}>
+                {truncate(node.node_id, group && onToggleGroup && group.unfoldable ? 16 : 24)}
               </text>
-              <text className="dag-node-sub" x={50} y={47}>
+              <text className="dag-node-sub" x={53} y={41}>
                 {truncate(node.task_ref, 27)}
               </text>
-              {/* The state name is repeated as text under the glyph because a
+              <line className="dag-card-divider" x1={12} x2={NODE_W - 12} y1={55} y2={55} />
+              {/* The state name, in a pill tinted from its tone, because a
                   colour plus a symbol still leaves an operator guessing which
                   of two symbols they are looking at. */}
-              <text className="dag-node-state" x={14} y={73} fill="var(--tone-bd)">
+              <rect className="dag-state-pill" x={12} y={63} width={pillWidth(v.label)} height={18} rx={9} />
+              <text className="dag-node-state" x={12 + pillWidth(v.label) / 2} y={75.5} textAnchor="middle" fill="var(--tone-fg)">
                 {v.label}
               </text>
               {group && (
-                <text className="dag-node-sub dag-group-summary" x={NODE_W - 14} y={73} textAnchor="end">
-                  {truncate(describeGroup(group), 26)}
+                <text className="dag-node-sub dag-group-summary" x={NODE_W - 12} y={75.5} textAnchor="end">
+                  {truncate(describeGroup(group), 24)}
                 </text>
               )}
               {/* Which worker has (or had) this task. The same slot a group
@@ -362,16 +396,16 @@ export function DagView({
                   worker id shortened -- a machine name is what an operator
                   matches against the fleet page. */}
               {!group && workerLabel(node) && (
-                <text className="dag-node-sub dag-node-worker" x={NODE_W - 14} y={73} textAnchor="end">
+                <text className="dag-node-sub dag-node-worker" x={NODE_W - 12} y={75.5} textAnchor="end">
                   <title>{workerTitle(node)}</title>
-                  {truncate(workerLabel(node) ?? '', 22)}
+                  {truncate(workerLabel(node) ?? '', 18)}
                 </text>
               )}
               {group && onToggleGroup && group.unfoldable && (
                 <text
                   className="dag-node-sub dag-group-toggle"
-                  x={NODE_W - 14}
-                  y={30}
+                  x={NODE_W - 12}
+                  y={25}
                   textAnchor="end"
                   role="button"
                   tabIndex={0}
@@ -392,22 +426,22 @@ export function DagView({
                 </text>
               )}
               {!group && node.failure_reason && (
-                <text className="dag-node-sub" x={NODE_W - 14} y={73} textAnchor="end" fill="var(--tone-danger-fg)">
+                <text className="dag-node-sub" x={NODE_W - 12} y={workerLabel(node) ? 41 : 75.5} textAnchor="end" fill="var(--tone-danger-fg)">
                   {node.failure_reason.startsWith('fan_in_too_large') ? 'fan-in too large' : 'not run'}
                 </text>
               )}
               {!group && cached && (
-                <text className="dag-node-sub dag-cached" x={NODE_W - 14} y={73} textAnchor="end">
+                <text className="dag-node-sub dag-cached" x={NODE_W - 12} y={workerLabel(node) ? 41 : 75.5} textAnchor="end">
                   cached
                 </text>
               )}
               {!group && !cached && attemptCount > 1 && (
-                <text className="dag-node-sub" x={NODE_W - 14} y={73} textAnchor="end">
+                <text className="dag-node-sub" x={NODE_W - 12} y={workerLabel(node) ? 41 : 75.5} textAnchor="end">
                   {attemptCount} attempts
                 </text>
               )}
               {!group && node.pendingReason && attemptCount <= 1 && (
-                <text className="dag-node-sub" x={NODE_W - 14} y={73} textAnchor="end" fill="var(--tone-warning-fg)">
+                <text className="dag-node-sub" x={NODE_W - 12} y={75.5} textAnchor="end" fill="var(--tone-warning-fg)">
                   stalled
                 </text>
               )}
@@ -445,6 +479,20 @@ function dashFor(style: string): string | undefined {
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
+}
+
+/**
+ * Width of the state pill for a label, in user units. SVG cannot size a rect
+ * to its text, so this is the 10px mono glyph advance (6.1) plus padding,
+ * which is exact for a monospace face and is the reason the state row is
+ * set in one.
+ */
+function pillWidth(label: string): number {
+  return Math.round(label.length * 6.1 + 16);
+}
+
+function isTerminalNode(state: string): boolean {
+  return stateVisual('node', state).terminal;
 }
 
 /**

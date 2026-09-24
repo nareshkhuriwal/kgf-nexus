@@ -104,13 +104,13 @@
   white-space: nowrap;
 }
 
-/* "Part of the graph is outside the view". The honest minimum answer to the
-   overflow bug: an operator is told content exists off-screen instead of
-   inferring it from a node count that does not match what they can see.
-   --tone-warning because it qualifies what is being shown. */
+/* "4 of 14 off-screen". Stated, not warned: a wide graph opening at a
+   readable scale is the intended state now, not a defect, so the count is
+   muted text beside the controls that fix it (the map, the fades, sideways
+   scroll) rather than a yellow caution that reads as something gone wrong. */
 .dag-clip-hint {
   font-size: var(--text-xs);
-  color: var(--tone-warning-fg);
+  color: var(--fg-muted);
   white-space: nowrap;
 }
 
@@ -156,6 +156,62 @@
 }
 /* Honest cursor: grab means "you can drag this", grabbing means "you are". */
 .dag-viewport.dragging { cursor: grabbing; }
+
+/* Edge fades: a gradient on whichever side has more graph beyond it. This is
+   the affordance a scrollbar used to give, without a second pan mechanism.
+   Four pseudo/child layers would be needed for four sides; the two sides
+   are the common case for a left-to-right DAG and get ::before/::after, the
+   top and bottom get an inset shadow, which is cheaper and reads the same. */
+.dag-viewport::before,
+.dag-viewport::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 56px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 160ms ease;
+  z-index: 1;
+}
+.dag-viewport::before { left: 0; background: linear-gradient(to right, var(--bg) 10%, transparent); }
+.dag-viewport::after { right: 0; background: linear-gradient(to left, var(--bg) 10%, transparent); }
+.dag-viewport.overflow-left::before,
+.dag-viewport.overflow-right::after { opacity: 0.85; }
+.dag-viewport.overflow-top { box-shadow: inset 0 28px 24px -24px rgb(0 0 0 / 0.55); }
+.dag-viewport.overflow-bottom { box-shadow: inset 0 -28px 24px -24px rgb(0 0 0 / 0.55); }
+.dag-viewport.overflow-top.overflow-bottom {
+  box-shadow: inset 0 28px 24px -24px rgb(0 0 0 / 0.55), inset 0 -28px 24px -24px rgb(0 0 0 / 0.55);
+}
+
+/* The minimap: the whole graph as a thumbnail with the viewport drawn on it,
+   bottom-right where every workflow designer puts it. Click or drag to move
+   the view. Present only while something is off-screen: on a graph that fits
+   it would be a picture of what is already in front of the operator. */
+.dag-minimap {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 2;
+  display: block;
+  background: color-mix(in srgb, var(--bg-raised) 90%, transparent);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.28);
+  cursor: crosshair;
+  touch-action: none;
+  overflow: visible;
+}
+.dag-minimap-node { fill: var(--border-strong); opacity: 0.9; }
+.dag-minimap-node[class*='tone-'] { fill: var(--tone-bd); }
+.dag-minimap-view {
+  fill: var(--accent); fill-opacity: 0.14;
+  stroke: var(--accent); stroke-width: 1.5px; vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+@media (max-width: 700px) {
+  .dag-minimap { right: 8px; bottom: 8px; transform: scale(0.7); transform-origin: bottom right; }
+}
 .dag-viewport svg { display: block; }
 
 /* The zoom transform is applied without transition during a gesture — a
@@ -226,19 +282,14 @@
 .dag-jump { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--fg-muted); }
 .dag-jump select { max-width: 260px; font-size: 12px; }
 .dag-viewport { background: radial-gradient(var(--border) .7px, transparent .7px) 0 0 / 24px 24px, var(--bg); }
-.dag-viewport .dag-node { fill: var(--bg-raised); stroke-width: 1.4px; }
 .dag-node-g .dag-node-label { font-size: 13px; font-weight: 650; letter-spacing: -.2px; }
+.dag-node-g .dag-node-shadow { fill: var(--border); opacity: .3; }
+.dag-edge.related { stroke: var(--tone-active-bd); }
 .dag-node-g .dag-node-sub { font-size: 10px; fill: var(--fg-muted); }
 .dag-node-g .dag-node-worker { font-family: var(--mono); }
 .dag-node-g .dag-node-state { font-size: 10px; letter-spacing: .6px; }
-.dag-card-divider { stroke: var(--border); stroke-width: 1px; }
-.dag-node-g .dag-node-shadow { fill: var(--border); opacity: .28; }
-.dag-node-g.selected .dag-node { stroke-width: 2.5px; }
-.dag-node-g:hover .dag-node { stroke-width: 2.5px; }
 .dag-node-g.unrelated { opacity: .45; pointer-events: auto; }
 .dag-node-g.unrelated:hover, .dag-node-g.unrelated:focus { opacity: 1; }
-.dag-viewport .dag-edge { stroke-width: 1.6px; }
-.dag-viewport .dag-edge.related { stroke-width: 2.4px; }
 .dag-guidance { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--border); color: var(--fg-muted); font-size: 11px; background: var(--bg-raised); }
 .dag-legend > summary { font-family: var(--sans); }
 .dag-clip-hint { white-space: normal; }

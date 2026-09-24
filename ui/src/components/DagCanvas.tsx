@@ -53,16 +53,22 @@ import {
   ZOOM_MAX,
   ZOOM_MIN,
   centerOffset,
+  centerOn,
   clampZoom,
   exportFileName,
   fitScale,
+  initialView,
   inlineComputedStyles,
+  minimapScale,
+  offscreenCount,
+  overflowEdges,
   svgDocument,
   zoomAbout,
   zoomIn,
   zoomLabel,
   zoomOut,
 } from '../lib/dagview';
+import { NODE_H, NODE_W } from '../lib/dag';
 // The one component-scoped stylesheet in the app.
 //
 // WHY NOT index.css, which is where every other rule lives. The DAG canvas is
@@ -121,7 +127,18 @@ export interface DagCanvasProps {
   legendLabel?: string;
   viewportHeight?: number;
   focusTarget?: { x: number; y: number };
+  /**
+   * Where the boxes are, for the minimap and the off-screen count. Optional:
+   * a caller that draws something other than NODE_W x NODE_H boxes gets the
+   * canvas without either. `tone` colours the minimap's dot for that box.
+   */
+  places?: { id: string; x: number; y: number; tone?: string }[];
 }
+
+/** Thumbnail bounds. Wide rather than square because the graphs are. */
+const MINIMAP_MAX = { width: 200, height: 110 };
+/** Keyboard pan step, in screen pixels. */
+const PAN_STEP = 80;
 
 export function DagCanvas({
   width,
@@ -137,6 +154,7 @@ export function DagCanvas({
   legendLabel = 'legend',
   focusTarget,
   viewportHeight,
+  places,
 }: DagCanvasProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -176,21 +194,24 @@ export function DagCanvas({
     setView({ scale, ...centerOffset({ width, height }, v, scale) });
   }, [width, height, box.width, box.height]);
 
-  // Fit on graph or viewport size changes, never on ordinary status polling.
+  // The opening view, on graph or viewport size changes, never on ordinary
+  // status polling. Not `fit`: a fit of a deep graph is unreadable, so the
+  // canvas opens readable and anchored to the first layer (lib/dagview
+  // initialView), and the Fit button remains the way to see everything.
   const fittedFor = useRef<string | null>(null);
   useEffect(() => {
     if (box.width <= 0 || box.height <= 0) return;
     const identity = `${graphKey}:${box.width}:${box.height}`;
     if (fittedFor.current === identity) return;
     fittedFor.current = identity;
-    fit();
-  }, [graphKey, box.width, box.height, fit]);
+    setView(initialView({ width, height }, box));
+  }, [graphKey, box.width, box.height, width, height]);
 
   useEffect(() => {
     if (!focusTarget) return;
     const el = viewportRef.current;
     if (!el) return;
-    setView({ scale: 1, x: el.clientWidth / 2 - focusTarget.x, y: el.clientHeight / 2 - focusTarget.y });
+    setView({ scale: 1, ...centerOn(focusTarget, 1, { width: el.clientWidth, height: el.clientHeight }) });
   }, [focusTarget]);
 
   const reset = () => setView({ scale: 1, ...centerOffset({ width, height }, box, 1) });
@@ -219,7 +240,7 @@ export function DagCanvas({
     // are buttons and stealing their click would remove the primary way of
     // selecting one.
     if (e.button !== 0) return;
-    if ((e.target as Element).closest('[role="button"]')) return;
+    if ((e.target as Element).closest('[role="button"], .dag-minimap')) return;
     drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
     setDragging(true);
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -255,11 +276,31 @@ export function DagCanvas({
    * because React's wheel handler is passive and preventDefault() inside it is
    * ignored — so Ctrl+wheel would zoom the graph AND page-zoom the browser.
    */
+  /**
+   * ...with one addition: a SIDEWAYS wheel pans the graph. A horizontal
+   * trackpad swipe or Shift+wheel has no meaning to the page, which does not
+   * scroll sideways, so taking it costs the operator nothing — and it is the
+   * gesture everyone tries first on a wide diagram. Vertical wheel is still
+   * the page's. Taken only while the graph actually extends past the sides,
+   * so a graph that fits never swallows a stray swipe.
+   */
+  const latest = useRef({ view, box, width, height });
+  latest.current = { view, box, width, height };
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey && !e.metaKey) return;
+      if (!e.ctrlKey && !e.metaKey) {
+        const sideways = e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY);
+        if (!sideways) return;
+        const { view: v, box: b, width: w, height: h } = latest.current;
+        const edges = overflowEdges({ width: w, height: h }, v, b);
+        if (!edges.left && !edges.right) return;
+        e.preventDefault();
+        const delta = e.shiftKey && Math.abs(e.deltaX) < Math.abs(e.deltaY) ? e.deltaY : e.deltaX;
+        setView((cur) => ({ ...cur, x: cur.x - delta }));
+        return;
+      }
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       const pointer = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -302,9 +343,37 @@ export function DagCanvas({
         e.preventDefault();
         fit();
         break;
+      // Plain arrows pan the canvas. Shift+arrows are the cards' own (they
+      // move a card, in useTaskLayout) and are stopped before they get here.
+      case 'ArrowLeft':
+      case 'ArrowRight':
+      case 'ArrowUp':
+      case 'ArrowDown': {
+        if (e.shiftKey) return;
+        e.preventDefault();
+        const dx = e.key === 'ArrowLeft' ? PAN_STEP : e.key === 'ArrowRight' ? -PAN_STEP : 0;
+        const dy = e.key === 'ArrowUp' ? PAN_STEP : e.key === 'ArrowDown' ? -PAN_STEP : 0;
+        setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+        break;
+      }
       default:
         break;
     }
+  };
+
+  /**
+   * Minimap: the whole graph as a thumbnail with the viewport drawn on it.
+   * Click or drag anywhere on it to put that point under the middle of the
+   * view. This is what every workflow designer offers for a diagram wider
+   * than its panel, and it answers "where am I" and "how do I get there" in
+   * one gesture where the old toolbar hint answered neither.
+   */
+  const mapScale = minimapScale({ width, height }, MINIMAP_MAX);
+  const mapDrag = useRef<number | null>(null);
+  const jumpTo = (e: React.PointerEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const point = { x: (e.clientX - rect.left) / mapScale, y: (e.clientY - rect.top) / mapScale };
+    setView((v) => ({ ...v, ...centerOn(point, v.scale, box) }));
   };
 
   /** Transient toolbar message ("Link copied", "Export failed"). Cleared on a
@@ -465,12 +534,12 @@ export function DagCanvas({
    * original bug: if a node is off-screen the operator is told so rather than
    * having to guess from a count that does not match what they can see.
    */
-  const clipped = useMemo(() => {
-    if (box.width <= 0) return false;
-    const w = width * view.scale;
-    const h = height * view.scale;
-    return view.x < -1 || view.y < -1 || view.x + w > box.width + 1 || view.y + h > box.height + 1;
-  }, [box, width, height, view]);
+  const edges = useMemo(() => overflowEdges({ width, height }, view, box), [box, width, height, view]);
+  const clipped = edges.left || edges.right || edges.top || edges.bottom;
+  const offscreen = useMemo(
+    () => (places ? offscreenCount(places, { width: NODE_W, height: NODE_H }, view, box) : 0),
+    [places, view, box],
+  );
 
   return (
     <>
@@ -480,7 +549,9 @@ export function DagCanvas({
         <span className="dag-toolbar-spacer" />
         {clipped && (
           <span className="dag-clip-hint" role="status">
-            part of the graph is outside the view — drag to pan
+            {places && offscreen > 0
+              ? `${offscreen} of ${places.length} off-screen · scroll sideways, drag, or use the map`
+              : 'part of the graph is outside the view · drag to pan'}
           </span>
         )}
         {notice && (
@@ -556,7 +627,11 @@ export function DagCanvas({
 
       <div
         ref={viewportRef}
-        className={`dag-viewport${dragging ? ' dragging' : ''}${expanded ? ' expanded' : ''}`}
+        className={
+          `dag-viewport${dragging ? ' dragging' : ''}${expanded ? ' expanded' : ''}` +
+          `${edges.left ? ' overflow-left' : ''}${edges.right ? ' overflow-right' : ''}` +
+          `${edges.top ? ' overflow-top' : ''}${edges.bottom ? ' overflow-bottom' : ''}`
+        }
         style={{ height: expanded ? 'min(72vh, 850px)' : `${Math.min(540, Math.max(280, (viewportHeight ?? height) + 80))}px` }}
         tabIndex={0}
         aria-label="Interactive graph canvas. Drag to pan, plus or minus to zoom, F to fit."
@@ -623,9 +698,58 @@ export function DagCanvas({
             {children}
           </g>
         </svg>
+        {places && places.length > 1 && clipped && box.width > 0 && (
+          <svg
+            className="dag-minimap"
+            width={Math.max(1, Math.round(width * mapScale))}
+            height={Math.max(1, Math.round(height * mapScale))}
+            viewBox={`0 0 ${width} ${height}`}
+            role="img"
+            aria-label={`Map of the graph. ${offscreen} of ${places.length} nodes off-screen. Click to move the view.`}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              e.stopPropagation();
+              mapDrag.current = e.pointerId;
+              e.currentTarget.setPointerCapture?.(e.pointerId);
+              jumpTo(e);
+            }}
+            onPointerMove={(e) => {
+              if (mapDrag.current !== e.pointerId) return;
+              jumpTo(e);
+            }}
+            onPointerUp={(e) => {
+              if (mapDrag.current !== e.pointerId) return;
+              mapDrag.current = null;
+              if (e.currentTarget.hasPointerCapture?.(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+            }}
+            onPointerCancel={() => {
+              mapDrag.current = null;
+            }}
+          >
+            {places.map((p) => (
+              <rect
+                key={p.id}
+                className={`dag-minimap-node${p.tone ? ` tone-${p.tone}` : ''}`}
+                x={p.x}
+                y={p.y}
+                width={NODE_W}
+                height={NODE_H}
+                rx={NODE_H / 4}
+              />
+            ))}
+            <rect
+              className="dag-minimap-view"
+              x={-view.x / view.scale}
+              y={-view.y / view.scale}
+              width={box.width / view.scale}
+              height={box.height / view.scale}
+              rx={6}
+            />
+          </svg>
+        )}
       </div>
 
-      <div className="dag-guidance"><span>Select a task to inspect its details</span><span>Drag to pan · Ctrl/⌘ + scroll to zoom · F to fit</span></div>
+      <div className="dag-guidance"><span>Select a task to inspect its details</span><span>Drag or scroll sideways to pan · Ctrl/⌘ + scroll to zoom · F to fit</span></div>
       {legend && (
         /*
           The legend was two permanently-open rows under every graph — a

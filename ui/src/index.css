@@ -835,28 +835,59 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
     var(--bg-inset);
 }
 
-/* Node vertex.
+/* Node card.
    Stroke widths here are literal: they are SVG user-space units inside a
    viewBox, not CSS lengths, so the spacing scale does not apply to them and a
-   token indirection would only hide that. */
+   token indirection would only hide that.
+
+   The card's body is the panel surface, not the tone tint: a tinted body
+   makes nine states nine pastel boxes and the label the lowest-contrast
+   thing on the card. The tone lives where it carries meaning -- the border,
+   the left stripe, the glyph disc and the state pill -- and the label sits on
+   the same surface everything else in the console is read from. */
 .dag-node {
-  fill: var(--tone-bg); stroke: var(--tone-bd); stroke-width: 1.5px;
+  fill: var(--bg-raised); stroke: var(--tone-bd); stroke-width: 1.5px;
   cursor: pointer;
-  transition: filter 120ms ease;
+  transition: filter 120ms ease, stroke-width 120ms ease;
 }
 /* Elevation, faked with an offset rect because SVG has no box-shadow. Kept
    behind the body and non-interactive so it never eats a click. */
-.dag-node-shadow { fill: var(--bg-inset); opacity: 0.5; pointer-events: none; }
-.dag-node-g:hover .dag-node { filter: brightness(1.12); }
-/* Selection thickens the stroke AND adds a focus-coloured outer ring, so it
-   stays distinguishable from a failed node (whose own border is already red)
-   and from the root-cause halo, which is drawn further out again. */
-.dag-node.selected { stroke-width: 3px; paint-order: stroke; }
+.dag-node-shadow { fill: var(--bg-inset); opacity: 0.55; pointer-events: none; }
+.dag-node-g:hover .dag-node { filter: brightness(1.08); stroke-width: 2px; }
+/* Selection is a ring OUTSIDE the card in the focus colour. It borrows
+   nothing from the border, which belongs to state, and sits inside the
+   root-cause halo, which is drawn further out again. The card's own stroke
+   thickens a little too so the ring is not the only cue at small zoom. */
+.dag-node.selected { stroke-width: 2px; }
+.dag-select-ring { fill: none; stroke: var(--focus); stroke-width: 2px; pointer-events: none; }
 .dag-node-g.selected .dag-node { outline: none; }
-/* The glyph chip: channel 4 given a surface of its own. Tinted from the tone so
-   it reinforces the state, at an opacity that keeps the glyph itself the
-   highest-contrast thing inside it. */
-.dag-glyph-chip { fill: var(--tone-bd); opacity: 0.16; pointer-events: none; }
+/* Channel 5: the status stripe. Redundant with the border by design -- it is
+   the one cue that reads from the card's silhouette at any zoom. */
+.dag-node-stripe { fill: var(--tone-bd); pointer-events: none; }
+.spec-node-stripe { fill: var(--border-strong); pointer-events: none; }
+.spec-node-stripe.root { fill: var(--tone-queued-bd); }
+/* The glyph disc: channel 4 given a surface of its own, tinted from the
+   tone at an opacity that keeps the glyph the highest-contrast thing in it. */
+.dag-glyph-chip { fill: var(--tone-bg); stroke: var(--tone-bd); stroke-width: 1px; pointer-events: none; }
+/* The state name's pill, the same tint as the disc so the two read as one
+   system rather than two decorations. */
+.dag-state-pill { fill: var(--tone-bg); pointer-events: none; }
+/* Ports: where an edge leaves or arrives. Body-coloured with a strong ring so
+   the arrowhead underneath reads as plugged in; lit to the tone on hover and
+   selection so the connections of the card in hand are traceable. */
+.dag-port { fill: var(--bg-raised); stroke: var(--border-strong); stroke-width: 1.5px; pointer-events: none; }
+.dag-node-g:hover .dag-port, .dag-node-g.selected .dag-port, .spec-node-g:hover .dag-port { stroke: var(--tone-bd, var(--tone-active-bd)); }
+/* A RUNNING node's disc emits a slow ring. The one animation on a card, on the
+   one state that means "right now"; stilled for reduced motion below. */
+.dag-node-pulse {
+  fill: none; stroke: var(--tone-bd); stroke-width: 2px; opacity: 0;
+  transform-box: fill-box; transform-origin: center;
+  animation: dag-pulse 2s ease-out infinite; pointer-events: none;
+}
+@keyframes dag-pulse {
+  0% { transform: scale(1); opacity: 0.75; }
+  100% { transform: scale(2); opacity: 0; }
+}
 
 /* EVERY SIZE IN THIS BLOCK IS A LITERAL, AND NONE OF THEM MOVED WITH THE TYPE
    SCALE. This is the one place in the stylesheet where that is a hard
@@ -885,21 +916,36 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
   letter-spacing: -0.01em; pointer-events: none;
 }
 .dag-node-sub { fill: var(--fg-muted); font: 10.5px var(--mono); pointer-events: none; }
-.dag-node-state { font: 700 10px var(--mono); letter-spacing: 0.06em; pointer-events: none; }
+.dag-node-state { font: 700 10px var(--mono); letter-spacing: 0.04em; pointer-events: none; }
 .dag-glyph { font: 700 12px var(--mono); pointer-events: none; }
+.dag-card-divider { stroke: var(--border); stroke-width: 1px; pointer-events: none; }
 
 /* Edges. Held slightly back in opacity so a dense graph reads as nodes-with-
    connections rather than a net; the arrowhead markers are drawn at full
    strength (DagView.tsx) so direction survives the reduction. */
 .dag-edge {
-  stroke: var(--border-strong); stroke-width: 1.6px; fill: none;
-  stroke-linecap: round; stroke-linejoin: round; opacity: 0.75;
+  stroke: var(--border-strong); stroke-width: 1.75px; fill: none;
+  stroke-linecap: round; stroke-linejoin: round; opacity: 0.8;
+  transition: opacity 120ms ease, stroke-width 120ms ease;
 }
+/* Progress along the edges. Between two SUCCEEDED nodes the line takes the
+   success tone, quietly, so the finished part of a run reads as a finished
+   path; into a RUNNING node it takes the active tone and flows. */
+.dag-edge.done { stroke: var(--tone-success-bd); opacity: 0.6; }
+.dag-edge.live {
+  stroke: var(--tone-active-bd); opacity: 1; stroke-width: 2px;
+  stroke-dasharray: 7 6; animation: dag-flow 900ms linear infinite;
+}
+@keyframes dag-flow { to { stroke-dashoffset: -13; } }
 /* A cascade is the one thing worth pulling forward, so the failed path is both
    thicker and fully opaque as well as dashed and red. */
 .dag-edge.failed-path {
   stroke: var(--tone-danger-bd); stroke-dasharray: 5 4;
-  stroke-width: 2px; opacity: 1;
+  stroke-width: 2px; opacity: 1; animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dag-edge.live { animation: none; stroke-dasharray: none; }
+  .dag-node-pulse { animation: none; }
 }
 /* A root cause gets a halo no other state can produce, so the origin of a
    cascade is findable without reading a single label. */
@@ -920,7 +966,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
   cursor: pointer;
 }
 .spec-node.root { stroke: var(--tone-queued-bd); }
-.spec-node.selected { stroke: var(--focus); stroke-width: 3px; }
+.spec-node.selected { stroke-width: 2px; }
 .spec-node-g.dimmed { opacity: 0.35; }
 .spec-node-g:hover .spec-node { fill: var(--bg-hover); }
 .dag-edge.spec-related { stroke: var(--tone-active-bd); stroke-width: 2px; }
