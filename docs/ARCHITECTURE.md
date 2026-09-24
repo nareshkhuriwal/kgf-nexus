@@ -1383,6 +1383,17 @@ Asset/lineage layer over the task core (the Dagster idea, added without rewritin
 5. **Priority model.** Single integer plus aging, or explicit weighted fair-share queues per namespace from the start? Retrofitting fair-share is unpleasant, so this deserves a decision in Phase 0.
 6. **Postgres-as-queue ceiling.** `SKIP LOCKED` comfortably handles thousands of dispatches/second, which covers the target envelope. At what measured throughput do we need a dedicated dispatch path, and what is the migration story?
 
+**Resolutions (Proposed — pending owner sign-off).** Each question is closed by an ADR carrying the evidence; the questions above are kept as asked.
+
+| # | Resolution | ADR |
+|---|---|---|
+| 1 | Go stays for control plane and agent. Stripped static agent: 16.6 MB (linux/amd64), ~19 ms exec-to-exit, 17 MB RSS floor; a Rust agent could save ~10 MB at most, for a second codegen and conformance stack. | [ADR-0013](adr/0013-go-control-plane-and-agent.md) |
+| 2 | gRPC only. All seven worker RPCs are unary, so the proxy requirements are short (HTTP/2 end to end, trailers, ≥ 60 s timeout, ≥ 4 MiB bodies, no buffering). No JSON fallback until a deployment needs HTTP/1.1-only egress; then Connect's JSON protocol. | [ADR-0014](adr/0014-worker-transport-grpc-without-json-fallback.md) |
+| 3 | Yes, bounded: `cancellation.uninterruptible` sends no SIGTERM, waits min(declared ≤ 1 h, agent ceiling default 10 m), then SIGKILL. Does not extend `start_to_close`. Implemented and tested. | [ADR-0015](adr/0015-bounded-uninterruptible-tasks.md) |
+| 4 | 64 KiB stays the default (measured: inline beats a MinIO round trip up to between 64 and 256 KiB; every shipped result is < 1 KiB), configurable within [1 B, 1 MiB], applied consistently. | [ADR-0016](adr/0016-inline-result-threshold.md) |
+| 5 | Weighted fair share across namespaces (in-flight ÷ weight) ahead of priority + aging within a namespace, inside the unchanged claim. Implemented (migration 0022) and tested for starvation-freedom, weights, aging and no double dispatch. | [ADR-0017](adr/0017-weighted-fair-share-across-namespaces.md) |
+| 6 | The assumption above does **not** hold for the current claim: its cost is linear in the queue's PENDING backlog (laptop: ~1.1k/s at 1k backlog with 16 replicas; ~40–200/s at 10k; single digits to ~20/s at 100k). Fix the scan in SQL first; build a dedicated dispatch path only if claim p99 > 250 ms, backlog > 50k, or demand > 70 % of measured capacity persists afterwards. | [ADR-0018](adr/0018-postgres-dispatch-ceiling.md) |
+
 ---
 
 ## 13. Document index
@@ -1400,3 +1411,9 @@ Asset/lineage layer over the task core (the Dagster idea, added without rewritin
 | [ADR-0009](adr/0009-no-ray-dependency.md) | No Ray dependency |
 | [ADR-0010](adr/0010-lease-based-task-ownership.md) | Lease-based task ownership and fencing |
 | [ADR-0011](adr/0011-microservice-decomposition.md) | Microservice decomposition with a shared database schema |
+| [ADR-0013](adr/0013-go-control-plane-and-agent.md) | Go remains the control-plane and agent language (§12 Q1) |
+| [ADR-0014](adr/0014-worker-transport-grpc-without-json-fallback.md) | Worker transport: gRPC, proxy requirements, no JSON fallback yet (§12 Q2) |
+| [ADR-0015](adr/0015-bounded-uninterruptible-tasks.md) | Bounded `uninterruptible` tasks (§12 Q3) |
+| [ADR-0016](adr/0016-inline-result-threshold.md) | Inline-vs-blob result threshold (§12 Q4) |
+| [ADR-0017](adr/0017-weighted-fair-share-across-namespaces.md) | Weighted fair share across namespaces (§12 Q5) |
+| [ADR-0018](adr/0018-postgres-dispatch-ceiling.md) | Postgres dispatch ceiling, trigger and migration path (§12 Q6) |

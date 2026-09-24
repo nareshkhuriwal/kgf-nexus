@@ -74,6 +74,9 @@ func main() {
 			"per-attempt scratch directory root (default: OS temp)")
 		drainGrace = flag.Duration("drain-grace", envDuration("NEXUS_DRAIN_GRACE", 5*time.Minute),
 			"how long a draining agent waits for in-flight work before giving up")
+		maxUninterruptible = flag.Duration("max-uninterruptible",
+			envDuration("NEXUS_MAX_UNINTERRUPTIBLE", worker.DefaultUninterruptibleCeiling),
+			"platform ceiling on how long cancelling an uninterruptible task waits before SIGKILL (ADR-0015)")
 		allowUnenforceable = flag.Bool("allow-unenforceable-limits",
 			os.Getenv("NEXUS_ALLOW_UNENFORCEABLE_LIMITS") == "true",
 			"DEVELOPMENT ONLY: run tasks whose resource limits the subprocess executor cannot enforce")
@@ -124,7 +127,8 @@ func main() {
 		AllowUnenforceableLimits: *allowUnenforceable,
 		// NEXUS_NATS_URL / NEXUS_NATS_CREDS. Empty means poll-only, which is a
 		// complete, correct configuration (ADR-0003).
-		Bus: bus.ConfigFromEnv("nexus-agent"),
+		Bus:                bus.ConfigFromEnv("nexus-agent"),
+		MaxUninterruptible: *maxUninterruptible,
 	}
 
 	// The kubernetes executor is opt-in: it exists only when NEXUS_K8S_NAMESPACE
@@ -149,6 +153,15 @@ func main() {
 		cfg.Kubernetes = ke
 		log.Info("kubernetes executor configured", "namespace", kcfg.Namespace,
 			"owner", ke.Config.Owner, "helper_image", ke.Config.HelperImage)
+	}
+
+	// A drain that gives up before the uninterruptible ceiling would kill, at
+	// deploy time, exactly the critical sections the ceiling promises to let
+	// finish. Not fatal -- an operator may accept that -- but never silent.
+	if *drainGrace < *maxUninterruptible {
+		log.Warn("drain grace is shorter than the uninterruptible ceiling: a deploy can SIGKILL an "+
+			"uninterruptible task before its declared bound (ADR-0015)",
+			"drain_grace", *drainGrace, "max_uninterruptible", *maxUninterruptible)
 	}
 
 	if err := run(ctx, cfg, *controlPlane, log); err != nil {

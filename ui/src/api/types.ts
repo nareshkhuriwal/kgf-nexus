@@ -527,6 +527,11 @@ export interface SpecTask {
   outputs?: Record<string, { type?: string; required?: boolean }>;
   input_params?: Record<string, string>;
   cache?: { enabled?: boolean };
+  /**
+   * ADR-0015. Absent means interruptible (the ordinary SIGTERM → grace →
+   * SIGKILL). max_uninterruptible_ms absent or 0 means "the worker's ceiling".
+   */
+  cancellation?: { uninterruptible?: boolean; max_uninterruptible_ms?: number };
   idempotency?: string;
   concurrency_key?: string;
   concurrency_limit?: number;

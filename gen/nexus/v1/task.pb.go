@@ -270,7 +270,13 @@ type TaskSpec struct {
 	// array named by `map.over_*` and materializes one child node per element,
 	// atomically and bounded by `map.max_fanout`. Downstream nodes depend on the
 	// template, which settles only when every child has.
-	Map           *MapSpec `protobuf:"bytes,21,opt,name=map,proto3" json:"map,omitempty"`
+	Map *MapSpec `protobuf:"bytes,21,opt,name=map,proto3" json:"map,omitempty"`
+	// ADR-0015: how EXTERNAL cancellation treats a running attempt of this task.
+	// Field number 50 rather than the next free one on purpose: parallel branches
+	// extend TaskSpec too, and a high, distinctive number cannot collide with
+	// their 21, 22, ... in a merge. Additive: an old agent ignores it and keeps
+	// the plain SIGTERM -> grace -> SIGKILL contract.
+	Cancellation  *CancellationPolicy `protobuf:"bytes,50,opt,name=cancellation,proto3" json:"cancellation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -452,6 +458,13 @@ func (x *TaskSpec) GetMap() *MapSpec {
 	return nil
 }
 
+func (x *TaskSpec) GetCancellation() *CancellationPolicy {
+	if x != nil {
+		return x.Cancellation
+	}
+	return nil
+}
+
 // MapSpec declares a fan-out over a runtime collection (§5.4).
 //
 // Every field is mandatory. max_fanout in particular has no default: an
@@ -535,6 +548,73 @@ func (x *MapSpec) GetMaxFanout() int32 {
 	return 0
 }
 
+// CancellationPolicy lets a task declare a critical section that must not be
+// torn down part way -- a non-idempotent side effect, a migration step -- and
+// BOUNDS that declaration, because an unbounded "do not stop me" is a worker
+// that can never be reclaimed (ADR-0015).
+//
+// Applies to external cancellation only: an operator or run cancel, a revoked
+// lease, an agent drain. The task's own start_to_close deadline is NOT
+// extended by it -- that is the author's declared maximum run time and still
+// ends the attempt TIMED_OUT on the usual SIGTERM -> grace -> SIGKILL path.
+type CancellationPolicy struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// When true, cancellation sends NO SIGTERM. The agent waits for the workload
+	// to finish on its own for up to the bound below, then SIGKILLs it.
+	Uninterruptible bool `protobuf:"varint,1,opt,name=uninterruptible,proto3" json:"uninterruptible,omitempty"`
+	// The declared upper bound on that wait. The effective bound is
+	// min(max_uninterruptible_ms, the worker's platform ceiling); 0 means "the
+	// ceiling". The ceiling is operator configuration on the agent, so no spec
+	// can hold a worker past what the platform allows.
+	MaxUninterruptibleMs int64 `protobuf:"varint,2,opt,name=max_uninterruptible_ms,json=maxUninterruptibleMs,proto3" json:"max_uninterruptible_ms,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *CancellationPolicy) Reset() {
+	*x = CancellationPolicy{}
+	mi := &file_nexus_v1_task_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancellationPolicy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancellationPolicy) ProtoMessage() {}
+
+func (x *CancellationPolicy) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_task_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancellationPolicy.ProtoReflect.Descriptor instead.
+func (*CancellationPolicy) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *CancellationPolicy) GetUninterruptible() bool {
+	if x != nil {
+		return x.Uninterruptible
+	}
+	return false
+}
+
+func (x *CancellationPolicy) GetMaxUninterruptibleMs() int64 {
+	if x != nil {
+		return x.MaxUninterruptibleMs
+	}
+	return 0
+}
+
 type ValueSpec struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// "int" | "float" | "string" | "bool" | "json" | "file_ref"
@@ -552,7 +632,7 @@ type ValueSpec struct {
 
 func (x *ValueSpec) Reset() {
 	*x = ValueSpec{}
-	mi := &file_nexus_v1_task_proto_msgTypes[2]
+	mi := &file_nexus_v1_task_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -564,7 +644,7 @@ func (x *ValueSpec) String() string {
 func (*ValueSpec) ProtoMessage() {}
 
 func (x *ValueSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_task_proto_msgTypes[2]
+	mi := &file_nexus_v1_task_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -577,7 +657,7 @@ func (x *ValueSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValueSpec.ProtoReflect.Descriptor instead.
 func (*ValueSpec) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{2}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ValueSpec) GetType() string {
@@ -619,7 +699,7 @@ type CachePolicy struct {
 
 func (x *CachePolicy) Reset() {
 	*x = CachePolicy{}
-	mi := &file_nexus_v1_task_proto_msgTypes[3]
+	mi := &file_nexus_v1_task_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -631,7 +711,7 @@ func (x *CachePolicy) String() string {
 func (*CachePolicy) ProtoMessage() {}
 
 func (x *CachePolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_task_proto_msgTypes[3]
+	mi := &file_nexus_v1_task_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -644,7 +724,7 @@ func (x *CachePolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CachePolicy.ProtoReflect.Descriptor instead.
 func (*CachePolicy) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{3}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CachePolicy) GetEnabled() bool {
@@ -697,7 +777,7 @@ type RuntimeSpec struct {
 
 func (x *RuntimeSpec) Reset() {
 	*x = RuntimeSpec{}
-	mi := &file_nexus_v1_task_proto_msgTypes[4]
+	mi := &file_nexus_v1_task_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -709,7 +789,7 @@ func (x *RuntimeSpec) String() string {
 func (*RuntimeSpec) ProtoMessage() {}
 
 func (x *RuntimeSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_task_proto_msgTypes[4]
+	mi := &file_nexus_v1_task_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -722,7 +802,7 @@ func (x *RuntimeSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuntimeSpec.ProtoReflect.Descriptor instead.
 func (*RuntimeSpec) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{4}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *RuntimeSpec) GetExecutor() string {
@@ -791,7 +871,7 @@ type SecretRef struct {
 
 func (x *SecretRef) Reset() {
 	*x = SecretRef{}
-	mi := &file_nexus_v1_task_proto_msgTypes[5]
+	mi := &file_nexus_v1_task_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -803,7 +883,7 @@ func (x *SecretRef) String() string {
 func (*SecretRef) ProtoMessage() {}
 
 func (x *SecretRef) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_task_proto_msgTypes[5]
+	mi := &file_nexus_v1_task_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -816,7 +896,7 @@ func (x *SecretRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretRef.ProtoReflect.Descriptor instead.
 func (*SecretRef) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{5}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *SecretRef) GetName() string {
@@ -860,7 +940,7 @@ type TaskAssignment struct {
 
 func (x *TaskAssignment) Reset() {
 	*x = TaskAssignment{}
-	mi := &file_nexus_v1_task_proto_msgTypes[6]
+	mi := &file_nexus_v1_task_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -872,7 +952,7 @@ func (x *TaskAssignment) String() string {
 func (*TaskAssignment) ProtoMessage() {}
 
 func (x *TaskAssignment) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_task_proto_msgTypes[6]
+	mi := &file_nexus_v1_task_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -885,7 +965,7 @@ func (x *TaskAssignment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskAssignment.ProtoReflect.Descriptor instead.
 func (*TaskAssignment) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{6}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *TaskAssignment) GetAttemptId() string {
@@ -962,8 +1042,7 @@ var File_nexus_v1_task_proto protoreflect.FileDescriptor
 
 const file_nexus_v1_task_proto_rawDesc = "" +
 	"\n" +
-	"\x13nexus/v1/task.proto\x12\bnexus.v1\x1a\x15nexus/v1/common.proto\"\xd2\n" +
-	"\n" +
+	"\x13nexus/v1/task.proto\x12\bnexus.v1\x1a\x15nexus/v1/common.proto\"\x94\v\n" +
 	"\bTaskSpec\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x19\n" +
 	"\btask_ref\x18\x02 \x01(\tR\ataskRef\x12\x18\n" +
@@ -986,7 +1065,8 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"\x0einput_literals\x18\x13 \x03(\v2%.nexus.v1.TaskSpec.InputLiteralsEntryR\rinputLiterals\x12F\n" +
 	"\finput_params\x18\x14 \x03(\v2#.nexus.v1.TaskSpec.InputParamsEntryR\vinputParams\x12\x1a\n" +
 	"\bpriority\x18\x12 \x01(\x05R\bpriority\x12#\n" +
-	"\x03map\x18\x15 \x01(\v2\x11.nexus.v1.MapSpecR\x03map\x1aN\n" +
+	"\x03map\x18\x15 \x01(\v2\x11.nexus.v1.MapSpecR\x03map\x12@\n" +
+	"\fcancellation\x182 \x01(\v2\x1c.nexus.v1.CancellationPolicyR\fcancellation\x1aN\n" +
 	"\vInputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
 	"\x05value\x18\x02 \x01(\v2\x13.nexus.v1.ValueSpecR\x05value:\x028\x01\x1aO\n" +
@@ -1010,7 +1090,10 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"\n" +
 	"item_input\x18\x03 \x01(\tR\titemInput\x12\x1d\n" +
 	"\n" +
-	"max_fanout\x18\x04 \x01(\x05R\tmaxFanout\"{\n" +
+	"max_fanout\x18\x04 \x01(\x05R\tmaxFanout\"t\n" +
+	"\x12CancellationPolicy\x12(\n" +
+	"\x0funinterruptible\x18\x01 \x01(\bR\x0funinterruptible\x124\n" +
+	"\x16max_uninterruptible_ms\x18\x02 \x01(\x03R\x14maxUninterruptibleMs\"{\n" +
 	"\tValueSpec\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x1a\n" +
 	"\brequired\x18\x02 \x01(\bR\brequired\x12!\n" +
@@ -1090,57 +1173,59 @@ func file_nexus_v1_task_proto_rawDescGZIP() []byte {
 }
 
 var file_nexus_v1_task_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_nexus_v1_task_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_nexus_v1_task_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_nexus_v1_task_proto_goTypes = []any{
-	(TriggerRule)(0),        // 0: nexus.v1.TriggerRule
-	(AttemptState)(0),       // 1: nexus.v1.AttemptState
-	(AttemptOutcome)(0),     // 2: nexus.v1.AttemptOutcome
-	(*TaskSpec)(nil),        // 3: nexus.v1.TaskSpec
-	(*MapSpec)(nil),         // 4: nexus.v1.MapSpec
-	(*ValueSpec)(nil),       // 5: nexus.v1.ValueSpec
-	(*CachePolicy)(nil),     // 6: nexus.v1.CachePolicy
-	(*RuntimeSpec)(nil),     // 7: nexus.v1.RuntimeSpec
-	(*SecretRef)(nil),       // 8: nexus.v1.SecretRef
-	(*TaskAssignment)(nil),  // 9: nexus.v1.TaskAssignment
-	nil,                     // 10: nexus.v1.TaskSpec.InputsEntry
-	nil,                     // 11: nexus.v1.TaskSpec.OutputsEntry
-	nil,                     // 12: nexus.v1.TaskSpec.NodeSelectorEntry
-	nil,                     // 13: nexus.v1.TaskSpec.InputLiteralsEntry
-	nil,                     // 14: nexus.v1.TaskSpec.InputParamsEntry
-	nil,                     // 15: nexus.v1.RuntimeSpec.EnvEntry
-	nil,                     // 16: nexus.v1.TaskAssignment.InputsEntry
-	(*ResourceRequest)(nil), // 17: nexus.v1.ResourceRequest
-	(*Timeouts)(nil),        // 18: nexus.v1.Timeouts
-	(*RetryPolicy)(nil),     // 19: nexus.v1.RetryPolicy
-	(IdempotencyMode)(0),    // 20: nexus.v1.IdempotencyMode
-	(*ResultRef)(nil),       // 21: nexus.v1.ResultRef
+	(TriggerRule)(0),           // 0: nexus.v1.TriggerRule
+	(AttemptState)(0),          // 1: nexus.v1.AttemptState
+	(AttemptOutcome)(0),        // 2: nexus.v1.AttemptOutcome
+	(*TaskSpec)(nil),           // 3: nexus.v1.TaskSpec
+	(*MapSpec)(nil),            // 4: nexus.v1.MapSpec
+	(*CancellationPolicy)(nil), // 5: nexus.v1.CancellationPolicy
+	(*ValueSpec)(nil),          // 6: nexus.v1.ValueSpec
+	(*CachePolicy)(nil),        // 7: nexus.v1.CachePolicy
+	(*RuntimeSpec)(nil),        // 8: nexus.v1.RuntimeSpec
+	(*SecretRef)(nil),          // 9: nexus.v1.SecretRef
+	(*TaskAssignment)(nil),     // 10: nexus.v1.TaskAssignment
+	nil,                        // 11: nexus.v1.TaskSpec.InputsEntry
+	nil,                        // 12: nexus.v1.TaskSpec.OutputsEntry
+	nil,                        // 13: nexus.v1.TaskSpec.NodeSelectorEntry
+	nil,                        // 14: nexus.v1.TaskSpec.InputLiteralsEntry
+	nil,                        // 15: nexus.v1.TaskSpec.InputParamsEntry
+	nil,                        // 16: nexus.v1.RuntimeSpec.EnvEntry
+	nil,                        // 17: nexus.v1.TaskAssignment.InputsEntry
+	(*ResourceRequest)(nil),    // 18: nexus.v1.ResourceRequest
+	(*Timeouts)(nil),           // 19: nexus.v1.Timeouts
+	(*RetryPolicy)(nil),        // 20: nexus.v1.RetryPolicy
+	(IdempotencyMode)(0),       // 21: nexus.v1.IdempotencyMode
+	(*ResultRef)(nil),          // 22: nexus.v1.ResultRef
 }
 var file_nexus_v1_task_proto_depIdxs = []int32{
-	10, // 0: nexus.v1.TaskSpec.inputs:type_name -> nexus.v1.TaskSpec.InputsEntry
-	11, // 1: nexus.v1.TaskSpec.outputs:type_name -> nexus.v1.TaskSpec.OutputsEntry
-	17, // 2: nexus.v1.TaskSpec.resources:type_name -> nexus.v1.ResourceRequest
-	12, // 3: nexus.v1.TaskSpec.node_selector:type_name -> nexus.v1.TaskSpec.NodeSelectorEntry
-	18, // 4: nexus.v1.TaskSpec.timeouts:type_name -> nexus.v1.Timeouts
-	19, // 5: nexus.v1.TaskSpec.retry:type_name -> nexus.v1.RetryPolicy
-	20, // 6: nexus.v1.TaskSpec.idempotency:type_name -> nexus.v1.IdempotencyMode
-	6,  // 7: nexus.v1.TaskSpec.cache:type_name -> nexus.v1.CachePolicy
-	7,  // 8: nexus.v1.TaskSpec.runtime:type_name -> nexus.v1.RuntimeSpec
+	11, // 0: nexus.v1.TaskSpec.inputs:type_name -> nexus.v1.TaskSpec.InputsEntry
+	12, // 1: nexus.v1.TaskSpec.outputs:type_name -> nexus.v1.TaskSpec.OutputsEntry
+	18, // 2: nexus.v1.TaskSpec.resources:type_name -> nexus.v1.ResourceRequest
+	13, // 3: nexus.v1.TaskSpec.node_selector:type_name -> nexus.v1.TaskSpec.NodeSelectorEntry
+	19, // 4: nexus.v1.TaskSpec.timeouts:type_name -> nexus.v1.Timeouts
+	20, // 5: nexus.v1.TaskSpec.retry:type_name -> nexus.v1.RetryPolicy
+	21, // 6: nexus.v1.TaskSpec.idempotency:type_name -> nexus.v1.IdempotencyMode
+	7,  // 7: nexus.v1.TaskSpec.cache:type_name -> nexus.v1.CachePolicy
+	8,  // 8: nexus.v1.TaskSpec.runtime:type_name -> nexus.v1.RuntimeSpec
 	0,  // 9: nexus.v1.TaskSpec.trigger_rule:type_name -> nexus.v1.TriggerRule
-	13, // 10: nexus.v1.TaskSpec.input_literals:type_name -> nexus.v1.TaskSpec.InputLiteralsEntry
-	14, // 11: nexus.v1.TaskSpec.input_params:type_name -> nexus.v1.TaskSpec.InputParamsEntry
+	14, // 10: nexus.v1.TaskSpec.input_literals:type_name -> nexus.v1.TaskSpec.InputLiteralsEntry
+	15, // 11: nexus.v1.TaskSpec.input_params:type_name -> nexus.v1.TaskSpec.InputParamsEntry
 	4,  // 12: nexus.v1.TaskSpec.map:type_name -> nexus.v1.MapSpec
-	15, // 13: nexus.v1.RuntimeSpec.env:type_name -> nexus.v1.RuntimeSpec.EnvEntry
-	8,  // 14: nexus.v1.RuntimeSpec.secrets:type_name -> nexus.v1.SecretRef
-	3,  // 15: nexus.v1.TaskAssignment.spec:type_name -> nexus.v1.TaskSpec
-	16, // 16: nexus.v1.TaskAssignment.inputs:type_name -> nexus.v1.TaskAssignment.InputsEntry
-	5,  // 17: nexus.v1.TaskSpec.InputsEntry.value:type_name -> nexus.v1.ValueSpec
-	5,  // 18: nexus.v1.TaskSpec.OutputsEntry.value:type_name -> nexus.v1.ValueSpec
-	21, // 19: nexus.v1.TaskAssignment.InputsEntry.value:type_name -> nexus.v1.ResultRef
-	20, // [20:20] is the sub-list for method output_type
-	20, // [20:20] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	5,  // 13: nexus.v1.TaskSpec.cancellation:type_name -> nexus.v1.CancellationPolicy
+	16, // 14: nexus.v1.RuntimeSpec.env:type_name -> nexus.v1.RuntimeSpec.EnvEntry
+	9,  // 15: nexus.v1.RuntimeSpec.secrets:type_name -> nexus.v1.SecretRef
+	3,  // 16: nexus.v1.TaskAssignment.spec:type_name -> nexus.v1.TaskSpec
+	17, // 17: nexus.v1.TaskAssignment.inputs:type_name -> nexus.v1.TaskAssignment.InputsEntry
+	6,  // 18: nexus.v1.TaskSpec.InputsEntry.value:type_name -> nexus.v1.ValueSpec
+	6,  // 19: nexus.v1.TaskSpec.OutputsEntry.value:type_name -> nexus.v1.ValueSpec
+	22, // 20: nexus.v1.TaskAssignment.InputsEntry.value:type_name -> nexus.v1.ResultRef
+	21, // [21:21] is the sub-list for method output_type
+	21, // [21:21] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_nexus_v1_task_proto_init() }
@@ -1155,7 +1240,7 @@ func file_nexus_v1_task_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nexus_v1_task_proto_rawDesc), len(file_nexus_v1_task_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   14,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

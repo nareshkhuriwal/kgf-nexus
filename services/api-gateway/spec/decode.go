@@ -144,6 +144,17 @@ func taskToProto(t map[string]any) (*nexusv1.TaskSpec, error) {
 		}
 	}
 
+	if c, ok := obj(t, "cancellation"); ok {
+		// Carried verbatim. The bound is NOT clamped here: the only ceiling
+		// that matters is the one on the worker that enforces it, and a
+		// gateway-side clamp would be a second, silently different copy of it.
+		// The schema already rejects anything over its absolute maximum.
+		ts.Cancellation = &nexusv1.CancellationPolicy{
+			Uninterruptible:      boolean(c, "uninterruptible"),
+			MaxUninterruptibleMs: i64(c, "max_uninterruptible_ms"),
+		}
+	}
+
 	if c, ok := obj(t, "cache"); ok {
 		ts.Cache = &nexusv1.CachePolicy{
 			Enabled: boolean(c, "enabled"),

@@ -27,6 +27,14 @@ type Candidate struct {
 	// the head-of-line-blocking guard can compare a blocked large task against
 	// the small tasks that would otherwise keep jumping it (§7.3).
 	EffectivePriority float64
+	// TenantID is the owning namespace's tenant (1:1 with namespace, 0013).
+	// Carried so the claim loop can set a blocked namespace aside for the rest
+	// of a cycle (ADR-0017).
+	TenantID uuid.UUID
+	// FairShare is the namespace's in-flight/weight at selection time, zero
+	// when fair share is off. Informational: logged, never re-used for a
+	// decision, because it is stale the moment the claim commits.
+	FairShare float64
 	// Spec is the node's task spec, the source of timeouts, retry policy,
 	// node_selector, executor and concurrency settings. Read from
 	// task_nodes.spec_json, which the scheduler reads but never writes.

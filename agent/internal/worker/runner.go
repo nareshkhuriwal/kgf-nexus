@@ -17,6 +17,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 )
 
 // LegacyOutputName is the output name given to a result produced under the
@@ -44,8 +45,20 @@ type Runner struct {
 	store     *resultstore.Client
 	log       *slog.Logger
 
-	// OutputInlineThreshold mirrors the result store's threshold so the runner
-	// knows when an output needs a blob write at all.
+	// UninterruptibleCeiling is the platform's hard cap on how long an
+	// external cancellation may be deferred for a task that declared itself
+	// uninterruptible (ADR-0015). Zero means DefaultUninterruptibleCeiling. It
+	// is operator configuration on the agent -- the component that enforces
+	// it -- so no workflow spec can hold this worker longer than the operator
+	// allows. Set before the first Run; read-only afterwards.
+	UninterruptibleCeiling time.Duration
+
+	// InlineThreshold is the control plane's inline-versus-blob boundary
+	// (ADR-0016), used on the no-result-store path to decide what may be
+	// inlined at all. Zero means the platform default. Set before the first
+	// Run; read-only afterwards.
+	InlineThreshold int64
+
 	mu      sync.Mutex
 	running map[string]*runningTask
 
@@ -54,7 +67,46 @@ type Runner struct {
 	WorkerID string
 }
 
+// DefaultUninterruptibleCeiling bounds a deferred cancellation when the agent is
+// not configured otherwise. Ten minutes: long enough for a typical
+// non-idempotent critical section (a payment capture, a schema step) to finish,
+// short enough that a cancelled run's capacity comes back within one coffee
+// break rather than one shift.
+const DefaultUninterruptibleCeiling = 10 * time.Minute
+
+// EffectiveUninterruptibleBound is how long a cancellation of a task with this
+// policy is deferred: the declared bound, clamped to the ceiling, or the
+// ceiling when none was declared. Zero for an interruptible task.
+//
+// The clamp is here, on the enforcing side, and nowhere else. A second copy in
+// the control plane would be a second ceiling that can drift from this one.
+func EffectiveUninterruptibleBound(p *nexusv1.CancellationPolicy, ceiling time.Duration) time.Duration {
+	if !p.GetUninterruptible() {
+		return 0
+	}
+	if ceiling <= 0 {
+		ceiling = DefaultUninterruptibleCeiling
+	}
+	declared := time.Duration(p.GetMaxUninterruptibleMs()) * time.Millisecond
+	if declared <= 0 || declared > ceiling {
+		return ceiling
+	}
+	return declared
+}
+
 type runningTask struct {
+	// policy is the task's declared cancellation policy (ADR-0015).
+	policy *nexusv1.CancellationPolicy
+	// deferring is set, under Runner.mu, once a cancellation of an
+	// uninterruptible task has started its bounded wait. The control plane
+	// repeats CANCEL_ATTEMPT on every heartbeat and a revoked lease cancels
+	// again. The first wait's timer already bounds the task, so a repeat must
+	// not start another: over a ten-minute ceiling that would be ~120 parked
+	// goroutines, each firing its own redundant SIGKILL and WARN line.
+	deferring bool
+	// done is closed when Run returns, which is how a deferred cancellation
+	// learns the task finished on its own and no SIGKILL is needed.
+	done   chan struct{}
 	cancel context.CancelFunc
 	// grace is the cancel directive's grace period, applied on teardown.
 	grace time.Duration
@@ -97,7 +149,7 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 	// A per-attempt cancellable context, so a CANCEL_ATTEMPT directive or a lease
 	// revocation can tear down THIS attempt without touching its siblings.
 	taskCtx, cancel := context.WithCancel(ctx)
-	rt := &runningTask{cancel: cancel}
+	rt := &runningTask{cancel: cancel, policy: a.GetSpec().GetCancellation(), done: make(chan struct{})}
 
 	r.mu.Lock()
 	r.running[attemptID] = rt
@@ -105,6 +157,7 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 
 	defer func() {
 		cancel()
+		close(rt.done)
 		r.mu.Lock()
 		delete(r.running, attemptID)
 		r.mu.Unlock()
@@ -540,7 +593,11 @@ func (r *Runner) putOutput(ctx context.Context, out executor.NamedOutput) (*nexu
 		// payload above the threshold is NOT inlined here — that would push a
 		// large payload through the control plane, which is the one thing
 		// invariant 6 forbids.
-		if int64(len(out.Bytes)) > resultstore.DefaultInlineThresholdBytes {
+		//
+		// The CONFIGURED threshold, not the compiled-in default: an operator
+		// who lowered it must not have a store-less worker quietly inline past
+		// it (ADR-0016).
+		if int64(len(out.Bytes)) > domain.ClampInlineThreshold(r.InlineThreshold) {
 			return nil, fmt.Errorf("%w: output is %d bytes and no result store is configured, "+
 				"so it cannot be stored without routing the payload through the control plane",
 				executor.ErrResultStore, len(out.Bytes))
@@ -605,6 +662,10 @@ func (r *Runner) Cancel(attemptID string, grace time.Duration, reason string) {
 		return // already finished; nothing to cancel
 	}
 	log := r.log.With("attempt_id", attemptID, "reason", reason)
+	if rt.policy.GetUninterruptible() {
+		r.cancelUninterruptible(rt, log)
+		return
+	}
 	log.Warn("cancelling attempt", "grace", grace)
 
 	go func() {
@@ -642,6 +703,67 @@ func (r *Runner) Cancel(attemptID string, grace time.Duration, reason string) {
 			}
 			rt.cancel()
 		})
+	}()
+}
+
+// cancelUninterruptible is Cancel for a task that declared itself
+// uninterruptible (ADR-0015): no SIGTERM at all, a bounded wait for the task to
+// finish on its own, then SIGKILL.
+//
+// No SIGTERM because the declaration says the task cannot be safely asked to
+// stop part way; a TERM it cannot honour would only invite a half-finished side
+// effect. SIGKILL at the bound because the platform's promise to reclaim a
+// worker outranks the task's wish to finish -- that is what "bounded" means.
+//
+// The control plane's grace_ms is deliberately ignored here: it is one number
+// for every attempt on the heartbeat, and the task's own declaration, clamped by
+// this agent's ceiling, is the more specific statement.
+func (r *Runner) cancelUninterruptible(rt *runningTask, log *slog.Logger) {
+	r.mu.Lock()
+	if rt.deferring {
+		r.mu.Unlock()
+		// A repeat (next heartbeat's CANCEL_ATTEMPT, a lease revocation). The
+		// first cancellation's clock is the one that counts.
+		return
+	}
+	rt.deferring = true
+	r.mu.Unlock()
+
+	bound := EffectiveUninterruptibleBound(rt.policy, r.UninterruptibleCeiling)
+	log.Warn("cancellation deferred: task declared uninterruptible; waiting for it to finish, then SIGKILL",
+		"bound", bound, "declared_ms", rt.policy.GetMaxUninterruptibleMs(),
+		"ceiling", r.UninterruptibleCeiling)
+
+	go func() {
+		rt.handleMu.Lock()
+		started := rt.handle != nil
+		rt.handleMu.Unlock()
+		if !started {
+			// Nothing is executing yet, so there is no critical section to
+			// protect: abandon Prepare/Start now rather than wait out the bound.
+			rt.cancel()
+			return
+		}
+
+		t := time.NewTimer(bound)
+		defer t.Stop()
+		select {
+		case <-rt.done:
+			log.Info("uninterruptible task finished within its cancellation bound")
+			return
+		case <-t.C:
+		}
+
+		rt.handleMu.Lock()
+		h, exec := rt.handle, rt.exec
+		rt.handleMu.Unlock()
+		log.Warn("uninterruptible cancellation bound expired; SIGKILL", "bound", bound)
+		if h != nil && exec != nil {
+			if err := exec.Signal(context.Background(), *h, executor.SignalKill); err != nil {
+				log.Warn("SIGKILL delivery failed", "error", err)
+			}
+		}
+		rt.cancel()
 	}()
 }
 

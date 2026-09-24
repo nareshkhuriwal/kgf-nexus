@@ -20,6 +20,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 )
 
 // Client is the full worker RPC surface, satisfied by the generated gRPC client
@@ -56,6 +57,11 @@ type Config struct {
 	// DrainGracePeriod bounds how long a draining agent waits for in-flight work
 	// before it stops waiting. A drain that never ends blocks a deploy.
 	DrainGracePeriod time.Duration
+
+	// MaxUninterruptible is the platform ceiling on how long a cancellation may
+	// be deferred for a task that declared itself uninterruptible (ADR-0015).
+	// Zero means worker.DefaultUninterruptibleCeiling.
+	MaxUninterruptible time.Duration
 
 	// AllowUnenforceableLimits relaxes the subprocess executor's refusal to run
 	// tasks whose limits it cannot honour. Development only.
@@ -308,6 +314,11 @@ func (a *Agent) register(ctx context.Context) error {
 	a.execs = execs
 	a.runner = NewRunner(execs, a.registry, a.keeper, reporter, a.wal, a.store, a.log)
 	a.runner.WorkerID = a.workerID
+	a.runner.UninterruptibleCeiling = a.cfg.MaxUninterruptible
+	// The control plane's threshold, clamped, also governs the no-store path:
+	// a worker without an object store must refuse exactly what a worker with
+	// one would have sent to it (ADR-0016).
+	a.runner.InlineThreshold = domain.ClampInlineThreshold(resp.GetResultStore().GetInlineThresholdBytes())
 	// The keeper revokes into the runner and the runner renews through the
 	// keeper, so one of the two edges must be wired after construction.
 	a.keeper.SetHandler(a.runner)

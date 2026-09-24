@@ -26,6 +26,7 @@ from typing import Any, Callable, Mapping, Sequence, TypeVar
 from .canonical import canonical_json
 from .types import (
     Cache,
+    Cancellation,
     Concurrency,
     IdempotencyMode,
     Resources,
@@ -106,6 +107,7 @@ class _Declaration:
     retry: Retry | None
     idempotency: str
     cache: Cache | None
+    cancellation: Cancellation | None
     runtime: Runtime | None
     node_selector: Mapping[str, str] | None
     prefer_same_worker_as: str | None
@@ -252,6 +254,13 @@ class TaskDefinition:
             spec["retry"] = d.retry.to_wire()
         if d.cache is not None:
             spec["cache"] = d.cache.to_wire()
+        if d.cancellation is not None:
+            # Omitted entirely when interruptible, so a task that never mentions
+            # cancellation compiles to the same bytes -- and the same content
+            # address -- as it did before the option existed.
+            cancellation = d.cancellation.to_wire()
+            if cancellation:
+                spec["cancellation"] = cancellation
         if d.runtime is not None:
             spec["runtime"] = d.runtime.to_wire()
         if d.node_selector:
@@ -280,6 +289,7 @@ def _as_author_kwargs(d: _Declaration) -> dict[str, Any]:
         "retry": d.retry,
         "idempotency": d.idempotency,
         "cache": d.cache,
+        "cancellation": d.cancellation,
         "runtime": d.runtime,
         "node_selector": d.node_selector,
         "prefer_same_worker_as": d.prefer_same_worker_as,
@@ -333,6 +343,10 @@ def _build_declaration(fn: Callable[..., Any], kw: Mapping[str, Any]) -> _Declar
     if cache is not None:
         cache.to_wire()
 
+    cancellation = Cancellation.coerce(kw.get("cancellation"))
+    if cancellation is not None:
+        cancellation.to_wire()
+
     runtime = Runtime.coerce(kw.get("runtime"))
     if runtime is not None:
         runtime.to_wire()
@@ -371,6 +385,7 @@ def _build_declaration(fn: Callable[..., Any], kw: Mapping[str, Any]) -> _Declar
         "retry",
         "idempotency",
         "cache",
+        "cancellation",
         "runtime",
         "node_selector",
         "prefer_same_worker_as",
@@ -394,6 +409,7 @@ def _build_declaration(fn: Callable[..., Any], kw: Mapping[str, Any]) -> _Declar
         retry=retry,
         idempotency=idempotency,
         cache=cache,
+        cancellation=cancellation,
         runtime=runtime,
         node_selector=dict(kw["node_selector"]) if kw.get("node_selector") else None,
         prefer_same_worker_as=kw.get("prefer_same_worker_as"),
@@ -416,6 +432,7 @@ def task(
     retry: Retry | Mapping[str, Any] | int | None = None,
     idempotency: IdempotencyMode = "required",
     cache: Cache | Mapping[str, Any] | bool | None = None,
+    cancellation: Cancellation | Mapping[str, Any] | bool | None = None,
     runtime: Runtime | Mapping[str, Any] | None = None,
     node_selector: Mapping[str, str] | None = None,
     prefer_same_worker_as: str | None = None,
@@ -454,6 +471,10 @@ def task(
     indeterminate (LOST) outcomes. `"none"` refuses it: such a task is marked
     FAILED with reason=indeterminate_outcome and waits for a human, because the
     platform cannot know whether it already ran (ADR-0006 point 5).
+
+    `cancellation=Cancellation(max_wait="5m")` (or `cancellation=True`) declares
+    the task uninterruptible: a cancel sends no SIGTERM and waits, bounded by
+    `max_wait` and the worker's platform ceiling, then SIGKILLs (ADR-0015).
     """
 
     def decorate(fn: Callable[..., Any]) -> TaskDefinition:
@@ -468,6 +489,7 @@ def task(
                 "retry": retry,
                 "idempotency": idempotency,
                 "cache": cache,
+                "cancellation": cancellation,
                 "runtime": runtime,
                 "node_selector": node_selector,
                 "prefer_same_worker_as": prefer_same_worker_as,

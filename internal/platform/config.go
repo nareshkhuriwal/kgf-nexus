@@ -21,7 +21,23 @@ type Scheduler struct {
 	MaxReplicas      int `json:"max_replicas"`
 	TargetCPU        int `json:"target_cpu_percent"`
 	ScaleDownSeconds int `json:"scale_down_seconds"`
+	// FairShareWeight is this namespace's weight in the dispatch claim's
+	// weighted fair share (ADR-0017): with weights 3 and 1, two namespaces with
+	// unbounded backlogs on one queue are served 3:1. The scheduler reads it
+	// through the scheduler_namespace_weights view (migration 0022). Bounded to
+	// 1-100 so no namespace can be configured out of service (0) or made
+	// effectively exclusive.
+	FairShareWeight int `json:"fair_share_weight"`
 }
+
+// Fair-share weight bounds, exported so the API, the view's clamp and the UI
+// agree on one range.
+const (
+	MinFairShareWeight     = 1
+	MaxFairShareWeight     = 100
+	DefaultFairShareWeight = 1
+)
+
 type Pool struct {
 	Name           string `json:"name"`
 	Queue          string `json:"queue"`
@@ -58,7 +74,7 @@ var namePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
 func Name(s string) bool { return len(s) > 0 && len(s) <= 63 && namePattern.MatchString(s) }
 func Default() Config {
-	return Config{Scheduler: Scheduler{1, 4, 65, 300}, Pools: []Pool{}, Profiles: []PodProfile{}}
+	return Config{Scheduler: Scheduler{1, 4, 65, 300, DefaultFairShareWeight}, Pools: []Pool{}, Profiles: []PodProfile{}}
 }
 func (c Config) Validate() error {
 	if c.Revision < 0 {
@@ -67,6 +83,9 @@ func (c Config) Validate() error {
 	s := c.Scheduler
 	if s.MinReplicas < 1 || s.MaxReplicas < s.MinReplicas || s.MaxReplicas > 100 || s.TargetCPU < 10 || s.TargetCPU > 90 || s.ScaleDownSeconds < 60 || s.ScaleDownSeconds > 3600 {
 		return fmt.Errorf("scheduler requires 1 ≤ min ≤ max ≤ 100, CPU target 10–90%% and cooldown 60–3600 seconds")
+	}
+	if s.FairShareWeight < MinFairShareWeight || s.FairShareWeight > MaxFairShareWeight {
+		return fmt.Errorf("fair-share weight must be %d–%d", MinFairShareWeight, MaxFairShareWeight)
 	}
 	if len(c.Pools) > 100 || len(c.Profiles) > 100 {
 		return fmt.Errorf("at most 100 pools and profiles per namespace")
