@@ -1,0 +1,420 @@
+# Release Pipeline for KGF Nexus
+# Triggers on merges to the default branch.
+#
+# Shape: one build job per image (compile-time expansion over the `images`
+# template, so a failure names the image), then a job that collects every
+# pushed digest into one validated map and publishes it as an artifact.
+#
+# ─── On the deploy stages ────────────────────────────────────────────────
+#
+# They are written and they are OFF. Nexus has no Helm chart and no Bicep stamp
+# today -- deploy/ is docker-compose, which README.md states is local-development
+# only -- and the dev cluster kgf-nexus-dev-cin-aks is provisioned but STOPPED,
+# with Nexus itself never deployed to it (deploy/AZURE-PROVISIONING.md, final
+# verification). So the deploy stages below are the shape the release will take,
+# not a path anything can currently travel. Each one guards itself: it refuses
+# to run until the chart it needs exists.
+#
+# Environment stages also stay off until their Azure DevOps resources exist,
+# because a service connection or variable group name that does not resolve is a
+# COMPILE-TIME error that fails the whole run, including the build. Each
+# environment needs:
+#   - an Azure Resource Manager service connection able to run
+#     `az aks get-credentials`, holding Azure Kubernetes Service RBAC Cluster
+#     Admin on the cluster
+#   - a variable group kgf-nexus-<env> holding NEXUS_SMOKE_TOKEN (secret)
+#   - an environment kgf-nexus-<env>; add an approval check on test and prod
+#   - deploy/helm/kgf-nexus to exist, with a values-<env>.yaml
+# Then set the matching deployTo<Env> parameter default to true and give the
+# environment its base URL.
+#
+# Until then this pipeline does the half that is real and useful today: it
+# builds every image on every merge, pushes it digest-pinned to ACR, and
+# publishes a complete digest map. Those images are what any deploy -- Helm,
+# compose on a VM, or a human running `docker run` -- will pull.
+
+# NOT a branch trigger.
+#
+# A `trigger: branches: [main]` here would start this pipeline on the merge
+# commit at the same moment the validation pipeline started on it -- the two
+# would race, and the release would build and push images for a commit whose
+# tests had not finished, sometimes publishing a digest for a commit that was
+# about to go red. Which of the two won would depend on agent availability.
+#
+# Declaring the gate as a pipeline RESOURCE inverts that: this pipeline does not
+# start until "kgf-nexus-pr-validation" has completed successfully on main, so
+# a push to the registry always follows a green gate on the same commit.
+#
+# The `trigger:` inside the resource is what makes it automatic; without it the
+# resource would only be a version to download artifacts from. `stages` is left
+# unset so completion of the WHOLE run is what starts this one, rather than one
+# stage of it.
+trigger: none
+pr: none
+
+resources:
+  pipelines:
+    - pipeline: validation          # the name this run refers to it by
+      source: kgf-nexus-pr-validation   # the pipeline's name in Azure DevOps
+      trigger:
+        branches:
+          include:
+            - main
+
+parameters:
+  # ── Registry ──────────────────────────────────────────────────────────
+  # Nexus shares kgf-cloud's registry under a nexus/ repository prefix, so
+  # nexus/api-gateway and kgf/gateway sit side by side in one ACR with one
+  # service connection. The prefix is what keeps them from colliding.
+  - name: acrServiceConnection
+    type: string
+    default: kgfcloudacr_conn
+  - name: acrLoginServer
+    type: string
+    default: kgfcloudacr.azurecr.io
+  - name: repositoryPrefix
+    type: string
+    default: nexus
+
+  # ── Portainer-managed Docker host ─────────────────────────────────────
+  # The deploy target that exists TODAY. The AKS stages further down need a
+  # Helm chart that does not exist yet; this one needs only a VM running Docker
+  # with Portainer on it, which is what is actually deployed to.
+  #
+  # Turning it on needs, in this project:
+  #   - an SSH service connection to the host (the name below)
+  #   - an Azure Resource Manager connection that can mint an ACR token
+  #   - <stackDir>/.env on the host, holding NEXUS_WORKER_API_KEY and the four
+  #     RESULT_STORE_* values; the deploy refuses to start without it
+  # See deploy/portainer/README.md.
+  - name: deployToDockerHost
+    type: boolean
+    default: false
+  - name: dockerHostSshConnection
+    type: string
+    default: kgf-nexus-docker-host
+  - name: dockerHostAzureSubscription
+    type: string
+    default: kgf-nexus-arm
+  - name: dockerHostStackDir
+    type: string
+    default: /opt/kgf-nexus
+  - name: dockerHostStackName
+    type: string
+    default: nexus
+  - name: dockerHostEnvironment
+    type: string
+    default: kgf-nexus-docker-host
+
+  # ── Dev environment ───────────────────────────────────────────────────
+  - name: deployToDev
+    type: boolean
+    default: false
+  - name: devAzureSubscription
+    type: string
+    default: kgf-nexus-arm
+  - name: devResourceGroup
+    type: string
+    default: kgf-nexus-dev-cin-rg
+  - name: devClusterName
+    type: string
+    default: kgf-nexus-dev-cin-aks
+  - name: devEnvironment
+    type: string
+    default: kgf-nexus-dev
+  - name: devBaseUrl
+    type: string
+    default: ''
+
+  # ── Test environment ──────────────────────────────────────────────────
+  - name: deployToTest
+    type: boolean
+    default: false
+  - name: testAzureSubscription
+    type: string
+    default: kgf-nexus-arm
+  - name: testResourceGroup
+    type: string
+    default: kgf-nexus-test-cin-rg
+  - name: testClusterName
+    type: string
+    default: kgf-nexus-test-cin-aks
+  - name: testEnvironment
+    type: string
+    default: kgf-nexus-test
+  - name: testBaseUrl
+    type: string
+    default: ''
+
+  # ── Production environment ────────────────────────────────────────────
+  - name: deployToProd
+    type: boolean
+    default: false
+  - name: prodAzureSubscription
+    type: string
+    default: kgf-nexus-arm
+  - name: prodResourceGroup
+    type: string
+    default: kgf-nexus-prod-cin-rg
+  - name: prodClusterName
+    type: string
+    default: kgf-nexus-prod-cin-aks
+  - name: prodEnvironment
+    type: string
+    default: kgf-nexus-prod
+  - name: prodBaseUrl
+    type: string
+    default: ''
+
+variables:
+  tag: 'v-$(Build.BuildId)'
+  # Explicit, and deliberately OUTSIDE $(Pipeline.Workspace). Go marks every
+  # file in its module cache read-only, and these jobs use `workspace: clean:
+  # all`, which cannot delete read-only files -- a cache under the workspace
+  # fails the job at "Prepare build directory" before any step runs. Naming it
+  # here also keeps every job on one cache rather than Go's per-user default,
+  # so ten parallel image builds share one download.
+  GOMODCACHE: '$(Agent.ToolsDirectory)/go-mod-cache'
+  CI: 'true'
+  # CI pins the toolchain rather than following the older minimum language
+  # version in go.mod. Passed to `docker build` too, so the image and the agent
+  # compile with the same Go.
+  GO_VERSION: '1.25'
+  NODE_VERSION: '20'
+
+pool:
+  # Self-hosted agents run this pipeline. Microsoft-hosted agents need purchased
+  # parallelism. The pool name is fixed here because a template expression is
+  # not allowed in a pipeline-level pool block.
+  name: Default
+
+stages:
+  # Build and push every image.
+  #
+  # On change detection: an image whose files did not change should ideally be
+  # skipped and its previous digest reused. Azure DevOps YAML cannot express
+  # that without a mechanism that can silently release a stale image. Jobs are
+  # expanded at compile time, so a runtime `git diff` cannot remove one; and
+  # reusing a previous digest means reading another run's output variables over
+  # the REST API and trusting a tag that may have been overwritten since. Both
+  # halves fail quietly and in the direction that matters -- what runs ends up
+  # being an image this release never built. And Nexus makes skipping worse than
+  # kgf-cloud does: every image is built from ONE Go module at the repository
+  # root, so a change to internal/ or gen/ changes every service binary, and
+  # "which files changed" is almost always "all of them". So all ten are built
+  # on every run, and every run produces a complete digest map. If build time
+  # becomes the constraint, the honest fix is a Docker layer cache on the agent,
+  # not a skipped job.
+  - stage: build
+    displayName: 'Build and push images'
+    jobs:
+      # The image set and the loop live in templates/images.yml, shared with the
+      # PR gate so the two cannot build different sets.
+      #
+      # Every build on main becomes the dev candidate, so dev-latest is applied
+      # here. test-latest and prod-latest are applied by their own deploy stage,
+      # because a build only becomes the test or production image once that
+      # stage's approval has released it; moving those tags at build time would
+      # make them describe an image no one approved.
+      - template: templates/images.yml
+        parameters:
+          acrLoginServer: ${{ parameters.acrLoginServer }}
+          acrServiceConnection: ${{ parameters.acrServiceConnection }}
+          repositoryPrefix: ${{ parameters.repositoryPrefix }}
+          imageTag: $(tag)
+          environmentTag: 'dev-latest'
+          push: true
+          timeoutInMinutes: 40
+
+
+  # ── Deploy to the Portainer-managed Docker host ─────────────────────────
+  #
+  # Runs after `build`, so it deploys the digest map that stage validated. It is
+  # a `deployment` job rather than a plain one so the run appears against an
+  # Azure DevOps environment, which is where an approval check is attached --
+  # the same gate the AKS stages use.
+  - ${{ if parameters.deployToDockerHost }}:
+    - stage: deploy_to_docker_host
+      displayName: 'Deploy to the Docker host (Portainer)'
+      dependsOn: build
+      condition: succeeded()
+      variables:
+        - name: imageDigests
+          value: $[ stageDependencies.build.collect_digests.outputs['collect.imageDigests'] ]
+      jobs:
+        - deployment: DeployToDockerHost
+          displayName: 'Pull and start the stack'
+          timeoutInMinutes: 45
+          environment: ${{ parameters.dockerHostEnvironment }}
+          # Pinned to the agent carrying `role=deploy` (a user capability set on
+          # the agent in the pool's web UI), rather than taking whichever agent
+          # is free like every other job here.
+          #
+          # Worth being clear about what this does and does not buy, because the
+          # steps below are SSH: the agent renders a compose file, mints an ACR
+          # token and sends both to the Portainer host, which pulls the images
+          # and runs the stack. NOTHING of Nexus runs on the agent. So this pins
+          # WHICH AGENT DRIVES THE DEPLOY -- useful because a release then does
+          # not sit behind a 10-image build on a busy agent -- and it does not
+          # change where Nexus lands.
+          #
+          # A demand is a hard constraint, not a preference: if no agent in the
+          # pool advertises role=deploy, this job QUEUES rather than falling
+          # back to another agent. That is the intended behaviour for a deploy
+          # (better to wait than to run somewhere unintended), but it does mean
+          # removing that capability, or losing that agent, blocks releases
+          # until another agent advertises it.
+          pool:
+            name: Default
+            demands:
+              - role -equals deploy
+          workspace:
+            clean: all
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - checkout: self
+                    persistCredentials: false
+                    fetchDepth: 1
+
+                  - template: templates/deploy-portainer-host.yml
+                    parameters:
+                      environment: 'docker-host'
+                      sshServiceConnection: ${{ parameters.dockerHostSshConnection }}
+                      azureSubscription: ${{ parameters.dockerHostAzureSubscription }}
+                      acrLoginServer: ${{ parameters.acrLoginServer }}
+                      stackDir: ${{ parameters.dockerHostStackDir }}
+                      stackName: ${{ parameters.dockerHostStackName }}
+
+  # ── Deploy to Dev ───────────────────────────────────────────────────────
+  - ${{ if parameters.deployToDev }}:
+    - stage: deploy_to_dev
+      displayName: 'Deploy to Dev Cluster'
+      dependsOn: build
+      condition: succeeded()
+      variables:
+        - group: kgf-nexus-dev
+        - name: imageDigests
+          value: $[ stageDependencies.build.collect_digests.outputs['collect.imageDigests'] ]
+      jobs:
+        - deployment: DeployToDev
+          displayName: 'Release kgf-nexus to dev'
+          timeoutInMinutes: 45
+          environment: ${{ parameters.devEnvironment }}
+          workspace:
+            clean: all
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - checkout: self
+                    persistCredentials: false
+                    fetchDepth: 1
+
+                  - template: templates/deploy-aks.yml
+                    parameters:
+                      environment: 'dev'
+                      azureSubscription: ${{ parameters.devAzureSubscription }}
+                      resourceGroup: ${{ parameters.devResourceGroup }}
+                      clusterName: ${{ parameters.devClusterName }}
+                      valuesFile: 'deploy/helm/kgf-nexus/values-dev.yaml'
+
+                  - template: templates/smoke-aks.yml
+                    parameters:
+                      environment: 'dev'
+                      baseUrl: ${{ parameters.devBaseUrl }}
+
+  # ── Deploy to Test (with manual approval on the environment) ────────────
+  - ${{ if parameters.deployToTest }}:
+    - stage: deploy_to_test
+      displayName: 'Deploy to Test Cluster'
+      dependsOn:
+        - build
+        - ${{ if parameters.deployToDev }}:
+          - deploy_to_dev
+      condition: succeeded()
+      variables:
+        - group: kgf-nexus-test
+        - name: imageDigests
+          value: $[ stageDependencies.build.collect_digests.outputs['collect.imageDigests'] ]
+      jobs:
+        - deployment: DeployToTest
+          displayName: 'Release kgf-nexus to test'
+          timeoutInMinutes: 45
+          environment: ${{ parameters.testEnvironment }}  # Add an approval check on this environment for a manual gate
+          workspace:
+            clean: all
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - checkout: self
+                    persistCredentials: false
+                    fetchDepth: 1
+
+                  - template: templates/deploy-aks.yml
+                    parameters:
+                      environment: 'test'
+                      azureSubscription: ${{ parameters.testAzureSubscription }}
+                      resourceGroup: ${{ parameters.testResourceGroup }}
+                      clusterName: ${{ parameters.testClusterName }}
+                      valuesFile: 'deploy/helm/kgf-nexus/values-test.yaml'
+
+                  - template: templates/smoke-aks.yml
+                    parameters:
+                      environment: 'test'
+                      baseUrl: ${{ parameters.testBaseUrl }}
+
+                  - template: templates/retag.yml
+                    parameters:
+                      environment: 'test'
+                      azureSubscription: ${{ parameters.testAzureSubscription }}
+                      acrLoginServer: ${{ parameters.acrLoginServer }}
+
+  # ── Deploy to Production (with manual approval on the environment) ──────
+  - ${{ if parameters.deployToProd }}:
+    - stage: deploy_to_prod
+      displayName: 'Deploy to Production Cluster'
+      dependsOn:
+        - build
+        - ${{ if parameters.deployToTest }}:
+          - deploy_to_test
+      condition: succeeded()
+      variables:
+        - group: kgf-nexus-prod
+        - name: imageDigests
+          value: $[ stageDependencies.build.collect_digests.outputs['collect.imageDigests'] ]
+      jobs:
+        - deployment: DeployToProd
+          displayName: 'Release kgf-nexus to production'
+          timeoutInMinutes: 60
+          environment: ${{ parameters.prodEnvironment }}  # Add an approval check on this environment for a manual gate
+          workspace:
+            clean: all
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - checkout: self
+                    persistCredentials: false
+                    fetchDepth: 1
+
+                  - template: templates/deploy-aks.yml
+                    parameters:
+                      environment: 'prod'
+                      azureSubscription: ${{ parameters.prodAzureSubscription }}
+                      resourceGroup: ${{ parameters.prodResourceGroup }}
+                      clusterName: ${{ parameters.prodClusterName }}
+                      valuesFile: 'deploy/helm/kgf-nexus/values-prod.yaml'
+
+                  - template: templates/smoke-aks.yml
+                    parameters:
+                      environment: 'prod'
+                      baseUrl: ${{ parameters.prodBaseUrl }}
+
+                  - template: templates/retag.yml
+                    parameters:
+                      environment: 'prod'
+                      azureSubscription: ${{ parameters.prodAzureSubscription }}
+                      acrLoginServer: ${{ parameters.acrLoginServer }}

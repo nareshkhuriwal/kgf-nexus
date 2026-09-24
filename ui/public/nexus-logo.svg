@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" color="#818cf8">
+  <title>KGF Nexus</title>
+  <g stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.55">
+    <path d="M12 12 L12 4.4"/>
+    <path d="M12 12 L18.6 15.8"/>
+    <path d="M12 12 L5.4 15.8"/>
+  </g>
+  <circle cx="12" cy="12" r="3.1" fill="currentColor"/>
+  <g stroke="currentColor" stroke-width="1.6" fill="none">
+    <circle cx="12" cy="3.4" r="2.1"/>
+    <circle cx="19.4" cy="16.3" r="2.1"/>
+    <circle cx="4.6" cy="16.3" r="2.1"/>
+  </g>
+</svg>

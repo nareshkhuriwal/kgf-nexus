@@ -57,8 +57,8 @@ describe('the account menu', () => {
     expect(screen.getByText('naresh@khuriwalgroup.com')).toBeInTheDocument();
   });
 
-  /** An API key names no person; claiming one would be an invention. */
-  it('does not invent an identity when only an API key is held', () => {
+  /** An Token names no person; claiming one would be an invention. */
+  it('does not invent an identity when only an Token is held', () => {
     render(<ProfileMenu session={null} onSignOut={vi.fn()} onSignIn={vi.fn()} />);
     open();
 
@@ -171,9 +171,12 @@ describe('the menu navigates instead of embedding controls', () => {
 
     fireEvent.click(screen.getByRole('menuitem', { name: 'Settings' }));
     expect(onOpenSettings).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    open();
 
-    fireEvent.click(screen.getByRole('menuitem', { name: 'API keys' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Tokens' }));
     expect(onOpenApiKeys).toHaveBeenCalledOnce();
+    open();
 
     fireEvent.click(screen.getByRole('menuitem', { name: /users & iam/i }));
     expect(onOpenUsers).toHaveBeenCalledOnce();
@@ -384,8 +387,8 @@ describe('deciding whether anyone is signed in', () => {
     expect(isSignedIn(null, { kind: 'user', name: 'naresh@khuriwalgroup.com' })).toBe(true);
   });
 
-  /** A machine credential names no person; logout cannot sign an API key out. */
-  it('is not signed in on an API key, or on nothing at all', () => {
+  /** A machine credential names no person; logout cannot sign an Token out. */
+  it('is not signed in on an Token, or on nothing at all', () => {
     expect(isSignedIn(null, { kind: 'api_key', name: 'ci-runner' })).toBe(false);
     expect(isSignedIn(null, null)).toBe(false);
     expect(isSignedIn(null, undefined)).toBe(false);
@@ -408,7 +411,7 @@ describe('deciding whether anyone is signed in', () => {
     expect(screen.getByText('naresh@khuriwalgroup.com')).toBeInTheDocument();
   });
 
-  it('still offers Sign in to an API key', () => {
+  it('still offers Sign in to an Token', () => {
     render(
       <ProfileMenu
         session={null}

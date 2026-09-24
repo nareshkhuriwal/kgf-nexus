@@ -3,7 +3,9 @@
 #   docker compose -f deploy/docker-compose.yml up --build
 #
 # Topology, in dependency order:
-#   postgres, minio            → infrastructure
+#   postgres, minio, nats      → infrastructure (nats is OPTIONAL: an empty
+#                                NEXUS_NATS_URL disables the bus and the
+#                                stack runs poll-only, ADR-0003)
 #   minio-init                 → creates the result bucket, then exits
 #   migrate                    → applies services/migrations/*.up.sql, then exits
 #   six control-plane services → ADR-0011; each waits for postgres AND migrate
@@ -56,6 +58,14 @@ x-service-env: &service-env
   EVENT_SERVICE_ADDR: event-service:9090
   NEXUS_EVENT_SERVICE_ADDR: event-service:9090
   API_GATEWAY_ADDR: api-gateway:9091
+
+# The event bus (ADR-0003). Only the event-service (outbox relay, SSE wake-ups)
+# and the agents (dispatch hints) connect; the scheduler, dag-engine and
+# workflow-manager write outbox rows to Postgres and never talk to NATS. Set
+# NEXUS_NATS_URL= (empty) to run without it -- nothing depends_on nats, because
+# nothing needs it to be correct.
+x-nats-env: &nats-env
+  NEXUS_NATS_URL: ${NEXUS_NATS_URL-nats://nats:4222}
 
 x-minio-env: &minio-env
   RESULT_STORE_ENDPOINT: http://minio:9000
@@ -149,6 +159,28 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  nats:
+    # Pinned to the newest patch of the 2.14 line rather than 2.15.0, which was
+    # days old when this was written; move to 2.15.x once it has a patch release.
+    image: nats:2.14.7-alpine
+    # -js enables JetStream; -sd puts its store on the volume so NEXUS_RUNS
+    # survives a restart; -m exposes /healthz and /jsz for monitoring.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "${NEXUS_NATS_PORT:-4222}:4222"
+      - "${NEXUS_NATS_MONITOR_PORT:-8222}:8222"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      # js-enabled-only: healthy means JetStream is actually serving, not merely
+      # that the process accepts connections.
+      test: ["CMD-SHELL", "wget -q -O- 'http://127.0.0.1:8222/healthz?js-enabled-only=true' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
   # Bucket auto-creation. A separate one-shot container rather than a service
   # startup step, for the same reason as migrations: exactly one actor performs
   # the setup, and everything else waits for it to finish.
@@ -171,6 +203,26 @@ services:
         mc anonymous set none "nexus/$${RESULT_STORE_BUCKET}"
         echo "minio-init: bucket $${RESULT_STORE_BUCKET} ready"
     restart: "no"
+
+  # Development mail catcher. Accepts SMTP on 1025 from the gateway and shows
+  # every message at http://localhost:8025, so verification and reset links can
+  # be followed without a real mail server. Pinned, like every other image here,
+  # so a laptop and CI catch the same behaviour. The web UI is bound to loopback:
+  # it displays live reset links, which are credentials.
+  mailpit:
+    image: axllent/mailpit:v1.27.0
+    environment:
+      MP_MAX_MESSAGES: "500"
+      MP_SMTP_AUTH_ACCEPT_ANY: "false"
+    ports:
+      - "127.0.0.1:${NEXUS_MAILPIT_UI_PORT:-8025}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
 
   # ── Migration job (ADR-0011 rule 4) ─────────────────────────────────────
   migrate:
@@ -216,6 +268,20 @@ services:
                                 # contends with UI queries (§3.2)
       # Static API keys are the MVP authn story (§11). `make seed` inserts one.
       AUTH_MODE: api_key
+      # Email verification and password recovery (docs/OPERATIONS.md, "Email").
+      # Defaults send to the Mailpit catcher below, so every flow is testable
+      # locally and nothing leaves the laptop. Each value is overridable because
+      # render_compose.py deploys THIS file: a real host must set NEXUS_SMTP_HOST
+      # and friends, or its users' reset mail lands in a catcher nobody reads.
+      NEXUS_SMTP_HOST: ${NEXUS_SMTP_HOST:-mailpit}
+      NEXUS_SMTP_PORT: ${NEXUS_SMTP_PORT:-1025}
+      NEXUS_SMTP_TLS: ${NEXUS_SMTP_TLS:-none}
+      NEXUS_SMTP_USERNAME: ${NEXUS_SMTP_USERNAME:-}
+      NEXUS_SMTP_PASSWORD: ${NEXUS_SMTP_PASSWORD:-}
+      NEXUS_SMTP_FROM: ${NEXUS_SMTP_FROM:-KGF Nexus <no-reply@nexus.localhost>}
+      # Links in emails point at the console, which is where the verify and
+      # reset pages live -- not at this gateway.
+      NEXUS_PUBLIC_URL: ${NEXUS_PUBLIC_URL:-http://localhost:3000}
     ports:
       - "${NEXUS_API_PORT:-8090}:8080"
       - "${NEXUS_GRPC_PORT:-9091}:9091"
@@ -367,7 +433,7 @@ services:
         SERVICE_PATH: services/event-service/cmd/event-service
     depends_on: *depends-on-db
     environment:
-      <<: *service-env
+      <<: [*service-env, *nats-env]
       HTTP_ADDR: ":8080"
       NEXUS_HTTP_ADDR: ":8080"
       NEXUS_REST_ADDR: ":8080"
@@ -377,6 +443,9 @@ services:
       NEXUS_GRPC_ADDR: ":9090"
       NEXUS_WFM_GRPC_ADDR: ":9090"
       RM_GRPC_ADDR: ":9090"
+      # Outbox relay tuning (services/event-service/relay). Defaults shown.
+      NEXUS_OUTBOX_RETENTION: 1h
+      NEXUS_OUTBOX_MAX_AGE: 24h
       # run_events is append-only (invariant 8); this service is its sole writer.
       EVENT_SSE_KEEPALIVE_MS: "15000"
     healthcheck: *service-healthcheck
@@ -397,7 +466,7 @@ services:
       api-gateway:
         condition: service_healthy
     environment:
-      <<: *minio-env
+      <<: [*minio-env, *nats-env]
       # Workers hold an API token and never database credentials: a compromised
       # worker cannot corrupt runs it never touched (§3.1 invariant 2).
       NEXUS_CONTROL_PLANE: api-gateway:9091
@@ -441,7 +510,7 @@ services:
       api-gateway:
         condition: service_healthy
     environment:
-      <<: *minio-env
+      <<: [*minio-env, *nats-env]
       NEXUS_CONTROL_PLANE: api-gateway:9091
       NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
       NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
@@ -490,7 +559,7 @@ services:
       api-gateway:
         condition: service_healthy
     environment:
-      <<: *minio-env
+      <<: [*minio-env, *nats-env]
       NEXUS_CONTROL_PLANE: api-gateway:9091
       NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
       NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
@@ -542,6 +611,7 @@ services:
 volumes:
   postgres-data:
   minio-data:
+  nats-data:
   agent-cpu-wal:
   agent-gpu-wal:
   agent-gpu-a10-wal:

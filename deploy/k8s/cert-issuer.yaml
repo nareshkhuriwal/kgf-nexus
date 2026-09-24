@@ -1,0 +1,112 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# The private CA that issues every Nexus inter-service certificate on AKS.
+# docs/TLS.md §5.2 explains the choice (private CA via cert-manager's CA issuer,
+# not Azure Key Vault) and the trade-offs.
+#
+# Requires cert-manager v1.18.2 and trust-manager v0.18.0 -- see
+# deploy/k8s/cert-README.md for the pinned install commands. Nothing in this
+# repository applies these manifests; the AKS release template does not yet
+# have a chart to put them in (.azure-pipelines/templates/deploy-aks.yml).
+#
+# ─── Shape ────────────────────────────────────────────────────────────────
+#
+#   Issuer nexus-ca-bootstrap (selfSigned, cert-manager ns)
+#     └─ Certificate nexus-internal-ca (isCA) → Secret nexus-internal-ca-keypair
+#          └─ ClusterIssuer nexus-internal-ca (CA issuer over that secret)
+#               └─ Certificate per service (cert-certificates.yaml)
+#
+# The CA lives in the cert-manager namespace, not kgf-nexus, so that reading the
+# CA KEY requires access to cert-manager's namespace. Anyone who can read
+# secrets in kgf-nexus can read service leaves, which is bad; if they could read
+# the CA key they could mint any identity, which is worse.
+#
+# ─── Bring your own CA (recommended for production) ──────────────────────
+#
+# The self-signed bootstrap below creates a ROOT whose key exists only in this
+# cluster. For production, create the root offline, sign an INTERMEDIATE for the
+# cluster, and load only that:
+#
+#   kubectl -n cert-manager create secret tls nexus-internal-ca-keypair \
+#     --cert=intermediate-chain.pem --key=intermediate-key.pem
+#
+# then delete the two bootstrap resources (Issuer nexus-ca-bootstrap and
+# Certificate nexus-internal-ca) from this file before applying it. A stolen
+# intermediate is then revocable by retiring it from the trust bundle, rather
+# than a root that has to be replaced everywhere.
+
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: nexus-ca-bootstrap
+  namespace: cert-manager
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nexus-internal-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: Nexus Internal CA
+  secretName: nexus-internal-ca-keypair
+  # A year, renewed a month early. Renewal re-signs the SAME key (rotationPolicy:
+  # Never below), so every leaf issued under the previous CA certificate still
+  # chains to the renewed one and nothing has to be re-issued in a hurry.
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # Deliberately NOT Always. Rotating the CA key on every renewal would make
+    # every existing leaf untrusted the moment trust-manager publishes the new
+    # CA -- an outage on a schedule. CA KEY rotation is a planned procedure with
+    # an overlap bundle (docs/OPERATIONS.md §9.4), not a side effect of renewal.
+    rotationPolicy: Never
+  issuerRef:
+    name: nexus-ca-bootstrap
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: nexus-internal-ca
+spec:
+  # A ClusterIssuer reads its secret from cert-manager's "cluster resource
+  # namespace" (cert-manager by default), which is what lets the CA key stay
+  # out of the kgf-nexus namespace.
+  ca:
+    secretName: nexus-internal-ca-keypair
+---
+# The trust bundle every service verifies peers against (NEXUS_TLS_CA_FILE).
+#
+# Why a separate bundle instead of each leaf secret's ca.crt: a leaf's ca.crt is
+# the CA that signed THAT leaf, and it changes only when that leaf renews. During
+# a CA key rotation, services renewing at different times would then trust
+# different CAs, and a peer could reject a perfectly valid leaf. One bundle,
+# distributed to every pod at once, is what makes an overlap window possible.
+apiVersion: trust.cert-manager.io/v1alpha1
+kind: Bundle
+metadata:
+  name: nexus-ca-bundle
+spec:
+  sources:
+    - secret:
+        name: nexus-internal-ca-keypair
+        key: tls.crt
+    # During a CA key rotation, add the OLD CA here as a second source until
+    # every leaf has been re-issued (docs/OPERATIONS.md §9.4):
+    # - inLine: |
+    #     -----BEGIN CERTIFICATE-----
+    #     ...
+    #     -----END CERTIFICATE-----
+  target:
+    configMap:
+      key: ca.crt
+    namespaceSelector:
+      matchLabels:
+        kgf-nexus.khuriwalgroup.com/trust-bundle: "enabled"

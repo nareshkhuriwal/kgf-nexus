@@ -24,13 +24,18 @@
 // behaviour when nothing is configured, and can be made fatal (see RequireTLS) by
 // a deployment that must not ship unencrypted.
 //
+// Certificates are loaded at startup (an unloadable one is fatal, as before) and
+// then re-read from disk every NEXUS_TLS_RELOAD_INTERVAL, so a renewal reaches
+// the next handshake without a restart; see reload.go for how a new pair is
+// validated before it replaces the old one, and metrics.go for the expiry
+// metrics an operator alerts on.
+//
 // This is transport encryption and peer identity only. It says nothing about
 // authorization -- see docs/TLS.md.
 package transport
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"os"
 	"strings"
@@ -132,38 +137,45 @@ func ServerOptions() ([]grpc.ServerOption, error) {
 			EnvServerCert, certFile, EnvServerKey, keyFile)
 	}
 
-	leaf, err := tls.LoadX509KeyPair(certFile, keyFile)
+	requireClient := boolEnv(EnvServerRequireClientCert)
+	caFile := os.Getenv(EnvCACert)
+	if requireClient && caFile == "" {
+		// Requiring a client cert with nothing to verify it against would
+		// accept ANY certificate, including a self-signed one an attacker
+		// minted -- strictly worse than plaintext, because it looks like mTLS
+		// in a config review.
+		return nil, fmt.Errorf("%s is set but %s is not: a client certificate cannot be verified without a CA bundle, and accepting an unverified one is weaker than the plaintext it replaces",
+			EnvServerRequireClientCert, EnvCACert)
+	}
+	files := fileSet{cert: certFile, key: keyFile}
+	if requireClient {
+		// The bundle is only read when it is enforced, as before: a server that
+		// does not verify client certificates has no use for it, and failing
+		// startup over an unused file would be a new way to break a deployment.
+		files.ca = caFile
+	}
+
+	// The initial load happens here, synchronously, so an unloadable pair still
+	// fails startup. After that the reloader re-reads the files in the
+	// background and every handshake uses its current snapshot (see reload.go).
+	r, err := getReloader(roleServer, files, requireClient)
 	if err != nil {
-		return nil, fmt.Errorf("load serving key pair from %s and %s: %w", certFile, keyFile, err)
+		return nil, err
 	}
 
 	cfg := &tls.Config{
-		Certificates: []tls.Certificate{leaf},
 		// Pinned rather than left to the default because the default floor moves
 		// with the Go release, and a control plane's floor should be a decision
 		// someone made rather than a property of the toolchain that built it.
 		MinVersion: tls.VersionTLS12,
+		// Per-handshake: the snapshot current at the moment the client says
+		// hello supplies the certificate, the client CA pool and the policy. A
+		// rotation therefore reaches the next handshake without a restart,
+		// and an established connection is never disturbed mid-stream.
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			return r.current().serverCfg, nil
+		},
 	}
-
-	requireClient := boolEnv(EnvServerRequireClientCert)
-	caFile := os.Getenv(EnvCACert)
-	if requireClient {
-		if caFile == "" {
-			// Requiring a client cert with nothing to verify it against would
-			// accept ANY certificate, including a self-signed one an attacker
-			// minted -- strictly worse than plaintext, because it looks like mTLS
-			// in a config review.
-			return nil, fmt.Errorf("%s is set but %s is not: a client certificate cannot be verified without a CA bundle, and accepting an unverified one is weaker than the plaintext it replaces",
-				EnvServerRequireClientCert, EnvCACert)
-		}
-		pool, err := certPool(caFile)
-		if err != nil {
-			return nil, err
-		}
-		cfg.ClientCAs = pool
-		cfg.ClientAuth = tls.RequireAndVerifyClientCert
-	}
-
 	return []grpc.ServerOption{grpc.Creds(credentials.NewTLS(cfg))}, nil
 }
 
@@ -189,39 +201,24 @@ func DialOption() (grpc.DialOption, error) {
 		return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
 	}
 
-	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
-
-	if caFile != "" {
-		pool, err := certPool(caFile)
-		if err != nil {
-			return nil, err
-		}
-		cfg.RootCAs = pool
-	}
 	// No CA but a client cert means "verify the server against the host's trust
 	// store, and identify myself" -- coherent for a peer behind a
-	// publicly-issued certificate, so it is allowed rather than rejected. Leaving
-	// RootCAs nil is what selects the system pool.
+	// publicly-issued certificate, so it is allowed rather than rejected. A
+	// snapshot with no pool leaves RootCAs nil, which is what selects the system
+	// pool.
+	if (certFile != "" || keyFile != "") && (certFile == "" || keyFile == "") {
+		return nil, fmt.Errorf("client TLS is half-configured: %s=%q and %s=%q -- both are required for mutual TLS",
+			EnvClientCert, certFile, EnvClientKey, keyFile)
+	}
 
-	if certFile != "" || keyFile != "" {
-		if certFile == "" || keyFile == "" {
-			return nil, fmt.Errorf("client TLS is half-configured: %s=%q and %s=%q -- both are required for mutual TLS",
-				EnvClientCert, certFile, EnvClientKey, keyFile)
-		}
-		leaf, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			return nil, fmt.Errorf("load client key pair from %s and %s: %w", certFile, keyFile, err)
-		}
-		cfg.Certificates = []tls.Certificate{leaf}
+	r, err := getReloader(roleClient, fileSet{cert: certFile, key: keyFile, ca: caFile}, false)
+	if err != nil {
+		return nil, err
 	}
 
 	// See EnvServerName: the name gRPC derives from a dns:///service:port target
 	// is a compose service name, which a real certificate will not carry.
-	if name := os.Getenv(EnvServerName); name != "" {
-		cfg.ServerName = name
-	}
-
-	return grpc.WithTransportCredentials(credentials.NewTLS(cfg)), nil
+	return grpc.WithTransportCredentials(&reloadingClientCreds{r: r, serverName: os.Getenv(EnvServerName)}), nil
 }
 
 // RequireTLS reports whether the deployment has demanded encrypted inter-service
@@ -254,28 +251,6 @@ func RequireTLS() bool {
 	// on once certs are actually distributed, which is the only point at which the
 	// requirement can be satisfied.
 	return false
-}
-
-// certPool reads a PEM bundle into a pool that trusts only what the file
-// contains.
-//
-// Deliberately not seeded from the system pool: the point of pinning an internal
-// CA is that a certificate signed by any of the ~150 public roots a host happens
-// to trust is NOT acceptable for a control-plane peer, and starting from
-// x509.SystemCertPool would quietly restore all of them.
-func certPool(path string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read CA bundle %s (%s): %w", path, EnvCACert, err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		// AppendCertsFromPEM reports only "nothing usable found", so the message
-		// has to supply the likely cause: this is what pointing the variable at a
-		// DER file, a key, or a truncated download looks like.
-		return nil, fmt.Errorf("CA bundle %s (%s) contains no PEM certificates; a DER-encoded or truncated file looks exactly like this", path, EnvCACert)
-	}
-	return pool, nil
 }
 
 // boolEnv reads an on/off switch with the same word list DSNRequired accepts, so

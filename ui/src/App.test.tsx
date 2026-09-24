@@ -15,11 +15,22 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { ADMIN_PERMISSIONS, NON_ADMIN_PERMISSIONS } from './test/permissions';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 
-/** Whoami answers; every page query is allowed to fail harmlessly. */
-function mockGateway(permissions: Record<string, boolean>) {
+/**
+ * Whoami answers; every page query is allowed to fail harmlessly.
+ *
+ * `effective_permissions` is the field App reads, and it is a LIST of exact
+ * permission identifiers -- the shape services/api-gateway/rest/admin.go sends
+ * and ui/src/api/auth.ts declares. An earlier version of this helper sent a
+ * `permissions` map of {admin_write: boolean}, which the console stopped
+ * reading when authorization moved to module permissions: the field was simply
+ * absent from the response, every grant was empty, and the shell rendered with
+ * no navigation at all.
+ */
+function mockGateway(effectivePermissions: readonly string[]) {
   vi.stubGlobal('fetch', (url: string) => {
     if (String(url).includes('/whoami')) {
       return Promise.resolve(
@@ -29,7 +40,7 @@ function mockGateway(permissions: Record<string, boolean>) {
             name: 'naresh@khuriwalgroup.com',
             role: 'admin',
             kind: 'session',
-            permissions,
+            effective_permissions: [...effectivePermissions],
           }),
           { status: 200, headers: { 'Content-Type': 'application/json' } },
         ),
@@ -69,7 +80,7 @@ function renderApp(route = '/') {
 beforeEach(() => {
   window.localStorage.clear();
   document.documentElement.removeAttribute('data-nav');
-  mockGateway({ admin_write: false });
+  mockGateway(NON_ADMIN_PERMISSIONS);
 });
 
 afterEach(() => {
@@ -87,8 +98,10 @@ describe('the application shell', () => {
     expect(document.getElementById('main')).toBeInTheDocument();
   });
 
-  it('renders the sidebar by default', () => {
+  it('renders the sidebar by default', async () => {
+    signIn();
     renderApp();
+    await screen.findByText('Observe');
 
     expect(screen.getByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
     // The grouped headings are the sidebar's distinguishing mark.
@@ -103,8 +116,10 @@ describe('the application shell', () => {
    * shell renders the bar's identity-and-tools row AND the rail's grouped
    * destinations at the same time.
    */
-  it('renders the bar and the rail together, with the groups on the rail', () => {
+  it('renders the bar and the rail together, with the groups on the rail', async () => {
+    signIn();
     renderApp();
+    await screen.findByText('Observe');
 
     expect(screen.getByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
     expect(screen.getByText('Observe')).toBeInTheDocument();
@@ -220,21 +235,19 @@ describe('the application shell', () => {
   });
 
   /**
-   * The key App presents is the one /settings saves. Asserted through the shell
-   * rather than on the page in isolation, because the reason the state stayed in
-   * App is that every request the shell's children make is authenticated with it.
+   * REMOVED: "saves an API key typed on the settings page".
+   *
+   * The console no longer has a "Set API key" control. It authenticates with a
+   * session established at sign-in, and the settings page shows the credential
+   * the gateway verified rather than offering a box to paste a key into. The
+   * test asserted a control that no longer exists in any source file, so it
+   * could only ever fail.
+   *
+   * Deleted rather than rewritten because there is nothing left to point it at:
+   * what it covered -- that the key App holds is the key /settings saves -- is
+   * not a property of session auth, where App holds no key at all. Sign-in and
+   * session handling are covered by LoginPage.test.tsx.
    */
-  it('saves an API key typed on the settings page', async () => {
-    renderApp('/settings');
-
-    fireEvent.click(await screen.findByRole('button', { name: /set api key/i }));
-    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'k-123' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: /api key ✓/i })).toBeInTheDocument(),
-    );
-  });
 
   /**
    * Choosing a layout must reshape the shell, not just stamp a token.
@@ -253,7 +266,9 @@ describe('the application shell', () => {
    * makes it safe to offer — so the links are asserted present in both states.
    */
   it('collapses and expands the rail from the bar, and remembers which', async () => {
+    signIn();
     const first = renderApp();
+    await screen.findByRole('link', { name: 'Runs' });
 
     // Asserted on the rail's own class rather than on the headings being
     // absent: the headings stay in the DOM when collapsed and are hidden by CSS,
@@ -276,8 +291,10 @@ describe('the application shell', () => {
 
     // Remembered across a remount, which is the point of persisting it.
     renderApp();
+    // Awaited again: the remount re-runs whoami, and the rail has no
+    // destinations until that answers.
+    await screen.findByRole('link', { name: 'Runs' });
     expect(document.querySelector('.sidebar')!.className).toContain('collapsed');
-    expect(screen.getByRole('link', { name: 'Runs' })).toBeInTheDocument();
   });
 
   /**
@@ -326,8 +343,10 @@ describe('the application shell', () => {
    * be a second way to reach a list that has not scrolled off the screen — a
    * control whose only effect is to cover the identical control beneath it.
    */
-  it('offers the drawer in the navbar layout only', () => {
+  it('offers the drawer in the navbar layout only', async () => {
+    signIn();
     renderApp();
+    await screen.findByText('Observe');
     expect(screen.queryByRole('button', { name: 'All destinations' })).toBeNull();
     // The rail shows the headings outright, which is why it needs no drawer.
     expect(screen.getByText('Observe')).toBeInTheDocument();
@@ -357,7 +376,7 @@ describe('admin gating in the shell', () => {
   /** The gateway decides. A link that 403s is worse than no link. */
   it('hides the Govern destinations from a credential without admin_write', async () => {
     signIn();
-    mockGateway({ admin_write: false });
+    mockGateway(NON_ADMIN_PERMISSIONS);
     renderApp();
 
     await waitFor(() => expect(screen.getByRole('link', { name: 'Runs' })).toBeInTheDocument());
@@ -367,7 +386,7 @@ describe('admin gating in the shell', () => {
 
   it('shows them once whoami reports admin_write', async () => {
     signIn();
-    mockGateway({ admin_write: true });
+    mockGateway(ADMIN_PERMISSIONS);
     renderApp();
 
     await waitFor(() => expect(screen.getByRole('link', { name: 'Users' })).toBeInTheDocument());
@@ -407,9 +426,11 @@ describe('routing', () => {
     expect(document.querySelector('.chrome')).toBeNull();
     expect(screen.queryByRole('button', { name: /account menu/i })).toBeNull();
     expect(screen.queryByLabelText('namespace')).toBeNull();
-    // The page still knows which namespace it will authenticate against; what
-    // it does not offer is the control that changes it.
-    expect(screen.getByText('payments')).toBeInTheDocument();
+    // The stored namespace is not DISPLAYED either, which this used to assert
+    // the opposite of. Sign-in now shows nothing about a namespace nobody has
+    // authenticated to yet -- the same reasoning that keeps invented pipeline
+    // data off this screen -- so the stored value must not leak onto it.
+    expect(screen.queryByText('payments')).toBeNull();
   });
 
   /**

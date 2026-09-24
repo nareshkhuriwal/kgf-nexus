@@ -55,7 +55,7 @@ export const ATTEMPT_STATES = [
 ] as const;
 export type AttemptState = (typeof ATTEMPT_STATES)[number];
 
-/** worker_state enum. QUARANTINED exists in the schema but is Phase 2. */
+/** worker_state enum. QUARANTINED = taken out of placement as a poison host (§5.5). */
 export const WORKER_STATES = ['ACTIVE', 'DRAINING', 'QUARANTINED', 'DEAD'] as const;
 export type WorkerState = (typeof WORKER_STATES)[number];
 
@@ -131,6 +131,45 @@ export interface RunNode {
   /** Denormalised convenience field; UI never depends on it being present. */
   latest_attempt_id?: string | null;
   pending_reason?: string | null;
+  /** Dynamic expansion (§5.4): set on a child, naming its map template. */
+  parent_node_id?: string | null;
+  /** Dynamic expansion: the child's position in the mapped collection. */
+  map_index?: number | null;
+  /**
+   * Why the node failed without running, e.g. a fan-in refused for exceeding
+   * the platform limit (§5.4). Absent for ordinary failures, whose reason is on
+   * the attempt.
+   */
+  failure_reason?: string | null;
+}
+
+/** One dynamic expansion of a map template (§5.4). */
+export interface RunExpansion {
+  template_node_id: string;
+  source_node_id: string;
+  source_output: string;
+  item_count: number;
+  max_fanout: number;
+  /** EXPANDED, or FAILED when refused (e.g. max_fanout_exceeded). */
+  outcome: 'EXPANDED' | 'FAILED';
+  reason?: string | null;
+  detail?: string | null;
+  created_at?: string;
+}
+
+/** One quarantine episode of a worker (§5.5). */
+export interface WorkerQuarantine {
+  id: string;
+  /** auto | manual | inherited */
+  trigger: string;
+  reason: string;
+  evidence?: Record<string, unknown> | null;
+  actor: string;
+  started_at: string;
+  expires_at?: string | null;
+  released_at?: string | null;
+  released_by?: string | null;
+  release_reason?: string | null;
 }
 
 export interface RunEdge {
@@ -143,6 +182,8 @@ export interface RunEdge {
 export interface RunDetail extends RunSummary {
   nodes: RunNode[];
   edges: RunEdge[];
+  /** Dynamic-expansion records; absent from gateways that predate them. */
+  expansions?: RunExpansion[];
   params?: Record<string, unknown>;
   deadline_at?: string | null;
   fail_fast?: boolean;
@@ -173,6 +214,8 @@ export interface Attempt {
   dispatched_at?: string | null;
   started_at?: string | null;
   ended_at?: string | null;
+  /** Set when this attempt reused a memoized result instead of executing (§6.4). */
+  cache_hit_of?: string | null;
 }
 
 export interface RunEvent {
@@ -484,6 +527,11 @@ export interface SpecTask {
   outputs?: Record<string, { type?: string; required?: boolean }>;
   input_params?: Record<string, string>;
   cache?: { enabled?: boolean };
+  /**
+   * ADR-0015. Absent means interruptible (the ordinary SIGTERM → grace →
+   * SIGKILL). max_uninterruptible_ms absent or 0 means "the worker's ceiling".
+   */
+  cancellation?: { uninterruptible?: boolean; max_uninterruptible_ms?: number };
   idempotency?: string;
   concurrency_key?: string;
   concurrency_limit?: number;

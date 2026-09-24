@@ -1,8 +1,8 @@
 # TLS for inter-service gRPC
 
-**Status:** available and opt-in. Nothing is wired into the service `main.go`s yet
-— `internal/transport` provides the credentials; see §6 for the call each service
-needs.
+**Status:** available, opt-in, and wired into every gRPC server and client (§6).
+Certificates hot-reload from disk without a restart, and there are tools to issue
+and rotate them for compose, AKS and the Portainer host (§5).
 
 **Audience:** whoever deploys this.
 
@@ -50,9 +50,9 @@ different questions and both are needed.
 reverse proxy, as usual), Postgres (`sslmode` in the DSN), or NATS (its own TLS
 config). This is inter-service gRPC only.
 
-**It does not do certificate issuance or rotation.** See §5 — that is honestly out
-of scope, and pretending otherwise is how a platform ends up with a CA whose key
-is in a git repository.
+**Issuance and rotation** are covered in §5: hot reload in the process, cert-manager
+on AKS, and `deploy/nexus-certs.sh` elsewhere. No CA key is ever in this
+repository.
 
 ## 3. Environment variables
 
@@ -68,7 +68,8 @@ what it is today: plaintext, no error, no warning.
 | `NEXUS_TLS_CLIENT_KEY_FILE` | Its private key. Both or neither. |
 | `NEXUS_TLS_REQUIRE_CLIENT_CERT` | When truthy, the server **requires and verifies** a client certificate. Needs `NEXUS_TLS_CA_FILE`. |
 | `NEXUS_TLS_SERVER_NAME` | Overrides the hostname a client verifies the server certificate against. See §4.3. |
-| `NEXUS_REQUIRE_TLS` / `NEXUS_ENV` | Make plaintext **fatal**. See §4.4. |
+| `NEXUS_REQUIRE_TLS` | Makes plaintext **fatal**. `NEXUS_ENV` does *not* arm this guard. See §4.4. |
+| `NEXUS_TLS_RELOAD_INTERVAL` | How often the files above are re-read (Go duration, default `10s`; `0` disables reloading). See §5.0. |
 
 The CA is one variable rather than two because in a single-issuer deployment —
 which is every deployment this platform is small enough to have — the serving and
@@ -146,71 +147,254 @@ which reads like a broken certificate and is a naming mismatch. Two fixes:
 
 ### 4.4 Make plaintext fatal
 
-The guard, mirroring `internal/config.DSNRequired()`:
-
-Set **`NEXUS_ENV=production`** (or `prod`, or `staging`) or
-**`NEXUS_REQUIRE_TLS=1`**. With either set and no certificates configured,
+Set **`NEXUS_REQUIRE_TLS=1`**. With it set and no certificates configured,
 `transport.ServerOptions()` and `transport.DialOption()` return an error naming
-the variables they checked, and the service should exit at startup rather than
-serve. `NEXUS_REQUIRE_TLS=0` overrides `NEXUS_ENV` for staging, canary, or a CI
-job that deliberately runs without certificates.
+the variables they checked, and the service exits at startup instead of serving.
 
-`NEXUS_ENV` is deliberately the same variable the DSN guard reads, so one setting
-arms every production-only check the platform has. `NEXUS_ENV=dev` arms nothing —
-the dev path must stay unchanged, which is the whole premise.
+**`NEXUS_ENV` does not arm this guard.** An earlier version of this document said
+it did, and that was wrong: `transport.RequireTLS()` reads only
+`NEXUS_REQUIRE_TLS`, and `TestNexusEnvDoesNotArmTheTLSGuard` pins that. The
+reason is in the code. Unlike a missing DSN, missing TLS has a working outcome,
+since every deployment ran plaintext until now. If `NEXUS_ENV=production` armed
+the guard, wiring TLS support into the services would have broken every
+deployment that already set it for the DSN guard. Requiring TLS is a separate
+decision. Make it once certificates are actually distributed.
 
 This is the step that turns "we forgot to configure certificates" from an
 invisible condition into a startup failure. Without it, the mistake is found by a
 packet capture or not at all.
 
-## 5. Certificate issuance and rotation: out of scope
+## 5. Certificate issuance and rotation
 
-`internal/transport` reads files. It does not create, sign, renew, or reload them,
-and the tests mint a throwaway CA in a temp directory precisely so that nothing
-about a real PKI is implied.
+Before this section was written, issuance and rotation were out of scope. The key
+pair was read once at startup, so every renewal needed a restart, and nothing
+reported expiry. Both have changed:
 
-Two consequences an operator must plan around:
+- **Rotation needs no restart.** The process re-reads its certificate, key and CA
+  bundle from disk every `NEXUS_TLS_RELOAD_INTERVAL` (10s by default).
+- **Issuance has a tool for every environment.** That is cert-manager on AKS, and
+  `deploy/nexus-certs.sh` for the laptop and the Portainer host.
+- **Expiry is measured**, as served, in metrics you can alert on.
 
-- **Rotation needs a restart.** The key pair is loaded once, at startup. Replacing
-  the file on disk does nothing to a running process. A future
-  `tls.Config.GetCertificate` callback could re-read on each handshake; that is
-  not implemented. Until it is, treat a certificate renewal as a rolling restart —
-  which the platform tolerates well, since `MaxPeerConnectionAge` already rotates
-  every connection every 30 seconds.
-- **Nothing checks expiry.** A certificate that lapses fails every handshake at
-  once, and the symptom is a control plane where every RPC fails with a TLS error.
-  Alert on days-to-expiry from wherever the certificates are issued, not from
-  here.
+### 5.0 How hot reload behaves
 
-How to actually wire issuance, roughly in order of how much machinery you already
-have:
+These points are what an operator can rely on. All of them are enforced by tests
+in `internal/transport`.
 
-- **cert-manager**, if this runs on Kubernetes. An `Issuer` plus a `Certificate`
-  per service mounts a secret with `tls.crt`, `tls.key`, `ca.crt`; point the three
-  variables at the mount path and let cert-manager renew. Pair it with a reloader
-  so renewal triggers a rolling restart.
-- **A service mesh** (Linkerd, Istio) does mTLS in a sidecar and needs none of
-  this — the services keep speaking plaintext to localhost while the mesh
-  encrypts the hop. If you are going that way, do not also configure these
-  variables; you would be paying for two handshakes and debugging both.
-- **`step-ca` or Vault PKI** for a plain-VM or compose deployment: a short-lived
-  leaf per service, renewed by a sidecar or a cron job, with the CA's root offline
-  and an intermediate doing the signing.
-- **A hand-rolled `openssl` CA** is adequate for a staging environment and is
-  where most deployments start. Keep the key off the machines it signs for, and
-  write down the expiry date somewhere a human reads.
+- **New handshakes use the new material; established connections keep theirs.** A
+  TLS session's certificate is fixed at its handshake. Control-plane connections
+  re-handshake at least every `MaxPeerConnectionAge` (30s, `config.PeerServerOptions`),
+  so a rotation reaches every internal hop within about a minute. The gateway's
+  **worker** listener does not set a connection age, so an agent keeps its current
+  connection, on its old certificate, until that connection drops. That is
+  harmless for renewal. It does mean that removing a CA from the bundle does not
+  disconnect agents already connected with a leaf from that CA. See §5.6.
+- **A new pair is validated before it replaces the old one.** It is rejected, and
+  the previous material keeps serving, if: the key does not match the certificate;
+  the leaf is expired; the leaf is not valid yet (more than 5 minutes of clock
+  skew); a file is missing or unreadable; or the CA bundle contains no currently
+  valid certificate. A rejection is logged once, at ERROR, with the serial still
+  being served. It increments `nexus_tls_reload_total{result="failure"}` and holds
+  `nexus_tls_reload_stale` at 1 until the files are fixed. A not-yet-valid
+  certificate is re-tried on every poll and applied once it becomes valid.
+- **Writers do not need to be atomic across files.** A poll that sees a change
+  waits a debounce (a quarter of the interval, at most 2s) and proceeds only if the
+  content has stopped changing. `cp cert; cp key` therefore does not produce a
+  spurious failure. Each individual file should still be replaced by rename, which
+  is what every tool here does.
+- **Kubernetes secret volumes work as is.** Kubelet swaps a `..data` symlink
+  atomically. Polling reads through the configured path and follows the swap.
+  (That is why this uses polling rather than fsnotify: a file watch misses that
+  swap.) **Never mount the secret with `subPath`.** subPath mounts are not updated,
+  which silently brings back "serve the old certificate until it expires".
+- **The CA bundle may hold several CAs at once.** That is how a CA rotates without
+  an outage (§5.3). Expired CAs in the bundle are ignored as long as at least one
+  is still valid.
+- **Startup is still strict.** An unloadable or expired certificate at startup is
+  fatal, as before. There is no previous material to fall back to, and a service
+  whose every handshake would fail should refuse to start.
+- **TLS session tickets are off** on the server. A resumed session skips
+  certificate presentation and would carry a pre-rotation identity past a
+  post-rotation CA bundle. Clients never resumed sessions anyway (grpc-go sets no
+  session cache), so this costs nothing.
+- `NEXUS_TLS_RELOAD_INTERVAL=0` turns reloading off and restores load-once.
 
-A deliberately unsupported option: do not put the CA private key in this
+### 5.1 Local compose
+
+```sh
+make dev-certs    # local CA + leaves for every service and agent, into .dev-certs/ (gitignored)
+make up-tls       # the normal stack plus deploy/docker-compose.tls.yml: mTLS on every gRPC hop
+make certs-check  # expiry of everything in .dev-certs
+```
+
+Leaves last 30 days (`NEXUS_CERT_DAYS`) and the CA 365 days (`NEXUS_CA_DAYS`).
+Keys are 0600 from creation. Each service leaf has its compose name, `localhost`
+and `127.0.0.1` as SANs, and carries both server and client auth. Agents get
+client-only leaves. The override's one-shot `tls-init` container copies the leaves
+and bundle into a volume owned by the service uid (10001). It never copies the CA
+key. This step is needed because your 0600 keys are unreadable to uid 10001
+through a bind mount.
+
+To rotate while the stack is running:
+
+```sh
+deploy/nexus-certs.sh issue scheduler --dns scheduler,localhost --ip 127.0.0.1
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tls.yml run --rm tls-init
+docker compose -f deploy/docker-compose.yml logs scheduler | grep 'TLS material reloaded'
+```
+
+Dev only: every service can read every leaf in the shared volume.
+
+### 5.2 AKS: cert-manager with a private CA
+
+Manifests are in `deploy/k8s/cert-*.yaml`. Install steps and a Deployment mount
+example are in [deploy/k8s/cert-README.md](../deploy/k8s/cert-README.md).
+cert-manager is pinned to v1.18.2 and trust-manager to v0.18.0.
+
+**The choice: a private CA held by cert-manager's CA issuer.** An Azure Key Vault
+issuer was considered and not chosen.
+
+| | Private CA (cert-manager `ca:` issuer) — **default** | Azure Key Vault |
+|---|---|---|
+| Where the CA key lives | A Kubernetes secret in the `cert-manager` namespace (or an intermediate from an offline root) | HSM-backed in Key Vault; never extractable |
+| Issuance path | In-cluster, no network dependency; renewals keep working if Azure's control plane is degraded | Every issuance is an Azure API call through a third-party issuer or CSI driver; Key Vault's own CA integration is for public CAs (DigiCert/GlobalSign), so a *private* CA needs extra machinery |
+| Cost / moving parts | cert-manager + trust-manager | cert-manager + a Key Vault issuer or the Secrets Store CSI driver + workload identity + Key Vault access policy |
+| Blast radius of a cluster compromise | Whoever can read the CA secret can mint identities until the CA is rotated | The key cannot be read, only used through its access policy, which is still a compromise but a revocable one |
+| Fit for 30-day leaves renewed automatically | Native | Workable, with more latency and more failure modes per renewal |
+
+The private CA wins for this platform. It has the fewest moving parts on the
+renewal path. A certificate system that fails during an Azure incident is a
+second outage stacked on the first. Its weakness is the CA key sitting in a
+secret. The mitigations are: keep it in the `cert-manager` namespace, not
+`kgf-nexus`; and **in production, load an intermediate signed by an offline root
+instead of the self-signed bootstrap** (instructions in the header of
+`cert-issuer.yaml`). Choose Key Vault instead if your compliance regime requires
+HSM-resident CA keys. The services do not care which issuer is used, because they
+read files either way.
+
+Design points and the reasons for them:
+
+- **One leaf per service, both EKUs, Service names as SANs.** It lasts 30 days,
+  renews at 10 days left, and gets a new key on every renewal.
+- **The CA renews with its key kept** (`rotationPolicy: Never`). Leaves issued
+  under the previous CA certificate still chain to the renewed one. Rotating the
+  *key* is a planned procedure (§5.3, OPERATIONS §9.4), not a side effect of
+  renewal.
+- **Peers verify against a trust-manager `Bundle`, not the leaf secret's
+  `ca.crt`.** A leaf's `ca.crt` changes only when that leaf renews, so during a CA
+  key rotation, services would trust different CAs depending on when each last
+  renewed. One bundle, updated for everyone at once, is what makes an overlap
+  window possible.
+
+### 5.3 CA rotation (overlap)
+
+This applies in every environment; only the tools differ. There are three states,
+and the move from one to the next waits until every process has reloaded:
+
+1. Bundle = **old**. All leaves are from old.
+2. Bundle = **old + new**. Re-issue every leaf from new. Both kinds verify.
+3. Bundle = **new**. Every leaf is from new.
+
+`TestCABundleOverlapRotation` checks each state with real handshakes. The step
+from 2 to 3 is the dangerous one. `nexus-certs.sh drop-retired-cas` refuses while
+any leaf it knows about is still from the old CA. On AKS, you check that yourself
+(OPERATIONS §9.4).
+
+### 5.4 Metrics and alerting
+
+`transport.RegisterMetrics(reg)` exposes, per process:
+
+| Metric | Meaning |
+|---|---|
+| `nexus_tls_cert_not_after_timestamp_seconds{role}` | Expiry of what is **served**, for `role` = `server`, `client`, `ca` (latest valid CA in the bundle). **Alert on this.** |
+| `nexus_tls_cert_expiry_seconds{role}` | Seconds remaining, refreshed each poll. Use it for dashboards only: it freezes if the poller stalls. |
+| `nexus_tls_reload_total{role,result}` | On-disk changes applied (`success`) or rejected (`failure`, once per distinct content) |
+| `nexus_tls_reload_stale{role}` | 1 while rejected material is on disk and the previous material is still served |
+
+**Readiness does not change.** A certificate near expiry still works. A `/readyz`
+that failed on it would take every replica out of rotation at the same moment and
+turn a warning into an outage. Alerting handles expiry. The rules are in
+`deploy/k8s/cert-alerts.yaml` and OPERATIONS §9.3.
+
+**Gap:** only workflow-manager serves `/metrics` today, so it is the only service
+exporting these. Every service logs a WARN, at most hourly, when the leaf it is
+serving is in the last fifth of its lifetime without a renewal. On AKS,
+cert-manager's own `certmanager_certificate_expiration_timestamp_seconds` covers
+every secret. What it cannot see is a process still serving an old certificate
+after a renewal. For the services without `/metrics`, that is only visible in the
+logs until they expose `/metrics` (each one needs a one-line
+`transport.RegisterMetrics(reg)` once it has a registry).
+
+### 5.5 Agents (execution plane)
+
+The agent dials through `transport.DialOption()`, so it hot-reloads its client
+certificate and CA bundle exactly as the services do. No restart is needed.
+
+**Enrolment of an agent outside the cluster.** The private key is created on the
+agent host and never leaves it:
+
+```sh
+# agent host
+deploy/nexus-certs.sh csr edge-agent-7 /etc/nexus/tls          # writes tls.key.new (0600) + tls.csr
+# send ONLY tls.csr to the CA holder
+# CA host (for AKS: the machine holding the offline root/intermediate, not the cluster)
+NEXUS_CERT_DIR=/secure/nexus-ca deploy/nexus-certs.sh sign-csr edge-agent-7 tls.csr
+# send back enrolled/edge-agent-7/tls.crt and ca-bundle.pem
+# agent host
+deploy/nexus-certs.sh install-signed /etc/nexus/tls tls.crt ca-bundle.pem
+```
+
+`sign-csr` signs client-only certificates, and only when the CSR's subject is
+exactly `CN=<name>`. The CA holder chooses the identity, not the requester.
+`install-signed` refuses a certificate that does not match the pending key. Agent
+environment:
+
+```
+NEXUS_TLS_CLIENT_CERT_FILE=/etc/nexus/tls/tls.crt
+NEXUS_TLS_CLIENT_KEY_FILE=/etc/nexus/tls/tls.key
+NEXUS_TLS_CA_FILE=/etc/nexus/tls/ca.crt
+NEXUS_TLS_SERVER_NAME=<a SAN on the gateway's leaf>   # only if the dialled name is not one
+NEXUS_REQUIRE_TLS=1
+```
+
+**Rotation** repeats the same three commands before expiry, from a cron job or a
+timer on the agent host (e.g. monthly for 30-day leaves). The running agent picks
+the new certificate up by itself. `TestAgentEnrollmentAndLiveRotation` runs this
+exact procedure twice against a live gateway.
+
+In-cluster agents mount the `nexus-agent-tls` secret instead
+(`cert-certificates.yaml`).
+
+### 5.6 What this still does not do
+
+- **No revocation.** There is no CRL and no OCSP. A leaked leaf stays valid until
+  it expires, which is why leaves are short-lived. To cut off a compromised
+  identity immediately, rotate the CA (§5.3) and re-issue everyone else. An agent
+  connection **already established** on the worker listener survives that for at
+  most `workerMaxConnectionAge` (5 minutes, `services/api-gateway/cmd/api-gateway`):
+  the gateway then sends GOAWAY and the agent redials against the current trust
+  bundle. In-flight long polls are allowed to finish first (grace = poll cap +
+  15s). To cut agents off sooner than that, restart the gateway.
+- **No authorization by certificate identity.** A valid client certificate still
+  grants nothing (§2). Nothing checks that the CN of a client leaf matches the
+  service or agent that presents it.
+- The Portainer host's rendered compose file (`deploy/render_compose.py`) does not
+  include the TLS override yet. OPERATIONS §9.5 describes the host-side setup that
+  replaces it.
+
+A deliberately unsupported option: do not put a CA private key in this
 repository, and do not reuse the test CA from `internal/transport/testca_test.go`
-for anything. It is generated per test run and thrown away, which is the only
-reason it is safe to have in the tree.
+for anything. Test CAs are generated per test run and thrown away, and
+`.dev-certs/` is gitignored.
 
-## 6. Wiring (not yet done)
+## 6. Wiring
 
-`internal/transport` is intentionally not called from any `main.go` yet. The
-options compose with the existing peer options rather than replacing them — the
-connection-age rotation in `config.PeerServerOptions()` is load-bearing regardless
-of the transport, so append, never substitute:
+Every gRPC server and client is wired. Check with
+`grep -rn 'transport\.\(ServerOptions\|DialOption\)' --include='*.go' services agent`.
+The options compose with the existing peer options rather than replacing them. The
+connection-age rotation in `config.PeerServerOptions()` matters regardless of the
+transport, and it is also what carries a rotated certificate onto existing
+internal connections (§5.0). So append, never substitute:
 
 ```go
 sopts, err := transport.ServerOptions()
@@ -228,14 +412,16 @@ if err != nil {
 conn, err := grpc.NewClient(config.PeerTarget(addr), append(config.PeerDialOptions(), creds)...)
 ```
 
-Sites that need the client half: `services/api-gateway/upstream/{dagengine,
-resourcemanager,scheduler,workflowmanager}.go`,
+Client half: `services/api-gateway/upstream/{dagengine,resourcemanager,scheduler,workflowmanager}.go`,
 `services/workflow-manager/grpcapi/{dagengine_grpc,scheduler_grpc}.go`,
-`services/dag-engine/runstate_client.go`, and
-`agent/internal/worker/grpcclient.go`. Sites that need the server half: the five
-`grpc.NewServer` calls in `services/{scheduler,dag-engine}/main.go`,
-`services/{resource-manager,workflow-manager,api-gateway}/cmd/*/main.go`.
+`services/dag-engine/runstate_client.go`, `agent/internal/worker/grpcclient.go`.
+Server half: `services/{scheduler,dag-engine}/main.go`,
+`services/{resource-manager,workflow-manager}/cmd/*/main.go`, and the worker listener in
+`services/api-gateway/cmd/api-gateway/main.go`. The worker listener deliberately
+does **not** use `PeerServerOptions`, because long polls need their own keepalive
+policy. That is why §5.0 and §5.6 treat agent connections separately.
 
-Note the agent's worker connection is the one hop that leaves the control-plane
-network, and is therefore the one where the plaintext matters most: its RPCs carry
-the API key and session token on every call.
+event-service speaks HTTP, not gRPC, and is not covered.
+
+Calls to `ServerOptions`/`DialOption` with the same files share one reloader per
+process, and therefore one poller and one set of metrics.

@@ -1,3 +1,4 @@
+import { PermissionContext } from '../components/Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -25,14 +26,14 @@ function wrapScheduleDetail(name = 'nightly-etl') {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={qc}>
+    <PermissionContext.Provider value={["schedules.view","schedules.create","schedules.update","schedules.delete","backfills.view","backfills.create","backfills.update","backfills.cancel","runs.create","workflows.view"]}><QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[`/schedules/${name}`]}>
         <Routes>
           <Route path="/schedules/:name" element={<ScheduleDetailPage namespace="default" />} />
           <Route path="/schedules" element={<div>schedule list</div>} />
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider></PermissionContext.Provider>,
   );
 }
 
@@ -41,7 +42,7 @@ function wrapBackfillDetail(id = 'bf-1') {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={qc}>
+    <PermissionContext.Provider value={["schedules.view","schedules.create","schedules.update","schedules.delete","backfills.view","backfills.create","backfills.update","backfills.cancel","runs.create","workflows.view"]}><QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[`/backfills/${id}`]}>
         <Routes>
           <Route
@@ -50,7 +51,7 @@ function wrapBackfillDetail(id = 'bf-1') {
           />
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider></PermissionContext.Provider>,
   );
 }
 
@@ -393,5 +394,54 @@ describe('the backfill detail view', () => {
     wrapBackfillDetail('missing');
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/no such backfill/i);
+  });
+});
+
+
+describe('editing a schedule', () => {
+  it('prefills and saves the existing schedule without changing its identity', async () => {
+    let current = schedule({ enabled: false, params: { shots: 20 }, spec_version: 2 });
+    let saved: Record<string, unknown> | undefined;
+    mockFetch((url, init) => {
+      if (url.includes('/preview')) return [200, { valid: true, next_fires: [] }];
+      if (url.includes('/backfills')) return [200, { backfills: [] }];
+      if (url.includes('/workflows')) return [200, { workflows: [] }];
+      if (init?.method === 'PUT') {
+        expect(url).toContain('/schedules/nightly-etl');
+        saved = JSON.parse(String(init.body));
+        current = { ...current, ...saved } as Schedule;
+      }
+      return [200, current];
+    });
+    wrapScheduleDetail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit schedule' }));
+    expect(screen.getByDisplayValue('nightly-etl')).toHaveAttribute('readonly');
+    expect(screen.getByDisplayValue('2')).toBeInTheDocument();
+    fireEvent.change(screen.getByDisplayValue('0 2 * * *'), { target: { value: '0 4 * * *' } });
+    await screen.findByDisplayValue('example-etl');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(saved).toMatchObject({ name: 'nightly-etl', cron: '0 4 * * *', enabled: false, params: { shots: 20 }, spec_version: 2 }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Save changes' })).not.toBeInTheDocument());
+  });
+
+  it('retains the draft after a failed save and allows cancelling', async () => {
+    let writes = 0;
+    mockFetch((url, init) => {
+      if (url.includes('/preview')) return [200, { valid: true, next_fires: [] }];
+      if (url.includes('/backfills')) return [200, { backfills: [] }];
+      if (url.includes('/workflows')) return [200, { workflows: [] }];
+      if (init?.method === 'PUT') { writes++; return [500, { error: { message: 'Unavailable' } }]; }
+      return [200, schedule()];
+    });
+    wrapScheduleDetail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit schedule' }));
+    fireEvent.change(screen.getByDisplayValue('0 2 * * *'), { target: { value: '0 5 * * *' } });
+    await screen.findByDisplayValue('example-etl');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await screen.findByRole('alert');
+    expect(screen.getByDisplayValue('0 5 * * *')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(writes).toBe(1);
+    expect(screen.queryByRole('button', { name: 'Save changes' })).not.toBeInTheDocument();
   });
 });

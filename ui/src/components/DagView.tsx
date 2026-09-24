@@ -35,7 +35,8 @@
  * by default.
  */
 
-import { useMemo } from 'react';
+import { useTaskLayout } from './useTaskLayout';
+import { useMemo, useState } from 'react';
 import {
   NODE_H,
   NODE_W,
@@ -50,6 +51,12 @@ import {
 import { STATE_TABLES, stateVisual } from '../lib/states';
 import { StateBadge } from './StateBadge';
 import { DagCanvas } from './DagCanvas';
+import { describeGroup, type ExpansionGroup } from '../lib/expansion';
+
+/** The expansion summary groupExpansions attached, if this node is a template. */
+function groupOf(node: DagNode): ExpansionGroup | undefined {
+  return (node as DagNode & { group?: ExpansionGroup }).group;
+}
 
 /**
  * Box geometry and placement come from lib/dag: the catalog's spec graph draws
@@ -75,8 +82,14 @@ export function DagView({
   selectedNodeId,
   onSelect,
   exportName,
+  onToggleGroup,
 }: {
   graph: DagGraph;
+  /**
+   * Fold/unfold a map template's children (§5.4). Absent means the view offers
+   * no toggle -- the catalog and tests draw the graph as given.
+   */
+  onToggleGroup?: (templateId: string) => void;
   selectedNodeId?: string | null;
   onSelect: (nodeId: string) => void;
   /**
@@ -91,12 +104,10 @@ export function DagView({
    */
   exportName?: string;
 }) {
-  const { placed, width, height } = useMemo(() => layout(graph), [graph]);
-  const byId = useMemo(() => {
-    const m: Record<string, Placed> = {};
-    for (const p of placed) m[p.node.node_id] = p;
-    return m;
-  }, [placed]);
+  const [focusTarget, setFocusTarget] = useState<{ x: number; y: number }>();
+  const base = useMemo(() => layout(graph), [graph]);
+  const taskLayout = useTaskLayout(base.placed, `run:${window.location.pathname}:${exportName ?? 'run'}`);
+  const { places: placed, width, height, byId } = taskLayout;
 
   /**
    * The selected node's full ancestry and descendancy. Everything outside it is
@@ -118,7 +129,7 @@ export function DagView({
    * fit; a poll that returns the same 30 nodes is not and must leave the
    * operator's zoom alone.
    */
-  const graphKey = `${exportName ?? 'run'}:${graph.nodes.length}:${graph.edges.length}`;
+  const graphKey = `${exportName ?? 'run'}:${graph.nodes.length}:${graph.edges.length}:${taskLayout.revision}`;
 
   if (graph.nodes.length === 0) {
     return (
@@ -149,7 +160,26 @@ export function DagView({
           </div>
         </div>
       )}
+      <div className="dag-state-summary" aria-label="Task state summary">
+        <span className="dag-flow-label">Execution flow <span aria-hidden="true">→</span></span>
+        {Object.entries(graph.counts).filter(([, count]) => count > 0).map(([state, count]) =>
+          <span className="dag-state-count" key={state}><StateBadge kind="node" state={state} small /><strong>{count}</strong></span>)}
+      </div>
+      <div className="dag-layout-note" role="status">{taskLayout.message}</div>
       <DagCanvas
+        viewportHeight={base.height}
+        focusTarget={focusTarget}
+        toolbarExtra={<><button type="button" onClick={taskLayout.reset}>Reset layout</button><label className="dag-jump">Jump to task
+          <select aria-label="Jump to task" value={selectedNodeId ?? ''} onChange={event => {
+            const target = byId[event.target.value];
+            if (!target) return;
+            onSelect(event.target.value);
+            setFocusTarget({ x: target.x + NODE_W / 2, y: target.y + NODE_H / 2 });
+          }}>
+            <option value="" disabled>Select a task…</option>
+            {placed.map(({ node }) => <option key={node.node_id} value={node.node_id}>{node.node_id} · {stateVisual('node', node.state).label}</option>)}
+          </select>
+        </label></>}
         width={width}
         height={height}
         graphKey={graphKey}
@@ -232,8 +262,11 @@ export function DagView({
           const selected = node.node_id === selectedNodeId;
           const attemptCount = node.attempts.length;
           const unrelated = related !== null && !related.has(node.node_id);
+          const group = groupOf(node);
+          const cached = !!node.latestAttempt?.cache_hit_of;
           return (
             <g
+              {...taskLayout.bindings(node.node_id)}
               key={node.node_id}
               transform={`translate(${x},${y})`}
               className={`dag-node-g tone-${v.tone}${selected ? ' selected' : ''}${
@@ -246,6 +279,7 @@ export function DagView({
                   onSelect(node.node_id);
                 }
               }}
+              aria-pressed={selected}
               tabIndex={0}
               role="button"
               aria-label={`${node.node_id}, ${v.label}${
@@ -255,8 +289,16 @@ export function DagView({
               <title>
                 {`${node.node_id} — ${v.label}\n${v.hint}` +
                   (node.isRootCause ? '\nROOT CAUSE: the earliest failure on this path.' : '') +
-                  (node.pendingReason ? `\n${node.pendingReason}` : '')}
+                  (node.pendingReason ? `\n${node.pendingReason}` : '') +
+                  (node.failure_reason ? `\n${node.failure_reason}` : '') +
+                  (group ? `\nMAP TEMPLATE: ${describeGroup(group)}` : '') +
+                  (cached ? `\nCACHED: reused the result of attempt ${node.latestAttempt?.cache_hit_of}` : '')}
               </title>
+              {group && (
+                // A stacked second outline reads as "several of these" before any
+                // text is read, which is the point of a folded fan-out.
+                <rect className="dag-node-shadow dag-group-stack" x={6} y={-6} width={NODE_W} height={NODE_H} rx={12} />
+              )}
               {node.isRootCause && (
                 <rect
                   className="dag-rootcause-halo"
@@ -284,37 +326,77 @@ export function DagView({
                 rx={12}
                 strokeDasharray={dashFor(v.borderStyle)}
               />
+              <line className="dag-card-divider" x1={14} x2={NODE_W - 14} y1={57} y2={57} />
               {/*
                 Channel 4, the glyph, now sits in its own tinted chip. A bare
                 glyph at 13px was the weakest of the four channels; a filled
                 square around it survives both a thumbnail and a greyscale
                 print, which is the whole point of the redundancy.
               */}
-              <rect className="dag-glyph-chip" x={10} y={11} width={22} height={22} rx={7} />
-              <text className="dag-glyph" x={21} y={26} textAnchor="middle" fill="var(--tone-bd)">
+              <rect className="dag-glyph-chip" x={14} y={15} width={26} height={26} rx={7} />
+              <text className="dag-glyph" x={27} y={33} textAnchor="middle" fill="var(--tone-bd)">
                 {v.glyph}
               </text>
               {/* The node id is the thing an operator searches for, so it is
                   the only element at full foreground weight and colour. */}
-              <text className="dag-node-label" x={40} y={26}>
-                {truncate(node.node_id, 18)}
+              <text className="dag-node-label" x={50} y={30}>
+                {truncate(node.node_id, 23)}
               </text>
-              <text className="dag-node-sub" x={40} y={39}>
-                {truncate(node.task_ref, 24)}
+              <text className="dag-node-sub" x={50} y={47}>
+                {truncate(node.task_ref, 27)}
               </text>
               {/* The state name is repeated as text under the glyph because a
                   colour plus a symbol still leaves an operator guessing which
                   of two symbols they are looking at. */}
-              <text className="dag-node-state" x={11} y={55} fill="var(--tone-bd)">
+              <text className="dag-node-state" x={14} y={73} fill="var(--tone-bd)">
                 {v.label}
               </text>
-              {attemptCount > 1 && (
-                <text className="dag-node-sub" x={NODE_W - 11} y={55} textAnchor="end">
+              {group && (
+                <text className="dag-node-sub dag-group-summary" x={NODE_W - 14} y={73} textAnchor="end">
+                  {truncate(describeGroup(group), 26)}
+                </text>
+              )}
+              {group && onToggleGroup && group.unfoldable && (
+                <text
+                  className="dag-node-sub dag-group-toggle"
+                  x={NODE_W - 14}
+                  y={30}
+                  textAnchor="end"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${group.unfolded ? 'Fold' : 'Unfold'} the ${group.total} items of ${node.node_id}`}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    onToggleGroup(node.node_id);
+                  }}
+                  onKeyDown={(ev) => {
+                    if (ev.key === 'Enter' || ev.key === ' ') {
+                      ev.preventDefault();
+                      ev.stopPropagation();
+                      onToggleGroup(node.node_id);
+                    }
+                  }}
+                >
+                  {group.unfolded ? '− fold' : '+ unfold'}
+                </text>
+              )}
+              {!group && node.failure_reason && (
+                <text className="dag-node-sub" x={NODE_W - 14} y={73} textAnchor="end" fill="var(--tone-danger-fg)">
+                  {node.failure_reason.startsWith('fan_in_too_large') ? 'fan-in too large' : 'not run'}
+                </text>
+              )}
+              {!group && cached && (
+                <text className="dag-node-sub dag-cached" x={NODE_W - 14} y={73} textAnchor="end">
+                  cached
+                </text>
+              )}
+              {!group && !cached && attemptCount > 1 && (
+                <text className="dag-node-sub" x={NODE_W - 14} y={73} textAnchor="end">
                   {attemptCount} attempts
                 </text>
               )}
-              {node.pendingReason && attemptCount <= 1 && (
-                <text className="dag-node-sub" x={NODE_W - 11} y={55} textAnchor="end" fill="var(--tone-warning-fg)">
+              {!group && node.pendingReason && attemptCount <= 1 && (
+                <text className="dag-node-sub" x={NODE_W - 14} y={73} textAnchor="end" fill="var(--tone-warning-fg)">
                   stalled
                 </text>
               )}

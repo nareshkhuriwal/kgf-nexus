@@ -1,3 +1,4 @@
+import { ActionIcon, RowAction } from '../components/RowAction';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -115,6 +116,7 @@ export function heartbeatStale(worker: Worker, now: number): boolean {
 
 export function WorkersPage({ namespace }: { namespace: string }) {
   const qc = useQueryClient();
+  const [tableControls,setTableControls] = useState<HTMLDivElement|null>(null);
   const workers = useWorkers(namespace);
   const capacity = useCapacity(namespace);
   const now = Date.now();
@@ -285,6 +287,7 @@ export function WorkersPage({ namespace }: { namespace: string }) {
         </div>
       ),
     },
+    {key:'actions',header:'Actions',cell:w=><div className="cell-actions"><Link className="icon-action" aria-label={`View worker ${w.id}`} title="View worker" to={`/workers/${encodeURIComponent(w.id)}`}><ActionIcon name="view"/></Link>{drainable(w)&&<RowAction permission="workers.drain" label={`Drain worker ${w.id}`} icon="disable" confirm="Stop this worker accepting new work? Existing tasks can finish." onAction={async()=>{await api.drainWorker(namespace,w.id);await qc.invalidateQueries({queryKey:['workers',namespace]})}}/>}</div>},
   ];
 
   return (
@@ -339,7 +342,7 @@ export function WorkersPage({ namespace }: { namespace: string }) {
 
       <div className="panel">
         <div className="panel-head">
-          <span>workers</span>
+          <span>Workers</span><div className="panel-head-controls" ref={setTableControls} />
         </div>
 
         <FleetFigures workers={workers.data} now={now} />
@@ -381,7 +384,7 @@ export function WorkersPage({ namespace }: { namespace: string }) {
                 noun={['worker', 'workers']}
                 actions={[
                   {
-                    verb: 'Drain',
+                    permission: "workers.drain", verb: 'Drain',
                     run: (w) => api.drainWorker(namespace, w.id),
                   },
                 ]}
@@ -397,6 +400,7 @@ export function WorkersPage({ namespace }: { namespace: string }) {
                 }}
               />
               <DataTable
+              controlsTarget={tableControls}
               rows={list}
               columns={columns}
               rowKey={(w) => w.id}
@@ -433,7 +437,7 @@ export function WorkersPage({ namespace }: { namespace: string }) {
               /* Every worker on screen at once: the question is about the fleet
                  as a whole, and a fleet split across pages cannot be scanned
                  for the one dead row. */
-              paging={{ mode: 'none' }}
+              paging={{ mode: 'client' }}
               /* No search box. The fleet is small enough to read in one pass —
                  it is bounded by how many agents an operator runs, not by a
                  namespace's history — and a filter over eight rows hides more

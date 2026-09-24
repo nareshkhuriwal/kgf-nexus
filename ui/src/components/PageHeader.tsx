@@ -23,6 +23,7 @@ export function PageHeader({
   return (
     <div className="page-head">
       <div style={{ minWidth: 0 }}>
+        <div className="page-eyebrow">Nexus / Orchestration</div>
         <h1>{title}</h1>
         {subtitle && <div className="sub">{subtitle}</div>}
       </div>

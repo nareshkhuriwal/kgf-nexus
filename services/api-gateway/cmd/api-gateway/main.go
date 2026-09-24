@@ -31,6 +31,8 @@ import (
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/mail"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
@@ -40,6 +42,11 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/upstream"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/workergrpc"
 )
+
+// workerMaxConnectionAge is the longest an agent connection lives before the
+// gateway asks it to redial, and so the longest a withdrawn certificate or CA
+// can keep an already-connected agent attached. See the worker listener.
+const workerMaxConnectionAge = 5 * time.Minute
 
 func main() {
 	if err := run(); err != nil {
@@ -53,6 +60,12 @@ func run() error {
 	slog.SetDefault(log)
 
 	cfg := loadConfig()
+	// Refuse to start rather than hand every worker a threshold that would push
+	// multi-megabyte results through ReportResult and into task_attempts. The
+	// agent clamps too; failing here is what makes the misconfiguration visible.
+	if err := domain.ValidateInlineThreshold(cfg.InlineThresholdBytes); err != nil {
+		return fmt.Errorf("NEXUS_INLINE_THRESHOLD_BYTES: %w", err)
+	}
 
 	// The shutdown context is cancelled on SIGTERM/SIGINT. Everything long-running
 	// derives from it, so one signal unwinds the whole process in order.
@@ -76,7 +89,7 @@ func run() error {
 	// request is authenticated. API keys are unaffected: WithIdentity only adds
 	// credential kinds, dispatched by prefix, and an unprefixed credential still
 	// takes the original api_keys path.
-	auth := authn.New(db).
+	auth := authn.New(db).WithRBAC().
 		WithIdentity(authn.StoreIdentity{DB: db}).
 		WithLogger(log)
 
@@ -110,7 +123,10 @@ func run() error {
 		// Nothing else in the deployment aggregates per-service health: each
 		// service serves its own /healthz and /readyz, but the gateway is the only
 		// ingress, so a console has no route to them.
-		WithFleetHealth(upstream.Fleet{WFM: wfmClient, RM: rmClient, Sched: schedClient})
+		WithFleetHealth(upstream.Fleet{WFM: wfmClient, RM: rmClient, Sched: schedClient}).
+		// Memo invalidation rides the scheduler client's dag-engine connection,
+		// the gateway's one existing route to the owner of memo_invalidations.
+		WithCacheInvalidator(schedClient)
 
 	// Rate limiting is opt-in because a limit guessed wrong is itself an outage:
 	// the right number depends on fleet size and the console's poll interval. Off
@@ -126,6 +142,12 @@ func run() error {
 			"requests_per_second", cfg.RequestsPerSecond, "burst", cfg.Burst,
 			"why", "the gateway is the only ingress, so an unlimited one has no defence against a retry loop or credential stuffing")
 	}
+	emailCfg, err := emailFlowConfig(log)
+	if err != nil {
+		return err
+	}
+	api = api.WithEmailFlows(emailCfg)
+
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", api.Routes())
 
@@ -168,9 +190,23 @@ func run() error {
 			MinTime:             10 * time.Second,
 			PermitWithoutStream: true,
 		}),
+		// MaxConnectionAge bounds how long a credential decision made at handshake
+		// time can outlive a revocation: without it, an agent that connected
+		// before its certificate (or the CA that signed it) was withdrawn kept its
+		// connection until it happened to drop. After this age the server sends
+		// GOAWAY and the agent redials, re-presenting its certificate to the
+		// current trust bundle. Minutes rather than the control plane's 30s,
+		// because this listener carries the whole fleet and each redial is a TLS
+		// handshake per agent.
+		//
+		// The grace is derived from the long-poll cap, not picked separately: GOAWAY
+		// lets in-flight RPCs finish, and a poll cut before it returns could strand
+		// an attempt the scheduler has already claimed for this worker.
 		grpc.KeepaliveParams(keepalive.ServerParameters{
-			Time:    30 * time.Second,
-			Timeout: 10 * time.Second,
+			Time:                  30 * time.Second,
+			Timeout:               10 * time.Second,
+			MaxConnectionAge:      workerMaxConnectionAge,
+			MaxConnectionAgeGrace: workergrpc.DefaultConfig().MaxPollWait + 15*time.Second,
 		}),
 		// A chatty fleet sends small messages; capping receive size bounds the
 		// memory a misbehaving agent can make the gateway allocate.
@@ -249,6 +285,12 @@ func run() error {
 	if err := restSrv.Shutdown(shutdownCtx); err != nil {
 		log.Error("REST shutdown did not complete cleanly", "error", err)
 	}
+	// After the listener: no new request can queue mail now, and anything already
+	// queued (a registration's verification, a reset link) gets the rest of the
+	// grace period to go out rather than being dropped with the process.
+	if err := api.CloseEmailFlows(shutdownCtx); err != nil {
+		log.Error("queued email was not fully delivered before shutdown", "error", err)
+	}
 
 	select {
 	case <-stopped:
@@ -305,7 +347,7 @@ func loadConfig() config {
 		ResultStoreRegion:   env("NEXUS_RESULT_STORE_REGION", "us-east-1"),
 		// Results at or below this size come back inline, avoiding two round-trips
 		// for a trivial output like {"rows": 42} (ADR-0008).
-		InlineThresholdBytes: int64(envInt("NEXUS_INLINE_THRESHOLD_BYTES", 65536)),
+		InlineThresholdBytes: int64(envInt("NEXUS_INLINE_THRESHOLD_BYTES", int(domain.DefaultInlineThresholdBytes))),
 		ShutdownTimeout:      time.Duration(envInt("NEXUS_SHUTDOWN_TIMEOUT_SEC", 30)) * time.Second,
 		// A brief pause after failing readiness, so load balancers observe the
 		// change before connections start closing.
@@ -359,4 +401,80 @@ func envInt(key string, def int) int {
 		return def
 	}
 	return n
+}
+
+// emailFlowConfig reads mail delivery and verification policy from the
+// environment and says, loudly, which mode the gateway is in.
+//
+// A misconfiguration (bad port, TLS mode, a From with no address, credentials
+// over plain text, SMTP without a public URL to build links from) stops startup:
+// discovering it from the first person whose reset email never arrived is worse.
+// NO configuration at all is valid and yields the disabled sender, which refuses
+// every send -- and the WARN below is the operator-facing record of that choice.
+func emailFlowConfig(log *slog.Logger) (rest.EmailFlowConfig, error) {
+	mcfg, err := mail.ConfigFromEnv(os.Getenv)
+	if err != nil {
+		return rest.EmailFlowConfig{}, fmt.Errorf("email delivery configuration: %w", err)
+	}
+	sender, err := mail.New(mcfg)
+	if err != nil {
+		return rest.EmailFlowConfig{}, fmt.Errorf("email delivery configuration: %w", err)
+	}
+	cfg := rest.DefaultEmailFlowConfig()
+	cfg.Mailer = sender
+	cfg.PublicURL = env("NEXUS_PUBLIC_URL", "")
+	cfg.VerifyTTL = time.Duration(envInt("NEXUS_EMAIL_VERIFY_TTL_SEC", int(cfg.VerifyTTL/time.Second))) * time.Second
+	cfg.ResetTTL = time.Duration(envInt("NEXUS_PASSWORD_RESET_TTL_SEC", int(cfg.ResetTTL/time.Second))) * time.Second
+	cfg.RequireVerified = envBool("NEXUS_EMAIL_VERIFICATION_REQUIRED", true)
+	if err := cfg.Validate(); err != nil {
+		return rest.EmailFlowConfig{}, fmt.Errorf("email flows: %w", err)
+	}
+
+	if !mcfg.Enabled() {
+		effect := "verification and password-reset requests answer 503 email_unavailable"
+		if cfg.RequireVerified {
+			effect += "; accounts created from now on cannot confirm their address and therefore cannot sign in"
+		}
+		log.Warn("email delivery is DISABLED: NEXUS_SMTP_HOST is not set",
+			"verification_required", cfg.RequireVerified, "effect", effect)
+		return cfg, nil
+	}
+	log.Info("email delivery configured",
+		"smtp_host", mcfg.Host, "smtp_port", mcfg.Port, "smtp_tls", string(mcfg.TLS),
+		"smtp_auth", mcfg.Username != "", "public_url", cfg.PublicURL,
+		"verify_ttl", cfg.VerifyTTL.String(), "reset_ttl", cfg.ResetTTL.String(),
+		"verification_required", cfg.RequireVerified)
+	if !cfg.RequireVerified {
+		log.Warn("NEXUS_EMAIL_VERIFICATION_REQUIRED=false: accounts may sign in before proving their email address")
+	}
+	// Probed in the background so a slow mail server never delays startup, but
+	// reported at ERROR so a wrong host, certificate or password is in the log
+	// from the first minute rather than discovered by a user.
+	if s, ok := sender.(*mail.SMTP); ok {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), mcfg.Timeout+5*time.Second)
+			defer cancel()
+			if err := s.Probe(ctx); err != nil {
+				log.Error("SMTP server probe failed; verification and reset emails will not be delivered until this is fixed",
+					"smtp_host", mcfg.Host, "smtp_port", mcfg.Port, "error", err)
+				return
+			}
+			log.Info("SMTP server probe succeeded", "smtp_host", mcfg.Host, "smtp_port", mcfg.Port)
+		}()
+	}
+	return cfg, nil
+}
+
+// envBool reads a boolean, keeping the default on an unparseable value for the
+// same reason envFloat does.
+func envBool(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
 }

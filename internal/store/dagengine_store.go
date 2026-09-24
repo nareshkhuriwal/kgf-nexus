@@ -46,6 +46,7 @@ var ErrDAGEngineRunNotFound = errors.New("run not found")
 // writes this table (workflow-manager owns it); it reads the pinned spec and the
 // current state so it can respect operator interventions it does not own.
 type DERunRow struct {
+	Params       []byte
 	ID           string
 	SpecID       string
 	Namespace    string
@@ -93,12 +94,12 @@ type DEAttemptRow struct {
 // would serialize every reconcile of the same run across replicas for no
 // correctness gain.
 func (s *DAGEngineStore) LoadRun(ctx context.Context, runID string) (*DERunRow, error) {
-	const q = `SELECT id::text, spec_id::text, namespace, state::text, priority, state_version
+	const q = `SELECT id::text, spec_id::text, namespace, state::text, priority, state_version, params
 	             FROM workflow_runs WHERE id = $1::uuid`
 	var r DERunRow
 	var state string
 	err := s.pool.QueryRow(ctx, q, runID).Scan(
-		&r.ID, &r.SpecID, &r.Namespace, &state, &r.Priority, &r.StateVersion)
+		&r.ID, &r.SpecID, &r.Namespace, &state, &r.Priority, &r.StateVersion, &r.Params)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("load run %s: %w", runID, ErrDAGEngineRunNotFound)
 	}
@@ -205,9 +206,16 @@ func (s *DAGEngineStore) LoadEdges(ctx context.Context, runID string) ([]DEEdgeR
 
 // LoadAttempts reads every attempt of a run, newest attempt_number last per node.
 func (s *DAGEngineStore) LoadAttempts(ctx context.Context, runID string) ([]DEAttemptRow, error) {
-	const q = `SELECT id::text, run_id::text, node_id, attempt_number, state::text, output_ref, error
-	             FROM task_attempts WHERE run_id = $1::uuid
-	            ORDER BY node_id, attempt_number`
+	// Expansion CHILDREN's output_ref is deliberately NOT loaded. A run can have
+	// max_fanout children with up to the inline threshold each -- hundreds of MiB
+	// read on every reconcile -- and nothing but fan-in assembly needs them, which
+	// streams them with a size bound instead (StreamChildOutputs).
+	const q = `SELECT a.id::text, a.run_id::text, a.node_id, a.attempt_number, a.state::text,
+	                  CASE WHEN n.parent_node_id IS NULL THEN a.output_ref END, a.error
+	             FROM task_attempts a
+	             JOIN task_nodes n ON n.run_id = a.run_id AND n.node_id = a.node_id
+	            WHERE a.run_id = $1::uuid
+	            ORDER BY a.node_id, a.attempt_number`
 	rows, err := s.pool.Query(ctx, q, runID)
 	if err != nil {
 		return nil, fmt.Errorf("load attempts for run %s: %w", runID, err)

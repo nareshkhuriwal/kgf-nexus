@@ -5,7 +5,7 @@
 **Scope:** Postgres backup and restore, the artifact (MinIO result store) backup
 and restore and the ordering between the two stores, the restore drills and their
 measured results, what these procedures do *not* cover, the RPO/RTO the approach
-actually delivers, and the schema-migration procedure.
+actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), and dynamic expansion, memoization and quarantine (§14).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -317,7 +317,9 @@ is made of items like these.
   all; wire the exit code into whatever alerts you.
 - **No NATS state backup**, deliberately. NATS carries notifications; Postgres
   holds truth ([ADR-0003](adr/0003-nats-as-event-bus.md)). There is nothing there
-  to restore.
+  to restore. The `outbox` table IS in the dump; after a restore the relay
+  re-publishes whatever it holds unpublished, and consumers de-duplicate by
+  run_id + seq.
 - **Postgres roles and grants are not in the dump.** `pg_dump --no-owner
   --no-privileges` is used so the archive restores cleanly as whatever role you
   have, which means role definitions are *not* carried. In the MVP there is one
@@ -761,3 +763,554 @@ the object durable strictly before the row is written, an object that existed at
 T1 still exists at T2. A false *negative* (an object deleted after the check) is
 acceptable and shows up next run; a false *positive* would send someone hunting
 for data loss that never happened.
+
+
+---
+
+## 9. TLS certificates: rotation runbook and expiry alerts
+
+Design and rationale are in [TLS.md §5](TLS.md). This section covers what to do.
+
+**Verified:** everything this section says about processes: hot reload, rejection
+of bad material, CA overlap, agent re-enrolment. Unit and integration tests in
+`internal/transport` cover it with real gRPC handshakes, and the tests check the
+serial number actually presented. `deploy/nexus-certs.sh` has been run on
+OpenSSL 3.0 and LibreSSL 3.3, and its `install` step inside alpine.
+**Not verified:** the full `make up-tls` stack end to end; anything on AKS (the
+manifests have only been parsed, never applied); the Portainer host procedure;
+the alert rules against a real Prometheus.
+
+### 9.1 Is rotation working? (any environment)
+
+After any renewal, each process logs one line per role within
+`NEXUS_TLS_RELOAD_INTERVAL` (default 10s) plus the time the volume takes to
+update (AKS: kubelet sync, usually under a minute):
+
+```
+INFO TLS material reloaded; new handshakes use it, ... role=server old_serial=… new_serial=…
+```
+
+To confirm from outside what a server actually presents:
+
+```sh
+openssl s_client -connect <host>:9090 -servername scheduler </dev/null 2>/dev/null \
+  | openssl x509 -noout -serial -enddate
+```
+
+Compare that serial with the file: `openssl x509 -in tls.crt -noout -serial`. A
+restart is **never** needed to pick up a renewal. If you find yourself restarting
+to make a certificate take effect, something is wrong. Look for the ERROR line in
+§9.3 first.
+
+### 9.2 Routine leaf renewal
+
+| Environment | Who renews | What you do |
+|---|---|---|
+| AKS | cert-manager, at 10 days left (30-day leaves) | Nothing. Watch the alerts. |
+| Local compose | You | `deploy/nexus-certs.sh issue <svc> --dns <svc>,localhost --ip 127.0.0.1`, then `docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tls.yml run --rm tls-init`. Or `make dev-certs` then the same `tls-init` for everything. |
+| Portainer host | You, monthly (§9.5) | Issue on the CA machine, install on the host. |
+| Off-cluster agent | The agent host, monthly (cron) | `csr` → `sign-csr` → `install-signed` (TLS.md §5.5). |
+
+### 9.3 Alerts, and what to do
+
+The rules are in `deploy/k8s/cert-alerts.yaml` (a PrometheusRule). For a plain
+Prometheus, for example on the Portainer host, the equivalent rules file is:
+
+```yaml
+groups:
+  - name: nexus-certificates
+    rules:
+      - alert: NexusServedCertificateExpiringSoon
+        expr: (nexus_tls_cert_not_after_timestamp_seconds - time()) < 3 * 86400
+        for: 15m
+        labels: { severity: critical }
+      - alert: NexusTLSReloadRejected
+        expr: max_over_time(nexus_tls_reload_stale[10m]) == 1
+        for: 10m
+        labels: { severity: warning }
+      - alert: NexusCACertificateExpiringSoon
+        expr: (nexus_tls_cert_not_after_timestamp_seconds{role="ca"} - time()) < 21 * 86400
+        for: 1h
+        labels: { severity: critical }
+```
+
+Alert on the **timestamp** minus `time()`, never on `nexus_tls_cert_expiry_seconds`.
+The latter is refreshed by the process's poller and would freeze if the poller
+stalled. On hosts without Prometheus, run `deploy/nexus-certs.sh check <dir>` from
+cron. It exits non-zero when anything is within 7 days of expiry
+(`--warn-days N`).
+
+| Alert | Meaning | Do this |
+|---|---|---|
+| `NexusCertificateRenewalOverdue` (AKS) | cert-manager should have renewed 3 days ago and has not | `kubectl -n kgf-nexus describe certificate <name>`, then `kubectl get certificaterequest,order -n kgf-nexus`. The usual causes are a ClusterIssuer that is not Ready (CA secret missing or expired) or cert-manager itself down. Once fixed, `cmctl renew -n kgf-nexus <name>` forces a renewal. |
+| `NexusCertificateNotReady` (AKS) | The Certificate's last issuance failed | Same as above. |
+| `NexusServedCertificateExpiringSoon` | A **process** is serving a certificate with under 3 days left | First, is the file on disk newer? Compare `openssl x509 -in <file> -noout -enddate` with the metric. **File newer, process older:** the process is not picking it up. Look for `TLS material on disk REJECTED` in its logs; if the mount is a `subPath`, change it to a directory mount. As a last resort, restart that one pod. **File old too:** renewal is broken, so treat it as `RenewalOverdue`. |
+| `NexusTLSReloadRejected` | New files arrived and the process refused them. It is still serving the previous certificate, which is safe until that one expires | Read the ERROR log line; it names the reason. `private key does not match public key` means the key and certificate come from different issuances, so re-issue them together. `expired` or `not valid until` means an issuer clock or stale-file problem. `contains no PEM certificates` means the bundle file is wrong. The alert clears as soon as valid files land; no restart is needed. |
+| `NexusCACertificateExpiringSoon` | The CA itself expires within 3 weeks | On AKS, cert-manager renews the CA at 30 days left, keeping its key, so this firing means that renewal failed: check the `nexus-internal-ca` Certificate in the `cert-manager` namespace. With a bring-your-own intermediate, issue a new intermediate from the offline root and replace the secret (same key: no overlap needed; new key: §9.4). |
+
+**Readiness does not change** under any of these, deliberately. An expiring
+certificate still works, and failing `/readyz` would pull every replica at once.
+
+### 9.4 Rotating the CA key (planned, or after a compromise)
+
+This is the one procedure that can cause an outage if done out of order. The
+invariant: **a CA leaves the bundle only after no leaf signed by it is still in
+use.** Wait at least one reload interval plus the volume update time between steps.
+
+**Compose / Portainer host / off-cluster agents** (`nexus-certs.sh`, run where the
+CA key lives):
+
+1. `deploy/nexus-certs.sh rotate-ca`. This creates a new CA and destroys the old
+   CA key; the bundle now holds new + old.
+2. Distribute the bundle: re-run `install` (or `tls-init` in compose) on every host,
+   and ship `ca-bundle.pem` to every enrolled agent. Wait until every process has
+   logged `ca_certs=2`.
+3. Re-issue every leaf (`issue …` for services, `sign-csr` for agents) and install.
+4. `deploy/nexus-certs.sh drop-retired-cas`. It **refuses** while any leaf it knows
+   about is still from the old CA. It cannot see agents enrolled from their own
+   CSRs, so confirm those yourself with
+   `openssl verify -CAfile ca/ca.crt <agent tls.crt>`.
+5. Distribute the bundle again.
+
+**AKS:**
+
+1. Save the current CA certificate: `kubectl -n cert-manager get secret
+   nexus-internal-ca-keypair -o jsonpath='{.data.tls\.crt}' | base64 -d > old-ca.pem`.
+2. Add it to the `nexus-ca-bundle` Bundle as an `inLine` source (commented in
+   `cert-issuer.yaml`) and apply it. trust-manager updates the ConfigMap in every
+   labelled namespace.
+3. Replace the CA key: either delete the `nexus-internal-ca-keypair` secret, which
+   makes cert-manager re-issue the self-signed CA with a new key, or load a new
+   intermediate. The Bundle now contains new + old.
+4. Re-issue every leaf: `cmctl renew --all -n kgf-nexus`. Confirm that every
+   `Certificate` is Ready and that its secret verifies against the new CA.
+5. Remove the `inLine` old CA from the Bundle and apply it.
+
+After a **compromise**, the same steps apply, done quickly. Remember that there
+is no revocation (TLS.md §5.6): agent connections already established on the
+gateway's worker listener survive for up to 5 minutes (the listener's maximum
+connection age) before they must re-handshake against the new bundle. To close
+that window immediately, restart the gateway after step 5.
+
+### 9.5 Portainer-managed Docker host
+
+The deploy pipeline renders only the base compose file
+(`.azure-pipelines/templates/deploy-portainer-host.yml` → `deploy/render_compose.py`).
+It does not know about TLS, so TLS on this host is a one-time manual setup,
+followed by monthly renewals.
+
+**Where the CA lives:** on an admin workstation or an offline machine, **never on
+the Docker host.** The host only receives leaves.
+
+One-time setup:
+
+```sh
+# CA machine
+NEXUS_CERT_DIR=/secure/nexus-ca NEXUS_CA_NAME="Nexus <env> CA" deploy/nexus-certs.sh init-ca
+for s in api-gateway workflow-manager dag-engine scheduler scheduler-gpu resource-manager; do
+  NEXUS_CERT_DIR=/secure/nexus-ca deploy/nexus-certs.sh issue "$s" --dns "$s"
+done
+# copy everything EXCEPT ca/ to the host, e.g.:
+rsync -a --exclude 'ca/' --exclude 'ca-retired-*' /secure/nexus-ca/ host:/opt/kgf-nexus/tls-staging/
+
+# Docker host (as root)
+/opt/kgf-nexus/nexus-certs.sh install /opt/kgf-nexus/tls-staging /opt/kgf-nexus/tls --owner 10001:10001
+rm -rf /opt/kgf-nexus/tls-staging
+```
+
+Then add a host-local override next to the stack (the same shape as
+`deploy/docker-compose.tls.yml`, with a bind mount of `/opt/kgf-nexus/tls` at
+`/etc/nexus/tls:ro` instead of the `tls-init` volume) and include it when bringing
+the stack up.
+
+Renewal, monthly (leaves are 30 days): repeat the `issue` loop and the `install`.
+The services reload by themselves. Put `deploy/nexus-certs.sh check /secure/nexus-ca`
+in the CA machine's cron so that an overdue renewal emails someone.
+
+## 10. Email: SMTP delivery for verification and password recovery
+
+The api-gateway sends two kinds of mail: address-verification links and password-reset links. Both links are credentials. Configure delivery before exposing self-service registration (docs/MULTITENANCY.md).
+
+### 10.1 Settings (api-gateway)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NEXUS_SMTP_HOST` | unset | SMTP server. **Unset disables email delivery** (see 9.2). |
+| `NEXUS_SMTP_PORT` | 587 (465 when TLS is `implicit`) | |
+| `NEXUS_SMTP_TLS` | `starttls` | `starttls` upgrades before any command and never falls back to plain text if the server does not offer it. `implicit` uses TLS from the first byte (SMTPS). `none` sends in plain text and is for a local relay or Mailpit only. |
+| `NEXUS_SMTP_USERNAME` / `NEXUS_SMTP_PASSWORD` | unset | AUTH PLAIN. Credentials with `NEXUS_SMTP_TLS=none` to a non-loopback host stop startup. |
+| `NEXUS_SMTP_PASSWORD_FILE` | unset | Read the password from a mounted secret instead of the environment. Setting it together with `NEXUS_SMTP_PASSWORD` is an error. |
+| `NEXUS_SMTP_FROM` | required with a host | e.g. `KGF Nexus <no-reply@example.com>` |
+| `NEXUS_SMTP_HELO` | `localhost` | EHLO name. Set it to the host's real name if your relay checks it. |
+| `NEXUS_SMTP_TIMEOUT_SEC` | 10 | Bounds one whole delivery: dial, TLS, AUTH and DATA. |
+| `NEXUS_PUBLIC_URL` | required with a host | External console origin. Links are `<url>/verify-email#token=…` and `<url>/reset-password#token=…`. |
+| `NEXUS_EMAIL_VERIFY_TTL_SEC` | 86400 | Verification link lifetime. Allowed range: 5 minutes to 7 days. |
+| `NEXUS_PASSWORD_RESET_TTL_SEC` | 1800 | Reset link lifetime. Allowed range: 5 minutes to 24 hours. |
+| `NEXUS_EMAIL_VERIFICATION_REQUIRED` | `true` | `false` lets unverified accounts sign in. The gateway logs a WARN at startup when it is `false`. |
+
+The gateway refuses to start on any invalid combination, such as a bad port or TLS mode, a malformed From address, credentials over plain text, or a host without `NEXUS_PUBLIC_URL`. When a host is configured, the gateway also probes SMTP at startup (connect, TLS, AUTH, QUIT, no message). A failed probe logs `SMTP server probe failed` at ERROR but does not stop startup.
+
+### 10.2 Running without a mail server is explicit, not silent
+
+With `NEXUS_SMTP_HOST` unset, the gateway logs `email delivery is DISABLED` at WARN on startup, including the effect on sign-in. The link-request routes then answer `503 email_unavailable` instead of pretending to have sent mail, and registration reports `email_verification.delivery: "mail_disabled"`. With verification required (the default), accounts created while mail is disabled cannot sign in until mail is configured and they request a new link from the sign-in page. Existing accounts are unaffected. Readiness (`/readyz`) does not depend on SMTP. An unreachable mail server must not remove the gateway from the load balancer, so check the startup log and the `user.*` audit outcomes instead.
+
+### 10.3 Delivery and retries
+
+Mail is sent after the database transaction commits, on a bounded background queue: 2 workers, 256 jobs. Each message is retried up to 4 times with exponential backoff, starting at 2 seconds and capped at 30 seconds. 5xx replies are not retried. Every attempt ends in an audit row (`user.email_verification_sent` / `user.password_reset_requested`) with outcome `success` or `error`, and failures are logged with the user id and recipient domain only. Tokens, links and full addresses are never logged. On shutdown, the gateway drains the queue within `NEXUS_SHUTDOWN_TIMEOUT_SEC`. Mail still queued when the process dies is lost, and the person can request another link. Tokens more than a day past expiry are deleted hourly.
+
+### 10.4 Local development: Mailpit
+
+`deploy/docker-compose.yml` runs `axllent/mailpit:v1.27.0` and points the gateway at it (`mailpit:1025`, TLS `none`). Every message appears at http://localhost:8025. That UI binds to loopback because it shows live reset links. **`render_compose.py` deploys the same file**, so a real host must override `NEXUS_SMTP_HOST`, `NEXUS_SMTP_PORT`, `NEXUS_SMTP_TLS`, `NEXUS_SMTP_USERNAME`, `NEXUS_SMTP_PASSWORD`, `NEXUS_SMTP_FROM` and `NEXUS_PUBLIC_URL`. Otherwise reset mail lands in a catcher nobody reads.
+
+### 10.5 Upgrade
+
+Apply migration 0017 before the new gateway. Every existing account is marked verified by the migration itself. Deploy the console together with the gateway: the new pages are `/verify-email`, `/forgot-password` and `/reset-password`. Rolling back 0017 discards which accounts are verified, and re-applying it marks every account that exists at that moment as verified. Export `SELECT id FROM users WHERE email_verified_at IS NULL` first if that matters.
+
+## 11. The event bus (NATS JetStream)
+
+NATS is **optional** and **never authoritative** ([ADR-0003](adr/0003-nats-as-event-bus.md)).
+Everything on it is either a hint that work may exist or a projection of a
+fact Postgres already holds. Losing it, emptying it, or never running it costs
+latency and live-update freshness, never correctness.
+
+### 11.1 Running it
+
+- Compose ships `nats:2.14.7-alpine` with JetStream on the `nats-data` volume
+  and a `/healthz?js-enabled-only=true` healthcheck. Monitoring is on port 8222
+  (`/varz`, `/connz`, `/jsz`).
+- Configuration (F38 naming): `NEXUS_NATS_URL` (empty disables the bus) and
+  `NEXUS_NATS_CREDS` (optional `.creds` file). Only the **event-service** (relay,
+  SSE wake-ups) and the **agents** (dispatch hints) connect. The scheduler,
+  dag-engine and workflow-manager only write `outbox` rows to Postgres.
+- Nothing `depends_on` NATS and nothing needs it to start: clients connect in
+  the background and retry forever.
+- Streams are created by the relay if missing and **never modified** if present,
+  so retention retuned with the `nats` CLI sticks:
+  `NEXUS_RUNS` (`nexus.run.>`, file, 7 days, 4 GiB, 10-minute duplicate window)
+  and `NEXUS_DISPATCH` (`nexus.task.dispatch.>`, memory, 2 minutes).
+- **Production needs authorization.** The compose broker is unauthenticated, like
+  every other dev credential there. Anyone who can reach an unauthenticated
+  broker can read every tenant's run events and publish fake hints. A fake hint
+  only costs a poll; reading run events is a real disclosure. Give the
+  event-service publish rights on `nexus.>`; give each agent subscribe-only
+  rights on `nexus.task.dispatch.<its namespace>.>` and nothing else.
+
+### 11.2 Relay tuning (event-service)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NEXUS_OUTBOX_BATCH_SIZE` | 256 | rows per publish transaction |
+| `NEXUS_OUTBOX_POLL_INTERVAL` | 200ms | idle pause between polls of the outbox |
+| `NEXUS_OUTBOX_PUBLISH_TIMEOUT` | 5s | ack wait; bounds how long a batch holds row locks |
+| `NEXUS_OUTBOX_MAX_BACKOFF` | 10s | cap on the relay-wide backoff during an outage |
+| `NEXUS_OUTBOX_RETENTION` | 1h | published rows kept for inspection, then pruned |
+| `NEXUS_OUTBOX_MAX_AGE` | 24h | unpublished rows older than this are DROPPED |
+| `NEXUS_OUTBOX_HINT_INTERVAL` | 10s | periodic re-announcement of queues with PENDING work |
+
+With `NEXUS_NATS_URL` empty the relay only prunes, so the table holds at most
+`NEXUS_OUTBOX_MAX_AGE` worth of writes.
+
+### 11.3 Monitoring (event-service `/metrics`)
+
+| Metric | Alert on |
+|---|---|
+| `nexus_outbox_oldest_unpublished_seconds` | > 60 for 5m: the bus is behind (outage or relay down) |
+| `nexus_outbox_backlog_rows` | sustained growth |
+| `nexus_outbox_broker_connected` | 0 for 5m on every replica |
+| `nexus_outbox_publish_failures_total{kind="row"}` | increasing while connected: a poison row (see `outbox.last_error`) |
+| `nexus_outbox_publish_failures_total{kind="broker"}` | informational during an outage |
+| `nexus_outbox_pruned_total{reason="expired"}` | any increase with the bus enabled: announcements were dropped unpublished |
+| `nexus_outbox_publish_lag_seconds` | p99, for end-to-end freshness |
+| `nexus_outbox_duplicate_acks_total` | informational: re-sends absorbed by de-duplication |
+
+Inspect the backlog directly:
+`SELECT topic, count(*), min(created_at), max(attempts) FROM outbox WHERE published_at IS NULL GROUP BY topic;`
+
+### 11.4 Outage behaviour
+
+- **Broker down:** writers are unaffected (they write Postgres). The relay stops
+  opening transactions, backs off (jittered, capped), and the backlog waits in
+  `outbox`. Agents keep long-polling; SSE tails keep polling at 1s. Dispatch
+  latency returns to the long-poll baseline.
+- **Broker back:** clients reconnect on their own; the relay notices within
+  about 100ms, re-verifies the streams (recreating them if the broker lost its
+  storage) and drains the backlog oldest-first. Re-sends inside the duplicate
+  window are dropped by `Nats-Msg-Id`; beyond it a consumer may see a duplicate
+  and must de-duplicate by run_id + seq. Within one hint interval every queue
+  with pending work is re-announced.
+- **Down for longer than `NEXUS_OUTBOX_MAX_AGE`:** the oldest unpublished rows
+  are dropped and counted. Their facts are still in Postgres; only the
+  announcements are gone.
+- **Relay replica dies mid-batch:** its transaction rolls back and a peer (or the
+  restart) re-sends the batch; de-duplication absorbs it.
+- Ordering is not guaranteed in any of these cases.
+
+### 11.5 Upgrading
+
+Apply migration 0016 **before** rolling any service that writes outbox rows: a
+new scheduler against a schema without `outbox` fails its claim transactions.
+Rolling the migration back requires first rolling back those services (see the
+comment in `0016_outbox.down.sql`).
+
+### 11.6 Testing
+
+`make test-nats` runs the relay, outbox and hint suites against a real
+JetStream and a real Postgres in throwaway containers (`nexus-nats-agent-*`,
+ports 55511/55512), including stopping and restarting the broker.
+
+---
+
+## 12. Cluster controller: installing, enabling apply, and backing out
+
+Design and safety argument: docs/CLUSTER-SCALING.md. This section is the runbook.
+
+### 12.1 Prerequisites
+
+- Migration `0018_cluster_registry` applied (additive; safe before the new
+  gateway and resource-manager are deployed).
+- A resource-manager that serves `ClusterControllerService` (this release), reachable
+  from the controller at `NEXUS_RM_ADDR`. The controller uses the same TLS
+  environment as other peers (`internal/transport`).
+- The worker Deployment follows `deploy/k8s/cluster-controller/base/worker-deployment.example.yaml`:
+  no hostname override, CPU/memory requests, `terminationGracePeriodSeconds` at
+  least `NEXUS_DRAIN_GRACE`, no HPA of its own.
+- The cluster-controller image built with
+  `docker build -f deploy/Dockerfile.service --build-arg SERVICE=cluster-controller .`
+  and pinned by digest (`kustomize edit set image`).
+
+### 12.2 Plan mode (default)
+
+```sh
+kubectl apply -k deploy/k8s/cluster-controller/base   # after setting NEXUS_CLUSTER_NAME
+kubectl -n kgf-nexus get lease nexus-cluster-controller-<cluster> -o jsonpath='{.spec.holderIdentity}'
+```
+
+In the console (Cluster & scaling → Live cluster) confirm: a report under a minute
+old, "Controller running: plan", the observed UID, desired = observed revision,
+the scheduler HPA with `ScalingActive`, and plan-only events that match what you
+would have done by hand. `/readyz` is `standby` on the follower and fails on the
+leader after four intervals without a successful cycle -- alert on that.
+
+### 12.3 Enabling apply
+
+1. `kubectl get namespace kube-system -o jsonpath='{.metadata.uid}'` against the
+   intended cluster; enter it in the console and confirm apply mode.
+2. `kubectl apply -k deploy/k8s/cluster-controller/apply`.
+3. Watch for `scale_out` / `drain` / `scale_in` events and "Controller running:
+   apply". If the tab still says plan, its reason names the missing opt-in.
+
+Keep registry ceilings (`max_replicas`) at what the budget allows: there is no
+provider cost estimate, and budget alerts are not hard caps.
+
+### 12.4 Backing out
+
+Fastest to slowest, all safe at any moment:
+
+1. Console: **Switch to plan**. The next cycle (≤ 15 s) stops mutating; the resource
+   manager refuses drains immediately.
+2. `kubectl apply -k deploy/k8s/cluster-controller/base` (drops the apply Role
+   binding and `NEXUS_CONTROLLER_ALLOW_APPLY`).
+3. `kubectl -n kgf-nexus scale deploy/nexus-cluster-controller --replicas=0`.
+
+Backing out never un-drains a worker: DRAINING is terminal by design. A drained
+pod that is no longer going to be removed can simply be deleted
+(`kubectl delete pod`); its agent registers afresh in the replacement pod.
+
+### 12.5 Diagnosing a pool that does not scale
+
+The Live cluster tab shows the last decision and its holds per Deployment. The
+common ones: `scale-in cooldown`, `removal of drained pods held: pod … is not
+Running and Ready` (fix the pod), `pod … kept: holds N live lease(s)` (working as
+intended -- it is removed when the work finishes), `namespace quota: …` (raise the
+quota or the pod requests are undeclared), and `deployment changed since it was
+read` (someone else is writing replicas -- find the second writer).
+
+### 12.6 Testing locally
+
+The end-to-end test only runs against `docker-desktop` or `kind-*` contexts, in
+namespace `nexus-scaling-test`, which it creates and deletes:
+
+```sh
+docker run -d --name nexus-scaling-pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=nexus \
+  -p 127.0.0.1:55531:5432 postgres:16-alpine   # then apply services/migrations/*.up.sql
+NEXUS_TEST_DATABASE_URL=postgres://postgres:test@localhost:55531/nexus \
+  go test -tags k8s_integration -run TestK8s -v ./services/cluster-controller/internal/controller/
+NEXUS_TEST_DATABASE_URL=postgres://postgres:test@localhost:55531/nexus \
+  go test -tags integration -run TestIntegrationClusterRegistry ./internal/store/
+```
+
+## 13. Kubernetes executor
+
+An agent that runs its attempts as Kubernetes Jobs (ADR-0007, Implementation
+notes). It is opt-in per agent: setting `NEXUS_K8S_NAMESPACE` enables it, and
+the agent advertises `kubernetes` (and its alias `k8s`) only after a startup
+probe passes. The probe checks that the cluster is reachable, that the server is
+1.29 or later (native sidecars), and, through SelfSubjectAccessReview, that the
+agent holds the RBAC verbs the executor uses. If the probe fails, the agent logs
+`kubernetes executor configured but not usable; not advertising it` with the
+reason and keeps serving its other executors.
+
+### 13.1 Deploying
+
+```bash
+kubectl apply -f deploy/k8s/executor-namespace.yaml   # nexus-exec, Pod Security "restricted" ENFORCED
+kubectl apply -f deploy/k8s/agent-rbac.yaml           # SA + namespace Role; no exec, no secret reads
+kubectl apply -f deploy/k8s/executor-policies.yaml    # default-deny NetworkPolicy + LimitRange for task pods
+kubectl -n nexus-exec create secret generic nexus-agent-credentials --from-literal=api-key="$NEXUS_WORKER_API_KEY"
+# Edit the image (pin a digest) and NEXUS_CONTROL_PLANE, then:
+kubectl apply -f deploy/k8s/agent-deployment.yaml
+```
+
+The agent and its task Jobs share one namespace. That is required, not a
+convenience: each Job is owned by the agent pod through the downward API, and
+Kubernetes owner references cannot cross namespaces. A cross-namespace owner is
+treated as missing, and the garbage collector would delete every Job the moment
+it was created. For that reason the executor sets the owner reference only when
+`NEXUS_K8S_OWNER_POD_NAMESPACE` equals `NEXUS_K8S_NAMESPACE`.
+
+**Capacity.** Set `NEXUS_CPU_MILLIS`, `NEXUS_MEMORY_BYTES` and `NEXUS_DISK_BYTES`
+to what the namespace can really run: its ResourceQuota, or the size of the node
+pool. Two schedulers are involved. Nexus places the attempt on this worker, then
+Kubernetes places the pod. If you over-advertise, attempts sit with pods Pending
+`Unschedulable` until `NEXUS_K8S_START_TIMEOUT` (default 10m). They then fail as
+retryable INFRASTRUCTURE. Each attempt pod also carries a collector sidecar that
+requests 50m CPU and 32Mi of memory, on top of the task's own request.
+
+### 13.2 Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NEXUS_K8S_NAMESPACE` | *(unset: disabled)* | Where Jobs are created. Setting it enables the executor. |
+| `NEXUS_K8S_KUBECONFIG`, `NEXUS_K8S_CONTEXT` | in-cluster if `KUBERNETES_SERVICE_HOST` is set, else `$KUBECONFIG` / `~/.kube/config` | Out-of-cluster access. |
+| `NEXUS_K8S_OWNER` | hostname (the pod name in-cluster) | This agent instance's identity, used for orphan reaping. It must be **stable across restarts** and **unique among agents that share the namespace**. |
+| `NEXUS_K8S_OWNER_POD_NAME` / `_UID` / `_NAMESPACE` | unset | Downward API values. When set, each Job is owned by the agent pod. |
+| `NEXUS_K8S_SERVICE_ACCOUNT` | namespace default | The service account task pods run as. Its token is never mounted. |
+| `NEXUS_K8S_HELPER_IMAGE` | `busybox:1.37.0` | The collector sidecar image. It needs `sh`, `base64`, `wc` and `sleep`. Mirror it for air-gapped clusters. |
+| `NEXUS_K8S_IMAGE_PULL_POLICY` / `_IMAGE_PULL_SECRETS` | Kubernetes default / none | Image pull settings for task images. |
+| `NEXUS_K8S_RUN_AS_USER` | `65532` | The non-root uid, gid and fsGroup for task pods. |
+| `NEXUS_K8S_WRITABLE_ROOT_FS` | `false` | Set to `true` only for images that must write outside `/nexus` and `/tmp`. |
+| `NEXUS_K8S_NODE_SELECTOR`, `NEXUS_K8S_TOLERATIONS` | none | Pins this worker's pods to a node pool. Format: `k=v,k2=v2` and `key=value:Effect,key:Effect`. |
+| `NEXUS_K8S_GPU_RESOURCE` | unset: GPU tasks are refused | The device-plugin resource, for example `nvidia.com/gpu`. |
+| `NEXUS_K8S_GPU_KIND_LABEL` | unset | A node label, for example `nvidia.com/gpu.product`. When set, `gpu_kind` becomes a nodeSelector on that label. |
+| `NEXUS_K8S_TTL_AFTER_FINISHED` | `10m` | Lets the Job controller delete Jobs the agent never cleaned up. This is also the window in which a restarted agent can harvest a finished attempt. |
+| `NEXUS_K8S_IMAGE_PULL_TIMEOUT` | `10m` | How long a **transient** pull failure may last. A pull that fails as not-found or unauthorised fails immediately. |
+| `NEXUS_K8S_START_TIMEOUT` | `10m` | How long an attempt may go unscheduled or unstarted before it fails as retryable. |
+
+### 13.3 What happens to attempts when things fail
+
+| Event | Outcome |
+|---|---|
+| Image not found / unauthorised / invalid | Prepare fails with `NOT_FOUND` / `PERMISSION_DENIED` / `VALIDATION`, all terminal. The Job is deleted. |
+| Collector sidecar crash-loops or cannot pull | `INFRASTRUCTURE`, retryable. This is an agent or cluster fault, never the task's. |
+| Task over its memory limit | `OOM`, retryable. The kernel OOM-kills the container and the runtime reports `OOMKilled`. |
+| Over `start_to_close` | `TIMED_OUT`. The Job's `activeDeadlineSeconds` sends SIGTERM, then SIGKILL after the grace period. |
+| Pod evicted or preempted | `INFRASTRUCTURE` (`Evicted`), retryable. |
+| Cancel or lease revoked | Pod deleted with the grace period (SIGTERM, grace, SIGKILL), then the Job is deleted. |
+| Agent **container** restarts | The WAL (an emptyDir) survives the restart. A Job that finished meanwhile is harvested and reported for real. A Job still running is killed, because this session cannot renew its lease and a retry is coming. Its STARTING entry is then replayed as INDETERMINATE. |
+| Agent **pod** deleted | The garbage collector deletes its Jobs. The WAL is lost, so those attempts become LOST through lease expiry and are retried. |
+
+### 13.4 Inspecting
+
+```bash
+kubectl -n nexus-exec get jobs,pods -l app.kubernetes.io/managed-by=nexus-agent
+kubectl -n nexus-exec get jobs -l nexus.dev/run=<run_id>           # everything for one run
+kubectl -n nexus-exec describe job nexus-<attempt_id>              # nexus.dev/enforced-limits annotation
+kubectl -n nexus-exec logs job/nexus-<attempt_id> -c task          # the task's log
+```
+
+Attempt ids that are not valid DNS labels are hashed into the Job name. The
+exact id is always in the `nexus.dev/attempt-id` annotation.
+
+### 13.5 Limits you will hit
+
+See CONTRACT-FINDINGS F96 for detail. In short:
+
+- Inputs are limited to about 1 MiB in total, because they are staged through a
+  Secret.
+- Outputs are limited to 4 MiB in total, because they leave the pod through the
+  collector's log.
+- `runtime.stdout_output` is rejected, because the pod log API cannot separate
+  stdout from stderr.
+- The pending reason sent through ReportProgress is not yet stored by the
+  scheduler.
+
+### 13.6 Running the executor's cluster tests
+
+```bash
+kubectl config current-context        # MUST be a local cluster (docker-desktop, kind-*, minikube, ...)
+NEXUS_K8S_CONFORMANCE=1 go test ./agent/internal/executor/ ./agent/internal/worker/ \
+  -run 'TestConformance/.*/kubernetes|TestK8s' -v
+```
+
+The tests refuse to run unless the context name is recognisably local **and**
+its API server is on a loopback address. They create namespace
+`nexus-k8s-exec-test`, with Pod Security "restricted" enforced, and delete it
+afterwards. Set `NEXUS_K8S_KEEP_NAMESPACE=1` to keep it for debugging.
+
+Check that the subtests actually ran (F89). Each `…/kubernetes` line should take
+seconds, not `0.00s`. A `-run` pattern that does not match the three-level
+subtest names skips them silently, and the run still passes.
+
+## 14. Dynamic expansion, memoization and worker quarantine
+
+### 14.1 Dynamic expansion (§5.4)
+
+- **Operator ceiling on `max_fanout`.** Submit-time validation rejects a template whose
+  `max_fanout` exceeds 10,000 (`dag.DefaultMaxFanoutCeiling`).
+- **Fan-in size limit.** `NEXUS_DAG_MAX_FANIN_BYTES` on the dag-engine (default `16777216`,
+  16 MiB; must be within 65536..268435456 or the service refuses to start) bounds the JSON
+  array a fan-in node receives. Over it, the consumer fails with `fan_in_too_large`:
+  `SELECT * FROM fan_in_refusals WHERE run_id = '<run>'`, the `FanInRejected` event, or the
+  run page. Prefer fixing the workflow over raising the limit: have children write large
+  results as blob outputs (passed as references, a few hundred bytes each), emit smaller
+  summaries, or lower `max_fanout`. Declaring `max_bytes` on the template's output makes an
+  impossible fan-in fail at submit instead of after every child ran.
+- **Why did a map node fail?** `SELECT outcome, reason, detail, item_count, max_fanout FROM
+  task_expansions WHERE run_id = '<run>'`, or the run page (the node footer reads "expansion
+  refused: …"). Reasons: `max_fanout_exceeded`, `collection_missing`, `collection_not_array`,
+  `collection_not_inline`.
+- The console folds a template's children into the template; unfold is offered up to 50.
+
+### 14.2 Memoization (§6.4)
+
+- **Invalidate** when a memoized task's results must not be reused (bad input data, a
+  handler bug fixed without a version bump):
+
+  ```sh
+  curl -X POST "$NEXUS_ENDPOINT/v1/namespaces/$NS/cache/invalidations" \
+       -H "Authorization: Bearer $NEXUS_API_KEY" \
+       -d '{"task_ref":"fanout.process_shard","reason":"reprocess after bad listing"}'
+  ```
+
+  Add `"task_version": N` to scope to one version, or pass `"cache_key"` for one entry.
+  Needs `workflows.cache.invalidate`. It removes nothing; later runs simply execute.
+  Bumping the task's `version` is the author-side equivalent.
+- **Which nodes were cached?** `SELECT node_id, cache_hit_of FROM task_attempts WHERE run_id =
+  '<run>' AND cache_hit_of IS NOT NULL`; `CacheHit` events name the source attempt.
+
+### 14.3 Worker quarantine (§5.5)
+
+Detector settings (resource-manager environment), with defaults:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NEXUS_QUARANTINE_ENABLED` | `true` | Detection on/off. Expiry of existing quarantines runs either way. |
+| `NEXUS_QUARANTINE_INTERVAL` | `30s` | Pass period. |
+| `NEXUS_QUARANTINE_WINDOW` | `10m` | Evidence window. |
+| `NEXUS_QUARANTINE_MIN_FAILURES` | `3` | Infrastructure-class failures needed. |
+| `NEXUS_QUARANTINE_MIN_DISTINCT_TASKS` | `2` | Distinct `task_ref`s they must span (worker-, not task-correlated). |
+| `NEXUS_QUARANTINE_MIN_FAILURE_RATIO` | `0.5` | Share of the worker's terminal attempts. |
+| `NEXUS_QUARANTINE_BASE_DURATION` | `15m` | First automatic quarantine; doubles per relapse within 24h. |
+| `NEXUS_QUARANTINE_MAX_DURATION` | `24h` | Cap. |
+| `NEXUS_QUARANTINE_MAX_FLEET_FRACTION` | `0.5` | Most of a namespace that may be quarantined at once. |
+
+- **A burst of "not quarantined: namespace at its quarantine cap" errors** means many workers
+  fail the same way at once -- almost always a shared dependency (result store, registry,
+  network), not bad hosts. Fix the dependency; do not raise the cap.
+- **Manual:** `POST …/workers/{id}/quarantine {"reason": "...", "duration_ms": 0}` (0 =
+  until released) and `POST …/workers/{id}/release`; permission `workers.quarantine`
+  (Infrastructure Operator, Administrator). Both are audited.
+- **History:** `GET …/workers/{id}/quarantines`, the worker page, or `worker_quarantines`.
+- Quarantine follows the host: restarting the agent does not clear it. Release it instead.
+- **Rolling back 0021** (break-glass): release every quarantined worker first; with the
+  episode table gone nothing expires a quarantine.

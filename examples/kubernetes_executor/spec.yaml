@@ -1,0 +1,93 @@
+api_version: nexus.dev/v1
+description: 'Two tasks, each run as a Kubernetes Job by the kubernetes executor.'
+edges:
+  - from_node_id: produce
+    output_to_input:
+      numbers: numbers
+    to_node_id: summarize
+name: kubernetes-executor-demo
+namespace: default
+run_timeout_ms: 1800000
+tasks:
+  - id: produce
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    outputs:
+      numbers:
+        required: true
+        type: json
+    queue: default
+    resources:
+      # Becomes requests == limits on the pod: cpu is a CFS quota, memory a
+      # cgroup limit the kernel OOM-kills at. Exceed 64Mi and the attempt
+      # reports ERROR_CLASS_OOM (retryable), not an application error.
+      request:
+        cpu_millis: 250
+        memory_bytes: 67108864
+    retry:
+      initial_ms: 5000
+      jitter: full
+      max_attempts: 3
+      max_ms: 60000
+      multiplier: 2
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      executor: kubernetes
+      # Pin by digest in real use; the pod runs as uid 65532 with a read-only
+      # root filesystem, so the task writes only under /nexus and /tmp.
+      image: busybox:1.37.0
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          echo "running in pod $HOSTNAME as uid $(id -u)"
+          # One declared output, so NEXUS_OUTPUT_FILE points at outputs/numbers.
+          printf '[1,2,3,4,5]' > "$NEXUS_OUTPUT_FILE"
+    task_ref: demo.k8s.produce
+    timeouts:
+      heartbeat_ms: 60000
+      schedule_to_close_ms: 1200000
+      schedule_to_start_ms: 600000
+      # Becomes the Job's activeDeadlineSeconds: enforced by the cluster even
+      # if the agent dies mid-task.
+      start_to_close_ms: 120000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1
+  - id: summarize
+    idempotency: IDEMPOTENCY_MODE_REQUIRED
+    inputs:
+      numbers:
+        required: true
+        type: json
+    outputs:
+      summary:
+        required: true
+        type: json
+    queue: default
+    resources:
+      request:
+        cpu_millis: 250
+        memory_bytes: 67108864
+    retry:
+      initial_ms: 5000
+      jitter: full
+      max_attempts: 3
+      max_ms: 60000
+      multiplier: 2
+      strategy: BACKOFF_STRATEGY_EXPONENTIAL
+    runtime:
+      executor: kubernetes
+      image: busybox:1.37.0
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          # The upstream output arrives as a file (staged through a Job-owned,
+          # immutable Secret); it never transits the control plane.
+          nums=$(cat "$NEXUS_INPUT_DIR/numbers")
+          printf '{"input":%s,"idempotency_key":"%s"}' "$nums" "$NEXUS_IDEMPOTENCY_KEY" > "$NEXUS_OUTPUT_DIR/summary"
+    task_ref: demo.k8s.summarize
+    timeouts:
+      heartbeat_ms: 60000
+      schedule_to_close_ms: 1200000
+      schedule_to_start_ms: 600000
+      start_to_close_ms: 120000
+    trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+    version: 1

@@ -6,6 +6,7 @@ package worker
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
@@ -21,10 +22,20 @@ type PollClient interface {
 // PULL, NEVER PUSH (ADR-0005). The control plane never opens a connection to a
 // worker, so workers can live behind NAT, in another VPC, or on a laptop; the
 // control plane needs no model of worker reachability; and backpressure is
-// automatic, because a saturated worker simply stops polling. Phase 1 is
-// poll-only — the NATS dispatch notification is deferred — so LONG POLLING
-// carries the latency: the server holds the request open until work appears
-// instead of making us choose between a tight poll loop and seconds of delay.
+// automatic, because a saturated worker simply stops polling. LONG POLLING
+// carries the baseline latency: the server holds the request open until work
+// appears instead of making us choose between a tight poll loop and seconds of
+// delay.
+//
+// NATS DISPATCH HINTS (ADR-0003/0005) are layered on top and are only ever an
+// accelerator. A hint (Wake) cuts short a pause BETWEEN polls; it never cancels a
+// poll in flight -- cancelling a PollTask whose claim already committed would
+// strand a leased assignment on the wire until its lease expired and the attempt
+// was declared LOST. Hints carry no work: whatever a hint says, the worker still
+// asks the control plane, and the §5.3 claim (a Postgres CAS) decides. So a
+// duplicate hint costs one extra poll, a stale or out-of-order hint costs one
+// empty poll, and a lost hint -- or the broker being down entirely -- costs
+// nothing but the latency long polling already bounds.
 type Puller struct {
 	client   PollClient
 	registry *Registry
@@ -46,8 +57,17 @@ type Puller struct {
 	// by poll_again_after_ms so the control plane can shed load.
 	IdleBackoff time.Duration
 	// ErrorBackoff is the pause after a failed poll, so an unreachable control
-	// plane is not hammered by the whole fleet.
+	// plane is not hammered by the whole fleet. Hints deliberately do NOT cut it
+	// short: a burst of hints during a control-plane outage must not turn the
+	// fleet's backoff into a retry storm.
 	ErrorBackoff time.Duration
+
+	// wake coalesces hints. Capacity one: any number of hints arriving while a
+	// poll is in flight collapse into a single "poll again now", so a flood of
+	// duplicate or reordered hints cannot queue up a flood of polls.
+	wake chan struct{}
+	// hints counts hints received, for tests and diagnostics.
+	hints atomic.Int64
 }
 
 // NewPuller builds a puller with defaults suited to Phase 1's poll-only path.
@@ -62,8 +82,24 @@ func NewPuller(workerID string, queues []string, c PollClient, reg *Registry,
 		MaxTasks:     4,
 		IdleBackoff:  time.Second,
 		ErrorBackoff: 2 * time.Second,
+		wake:         make(chan struct{}, 1),
 	}
 }
+
+// Wake is a dispatch hint: work may have become available on one of this
+// worker's queues. Safe to call from any goroutine, never blocks, and is
+// idempotent within one poll cycle. See the Puller doc for why a hint can never
+// cause harm, only save latency.
+func (p *Puller) Wake() {
+	p.hints.Add(1)
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
+}
+
+// HintsReceived reports how many hints this puller has been given.
+func (p *Puller) HintsReceived() int64 { return p.hints.Load() }
 
 // Run polls until ctx is cancelled or the worker is draining and idle.
 func (p *Puller) Run(ctx context.Context) error {
@@ -78,28 +114,39 @@ func (p *Puller) Run(ctx context.Context) error {
 			return nil
 		}
 
-		wait := p.pollOnce(ctx)
+		wait, interruptible := p.pollOnce(ctx)
 		if wait <= 0 {
 			continue
 		}
+		// A nil channel blocks forever, which is how a non-interruptible wait
+		// (the error backoff) ignores hints.
+		var wake <-chan struct{}
+		if interruptible {
+			wake = p.wake
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return nil
-		case <-time.After(wait):
+		case <-timer.C:
+		case <-wake:
+			timer.Stop()
 		}
 	}
 }
 
 // pollOnce performs one long poll and dispatches whatever comes back. It returns
-// how long to wait before polling again.
-func (p *Puller) pollOnce(ctx context.Context) time.Duration {
+// how long to wait before polling again, and whether a dispatch hint may cut that
+// wait short.
+func (p *Puller) pollOnce(ctx context.Context) (time.Duration, bool) {
 	free := p.registry.FreeCapacity()
 
 	// A worker with nothing free must not long-poll: it would hold a connection
 	// open for 20s only to reject whatever it was handed, and the control plane
 	// would have reserved capacity against it in the meantime.
 	if p.registry.Count() > 0 && isExhausted(free) {
-		return p.IdleBackoff
+		return p.IdleBackoff, true
 	}
 
 	// The RPC outlives the long-poll window by a margin so the SERVER, not the
@@ -117,27 +164,27 @@ func (p *Puller) pollOnce(ctx context.Context) time.Duration {
 
 	if err != nil {
 		if ctx.Err() != nil {
-			return 0
+			return 0, false
 		}
 		p.log.Warn("PollTask failed", "error", err)
-		return p.ErrorBackoff
+		return p.ErrorBackoff, false
 	}
 
 	assignments := resp.GetAssignments()
 	if len(assignments) == 0 {
 		if ms := resp.GetPollAgainAfterMs(); ms > 0 {
-			return time.Duration(ms) * time.Millisecond
+			return time.Duration(ms) * time.Millisecond, true
 		}
 		// A long poll that returned empty already consumed its wait; poll again
 		// immediately rather than adding latency on top of the server's window.
-		return 0
+		return 0, true
 	}
 
 	for _, a := range assignments {
 		p.dispatch(ctx, a)
 	}
 	// Work is flowing: poll again at once rather than sleeping through a backlog.
-	return 0
+	return 0, true
 }
 
 // dispatch runs the LOCAL admission check and starts the attempt.

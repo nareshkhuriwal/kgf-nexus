@@ -1,3 +1,4 @@
+import { PermissionContext } from '../components/Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -30,7 +31,7 @@ function wrap(entry: string) {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={qc}>
+    <PermissionContext.Provider value={["runs.view","runs.create","runs.cancel","runs.retry","workflows.view","workflows.publish","workflows.delete","schedules.create","tasks.logs.view","tasks.results.view"]}><QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[entry]}>
         <LocationProbe />
         <Routes>
@@ -38,7 +39,7 @@ function wrap(entry: string) {
           <Route path="/runs" element={<div>run list</div>} />
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider></PermissionContext.Provider>,
   );
 }
 
@@ -130,7 +131,7 @@ describe('the run header', () => {
   it('offers a route back to the list', async () => {
     serveRun();
     wrap('/runs/run-aaaaaaaaaaaa');
-    expect(await screen.findByRole('link', { name: /all runs/i })).toHaveAttribute('href', '/runs');
+    expect(await screen.findByRole('link', { name: /back to runs/i })).toHaveAttribute('href', '/runs');
   });
 
   it('surfaces an unreachable backend instead of a blank page', async () => {
@@ -325,13 +326,13 @@ describe('cancel', () => {
    * A terminal run cannot be cancelled, and the control says why rather than
    * silently doing nothing.
    */
-  it('disables cancel on a run that has already finished', async () => {
+  it('offers re-run and retry instead of cancel after failure', async () => {
     serveRun();
     wrap('/runs/run-aaaaaaaaaaaa');
 
-    const button = await screen.findByRole('button', { name: /cancel run/i });
-    expect(button).toBeDisabled();
-    expect(button).toHaveAttribute('title', expect.stringContaining('cannot be cancelled'));
+    expect(await screen.findByRole('button', {name:'Re-run'})).toBeEnabled();
+    expect(screen.getByRole('button',{name:'Retry failed tasks'})).toBeEnabled();
+    expect(screen.queryByRole('button', {name:/cancel run/i})).toBeNull();
   });
 });
 
@@ -367,7 +368,7 @@ describe('the way out survives every state', () => {
     vi.stubGlobal('fetch', () => new Promise(() => {}));
     wrap('/runs/run-aaaaaaaaaaaa');
 
-    expect(await screen.findByRole('link', { name: /all runs/i })).toHaveAttribute('href', '/runs');
+    expect(await screen.findByRole('link', { name: /back to runs/i })).toHaveAttribute('href', '/runs');
     // Still genuinely loading, not silently empty.
     expect(document.querySelector('[aria-busy="true"]')).toBeInTheDocument();
   });
@@ -377,7 +378,7 @@ describe('the way out survives every state', () => {
     wrap('/runs/run-aaaaaaaaaaaa');
 
     await screen.findByRole('alert', {}, { timeout: 5000 });
-    expect(screen.getByRole('link', { name: /all runs/i })).toHaveAttribute('href', '/runs');
+    expect(screen.getByRole('link', { name: /back to runs/i })).toHaveAttribute('href', '/runs');
     // The id is named even though the run behind it never arrived, so the
     // operator can tell WHICH run failed to load.
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('run-aaaa');
@@ -410,4 +411,12 @@ describe('the run identifiers', () => {
     expect(ids.textContent).toMatch(/params/);
     expect(ids.textContent).toMatch(/none/);
   });
+});
+
+it('successful runs offer a fresh execution and never cancel or retry failed tasks', async () => {
+ mockFetch((url) => url.includes('/events') ? [200,{events:[]}] : [200,{...failedRun,state:'SUCCEEDED'}]);
+ wrap('/runs/run-aaaaaaaaaaaa');
+ expect(await screen.findByRole('button',{name:'Re-run'})).toBeEnabled();
+ expect(screen.queryByRole('button',{name:/cancel run/i})).toBeNull();
+ expect(screen.queryByRole('button',{name:'Retry failed tasks'})).toBeNull();
 });

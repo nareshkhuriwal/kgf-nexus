@@ -26,6 +26,7 @@ import (
 	"time"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -34,7 +35,10 @@ import (
 // supply one. 64 KiB per ADR-0008: below it the two round-trips to object
 // storage cost more than the bytes are worth, and in a 50-node DAG of trivial
 // outputs that overhead is the dominant latency term.
-const DefaultInlineThresholdBytes = 64 * 1024
+//
+// Aliases internal/domain so the gateway that configures the value and the
+// agent that applies it share one definition (ADR-0016).
+const DefaultInlineThresholdBytes = domain.DefaultInlineThresholdBytes
 
 // Client reads and writes content-addressed objects.
 type Client struct {
@@ -86,10 +90,7 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resultstore: new client for %s: %w", cfg.Endpoint, err)
 	}
-	inline := cfg.InlineThreshold
-	if inline <= 0 {
-		inline = DefaultInlineThresholdBytes
-	}
+	inline := domain.ClampInlineThreshold(cfg.InlineThreshold)
 	log := cfg.Log
 	if log == nil {
 		log = slog.Default()

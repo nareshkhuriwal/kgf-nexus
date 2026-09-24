@@ -32,6 +32,25 @@ var accepted = map[string]string{
 	// docs/OPERATIONS.md, and the rule now stops the NEXT one.
 	"0002_event_seq.up.sql/unbounded-update": "applied everywhere; retained as the documented precedent",
 
+	// 0015 is the DEFERRED HALF of 0014, and is the shape this rule asks for
+	// rather than an exception to it.
+	//
+	// The rule says: "add a DEFAULT and enforce NOT NULL a release later." 0014
+	// adds tenant_id nullable, backfills it and installs triggers that assign it
+	// on every INSERT and UPDATE. 0015 enforces it, in its own migration, to be
+	// applied a release later. Splitting them is what makes the enforcement safe,
+	// so the finding fires on the file that did the right thing -- the analyser
+	// reads one file at a time and cannot see that 0014 came first.
+	//
+	// What makes it safe is the trigger, not the delay: once assign_*_tenant is
+	// installed, a replica that predates the column still writes a correct
+	// tenant_id, because the trigger supplies it. A DEFAULT cannot, since the
+	// value depends on the row's namespace or its parent.
+	//
+	// The operator requirement is real and is recorded in the migration's header:
+	// do not apply 0015 in the same release as 0014.
+	"0015_enforce_tenant_ownership.up.sql/set-not-null": "deferred enforcement of 0014, applied a release later once the 0014 triggers populate tenant_id on every write",
+
 	// 0003 and 0004 are deliberately ABSENT from this list. Both carry a top-level
 	// WHERE that bounds the write set -- 0003 to rows still holding the old JSONB
 	// key spelling, 0004 to rows that actually drifted -- so the analyser does not

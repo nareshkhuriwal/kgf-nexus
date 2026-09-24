@@ -11,6 +11,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { WithPermissions } from '../../test/permissions';
 import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,7 +27,7 @@ function wrap(ui: ReactNode) {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>{ui}</MemoryRouter>
+      <WithPermissions><MemoryRouter>{ui}</MemoryRouter></WithPermissions>
     </QueryClientProvider>,
   );
 }
@@ -206,7 +207,10 @@ describe('UsersPage', () => {
     ]);
     wrap(<UsersPage namespace="default" canAdmin />);
 
-    const disable = await screen.findByRole('button', { name: 'Disable' });
+    // The control is an icon action now, so its accessible name is the
+    // aria-label rather than visible text. The title it carries -- the point of
+    // this test -- is unchanged.
+    const disable = await screen.findByRole('button', { name: 'Disable user' });
     // The consequence is the reason an operator is on this screen during an
     // offboarding, so it is stated up front rather than reported afterwards.
     expect(disable).toHaveAttribute('title', expect.stringContaining('end every session'));
@@ -271,7 +275,7 @@ describe('TokensPage', () => {
     wrap(<TokensPage namespace="default" canAdmin />);
 
     expect(await screen.findByText('revoked')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Revoke' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Revoke token' })).toBeDisabled();
   });
 
   it('explains that an empty token list is not an error', async () => {

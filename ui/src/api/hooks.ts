@@ -363,6 +363,18 @@ export function useCronPreview(namespace: string, cron: string, timezone: string
   });
 }
 
+export function useUpdateSchedule(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateScheduleRequest) => api.updateSchedule(namespace, body),
+    onSuccess: (updated: Schedule) => {
+      qc.setQueryData(qk.schedule(namespace, updated.name), updated);
+      void qc.invalidateQueries({ queryKey: qk.schedules(namespace) });
+      void qc.invalidateQueries({ queryKey: qk.schedule(namespace, updated.name) });
+    }, retry: false,
+  });
+}
+
 export function useCreateSchedule(namespace: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -597,8 +609,9 @@ export function useCreateRun(namespace: string) {
  */
 const ATTENTION_POLL_MS = 10_000;
 
-export function useAttention(namespace: string, filter: AttentionFilter = {}) {
+export function useAttention(namespace: string, filter: AttentionFilter = {}, enabled = true) {
   return useQuery({
+    enabled,
     queryKey: qk.attention(namespace, filter),
     queryFn: () => api.getAttention(namespace, filter),
     refetchInterval: ATTENTION_POLL_MS,

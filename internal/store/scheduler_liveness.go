@@ -66,7 +66,9 @@ func (s *SchedulerStore) SweepDeadWorkers(
 	rows, err := s.pool.Query(ctx, `
 SELECT id, hostname, last_heartbeat_at
   FROM workers
- WHERE state IN ('ACTIVE','DRAINING')
+ -- QUARANTINED workers still hold leases for the work they were running when
+ -- quarantined, so one that goes silent must be declared DEAD like any other.
+ WHERE state IN ('ACTIVE','DRAINING','QUARANTINED')
    AND last_heartbeat_at <= $1
    AND $3 = ANY(queues)
  ORDER BY last_heartbeat_at
@@ -131,7 +133,7 @@ func (s *SchedulerStore) killWorker(
 UPDATE workers
    SET state = 'DEAD'
  WHERE id = $1
-   AND state IN ('ACTIVE','DRAINING')
+   AND state IN ('ACTIVE','DRAINING','QUARANTINED')
    AND last_heartbeat_at <= $2`, workerID, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("mark worker DEAD: %w", err)

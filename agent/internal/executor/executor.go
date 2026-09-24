@@ -77,6 +77,21 @@ type TaskSpec struct {
 	StartToCloseDeadline time.Time
 	// GraceAfterTerm is how long SIGTERM is given before SIGKILL follows.
 	GraceAfterTerm time.Duration
+
+	// WorkerID is the agent's per-session identity. Informational only (the
+	// kubernetes executor labels its Jobs with it so `kubectl get jobs -l`
+	// answers "what is this worker running"); nothing keys correctness on it,
+	// because it changes on every re-registration.
+	WorkerID string
+
+	// OnPhase, when set, is called on every observed change in the workload's
+	// substrate-level lifecycle (for kubernetes: pod phase and the reason
+	// behind it). It exists so the control plane can see WHY an attempt that
+	// it considers RUNNING has not started — "0/12 nodes available:
+	// insufficient nvidia.com/gpu" — which is ADR-0007's mitigation for nested
+	// scheduling. It MUST NOT block: it is called from the executor's wait loop.
+	// Executors whose workload has no such lifecycle never call it.
+	OnPhase func(phase, detail string)
 }
 
 // Prepared is an executor's staged, not-yet-running workload: a materialised

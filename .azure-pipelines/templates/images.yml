@@ -1,0 +1,245 @@
+# The canonical list of every Nexus image, in one file because both pipelines
+# need it and two copies of a service list drift the moment someone adds a
+# service to one of them.
+#
+# Both pipelines consume this as a JOBS template: it owns the list AND the loop
+# that expands it, so the PR gate and the release build exactly the same set.
+#
+# It is a jobs template rather than a list included into a `parameters:` block,
+# because Azure DevOps does not accept `- template:` inside `parameters:` -- the
+# whole pipeline fails to compile with "Unexpected value 'template'". Putting
+# the loop here is what lets one file stay the single source of the set.
+#
+# The per-pipeline differences -- whether to push, which registry, the tag, the
+# job timeout -- are parameters below.
+#
+# servicePath is the main package, passed explicitly for every Go image. The
+# mains are not all in the same place -- api-gateway and workflow-manager,
+# resource-manager and event-service use cmd/<name>/, while dag-engine and
+# scheduler put main at the package root -- so there is nothing to infer. This
+# mirrors deploy/docker-compose.yml, which passes SERVICE_PATH for the same
+# reason. When a main package moves, it moves in both files.
+#
+# scheduler appears ONCE even though compose runs two of it (scheduler and
+# scheduler-gpu). They are the same image with different environment; an image
+# list is not a topology.
+#
+# ADDING A SERVICE means an entry here and a service in deploy/docker-compose.yml.
+# Nothing validates that those two agree yet -- kgf-cloud has
+# scripts/platform_release.py plan for this, Nexus has no equivalent -- so it is
+# worth checking by hand until it does.
+
+# EVERY entry carries all three keys -- name, dockerfile, servicePath -- even
+# where a value is empty or the default. A template expression that reads an
+# ABSENT object key is a compile-time error that fails the entire run, build
+# included, so the list states everything rather than relying on a fallback
+# expression to supply it. servicePath is empty for the two images that are not
+# Go builds.
+parameters:
+  # ── What the caller varies ────────────────────────────────────────────
+  - name: acrLoginServer
+    type: string
+  # Empty when push is false; the registry steps are then never emitted, so it
+  # is never resolved. That is how the PR gate builds every image without
+  # referencing a service connection a fork could acquire.
+  - name: acrServiceConnection
+    type: string
+    default: ''
+  - name: imageTag
+    type: string
+  - name: repositoryPrefix
+    type: string
+    default: nexus
+  - name: environmentTag
+    type: string
+    default: ''
+  - name: push
+    type: boolean
+    default: true
+  - name: timeoutInMinutes
+    type: number
+    default: 40
+  # Emitted after the build; the PR gate uses it to remove the local tag it just
+  # created, since nothing pushes it anywhere.
+  - name: postBuildSteps
+    type: stepList
+    default: []
+
+  # ── The set itself ────────────────────────────────────────────────────
+  - name: images
+    type: object
+    default:
+      # ── Control plane: the six services of ADR-0011 ──────────────────────
+      - name: api-gateway
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/api-gateway/cmd/api-gateway
+      - name: workflow-manager
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/workflow-manager/cmd/workflow-manager
+      - name: dag-engine
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/dag-engine
+      - name: scheduler
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/scheduler
+      - name: resource-manager
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/resource-manager/cmd/resource-manager
+      - name: event-service
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/event-service/cmd/event-service
+
+      # ── Worker agent ────────────────────────────────────────────────────
+      # One image for every agent flavour; compose runs agent-cpu, agent-gpu and
+      # agent-gpu-a10 from it, differing only in advertised capacity.
+      - name: agent
+        dockerfile: deploy/Dockerfile.service
+        servicePath: agent/cmd/nexus-agent
+
+      # ── Artifact GC (ADR-0008) ──────────────────────────────────────────
+      # Reports orphaned result-store objects. Shipped as an image so it can run
+      # as a scheduled job rather than from someone's laptop.
+      - name: artifact-gc
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/artifact-gc/cmd/artifact-gc
+
+      # ── Operator console ────────────────────────────────────────────────
+      # nginx serving the built bundle and proxying /v1 to the gateway, so the
+      # browser sees one origin and the gateway needs no CORS configuration.
+      # Its Dockerfile runs npm ci and vite build itself, so there is no
+      # servicePath and no separate front-end build step in the pipeline.
+      - name: ui
+        dockerfile: deploy/Dockerfile.ui
+        servicePath: ''
+
+      # ── Migration job (ADR-0011 rule 4) ─────────────────────────────────
+      # Schema migrations are applied by a dedicated job, never by a service at
+      # startup, because concurrent replicas must not race to migrate. A plain
+      # postgres-client image running psql: no Go build, so no servicePath.
+      - name: migrate
+        dockerfile: deploy/Dockerfile.migrate
+        servicePath: ''
+
+jobs:
+  # One job per image, so a Dockerfile that stops building names the image in
+  # the failed job rather than in a log line a thousand lines down.
+  - ${{ each image in parameters.images }}:
+    - job: build_${{ replace(image.name, '-', '_') }}
+      displayName: 'Build ${{ parameters.repositoryPrefix }}/${{ image.name }}'
+      timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
+      workspace:
+        clean: all
+      steps:
+        - checkout: self
+          persistCredentials: false
+
+        - task: GoTool@0
+          displayName: 'Install Go'
+          inputs:
+            version: $(GO_VERSION)
+
+        - template: service-build.yml
+          parameters:
+            name: ${{ image.name }}
+            imageName: ${{ parameters.repositoryPrefix }}/${{ image.name }}
+            dockerfile: ${{ image.dockerfile }}
+            servicePath: ${{ image.servicePath }}
+            acrLoginServer: ${{ parameters.acrLoginServer }}
+            acrServiceConnection: ${{ parameters.acrServiceConnection }}
+            imageTag: ${{ parameters.imageTag }}
+            environmentTag: ${{ parameters.environmentTag }}
+            push: ${{ parameters.push }}
+
+        - ${{ each step in parameters.postBuildSteps }}:
+          - ${{ step }}
+
+  # Only the pipeline that PUSHES needs a digest map; the PR gate builds the
+  # same images and pushes none, so there are no digests to collect and the job
+  # is not emitted at all there.
+  - ${{ if parameters.push }}:
+    # Turn the per-job output variables into one JSON map the deploy stages
+    # consume, and refuse it here if it is incomplete or not digest-pinned, so
+    # a bad map fails before anything is deployed.
+    - job: collect_digests
+      displayName: 'Collect and validate image digests'
+      dependsOn:
+        - ${{ each image in parameters.images }}:
+          - build_${{ replace(image.name, '-', '_') }}
+      condition: succeeded()
+      variables:
+        # service-build.yml names its push step push_<name> and sets
+        # publishedImage_<name>, both with dashes replaced by underscores.
+        ${{ each image in parameters.images }}:
+          digest_${{ replace(image.name, '-', '_') }}: $[ dependencies.build_${{ replace(image.name, '-', '_') }}.outputs['push_${{ replace(image.name, '-', '_') }}.publishedImage_${{ replace(image.name, '-', '_') }}'] ]
+      steps:
+        - checkout: self
+          persistCredentials: false
+          fetchDepth: 1
+
+        - script: |
+            set -euo pipefail
+            mkdir -p "$(Build.ArtifactStagingDirectory)"
+            # Every NEXUS_DIGEST_* variable below is one build job's output.
+            # The map is refused unless EVERY expected image is present and
+            # every reference is digest-pinned -- a tag reference would let
+            # the thing that eventually deploys pull an image this run did not
+            # build, which is the whole failure this map exists to prevent.
+            python3 - "$(Build.ArtifactStagingDirectory)/digests.json" <<'PY'
+            import json, os, re, sys
+
+            # The variable name holds the image name with dashes replaced by
+            # underscores, because a dash is not legal in a shell variable
+            # name; only the dashes have to be restored.
+            # The each-loop above emits one NEXUS_DIGEST_<name> variable per
+            # image in templates/images.yml, so the set of those variables is
+            # already the complete expected set -- no second list to keep in
+            # step with the first. A build job that failed or never ran leaves
+            # its variable PRESENT and EMPTY, which is the missing case below.
+            prefix = "NEXUS_DIGEST_"
+            pinned = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
+
+            digests, problems = {}, []
+            for key, value in os.environ.items():
+                if not key.startswith(prefix):
+                    continue
+                name = key[len(prefix):].lower().replace("_", "-")
+                value = value.strip()
+                if not value:
+                    problems.append(f"{name}: no digest was published (did its push step run?)")
+                elif not pinned.match(value):
+                    problems.append(f"{name}: not a digest-pinned reference: {value!r}")
+                else:
+                    digests[name] = value
+
+            if not digests and not problems:
+                problems.append("no NEXUS_DIGEST_* variables were set at all; the build stage produced nothing")
+
+            if problems:
+                print("The digest map is not releasable:", file=sys.stderr)
+                for p in problems:
+                    print(f"  - {p}", file=sys.stderr)
+                raise SystemExit(1)
+
+            # Only written once the WHOLE map validates, so a partial map
+            # never reaches a deploy stage.
+            with open(sys.argv[1], "w") as fh:
+                json.dump(digests, fh, indent=2, sort_keys=True)
+            print(f"{len(digests)} images, every one digest-pinned")
+            PY
+            cat "$(Build.ArtifactStagingDirectory)/digests.json"
+            echo "##vso[task.setvariable variable=imageDigests;isOutput=true]$(python3 -c 'import json,sys;print(json.dumps(json.load(open(sys.argv[1])),sort_keys=True))' "$(Build.ArtifactStagingDirectory)/digests.json")"
+          name: collect
+          displayName: 'Collect and validate digests'
+          env:
+            # Mapping context, so the compile-time loop is legal here. The
+            # variable name carries the image name after the prefix.
+            ${{ each image in parameters.images }}:
+              NEXUS_DIGEST_${{ replace(image.name, '-', '_') }}: $(digest_${{ replace(image.name, '-', '_') }})
+
+
+        - task: PublishPipelineArtifact@1
+          displayName: 'Publish digest map'
+          inputs:
+            targetPath: '$(Build.ArtifactStagingDirectory)/digests.json'
+            artifactName: 'image-digests'
+            publishLocation: 'pipeline'

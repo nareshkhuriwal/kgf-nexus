@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 )
 
 // integrationPool connects, or SKIPS — matching internal/store's convention so a
@@ -27,9 +27,9 @@ func integrationPool(t *testing.T) store.GWDB {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	pool, err := store.GWOpen(ctx, nexuscfg.DSN("postgres://postgres:test@localhost:55432/nexus"), 5)
+	pool, err := store.GWOpen(ctx, testdb.DSN(t), 5)
 	if err != nil {
-		t.Skipf("skipping integration test: test database unreachable: %v", err)
+		testdb.SkipUnreachable(t, err)
 	}
 	t.Cleanup(pool.Close)
 	return pool
@@ -40,6 +40,7 @@ func TestIntegrationSweeperRemovesExpiredSessionsOnly(t *testing.T) {
 	pool := integrationPool(t)
 
 	ns := "it-sweeper-" + time.Now().Format("20060102150405.000000000")
+	testdb.RegisterTenant(t, pool, ns)
 	u, err := store.GatewayCreateUser(ctx, pool, ns, "sweeper@example.com", "Sweeper", "reader", "password-here")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -89,6 +90,7 @@ func TestIntegrationSweepIsBoundedByTheBatchLimit(t *testing.T) {
 	pool := integrationPool(t)
 
 	ns := "it-sweepbound-" + time.Now().Format("20060102150405.000000000")
+	testdb.RegisterTenant(t, pool, ns)
 	u, err := store.GatewayCreateUser(ctx, pool, ns, "bound@example.com", "Bound", "reader", "password-here")
 	if err != nil {
 		t.Fatalf("create user: %v", err)

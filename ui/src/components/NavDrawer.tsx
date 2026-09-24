@@ -1,3 +1,4 @@
+import { usePermission } from './Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -103,7 +104,8 @@ export interface NavDrawerProps {
 export function NavDrawer({ open, onClose, returnFocusTo, canAdmin }: NavDrawerProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  const groups = visibleGroups(canAdmin);
+  const can = usePermission();
+  const groups = visibleGroups(canAdmin, can);
 
   /**
    * Dismiss on Escape, and hand focus back.

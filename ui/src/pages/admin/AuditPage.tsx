@@ -1,3 +1,4 @@
+import { RowAction, RowDetails } from '../../components/RowAction';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -30,11 +31,12 @@
  * rather than presenting a page as the history.
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { authApi, type AuditEntry } from '../../api/auth';
 import { shouldRetry } from '../../api/hooks';
 import { AsyncPanel } from '../../components/Status';
+import { BulkActionBar } from '../../components/BulkActionBar';
 import { DataTable } from '../../components/DataTable';
 import type { Column, RowCountKind } from '../../components/DataTable';
 import { fmtTs } from '../../lib/format';
@@ -51,6 +53,84 @@ import { Forbidden } from '../../components/Forbidden';
 const AUDIT_LIMIT = 200;
 const AUDIT_COUNT: RowCountKind = { kind: 'capped', limit: AUDIT_LIMIT };
 
+/**
+ * One audit entry as a row of CSV fields, in the column order the table shows.
+ *
+ * `detail` is serialised as JSON rather than flattened into columns: its shape
+ * differs per action, so any flattening would either invent a union of every
+ * key or silently drop the ones it did not anticipate — and this file is
+ * evidence, so dropping a field is the one thing it must not do.
+ */
+function auditRow(e: AuditEntry): string[] {
+  return [
+    e.occurred_at,
+    e.action,
+    e.outcome,
+    e.actor_label,
+    e.actor_kind,
+    e.client_ip,
+    e.target_kind,
+    e.target_id,
+    e.detail == null ? '' : JSON.stringify(e.detail),
+  ];
+}
+
+const AUDIT_CSV_HEADER = [
+  'occurred_at',
+  'action',
+  'outcome',
+  'actor_label',
+  'actor_kind',
+  'client_ip',
+  'target_kind',
+  'target_id',
+  'detail',
+];
+
+/**
+ * Quotes one CSV field.
+ *
+ * Everything is quoted rather than only the fields that need it. An audit
+ * export carries operator-supplied target ids and JSON detail, so the cases
+ * that need quoting are the common ones here, and a rule with no exceptions
+ * cannot be applied inconsistently.
+ *
+ * The leading apostrophe on a field starting with = + - @ is deliberate: a
+ * spreadsheet reads those as formulas, and an audit trail is precisely where an
+ * attacker-controlled string like `=HYPERLINK(...)` must not become live when a
+ * reviewer opens the file. It changes the displayed value, which is the correct
+ * trade against executing it.
+ */
+function csvField(v: string): string {
+  const injectable = /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
+  return `"${injectable.replace(/"/g, '""')}"`;
+}
+
+function toCsv(rows: string[][]): string {
+  // CRLF, which is what RFC 4180 specifies and what Excel expects.
+  return rows.map((r) => r.map(csvField).join(',')).join('\r\n');
+}
+
+/**
+ * Hands the browser a file. Mirrors DagCanvas's exporter, including the
+ * deferred revoke: some browsers have not read the blob when click() returns
+ * and revoking synchronously produces a zero-byte file.
+ */
+function downloadCsv(csv: string, filename: string) {
+  // The BOM makes Excel read the file as UTF-8. Without it, an actor label with
+  // a non-ASCII character is mojibake in the one tool most reviewers open.
+  const blob = new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 /** Outcome -> tone, reusing the state palette so colour means the same thing here. */
 function outcomeTone(outcome: string): string {
   if (outcome === 'denied') return 'tone-warning';
@@ -59,8 +139,18 @@ function outcomeTone(outcome: string): string {
 }
 
 export function AuditPage({ namespace, canAdmin }: { namespace: string; canAdmin: boolean }) {
+  const [tableControls,setTableControls] = useState<HTMLDivElement|null>(null);
   const [outcome, setOutcome] = useState('');
   const [action, setAction] = useState('');
+
+  /**
+   * The selected entry ids.
+   *
+   * Audit rows are immutable and never change under the operator — unlike the
+   * run list, a selected entry cannot become ineligible — so there is no
+   * eligibility predicate here and every row is selectable.
+   */
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
 
   const audit = useQuery({
     queryKey: ['audit', namespace, outcome, action],
@@ -71,6 +161,18 @@ export function AuditPage({ namespace, canAdmin }: { namespace: string; canAdmin
     // a stale audit view is actively misleading about what is happening now.
     refetchInterval: 10_000,
   });
+
+  /**
+   * The selected rows, resolved against the latest fetch.
+   *
+   * Derived from the ids rather than held as rows: this list refetches every
+   * 10s, and holding row objects would export a stale copy of an entry whose
+   * server-side representation had since been re-read.
+   */
+  const selectedEntries = useMemo(
+    () => (audit.data ?? []).filter((e) => selected.has(String(e.id))),
+    [audit.data, selected],
+  );
 
   /**
    * Newest first is the server's order and the page's subtitle promises it, so
@@ -140,6 +242,7 @@ export function AuditPage({ namespace, canAdmin }: { namespace: string; canAdmin
       cellClass: 'mono audit-narrow',
       cell: (e) => <AuditDetail detail={e.detail} />,
     },
+    {key:'actions',header:'Actions',cell:e=><div className="cell-actions"><RowDetails label={`View audit entry ${e.id}`} value={e}/><RowAction label={`Export audit entry ${e.id}`} icon="export" onAction={()=>downloadCsv(toCsv([AUDIT_CSV_HEADER,auditRow(e)]),`audit-${e.id}.csv`)}/></div>},
   ];
 
   if (!canAdmin) {
@@ -164,7 +267,7 @@ export function AuditPage({ namespace, canAdmin }: { namespace: string; canAdmin
 
       <div className="panel">
         <div className="panel-head">
-          <span>events</span>
+          <span>Events</span><div className="panel-head-controls" ref={setTableControls} />
         </div>
         {/* The SERVER-side filters, and they live OUTSIDE <AsyncPanel> on
             purpose — the one structural change this refactor makes to the page.
@@ -232,16 +335,61 @@ export function AuditPage({ namespace, canAdmin }: { namespace: string; canAdmin
           }
         >
           {(entries) => (
-            <DataTable
+            <>
+              {/*
+                EXPORT, and nothing else. The audit trail is append-only by
+                design — there is no delete or edit endpoint for an entry and
+                there must not be, because a log an admin can prune is not
+                evidence. So the one bulk operation that exists here is taking
+                rows OUT: a reviewer assembling an incident timeline selects the
+                relevant entries and gets a file to attach to the report.
+
+                Not destructive, so no confirmation: it writes a file and
+                changes nothing on the server.
+
+                It is a local operation rather than N requests, so `run` is
+                called per row only to satisfy the bar's contract — the file is
+                built once, below, from the selection.
+              */}
+              <BulkActionBar<AuditEntry>
+                selected={selectedEntries}
+                rowId={(e) => String(e.id)}
+                rowLabel={(e) => `${e.action} · ${fmtTs(e.occurred_at)}`}
+                noun={['entry', 'entries']}
+                actions={[
+                  {
+                    verb: 'Export',
+                    run: async () => {
+                      /* No-op per row. The download happens once in onDone:
+                         firing it per row would hand the operator N files. */
+                    },
+                  },
+                ]}
+                onClear={() => setSelected(new Set())}
+                onDone={(outcome_) => {
+                  if (outcome_.failed > 0 || selectedEntries.length === 0) return;
+                  const csv = toCsv([
+                    AUDIT_CSV_HEADER,
+                    ...selectedEntries.map(auditRow),
+                  ]);
+                  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+                  downloadCsv(csv, `nexus-audit-${namespace}-${stamp}.csv`);
+                }}
+              />
+              <DataTable
+              controlsTarget={tableControls}
               rows={entries}
               columns={columns}
               rowKey={(e) => String(e.id)}
               noun="events"
               count={AUDIT_COUNT}
-              /* A trail this long wants bigger pages than the 25 the other
-                 admin tables default to: a review scrolls, and 50 rows is about
-                 what a maximised window shows without one. */
-              defaultPageSize={50}
+              /* 25, the same as every other table in the console. The trail
+                 used to open at 50 on the argument that a review scrolls, but a
+                 page size that differs per table makes "the second page" mean a
+                 different amount of history on each one, and an operator
+                 comparing an audit page against a run page was silently
+                 comparing different-sized windows. One size everywhere; the
+                 rows selector is still there for a reviewer who wants more. */
               /* Local, over the actor and target the SQL filters do not cover.
                  It reaches only the fetched page, which is why it is declared
                  client-side and labelled as such: on a capped 200-row trail an
@@ -253,7 +401,16 @@ export function AuditPage({ namespace, canAdmin }: { namespace: string; canAdmin
               }}
               noMatchTitle="No event on this page matches that text"
               noMatchDetail="This box filters only the entries already fetched. To search the whole trail, use the outcome and action filters above — those run in SQL."
+              /* Every row is selectable: an audit entry is immutable, so there
+                 is no state in which one is not a valid thing to export. */
+              selection={{
+                selected,
+                onChange: setSelected,
+                rowId: (e) => String(e.id),
+                label: (e) => `${e.action} at ${fmtTs(e.occurred_at)}`,
+              }}
             />
+            </>
           )}
         </AsyncPanel>
       </div>

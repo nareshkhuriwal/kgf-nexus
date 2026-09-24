@@ -26,7 +26,8 @@
  * that drift.
  */
 
-import { useMemo } from 'react';
+import { useTaskLayout } from './useTaskLayout';
+import { type SVGProps, useMemo } from 'react';
 import { NODE_H, NODE_W, edgePath, layoutLayers, relatedSet } from '../lib/dag';
 import type { SpecGraph, SpecGraphNode } from '../lib/specgraph';
 import { fmtResources } from '../lib/format';
@@ -46,7 +47,9 @@ export function SpecDagView({
    *  rather than read from the router here, for the same reason as DagView's. */
   exportName?: string;
 }) {
-  const { places, width, height, byId } = useMemo(() => layoutLayers(graph.layers), [graph]);
+  const base = useMemo(() => layoutLayers(graph.layers), [graph]);
+  const taskLayout = useTaskLayout(base.places, `spec:${window.location.pathname}:${exportName ?? 'spec'}`);
+  const { places, width, height, byId } = taskLayout;
 
   if (graph.nodes.length === 0) {
     return (
@@ -111,12 +114,15 @@ export function SpecDagView({
         </div>
       )}
 
+      <div className="dag-layout-note" role="status">{taskLayout.message}</div>
       <DagCanvas
+        viewportHeight={base.height}
+        toolbarExtra={<button type="button" onClick={taskLayout.reset}>Reset layout</button>}
         width={width}
         height={height}
         /* Layer and task counts, not a timestamp: a definition does not change
            under the reader, so the identity is just its shape. */
-        graphKey={`${exportName ?? 'spec'}:${graph.nodes.length}:${graph.edges.length}`}
+        graphKey={`${exportName ?? 'spec'}:${graph.nodes.length}:${graph.edges.length}:${taskLayout.revision}`}
         label={`Workflow dependency graph, ${graph.nodes.length} tasks`}
         exportName={exportName}
         stats={
@@ -191,6 +197,7 @@ export function SpecDagView({
           if (!node) return null;
           return (
             <SpecTaskBox
+              dragBindings={taskLayout.bindings(p.id)}
               key={p.id}
               node={node}
               x={p.x}
@@ -207,6 +214,7 @@ export function SpecDagView({
 }
 
 function SpecTaskBox({
+  dragBindings,
   node,
   x,
   y,
@@ -214,6 +222,7 @@ function SpecTaskBox({
   dimmed,
   onSelect,
 }: {
+  dragBindings: SVGProps<SVGGElement>;
   node: SpecGraphNode;
   x: number;
   y: number;
@@ -228,6 +237,7 @@ function SpecTaskBox({
 
   return (
     <g
+      {...dragBindings}
       transform={`translate(${x},${y})`}
       className={`spec-node-g${dimmed ? ' dimmed' : ''}`}
       onClick={() => onSelect(node.id)}
@@ -252,19 +262,19 @@ function SpecTaskBox({
         className={`spec-node${selected ? ' selected' : ''}${node.isRoot ? ' root' : ''}`}
         width={NODE_W}
         height={NODE_H}
-        rx={6}
+        rx={12}
       />
-      <text className="dag-node-label" x={11} y={20}>
+      <text className="dag-node-label" x={11} y={27}>
         {truncate(node.id, 22)}
       </text>
-      <text className="dag-node-sub" x={11} y={35}>
+      <text className="dag-node-sub" x={11} y={45}>
         {truncate(node.task.task_ref ?? '—', 28)}
       </text>
-      <text className="dag-node-sub" x={11} y={49}>
+      <text className="dag-node-sub" x={11} y={71}>
         {truncate(resources, 20)}
       </text>
       {node.task.queue && (
-        <text className="dag-node-sub" x={NODE_W - 11} y={49} textAnchor="end" fill="var(--tone-queued-fg)">
+        <text className="dag-node-sub" x={NODE_W - 11} y={71} textAnchor="end" fill="var(--tone-queued-fg)">
           {truncate(node.task.queue, 10)}
         </text>
       )}

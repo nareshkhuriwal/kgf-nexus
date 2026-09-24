@@ -1,0 +1,236 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package nexus.rm.v1;
+
+option go_package = "github.com/khuriwalgroup/kgf-nexus/services/resource-manager/gen/nexus/rm/v1;rmv1";
+
+// ClusterControllerService is the in-cluster scaling controller's ONLY path to
+// Nexus state (docs/CLUSTER-SCALING.md).
+//
+// OWNERSHIP (ADR-0011): the resource manager owns the observed-cluster tables
+// (cluster_status, cluster_observations, cluster_scaling_state,
+// cluster_reconcile_errors, cluster_scaling_events) because it already owns the
+// fleet -- `workers` -- that the controller scales. It READS the gateway-owned
+// registry (clusters, cluster_namespace_bindings), platform_config, and the
+// scheduler's leases. The controller holds no database credential at all.
+//
+// Every mutating RPC re-checks, server-side, that the cluster is in apply mode
+// and that its observed identity matches the registry. A buggy or compromised
+// controller therefore cannot drain a worker the registry did not hand it.
+service ClusterControllerService {
+  // Returns the cluster's desired state: mode, identity, bindings and each
+  // binding's pool policy resolved from platform_config.
+  rpc GetAssignment(GetAssignmentRequest) returns (ClusterAssignment);
+
+  // Replaces the observed snapshot for every kind listed in complete_kinds and
+  // records the controller's self-report.
+  rpc ReportObservations(ReportObservationsRequest) returns (ReportObservationsResponse);
+
+  // Queue demand for a pool plus the live worker rows behind the given pod
+  // hostnames, with their lease and reservation counts.
+  rpc GetPoolState(GetPoolStateRequest) returns (PoolState);
+
+  // Moves every ACTIVE worker registered from this pod to DRAINING. Refused
+  // unless the cluster is in apply mode with a verified identity.
+  rpc DrainPod(DrainPodRequest) returns (DrainPodResponse);
+
+  // A FRESH check, made immediately before removing capacity: removable only if
+  // no worker from this pod is ACTIVE/QUARANTINED and none holds a lease or a
+  // reservation.
+  rpc CheckPodRemovable(CheckPodRemovableRequest) returns (CheckPodRemovableResponse);
+
+  // Appends a scaling event and updates the persisted cooldown/idle state.
+  rpc RecordScaling(RecordScalingRequest) returns (RecordScalingResponse);
+
+  rpc ReportReconcileError(ReportReconcileErrorRequest) returns (ReportReconcileErrorResponse);
+}
+
+message GetAssignmentRequest { string cluster_name = 1; }
+
+message ClusterAssignment {
+  string cluster_id = 1;
+  string cluster_name = 2;
+  string namespace = 3;
+  string provider = 4;
+  string provider_resource_id = 5;
+  string expected_cluster_uid = 6;
+  string control_plane_namespace = 7;
+  // "plan" or "apply" as registered. The controller may run narrower.
+  string mode = 8;
+  int64 desired_revision = 9;
+  repeated PoolBinding bindings = 10;
+}
+
+message PoolBinding {
+  string namespace = 1;
+  string kubernetes_namespace = 2;
+  string worker_deployment = 3;
+  string pool = 4;
+  string queue = 5;
+  bool enabled = 6;
+  int32 min_workers = 7;
+  // Already the smaller of the pool policy and the registry ceiling.
+  int32 max_workers = 8;
+  int32 tasks_per_worker = 9;
+  int32 idle_seconds = 10;
+  int32 max_scale_up_step = 11;
+  int32 max_scale_down_step = 12;
+  int32 scale_up_cooldown_seconds = 13;
+  int32 scale_down_cooldown_seconds = 14;
+  int64 profile_cpu_millis = 15;
+  int64 profile_memory_mib = 16;
+  int32 profile_gpu_count = 17;
+  int64 platform_revision = 18;
+  // Persisted controller memory (cluster_scaling_state). 0 = never / not idle.
+  int64 last_scale_at_unix_ms = 19;
+  string last_scale_direction = 20;
+  int64 idle_since_unix_ms = 21;
+  // Non-empty when the binding cannot be reconciled (unknown pool, missing
+  // profile). The controller reports it and leaves the Deployment alone.
+  string config_error = 22;
+}
+
+message ObservedObject {
+  // SchedulerDeployment | WorkerDeployment | Deployment | Node | Job | HorizontalPodAutoscaler
+  string kind = 1;
+  string namespace = 2;
+  string name = 3;
+  string uid = 4;
+  int64 generation = 5;
+  int64 observed_generation = 6;
+  // -1 = not applicable to this kind.
+  int32 spec_replicas = 7;
+  int32 ready_replicas = 8;
+  bool ready = 9;
+  string resource_version = 10;
+  // Bounded JSON summary; the server rejects anything over 8 KiB.
+  string summary_json = 11;
+  int64 created_at_unix_ms = 12;
+}
+
+message ReportObservationsRequest {
+  string cluster_id = 1;
+  string controller_identity = 2;
+  string observed_cluster_uid = 3;
+  string kubernetes_version = 4;
+  // The desired_revision this report reflects a complete reconcile of; 0 when
+  // the cycle did not complete.
+  int64 observed_revision = 5;
+  string effective_mode = 6;
+  string effective_mode_reason = 7;
+  // Kinds whose list succeeded in full. Only these are replaced; a kind whose
+  // list failed keeps its previous rows rather than being reported as empty,
+  // because "no Nodes" and "could not list Nodes" must never look the same.
+  repeated string complete_kinds = 8;
+  repeated ObservedObject objects = 9;
+  string last_error = 10;
+}
+
+message ReportObservationsResponse { int64 desired_revision = 1; }
+
+message GetPoolStateRequest {
+  string cluster_id = 1;
+  string namespace = 2;
+  string pool = 3;
+  repeated string hostnames = 4;
+}
+
+message Demand {
+  int32 pending_tasks = 1;
+  int32 running_tasks = 2;
+  int64 cpu_millis = 3;
+  int64 memory_mib = 4;
+  int32 gpu_count = 5;
+  int32 unschedulable_tasks = 6;
+  int32 current_workers = 7;
+}
+
+message PodWorkers {
+  string hostname = 1;
+  // Live (non-DEAD) worker rows registered from this pod. More than one is
+  // normal for a moment after an agent restarts inside the same pod.
+  int32 active = 2;
+  int32 draining = 3;
+  int32 quarantined = 4;
+  // Across EVERY row for this hostname, DEAD included: a lease the liveness
+  // sweep has not yet expired still means work may be running there.
+  int32 lease_count = 5;
+  int32 reservation_count = 6;
+  int64 last_heartbeat_unix_ms = 7;
+}
+
+message PoolState {
+  Demand demand = 1;
+  repeated PodWorkers pods = 2;
+}
+
+message DrainPodRequest {
+  string cluster_id = 1;
+  string namespace = 2;
+  string hostname = 3;
+  string reason = 4;
+  string actor = 5;
+  // The kube-system UID the controller observes right now.
+  string observed_cluster_uid = 6;
+  // The bound Deployment the pod belongs to; refused unless it is bound.
+  string kubernetes_namespace = 7;
+  string worker_deployment = 8;
+}
+
+message DrainPodResponse {
+  int32 drained = 1;
+  int32 already_draining = 2;
+}
+
+message CheckPodRemovableRequest {
+  string cluster_id = 1;
+  string namespace = 2;
+  string hostname = 3;
+}
+
+message CheckPodRemovableResponse {
+  bool removable = 1;
+  string reason = 2;
+  PodWorkers workers = 3;
+}
+
+message RecordScalingRequest {
+  string cluster_id = 1;
+  string kubernetes_namespace = 2;
+  string worker_deployment = 3;
+  // plan | scale_out | drain | scale_in | hold | refused. Empty = state only.
+  string action = 4;
+  string mode = 5;
+  bool applied = 6;
+  int32 from_replicas = 7;
+  int32 to_replicas = 8;
+  string reason = 9;
+  string actor = 10;
+  string detail_json = 11;
+  // When set, last_scale_at := now and last_scale_direction := this ("out"/"in").
+  string scaled_direction = 12;
+  // idle_since bookkeeping: SET stores idle_since_unix_ms, CLEAR nulls it.
+  enum IdleUpdate {
+    IDLE_UPDATE_UNSPECIFIED = 0;
+    IDLE_UPDATE_SET = 1;
+    IDLE_UPDATE_CLEAR = 2;
+  }
+  IdleUpdate idle_update = 13;
+  int64 idle_since_unix_ms = 14;
+  int64 observed_platform_revision = 15;
+  string decision_json = 16;
+}
+
+message RecordScalingResponse {}
+
+message ReportReconcileErrorRequest {
+  string cluster_id = 1;
+  string target = 2;
+  string message = 3;
+  string actor = 4;
+}
+
+message ReportReconcileErrorResponse {}

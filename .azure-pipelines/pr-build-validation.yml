@@ -1,0 +1,643 @@
+# PR Build Validation Pipeline for KGF Nexus
+# Triggers on pull requests to the default branch.
+# Runs the verification suite before the image build, and fails if any check fails.
+#
+# Stages:
+#   UnitTest          go build, go vet, `go test -race` with JUnit and coverage
+#                     reporting, the SPDX header check, and the generated-file
+#                     git diff. This is the mandatory gate.
+#   Integration       migrations applied to a throwaway PostgreSQL, then
+#                     `go test -tags integration`, with a guard that fails when
+#                     the suites SKIPPED. Off by default (see runIntegration).
+#   UserInterface     npm ci, vitest and the production build. Off by default.
+#   BuildValidation   one job per image; built, never pushed.
+#   EndToEnd          the real compose stack, every example run to SUCCEEDED,
+#                     and the chaos suite. Off by default; ~45 minutes.
+#   QualityGate       summary once the enabled stages succeed.
+#
+# On the three stages that default to false: each needs something the agent may
+# not have -- a PostgreSQL the agent can reach, a registry-reachable Docker for
+# the full compose stack, ~45 minutes of agent time. Turning one on is a one-word
+# edit to its parameter default, or a checkbox at queue time. They are written
+# out in full so that turning one on is a decision, not an authoring job.
+
+# Runs on pull requests AND on main.
+#
+# The main-branch run is what the release pipeline waits for: it declares this
+# pipeline as a `resources: pipelines:` source, so the release only starts once
+# these checks have passed on the merged commit. With `trigger: none` this
+# pipeline never ran on main at all, so that dependency could never be
+# satisfied and the release would simply never fire.
+#
+# The same paths are excluded from both: a docs-only commit should not occupy
+# an agent building ten images.
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - "docs/**"
+      - "**/*.md"
+
+pr:
+  branches:
+    include:
+      - main
+      - f61-multi-queue-dispatch   # the current integration branch
+  paths:
+    exclude:
+      - ".azure-pipelines/kgf-nexus-release.yml"  # Don't trigger on release pipeline changes
+      - "docs/**"
+      - "**/*.md"
+
+parameters:
+  # Each of these costs agent time or needs a service the agent may not have.
+  # See the note at the top of the file.
+  - name: runIntegration
+    displayName: 'Run the PostgreSQL integration suite'
+    type: boolean
+    default: false
+  - name: runUserInterface
+    displayName: 'Run the operator console tests and build'
+    type: boolean
+    default: false
+  - name: runEndToEnd
+    displayName: 'Run the examples and chaos suite (~45 min)'
+    type: boolean
+    default: false
+
+variables:
+  - name: dockerImageTag
+    value: 'pr-$(Build.BuildId)'
+  - name: CI
+    value: 'true'
+  # CI pins the toolchain rather than following the older minimum language
+  # version in go.mod, so what the gate accepts does not change under it when a
+  # new Go is released.
+  - name: GO_VERSION
+    value: '1.25'
+  # The operator console's Dockerfile builds on node:20-alpine. Keeping the
+  # agent's Node on the same major means a lockfile that resolves here resolves
+  # in the image too.
+  - name: NODE_VERSION
+    value: '20'
+  # The throwaway database the integration stage runs against. Not a secret:
+  # it is created and destroyed inside the job and is never reachable off the
+  # agent. Deliberately the same credentials as deploy/docker-compose.yml, which
+  # marks them DEV ONLY.
+  - name: PG_IMAGE
+    value: 'postgres:16-alpine'
+  # No fixed host port. `docker run -P` lets the kernel allocate an unused one
+  # and the job reads it back, because a hardcoded port is a hard collision the
+  # moment two runs share an agent pool: the second `docker run -p 55434:5432`
+  # fails to bind and the stage dies before a single test runs. The port is
+  # published (not just container-internal) because `make migrate-up` shells out
+  # to psql on the AGENT, not inside the container.
+  # Deliberately OUTSIDE $(Pipeline.Workspace): Go marks every file in the module
+  # cache read-only, and `workspace: clean: all` cannot delete those, which fails
+  # the job before any step runs. $(Agent.ToolsDirectory) is not cleaned between
+  # jobs, so the cache also survives to be reused.
+  - name: GOMODCACHE
+    value: '$(Agent.ToolsDirectory)/go-mod-cache'
+
+  # Test reports are written OUTSIDE the source tree, so the generated-file
+  # synchronisation check (git diff --exit-code) does not see them.
+  - name: reportDir
+    value: '$(Build.ArtifactStagingDirectory)/test-results'
+
+pool:
+  # Self-hosted agents have Docker and Python 3. The pool name is fixed here
+  # because a template expression is not allowed in a pipeline-level pool block.
+  name: Default
+
+stages:
+- stage: UnitTest
+  displayName: 'Unit Tests & Code Quality'
+  jobs:
+  - job: RunUnitTests
+    displayName: 'Execute Unit Tests'
+    timeoutInMinutes: 30
+    workspace:
+      clean: all
+    steps:
+    - checkout: self
+      persistCredentials: false
+
+    - task: GoTool@0
+      displayName: 'Install Go'
+      inputs:
+        version: $(GO_VERSION)
+
+    - script: |
+        echo "=== Toolchain Version Check ==="
+        go version
+        python3 --version
+        docker --version
+      displayName: 'Check Toolchain Versions'
+
+    # NOT under $(Pipeline.Workspace). Go makes every file in its module cache
+    # READ-ONLY, and every job here declares `workspace: clean: all` -- so with
+    # the cache inside the workspace the agent cannot delete it, and the job
+    # fails in under a second at "Prepare build directory" with
+    #
+    #   Access to the path '.../.cache/go-mod/github.com/...' is denied
+    #
+    # before a single step runs. $(Agent.ToolsDirectory) survives the clean,
+    # which is the whole point of caching the modules at all.
+    - task: Cache@2
+      displayName: 'Cache Go modules'
+      inputs:
+        key: 'go | "$(Agent.OS)" | go.sum'
+        restoreKeys: |
+          go | "$(Agent.OS)"
+        path: $(GOMODCACHE)
+
+    - script: |
+        set -euo pipefail
+        echo "=== Installing Locked Dependencies ==="
+        # An environment variable for THIS process tree, not `go env -w`, which
+        # writes the agent's global Go config and would silently redirect the
+        # module cache for every other pipeline and every manual build on this
+        # machine long after this run finished.
+        export GOMODCACHE='$(GOMODCACHE)'
+        mkdir -p "$GOMODCACHE"
+        go env GOMODCACHE
+        go mod download
+        # verify checks the downloaded modules against go.sum: it is what turns
+        # a tampered module cache into a failure rather than a silent build.
+        go mod verify
+        echo "✅ Dependencies installed successfully"
+      displayName: 'Install Dependencies'
+
+    - script: |
+        set -euo pipefail
+        echo "=== Build every package ==="
+        go build ./...
+      displayName: 'Build (go build ./...)'
+
+    - script: |
+        set -euo pipefail
+        echo "=== Vet every package ==="
+        go vet ./...
+      displayName: 'Vet (go vet ./...)'
+
+    - script: |
+        set -euo pipefail
+        mkdir -p "$(reportDir)"
+        echo "=== Running Go Race Tests With Coverage ==="
+        # No -tags: the integration and chaos suites are tagged out on purpose,
+        # so this stays a pure unit run that needs no services. They have their
+        # own stages below.
+        #
+        # The pipe means `go test`'s own exit code is not the one the shell
+        # reports, so -set-exit-code on the report writer is what actually fails
+        # this step. pipefail covers the rest.
+        go test -race -covermode=atomic -coverprofile="$(reportDir)/go-coverage.out" -json ./... 2>&1 \
+          | tee "$(reportDir)/go-test.json" \
+          | go run github.com/jstemmer/go-junit-report/v2@v2.1.0 -parser gojson -set-exit-code -out "$(reportDir)/go-junit.xml"
+      displayName: 'Execute Go Unit Tests (go test -race)'
+      continueOnError: false  # Critical: the pipeline fails if tests fail.
+
+    - script: |
+        set -euo pipefail
+        go run github.com/boumenot/gocover-cobertura@v1.5.0 < "$(reportDir)/go-coverage.out" > "$(reportDir)/go-coverage.xml"
+        echo "✅ Coverage report converted to Cobertura format"
+      displayName: 'Convert Go Coverage Report'
+      condition: succeededOrFailed()
+
+    - script: |
+        set -euo pipefail
+        echo "=== SPDX Headers ==="
+        # Every first-party source file carries an SPDX identifier. Generated
+        # code under gen/ is exempt; the target knows that.
+        make license-check
+      displayName: 'Assert SPDX Headers (make license-check)'
+
+    - script: |
+        set -euo pipefail
+        echo "=== Generated Files Stay Synchronized ==="
+        # Catches a hand-edited gen/ file, or a proto change committed without
+        # `make proto`. Reports are written outside the tree, so a clean tree
+        # here means the committed generated code matches its source.
+        git diff --exit-code
+      displayName: 'Verify Generated Files Stay Synchronized'
+
+    - task: PublishTestResults@2
+      condition: succeededOrFailed()  # Publish results even if tests fail.
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '*-junit.xml'
+        searchFolder: '$(reportDir)'
+        testRunTitle: 'KGF Nexus Unit Tests (PR Validation)'
+        mergeTestResults: true
+      displayName: 'Publish Test Results'
+
+    - task: PublishCodeCoverageResults@2
+      condition: succeededOrFailed()
+      inputs:
+        summaryFileLocation: '$(reportDir)/go-coverage.xml'
+        failIfCoverageEmpty: false
+      displayName: 'Publish Code Coverage'
+
+- ${{ if parameters.runIntegration }}:
+  - stage: Integration
+    displayName: 'PostgreSQL Integration'
+    dependsOn: []   # Independent of the unit run: a broken migration should be
+                    # visible without waiting for it.
+    jobs:
+    - job: RunIntegration
+      displayName: 'Migrations and Integration Suite'
+      timeoutInMinutes: 30
+      workspace:
+        clean: all
+      variables:
+        # Both spellings, deliberately. Two conventions coexist in the tree --
+        # the scheduler harness reads NEXUS_TEST_DSN, while internal/store,
+        # resource-manager and the schedules package read
+        # NEXUS_TEST_DATABASE_URL -- and every one of these suites SKIPS rather
+        # than fails when its variable is unset. Setting only one leaves four
+        # packages quietly not running, which looks exactly like passing.
+        # Deliberately NOT set here: the host port is not known until the
+        # container is running, and a job-level variable is fixed at compile
+        # time. The 'Start Throwaway PostgreSQL' step sets DSN with
+        # ##vso[task.setvariable], so every later step reads $(DSN) as usual.
+        PGDATABASE: 'nexus'
+      steps:
+      - checkout: self
+        persistCredentials: false
+
+      - task: GoTool@0
+        displayName: 'Install Go'
+        inputs:
+          version: $(GO_VERSION)
+
+      - script: |
+          set -euo pipefail
+          echo "=== Start a throwaway PostgreSQL ==="
+          docker rm -f nexus-ci-pg-$(Build.BuildId) >/dev/null 2>&1 || true
+          # -P, not -p <fixed>:5432: the kernel picks a free ephemeral port, so
+          # two concurrent runs on the same agent pool cannot fight over one.
+          docker run -d --name nexus-ci-pg-$(Build.BuildId) \
+            -e POSTGRES_USER=nexus \
+            -e POSTGRES_PASSWORD=nexus-dev-password \
+            -e POSTGRES_DB=nexus \
+            -P \
+            $(PG_IMAGE)
+
+          # Read back whatever the kernel assigned. `docker port` prints e.g.
+          # "0.0.0.0:49154" and may print one line per address family, so take
+          # the first and keep only what follows the last colon.
+          PG_PORT=$(docker port nexus-ci-pg-$(Build.BuildId) 5432/tcp | head -1 | sed 's/.*://')
+          if [ -z "${PG_PORT:-}" ]; then
+            echo "could not determine the published port for 5432/tcp" >&2
+            docker port nexus-ci-pg-$(Build.BuildId) >&2
+            exit 1
+          fi
+          echo "PostgreSQL published on host port $PG_PORT"
+
+          # Every later step in this job reads $(DSN); this is where it is born.
+          DSN="postgres://nexus:nexus-dev-password@localhost:$PG_PORT/nexus?sslmode=disable"
+          echo "##vso[task.setvariable variable=PG_PORT]$PG_PORT"
+          echo "##vso[task.setvariable variable=DSN]$DSN"
+
+          # -d nexus matters: pg_isready with no database succeeds while the
+          # initdb bootstrap database is still being replaced, so a migration
+          # can start against a database that is about to be dropped.
+          for _ in $(seq 1 60); do
+            if docker exec nexus-ci-pg-$(Build.BuildId) pg_isready -U nexus -d nexus >/dev/null 2>&1; then
+              echo "✅ PostgreSQL is accepting connections"; exit 0
+            fi
+            sleep 2
+          done
+          echo "PostgreSQL never became ready" >&2
+          docker logs --tail=50 nexus-ci-pg-$(Build.BuildId) >&2
+          exit 1
+        displayName: 'Start Throwaway PostgreSQL'
+
+      - script: |
+          set -euo pipefail
+          echo "=== Apply Migrations ==="
+          # Applied by a job, never by a service at startup (ADR-0011 rule 4).
+          # This is that job.
+          make migrate-up DATABASE_URL='$(DSN)'
+        displayName: 'Apply Migrations (make migrate-up)'
+
+      - script: |
+          set -euo pipefail
+          echo "=== Integration Suite ==="
+          go test -tags integration -count=1 ./...
+        displayName: 'Run Integration Suite'
+        env:
+          NEXUS_TEST_DSN: $(DSN)
+          NEXUS_TEST_DATABASE_URL: $(DSN)
+
+      - script: |
+          set -euo pipefail
+          echo "=== Prove the Integration Suite Actually Ran ==="
+          # A skip is indistinguishable from a pass in `go test` output, and
+          # these are the suites that exercise real SQL. Fail loudly if the
+          # database was not reachable, rather than shipping a green tick that
+          # proved nothing.
+          out=$(go test -tags integration -count=1 -v ./internal/store/ 2>&1)
+          if grep -q "skipping integration test" <<<"$out"; then
+            echo "integration tests SKIPPED -- the database was not reachable" >&2
+            grep "skipping integration test" <<<"$out" >&2
+            exit 1
+          fi
+          echo "✅ integration tests ran against a real database"
+        displayName: 'Fail if Integration Tests Skipped'
+        env:
+          NEXUS_TEST_DSN: $(DSN)
+          NEXUS_TEST_DATABASE_URL: $(DSN)
+
+      - script: |
+          docker rm -f nexus-ci-pg-$(Build.BuildId) >/dev/null 2>&1 || true
+          echo "Throwaway PostgreSQL removed"
+        displayName: 'Stop Throwaway PostgreSQL'
+        condition: always()
+
+- ${{ if parameters.runUserInterface }}:
+  - stage: UserInterface
+    displayName: 'Operator Console'
+    dependsOn: []
+    jobs:
+    - job: RunUiTests
+      displayName: 'Console Tests and Production Build'
+      timeoutInMinutes: 20
+      workspace:
+        clean: all
+      steps:
+      - checkout: self
+        persistCredentials: false
+
+      - task: NodeTool@0
+        displayName: 'Install Node'
+        inputs:
+          versionSpec: $(NODE_VERSION)
+
+      - task: Cache@2
+        displayName: 'Cache npm'
+        inputs:
+          key: 'npm | "$(Agent.OS)" | ui/package-lock.json'
+          restoreKeys: |
+            npm | "$(Agent.OS)"
+          path: $(Pipeline.Workspace)/.npm
+
+      - script: |
+          set -euo pipefail
+          npm config set cache $(Pipeline.Workspace)/.npm
+          # ci, not install: it installs exactly the lockfile and fails when
+          # package.json and the lockfile disagree, which `npm install` would
+          # quietly fix in the workspace and not in the commit.
+          npm --prefix ui ci
+        displayName: 'Install Console Dependencies (npm ci)'
+
+      - script: |
+          set -euo pipefail
+          npm --prefix ui test
+        displayName: 'Console Component Tests (vitest)'
+
+      - script: |
+          set -euo pipefail
+          # `build` is `tsc -b && vite build`, so this is the typecheck too.
+          npm --prefix ui run build
+        displayName: 'Console Production Build'
+
+- stage: BuildValidation
+  displayName: 'Docker Build Validation'
+  dependsOn: UnitTest
+  condition: succeeded('UnitTest')  # Only run if the unit gate passed.
+  jobs:
+  # The image set and the loop live in templates/images.yml, so the gate and the
+  # release cannot build different sets. push: false means the registry steps
+  # are never emitted and no service connection is referenced anywhere in this
+  # pipeline -- which is also why a PR from a fork cannot acquire credentials.
+  - template: templates/images.yml
+    parameters:
+      acrLoginServer: 'localhost'
+      imageTag: $(dockerImageTag)
+      push: false
+      timeoutInMinutes: 25
+      # The agent is shared and nothing pushed these anywhere, so the tag this
+      # job created is removed rather than left to accumulate across runs.
+      # Keyed on the build id, so a concurrent run's images are untouched.
+      postBuildSteps:
+        - script: |
+            docker image prune -f --filter "label=stage=build" >/dev/null 2>&1 || true
+            docker images --format '{{.Repository}}:{{.Tag}}' \
+              | grep "^localhost/nexus/.*:$(dockerImageTag)$" \
+              | xargs -r docker rmi || true
+            echo "✅ image built and the local tag cleaned up; PR validation does not push"
+          displayName: 'Summary and Local Image Cleanup'
+          condition: always()
+
+- ${{ if parameters.runEndToEnd }}:
+  - stage: EndToEnd
+    displayName: 'Examples and Chaos Suite'
+    dependsOn: BuildValidation
+    condition: succeeded('BuildValidation')
+    jobs:
+    - job: RunEndToEnd
+      displayName: 'Run Every Example and Kill Workers Mid-Task'
+      # Generous: this builds every service image before it can run anything.
+      timeoutInMinutes: 60
+      workspace:
+        clean: all
+      variables:
+        # ── Why this job is namespaced per run ────────────────────────────
+        # deploy/docker-compose.yml pins `name: nexus`, so every run of this
+        # stage would otherwise drive THE SAME stack: two concurrent builds
+        # would share one set of containers, and whichever finished first would
+        # run `make down -v` underneath the other -- destroying its database
+        # mid-test. The failure looks like a flaky chaos suite, not a
+        # collision, which is the worst kind of CI bug to chase.
+        #
+        # COMPOSE_PROJECT_NAME namespaces containers, networks AND volumes, so
+        # each run gets its own stack and its own `down -v`. The chaos suite
+        # reads this same variable to build its container-name prefix.
+        COMPOSE_PROJECT_NAME: 'nexus-ci-$(Build.BuildId)'
+        # Namespacing containers is not enough: published host ports are a
+        # single machine-wide resource, so the compose defaults (3000, 8090,
+        # 9091, 55433, 9010, 9011) collide even between namespaced stacks.
+        # Every one of these is an override compose already honours, and the
+        # 'Allocate Host Ports' step below picks a free block and sets them.
+        # Not computed here: pipeline expressions have no arithmetic, and a
+        # port derived from the build id can still be occupied by something
+        # else on a long-lived self-hosted agent. Only a bind test proves free.
+      steps:
+      - checkout: self
+        persistCredentials: false
+
+      - task: GoTool@0
+        displayName: 'Install Go'
+        inputs:
+          version: $(GO_VERSION)
+
+      - script: |
+          set -euo pipefail
+          echo "=== Allocate a Free Block of Host Ports ==="
+          # Ask the kernel for six ports nothing is listening on, rather than
+          # deriving them from the build id: this agent is self-hosted and
+          # long-lived, so a developer's own stack, a leaked container from an
+          # earlier run, or the other agent on this machine may already hold
+          # any given port. Python's bind-to-0 asks the kernel for one it knows
+          # is free, and SO_REUSEADDR lets compose take it immediately after.
+          read -r UI API GRPC PG MINIO MINIO_CONSOLE <<<"$(python3 - <<'PY'
+          import socket
+          ports = []
+          socks = []
+          for _ in range(6):
+              s = socket.socket()
+              s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+              s.bind(("127.0.0.1", 0))
+              ports.append(s.getsockname()[1])
+              socks.append(s)   # held open until every port is chosen, so the
+                                # kernel cannot hand out the same one twice
+          for s in socks:
+              s.close()
+          print(" ".join(map(str, ports)))
+          PY
+          )"
+          for name in UI API GRPC PG MINIO MINIO_CONSOLE; do
+            [ -n "${!name:-}" ] || { echo "failed to allocate a port for $name" >&2; exit 1; }
+          done
+          echo "UI=$UI API=$API GRPC=$GRPC PG=$PG MINIO=$MINIO CONSOLE=$MINIO_CONSOLE"
+
+          # The names compose reads (see deploy/docker-compose.yml `ports:`).
+          echo "##vso[task.setvariable variable=NEXUS_UI_PORT]$UI"
+          echo "##vso[task.setvariable variable=NEXUS_API_PORT]$API"
+          echo "##vso[task.setvariable variable=NEXUS_GRPC_PORT]$GRPC"
+          echo "##vso[task.setvariable variable=NEXUS_POSTGRES_PORT]$PG"
+          echo "##vso[task.setvariable variable=NEXUS_MINIO_PORT]$MINIO"
+          echo "##vso[task.setvariable variable=NEXUS_MINIO_CONSOLE_PORT]$MINIO_CONSOLE"
+        displayName: 'Allocate Host Ports'
+
+      - script: |
+          set -euo pipefail
+          echo "=== Bring Up the Full Stack ==="
+          echo "compose project: $COMPOSE_PROJECT_NAME"
+          make up
+        displayName: 'Bring Up the Stack (make up)'
+        env:
+          # Exported so compose substitutes them into its `ports:` defaults.
+          NEXUS_UI_PORT: $(NEXUS_UI_PORT)
+          NEXUS_API_PORT: $(NEXUS_API_PORT)
+          NEXUS_GRPC_PORT: $(NEXUS_GRPC_PORT)
+          NEXUS_POSTGRES_PORT: $(NEXUS_POSTGRES_PORT)
+          NEXUS_MINIO_PORT: $(NEXUS_MINIO_PORT)
+          NEXUS_MINIO_CONSOLE_PORT: $(NEXUS_MINIO_CONSOLE_PORT)
+
+      - script: |
+          set -euo pipefail
+          echo "=== Seed an Admin API Key ==="
+          KEY="nxs_admin_$(openssl rand -hex 32)"
+          HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
+          # Only the SHA-256 hash is stored, matching how the gateway verifies
+          # it: a plaintext key in the database would defeat hashing at rest
+          # even in a throwaway stack.
+          docker compose -f deploy/docker-compose.yml exec -T postgres \
+            psql -U nexus -d nexus -v ON_ERROR_STOP=1 -q -c \
+            "INSERT INTO api_keys (namespace, name, key_hash, role)
+             VALUES ('default','ci-admin','$HASH','admin')
+             ON CONFLICT (key_hash) DO NOTHING"
+          # Masked so a re-read of the log cannot leak it, even though it is
+          # scoped to a stack that is destroyed at the end of this job.
+          echo "##vso[task.setvariable variable=NEXUS_API_KEY;issecret=true]$KEY"
+        displayName: 'Seed an API Key'
+
+      - script: |
+          set -euo pipefail
+          echo "=== Wait for the Fleet to Register ==="
+          # The examples need workers. Without this wait the suite fails with a
+          # scheduling timeout that says nothing about the actual cause.
+          for _ in $(seq 1 60); do
+            n=$(docker compose -f deploy/docker-compose.yml exec -T postgres \
+                  psql -U nexus -d nexus -tAc \
+                  "SELECT count(*) FROM workers WHERE state='ACTIVE'" | tr -d ' \r')
+            [ "${n:-0}" -ge 3 ] && { echo "✅ $n workers registered"; exit 0; }
+            sleep 5
+          done
+          echo "workers never registered; the examples cannot run" >&2
+          docker compose -f deploy/docker-compose.yml logs --tail=50 agent-cpu >&2
+          exit 1
+        displayName: 'Wait for the Fleet to Register'
+
+      - script: |
+          set -euo pipefail
+          echo "=== Examples and Chaos Suite ==="
+          # Phase 1 exit criteria 1, 2 and 3 in one suite: every committed
+          # example run to SUCCEEDED, a worker SIGKILLed mid-task, and three
+          # scheduler replicas raced -- asserting exactly one logical effect.
+          make chaos
+        displayName: 'Run Examples and Chaos Suite (make chaos)'
+        env:
+          # The allocated port, NOT the compose default 8090: this job publishes
+          # the gateway on whatever 'Allocate Host Ports' obtained, so a
+          # hardcoded 8090 would point the suite at another run's stack, or at
+          # nothing at all.
+          NEXUS_ENDPOINT: http://localhost:$(NEXUS_API_PORT)
+          NEXUS_API_KEY: $(NEXUS_API_KEY)
+
+      # Logs are worth far more than the exit code when this fails: the whole
+      # point of the suite is that the interesting evidence lives in the
+      # services, not in the test output.
+      - script: |
+          docker compose -f deploy/docker-compose.yml logs --tail=200
+        displayName: 'Dump Service Logs on Failure'
+        condition: failed()
+
+      - script: |
+          # COMPOSE_PROJECT_NAME is a job variable, so it is already exported
+          # here and `make down` destroys THIS run's stack, not another run's.
+          # Echoed because a teardown that silently targets the wrong project
+          # is the one failure mode that would be invisible in the log.
+          echo "tearing down compose project: ${COMPOSE_PROJECT_NAME:-<unset>}"
+          test -n "${COMPOSE_PROJECT_NAME:-}" || echo "WARNING: COMPOSE_PROJECT_NAME is unset; this would target the default 'nexus' stack" >&2
+          make down || true
+          echo "Stack torn down"
+        displayName: 'Tear Down the Stack (make down)'
+        condition: always()
+
+- stage: QualityGate
+  displayName: 'PR Quality Gate'
+  dependsOn:
+    - UnitTest
+    - ${{ if parameters.runIntegration }}:
+      - Integration
+    - ${{ if parameters.runUserInterface }}:
+      - UserInterface
+    - BuildValidation
+    - ${{ if parameters.runEndToEnd }}:
+      - EndToEnd
+  condition: succeeded()
+  jobs:
+  - job: QualityGateValidation
+    displayName: 'Final Quality Validation'
+    steps:
+    - checkout: none
+    - script: |
+        echo "=== PR Quality Gate Results ==="
+        echo "✅ go build and go vet passed over the whole module"
+        echo "✅ Go race tests passed; JUnit and coverage reports published"
+        echo "✅ Every first-party source file carries an SPDX identifier"
+        echo "✅ Generated files are synchronized with their sources"
+        echo "✅ Every image builds without errors"
+        echo "${{ parameters.runIntegration }}" | grep -qi true \
+          && echo "✅ Migrations applied and the integration suite ran against a real database" \
+          || echo "⏭️  PostgreSQL integration suite not run (runIntegration is false)"
+        echo "${{ parameters.runUserInterface }}" | grep -qi true \
+          && echo "✅ Operator console tests and production build passed" \
+          || echo "⏭️  Operator console not built (runUserInterface is false)"
+        echo "${{ parameters.runEndToEnd }}" | grep -qi true \
+          && echo "✅ Every example ran to SUCCEEDED and the chaos suite held" \
+          || echo "⏭️  Examples and chaos suite not run (runEndToEnd is false)"
+        echo ""
+        echo "🎉 PR is ready for review and merge!"
+        echo ""
+        echo "=== Next Steps ==="
+        echo "• Review code changes in the PR"
+        echo "• Merge the PR to trigger the kgf-nexus release pipeline"
+        echo "• The release pipeline builds every image and pushes it to ACR,"
+        echo "  digest-pinned, and publishes the digest map as an artifact"
+      displayName: 'Quality Gate Summary'

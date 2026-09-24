@@ -14,6 +14,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { WithPermissions } from '../test/permissions';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -32,11 +33,11 @@ function wrap(path = `/workers/${WORKER_ID}`) {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[path]}>
+      <WithPermissions><MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/workers/:workerId" element={<WorkerDetailPage namespace="default" />} />
         </Routes>
-      </MemoryRouter>
+      </MemoryRouter></WithPermissions>
     </QueryClientProvider>,
   );
 }
@@ -183,7 +184,7 @@ describe('the tasks running on a worker', () => {
     wrap();
 
     await screen.findByText('ml.train:v2');
-    expect(screen.getByRole('link', { name: /worker fleet/i })).toHaveAttribute('href', '/workers');
+    expect(screen.getByRole('link', { name: /back to workers/i })).toHaveAttribute('href', '/workers');
   });
 });
 
@@ -338,7 +339,7 @@ describe('failure and compatibility', () => {
 
     const err = await screen.findByRole('alert');
     expect(err).toHaveTextContent(/Could not load worker/i);
-    expect(screen.getByRole('link', { name: /worker fleet/i })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /back to workers/i })).toBeInTheDocument();
   });
 
   /**

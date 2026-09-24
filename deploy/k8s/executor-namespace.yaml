@@ -1,0 +1,22 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Namespace for the Kubernetes executor: the in-cluster agent AND the task
+# Jobs it creates live here (see agent-rbac.yaml for why they share one).
+#
+# Pod Security "restricted" is ENFORCED, not merely warned: the executor's pods
+# are built to pass it (non-root, no privilege escalation, all capabilities
+# dropped, seccomp RuntimeDefault), and enforcement means a regression in that
+# spec fails loudly at admission instead of quietly shipping privileged pods.
+# The integration tests run in a namespace with the same labels.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nexus-exec
+  labels:
+    app.kubernetes.io/part-of: nexus
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.34
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

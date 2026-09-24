@@ -20,6 +20,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CommandPalette } from './CommandPalette';
 import type { Command } from '../lib/commands';
+import { WithPermissions } from '../test/permissions';
 
 /** Cmd+K, as the browser delivers it. */
 function pressCmdK(target: Document | Element = document) {
@@ -66,14 +67,18 @@ const fixture: Command[] = [
 function setup(over: Partial<React.ComponentProps<typeof CommandPalette>> = {}) {
   const onNavigate = vi.fn();
   const onSignOut = vi.fn();
+  // The palette filters commands and search groups by permission, so without a
+  // provider the list is empty except for the commands that require none.
   const utils = render(
-    <CommandPalette
-      namespace="default"
-      onNavigate={onNavigate}
-      onSignOut={onSignOut}
-      commands={fixture}
-      {...over}
-    />,
+    <WithPermissions>
+      <CommandPalette
+        namespace="default"
+        onNavigate={onNavigate}
+        onSignOut={onSignOut}
+        commands={fixture}
+        {...over}
+      />
+    </WithPermissions>,
   );
   return { onNavigate, onSignOut, ...utils };
 }

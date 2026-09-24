@@ -413,6 +413,60 @@ class Cache:
         return Cache(**value)
 
 
+# The schema's absolute maximum for a declared bound (ADR-0015). Checked here too
+# so an over-long bound fails at the decorator rather than at submit.
+MAX_UNINTERRUPTIBLE_MS = 3_600_000
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Cancellation:
+    """How EXTERNAL cancellation treats a running attempt (ADR-0015).
+
+    ``uninterruptible=True`` declares a critical section that must not be torn
+    down part way -- a non-idempotent charge, a schema step. Cancelling it
+    (operator or run cancel, a revoked lease, an agent drain) sends NO SIGTERM:
+    the worker waits for the task to finish on its own for up to ``max_wait``,
+    clamped to the worker's platform ceiling, then SIGKILLs it. ``max_wait``
+    omitted means "the ceiling".
+
+    It is bounded on purpose, twice: by ``max_wait`` (at most one hour) and by the
+    ceiling the operator configures on the worker. An unbounded "do not stop me"
+    would be a worker the platform could never reclaim. It does NOT extend
+    ``timeouts.start_to_close``, which remains the task's own hard limit.
+    """
+
+    uninterruptible: bool = True
+    max_wait: str | int | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        if not self.uninterruptible:
+            if self.max_wait is not None:
+                raise SpecError(
+                    "cancellation.max_wait bounds a deferred cancellation, so it "
+                    "requires uninterruptible=True"
+                )
+            return {}
+        out: dict[str, Any] = {"uninterruptible": True}
+        if self.max_wait is not None:
+            ms = parse_duration_ms(self.max_wait)
+            if ms <= 0 or ms > MAX_UNINTERRUPTIBLE_MS:
+                raise SpecError(
+                    f"cancellation.max_wait must be between 1ms and 1h, got {self.max_wait!r}"
+                )
+            out["max_uninterruptible_ms"] = ms
+        return out
+
+    @staticmethod
+    def coerce(
+        value: "Cancellation | Mapping[str, Any] | bool | None",
+    ) -> "Cancellation | None":
+        if value is None or isinstance(value, Cancellation):
+            return value
+        if isinstance(value, bool):
+            return Cancellation(uninterruptible=value)
+        return Cancellation(**value)
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class SecretRef:
     """A secret REFERENCE, never a value.
@@ -445,7 +499,7 @@ class Runtime:
     restricts the task to Docker-capable workers rather than failing at dispatch.
     """
 
-    executor: Literal["subprocess", "docker", "k8s"] = "subprocess"
+    executor: Literal["subprocess", "docker", "k8s", "kubernetes"] = "subprocess"
     image: str | None = None
     command: Sequence[str] | None = None
     args: Sequence[str] | None = None
@@ -454,11 +508,11 @@ class Runtime:
     working_dir: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        if self.executor not in ("subprocess", "docker", "k8s"):
+        if self.executor not in ("subprocess", "docker", "k8s", "kubernetes"):
             raise SpecError(
-                f"unknown executor {self.executor!r}; expected subprocess, docker, or k8s"
+                f"unknown executor {self.executor!r}; expected subprocess, docker, kubernetes (or its alias k8s)"
             )
-        if self.executor in ("docker", "k8s") and not self.image:
+        if self.executor in ("docker", "k8s", "kubernetes") and not self.image:
             raise SpecError(f"runtime.executor={self.executor} requires an image")
         out: dict[str, Any] = {"executor": self.executor}
         if self.image:

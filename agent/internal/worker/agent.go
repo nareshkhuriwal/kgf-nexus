@@ -19,6 +19,8 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 )
 
 // Client is the full worker RPC surface, satisfied by the generated gRPC client
@@ -56,9 +58,23 @@ type Config struct {
 	// before it stops waiting. A drain that never ends blocks a deploy.
 	DrainGracePeriod time.Duration
 
+	// MaxUninterruptible is the platform ceiling on how long a cancellation may
+	// be deferred for a task that declared itself uninterruptible (ADR-0015).
+	// Zero means worker.DefaultUninterruptibleCeiling.
+	MaxUninterruptible time.Duration
+
 	// AllowUnenforceableLimits relaxes the subprocess executor's refusal to run
 	// tasks whose limits it cannot honour. Development only.
 	AllowUnenforceableLimits bool
+
+	// Bus is the optional NATS connection for dispatch hints (ADR-0005). An empty
+	// URL disables it and the agent long-polls exactly as it always has.
+	Bus bus.Config
+
+	// Kubernetes is the kubernetes executor, or nil when NEXUS_K8S_NAMESPACE is
+	// unset. Built once by the caller rather than per session: it owns
+	// long-lived informers, and a REREGISTER must not leak a watch per session.
+	Kubernetes *executor.KubernetesExecutor
 }
 
 // ResultStoreCredentials are the parts of result-store access the agent holds
@@ -66,6 +82,8 @@ type Config struct {
 // only the credentials are local, because credentials must never be in the
 // metadata store (ADR-0008).
 type ResultStoreCredentials struct {
+	// Endpoint overrides the advertised address for workers outside its network.
+	Endpoint        string
 	AccessKeyID     string
 	SecretAccessKey string
 	SessionToken    string
@@ -88,6 +106,10 @@ type Agent struct {
 
 	workerID     string
 	sessionToken string
+
+	// execs is built once per session at registration, so what the worker
+	// advertises and what it runs (and reaps) are the same instances.
+	execs map[string]executor.Executor
 
 	// reregister signals the supervising loop that this session is invalid and a
 	// fresh registration (a NEW worker_id) is required.
@@ -147,6 +169,13 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Kubernetes re-attach runs BEFORE the generic replay, because it can
+	// upgrade a STARTING entry (outcome unknowable) into a COMPLETED one: the
+	// attempt's Job outlived the agent, so the outcome is still readable. The
+	// generic replay would otherwise report INDETERMINATE first and turn
+	// finished work into a LOST attempt and a re-execution.
+	a.reattachKubernetes(ctx)
+
 	// ── WAL replay, BEFORE any new work ───────────────────────────────────────
 	// Ordering matters: a COMPLETED entry re-reported before we start polling
 	// lets the control plane finalise the attempt and release its reservation
@@ -190,6 +219,18 @@ func (a *Agent) Run(ctx context.Context) error {
 			errs <- fmt.Errorf("lease keeper: %w", err)
 		}
 	}()
+
+	// Dispatch hints, if a bus is configured. Started before the puller so the
+	// first hint is not missed, and never fatal: a hint subscription that fails
+	// leaves the agent exactly as capable as a poll-only one.
+	if a.cfg.Bus.Enabled() {
+		hints, err := SubscribeDispatchHints(a.cfg.Bus, a.cfg.Namespace, a.cfg.Queues, a.puller.Wake, a.log)
+		if err != nil {
+			a.log.Warn("dispatch hints unavailable; long polling only", "error", err)
+		} else {
+			defer hints.Close()
+		}
+	}
 
 	wg.Add(1)
 	go func() {
@@ -270,7 +311,14 @@ func (a *Agent) register(ctx context.Context) error {
 
 	reporter := NewReporter(a.client, a.wal, a.log)
 	a.keeper = lease.New(a.workerID, a.client, nil, ttl, a.log)
+	a.execs = execs
 	a.runner = NewRunner(execs, a.registry, a.keeper, reporter, a.wal, a.store, a.log)
+	a.runner.WorkerID = a.workerID
+	a.runner.UninterruptibleCeiling = a.cfg.MaxUninterruptible
+	// The control plane's threshold, clamped, also governs the no-store path:
+	// a worker without an object store must refuse exactly what a worker with
+	// one would have sent to it (ADR-0016).
+	a.runner.InlineThreshold = domain.ClampInlineThreshold(resp.GetResultStore().GetInlineThresholdBytes())
 	// The keeper revokes into the runner and the runner renews through the
 	// keeper, so one of the two edges must be wired after construction.
 	a.keeper.SetHandler(a.runner)
@@ -300,16 +348,90 @@ func (a *Agent) buildExecutors() map[string]executor.Executor {
 	} else {
 		a.log.Warn("docker daemon unreachable; not advertising the docker executor")
 	}
+	if k := a.cfg.Kubernetes; k != nil {
+		// Same rule as docker: advertise only what we verified we can run.
+		// Probe checks reachability, server version and the RBAC verbs the
+		// executor uses, so a missing Role is a log line at boot rather than
+		// an INFRASTRUCTURE failure on every task routed here.
+		kprobe, kcancel := context.WithTimeout(context.Background(), 20*time.Second)
+		err := k.Probe(kprobe)
+		kcancel()
+		if err != nil {
+			a.log.Warn("kubernetes executor configured but not usable; not advertising it",
+				"namespace", k.Config.Namespace, "error", err)
+		} else {
+			out[executor.KubernetesKind] = k
+			out[executor.KubernetesKindAlias] = k
+		}
+	}
 	return out
 }
 
+// reattachKubernetes resolves the WAL's STARTING entries whose attempts ran as
+// Kubernetes Jobs, before the generic replay reports them INDETERMINATE.
+//
+//   - Job FINISHED: harvest the real outcome (exit code, OOM, outputs) and
+//     report it under the attempt's original lease token. If the lease is still
+//     live the control plane accepts it, and completed work is not re-run —
+//     the case the WAL exists for. If the lease has expired the report is
+//     rejected and dropped, exactly like any stale report.
+//   - Job still RUNNING: kill it. This session cannot renew the old lease
+//     (renewal is scoped to the worker_id, which is per-session, §5.5), so the
+//     control plane WILL declare the attempt LOST and dispatch a retry under a
+//     new attempt id. Leaving the old Job running would put two copies of the
+//     same logical work on the cluster at once. The entry stays STARTING, so
+//     replay reports INDETERMINATE: honest, since the task may have had side
+//     effects before it was killed.
+//   - No Job: nothing to do; replay handles the entry as usual.
+func (a *Agent) reattachKubernetes(ctx context.Context) {
+	k := a.cfg.Kubernetes
+	if k == nil || a.execs[executor.KubernetesKind] == nil {
+		return
+	}
+	entries, _ := a.wal.List()
+	for _, e := range entries {
+		if e.State != wal.StateStarting {
+			continue
+		}
+		log := a.log.With("attempt_id", e.AttemptID, "run_id", e.RunID, "node_id", e.NodeID)
+		rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		h, state, err := k.Reattach(rctx, e.AttemptID)
+		switch {
+		case err != nil:
+			log.Warn("could not look up the attempt's Kubernetes Job; replay will report INDETERMINATE", "error", err)
+		case state == executor.ReattachFinished:
+			o, werr := k.Wait(rctx, h)
+			if werr != nil {
+				log.Warn("could not read the finished Job's outcome", "error", werr)
+				break
+			}
+			log.Info("harvested the outcome of an attempt that finished while the agent was down",
+				"exit_code", o.ExitCode, "succeeded", o.Succeeded())
+			a.runner.reportOutcome(rctx, &nexusv1.TaskAssignment{
+				AttemptId: e.AttemptID, RunId: e.RunID, NodeId: e.NodeID, LeaseToken: e.LeaseToken,
+			}, o, log)
+			_ = k.Cleanup(rctx, h)
+		case state == executor.ReattachRunning:
+			log.Warn("killing an attempt Job that outlived its agent session; its lease cannot be renewed " +
+				"by this session and a retry will be dispatched")
+			_ = k.Signal(rctx, h, executor.SignalKill)
+			_ = k.Cleanup(rctx, h)
+		}
+		cancel()
+	}
+}
+
 func (a *Agent) initResultStore(cfg *nexusv1.ResultStoreConfig) {
-	if cfg.GetEndpoint() == "" {
+	endpoint := a.cfg.ResultStore.Endpoint
+	if endpoint == "" {
+		endpoint = cfg.GetEndpoint()
+	}
+	if endpoint == "" {
 		a.log.Warn("control plane supplied no result store; outputs will be inlined only")
 		return
 	}
 	c, err := resultstore.New(resultstore.Config{
-		Endpoint:        cfg.GetEndpoint(),
+		Endpoint:        endpoint,
 		Bucket:          cfg.GetBucket(),
 		Region:          cfg.GetRegion(),
 		Namespace:       a.cfg.Namespace,
@@ -334,7 +456,18 @@ func (a *Agent) initResultStore(cfg *nexusv1.ResultStoreConfig) {
 }
 
 func (a *Agent) reapOrphans(ctx context.Context) {
-	d, ok := a.buildExecutors()["docker"]
+	if k, ok := a.execs[executor.KubernetesKind].(*executor.KubernetesExecutor); ok {
+		// Nothing is running yet in this session, so every Job this agent
+		// instance owns is an orphan of a previous one.
+		kctx, kcancel := context.WithTimeout(ctx, 2*time.Minute)
+		if n, err := k.ReapOrphans(kctx, nil); err != nil {
+			a.log.Warn("could not reap orphaned Kubernetes Jobs", "error", err)
+		} else if n > 0 {
+			a.log.Warn("reaped orphaned Kubernetes Jobs from a previous session", "count", n)
+		}
+		kcancel()
+	}
+	d, ok := a.execs["docker"]
 	if !ok {
 		return
 	}

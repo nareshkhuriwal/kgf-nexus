@@ -1028,7 +1028,6 @@ way to advertise it. Worth checking any dimension added to `ResourceVector` from
 here for an agent flag AND an end-to-end run that uses it, because unit tests
 construct the vector directly and cannot see the gap.
 
-
 ### F67. Two allocators for `run_events.seq` collided — FIXED
 
 `run_events` has two writers and they numbered rows differently. event-service
@@ -1281,7 +1280,6 @@ looked like a platform bug: the killed container must be allowed to re-register
 before the next test starts (restarting the container is not the same as having
 a worker), and the effects must be read from whichever agent is alive rather than
 a hard-coded `agent-cpu` -- which is sometimes the container the test just killed.
-
 
 ### F77. Nothing enforced ADR-0011 rule 5's additive-migration requirement — FIXED
 
@@ -1844,3 +1842,314 @@ before trusting it green.
 
 **Related:** [[F89]] — the check that lies. The discipline that caught this is the one
 F89 prescribes: prove the instrument fails when the thing is broken.
+
+### F92. Certificates could not rotate without a restart, and TLS.md said NEXUS_ENV armed a guard it does not — FIXED
+
+(F92–F97 were written on six parallel branches that each chose F92; they were
+renumbered in merge order when the branches were integrated — see F88.)
+
+**What was wrong.** `internal/transport` read the key pair and CA bundle once, at
+startup. A renewed certificate on disk did nothing to a running process, so every
+renewal was silently coupled to a restart, and a missed restart meant serving the
+old leaf until it expired and every handshake in the control plane failed at once.
+Nothing measured expiry. Two parts of `docs/TLS.md` were also stale in ways an
+operator would act on: §6 said nothing was wired (every server and client already
+called `ServerOptions`/`DialOption`), and §4.4 said `NEXUS_ENV=production` makes
+plaintext fatal — the code and `TestNexusEnvDoesNotArmTheTLSGuard` say the
+opposite, deliberately. An operator trusting §4.4 would believe plaintext was
+impossible in production while it was merely unguarded.
+
+**Fix.** Servers answer each handshake from `GetConfigForClient`, clients build a
+config per handshake with `GetClientCertificate`, both from a snapshot a poller
+replaces only after validation (key matches cert, within validity, bundle holds a
+valid CA). Rejected material is logged once, counted, flagged by
+`nexus_tls_reload_stale`, and the old material keeps serving. CA bundles may hold
+several CAs, which makes CA rotation hitless. Issuance: `deploy/nexus-certs.sh`
+(compose via `make dev-certs` / `make up-tls`, the Portainer host, and CSR-based
+agent enrolment where the agent's key never leaves its host), and cert-manager
+manifests for AKS (`deploy/k8s/cert-*`). Runbook and alerts: OPERATIONS §9.
+
+**The F89 part.** Every rotation test asserts on the serial number presented in a
+real handshake, in both directions, never on the reloader's own bookkeeping — a
+"reload succeeded" check could pass while handshakes still used the old leaf. Five
+mutations were then applied to prove the tests can fail: a no-op poller, a server
+pinned to its startup snapshot, a client pinned to its first snapshot, no validity
+check, no debounce. Each turned tests red. The first mutation run was itself
+misleading: M1 appeared to leave the integration tests green because the debounce
+test's writer goroutine outlived its test, panicked the binary, and hid every later
+test's result. `ok`/`FAIL` at package level said FAIL; the per-test list simply
+omitted the tests that never ran. Fixed (the goroutine is joined), re-run, all five
+mutations caught. **A mutation run whose failure list is shorter than expected is
+not evidence either** — count what ran.
+
+**Still open.** Only workflow-manager serves `/metrics`, so only it exports the
+served-certificate metrics (others log a WARN near expiry). No revocation. (Agent
+connections on the gateway's worker listener used to survive a CA withdrawal
+until they dropped; fixed at integration by a 5-minute `MaxConnectionAge` on that
+listener, whose grace outlasts the long-poll cap.) Nothing on AKS or the
+Portainer host has been applied or run; the full `make up-tls` stack has not been
+brought up end to end. `TestServerNameOverrideFixesTheComposeNameMismatch` takes
+1–9s under `-race` in a full package run (0.06s alone) — measured identical on the
+pre-change code, so not introduced here, but within reach of its 10s deadline.
+
+### F93. Registration accepted any email address, and there was no password recovery — FIXED
+
+Self-service registration (0013) created a tenant owner for any address typed in, and nothing proved the registrant controlled it. There was also no recovery path: a forgotten password needed an administrator of the same tenant, and the registrant was usually the only administrator. MULTITENANCY.md listed both as prerequisites for public registration.
+
+**Fix:** migration 0017 (`users.email_verified_at`, `email_tokens`), `internal/mail` (SMTP with STARTTLS or implicit TLS, timeouts and retry), four unguarded and rate-limited gateway routes, and console pages. The policy, the no-oracle design and the limits are in docs/MULTITENANCY.md; configuration is in docs/OPERATIONS.md §10. Decisions worth recording here:
+
+- **Existing accounts are verified by the migration, without a backfill.** `ADD COLUMN … DEFAULT now()` followed by `DROP DEFAULT` stores the value as the column's missing value for existing rows. New rows, including rows an old replica inserts mid-deploy, are unverified. This was verified on Postgres 16 and passes the migration safety gate unmodified.
+- **Unverified accounts cannot sign in**, and the 403 is returned only after the password is verified. Admin-created and address-changed accounts are unverified too; a trigger clears verification when the address changes.
+- **Link requests are answered before the lookup**, so the response does not depend on whether the account exists in body, headers or timing.
+- **A disabled mailer fails loudly.** It returns 503 `email_unavailable` and logs a WARN at startup, and never reports a successful send.
+
+**Found along the way (not fixed, outside this slice):**
+
+- The existing per-credential limiter keys unauthenticated requests on `r.RemoteAddr` *including the ephemeral port*. Each new TCP connection therefore gets a fresh bucket, so login and registration are barely limited against a client that does not reuse connections. The new per-IP limiter strips the port.
+- `clientIP()` trusts `X-Forwarded-For` from any peer. That is fine for audit notes, as its comment says, and wrong for limits, which is why the new routes use `requesterIP()` instead.
+- Several pre-0014 store integration tests create rows in namespaces that were never registered as tenants and now fail with `Namespace must belong to a registered tenant`: `TestIntegrationDisabledUserCannotAuthenticate`, `TestIntegrationDuplicateEmailIsRejected`, `TestIntegrationSpecContentAddressing`, `TestConcurrentReserveDoesNotOverCommit`, `TestConcurrentReconcileDoesNotDoubleSubtract`, `TestConcurrentTickClaimsYieldOneWinner` and `TestConcurrentEventAppendsNeverCollide`. `TestIntegrationTenantRegistrationIsolation` uses fixed emails and counts every registration in the database, so it passes only once per database.
+- The default integration DSN `localhost:55432` is, on at least one developer machine, a different product's Postgres (`polaris-postgres`). Always set `NEXUS_TEST_DATABASE_URL`.
+- `deploy/render_compose.py` deploys the development compose file, so development defaults (now including Mailpit as the SMTP host) reach deployed hosts unless they are overridden.
+
+### F94. NATS was designed as publish-after-commit, which loses messages; built as an outbox instead — DONE
+
+ADR-0003 and §5.3 step 5 said: commit the claim, then publish the notification.
+That is correct about *where not to publish* (never inside the transaction) and
+wrong about what it leaves: a process that dies between COMMIT and publish drops
+the message, and nothing ever notices, because the bus is a hint and a missing
+hint is silent. The same shape applied to run-event fan-out would silently drop
+UI updates.
+
+Built instead (migration 0016, `internal/bus`, `services/event-service/relay`):
+
+- **A transactional outbox, written by the fact's own statement.** Every
+  `run_events` append (including `AttemptDispatched` inside the §5.3 claim),
+  every new `PENDING` attempt and every run state transition inserts its outbox
+  row as a data-modifying CTE of the same SQL statement. The claim gains no round
+  trip and no lock, and its isolation level is unchanged. A CTE also cannot be
+  "forgotten" by a later refactor the way a second call can.
+- **The event-service owns and relays it**, not the scheduler: the one component
+  allowed to be down stays off the one path that must never stall. Writers have
+  INSERT-only grants, like the dispatch exception's `run_events` grant.
+- **Effectively-once into JetStream** via `Nats-Msg-Id` = outbox id + created_at
+  (created_at so a restored database whose id sequence rewinds cannot collide
+  with an old id inside the duplicate window). Rows are claimed `FOR UPDATE SKIP
+  LOCKED`, marked only after the broker acks, in the same transaction.
+- **Hints mean "work may exist", not "you were dispatched X".** Dispatch is pull,
+  so the worker that wins a claim already has the attempt; what is worth
+  broadcasting is that claimable work appeared. The agent uses a hint only to cut
+  the pause *between* long polls. It never cancels a poll in flight: a cancelled
+  `PollTask` whose claim had already committed would strand a lease until expiry
+  and turn the attempt LOST.
+- **Periodic reconciliation**: the relay re-announces every queue with pending
+  work every 10s, so transitions no outbox row covers (resume, freed capacity)
+  and anything missed during an outage are re-hinted from Postgres.
+
+**Honest scale of the latency win.** The gateway already re-checks a held long
+poll every 250ms, so with a healthy control plane a hint saves at most that pause
+plus the between-poll gap. The larger payoffs -- raising the gateway's re-check
+interval to cut per-worker claim transactions, and live UI updates without the
+1s SSE poll -- are now possible but only the second is wired (SSE tails wake on
+run subjects; the 1s poll stays as the fallback).
+
+**Verification, and making it able to fail (F89).** Real NATS and real Postgres in
+throwaway containers (`make test-nats`): rollback leaves no message (with a
+committed transition as the control), duplicate re-publish is absorbed, a crash
+between ack and mark re-sends without a duplicate, a real `docker stop`/`start`
+of the broker drains a 40-row backlog written during the outage exactly once,
+two relays never publish the same row (made deterministic by holding one relay's
+batch open rather than hoping for a race, F86), and duplicate/stale hints to two
+workers produce exactly one claim. Mutation-checked: removing `WithMsgID` fails
+the dedupe and crash tests; removing `SKIP LOCKED` fails the two-relay test.
+That test first HUNG under the mutation instead of failing -- the held relay kept
+its row locks and the cleanup `DELETE` waited on them forever -- so it now
+releases on every exit path. A test that can only hang when the property breaks
+is F89's red-while-fine problem in a new shape.
+
+**Also found:** on a freshly migrated database, most pre-existing integration
+fixtures in `internal/store`, `services/scheduler`, `resource-manager` and
+`api-gateway/rest` fail with `Namespace must belong to a registered tenant`:
+they predate migration 0014 and never create a tenant row. CI applies migrations
+too, so this is worth checking there. The NATS tests register their tenants.
+Not fixed here (out of scope).
+
+### F95. Cluster scaling needed two grants nobody had exercised, and an ownership decision — FIXED / DECIDED
+
+**Ownership (ADR-0011), decided, not yet in the ADR table.** Migration 0018 adds
+seven tables. The registry (`clusters`, `cluster_namespace_bindings`) is operator
+intent and is owned by **api-gateway**, following the existing `platform_config`
+precedent (0010) -- which the ADR-0011 table does not list either. Everything
+observed about a cluster (`cluster_status`, `cluster_observations`,
+`cluster_scaling_state`, `cluster_reconcile_errors`, `cluster_scaling_events`) is
+owned by **resource-manager**, which owns the fleet it describes and performs the
+drain. The in-cluster controller has no database credential at all; it goes through
+the resource manager's new `ClusterControllerService`. The ADR-0011 ownership table
+should gain both rows (and `platform_config`) when it is next revised.
+
+**Two defects found only because the test connected as the service roles.** Every
+earlier store test connects as the superuser, where grants are invisible.
+
+1. The resource manager had no `SELECT` on `platform_config`: 0010 granted it to
+   the gateway only, and 0005's blanket `GRANT SELECT ON ALL TABLES` covers only
+   tables that existed when 0005 ran. So ADR-0011's "every service reads
+   everything" is silently false for every table created after 0005 unless its
+   migration grants it. 0018 grants the one read it needs; the general gap is open
+   -- a test that lists tables lacking `SELECT` for any service role would close it.
+2. `SELECT ... FOR SHARE` on a table requires `UPDATE` privilege. The drain's
+   apply-gate read used it on `clusters`, which the resource manager must not be
+   able to update, so every drain would have failed with 42501 in a deployment
+   that uses the roles, and passed in every superuser test. It is now a plain
+   read; the consequence (a concurrent switch to plan takes effect on the next
+   call) is documented in docs/CLUSTER-SCALING.md.
+
+**Watched fail, per F89.** Removing the lease check or the quota bound from the
+controller fails its unit tests; removing `patch pods` from the shipped apply Role
+makes the local-cluster end-to-end test fail with a Forbidden error, which is the
+evidence that that test really runs with the manifests' permissions and not as
+cluster-admin.
+
+**Dependency note.** client-go is pinned at v0.35.8 because v0.36+ requires
+`go 1.26`, and `deploy/Dockerfile.service` builds with `golang:1.25`. Another branch
+adding client-go must agree on the version.
+
+### F96. The Kubernetes executor exists; what it enforces, and what it cannot yet do — NOTE
+
+The `kubernetes` executor (ADR-0007, Implementation notes) runs each attempt as a
+Job. It passes the shared conformance suite against a local Docker Desktop
+cluster (Kubernetes 1.34). F28 set the standard that each substrate states what
+it enforces instead of implying it, so this entry does that, including the gaps.
+
+**Advertised versus enforced (the F28 question for this substrate):**
+
+| Dimension | Enforced by | Strength |
+|---|---|---|
+| memory | cgroup `memory.max` from `limits.memory` (requests = limits) | hard; the kernel OOM-kills and the runtime reports `OOMKilled` |
+| cpu | CFS quota from `limits.cpu` | throttling, never a kill |
+| GPU | device-plugin extended resource (`NEXUS_K8S_GPU_RESOURCE`) | whole devices, isolated by the plugin; refused if unconfigured |
+| disk | `ephemeral-storage` limit + emptyDir `sizeLimit` | kubelet **eviction** on a sampling interval, the softest of the four |
+| start_to_close | Job `activeDeadlineSeconds` | enforced by the cluster, and holds with the agent dead |
+| custom resources | nothing | Nexus ledger only |
+| per-attempt overhead | collector sidecar, 50m / 32Mi | not in the Nexus request, so size advertised capacity to allow for it |
+
+**Defects the real cluster found, which a fake clientset could not have**
+(commit 6f47390, all fixed):
+
+1. **The collector crash-looped on every pod.** It mounted the outputs volume
+   *nested inside* its read-only work mount, and runc cannot create a mountpoint
+   inside a read-only volume. Every unit test passed, because a fake clientset
+   has no runc.
+2. **Every cluster-enforced timeout was classified APPLICATION**, which is
+   terminal, instead of TIMEOUT, which is retryable. Since Kubernetes 1.31 the
+   Job controller first sets `FailureTarget` (DeadlineExceeded), kills the pod,
+   and only afterwards sets `Failed`. The code read only `Failed`. The
+   conformance suite's sigkill test was red on this and is green after the fix.
+3. **The output cap refused every file after the first oversized one.** A file
+   that was refused still counted toward the total. Running the real collector
+   script under `/bin/sh` in a unit test exposed it.
+
+**An instrument error, caught before it was believed (F89 again).** The first
+full run printed `ok` with every kubernetes conformance subtest taking
+`0.00s`. The `-run 'Conformance.*/kubernetes'` pattern matched the second
+level of `TestX/success/kubernetes`, not the third, so every subtest was
+skipped and the run still passed. The corrected pattern is
+`TestConformance/.*/kubernetes`. The durations are what gave it away. A second
+instrument error followed. Each package passed alone, but the combined run
+failed with "namespace is being terminated". `go test ./a ./b` runs packages as
+concurrent processes, and the first to finish deleted the namespace they share.
+Each process now holds a reference ConfigMap, and only the last one to leave
+deletes the namespace. The
+least-privilege Role was also mutation-tested: a test applies the shipped
+`deploy/k8s/agent-rbac.yaml` and runs the whole lifecycle as that service
+account. Deleting the `pods/log` rule turns that test red with
+`agent may not get pods/log`.
+
+**Open: limits of this executor.** Each of these is refused explicitly rather
+than handled silently:
+
+- **Inputs are limited to about 1 MiB in total.** They are staged through one
+  Secret, and anything larger fails as VALIDATION. The fix is a pod-side fetch
+  using a scoped, short-lived presigned URL. That needs a result-store API that
+  does not exist yet, and it must not put store credentials into task pods
+  (ADR-0008).
+- **Outputs are limited to 4 MiB in total.** They leave the pod base64-framed
+  through the collector's log, and the cap keeps them below the kubelet's
+  default 10 MiB log rotation. The same presigned-URL mechanism, in the upload
+  direction, would remove this limit.
+- **`runtime.stdout_output` is rejected with VALIDATION.** The pod log API
+  merges stdout and stderr. Stream selection (KEP-3288) is alpha and is silently
+  ignored where the feature is disabled, so an output built from it would carry
+  the task's stderr inside its data.
+- **Pending reasons reach the control plane but go no further.** The executor
+  sends pod phase changes to `ReportProgress` (ADR-0007's nested-scheduling
+  mitigation). `scheduler.RecordProgress` stores only the heartbeat time and
+  drops the message and the fraction. Surfacing "Unschedulable: insufficient
+  cpu" in the UI needs a scheduler column and an API field. That belongs to
+  another workstream, and no proto change was made here.
+- **Tolerations have no field in the TaskSpec proto** (§4.3 shows one; F21
+  class). Pool pinning is therefore per-worker configuration
+  (`NEXUS_K8S_NODE_SELECTOR` / `NEXUS_K8S_TOLERATIONS`), and a Nexus worker
+  represents one node pool. `gpu_kind` does map to a nodeSelector when
+  `NEXUS_K8S_GPU_KIND_LABEL` is set.
+- **"delete pods" cannot be narrowed by label in RBAC.** The agent's Role could
+  therefore delete a sibling agent pod in the same namespace. The executor only
+  ever deletes pods matching its own owner and attempt labels. The namespace is
+  shared because owner references cannot cross namespaces, and a
+  cross-namespace owner makes the garbage collector delete the Job immediately.
+- **A Job still running when its agent restarts is killed, not adopted.** Lease
+  renewal is scoped to the worker_id (`GatewayRenewLeases`), and a restarted
+  agent gets a new worker_id (§5.5), so the old lease cannot be kept alive.
+  Adopting the Job would mean running it beside the retry the control plane is
+  about to dispatch. Adopting is used only where it is safe: when Prepare is
+  repeated for the same attempt (same name, AlreadyExists), and when harvesting
+  a Job that has already **finished**.
+- The proto comment on `RuntimeSpec.executor` still reads
+  `"subprocess" | "docker" | "k8s"`. It was left unchanged so the executor did
+  not need a proto regeneration. The schema and SDK accept both spellings.
+
+### F97. Dynamic expansion, memoization and worker quarantine — IMPLEMENTED
+
+Three deferred features landed together because they share the attempt-creation and
+placement paths. Decisions a reviewer should know, each with its reason:
+
+- **§6.4 said the SCHEDULER short-circuits on dispatch. The DAG ENGINE does, at attempt
+  creation.** A hit is born `SUCCEEDED` with `cache_hit_of`, so it is never `PENDING`: no
+  race with the §5.3 claim, and the claim (being reworked on two other branches) is
+  untouched. This extends the "task_attempts: creation vs mutation" split above: the
+  engine now INSERTs either a `PENDING` attempt or a terminal memoized one, and still
+  never UPDATEs. The existing INSERT-only grant covers it.
+- **The memo key includes the namespace**, beyond §6.4's formula, for tenant isolation.
+- **Templates are engine state, not attempt projections (extends F14).** A map template
+  never has attempts; `deriveNodeStates` keeps its stored state. Deriving "no attempts ->
+  PENDING" would un-expand it and wedge the run.
+- **F2 applies to children unchanged:** a retry-exhausted child folds to `FAILED`, and the
+  template aggregates FAILED > CANCELLED > SKIPPED > SUCCEEDED.
+- **F52b:** both schema copies gained `MapSpec`; `TestEmbeddedSchemaMatchesCanonical` passes.
+- **Pre-existing gap fixed on the way:** `Validate` and `InputPlan` did not know F18's
+  `input_literals` / renamed `input_params`, so a spec binding a required input by
+  literal was rejected at materialize time, and the gateway never decoded either field
+  (so submit-time validation checked a different graph than the engine ran).
+- **Quarantine definition** (§11 listed it as deferred without one; §5.5/§10 imply it):
+  no new dispatches, triggered by infrastructure-class failures across distinct tasks,
+  fleet-capped, expiring, host-sticky, operator-releasable. `QUARANTINED` workers now keep
+  heartbeating and no longer receive `DRAIN` -- the agent treats DRAIN as permanent, which
+  would have made release a no-op.
+- **Pre-existing test rot found, not fixed:** the resource-manager server tests and several
+  `-tags integration` suites mint random namespaces and fail on any database migrated past
+  0014 ("Namespace must belong to a registered tenant"); they only pass against a dev DB
+  that happens to hold matching tenants. `registerWorker` in the RM tests now registers its
+  tenant; the reservation tests still fail for the same reason via fake attempts.
+
+- **Fan-in is bounded (added before merge).** The fan-in array is assembled in the
+  control plane; unbounded, max_fanout 10,000 x 64 KiB inline outputs is ~640 MiB per
+  reconcile. It is now capped by `NEXUS_DAG_MAX_FANIN_BYTES` (16 MiB default, 256 MiB
+  ceiling), streamed from Postgres with the check before each append, and child outputs are
+  no longer loaded by `LoadAttempts` at all (that load alone was the same hazard). Over the
+  cap the consumer is FAILED with a `fan_in_refusals` row (`fan_in_too_large`); submit-time
+  validation rejects it when `ValueSpec.max_bytes` (new, additive, field 4) proves it
+  statically. Mutation-tested: disabling the size check turns the unit and integration
+  over-cap tests red.
+
+**F89 discipline:** the guards that matter were mutation-tested -- removing the second
+template fold (cancel test goes red), counting templates as in flight (pause test red),
+dropping `cache_hit_of IS NULL` from the memo lookup (hit-of-a-hit test red), and dropping
+the distinct-task threshold (poison-task worker gets quarantined; test red).

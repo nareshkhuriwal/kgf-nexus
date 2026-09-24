@@ -4,6 +4,9 @@
 package rest
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -163,4 +166,48 @@ func TestConcurrentAllowIsRaceFree(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// An unauthenticated client must land in the same bucket on every connection.
+// Keying on raw RemoteAddr included the source port, which changes per TCP
+// connection, so reconnecting was enough to escape the limit entirely.
+func TestUnauthenticatedKeyIgnoresTheSourcePort(t *testing.T) {
+	a := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
+	a.RemoteAddr = "203.0.113.7:50001"
+	b := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
+	b.RemoteAddr = "203.0.113.7:50002"
+	if ka, kb := bearerOrPeer(a), bearerOrPeer(b); ka != kb {
+		t.Fatalf("two connections from one host keyed apart: %q vs %q", ka, kb)
+	}
+
+	other := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
+	other.RemoteAddr = "203.0.113.8:50001"
+	if bearerOrPeer(a) == bearerOrPeer(other) {
+		t.Fatal("two different hosts share one bucket")
+	}
+
+	// And the fix is not bypassable the other way: a public peer cannot pick
+	// its own bucket by sending X-Real-IP.
+	spoof := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
+	spoof.RemoteAddr = "203.0.113.7:50003"
+	spoof.Header.Set("X-Real-IP", "198.51.100.1")
+	if bearerOrPeer(spoof) != bearerOrPeer(a) {
+		t.Fatalf("public peer chose its bucket via X-Real-IP: %q", bearerOrPeer(spoof))
+	}
+}
+
+// Reconnecting must not refill the bucket: the limit holds across source ports.
+func TestUnauthenticatedLimitHoldsAcrossReconnects(t *testing.T) {
+	l := newRateLimiter(RateLimitConfig{RequestsPerSecond: 1, Burst: 2}, func() time.Time { return time.Unix(0, 0) })
+	refused := false
+	for port := 40000; port < 40005; port++ {
+		r := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
+		r.RemoteAddr = "203.0.113.9:" + strconv.Itoa(port)
+		if ok, _ := l.allow(bearerOrPeer(r)); !ok {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Fatal("5 requests from one host over 5 connections all passed a burst of 2")
+	}
 }

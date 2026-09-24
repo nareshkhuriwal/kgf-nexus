@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -89,6 +90,23 @@ type ValidationErrorJSON struct {
 	Field  string   `json:"field,omitempty"`
 	Msg    string   `json:"message"`
 	Path   []string `json:"path,omitempty"`
+}
+
+// InvalidateCacheRequest records a memo invalidation (§6.4). The gateway has
+// already authenticated and authorized the caller; Actor is its attribution.
+type InvalidateCacheRequest struct {
+	Namespace   string `json:"namespace"`
+	TaskRef     string `json:"task_ref,omitempty"`
+	TaskVersion *int32 `json:"task_version,omitempty"`
+	CacheKey    string `json:"cache_key,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Actor       string `json:"actor"`
+}
+
+// InvalidateCacheResponse identifies the recorded cutoff.
+type InvalidateCacheResponse struct {
+	InvalidationID int64     `json:"invalidation_id"`
+	InvalidatedAt  time.Time `json:"invalidated_at"`
 }
 
 // GRPCServer adapts Engine to the gRPC surface.
@@ -179,6 +197,27 @@ func (s *GRPCServer) ValidateSpec(ctx context.Context, req *ValidateSpecRequest)
 	return out, nil
 }
 
+// InvalidateCache records an operator's memo invalidation.
+func (s *GRPCServer) InvalidateCache(ctx context.Context, req *InvalidateCacheRequest) (*InvalidateCacheResponse, error) {
+	if req == nil || req.Namespace == "" || req.Actor == "" {
+		return nil, status.Error(codes.InvalidArgument, "namespace and actor are required")
+	}
+	if req.TaskRef == "" && req.CacheKey == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_ref or cache_key is required")
+	}
+	if req.TaskVersion != nil && req.TaskRef == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_version needs a task_ref")
+	}
+	id, at, err := s.engine.InvalidateCache(ctx, store.MemoInvalidation{
+		Namespace: req.Namespace, TaskRef: req.TaskRef, TaskVersion: req.TaskVersion,
+		CacheKey: req.CacheKey, Reason: req.Reason, Actor: req.Actor,
+	})
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &InvalidateCacheResponse{InvalidationID: id, InvalidatedAt: at}, nil
+}
+
 // GetRunID accessors keep nil requests from panicking in the handler, which a
 // malformed client frame can otherwise cause.
 func (r *MaterializeRunRequest) GetRunID() string {
@@ -239,6 +278,10 @@ var DagEngineServiceDesc = grpc.ServiceDesc{
 			MethodName: "ValidateSpec",
 			Handler:    validateSpecHandler,
 		},
+		{
+			MethodName: "InvalidateCache",
+			Handler:    invalidateCacheHandler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "services/dag-engine/grpcapi.go",
@@ -248,6 +291,22 @@ type dagEngineService interface {
 	MaterializeRun(context.Context, *MaterializeRunRequest) (*MaterializeRunResponse, error)
 	ReconcileRun(context.Context, *ReconcileRunRequest) (*ReconcileRunResponse, error)
 	ValidateSpec(context.Context, *ValidateSpecRequest) (*ValidateSpecResponse, error)
+	InvalidateCache(context.Context, *InvalidateCacheRequest) (*InvalidateCacheResponse, error)
+}
+
+func invalidateCacheHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(InvalidateCacheRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(dagEngineService).InvalidateCache(ctx, in)
+	}
+	return interceptor(ctx, in, &grpc.UnaryServerInfo{
+		Server: srv, FullMethod: "/nexus.v1.DagEngineService/InvalidateCache",
+	}, func(ctx context.Context, req any) (any, error) {
+		return srv.(dagEngineService).InvalidateCache(ctx, req.(*InvalidateCacheRequest))
+	})
 }
 
 func materializeRunHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {

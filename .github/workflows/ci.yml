@@ -73,34 +73,57 @@ jobs:
         run: make migrate-up
         env:
           DATABASE_URL: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
-      # BOTH spellings. Two conventions coexist in the tree -- the scheduler
-      # harness reads NEXUS_TEST_DSN, while internal/store, resource-manager and
-      # the schedules package read NEXUS_TEST_DATABASE_URL -- and every one of
-      # these suites SKIPS rather than fails when its variable is unset. Setting
-      # only one leaves four packages quietly not running, which looks exactly
-      # like passing.
+      # ONE variable. Every Postgres integration test reads its database from
+      # NEXUS_TEST_DATABASE_URL and nothing else (internal/testdb): there is no
+      # compiled-in fallback DSN any more, because a fallback silently pointed
+      # the suite at whatever Postgres was listening on a developer's machine.
+      #
+      # A skip is indistinguishable from a pass in `go test` output (F85), so
+      # the suite runs ONCE, verbosely, and the job fails if any test skipped
+      # for want of a database -- in any package, not just internal/store.
+      # testdb.SkipMarker is the exact text such a skip prints. Tests that skip
+      # for a different reason -- no NATS broker (run by the nats-integration
+      # job below), no Kubernetes cluster, no Mailpit -- print a different
+      # message and are not caught here.
+      #
+      # -p 1: the packages share one database, and some assertions (timer
+      # claims, reservation sums) are only meaningful without another package
+      # writing the same tables at the same moment.
       - name: Run integration suite
-        run: go test -tags integration -count=1 ./...
-        env:
-          NEXUS_TEST_DSN: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
-          NEXUS_TEST_DATABASE_URL: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
-
-      # A skip is indistinguishable from a pass in `go test` output, and these
-      # suites are the ones that exercise real SQL. Fail loudly if the database
-      # was not reachable rather than shipping a green tick that proved nothing.
-      - name: Fail if integration tests skipped
         run: |
           set -euo pipefail
-          out=$(go test -tags integration -count=1 -v ./internal/store/ 2>&1)
-          if grep -q "skipping integration test" <<<"$out"; then
-            echo "integration tests SKIPPED -- the database was not reachable" >&2
-            grep "skipping integration test" <<<"$out" >&2
+          status=0
+          go test -tags integration -count=1 -p 1 -v ./... > integration.log 2>&1 || status=$?
+          grep -E '^(--- FAIL|FAIL|ok|panic)' integration.log || true
+          if grep -q "skipping integration test: no test database" integration.log; then
+            echo "integration tests SKIPPED -- NEXUS_TEST_DATABASE_URL unset or unreachable; treating as failure (F85)" >&2
+            grep "skipping integration test: no test database" integration.log >&2
             exit 1
           fi
-          echo "integration tests ran against a real database"
+          if [ "$status" != 0 ]; then
+            tail -300 integration.log >&2
+          fi
+          exit "$status"
         env:
-          NEXUS_TEST_DSN: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
           NEXUS_TEST_DATABASE_URL: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
+
+  # The outbox relay and dispatch hints against a REAL NATS JetStream server and a
+  # REAL Postgres, each in a throwaway container the script starts itself. It
+  # stops and restarts the broker (the outage test), which is why it is its own
+  # job rather than a service container shared with the suite above. The script
+  # fails if any TestNATS* test skipped (F85).
+  nats-integration:
+    name: nats integration tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Run NATS/outbox integration suite
+        run: tests/nats/run-integration.sh
 
   ui:
     name: ui tests

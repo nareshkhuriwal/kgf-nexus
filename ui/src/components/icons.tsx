@@ -402,3 +402,13 @@ export function IconSearch(props: IconProps) {
     </Icon>
   );
 }
+
+/** Cluster topology, distinct from the overview gauge and worker server. */
+export function IconCluster(props: IconProps) {
+  return <Icon {...props}><rect x="8" y="2.5" width="8" height="6" rx="1.5"/><path d="M12 8.5v4M5 16v-3.5h14V16"/><rect x="2" y="16" width="6" height="5.5" rx="1.2"/><rect x="16" y="16" width="6" height="5.5" rx="1.2"/></Icon>;
+}
+
+/** Shield and check for access policy, distinct from account management. */
+export function IconShield(props: IconProps) {
+  return <Icon {...props}><path d="M12 2.5 20 6v5.5c0 5-3.7 8-8 10-4.3-2-8-5-8-10V6z"/><path d="m8.5 11.8 2.3 2.4 4.7-4.8"/></Icon>;
+}

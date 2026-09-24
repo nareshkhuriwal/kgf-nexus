@@ -1,6 +1,9 @@
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
-
+import { useNavigate } from 'react-router-dom';
+import { useMutation } from '@tanstack/react-query';
+import { api } from '../api/client';
+import { Permit, usePermission } from '../components/Permissions';
 /**
  * Run detail: DAG, attempt history, log tail, event timeline, and cancel.
  *
@@ -23,6 +26,7 @@ import {
 } from '../api/hooks';
 import { useRunLive } from '../api/live';
 import { buildDagGraph, summarizeDag } from '../lib/dag';
+import { groupExpansions } from '../lib/expansion';
 import { isTerminal, stateVisual } from '../lib/states';
 import { durationBetween, fmtDurationMs, fmtTs, shortId } from '../lib/format';
 import { StateBadge } from '../components/StateBadge';
@@ -34,6 +38,13 @@ import { EventTimeline } from '../components/EventTimeline';
 
 export function RunDetailPage({ namespace }: { namespace: string }) {
   const { runId = '' } = useParams();
+  const navigate = useNavigate();
+  const can = usePermission();
+  const rerun = useMutation({mutationFn: async () => {
+    const current = await api.getRun(namespace, runId);
+    return api.createRun(namespace, {spec_id: current.spec_id, params: current.params, priority: current.priority, trigger_kind: 'manual'});
+  }, onSuccess: (created) => navigate('/runs/' + created.id)});
+  const retry = useMutation({mutationFn: () => api.runAction(namespace, runId, 'retry'), onSuccess: () => { void runQuery.refetch(); }});
   const [params, setParams] = useSearchParams();
   const selectedNodeId = params.get('node');
   const selectedAttemptId = params.get('attempt');
@@ -47,13 +58,21 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
   const eventsQuery = useRunEvents(namespace, runId, live.transport, terminal);
   const cancel = useCancelRun(namespace);
 
-  const graph = useMemo(
-    () =>
-      runQuery.data
-        ? buildDagGraph(runQuery.data, attemptsQuery.data ?? [])
-        : null,
-    [runQuery.data, attemptsQuery.data],
-  );
+  // Map templates start folded: a fan-out of hundreds drawn node by node is not
+  // a graph anyone can read (lib/expansion).
+  const [unfolded, setUnfolded] = useState<ReadonlySet<string>>(new Set());
+  const toggleGroup = (templateId: string) =>
+    setUnfolded((cur) => {
+      const next = new Set(cur);
+      if (next.has(templateId)) next.delete(templateId);
+      else next.add(templateId);
+      return next;
+    });
+  const graph = useMemo(() => {
+    if (!runQuery.data) return null;
+    const grouped = groupExpansions(runQuery.data, attemptsQuery.data ?? [], unfolded);
+    return buildDagGraph({ nodes: grouped.nodes, edges: grouped.edges }, attemptsQuery.data ?? []);
+  }, [runQuery.data, attemptsQuery.data, unfolded]);
 
   const selectNode = (nodeId: string) => {
     const next = new URLSearchParams(params);
@@ -93,12 +112,10 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
         <div className="run-head">
           <div className="run-head-id">
             <div className="run-head-line">
-              <Link to="/runs" className="sub">
-                ← all runs
-              </Link>
               <h1>{shortId(runId, 14)}</h1>
             </div>
           </div>
+          <div className="run-head-actions"><Link to="/runs" className="btn">← Back to runs</Link></div>
         </div>
         <ErrorBox error={runQuery.error} what={`run ${shortId(runId, 12)}`} onRetry={runQuery.refetch} />
       </div>
@@ -113,12 +130,10 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
         <div className="run-head">
           <div className="run-head-id">
             <div className="run-head-line">
-              <Link to="/runs" className="sub">
-                ← all runs
-              </Link>
               <h1>{shortId(runId, 14)}</h1>
             </div>
           </div>
+          <div className="run-head-actions"><Link to="/runs" className="btn">← Back to runs</Link></div>
         </div>
         <div className="panel">
           <Loading rows={8} label="Loading run" />
@@ -140,9 +155,6 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
       <div className="run-head">
         <div className="run-head-id">
           <div className="run-head-line">
-            <Link to="/runs" className="sub">
-              ← all runs
-            </Link>
             <StateBadge kind="run" state={run.state} />
             <h1>{shortId(run.id, 14)}</h1>
           </div>
@@ -168,13 +180,18 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
           <div className="run-head-hint">{stateVisual('run', run.state).hint}</div>
         </div>
         <div className="run-head-actions">
-          <CancelButton
+          <Link to="/runs" className="btn">← Back to runs</Link>
+          {isTerminal('run', run.state) ? <>
+            {can('runs.create') && can('workflows.view') && <button className="primary" disabled={rerun.isPending} onClick={() => { if(window.confirm('Start a new run? Every task will execute again with the original parameters.')) rerun.mutate(); }}>{rerun.isPending ? 'Starting…' : 'Re-run'}</button>}
+            {(run.state === 'FAILED' || run.state === 'TIMED_OUT') && can('runs.retry') && <button disabled={retry.isPending} onClick={() => { if(window.confirm('Retry failed tasks in this run?')) retry.mutate(); }}>Retry failed tasks</button>}
+            {rerun.error && <ErrorBox error={rerun.error} what="re-run" />}{retry.error && <ErrorBox error={retry.error} what="retry" />}
+          </> : can('runs.cancel') && <CancelButton
             canCancel={canCancel}
             state={run.state}
             pending={cancel.isPending}
             error={cancel.error}
             onCancel={() => cancel.mutate(run.id)}
-          />
+          />}
         </div>
       </div>
 
@@ -182,7 +199,7 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
 
       <div className="panel">
         <div className="panel-head">
-          <span>dag</span>
+          <span>Workflow graph</span>
           {graph && <span className="chip">{graph.nodes.length} nodes</span>}
           {graph && graph.rootCauses.length > 0 && (
             <span className="chip warn">root cause: {graph.rootCauses.join(', ')}</span>
@@ -204,6 +221,7 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
             // fit-to-view, so this page's polling cannot re-fit the view under
             // an operator who has zoomed in on a node.
             exportName={runId}
+            onToggleGroup={toggleGroup}
           />
         ) : null}
       </div>
@@ -257,11 +275,11 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
       </div>
 
       {selectedAttempt && (
-        <LogTail
+        <Permit permission="tasks.logs.view"><LogTail
           namespace={namespace}
           attemptId={selectedAttempt.id}
           live={!isTerminal('attempt', selectedAttempt.state)}
-        />
+        /></Permit>
       )}
 
       <div className="panel">

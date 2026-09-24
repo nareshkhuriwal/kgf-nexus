@@ -1,0 +1,78 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# The cluster controller. Two replicas for failover; a Kubernetes Lease makes
+# exactly one of them act (the other stands by and reports /readyz "standby").
+#
+# IMAGE PINNING: the tag below is a release version, never "latest". A release
+# pins it to the built digest with
+#   kustomize edit set image kgf-nexus/cluster-controller=<acr>/nexus/cluster-controller@sha256:<digest>
+# which is the same digest discipline .azure-pipelines/templates/deploy-aks.yml
+# applies to the other services.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-cluster-controller
+  namespace: kgf-nexus
+  labels: {app.kubernetes.io/name: nexus-cluster-controller, app.kubernetes.io/part-of: kgf-nexus, app.kubernetes.io/component: cluster-controller}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: {app.kubernetes.io/name: nexus-cluster-controller}
+  strategy:
+    type: RollingUpdate
+    # One at a time, so a rollout never leaves zero candidates for the lease.
+    rollingUpdate: {maxUnavailable: 1, maxSurge: 0}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: nexus-cluster-controller, app.kubernetes.io/part-of: kgf-nexus, app.kubernetes.io/component: cluster-controller}
+    spec:
+      serviceAccountName: nexus-cluster-controller
+      # Enough for the leader to finish a cycle and release its Lease, so the
+      # standby takes over in seconds rather than after a full lease duration.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      affinity:
+        podAntiAffinity:
+          # Failover is only real if the two replicas are not on one node.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: {app.kubernetes.io/name: nexus-cluster-controller}
+      containers:
+        - name: controller
+          image: kgf-nexus/cluster-controller:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: NEXUS_CLUSTER_NAME, value: aks-dev}   # must equal clusters.name in the registry
+            - {name: NEXUS_RM_ADDR, value: "resource-manager.kgf-nexus.svc:50052"}
+            # Plan (dry-run) unless apply/allow-apply-patch.yaml is applied.
+            - {name: NEXUS_CONTROLLER_ALLOW_APPLY, value: "false"}
+            - {name: NEXUS_CONTROLLER_INTERVAL, value: 15s}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+          ports:
+            - {name: http, containerPort: 8090}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 15
+            failureThreshold: 4
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {cpu: 250m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

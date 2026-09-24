@@ -24,8 +24,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/worker"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
 )
 
 // version is stamped at build time (-ldflags "-X main.version=..."). It is
@@ -72,6 +74,9 @@ func main() {
 			"per-attempt scratch directory root (default: OS temp)")
 		drainGrace = flag.Duration("drain-grace", envDuration("NEXUS_DRAIN_GRACE", 5*time.Minute),
 			"how long a draining agent waits for in-flight work before giving up")
+		maxUninterruptible = flag.Duration("max-uninterruptible",
+			envDuration("NEXUS_MAX_UNINTERRUPTIBLE", worker.DefaultUninterruptibleCeiling),
+			"platform ceiling on how long cancelling an uninterruptible task waits before SIGKILL (ADR-0015)")
 		allowUnenforceable = flag.Bool("allow-unenforceable-limits",
 			os.Getenv("NEXUS_ALLOW_UNENFORCEABLE_LIMITS") == "true",
 			"DEVELOPMENT ONLY: run tasks whose resource limits the subprocess executor cannot enforce")
@@ -113,12 +118,50 @@ func main() {
 		WorkDir:          *workDir,
 		DrainGracePeriod: *drainGrace,
 		ResultStore: worker.ResultStoreCredentials{
+			Endpoint:        os.Getenv("NEXUS_RESULT_STORE_ENDPOINT"),
 			AccessKeyID:     os.Getenv("NEXUS_S3_ACCESS_KEY_ID"),
 			SecretAccessKey: os.Getenv("NEXUS_S3_SECRET_ACCESS_KEY"),
 			SessionToken:    os.Getenv("NEXUS_S3_SESSION_TOKEN"),
 			UseTLS:          os.Getenv("NEXUS_S3_USE_TLS") == "true",
 		},
 		AllowUnenforceableLimits: *allowUnenforceable,
+		// NEXUS_NATS_URL / NEXUS_NATS_CREDS. Empty means poll-only, which is a
+		// complete, correct configuration (ADR-0003).
+		Bus:                bus.ConfigFromEnv("nexus-agent"),
+		MaxUninterruptible: *maxUninterruptible,
+	}
+
+	// The kubernetes executor is opt-in: it exists only when NEXUS_K8S_NAMESPACE
+	// names a target namespace. It is built ONCE here, outside the session loop,
+	// because it owns informers that must not be re-created on every REREGISTER.
+	kcfg, kEnabled, err := executor.LoadKubernetesConfigFromEnv(os.Getenv)
+	if err != nil {
+		// A malformed NEXUS_K8S_* is a deployment bug; failing fast beats an
+		// agent that silently advertises less than its operator intended.
+		log.Error("invalid kubernetes executor configuration", "error", err)
+		os.Exit(1)
+	}
+	if kEnabled {
+		client, cerr := executor.NewKubernetesClient(kcfg)
+		if cerr != nil {
+			// Not fatal: the agent still serves subprocess/docker work, and
+			// buildExecutors will simply not advertise kubernetes.
+			log.Error("could not build the kubernetes client; the kubernetes executor is disabled", "error", cerr)
+		}
+		ke := executor.NewKubernetesExecutor(kcfg, client, *workDir, log)
+		defer ke.Close()
+		cfg.Kubernetes = ke
+		log.Info("kubernetes executor configured", "namespace", kcfg.Namespace,
+			"owner", ke.Config.Owner, "helper_image", ke.Config.HelperImage)
+	}
+
+	// A drain that gives up before the uninterruptible ceiling would kill, at
+	// deploy time, exactly the critical sections the ceiling promises to let
+	// finish. Not fatal -- an operator may accept that -- but never silent.
+	if *drainGrace < *maxUninterruptible {
+		log.Warn("drain grace is shorter than the uninterruptible ceiling: a deploy can SIGKILL an "+
+			"uninterruptible task before its declared bound (ADR-0015)",
+			"drain_grace", *drainGrace, "max_uninterruptible", *maxUninterruptible)
 	}
 
 	if err := run(ctx, cfg, *controlPlane, log); err != nil {

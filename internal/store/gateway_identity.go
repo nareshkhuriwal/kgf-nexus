@@ -43,6 +43,11 @@ type UserRow struct {
 	Role        string
 	CreatedAt   time.Time
 	DisabledAt  *time.Time
+	// EmailVerifiedAt is when the account proved it controls Email (migration
+	// 0017). Nil means unproven. Populated by the reads that feed a decision or a
+	// display -- password authentication, GetUser and ListUsers -- and left nil by
+	// writes that return the row they just inserted, where it is nil anyway.
+	EmailVerifiedAt *time.Time
 }
 
 // SessionRow is a live browser session.
@@ -169,15 +174,42 @@ func gatewayInsertUser(ctx context.Context, q GWQuerier, namespace, email, displ
 // the namespace regardless of how carefully the error strings are matched.
 func GatewayAuthenticatePassword(ctx context.Context, q GWQuerier, namespace, email, password string) (UserRow, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
+	// Email-only sign-in resolves a unique enabled account; never pick an
+	// arbitrary tenant when legacy accounts share an address.
+	if namespace == "" {
+		rows, err := q.Query(ctx, `SELECT namespace FROM users WHERE lower(email)=$1 AND disabled_at IS NULL LIMIT 2`, email)
+		if err != nil {
+			return UserRow{}, fmt.Errorf("resolve sign-in workspace: %w", err)
+		}
+		namespaces := []string{}
+		for rows.Next() {
+			var ns string
+			if err = rows.Scan(&ns); err != nil {
+				rows.Close()
+				return UserRow{}, err
+			}
+			namespaces = append(namespaces, ns)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return UserRow{}, err
+		}
+		if len(namespaces) != 1 {
+			_ = VerifyPassword(dummyVerifier, password)
+			return UserRow{}, ErrIdentityUnknown
+		}
+		namespace = namespaces[0]
+	}
 
 	var u UserRow
 	var hash *string
 	err := q.QueryRow(ctx, `
-		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at, password_hash
+		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at, password_hash, email_verified_at
 		  FROM users
 		 WHERE namespace = $1 AND lower(email) = $2`,
 		namespace, email,
-	).Scan(&u.ID, &u.Namespace, &u.Email, &u.DisplayName, &u.Role, &u.CreatedAt, &u.DisabledAt, &hash)
+	).Scan(&u.ID, &u.Namespace, &u.Email, &u.DisplayName, &u.Role, &u.CreatedAt, &u.DisabledAt, &hash, &u.EmailVerifiedAt)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -251,7 +283,7 @@ func GatewayListUsers(ctx context.Context, q GWQuerier, namespace string, limit 
 		limit = 100
 	}
 	rows, err := q.Query(ctx, `
-		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at
+		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at, email_verified_at
 		  FROM users
 		 WHERE namespace = $1
 		 ORDER BY created_at DESC
@@ -264,7 +296,7 @@ func GatewayListUsers(ctx context.Context, q GWQuerier, namespace string, limit 
 	out := make([]UserRow, 0, 16)
 	for rows.Next() {
 		var u UserRow
-		if err := rows.Scan(&u.ID, &u.Namespace, &u.Email, &u.DisplayName, &u.Role, &u.CreatedAt, &u.DisabledAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Namespace, &u.Email, &u.DisplayName, &u.Role, &u.CreatedAt, &u.DisabledAt, &u.EmailVerifiedAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		out = append(out, u)
@@ -280,10 +312,10 @@ func GatewayListUsers(ctx context.Context, q GWQuerier, namespace string, limit 
 func GatewayGetUser(ctx context.Context, q GWQuerier, namespace, userID string) (UserRow, error) {
 	var u UserRow
 	err := q.QueryRow(ctx, `
-		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at
+		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at, email_verified_at
 		  FROM users
 		 WHERE namespace = $1 AND id = $2`, namespace, userID,
-	).Scan(&u.ID, &u.Namespace, &u.Email, &u.DisplayName, &u.Role, &u.CreatedAt, &u.DisabledAt)
+	).Scan(&u.ID, &u.Namespace, &u.Email, &u.DisplayName, &u.Role, &u.CreatedAt, &u.DisabledAt, &u.EmailVerifiedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return UserRow{}, ErrNotFound
 	}
@@ -300,6 +332,8 @@ func GatewayGetUser(ctx context.Context, q GWQuerier, namespace, userID string) 
 // alive would mean a person who was just deactivated keeps full access until
 // their token happens to expire -- which is exactly the window an offboarding
 // exists to close. The two facts must commit together or the guarantee is empty.
+var ErrLastAdministrator = errors.New("cannot disable the last active administrator")
+
 func GatewaySetUserDisabled(ctx context.Context, db GWDB, namespace, userID string, disabled bool) (UserRow, error) {
 	tx, err := db.Begin(ctx)
 	if err != nil {
@@ -307,6 +341,19 @@ func GatewaySetUserDisabled(ctx context.Context, db GWDB, namespace, userID stri
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, namespace); err != nil {
+		return UserRow{}, err
+	}
+	if disabled {
+		var last bool
+		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE namespace=$1 AND id=$2 AND role='admin' AND disabled_at IS NULL) AND (SELECT count(*) FROM users WHERE namespace=$1 AND role='admin' AND disabled_at IS NULL)<=1`, namespace, userID).Scan(&last)
+		if err != nil {
+			return UserRow{}, err
+		}
+		if last {
+			return UserRow{}, ErrLastAdministrator
+		}
+	}
 	var at *time.Time
 	if disabled {
 		now := time.Now().UTC()
@@ -754,7 +801,7 @@ type AuditFilter struct {
 
 // GatewayListAudit reads the audit trail for a namespace, most recent first.
 //
-// Filters are applied in SQL with NULL-tolerant predicates ($n = '' OR col = $n)
+// Filters are applied in SQL with NULL-tolerant predicates ($n = ” OR col = $n)
 // so one statement serves every combination. That keeps the query planner's job
 // simple and avoids building SQL by string concatenation in an admin-only path,
 // which is where an injection would be most damaging.

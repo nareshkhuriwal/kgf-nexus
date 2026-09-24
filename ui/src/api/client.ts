@@ -35,6 +35,7 @@ import type {
   SpecVersion,
   StartBackfillRequest,
   Worker,
+  WorkerQuarantine,
   WorkerDetail,
   WorkflowSummary,
 } from './types';
@@ -293,6 +294,7 @@ export interface RunListFilter {
 export interface RunPage {
   runs: RunSummary[];
   nextBefore?: string;
+  total?: number;
 }
 
 /**
@@ -411,7 +413,10 @@ export const api = {
       const raw = (payload as Record<string, unknown>).next_before;
       if (typeof raw === 'string' && raw !== '') nextBefore = raw;
     }
-    return { runs: sorted, nextBefore };
+    const rawTotal = payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>).total : undefined;
+    const total = typeof rawTotal === 'number' && Number.isSafeInteger(rawTotal) && rawTotal >= 0 ? rawTotal : undefined;
+    return { runs: sorted, nextBefore, ...(total !== undefined ? { total } : {}) };
   },
 
   /**
@@ -481,6 +486,10 @@ export const api = {
   },
 
   /** Kept as its own name: it is called from a list row as well as the detail page. */
+  deleteRun(namespace: string, runId: string): Promise<void> {
+    return request<void>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}`, {method: "DELETE"});
+  },
+
   cancelRun(namespace: string, runId: string): Promise<void> {
     return request<void>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}/cancel`, {
       method: 'POST',
@@ -502,6 +511,40 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
+    });
+  },
+
+  /** Take a worker out of placement. durationMs 0 = until released. */
+  quarantineWorker(namespace: string, workerId: string, reason: string, durationMs = 0): Promise<void> {
+    return request<void>(`${ns(namespace)}/workers/${encodeURIComponent(workerId)}/quarantine`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason, duration_ms: durationMs }),
+    });
+  },
+
+  releaseWorker(namespace: string, workerId: string, reason = ''): Promise<void> {
+    return request<void>(`${ns(namespace)}/workers/${encodeURIComponent(workerId)}/release`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+  },
+
+  async listWorkerQuarantines(namespace: string, workerId: string): Promise<WorkerQuarantine[]> {
+    const payload = await request<unknown>(`${ns(namespace)}/workers/${encodeURIComponent(workerId)}/quarantines`);
+    return asList<WorkerQuarantine>(payload, 'quarantines');
+  },
+
+  /** Stop reusing memoized results of a task (or one cache key). */
+  invalidateCache(
+    namespace: string,
+    sel: { task_ref?: string; task_version?: number; cache_key?: string; reason?: string },
+  ): Promise<{ invalidation_id: number; invalidated_at: string }> {
+    return request(`${ns(namespace)}/cache/invalidations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(sel),
     });
   },
 
@@ -601,6 +644,12 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+    });
+  },
+
+  updateSchedule(namespace: string, body: CreateScheduleRequest): Promise<Schedule> {
+    return request<Schedule>(`${ns(namespace)}/schedules/${encodeURIComponent(body.name)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
   },
 

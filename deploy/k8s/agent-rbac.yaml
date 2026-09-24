@@ -1,0 +1,89 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Least-privilege identity for the in-cluster Nexus agent's Kubernetes executor.
+#
+# A Role, never a ClusterRole: the agent can act in ONE namespace only. Every
+# verb below is used by agent/internal/executor/kubernetes*.go, and the agent's
+# startup Probe checks the load-bearing ones with SelfSubjectAccessReview, so a
+# missing rule is a log line at boot rather than a failure on every task.
+#
+# Deliberately ABSENT:
+#   - pods/exec, pods/attach: outputs leave the pod via the collector sidecar's
+#     log (pods/log), so the agent never needs to run code inside a task pod.
+#   - pods create: the Job controller creates task pods, not the agent.
+#   - update/patch on anything: Jobs are create-once; nothing is mutated.
+#   - secrets get/list/watch: the agent WRITES each attempt's inputs Secret and
+#     deletes it; it can read no Secret in the namespace, including other
+#     attempts' inputs.
+#   - pods/finalizers: owner references are set with blockOwnerDeletion=false
+#     so this grant is not needed.
+#
+# Known limit of RBAC here: "delete pods" cannot be narrowed by label, so the
+# role could delete a sibling agent pod in the same namespace. The executor only
+# ever deletes pods selected by its own owner + attempt labels; see F96.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nexus-agent
+  namespace: nexus-exec
+  labels:
+    app.kubernetes.io/name: nexus-agent
+    app.kubernetes.io/part-of: nexus
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nexus-agent-executor
+  namespace: nexus-exec
+  labels:
+    app.kubernetes.io/name: nexus-agent
+    app.kubernetes.io/part-of: nexus
+rules:
+  # One Job per attempt; list/watch feed the executor's single informer.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Pods are observed (phase, exit codes, OOM) and deleted to deliver
+  # SIGTERM-with-grace on cancel, lease loss and the deadline backstop.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  # Task log streaming and the collector's output dump.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Per-attempt inputs Secret (Job-owned, immutable).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nexus-agent-executor
+  namespace: nexus-exec
+  labels:
+    app.kubernetes.io/name: nexus-agent
+    app.kubernetes.io/part-of: nexus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nexus-agent-executor
+subjects:
+  - kind: ServiceAccount
+    name: nexus-agent
+    namespace: nexus-exec
+---
+# The identity TASK pods run as (NEXUS_K8S_SERVICE_ACCOUNT). It is bound to
+# nothing and its token is never mounted; it exists so image pull secrets and
+# admission policy can target task pods without touching the namespace default.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nexus-task
+  namespace: nexus-exec
+  labels:
+    app.kubernetes.io/part-of: nexus
+automountServiceAccountToken: false

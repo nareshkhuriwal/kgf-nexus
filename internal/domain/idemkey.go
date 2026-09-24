@@ -87,3 +87,26 @@ func CacheKey(taskRef string, version int32, inputsCanonicalJSON []byte) string 
 	h.Write(inputsCanonicalJSON)
 	return hex.EncodeToString(h.Sum(nil))
 }
+
+// MemoKey is CacheKey scoped to a namespace: sha256(namespace ‖ task_ref ‖
+// version ‖ canonical_hash(inputs)). It is the key the DAG engine actually
+// memoizes on.
+//
+// It reuses the §6.2 derivation's construction -- sha256 over fields joined by
+// the unforgeable \x1f separator -- and adds the namespace as the leading field.
+// §6.4's formula has no tenant in it, which is right for a single-tenant
+// platform and wrong for this one: a cached output_ref points into ITS tenant's
+// result-store prefix, which another tenant's workers cannot read, and a
+// cross-tenant hit would also disclose that the other tenant ran the same work on
+// the same inputs. Scoping the key makes such a hit structurally impossible
+// rather than something a lookup predicate must remember to prevent.
+//
+// Like CacheKey it contains no run_id and no attempt_number: it identifies (code,
+// inputs), which is what lets a re-run skip work whose inputs did not change.
+func MemoKey(namespace, taskRef string, version int32, inputsDigest []byte) string {
+	h := sha256.New()
+	h.Write([]byte(namespace))
+	h.Write([]byte(keySep))
+	h.Write([]byte(CacheKey(taskRef, version, inputsDigest)))
+	return hex.EncodeToString(h.Sum(nil))
+}

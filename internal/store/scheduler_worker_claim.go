@@ -221,7 +221,7 @@ func (s *SchedulerStore) claimOneForWorker(
 		// transaction as the dispatch so two schedulers cannot both see limit-1
 		// held and both admit.
 		if key := cand.Spec.ConcurrencyKey; key != "" && cand.Spec.ConcurrencyLimit > 0 {
-			ok, held, err := s.concurrencyAdmit(ctx, tx, key, cand.Spec.ConcurrencyLimit)
+			ok, held, err := s.concurrencyAdmit(ctx, tx, key, cand.Spec.ConcurrencyLimit, cand.ID)
 			if err != nil {
 				return nil, err
 			}
@@ -401,6 +401,7 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.queue, a.priority,
   JOIN workflow_runs r ON r.id = a.run_id
  WHERE a.state = 'PENDING'
    AND a.queue = $1
+   AND a.tenant_id = (SELECT tenant_id FROM workers WHERE id=$11)
    AND a.scheduled_at <= $2
    AND r.state IN ('PENDING','RUNNING')
    AND NOT (a.id = ANY($4::uuid[]))
@@ -436,7 +437,7 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.queue, a.priority,
 	row := tx.QueryRow(ctx, q,
 		s.cfg.Queue, now, s.cfg.AgingRate, skip, executors, labelsJSON,
 		budget.GetCpuMillis(), budget.GetMemoryBytes(),
-		int64(budget.GetGpuCount()), budget.GetDiskBytes())
+		int64(budget.GetGpuCount()), budget.GetDiskBytes(), worker.ID)
 
 	var c Candidate
 	var reqJSON, specJSON []byte
@@ -637,10 +638,11 @@ SELECT a.id, a.resource_request
   FROM task_attempts a
  WHERE a.state = 'PENDING'
    AND a.queue = $1
+   AND a.tenant_id = (SELECT tenant_id FROM workers WHERE id=$3)
    AND (a.pending_reason IS NULL OR a.pending_reason = '')
    AND NOT (a.id = ANY($2::uuid[]))
  ORDER BY a.scheduled_at
- LIMIT 20`, s.cfg.Queue, skip)
+ LIMIT 20`, s.cfg.Queue, skip, worker.ID)
 	if err != nil {
 		return fmt.Errorf("explain unschedulable: %w", err)
 	}

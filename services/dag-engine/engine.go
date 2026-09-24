@@ -60,6 +60,8 @@ type Engine struct {
 	// validation is the submit-time policy. Held here so the same binary can run
 	// with Phase-2 trigger rules enabled by configuration rather than a rebuild.
 	validation dag.ValidationOptions
+	// fanInLimit bounds an assembled fan-in array (§5.4); 0 = the default.
+	fanInLimit int64
 }
 
 // NewEngine wires the engine. runs and ev may be nil, in which case the engine
@@ -80,7 +82,17 @@ func NewEngine(st *store.DAGEngineStore, runs RunStateWriter, ev EventWriter, lo
 }
 
 // SetValidationOptions overrides submit-time validation policy.
-func (e *Engine) SetValidationOptions(o dag.ValidationOptions) { e.validation = o }
+func (e *Engine) SetValidationOptions(o dag.ValidationOptions) {
+	o.MaxFanInBytes = e.validation.MaxFanInBytes
+	e.validation = o
+}
+
+// SetFanInLimit bounds assembled fan-in arrays, and makes materialize-time
+// validation check statically declared sizes against the same bound.
+func (e *Engine) SetFanInLimit(limit int64) {
+	e.fanInLimit = limit
+	e.validation.MaxFanInBytes = limit
+}
 
 // MaterializeResult reports what Materialize did.
 type MaterializeResult struct {
@@ -182,6 +194,8 @@ type ReconcileResult struct {
 	RunTerminal     bool
 	Halted          bool
 	CASMisses       []string
+	// Expanded lists the map templates this reconcile expanded (§5.4).
+	Expanded []string
 }
 
 // Reconcile recomputes the run from ground truth and applies the result.
@@ -196,32 +210,73 @@ type ReconcileResult struct {
 //
 // Reconcile is safe to call concurrently from several replicas and safe to call
 // repeatedly: every write it makes is CAS-guarded or ON CONFLICT DO NOTHING.
+//
+// It runs up to maxReconcilePasses passes, stopping as soon as a pass changes
+// nothing a further pass could act on. More than one pass is needed only when a
+// pass creates work that is ALREADY complete -- an expansion (whose children are
+// immediately ready, or which settles the template at once), or a memo hit (an
+// attempt born SUCCEEDED). Nothing will report on such work, so if this call did
+// not look again, nothing would: a run of fully-memoized tasks would stop after
+// its first node, with no attempt ever reporting to trigger the next reconcile.
 func (e *Engine) Reconcile(ctx context.Context, runID string) (*ReconcileResult, error) {
+	var total *ReconcileResult
+	for pass := 0; pass < maxReconcilePasses; pass++ {
+		res, again, err := e.reconcilePass(ctx, runID)
+		if err != nil {
+			return nil, err
+		}
+		if total == nil {
+			total = res
+		} else {
+			total.Frontier = append(total.Frontier, res.Frontier...)
+			total.Transitions = append(total.Transitions, res.Transitions...)
+			total.AttemptsCreated = append(total.AttemptsCreated, res.AttemptsCreated...)
+			total.CASMisses = append(total.CASMisses, res.CASMisses...)
+			total.Expanded = append(total.Expanded, res.Expanded...)
+			total.RunState, total.RunTerminal, total.Halted = res.RunState, res.RunTerminal, res.Halted
+		}
+		if !again {
+			break
+		}
+	}
+	return total, nil
+}
+
+// maxReconcilePasses bounds Reconcile's inner loop. Each pass that asks for
+// another has made durable progress (an expansion or a memo hit committed), so
+// the loop cannot spin; the bound only caps how much of a long chain of
+// memoized nodes one call resolves -- the next report or the stall sweeper
+// continues it.
+const maxReconcilePasses = 8
+
+// reconcilePass is one load-decide-apply cycle. again reports that it committed
+// work that is already complete (see Reconcile).
+func (e *Engine) reconcilePass(ctx context.Context, runID string) (res *ReconcileResult, again bool, err error) {
 	log := e.log.With("run_id", runID)
 
 	run, err := e.store.LoadRun(ctx, runID)
 	if err != nil {
-		return nil, fmt.Errorf("reconcile: %w", err)
+		return nil, false, fmt.Errorf("reconcile: %w", err)
 	}
 	nodes, err := e.store.LoadNodes(ctx, runID)
 	if err != nil {
-		return nil, fmt.Errorf("reconcile run %s: %w", runID, err)
+		return nil, false, fmt.Errorf("reconcile run %s: %w", runID, err)
 	}
 	if len(nodes) == 0 {
-		return nil, fmt.Errorf("reconcile run %s: no nodes materialized", runID)
+		return nil, false, fmt.Errorf("reconcile run %s: no nodes materialized", runID)
 	}
 	edges, err := e.store.LoadEdges(ctx, runID)
 	if err != nil {
-		return nil, fmt.Errorf("reconcile run %s: %w", runID, err)
+		return nil, false, fmt.Errorf("reconcile run %s: %w", runID, err)
 	}
 	attempts, err := e.store.LoadAttempts(ctx, runID)
 	if err != nil {
-		return nil, fmt.Errorf("reconcile run %s: %w", runID, err)
+		return nil, false, fmt.Errorf("reconcile run %s: %w", runID, err)
 	}
 
 	spec, err := e.store.LoadSpec(ctx, run.SpecID)
 	if err != nil {
-		return nil, fmt.Errorf("reconcile run %s: %w", runID, err)
+		return nil, false, fmt.Errorf("reconcile run %s: %w", runID, err)
 	}
 	g := graphFromRows(nodes, edges, spec)
 
@@ -268,17 +323,54 @@ func (e *Engine) Reconcile(ctx context.Context, runID string) (*ReconcileResult,
 		})
 	}
 
-	newAttempts, err := e.buildAttempts(ctx, runID, run, g, decision.Frontier, attempts)
+	// Outputs visible to this pass: every node's latest success. Map templates'
+	// fan-in arrays are NOT precomputed; buildAttempts assembles one only for a
+	// frontier node that reads it, streamed and bounded (fanIn).
+	outputs := latestSucceededOutputs(attempts)
+
+	newAttempts, refusals, err := e.buildAttempts(ctx, runID, run, g, decision.Frontier, outputs)
 	if err != nil {
-		return nil, fmt.Errorf("reconcile run %s: %w", runID, err)
+		return nil, false, fmt.Errorf("reconcile run %s: %w", runID, err)
+	}
+	// A refused fan-in fails its consumer instead of starting it: the decision's
+	// PENDING->READY for that node becomes PENDING->FAILED, committed with the
+	// recorded reason. Deterministic, so no retry -- the same children would
+	// produce the same too-large array.
+	for _, r := range refusals {
+		for i := range writes {
+			if writes[i].NodeID == r.NodeID {
+				writes[i].To = domain.NodeFailed
+			}
+		}
 	}
 
-	applied, err := e.store.ApplyNodeStateAndCreateAttempts(ctx, runID, writes, newAttempts)
+	applied, err := e.store.ApplyReconcile(ctx, runID, writes, newAttempts, refusals)
 	if err != nil {
-		return nil, fmt.Errorf("reconcile run %s: %w", runID, err)
+		return nil, false, fmt.Errorf("reconcile run %s: %w", runID, err)
+	}
+	for _, r := range refusals {
+		if containsString(applied.NodeCASMisses, r.NodeID) {
+			continue
+		}
+		log.Warn("fan-in refused: assembled array would exceed the limit; consuming node FAILED",
+			"node_id", r.NodeID, "template", r.TemplateNodeID, "output", r.TemplateOutput,
+			"limit_bytes", r.LimitBytes, "children", r.ChildrenTotal, "accepted_before_limit", r.ChildrenBeforeLimit)
+		e.emit(ctx, runID, r.NodeID, EventFanInRejected, map[string]any{
+			"reason": r.Reason, "detail": r.Detail, "template_node_id": r.TemplateNodeID,
+			"template_output": r.TemplateOutput, "limit_bytes": r.LimitBytes,
+		})
+		// The node is now FAILED: settle its downstream in this call.
+		again = true
 	}
 
 	for _, t := range decision.Transitions {
+		if t.Reason == dag.ReasonExpansionSettled {
+			log.Info("map template settled from its children", "node_id", t.NodeID, "state", string(t.To))
+			e.emit(ctx, runID, t.NodeID, "NodeStateChanged", map[string]any{
+				"state": string(t.To), "reason": string(t.Reason),
+			})
+			continue
+		}
 		if t.To == dag.NodeSkipped || t.To == dag.NodeUpstreamFailed {
 			// Logged individually and at INFO: "why did this node not run" is the
 			// most common question asked of a failed run, and the cause is the
@@ -292,11 +384,42 @@ func (e *Engine) Reconcile(ctx context.Context, runID string) (*ReconcileResult,
 		}
 	}
 	for _, a := range applied.AttemptsCreated {
+		if a.CacheHitOf != nil {
+			// Recorded distinctly: a memo hit is not an execution, and an operator
+			// reading the timeline must be able to tell "ran and succeeded" from
+			// "reused a result from attempt X" at a glance.
+			log.Info("memo hit: node satisfied from cache",
+				"node_id", a.NodeID, "attempt_id", a.AttemptID, "source_attempt_id", *a.CacheHitOf)
+			e.emit(ctx, runID, a.NodeID, EventCacheHit, map[string]any{
+				"attempt_id": a.AttemptID, "attempt_number": a.AttemptNumber,
+				"source_attempt_id": *a.CacheHitOf,
+			})
+			again = true
+			continue
+		}
 		log.Info("created pending attempt",
 			"node_id", a.NodeID, "attempt_id", a.AttemptID, "attempt_number", a.AttemptNumber)
 		e.emit(ctx, runID, a.NodeID, domain.EventAttemptScheduled, map[string]any{
 			"attempt_id": a.AttemptID, "attempt_number": a.AttemptNumber,
 		})
+	}
+
+	// Expansions last: they touch only templates the decision left PENDING, so
+	// they cannot conflict with the node writes above, and doing them after the
+	// frontier means a failure here never blocks unrelated nodes from starting.
+	var expanded []string
+	if len(decision.Expansions) > 0 {
+		sources := latestSucceededAttempts(attempts)
+		for _, t := range decision.Expansions {
+			ok, xerr := e.expandTemplate(ctx, run, g, t, outputs, sources)
+			if xerr != nil {
+				return nil, false, fmt.Errorf("reconcile run %s: %w", runID, xerr)
+			}
+			if ok {
+				expanded = append(expanded, t)
+				again = true
+			}
+		}
 	}
 	if len(applied.NodeCASMisses) > 0 {
 		// Normal under concurrency: another replica won the race. Sustained high
@@ -304,7 +427,8 @@ func (e *Engine) Reconcile(ctx context.Context, runID string) (*ReconcileResult,
 		log.Debug("node cas misses", "nodes", applied.NodeCASMisses)
 	}
 
-	res := &ReconcileResult{
+	res = &ReconcileResult{
+		Expanded:        expanded,
 		RunID:           runID,
 		Frontier:        decision.Frontier,
 		Transitions:     decision.Transitions,
@@ -323,7 +447,7 @@ func (e *Engine) Reconcile(ctx context.Context, runID string) (*ReconcileResult,
 	// underneath it, and — worse than cosmetic — the scheduler's candidate query
 	// admits only runs in ('PENDING','RUNNING'), so the two states differ for
 	// pause and cancel handling downstream.
-	if run.State == domain.RunPending && len(applied.AttemptsCreated) > 0 {
+	if run.State == domain.RunPending && (len(applied.AttemptsCreated) > 0 || len(expanded) > 0) {
 		if err := e.publishRunState(ctx, runID, domain.RunRunning); err != nil {
 			// Visibility, not correctness: the attempts are already durable and
 			// dispatchable, and the next reconcile republishes.
@@ -384,7 +508,7 @@ func (e *Engine) Reconcile(ctx context.Context, runID string) (*ReconcileResult,
 			}
 		}
 	}
-	return res, nil
+	return res, again, nil
 }
 
 func containsTransition(ts []store.NodeTransition, nodeID string) bool {
@@ -400,22 +524,51 @@ func containsTransition(ts []store.NodeTransition, nodeID string) bool {
 // inputs from its upstreams' outputs.
 func (e *Engine) buildAttempts(
 	ctx context.Context, runID string, run *store.DERunRow, g *dag.Graph,
-	frontier []string, attempts []store.DEAttemptRow,
-) ([]store.NewAttempt, error) {
+	frontier []string, outputs map[string]map[string]json.RawMessage,
+) ([]store.NewAttempt, []store.FanInRefusal, error) {
 	if len(frontier) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	outputs := latestSucceededOutputs(attempts)
+	now := time.Now()
 
+	var refusals []store.FanInRefusal
 	out := make([]store.NewAttempt, 0, len(frontier))
 	for _, nodeID := range frontier {
 		n := g.Node(nodeID)
 		if n == nil {
-			return nil, fmt.Errorf("frontier names unknown node %q", nodeID)
+			return nil, nil, fmt.Errorf("frontier names unknown node %q", nodeID)
+		}
+		refusal, err := e.loadFanIns(ctx, runID, g, nodeID, outputs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("fan-in for node %q: %w", nodeID, err)
+		}
+		if refusal != nil {
+			refusals = append(refusals, *refusal)
+			continue
 		}
 		inputRefs, err := e.resolveInputs(g, nodeID, outputs)
 		if err != nil {
-			return nil, fmt.Errorf("resolve inputs for node %q: %w", nodeID, err)
+			return nil, nil, fmt.Errorf("resolve inputs for node %q: %w", nodeID, err)
+		}
+		inputRefs, err = resolveRunInputs(g, nodeID, run.Params, inputRefs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve run inputs for node %q: %w", nodeID, err)
+		}
+		cacheKey, hit, err := e.memoFor(ctx, run, n, inputRefs, now)
+		if err != nil {
+			return nil, nil, fmt.Errorf("memo lookup for node %q: %w", nodeID, err)
+		}
+		var mapIndex *int
+		if n.IsChild() {
+			// §6.2: map_index participates in the idempotency key, and node_id is
+			// the TEMPLATE's id -- so retrying child 7 re-runs exactly child 7's
+			// logical work, and the key does not depend on how children are named.
+			idx := n.MapIndex
+			mapIndex = &idx
+		}
+		idemNode := nodeID
+		if n.IsChild() {
+			idemNode = n.ParentID
 		}
 		priority := n.Spec.GetPriority()
 		if priority == 0 {
@@ -433,11 +586,16 @@ func (e *Engine) buildAttempts(
 			Resources: n.Spec.GetResources().GetRequest(),
 			// Excludes attempt_number by construction (CONTRACT.md invariant 1),
 			// so every retry of this work shares one key.
-			IdempotencyKey: domain.IdempotencyKey(runID, nodeID, nil, n.Spec.GetVersion()),
+			IdempotencyKey: domain.IdempotencyKey(runID, idemNode, mapIndex, n.Spec.GetVersion()),
 			InputRefs:      inputRefs,
+			CacheKey:       cacheKey,
 		})
+		if hit != nil {
+			out[len(out)-1].MemoHitOf = &hit.SourceAttemptID
+			out[len(out)-1].MemoOutputRef = hit.OutputRef
+		}
 	}
-	return out, nil
+	return out, refusals, nil
 }
 
 // resolveInputs maps upstream attempt output_ref values into this node's
@@ -527,6 +685,15 @@ func deriveNodeStates(
 
 	out := make(dag.States, len(nodes))
 	for _, n := range nodes {
+		if gn := g.Node(n.NodeID); gn != nil && gn.IsTemplate() {
+			// A map template has no attempts, ever: its state is written by the
+			// expansion transaction (PENDING -> RUNNING/SUCCEEDED/FAILED) and by the
+			// pure engine's fold over its children. It is engine state, not a
+			// projection of attempts, so the stored value IS the truth. Deriving
+			// "no attempts -> PENDING" here would un-expand an expanded template.
+			out[n.NodeID] = stored.Get(n.NodeID)
+			continue
+		}
 		as := byNode[n.NodeID]
 		if len(as) == 0 {
 			// No attempt yet. Preserve a stored terminal state (SKIPPED or
@@ -584,7 +751,16 @@ func graphFromRows(nodes []store.DENodeRow, edges []store.DEEdgeRow, spec *nexus
 			FromNodeId: ed.From, ToNodeId: ed.To, OutputToInput: ed.OutputToInput,
 		})
 	}
-	return dag.Build(rebuilt)
+	// Expansion children are identified by their ROW (parent_node_id, map_index),
+	// not by their id's spelling: the id format is presentation, the columns are
+	// the fact.
+	children := map[string]dag.ChildRef{}
+	for _, n := range nodes {
+		if n.ParentNodeID != nil && n.MapIndex != nil {
+			children[n.NodeID] = dag.ChildRef{Parent: *n.ParentNodeID, MapIndex: int(*n.MapIndex)}
+		}
+	}
+	return dag.BuildWithChildren(rebuilt, children)
 }
 
 func triggerRuleToProto(s string) nexusv1.TriggerRule {
@@ -641,3 +817,73 @@ func (e *Engine) ValidateSpec(spec *nexusv1.WorkflowSpec) error {
 
 // ErrNotMaterialized is returned when a run has no nodes yet.
 var ErrNotMaterialized = errors.New("run has no materialized nodes")
+
+// resolveRunInputs delivers literals, run parameters and defaults through the
+// same ResultRefs as edge inputs. Agents do not receive the run document and
+// worker credentials intentionally cannot read it through the REST API.
+func resolveRunInputs(g *dag.Graph, nodeID string, rawParams, rawRefs []byte) ([]byte, error) {
+	params := map[string]json.RawMessage{}
+	refs := map[string]json.RawMessage{}
+	if len(rawParams) > 0 {
+		if err := json.Unmarshal(rawParams, &params); err != nil {
+			return nil, err
+		}
+	}
+	if err := json.Unmarshal(rawRefs, &refs); err != nil {
+		return nil, err
+	}
+	node := g.Node(nodeID)
+	plan, err := dag.InputPlan(g, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, binding := range plan {
+		name := binding.InputName
+		if binding.Source() == dag.FromEdge {
+			continue
+		}
+		var value json.RawMessage
+		if literal, ok := node.Spec.GetInputLiterals()[name]; ok {
+			value = json.RawMessage(literal)
+		} else if binding.Source() == dag.FromMapItem {
+			// A child's element is written onto its spec by the expansion. A
+			// template itself never gets an attempt. Reaching here means a child
+			// row without its element, which must not silently fall through to a
+			// same-named run param and hand every child the same value.
+			return nil, fmt.Errorf("map item input %q of %s has no element", name, nodeID)
+		} else {
+			paramName := node.Spec.GetInputParams()[name]
+			if paramName == "" {
+				paramName = name
+			}
+			value = params[paramName]
+			// The workflow-manager RPC stores non-string parameters as JSON
+			// text inside its string map. Decode that transport layer according
+			// to the declared type, without changing actual string parameters.
+			if ps := g.Params[paramName]; ps != nil && ps.GetType() != "string" {
+				var encoded string
+				if json.Unmarshal(value, &encoded) == nil && json.Valid([]byte(encoded)) {
+					value = json.RawMessage(encoded)
+				}
+			}
+			if len(value) == 0 && g.Params[paramName] != nil {
+				value = json.RawMessage(g.Params[paramName].GetDefaultJson())
+			}
+			if len(value) == 0 {
+				value = json.RawMessage(binding.DefaultJSON)
+			}
+		}
+		if len(value) == 0 {
+			continue
+		}
+		if !json.Valid(value) {
+			return nil, fmt.Errorf("invalid JSON for input %q", name)
+		}
+		// ResultRef.inline is protobuf bytes, hence base64 in its JSON wire form.
+		refs[name], err = json.Marshal(map[string]any{"inline": []byte(value), "content_type": "application/json"})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(refs)
+}

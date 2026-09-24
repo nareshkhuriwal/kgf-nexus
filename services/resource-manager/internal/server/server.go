@@ -89,6 +89,17 @@ func (s *Server) RegisterWorker(ctx context.Context, req *rmv1.RegisterWorkerReq
 		"namespace", req.GetNamespace(), "hostname", req.GetHostname(),
 		"queues", queues, "executors", req.GetExecutors(),
 		"agent_version", req.GetAgentVersion())
+	// A new session from a host with an open quarantine inherits it (see
+	// store.InheritHostQuarantine). Best-effort: failing registration over it
+	// would take a healthy host out of service on a bookkeeping error, and the
+	// detector re-quarantines a genuinely poisoned one within a window.
+	if inherited, qerr := s.store.InheritHostQuarantine(ctx, id); qerr != nil {
+		s.log.Error("could not check host quarantine for a new worker session",
+			"worker_id", id, "hostname", req.GetHostname(), "error", qerr)
+	} else if inherited {
+		s.log.Warn("new worker session inherited its host's quarantine",
+			"worker_id", id, "hostname", req.GetHostname())
+	}
 	return &rmv1.RegisterWorkerResponse{WorkerId: id}, nil
 }
 
@@ -273,15 +284,13 @@ func (s *Server) SetWorkerState(ctx context.Context, req *rmv1.SetWorkerStateReq
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if target == store.WorkerQuarantined {
-		// Phase 2. The DB enum, the store's transition table and this proto all
-		// admit QUARANTINED so that adding the detector is not a migration, but
-		// nothing in Phase 1 issues it, and quietly accepting it would create
-		// workers no Phase 1 code path can ever re-ACTIVE.
-		return nil, status.Error(codes.Unimplemented,
-			"QUARANTINED is Phase 2: the poison-host circuit breaker is not implemented yet")
-	}
 	log := s.log.With("worker_id", workerID, "target_state", string(target), "reason", req.GetReason())
+
+	// Quarantine and release go through the episode-recording paths, so every
+	// entry to and exit from QUARANTINED is attributable and has a reason.
+	if target == store.WorkerQuarantined || target == store.WorkerActive {
+		return s.setQuarantine(ctx, req, target, log)
+	}
 
 	applied, err := s.store.SetWorkerState(ctx, workerID, target)
 	if err != nil {
@@ -312,6 +321,57 @@ func (s *Server) SetWorkerState(ctx context.Context, req *rmv1.SetWorkerStateReq
 			log.Warn("worker DEAD: all reservations released, capacity returned to the pool",
 				"reservations", len(leaked))
 		}
+	}
+	return resp, nil
+}
+
+// setQuarantine implements manual quarantine (QUARANTINED) and release
+// (ACTIVE from QUARANTINED).
+func (s *Server) setQuarantine(
+	ctx context.Context, req *rmv1.SetWorkerStateRequest, target store.WorkerState, log *slog.Logger,
+) (*rmv1.SetWorkerStateResponse, error) {
+	actor := req.GetActor()
+	if actor == "" {
+		actor = "unknown"
+	}
+	reason := req.GetReason()
+	var applied bool
+	var err error
+	if target == store.WorkerQuarantined {
+		if reason == "" {
+			return nil, status.Error(codes.InvalidArgument, "a quarantine needs a reason")
+		}
+		if req.GetQuarantineMs() < 0 {
+			return nil, status.Error(codes.InvalidArgument, "quarantine_ms must not be negative")
+		}
+		var expires *time.Time
+		if ms := req.GetQuarantineMs(); ms > 0 {
+			t := time.Now().Add(time.Duration(ms) * time.Millisecond)
+			expires = &t
+		}
+		applied, err = s.store.QuarantineWorker(ctx, req.GetWorkerId(), store.QuarantineManual, reason, actor, expires, nil)
+	} else {
+		if reason == "" {
+			reason = "released by operator"
+		}
+		applied, err = s.store.ReleaseQuarantine(ctx, req.GetWorkerId(), actor, reason)
+	}
+	if err != nil {
+		log.Error("quarantine transition failed", "error", err)
+		return nil, status.Errorf(codes.Internal, "set worker state: %v", err)
+	}
+	if applied {
+		log.Warn("worker quarantine changed by operator", "actor", actor)
+	} else {
+		log.Info("quarantine transition not applied: illegal from the current state")
+	}
+	resp := &rmv1.SetWorkerStateResponse{Applied: applied}
+	w, gerr := s.store.GetWorker(ctx, req.GetWorkerId())
+	if errors.Is(gerr, store.ErrWorkerNotFound) {
+		return nil, status.Errorf(codes.NotFound, "worker %s not found", req.GetWorkerId())
+	}
+	if gerr == nil {
+		resp.Current = toProtoState(w.State)
 	}
 	return resp, nil
 }

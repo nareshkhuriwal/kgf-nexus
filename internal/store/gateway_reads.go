@@ -206,10 +206,28 @@ func GatewayGetRun(ctx context.Context, q GWQuerier, namespace, runID string) (R
 
 // RunFilter narrows a run listing.
 type RunFilter struct {
-	States   []string
-	SpecName string
-	Limit    int
-	Before   *time.Time
+	Lookahead bool // Fetch one extra row to determine whether another page exists.
+	States    []string
+	SpecName  string
+	Limit     int
+	Before    *time.Time
+}
+
+// GatewayCountRuns counts the matching visible namespace, independent of the cursor.
+func GatewayCountRuns(ctx context.Context, q GWQuerier, namespace string, f RunFilter) (int64, error) {
+	conds := []string{"r.namespace = $1", "NOT EXISTS (SELECT 1 FROM run_deletions d WHERE d.run_id=r.id)"}
+	args := []any{namespace}
+	if len(f.States) > 0 {
+		args = append(args, f.States)
+		conds = append(conds, fmt.Sprintf("r.state::text = ANY($%d)", len(args)))
+	}
+	if f.SpecName != "" {
+		args = append(args, f.SpecName)
+		conds = append(conds, fmt.Sprintf("s.name = $%d", len(args)))
+	}
+	var total int64
+	err := q.QueryRow(ctx, "SELECT count(*) FROM workflow_runs r JOIN workflow_specs s ON s.id=r.spec_id WHERE "+strings.Join(conds, " AND "), args...).Scan(&total)
+	return total, err
 }
 
 // GatewayListRuns lists runs newest-first, keyset-paginated on created_at.
@@ -219,7 +237,7 @@ type RunFilter struct {
 // when new runs arrive mid-pagination.
 func GatewayListRuns(ctx context.Context, q GWQuerier, namespace string, f RunFilter) ([]RunRow, error) {
 	var (
-		conds = []string{"r.namespace = $1"}
+		conds = []string{"r.namespace = $1", "NOT EXISTS (SELECT 1 FROM run_deletions d WHERE d.run_id=r.id)"}
 		args  = []any{namespace}
 	)
 	if len(f.States) > 0 {
@@ -237,6 +255,9 @@ func GatewayListRuns(ctx context.Context, q GWQuerier, namespace string, f RunFi
 	limit := f.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 100
+	}
+	if f.Lookahead {
+		limit++
 	}
 	args = append(args, limit)
 
@@ -269,12 +290,16 @@ type NodeRow struct {
 	MaxAttempts  int32
 	AttemptsUsed int32
 	MapIndex     *int32
+	// ParentNodeID is set on a dynamic-expansion child (§5.4): the template it
+	// was materialized from. The console groups children under it.
+	ParentNodeID *string
 }
 
 // GatewayListRunNodes returns node states for a run detail view.
 func GatewayListRunNodes(ctx context.Context, q GWQuerier, runID string) ([]NodeRow, error) {
 	rows, err := q.Query(ctx, `
-		SELECT node_id, task_ref, state::text, trigger_rule, max_attempts, attempts_used, map_index
+		SELECT node_id, task_ref, state::text, trigger_rule, max_attempts, attempts_used, map_index,
+		       parent_node_id
 		  FROM task_nodes
 		 WHERE run_id = $1
 		 ORDER BY node_id`,
@@ -288,7 +313,7 @@ func GatewayListRunNodes(ctx context.Context, q GWQuerier, runID string) ([]Node
 	var out []NodeRow
 	for rows.Next() {
 		var n NodeRow
-		if err := rows.Scan(&n.NodeID, &n.TaskRef, &n.State, &n.TriggerRule, &n.MaxAttempts, &n.AttemptsUsed, &n.MapIndex); err != nil {
+		if err := rows.Scan(&n.NodeID, &n.TaskRef, &n.State, &n.TriggerRule, &n.MaxAttempts, &n.AttemptsUsed, &n.MapIndex, &n.ParentNodeID); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		out = append(out, n)
@@ -338,6 +363,101 @@ func GatewayListRunEdges(ctx context.Context, q GWQuerier, runID string) ([]Edge
 	return out, rows.Err()
 }
 
+// ExpansionRow is one dynamic expansion as the REST API reports it.
+type ExpansionRow struct {
+	TemplateNodeID string
+	SourceNodeID   string
+	SourceOutput   string
+	ItemCount      int32
+	MaxFanout      int32
+	Outcome        string
+	Reason         *string
+	Detail         *string
+	CreatedAt      time.Time
+}
+
+// GatewayListRunExpansions returns a run's expansion records (§5.4), so the
+// console can label a template with how many children it produced -- or why it
+// produced none -- without counting rows.
+func GatewayListRunExpansions(ctx context.Context, q GWQuerier, runID string) ([]ExpansionRow, error) {
+	rows, err := q.Query(ctx, `
+		SELECT template_node_id, source_node_id, source_output, item_count, max_fanout,
+		       outcome, reason, detail, created_at
+		  FROM task_expansions WHERE run_id = $1 ORDER BY template_node_id`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list run expansions: %w", err)
+	}
+	defer rows.Close()
+	var out []ExpansionRow
+	for rows.Next() {
+		var e ExpansionRow
+		if err := rows.Scan(&e.TemplateNodeID, &e.SourceNodeID, &e.SourceOutput, &e.ItemCount,
+			&e.MaxFanout, &e.Outcome, &e.Reason, &e.Detail, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan expansion: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// GatewayListRunFanInRefusals maps node_id -> the recorded reason a fan-in was
+// refused (§5.4), so the run view can say WHY a node failed without an attempt.
+func GatewayListRunFanInRefusals(ctx context.Context, q GWQuerier, runID string) (map[string]string, error) {
+	rows, err := q.Query(ctx, `SELECT node_id, detail FROM fan_in_refusals WHERE run_id = $1`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list fan-in refusals: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, detail string
+		if err := rows.Scan(&id, &detail); err != nil {
+			return nil, fmt.Errorf("scan fan-in refusal: %w", err)
+		}
+		out[id] = detail
+	}
+	return out, rows.Err()
+}
+
+// WorkerQuarantineRow is one quarantine episode as the REST API reports it.
+type WorkerQuarantineRow struct {
+	ID            string
+	Trigger       string
+	Reason        string
+	Evidence      []byte
+	Actor         string
+	StartedAt     time.Time
+	ExpiresAt     *time.Time
+	ReleasedAt    *time.Time
+	ReleasedBy    *string
+	ReleaseReason *string
+}
+
+// GatewayListWorkerQuarantines returns a worker's quarantine episodes, newest
+// first, scoped by namespace.
+func GatewayListWorkerQuarantines(ctx context.Context, q GWQuerier, namespace, workerID string) ([]WorkerQuarantineRow, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id::text, trigger_kind, reason, evidence::text, actor, started_at, expires_at,
+		       released_at, released_by, release_reason
+		  FROM worker_quarantines
+		 WHERE worker_id = $1 AND namespace = $2
+		 ORDER BY started_at DESC LIMIT 50`, workerID, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("list worker quarantines: %w", err)
+	}
+	defer rows.Close()
+	var out []WorkerQuarantineRow
+	for rows.Next() {
+		var r WorkerQuarantineRow
+		if err := rows.Scan(&r.ID, &r.Trigger, &r.Reason, &r.Evidence, &r.Actor, &r.StartedAt,
+			&r.ExpiresAt, &r.ReleasedAt, &r.ReleasedBy, &r.ReleaseReason); err != nil {
+			return nil, fmt.Errorf("scan worker quarantine: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // AttemptRow is an attempt as the REST API reports it.
 type AttemptRow struct {
 	ID            string
@@ -353,6 +473,9 @@ type AttemptRow struct {
 	ScheduledAt   time.Time
 	StartedAt     *time.Time
 	EndedAt       *time.Time
+	// CacheHitOf is set when the attempt was satisfied from the memo cache
+	// (§6.4) rather than executed, naming the attempt whose result it reused.
+	CacheHitOf *string
 }
 
 // GatewayListRunAttempts returns every attempt of a run, including terminal ones.
@@ -362,7 +485,7 @@ func GatewayListRunAttempts(ctx context.Context, q GWQuerier, runID string) ([]A
 	rows, err := q.Query(ctx, `
 		SELECT id::text, run_id::text, node_id, attempt_number, state::text, queue,
 		       worker_id::text, pending_reason, error::text, metrics::text,
-		       scheduled_at, started_at, ended_at
+		       scheduled_at, started_at, ended_at, cache_hit_of::text
 		  FROM task_attempts
 		 WHERE run_id = $1
 		 ORDER BY node_id, attempt_number`,
@@ -378,7 +501,7 @@ func GatewayListRunAttempts(ctx context.Context, q GWQuerier, runID string) ([]A
 		var a AttemptRow
 		if err := rows.Scan(&a.ID, &a.RunID, &a.NodeID, &a.AttemptNumber, &a.State, &a.Queue,
 			&a.WorkerID, &a.PendingReason, &a.Error, &a.Metrics,
-			&a.ScheduledAt, &a.StartedAt, &a.EndedAt); err != nil {
+			&a.ScheduledAt, &a.StartedAt, &a.EndedAt, &a.CacheHitOf); err != nil {
 			return nil, fmt.Errorf("scan attempt: %w", err)
 		}
 		out = append(out, a)
@@ -392,14 +515,14 @@ func GatewayGetAttempt(ctx context.Context, q GWQuerier, namespace, attemptID st
 	err := q.QueryRow(ctx, `
 		SELECT a.id::text, a.run_id::text, a.node_id, a.attempt_number, a.state::text, a.queue,
 		       a.worker_id::text, a.pending_reason, a.error::text, a.metrics::text,
-		       a.scheduled_at, a.started_at, a.ended_at
+		       a.scheduled_at, a.started_at, a.ended_at, a.cache_hit_of::text
 		  FROM task_attempts a
 		  JOIN workflow_runs r ON r.id = a.run_id
 		 WHERE a.id = $1 AND r.namespace = $2`,
 		attemptID, namespace,
 	).Scan(&a.ID, &a.RunID, &a.NodeID, &a.AttemptNumber, &a.State, &a.Queue,
 		&a.WorkerID, &a.PendingReason, &a.Error, &a.Metrics,
-		&a.ScheduledAt, &a.StartedAt, &a.EndedAt)
+		&a.ScheduledAt, &a.StartedAt, &a.EndedAt, &a.CacheHitOf)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AttemptRow{}, ErrNotFound
 	}

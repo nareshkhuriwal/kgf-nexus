@@ -54,3 +54,12 @@ Concretely:
 **Transactional side effects (two-phase commit with downstream systems).** Genuine exactly-once where the downstream supports it. Rejected: almost nothing in practice supports 2PC, it is operationally fragile, and coordinator failure creates worse problems than it solves.
 
 **Deterministic replay (Temporal).** Solves a related but different problem — it makes *orchestration* resumable, not side effects exactly-once. Temporal activities are themselves at-least-once and require idempotency, exactly as here. Not an alternative to this decision.
+
+## Addendum (2026-09): memoization implemented
+
+Point 8 is implemented (architecture §6.4). Two consequences for this ADR's guarantees:
+a memo hit is recorded as its own `SUCCEEDED` attempt with `cache_hit_of`, so "show me
+every attempt" still answers truthfully (it reused, it did not run); and memoization is
+never applied to `idempotency: none`, so the at-most-once opt-out cannot be bypassed by
+the cache. Dynamic-expansion children derive their key from the TEMPLATE id plus
+`map_index` (§6.2), so retrying child 7 re-runs exactly child 7's logical work.

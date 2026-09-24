@@ -1,0 +1,13 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Apply mode = the base + the mutating Role + the process-level permission.
+# The registry entry must ALSO be switched to apply, with the cluster's
+# kube-system UID, from the console (Cluster & scaling -> Live cluster).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+  - rbac-apply.yaml
+patches:
+  - path: allow-apply-patch.yaml

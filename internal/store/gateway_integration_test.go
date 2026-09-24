@@ -15,15 +15,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 )
-
-const defaultTestDSN = "postgres://postgres:test@localhost:55432/nexus"
 
 // testPool connects, or SKIPS the test.
 //
@@ -33,16 +32,13 @@ const defaultTestDSN = "postgres://postgres:test@localhost:55432/nexus"
 // train people to ignore the suite.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("NEXUS_TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = defaultTestDSN
-	}
+	dsn := testdb.DSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	pool, err := GWOpen(ctx, dsn, 10)
 	if err != nil {
-		t.Skipf("skipping integration test: test database unreachable at %s: %v", dsn, err)
+		testdb.SkipUnreachable(t, err)
 	}
 	t.Cleanup(pool.Close)
 	return pool
@@ -50,9 +46,25 @@ func testPool(t *testing.T) *pgxpool.Pool {
 
 // uniqueNS gives each test its own namespace so tests never collide and can run in
 // parallel against one database without truncating shared tables.
-func uniqueNS(t *testing.T) string {
+//
+// It also registers the namespace as a tenant: since 0014 every namespace-owned
+// row is rejected unless its namespace belongs to a registered tenant.
+func uniqueNS(t *testing.T, db testdb.Execer) string {
 	t.Helper()
-	return fmt.Sprintf("it-%s-%d", sanitize(t.Name()), time.Now().UnixNano())
+	ns := uniqueName(t)
+	testdb.RegisterTenant(t, db, ns)
+	return ns
+}
+
+// nameSeq keeps two names minted by one test in the same clock tick distinct.
+var nameSeq atomic.Int64
+
+// uniqueName is a per-test unique identifier with no database side effects, for
+// namespaces a test registers itself (inside its own transaction) and for other
+// unique strings such as email addresses.
+func uniqueName(t *testing.T) string {
+	t.Helper()
+	return fmt.Sprintf("it-%s-%d-%d", sanitize(t.Name()), time.Now().UnixNano(), nameSeq.Add(1))
 }
 
 func sanitize(s string) string {
@@ -76,7 +88,7 @@ func sanitize(s string) string {
 func TestIntegrationAPIKeyRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	const plaintext = "nx_live_abc123_do_not_log_me"
 	id, err := GatewayCreateAPIKey(ctx, pool, ns, "ci-key", string("admin"), plaintext)
@@ -124,7 +136,7 @@ func TestIntegrationAPIKeyRoundTrip(t *testing.T) {
 func TestIntegrationIdempotencyKeyFlow(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 	const key = "client-key-1"
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM idempotency_keys WHERE namespace = $1`, ns) })
 
@@ -171,7 +183,7 @@ func TestIntegrationIdempotencyKeyFlow(t *testing.T) {
 func TestIntegrationIdempotencyClaimIsAtomic(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 	const key = "concurrent-key"
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM idempotency_keys WHERE namespace = $1`, ns) })
 
@@ -390,7 +402,7 @@ func TestIntegrationReconciliationProjections(t *testing.T) {
 func TestIntegrationSpecContentAddressing(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM workflow_specs WHERE namespace = $1`, ns) })
 
 	canonical := []byte(`{"api_version":"nexus.dev/v1","name":"train","namespace":"` + ns + `","tasks":[]}`)
@@ -656,10 +668,10 @@ func TestIntegrationTimerSkipLocked(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
 
-	subject := mustUUID(t, ctx, pool)
+	subject := timerSubject(t, ctx, pool)
 	const total = 20
 	for i := 0; i < total; i++ {
-		if _, err := WFMArmTimer(ctx, pool, "integration_probe", subject, -time.Second, nil); err != nil {
+		if _, err := WFMArmTimer(ctx, pool, timerKind, subject, -time.Second, nil); err != nil {
 			t.Fatalf("arm timer: %v", err)
 		}
 	}
@@ -719,16 +731,16 @@ func TestIntegrationTimerSkipLocked(t *testing.T) {
 func TestIntegrationTimerLifecycle(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	subject := mustUUID(t, ctx, pool)
+	subject := timerSubject(t, ctx, pool)
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM timers WHERE subject_id = $1`, subject) })
 
 	// A future timer must NOT be claimed.
-	futureID, err := WFMArmTimer(ctx, pool, "future_probe", subject, time.Hour, nil)
+	futureID, err := WFMArmTimer(ctx, pool, timerKind, subject, time.Hour, nil)
 	if err != nil {
 		t.Fatalf("arm future timer: %v", err)
 	}
 	// A due one must be.
-	dueID, err := WFMArmTimer(ctx, pool, "due_probe", subject, -time.Second, []byte(`{"n":1}`))
+	dueID, err := WFMArmTimer(ctx, pool, timerKind, subject, -time.Second, []byte(`{"n":1}`))
 	if err != nil {
 		t.Fatalf("arm due timer: %v", err)
 	}
@@ -758,7 +770,7 @@ func TestIntegrationTimerLifecycle(t *testing.T) {
 	}
 
 	// Cancelling a subject's timers clears the still-pending future one.
-	n, err := WFMCancelTimers(ctx, pool, subject, "future_probe")
+	n, err := WFMCancelTimers(ctx, pool, subject, timerKind)
 	if err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
@@ -773,10 +785,10 @@ func TestIntegrationTimerLifecycle(t *testing.T) {
 func TestIntegrationStaleClaimSweep(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	subject := mustUUID(t, ctx, pool)
+	subject := timerSubject(t, ctx, pool)
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM timers WHERE subject_id = $1`, subject) })
 
-	id, err := WFMArmTimer(ctx, pool, "sweep_probe", subject, -time.Second, nil)
+	id, err := WFMArmTimer(ctx, pool, timerKind, subject, -time.Second, nil)
 	if err != nil {
 		t.Fatalf("arm: %v", err)
 	}
@@ -834,7 +846,7 @@ type fixture struct {
 
 func newFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *fixture {
 	t.Helper()
-	f := &fixture{t: t, ctx: ctx, pool: pool, ns: uniqueNS(t)}
+	f := &fixture{t: t, ctx: ctx, pool: pool, ns: uniqueNS(t, pool)}
 
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO workflow_specs (namespace, name, version, spec_hash, spec_json, created_by)
@@ -903,16 +915,19 @@ func (f *fixture) worker() string {
 	return id
 }
 
-// mustUUID returns a fresh UUID from the database, for timer subjects that need no
-// referenced row (timers.subject_id has no foreign key, deliberately, since it points
-// at several different tables depending on kind).
-func mustUUID(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {
+// timerKind is the kind the timer tests arm. It must be a real kind: since 0014
+// a timer inherits its tenant from its subject, found by kind, and an unknown
+// kind is rejected (23514).
+const timerKind = "run_deadline"
+
+// timerSubject returns a real run in a registered namespace, for timer tests.
+//
+// timers.subject_id still has no foreign key (it points at several different
+// tables depending on kind), but the 0014 ownership trigger resolves the
+// subject to find the timer's tenant, so an arbitrary UUID is refused.
+func timerSubject(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {
 	t.Helper()
-	var id string
-	if err := pool.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&id); err != nil {
-		t.Fatalf("generate uuid: %v", err)
-	}
-	return id
+	return newFixture(t, ctx, pool).runID
 }
 
 // TestIntegrationListStalledRuns pins the backstop for the class of bug that put
@@ -1045,7 +1060,7 @@ func contains(haystack []string, needle string) bool {
 func TestIntegrationCatalogGroupsByNameAndKeepsTheNewestVersion(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	// Two workflows: one with three versions, one with a single version.
 	for v := 1; v <= 3; v++ {
@@ -1100,7 +1115,7 @@ func TestIntegrationCatalogGroupsByNameAndKeepsTheNewestVersion(t *testing.T) {
 func TestIntegrationCatalogSearchMatchesNameCaseInsensitively(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	for _, name := range []string{"NightlyRetrain", "hourly-ingest"} {
 		if _, err := pool.Exec(ctx, `

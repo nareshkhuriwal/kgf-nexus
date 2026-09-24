@@ -1,3 +1,4 @@
+import { Permit } from '../components/Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -33,6 +34,7 @@ import { Link, useParams } from 'react-router-dom';
 import { errorMessage, useDrainWorker, useWorker } from '../api/hooks';
 import type { WorkerAttempt, WorkerDetail } from '../api/types';
 import { StateBadge } from '../components/StateBadge';
+import { QuarantinePanel } from '../components/QuarantinePanel';
 import { CapacityGrid } from '../components/CapacityGrid';
 import { AsyncPanel, Empty, ErrorBox, Loading, StaleWarning } from '../components/Status';
 import { DataTable } from '../components/DataTable';
@@ -76,9 +78,7 @@ export function WorkerDetailPage({ namespace }: { namespace: string }) {
   if (worker.error && worker.data === undefined) {
     return (
       <div className="col">
-        <Link to="/workers" className="detail-crumb">
-          ← worker fleet
-        </Link>
+        <div className="detail-actions detail-back-only"><Link to="/workers" className="btn">← Back to workers</Link></div>
         <ErrorBox
           error={worker.error}
           what={`worker ${shortId(workerId, 12)}`}
@@ -87,7 +87,7 @@ export function WorkerDetailPage({ namespace }: { namespace: string }) {
       </div>
     );
   }
-  if (!worker.data) return <Loading rows={8} label="Loading worker" />;
+  if (!worker.data) return <div className="col"><div className="detail-actions detail-back-only"><Link to="/workers" className="btn">← Back to workers</Link></div><Loading rows={8} label="Loading worker" /></div>;
 
   const w = worker.data;
   const stale = heartbeatStale(w, now);
@@ -97,6 +97,8 @@ export function WorkerDetailPage({ namespace }: { namespace: string }) {
       <WorkerHead worker={w} namespace={namespace} stale={stale} now={now} />
 
       {worker.error != null ? <StaleWarning error={worker.error} /> : null}
+
+      <QuarantinePanel namespace={namespace} workerId={w.id} state={w.state} />
 
       {/* The liveness contradiction leads the page when it applies. A worker the
           control plane calls ACTIVE while its heartbeat has stopped looks
@@ -173,9 +175,6 @@ function WorkerHead({
   return (
     <div className="detail-head">
       <div className="detail-head-text">
-        <Link to="/workers" className="detail-crumb">
-          ← worker fleet
-        </Link>
         <div className="detail-title-row">
           <StateBadge kind="worker" state={worker.state} />
           <h1 className="detail-title mono">{worker.hostname}</h1>
@@ -187,7 +186,8 @@ function WorkerHead({
         </div>
       </div>
       <div className="detail-actions">
-        <DrainButton worker={worker} namespace={namespace} />
+        <Link to="/workers" className="btn">← Back to workers</Link>
+        <Permit permission="workers.drain"><DrainButton worker={worker} namespace={namespace} /></Permit>
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 # ADR-0003: NATS + JetStream as event bus, never as source of truth
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented; see "Implementation" below)
 - **Date:** 2026-09-12
 - **Deciders:** platform team
 
@@ -26,6 +26,17 @@ Two subject families:
 - A lost notification costs **latency only**. Workers poll on a fallback interval, and the reconciler sweeps for `PENDING` attempts with no lease.
 - NATS being wholly unavailable degrades the system to poll-only. It does not stop it.
 - Nothing reads state *from* the bus. `run_events` in Postgres is the authoritative history; JetStream carries a projection.
+
+## Implementation (2026-09)
+
+What was built, and where it deliberately differs from the decision above:
+
+- **Transactional outbox, not publish-after-commit** (migration 0016). Every announced fact writes an `outbox` row in the same SQL statement as the fact, and the **event-service** relays it. Publishing after commit from the writer loses the message whenever the process dies between COMMIT and publish; the outbox cannot. The relay lives in the event-service, not the scheduler, so a broker problem can never touch a claim transaction.
+- **Dispatch hints go through JetStream too**, into a small in-memory stream (`NEXUS_DISPATCH`, 2-minute max age), for the publish ack and `Nats-Msg-Id` de-duplication. Workers still receive them with plain core subscriptions, so the at-most-once, no-consumer-state semantics above hold for them.
+- **Subjects carry the namespace**: `nexus.task.dispatch.<ns>.<queue>`, `nexus.run.events.<ns>.<run_id>`, `nexus.run.state.<ns>.<run_id>` (stream `NEXUS_RUNS`, 7 days, 10-minute duplicate window). Tokens are escaped so a name cannot become a wildcard.
+- **The hint means "work may exist", not "attempt X was dispatched to you".** Dispatch is pull (ADR-0005): the worker that claims an attempt receives it in the same `PollTask` response, so the useful signal is that dispatchable work appeared. It is written when an attempt becomes `PENDING` (published at its `scheduled_at`), and the relay re-announces every queue with pending work every 10s so transitions no outbox row covers are still hinted. The scheduler's push dispatch loop stays disabled.
+- **Delivery is effectively-once into the stream, at-least-once beyond it, unordered.** Consumers order run events by `seq` and run state by `state_version`.
+- `NEXUS_NATS_URL` empty disables the bus; nothing needs NATS to start. Operating it: docs/OPERATIONS.md §11.
 
 ## Consequences
 

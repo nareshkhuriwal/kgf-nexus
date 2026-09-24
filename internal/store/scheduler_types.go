@@ -27,6 +27,14 @@ type Candidate struct {
 	// the head-of-line-blocking guard can compare a blocked large task against
 	// the small tasks that would otherwise keep jumping it (§7.3).
 	EffectivePriority float64
+	// TenantID is the owning namespace's tenant (1:1 with namespace, 0013).
+	// Carried so the claim loop can set a blocked namespace aside for the rest
+	// of a cycle (ADR-0017).
+	TenantID uuid.UUID
+	// FairShare is the namespace's in-flight/weight at selection time, zero
+	// when fair share is off. Informational: logged, never re-used for a
+	// decision, because it is stale the moment the claim commits.
+	FairShare float64
 	// Spec is the node's task spec, the source of timeouts, retry policy,
 	// node_selector, executor and concurrency settings. Read from
 	// task_nodes.spec_json, which the scheduler reads but never writes.
@@ -182,10 +190,14 @@ type WorkerCandidate struct {
 	Score     float64
 }
 
-// DispatchResult describes a committed dispatch. The NATS notification is
-// published from this, AFTER the transaction commits (invariant 4): the bus is
-// a hint, and publishing inside the transaction would demand a distributed
-// transaction across Postgres and NATS.
+// DispatchResult describes a committed dispatch.
+//
+// The bus announcement of a dispatch is NOT published from this. The claim
+// writes an outbox row (the AttemptDispatched run_event's, see outbox.go) inside
+// its own transaction, and the event-service relay publishes it after commit
+// (invariant 4). Publishing from here, after commit, would lose the message
+// whenever the process died between COMMIT and publish; publishing inside the
+// transaction would demand a distributed transaction across Postgres and NATS.
 type DispatchResult struct {
 	AttemptID  uuid.UUID
 	RunID      uuid.UUID

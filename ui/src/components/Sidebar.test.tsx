@@ -25,10 +25,18 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import { Sidebar } from './Sidebar';
 import { NavBar } from './NavBar';
-import { visibleItems } from './navItems';
+import { NAV_GROUPS, visibleItems } from './navItems';
+import { permissionForPath } from './Permissions';
+import { ADMIN_PERMISSIONS, NON_ADMIN_PERMISSIONS, WithPermissions } from '../test/permissions';
 
-function wrap(ui: ReactNode, route = '/') {
-  return render(<MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>);
+function wrap(ui: ReactNode, route = '/', permissions: readonly string[] = ADMIN_PERMISSIONS) {
+  // The rail reads PermissionContext and renders nothing it was not granted,
+  // so a test that omits the provider asserts against an empty rail.
+  return render(
+    <MemoryRouter initialEntries={[route]}>
+      <WithPermissions permissions={permissions}>{ui}</WithPermissions>
+    </MemoryRouter>,
+  );
 }
 
 const account = <button type="button">Account slot</button>;
@@ -82,7 +90,7 @@ describe('the sidebar', () => {
 
   /** The gateway decides; the rail must not render a link that will 403. */
   it('omits the admin destinations without admin_write', () => {
-    wrap(<Sidebar canAdmin={false} />);
+    wrap(<Sidebar canAdmin={false} />, '/', NON_ADMIN_PERMISSIONS);
 
     expect(screen.queryByRole('link', { name: 'Users' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Tokens' })).not.toBeInTheDocument();
@@ -303,15 +311,27 @@ describe('the navbar tool cluster', () => {
 
 
 describe('the rail renders the whole destination list', () => {
+  /**
+   * Iterates over PERMISSION SETS, not over canAdmin.
+   *
+   * The rail passes its permission check into visibleGroups, and that argument
+   * takes precedence over canAdmin entirely -- so looping over canAdmin while
+   * granting one fixed permission set rendered the same rail twice and compared
+   * it against two different expectations. The gate that decides what appears
+   * is the permission set, so that is what varies here.
+   */
   it('offers every visible destination, in declaration order, at both gates', () => {
-    for (const canAdmin of [false, true]) {
-      const view = wrap(<Sidebar canAdmin={canAdmin} />);
+    for (const permissions of [NON_ADMIN_PERMISSIONS, ADMIN_PERMISSIONS]) {
+      const view = wrap(<Sidebar canAdmin />, '/', permissions);
       const links = within(screen.getByRole('navigation', { name: 'Primary' }))
         .getAllByRole('link')
         .map((a) => a.getAttribute('href'));
       view.unmount();
 
-      expect(links).toEqual(visibleItems(canAdmin).map((i) => i.to));
+      const expected = NAV_GROUPS.flatMap((g) => g.items)
+        .filter((i) => permissions.includes(permissionForPath(i.to) ?? ''))
+        .map((i) => i.to);
+      expect(links).toEqual(expected);
     }
   });
 

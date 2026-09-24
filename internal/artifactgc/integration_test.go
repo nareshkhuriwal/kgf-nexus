@@ -11,11 +11,11 @@
 //
 // Run with:
 //
-//	NEXUS_POSTGRES_DSN='postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable' \
+//	NEXUS_TEST_DATABASE_URL='postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable' \
 //	  go test -tags integration -count=1 ./internal/artifactgc/...
 //
-// They SKIP when no DSN is reachable rather than fail, matching
-// agent/internal/resultstore/integration_test.go.
+// They SKIP when NEXUS_TEST_DATABASE_URL is unset or unreachable rather than
+// fail; CI fails the job on such a skip (see internal/testdb).
 //
 // EVERY test here works inside a transaction that is ROLLED BACK. Nothing writes
 // to the live database, and nothing touches the object store at all.
@@ -23,7 +23,6 @@ package artifactgc
 
 import (
 	"context"
-	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -31,32 +30,21 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 )
-
-func dsn() string {
-	for _, k := range []string{"NEXUS_POSTGRES_DSN", "NEXUS_DATABASE_URL", "DATABASE_URL", "NEXUS_DSN"} {
-		if v := os.Getenv(k); v != "" {
-			return v
-		}
-	}
-	return ""
-}
 
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	d := dsn()
-	if d == "" {
-		t.Skip("no Postgres DSN set (NEXUS_POSTGRES_DSN); skipping")
-	}
+	d := testdb.DSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, d)
 	if err != nil {
-		t.Skipf("cannot open a pool (%v); skipping", err)
+		testdb.SkipUnreachable(t, err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		t.Skipf("Postgres unreachable at %s (%v); skipping", d, err)
+		testdb.SkipUnreachable(t, err)
 	}
 	t.Cleanup(pool.Close)
 	return pool
@@ -86,6 +74,8 @@ func inRollbackTx(t *testing.T, pool *pgxpool.Pool, fn func(tx pgx.Tx)) {
 func seedAttempt(t *testing.T, tx pgx.Tx, outputRef, inputRefs string) {
 	t.Helper()
 	ctx := context.Background()
+	// Registered inside the rolled-back transaction, like every other row here.
+	testdb.RegisterTenant(t, tx, "artifactgc-test")
 	var specID, runID string
 	err := tx.QueryRow(ctx, `
 		INSERT INTO workflow_specs (namespace, name, version, spec_hash, spec_json, created_by)

@@ -26,6 +26,7 @@ var tlsEnvNames = []string{
 	EnvServerCert, EnvServerKey,
 	EnvClientCert, EnvClientKey,
 	EnvCACert, EnvServerRequireClientCert, EnvServerName,
+	EnvReloadInterval,
 	"NEXUS_REQUIRE_TLS", "NEXUS_ENV",
 }
 
@@ -34,6 +35,20 @@ func clearEnv(t *testing.T) {
 	for _, name := range tlsEnvNames {
 		t.Setenv(name, "")
 	}
+	// Reloaders are process-wide and keyed by file paths. Stopping them here
+	// and at cleanup keeps one test's poller from reading another test's
+	// deleted temp directory and logging errors into the wrong test.
+	stopAllReloaders()
+	resetSinksForTest()
+	t.Cleanup(stopAllReloaders)
+}
+
+// resetSinksForTest drops every registry RegisterMetrics was given, so a test's
+// assertions about a registry are not affected by an earlier test's.
+func resetSinksForTest() {
+	sinks.mu.Lock()
+	sinks.list = nil
+	sinks.mu.Unlock()
 }
 
 // serve stands up a real gRPC server carrying the health service on an ephemeral

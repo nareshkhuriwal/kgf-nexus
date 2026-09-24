@@ -1,3 +1,4 @@
+import { PermissionContext } from '../components/Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -43,7 +44,7 @@ function wrap(ui: ReactNode, path = '/workflows/ten-node-mixed') {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={qc}>
+    <PermissionContext.Provider value={["runs.view","runs.create","runs.cancel","runs.retry","workflows.view","workflows.publish","workflows.delete","schedules.create","tasks.logs.view","tasks.results.view"]}><QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/workflows/:name" element={ui} />
@@ -52,7 +53,7 @@ function wrap(ui: ReactNode, path = '/workflows/ten-node-mixed') {
           <Route path="/runs/:runId" element={<div>run page for test</div>} />
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider></PermissionContext.Provider>,
   );
 }
 
@@ -131,6 +132,7 @@ const definition = (over: Partial<SpecDefinition> = {}): SpecDefinition => ({
         queue: 'gpu',
         resources: { request: { gpu_count: 1, cpu_millis: 4000 } },
         retry: { max_attempts: 3, strategy: 'exponential', initial_ms: 30000 },
+        cancellation: { uninterruptible: true, max_uninterruptible_ms: 120000 },
       },
       {
         id: 'publish',
@@ -203,7 +205,7 @@ describe('version history', () => {
     healthy();
     wrap(<WorkflowDetailPage namespace="default" />);
 
-    const crumb = await screen.findByRole('link', { name: /catalog/ });
+    const crumb = await screen.findByRole('link', { name: /Back to workflows/ });
     expect(crumb).toHaveAttribute('href', '/workflows');
   });
 
@@ -298,6 +300,21 @@ describe('the dependency graph', () => {
     const panel = (await screen.findByText('dependencies')).closest('.panel-body') as HTMLElement;
     expect(within(panel).getByText('ingest')).toBeInTheDocument();
     expect(within(panel).getByText('publish')).toBeInTheDocument();
+  });
+
+  // ADR-0015: before pressing Cancel an operator must be able to see that a
+  // task will NOT stop immediately, and for how long at most.
+  it('shows an uninterruptible task and its cancellation bound', async () => {
+    healthy();
+    wrap(<WorkflowDetailPage namespace="default" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /^train, ml.train$/ }));
+    const panel = (await screen.findByText('dependencies')).closest('.panel-body') as HTMLElement;
+    expect(within(panel).getByText(/uninterruptible: cancel waits up to 2m.*then SIGKILL/)).toBeInTheDocument();
+
+    fireEvent.click(within(await tasksTable()).getByRole('button', { name: 'publish' }));
+    const other = (await screen.findByText('dependencies')).closest('.panel-body') as HTMLElement;
+    expect(within(other).getByText(/^interruptible/)).toBeInTheDocument();
   });
 
   /**

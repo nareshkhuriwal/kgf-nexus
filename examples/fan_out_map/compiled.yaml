@@ -1,0 +1,139 @@
+api_version: nexus.dev/v1
+description: List shards at run time, process each in parallel, summarize.
+edges:
+- from_node_id: list_shards
+  output_to_input: {}
+  to_node_id: process_shard
+- from_node_id: process_shard
+  output_to_input:
+    results: result
+  to_node_id: summarize
+name: fan-out-map
+namespace: default
+params:
+  source:
+    required: true
+    type: string
+run_timeout_ms: 3600000
+tasks:
+- id: list_shards
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    source: source
+  inputs:
+    source:
+      required: true
+      type: json
+  outputs:
+    shards:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - printf '["shard-0","shard-1","shard-2","shard-3","shard-4"]' > "$NEXUS_OUTPUT_DIR/shards"
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: fanout.list_shards
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- cache:
+    enabled: true
+    ttl_ms: 3600000
+  id: process_shard
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    shard:
+      required: true
+      type: json
+  map:
+    item_input: shard
+    max_fanout: 50
+    over_node_id: list_shards
+    over_output: shards
+  outputs:
+    result:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - printf '{"shard":%s,"rows":42}' "$(cat "$NEXUS_INPUT_DIR/shard")" > "$NEXUS_OUTPUT_DIR/result"
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: fanout.process_shard
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 600000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: summarize
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    results:
+      required: true
+      type: json
+  outputs:
+    result:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - echo "summarizing $(cat "$NEXUS_INPUT_DIR/results")"
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: fanout.summarize
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_DONE
+  version: 1

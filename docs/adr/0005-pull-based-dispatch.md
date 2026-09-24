@@ -1,6 +1,6 @@
 # ADR-0005: Pull-based dispatch with push notification
 
-- **Status:** Proposed
+- **Status:** Accepted (pull and long polling since Phase 1; NATS hints implemented 2026-09, ADR-0003)
 - **Date:** 2026-09-12
 - **Deciders:** platform team
 
@@ -18,7 +18,8 @@ Pull inverts all of that, at the cost of poll-interval latency.
 
 Flow:
 1. Worker registers over gRPC, advertising capacity, queues, and labels.
-2. Worker subscribes to `task.dispatch.<queue>` for each queue it serves.
+2. Worker subscribes to `task.dispatch.<queue>` for each queue it serves (as implemented: `nexus.task.dispatch.<namespace>.<queue>`, optional; long polling continues regardless).
+   A hint only cuts the pause *between* polls. It never cancels a poll in flight -- a cancelled `PollTask` whose claim already committed would strand a leased assignment until the lease expired -- and it never shortens the error backoff.
 3. On notification — or on a fallback poll interval — the worker calls `PollTask(worker_id, free_capacity)`.
 4. The control plane returns an attempt plus a lease token, or empty.
 5. The worker reports state changes via gRPC, which it initiates.

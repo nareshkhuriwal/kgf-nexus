@@ -44,6 +44,11 @@ func run() error {
 		leaseTTL  = flag.Duration("lease-ttl", 30*time.Second, "initial lease lifetime (ADR-0010 default)")
 		liveness  = flag.Duration("liveness-window", 30*time.Second, "heartbeat staleness before a worker is DEAD")
 		agingRate = flag.Float64("aging-rate", 1.0, "effective-priority gain per second a PENDING attempt accrues (§7.3)")
+		// An escape hatch, not a tuning knob: fair share is on by default, and
+		// turning it off is how an operator rolls back to pure priority order
+		// before reverting migration 0022 (ADR-0017).
+		fairShare = flag.Bool("fair-share", envOr("NEXUS_FAIR_SHARE", "true") != "false",
+			"order the dispatch scan by namespace in-flight/weight before priority (ADR-0017)")
 	)
 	flag.Parse()
 
@@ -76,6 +81,7 @@ func run() error {
 	claimCfg.LeaseTTL = *leaseTTL
 	claimCfg.LivenessWindow = *liveness
 	claimCfg.AgingRate = *agingRate
+	claimCfg.FairShare = *fairShare
 
 	st := store.NewSchedulerStore(pool, claimCfg, instanceID)
 	sched := NewSchedulerWithLogger(st, log)
@@ -132,7 +138,8 @@ func run() error {
 	ready.Store(true)
 	log.Info("scheduler starting",
 		"lease_ttl", claimCfg.LeaseTTL, "liveness_window", claimCfg.LivenessWindow,
-		"aging_rate", claimCfg.AgingRate, "look_ahead", claimCfg.LookAhead)
+		"aging_rate", claimCfg.AgingRate, "look_ahead", claimCfg.LookAhead,
+		"fair_share", claimCfg.FairShare)
 
 	done := make(chan struct{})
 	go func() {
@@ -184,9 +191,13 @@ func run() error {
 
 // NewSchedulerWithLogger builds a Scheduler with default cadences.
 func NewSchedulerWithLogger(st *store.SchedulerStore, log *slog.Logger) *Scheduler {
-	// No NATS in the MVP wiring. The nil notifier is safe by design: the bus is
-	// a hint, and a worker's next poll picks up anything the notification would
-	// have accelerated (§5.3 step 5).
+	// The scheduler holds no NATS connection, deliberately. Its bus traffic is
+	// written to the transactional outbox inside the claim and published by the
+	// event-service relay (ADR-0003), so the correctness-critical process has no
+	// broker dependency at all. The nil notifier also keeps the PUSH dispatch loop
+	// off, which is required: workers are pull-only, and a pushed dispatch would
+	// reach no one (see dispatchLoop). Workers are woken by dispatch HINTS
+	// instead, and still claim through PollTask.
 	return NewScheduler(st, log, DefaultLoopConfig(), nil)
 }
 

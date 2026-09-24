@@ -43,6 +43,8 @@ export interface StoredSession {
 }
 
 export interface Principal {
+  effective_permissions?: string[];
+  roles?: string[];
   namespace: string;
   name: string;
   role: string;
@@ -117,7 +119,7 @@ function authHeader(): Record<string, string> {
  * would put the credential decision in two places. This is the one place that
  * decision lives.
  */
-async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
+export async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const url = apiUrl(path);
   let res: Response;
   try {
@@ -261,7 +263,7 @@ export const authApi = {
     }>('/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ namespace, email, password }),
+      body: JSON.stringify({ ...(namespace ? {namespace} : {}), email, password }),
     });
     return {
       token: res.token,
@@ -312,12 +314,19 @@ export const authApi = {
 
   createUser(
     namespace: string,
-    input: { email: string; display_name: string; role: string; password: string },
+    input: { email: string; display_name: string; role: string; role_name?: string; password: string },
   ): Promise<User> {
     return authRequest<User>(`${ns(namespace)}/users`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
+    });
+  },
+
+  updateUser(namespace: string, user: User, input: {email: string; display_name: string}): Promise<User> {
+    return authRequest<User>(`${ns(namespace)}/users/${encodeURIComponent(user.id)}`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({...input, previous_email: user.email, previous_display_name: user.display_name}),
     });
   },
 

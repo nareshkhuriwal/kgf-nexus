@@ -8,7 +8,6 @@ package schedules
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -16,21 +15,18 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 )
 
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("NEXUS_TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://postgres:test@localhost:55432/nexus"
-	}
-	pool, err := pgxpool.New(context.Background(), dsn)
+	pool, err := pgxpool.New(context.Background(), testdb.DSN(t))
 	if err != nil {
-		t.Skipf("no test database: %v", err)
+		testdb.SkipUnreachable(t, err)
 	}
 	if err := pool.Ping(context.Background()); err != nil {
 		pool.Close()
-		t.Skipf("test database unreachable: %v", err)
+		testdb.SkipUnreachable(t, err)
 	}
 	t.Cleanup(pool.Close)
 	return pool
@@ -82,6 +78,7 @@ func newBFFixture(t *testing.T, cronExpr string) *bfFixture {
 	ctx := context.Background()
 	pool := testPool(t)
 	ns := "bf-" + uuid.NewString()[:8]
+	testdb.RegisterTenant(t, pool, ns)
 
 	var specID string
 	if err := pool.QueryRow(ctx, `

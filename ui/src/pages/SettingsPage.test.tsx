@@ -1,3 +1,6 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { authRequest } from '../api/auth';
+vi.mock('../api/auth', () => ({authRequest: vi.fn()}));
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -36,16 +39,15 @@ afterEach(() => {
 
 function renderPage(props: Partial<React.ComponentProps<typeof SettingsPage>> = {}) {
   const onNamespaceChange = vi.fn();
-  const onApiKeyChange = vi.fn();
+  vi.mocked(authRequest).mockResolvedValue({tenant:{id:"tenant-123",name:"Example Organization",namespace:"payments",contact_email:"contact@example.test"}});
   render(
-    <SettingsPage
+    <QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false}}})}><SettingsPage
       namespace="payments"
       onNamespaceChange={onNamespaceChange}
-      onApiKeyChange={onApiKeyChange}
       {...props}
-    />,
+    /></QueryClientProvider>,
   );
-  return { onNamespaceChange, onApiKeyChange };
+  return { onNamespaceChange };
 }
 
 describe('the settings page', () => {
@@ -139,65 +141,24 @@ describe('the namespace control', () => {
   });
 });
 
-describe('the credential control', () => {
-  it('names the deployment this tab is pointed at', () => {
-    renderPage();
+it('replaces the credential controls with tenant account details', async () => {
+ renderPage({principal:{name:'operator@example.com',kind:'session',namespace:'payments',role:'reader',permissions:{}}});
+ expect(await screen.findByText('Example Organization')).toBeInTheDocument();
+ expect(screen.getByText('tenant-123')).toBeInTheDocument();
+ expect(screen.getByText('contact@example.test')).toBeInTheDocument();
+ expect(screen.queryByText('Connected to')).not.toBeInTheDocument();
+ expect(screen.queryByRole('button',{name:/token/i})).not.toBeInTheDocument();
+});
 
-    expect(screen.getByText('Connected to')).toBeInTheDocument();
-    // API_BASE is empty in the test environment, which IS the same-origin case.
-    expect(screen.getByText('same origin')).toBeInTheDocument();
-  });
-
-  it('reports no key as an invitation to set one', () => {
-    renderPage({ apiKey: '' });
-    expect(screen.getByRole('button', { name: /set api key/i })).toBeInTheDocument();
-  });
-
-  it('reports a key that is set without printing it', () => {
-    renderPage({ apiKey: 'nx_secret_value' });
-
-    expect(screen.getByRole('button', { name: /api key ✓/i })).toBeInTheDocument();
-    expect(screen.queryByText('nx_secret_value')).not.toBeInTheDocument();
-  });
-
-  /** Drafted, not applied per keystroke: see the file comment. */
-  it('saves the key only on submit, trimmed', () => {
-    const { onApiKeyChange } = renderPage({ apiKey: '' });
-
-    fireEvent.click(screen.getByRole('button', { name: /set api key/i }));
-    fireEvent.change(screen.getByLabelText('API key'), { target: { value: '  nx_abc  ' } });
-    expect(onApiKeyChange).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    expect(onApiKeyChange).toHaveBeenCalledWith('nx_abc');
-  });
-
-  it('abandons the draft on cancel', () => {
-    const { onApiKeyChange } = renderPage({ apiKey: '' });
-
-    fireEvent.click(screen.getByRole('button', { name: /set api key/i }));
-    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'nx_abc' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-
-    expect(onApiKeyChange).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: /set api key/i })).toBeInTheDocument();
-  });
-
-  /** The same honesty the appearance controls owe: never claim a key is stored. */
-  it('does not claim the key is set when storing it failed', () => {
-    renderPage({ apiKey: '', apiKeyPersistFailed: true });
-    expect(screen.getByRole('button', { name: /not saved/i })).toBeInTheDocument();
-  });
-
-  /**
-   * A control that cannot do anything should not be drawn. A deployment that
-   * offers no key entry gets no key entry, rather than a button that no-ops.
-   */
-  it('omits the key control entirely when no handler is given', () => {
-    render(<SettingsPage namespace="payments" onNamespaceChange={vi.fn()} />);
-
-    expect(screen.queryByRole('button', { name: /api key/i })).not.toBeInTheDocument();
-    // The deployment is still named: that is a fact, not a control.
-    expect(screen.getByText('Connected to')).toBeInTheDocument();
-  });
+it('shows the active token alias from the gateway without exposing its secret', () => {
+ renderPage({principal:{name:'dev-console',kind:'api_key',namespace:'default',role:'admin',permissions:{read:true,write:true,admin_write:true}}});
+ expect(screen.getByText('dev-console')).toBeInTheDocument();
+ expect(screen.getByText('Active token alias')).toBeInTheDocument();
+ expect(screen.queryByText('secret-not-for-display')).not.toBeInTheDocument();
+});
+it('identifies an active session instead of presenting the saved token as active', () => {
+ renderPage({principal:{name:'operator@example.com',kind:'session',namespace:'default',role:'reader',permissions:{read:true,write:false,admin_write:false}}});
+ expect(screen.getByText('Signed-in account')).toBeInTheDocument();
+ expect(screen.getByText('operator@example.com')).toBeInTheDocument();
+ expect(screen.queryByText('Active token alias')).not.toBeInTheDocument();
 });

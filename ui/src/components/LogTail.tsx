@@ -40,6 +40,21 @@ export function LogTail({
   const [error, setError] = useState<unknown>(null);
   const [follow, setFollow] = useState(true);
   const paneRef = useRef<HTMLDivElement>(null);
+  const [search, setSearch] = useState('');
+  const [stream, setStream] = useState('');
+  const [wrap, setWrap] = useState(true);
+  const visibleLines = (lines ?? []).filter(line =>
+    (!stream || line.stream === stream) && line.message.toLowerCase().includes(search.toLowerCase()));
+
+  function downloadLogs() {
+    const text = visibleLines.map(line => `${line.ts ?? ''} [${line.stream}] ${line.message}`).join('\n');
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `attempt-${attemptId.replace(/[^a-zA-Z0-9_-]/g, '_')}-loaded-logs.txt`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 
   useEffect(() => {
     setLines(null);
@@ -148,6 +163,13 @@ export function LogTail({
         </label>
       </div>
 
+      <div className="log-tools">
+        <label>Search logs<input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Find text in loaded logs…" /></label>
+        <label>Stream<select value={stream} onChange={event => setStream(event.target.value)}><option value="">All streams</option><option value="stdout">stdout</option><option value="stderr">stderr</option></select></label>
+        <label className="log-wrap"><input type="checkbox" checked={wrap} onChange={event => setWrap(event.target.checked)} />Wrap lines</label>
+        <button type="button" onClick={downloadLogs} disabled={!visibleLines.length}>Download loaded logs</button>
+        {lines !== null && <span className="faint">{visibleLines.length} / {lines.length} loaded lines</span>}
+      </div>
       {error !== null && lines === null ? (
         <div style={{ padding: 'var(--space-5)' }}>
           <ErrorBox error={error} what="logs" />
@@ -162,8 +184,9 @@ export function LogTail({
             : ' The attempt produced no output.'}
         </div>
       ) : (
-        <div className="logs" ref={paneRef} role="log" aria-live={follow ? 'polite' : 'off'}>
-          {lines.map((l, i) => (
+        <div className={`logs${wrap ? ' logs-wrap' : ' logs-nowrap'}`} ref={paneRef} role="log" aria-live={follow ? 'polite' : 'off'}>
+          {visibleLines.length === 0 && <div className="muted">No loaded lines match these filters.</div>}
+          {visibleLines.map((l, i) => (
             <div key={i} className={`log-line ${l.stream === 'stderr' ? 'stderr' : ''}`}>
               {l.ts && <span className="log-ts">{l.ts}</span>}
               <span className="log-msg">{l.message}</span>

@@ -21,6 +21,9 @@ const (
 	ReasonTriggerUnsatisfiable TransitionReason = "trigger_rule_unsatisfiable"
 	ReasonFailFast             TransitionReason = "fail_fast_halt"
 	ReasonRunCancelled         TransitionReason = "run_cancelled"
+	// ReasonExpansionSettled: a map template took the aggregate state of its
+	// children once every child was terminal (§5.4).
+	ReasonExpansionSettled TransitionReason = "expansion_settled"
 )
 
 // Transition is one state change the engine concluded from the inputs. The
@@ -60,6 +63,12 @@ type Decision struct {
 	// terminal (in-flight attempts still drain), but the frontier is empty by
 	// policy rather than by dependency.
 	Halted bool
+	// Expansions is the map templates whose trigger rule is satisfied: they must
+	// be EXPANDED (children materialized) rather than given an attempt. The pure
+	// engine cannot expand them itself -- the collection lives in an upstream
+	// attempt's output, which is I/O -- so it names them and the service layer
+	// performs the expansion atomically. Templates never appear in Frontier.
+	Expansions []string
 }
 
 // States is the current node-state snapshot the engine reasons over. It is a
@@ -222,6 +231,30 @@ func evalTrigger(rule TriggerRule, t upstreamTally) triggerOutcome {
 // decide propagation or run state, because a caller that wants just the frontier
 // should not have to reason about the rest. Reconcile composes all three.
 func ReadyFrontier(g *Graph, st States) []string {
+	var out []string
+	for _, id := range readyNodes(g, st) {
+		if g.nodes[id].IsTemplate() {
+			// A template never gets an attempt; see Decision.Expansions.
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+// ReadyTemplates returns the map templates whose trigger rule is satisfied and
+// which are still PENDING, i.e. those due to be expanded.
+func ReadyTemplates(g *Graph, st States) []string {
+	var out []string
+	for _, id := range readyNodes(g, st) {
+		if g.nodes[id].IsTemplate() {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func readyNodes(g *Graph, st States) []string {
 	var out []string
 	for _, id := range g.Nodes() {
 		if st.Get(id) != NodePending {
@@ -400,6 +433,12 @@ func Reconcile(in ReconcileInput) Decision {
 	st := in.States.Clone()
 	d := Decision{RunState: in.RunState}
 
+	// Settle expanded templates FIRST, so a template whose last child just
+	// finished releases its downstream in this same pass rather than one
+	// reconcile later -- and, for a failed child, so propagation below sees the
+	// failure now.
+	d.Transitions = append(d.Transitions, foldTemplates(g, st)...)
+
 	transitions := Propagate(g, st)
 	for _, t := range transitions {
 		st[t.NodeID] = t.To
@@ -431,6 +470,11 @@ func Reconcile(in ReconcileInput) Decision {
 	cancelling := in.RunState == RunCancelling || in.RunState == RunCancelled
 
 	if !suppressDispatch {
+		// Expansion is dispatch-like: it creates work. It is therefore withheld
+		// under exactly the same conditions as the frontier -- pause, cancel and
+		// fail_fast -- so a paused run never grows new children and a cancelled
+		// run never materializes any.
+		d.Expansions = ReadyTemplates(g, st)
 		frontier := ReadyFrontier(g, st)
 		d.Frontier = frontier
 		for _, id := range frontier {
@@ -479,6 +523,12 @@ func Reconcile(in ReconcileInput) Decision {
 		}
 	}
 
+	// Fold again: the cancel and fail_fast loops above may just have settled the
+	// last non-terminal children of an expanded template. Without this second
+	// fold the template would stay RUNNING until some later reconcile, and for a
+	// cancelled run with nothing in flight there IS no later reconcile.
+	d.Transitions = append(d.Transitions, foldTemplates(g, st)...)
+
 	// A run under operator control keeps its operator-assigned state; the engine
 	// must not overwrite CANCELLING with RUNNING and undo an intervention it does
 	// not own.
@@ -520,6 +570,13 @@ func allTerminal(g *Graph, st States) bool {
 // undispatched work reaches PAUSED rather than waiting for it (§5.2).
 func noneInFlight(g *Graph, st States) bool {
 	for _, id := range g.Nodes() {
+		if g.nodes[id].IsTemplate() {
+			// An expanded template is RUNNING for as long as it has unsettled
+			// children, including children that are merely PENDING. Its children
+			// are in the graph and speak for themselves; counting the template
+			// too would keep a paused run in PAUSING forever.
+			continue
+		}
 		switch st.Get(id) {
 		case NodeReady, NodeRunning:
 			return false

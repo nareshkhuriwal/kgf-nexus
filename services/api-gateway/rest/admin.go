@@ -107,7 +107,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_json", "request body is not valid JSON")
 		return
 	}
-	req.Namespace = orDefault(strings.TrimSpace(req.Namespace), "default")
+	req.Namespace = strings.TrimSpace(req.Namespace)
 	req.Email = strings.TrimSpace(req.Email)
 
 	user, err := a.identity.AuthenticatePassword(r.Context(), req.Namespace, req.Email, req.Password)
@@ -116,11 +116,15 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 			// Recorded as DENIED so a burst of these is visible to an operator. The
 			// email is recorded because an admin reviewing an attack needs to know
 			// which accounts were targeted; the password never is.
-			a.auditAttempt(r, store.AuditEntry{
-				Namespace: req.Namespace, ActorKind: "anonymous", ActorLabel: req.Email,
-				Action: "session.login", Outcome: store.AuditDenied,
-				Detail: map[string]any{"reason": "invalid credentials"},
-			})
+			if req.Namespace != "" {
+				a.auditAttempt(r, store.AuditEntry{
+					Namespace: req.Namespace, ActorKind: "anonymous", ActorLabel: req.Email,
+					Action: "session.login", Outcome: store.AuditDenied,
+					Detail: map[string]any{"reason": "invalid credentials"},
+				})
+			} else {
+				a.log.WarnContext(r.Context(), "email sign-in denied")
+			}
 			// One opaque 401. Never "no such user" or "wrong password": the pair would
 			// let an attacker enumerate who has an account here.
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "invalid email or password")
@@ -130,6 +134,12 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		// here would tell every console user their password stopped working.
 		a.log.ErrorContext(r.Context(), "login backend failed", "namespace", req.Namespace, "error", err)
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "authentication is temporarily unavailable")
+		return
+	}
+
+	// After the password check, never before: only someone who knows the
+	// password learns the account is unverified.
+	if a.blockUnverifiedLogin(w, r, user) {
 		return
 	}
 
@@ -197,12 +207,28 @@ func (a *API) whoami(w http.ResponseWriter, r *http.Request, p authn.Principal) 
 		perms[string(act)] = p.Authorize(p.Namespace, act) == nil
 	}
 
+	if p.Grants != nil {
+		perms["read"] = false
+		perms["write"] = false
+		perms["admin_write"] = false
+		for grant, allowed := range p.Grants {
+			if allowed {
+				if strings.HasSuffix(grant, ".view") {
+					perms["read"] = true
+				} else {
+					perms["write"] = true
+				}
+			}
+		}
+	}
 	out := map[string]any{
-		"namespace":   p.Namespace,
-		"name":        p.Name,
-		"role":        string(p.Role),
-		"kind":        string(kind),
-		"permissions": perms,
+		"namespace":             p.Namespace,
+		"name":                  p.Name,
+		"role":                  string(p.Role),
+		"kind":                  string(kind),
+		"permissions":           perms,
+		"effective_permissions": effectivePermissions(p),
+		"roles":                 p.RoleNames,
 	}
 	if p.UserID != "" {
 		out["user_id"] = p.UserID
@@ -248,6 +274,7 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request, p authn.Princip
 		Email       string `json:"email"`
 		DisplayName string `json:"display_name"`
 		Role        string `json:"role"`
+		RoleName    string `json:"role_name"`
 		Password    string `json:"password"`
 	}
 	if err := json.Unmarshal(nonEmptyJSON(body), &req); err != nil {
@@ -255,6 +282,12 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request, p authn.Princip
 		return
 	}
 	req.Email = strings.TrimSpace(req.Email)
+	if req.RoleName != "" {
+		req.Role = "reader"
+		if req.RoleName == authn.AdministratorRole {
+			req.Role = "admin"
+		}
+	}
 	req.Role = orDefault(strings.TrimSpace(req.Role), string(authn.RoleReader))
 
 	if problems := validateNewUser(req.Email, req.Role, req.Password); len(problems) > 0 {
@@ -265,6 +298,10 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request, p authn.Princip
 		return
 	}
 
+	if req.RoleName != "" {
+		a.createUserWithRole(w, r, p, req.Email, req.DisplayName, req.RoleName, req.Password)
+		return
+	}
 	user, err := a.identity.CreateUser(r.Context(), ns, req.Email, req.DisplayName, req.Role, req.Password)
 	if err != nil {
 		if errors.Is(err, store.ErrEmailTaken) {
@@ -330,6 +367,10 @@ func (a *API) setUserDisabled(w http.ResponseWriter, r *http.Request, p authn.Pr
 	}
 
 	user, err := a.identity.SetUserDisabled(r.Context(), ns, id, disabled)
+	if errors.Is(err, store.ErrLastAdministrator) {
+		writeError(w, 409, "last_administrator", err.Error())
+		return
+	}
 	if err != nil {
 		a.fail(w, r, "set user disabled", err)
 		return
@@ -455,6 +496,9 @@ func userPayload(u store.UserRow) map[string]any {
 		// Derived rather than left to the client, so "is this person active" has one
 		// definition. A null disabled_at is easy to misread as "unknown".
 		"disabled": u.DisabledAt != nil,
+		// Whether the address is proven (migration 0017). Derived for the same
+		// reason as "disabled"; an admin needs to see why a person cannot sign in.
+		"email_verified": u.EmailVerifiedAt != nil,
 	}
 }
 

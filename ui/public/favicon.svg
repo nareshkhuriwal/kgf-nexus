@@ -1,44 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" role="img" aria-label="Nexus">
-  <!-- The Nexus mark: a hub with edges to satellite nodes, which is the smallest
-       honest drawing of what this platform is about, a DAG.
-
-       SAME SILHOUETTE as ui/src/components/Logo.tsx, deliberately NOT the same
-       geometry. That difference is the entire reason this file is hand-written
-       rather than generated from the component.
-
-       The component is tuned for 20px and up in a rail. Scaled to a 16px tab it
-       falls apart: a 1.6 stroke on a 24 viewBox lands on ~1.07 device pixels and
-       the edges are held back to 0.55 opacity on top of that, leaving well under
-       one pixel of ink. Sub-pixel line-work does not survive rasterisation, so
-       the mark greyed out into a smudge in the tab strip.
-
-       Re-cut for small sizes, verified by rasterising to 16px and counting ink:
-         - a 32 viewBox, so every coordinate lands on a whole pixel at 16px
-         - heavier strokes (2.8 edges), comfortably over one device pixel
-         - full opacity, because there is nothing to spare for de-emphasis here
-         - satellites FILLED rather than outlined. As rings their hole measured
-           0.9px, which reads as mush; a solid dot is the same silhouette with a
-           detail removed that could not survive anyway. The component keeps its
-           rings, where there is room for them.
-         - geometry pulled inside a 2-unit margin so no stroke clips the edge
-
-       A favicon cannot inherit currentColor -- there is no document to resolve
-       it against -- so the accent is pinned to indigo (#818cf8), the console's
-       default. That hue was picked to sit clear of every run-state colour, and
-       it holds against both a light and a dark tab strip, which matters because
-       the tab follows the OS theme rather than the page's. -->
-  <g stroke="#818cf8" stroke-width="2.8" stroke-linecap="round">
-    <path d="M16 15.5 L16 8.5" />
-    <path d="M16 15.5 L22 22" />
-    <path d="M16 15.5 L10 22" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" color="#818cf8">
+  <title>KGF Nexus</title>
+  <g stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.55">
+    <path d="M12 12 L12 4.4"/>
+    <path d="M12 12 L18.6 15.8"/>
+    <path d="M12 12 L5.4 15.8"/>
   </g>
-  <!-- The hub, largest and filled: the point where everything meets is the one
-       element that must never read as an outline. -->
-  <circle cx="16" cy="15.5" r="4.6" fill="#818cf8" />
-  <!-- Satellites, smaller than the hub so it stays the visual centre. -->
-  <g fill="#818cf8">
-    <circle cx="16" cy="6.2" r="3.1" />
-    <circle cx="24.4" cy="23.6" r="3.1" />
-    <circle cx="7.6" cy="23.6" r="3.1" />
+  <circle cx="12" cy="12" r="3.1" fill="currentColor"/>
+  <g stroke="currentColor" stroke-width="1.6" fill="none">
+    <circle cx="12" cy="3.4" r="2.1"/>
+    <circle cx="19.4" cy="16.3" r="2.1"/>
+    <circle cx="4.6" cy="16.3" r="2.1"/>
   </g>
 </svg>

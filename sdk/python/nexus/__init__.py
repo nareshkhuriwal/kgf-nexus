@@ -61,6 +61,7 @@ from .context import (
 from .task import TaskDefinition, registry, task
 from .types import (
     Cache,
+    Cancellation,
     Concurrency,
     Gpu,
     Resources,
@@ -111,6 +112,7 @@ __all__ = [
     "Timeouts",
     "Retry",
     "Cache",
+    "Cancellation",
     "Runtime",
     "SecretRef",
     "Concurrency",

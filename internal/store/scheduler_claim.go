@@ -41,6 +41,16 @@ type ClaimConfig struct {
 	// giving up, so one unplaceable task does not stall the whole queue while
 	// aging accrues.
 	LookAhead int
+	// FairShare orders the push-path candidate scan by each namespace's
+	// in-flight attempts divided by its weight BEFORE priority, so one
+	// namespace flooding a shared queue cannot monopolise dispatch (ADR-0017).
+	// Priority and aging still order work WITHIN a namespace.
+	FairShare bool
+	// FairShareMaxNamespaces bounds how many namespaces one cycle may give up
+	// on (each after LookAhead blocked candidates) before returning. It is the
+	// cost ceiling of a cycle in which every namespace is blocked:
+	// LookAhead x FairShareMaxNamespaces candidate reads, never more.
+	FairShareMaxNamespaces int
 }
 
 // DefaultClaimConfig returns the ADR-0010 recommended lease settings.
@@ -55,6 +65,11 @@ func DefaultClaimConfig(queue string) ClaimConfig {
 		AgingRate:           1.0,
 		AgingBlockThreshold: 60,
 		LookAhead:           8,
+		// On by default: with a single namespace per queue it orders exactly
+		// as before, and the case it exists for -- a flood from one tenant --
+		// is the one nobody enables a flag for in advance.
+		FairShare:              true,
+		FairShareMaxNamespaces: 4,
 	}
 }
 
@@ -101,8 +116,9 @@ var ErrNoCandidate = errors.New("no dispatchable attempt")
 //
 // It deliberately performs NO network I/O: a claim transaction that waited on
 // NATS would hold row locks across a network round trip and block vacuum
-// (ADR-0002 negative consequences). The notification is published by the caller
-// after commit.
+// (ADR-0002 negative consequences). The bus announcement is an outbox row
+// written by the same statement as the AttemptDispatched event (appendEvent), and
+// the event-service relay publishes it after commit (migration 0016).
 func (s *SchedulerStore) Claim(ctx context.Context, now time.Time) (ClaimReport, error) {
 	// READ COMMITTED, deliberately, and NOT the REPEATABLE READ that §5.3's
 	// pseudocode shows. Under REPEATABLE READ, a locking read that reaches a row
@@ -150,8 +166,31 @@ func (s *SchedulerStore) claimInTx(ctx context.Context, tx pgx.Tx, now time.Time
 	var skipped []uuid.UUID
 	var firstBlocked *ClaimReport
 
-	for i := 0; i < lookAhead; i++ {
-		cand, err := s.selectCandidate(ctx, tx, now, skipped)
+	// Fair share turns the flat look-ahead into a per-namespace one. Without
+	// the exclusion, a namespace whose head is blocked -- its workers full --
+	// sits at the lowest share (nothing of it is in flight) and would absorb
+	// every look-ahead slot of every cycle, starving the namespaces behind it:
+	// the very flood fair share exists to contain. So a namespace that has
+	// used its LookAhead is set aside for the rest of THIS cycle only.
+	budget := lookAhead
+	maxNS := 1
+	if s.cfg.FairShare {
+		maxNS = s.cfg.FairShareMaxNamespaces
+		if maxNS < 1 {
+			maxNS = 1
+		}
+		budget = lookAhead * maxNS
+	}
+	var excluded []uuid.UUID
+	blockedIn := map[uuid.UUID]int{}
+	// The salt rotates namespaces that tie on share (typically several at
+	// zero in flight) from cycle to cycle, so a tie is never broken the same
+	// way forever. Per-namespace, not per-row: a per-row random() would
+	// scramble priority order inside a namespace.
+	salt := fairShareSalt(now)
+
+	for i := 0; i < budget; i++ {
+		cand, err := s.selectCandidate(ctx, tx, now, skipped, excluded, salt)
 		if errors.Is(err, ErrNoCandidate) {
 			break
 		}
@@ -174,6 +213,13 @@ func (s *SchedulerStore) claimInTx(ctx context.Context, tx pgx.Tx, now time.Time
 			firstBlocked = &r
 		}
 		skipped = append(skipped, cand.ID)
+		blockedIn[cand.TenantID]++
+		if blockedIn[cand.TenantID] >= lookAhead {
+			excluded = append(excluded, cand.TenantID)
+			if len(excluded) >= maxNS {
+				break
+			}
+		}
 	}
 
 	if firstBlocked != nil {
@@ -195,36 +241,80 @@ func (s *SchedulerStore) claimInTx(ctx context.Context, tx pgx.Tx, now time.Time
 // It also filters on the RUN's state, because a PAUSING/PAUSED/CANCELLING run
 // must receive no NEW dispatch (§5.2). The scheduler READS workflow_runs; it
 // never writes it (ADR-0011).
+//
+// With FairShare on, the namespace's share -- in-flight attempts on this queue
+// divided by its configured weight -- is the FIRST sort key, ahead of priority
+// (ADR-0017). Two consequences are deliberate. Priority is compared only
+// within a namespace, so a tenant cannot jump the whole queue by declaring
+// priority 1000 on everything. And the share is computed inside this same READ
+// COMMITTED transaction from committed rows, so it is at worst one concurrent
+// dispatch stale; nothing about the SKIP LOCKED + CAS argument changes, because
+// the share only decides which unlocked PENDING row is tried first.
 func (s *SchedulerStore) selectCandidate(
-	ctx context.Context, tx pgx.Tx, now time.Time, skip []uuid.UUID,
+	ctx context.Context, tx pgx.Tx, now time.Time, skip, excludeTenants []uuid.UUID, salt string,
 ) (*Candidate, error) {
+	// The in-flight count is a CTE, not a join-and-aggregate in the main query:
+	// FOR UPDATE is not allowed alongside GROUP BY, and it must lock only the
+	// attempt row. idx_attempts_inflight_by_tenant (migration 0022) makes the
+	// CTE an index-only walk over the active rows of this queue.
+	//
+	// MATERIALIZED is load-bearing, measured (ADR-0018): pgx prepares this
+	// statement, and after five executions Postgres may switch to a generic
+	// plan that inlines the CTE as a correlated subquery re-run once PER
+	// PENDING ROW. With 8,000 pending and 2,000 in flight that took a claim
+	// from ~25 ms to ~1,140 ms. Materializing evaluates the count once.
 	const q = `
+WITH inflight AS MATERIALIZED (
+  SELECT tenant_id, count(*) AS n
+    FROM task_attempts
+   WHERE queue = $1 AND state IN ('DISPATCHED','RUNNING')
+   GROUP BY tenant_id
+)
 SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.queue, a.priority,
        a.resource_request, a.scheduled_at,
        a.priority + (EXTRACT(EPOCH FROM ($2::timestamptz - a.scheduled_at)) * $3) AS effective_priority,
-       n.spec_json
+       n.spec_json, a.tenant_id,
+       CASE WHEN $6::bool
+            THEN COALESCE(i.n, 0)::float8 / COALESCE(w.weight, 1)
+            ELSE 0 END AS share
   FROM task_attempts a
   JOIN task_nodes    n ON n.run_id = a.run_id AND n.node_id = a.node_id
   JOIN workflow_runs r ON r.id = a.run_id
+  LEFT JOIN inflight i ON i.tenant_id = a.tenant_id
+  LEFT JOIN scheduler_namespace_weights w ON w.tenant_id = a.tenant_id
  WHERE a.state = 'PENDING'
    AND a.queue = $1
    AND a.scheduled_at <= $2
    AND r.state IN ('PENDING','RUNNING')
    AND NOT (a.id = ANY($4::uuid[]))
- ORDER BY effective_priority DESC, a.scheduled_at ASC
+   AND NOT (a.tenant_id = ANY($5::uuid[]))
+ ORDER BY share ASC,
+          CASE WHEN $6::bool THEN hashtext(a.tenant_id::text || $7) ELSE 0 END,
+          effective_priority DESC, a.scheduled_at ASC
  LIMIT 1
  FOR UPDATE OF a SKIP LOCKED`
 
 	if skip == nil {
 		skip = []uuid.UUID{}
 	}
-	row := tx.QueryRow(ctx, q, s.cfg.Queue, now, s.cfg.AgingRate, skip)
+	if excludeTenants == nil {
+		excludeTenants = []uuid.UUID{}
+	}
+	// QueryExecModeDescribeExec (an unnamed statement, re-planned every call) instead
+	// of pgx's default cached prepared statement, measured (ADR-0018): after
+	// five executions Postgres may adopt a GENERIC plan for this query, and the
+	// one it picks nested-loops a scan of workflow_runs per pending row. At a
+	// 100k backlog that took one claim from ~270 ms (custom plan) to ~3.3 s.
+	// Planning costs ~1-3 ms per claim; a plan that is wrong by 10x costs more.
+	row := tx.QueryRow(ctx, q, pgx.QueryExecModeDescribeExec, s.cfg.Queue, now, s.cfg.AgingRate, skip,
+		excludeTenants, s.cfg.FairShare, salt)
 
 	var c Candidate
 	var reqJSON, specJSON []byte
 	if err := row.Scan(
 		&c.ID, &c.RunID, &c.NodeID, &c.AttemptNumber, &c.Queue, &c.Priority,
 		&reqJSON, &c.ScheduledAt, &c.EffectivePriority, &specJSON,
+		&c.TenantID, &c.FairShare,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNoCandidate
@@ -276,7 +366,7 @@ func (s *SchedulerStore) placeCandidate(
 	// task that cannot fit anywhere should report the resource shortfall, which
 	// is the actionable problem, rather than a semaphore it never reached.
 	if key := cand.Spec.ConcurrencyKey; key != "" && cand.Spec.ConcurrencyLimit > 0 {
-		ok, held, err := s.concurrencyAdmit(ctx, tx, key, cand.Spec.ConcurrencyLimit)
+		ok, held, err := s.concurrencyAdmit(ctx, tx, key, cand.Spec.ConcurrencyLimit, cand.ID)
 		if err != nil {
 			return ClaimReport{}, err
 		}
@@ -337,11 +427,12 @@ SELECT id, hostname, capacity, committed
    AND last_heartbeat_at > $2
    AND labels @> $3::jsonb
    AND ($4 = '' OR $4 = ANY(executors))
+   AND tenant_id = (SELECT tenant_id FROM task_attempts WHERE id=$5)
  ORDER BY id
  FOR UPDATE SKIP LOCKED`
 
 	rows, err := tx.Query(ctx, q,
-		s.cfg.Queue, now.Add(-s.cfg.LivenessWindow), selJSON, cand.Spec.Executor)
+		s.cfg.Queue, now.Add(-s.cfg.LivenessWindow), selJSON, cand.Spec.Executor, cand.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("select candidate workers: %w", err)
 	}
@@ -432,6 +523,7 @@ SELECT a.id, a.resource_request,
  WHERE a.state = 'PENDING'
    AND a.queue = $3
    AND a.id <> $4
+   AND a.tenant_id = (SELECT tenant_id FROM task_attempts WHERE id=$4)
    AND a.pending_reason LIKE 'waiting_for_resources:%'
    AND r.state IN ('PENDING','RUNNING')
    AND a.priority + (EXTRACT(EPOCH FROM ($1::timestamptz - a.scheduled_at)) * $2) >= $5
@@ -504,7 +596,7 @@ SELECT a.id, a.resource_request,
 // the attempt is not enough for this — the contending attempts are different
 // rows — so the count and the insert must share a transaction, which they do.
 func (s *SchedulerStore) concurrencyAdmit(
-	ctx context.Context, tx pgx.Tx, key string, limit int32,
+	ctx context.Context, tx pgx.Tx, key string, limit int32, attemptID uuid.UUID,
 ) (bool, int32, error) {
 	// Only slots belonging to attempts that are genuinely still active count.
 	// A slot whose attempt is terminal is garbage the release path missed (a
@@ -514,9 +606,10 @@ SELECT count(*)
   FROM concurrency_slots c
   JOIN task_attempts a ON a.id = c.attempt_id
  WHERE c.key = $1
+   AND c.tenant_id = (SELECT tenant_id FROM task_attempts WHERE id=$2)
    AND a.state IN ('DISPATCHED','RUNNING')`
 	var held int32
-	if err := tx.QueryRow(ctx, q, key).Scan(&held); err != nil {
+	if err := tx.QueryRow(ctx, q, key, attemptID).Scan(&held); err != nil {
 		return false, 0, fmt.Errorf("count concurrency slots for %q: %w", key, err)
 	}
 	return held < limit, held, nil

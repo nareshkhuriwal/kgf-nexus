@@ -1,0 +1,114 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Least-privilege, READ-ONLY permissions for the cluster controller (plan mode).
+# Namespaced Roles in exactly two namespaces -- the control plane (kgf-nexus)
+# and the worker namespace (nexus-workers) -- plus one ClusterRole limited to
+# what is cluster-scoped by nature: Nodes (read) and the kube-system Namespace
+# object (read, by name) whose UID is the cluster identity fingerprint.
+#
+# Nothing here can change the cluster. The mutating permissions live in
+# apply/rbac-apply.yaml and are bound only when a cluster is deliberately put
+# into apply mode. Add a worker Role/RoleBinding pair per additional bound
+# worker namespace; never widen this to a ClusterRole over all namespaces.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nexus-cluster-controller
+  namespace: kgf-nexus
+  labels: {app.kubernetes.io/name: nexus-cluster-controller, app.kubernetes.io/part-of: kgf-nexus}
+# The controller talks to the Kubernetes API with this token, and to Nexus
+# only over gRPC. It needs the token mounted; nothing else in the pod does.
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nexus-cluster-controller
+  namespace: kgf-nexus
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+rules:
+  # Leader election. create is needed once, to make the Lease; get/update to
+  # hold and renew it.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update]
+  # Observe the scheduler Deployment and its HPA.
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nexus-cluster-controller
+  namespace: kgf-nexus
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: nexus-cluster-controller}
+subjects:
+  - {kind: ServiceAccount, name: nexus-cluster-controller, namespace: kgf-nexus}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nexus-cluster-controller-observe
+  namespace: nexus-workers
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch]
+  # Pods: to map worker pods to worker rows (the agent's hostname is the pod
+  # name) and to check readiness before any scale-in.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  # Quotas bound scale-out, so an over-quota request is a visible decision
+  # instead of a ReplicaSet that fails to create pods forever.
+  - apiGroups: [""]
+    resources: [resourcequotas]
+    verbs: [get, list, watch]
+  # Task Jobs are reported, never created or deleted here.
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nexus-cluster-controller-observe
+  namespace: nexus-workers
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: nexus-cluster-controller-observe}
+subjects:
+  - {kind: ServiceAccount, name: nexus-cluster-controller, namespace: kgf-nexus}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nexus-cluster-controller-nodes
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+rules:
+  # Reported for capacity context only; nodes are scaled by the AKS cluster
+  # autoscaler, never by Nexus.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  # Only the kube-system Namespace object, only get: its UID is the cluster
+  # identity that apply mode is verified against.
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [kube-system]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nexus-cluster-controller-nodes
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nexus-cluster-controller-nodes}
+subjects:
+  - {kind: ServiceAccount, name: nexus-cluster-controller, namespace: kgf-nexus}

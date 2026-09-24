@@ -1,3 +1,4 @@
+import { usePermission } from './Permissions';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -139,6 +140,7 @@ function describeError(e: unknown): string {
  * How the bar describes and performs its action.
  */
 export interface BulkAction<Row> {
+  permission?: string;
   /**
    * The verb, imperative and exact: "Delete", "Revoke", "Cancel", "Drain". It is
    * rendered as `${verb} ${n} ${noun}` on the button, so it must be the word for
@@ -210,6 +212,8 @@ export function BulkActionBar<Row>({
   onClear,
   onDone,
 }: BulkActionBarProps<Row>) {
+  const can=usePermission();
+  actions = actions.filter(a => !a.permission || can(a.permission));
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
   const confirmRef = useRef<HTMLButtonElement>(null);
 
