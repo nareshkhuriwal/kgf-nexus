@@ -339,6 +339,43 @@
         }
       }
     },
+    "CancellationPolicy": {
+      "description": "ADR-0015. uninterruptible: external cancellation (operator/run cancel, revoked lease, agent drain) sends NO SIGTERM; the worker waits for the task to finish on its own for up to min(max_uninterruptible_ms, the worker's platform ceiling), then SIGKILLs it. It does NOT extend the task's own start_to_close deadline. 0 or absent max_uninterruptible_ms means the platform ceiling. One hour is the absolute schema maximum: a longer 'do not stop me' is a worker that cannot be reclaimed.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "uninterruptible": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_uninterruptible_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600000
+        }
+      },
+      "if": {
+        "properties": {
+          "max_uninterruptible_ms": {
+            "minimum": 1
+          }
+        },
+        "required": [
+          "max_uninterruptible_ms"
+        ]
+      },
+      "then": {
+        "description": "A bound on an interruption the task never asked to defer is an authoring mistake, not a no-op worth accepting silently.",
+        "required": [
+          "uninterruptible"
+        ],
+        "properties": {
+          "uninterruptible": {
+            "const": true
+          }
+        }
+      }
+    },
     "SecretRef": {
       "description": "A REFERENCE ONLY. Resolved by the worker at execution time; secret VALUES never enter the metadata store, so a metadata compromise leaks no credentials.",
       "type": "object",
@@ -521,6 +558,9 @@
         },
         "cache": {
           "$ref": "#/$defs/CachePolicy"
+        },
+        "cancellation": {
+          "$ref": "#/$defs/CancellationPolicy"
         },
         "runtime": {
           "$ref": "#/$defs/RuntimeSpec"

@@ -56,6 +56,11 @@ type Config struct {
 	// before it stops waiting. A drain that never ends blocks a deploy.
 	DrainGracePeriod time.Duration
 
+	// MaxUninterruptible is the platform ceiling on how long a cancellation may
+	// be deferred for a task that declared itself uninterruptible (ADR-0015).
+	// Zero means worker.DefaultUninterruptibleCeiling.
+	MaxUninterruptible time.Duration
+
 	// AllowUnenforceableLimits relaxes the subprocess executor's refusal to run
 	// tasks whose limits it cannot honour. Development only.
 	AllowUnenforceableLimits bool
@@ -273,6 +278,7 @@ func (a *Agent) register(ctx context.Context) error {
 	reporter := NewReporter(a.client, a.wal, a.log)
 	a.keeper = lease.New(a.workerID, a.client, nil, ttl, a.log)
 	a.runner = NewRunner(execs, a.registry, a.keeper, reporter, a.wal, a.store, a.log)
+	a.runner.UninterruptibleCeiling = a.cfg.MaxUninterruptible
 	// The keeper revokes into the runner and the runner renews through the
 	// keeper, so one of the two edges must be wired after construction.
 	a.keeper.SetHandler(a.runner)

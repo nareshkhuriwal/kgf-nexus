@@ -67,6 +67,33 @@ message TaskSpec {
   map<string, string> input_params = 20;
 
   int32 priority = 18;
+
+  // ADR-0015: how EXTERNAL cancellation treats a running attempt of this task.
+  // Field number 50 rather than the next free one on purpose: parallel branches
+  // extend TaskSpec too, and a high, distinctive number cannot collide with
+  // their 21, 22, ... in a merge. Additive: an old agent ignores it and keeps
+  // the plain SIGTERM -> grace -> SIGKILL contract.
+  CancellationPolicy cancellation = 50;
+}
+
+// CancellationPolicy lets a task declare a critical section that must not be
+// torn down part way -- a non-idempotent side effect, a migration step -- and
+// BOUNDS that declaration, because an unbounded "do not stop me" is a worker
+// that can never be reclaimed (ADR-0015).
+//
+// Applies to external cancellation only: an operator or run cancel, a revoked
+// lease, an agent drain. The task's own start_to_close deadline is NOT
+// extended by it -- that is the author's declared maximum run time and still
+// ends the attempt TIMED_OUT on the usual SIGTERM -> grace -> SIGKILL path.
+message CancellationPolicy {
+  // When true, cancellation sends NO SIGTERM. The agent waits for the workload
+  // to finish on its own for up to the bound below, then SIGKILLs it.
+  bool uninterruptible = 1;
+  // The declared upper bound on that wait. The effective bound is
+  // min(max_uninterruptible_ms, the worker's platform ceiling); 0 means "the
+  // ceiling". The ceiling is operator configuration on the agent, so no spec
+  // can hold a worker past what the platform allows.
+  int64 max_uninterruptible_ms = 2;
 }
 
 message ValueSpec {

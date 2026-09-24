@@ -280,6 +280,20 @@ function DefinitionPanels({
   );
 }
 
+/**
+ * ADR-0015. Said in operational terms rather than echoing the field: what an
+ * operator needs before pressing Cancel is "this will NOT stop immediately, and
+ * for at most how long". The worker ceiling is named because it can shorten the
+ * declared bound and the console cannot see its value.
+ */
+function fmtCancellation(c: SpecTask['cancellation']): string {
+  if (!c?.uninterruptible) return 'interruptible (SIGTERM, grace, SIGKILL)';
+  const bound = c.max_uninterruptible_ms
+    ? `up to ${fmtDurationMs(c.max_uninterruptible_ms)}`
+    : 'up to the worker ceiling';
+  return `uninterruptible: cancel waits ${bound} (capped by the worker ceiling), then SIGKILL`;
+}
+
 function TaskDetail({
   task,
   upstream,
@@ -306,6 +320,8 @@ function TaskDetail({
           <dd>{task.runtime?.executor || EMPTY}</dd>
           <dt>idempotency</dt>
           <dd>{task.idempotency || EMPTY}</dd>
+          <dt>cancellation</dt>
+          <dd>{fmtCancellation(task.cancellation)}</dd>
         </dl>
       </div>
       <div>

@@ -132,6 +132,7 @@ const definition = (over: Partial<SpecDefinition> = {}): SpecDefinition => ({
         queue: 'gpu',
         resources: { request: { gpu_count: 1, cpu_millis: 4000 } },
         retry: { max_attempts: 3, strategy: 'exponential', initial_ms: 30000 },
+        cancellation: { uninterruptible: true, max_uninterruptible_ms: 120000 },
       },
       {
         id: 'publish',
@@ -299,6 +300,21 @@ describe('the dependency graph', () => {
     const panel = (await screen.findByText('dependencies')).closest('.panel-body') as HTMLElement;
     expect(within(panel).getByText('ingest')).toBeInTheDocument();
     expect(within(panel).getByText('publish')).toBeInTheDocument();
+  });
+
+  // ADR-0015: before pressing Cancel an operator must be able to see that a
+  // task will NOT stop immediately, and for how long at most.
+  it('shows an uninterruptible task and its cancellation bound', async () => {
+    healthy();
+    wrap(<WorkflowDetailPage namespace="default" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /^train, ml.train$/ }));
+    const panel = (await screen.findByText('dependencies')).closest('.panel-body') as HTMLElement;
+    expect(within(panel).getByText(/uninterruptible: cancel waits up to 2m.*then SIGKILL/)).toBeInTheDocument();
+
+    fireEvent.click(within(await tasksTable()).getByRole('button', { name: 'publish' }));
+    const other = (await screen.findByText('dependencies')).closest('.panel-body') as HTMLElement;
+    expect(within(other).getByText(/^interruptible/)).toBeInTheDocument();
   });
 
   /**
