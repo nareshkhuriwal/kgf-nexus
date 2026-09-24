@@ -19,6 +19,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
 )
 
 // Client is the full worker RPC surface, satisfied by the generated gRPC client
@@ -59,6 +60,10 @@ type Config struct {
 	// AllowUnenforceableLimits relaxes the subprocess executor's refusal to run
 	// tasks whose limits it cannot honour. Development only.
 	AllowUnenforceableLimits bool
+
+	// Bus is the optional NATS connection for dispatch hints (ADR-0005). An empty
+	// URL disables it and the agent long-polls exactly as it always has.
+	Bus bus.Config
 }
 
 // ResultStoreCredentials are the parts of result-store access the agent holds
@@ -192,6 +197,18 @@ func (a *Agent) Run(ctx context.Context) error {
 			errs <- fmt.Errorf("lease keeper: %w", err)
 		}
 	}()
+
+	// Dispatch hints, if a bus is configured. Started before the puller so the
+	// first hint is not missed, and never fatal: a hint subscription that fails
+	// leaves the agent exactly as capable as a poll-only one.
+	if a.cfg.Bus.Enabled() {
+		hints, err := SubscribeDispatchHints(a.cfg.Bus, a.cfg.Namespace, a.cfg.Queues, a.puller.Wake, a.log)
+		if err != nil {
+			a.log.Warn("dispatch hints unavailable; long polling only", "error", err)
+		} else {
+			defer hints.Close()
+		}
+	}
 
 	wg.Add(1)
 	go func() {
