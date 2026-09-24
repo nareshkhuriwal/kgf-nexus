@@ -381,12 +381,15 @@ func (r *Runner) buildExecutorSpec(ctx context.Context, a *nexusv1.TaskAssignmen
 	}
 
 	return executor.TaskSpec{
-		AttemptID:            a.GetAttemptId(),
-		RunID:                a.GetRunId(),
-		NodeID:               a.GetNodeId(),
-		IdempotencyKey:       a.GetIdempotencyKey(),
-		Runtime:              spec.GetRuntime(),
-		Limit:                effectiveLimit(spec.GetResources()),
+		AttemptID:      a.GetAttemptId(),
+		RunID:          a.GetRunId(),
+		NodeID:         a.GetNodeId(),
+		IdempotencyKey: a.GetIdempotencyKey(),
+		Runtime:        spec.GetRuntime(),
+		Limit:          effectiveLimit(spec.GetResources()),
+		// The devices the registry named at admission, so concurrent GPU
+		// attempts on this worker never share one.
+		GPUDevices:           r.registry.GPUDevices(a.GetAttemptId()),
 		Inputs:               inputs,
 		DeclaredOutputs:      declaredOutputNames(spec),
 		StdoutOutput:         spec.GetRuntime().GetStdoutOutput(),

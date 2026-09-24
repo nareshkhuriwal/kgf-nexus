@@ -122,17 +122,28 @@ func buildEnv(spec TaskSpec, workDir, inputDir, outputFile, outputDir string) []
 	// A GPU request without device isolation is pinned by convention only; a
 	// workload can override this, which is precisely the fidelity gap that
 	// makes subprocess development-grade.
-	if n := spec.Limit.GetGpuCount(); n > 0 {
-		ids := ""
-		for i := int32(0); i < n; i++ {
-			if i > 0 {
-				ids += ","
-			}
-			ids += strconv.Itoa(int(i))
-		}
+	if ids := gpuDeviceList(spec); ids != "" {
 		env = append(env, "CUDA_VISIBLE_DEVICES="+ids)
 	}
 	return env
+}
+
+// gpuDeviceList is the comma-separated device indices an attempt may use: the
+// ones the worker's registry assigned. Without an assignment (a caller with no
+// registry, such as the executor conformance suite) it falls back to 0..n-1,
+// which is only correct when nothing else runs on the host concurrently.
+func gpuDeviceList(spec TaskSpec) string {
+	devices := spec.GPUDevices
+	if len(devices) == 0 {
+		for i := 0; i < int(spec.Limit.GetGpuCount()); i++ {
+			devices = append(devices, i)
+		}
+	}
+	ids := make([]string, len(devices))
+	for i, d := range devices {
+		ids[i] = strconv.Itoa(d)
+	}
+	return strings.Join(ids, ",")
 }
 
 // ReadOutputFile reads the conventional output file from an attempt's work

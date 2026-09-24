@@ -1,0 +1,298 @@
+{{- /*
+Copyright 2026 Khuriwal Group
+SPDX-License-Identifier: Apache-2.0
+
+In-cluster dependencies for a self-contained environment. Each can be turned
+off to point Nexus at a managed service instead (production).
+*/ -}}
+{{- include "nexus.required" . }}
+{{- if .Values.postgres.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels: {{- include "nexus.labels" (list . "postgres") | nindent 4 }}
+spec:
+  selector: {{- include "nexus.selector" (list . "postgres") | nindent 4 }}
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels: {{- include "nexus.labels" (list . "postgres") | nindent 4 }}
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: {{- include "nexus.selector" (list . "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "nexus.labels" (list . "postgres") | nindent 8 }}
+    spec:
+      # The postgres image's entrypoint prepares PGDATA as root and then drops
+      # to the postgres user (uid 70), so it is not forced non-root here.
+      securityContext:
+        fsGroup: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          args: ["-c", "max_connections={{ .Values.postgres.maxConnections }}", "-c", "shared_buffers={{ .Values.postgres.sharedBuffers }}"]
+          env:
+            - { name: POSTGRES_USER, value: {{ .Values.postgres.user | quote }} }
+            - { name: POSTGRES_DB, value: {{ .Values.postgres.database | quote }} }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: postgres-password } }
+            - { name: POSTGRES_INITDB_ARGS, value: "--auth-host=scram-sha-256" }
+            # A subdirectory: the volume root holds lost+found on many
+            # provisioners, which initdb refuses to initialise over.
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          readinessProbe:
+            exec: { command: ["sh", "-c", "pg_isready -U {{ .Values.postgres.user }} -d {{ .Values.postgres.database }}"] }
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["sh", "-c", "pg_isready -U {{ .Values.postgres.user }} -d {{ .Values.postgres.database }}"] }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+          resources: {{- toYaml .Values.postgres.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.postgres.storage.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests: { storage: {{ .Values.postgres.storage.size }} }
+{{- end }}
+{{- if .Values.minio.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  labels: {{- include "nexus.labels" (list . "minio") | nindent 4 }}
+spec:
+  selector: {{- include "nexus.selector" (list . "minio") | nindent 4 }}
+  ports:
+    - { name: s3, port: 9000, targetPort: s3 }
+    - { name: console, port: 9001, targetPort: console }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  labels: {{- include "nexus.labels" (list . "minio") | nindent 4 }}
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels: {{- include "nexus.selector" (list . "minio") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "nexus.labels" (list . "minio") | nindent 8 }}
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: minio
+          image: {{ .Values.minio.image }}
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: minio-root-user } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: minio-root-password } }
+          ports:
+            - { name: s3, containerPort: 9000 }
+            - { name: console, containerPort: 9001 }
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: s3 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: s3 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources: {{- toYaml .Values.minio.resources | nindent 12 }}
+          securityContext: {{- include "nexus.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /data }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.minio.storage.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests: { storage: {{ .Values.minio.storage.size }} }
+---
+# Creates the result bucket and keeps it private. Idempotent, so it is simply
+# re-run whenever the release's image tag changes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-init-{{ include "nexus.jobSuffix" . }}
+  labels: {{- include "nexus.labels" (list . "minio-init") | nindent 4 }}
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: {{- include "nexus.labels" (list . "minio-init") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: minio-init
+          image: {{ .Values.minio.mcImage }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              export MC_CONFIG_DIR=/tmp/mc
+              until mc alias set nexus "$RESULT_STORE_ENDPOINT" "$RESULT_STORE_ACCESS_KEY" "$RESULT_STORE_SECRET_KEY" >/dev/null 2>&1; do
+                echo "waiting for minio"; sleep 2
+              done
+              mc mb --ignore-existing "nexus/$RESULT_STORE_BUCKET"
+              mc anonymous set none "nexus/$RESULT_STORE_BUCKET"
+              echo "bucket $RESULT_STORE_BUCKET ready"
+          env: {{- include "nexus.resultStoreEnv" . | nindent 12 }}
+          securityContext: {{- include "nexus.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+{{- end }}
+{{- if .Values.nats.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  labels: {{- include "nexus.labels" (list . "nats") | nindent 4 }}
+spec:
+  selector: {{- include "nexus.selector" (list . "nats") | nindent 4 }}
+  ports:
+    - { name: client, port: 4222, targetPort: client }
+    - { name: monitor, port: 8222, targetPort: monitor }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nats
+  labels: {{- include "nexus.labels" (list . "nats") | nindent 4 }}
+spec:
+  serviceName: nats
+  replicas: 1
+  selector:
+    matchLabels: {{- include "nexus.selector" (list . "nats") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "nexus.labels" (list . "nats") | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: nats
+          image: {{ .Values.nats.image }}
+          args: ["-js", "-sd", "/data", "-m", "8222"]
+          ports:
+            - { name: client, containerPort: 4222 }
+            - { name: monitor, containerPort: 8222 }
+          readinessProbe:
+            httpGet: { path: "/healthz?js-enabled-only=true", port: monitor }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: monitor }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources: {{- toYaml .Values.nats.resources | nindent 12 }}
+          securityContext: {{- include "nexus.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /data }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.nats.storage.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests: { storage: {{ .Values.nats.storage.size }} }
+{{- end }}
+{{- if .Values.mailpit.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailpit
+  labels: {{- include "nexus.labels" (list . "mailpit") | nindent 4 }}
+spec:
+  type: {{ .Values.mailpit.serviceType | default "ClusterIP" }}
+  selector: {{- include "nexus.selector" (list . "mailpit") | nindent 4 }}
+  ports:
+    - { name: smtp, port: 1025, targetPort: smtp }
+    - { name: ui, port: {{ .Values.mailpit.uiPort | default 8025 }}, targetPort: ui }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailpit
+  labels: {{- include "nexus.labels" (list . "mailpit") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "nexus.selector" (list . "mailpit") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "nexus.labels" (list . "mailpit") | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: mailpit
+          image: {{ .Values.mailpit.image }}
+          env:
+            - { name: MP_MAX_MESSAGES, value: "500" }
+            - { name: MP_SMTP_AUTH_ACCEPT_ANY, value: "false" }
+          ports:
+            - { name: smtp, containerPort: 1025 }
+            - { name: ui, containerPort: 8025 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: ui }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext: {{- include "nexus.containerSecurity" . | nindent 12 }}
+{{- end }}

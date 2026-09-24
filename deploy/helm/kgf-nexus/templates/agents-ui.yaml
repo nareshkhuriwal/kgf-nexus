@@ -1,0 +1,133 @@
+{{- /*
+Copyright 2026 Khuriwal Group
+SPDX-License-Identifier: Apache-2.0
+
+Worker agents and the console.
+*/ -}}
+{{- $root := . -}}
+{{- range .Values.agents }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .name }}
+  labels: {{- include "nexus.labels" (list $root .name) | nindent 4 }}
+    nexus.khuriwalgroup.com/role: agent
+spec:
+  replicas: {{ .replicas | default 1 }}
+  # An agent is a worker identity: replacing it while its old pod still holds
+  # leases would briefly double its advertised capacity. Recreate drains the
+  # old one (NEXUS_DRAIN_GRACE) before the new one registers.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: {{- include "nexus.selector" (list $root .name) | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "nexus.labels" (list $root .name) | nindent 8 }}
+        nexus.khuriwalgroup.com/role: agent
+    spec:
+      {{- include "nexus.pullSecrets" $root | nindent 6 }}
+      securityContext: {{- include "nexus.podSecurity" $root | nindent 8 }}
+      terminationGracePeriodSeconds: {{ $root.Values.agentDefaults.terminationGracePeriodSeconds }}
+      containers:
+        - name: agent
+          image: {{ include "nexus.image" (list $root "agent") }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          # Every number is rendered through int64: Helm reads YAML numbers as
+          # float64, and a large one would otherwise print as 1.7179869184e+10.
+          env:
+            {{- include "nexus.resultStoreEnv" $root | nindent 12 }}
+            {{- include "nexus.natsEnv" $root | nindent 12 }}
+            - { name: NEXUS_CONTROL_PLANE, value: "api-gateway:9091" }
+            - name: NEXUS_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.existingSecret }}, key: worker-api-key } }
+            - { name: NEXUS_NAMESPACE, value: {{ $root.Values.nexusNamespace | quote }} }
+            - { name: NEXUS_QUEUES, value: {{ .queues | quote }} }
+            - { name: NEXUS_LABELS, value: {{ .labels | quote }} }
+            - { name: NEXUS_EXECUTORS, value: {{ .executors | default "subprocess" | quote }} }
+            - { name: NEXUS_CPU_MILLIS, value: {{ .cpuMillis | int64 | toString | quote }} }
+            - { name: NEXUS_MEMORY_BYTES, value: {{ .memoryBytes | int64 | toString | quote }} }
+            - { name: NEXUS_GPU_COUNT, value: {{ .gpuCount | default 0 | int64 | toString | quote }} }
+            {{- with .gpuKind }}
+            - { name: NEXUS_GPU_KIND, value: {{ . | quote }} }
+            {{- end }}
+            {{- with .gpuMemoryBytes }}
+            - { name: NEXUS_GPU_MEMORY_BYTES, value: {{ . | int64 | toString | quote }} }
+            {{- end }}
+            - { name: NEXUS_DISK_BYTES, value: {{ .diskBytes | int64 | toString | quote }} }
+            {{- with .customResources }}
+            - { name: NEXUS_CUSTOM_RESOURCES, value: {{ . | quote }} }
+            {{- end }}
+            - { name: NEXUS_HEARTBEAT_INTERVAL_MS, value: {{ $root.Values.agentDefaults.heartbeatIntervalMs | int64 | toString | quote }} }
+            - { name: NEXUS_DRAIN_GRACE, value: {{ $root.Values.agentDefaults.drainGrace | quote }} }
+            - { name: NEXUS_WAL_DIR, value: /var/lib/nexus/wal }
+            - { name: NEXUS_WORK_DIR, value: /var/lib/nexus/work }
+            - { name: LOG_LEVEL, value: {{ $root.Values.logLevel | quote }} }
+            - { name: NEXUS_LOG_LEVEL, value: {{ $root.Values.logLevel | quote }} }
+          resources: {{- toYaml .resources | nindent 12 }}
+          securityContext: {{- include "nexus.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            # The WAL outlives a container restart (emptyDir survives those),
+            # which is the case it exists for; a rescheduled pod is a new
+            # worker identity anyway and re-registers.
+            - { name: wal, mountPath: /var/lib/nexus/wal }
+            - { name: work, mountPath: /var/lib/nexus/work }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: wal, emptyDir: {} }
+        - { name: work, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+{{- end }}
+{{- if .Values.ui.enabled }}
+{{- $resolver := .Values.dns.resolver }}
+{{- if not $resolver }}
+{{- $kubeDNS := lookup "v1" "Service" "kube-system" "kube-dns" }}
+{{- $resolver = ($kubeDNS.spec).clusterIP | default "10.96.0.10" }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  labels: {{- include "nexus.labels" (list . "ui") | nindent 4 }}
+spec:
+  type: {{ .Values.ui.service.type }}
+  selector: {{- include "nexus.selector" (list . "ui") | nindent 4 }}
+  ports:
+    - { name: http, port: {{ .Values.ui.service.port }}, targetPort: http }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  labels: {{- include "nexus.labels" (list . "ui") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "nexus.selector" (list . "ui") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "nexus.labels" (list . "ui") | nindent 8 }}
+    spec:
+      {{- include "nexus.pullSecrets" . | nindent 6 }}
+      containers:
+        - name: ui
+          image: {{ include "nexus.image" (list . "ui") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # nginx's resolver needs an IP and applies no search domains, so
+            # the cluster DNS IP and the gateway's FQDN (deploy/nginx.conf).
+            - { name: NEXUS_DNS_RESOLVER, value: {{ $resolver | quote }} }
+            - { name: NEXUS_GATEWAY_UPSTREAM, value: {{ printf "api-gateway.%s.svc.%s:8080" .Release.Namespace .Values.dns.clusterDomain | quote }} }
+          ports:
+            - { name: http, containerPort: 80 }
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 10
+          resources: {{- toYaml .Values.ui.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+{{- end }}

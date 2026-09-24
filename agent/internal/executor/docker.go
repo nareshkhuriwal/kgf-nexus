@@ -61,6 +61,7 @@ type dockerState struct {
 	workDir     string
 	containerWD string
 	limit       *nexusv1.ResourceVector
+	gpuDevices  []int
 	deadline    time.Time
 	grace       time.Duration
 	name        string
@@ -159,6 +160,7 @@ func (e *DockerExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepared, 
 		workDir:         workDir,
 		containerWD:     containerWD,
 		limit:           spec.Limit,
+		gpuDevices:      spec.GPUDevices,
 		deadline:        spec.StartToCloseDeadline,
 		grace:           orDefaultGrace(spec.GraceAfterTerm),
 		declaredOutputs: spec.DeclaredOutputs,
@@ -220,7 +222,7 @@ func (e *DockerExecutor) Start(ctx context.Context, p Prepared) (Handle, error) 
 		"--label", "nexus.attempt_id=" + p.AttemptID,
 		"--label", "nexus.managed=true",
 	}
-	args = append(args, dockerLimitArgs(st.limit)...)
+	args = append(args, dockerLimitArgs(st.limit, st.gpuDevices)...)
 	for _, kv := range st.env {
 		args = append(args, "--env", kv)
 	}
@@ -534,7 +536,7 @@ func (e *DockerExecutor) ReapOrphans(ctx context.Context) (int, error) {
 // limit >= request is what permits opportunistic bursting, and applying the
 // request as a cap would throttle every task that was deliberately given
 // headroom.
-func dockerLimitArgs(limit *nexusv1.ResourceVector) []string {
+func dockerLimitArgs(limit *nexusv1.ResourceVector, gpuDevices []int) []string {
 	var args []string
 	if limit == nil {
 		return args
@@ -556,7 +558,16 @@ func dockerLimitArgs(limit *nexusv1.ResourceVector) []string {
 		// fails, which is the correct outcome: silently running a GPU task
 		// without GPUs produces a confusing application-level failure hours
 		// later instead of an immediate, legible one.
-		args = append(args, "--gpus", strconv.Itoa(int(g)))
+		//
+		// The assigned devices, not a count: "--gpus N" lets the runtime pick
+		// the first N, so two concurrent containers on one host both got
+		// device 0. The inner quotes are docker's CSV syntax for a device list
+		// containing commas.
+		if len(gpuDevices) > 0 {
+			args = append(args, "--gpus", `"device=`+gpuDeviceList(TaskSpec{GPUDevices: gpuDevices})+`"`)
+		} else {
+			args = append(args, "--gpus", strconv.Itoa(int(g)))
+		}
 	}
 	if d := limit.GetDiskBytes(); d > 0 {
 		// Only honoured on storage drivers that support it (overlay2 on xfs

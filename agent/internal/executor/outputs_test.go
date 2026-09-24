@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 )
 
 func writeOutput(t *testing.T, workDir, name string, b []byte) {
@@ -147,5 +149,35 @@ func TestBoundedBufferTruncatesWithoutShortWrites(t *testing.T) {
 	}
 	if !b.Truncated() {
 		t.Error("truncation was not reported, so a partial result would be reported as complete")
+	}
+}
+
+// CUDA_VISIBLE_DEVICES must name the devices the worker assigned, not 0..n-1:
+// with the old numbering two concurrent attempts both got device 0.
+func TestCUDAVisibleDevicesUsesTheAssignedDevices(t *testing.T) {
+	spec := TaskSpec{
+		Limit:      &nexusv1.ResourceVector{GpuCount: 1},
+		GPUDevices: []int{1},
+	}
+	if got := gpuDeviceList(spec); got != "1" {
+		t.Fatalf("assigned [1] exported as %q", got)
+	}
+	spec = TaskSpec{Limit: &nexusv1.ResourceVector{GpuCount: 2}, GPUDevices: []int{2, 3}}
+	if got := gpuDeviceList(spec); got != "2,3" {
+		t.Fatalf("assigned [2 3] exported as %q", got)
+	}
+	// No assignment (no registry, e.g. the conformance suite): the old default.
+	if got := gpuDeviceList(TaskSpec{Limit: &nexusv1.ResourceVector{GpuCount: 2}}); got != "0,1" {
+		t.Fatalf("unassigned fallback = %q, want 0,1", got)
+	}
+	args := dockerLimitArgs(&nexusv1.ResourceVector{GpuCount: 2}, []int{0, 1})
+	found := false
+	for i, a := range args {
+		if a == "--gpus" && i+1 < len(args) && args[i+1] == `"device=0,1"` {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("docker args %v do not pin the assigned devices", args)
 	}
 }

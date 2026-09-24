@@ -38,6 +38,14 @@ type Registry struct {
 	// draining stops admission without touching what is already running: a
 	// DRAIN means "finish current work, accept none", not "abandon".
 	draining bool
+
+	// gpus maps attempt_id to the device indices it holds, and gpuHeld marks
+	// which indices are taken. The ledger above only COUNTS GPUs; without
+	// naming them, every GPU attempt was told to use devices 0..n-1, so two
+	// concurrent 1-GPU attempts on a 2-GPU worker both ran on device 0 while
+	// device 1 sat idle.
+	gpus    map[string][]int
+	gpuHeld map[int]bool
 }
 
 // NewRegistry builds a registry over the capacity advertised at registration.
@@ -46,6 +54,8 @@ func NewRegistry(capacity *nexusv1.ResourceVector) *Registry {
 		capacity:  capacity,
 		committed: &nexusv1.ResourceVector{},
 		active:    make(map[string]*nexusv1.ResourceVector),
+		gpus:      make(map[string][]int),
+		gpuHeld:   make(map[int]bool),
 	}
 }
 
@@ -73,9 +83,36 @@ func (r *Registry) Admit(attemptID string, request *nexusv1.ResourceVector) (boo
 	if !ok {
 		return false, domain.ShortfallReason(short)
 	}
+	// Name the devices in the same critical section as the count, so two
+	// concurrent admissions can never pick the same free device.
+	var devices []int
+	if n := int(request.GetGpuCount()); n > 0 {
+		for d := 0; d < int(r.capacity.GetGpuCount()) && len(devices) < n; d++ {
+			if !r.gpuHeld[d] {
+				devices = append(devices, d)
+			}
+		}
+		if len(devices) < n {
+			// Fits passed on the count, so the held set disagrees with the
+			// ledger. Refuse rather than hand out a device someone holds.
+			return false, "gpu_devices_unavailable"
+		}
+		for _, d := range devices {
+			r.gpuHeld[d] = true
+		}
+		r.gpus[attemptID] = devices
+	}
 	r.active[attemptID] = request
 	r.committed = domain.AddVec(r.committed, request)
 	return true, ""
+}
+
+// GPUDevices is the device indices an admitted attempt holds, lowest first, or
+// nil if it holds none.
+func (r *Registry) GPUDevices(attemptID string) []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int(nil), r.gpus[attemptID]...)
 }
 
 // Release frees an attempt's locally committed resources. Idempotent: release is
@@ -90,6 +127,10 @@ func (r *Registry) Release(attemptID string) {
 	}
 	delete(r.active, attemptID)
 	r.committed = domain.SubVec(r.committed, req)
+	for _, d := range r.gpus[attemptID] {
+		delete(r.gpuHeld, d)
+	}
+	delete(r.gpus, attemptID)
 }
 
 // RunningAttemptIDs is the heartbeat's ground truth. Sorted so the wire payload

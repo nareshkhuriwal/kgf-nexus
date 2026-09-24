@@ -9,6 +9,31 @@ Read them in this order.
 | [`idempotent_effect/`](idempotent_effect/) | The three idempotency mechanisms, in descending order of strength. |
 | [`fan_out_map/`](fan_out_map/) | Dynamic expansion over a runtime collection (mandatory `max_fanout`), fan-in, and memoized children. |
 
+## Workload suite
+
+Four realistic workflows that check their own results and FAIL the run if the
+check fails. They are plain `sh` + `awk`, so they run on the stock agent image.
+
+| Example | What it does | What it proves |
+|---|---|---|
+| [`csv_sales_pipeline/`](csv_sales_pipeline/) | 16 regions × (generate CSV → validate → aggregate) → report; 320k rows by default | A 49-node DAG; MB-sized files through the result store (MinIO); every row either aggregated or rejected, or the run fails |
+| [`ml_training_pipeline/`](ml_training_pipeline/) | Synthetic regression data, a 24-trial hyperparameter search (real gradient descent), best-model selection, an R² quality gate | Runtime fan-out with shared blob inputs, memoization (a re-run reuses every trial), a gate that can fail the run |
+| [`gpu_scheduling/`](gpu_scheduling/) | 8 GPU jobs (1×A100, 2×A100, A10) contending for 2 A100s + 1 A10 | Queueing under GPU contention; an audit fails the run on oversubscription, a wrong GPU model, or two concurrent jobs sharing a device |
+| [`fanout_scale/`](fanout_scale/) | Fan out to N tiny tasks (500 by default) and sum them | Dispatch throughput with hundreds queued; the sum must equal the closed form exactly |
+
+Run all four on the Kubernetes dev environment:
+
+```bash
+make k8s-dev-up      # once: deploy the platform (deploy/terraform/environments/dev)
+make k8s-dev-test    # examples/run-suite.sh -- prints each verdict, exits non-zero on any failure
+SCALE=large make k8s-dev-test    # 1.6M CSV rows, 50k-row training set, 1,500-way fan-out
+SUITE="gpu" make k8s-dev-test    # one workload
+```
+
+On a laptop the GPUs are **simulated** (the dev agents advertise capacity and
+are labelled `simulated=true`): `gpu_scheduling` tests the scheduler's GPU
+accounting, queueing and device assignment, not CUDA.
+
 ## Setup (once)
 
 ```bash

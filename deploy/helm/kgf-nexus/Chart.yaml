@@ -1,0 +1,12 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v2
+name: kgf-nexus
+description: >-
+  KGF Nexus workflow orchestration -- the six control-plane services, worker
+  agents, console, and (optionally) the Postgres, MinIO, NATS and Mailpit
+  dependencies. Environments are driven by deploy/terraform.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"

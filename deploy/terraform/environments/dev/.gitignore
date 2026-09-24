@@ -1,0 +1,6 @@
+# State holds the generated credentials. Never commit it.
+.terraform/
+terraform.tfstate
+terraform.tfstate.*
+*.tfvars
+crash.log

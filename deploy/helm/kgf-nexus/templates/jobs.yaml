@@ -1,0 +1,93 @@
+{{- /*
+Copyright 2026 Khuriwal Group
+SPDX-License-Identifier: Apache-2.0
+
+Schema migration and bootstrap. Plain Jobs rather than Helm hooks on purpose: a
+post-install hook would run only after `helm --wait` saw every Deployment
+ready, but the services wait for the schema (wait-for-schema), so the two would
+wait on each other forever. Named per image tag: a new release runs them again;
+re-applying the same release changes nothing.
+*/ -}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate-{{ include "nexus.jobSuffix" . }}
+  labels: {{- include "nexus.labels" (list . "migrate") | nindent 4 }}
+spec:
+  # migrate.sh is safe to re-run (it skips applied versions and 0015+ files
+  # are written to be re-runnable), so a failed attempt simply retries.
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: {{- include "nexus.labels" (list . "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      {{- include "nexus.pullSecrets" . | nindent 6 }}
+      securityContext: {{- include "nexus.podSecurity" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "nexus.image" (list . "migrate") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            {{- include "nexus.dbEnv" . | nindent 12 }}
+            - { name: MIGRATIONS_DIR, value: /migrations }
+          resources: {{- toYaml .Values.migrate.resources | nindent 12 }}
+          securityContext: {{- include "nexus.containerSecurity" . | nindent 12 }}
+---
+# Bootstrap: the facts a brand-new database lacks that the platform cannot run
+# without. A tenant row for the Nexus namespace (the 0014 trigger rejects every
+# worker and API key in a namespace without one), and the worker/admin API keys
+# from the Secret, stored as SHA-256 hashes exactly as `make seed` does. Only
+# hashes reach the database and nothing is echoed, so the keys never appear in
+# a log.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bootstrap-{{ include "nexus.jobSuffix" . }}
+  labels: {{- include "nexus.labels" (list . "bootstrap") | nindent 4 }}
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: {{- include "nexus.labels" (list . "bootstrap") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      {{- include "nexus.pullSecrets" . | nindent 6 }}
+      securityContext: {{- include "nexus.podSecurity" . | nindent 8 }}
+      initContainers:
+        {{- include "nexus.waitForSchema" . | nindent 8 }}
+      containers:
+        - name: bootstrap
+          image: {{ include "nexus.image" (list . "migrate") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q \
+                -v ns="$NEXUS_NAMESPACE" -v wkey="$WORKER_API_KEY" -v akey="${ADMIN_API_KEY:-}" <<'SQL'
+              INSERT INTO tenants (namespace, name) VALUES (:'ns', :'ns')
+                ON CONFLICT (namespace) DO NOTHING;
+              INSERT INTO api_keys (namespace, name, key_hash, role)
+                VALUES (:'ns', 'bootstrap-worker', encode(sha256(convert_to(:'wkey', 'UTF8')), 'hex'), 'worker')
+                ON CONFLICT (key_hash) DO NOTHING;
+              INSERT INTO api_keys (namespace, name, key_hash, role)
+                SELECT :'ns', 'bootstrap-admin', encode(sha256(convert_to(:'akey', 'UTF8')), 'hex'), 'admin'
+                 WHERE :'akey' <> ''
+                ON CONFLICT (key_hash) DO NOTHING;
+              SQL
+              echo "bootstrap: tenant and keys for namespace $NEXUS_NAMESPACE are in place"
+          env:
+            {{- include "nexus.dbEnv" . | nindent 12 }}
+            - { name: NEXUS_NAMESPACE, value: {{ .Values.nexusNamespace | quote }} }
+            - name: WORKER_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: worker-api-key } }
+            - name: ADMIN_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: admin-api-key, optional: true } }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          securityContext: {{- include "nexus.containerSecurity" . | nindent 12 }}

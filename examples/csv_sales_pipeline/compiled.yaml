@@ -1,0 +1,2768 @@
+api_version: nexus.dev/v1
+description: '16-region CSV ETL: generate, validate, aggregate per region, then a
+  checked report.'
+edges:
+- from_node_id: aggregate_00
+  output_to_input:
+    summary_00: summary
+  to_node_id: report
+- from_node_id: aggregate_01
+  output_to_input:
+    summary_01: summary
+  to_node_id: report
+- from_node_id: aggregate_02
+  output_to_input:
+    summary_02: summary
+  to_node_id: report
+- from_node_id: aggregate_03
+  output_to_input:
+    summary_03: summary
+  to_node_id: report
+- from_node_id: aggregate_04
+  output_to_input:
+    summary_04: summary
+  to_node_id: report
+- from_node_id: aggregate_05
+  output_to_input:
+    summary_05: summary
+  to_node_id: report
+- from_node_id: aggregate_06
+  output_to_input:
+    summary_06: summary
+  to_node_id: report
+- from_node_id: aggregate_07
+  output_to_input:
+    summary_07: summary
+  to_node_id: report
+- from_node_id: aggregate_08
+  output_to_input:
+    summary_08: summary
+  to_node_id: report
+- from_node_id: aggregate_09
+  output_to_input:
+    summary_09: summary
+  to_node_id: report
+- from_node_id: aggregate_10
+  output_to_input:
+    summary_10: summary
+  to_node_id: report
+- from_node_id: aggregate_11
+  output_to_input:
+    summary_11: summary
+  to_node_id: report
+- from_node_id: aggregate_12
+  output_to_input:
+    summary_12: summary
+  to_node_id: report
+- from_node_id: aggregate_13
+  output_to_input:
+    summary_13: summary
+  to_node_id: report
+- from_node_id: aggregate_14
+  output_to_input:
+    summary_14: summary
+  to_node_id: report
+- from_node_id: aggregate_15
+  output_to_input:
+    summary_15: summary
+  to_node_id: report
+- from_node_id: generate_00
+  output_to_input:
+    csv: csv
+  to_node_id: validate_00
+- from_node_id: generate_01
+  output_to_input:
+    csv: csv
+  to_node_id: validate_01
+- from_node_id: generate_02
+  output_to_input:
+    csv: csv
+  to_node_id: validate_02
+- from_node_id: generate_03
+  output_to_input:
+    csv: csv
+  to_node_id: validate_03
+- from_node_id: generate_04
+  output_to_input:
+    csv: csv
+  to_node_id: validate_04
+- from_node_id: generate_05
+  output_to_input:
+    csv: csv
+  to_node_id: validate_05
+- from_node_id: generate_06
+  output_to_input:
+    csv: csv
+  to_node_id: validate_06
+- from_node_id: generate_07
+  output_to_input:
+    csv: csv
+  to_node_id: validate_07
+- from_node_id: generate_08
+  output_to_input:
+    csv: csv
+  to_node_id: validate_08
+- from_node_id: generate_09
+  output_to_input:
+    csv: csv
+  to_node_id: validate_09
+- from_node_id: generate_10
+  output_to_input:
+    csv: csv
+  to_node_id: validate_10
+- from_node_id: generate_11
+  output_to_input:
+    csv: csv
+  to_node_id: validate_11
+- from_node_id: generate_12
+  output_to_input:
+    csv: csv
+  to_node_id: validate_12
+- from_node_id: generate_13
+  output_to_input:
+    csv: csv
+  to_node_id: validate_13
+- from_node_id: generate_14
+  output_to_input:
+    csv: csv
+  to_node_id: validate_14
+- from_node_id: generate_15
+  output_to_input:
+    csv: csv
+  to_node_id: validate_15
+- from_node_id: validate_00
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_00
+- from_node_id: validate_00
+  output_to_input:
+    quality_00: quality
+  to_node_id: report
+- from_node_id: validate_01
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_01
+- from_node_id: validate_01
+  output_to_input:
+    quality_01: quality
+  to_node_id: report
+- from_node_id: validate_02
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_02
+- from_node_id: validate_02
+  output_to_input:
+    quality_02: quality
+  to_node_id: report
+- from_node_id: validate_03
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_03
+- from_node_id: validate_03
+  output_to_input:
+    quality_03: quality
+  to_node_id: report
+- from_node_id: validate_04
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_04
+- from_node_id: validate_04
+  output_to_input:
+    quality_04: quality
+  to_node_id: report
+- from_node_id: validate_05
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_05
+- from_node_id: validate_05
+  output_to_input:
+    quality_05: quality
+  to_node_id: report
+- from_node_id: validate_06
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_06
+- from_node_id: validate_06
+  output_to_input:
+    quality_06: quality
+  to_node_id: report
+- from_node_id: validate_07
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_07
+- from_node_id: validate_07
+  output_to_input:
+    quality_07: quality
+  to_node_id: report
+- from_node_id: validate_08
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_08
+- from_node_id: validate_08
+  output_to_input:
+    quality_08: quality
+  to_node_id: report
+- from_node_id: validate_09
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_09
+- from_node_id: validate_09
+  output_to_input:
+    quality_09: quality
+  to_node_id: report
+- from_node_id: validate_10
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_10
+- from_node_id: validate_10
+  output_to_input:
+    quality_10: quality
+  to_node_id: report
+- from_node_id: validate_11
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_11
+- from_node_id: validate_11
+  output_to_input:
+    quality_11: quality
+  to_node_id: report
+- from_node_id: validate_12
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_12
+- from_node_id: validate_12
+  output_to_input:
+    quality_12: quality
+  to_node_id: report
+- from_node_id: validate_13
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_13
+- from_node_id: validate_13
+  output_to_input:
+    quality_13: quality
+  to_node_id: report
+- from_node_id: validate_14
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_14
+- from_node_id: validate_14
+  output_to_input:
+    quality_14: quality
+  to_node_id: report
+- from_node_id: validate_15
+  output_to_input:
+    clean: clean
+  to_node_id: aggregate_15
+- from_node_id: validate_15
+  output_to_input:
+    quality_15: quality
+  to_node_id: report
+name: csv-sales-pipeline
+namespace: default
+params:
+  rows_per_region:
+    default_json: '20000'
+    type: int
+  seed:
+    default_json: '7'
+    type: int
+run_timeout_ms: 3600000
+tasks:
+- id: aggregate_00
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_01
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_02
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_03
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_04
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_05
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_06
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_07
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_08
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_09
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_10
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_11
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_12
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_13
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_14
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: aggregate_15
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    clean:
+      required: true
+      type: string
+  outputs:
+    summary:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, 'NR > 1 { rev[$3] += $5 * $6; units[$3] += $5; orders[$3]++; region\
+      \ = $2; n++ }\nEND {\n  printf \"{\\\"region\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\
+      \"categories\\\":[\\n\", region, n;\n  sep = \"\";\n  for (c in rev) {\n   \
+      \ printf \"%s{\\\"category\\\":\\\"%s\\\",\\\"revenue\\\":%.2f,\\\"units\\\"\
+      :%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\n    sep = \"\
+      ,\\n\";\n  }\n  printf \"\\n]}\\n\";\n}' \"$NEXUS_INPUT_DIR/clean\" > \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.aggregate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_00
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-00"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_01
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-01"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_02
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-02"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_03
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-03"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_04
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-04"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_05
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-05"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_06
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-06"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_07
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-07"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_08
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-08"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_09
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-09"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_10
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-10"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_11
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-11"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_12
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-12"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_13
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-13"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_14
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-14"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: generate_15
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_literals:
+    region: '"region-15"'
+  input_params:
+    rows: rows_per_region
+    seed: seed
+  inputs:
+    region:
+      required: true
+      type: string
+    rows:
+      required: true
+      type: json
+    seed:
+      required: true
+      type: json
+  outputs:
+    csv:
+      required: true
+      type: string
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v region=\"$(v region)\"\
+      \ -v rows=\"$(v rows)\" -v seed=\"$(v seed)\" '\nBEGIN {\n  split(\"electronics\
+      \ grocery apparel home toys sports books beauty\", cat, \" \");\n  n = region;\
+      \ gsub(/[^0-9]/, \"\", n); s = seed * 100003 + n * 7919;\n  srand(s);\n  print\
+      \ \"order_id,region,category,product,qty,unit_price,order_date\";\n  for (i\
+      \ = 1; i <= rows; i++) {\n    c = cat[int(rand() * 8) + 1];\n    p = c \"-sku-\"\
+      \ int(rand() * 25);\n    q = int(rand() * 9) + 1;\n    pr = sprintf(\"%.2f\"\
+      , 2 + rand() * 198);\n    d = sprintf(\"2026-%02d-%02d\", int(rand() * 12) +\
+      \ 1, int(rand() * 28) + 1);\n    r = rand();\n    if (r < 0.0025) q = \"\";\n\
+      \    else if (r < 0.005) pr = \"-\" pr;\n    printf \"%s-%07d,%s,%s,%s,%s,%s,%s\\\
+      n\", region, i, region, c, p, q, pr, d;\n  }\n}' > \"$NEXUS_OUTPUT_DIR/csv\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.generate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: report
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    quality_00:
+      required: true
+      type: json
+    quality_01:
+      required: true
+      type: json
+    quality_02:
+      required: true
+      type: json
+    quality_03:
+      required: true
+      type: json
+    quality_04:
+      required: true
+      type: json
+    quality_05:
+      required: true
+      type: json
+    quality_06:
+      required: true
+      type: json
+    quality_07:
+      required: true
+      type: json
+    quality_08:
+      required: true
+      type: json
+    quality_09:
+      required: true
+      type: json
+    quality_10:
+      required: true
+      type: json
+    quality_11:
+      required: true
+      type: json
+    quality_12:
+      required: true
+      type: json
+    quality_13:
+      required: true
+      type: json
+    quality_14:
+      required: true
+      type: json
+    quality_15:
+      required: true
+      type: json
+    summary_00:
+      required: true
+      type: json
+    summary_01:
+      required: true
+      type: json
+    summary_02:
+      required: true
+      type: json
+    summary_03:
+      required: true
+      type: json
+    summary_04:
+      required: true
+      type: json
+    summary_05:
+      required: true
+      type: json
+    summary_06:
+      required: true
+      type: json
+    summary_07:
+      required: true
+      type: json
+    summary_08:
+      required: true
+      type: json
+    summary_09:
+      required: true
+      type: json
+    summary_10:
+      required: true
+      type: json
+    summary_11:
+      required: true
+      type: json
+    summary_12:
+      required: true
+      type: json
+    summary_13:
+      required: true
+      type: json
+    summary_14:
+      required: true
+      type: json
+    summary_15:
+      required: true
+      type: json
+  outputs:
+    report:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "cd \"$NEXUS_INPUT_DIR\" && awk -F'[{}\":,]+' '\nFILENAME ~ /^quality_/ { for\
+      \ (i = 2; i < NF; i += 2) q[$i] += $(i + 1); next }\n$2 == \"category\" { rev[$3]\
+      \ += $5; units[$3] += $7; orders[$3] += $9; agg += $9 }\nEND {\n  if (q[\"clean\"\
+      ] != agg || q[\"clean\"] + q[\"rejected\"] != q[\"rows\"]) {\n    printf \"\
+      ROW ACCOUNTING FAILED: rows=%d clean=%d rejected=%d aggregated=%d\\n\", q[\"\
+      rows\"], q[\"clean\"], q[\"rejected\"], agg > \"/dev/stderr\";\n    exit 1;\n\
+      \  }\n  for (c in rev) { total += rev[c]; if (rev[c] > best) { best = rev[c];\
+      \ top = c } }\n  printf \"{\\\"regions\\\":%d,\\\"rows\\\":%d,\\\"clean\\\"\
+      :%d,\\\"rejected\\\":%d,\\\"reject_rate_pct\\\":%.3f,\\\"categories\\\":{\"\
+      , 16, q[\"rows\"], q[\"clean\"], q[\"rejected\"], 100 * q[\"rejected\"] / q[\"\
+      rows\"];\n  sep = \"\";\n  for (c in rev) { printf \"%s\\\"%s\\\":{\\\"revenue\\\
+      \":%.2f,\\\"units\\\":%d,\\\"orders\\\":%d}\", sep, c, rev[c], units[c], orders[c];\
+      \ sep = \",\" }\n  printf \"},\\\"total_revenue\\\":%.2f,\\\"top_category\\\"\
+      :\\\"%s\\\",\\\"row_accounting\\\":\\\"ok\\\"}\\n\", total, top;\n}' quality_*\
+      \ summary_* > \"$NEXUS_OUTPUT_DIR/report\" && cat \"$NEXUS_OUTPUT_DIR/report\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.report
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_00
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_01
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_02
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_03
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_04
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_05
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_06
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_07
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_08
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_09
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_10
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_11
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_12
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_13
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_14
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: validate_15
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    csv:
+      required: true
+      type: string
+  outputs:
+    clean:
+      required: true
+      type: string
+    quality:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "awk -F, -v out=\"$NEXUS_OUTPUT_DIR/clean\" '\nNR == 1 { print > out; next }\n\
+      { total++ }\nNF != 7              { bad++; reason[\"columns\"]++;   next }\n\
+      $5 !~ /^[0-9]+$/     { bad++; reason[\"qty\"]++;       next }\n$6 !~ /^[0-9.]+$/\
+      \    { bad++; reason[\"price\"]++;     next }\n{ print > out; good++ }\nEND\
+      \ {\n  printf \"{\\\"rows\\\":%d,\\\"clean\\\":%d,\\\"rejected\\\":%d,\\\"bad_qty\\\
+      \":%d,\\\"bad_price\\\":%d,\\\"bad_columns\\\":%d}\",\n    total, good, bad,\
+      \ reason[\"qty\"], reason[\"price\"], reason[\"columns\"];\n}' \"$NEXUS_INPUT_DIR/csv\"\
+      \ > \"$NEXUS_OUTPUT_DIR/quality\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: csv.validate
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 900000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+

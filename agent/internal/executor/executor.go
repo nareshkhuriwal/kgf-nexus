@@ -55,6 +55,12 @@ type TaskSpec struct {
 	// permits opportunistic bursting.
 	Limit *nexusv1.ResourceVector
 
+	// GPUDevices are the device indices this attempt holds on the worker,
+	// assigned by the worker's registry at admission. Executors expose exactly
+	// these (CUDA_VISIBLE_DEVICES, docker --gpus device=...) so concurrent GPU
+	// attempts land on different devices. Nil means none were assigned.
+	GPUDevices []int
+
 	// Inputs are already-resolved references. Staging them is the executor's
 	// job because the payload must never transit the control plane (ADR-0008).
 	Inputs map[string]*nexusv1.ResultRef
