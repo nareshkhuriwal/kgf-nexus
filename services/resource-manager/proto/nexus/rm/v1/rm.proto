@@ -111,6 +111,12 @@ message SetWorkerStateRequest {
   string worker_id = 1;
   WorkerState state = 2;
   string reason = 3;
+  // For state = QUARANTINED: how long before it lifts by itself. 0 means
+  // indefinite (an operator must release it).
+  int64 quarantine_ms = 4;
+  // Who asked, e.g. "user:<sub>". Recorded on the quarantine episode, because
+  // an unattributed quarantine or release is useless in an incident review.
+  string actor = 5;
 }
 
 message SetWorkerStateResponse {

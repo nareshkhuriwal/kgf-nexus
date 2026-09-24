@@ -21,12 +21,11 @@ import (
 
 // WorkerState mirrors the frozen `worker_state` enum (§5.5).
 //
-// QUARANTINED exists in the schema but is NOT issued in Phase 1. It is the
-// circuit breaker for the poison host — a worker with a broken driver or a bad
-// disk that accepts tasks, fails them instantly, and is immediately handed more,
-// chewing through the retry budget of every task in the queue in seconds. The
-// constant is defined and the transition table permits it so that Phase 2 adds
-// the detector, not a migration.
+// QUARANTINED is the circuit breaker for the poison host — a worker with a
+// broken driver or a bad disk that accepts tasks, fails them instantly, and is
+// immediately handed more, chewing through the retry budget of every task in
+// the queue in seconds. It is entered and left through rm_quarantine.go, which
+// records every episode; see the definition there.
 type WorkerState string
 
 const (
@@ -137,12 +136,15 @@ func (s *RMStore) GetWorker(ctx context.Context, workerID string) (*Worker, erro
 func (s *RMStore) TouchHeartbeat(ctx context.Context, workerID string) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE workers SET last_heartbeat_at = now()
-		 WHERE id = $1 AND state IN ('ACTIVE','DRAINING')`, workerID)
+		 WHERE id = $1 AND state IN ('ACTIVE','DRAINING','QUARANTINED')`, workerID)
 	if err != nil {
 		return fmt.Errorf("store: touch heartbeat %s: %w", workerID, err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Either the worker does not exist or it is already DEAD/QUARANTINED.
+		// Either the worker does not exist or it is already DEAD.
+		// QUARANTINED keeps heartbeating on purpose: it is alive, still finishing
+		// the work it held, and must be reachable to be released -- refusing its
+		// beat would order it to re-register and launder the quarantine away.
 		// Both mean this session must re-register; the caller turns that into a
 		// REREGISTER directive.
 		return fmt.Errorf("%w: %s (or not in a live state)", ErrWorkerNotFound, workerID)
@@ -168,8 +170,8 @@ func (s *RMStore) SetWorkerState(ctx context.Context, workerID string, to Worker
 		// DEAD is terminal and reachable from every non-terminal state.
 		allowedFrom = []string{"ACTIVE", "DRAINING", "QUARANTINED"}
 	case WorkerQuarantined:
-		// Phase 2 hook: the transition is legal in the schema and here, but
-		// nothing in Phase 1 issues it. See the WorkerState doc comment.
+		// Prefer QuarantineWorker, which also records the episode; this bare
+		// transition exists for the table's completeness.
 		allowedFrom = []string{"ACTIVE"}
 	case WorkerActive:
 		// Re-activation after quarantine (operator or auto-recovery). NEVER from
@@ -196,7 +198,7 @@ func (s *RMStore) ListStaleWorkers(ctx context.Context, window time.Duration) ([
 		SELECT id, namespace, hostname, queues, executors, labels, capacity, committed,
 		       state, agent_version, registered_at, last_heartbeat_at
 		  FROM workers
-		 WHERE state IN ('ACTIVE','DRAINING')
+		 WHERE state IN ('ACTIVE','DRAINING','QUARANTINED')
 		   AND last_heartbeat_at < now() - $1::interval`,
 		fmt.Sprintf("%d milliseconds", window.Milliseconds()))
 	if err != nil {

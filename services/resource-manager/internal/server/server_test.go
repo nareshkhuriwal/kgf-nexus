@@ -60,6 +60,7 @@ func vec(cpu, mem int64, gpu int32) *nexusv1.ResourceVector {
 func registerWorker(t *testing.T, s *Server, st *store.RMStore, capacity *nexusv1.ResourceVector) string {
 	t.Helper()
 	ns := fmt.Sprintf("rmsrv-%s-%d", t.Name(), time.Now().UnixNano())
+	ensureTenant(t, st, ns)
 	resp, err := s.RegisterWorker(context.Background(), &rmv1.RegisterWorkerRequest{
 		Namespace: ns, Hostname: "host-1", Queues: []string{"default"},
 		Executors: []string{"subprocess", "docker"},
@@ -74,6 +75,21 @@ func registerWorker(t *testing.T, s *Server, st *store.RMStore, capacity *nexusv
 		_, _ = st.Pool().Exec(context.Background(), `DELETE FROM workers WHERE id = $1`, id)
 	})
 	return id
+}
+
+// ensureTenant registers a namespace's tenant. Since 0014 every workers row must
+// belong to a registered tenant, and these tests mint a namespace per test.
+func ensureTenant(t *testing.T, st *store.RMStore, ns string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := st.Pool().Exec(ctx,
+		`INSERT INTO tenants (namespace, name) VALUES ($1, $1) ON CONFLICT (namespace) DO NOTHING`, ns); err != nil {
+		t.Fatalf("register tenant %s: %v", ns, err)
+	}
+	t.Cleanup(func() {
+		_, _ = st.Pool().Exec(context.Background(), `DELETE FROM workers WHERE namespace = $1`, ns)
+		_, _ = st.Pool().Exec(context.Background(), `DELETE FROM tenants WHERE namespace = $1`, ns)
+	})
 }
 
 // dropAttemptFK lets ledger tests write reservations without a full DAG. Skips if
@@ -333,21 +349,74 @@ func TestDeadWorkerReleasesAllCapacity(t *testing.T) {
 	}
 }
 
-// TestQuarantinedIsExplicitlyUnimplemented: the DB enum, the store's transition
-// table and the proto all admit QUARANTINED so Phase 2 adds a detector rather than
-// a migration. Quietly accepting it now would create workers no Phase 1 code path
-// can ever re-ACTIVE.
-func TestQuarantinedIsExplicitlyUnimplemented(t *testing.T) {
+// Manual quarantine is recorded, excludes the worker from placement (state is
+// no longer ACTIVE), keeps its heartbeat accepted, and release restores it.
+func TestManualQuarantineAndRelease(t *testing.T) {
 	s, st := newTestServer(t)
 	ctx := context.Background()
 	workerID := registerWorker(t, s, st, vec(1000, 1<<30, 0))
 
-	_, err := s.SetWorkerState(ctx, &rmv1.SetWorkerStateRequest{
+	if _, err := s.SetWorkerState(ctx, &rmv1.SetWorkerStateRequest{
 		WorkerId: workerID, State: rmv1.WorkerState_WORKER_STATE_QUARANTINED,
+	}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("a quarantine without a reason: err = %v, want InvalidArgument", err)
+	}
+	resp, err := s.SetWorkerState(ctx, &rmv1.SetWorkerStateRequest{
+		WorkerId: workerID, State: rmv1.WorkerState_WORKER_STATE_QUARANTINED,
+		Reason: "bad GPU driver", Actor: "user:ops", QuarantineMs: 60_000,
 	})
-	if status.Code(err) != codes.Unimplemented {
-		t.Errorf("err = %v (code %v), want Unimplemented — QUARANTINED is a Phase 2 hook",
-			err, status.Code(err))
+	if err != nil || !resp.GetApplied() || resp.GetCurrent() != rmv1.WorkerState_WORKER_STATE_QUARANTINED {
+		t.Fatalf("quarantine: resp=%v err=%v", resp, err)
+	}
+	if err := st.TouchHeartbeat(ctx, workerID); err != nil {
+		t.Fatalf("a quarantined worker's heartbeat was refused (it would be told to re-register): %v", err)
+	}
+	eps, err := st.ListQuarantines(ctx, workerID)
+	if err != nil || len(eps) != 1 || eps[0].Trigger != store.QuarantineManual || eps[0].Actor != "user:ops" || eps[0].ExpiresAt == nil {
+		t.Fatalf("episode = %+v err=%v", eps, err)
+	}
+	// A second quarantine is not applied: one open episode per worker.
+	resp, err = s.SetWorkerState(ctx, &rmv1.SetWorkerStateRequest{
+		WorkerId: workerID, State: rmv1.WorkerState_WORKER_STATE_QUARANTINED, Reason: "again", Actor: "user:ops",
+	})
+	if err != nil || resp.GetApplied() {
+		t.Fatalf("double quarantine applied: %v %v", resp, err)
+	}
+
+	resp, err = s.SetWorkerState(ctx, &rmv1.SetWorkerStateRequest{
+		WorkerId: workerID, State: rmv1.WorkerState_WORKER_STATE_ACTIVE, Actor: "user:ops", Reason: "driver fixed",
+	})
+	if err != nil || !resp.GetApplied() || resp.GetCurrent() != rmv1.WorkerState_WORKER_STATE_ACTIVE {
+		t.Fatalf("release: resp=%v err=%v", resp, err)
+	}
+	eps, _ = st.ListQuarantines(ctx, workerID)
+	if eps[0].ReleasedAt == nil || eps[0].ReleasedBy == nil || *eps[0].ReleasedBy != "user:ops" {
+		t.Fatalf("release not recorded: %+v", eps[0])
+	}
+}
+
+// Quarantine follows the host: a restarted agent's new session inherits it.
+func TestQuarantineIsInheritedByANewSessionOfTheSameHost(t *testing.T) {
+	s, st := newTestServer(t)
+	ctx := context.Background()
+	first := registerWorker(t, s, st, vec(1000, 1<<30, 0))
+	var ns string
+	_ = st.Pool().QueryRow(ctx, `SELECT namespace FROM workers WHERE id=$1`, first).Scan(&ns)
+	if _, err := s.SetWorkerState(ctx, &rmv1.SetWorkerStateRequest{
+		WorkerId: first, State: rmv1.WorkerState_WORKER_STATE_QUARANTINED, Reason: "poison", Actor: "user:ops",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := s.RegisterWorker(ctx, &rmv1.RegisterWorkerRequest{
+		Namespace: ns, Hostname: "host-1", Queues: []string{"default"}, Capacity: vec(1000, 1<<30, 0),
+		AgentVersion: "test", SessionTokenHash: "h2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := st.GetWorker(ctx, resp.GetWorkerId())
+	if err != nil || w.State != store.WorkerQuarantined {
+		t.Fatalf("new session state = %v err=%v, want QUARANTINED (inherited)", w, err)
 	}
 }
 
