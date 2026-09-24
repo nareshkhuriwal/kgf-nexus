@@ -32,12 +32,13 @@ MIGRATIONS    := services/migrations
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
-        license-report license-check dev-certs up-tls certs-check bench-pg bench-dispatch bench-inline
+        license-report license-check dev-certs up-tls certs-check \
+        k8s-dev-images k8s-dev-up k8s-dev-test k8s-dev-status k8s-dev-down bench-pg bench-dispatch bench-inline
 
 help: ## Show this help
 	@echo "Nexus — make targets"
 	@echo
-	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | sort \
 	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@echo
@@ -165,6 +166,32 @@ logs: ## Tail logs for all services
 
 ps: ## Show container status
 	$(COMPOSE) ps
+
+# ── Kubernetes dev environment (deploy/terraform/environments/dev) ────────
+# The whole platform on Docker Desktop's Kubernetes, via the kgf-nexus Helm
+# chart and Terraform. Runs alongside the compose stack (different ports).
+TF_DEV := deploy/terraform/environments/dev
+
+k8s-dev-images: ## Build every image and load it into the local kind node (prints the tag)
+	@deploy/scripts/k8s-dev-images.sh
+
+k8s-dev-up: ## Build + load images, then terraform apply the dev environment on Docker Desktop
+	@set -euo pipefail; \
+	tag=$$(deploy/scripts/k8s-dev-images.sh | tail -n 1); \
+	echo "image tag: $$tag"; \
+	terraform -chdir=$(TF_DEV) init -input=false -upgrade=false >/dev/null; \
+	terraform -chdir=$(TF_DEV) apply -input=false -auto-approve -var "image_tag=$$tag"; \
+	echo; echo "Admin API key: terraform -chdir=$(TF_DEV) output -raw admin_api_key"
+
+k8s-dev-test: ## Run the workload suite (CSV ETL, ML training, GPU scheduling, fan-out) on the dev environment
+	examples/run-suite.sh
+
+k8s-dev-status: ## Show the dev environment's pods and URLs
+	kubectl -n nexus-dev get pods,svc
+	@terraform -chdir=$(TF_DEV) output
+
+k8s-dev-down: ## Destroy the dev environment (DELETES its data volumes)
+	terraform -chdir=$(TF_DEV) destroy -input=false
 
 # ── TLS (docs/TLS.md §5) ──────────────────────────────────────────────────
 # Opt-in. `make up` stays plaintext; `make up-tls` layers the mTLS override on

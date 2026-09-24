@@ -1,0 +1,186 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Defaults are PRODUCTION-SAFE: no credentials here (every secret comes from an
+# existing Secret), one CPU agent, ClusterIP services, simulated hardware off.
+# Environment-specific choices -- Docker Desktop's LoadBalancer ports, dev
+# simulated GPU agents -- live in deploy/terraform/environments/*, not here.
+#
+# One release per Kubernetes namespace: components use fixed Service names
+# (api-gateway, postgres, ...) exactly as the compose stack does, so the
+# services' peer addresses are the same everywhere.
+
+image:
+  # Prefix for every Nexus image: <registry><repositoryPrefix><component>:<tag>.
+  # Components: api-gateway workflow-manager dag-engine scheduler
+  # resource-manager event-service agent migrate ui.
+  registry: ""
+  repositoryPrefix: "kgf-nexus/"
+  # Pin to an immutable tag (a git SHA or a digest-backed release tag). Never
+  # "latest": a node that already has a "latest" would silently run old code.
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# The Nexus namespace (tenant) the agents serve and that bootstrap creates if
+# missing. Distinct from the Kubernetes namespace the release is installed in.
+nexusNamespace: default
+logLevel: info
+
+# Credentials. REQUIRED: the name of a Secret in the release namespace with:
+#   postgres-password     password for the nexus database user (URL-safe)
+#   minio-root-user       object store access key
+#   minio-root-password   object store secret key
+#   worker-api-key        API key the agents authenticate with (nxs_worker_...)
+#   admin-api-key         optional; bootstrap installs it as an admin key
+# deploy/terraform creates this Secret with generated values.
+existingSecret: ""
+
+# Cluster DNS, for the console's nginx (its resolver needs an IP and does not
+# apply search domains). Empty = look up kube-system/kube-dns at install time.
+dns:
+  resolver: ""
+  clusterDomain: cluster.local
+
+postgres:
+  # false = use an external database (managed Postgres in production).
+  enabled: true
+  image: postgres:16-alpine
+  host: postgres        # used when enabled=false
+  port: 5432
+  user: nexus
+  database: nexus
+  sslmode: disable
+  maxConnections: 200
+  sharedBuffers: 256MB
+  storage:
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { memory: 1Gi }
+
+minio:
+  enabled: true
+  image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+  mcImage: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+  endpoint: http://minio:9000   # used when enabled=false
+  bucket: nexus-results
+  region: us-east-1
+  useTLS: false
+  inlineThresholdBytes: 65536
+  storage:
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+nats:
+  # The event bus is optional (ADR-0003): disabled, the agents long-poll.
+  enabled: true
+  image: nats:2.14.7-alpine
+  storage:
+    size: 5Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 512Mi }
+
+mailpit:
+  # Development mail catcher. Leave false in production and set smtp.* instead.
+  enabled: false
+  image: axllent/mailpit:v1.27.0
+
+smtp:
+  # Empty host = mail disabled (the gateway says so at startup; link routes 503).
+  host: ""
+  port: 587
+  tls: starttls
+  from: "KGF Nexus <no-reply@nexus.localhost>"
+  # Where emailed links point: the console's public URL.
+  publicUrl: ""
+
+migrate:
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+# Shared defaults for the Go services; each service below can override.
+serviceDefaults:
+  replicas: 1
+  resources:
+    requests: { cpu: 100m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+services:
+  apiGateway:
+    replicas: 1
+    # Exposure outside the cluster, as a SEPARATE Service. The in-cluster
+    # api-gateway Service always keeps 8080 (REST) and 9091 (worker gRPC).
+    external:
+      enabled: false
+      type: LoadBalancer
+      httpPort: 8080
+      grpcPort: 9091
+  workflowManager: {}
+  dagEngine: {}
+  resourceManager: {}
+  eventService: {}
+
+# One scheduler Deployment per queue it drains. Replicas are safe to scale: the
+# claim is atomic in Postgres (ADR-0011, F81).
+schedulers:
+  - name: scheduler
+    queue: default
+    replicas: 1
+  - name: scheduler-gpu
+    queue: gpu
+    replicas: 1
+
+# Worker agents. Real hardware only by default; simulated capacity belongs in a
+# dev environment and must be labelled as such.
+agents:
+  - name: agent-cpu
+    replicas: 1
+    queues: default
+    labels: "zone=cluster,accelerator=none"
+    executors: subprocess
+    cpuMillis: 2000
+    memoryBytes: 4294967296
+    gpuCount: 0
+    diskBytes: 10737418240
+    resources:
+      requests: { cpu: 250m, memory: 256Mi }
+      limits: { memory: 4Gi }
+
+agentDefaults:
+  heartbeatIntervalMs: 5000
+  # Must stay below terminationGracePeriodSeconds, or Kubernetes kills an agent
+  # mid-drain and strands its attempts until their leases expire.
+  drainGrace: 60s
+  terminationGracePeriodSeconds: 90
+
+# Host-based routing via the Gateway API (templates/gateway.yaml). Off by
+# default: it needs a Gateway API implementation installed in the cluster.
+gateway:
+  enabled: false
+  # Create the cluster-scoped GatewayClass too (a cluster with its own shared
+  # class, as most shared clusters have, sets this false and names it below).
+  createGatewayClass: false
+  className: eg
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  port: 80
+  hosts:
+    console: ""
+    api: ""
+    mail: ""
+
+ui:
+  enabled: true
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { memory: 128Mi }
