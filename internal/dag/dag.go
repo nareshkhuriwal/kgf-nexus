@@ -113,7 +113,21 @@ type Node struct {
 	TaskRef     string
 	TriggerRule TriggerRule
 	Spec        *nexusv1.TaskSpec
+
+	// ParentID and MapIndex are set only on a dynamic-expansion child (§5.4):
+	// the template it was materialized from and its position in the collection.
+	// MapIndex is -1 on every other node, so a zero value can never be mistaken
+	// for "child 0".
+	ParentID string
+	MapIndex int
 }
+
+// IsTemplate reports whether this node is a map template: it declares a
+// MapSpec and therefore never executes itself, but expands into children.
+func (n *Node) IsTemplate() bool { return n != nil && n.Spec.GetMap() != nil && n.ParentID == "" }
+
+// IsChild reports whether this node was materialized by a dynamic expansion.
+func (n *Node) IsChild() bool { return n != nil && n.ParentID != "" }
 
 // Edge is one dependency. OutputToInput maps a DOWNSTREAM INPUT NAME to an
 // UPSTREAM OUTPUT NAME, matching the frozen proto comment on nexusv1.Edge
@@ -141,6 +155,10 @@ type Graph struct {
 	preds    map[string][]string
 	succs    map[string][]string
 	edgeByTo map[string][]Edge
+	// children maps a template id to its expanded children, ordered by
+	// map_index. Empty for a template that has not expanded (or expanded to an
+	// empty collection).
+	children map[string][]string
 
 	// FailFast mirrors WorkflowSpec.fail_fast: stop dispatching NEW work on the
 	// first terminal failure. It does not cancel in-flight work, which is what
@@ -247,16 +265,48 @@ func NodeStateToProto(s NodeState) nexusv1.NodeState {
 	}
 }
 
+// Children returns the expanded children of a template, ordered by map_index.
+func (g *Graph) Children(id string) []string { return append([]string(nil), g.children[id]...) }
+
+// Templates returns the map template node ids in deterministic order.
+func (g *Graph) Templates() []string {
+	var out []string
+	for _, id := range g.order {
+		if g.nodes[id].IsTemplate() {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// ChildRef locates one materialized expansion child within its template.
+type ChildRef struct {
+	Parent   string
+	MapIndex int
+}
+
 // Build compiles a WorkflowSpec into a Graph WITHOUT validating it. Callers that
 // accept an untrusted spec must use Validate instead; Build exists separately so
 // the validator can inspect a malformed (even cyclic) graph in order to report
 // what is wrong with it.
-func Build(spec *nexusv1.WorkflowSpec) *Graph {
+func Build(spec *nexusv1.WorkflowSpec) *Graph { return BuildWithChildren(spec, nil) }
+
+// BuildWithChildren is Build for a RUN's graph, which may contain nodes that
+// dynamic expansion materialized after submission. `children` names which of
+// the spec's tasks are expansion children and where they sit; every other task
+// is an ordinary node or a template.
+//
+// Children are carried as ordinary nodes rather than as a side table because
+// that is the property §5.4 asks for: they flow through exactly the same
+// trigger-rule, propagation and terminal-detection code as static nodes, so a
+// child cannot end up with second-class state handling.
+func BuildWithChildren(spec *nexusv1.WorkflowSpec, children map[string]ChildRef) *Graph {
 	g := &Graph{
 		nodes:    make(map[string]*Node, len(spec.GetTasks())),
 		preds:    make(map[string][]string),
 		succs:    make(map[string][]string),
 		edgeByTo: make(map[string][]Edge),
+		children: make(map[string][]string),
 		FailFast: spec.GetFailFast(),
 		Params:   spec.GetParams(),
 	}
@@ -269,12 +319,26 @@ func Build(spec *nexusv1.WorkflowSpec) *Graph {
 		if _, dup := g.nodes[id]; dup {
 			continue
 		}
-		g.nodes[id] = &Node{
+		n := &Node{
 			ID:          id,
 			TaskRef:     t.GetTaskRef(),
 			TriggerRule: TriggerRuleFromProto(t.GetTriggerRule()),
 			Spec:        t,
+			MapIndex:    -1,
 		}
+		if ref, ok := children[id]; ok {
+			n.ParentID, n.MapIndex = ref.Parent, ref.MapIndex
+		}
+		g.nodes[id] = n
+	}
+	for id, n := range g.nodes {
+		if n.ParentID != "" && g.nodes[n.ParentID] != nil {
+			g.children[n.ParentID] = append(g.children[n.ParentID], id)
+		}
+	}
+	for parent, kids := range g.children {
+		sort.Slice(kids, func(i, j int) bool { return g.nodes[kids[i]].MapIndex < g.nodes[kids[j]].MapIndex })
+		g.children[parent] = kids
 	}
 
 	seenEdge := make(map[[2]string]bool, len(spec.GetEdges()))

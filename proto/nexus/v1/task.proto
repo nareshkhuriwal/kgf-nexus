@@ -67,6 +67,35 @@ message TaskSpec {
   map<string, string> input_params = 20;
 
   int32 priority = 18;
+
+  // Dynamic expansion (§5.4). When set, this task is a TEMPLATE: it never
+  // executes itself. Once its upstreams settle, the DAG engine reads the JSON
+  // array named by `map.over_*` and materializes one child node per element,
+  // atomically and bounded by `map.max_fanout`. Downstream nodes depend on the
+  // template, which settles only when every child has.
+  MapSpec map = 21;
+}
+
+// MapSpec declares a fan-out over a runtime collection (§5.4).
+//
+// Every field is mandatory. max_fanout in particular has no default: an
+// upstream that returns ten million items must fail the expansion explicitly
+// rather than silently materializing ten million rows, and a platform default
+// would make that bound invisible to the author who has to choose it.
+message MapSpec {
+  // The upstream node whose output holds the collection. Must be a direct
+  // predecessor of this task via an Edge, so the dependency is visible in the
+  // graph rather than implied by a string.
+  string over_node_id = 1;
+  // The upstream output holding a JSON array. The collection must be INLINE
+  // (at or below the result-store inline threshold): the control plane counts
+  // and slices it, and invariant 6 forbids it from fetching blob payloads.
+  string over_output = 2;
+  // This task's input that receives one element per child.
+  string item_input = 3;
+  // Hard ceiling on children. Exceeding it FAILS the template node with
+  // reason max_fanout_exceeded; nothing is materialized.
+  int32 max_fanout = 4;
 }
 
 message ValueSpec {
