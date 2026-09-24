@@ -84,10 +84,17 @@ func (s *Store) Append(ctx context.Context, e Event) (Event, error) {
 	}
 	var id int64
 	var occurred time.Time
+	// The outbox row is written by the same statement, so the bus announcement
+	// exists exactly when the event does (migration 0016, internal/store/outbox.go).
 	err = tx.QueryRow(ctx,
-		`INSERT INTO run_events (run_id, seq, node_id, attempt_id, kind, payload, actor)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7)
-		 RETURNING id, occurred_at`,
+		`WITH ev AS (
+		   INSERT INTO run_events (run_id, seq, node_id, attempt_id, kind, payload, actor)
+		   VALUES ($1,$2,$3,$4,$5,$6,$7)
+		   RETURNING id, occurred_at
+		 ), ob AS (
+		   INSERT INTO outbox (topic, ref_id) SELECT 'run_event', id FROM ev
+		 )
+		 SELECT id, occurred_at FROM ev`,
 		e.RunID, seq, e.NodeID, e.AttemptID, e.Kind, payload, e.Actor).Scan(&id, &occurred)
 	if err != nil {
 		return Event{}, fmt.Errorf("insert event: %w", err)

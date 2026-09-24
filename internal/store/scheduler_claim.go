@@ -101,8 +101,9 @@ var ErrNoCandidate = errors.New("no dispatchable attempt")
 //
 // It deliberately performs NO network I/O: a claim transaction that waited on
 // NATS would hold row locks across a network round trip and block vacuum
-// (ADR-0002 negative consequences). The notification is published by the caller
-// after commit.
+// (ADR-0002 negative consequences). The bus announcement is an outbox row
+// written by the same statement as the AttemptDispatched event (appendEvent), and
+// the event-service relay publishes it after commit (migration 0016).
 func (s *SchedulerStore) Claim(ctx context.Context, now time.Time) (ClaimReport, error) {
 	// READ COMMITTED, deliberately, and NOT the REPEATABLE READ that §5.3's
 	// pseudocode shows. Under REPEATABLE READ, a locking read that reaches a row

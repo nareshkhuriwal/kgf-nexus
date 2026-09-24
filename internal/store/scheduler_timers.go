@@ -175,14 +175,20 @@ SELECT a.run_id, a.node_id, a.attempt_number, a.state, a.queue, a.priority,
 
 	// ON CONFLICT DO NOTHING on UNIQUE(run_id, node_id, attempt_number) makes
 	// this idempotent: a duplicated timer delivery creates no second attempt.
+	//
+	// The CTE writes the retry's task_ready outbox row in the same statement, so
+	// an idle worker is woken for the retry exactly when it becomes claimable.
 	var newID uuid.UUID
 	err = tx.QueryRow(ctx, `
+WITH a AS (
 INSERT INTO task_attempts (
         run_id, node_id, attempt_number, state, queue, priority,
         resource_request, idempotency_key, cache_key, input_refs, scheduled_at)
 VALUES ($1,$2,$3,'PENDING',$4,$5,$6,$7,$8,$9,$10)
 ON CONFLICT (run_id, node_id, attempt_number) DO NOTHING
-RETURNING id`,
+RETURNING id, run_id, queue, scheduled_at
+),`+outboxTaskReadyCTE+`
+SELECT id FROM a`,
 		runID, nodeID, nextNumber, queue, priority,
 		reqJSON, idemKey, cacheKey, inputRefs, now,
 	).Scan(&newID)

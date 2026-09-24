@@ -184,9 +184,13 @@ func run() error {
 
 // NewSchedulerWithLogger builds a Scheduler with default cadences.
 func NewSchedulerWithLogger(st *store.SchedulerStore, log *slog.Logger) *Scheduler {
-	// No NATS in the MVP wiring. The nil notifier is safe by design: the bus is
-	// a hint, and a worker's next poll picks up anything the notification would
-	// have accelerated (§5.3 step 5).
+	// The scheduler holds no NATS connection, deliberately. Its bus traffic is
+	// written to the transactional outbox inside the claim and published by the
+	// event-service relay (ADR-0003), so the correctness-critical process has no
+	// broker dependency at all. The nil notifier also keeps the PUSH dispatch loop
+	// off, which is required: workers are pull-only, and a pushed dispatch would
+	// reach no one (see dispatchLoop). Workers are woken by dispatch HINTS
+	// instead, and still claim through PollTask.
 	return NewScheduler(st, log, DefaultLoopConfig(), nil)
 }
 

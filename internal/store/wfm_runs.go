@@ -161,8 +161,15 @@ func WFMGetRunByIdempotencyKey(ctx context.Context, q GWQuerier, namespace, key 
 // state_version increments on every accepted transition, giving clients a cheap
 // way to detect that their view is stale.
 func WFMTransitionRun(ctx context.Context, q GWQuerier, runID string, from []string, to string) (RunRow, error) {
+	// The run_state outbox row is written by the SAME statement, so it is atomic
+	// with the transition whether q is a pool or a caller's transaction. The
+	// RunStateChanged run_event the service emits afterwards goes through the
+	// event-service in a separate call and can be lost; this announcement cannot.
+	// state_version rides along so a consumer can discard a reordered, older
+	// transition instead of regressing its view.
 	var id string
 	err := q.QueryRow(ctx, `
+		WITH upd AS (
 		UPDATE workflow_runs
 		   SET state = $3::run_state,
 		       state_version = state_version + 1,
@@ -175,7 +182,15 @@ func WFMTransitionRun(ctx context.Context, q GWQuerier, runID string, from []str
 		                         THEN now() ELSE ended_at END
 		 WHERE id = $1
 		   AND state::text = ANY($2)
-		RETURNING id::text`,
+		RETURNING id, namespace, state, state_version
+		), ob AS (
+		  INSERT INTO outbox (topic, namespace, routing_key, payload)
+		  SELECT 'run_state', namespace, id::text,
+		         jsonb_build_object('run_id', id, 'namespace', namespace,
+		                            'state', state::text, 'state_version', state_version)
+		    FROM upd
+		)
+		SELECT id::text FROM upd`,
 		runID, from, to,
 	).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
