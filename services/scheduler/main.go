@@ -49,6 +49,12 @@ func run() error {
 		// before reverting migration 0022 (ADR-0017).
 		fairShare = flag.Bool("fair-share", envOr("NEXUS_FAIR_SHARE", "true") != "false",
 			"order the dispatch scan by namespace in-flight/weight before priority (ADR-0017)")
+		// ADR-0018 Stage 1. 0 disables windowing: every pull claim then scans the
+		// queue's whole PENDING backlog, which is the pre-0023 behaviour.
+		claimWindow = flag.Int("claim-window", 64,
+			"PENDING attempts a pull claim reads per index window before joining (0 = scan the backlog)")
+		claimWindowPages = flag.Int("claim-window-pages", 4,
+			"windows a pull claim may read before falling back to a full scan")
 	)
 	flag.Parse()
 
@@ -82,8 +88,26 @@ func run() error {
 	claimCfg.LivenessWindow = *liveness
 	claimCfg.AgingRate = *agingRate
 	claimCfg.FairShare = *fairShare
+	claimCfg.ClaimWindow = *claimWindow
+	claimCfg.ClaimWindowPages = *claimWindowPages
 
 	st := store.NewSchedulerStore(pool, claimCfg, instanceID)
+	// Decided once, here, before the store serves a claim. An unindexed or
+	// disabled window is not fatal -- claims stay correct -- but it is the
+	// first thing to look at when dispatch is slow at a large backlog, so it
+	// is logged at WARN rather than left to be inferred.
+	win, err := st.EnableWindowedClaim(ctx)
+	if err != nil {
+		return err
+	}
+	switch {
+	case !win.Enabled:
+		log.Warn("pull claims scan the whole PENDING backlog", "reason", win.Reason,
+			"why", "claim cost grows with the backlog (ADR-0018); apply migration 0023 and restart")
+	case !win.Indexed:
+		log.Warn("pull claims are windowed but unindexed", "aging_rate", claimCfg.AgingRate,
+			"why", "idx_attempts_dispatch_rank is built for aging rate 1; any other rate orders correctly but sorts the backlog")
+	}
 	sched := NewSchedulerWithLogger(st, log)
 
 	// The scheduler is live once it can reach the DB. Readiness is stricter:
@@ -139,7 +163,9 @@ func run() error {
 	log.Info("scheduler starting",
 		"lease_ttl", claimCfg.LeaseTTL, "liveness_window", claimCfg.LivenessWindow,
 		"aging_rate", claimCfg.AgingRate, "look_ahead", claimCfg.LookAhead,
-		"fair_share", claimCfg.FairShare)
+		"fair_share", claimCfg.FairShare,
+		"claim_window", claimCfg.ClaimWindow, "claim_window_enabled", win.Enabled,
+		"claim_window_indexed", win.Indexed)
 
 	done := make(chan struct{})
 	go func() {

@@ -170,7 +170,19 @@ func run(ctx context.Context, t *testing.T, dsn, mode string, w *world, replicas
 		// NEXUS_BENCH_FAIR_SHARE=false measures the pre-ADR-0017 order, so the
 		// fair-share term's own cost can be separated from the queue's.
 		cfg.FairShare = envStr("NEXUS_BENCH_FAIR_SHARE", "true") != "false"
-		stores[r] = store.NewSchedulerStore(p, cfg, fmt.Sprintf("bench-%d", r))
+		st := store.NewSchedulerStore(p, cfg, fmt.Sprintf("bench-%d", r))
+		// NEXUS_BENCH_WINDOW=false measures the exhaustive pull scan that
+		// ADR-0018 Stage 1 replaced, so before/after come from one run on one
+		// machine. Asking for the window and not getting it is a failure, not
+		// a silent fallback: a benchmark that quietly measured the old path
+		// would report the fix as a no-op (F89).
+		if envStr("NEXUS_BENCH_WINDOW", "true") != "false" {
+			ws, err := st.EnableWindowedClaim(ctx)
+			if err != nil || !ws.Enabled || !ws.Indexed {
+				t.Fatalf("windowed claim requested but not active: %+v %v (is migration 0023 applied?)", ws, err)
+			}
+		}
+		stores[r] = st
 	}
 	deadline := time.Now().Add(limit)
 	start := time.Now()
@@ -242,6 +254,7 @@ func run(ctx context.Context, t *testing.T, dsn, mode string, w *world, replicas
 //	NEXUS_BENCH_WORKERS   64
 //	NEXUS_BENCH_CLAIMS    3000   dispatches measured per cell (capped at backlog/2
 //	                             so the backlog stays roughly the size named)
+//	NEXUS_BENCH_WINDOW    true   false measures the pre-0023 exhaustive pull scan
 //	NEXUS_BENCH_OUT       path to also write the markdown table to
 func TestDispatchCeiling(t *testing.T) {
 	dsn := os.Getenv("NEXUS_BENCH_DSN")

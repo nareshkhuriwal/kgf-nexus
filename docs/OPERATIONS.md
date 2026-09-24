@@ -5,7 +5,7 @@
 **Scope:** Postgres backup and restore, the artifact (MinIO result store) backup
 and restore and the ordering between the two stores, the restore drills and their
 measured results, what these procedures do *not* cover, the RPO/RTO the approach
-actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), and dynamic expansion, memoization and quarantine (§14).
+actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), and the windowed pull claim at large backlogs (§15).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -1314,3 +1314,56 @@ Detector settings (resource-manager environment), with defaults:
 - Quarantine follows the host: restarting the agent does not clear it. Release it instead.
 - **Rolling back 0021** (break-glass): release every quarantined worker first; with the
   episode table gone nothing expires a quarantine.
+
+## 15. Dispatch at large backlogs: the windowed pull claim
+
+A polling worker's claim (`ClaimForWorker`) used to evaluate and sort the
+queue's whole PENDING backlog on every poll, so its cost grew with the backlog
+(ADR-0018). With migration 0023 it reads a small window of candidates off an
+index instead, and only joins and filters those.
+
+### 15.1 Deploy order
+
+1. Apply migration 0023. It builds two indexes `CONCURRENTLY`, so it takes no
+   table lock and can run under load; on a large `task_attempts` expect the
+   build to take a while. It is safe to re-run.
+2. Restart (or roll) the schedulers. **A scheduler decides at startup** whether
+   the rank function exists; one started before 0023 keeps scanning the backlog
+   until it restarts. That is the safe direction: it never fails a claim.
+
+To roll back, restart the schedulers with `--claim-window=0` (or roll them back)
+**before** running `0023_dispatch_rank_index.down.sql`.
+
+### 15.2 Reading the startup log
+
+The scheduler's `scheduler starting` line carries `claim_window`,
+`claim_window_enabled` and `claim_window_indexed`. Two WARN lines mean dispatch
+is slower than it could be:
+
+| WARN | Meaning | Fix |
+|---|---|---|
+| `pull claims scan the whole PENDING backlog` | 0023 is not applied, or `--claim-window=0` | Apply 0023 and restart |
+| `pull claims are windowed but unindexed` | `--aging-rate` is not `1` | The index is built for rate 1. Other rates still claim in the correct order but sort the backlog. |
+
+### 15.3 Tuning
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--claim-window` | 64 | Candidates read per window. `0` disables windowing. |
+| `--claim-window-pages` | 4 | Windows one claim may read before falling back to a full scan. |
+
+The fallback exists for a worker that can run nothing near the top of its queue,
+such as a CPU worker behind thousands of GPU tasks. Paging on through the whole
+backlog a window at a time would be slower than one scan, so after the last page
+the claim scans once. Such a worker pays the old cost; every other claim pays
+for a window.
+
+### 15.4 Checking the index is used
+
+```sql
+SELECT idx_scan FROM pg_stat_user_indexes
+ WHERE indexrelname = 'idx_attempts_dispatch_rank';
+```
+
+This should rise with every poll. If it stays flat while workers poll, the
+scheduler is not windowing; check the startup log (§15.2).

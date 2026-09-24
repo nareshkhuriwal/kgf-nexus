@@ -161,6 +161,43 @@ as it is and is independently shippable:**
   choices with the SQL claim, and fall back to the SQL claim on any dispatcher
   failure. Nothing about workers, leases or fencing changes.
 
+## Stage 1 delivered: the windowed pull claim
+
+Migration 0023 adds `nexus_dispatch_rank(priority, scheduled_at, rate)` (an
+honestly immutable function) and `idx_attempts_dispatch_rank` on
+`(queue, tenant_id, rank DESC, scheduled_at, id) WHERE state='PENDING'`, plus
+`idx_attempts_unexplained` for `explainUnschedulable`. The pull claim now reads
+a window of 64 ids off that index with no join or sort, then joins and filters
+only those with the same eligibility template the exhaustive scan uses, and
+locks the best with `SKIP LOCKED`. After 4 full windows with nothing this
+worker can run, it falls back to the exhaustive scan once, so the worst case is
+the old cost plus four cheap reads. The scheduler detects the function at
+startup and stays on the exhaustive scan without it (see OPERATIONS §15).
+
+Measured with the same harness, same machine, same run (Postgres 16.15 in
+Docker, client GOMAXPROCS=14, 64 workers; laptop numbers, as above):
+
+| backlog | replicas | before claims/s | after claims/s | before p50 / p99 | after p50 / p99 |
+|---:|---:|---:|---:|---:|---:|
+| 10,000 | 1 | 6 | 215 | 145 ms / 558 ms | 4.2 ms / 10.1 ms |
+| 10,000 | 8 | 48 | 826 | 128 ms / 907 ms | 8.9 ms / 20.3 ms |
+| 10,000 | 16 | 77 | 861 | 190 ms / 509 ms | 15.7 ms / 62.9 ms |
+| 100,000 | 1 | 1 | 191 | 660 ms / 1.49 s | 4.7 ms / 12.9 ms |
+| 100,000 | 8 | 10 | 721 | 693 ms / 1.79 s | 8.8 ms / 54.9 ms |
+| 100,000 | 16 | 8 | 866 | 1.45 s / 6.51 s | 16.1 ms / 62.6 ms |
+
+Claim cost no longer grows with the backlog (100k performs like 10k), no cell
+had an error, and every p99 is well under this ADR's 250 ms trigger. Finding
+3(b), the pull plan collapse, is closed: the join now only ever sees a window,
+so it has nothing to degenerate over. The "before" numbers differ from the
+Results table above because that table came from a different run; compare
+within this table.
+
+What this does not change: a worker that can run nothing near the top of its
+queue still pays one full scan per poll (the fallback); the push path
+(`Claim`) is not windowed; and the two trigger metrics
+(`nexus_claim_seconds`, `nexus_pending_attempts`) still do not exist.
+
 ## Consequences
 
 **Positive** -- the ceiling is now a measured curve with a reproducible
@@ -170,8 +207,8 @@ metrics exist.
 
 **Negative** -- today, on this hardware, a queue with a 10k backlog dispatches
 at roughly 40–200/s and a 100k backlog at single-digit to ~20/s; that is the
-real current ceiling and it is far below §12's assumption. Finding 3(b) is an
-open defect on the pull path. All numbers are laptop numbers (client and
+real current ceiling and it is far below §12's assumption. Finding 3(b) was an
+open defect on the pull path, since fixed by Stage 1 (above). All numbers are laptop numbers (client and
 database share one machine and a Docker VM); production capacity must be
 re-measured on production-class hardware with the same harness.
 

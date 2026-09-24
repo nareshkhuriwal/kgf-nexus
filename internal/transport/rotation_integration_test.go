@@ -406,6 +406,32 @@ func TestCABundleOverlapRotation(t *testing.T) {
 	nsc, nsk := newCA.issue(t, "server-new", []string{"scheduler"}, false)
 	rotatePair(t, nsc, nsk, srvCert, srvKey)
 	eventually(t, 10*time.Second, "state 2: new-CA client accepted during overlap", accepts(newClient))
+	// "Accepted" is not "rotated": during the overlap the new-CA client trusts
+	// BOTH CAs, so it is accepted even while the server still presents its OLD
+	// leaf. Wait for the server to actually serve the new-CA leaf before
+	// withdrawing the old CA -- otherwise, under load, state 3 can race the
+	// server's leaf reload and the new-CA client (which by then trusts only
+	// the new CA) sees the old leaf and fails with "unknown authority". That
+	// is also the operator's order in OPERATIONS §9.4: confirm every leaf has
+	// moved, THEN drop the old CA.
+	wantLeaf := serialOfFile(t, nsc)
+	eventually(t, 10*time.Second, "state 2: server presents its new-CA leaf", func() error {
+		conn, err := grpc.NewClient(srv.addr, newClient)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		got, err := servedSerial(ctx, conn, true)
+		if err != nil {
+			return err
+		}
+		if got.Cmp(wantLeaf) != 0 {
+			return fmt.Errorf("server presents %s, want the new-CA leaf %s", fmtSerial(got), fmtSerial(wantLeaf))
+		}
+		return nil
+	})
 	if err := accepts(oldClient)(); err != nil {
 		t.Fatalf("state 2: old-CA client refused during overlap: %v", err)
 	}

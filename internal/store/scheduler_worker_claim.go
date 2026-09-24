@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -385,13 +386,50 @@ func (s *SchedulerStore) selectCandidateForWorker(
 		return nil, fmt.Errorf("marshal worker labels: %w", err)
 	}
 
-	// Aging is in the ORDER BY for the same reason as in selectCandidate: a
-	// background UPDATE-based ager would rewrite every PENDING row every tick,
-	// and it would destroy the author's declared priority as displayed data.
-	//
-	// r.state IN ('PENDING','RUNNING') is §5.2: a PAUSING/PAUSED/CANCELLING run
-	// receives no NEW dispatch.
-	const q = `
+	args := []any{
+		s.cfg.Queue, now, s.cfg.AgingRate, skip, executors, labelsJSON,
+		budget.GetCpuMillis(), budget.GetMemoryBytes(),
+		int64(budget.GetGpuCount()), budget.GetDiskBytes(), worker.ID,
+	}
+
+	if s.windowed && s.cfg.ClaimWindow > 0 {
+		cand, err, decided := s.selectCandidateWindowed(ctx, tx, now, worker, skip, args)
+		if decided {
+			return cand, err
+		}
+		// Every window this claim may read was full and held nothing this
+		// worker can run -- say a CPU worker behind thousands of GPU tasks.
+		// Paging on would read the backlog 64 rows at a time, strictly worse
+		// than one scan, so fall through to the exhaustive query: the worst
+		// case is today's cost plus a few cheap window reads, never more.
+	}
+
+	row := tx.QueryRow(ctx,
+		workerCandidateSQL("", "effective_priority DESC, a.scheduled_at ASC"), args...)
+	return s.finishWorkerCandidate(ctx, tx, worker, row)
+}
+
+// workerCandidateSQL is the pinned claim's candidate query: §5.3 step 1
+// narrowed to what one polling worker can run.
+//
+// ONE template serves both the exhaustive scan and the windowed lock step, so
+// the eligibility rules -- run state, executor, labels, the resource
+// pre-filter -- exist exactly once. Two copies of them would be two
+// definitions of "dispatchable" that drift, and the windowed claim would then
+// quietly pick a different attempt than the scan it replaces.
+//
+// Parameters, shared by both callers: $1 queue, $2 now, $3 aging rate,
+// $4 skip ids, $5 executors, $6 worker labels, $7-$10 budget, $11 worker id.
+// The windowed caller adds $12, the window's ids.
+//
+// Aging is in the ORDER BY for the same reason as in selectCandidate: a
+// background UPDATE-based ager would rewrite every PENDING row every tick, and
+// it would destroy the author's declared priority as displayed data.
+//
+// r.state IN ('PENDING','RUNNING') is §5.2: a PAUSING/PAUSED/CANCELLING run
+// receives no NEW dispatch.
+func workerCandidateSQL(extraWhere, orderBy string) string {
+	return `
 SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.queue, a.priority,
        a.resource_request, a.scheduled_at,
        a.priority + (EXTRACT(EPOCH FROM ($2::timestamptz - a.scheduled_at)) * $3) AS effective_priority,
@@ -430,15 +468,157 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.queue, a.priority,
    AND COALESCE((a.resource_request ->> 'memory_bytes')::bigint, 0)  <= $8
    AND COALESCE((a.resource_request ->> 'gpu_count')::bigint, 0)     <= $9
    AND COALESCE((a.resource_request ->> 'disk_bytes')::bigint, 0)    <= $10
- ORDER BY effective_priority DESC, a.scheduled_at ASC
+   ` + extraWhere + `
+ ORDER BY ` + orderBy + `
  LIMIT 1
  FOR UPDATE OF a SKIP LOCKED`
+}
 
-	row := tx.QueryRow(ctx, q,
-		s.cfg.Queue, now, s.cfg.AgingRate, skip, executors, labelsJSON,
-		budget.GetCpuMillis(), budget.GetMemoryBytes(),
-		int64(budget.GetGpuCount()), budget.GetDiskBytes(), worker.ID)
+// windowCursor is the keyset position after the last row of a claim window, in
+// the window's own order: rank DESC, scheduled_at ASC, id ASC.
+type windowCursor struct {
+	rank        float64
+	scheduledAt time.Time
+	id          uuid.UUID
+}
 
+// selectCandidateWindowed is the bounded form of the candidate scan
+// (ADR-0018 Stage 1).
+//
+// It reads the top ClaimWindow PENDING ids for this worker's queue and tenant
+// straight off idx_attempts_dispatch_rank -- no join, no sort -- and only then
+// joins and filters THOSE rows with the shared eligibility template, locking
+// the best one with SKIP LOCKED exactly as the exhaustive scan does. A claim
+// therefore costs a window, not the backlog, and the join cannot degenerate
+// into a per-row scan of workflow_runs because it only ever sees the window.
+//
+// decided=false means "every page was full and nothing in it was eligible":
+// the caller falls back to the exhaustive scan. decided=true returns the same
+// answer the exhaustive scan would give (a candidate, ErrNoCandidate, or an
+// error), because the window order is the scan's order.
+func (s *SchedulerStore) selectCandidateWindowed(
+	ctx context.Context, tx pgx.Tx, now time.Time,
+	worker *pollWorker, skip []uuid.UUID, args []any,
+) (*Candidate, error, bool) {
+	pages := s.cfg.ClaimWindowPages
+	if pages < 1 {
+		pages = 1
+	}
+	var cursor *windowCursor
+	for page := 0; page < pages; page++ {
+		ids, last, err := s.claimWindow(ctx, tx, now, worker, skip, cursor)
+		if err != nil {
+			return nil, err, true
+		}
+		if len(ids) == 0 {
+			// Nothing PENDING and due at or after the cursor: the exhaustive
+			// scan would find nothing either.
+			return nil, ErrNoCandidate, true
+		}
+
+		row := tx.QueryRow(ctx, workerCandidateSQL(
+			"AND a.id = ANY($12::uuid[])",
+			// The same order the window was read in, with the configured rate
+			// passed as a parameter: this sorts at most ClaimWindow rows, so it
+			// needs no index, and it keeps the pick identical to the window's.
+			"nexus_dispatch_rank(a.priority, a.scheduled_at, $3) DESC, a.scheduled_at ASC, a.id ASC",
+		), append(args, ids)...)
+		cand, err := s.finishWorkerCandidate(ctx, tx, worker, row)
+		if !errors.Is(err, ErrNoCandidate) || errors.Is(err, errCandidateBlocked) {
+			// A candidate, a real error, or the best eligible attempt found but
+			// not fitting this worker (its reason is already recorded). The
+			// exhaustive scan stops at that same attempt, so stop here too.
+			return cand, err, true
+		}
+		if len(ids) < s.cfg.ClaimWindow {
+			// A short window is the end of the backlog.
+			return nil, ErrNoCandidate, true
+		}
+		cursor = last
+	}
+	return nil, nil, false
+}
+
+// claimWindow reads one window of candidate ids in rank order, starting after
+// cursor (or at the top when cursor is nil).
+//
+// No join and no row lock: this is a cheap, index-ordered read. Locking and
+// every eligibility rule happen in the second query, over these ids only.
+//
+// The rank expression embeds the configured aging rate as a literal, because
+// that is what lets the planner match idx_attempts_dispatch_rank (built for the
+// default rate 1.0). A different rate still orders correctly; it just cannot
+// use the index, which EnableWindowedClaim warns about at startup.
+func (s *SchedulerStore) claimWindow(
+	ctx context.Context, tx pgx.Tx, now time.Time,
+	worker *pollWorker, skip []uuid.UUID, cursor *windowCursor,
+) ([]uuid.UUID, *windowCursor, error) {
+	args := []any{s.cfg.Queue, worker.ID, now, skip, s.cfg.ClaimWindow}
+	if cursor != nil {
+		args = append(args, cursor.rank, cursor.scheduledAt, cursor.id)
+	}
+	rows, err := tx.Query(ctx, s.claimWindowSQL(cursor != nil), args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read claim window for worker %s: %w", worker.ID, err)
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	var last windowCursor
+	for rows.Next() {
+		if err := rows.Scan(&last.id, &last.rank, &last.scheduledAt); err != nil {
+			return nil, nil, fmt.Errorf("scan claim window: %w", err)
+		}
+		ids = append(ids, last.id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("claim window rows: %w", err)
+	}
+	return ids, &last, nil
+}
+
+// errCandidateBlocked is ErrNoCandidate for "the best eligible attempt was
+// found but does not fit this worker". It wraps ErrNoCandidate so every existing
+// caller treats it exactly as before; only the windowed scan distinguishes it,
+// because it must stop paging there rather than read the next window.
+var errCandidateBlocked = fmt.Errorf("%w: best candidate does not fit the polling worker", ErrNoCandidate)
+
+// claimWindowSQL is the window query, separate so a test can EXPLAIN the exact
+// text the claim runs rather than a copy of it that could drift.
+//
+// Parameters: $1 queue, $2 worker id, $3 now, $4 skip ids, $5 window size, and
+// with a cursor $6 rank, $7 scheduled_at, $8 id.
+func (s *SchedulerStore) claimWindowSQL(withCursor bool) string {
+	rank := "nexus_dispatch_rank(a.priority, a.scheduled_at, " +
+		strconv.FormatFloat(s.cfg.AgingRate, 'g', -1, 64) + "::double precision)"
+	q := `
+SELECT a.id, ` + rank + ` AS rank, a.scheduled_at
+  FROM task_attempts a
+ WHERE a.state = 'PENDING'
+   AND a.queue = $1
+   AND a.tenant_id = (SELECT tenant_id FROM workers WHERE id = $2)
+   AND a.scheduled_at <= $3
+   AND NOT (a.id = ANY($4::uuid[]))`
+	if withCursor {
+		// Keyset paging in the index's mixed order. The leading "rank <= $6"
+		// is redundant with the OR below but is what lets the scan START at
+		// the cursor instead of re-reading every earlier page.
+		q += `
+   AND ` + rank + ` <= $6
+   AND (` + rank + ` < $6
+        OR (a.scheduled_at > $7 OR (a.scheduled_at = $7 AND a.id > $8)))`
+	}
+	return q + `
+ ORDER BY ` + rank + ` DESC, a.scheduled_at ASC, a.id ASC
+ LIMIT $5`
+}
+
+// finishWorkerCandidate scans the candidate row and applies the authoritative
+// fit check. Shared by the exhaustive and windowed paths so both decide fit
+// the same way.
+func (s *SchedulerStore) finishWorkerCandidate(
+	ctx context.Context, tx pgx.Tx, worker *pollWorker, row pgx.Row,
+) (*Candidate, error) {
+	var err error
 	var c Candidate
 	var reqJSON, specJSON []byte
 	if err := row.Scan(
@@ -474,7 +654,7 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.queue, a.priority,
 		if err := s.markBlocked(ctx, tx, c.ID, reason); err != nil {
 			return nil, err
 		}
-		return nil, ErrNoCandidate
+		return nil, errCandidateBlocked
 	}
 	return &c, nil
 }

@@ -2153,3 +2153,37 @@ placement paths. Decisions a reviewer should know, each with its reason:
 template fold (cancel test goes red), counting templates as in flight (pause test red),
 dropping `cache_hit_of IS NULL` from the memo lookup (hit-of-a-hit test red), and dropping
 the distinct-task threshold (poison-task worker gets quarantined; test red).
+
+### F98. The pull claim sorted the whole backlog on every poll — FIXED
+
+**Severity:** HIGH at scale. Every worker poll ran a candidate query ordered by
+`priority + (now − scheduled_at)·rate`. The `now` in that expression meant no
+index could serve it, so each claim evaluated and sorted the queue's whole
+PENDING backlog. Measured: 1–10 claims/s with p99 up to 6.5 s at a 100k backlog
+(ADR-0018 finding 3(b) recorded a 4.6 s plan collapse at 8 replicas).
+
+**Fix (ADR-0018 Stage 1, migration 0023).** For a fixed rate the expression
+orders identically to `priority − epoch(scheduled_at)·rate`, which has no `now`
+and can be indexed. The claim reads a window of 64 candidates off that index,
+then applies the unchanged eligibility template to the window only. After 4
+empty windows it falls back to one exhaustive scan. At a 100k backlog with 8
+replicas: 10 → 721 claims/s, p99 1.79 s → 55 ms.
+
+**How it is held.**
+- `TestClaimWindowIsServedByTheRankIndex` EXPLAINs the exact query text and
+  fails if the index stops supplying the order (a Sort node). The failure mode
+  it guards against is silent: an expression mismatch just sorts again.
+- `TestWindowedClaimDispatchesInExactlyTheScanOrder` drains a randomized
+  backlog with an ineligible wall and every exclusion rule, checked against a Go
+  oracle and against the exhaustive scan.
+- `TestWindowedClaimReachesWorkBehindAnIneligibleWall` checks the fallback
+  keeps work reachable.
+- Two mutations (reverse the window's order; skip the fallback) each turn the
+  expected tests red.
+
+**Two things worth knowing.** The index is built for the default aging rate 1.
+Another rate still claims in the right order (the test asserts it sorts rather
+than borrowing the index's order) but runs unindexed, and the scheduler logs a
+WARN. The scheduler detects migration 0023 at startup, not per claim, so a
+scheduler started before 0023 must be restarted to pick it up (OPERATIONS §15).
+
