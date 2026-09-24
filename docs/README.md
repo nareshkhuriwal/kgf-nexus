@@ -1,15 +1,50 @@
-# Nexus — design proposal (Phase 0)
+# Nexus — design and operations documentation
 
 A reusable, application-agnostic distributed workflow orchestration platform.
-**This directory is a design proposal. There is no implementation code, by
-intent** — Phase 0 exists to settle the architecture before anything is built.
+
+This directory began as the Phase 0 design proposal, written before any code.
+The design is now implemented in this repository and the documents here
+describe the system as it is built, including the parts that are not finished.
+
+## Current state
+
+**Built:** six control-plane services sharing one PostgreSQL schema (API gateway,
+workflow manager, DAG engine, scheduler, resource manager, event service), plus
+artifact GC and a cluster controller; the Go worker agent and `nexus` CLI; the
+Python SDK; the React operator console; MinIO-backed result storage; an optional
+NATS JetStream relay fed by a transactional outbox; Docker Compose and Helm
+deployment.
+
+**Not production-ready.** The project has not passed its production acceptance
+gates, and it should not be described as production-ready until it does. Known
+gaps include:
+
+- **Identity:** email + password sessions, API keys and scoped tokens exist. OIDC
+  and SAML single sign-on, identity-provider group mapping and SCIM are planned
+  but not implemented ([ARCHITECTURE.md §3.2](ARCHITECTURE.md#api-gateway),
+  [RBAC-IMPLEMENTATION.md](RBAC-IMPLEMENTATION.md)).
+- **Transport security:** inter-service TLS/mTLS is supported but opt-in, and
+  plaintext is only fatal with `NEXUS_REQUIRE_TLS` set ([TLS.md](TLS.md)).
+- **Authorization:** namespace-scoped module RBAC for human accounts is
+  implemented. The broader model in [RBAC-DESIGN.md](RBAC-DESIGN.md) is the
+  target, not the current behaviour.
+
+Open defects, decisions and their verification live in
+[CONTRACT-FINDINGS.md](../CONTRACT-FINDINGS.md). When a document here disagrees
+with the code, treat the document as the bug.
 
 ## Contents
 
 | Document | What it covers |
 | --- | --- |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | The full design: prior-art assessment, component architecture, data model, state machines, execution semantics, failure matrix, phased plan |
-| [adr/](adr/README.md) | Ten decision records, each with alternatives and the reason for rejection |
+| [adr/](adr/README.md) | Decision records, each with alternatives and the reason for rejection |
+| [OPERATIONS.md](OPERATIONS.md) | Running a deployment: configuration, backup and restore, migrations and upgrades, artifact GC |
+| [TLS.md](TLS.md) | Inter-service transport security and how to roll it out |
+| [MULTITENANCY.md](MULTITENANCY.md) | Tenant and namespace isolation |
+| [RBAC-DESIGN.md](RBAC-DESIGN.md) / [RBAC-IMPLEMENTATION.md](RBAC-IMPLEMENTATION.md) | The target authorization model, and what is implemented today |
+| [CLUSTER-SCALING.md](CLUSTER-SCALING.md) | The cluster registry and controller |
+| [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) | Dependency licences |
 
 ## The design in brief
 
@@ -46,14 +81,17 @@ databases or brokers.
 
 ## Where to start
 
-- Reviewing the whole proposal → [ARCHITECTURE.md](ARCHITECTURE.md) top to bottom.
+- Running it locally → [deploy/README.md](../deploy/README.md).
+- Operating a deployment → [OPERATIONS.md](OPERATIONS.md).
+- The whole design → [ARCHITECTURE.md](ARCHITECTURE.md) top to bottom.
 - Just the decisions and trade-offs → [adr/README.md](adr/README.md).
 - Correctness under failure → architecture §5 (state machines), §6 (semantics), §10 (failure matrix).
-- Scope of the first build → architecture §11, Phase 1.
 
-## Open questions
+## Questions raised by the proposal
 
-Six decisions are flagged for reviewers in architecture §12, including the
-control-plane language, the priority model (single integer with aging vs.
-weighted fair-share from the start — unpleasant to retrofit), and the measured
-throughput at which Postgres-as-queue needs a dedicated dispatch path.
+Architecture §12 lists the questions the Phase 0 proposal left open. Several are
+now addressed by later ADRs, which are implemented but still marked *Proposed —
+pending owner sign-off*: for example the control-plane language
+([ADR-0013](adr/0013-go-control-plane-and-agent.md)), weighted fair share
+across namespaces ([ADR-0017](adr/0017-weighted-fair-share-across-namespaces.md))
+and the Postgres dispatch ceiling ([ADR-0018](adr/0018-postgres-dispatch-ceiling.md)).

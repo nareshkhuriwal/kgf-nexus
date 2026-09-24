@@ -354,7 +354,8 @@ loops.
   service_completed_successfully}}`, so nothing starts against an unmigrated
   schema.
 
-The set runs `0001_init` … `0023_dispatch_rank_index` with **no 0019**. That
+The sequence has a hole: `0018_cluster_registry` is followed by
+`0020_dynamic_expansion`, and there is **no 0019**. That
 number was never used on any branch. It is not a lost migration, and it must not
 be filled in later: on an existing database a new `0019_*` would run after 0020+,
 and on a fresh one before them. See `services/migrations/README.md`.
