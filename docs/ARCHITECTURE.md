@@ -1233,7 +1233,7 @@ service WorkerService {
   rpc ReportStarted  (ReportStartedRequest)returns (Ack);
   rpc ExtendLease    (ExtendLeaseRequest)  returns (ExtendLeaseResponse);
   rpc ReportResult   (ReportResultRequest) returns (Ack);
-  rpc ReportProgress (ProgressRequest)     returns (Ack);   // task heartbeat
+  rpc ReportProgress (ProgressRequest)     returns (Ack);   // task heartbeat + executor status (F96)
 }
 
 message HeartbeatRequest {

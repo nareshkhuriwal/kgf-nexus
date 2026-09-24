@@ -1231,8 +1231,12 @@ See CONTRACT-FINDINGS F96 for detail. In short:
   collector's log.
 - `runtime.stdout_output` is rejected, because the pod log API cannot separate
   stdout from stderr.
-- The pending reason sent through ReportProgress is not yet stored by the
-  scheduler.
+- The pod status sent through ReportProgress ("pod Pending: Unschedulable:
+  ...") is stored per attempt and shown in the console as the **executor
+  status**. That is separate from the scheduler's own placement reason. It is
+  the latest status only, capped at 512 bytes. The run history keeps at most
+  50 `AttemptProgress` events per attempt, rate-limited, so read the attempt
+  card for what the pod is doing now.
 
 ### 13.6 Running the executor's cluster tests
 

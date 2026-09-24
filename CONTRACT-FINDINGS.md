@@ -2079,12 +2079,58 @@ than handled silently:
   merges stdout and stderr. Stream selection (KEP-3288) is alpha and is silently
   ignored where the feature is disabled, so an output built from it would carry
   the task's stderr inside its data.
-- **Pending reasons reach the control plane but go no further.** The executor
-  sends pod phase changes to `ReportProgress` (ADR-0007's nested-scheduling
-  mitigation). `scheduler.RecordProgress` stores only the heartbeat time and
-  drops the message and the fraction. Surfacing "Unschedulable: insufficient
-  cpu" in the UI needs a scheduler column and an API field. That belongs to
-  another workstream, and no proto change was made here.
+- **Pending reasons reach the control plane but go no further — RESOLVED.**
+  The executor sends pod phase changes to `ReportProgress` (ADR-0007's
+  nested-scheduling mitigation), and `scheduler.RecordProgress` used to store
+  only the heartbeat time. It now stores the latest message and fraction per
+  attempt, and the console shows them. No proto change was needed. What was
+  built, and why:
+  - **A side table, `attempt_progress` (migration 0024), not columns on
+    `task_attempts`.** ApplyResult, cancellation and lease reclaim lock the
+    attempt row with `FOR UPDATE ... SKIP LOCKED` and treat "no row" as
+    "already handled". A progress write that held that row, or a foreign key
+    to it (whose check takes `FOR KEY SHARE`), could make a result arriving
+    alongside it be skipped, and the attempt would then expire as LOST.
+    `TestProgressNeverBlocksTheResult` races progress against ApplyResult; a
+    mutation that locks the attempt row turns it red. The table is the
+    scheduler's (ADR-0011 matrix updated), cascades from the run, and every
+    service may read it.
+  - **Untrusted input.** Sanitized in one place (`domain.SanitizeProgressMessage`):
+    invalid UTF-8 replaced, newlines collapsed to spaces, control and format
+    (bidi, zero-width) characters removed, capped at 512 bytes with a visible
+    "…". A DB CHECK allows 1024. The fraction must be finite and in (0, 1]: 0
+    is proto3's unset value and never erases a stored fraction, and an invalid
+    one is dropped and logged without failing the heartbeat.
+  - **Fenced twice.** The gateway still fences first. It now forwards the
+    lease token (additive `lease_token` in the scheduler's JSON request), and
+    the scheduler re-checks it inside the write: a wrong, expired or reclaimed
+    lease is refused, and so is a report from an older lease epoch than the
+    one that last wrote the row. A stale answer from the scheduler becomes
+    `Ack{accepted:false, reason:"stale_lease_token"}`. A lease *lock* was tried
+    and deadlocked against ApplyResult (timers vs. lease order). The fence is
+    therefore a read, so a report that was current when read can commit just
+    after the lease ends. It then records the attempt's last status. It can
+    never reach another attempt.
+  - **Independent of the heartbeat budget.** Stored for DISPATCHED and RUNNING
+    attempts whether or not `heartbeat_ms` is set. The heartbeat re-arm is
+    unchanged, and runs before the event so the lock order (timers, then the
+    run row) matches every terminal path.
+  - **Bounded history.** An `AttemptProgress` run event, attributed to
+    `worker:<id>`, only for a changed message: at most one per 2 s across a
+    phase change ("pod Pending" → "pod Running"), one per 60 s within a phase,
+    and 50 per attempt. Skipped changes are counted in the next event's
+    `suppressed_changes`.
+  - **Rolling upgrade.** A gateway without the field sends no token, and the
+    new scheduler honours only the heartbeat, as before. An old scheduler
+    ignores the token and returns `{}`, which the new gateway reads as
+    "not stale". Migrations run before services (ADR-0011 rule 4), so the new
+    gateway's join always finds the table.
+  - **API and UI.** The REST attempt gains `progress_message`,
+    `progress_fraction`, `progress_at` and `progress_message_at`, all null
+    when nothing was reported. The attempt card, the placement panel ("why /
+    status") and the DAG tooltip label the scheduler's placement reason and
+    the executor's status separately. A RUNNING node whose pod is still
+    Pending gets a "pod pending" badge.
 - **Tolerations have no field in the TaskSpec proto** (§4.3 shows one; F21
   class). Pool pinning is therefore per-worker configuration
   (`NEXUS_K8S_NODE_SELECTOR` / `NEXUS_K8S_TOLERATIONS`), and a Nexus worker
