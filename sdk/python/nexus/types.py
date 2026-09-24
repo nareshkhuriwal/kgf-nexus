@@ -445,7 +445,7 @@ class Runtime:
     restricts the task to Docker-capable workers rather than failing at dispatch.
     """
 
-    executor: Literal["subprocess", "docker", "k8s"] = "subprocess"
+    executor: Literal["subprocess", "docker", "k8s", "kubernetes"] = "subprocess"
     image: str | None = None
     command: Sequence[str] | None = None
     args: Sequence[str] | None = None
@@ -454,11 +454,11 @@ class Runtime:
     working_dir: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        if self.executor not in ("subprocess", "docker", "k8s"):
+        if self.executor not in ("subprocess", "docker", "k8s", "kubernetes"):
             raise SpecError(
-                f"unknown executor {self.executor!r}; expected subprocess, docker, or k8s"
+                f"unknown executor {self.executor!r}; expected subprocess, docker, kubernetes (or its alias k8s)"
             )
-        if self.executor in ("docker", "k8s") and not self.image:
+        if self.executor in ("docker", "k8s", "kubernetes") and not self.image:
             raise SpecError(f"runtime.executor={self.executor} requires an image")
         out: dict[str, Any] = {"executor": self.executor}
         if self.image:
