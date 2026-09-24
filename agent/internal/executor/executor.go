@@ -98,6 +98,12 @@ type TaskSpec struct {
 	// scheduling. It MUST NOT block: it is called from the executor's wait loop.
 	// Executors whose workload has no such lifecycle never call it.
 	OnPhase func(phase, detail string)
+
+	// LogSink, when set, receives the workload's output for durable shipping
+	// (ADR-0020). Executors that implement LogCapturer write to it directly,
+	// tagged by stream; for the others the runner follows Logs() into it. Nil
+	// leaves every executor's capture exactly as it was before log shipping.
+	LogSink LogSink
 }
 
 // Prepared is an executor's staged, not-yet-running workload: a materialised

@@ -73,6 +73,13 @@ type dockerState struct {
 
 	containerID string
 
+	// logSink and the follower that feeds it (ADR-0020). `docker logs` keeps
+	// stdout and stderr distinguishable on the wire, so they arrive tagged.
+	logSink    LogSink
+	logsCmd    *exec.Cmd
+	logsDone   chan struct{}
+	logsCancel context.CancelFunc
+
 	waitMu   sync.Mutex
 	waited   bool
 	outcome  Outcome
@@ -80,6 +87,47 @@ type dockerState struct {
 }
 
 func (e *DockerExecutor) Kind() string { return "docker" }
+
+// CapturesLogs: the docker executor follows the container's two streams into
+// TaskSpec.LogSink itself.
+func (e *DockerExecutor) CapturesLogs() bool { return true }
+
+// followLogs starts `docker logs --follow` into the sink. The follower ends by
+// itself when the container exits; Wait bounds how long it may take after
+// that, and Cleanup kills it on every path.
+func (e *DockerExecutor) followLogs(st *dockerState) {
+	if st.logSink == nil || st.containerID == "" {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, e.bin(), "logs", "--follow", st.containerID)
+	// Not *os.File, so exec copies through its own goroutines; the sink never
+	// blocks, so those goroutines never apply backpressure to the container.
+	cmd.Stdout = st.logSink.Writer(LogStreamStdout)
+	cmd.Stderr = st.logSink.Writer(LogStreamStderr)
+	if err := cmd.Start(); err != nil {
+		cancel()
+		e.logger().Warn("could not follow container logs; this attempt's log will be empty",
+			"container", shortID(st.containerID), "error", err)
+		return
+	}
+	st.logsCmd, st.logsCancel, st.logsDone = cmd, cancel, make(chan struct{})
+	go func() { _ = cmd.Wait(); close(st.logsDone) }()
+}
+
+// finishLogs waits (bounded) for the follower to drain after the container
+// has exited, then stops it.
+func (st *dockerState) finishLogs(grace time.Duration) {
+	if st.logsCmd == nil {
+		return
+	}
+	select {
+	case <-st.logsDone:
+	case <-time.After(grace):
+	}
+	st.logsCancel()
+	<-st.logsDone
+}
 
 func (e *DockerExecutor) bin() string {
 	if e.Binary != "" {
@@ -165,6 +213,7 @@ func (e *DockerExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepared, 
 		grace:           orDefaultGrace(spec.GraceAfterTerm),
 		declaredOutputs: spec.DeclaredOutputs,
 		stdoutOutput:    spec.StdoutOutput,
+		logSink:         spec.LogSink,
 		// Deterministic name derived from the attempt id: it makes an orphan
 		// findable after an agent restart (`docker ps --filter name=nexus-`),
 		// which is what turns "no orphaned workload" into something we can
@@ -243,6 +292,7 @@ func (e *DockerExecutor) Start(ctx context.Context, p Prepared) (Handle, error) 
 	}
 	st.containerID = strings.TrimSpace(out)
 	st.startedA = time.Now()
+	e.followLogs(st)
 
 	e.logger().Info("container started", "attempt_id", p.AttemptID,
 		"container", shortID(st.containerID), "image", st.image)
@@ -309,6 +359,7 @@ wait:
 	}
 
 	o := e.inspectOutcome(st, timedOut)
+	st.finishLogs(captureDrainGrace)
 	st.waitMu.Lock()
 	st.waited, st.outcome = true, o
 	st.waitMu.Unlock()
@@ -491,6 +542,7 @@ func (e *DockerExecutor) Logs(ctx context.Context, h Handle) (io.ReadCloser, err
 func (e *DockerExecutor) Cleanup(ctx context.Context, h Handle) error {
 	var errs []error
 	if st, ok := h.State.(*dockerState); ok && st.containerID != "" {
+		st.finishLogs(0)
 		out, err := e.output(ctx, 60*time.Second, "rm", "--force", "--volumes", st.containerID)
 		if err != nil && !strings.Contains(strings.ToLower(out), "no such container") {
 			errs = append(errs, fmt.Errorf("docker rm %s: %w: %s", shortID(st.containerID), err, strings.TrimSpace(out)))

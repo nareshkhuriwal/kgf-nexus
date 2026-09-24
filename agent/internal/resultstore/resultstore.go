@@ -247,6 +247,30 @@ func isNotFound(err error) bool {
 	return minio.ToErrorResponse(err).StatusCode == http.StatusNotFound
 }
 
+// ErrLogKeyOutsideNamespace refuses a log write outside this worker's own
+// namespace prefix. The gateway refuses to INDEX such a key anyway; refusing
+// to WRITE it means a bug here cannot scribble into another tenant's prefix
+// with credentials that happen to be broader than they should be.
+var ErrLogKeyOutsideNamespace = errors.New("resultstore: log key outside this namespace's log prefix")
+
+// PutLogObject writes one log object (a chunk or the compacted log) at an
+// explicit key under <namespace>/logs/ (ADR-0020).
+//
+// Unlike Put this is NOT content-addressed: a log chunk is identified by its
+// attempt and sequence number, because that is what the index and the read API
+// address. A retry rewrites the same bytes to the same key.
+func (c *Client) PutLogObject(ctx context.Context, key string, body io.Reader, size int64) error {
+	if c.namespace == "" || !strings.HasPrefix(key, c.namespace+"/logs/") {
+		return fmt.Errorf("%w: %q", ErrLogKeyOutsideNamespace, key)
+	}
+	_, err := c.mc.PutObject(ctx, c.bucket, key, body, size,
+		minio.PutObjectOptions{ContentType: "application/x-ndjson"})
+	if err != nil {
+		return fmt.Errorf("resultstore: put log %s/%s: %w", c.bucket, key, err)
+	}
+	return nil
+}
+
 func stripScheme(endpoint string) string {
 	endpoint = strings.TrimPrefix(endpoint, "https://")
 	return strings.TrimPrefix(endpoint, "http://")
