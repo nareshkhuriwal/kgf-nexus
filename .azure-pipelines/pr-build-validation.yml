@@ -9,13 +9,16 @@
 #   Integration       migrations applied to a throwaway PostgreSQL, then
 #                     `go test -tags integration`, with a guard that fails when
 #                     the suites SKIPPED. Off by default (see runIntegration).
-#   UserInterface     npm ci, vitest and the production build. Off by default.
+#   PythonSdk         the SDK pytest suite on Python 3.11, 3.12 and 3.13, with
+#                     JUnit and coverage reporting. Always on.
+#   UserInterface     npm ci, typecheck, vitest (JUnit published) and the
+#                     production build. On by default (see runUserInterface).
 #   BuildValidation   one job per image; built, never pushed.
 #   EndToEnd          the real compose stack, every example run to SUCCEEDED,
 #                     and the chaos suite. Off by default; ~45 minutes.
 #   QualityGate       summary once the enabled stages succeed.
 #
-# On the three stages that default to false: each needs something the agent may
+# On the two stages that default to false: each needs something the agent may
 # not have -- a PostgreSQL the agent can reach, a registry-reachable Docker for
 # the full compose stack, ~45 minutes of agent time. Turning one on is a one-word
 # edit to its parameter default, or a checkbox at queue time. They are written
@@ -58,10 +61,14 @@ parameters:
     displayName: 'Run the PostgreSQL integration suite'
     type: boolean
     default: false
+  # On by default, unlike the other two: it needs only Node, which NodeTool
+  # fetches, and the npm registry, which BuildValidation's console image build
+  # needs anyway -- nothing the gate does not already require. The GitHub
+  # workflow runs the same steps on every change. Still a queue-time checkbox.
   - name: runUserInterface
-    displayName: 'Run the operator console tests and build'
+    displayName: 'Run the operator console typecheck, tests and build'
     type: boolean
-    default: false
+    default: true
   - name: runEndToEnd
     displayName: 'Run the examples and chaos suite (~45 min)'
     type: boolean
@@ -357,13 +364,101 @@ stages:
         displayName: 'Stop Throwaway PostgreSQL'
         condition: always()
 
+- stage: PythonSdk
+  displayName: 'Python SDK'
+  dependsOn: []   # Needs nothing the Go gate produces.
+  jobs:
+  - job: RunSdkTests
+    displayName: 'SDK Tests on Python'
+    timeoutInMinutes: 15
+    workspace:
+      clean: all
+    # Every Python the package claims (pyproject: requires-python >=3.11,
+    # classifiers 3.11-3.13), the same set as the GitHub workflow.
+    strategy:
+      matrix:
+        py311:
+          PYTHON_VERSION: '3.11'
+        py312:
+          PYTHON_VERSION: '3.12'
+        py313:
+          PYTHON_VERSION: '3.13'
+          # One leg publishes coverage: three copies of the same numbers would
+          # only make the Code Coverage tab harder to read. The newest, because
+          # it is the one users installing today most likely run.
+          PUBLISH_COVERAGE: 'true'
+    steps:
+    - checkout: self
+      persistCredentials: false
+
+    - script: |
+        set -euo pipefail
+        mkdir -p "$(reportDir)"
+        echo "=== Python SDK suite on python:$(PYTHON_VERSION)-slim ==="
+        # In a container, not UsePythonVersion: on a self-hosted pool that
+        # task only finds interpreters someone pre-seeded into the tool cache,
+        # and "Default" promises Docker and *a* Python 3 -- not 3.11, 3.12 and
+        # 3.13. The official image pins the minor version exactly.
+        #
+        # The checkout is mounted READ-ONLY and the SDK copied out of it, and
+        # the container runs as the agent's own uid: nothing root-owned
+        # (egg-info, __pycache__, .coverage) is left in the workspace for
+        # `workspace: clean: all` to fail on in the next job. Only the report
+        # directory is writable. examples/ is copied beside sdk/ because
+        # tests/test_map.py compiles examples/fan_out_map/dag.py against its
+        # committed compiled.yaml, found relative to the repository root.
+        #
+        # Same pytest flags as `make sdk-test`; the coverage floor lives in
+        # sdk/python/pyproject.toml so the two cannot disagree about it.
+        docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          -e HOME=/tmp -e PIP_DISABLE_PIP_VERSION_CHECK=1 -e PIP_NO_CACHE_DIR=1 \
+          -e PYTHONDONTWRITEBYTECODE=1 -e COVERAGE_FILE=/tmp/.coverage \
+          -v "$(Build.SourcesDirectory):/repo:ro" \
+          -v "$(reportDir):/reports" \
+          "python:$(PYTHON_VERSION)-slim" \
+          sh -euc '
+            mkdir /tmp/ws && cp -r /repo/sdk /repo/examples /tmp/ws/
+            cd /tmp/ws/sdk/python
+            python --version
+            python -m venv /tmp/venv
+            /tmp/venv/bin/python -m pip install --quiet ".[dev]"
+            /tmp/venv/bin/python -m pip list --format=freeze | grep -iE "^(pytest|pytest-cov|coverage|pyyaml)=="
+            /tmp/venv/bin/python -m pytest -p no:cacheprovider \
+              --cov=nexus --cov-report=term \
+              --cov-report=xml:/reports/sdk-coverage.xml \
+              --junitxml=/reports/sdk-junit.xml \
+              -o junit_suite_name="nexus-sdk-py$(PYTHON_VERSION)"
+          '
+      displayName: 'Run SDK Tests (pytest, Python $(PYTHON_VERSION))'
+
+    - task: PublishTestResults@2
+      condition: succeededOrFailed()
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: 'sdk-junit.xml'
+        searchFolder: '$(reportDir)'
+        testRunTitle: 'KGF Nexus Python SDK (Python $(PYTHON_VERSION))'
+        failTaskOnMissingResultsFile: true
+      displayName: 'Publish SDK Test Results'
+
+    - task: PublishCodeCoverageResults@2
+      condition: and(succeededOrFailed(), eq(variables['PUBLISH_COVERAGE'], 'true'))
+      inputs:
+        summaryFileLocation: '$(reportDir)/sdk-coverage.xml'
+        # The report was written inside the container, where the source lived
+        # at /tmp/ws/sdk/python; point the source view at the checkout instead.
+        pathToSources: '$(Build.SourcesDirectory)/sdk/python'
+        failIfCoverageEmpty: true
+      displayName: 'Publish SDK Code Coverage'
+
 - ${{ if parameters.runUserInterface }}:
   - stage: UserInterface
     displayName: 'Operator Console'
     dependsOn: []
     jobs:
     - job: RunUiTests
-      displayName: 'Console Tests and Production Build'
+      displayName: 'Console Typecheck, Tests and Production Build'
       timeoutInMinutes: 20
       workspace:
         clean: all
@@ -395,14 +490,30 @@ stages:
 
       - script: |
           set -euo pipefail
-          npm --prefix ui test
+          # Its own step even though `build` runs `tsc -b` too: a type error
+          # should be reported as a type error, not as a failed build.
+          npm --prefix ui run typecheck
+        displayName: 'Console Typecheck (tsc --noEmit)'
+
+      - script: |
+          set -euo pipefail
+          mkdir -p "$(reportDir)"
+          npm --prefix ui run test:ci -- --outputFile.junit="$(reportDir)/ui-junit.xml"
         displayName: 'Console Component Tests (vitest)'
 
       - script: |
           set -euo pipefail
-          # `build` is `tsc -b && vite build`, so this is the typecheck too.
           npm --prefix ui run build
         displayName: 'Console Production Build'
+
+      - task: PublishTestResults@2
+        condition: succeededOrFailed()
+        inputs:
+          testResultsFormat: 'JUnit'
+          testResultsFiles: 'ui-junit.xml'
+          searchFolder: '$(reportDir)'
+          testRunTitle: 'KGF Nexus Operator Console (vitest)'
+        displayName: 'Publish Console Test Results'
 
 - stage: BuildValidation
   displayName: 'Docker Build Validation'
@@ -603,6 +714,7 @@ stages:
   displayName: 'PR Quality Gate'
   dependsOn:
     - UnitTest
+    - PythonSdk
     - ${{ if parameters.runIntegration }}:
       - Integration
     - ${{ if parameters.runUserInterface }}:
@@ -620,6 +732,7 @@ stages:
         echo "=== PR Quality Gate Results ==="
         echo "✅ go build and go vet passed over the whole module"
         echo "✅ Go race tests passed; JUnit and coverage reports published"
+        echo "✅ Python SDK tests passed on 3.11, 3.12 and 3.13; JUnit and coverage published"
         echo "✅ Every first-party source file carries an SPDX identifier"
         echo "✅ Generated files are synchronized with their sources"
         echo "✅ Every image builds without errors"
@@ -627,7 +740,7 @@ stages:
           && echo "✅ Migrations applied and the integration suite ran against a real database" \
           || echo "⏭️  PostgreSQL integration suite not run (runIntegration is false)"
         echo "${{ parameters.runUserInterface }}" | grep -qi true \
-          && echo "✅ Operator console tests and production build passed" \
+          && echo "✅ Operator console typecheck, tests and production build passed" \
           || echo "⏭️  Operator console not built (runUserInterface is false)"
         echo "${{ parameters.runEndToEnd }}" | grep -qi true \
           && echo "✅ Every example ran to SUCCEEDED and the chaos suite held" \
