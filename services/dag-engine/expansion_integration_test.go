@@ -820,9 +820,9 @@ func fanInRun(t *testing.T, pool *pgxpool.Pool, n, size int, limit int64) (strin
 }
 
 type refusalRow struct {
-	Reason, Detail   string
-	Limit            int64
-	Total, Accepted  int
+	Reason, Detail  string
+	Limit           int64
+	Total, Accepted int
 }
 
 func readRefusal(t *testing.T, pool *pgxpool.Pool, runID string) *refusalRow {
