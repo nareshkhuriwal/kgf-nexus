@@ -109,7 +109,35 @@ func setup() {
 		skipWhy = fmt.Sprintf("ensure namespace %s: %v", Namespace, err)
 		return
 	}
+	if err := registerUser(ctx, cs); err != nil {
+		skipWhy = fmt.Sprintf("register test user in %s: %v", Namespace, err)
+		return
+	}
 	client = cs
+}
+
+// userLabel marks the per-process reference ConfigMaps.
+//
+// `go test ./a ./b` runs packages as CONCURRENT processes that share this one
+// namespace. Deleting it when the first process finishes killed every test the
+// other was still running ("namespace is being terminated"); it passed only when
+// each package was run alone. Each process holds a reference, and only the last
+// one to leave deletes the namespace.
+const userLabel = "nexus.dev/test-user"
+
+var userMarker string
+
+func registerUser(ctx context.Context, cs kubernetes.Interface) error {
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		GenerateName: "test-user-",
+		Labels:       map[string]string{userLabel: "true"},
+	}}
+	created, err := cs.CoreV1().ConfigMaps(Namespace).Create(ctx, cm, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+	userMarker = created.Name
+	return nil
 }
 
 func isLocalContextName(name string) bool {
@@ -197,13 +225,22 @@ func ImpersonatingClient(user string) (kubernetes.Interface, error) {
 	return kubernetes.NewForConfig(rc)
 }
 
-// Teardown deletes the test namespace if this process created (or adopted) it.
-// NEXUS_K8S_KEEP_NAMESPACE=1 keeps it for post-mortem debugging.
+// Teardown releases this process's reference and deletes the test namespace
+// when no other test process still holds one. NEXUS_K8S_KEEP_NAMESPACE=1 keeps
+// it for post-mortem debugging.
 func Teardown() {
-	if client == nil || !createdNS || os.Getenv("NEXUS_K8S_KEEP_NAMESPACE") == "1" {
+	if client == nil || userMarker == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	_ = client.CoreV1().ConfigMaps(Namespace).Delete(ctx, userMarker, metav1.DeleteOptions{})
+	if !createdNS || os.Getenv("NEXUS_K8S_KEEP_NAMESPACE") == "1" {
+		return
+	}
+	others, err := client.CoreV1().ConfigMaps(Namespace).List(ctx, metav1.ListOptions{LabelSelector: userLabel + "=true"})
+	if err != nil || len(others.Items) > 0 {
+		return // another test process is still using it; it will delete it
+	}
 	_ = client.CoreV1().Namespaces().Delete(ctx, Namespace, metav1.DeleteOptions{})
 }

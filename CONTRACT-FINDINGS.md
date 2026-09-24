@@ -1888,7 +1888,12 @@ full run printed `ok` with every kubernetes conformance subtest taking
 `0.00s`. The `-run 'Conformance.*/kubernetes'` pattern matched the second
 level of `TestX/success/kubernetes`, not the third, so every subtest was
 skipped and the run still passed. The corrected pattern is
-`TestConformance/.*/kubernetes`. The durations are what gave it away. The
+`TestConformance/.*/kubernetes`. The durations are what gave it away. A second
+instrument error followed. Each package passed alone, but the combined run
+failed with "namespace is being terminated". `go test ./a ./b` runs packages as
+concurrent processes, and the first to finish deleted the namespace they share.
+Each process now holds a reference ConfigMap, and only the last one to leave
+deletes the namespace. The
 least-privilege Role was also mutation-tested: a test applies the shipped
 `deploy/k8s/agent-rbac.yaml` and runs the whole lifecycle as that service
 account. Deleting the `pods/log` rule turns that test red with
