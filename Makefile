@@ -13,9 +13,17 @@ PROTOC        ?= protoc
 GOBIN         ?= $(shell $(GO) env GOPATH)/bin
 NAMESPACE     ?= default
 
-# The local dev database from CONTRACT.md. Compose publishes its own on 55433 so
-# the two can coexist; override DATABASE_URL to point migrate-up at either.
-DATABASE_URL  ?= postgres://postgres:test@localhost:55432/nexus?sslmode=disable
+# The database `make up` starts, which is what seed and the migrate targets act
+# on unless told otherwise. It used to default to a bare "local dev database"
+# on 55432 that nothing here creates -- so on a machine where something else
+# owned 55432, `make seed` (and the schema-dropping `make migrate-down`) aimed
+# at an unrelated database. Override DATABASE_URL to target another one.
+NEXUS_POSTGRES_PORT ?= 55433
+DATABASE_URL  ?= postgres://nexus:nexus-dev-password@localhost:$(NEXUS_POSTGRES_PORT)/nexus?sslmode=disable
+# The gateway as `make up` publishes it (deploy/docker-compose.yml maps
+# NEXUS_API_PORT on the host to the gateway's 8080 in the container).
+NEXUS_API_PORT ?= 8090
+NEXUS_ENDPOINT ?= http://localhost:$(NEXUS_API_PORT)
 MIGRATIONS    := services/migrations
 
 # test-nats has its own .PHONY line so a merge that edits the list below does
@@ -224,10 +232,28 @@ seed: ## Generate and install API keys (prints each plaintext exactly once)
 # the default because it IS the Phase 1 exit criterion: 10 nodes, mixed CPU/GPU.
 EXAMPLE ?= ten_node_mixed
 
-submit-example: ## Submit an example DAG and create a run (EXAMPLE=ten_node_mixed)
+# PARAMS are the run's parameters as space-separated KEY=VALUE pairs, e.g.
+#   make submit-example EXAMPLE=fan_out_map PARAMS="source=demo"
+# With PARAMS the run is created and followed to a terminal state; without them
+# only the spec is registered, because most examples declare required params
+# and a run created without them is refused (HTTP 422) rather than guessed.
+PARAMS ?=
+
+submit-example: ## Submit an example DAG, and create a run when PARAMS is set (EXAMPLE=ten_node_mixed PARAMS="k=v ...")
 	@test -f examples/$(EXAMPLE)/compiled.yaml || { echo "examples/$(EXAMPLE)/compiled.yaml not found (examples/ is owned by the CLI/SDK workstream)"; exit 1; }
-	$(GO) run ./cli/cmd/nexusctl workflow submit -f examples/$(EXAMPLE)/compiled.yaml --namespace $(NAMESPACE)
-	@echo "Now create a run: go run ./cli/cmd/nexusctl run create --spec <name-from-compiled.yaml> --namespace $(NAMESPACE)"
+	@test -n "$$NEXUS_API_KEY" || { echo "NEXUS_API_KEY is unset: run 'make seed' and export the admin key it prints"; exit 1; }
+	@set -eu; \
+	export NEXUS_ENDPOINT='$(NEXUS_ENDPOINT)' NEXUS_NAMESPACE='$(NAMESPACE)'; \
+	name=$$(awk '/^name:/ {gsub(/["\x27]/, "", $$2); print $$2; exit}' examples/$(EXAMPLE)/compiled.yaml); \
+	test -n "$$name" || { echo "no top-level name: in examples/$(EXAMPLE)/compiled.yaml"; exit 1; }; \
+	$(GO) run ./cli/cmd/nexusctl workflow submit examples/$(EXAMPLE)/compiled.yaml; \
+	if [ -z '$(PARAMS)' ]; then \
+	  echo; echo "Spec '$$name' registered. Create a run (see examples/$(EXAMPLE) for its required params):"; \
+	  echo "  make submit-example EXAMPLE=$(EXAMPLE) PARAMS=\"key=value\""; \
+	  exit 0; \
+	fi; \
+	set --; for kv in $(PARAMS); do set -- "$$@" --param "$$kv"; done; \
+	$(GO) run ./cli/cmd/nexusctl run create "$$name" "$$@" --wait
 
 # ── Backup and restore ────────────────────────────────────────────────────
 # BACKUP_DIR is passed through rather than baked in, so the same targets work

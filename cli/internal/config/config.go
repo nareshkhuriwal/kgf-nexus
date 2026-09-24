@@ -24,7 +24,14 @@ import (
 )
 
 // DefaultEndpoint is used when nothing else supplies one.
-const DefaultEndpoint = "http://localhost:8080"
+//
+// 8090, not 8080: the gateway LISTENS on 8080 inside its container, but
+// `make up` publishes it on the host as 8090 (deploy/docker-compose.yml,
+// NEXUS_API_PORT). A client default of 8080 reached whatever else a developer
+// had on that port -- on one machine an unrelated nginx, which answered every
+// command with an HTML page the CLI then reported as "control plane
+// unreachable". The SDK and the UI dev proxy use the same default.
+const DefaultEndpoint = "http://localhost:8090"
 
 // DefaultNamespace matches the Phase 1 single-namespace deployment.
 const DefaultNamespace = "default"

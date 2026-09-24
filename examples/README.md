@@ -19,7 +19,7 @@ go build -o ./nexusctl ./cli/cmd/nexusctl
 Point the CLI at your control plane:
 
 ```bash
-export NEXUS_ENDPOINT=http://localhost:8080
+export NEXUS_ENDPOINT=http://localhost:8090   # the gateway `make up` publishes
 export NEXUS_API_KEY=...        # never passed as a flag in shared shells
 ```
 

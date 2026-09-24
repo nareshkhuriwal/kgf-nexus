@@ -155,7 +155,7 @@ window that mechanism 3 does *not* close.
 ```python
 from nexus import NexusClient
 
-c = NexusClient("http://localhost:8080", api_key="...", namespace="default")
+c = NexusClient("http://localhost:8090", api_key="...", namespace="default")
 c.submit_spec(daily_etl.compile())
 run = c.create_run("daily-etl", params={"source": "s3://in"},
                    idempotency_key="daily-2026-09-12")   # sent as a header
