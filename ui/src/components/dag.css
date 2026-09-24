@@ -252,3 +252,10 @@
 .dag-node-g:active, .spec-node-g:active { cursor: grabbing; }
 .dag-layout-note { padding: 8px 20px; color: var(--fg-muted); background: var(--bg-raised); font-size: 11px; border-bottom: 1px solid var(--border); }
 .spec-node-g.dimmed { pointer-events: auto; }
+
+/* Dynamic expansion (§5.4): a folded map template draws a second outline
+   behind itself, so "many of these" reads before any text does. */
+.dag-node-g .dag-group-stack { opacity: .45; }
+.dag-group-toggle { cursor: pointer; fill: var(--accent, currentColor); font-weight: 600; }
+/* Memoized (§6.4): reused a prior result rather than executing. */
+.dag-cached { fill: var(--tone-info-fg, currentColor); font-style: italic; }

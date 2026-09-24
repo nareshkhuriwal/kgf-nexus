@@ -130,6 +130,20 @@ func taskToProto(t map[string]any) (*nexusv1.TaskSpec, error) {
 		ts.Retry = rp
 	}
 
+	// F18 bindings and the §5.4 map template. Decoded here so submit-time
+	// semantic validation sees the same graph the DAG engine will execute; a
+	// field the gateway ignored would be validated by nobody until run time.
+	ts.InputLiterals = strMap(t, "input_literals")
+	ts.InputParams = strMap(t, "input_params")
+	if m, ok := obj(t, "map"); ok {
+		ts.Map = &nexusv1.MapSpec{
+			OverNodeId: str(m, "over_node_id"),
+			OverOutput: str(m, "over_output"),
+			ItemInput:  str(m, "item_input"),
+			MaxFanout:  i32(m, "max_fanout"),
+		}
+	}
+
 	if c, ok := obj(t, "cache"); ok {
 		ts.Cache = &nexusv1.CachePolicy{
 			Enabled: boolean(c, "enabled"),
@@ -207,6 +221,7 @@ func valueSpecMap(m map[string]any, key string) map[string]*nexusv1.ValueSpec {
 			Type:        str(vm, "type"),
 			Required:    boolean(vm, "required"),
 			DefaultJson: str(vm, "default_json"),
+			MaxBytes:    i64(vm, "max_bytes"),
 		}
 	}
 	return out

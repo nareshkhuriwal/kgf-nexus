@@ -140,6 +140,11 @@
           "description": "JSON-ENCODED default (a string), matching proto ValueSpec.default_json. Encoding it as text keeps the wire type uniform regardless of the declared value type.",
           "type": "string",
           "maxLength": 65536
+        },
+        "max_bytes": {
+          "description": "Optional author-declared upper bound on this value's size in bytes. When a map template declares it on an output, submit-time validation rejects the workflow if max_fanout x max_bytes could exceed the platform's fan-in limit (ARCH 5.4), instead of failing at run time.",
+          "type": "integer",
+          "minimum": 0
         }
       },
       "not": {
@@ -335,7 +340,39 @@
           "default": false
         },
         "ttl_ms": {
+          "description": "How long a SUCCEEDED result may be reused. Absent or 0 means the platform default (7 days). Tasks declaring idempotency none cannot enable the cache.",
           "$ref": "#/$defs/durationMs"
+        }
+      }
+    },
+    "MapSpec": {
+      "description": "Dynamic expansion (ARCH 5.4). Makes this task a TEMPLATE that never executes itself: once its upstreams settle, the control plane reads the JSON array at over_node_id.over_output and materializes one child task per element, delivering the element through item_input. Downstream tasks receive a JSON array of the children's outputs, in element order. The collection must be inline (at or below the result-store inline threshold); a larger one fails the template explicitly.",
+      "type": "object",
+      "required": [
+        "over_node_id",
+        "over_output",
+        "item_input",
+        "max_fanout"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "over_node_id": {
+          "description": "A direct upstream of this task (an edge must exist) whose output holds the collection.",
+          "$ref": "#/$defs/nodeId"
+        },
+        "over_output": {
+          "description": "The upstream output holding a JSON array. Must be declared with type json.",
+          "$ref": "#/$defs/identifier"
+        },
+        "item_input": {
+          "description": "This task's input that receives one element per child. Must not be bound by an edge or a literal.",
+          "$ref": "#/$defs/identifier"
+        },
+        "max_fanout": {
+          "description": "MANDATORY hard ceiling on children. A collection larger than this fails the template with reason max_fanout_exceeded and materializes nothing. The platform additionally enforces an operator ceiling (default 10000).",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
         }
       }
     },
@@ -571,6 +608,9 @@
             "type": "string"
           },
           "description": "Inputs bound to run parameters. Key is this task's input name, value is the WorkflowSpec.params key."
+        },
+        "map": {
+          "$ref": "#/$defs/MapSpec"
         }
       },
       "allOf": [

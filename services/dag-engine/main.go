@@ -90,6 +90,14 @@ func run() error {
 	}
 
 	engine := NewEngine(st, runStates, nil, log)
+	fanInLimit, err := parseFanInLimit(os.Getenv("NEXUS_DAG_MAX_FANIN_BYTES"))
+	if err != nil {
+		// Refuse to start: a limit nobody chose (or one above the ceiling) is the
+		// availability hazard the setting exists to prevent.
+		return fmt.Errorf("NEXUS_DAG_MAX_FANIN_BYTES: %w", err)
+	}
+	engine.SetFanInLimit(fanInLimit)
+	log.Info("fan-in assembly bounded", "max_fanin_bytes", fanInLimit)
 	if *allowAllRules {
 		opts := dag.DefaultValidationOptions()
 		opts.AllowDeferredTriggerRules = true

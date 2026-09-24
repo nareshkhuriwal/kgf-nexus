@@ -937,6 +937,18 @@ Rules that keep this from becoming a footgun:
 - The reduce node's trigger rule decides tolerance for partial failure (`all_success` vs. `none_failed` vs. a `min_success_ratio` threshold).
 - Expansion is recorded as an event, so the materialized DAG for a historical run is reconstructible.
 
+**As implemented** (migration 0020, `internal/dag/expand.go`, `services/dag-engine/expansion.go`):
+
+- **Spec.** A task with `map: {over_node_id, over_output, item_input, max_fanout}` is a *template*. Submit-time validation requires `max_fanout > 0` and at most the operator ceiling (default 10,000), `over_node_id` to be a **direct** upstream (an edge must exist), `over_output` to be declared `json`, `item_input` to be a declared input bound by no edge or literal, and every downstream input fed by the template to be `json`. Authored node ids may not contain `[`/`]`, which are reserved for child ids `template[i]`.
+- **The collection must be inline** (≤ the result-store inline threshold). The control plane counts and slices it; invariant 6 forbids it from fetching a blob, so a blob collection fails the template with `collection_not_inline`. Map over references (object keys), not over data.
+- **Atomic, at most once.** When the template's trigger fires, the engine CASes the template `PENDING → RUNNING` (or `SUCCEEDED` for an empty collection, `FAILED` for a refused one), inserts a `task_expansions` record keyed `(run_id, template_node_id)`, and inserts every child `task_nodes` row and inherited `task_edges` row — **one transaction**. A crash leaves nothing; the retry re-derives byte-identical children from the same immutable upstream output. Concurrent reconcilers and duplicate completion reports lose the CAS (or the record's primary key) and roll back entirely.
+- **Refusal is explicit.** Over `max_fanout`, not an array, missing, or not inline: the template becomes `FAILED` with the reason on the record and an `ExpansionFailed` event; nothing is materialized; downstream propagates as for any failure.
+- **Children** inherit the template's spec (minus `map`), trigger rule, retry budget and incoming edges; the element is written onto the child's spec as an `input_literals` entry. Their idempotency key is `sha256(run_id ‖ template_node_id ‖ map_index ‖ version)`.
+- **Fan-in.** Downstream nodes depend on the template, never on children, so a 10,000-item fan-in has one predecessor. The template's state is the aggregate of its children (any failed → `FAILED`; else any cancelled → `CANCELLED`; else any skipped → `SKIPPED`; else `SUCCEEDED`), folded in the same reconcile pass in which the last child settles. A downstream input bound to a template output receives an inline JSON array, one element per child in `map_index` order: the child's inline JSON value, `{"inline_base64": …}` for non-JSON inline bytes, `{"result_ref": …}` for a blob, `null` for a child that did not succeed.
+- **The fan-in is bounded.** The array is assembled in the control plane, so it is capped at `NEXUS_DAG_MAX_FANIN_BYTES` (default 16 MiB, allowed 64 KiB–256 MiB; the JSON payload before base64). Children's outputs are never loaded with the rest of the run; they are streamed from Postgres in `map_index` order and the size is checked **before each element is appended**, so an over-limit fan-in stops reading at the element that would cross the limit and never holds more than the limit. The consuming node is then `FAILED` without an attempt, in one transaction with a `fan_in_refusals` row (`reason = fan_in_too_large`, the limit, how many children fit, how to raise it or restructure) and a `FanInRejected` event; the run view shows it as "fan-in too large". Not retried: the same children produce the same array. At submit time, a template output declaring `max_bytes` is rejected (`map_fan_in_too_large`) when `max_fanout × max_bytes` could exceed the limit (the gateway checks against the default; the engine re-checks against its configured limit at materialize).
+- **Pause / cancel / fail_fast** withhold expansion exactly as they withhold the frontier. Cancel settles unexpanded templates and pending children `CANCELLED`; pause leaves them `PENDING` to be dispatched on resume (an expanded template does not count as in flight).
+- **Not implemented:** `min_success_ratio` (use `all_done` / `none_failed` on the fan-in); nested maps inside one template; expanding over a blob collection; single-flight between a retry-from-failed and an expansion (retry-from-failed is itself unwired, `ResetFailedNodes`).
+
 ### 5.5 Worker lifecycle
 
 ```
@@ -978,6 +990,14 @@ fails them instantly, and is immediately handed more — chewing through the
 retry budget of every task in the queue in seconds. Circuit-breaking the
 worker, not just the task, is the fix.
 ```
+
+**Quarantine, as implemented** (migration 0021, `internal/store/rm_quarantine.go`, `services/resource-manager/internal/server/quarantine.go`). *Definition:* a QUARANTINED worker receives **no new dispatches** — the claim admits only `ACTIVE` workers — while work it already holds finishes; it keeps heartbeating (and is swept `DEAD` if it stops). It is entered:
+
+- **automatically**, by a resource-manager detector, when in the last 10 minutes a worker has ≥ 3 infrastructure-class failures (`ERROR_CLASS_INFRASTRUCTURE`, `ERROR_CLASS_WORKER_LOST`, or `LOST` while it stayed registered) spanning ≥ 2 distinct `task_ref`s and ≥ 50% of its terminal attempts. The distinct-task rule is what makes the verdict worker-correlated rather than a poison *task*. Application, validation, timeout and OOM failures never count. Never more than 50% of a namespace's fleet at once, and never its last ACTIVE worker — a shared-dependency outage makes every worker look poisoned, and quarantining them all would outlast the outage. Duration 15 min, doubling per relapse of the same host within 24 h, capped at 24 h;
+- **manually**, by an operator (`POST …/workers/{id}/quarantine {reason, duration_ms}`, permission `workers.quarantine`); `duration_ms: 0` is indefinite;
+- **by inheritance**: a new session from a host with an open episode starts QUARANTINED, because worker identity is per session and a restart must not launder a poison host back into the pool.
+
+It ends on expiry, or by `POST …/workers/{id}/release`, which closes every open episode for the host. Every episode is a `worker_quarantines` row (trigger, reason, evidence, actor, expiry, release); operator actions are also in `audit_log`. A quarantined worker is no longer sent `DRAIN`, which the agent treats as permanent. All thresholds are `NEXUS_QUARANTINE_*` settings (OPERATIONS §9).
 
 ---
 
@@ -1074,6 +1094,14 @@ cache_key = sha256(task_ref ‖ task_version ‖ canonical_hash(inputs))
 ```
 
 On dispatch, if a `SUCCEEDED` attempt with the same `cache_key` exists within TTL, the scheduler short-circuits: the new attempt goes straight to `SUCCEEDED` with the cached `output_ref`, and emits a `CacheHit` event. This is Flyte's memoization and Luigi's target-completeness idea, and it is what makes retrying a 50-node pipeline after one late failure cheap instead of catastrophic. Opt-in per task, because it is only valid for genuinely pure tasks.
+
+**As implemented** (migration 0021, `services/dag-engine/expansion.go` `memoFor`, `internal/store/dagengine_memo.go`), with two deliberate departures from the paragraph above:
+
+- **The key is namespaced:** `cache_key = sha256(namespace ‖ sha256(task_ref ‖ version ‖ inputs_digest))`, using the §6.2 construction (`\x1f`-separated fields). A cached `output_ref` points into its tenant's result-store prefix, so a cross-tenant hit would be both unusable and a disclosure. `inputs_digest` hashes each resolved input's **content** (inline bytes, or the blob's content address), so encodings of one value cannot miss.
+- **The DAG engine, not the scheduler, short-circuits** — at attempt *creation*. A hit is inserted directly as a `SUCCEEDED` attempt carrying the source's `output_ref` and `cache_hit_of = <source attempt>`; it is never `PENDING`, so no scheduler can race to dispatch it and the §5.3 claim pays nothing for memoization. The engine re-reconciles in the same call so downstream work proceeds (nothing will ever report on a memoized attempt). A `CacheHit` event is emitted and the console marks the node *cached*.
+- **Eligibility:** only `SUCCEEDED`, executed (`cache_hit_of IS NULL` — a hit never restamps the TTL), ended within `cache.ttl_ms` (default 7 days) of control-plane time, after the newest matching operator invalidation, same tenant. Never `idempotency: none` (rejected at submit, and never memoized at runtime for specs stored earlier); never a failed/timed-out/lost/cancelled result.
+- **Concurrency:** identical runs that miss concurrently both execute (the task is declared pure); later runs hit the newest source. No single-flight — documented, not implemented.
+- **Invalidation:** `POST /v1/namespaces/{ns}/cache/invalidations {task_ref[, task_version] | cache_key, reason}` appends a cutoff to `memo_invalidations`; it deletes nothing.
 
 ### 6.5 Handling indeterminate outcomes
 
@@ -1299,7 +1327,9 @@ The decorator does **not** execute at DAG-build time in the control plane. It co
 | Result store unavailable | Put/get error | Attempt fails as `transient`; retried | No silent data loss |
 | Poison task (crashes every worker) | Repeated identical failures | Exhaust `max_attempts` → `FAILED`; escalate to quarantine only if worker-correlated | Fleet stays healthy |
 | Poison worker (fails every task) | Failure rate per worker | → `QUARANTINED`; stops receiving work | Retry budgets not burned |
-| Runaway dynamic expansion | `max_fanout` exceeded | Expansion fails explicitly | Control plane stability |
+| Runaway dynamic expansion | `max_fanout` exceeded | Expansion fails explicitly: template `FAILED`, `task_expansions.reason = max_fanout_exceeded`, nothing materialized | Control plane stability |
+| Crash mid-expansion | — | The expansion is one transaction; nothing survives, and the next reconcile re-expands identically | No partial fan-out |
+| Shared dependency down (every worker reports infrastructure errors) | Detector fleet cap reached | At most 50% of a namespace quarantined; the rest keep serving; logged as a probable shared-dependency fault | Platform stays up |
 | Clock skew between nodes | — | All deadlines computed from control-plane time; worker clocks never authoritative | Correct timeouts |
 | Duplicate run submission | `UNIQUE(namespace, idempotency_key)` | Return the existing run | Exactly one run per key |
 
@@ -1329,7 +1359,7 @@ In scope:
 - Docker Compose: Postgres, MinIO, control plane, 2 workers, UI.
 - Tests: DAG-engine property tests; a chaos suite that kills workers mid-task and asserts exactly-one-logical-effect.
 
-Explicitly deferred: dynamic expansion, cron schedules, backfill, NATS (since implemented as an optional transactional-outbox relay, ADR-0003), k8s executor (since delivered early; see Phase 3), multi-tenancy beyond a single namespace, RBAC, memoization, quarantine.
+Explicitly deferred: dynamic expansion, cron schedules, backfill, NATS, k8s executor, multi-tenancy beyond a single namespace, RBAC, memoization, quarantine. (Since delivered: NATS as an optional transactional-outbox relay, ADR-0003; the k8s executor, see Phase 3; dynamic expansion, memoization and worker quarantine, see §5.4, §6.4 and §5.5.)
 
 *Exit criteria:* a 10-node DAG with mixed CPU/GPU tasks completes correctly; killing a worker mid-run yields exactly one logical effect per task; two schedulers never double-dispatch under load.
 

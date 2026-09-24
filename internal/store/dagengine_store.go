@@ -206,9 +206,16 @@ func (s *DAGEngineStore) LoadEdges(ctx context.Context, runID string) ([]DEEdgeR
 
 // LoadAttempts reads every attempt of a run, newest attempt_number last per node.
 func (s *DAGEngineStore) LoadAttempts(ctx context.Context, runID string) ([]DEAttemptRow, error) {
-	const q = `SELECT id::text, run_id::text, node_id, attempt_number, state::text, output_ref, error
-	             FROM task_attempts WHERE run_id = $1::uuid
-	            ORDER BY node_id, attempt_number`
+	// Expansion CHILDREN's output_ref is deliberately NOT loaded. A run can have
+	// max_fanout children with up to the inline threshold each -- hundreds of MiB
+	// read on every reconcile -- and nothing but fan-in assembly needs them, which
+	// streams them with a size bound instead (StreamChildOutputs).
+	const q = `SELECT a.id::text, a.run_id::text, a.node_id, a.attempt_number, a.state::text,
+	                  CASE WHEN n.parent_node_id IS NULL THEN a.output_ref END, a.error
+	             FROM task_attempts a
+	             JOIN task_nodes n ON n.run_id = a.run_id AND n.node_id = a.node_id
+	            WHERE a.run_id = $1::uuid
+	            ORDER BY a.node_id, a.attempt_number`
 	rows, err := s.pool.Query(ctx, q, runID)
 	if err != nil {
 		return nil, fmt.Errorf("load attempts for run %s: %w", runID, err)

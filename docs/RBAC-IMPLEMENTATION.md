@@ -33,3 +33,12 @@ Apply `services/migrations/0012_rbac.up.sql` before deploying the new gateway. I
 - UI permission tests proving forbidden routes do not mount, hidden navigation, delegated audit visibility and revocation.
 - Run/workflow detail and workflow list regression tests, including terminal run actions.
 - TypeScript and production bundle build. Browser interaction and cloud deployments are not part of this verification.
+
+## Permissions added with expansion, memoization and quarantine
+
+- `workers.quarantine` — quarantine and release a worker (`POST …/workers/{id}/quarantine|release`).
+  Admin-level in the legacy (unbound) mapping, like `workers.drain`; granted to the built-in
+  Infrastructure Operator. Reading a worker's quarantine history needs only `workers.view`.
+- `workflows.cache.invalidate` — record a memo invalidation (`POST …/cache/invalidations`).
+  Write-level in the legacy mapping (it can only cause work to run again); granted to the
+  built-in Workflow Developer.

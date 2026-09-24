@@ -46,3 +46,13 @@ Our constraint that the control plane must never run user code (architecture §3
 **Code-as-DAG in an isolated parser sidecar.** A real middle ground: user code runs, but in a sandbox separate from the scheduler. Rejected for MVP as strictly more complexity than the declarative path while still giving up portability and reproducibility. Reconsider only if dynamic expansion proves insufficient in practice.
 
 **Full durable-execution model (Temporal).** Maximum expressiveness — arbitrary control flow, because the program *is* the workflow. Rejected as the *core* model: replay determinism is a heavy constraint on user code and a significant learning curve, and the DAG covers the large majority of orchestration needs. Retained as an optional second authoring mode in Phase 4 for users who need it.
+
+## Addendum (2026-09): dynamic expansion as a spec field
+
+The "genuinely dynamic control flow" negative is mitigated as planned: `TaskSpec.map`
+(architecture §5.4) declares a fan-out over a runtime collection in the document itself.
+The control plane still never runs user code -- it counts and slices an INLINE JSON array
+produced by an upstream task -- and the bound (`max_fanout`, plus an operator ceiling) is
+checked at submit time and again at expansion. The SDK surface is
+`task.map(upstream_output, item="param", max_fanout=N)`; `nexusctl workflow compile --show`
+shows the resulting `map` block exactly as the platform sees it.

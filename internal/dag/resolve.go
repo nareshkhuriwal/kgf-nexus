@@ -37,8 +37,11 @@ type InputBinding struct {
 	DefaultJSON string
 	// FromParam is set when the value comes from a workflow-level param.
 	FromParam bool
-	Required  bool
-	Type      string
+	// FromMapItem is set on an expansion child's item input: the value is the
+	// child's element of the mapped collection, delivered by the expansion.
+	FromMapItem bool
+	Required    bool
+	Type        string
 }
 
 // Source classifies where a binding's value comes from, for logging and for the
@@ -49,11 +52,14 @@ const (
 	FromEdge     BindingSource = "edge"
 	FromDefault  BindingSource = "default"
 	FromParamSrc BindingSource = "param"
+	FromMapItem  BindingSource = "map_item"
 )
 
 // Source reports the binding's origin.
 func (b InputBinding) Source() BindingSource {
 	switch {
+	case b.FromMapItem:
+		return FromMapItem
 	case b.UpstreamNode != "":
 		return FromEdge
 	case b.FromParam:
@@ -91,16 +97,37 @@ func InputPlan(g *Graph, nodeID string) ([]InputBinding, error) {
 		}
 	}
 
+	// The item input of a map template (and of each of its children) is bound by
+	// the expansion itself, never by an edge, a param or a default: it is the
+	// one input whose value differs per child. Resolving it any other way would
+	// hand every child the same value, which is the bug expansion exists to avoid.
+	itemInput := MapItemInput(g, nodeID)
+
 	for inName, vs := range n.Spec.GetInputs() {
 		if _, ok := bound[inName]; ok {
 			continue
 		}
 		b := InputBinding{InputName: inName, Required: vs.GetRequired(), Type: vs.GetType()}
+		if inName == itemInput {
+			b.FromMapItem = true
+			bound[inName] = b
+			continue
+		}
+		paramName := inName
+		if bound := n.Spec.GetInputParams()[inName]; bound != "" {
+			paramName = bound
+		}
+		_, literal := n.Spec.GetInputLiterals()[inName]
 		switch {
-		case g.Params[inName] != nil:
+		case g.Params[paramName] != nil:
 			// Edge beats param beats default. A node wired to an upstream must not
 			// silently read a run param instead — that would make the graph a lie.
 			b.FromParam = true
+		case literal:
+			// An F18 literal: resolved from the spec by resolveRunInputs, which
+			// checks literals first. Planned like a default because, like one, its
+			// value is fixed at authoring time.
+			b.DefaultJSON = n.Spec.GetInputLiterals()[inName]
 		case vs.GetDefaultJson() != "":
 			b.DefaultJSON = vs.GetDefaultJson()
 		case vs.GetRequired():
@@ -122,6 +149,24 @@ func InputPlan(g *Graph, nodeID string) ([]InputBinding, error) {
 	return out, nil
 }
 
+// MapItemInput names the input that a map template's children receive their
+// element through, or "" when nodeID is neither a template nor a child.
+func MapItemInput(g *Graph, nodeID string) string {
+	n := g.nodes[nodeID]
+	if n == nil {
+		return ""
+	}
+	if n.IsTemplate() {
+		return n.Spec.GetMap().GetItemInput()
+	}
+	if n.IsChild() {
+		if p := g.nodes[n.ParentID]; p != nil {
+			return p.Spec.GetMap().GetItemInput()
+		}
+	}
+	return ""
+}
+
 func sortedBindingKeys(m map[string]InputBinding) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -131,19 +176,11 @@ func sortedBindingKeys(m map[string]InputBinding) []string {
 	return out
 }
 
-// ── Dynamic expansion (§5.4) — DESIGNED, DEFERRED from Phase 1 ────────────────
+// ── Dynamic expansion (§5.4): the fan-out bound ─────────────────────────────
 //
-// Architecture §11 defers expansion to Phase 3. The types below exist so the
-// pure engine's shape does not have to change when it lands, because the thing
-// that makes expansion safe is a property of the GRAPH, not of the service:
-// children are real nodes, so they must flow through the same trigger-rule,
-// propagation, and terminal-detection code that static nodes do. Bolting
-// expansion on later as a parallel path would give map children second-class
-// state handling, which is exactly the footgun §5.4 warns against.
-//
-// Nothing here is called by Phase-1 code. It is deliberately small: the contract
-// (what an expansion request is, what it produces) rather than an implementation
-// that would rot before Phase 3.
+// PlanExpansion is the count-based core of expansion planning; PlanFromCollection
+// (expand.go) decodes a real collection and delegates the bound to it, so there
+// is exactly one definition of "over the limit".
 
 // ExpansionRequest is the engine's view of "materialize N children of this
 // template node".
@@ -171,9 +208,6 @@ type ExpandedChild struct {
 // bound and names the children deterministically. Deterministic child ids matter
 // because the idempotency key is derived from the node id, so a non-deterministic
 // naming scheme would break at-least-once on retry.
-//
-// DEFERRED: not reachable from Phase-1 code paths. Present and tested so the
-// Phase-3 work is a service-layer change, not an engine redesign.
 func PlanExpansion(req ExpansionRequest) ([]ExpandedChild, error) {
 	if req.MaxFanout <= 0 {
 		return nil, fmt.Errorf("expansion of %q: max_fanout is mandatory and must be positive (§5.4)", req.TemplateNodeID)
@@ -188,7 +222,7 @@ func PlanExpansion(req ExpansionRequest) ([]ExpandedChild, error) {
 	out := make([]ExpandedChild, 0, req.Cardinality)
 	for i := 0; i < req.Cardinality; i++ {
 		out = append(out, ExpandedChild{
-			NodeID:       fmt.Sprintf("%s[%d]", req.TemplateNodeID, i),
+			NodeID:       ChildID(req.TemplateNodeID, i),
 			ParentNodeID: req.TemplateNodeID,
 			MapIndex:     i,
 		})

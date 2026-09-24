@@ -26,6 +26,7 @@ import {
 } from '../api/hooks';
 import { useRunLive } from '../api/live';
 import { buildDagGraph, summarizeDag } from '../lib/dag';
+import { groupExpansions } from '../lib/expansion';
 import { isTerminal, stateVisual } from '../lib/states';
 import { durationBetween, fmtDurationMs, fmtTs, shortId } from '../lib/format';
 import { StateBadge } from '../components/StateBadge';
@@ -57,13 +58,21 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
   const eventsQuery = useRunEvents(namespace, runId, live.transport, terminal);
   const cancel = useCancelRun(namespace);
 
-  const graph = useMemo(
-    () =>
-      runQuery.data
-        ? buildDagGraph(runQuery.data, attemptsQuery.data ?? [])
-        : null,
-    [runQuery.data, attemptsQuery.data],
-  );
+  // Map templates start folded: a fan-out of hundreds drawn node by node is not
+  // a graph anyone can read (lib/expansion).
+  const [unfolded, setUnfolded] = useState<ReadonlySet<string>>(new Set());
+  const toggleGroup = (templateId: string) =>
+    setUnfolded((cur) => {
+      const next = new Set(cur);
+      if (next.has(templateId)) next.delete(templateId);
+      else next.add(templateId);
+      return next;
+    });
+  const graph = useMemo(() => {
+    if (!runQuery.data) return null;
+    const grouped = groupExpansions(runQuery.data, attemptsQuery.data ?? [], unfolded);
+    return buildDagGraph({ nodes: grouped.nodes, edges: grouped.edges }, attemptsQuery.data ?? []);
+  }, [runQuery.data, attemptsQuery.data, unfolded]);
 
   const selectNode = (nodeId: string) => {
     const next = new URLSearchParams(params);
@@ -212,6 +221,7 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
             // fit-to-view, so this page's polling cannot re-fit the view under
             // an operator who has zoomed in on a node.
             exportName={runId}
+            onToggleGroup={toggleGroup}
           />
         ) : null}
       </div>

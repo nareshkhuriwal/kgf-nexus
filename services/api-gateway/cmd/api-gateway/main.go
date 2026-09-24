@@ -111,7 +111,10 @@ func run() error {
 		// Nothing else in the deployment aggregates per-service health: each
 		// service serves its own /healthz and /readyz, but the gateway is the only
 		// ingress, so a console has no route to them.
-		WithFleetHealth(upstream.Fleet{WFM: wfmClient, RM: rmClient, Sched: schedClient})
+		WithFleetHealth(upstream.Fleet{WFM: wfmClient, RM: rmClient, Sched: schedClient}).
+		// Memo invalidation rides the scheduler client's dag-engine connection,
+		// the gateway's one existing route to the owner of memo_invalidations.
+		WithCacheInvalidator(schedClient)
 
 	// Rate limiting is opt-in because a limit guessed wrong is itself an outage:
 	// the right number depends on fleet size and the console's poll interval. Off

@@ -118,6 +118,12 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	sweeper.LivenessWindow = cfg.livenessWindow
 	sweeper.Interval = cfg.sweepInterval
 
+	qcfg, err := server.QuarantineConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("quarantine config: %w", err)
+	}
+	detector := server.NewQuarantineDetector(st, log, qcfg)
+
 	// PeerServerOptions bounds how long one connection lives. Without it a client
 	// that connected before an address swap keeps using a healthy connection to
 	// whatever now answers at the old address, and nothing re-resolves it.
@@ -148,7 +154,7 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	var ready atomic.Bool
 	httpSrv := healthServer(cfg.httpAddr, pool, &ready)
 
-	errs := make(chan error, 3)
+	errs := make(chan error, 4)
 	go func() {
 		log.Info("gRPC serving", "addr", cfg.grpcAddr)
 		ready.Store(true)
@@ -168,6 +174,16 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 			"liveness_window", cfg.livenessWindow, "interval", cfg.sweepInterval)
 		if err := sweeper.Run(ctx); err != nil {
 			errs <- fmt.Errorf("sweeper: %w", err)
+		}
+	}()
+
+	go func() {
+		log.Info("worker quarantine detector starting",
+			"enabled", qcfg.Enabled, "interval", qcfg.Interval, "window", qcfg.Window,
+			"min_failures", qcfg.MinFailures, "min_distinct_tasks", qcfg.MinDistinctTasks,
+			"max_fleet_fraction", qcfg.MaxFleetFraction)
+		if err := detector.Run(ctx); err != nil {
+			errs <- fmt.Errorf("quarantine detector: %w", err)
 		}
 	}()
 

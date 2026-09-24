@@ -37,6 +37,21 @@ const (
 	ErrBadDefault          ErrorCode = "invalid_default_json"
 	ErrTriggerRuleDeferred ErrorCode = "trigger_rule_not_in_phase_1"
 	ErrMissingTaskRef      ErrorCode = "missing_task_ref"
+	// ErrReservedNodeID: "[" and "]" are reserved for dynamic-expansion child
+	// ids ("process[3]"), so an authored id containing them could collide with a
+	// child the engine materializes.
+	ErrReservedNodeID ErrorCode = "reserved_node_id"
+
+	// Dynamic expansion (§5.4).
+	ErrMapMaxFanout ErrorCode = "map_max_fanout_invalid"
+	ErrMapSource    ErrorCode = "map_source_invalid"
+	ErrMapItemInput ErrorCode = "map_item_input_invalid"
+	ErrMapFanInType ErrorCode = "map_fan_in_type_mismatch"
+	ErrMapFanInSize ErrorCode = "map_fan_in_too_large"
+
+	// Memoization (§6.4).
+	ErrCacheTTLRequired   ErrorCode = "cache_ttl_invalid"
+	ErrCacheNotIdempotent ErrorCode = "cache_requires_idempotency"
 )
 
 // ValidationError is one specific, actionable problem with a spec.
@@ -157,6 +172,28 @@ type ValidationOptions struct {
 	// edge), so it is an error by default, but a spec generator that emits
 	// deliberately isolated nodes can opt out.
 	AllowUnreachable bool
+
+	// MaxFanoutCeiling is the operator's upper bound on any template's declared
+	// max_fanout. Zero means DefaultMaxFanoutCeiling.
+	MaxFanoutCeiling int
+
+	// MaxFanInBytes is the limit on an assembled fan-in array. Zero means
+	// DefaultMaxFanInBytes.
+	MaxFanInBytes int64
+}
+
+func (o ValidationOptions) fanInLimit() int64 {
+	if o.MaxFanInBytes > 0 {
+		return o.MaxFanInBytes
+	}
+	return DefaultMaxFanInBytes
+}
+
+func (o ValidationOptions) fanoutCeiling() int {
+	if o.MaxFanoutCeiling > 0 {
+		return o.MaxFanoutCeiling
+	}
+	return DefaultMaxFanoutCeiling
 }
 
 // DefaultValidationOptions is the Phase-1 policy.
@@ -189,6 +226,7 @@ func Validate(spec *nexusv1.WorkflowSpec, opts ValidationOptions) (*Graph, Valid
 	}
 	errs = append(errs, validateTriggerRules(g, opts)...)
 	errs = append(errs, validateInterfaces(g)...)
+	errs = append(errs, validateMaps(g, opts)...)
 
 	sortErrors(errs)
 	return g, errs
@@ -218,6 +256,12 @@ func validateNodes(spec *nexusv1.WorkflowSpec) ValidationErrors {
 		if strings.TrimSpace(id) == "" {
 			errs = append(errs, ValidationError{Code: ErrEmptyNodeID, Msg: "task has an empty id"})
 			continue
+		}
+		if strings.ContainsAny(id, "[]") {
+			errs = append(errs, ValidationError{
+				Code: ErrReservedNodeID, NodeID: id,
+				Msg: "node ids may not contain '[' or ']'; those characters are reserved for dynamic-expansion children",
+			})
 		}
 		seen[id]++
 		if seen[id] == 2 {
@@ -493,10 +537,25 @@ func validateInterfaces(g *Graph) ValidationErrors {
 			if _, bound := boundBy[inName]; bound {
 				continue
 			}
+			if down.IsTemplate() && inName == down.Spec.GetMap().GetItemInput() {
+				// Satisfied by the expansion itself, one element per child.
+				continue
+			}
 			if vs.GetDefaultJson() != "" {
 				continue
 			}
-			if p, ok := g.Params[inName]; ok {
+			// F18's bindings satisfy an input too. The validator predates them, so a
+			// literal-bound required input was reported unsatisfied even though
+			// input resolution delivers it -- and a param bound under a different
+			// name was checked against the wrong param.
+			if _, lit := down.Spec.GetInputLiterals()[inName]; lit {
+				continue
+			}
+			paramName := inName
+			if bound := down.Spec.GetInputParams()[inName]; bound != "" {
+				paramName = bound
+			}
+			if p, ok := g.Params[paramName]; ok {
 				// A param can satisfy an input only if its type is compatible;
 				// otherwise the mismatch just moves from the edge to the binding.
 				if assignable(p.GetType(), vs.GetType()) {
@@ -515,6 +574,185 @@ func validateInterfaces(g *Graph) ValidationErrors {
 		}
 	}
 	return errs
+}
+
+// validateMaps checks every map template (§5.4) at submit time, so an expansion
+// that could never work fails on the author's desk rather than mid-run:
+//
+//   - max_fanout is mandatory, positive, and within the operator's ceiling;
+//   - the collection comes from a DIRECT upstream (an edge exists), through an
+//     output that upstream declares, typed json (a list has no other type);
+//   - item_input is a declared input of the template, bound by no edge (the
+//     expansion binds it, per child);
+//   - a template's outputs reach downstream only as json, because the value a
+//     downstream receives is the ARRAY of child outputs, not one of them;
+//   - templates do not nest: a template's children are ordinary tasks.
+func validateMaps(g *Graph, opts ValidationOptions) ValidationErrors {
+	var errs ValidationErrors
+	ceiling := opts.fanoutCeiling()
+	for _, id := range sortedKeys(g.nodes) {
+		n := g.nodes[id]
+		m := n.Spec.GetMap()
+		if m == nil {
+			continue
+		}
+		if mf := int(m.GetMaxFanout()); mf <= 0 {
+			errs = append(errs, ValidationError{
+				Code: ErrMapMaxFanout, NodeID: id, Field: "map.max_fanout",
+				Msg: "max_fanout is mandatory and must be positive; an unbounded fan-out is how one runaway upstream takes the database down (§5.4)",
+			})
+		} else if mf > ceiling {
+			errs = append(errs, ValidationError{
+				Code: ErrMapMaxFanout, NodeID: id, Field: "map.max_fanout",
+				Msg: fmt.Sprintf("max_fanout %d exceeds the platform ceiling of %d", mf, ceiling),
+			})
+		}
+
+		src := m.GetOverNodeId()
+		up := g.nodes[src]
+		switch {
+		case src == "":
+			errs = append(errs, ValidationError{Code: ErrMapSource, NodeID: id, Field: "map.over_node_id",
+				Msg: "over_node_id is required: it names the upstream whose output is the collection"})
+		case up == nil:
+			errs = append(errs, ValidationError{Code: ErrMapSource, NodeID: id, Field: "map.over_node_id",
+				Msg: fmt.Sprintf("over_node_id %q is not a task in this workflow", src)})
+		case !contains(g.preds[id], src):
+			errs = append(errs, ValidationError{Code: ErrMapSource, NodeID: id, Field: "map.over_node_id",
+				Msg: fmt.Sprintf("over_node_id %q must be a direct upstream of %s: add an edge %s->%s so the dependency is part of the graph", src, id, src, id)})
+		}
+		if up != nil {
+			outName := m.GetOverOutput()
+			outSpec, ok := up.Spec.GetOutputs()[outName]
+			switch {
+			case outName == "":
+				errs = append(errs, ValidationError{Code: ErrMapSource, NodeID: id, Field: "map.over_output",
+					Msg: "over_output is required: it names the upstream output holding the JSON array"})
+			case !ok:
+				errs = append(errs, ValidationError{Code: ErrMapSource, NodeID: id, Field: "map.over_output",
+					Msg: fmt.Sprintf("%s declares no output %q", src, outName)})
+			case !up.IsTemplate() && outSpec.GetType() != "json":
+				// A template's outputs reach downstream as the ARRAY of its
+				// children's values, which is json whatever each child declares,
+				// so mapping over a template's fan-in is always well-typed.
+				errs = append(errs, ValidationError{Code: ErrMapSource, NodeID: id, Field: "map.over_output",
+					Msg: fmt.Sprintf("%s.%s is %s; a mapped collection must be json (an array)", src, outName, outSpec.GetType())})
+			}
+		}
+
+		item := m.GetItemInput()
+		if item == "" {
+			errs = append(errs, ValidationError{Code: ErrMapItemInput, NodeID: id, Field: "map.item_input",
+				Msg: "item_input is required: it names the input each child receives its element through"})
+		} else {
+			if _, ok := n.Spec.GetInputs()[item]; !ok {
+				errs = append(errs, ValidationError{Code: ErrMapItemInput, NodeID: id, Field: "map.item_input",
+					Msg: fmt.Sprintf("%s declares no input %q", id, item)})
+			}
+			for _, e := range g.edgeByTo[id] {
+				if _, bound := e.OutputToInput[item]; bound {
+					errs = append(errs, ValidationError{Code: ErrMapItemInput, NodeID: id,
+						Field: fmt.Sprintf("edge %s->%s[%s]", e.From, id, item),
+						Msg:   fmt.Sprintf("input %q is bound by the map, one element per child; an edge binding it would give every child the whole value", item)})
+				}
+			}
+			if _, lit := n.Spec.GetInputLiterals()[item]; lit {
+				errs = append(errs, ValidationError{Code: ErrMapItemInput, NodeID: id, Field: "input_literals." + item,
+					Msg: fmt.Sprintf("input %q is bound by the map and cannot also be a literal", item)})
+			}
+		}
+
+		for _, down := range g.succs[id] {
+			dn := g.nodes[down]
+			for _, e := range g.edgeByTo[down] {
+				if e.From != id {
+					continue
+				}
+				for inName, outName := range e.OutputToInput {
+					// Static fan-in bound: when the template declares how large each
+					// child's value can be, max_fanout of them either fits the
+					// platform's fan-in limit or does not, and "does not" is known
+					// now -- rejecting here is cheaper than a run that fails after
+					// max_fanout children did their work.
+					if ob := n.Spec.GetOutputs()[outName].GetMaxBytes(); ob > 0 && m.GetMaxFanout() > 0 {
+						mf := int64(m.GetMaxFanout())
+						worst := mf*ob + (mf - 1) + 2 // elements, commas, brackets
+						if worst > opts.fanInLimit() {
+							errs = append(errs, ValidationError{Code: ErrMapFanInSize, NodeID: down,
+								Field: fmt.Sprintf("edge %s->%s[%s<-%s]", id, down, inName, outName),
+								Msg: fmt.Sprintf("the fan-in of %s.%s can reach %d bytes (max_fanout %d x max_bytes %d), over the %d-byte fan-in limit; "+
+									"lower max_fanout, declare a smaller max_bytes, or emit blob outputs (passed by reference)",
+									id, outName, worst, mf, ob, opts.fanInLimit())})
+						}
+					}
+					if vs, ok := dn.Spec.GetInputs()[inName]; ok && vs.GetType() != "json" {
+						errs = append(errs, ValidationError{Code: ErrMapFanInType, NodeID: down,
+							Field: fmt.Sprintf("edge %s->%s[%s]", id, down, inName),
+							Msg:   fmt.Sprintf("%s is a map template, so %s receives a JSON array of its children's outputs; declare input %q as json", id, down, inName)})
+					}
+				}
+			}
+		}
+	}
+	return errs
+}
+
+// DefaultCacheTTLMs applies when a task enables memoization without a TTL:
+// §4.3's illustrative spec uses 7d, and a finite default means an entry cannot
+// outlive every reason it was valid just because the author omitted a field.
+const DefaultCacheTTLMs int64 = 7 * 24 * 60 * 60 * 1000
+
+// CacheTTLMs is the effective memoization TTL for a task.
+func CacheTTLMs(spec *nexusv1.TaskSpec) int64 {
+	if ttl := spec.GetCache().GetTtlMs(); ttl > 0 {
+		return ttl
+	}
+	return DefaultCacheTTLMs
+}
+
+// Memoizable reports whether a task's results may be reused (§6.4): opt-in,
+// and never for work that declared it is not idempotent. A task that cannot be
+// run twice safely is certainly not pure enough to have its result reused, and
+// memoizing it would hide the one execution the author said must happen.
+func Memoizable(spec *nexusv1.TaskSpec) bool {
+	return spec.GetCache().GetEnabled() &&
+		spec.GetIdempotency() != nexusv1.IdempotencyMode_IDEMPOTENCY_MODE_NONE
+}
+
+// ValidateCache is the SUBMIT-TIME memoization check.
+//
+// Deliberately not part of Validate: Validate also runs when the DAG engine
+// materializes a stored spec, and a rule added now must not make a spec that
+// was accepted yesterday impossible to run today (ADR-0011 rule 5). The runtime
+// enforces the same rule anyway -- Memoizable is false for idempotency:none --
+// so an old spec loses only the (never-delivered) memoization, not its run.
+func ValidateCache(spec *nexusv1.WorkflowSpec) ValidationErrors {
+	var errs ValidationErrors
+	for _, t := range spec.GetTasks() {
+		c := t.GetCache()
+		if !c.GetEnabled() {
+			continue
+		}
+		if c.GetTtlMs() < 0 {
+			errs = append(errs, ValidationError{Code: ErrCacheTTLRequired, NodeID: t.GetId(), Field: "cache.ttl_ms",
+				Msg: "ttl_ms must not be negative"})
+		}
+		if t.GetIdempotency() == nexusv1.IdempotencyMode_IDEMPOTENCY_MODE_NONE {
+			errs = append(errs, ValidationError{Code: ErrCacheNotIdempotent, NodeID: t.GetId(), Field: "cache.enabled",
+				Msg: "idempotency: none cannot be memoized; memoization is only valid for pure tasks"})
+		}
+	}
+	sortErrors(errs)
+	return errs
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }
 
 func sortedMapKeys(m map[string]string) []string {

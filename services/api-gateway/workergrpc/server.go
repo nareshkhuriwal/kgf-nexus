@@ -290,7 +290,12 @@ func (s *Server) reconcileAndBuildDirectives(ctx context.Context, workerID, work
 	// DRAIN rides the heartbeat because the control plane cannot dial the worker.
 	// At a 5s heartbeat, worst-case drain latency is 5s, which is entirely
 	// adequate for a deploy or a scale-in (ADR-0005).
-	if workerState == "DRAINING" || workerState == "QUARANTINED" {
+	// QUARANTINED deliberately gets NO drain directive. The agent treats DRAIN as
+	// permanent (it never re-admits work), so draining a quarantined worker would
+	// make release meaningless. It needs none: the claim admits only ACTIVE
+	// workers, so a quarantined one is simply never handed new work while it
+	// finishes what it holds, and resumes the moment it is released.
+	if workerState == "DRAINING" {
 		directives = append(directives, &nexusv1.Directive{
 			Kind:    nexusv1.DirectiveKind_DIRECTIVE_KIND_DRAIN,
 			GraceMs: int32(s.cfg.CancelGrace.Milliseconds()),

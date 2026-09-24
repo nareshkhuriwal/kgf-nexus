@@ -86,8 +86,8 @@ class OutputRef:
     def __iter__(self) -> Any:
         raise SpecError(
             f"cannot iterate {self!r}: the size of a task's output is a runtime "
-            "property. Fan-out over a runtime collection needs dynamic expansion "
-            "(architecture §5.4), which is deferred past Phase 1."
+            "property. To fan out over a runtime collection use dynamic expansion: "
+            "`some_task.map(this_output, item=\"param\", max_fanout=N)` (§5.4)."
         )
 
     def __getattr__(self, item: str) -> Any:
@@ -152,8 +152,8 @@ class TaskInvocation:
     def __iter__(self) -> Any:
         raise SpecError(
             f"cannot iterate {self!r}: the size of a task's output is a runtime "
-            "property. Fan-out over a runtime collection needs dynamic expansion "
-            "(architecture §5.4), which is deferred past Phase 1."
+            "property. To fan out over a runtime collection use dynamic expansion: "
+            "`some_task.map(this_output, item=\"param\", max_fanout=N)` (§5.4)."
         )
 
     def __repr__(self) -> str:
@@ -186,6 +186,8 @@ class _Node:
     literals: dict[str, Any]
     params: dict[str, str]
     upstream: dict[str, tuple[str, str]]  # input name -> (from_node, output)
+    # Set on a dynamic-expansion TEMPLATE (§5.4): the wire MapSpec.
+    map_spec: dict[str, Any] | None = None
 
 
 class _Builder:
@@ -237,6 +239,67 @@ class _Builder:
         self.nodes.append(node)
         self._by_id[node_id] = node
         return TaskInvocation(node_id, definition.declared_outputs)
+
+    def add_map_node(
+        self,
+        definition: Any,
+        over: Any,
+        item: str,
+        max_fanout: int,
+        args: Sequence[Any],
+        kwargs: Mapping[str, Any],
+    ) -> TaskInvocation:
+        """Record a map TEMPLATE node (§5.4).
+
+        `over` names the collection; `item` is the handler parameter each child
+        receives one element through. The remaining arguments bind exactly as
+        for an ordinary call and are shared by every child. The returned handle's
+        outputs are, at run time, JSON ARRAYS of the children's outputs in
+        element order -- which is what a downstream fan-in task receives.
+        """
+        if isinstance(over, TaskInvocation):
+            over = over.primary
+        if not isinstance(over, OutputRef):
+            raise SpecError(
+                f"{definition.task_ref}.map: `over` must be an upstream task output, got "
+                f"{type(over).__name__}; a literal list is known at compile time and "
+                "needs no dynamic expansion"
+            )
+        if isinstance(max_fanout, bool) or not isinstance(max_fanout, int) or max_fanout < 1:
+            raise SpecError(
+                f"{definition.task_ref}.map: max_fanout is mandatory and must be a positive "
+                f"integer, got {max_fanout!r}. An unbounded fan-out is how one runaway "
+                "upstream takes the control plane down (§5.4)."
+            )
+        names = definition.parameter_names
+        if names and item not in names:
+            raise SpecError(
+                f"{definition.task_ref}.map: item={item!r} is not a handler parameter; "
+                f"parameters are {', '.join(names) or 'none'}"
+            )
+        if item in kwargs:
+            raise SpecError(
+                f"{definition.task_ref}.map: {item!r} is bound by the map, one element per "
+                "child; do not also pass it"
+            )
+        # Positional args must skip the item parameter: bind by name instead.
+        remaining = [n for n in names if n != item]
+        if len(args) > len(remaining):
+            raise SpecError(
+                f"{definition.task_ref}.map: too many positional arguments; pass shared "
+                "inputs by keyword"
+            )
+        kw = dict(zip(remaining, args))
+        kw.update(kwargs)
+        inv = self.add_node(definition, (), kw)
+        node = self._by_id[inv.node_id]
+        node.map_spec = {
+            "over_node_id": over.node_id,
+            "over_output": over.output,
+            "item_input": item,
+            "max_fanout": int(max_fanout),
+        }
+        return inv
 
     def _bind_arguments(
         self, definition: Any, node_id: str, args: Sequence[Any], kwargs: Mapping[str, Any]
@@ -488,7 +551,10 @@ class WorkflowDefinition:
         for node in builder.nodes:
             inputs: dict[str, ValueSpec] = {}
             declared = getattr(node.definition, "_decl").inputs or {}
-            for name in sorted(set(node.literals) | set(node.params) | set(node.upstream)):
+            bound_names = set(node.literals) | set(node.params) | set(node.upstream)
+            if node.map_spec is not None:
+                bound_names.add(node.map_spec["item_input"])
+            for name in sorted(bound_names):
                 if name in declared:
                     inputs[name] = declared[name]
                     continue
@@ -510,6 +576,16 @@ class WorkflowDefinition:
                 }
             if node.params:
                 spec["input_params"] = dict(sorted(node.params.items()))
+            if node.map_spec is not None:
+                spec["map"] = dict(sorted(node.map_spec.items()))
+                src = node.map_spec["over_node_id"]
+                if src not in known:
+                    raise SpecError(
+                        f"node {node.node_id!r} maps over {src!r}, which is not part of this workflow"
+                    )
+                # The collection's producer must be a DIRECT upstream in the graph,
+                # not an implication of a string (the server validates the same).
+                edge_map.setdefault((src, node.node_id), {})
             tasks.append(spec)
 
             for input_name, (from_node, output) in node.upstream.items():

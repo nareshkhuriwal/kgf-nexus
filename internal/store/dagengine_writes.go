@@ -140,6 +140,15 @@ type NewAttempt struct {
 	// InputRefs is the resolved upstream output mapping, as JSONB.
 	InputRefs []byte
 	MapIndex  *int32
+
+	// MemoHitOf, when set, makes this a MEMOIZED attempt (§6.4): it is inserted
+	// directly as SUCCEEDED with MemoOutputRef, naming the attempt whose result
+	// it reuses, and is never dispatched. Creation is the engine's concern, so
+	// deciding "this work need not run" belongs here rather than in the claim:
+	// the row is never PENDING, so no scheduler can race to dispatch it, and the
+	// §5.3 hot path pays nothing for memoization.
+	MemoHitOf     *string
+	MemoOutputRef []byte
 }
 
 // ApplyNodeStateAndCreateAttempts applies node-state transitions and creates the
@@ -181,6 +190,17 @@ type NewAttempt struct {
 func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 	ctx context.Context, runID string, transitions []NodeTransition, attempts []NewAttempt,
 ) (Applied, error) {
+	return s.ApplyReconcile(ctx, runID, transitions, attempts, nil)
+}
+
+// ApplyReconcile is ApplyNodeStateAndCreateAttempts plus fan-in refusals: a
+// refused node's transition (which the caller has already pointed at FAILED)
+// and its fan_in_refusals row commit together, so a FAILED node never lacks
+// its reason and a reason never names a node that is not FAILED.
+func (s *DAGEngineStore) ApplyReconcile(
+	ctx context.Context, runID string, transitions []NodeTransition, attempts []NewAttempt,
+	refusals []FanInRefusal,
+) (Applied, error) {
 	var res Applied
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -211,6 +231,29 @@ func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 		res.NodesUpdated++
 	}
 
+	failedNow := map[string]bool{}
+	for _, t := range transitions {
+		if t.To == domain.NodeFailed {
+			failedNow[t.NodeID] = true
+		}
+	}
+	for _, r := range refusals {
+		if !failedNow[r.NodeID] || containsString(res.NodeCASMisses, r.NodeID) {
+			// Another reconciler owns this node's transition; it records the reason.
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO fan_in_refusals
+			  (run_id, node_id, template_node_id, template_output, limit_bytes,
+			   children_total, children_before_limit, reason, detail)
+			VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (run_id, node_id) DO NOTHING`,
+			runID, r.NodeID, r.TemplateNodeID, r.TemplateOutput, r.LimitBytes,
+			r.ChildrenTotal, r.ChildrenBeforeLimit, r.Reason, r.Detail); err != nil {
+			return res, fmt.Errorf("record fan-in refusal for %s/%s: %w", runID, r.NodeID, err)
+		}
+	}
+
 	// attempts_used is incremented with the attempt row so the retry budget can
 	// never drift from the number of attempts that actually exist.
 	// Read in its own statement so the value is FIXED before the insert. Folding
@@ -236,6 +279,21 @@ func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 		RETURNING id, run_id, queue, scheduled_at, attempt_number
 		),` + outboxTaskReadyCTE + `
 		SELECT id::text, attempt_number FROM a`
+
+	// A memo hit is born terminal. It carries no worker, lease or reservation, so
+	// nothing in the scheduler ever selects it (every scheduler query filters on
+	// a non-terminal state), and invariant 9 holds trivially: it is never mutated
+	// after this INSERT. started_at = ended_at = now records that it took no time.
+	const insMemoAttempt = `
+		INSERT INTO task_attempts
+		  (run_id, node_id, attempt_number, state, queue, priority,
+		   resource_request, idempotency_key, cache_key, input_refs,
+		   output_ref, cache_hit_of, scheduled_at, started_at, ended_at)
+		VALUES ($1::uuid, $2, $3,
+		        'SUCCEEDED'::attempt_state, $4, $5, $6, $7, $8, $9,
+		        $10, $11::uuid, now(), now(), now())
+		ON CONFLICT (run_id, node_id, attempt_number) DO NOTHING
+		RETURNING id::text, attempt_number`
 
 	const bumpUsed = `
 		UPDATE task_nodes SET attempts_used = attempts_used + 1
@@ -272,8 +330,15 @@ func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 
 		var id string
 		var num int32
-		qerr := tx.QueryRow(ctx, insAttempt, runID, a.NodeID, next, queue, a.Priority,
-			resJSON, a.IdempotencyKey, a.CacheKey, inputs).Scan(&id, &num)
+		var qerr error
+		if a.MemoHitOf != nil {
+			qerr = tx.QueryRow(ctx, insMemoAttempt, runID, a.NodeID, next, queue, a.Priority,
+				resJSON, a.IdempotencyKey, a.CacheKey, inputs,
+				nullableJSON(a.MemoOutputRef), *a.MemoHitOf).Scan(&id, &num)
+		} else {
+			qerr = tx.QueryRow(ctx, insAttempt, runID, a.NodeID, next, queue, a.Priority,
+				resJSON, a.IdempotencyKey, a.CacheKey, inputs).Scan(&id, &num)
+		}
 		if errors.Is(qerr, pgx.ErrNoRows) {
 			// The ON CONFLICT fired: this attempt number already exists, so a
 			// concurrent reconciler created it. Not an error; the work exists.
@@ -287,7 +352,7 @@ func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 			return res, fmt.Errorf("bump attempts_used for %s/%s: %w", runID, a.NodeID, uerr)
 		}
 		res.AttemptsCreated = append(res.AttemptsCreated, CreatedAttempt{
-			AttemptID: id, NodeID: a.NodeID, AttemptNumber: num,
+			AttemptID: id, NodeID: a.NodeID, AttemptNumber: num, CacheHitOf: a.MemoHitOf,
 		})
 	}
 
@@ -309,6 +374,9 @@ type CreatedAttempt struct {
 	AttemptID     string
 	NodeID        string
 	AttemptNumber int32
+	// CacheHitOf is set when the attempt was satisfied from the memo cache and
+	// names the attempt whose result it reused.
+	CacheHitOf *string
 }
 
 // Applied reports what a reconcile actually changed. The misses and conflicts are

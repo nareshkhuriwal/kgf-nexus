@@ -35,6 +35,7 @@ import type {
   SpecVersion,
   StartBackfillRequest,
   Worker,
+  WorkerQuarantine,
   WorkerDetail,
   WorkflowSummary,
 } from './types';
@@ -510,6 +511,40 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
+    });
+  },
+
+  /** Take a worker out of placement. durationMs 0 = until released. */
+  quarantineWorker(namespace: string, workerId: string, reason: string, durationMs = 0): Promise<void> {
+    return request<void>(`${ns(namespace)}/workers/${encodeURIComponent(workerId)}/quarantine`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason, duration_ms: durationMs }),
+    });
+  },
+
+  releaseWorker(namespace: string, workerId: string, reason = ''): Promise<void> {
+    return request<void>(`${ns(namespace)}/workers/${encodeURIComponent(workerId)}/release`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+  },
+
+  async listWorkerQuarantines(namespace: string, workerId: string): Promise<WorkerQuarantine[]> {
+    const payload = await request<unknown>(`${ns(namespace)}/workers/${encodeURIComponent(workerId)}/quarantines`);
+    return asList<WorkerQuarantine>(payload, 'quarantines');
+  },
+
+  /** Stop reusing memoized results of a task (or one cache key). */
+  invalidateCache(
+    namespace: string,
+    sel: { task_ref?: string; task_version?: number; cache_key?: string; reason?: string },
+  ): Promise<{ invalidation_id: number; invalidated_at: string }> {
+    return request(`${ns(namespace)}/cache/invalidations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(sel),
     });
   },
 
