@@ -31,15 +31,15 @@ import (
 
 // Event is one durable entry in a run's history.
 type Event struct {
-	ID         int64             `json:"id"`
-	RunID      string            `json:"run_id"`
-	Seq        int32             `json:"seq"`
-	NodeID     *string           `json:"node_id,omitempty"`
-	AttemptID  *string           `json:"attempt_id,omitempty"`
-	Kind       string            `json:"kind"`
-	Payload    map[string]any    `json:"payload"`
-	Actor      string            `json:"actor"`
-	OccurredAt time.Time         `json:"occurred_at"`
+	ID         int64          `json:"id"`
+	RunID      string         `json:"run_id"`
+	Seq        int32          `json:"seq"`
+	NodeID     *string        `json:"node_id,omitempty"`
+	AttemptID  *string        `json:"attempt_id,omitempty"`
+	Kind       string         `json:"kind"`
+	Payload    map[string]any `json:"payload"`
+	Actor      string         `json:"actor"`
+	OccurredAt time.Time      `json:"occurred_at"`
 }
 
 // Store is the data access surface for run_events.
