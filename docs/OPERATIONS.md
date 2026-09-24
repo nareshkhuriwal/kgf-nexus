@@ -761,3 +761,62 @@ the object durable strictly before the row is written, an object that existed at
 T1 still exists at T2. A false *negative* (an object deleted after the check) is
 acceptable and shows up next run; a false *positive* would send someone hunting
 for data loss that never happened.
+
+## 9. Dynamic expansion, memoization and worker quarantine
+
+### 9.1 Dynamic expansion (§5.4)
+
+- **Operator ceiling on `max_fanout`.** Submit-time validation rejects a template whose
+  `max_fanout` exceeds 10,000 (`dag.DefaultMaxFanoutCeiling`). The fan-in value is an inline
+  JSON array assembled in the control plane; at the ceiling and the 64 KiB inline threshold
+  that is bounded but can reach hundreds of MiB, so prefer small per-child outputs (or blob
+  outputs, which are passed as references).
+- **Why did a map node fail?** `SELECT outcome, reason, detail, item_count, max_fanout FROM
+  task_expansions WHERE run_id = '<run>'`, or the run page (the node footer reads "expansion
+  refused: …"). Reasons: `max_fanout_exceeded`, `collection_missing`, `collection_not_array`,
+  `collection_not_inline`.
+- The console folds a template's children into the template; unfold is offered up to 50.
+
+### 9.2 Memoization (§6.4)
+
+- **Invalidate** when a memoized task's results must not be reused (bad input data, a
+  handler bug fixed without a version bump):
+
+  ```sh
+  curl -X POST "$NEXUS_ENDPOINT/v1/namespaces/$NS/cache/invalidations" \
+       -H "Authorization: Bearer $NEXUS_API_KEY" \
+       -d '{"task_ref":"fanout.process_shard","reason":"reprocess after bad listing"}'
+  ```
+
+  Add `"task_version": N` to scope to one version, or pass `"cache_key"` for one entry.
+  Needs `workflows.cache.invalidate`. It removes nothing; later runs simply execute.
+  Bumping the task's `version` is the author-side equivalent.
+- **Which nodes were cached?** `SELECT node_id, cache_hit_of FROM task_attempts WHERE run_id =
+  '<run>' AND cache_hit_of IS NOT NULL`; `CacheHit` events name the source attempt.
+
+### 9.3 Worker quarantine (§5.5)
+
+Detector settings (resource-manager environment), with defaults:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NEXUS_QUARANTINE_ENABLED` | `true` | Detection on/off. Expiry of existing quarantines runs either way. |
+| `NEXUS_QUARANTINE_INTERVAL` | `30s` | Pass period. |
+| `NEXUS_QUARANTINE_WINDOW` | `10m` | Evidence window. |
+| `NEXUS_QUARANTINE_MIN_FAILURES` | `3` | Infrastructure-class failures needed. |
+| `NEXUS_QUARANTINE_MIN_DISTINCT_TASKS` | `2` | Distinct `task_ref`s they must span (worker-, not task-correlated). |
+| `NEXUS_QUARANTINE_MIN_FAILURE_RATIO` | `0.5` | Share of the worker's terminal attempts. |
+| `NEXUS_QUARANTINE_BASE_DURATION` | `15m` | First automatic quarantine; doubles per relapse within 24h. |
+| `NEXUS_QUARANTINE_MAX_DURATION` | `24h` | Cap. |
+| `NEXUS_QUARANTINE_MAX_FLEET_FRACTION` | `0.5` | Most of a namespace that may be quarantined at once. |
+
+- **A burst of "not quarantined: namespace at its quarantine cap" errors** means many workers
+  fail the same way at once -- almost always a shared dependency (result store, registry,
+  network), not bad hosts. Fix the dependency; do not raise the cap.
+- **Manual:** `POST …/workers/{id}/quarantine {"reason": "...", "duration_ms": 0}` (0 =
+  until released) and `POST …/workers/{id}/release`; permission `workers.quarantine`
+  (Infrastructure Operator, Administrator). Both are audited.
+- **History:** `GET …/workers/{id}/quarantines`, the worker page, or `worker_quarantines`.
+- Quarantine follows the host: restarting the agent does not clear it. Release it instead.
+- **Rolling back 0021** (break-glass): release every quarantined worker first; with the
+  episode table gone nothing expires a quarantine.

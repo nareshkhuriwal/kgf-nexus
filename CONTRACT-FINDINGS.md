@@ -1844,3 +1844,44 @@ before trusting it green.
 
 **Related:** [[F89]] — the check that lies. The discipline that caught this is the one
 F89 prescribes: prove the instrument fails when the thing is broken.
+
+### F92. Dynamic expansion, memoization and worker quarantine — IMPLEMENTED
+
+(Numbered from this branch's high-water mark, F91. Parallel branches may also have
+taken F92 -- see F88; renumber on merge, this entry references no other F92.)
+
+Three deferred features landed together because they share the attempt-creation and
+placement paths. Decisions a reviewer should know, each with its reason:
+
+- **§6.4 said the SCHEDULER short-circuits on dispatch. The DAG ENGINE does, at attempt
+  creation.** A hit is born `SUCCEEDED` with `cache_hit_of`, so it is never `PENDING`: no
+  race with the §5.3 claim, and the claim (being reworked on two other branches) is
+  untouched. This extends the "task_attempts: creation vs mutation" split above: the
+  engine now INSERTs either a `PENDING` attempt or a terminal memoized one, and still
+  never UPDATEs. The existing INSERT-only grant covers it.
+- **The memo key includes the namespace**, beyond §6.4's formula, for tenant isolation.
+- **Templates are engine state, not attempt projections (extends F14).** A map template
+  never has attempts; `deriveNodeStates` keeps its stored state. Deriving "no attempts ->
+  PENDING" would un-expand it and wedge the run.
+- **F2 applies to children unchanged:** a retry-exhausted child folds to `FAILED`, and the
+  template aggregates FAILED > CANCELLED > SKIPPED > SUCCEEDED.
+- **F52b:** both schema copies gained `MapSpec`; `TestEmbeddedSchemaMatchesCanonical` passes.
+- **Pre-existing gap fixed on the way:** `Validate` and `InputPlan` did not know F18's
+  `input_literals` / renamed `input_params`, so a spec binding a required input by
+  literal was rejected at materialize time, and the gateway never decoded either field
+  (so submit-time validation checked a different graph than the engine ran).
+- **Quarantine definition** (§11 listed it as deferred without one; §5.5/§10 imply it):
+  no new dispatches, triggered by infrastructure-class failures across distinct tasks,
+  fleet-capped, expiring, host-sticky, operator-releasable. `QUARANTINED` workers now keep
+  heartbeating and no longer receive `DRAIN` -- the agent treats DRAIN as permanent, which
+  would have made release a no-op.
+- **Pre-existing test rot found, not fixed:** the resource-manager server tests and several
+  `-tags integration` suites mint random namespaces and fail on any database migrated past
+  0014 ("Namespace must belong to a registered tenant"); they only pass against a dev DB
+  that happens to hold matching tenants. `registerWorker` in the RM tests now registers its
+  tenant; the reservation tests still fail for the same reason via fake attempts.
+
+**F89 discipline:** the guards that matter were mutation-tested -- removing the second
+template fold (cancel test goes red), counting templates as in flight (pause test red),
+dropping `cache_hit_of IS NULL` from the memo lookup (hit-of-a-hit test red), and dropping
+the distinct-task threshold (poison-task worker gets quarantined; test red).
