@@ -4,8 +4,10 @@
 #
 # Run the workload suite end to end and report each workflow's own verdict.
 #
-#   examples/run-suite.sh                 # all four, default sizes
+#   examples/run-suite.sh                 # the four quick workloads (~2 min)
 #   SUITE="csv ml" examples/run-suite.sh  # a subset
+#   SUITE=long examples/run-suite.sh      # the long ones: credit-risk ML (~11 min)
+#                                         # and GPU image processing (~7 min)
 #   SCALE=large examples/run-suite.sh     # bigger inputs
 #
 # Every workflow checks its own result (row accounting, a model quality gate, a
@@ -35,9 +37,11 @@ SCALE=${SCALE:-default}
 if [ "$SCALE" = large ]; then
   csv_params="rows_per_region=100000 seed=7"; ml_params="rows=50000 seed=11 min_r2=0.95"
   gpu_params="hold_seconds=20";               scale_params="count=1500"
+  credit_params="rows=100000 epochs=10 seed=2026 min_auc=0.75"; images_params="images=6 size=512 denoise_passes=3 min_accuracy=0.9"
 else
   csv_params="rows_per_region=20000 seed=7";  ml_params="rows=20000 seed=11 min_r2=0.95"
   gpu_params="hold_seconds=15";               scale_params="count=500"
+  credit_params="rows=60000 epochs=10 seed=2026 min_auc=0.75"; images_params="images=4 size=384 denoise_passes=2 min_accuracy=0.9"
 fi
 
 # key | example dir | workflow name | params | node whose output is the verdict
@@ -46,8 +50,12 @@ workloads=(
   "ml|ml_training_pipeline|ml-training-pipeline|$ml_params|quality_gate"
   "gpu|gpu_scheduling|gpu-scheduling|$gpu_params|audit"
   "scale|fanout_scale|fanout-scale|$scale_params|verify"
+  "credit|credit_risk_ml|credit-risk-ml|$credit_params|model_card"
+  "images|image_processing_gpu|image-processing-gpu|$images_params|quality_report"
 )
 SUITE=${SUITE:-csv ml gpu scale}
+[ "$SUITE" = long ] && SUITE="credit images"
+[ "$SUITE" = all ] && SUITE="csv ml gpu scale credit images"
 
 json() { python3 -c "import sys,json; d=json.load(sys.stdin); print(eval(sys.argv[1]))" "$1"; }
 
