@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/worker"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
@@ -124,6 +125,30 @@ func main() {
 		// NEXUS_NATS_URL / NEXUS_NATS_CREDS. Empty means poll-only, which is a
 		// complete, correct configuration (ADR-0003).
 		Bus: bus.ConfigFromEnv("nexus-agent"),
+	}
+
+	// The kubernetes executor is opt-in: it exists only when NEXUS_K8S_NAMESPACE
+	// names a target namespace. It is built ONCE here, outside the session loop,
+	// because it owns informers that must not be re-created on every REREGISTER.
+	kcfg, kEnabled, err := executor.LoadKubernetesConfigFromEnv(os.Getenv)
+	if err != nil {
+		// A malformed NEXUS_K8S_* is a deployment bug; failing fast beats an
+		// agent that silently advertises less than its operator intended.
+		log.Error("invalid kubernetes executor configuration", "error", err)
+		os.Exit(1)
+	}
+	if kEnabled {
+		client, cerr := executor.NewKubernetesClient(kcfg)
+		if cerr != nil {
+			// Not fatal: the agent still serves subprocess/docker work, and
+			// buildExecutors will simply not advertise kubernetes.
+			log.Error("could not build the kubernetes client; the kubernetes executor is disabled", "error", cerr)
+		}
+		ke := executor.NewKubernetesExecutor(kcfg, client, *workDir, log)
+		defer ke.Close()
+		cfg.Kubernetes = ke
+		log.Info("kubernetes executor configured", "namespace", kcfg.Namespace,
+			"owner", ke.Config.Owner, "helper_image", ke.Config.HelperImage)
 	}
 
 	if err := run(ctx, cfg, *controlPlane, log); err != nil {

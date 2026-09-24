@@ -1,0 +1,139 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# In-cluster Nexus agent running the Kubernetes executor.
+#
+# Each replica is an independent Nexus WORKER. It advertises the capacity below
+# to the Nexus scheduler and turns every attempt it is given into a Job in its
+# own namespace. The advertised capacity should match what the namespace can
+# really run (its ResourceQuota / node pool), because two schedulers are in play
+# (ADR-0007): Nexus places the attempt on this worker, then Kubernetes places
+# the pod. Over-advertising shows up as pods Pending "Unschedulable", reported
+# back to the control plane through ReportProgress.
+#
+# Apply order: executor-namespace.yaml, agent-rbac.yaml, executor-*.yaml, then
+# this file, after creating the worker API key Secret:
+#   kubectl -n nexus-exec create secret generic nexus-agent-credentials \
+#     --from-literal=api-key="$NEXUS_WORKER_API_KEY"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-agent
+  namespace: nexus-exec
+  labels:
+    app.kubernetes.io/name: nexus-agent
+    app.kubernetes.io/part-of: nexus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nexus-agent
+  strategy:
+    # Recreate, not RollingUpdate: an agent's pod name is its orphan-reaping
+    # identity, and a surge replica would briefly advertise capacity twice.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nexus-agent
+        app.kubernetes.io/part-of: nexus
+    spec:
+      serviceAccountName: nexus-agent
+      # The agent needs its token (it talks to the API server); tasks do not.
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      # Longer than NEXUS_DRAIN_GRACE: SIGTERM starts a DRAIN, and the agent
+      # must be allowed to finish in-flight attempts before the kubelet kills it.
+      terminationGracePeriodSeconds: 330
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          # PIN THIS to the digest your pipeline pushed (nexus/agent from
+          # deploy/Dockerfile.service, SERVICE_PATH=agent/cmd/nexus-agent).
+          # A floating tag lets two replicas run different agent versions.
+          image: nexus/agent:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NEXUS_CONTROL_PLANE
+              value: "api-gateway.nexus.svc:9091"
+            - name: NEXUS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nexus-agent-credentials
+                  key: api-key
+            - name: NEXUS_NAMESPACE
+              value: "default"
+            - name: NEXUS_QUEUES
+              value: "default"
+            - name: NEXUS_LABELS
+              value: "substrate=kubernetes"
+            # Capacity this worker offers to the Nexus scheduler (see header).
+            - name: NEXUS_CPU_MILLIS
+              value: "16000"
+            - name: NEXUS_MEMORY_BYTES
+              value: "34359738368"
+            - name: NEXUS_DISK_BYTES
+              value: "107374182400"
+            - name: NEXUS_WAL_DIR
+              value: /var/lib/nexus-agent/wal
+            - name: NEXUS_LOG_FORMAT
+              value: json
+            # ── Kubernetes executor ──────────────────────────────────────
+            # Setting the namespace is what enables the executor. Tasks run in
+            # the agent's OWN namespace, which is also what allows each Job to
+            # be owned by (and garbage-collected with) this agent pod.
+            - name: NEXUS_K8S_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: NEXUS_K8S_OWNER
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: NEXUS_K8S_OWNER_POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: NEXUS_K8S_OWNER_POD_UID
+              valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+            - name: NEXUS_K8S_OWNER_POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: NEXUS_K8S_SERVICE_ACCOUNT
+              value: nexus-task
+            - name: NEXUS_K8S_HELPER_IMAGE
+              value: busybox:1.37.0
+            - name: NEXUS_K8S_TTL_AFTER_FINISHED
+              value: 10m
+            # Uncomment for a GPU pool:
+            # - name: NEXUS_K8S_GPU_RESOURCE
+            #   value: nvidia.com/gpu
+            # - name: NEXUS_K8S_GPU_KIND_LABEL
+            #   value: nvidia.com/gpu.product
+            # - name: NEXUS_K8S_NODE_SELECTOR
+            #   value: "nexus.dev/pool=gpu"
+            # - name: NEXUS_K8S_TOLERATIONS
+            #   value: "nvidia.com/gpu:NoSchedule"
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: wal
+              mountPath: /var/lib/nexus-agent/wal
+            - name: work
+              mountPath: /tmp
+      volumes:
+        # emptyDir survives agent CONTAINER restarts (the common crash) but not
+        # pod deletion. That is consistent by design: deleting the pod also
+        # garbage-collects its Jobs, so there is nothing left to re-attach to,
+        # and those attempts become LOST via lease expiry and are retried.
+        - name: wal
+          emptyDir: {}
+        - name: work
+          emptyDir: {}

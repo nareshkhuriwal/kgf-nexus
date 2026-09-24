@@ -272,7 +272,7 @@ The worker agent is deliberately small. Its entire job is: register, prove liven
 │  ┌───────▼─────────────────────────────────────────────────┐             │
 │  │                     Executor (pluggable)                │             │
 │  │                                                          │             │
-│  │   subprocess │ docker │ k8s-pod │ (future: firecracker)  │             │
+│  │   subprocess │ docker │ kubernetes │ (future: firecracker)│             │
 │  │                                                          │             │
 │  │   • stage inputs from result store                       │             │
 │  │   • apply cgroup/container CPU+memory+GPU limits         │             │
@@ -682,7 +682,7 @@ semantics:
 
 # ── Runtime ───────────────────────────────────────────────────────────────
 runtime:
-  executor: docker             # subprocess | docker | k8s
+  executor: docker             # subprocess | docker | kubernetes (alias: k8s)
   image: registry/ml-train:3.1.0@sha256:abc...   # digest-pinned
   command: ["python", "-m", "train"]
   env:
@@ -1329,7 +1329,7 @@ In scope:
 - Docker Compose: Postgres, MinIO, control plane, 2 workers, UI.
 - Tests: DAG-engine property tests; a chaos suite that kills workers mid-task and asserts exactly-one-logical-effect.
 
-Explicitly deferred: dynamic expansion, cron schedules, backfill, NATS (since implemented as an optional transactional-outbox relay, ADR-0003), k8s executor, multi-tenancy beyond a single namespace, RBAC, memoization, quarantine.
+Explicitly deferred: dynamic expansion, cron schedules, backfill, NATS (since implemented as an optional transactional-outbox relay, ADR-0003), k8s executor (since delivered early; see Phase 3), multi-tenancy beyond a single namespace, RBAC, memoization, quarantine.
 
 *Exit criteria:* a 10-node DAG with mixed CPU/GPU tasks completes correctly; killing a worker mid-run yields exactly one logical effect per task; two schedulers never double-dispatch under load.
 
@@ -1337,7 +1337,7 @@ Explicitly deferred: dynamic expansion, cron schedules, backfill, NATS (since im
 NATS JetStream for sub-second dispatch and UI live updates. Cron schedules with timezone and catchup. Backfill with its own concurrency cap. Full trigger-rule set and conditional edges (sandboxed CEL). Memoization. Worker quarantine. Namespaces, RBAC, quotas. OpenTelemetry traces and the full Prometheus metric set. Retention and partition pruning. Multi-replica control plane with rolling upgrade and N-1 agent compatibility.
 
 ### Phase 3 — Scale and expressiveness
-Dynamic expansion with `max_fanout`. Sub-workflows and workflow-of-workflows. Event-driven triggers (webhook, bus, sensor tasks). Kubernetes executor via the `Executor` interface. Fair-share and preemption. Typed interface validation and lineage. Additional SDKs (TypeScript, Go) generated from `proto/`.
+Dynamic expansion with `max_fanout`. Sub-workflows and workflow-of-workflows. Event-driven triggers (webhook, bus, sensor tasks). Kubernetes executor via the `Executor` interface (**delivered**: `agent/internal/executor/kubernetes*.go`, one Job per attempt, conformance-tested against a local cluster; see ADR-0007 "Implementation notes" and CONTRACT-FINDINGS F92 for what it does not yet do). Fair-share and preemption. Typed interface validation and lineage. Additional SDKs (TypeScript, Go) generated from `proto/`.
 
 ### Phase 4 — Platform maturity
 Asset/lineage layer over the task core (the Dagster idea, added without rewriting the core — the reason the task layer is kept clean). Pluggable capacity providers for autoscaling. Multi-region control plane. Durable-execution programming model as an *optional* second authoring mode for users who need Temporal-style semantics.

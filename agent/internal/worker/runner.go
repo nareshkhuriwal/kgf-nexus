@@ -48,6 +48,10 @@ type Runner struct {
 	// knows when an output needs a blob write at all.
 	mu      sync.Mutex
 	running map[string]*runningTask
+
+	// WorkerID is this session's identity, handed to executors that label
+	// their workloads with it. Set after registration.
+	WorkerID string
 }
 
 type runningTask struct {
@@ -335,7 +339,52 @@ func (r *Runner) buildExecutorSpec(ctx context.Context, a *nexusv1.TaskAssignmen
 		StdoutOutput:         spec.GetRuntime().GetStdoutOutput(),
 		StartToCloseDeadline: deadline,
 		GraceAfterTerm:       executor.DefaultGraceAfterTerm,
+		WorkerID:             r.WorkerID,
+		OnPhase:              r.phaseReporter(ctx, a),
 	}, nil
+}
+
+// phaseReporter turns an executor's substrate-phase changes (a Kubernetes pod
+// going Pending → Running, or stuck on "Unschedulable: insufficient cpu") into
+// task-level ReportProgress calls.
+//
+// That makes the TASK heartbeat reflect whether the workload actually exists
+// and is progressing through its lifecycle, which is ADR-0007's mitigation for
+// nested scheduling. Only changes are reported, so a pod stuck Pending does
+// NOT keep refreshing the heartbeat: the task-level heartbeat timeout still
+// catches an attempt the cluster never starts.
+//
+// Delivery is on one goroutine per attempt through a small buffer: the
+// executor's wait loop must never block on an RPC, and a single sender keeps
+// "Pending" from overtaking "Running" on the wire. A full buffer drops the
+// update — a progress note is advisory, and a lost one is corrected by the next.
+func (r *Runner) phaseReporter(ctx context.Context, a *nexusv1.TaskAssignment) func(phase, detail string) {
+	if r.reporter == nil {
+		return nil
+	}
+	ch := make(chan string, 8)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg := <-ch:
+				rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				r.reporter.ReportProgress(rctx, a.GetAttemptId(), r.currentToken(a), msg, 0)
+				cancel()
+			}
+		}
+	}()
+	return func(phase, detail string) {
+		msg := "pod " + phase
+		if detail != "" {
+			msg += ": " + detail
+		}
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
 }
 
 // declaredOutputNames lists TaskSpec.outputs in a STABLE order.

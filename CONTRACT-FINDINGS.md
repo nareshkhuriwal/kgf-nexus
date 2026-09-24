@@ -2015,3 +2015,100 @@ cluster-admin.
 **Dependency note.** client-go is pinned at v0.35.8 because v0.36+ requires
 `go 1.26`, and `deploy/Dockerfile.service` builds with `golang:1.25`. Another branch
 adding client-go must agree on the version.
+
+### F92. The Kubernetes executor exists; what it enforces, and what it cannot yet do — NOTE
+
+*(Numbered F92 on the branch that added it. If a parallel branch also took F92,
+renumber on merge; F88 records the last time this collided.)*
+
+The `kubernetes` executor (ADR-0007, Implementation notes) runs each attempt as a
+Job. It passes the shared conformance suite against a local Docker Desktop
+cluster (Kubernetes 1.34). F28 set the standard that each substrate states what
+it enforces instead of implying it, so this entry does that, including the gaps.
+
+**Advertised versus enforced (the F28 question for this substrate):**
+
+| Dimension | Enforced by | Strength |
+|---|---|---|
+| memory | cgroup `memory.max` from `limits.memory` (requests = limits) | hard; the kernel OOM-kills and the runtime reports `OOMKilled` |
+| cpu | CFS quota from `limits.cpu` | throttling, never a kill |
+| GPU | device-plugin extended resource (`NEXUS_K8S_GPU_RESOURCE`) | whole devices, isolated by the plugin; refused if unconfigured |
+| disk | `ephemeral-storage` limit + emptyDir `sizeLimit` | kubelet **eviction** on a sampling interval, the softest of the four |
+| start_to_close | Job `activeDeadlineSeconds` | enforced by the cluster, and holds with the agent dead |
+| custom resources | nothing | Nexus ledger only |
+| per-attempt overhead | collector sidecar, 50m / 32Mi | not in the Nexus request, so size advertised capacity to allow for it |
+
+**Defects the real cluster found, which a fake clientset could not have**
+(commit 6f47390, all fixed):
+
+1. **The collector crash-looped on every pod.** It mounted the outputs volume
+   *nested inside* its read-only work mount, and runc cannot create a mountpoint
+   inside a read-only volume. Every unit test passed, because a fake clientset
+   has no runc.
+2. **Every cluster-enforced timeout was classified APPLICATION**, which is
+   terminal, instead of TIMEOUT, which is retryable. Since Kubernetes 1.31 the
+   Job controller first sets `FailureTarget` (DeadlineExceeded), kills the pod,
+   and only afterwards sets `Failed`. The code read only `Failed`. The
+   conformance suite's sigkill test was red on this and is green after the fix.
+3. **The output cap refused every file after the first oversized one.** A file
+   that was refused still counted toward the total. Running the real collector
+   script under `/bin/sh` in a unit test exposed it.
+
+**An instrument error, caught before it was believed (F89 again).** The first
+full run printed `ok` with every kubernetes conformance subtest taking
+`0.00s`. The `-run 'Conformance.*/kubernetes'` pattern matched the second
+level of `TestX/success/kubernetes`, not the third, so every subtest was
+skipped and the run still passed. The corrected pattern is
+`TestConformance/.*/kubernetes`. The durations are what gave it away. A second
+instrument error followed. Each package passed alone, but the combined run
+failed with "namespace is being terminated". `go test ./a ./b` runs packages as
+concurrent processes, and the first to finish deleted the namespace they share.
+Each process now holds a reference ConfigMap, and only the last one to leave
+deletes the namespace. The
+least-privilege Role was also mutation-tested: a test applies the shipped
+`deploy/k8s/agent-rbac.yaml` and runs the whole lifecycle as that service
+account. Deleting the `pods/log` rule turns that test red with
+`agent may not get pods/log`.
+
+**Open: limits of this executor.** Each of these is refused explicitly rather
+than handled silently:
+
+- **Inputs are limited to about 1 MiB in total.** They are staged through one
+  Secret, and anything larger fails as VALIDATION. The fix is a pod-side fetch
+  using a scoped, short-lived presigned URL. That needs a result-store API that
+  does not exist yet, and it must not put store credentials into task pods
+  (ADR-0008).
+- **Outputs are limited to 4 MiB in total.** They leave the pod base64-framed
+  through the collector's log, and the cap keeps them below the kubelet's
+  default 10 MiB log rotation. The same presigned-URL mechanism, in the upload
+  direction, would remove this limit.
+- **`runtime.stdout_output` is rejected with VALIDATION.** The pod log API
+  merges stdout and stderr. Stream selection (KEP-3288) is alpha and is silently
+  ignored where the feature is disabled, so an output built from it would carry
+  the task's stderr inside its data.
+- **Pending reasons reach the control plane but go no further.** The executor
+  sends pod phase changes to `ReportProgress` (ADR-0007's nested-scheduling
+  mitigation). `scheduler.RecordProgress` stores only the heartbeat time and
+  drops the message and the fraction. Surfacing "Unschedulable: insufficient
+  cpu" in the UI needs a scheduler column and an API field. That belongs to
+  another workstream, and no proto change was made here.
+- **Tolerations have no field in the TaskSpec proto** (§4.3 shows one; F21
+  class). Pool pinning is therefore per-worker configuration
+  (`NEXUS_K8S_NODE_SELECTOR` / `NEXUS_K8S_TOLERATIONS`), and a Nexus worker
+  represents one node pool. `gpu_kind` does map to a nodeSelector when
+  `NEXUS_K8S_GPU_KIND_LABEL` is set.
+- **"delete pods" cannot be narrowed by label in RBAC.** The agent's Role could
+  therefore delete a sibling agent pod in the same namespace. The executor only
+  ever deletes pods matching its own owner and attempt labels. The namespace is
+  shared because owner references cannot cross namespaces, and a
+  cross-namespace owner makes the garbage collector delete the Job immediately.
+- **A Job still running when its agent restarts is killed, not adopted.** Lease
+  renewal is scoped to the worker_id (`GatewayRenewLeases`), and a restarted
+  agent gets a new worker_id (§5.5), so the old lease cannot be kept alive.
+  Adopting the Job would mean running it beside the retry the control plane is
+  about to dispatch. Adopting is used only where it is safe: when Prepare is
+  repeated for the same attempt (same name, AlreadyExists), and when harvesting
+  a Job that has already **finished**.
+- The proto comment on `RuntimeSpec.executor` still reads
+  `"subprocess" | "docker" | "k8s"`. It was left unchanged so the executor did
+  not need a proto regeneration. The schema and SDK accept both spellings.
