@@ -51,6 +51,17 @@ type ClaimConfig struct {
 	// cost ceiling of a cycle in which every namespace is blocked:
 	// LookAhead x FairShareMaxNamespaces candidate reads, never more.
 	FairShareMaxNamespaces int
+	// ClaimWindow is how many PENDING attempts the pull-path claim reads off
+	// idx_attempts_dispatch_rank per window before joining and filtering them
+	// (ADR-0018 Stage 1). It bounds a claim's cost by the window instead of
+	// the backlog. Zero disables windowing and every claim scans the backlog.
+	ClaimWindow int
+	// ClaimWindowPages bounds how many consecutive windows one claim may read
+	// before falling back to the exhaustive scan. A worker that can run
+	// nothing near the top of the queue (a CPU worker behind a wall of GPU
+	// tasks) would otherwise page through the whole backlog 64 rows at a
+	// time, which is slower than scanning it once.
+	ClaimWindowPages int
 }
 
 // DefaultClaimConfig returns the ADR-0010 recommended lease settings.
@@ -70,6 +81,8 @@ func DefaultClaimConfig(queue string) ClaimConfig {
 		// is the one nobody enables a flag for in advance.
 		FairShare:              true,
 		FairShareMaxNamespaces: 4,
+		ClaimWindow:            64,
+		ClaimWindowPages:       4,
 	}
 }
 
@@ -82,6 +95,10 @@ type SchedulerStore struct {
 	// instanceID identifies this replica in timers.claimed_by, so a crashed
 	// replica's claimed timers can be told apart from live ones.
 	instanceID string
+	// windowed selects the bounded pull-path claim. Set once, before the store
+	// serves claims, by EnableWindowedClaim -- never flipped afterwards, so it
+	// needs no synchronisation.
+	windowed bool
 }
 
 // NewSchedulerStore constructs the store. instanceID should be stable for the
@@ -92,6 +109,49 @@ func NewSchedulerStore(pool *pgxpool.Pool, cfg ClaimConfig, instanceID string) *
 
 // Config exposes the tunables for logging and for the reconcilers.
 func (s *SchedulerStore) Config() ClaimConfig { return s.cfg }
+
+// indexedAgingRate is the aging rate idx_attempts_dispatch_rank is built for
+// (migration 0023). A scheduler configured with another rate still claims in
+// the right order but cannot use the index.
+const indexedAgingRate = 1.0
+
+// WindowedClaimStatus reports how the pull-path claim will run, for the
+// startup log line an operator reads when dispatch is slow.
+type WindowedClaimStatus struct {
+	// Enabled is true when claims read bounded windows.
+	Enabled bool
+	// Indexed is true when those windows are served by the index. False with
+	// Enabled true means a non-default aging rate: correct order, unindexed.
+	Indexed bool
+	// Reason says why windowing is off, when it is.
+	Reason string
+}
+
+// EnableWindowedClaim turns on the bounded pull-path claim if the database
+// has migration 0023's rank function. Call it once at startup, before the
+// store serves claims.
+//
+// Detected rather than assumed, because a scheduler can start before 0023 is
+// applied during a rollout: using the windowed query then would fail EVERY
+// pull claim, whereas the exhaustive scan it replaces keeps working. A
+// scheduler that started without the function stays on the exhaustive scan
+// until it restarts, which is the safe direction to be wrong in.
+func (s *SchedulerStore) EnableWindowedClaim(ctx context.Context) (WindowedClaimStatus, error) {
+	if s.cfg.ClaimWindow <= 0 {
+		return WindowedClaimStatus{Reason: "claim window is 0 (disabled by configuration)"}, nil
+	}
+	var present bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT to_regprocedure('nexus_dispatch_rank(integer,timestamptz,double precision)') IS NOT NULL`,
+	).Scan(&present); err != nil {
+		return WindowedClaimStatus{}, fmt.Errorf("detect nexus_dispatch_rank: %w", err)
+	}
+	if !present {
+		return WindowedClaimStatus{Reason: "migration 0023 not applied (nexus_dispatch_rank missing)"}, nil
+	}
+	s.windowed = true
+	return WindowedClaimStatus{Enabled: true, Indexed: s.cfg.AgingRate == indexedAgingRate}, nil
+}
 
 // ErrNoCandidate signals an empty queue, distinguished from a real error so the
 // dispatch loop can back off instead of logging a failure every tick.
