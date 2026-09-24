@@ -476,9 +476,9 @@ describe('routing', () => {
  * changes, because navigating first spends the transition refetching every
  * mounted panel with a token the gateway has just revoked.
  *
- * Both entry points are covered. Sign-out is reachable from the account menu's
- * row and from the palette's command, and the navigation lives in signOut()
- * precisely so neither can be the path that forgets it.
+ * Sign-out is reachable from the account menu's row (the palette no longer
+ * offers it), and the navigation lives in signOut() so any future entry point
+ * cannot be the path that forgets it.
  */
 describe('signing out', () => {
   it('clears the credential and then lands on the sign-in page', async () => {
@@ -495,15 +495,15 @@ describe('signing out', () => {
     expect(window.localStorage.getItem('nexus.session')).toBeNull();
   });
 
-  it('lands there from the palette command as well', async () => {
+  it('is not offered by the search palette', () => {
     signIn();
     renderApp();
 
     fireEvent.keyDown(document, { key: 'k', metaKey: true });
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'sign out' } });
-    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Enter' });
 
-    await waitFor(() => expect(document.querySelector('.chrome')).toBeNull());
-    expect(window.localStorage.getItem('nexus.session')).toBeNull();
+    expect(screen.queryByRole('option', { name: /sign out/i })).toBeNull();
+    // Still signed in: searching for it did not clear the session.
+    expect(window.localStorage.getItem('nexus.session')).not.toBeNull();
   });
 });
