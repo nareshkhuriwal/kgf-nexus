@@ -646,6 +646,9 @@ the backup ordering produces them on purpose, and a restore leaves them behind.
 # Report only. Deletes NOTHING. This is the default.
 make artifact-gc
 
+# Run directly, the DSN must be explicit (§8): there is no built-in default.
+export DATABASE_URL='postgres://nexus:...@db.internal:5432/nexus?sslmode=require'
+
 # Same, scoped to one namespace prefix, with a longer grace period.
 go run ./services/artifact-gc/cmd/artifact-gc -prefix default/ -grace 72h
 
@@ -704,26 +707,55 @@ young, and deleted, with counts.
 
 ---
 
-## 8. Configuration guard: an explicit DSN in production
+## 8. Configuration guard: every service requires an explicit DSN
 
 Related, because it is the same class of failure as an untested backup — a
 misconfiguration that looks fine until it is not.
 
-Six services resolve their DSN through `internal/config.DSN()`, which accepts
-four spellings (`NEXUS_DATABASE_URL`, `DATABASE_URL`, `NEXUS_POSTGRES_DSN`,
-`NEXUS_DSN`) and falls back to a compiled-in developer default pointing at
-`localhost:55432`. Accepting four names is what keeps dev painless; the fallback
-is what makes a typo in production look like a network problem instead of a
-configuration problem.
+Every service that talks to Postgres (api-gateway, workflow-manager, dag-engine,
+scheduler, resource-manager, event-service, artifact-gc) resolves its DSN through
+`internal/config.DSN()`. It accepts four spellings, in this precedence order:
 
-Set **`NEXUS_ENV=production`** (or `prod`, or `staging`) or **`NEXUS_REQUIRE_DSN=1`**
-in any real deployment. With either set and no DSN found, every service exits at
-startup with a message naming all four spellings it checked, instead of quietly
-dialing `localhost`. `NEXUS_REQUIRE_DSN=0` overrides `NEXUS_ENV` for the case
-where the requirement is inherited from a base config that cannot be edited.
+1. `NEXUS_DATABASE_URL`
+2. `DATABASE_URL`
+3. `NEXUS_POSTGRES_DSN`
+4. `NEXUS_DSN`
 
-With neither set, behaviour is exactly as before: the dev default applies and
-`go test` needs no environment.
+and, for the services that have one, the command-line flag (`-dsn` on scheduler
+and dag-engine, `-database-url` on resource-manager and artifact-gc). A flag
+given on the command line overrides the environment.
+
+**There is no built-in default, in any environment.** With none of the above
+set, the service exits with status 1 before opening anything, printing:
+
+```
+scheduler: fatal: no Postgres DSN configured: set NEXUS_DATABASE_URL (also
+accepted: DATABASE_URL, NEXUS_POSTGRES_DSN, NEXUS_DSN) or pass -dsn. There is no
+built-in default, ...
+```
+
+Services used to fall back to `postgres://postgres:test@localhost:55432/nexus`
+(artifact-gc to `localhost:55433`) unless `NEXUS_ENV` was `production`/`staging`
+or `NEXUS_REQUIRE_DSN` was set. That fallback meant a typo'd variable name, or a
+manifest that missed one container, connected the service to whatever Postgres
+listened on that port. On at least one developer machine 55432 is an unrelated
+product's database. `NEXUS_ENV` and `NEXUS_REQUIRE_DSN` no longer affect the DSN;
+setting them is harmless, and `NEXUS_REQUIRE_DSN=0` can no longer switch the
+check off.
+
+Where the DSN comes from in each supported way of running Nexus:
+
+| How you run it | DSN source |
+|---|---|
+| `make up` / `deploy/docker-compose.yml` (and the TLS overlay) | `x-postgres-env` sets `DATABASE_URL` for every service, pointing at the compose `postgres` container. |
+| Helm chart (`deploy/helm/kgf-nexus`) | `nexus.dbEnv` builds `DATABASE_URL` from `.Values.postgres.*` and the password in `existingSecret`. |
+| `make seed`, `make migrate-*`, `make artifact-gc`, `make check-refs` | The Makefile's `DATABASE_URL`, defaulting to the compose stack on `localhost:$(NEXUS_POSTGRES_PORT)` (55433). Override it to target another database. |
+| `go run ./services/<svc>/...` by hand | Export one of the four names yourself, e.g. `export DATABASE_URL='postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable'` for the compose stack. |
+| Integration tests | `NEXUS_TEST_DATABASE_URL` only (`internal/testdb`); tests skip without it and never read the service spellings. |
+
+`examples/run-suite.sh` and `tests/chaos` drive an already-running stack
+(Kubernetes or compose respectively) and do not start services themselves, so
+the DSN is whatever that stack was deployed with.
 
 ### 7.8 The other direction: rows whose object is gone
 

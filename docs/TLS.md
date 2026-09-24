@@ -77,8 +77,7 @@ verifying bundles are the same file, and two knobs invite setting one and
 forgetting the other. If you genuinely need separate issuers per direction, that
 is a change to `internal/transport`, not a config trick.
 
-Truthy values follow the same word list `NEXUS_REQUIRE_DSN` accepts: anything
-other than empty, `0`, `false`, `no`, `off` is on.
+Truthy values: anything other than empty, `0`, `false`, `no`, `off` is on.
 
 ## 4. Rolling it out
 
@@ -157,7 +156,7 @@ it did, and that was wrong: `transport.RequireTLS()` reads only
 reason is in the code. Unlike a missing DSN, missing TLS has a working outcome,
 since every deployment ran plaintext until now. If `NEXUS_ENV=production` armed
 the guard, wiring TLS support into the services would have broken every
-deployment that already set it for the DSN guard. Requiring TLS is a separate
+deployment that already set it for the (then NEXUS_ENV-armed) DSN guard. Requiring TLS is a separate
 decision. Make it once certificates are actually distributed.
 
 This is the step that turns "we forgot to configure certificates" from an

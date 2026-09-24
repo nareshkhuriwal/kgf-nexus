@@ -336,7 +336,7 @@ func loadConfig() config {
 		// Separate ports, per §3.2: worker traffic must not contend with UI queries.
 		RESTAddr:            env("NEXUS_REST_ADDR", ":8080"),
 		GRPCAddr:            env("NEXUS_GRPC_ADDR", ":9090"),
-		DatabaseURL:         nexuscfg.DSN("postgres://postgres:test@localhost:55432/nexus"),
+		DatabaseURL:         nexuscfg.DSN(),
 		MaxConns:            int32(envInt("NEXUS_DB_MAX_CONNS", 20)),
 		WorkflowManagerAddr: env("NEXUS_WORKFLOW_MANAGER_ADDR", ""),
 		ResourceManagerAddr: env("NEXUS_RESOURCE_MANAGER_ADDR", ""),

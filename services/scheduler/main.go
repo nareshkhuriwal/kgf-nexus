@@ -36,7 +36,7 @@ func main() {
 
 func run() error {
 	var (
-		dsn       = flag.String("dsn", config.DSN("postgres://postgres:test@localhost:55432/nexus"), "Postgres DSN")
+		dsn       = flag.String("dsn", config.DSN("dsn"), "Postgres DSN")
 		queue     = flag.String("queue", envOr("NEXUS_QUEUE", "default"), "queue this replica drains")
 		httpAddr  = flag.String("http-addr", envOr("NEXUS_HTTP_ADDR", ":8081"), "address for /healthz and /readyz")
 		grpcAddr  = flag.String("grpc-addr", envOr("NEXUS_GRPC_ADDR", envOr("GRPC_ADDR", ":9090")), "address for nexus.v1.SchedulerService")
