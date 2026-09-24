@@ -107,6 +107,25 @@ func conformanceTargets() []conformanceTarget {
 				return ""
 			},
 		},
+		{
+			// The kubernetes executor, against a LOCAL cluster only. Opt-in
+			// (NEXUS_K8S_CONFORMANCE=1) because it creates a namespace, and
+			// guarded so it can never touch a remote cluster: see
+			// k8sConformanceSkip in kubernetes_integration_test.go.
+			name: KubernetesKind,
+			new: func(t *testing.T, root string) Executor {
+				return newK8sConformanceExecutor(t, root)
+			},
+			fidelity: KubernetesFidelity(),
+			shellSpec: func(script string) *nexusv1.RuntimeSpec {
+				return &nexusv1.RuntimeSpec{
+					Image:   k8sConformanceImage(),
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{script},
+				}
+			},
+			skip: k8sConformanceSkip,
+		},
 	}
 }
 
@@ -283,7 +302,7 @@ func TestConformanceMissingHandlerIsNotFound(t *testing.T) {
 		switch tgt.name {
 		case "subprocess":
 			spec.Runtime = &nexusv1.RuntimeSpec{Command: []string{"/nonexistent/definitely-not-a-binary-xyz"}}
-		case "docker":
+		case "docker", KubernetesKind:
 			spec.Runtime = &nexusv1.RuntimeSpec{
 				Image:   "nexus-conformance-does-not-exist-xyz:v0",
 				Command: []string{"/bin/true"},
@@ -310,7 +329,7 @@ func TestConformanceInvalidSpecIsValidationError(t *testing.T) {
 		switch tgt.name {
 		case "subprocess":
 			spec.Runtime = &nexusv1.RuntimeSpec{}
-		case "docker":
+		case "docker", KubernetesKind:
 			spec.Runtime = &nexusv1.RuntimeSpec{Command: []string{"/bin/true"}} // no image
 		}
 		_, err := e.Prepare(context.Background(), spec)
@@ -548,6 +567,23 @@ i=0; while [ $i -lt 6000 ]; do sleep 0.1; i=$((i+1)); done`
 		h, err := e.Start(ctx, p)
 		if err != nil {
 			t.Fatalf("Start: %v", err)
+		}
+
+		if tgt.name == KubernetesKind {
+			// The pod's pids and files live on a node, not in p.WorkDir, so
+			// the pid-file handshake cannot apply. The meaningful assertion is
+			// the same as docker's one level up: once the task container is
+			// running, an abandoning Cleanup must leave neither the Job nor
+			// any pod of the attempt behind — deleting the pod takes every
+			// process in it, grandchildren included.
+			k8sAwaitTaskRunning(t, e, h)
+			if err := e.Cleanup(ctx, h); err != nil {
+				t.Fatalf("Cleanup: %v", err)
+			}
+			if err := k8sWaitForAttemptGone(e, h.AttemptID, 60*time.Second); err != nil {
+				t.Errorf("ORPHAN LEAKED: %v", err)
+			}
+			return
 		}
 
 		// Wait for the grandchild pid to be recorded.
