@@ -112,6 +112,127 @@ export function overflows(
 }
 
 /**
+ * The scale the canvas OPENS at.
+ *
+ * Fit-to-view is the right answer to "show me everything" and the wrong answer
+ * to "show me the run": an eleven-layer DAG fitted into a 1500px panel lands
+ * at 37%, where a node is 90px wide and its label is 5px tall — every node is
+ * on screen and none of them can be read. The screenshot that prompted this
+ * was exactly that: a row of unreadable chips across the middle of an empty
+ * canvas.
+ *
+ * So the initial view fits when fitting is readable, and otherwise opens at
+ * READABLE_MIN anchored to the START of the graph, because a left-to-right
+ * DAG is read from its roots and the first layer is what the operator wants
+ * under their eyes. The rest is reached by panning, which the canvas now makes
+ * obvious (edge fades, minimap, sideways scroll). The Fit button still fits.
+ *
+ * 0.75 rather than the 0.3 zoom floor: at 0.75 a 248px card is 186px and its
+ * 13px label is just under 10px, which is the smallest the console renders
+ * anywhere else. Below that the card is a shape, not a label.
+ */
+export const READABLE_MIN = 0.75;
+/** Screen pixels between the viewport edge and the graph's first layer when
+ *  the view is anchored rather than centred. */
+export const VIEW_MARGIN = 24;
+
+export function initialView(
+  graph: { width: number; height: number },
+  view: { width: number; height: number },
+): { scale: number; x: number; y: number } {
+  const fit = fitScale(graph, view);
+  if (fit >= READABLE_MIN) return { scale: fit, ...centerOffset(graph, view, fit) };
+  const scale = READABLE_MIN;
+  const w = graph.width * scale;
+  const h = graph.height * scale;
+  // Each axis independently: a wide, shallow graph is left-anchored and
+  // vertically centred; a deep one is top-anchored too.
+  return {
+    scale,
+    x: w <= view.width ? (view.width - w) / 2 : VIEW_MARGIN,
+    y: h <= view.height ? (view.height - h) / 2 : VIEW_MARGIN,
+  };
+}
+
+/**
+ * How many boxes are not FULLY inside the viewport at the current view.
+ *
+ * The number the overflow hint states. "Part of the graph is outside the
+ * view" was true and useless; "4 tasks off-screen" tells the operator whether
+ * to bother panning. Partially visible boxes count as off-screen: a card whose
+ * label is clipped is a card the operator cannot read.
+ */
+export function offscreenCount(
+  boxes: { x: number; y: number }[],
+  size: { width: number; height: number },
+  view: { scale: number; x: number; y: number },
+  viewport: { width: number; height: number },
+): number {
+  if (viewport.width <= 0 || viewport.height <= 0) return 0;
+  let n = 0;
+  for (const b of boxes) {
+    const sx = view.x + b.x * view.scale;
+    const sy = view.y + b.y * view.scale;
+    const inside =
+      sx >= 0 &&
+      sy >= 0 &&
+      sx + size.width * view.scale <= viewport.width &&
+      sy + size.height * view.scale <= viewport.height;
+    if (!inside) n += 1;
+  }
+  return n;
+}
+
+/**
+ * Which viewport edges have content beyond them. Drives the edge fades: a
+ * gradient on the side that has more is the affordance a scrollbar used to
+ * be, without a second pan mechanism the zoom readout knows nothing about.
+ */
+export function overflowEdges(
+  graph: { width: number; height: number },
+  view: { scale: number; x: number; y: number },
+  viewport: { width: number; height: number },
+): { left: boolean; right: boolean; top: boolean; bottom: boolean } {
+  if (viewport.width <= 0 || viewport.height <= 0) {
+    return { left: false, right: false, top: false, bottom: false };
+  }
+  const w = graph.width * view.scale;
+  const h = graph.height * view.scale;
+  return {
+    left: view.x < -1,
+    top: view.y < -1,
+    right: view.x + w > viewport.width + 1,
+    bottom: view.y + h > viewport.height + 1,
+  };
+}
+
+/**
+ * The pan that puts graph point `point` at the centre of the viewport at the
+ * current scale. The minimap's click and drag, and "jump to task", are both
+ * this one line.
+ */
+export function centerOn(
+  point: { x: number; y: number },
+  scale: number,
+  viewport: { width: number; height: number },
+): { x: number; y: number } {
+  return { x: viewport.width / 2 - point.x * scale, y: viewport.height / 2 - point.y * scale };
+}
+
+/**
+ * Minimap scale: the graph shrunk to fit a thumbnail of at most `max` on
+ * either axis. Never magnifies, so a tiny graph gets a tiny minimap rather
+ * than a blown-up one.
+ */
+export function minimapScale(
+  graph: { width: number; height: number },
+  max: { width: number; height: number },
+): number {
+  if (graph.width <= 0 || graph.height <= 0) return 1;
+  return Math.min(1, max.width / graph.width, max.height / graph.height);
+}
+
+/**
  * The pan offset that centres a graph drawn at `scale` inside `view`.
  *
  * Centring rather than pinning top-left because a fitted graph usually has

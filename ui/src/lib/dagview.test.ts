@@ -16,7 +16,14 @@ import { describe, expect, it } from 'vitest';
 import {
   ZOOM_MAX,
   ZOOM_MIN,
+  READABLE_MIN,
+  VIEW_MARGIN,
   centerOffset,
+  centerOn,
+  initialView,
+  minimapScale,
+  offscreenCount,
+  overflowEdges,
   clampZoom,
   exportFileName,
   fitScale,
@@ -274,5 +281,79 @@ describe('exported markup carries the appearance, not just the shape', () => {
     expect(doc).toContain('fill="rgb(1, 4, 9)"');
     expect(doc.startsWith('<svg')).toBe(true);
     expect(doc.endsWith('</svg>')).toBe(true);
+  });
+});
+
+describe('the opening view is readable', () => {
+  /**
+   * The screenshot that prompted this: an eleven-layer run fitted to 37%,
+   * every node on screen and not one of them legible. Opening at a readable
+   * scale anchored to the first layer is the fix; Fit stays available for
+   * "show me everything".
+   */
+  it('fits when fitting is readable, centred like a fit', () => {
+    const graph = { width: 1200, height: 300 };
+    const view = { width: 1500, height: 600 };
+    expect(initialView(graph, view)).toEqual({ scale: 1, ...centerOffset(graph, view, 1) });
+  });
+
+  it('refuses to open below the readable floor, and starts at the first layer', () => {
+    const graph = { width: 4000, height: 300 };
+    const view = { width: 1500, height: 600 };
+    const v = initialView(graph, view);
+    expect(v.scale).toBe(READABLE_MIN);
+    // Left-anchored: the roots are what a left-to-right DAG is read from.
+    expect(v.x).toBe(VIEW_MARGIN);
+    // The axis that does fit is still centred.
+    expect(v.y).toBeCloseTo((600 - 300 * READABLE_MIN) / 2, 6);
+  });
+
+  it('anchors both axes when the graph overflows both', () => {
+    const v = initialView({ width: 4000, height: 3000 }, { width: 1500, height: 600 });
+    expect(v).toEqual({ scale: READABLE_MIN, x: VIEW_MARGIN, y: VIEW_MARGIN });
+  });
+});
+
+describe('overflow is described, not just detected', () => {
+  const size = { width: 248, height: 88 };
+  const viewport = { width: 1000, height: 400 };
+
+  it('counts the boxes not fully inside the viewport', () => {
+    const boxes = [
+      { x: 10, y: 10 }, // inside
+      { x: 900, y: 10 }, // clipped on the right
+      { x: 2000, y: 10 }, // far off
+    ];
+    expect(offscreenCount(boxes, size, { scale: 1, x: 0, y: 0 }, viewport)).toBe(2);
+    // Panned by 1300 the far one is in (700..948) and the first two are out.
+    expect(offscreenCount(boxes, size, { scale: 1, x: -1300, y: 0 }, viewport)).toBe(2);
+  });
+
+  it('counts nothing before the viewport is measured', () => {
+    expect(offscreenCount([{ x: 5000, y: 0 }], size, { scale: 1, x: 0, y: 0 }, { width: 0, height: 0 })).toBe(0);
+  });
+
+  it('names the sides with more graph beyond them', () => {
+    const graph = { width: 3000, height: 300 };
+    expect(overflowEdges(graph, { scale: 1, x: 24, y: 50 }, viewport)).toEqual({
+      left: false, right: true, top: false, bottom: false,
+    });
+    expect(overflowEdges(graph, { scale: 1, x: -2500, y: 50 }, viewport)).toEqual({
+      left: true, right: false, top: false, bottom: false,
+    });
+  });
+});
+
+describe('minimap', () => {
+  it('centres the view on the point clicked', () => {
+    const off = centerOn({ x: 1000, y: 200 }, 0.5, { width: 1200, height: 600 });
+    // Graph point (1000,200) at scale .5 is 500px from the origin; the view
+    // origin must sit 600-500 = 100 to the left of centre.
+    expect(off).toEqual({ x: 100, y: 200 });
+  });
+
+  it('shrinks a wide graph to the thumbnail width and never magnifies', () => {
+    expect(minimapScale({ width: 4000, height: 300 }, { width: 200, height: 110 })).toBeCloseTo(0.05, 6);
+    expect(minimapScale({ width: 100, height: 50 }, { width: 200, height: 110 })).toBe(1);
   });
 });

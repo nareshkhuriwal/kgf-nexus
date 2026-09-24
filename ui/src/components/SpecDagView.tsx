@@ -116,6 +116,7 @@ export function SpecDagView({
 
       <div className="dag-layout-note" role="status">{taskLayout.message}</div>
       <DagCanvas
+        places={places}
         viewportHeight={base.height}
         toolbarExtra={<button type="button" onClick={taskLayout.reset}>Reset layout</button>}
         width={width}
@@ -146,22 +147,22 @@ export function SpecDagView({
               viewBox="0 0 8 8"
               refX="7"
               refY="4"
-              markerWidth="7"
-              markerHeight="7"
+              markerWidth="5"
+              markerHeight="5"
               orient="auto"
             >
-              <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--border-strong)" />
+              <path d="M 0 0.5 L 7.5 4 L 0 7.5 L 2 4 z" fill="var(--border-strong)" />
             </marker>
             <marker
               id="spec-arrow-related"
               viewBox="0 0 8 8"
               refX="7"
               refY="4"
-              markerWidth="7"
-              markerHeight="7"
+              markerWidth="5"
+              markerHeight="5"
               orient="auto"
             >
-              <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--tone-active-bd)" />
+              <path d="M 0 0.5 L 7.5 4 L 0 7.5 L 2 4 z" fill="var(--tone-active-bd)" />
             </marker>
           </>
         }
@@ -258,24 +259,36 @@ function SpecTaskBox({
           `\nrequests: ${resources}` +
           `\ndepends on: ${node.upstream.length > 0 ? node.upstream.join(', ') : 'nothing'}`}
       </title>
+      {/* The same card silhouette as a run's node -- shadow, radius, stripe,
+          ports, divider -- so a workflow looks like itself in the catalog and
+          in a run. What it does NOT share is any state tone: the stripe is
+          structural (entry point or not), never a state. */}
+      <rect className="dag-node-shadow" y={3} width={NODE_W} height={NODE_H} rx={14} />
+      {selected && (
+        <rect className="dag-select-ring" x={-4} y={-4} width={NODE_W + 8} height={NODE_H + 8} rx={18} />
+      )}
       <rect
         className={`spec-node${selected ? ' selected' : ''}${node.isRoot ? ' root' : ''}`}
         width={NODE_W}
         height={NODE_H}
-        rx={12}
+        rx={14}
       />
-      <text className="dag-node-label" x={11} y={27}>
-        {truncate(node.id, 22)}
+      <rect className={`spec-node-stripe${node.isRoot ? ' root' : ''}`} x={0} y={16} width={4} height={NODE_H - 32} rx={2} />
+      {!node.isRoot && <circle className="dag-port" cx={0} cy={NODE_H / 2} r={4} />}
+      {!node.isLeaf && <circle className="dag-port" cx={NODE_W} cy={NODE_H / 2} r={4} />}
+      <text className="dag-node-label" x={16} y={25}>
+        {truncate(node.id, 26)}
       </text>
-      <text className="dag-node-sub" x={11} y={45}>
-        {truncate(node.task.task_ref ?? '—', 28)}
+      <text className="dag-node-sub" x={16} y={41}>
+        {truncate(node.task.task_ref ?? '—', 30)}
       </text>
-      <text className="dag-node-sub" x={11} y={71}>
-        {truncate(resources, 20)}
+      <line className="dag-card-divider" x1={12} x2={NODE_W - 12} y1={55} y2={55} />
+      <text className="dag-node-sub" x={16} y={75.5}>
+        {truncate(resources, 22)}
       </text>
       {node.task.queue && (
-        <text className="dag-node-sub" x={NODE_W - 11} y={71} textAnchor="end" fill="var(--tone-queued-fg)">
-          {truncate(node.task.queue, 10)}
+        <text className="dag-node-sub" x={NODE_W - 12} y={75.5} textAnchor="end" fill="var(--tone-queued-fg)">
+          {truncate(node.task.queue, 12)}
         </text>
       )}
     </g>
