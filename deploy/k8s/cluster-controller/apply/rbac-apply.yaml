@@ -1,0 +1,39 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# OPT-IN mutating permissions for apply mode. Bind ONLY together with:
+#   - the cluster's registry entry set to apply (with its kube-system UID), and
+#   - NEXUS_CONTROLLER_ALLOW_APPLY=true on the controller Deployment
+#     (apply/allow-apply-patch.yaml).
+# Any one of the three missing keeps the controller in plan mode.
+#
+# Scoped to the worker namespace and to exactly two verbs:
+#   deployments/scale update -- the replica count, and nothing else about the
+#                               Deployment (not its image, not its template)
+#   pods patch               -- to set controller.kubernetes.io/pod-deletion-cost
+#                               on a drained, lease-free pod just before scale-in
+# The controller cannot create, delete or exec into pods, and cannot touch the
+# scheduler (its HPA owns that) or nodes (the cluster autoscaler owns those).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nexus-cluster-controller-apply
+  namespace: nexus-workers
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments/scale]
+    verbs: [update]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nexus-cluster-controller-apply
+  namespace: nexus-workers
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: nexus-cluster-controller-apply}
+subjects:
+  - {kind: ServiceAccount, name: nexus-cluster-controller, namespace: kgf-nexus}

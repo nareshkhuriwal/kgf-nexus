@@ -1973,3 +1973,45 @@ fixtures in `internal/store`, `services/scheduler`, `resource-manager` and
 they predate migration 0014 and never create a tenant row. CI applies migrations
 too, so this is worth checking there. The NATS tests register their tenants.
 Not fixed here (out of scope).
+
+### F92. Cluster scaling needed two grants nobody had exercised, and an ownership decision — FIXED / DECIDED
+
+(Number chosen from this branch's tail; parallel branches may also have taken F92 --
+renumber on merge, see F88.)
+
+**Ownership (ADR-0011), decided, not yet in the ADR table.** Migration 0018 adds
+seven tables. The registry (`clusters`, `cluster_namespace_bindings`) is operator
+intent and is owned by **api-gateway**, following the existing `platform_config`
+precedent (0010) -- which the ADR-0011 table does not list either. Everything
+observed about a cluster (`cluster_status`, `cluster_observations`,
+`cluster_scaling_state`, `cluster_reconcile_errors`, `cluster_scaling_events`) is
+owned by **resource-manager**, which owns the fleet it describes and performs the
+drain. The in-cluster controller has no database credential at all; it goes through
+the resource manager's new `ClusterControllerService`. The ADR-0011 ownership table
+should gain both rows (and `platform_config`) when it is next revised.
+
+**Two defects found only because the test connected as the service roles.** Every
+earlier store test connects as the superuser, where grants are invisible.
+
+1. The resource manager had no `SELECT` on `platform_config`: 0010 granted it to
+   the gateway only, and 0005's blanket `GRANT SELECT ON ALL TABLES` covers only
+   tables that existed when 0005 ran. So ADR-0011's "every service reads
+   everything" is silently false for every table created after 0005 unless its
+   migration grants it. 0018 grants the one read it needs; the general gap is open
+   -- a test that lists tables lacking `SELECT` for any service role would close it.
+2. `SELECT ... FOR SHARE` on a table requires `UPDATE` privilege. The drain's
+   apply-gate read used it on `clusters`, which the resource manager must not be
+   able to update, so every drain would have failed with 42501 in a deployment
+   that uses the roles, and passed in every superuser test. It is now a plain
+   read; the consequence (a concurrent switch to plan takes effect on the next
+   call) is documented in docs/CLUSTER-SCALING.md.
+
+**Watched fail, per F89.** Removing the lease check or the quota bound from the
+controller fails its unit tests; removing `patch pods` from the shipped apply Role
+makes the local-cluster end-to-end test fail with a Forbidden error, which is the
+evidence that that test really runs with the manifests' permissions and not as
+cluster-admin.
+
+**Dependency note.** client-go is pinned at v0.35.8 because v0.36+ requires
+`go 1.26`, and `deploy/Dockerfile.service` builds with `golang:1.25`. Another branch
+adding client-go must agree on the version.

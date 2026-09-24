@@ -1056,3 +1056,84 @@ comment in `0016_outbox.down.sql`).
 `make test-nats` runs the relay, outbox and hint suites against a real
 JetStream and a real Postgres in throwaway containers (`nexus-nats-agent-*`,
 ports 55511/55512), including stopping and restarting the broker.
+
+---
+
+## 9. Cluster controller: installing, enabling apply, and backing out
+
+Design and safety argument: docs/CLUSTER-SCALING.md. This section is the runbook.
+
+### 9.1 Prerequisites
+
+- Migration `0018_cluster_registry` applied (additive; safe before the new
+  gateway and resource-manager are deployed).
+- A resource-manager that serves `ClusterControllerService` (this release), reachable
+  from the controller at `NEXUS_RM_ADDR`. The controller uses the same TLS
+  environment as other peers (`internal/transport`).
+- The worker Deployment follows `deploy/k8s/cluster-controller/base/worker-deployment.example.yaml`:
+  no hostname override, CPU/memory requests, `terminationGracePeriodSeconds` at
+  least `NEXUS_DRAIN_GRACE`, no HPA of its own.
+- The cluster-controller image built with
+  `docker build -f deploy/Dockerfile.service --build-arg SERVICE=cluster-controller .`
+  and pinned by digest (`kustomize edit set image`).
+
+### 9.2 Plan mode (default)
+
+```sh
+kubectl apply -k deploy/k8s/cluster-controller/base   # after setting NEXUS_CLUSTER_NAME
+kubectl -n kgf-nexus get lease nexus-cluster-controller-<cluster> -o jsonpath='{.spec.holderIdentity}'
+```
+
+In the console (Cluster & scaling → Live cluster) confirm: a report under a minute
+old, "Controller running: plan", the observed UID, desired = observed revision,
+the scheduler HPA with `ScalingActive`, and plan-only events that match what you
+would have done by hand. `/readyz` is `standby` on the follower and fails on the
+leader after four intervals without a successful cycle -- alert on that.
+
+### 9.3 Enabling apply
+
+1. `kubectl get namespace kube-system -o jsonpath='{.metadata.uid}'` against the
+   intended cluster; enter it in the console and confirm apply mode.
+2. `kubectl apply -k deploy/k8s/cluster-controller/apply`.
+3. Watch for `scale_out` / `drain` / `scale_in` events and "Controller running:
+   apply". If the tab still says plan, its reason names the missing opt-in.
+
+Keep registry ceilings (`max_replicas`) at what the budget allows: there is no
+provider cost estimate, and budget alerts are not hard caps.
+
+### 9.4 Backing out
+
+Fastest to slowest, all safe at any moment:
+
+1. Console: **Switch to plan**. The next cycle (≤ 15 s) stops mutating; the resource
+   manager refuses drains immediately.
+2. `kubectl apply -k deploy/k8s/cluster-controller/base` (drops the apply Role
+   binding and `NEXUS_CONTROLLER_ALLOW_APPLY`).
+3. `kubectl -n kgf-nexus scale deploy/nexus-cluster-controller --replicas=0`.
+
+Backing out never un-drains a worker: DRAINING is terminal by design. A drained
+pod that is no longer going to be removed can simply be deleted
+(`kubectl delete pod`); its agent registers afresh in the replacement pod.
+
+### 9.5 Diagnosing a pool that does not scale
+
+The Live cluster tab shows the last decision and its holds per Deployment. The
+common ones: `scale-in cooldown`, `removal of drained pods held: pod … is not
+Running and Ready` (fix the pod), `pod … kept: holds N live lease(s)` (working as
+intended -- it is removed when the work finishes), `namespace quota: …` (raise the
+quota or the pod requests are undeclared), and `deployment changed since it was
+read` (someone else is writing replicas -- find the second writer).
+
+### 9.6 Testing locally
+
+The end-to-end test only runs against `docker-desktop` or `kind-*` contexts, in
+namespace `nexus-scaling-test`, which it creates and deletes:
+
+```sh
+docker run -d --name nexus-scaling-pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=nexus \
+  -p 127.0.0.1:55531:5432 postgres:16-alpine   # then apply services/migrations/*.up.sql
+NEXUS_TEST_DATABASE_URL=postgres://postgres:test@localhost:55531/nexus \
+  go test -tags k8s_integration -run TestK8s -v ./services/cluster-controller/internal/controller/
+NEXUS_TEST_DATABASE_URL=postgres://postgres:test@localhost:55531/nexus \
+  go test -tags integration -run TestIntegrationClusterRegistry ./internal/store/
+```

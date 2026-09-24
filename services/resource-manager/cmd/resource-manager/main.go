@@ -129,6 +129,9 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	}
 	gs := grpc.NewServer(append(config.PeerServerOptions(), sopts...)...)
 	rmv1.RegisterResourceManagerServiceServer(gs, svc)
+	// The in-cluster scaling controller's only path to Nexus state; it holds no
+	// database credential (docs/CLUSTER-SCALING.md, migration 0018).
+	rmv1.RegisterClusterControllerServiceServer(gs, server.NewClusterServer(st, log))
 	hs := health.NewServer()
 	healthpb.RegisterHealthServer(gs, hs)
 	// Reflection makes grpcurl work against a running instance, which is the

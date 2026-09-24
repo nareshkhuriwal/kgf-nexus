@@ -76,5 +76,26 @@ func (a *API) platformPlan(w http.ResponseWriter, r *http.Request, p authn.Princ
 		}
 		plans = append(plans, platform.Plan(pool, profile, d))
 	}
-	writeJSON(w, 200, map[string]any{"revision": c.Revision, "mode": "preview", "decisions": plans, "task_job_templates": templates, "message": "Policies are saved. No cloud controller is connected; this is a demand preview, not applied infrastructure."})
+	// Say honestly whether anything acts on this plan. The preview itself is
+	// always computed here and never applied; a registered cluster controller
+	// computes and (only in apply mode) acts on its own copy of the decision.
+	message := "Policies are saved. No cluster controller is registered for this namespace; this is a demand preview, not applied infrastructure."
+	clusters, err := store.GatewayClusterList(r.Context(), a.db, p.Namespace)
+	if err != nil {
+		a.fail(w, r, "load cluster registry", err)
+		return
+	}
+	controllers := []map[string]any{}
+	for _, cl := range clusters {
+		entry := map[string]any{"cluster": cl.Name, "registry_mode": cl.Mode, "reporting": cl.Status != nil}
+		if cl.Status != nil {
+			entry["effective_mode"] = cl.Status.EffectiveMode
+			entry["last_report_at"] = cl.Status.LastReportAt
+		}
+		controllers = append(controllers, entry)
+	}
+	if len(clusters) > 0 {
+		message = "This preview is computed by the gateway and is not applied. Registered cluster controllers report their own decisions and applied state under Live cluster."
+	}
+	writeJSON(w, 200, map[string]any{"revision": c.Revision, "mode": "preview", "decisions": plans, "task_job_templates": templates, "controllers": controllers, "message": message})
 }
