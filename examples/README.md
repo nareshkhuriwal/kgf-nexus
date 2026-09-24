@@ -7,6 +7,7 @@ Read them in this order.
 | [`hello_dag/`](hello_dag/) | The basic shape: 3 tasks in a line, resources, timeouts, edges from data flow. |
 | [`ten_node_mixed/`](ten_node_mixed/) | The Phase 1 exit-criteria DAG: 10 nodes, fan-out/fan-in, real GPU constraints. |
 | [`idempotent_effect/`](idempotent_effect/) | The three idempotency mechanisms, in descending order of strength. |
+| [`fan_out_map/`](fan_out_map/) | Dynamic expansion over a runtime collection (mandatory `max_fanout`), fan-in, and memoized children. |
 
 ## Setup (once)
 

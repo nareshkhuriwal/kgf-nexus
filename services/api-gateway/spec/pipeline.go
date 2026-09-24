@@ -68,6 +68,9 @@ func Compile(body []byte, format Format) (*Compiled, error) {
 
 	graph, verrs := dag.Validate(proto, dag.DefaultValidationOptions())
 	problems := semanticProblems(verrs)
+	// Memoization rules are submit-time only (see dag.ValidateCache): a spec
+	// stored before they existed must still materialize.
+	problems = append(problems, semanticProblems(dag.ValidateCache(proto))...)
 
 	// Timeout coherence is checked here rather than in internal/dag because it is a
 	// property of a single task, not of the graph, and internal/dag is deliberately

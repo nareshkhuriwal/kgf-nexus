@@ -181,6 +181,31 @@ class TaskDefinition:
             return self.fn(*args, **kwargs)
         return builder.add_node(self, args, kwargs)
 
+    def map(self, over: Any, *args: Any, item: str, max_fanout: int, **kwargs: Any) -> Any:
+        """Fan this task out over a runtime collection (dynamic expansion, §5.4).
+
+        Inside a workflow body: `over` is an upstream output holding a JSON
+        array; at run time the platform creates one child of this task per
+        element, passing the element as parameter `item`. `max_fanout` is
+        MANDATORY: a longer collection fails the node explicitly and runs
+        nothing. Other arguments are shared by every child. The returned handle
+        refers to the JSON ARRAY of the children's outputs, in element order
+        (null where a child did not succeed) -- pass it to a fan-in task.
+
+        Outside a workflow body (unit tests): runs the handler once per element
+        of the concrete list `over` and returns the list of results.
+        """
+        from .workflow import current_builder
+
+        builder = current_builder()
+        if builder is None:
+            if isinstance(max_fanout, int) and len(over) > max_fanout:
+                raise SpecError(
+                    f"{self.task_ref}.map: {len(over)} items exceed max_fanout={max_fanout}"
+                )
+            return [self.fn(*args, **{**kwargs, item: element}) for element in over]
+        return builder.add_map_node(self, over, item, max_fanout, args, dict(kwargs))
+
     def bind(self, *args: Any, **kwargs: Any) -> Any:
         """Explicit alias for __call__, for readers who find tracing surprising."""
         return self(*args, **kwargs)
