@@ -140,6 +140,11 @@
           "description": "JSON-ENCODED default (a string), matching proto ValueSpec.default_json. Encoding it as text keeps the wire type uniform regardless of the declared value type.",
           "type": "string",
           "maxLength": 65536
+        },
+        "max_bytes": {
+          "description": "Optional author-declared upper bound on this value's size in bytes. When a map template declares it on an output, submit-time validation rejects the workflow if max_fanout x max_bytes could exceed the platform's fan-in limit (ARCH 5.4), instead of failing at run time.",
+          "type": "integer",
+          "minimum": 0
         }
       },
       "not": {

@@ -793,3 +793,124 @@ func TestIntegration_GatewayReadsExpansionAndMemo(t *testing.T) {
 		t.Fatal("gateway did not report the memo hit")
 	}
 }
+
+// fanInRun expands n children, completes each with a `size`-char string, and
+// reconciles once with the engine's fan-in limit set to limit.
+func fanInRun(t *testing.T, pool *pgxpool.Pool, n, size int, limit int64) (string, *ReconcileResult) {
+	t.Helper()
+	ctx := context.Background()
+	items := make([]any, n)
+	for i := range items {
+		items[i] = i
+	}
+	runID, e := startFanout(t, pool, fanoutSpec(int32(n), nexusv1.TriggerRule_TRIGGER_RULE_ALL_SUCCESS), items)
+	e.SetFanInLimit(limit)
+	if _, err := e.Reconcile(ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < n; i++ {
+		settleRef(t, pool, runID, dag.ChildID("process", i), domain.AttemptSucceeded,
+			map[string]json.RawMessage{"result": ref(t, strings.Repeat("x", size))})
+	}
+	res, err := e.Reconcile(ctx, runID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	return runID, res
+}
+
+type refusalRow struct {
+	Reason, Detail   string
+	Limit            int64
+	Total, Accepted  int
+}
+
+func readRefusal(t *testing.T, pool *pgxpool.Pool, runID string) *refusalRow {
+	t.Helper()
+	var r refusalRow
+	err := pool.QueryRow(context.Background(), `
+		SELECT reason, detail, limit_bytes, children_total, children_before_limit
+		  FROM fan_in_refusals WHERE run_id = $1::uuid AND node_id = 'summarize'`, runID).
+		Scan(&r.Reason, &r.Detail, &r.Limit, &r.Total, &r.Accepted)
+	if err != nil {
+		return nil
+	}
+	return &r
+}
+
+// The fan-in bound, end to end: under and exactly at the cap the consumer runs
+// with the full array; one byte over, it FAILS with the recorded reason, gets
+// no attempt, the run settles FAILED, and assembly stopped early.
+func TestIntegration_FanInSizeLimit(t *testing.T) {
+	pool := testPool(t)
+	const n, size = 40, 1000
+	exact := int64(n*(size+2) + (n - 1) + 2) // ["xx..","xx..",...]
+
+	for _, tc := range []struct {
+		name  string
+		limit int64
+		ok    bool
+	}{
+		{"under the cap", exact + 100, true},
+		{"exactly at the cap", exact, true},
+		{"one byte over the cap", exact - 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runID, res := fanInRun(t, pool, n, size, tc.limit)
+			states := nodeStates(t, pool, runID)
+			att := pendingAttempts(t, pool, runID)
+			if tc.ok {
+				if states["summarize"] != "READY" || att["summarize"] != 1 {
+					t.Fatalf("under/at cap: summarize=%s attempts=%d", states["summarize"], att["summarize"])
+				}
+				var inputs []byte
+				_ = pool.QueryRow(context.Background(),
+					`SELECT input_refs FROM task_attempts WHERE run_id=$1::uuid AND node_id='summarize'`, runID).Scan(&inputs)
+				var refs map[string]json.RawMessage
+				_ = json.Unmarshal(inputs, &refs)
+				if got := int64(len(decodeInline(t, refs["results"]))); got != exact {
+					t.Fatalf("fan-in payload = %d bytes, want %d", got, exact)
+				}
+				if readRefusal(t, pool, runID) != nil {
+					t.Fatal("a refusal was recorded for a fan-in that fit")
+				}
+				return
+			}
+			if states["summarize"] != "FAILED" {
+				t.Fatalf("over cap: summarize = %s, want FAILED", states["summarize"])
+			}
+			if att["summarize"] != 0 {
+				t.Fatalf("over cap: summarize got %d attempt(s); nothing may be materialized", att["summarize"])
+			}
+			r := readRefusal(t, pool, runID)
+			if r == nil {
+				t.Fatal("over cap: no fan_in_refusals row -- the reason is not operator-visible")
+			}
+			if r.Reason != dag.FanInTooLargeReason || r.Limit != exact-1 || r.Total != n ||
+				!strings.Contains(r.Detail, "NEXUS_DAG_MAX_FANIN_BYTES") {
+				t.Fatalf("refusal = %+v", r)
+			}
+			if seen, err := store.GatewayListRunFanInRefusals(context.Background(), pool, runID); err != nil ||
+				!strings.HasPrefix(seen["summarize"], dag.FanInTooLargeReason) {
+				t.Fatalf("the gateway does not surface the reason: %v %v", seen, err)
+			}
+			if r.Accepted >= n {
+				t.Fatalf("assembly did not stop early: accepted %d of %d", r.Accepted, n)
+			}
+			if res.RunState != domain.RunFailed {
+				t.Fatalf("run = %s, want FAILED (the refusal settles downstream in the same call)", res.RunState)
+			}
+		})
+	}
+}
+
+func TestParseFanInLimit(t *testing.T) {
+	for in, ok := range map[string]bool{
+		"": true, "16777216": true, "65536": true, "268435456": true,
+		"65535": false, "268435457": false, "lots": false, "-1": false,
+	} {
+		if _, err := parseFanInLimit(in); (err == nil) != ok {
+			t.Errorf("parseFanInLimit(%q) err = %v, want ok=%v", in, err, ok)
+		}
+	}
+}

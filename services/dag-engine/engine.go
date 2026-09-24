@@ -60,6 +60,8 @@ type Engine struct {
 	// validation is the submit-time policy. Held here so the same binary can run
 	// with Phase-2 trigger rules enabled by configuration rather than a rebuild.
 	validation dag.ValidationOptions
+	// fanInLimit bounds an assembled fan-in array (§5.4); 0 = the default.
+	fanInLimit int64
 }
 
 // NewEngine wires the engine. runs and ev may be nil, in which case the engine
@@ -80,7 +82,17 @@ func NewEngine(st *store.DAGEngineStore, runs RunStateWriter, ev EventWriter, lo
 }
 
 // SetValidationOptions overrides submit-time validation policy.
-func (e *Engine) SetValidationOptions(o dag.ValidationOptions) { e.validation = o }
+func (e *Engine) SetValidationOptions(o dag.ValidationOptions) {
+	o.MaxFanInBytes = e.validation.MaxFanInBytes
+	e.validation = o
+}
+
+// SetFanInLimit bounds assembled fan-in arrays, and makes materialize-time
+// validation check statically declared sizes against the same bound.
+func (e *Engine) SetFanInLimit(limit int64) {
+	e.fanInLimit = limit
+	e.validation.MaxFanInBytes = limit
+}
 
 // MaterializeResult reports what Materialize did.
 type MaterializeResult struct {
@@ -311,23 +323,44 @@ func (e *Engine) reconcilePass(ctx context.Context, runID string) (res *Reconcil
 		})
 	}
 
-	// Outputs visible to this pass: every node's latest success, plus the fan-in
-	// arrays of templates that are settled AFTER this decision -- a template whose
-	// last child just finished releases its fan-in in this same pass, and the
-	// fan-in's input must already be resolvable when its attempt is created.
+	// Outputs visible to this pass: every node's latest success. Map templates'
+	// fan-in arrays are NOT precomputed; buildAttempts assembles one only for a
+	// frontier node that reads it, streamed and bounded (fanIn).
 	outputs := latestSucceededOutputs(attempts)
-	if err := templateOutputs(g, dag.ApplyTransitions(current, decision.Transitions), outputs); err != nil {
-		return nil, false, fmt.Errorf("reconcile run %s: %w", runID, err)
-	}
 
-	newAttempts, err := e.buildAttempts(ctx, runID, run, g, decision.Frontier, outputs)
+	newAttempts, refusals, err := e.buildAttempts(ctx, runID, run, g, decision.Frontier, outputs)
 	if err != nil {
 		return nil, false, fmt.Errorf("reconcile run %s: %w", runID, err)
 	}
+	// A refused fan-in fails its consumer instead of starting it: the decision's
+	// PENDING->READY for that node becomes PENDING->FAILED, committed with the
+	// recorded reason. Deterministic, so no retry -- the same children would
+	// produce the same too-large array.
+	for _, r := range refusals {
+		for i := range writes {
+			if writes[i].NodeID == r.NodeID {
+				writes[i].To = domain.NodeFailed
+			}
+		}
+	}
 
-	applied, err := e.store.ApplyNodeStateAndCreateAttempts(ctx, runID, writes, newAttempts)
+	applied, err := e.store.ApplyReconcile(ctx, runID, writes, newAttempts, refusals)
 	if err != nil {
 		return nil, false, fmt.Errorf("reconcile run %s: %w", runID, err)
+	}
+	for _, r := range refusals {
+		if containsString(applied.NodeCASMisses, r.NodeID) {
+			continue
+		}
+		log.Warn("fan-in refused: assembled array would exceed the limit; consuming node FAILED",
+			"node_id", r.NodeID, "template", r.TemplateNodeID, "output", r.TemplateOutput,
+			"limit_bytes", r.LimitBytes, "children", r.ChildrenTotal, "accepted_before_limit", r.ChildrenBeforeLimit)
+		e.emit(ctx, runID, r.NodeID, EventFanInRejected, map[string]any{
+			"reason": r.Reason, "detail": r.Detail, "template_node_id": r.TemplateNodeID,
+			"template_output": r.TemplateOutput, "limit_bytes": r.LimitBytes,
+		})
+		// The node is now FAILED: settle its downstream in this call.
+		again = true
 	}
 
 	for _, t := range decision.Transitions {
@@ -492,29 +525,38 @@ func containsTransition(ts []store.NodeTransition, nodeID string) bool {
 func (e *Engine) buildAttempts(
 	ctx context.Context, runID string, run *store.DERunRow, g *dag.Graph,
 	frontier []string, outputs map[string]map[string]json.RawMessage,
-) ([]store.NewAttempt, error) {
+) ([]store.NewAttempt, []store.FanInRefusal, error) {
 	if len(frontier) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	now := time.Now()
 
+	var refusals []store.FanInRefusal
 	out := make([]store.NewAttempt, 0, len(frontier))
 	for _, nodeID := range frontier {
 		n := g.Node(nodeID)
 		if n == nil {
-			return nil, fmt.Errorf("frontier names unknown node %q", nodeID)
+			return nil, nil, fmt.Errorf("frontier names unknown node %q", nodeID)
+		}
+		refusal, err := e.loadFanIns(ctx, runID, g, nodeID, outputs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("fan-in for node %q: %w", nodeID, err)
+		}
+		if refusal != nil {
+			refusals = append(refusals, *refusal)
+			continue
 		}
 		inputRefs, err := e.resolveInputs(g, nodeID, outputs)
 		if err != nil {
-			return nil, fmt.Errorf("resolve inputs for node %q: %w", nodeID, err)
+			return nil, nil, fmt.Errorf("resolve inputs for node %q: %w", nodeID, err)
 		}
 		inputRefs, err = resolveRunInputs(g, nodeID, run.Params, inputRefs)
 		if err != nil {
-			return nil, fmt.Errorf("resolve run inputs for node %q: %w", nodeID, err)
+			return nil, nil, fmt.Errorf("resolve run inputs for node %q: %w", nodeID, err)
 		}
 		cacheKey, hit, err := e.memoFor(ctx, run, n, inputRefs, now)
 		if err != nil {
-			return nil, fmt.Errorf("memo lookup for node %q: %w", nodeID, err)
+			return nil, nil, fmt.Errorf("memo lookup for node %q: %w", nodeID, err)
 		}
 		var mapIndex *int
 		if n.IsChild() {
@@ -553,7 +595,7 @@ func (e *Engine) buildAttempts(
 			out[len(out)-1].MemoOutputRef = hit.OutputRef
 		}
 	}
-	return out, nil
+	return out, refusals, nil
 }
 
 // resolveInputs maps upstream attempt output_ref values into this node's

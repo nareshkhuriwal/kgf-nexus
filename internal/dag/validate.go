@@ -47,6 +47,7 @@ const (
 	ErrMapSource    ErrorCode = "map_source_invalid"
 	ErrMapItemInput ErrorCode = "map_item_input_invalid"
 	ErrMapFanInType ErrorCode = "map_fan_in_type_mismatch"
+	ErrMapFanInSize ErrorCode = "map_fan_in_too_large"
 
 	// Memoization (§6.4).
 	ErrCacheTTLRequired   ErrorCode = "cache_ttl_invalid"
@@ -175,6 +176,17 @@ type ValidationOptions struct {
 	// MaxFanoutCeiling is the operator's upper bound on any template's declared
 	// max_fanout. Zero means DefaultMaxFanoutCeiling.
 	MaxFanoutCeiling int
+
+	// MaxFanInBytes is the limit on an assembled fan-in array. Zero means
+	// DefaultMaxFanInBytes.
+	MaxFanInBytes int64
+}
+
+func (o ValidationOptions) fanInLimit() int64 {
+	if o.MaxFanInBytes > 0 {
+		return o.MaxFanInBytes
+	}
+	return DefaultMaxFanInBytes
 }
 
 func (o ValidationOptions) fanoutCeiling() int {
@@ -656,7 +668,23 @@ func validateMaps(g *Graph, opts ValidationOptions) ValidationErrors {
 				if e.From != id {
 					continue
 				}
-				for inName := range e.OutputToInput {
+				for inName, outName := range e.OutputToInput {
+					// Static fan-in bound: when the template declares how large each
+					// child's value can be, max_fanout of them either fits the
+					// platform's fan-in limit or does not, and "does not" is known
+					// now -- rejecting here is cheaper than a run that fails after
+					// max_fanout children did their work.
+					if ob := n.Spec.GetOutputs()[outName].GetMaxBytes(); ob > 0 && m.GetMaxFanout() > 0 {
+						mf := int64(m.GetMaxFanout())
+						worst := mf*ob + (mf - 1) + 2 // elements, commas, brackets
+						if worst > opts.fanInLimit() {
+							errs = append(errs, ValidationError{Code: ErrMapFanInSize, NodeID: down,
+								Field: fmt.Sprintf("edge %s->%s[%s<-%s]", id, down, inName, outName),
+								Msg: fmt.Sprintf("the fan-in of %s.%s can reach %d bytes (max_fanout %d x max_bytes %d), over the %d-byte fan-in limit; "+
+									"lower max_fanout, declare a smaller max_bytes, or emit blob outputs (passed by reference)",
+									id, outName, worst, mf, ob, opts.fanInLimit())})
+						}
+					}
 					if vs, ok := dn.Spec.GetInputs()[inName]; ok && vs.GetType() != "json" {
 						errs = append(errs, ValidationError{Code: ErrMapFanInType, NodeID: down,
 							Field: fmt.Sprintf("edge %s->%s[%s]", id, down, inName),

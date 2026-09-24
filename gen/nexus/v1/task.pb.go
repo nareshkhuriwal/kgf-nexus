@@ -541,7 +541,11 @@ type ValueSpec struct {
 	Type     string `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
 	Required bool   `protobuf:"varint,2,opt,name=required,proto3" json:"required,omitempty"`
 	// JSON-encoded default, applied when the input is absent.
-	DefaultJson   string `protobuf:"bytes,3,opt,name=default_json,json=defaultJson,proto3" json:"default_json,omitempty"`
+	DefaultJson string `protobuf:"bytes,3,opt,name=default_json,json=defaultJson,proto3" json:"default_json,omitempty"`
+	// Optional author-declared upper bound on this value's size in bytes. Used at
+	// submit time to reject a map template whose fan-in (max_fanout x max_bytes)
+	// can never fit the platform's fan-in limit (§5.4). 0 = undeclared.
+	MaxBytes      int64 `protobuf:"varint,4,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -595,6 +599,13 @@ func (x *ValueSpec) GetDefaultJson() string {
 		return x.DefaultJson
 	}
 	return ""
+}
+
+func (x *ValueSpec) GetMaxBytes() int64 {
+	if x != nil {
+		return x.MaxBytes
+	}
+	return 0
 }
 
 type CachePolicy struct {
@@ -999,11 +1010,12 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"\n" +
 	"item_input\x18\x03 \x01(\tR\titemInput\x12\x1d\n" +
 	"\n" +
-	"max_fanout\x18\x04 \x01(\x05R\tmaxFanout\"^\n" +
+	"max_fanout\x18\x04 \x01(\x05R\tmaxFanout\"{\n" +
 	"\tValueSpec\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x1a\n" +
 	"\brequired\x18\x02 \x01(\bR\brequired\x12!\n" +
-	"\fdefault_json\x18\x03 \x01(\tR\vdefaultJson\">\n" +
+	"\fdefault_json\x18\x03 \x01(\tR\vdefaultJson\x12\x1b\n" +
+	"\tmax_bytes\x18\x04 \x01(\x03R\bmaxBytes\">\n" +
 	"\vCachePolicy\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x15\n" +
 	"\x06ttl_ms\x18\x02 \x01(\x03R\x05ttlMs\"\xcc\x02\n" +

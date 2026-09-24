@@ -214,3 +214,56 @@ func (s *DAGEngineStore) LoadExpansions(ctx context.Context, runID string) ([]DE
 	}
 	return out, nil
 }
+
+// StreamChildOutputs feeds a template's children's values for one output to fn,
+// in map_index order, ONE ROW AT A TIME: a child's value is its latest SUCCEEDED
+// attempt's output (nil when it has none). fn returning an error stops the scan
+// and closes the result set, so a fan-in that hits its size limit stops reading
+// rows too -- the rest are never transferred.
+func (s *DAGEngineStore) StreamChildOutputs(
+	ctx context.Context, runID, templateID, output string, fn func(mapIndex int, ref []byte) error,
+) (total int, err error) {
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM task_nodes WHERE run_id = $1::uuid AND parent_node_id = $2`,
+		runID, templateID).Scan(&total); err != nil {
+		return 0, fmt.Errorf("count children of %s/%s: %w", runID, templateID, err)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT n.map_index,
+		       (SELECT a.output_ref -> $3 FROM task_attempts a
+		         WHERE a.run_id = n.run_id AND a.node_id = n.node_id AND a.state = 'SUCCEEDED'
+		         ORDER BY a.attempt_number DESC LIMIT 1)
+		  FROM task_nodes n
+		 WHERE n.run_id = $1::uuid AND n.parent_node_id = $2
+		 ORDER BY n.map_index`, runID, templateID, output)
+	if err != nil {
+		return total, fmt.Errorf("stream children of %s/%s: %w", runID, templateID, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var idx int
+		var ref []byte
+		if err := rows.Scan(&idx, &ref); err != nil {
+			return total, fmt.Errorf("scan child output: %w", err)
+		}
+		if err := fn(idx, ref); err != nil {
+			return total, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return total, fmt.Errorf("iterate child outputs: %w", err)
+	}
+	return total, nil
+}
+
+// FanInRefusal records a fan-in the engine refused to assemble (§5.4).
+type FanInRefusal struct {
+	NodeID              string
+	TemplateNodeID      string
+	TemplateOutput      string
+	LimitBytes          int64
+	ChildrenTotal       int
+	ChildrenBeforeLimit int
+	Reason              string
+	Detail              string
+}

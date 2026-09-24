@@ -22,6 +22,7 @@ const (
 	EventNodeExpanded    = "NodeExpanded"
 	EventExpansionFailed = "ExpansionFailed"
 	EventCacheHit        = "CacheHit"
+	EventFanInRejected   = "FanInRejected"
 )
 
 // expandTemplate performs ONE template's expansion (§5.4): read the collection
@@ -63,7 +64,22 @@ func (e *Engine) expandTemplate(
 		w.SourceAttemptID = &id
 	}
 
-	planned, err := dag.PlanFromCollection(templateID, outputs[m.GetOverNodeId()][m.GetOverOutput()], int(m.GetMaxFanout()))
+	collection := outputs[m.GetOverNodeId()][m.GetOverOutput()]
+	var fanErr error
+	if src := g.Node(m.GetOverNodeId()); src != nil && src.IsTemplate() {
+		// Mapping over another template's fan-in: assemble it, bounded.
+		collection, fanErr = e.fanIn(ctx, run.ID, m.GetOverNodeId(), m.GetOverOutput())
+	}
+	var planned []dag.PlannedChild
+	var err error
+	var tooLarge *dag.FanInTooLarge
+	if errors.As(fanErr, &tooLarge) {
+		err = &dag.ExpansionFailure{Reason: dag.FanInTooLargeReason, Detail: tooLarge.Error()}
+	} else if fanErr != nil {
+		return false, fmt.Errorf("fan-in source of %s: %w", templateID, fanErr)
+	} else {
+		planned, err = dag.PlanFromCollection(templateID, collection, int(m.GetMaxFanout()))
+	}
 	var refusal *dag.ExpansionFailure
 	switch {
 	case errors.As(err, &refusal):
@@ -122,37 +138,70 @@ func (e *Engine) expandTemplate(
 	return true, nil
 }
 
-// templateOutputs synthesizes the outputs of every settled map template: for
-// each output name the template declares, the fan-in array of its children's
-// values (dag.FanInValue). A template has no attempt of its own, so without
-// this a downstream fan-in would find nothing to read.
-//
-// Only SETTLED templates contribute. The fan-in is gated on the template being
-// terminal anyway, and building the array for a template still running would be
-// wasted work on the hottest path of a large fan-out.
-func templateOutputs(g *dag.Graph, st dag.States, outputs map[string]map[string]json.RawMessage) error {
-	for _, t := range g.Templates() {
-		if !st.Get(t).Terminal() {
+// fanIn assembles one template output's fan-in array (dag.FanInBuilder),
+// streaming the children's values from the store with the size checked before
+// each append. On *dag.FanInTooLarge nothing is kept: the partial array is
+// dropped and the row scan stops, so an over-limit fan-in costs at most the
+// limit in memory, never max_fanout x the inline threshold.
+func (e *Engine) fanIn(ctx context.Context, runID, templateID, output string) (json.RawMessage, error) {
+	var b *dag.FanInBuilder
+	total, err := e.store.StreamChildOutputs(ctx, runID, templateID, output, func(_ int, ref []byte) error {
+		if b == nil {
+			// Created lazily only to keep total in scope below; the count is
+			// known before the first row arrives.
+			b = dag.NewFanInBuilder(templateID, output, 0, e.fanInLimit)
+		}
+		return b.Add(ref)
+	})
+	var tooLarge *dag.FanInTooLarge
+	if errors.As(err, &tooLarge) {
+		tooLarge.Total = total
+		return nil, tooLarge
+	}
+	if err != nil {
+		return nil, err
+	}
+	if b == nil {
+		b = dag.NewFanInBuilder(templateID, output, total, e.fanInLimit)
+	}
+	return b.Finish()
+}
+
+// loadFanIns resolves, into outputs, every template output that frontier node
+// nodeID reads, and reports a refusal when one is over the limit.
+func (e *Engine) loadFanIns(
+	ctx context.Context, runID string, g *dag.Graph, nodeID string,
+	outputs map[string]map[string]json.RawMessage,
+) (*store.FanInRefusal, error) {
+	for _, ed := range g.EdgesTo(nodeID) {
+		t := g.Node(ed.From)
+		if t == nil || !t.IsTemplate() {
 			continue
 		}
-		kids := g.Children(t)
-		childOuts := make([]map[string]json.RawMessage, len(kids))
-		for i, k := range kids {
-			if st.Get(k) == dag.NodeSucceeded {
-				childOuts[i] = outputs[k]
+		for _, outName := range ed.OutputToInput {
+			if _, done := outputs[ed.From][outName]; done {
+				continue
 			}
-		}
-		agg := map[string]json.RawMessage{}
-		for name := range g.Node(t).Spec.GetOutputs() {
-			v, err := dag.FanInValue(childOuts, name)
+			v, err := e.fanIn(ctx, runID, ed.From, outName)
+			var tooLarge *dag.FanInTooLarge
+			if errors.As(err, &tooLarge) {
+				return &store.FanInRefusal{
+					NodeID: nodeID, TemplateNodeID: ed.From, TemplateOutput: outName,
+					LimitBytes: tooLarge.Limit, ChildrenTotal: tooLarge.Total,
+					ChildrenBeforeLimit: tooLarge.Children,
+					Reason:              dag.FanInTooLargeReason, Detail: tooLarge.Error(),
+				}, nil
+			}
 			if err != nil {
-				return fmt.Errorf("fan-in of %s.%s: %w", t, name, err)
+				return nil, err
 			}
-			agg[name] = v
+			if outputs[ed.From] == nil {
+				outputs[ed.From] = map[string]json.RawMessage{}
+			}
+			outputs[ed.From][outName] = v
 		}
-		outputs[t] = agg
 	}
-	return nil
+	return nil, nil
 }
 
 // latestSucceededAttempts indexes each node's most recent SUCCEEDED attempt,
@@ -220,4 +269,13 @@ func (e *Engine) InvalidateCache(ctx context.Context, inv store.MemoInvalidation
 		"namespace", inv.Namespace, "task_ref", inv.TaskRef, "cache_key", inv.CacheKey,
 		"actor", inv.Actor, "reason", inv.Reason, "invalidation_id", id)
 	return id, at, nil
+}
+
+func containsString(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }

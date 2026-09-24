@@ -1881,6 +1881,16 @@ placement paths. Decisions a reviewer should know, each with its reason:
   that happens to hold matching tenants. `registerWorker` in the RM tests now registers its
   tenant; the reservation tests still fail for the same reason via fake attempts.
 
+- **Fan-in is bounded (added before merge).** The fan-in array is assembled in the
+  control plane; unbounded, max_fanout 10,000 x 64 KiB inline outputs is ~640 MiB per
+  reconcile. It is now capped by `NEXUS_DAG_MAX_FANIN_BYTES` (16 MiB default, 256 MiB
+  ceiling), streamed from Postgres with the check before each append, and child outputs are
+  no longer loaded by `LoadAttempts` at all (that load alone was the same hazard). Over the
+  cap the consumer is FAILED with a `fan_in_refusals` row (`fan_in_too_large`); submit-time
+  validation rejects it when `ValueSpec.max_bytes` (new, additive, field 4) proves it
+  statically. Mutation-tested: disabling the size check turns the unit and integration
+  over-cap tests red.
+
 **F89 discipline:** the guards that matter were mutation-tested -- removing the second
 template fold (cancel test goes red), counting templates as in flight (pause test red),
 dropping `cache_hit_of IS NULL` from the memo lookup (hit-of-a-hit test red), and dropping

@@ -290,6 +290,7 @@ export function DagView({
                 {`${node.node_id} — ${v.label}\n${v.hint}` +
                   (node.isRootCause ? '\nROOT CAUSE: the earliest failure on this path.' : '') +
                   (node.pendingReason ? `\n${node.pendingReason}` : '') +
+                  (node.failure_reason ? `\n${node.failure_reason}` : '') +
                   (group ? `\nMAP TEMPLATE: ${describeGroup(group)}` : '') +
                   (cached ? `\nCACHED: reused the result of attempt ${node.latestAttempt?.cache_hit_of}` : '')}
               </title>
@@ -377,6 +378,11 @@ export function DagView({
                   }}
                 >
                   {group.unfolded ? '− fold' : '+ unfold'}
+                </text>
+              )}
+              {!group && node.failure_reason && (
+                <text className="dag-node-sub" x={NODE_W - 14} y={73} textAnchor="end" fill="var(--tone-danger-fg)">
+                  {node.failure_reason.startsWith('fan_in_too_large') ? 'fan-in too large' : 'not run'}
                 </text>
               )}
               {!group && cached && (

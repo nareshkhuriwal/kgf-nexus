@@ -65,6 +65,31 @@ DROP TRIGGER IF EXISTS tenant_assignment ON task_expansions;
 CREATE TRIGGER tenant_assignment BEFORE INSERT OR UPDATE ON task_expansions
     FOR EACH ROW EXECUTE FUNCTION public.assign_parent_tenant('run_id', 'workflow_runs');
 
+-- A fan-in refused because its assembled array would exceed the platform limit
+-- (NEXUS_DAG_MAX_FANIN_BYTES). The consuming node is FAILED in the same
+-- transaction that writes this row, and it has no attempt -- nothing ran -- so
+-- this row is where the operator-visible reason lives: which template, which
+-- output, what limit, and how far assembly got before it stopped.
+CREATE TABLE IF NOT EXISTS fan_in_refusals (
+    run_id           UUID NOT NULL,
+    node_id          TEXT NOT NULL,
+    tenant_id        UUID NOT NULL REFERENCES tenants(id),
+    template_node_id TEXT NOT NULL,
+    template_output  TEXT NOT NULL,
+    limit_bytes      BIGINT NOT NULL CHECK (limit_bytes > 0),
+    children_total   INT NOT NULL,
+    children_before_limit INT NOT NULL,
+    reason           TEXT NOT NULL,
+    detail           TEXT NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, node_id),
+    FOREIGN KEY (run_id, node_id) REFERENCES task_nodes (run_id, node_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS fan_in_refusals_tenant_idx ON fan_in_refusals (tenant_id);
+DROP TRIGGER IF EXISTS tenant_assignment ON fan_in_refusals;
+CREATE TRIGGER tenant_assignment BEFORE INSERT OR UPDATE ON fan_in_refusals
+    FOR EACH ROW EXECUTE FUNCTION public.assign_parent_tenant('run_id', 'workflow_runs');
+
 -- Grants, in the 0005 style: every service reads, only the owner writes.
 -- INSERT only for the owner -- an expansion is a historical fact, never edited.
 -- Guarded on role existence so a database without the per-service roles (a bare
@@ -78,10 +103,10 @@ BEGIN
         'nexus_scheduler', 'nexus_resource_manager', 'nexus_event_service'
     ] LOOP
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
-            EXECUTE format('GRANT SELECT ON task_expansions TO %I', r);
+            EXECUTE format('GRANT SELECT ON task_expansions, fan_in_refusals TO %I', r);
         END IF;
     END LOOP;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_dag_engine') THEN
-        GRANT INSERT ON task_expansions TO nexus_dag_engine;
+        GRANT INSERT ON task_expansions, fan_in_refusals TO nexus_dag_engine;
     END IF;
 END $$;

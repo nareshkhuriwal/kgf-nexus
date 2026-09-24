@@ -767,10 +767,15 @@ for data loss that never happened.
 ### 9.1 Dynamic expansion (§5.4)
 
 - **Operator ceiling on `max_fanout`.** Submit-time validation rejects a template whose
-  `max_fanout` exceeds 10,000 (`dag.DefaultMaxFanoutCeiling`). The fan-in value is an inline
-  JSON array assembled in the control plane; at the ceiling and the 64 KiB inline threshold
-  that is bounded but can reach hundreds of MiB, so prefer small per-child outputs (or blob
-  outputs, which are passed as references).
+  `max_fanout` exceeds 10,000 (`dag.DefaultMaxFanoutCeiling`).
+- **Fan-in size limit.** `NEXUS_DAG_MAX_FANIN_BYTES` on the dag-engine (default `16777216`,
+  16 MiB; must be within 65536..268435456 or the service refuses to start) bounds the JSON
+  array a fan-in node receives. Over it, the consumer fails with `fan_in_too_large`:
+  `SELECT * FROM fan_in_refusals WHERE run_id = '<run>'`, the `FanInRejected` event, or the
+  run page. Prefer fixing the workflow over raising the limit: have children write large
+  results as blob outputs (passed as references, a few hundred bytes each), emit smaller
+  summaries, or lower `max_fanout`. Declaring `max_bytes` on the template's output makes an
+  impossible fan-in fail at submit instead of after every child ran.
 - **Why did a map node fail?** `SELECT outcome, reason, detail, item_count, max_fanout FROM
   task_expansions WHERE run_id = '<run>'`, or the run page (the node footer reads "expansion
   refused: …"). Reasons: `max_fanout_exceeded`, `collection_missing`, `collection_not_array`,

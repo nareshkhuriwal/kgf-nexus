@@ -190,6 +190,17 @@ type NewAttempt struct {
 func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 	ctx context.Context, runID string, transitions []NodeTransition, attempts []NewAttempt,
 ) (Applied, error) {
+	return s.ApplyReconcile(ctx, runID, transitions, attempts, nil)
+}
+
+// ApplyReconcile is ApplyNodeStateAndCreateAttempts plus fan-in refusals: a
+// refused node's transition (which the caller has already pointed at FAILED)
+// and its fan_in_refusals row commit together, so a FAILED node never lacks
+// its reason and a reason never names a node that is not FAILED.
+func (s *DAGEngineStore) ApplyReconcile(
+	ctx context.Context, runID string, transitions []NodeTransition, attempts []NewAttempt,
+	refusals []FanInRefusal,
+) (Applied, error) {
 	var res Applied
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -218,6 +229,29 @@ func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 			wonDispatch[t.NodeID] = true
 		}
 		res.NodesUpdated++
+	}
+
+	failedNow := map[string]bool{}
+	for _, t := range transitions {
+		if t.To == domain.NodeFailed {
+			failedNow[t.NodeID] = true
+		}
+	}
+	for _, r := range refusals {
+		if !failedNow[r.NodeID] || containsString(res.NodeCASMisses, r.NodeID) {
+			// Another reconciler owns this node's transition; it records the reason.
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO fan_in_refusals
+			  (run_id, node_id, template_node_id, template_output, limit_bytes,
+			   children_total, children_before_limit, reason, detail)
+			VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (run_id, node_id) DO NOTHING`,
+			runID, r.NodeID, r.TemplateNodeID, r.TemplateOutput, r.LimitBytes,
+			r.ChildrenTotal, r.ChildrenBeforeLimit, r.Reason, r.Detail); err != nil {
+			return res, fmt.Errorf("record fan-in refusal for %s/%s: %w", runID, r.NodeID, err)
+		}
 	}
 
 	// attempts_used is incremented with the attempt row so the retry budget can

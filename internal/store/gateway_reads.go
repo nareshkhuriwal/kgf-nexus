@@ -400,6 +400,25 @@ func GatewayListRunExpansions(ctx context.Context, q GWQuerier, runID string) ([
 	return out, rows.Err()
 }
 
+// GatewayListRunFanInRefusals maps node_id -> the recorded reason a fan-in was
+// refused (§5.4), so the run view can say WHY a node failed without an attempt.
+func GatewayListRunFanInRefusals(ctx context.Context, q GWQuerier, runID string) (map[string]string, error) {
+	rows, err := q.Query(ctx, `SELECT node_id, detail FROM fan_in_refusals WHERE run_id = $1`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list fan-in refusals: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, detail string
+		if err := rows.Scan(&id, &detail); err != nil {
+			return nil, fmt.Errorf("scan fan-in refusal: %w", err)
+		}
+		out[id] = detail
+	}
+	return out, rows.Err()
+}
+
 // WorkerQuarantineRow is one quarantine episode as the REST API reports it.
 type WorkerQuarantineRow struct {
 	ID            string

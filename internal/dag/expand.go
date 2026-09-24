@@ -226,8 +226,50 @@ func foldTemplates(g *Graph, st States) []Transition {
 	return out
 }
 
-// FanInValue builds the value a downstream input receives from a template's
-// output: a JSON array with one element per child, in map_index order.
+// DefaultMaxFanInBytes bounds the assembled fan-in array (the JSON payload,
+// before its base64 wrapping in the ResultRef). The array is built IN THE
+// CONTROL PLANE, so without a bound max_fanout x the inline threshold -- 10,000 x
+// 64 KiB, 640 MiB -- is a single allocation inside the DAG engine and then a
+// single row in task_attempts. 16 MiB is ~250x a typical per-child summary and
+// comfortably inside what one Postgres row and one gRPC message carry.
+const DefaultMaxFanInBytes int64 = 16 << 20
+
+// MaxFanInBytesCeiling is the most an operator may configure. Above it the
+// failure the limit exists to prevent (one reconcile holding hundreds of MiB)
+// is back; a workflow that needs more should pass references, not values.
+const MaxFanInBytesCeiling int64 = 256 << 20
+
+// MinFanInBytes is the least an operator may configure: one inline child
+// output must always fit, or no fan-in could ever run.
+const MinFanInBytes int64 = 64 << 10
+
+// FanInTooLarge is the deliberate refusal to assemble a fan-in over the limit.
+// Like an ExpansionFailure it is the workflow's shape, not an infrastructure
+// fault: retrying cannot change it, so the consuming node fails with this reason
+// recorded.
+type FanInTooLarge struct {
+	Template string
+	Output   string
+	Limit    int64
+	// Children is how many child values had been accepted when the limit was hit.
+	Children int
+	// Total is how many children the template has.
+	Total int
+}
+
+// FanInTooLargeReason is the stable, machine-readable reason recorded for it.
+const FanInTooLargeReason = "fan_in_too_large"
+
+func (e *FanInTooLarge) Error() string {
+	return fmt.Sprintf("%s: the fan-in of %s.%s exceeds the %d-byte limit after %d of %d children; "+
+		"raise NEXUS_DAG_MAX_FANIN_BYTES (max %d) or have the children write large results as blob "+
+		"outputs (passed by reference) or smaller summaries",
+		FanInTooLargeReason, e.Template, e.Output, e.Limit, e.Children, e.Total, MaxFanInBytesCeiling)
+}
+
+// FanInBuilder assembles the value a downstream input receives from a
+// template's output: a JSON array with one element per child, in map_index
+// order, INCREMENTALLY and BOUNDED.
 //
 // Each element is the child's value for that output. An inline JSON value is
 // embedded as itself; an inline non-JSON payload as {"inline_base64": "..."};
@@ -236,39 +278,89 @@ func foldTemplates(g *Graph, st States) []Transition {
 // succeed contributes null, so element i always belongs to child i and a fan-in
 // tolerating partial failure (all_done) can tell which items are missing.
 //
-// childOutputs[i] is child i's output map (nil when it did not succeed).
-// The result is itself a protojson ResultRef carrying the array inline.
-func FanInValue(childOutputs []map[string]json.RawMessage, output string) (json.RawMessage, error) {
-	elems := make([]json.RawMessage, len(childOutputs))
-	for i, outs := range childOutputs {
-		elems[i] = json.RawMessage("null")
-		ref, ok := outs[output]
-		if !ok || len(ref) == 0 {
-			continue
-		}
+// The size is checked BEFORE each element is appended, so an over-limit fan-in
+// stops at the element that would cross the limit: the builder never holds
+// more than `limit` bytes, and the caller -- which feeds it from a streaming
+// query -- stops reading rows too. Build-then-measure would already have paid
+// the allocation the limit exists to prevent.
+type FanInBuilder struct {
+	template, output string
+	limit            int64
+	total, n         int
+	buf              bytes.Buffer
+}
+
+// NewFanInBuilder starts a fan-in of `total` children. limit <= 0 means
+// DefaultMaxFanInBytes.
+func NewFanInBuilder(template, output string, total int, limit int64) *FanInBuilder {
+	if limit <= 0 {
+		limit = DefaultMaxFanInBytes
+	}
+	b := &FanInBuilder{template: template, output: output, limit: limit, total: total}
+	b.buf.WriteByte('[')
+	return b
+}
+
+// Add appends child n's value (ref nil or empty when it did not succeed).
+// Returns *FanInTooLarge, with nothing further appended, when the element would
+// take the array (including its closing bracket) past the limit.
+func (b *FanInBuilder) Add(ref json.RawMessage) error {
+	elem := json.RawMessage("null")
+	if len(ref) > 0 && !bytes.Equal(bytes.TrimSpace(ref), []byte("null")) {
 		payload, inline, err := inlinePayload(ref)
 		if err != nil {
-			return nil, fmt.Errorf("child %d output %q: %w", i, output, err)
+			return fmt.Errorf("child %d output %q: %w", b.n, b.output, err)
 		}
 		switch {
 		case !inline:
-			elems[i] = json.RawMessage(`{"result_ref":` + string(ref) + `}`)
+			elem = json.RawMessage(`{"result_ref":` + string(ref) + `}`)
 		case json.Valid(payload):
 			c, cerr := CanonicalJSON(payload)
 			if cerr != nil {
-				return nil, fmt.Errorf("child %d output %q: %w", i, output, cerr)
+				return fmt.Errorf("child %d output %q: %w", b.n, b.output, cerr)
 			}
-			elems[i] = c
+			elem = c
 		default:
-			b, _ := json.Marshal(map[string]string{"inline_base64": base64.StdEncoding.EncodeToString(payload)})
-			elems[i] = b
+			enc, _ := json.Marshal(map[string]string{"inline_base64": base64.StdEncoding.EncodeToString(payload)})
+			elem = enc
 		}
 	}
-	arr, err := json.Marshal(elems)
-	if err != nil {
-		return nil, fmt.Errorf("marshal fan-in array: %w", err)
+	sep := 0
+	if b.n > 0 {
+		sep = 1
 	}
-	return InlineJSONRef(arr)
+	// +1 for the closing bracket Finish will write.
+	if int64(b.buf.Len()+sep+len(elem)+1) > b.limit {
+		return &FanInTooLarge{Template: b.template, Output: b.output, Limit: b.limit, Children: b.n, Total: b.total}
+	}
+	if sep == 1 {
+		b.buf.WriteByte(',')
+	}
+	b.buf.Write(elem)
+	b.n++
+	return nil
+}
+
+// Size is the assembled payload so far, closing bracket included.
+func (b *FanInBuilder) Size() int { return b.buf.Len() + 1 }
+
+// Finish closes the array and wraps it as an inline ResultRef.
+func (b *FanInBuilder) Finish() (json.RawMessage, error) {
+	b.buf.WriteByte(']')
+	return InlineJSONRef(b.buf.Bytes())
+}
+
+// FanInValue is FanInBuilder over an in-memory slice, for callers that already
+// hold the children's outputs. childOutputs[i] is child i's output map (nil when
+// it did not succeed).
+func FanInValue(childOutputs []map[string]json.RawMessage, output string, limit int64) (json.RawMessage, error) {
+	b := NewFanInBuilder("", output, len(childOutputs), limit)
+	for _, outs := range childOutputs {
+		if err := b.Add(outs[output]); err != nil {
+			return nil, err
+		}
+	}
+	return b.Finish()
 }
 
 // InlineJSONRef wraps a JSON payload as an inline protojson ResultRef, the

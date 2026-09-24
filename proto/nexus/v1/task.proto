@@ -104,6 +104,10 @@ message ValueSpec {
   bool required = 2;
   // JSON-encoded default, applied when the input is absent.
   string default_json = 3;
+  // Optional author-declared upper bound on this value's size in bytes. Used at
+  // submit time to reject a map template whose fan-in (max_fanout x max_bytes)
+  // can never fit the platform's fan-in limit (§5.4). 0 = undeclared.
+  int64 max_bytes = 4;
 }
 
 // Airflow's trigger-rule taxonomy is well designed and worth adopting directly.

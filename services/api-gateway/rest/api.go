@@ -952,6 +952,18 @@ func (a *API) getRun(w http.ResponseWriter, r *http.Request, p authn.Principal) 
 			a.fail(w, r, "list run expansions", err)
 			return
 		}
+		refusals, err := store.GatewayListRunFanInRefusals(r.Context(), a.db, run.ID)
+		if err != nil {
+			a.fail(w, r, "list fan-in refusals", err)
+			return
+		}
+		// A node failed by a refused fan-in has no attempt to carry the error,
+		// so the reason rides on the node itself.
+		for _, n := range nodeOut {
+			if reason, ok := refusals[n["node_id"].(string)]; ok {
+				n["failure_reason"] = reason
+			}
+		}
 		for _, e := range exps {
 			expOut = append(expOut, map[string]any{
 				"template_node_id": e.TemplateNodeID, "source_node_id": e.SourceNodeID,

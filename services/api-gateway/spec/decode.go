@@ -221,6 +221,7 @@ func valueSpecMap(m map[string]any, key string) map[string]*nexusv1.ValueSpec {
 			Type:        str(vm, "type"),
 			Required:    boolean(vm, "required"),
 			DefaultJson: str(vm, "default_json"),
+			MaxBytes:    i64(vm, "max_bytes"),
 		}
 	}
 	return out

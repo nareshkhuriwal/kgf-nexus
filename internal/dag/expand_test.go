@@ -399,7 +399,7 @@ func TestFanInValue_PositionalWithNullsAndRefs(t *testing.T) {
 		{"result": blob},
 		{"result": mustRef([]byte("not json"))},
 	}
-	ref, err := FanInValue(outs, "result")
+	ref, err := FanInValue(outs, "result", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

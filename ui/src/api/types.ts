@@ -135,6 +135,12 @@ export interface RunNode {
   parent_node_id?: string | null;
   /** Dynamic expansion: the child's position in the mapped collection. */
   map_index?: number | null;
+  /**
+   * Why the node failed without running, e.g. a fan-in refused for exceeding
+   * the platform limit (§5.4). Absent for ordinary failures, whose reason is on
+   * the attempt.
+   */
+  failure_reason?: string | null;
 }
 
 /** One dynamic expansion of a map template (§5.4). */
