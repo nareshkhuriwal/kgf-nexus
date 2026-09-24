@@ -15,9 +15,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go"
 
+	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	eventservice "github.com/khuriwalgroup/kgf-nexus/services/event-service"
+	"github.com/khuriwalgroup/kgf-nexus/services/event-service/relay"
 )
 
 func main() {
@@ -36,8 +40,44 @@ func main() {
 	}
 	defer pool.Close()
 
+	// ── NATS (optional, ADR-0003) ──────────────────────────────────────────
+	// The outbox relay lives here because this service owns run_events and is
+	// not on the dispatch path (see package relay). An empty NEXUS_NATS_URL is a
+	// supported configuration: the relay then only prunes the outbox, SSE tails
+	// poll, and agents long-poll -- the Phase 1 behaviour, fully correct.
+	reg := metrics.NewRegistry()
+	busCfg := bus.ConfigFromEnv("nexus-event-service")
+	var nc *nats.Conn
+	waker := eventservice.NewRunWaker()
+	if busCfg.Enabled() {
+		// Connect never blocks on the broker being up (RetryOnFailedConnect), so a
+		// NATS outage at deploy time cannot keep the event history offline.
+		nc, err = bus.Connect(busCfg, log)
+		if err != nil {
+			log.Error("nats configuration rejected; continuing without the bus", "error", err)
+			nc = nil
+		} else {
+			defer nc.Close()
+			if _, err := waker.Attach(nc); err != nil {
+				log.Warn("could not subscribe SSE waker; tails will poll", "error", err)
+			}
+		}
+	} else {
+		log.Info("NEXUS_NATS_URL is empty: event bus disabled; polling only")
+	}
+	rl, err := relay.New(pool, nc, relay.ConfigFromEnv(log), log, relay.NewMetrics(reg))
+	if err != nil {
+		log.Error("could not build outbox relay", "error", err)
+		os.Exit(1)
+	}
+	relayDone := make(chan struct{})
+	go func() { rl.Run(ctx); close(relayDone) }()
+
 	srv := &http.Server{
-		Handler:           eventservice.NewServer(eventservice.NewStore(pool), log).Routes(),
+		Handler: eventservice.NewServer(eventservice.NewStore(pool), log).
+			WithWaker(waker).
+			WithRoutes(reg.Routes).
+			Routes(),
 		Addr:              addr,
 		ReadHeaderTimeout: 10 * time.Second,
 		// No WriteTimeout: SSE streams are long-lived by design and a write
@@ -60,6 +100,12 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Warn("graceful shutdown incomplete", "error", err)
+	}
+	// The relay stops on ctx; an in-flight batch rolls back and its rows are
+	// re-sent by a peer or the next start, de-duplicated by Nats-Msg-Id.
+	select {
+	case <-relayDone:
+	case <-shutdownCtx.Done():
 	}
 }
 
