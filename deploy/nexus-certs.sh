@@ -30,6 +30,9 @@
 #   rotate-ca            new CA; bundle = new + old (overlap), old key destroyed
 #   drop-retired-cas     bundle = current CA only (finish a CA rotation)
 #   install SRC DEST     copy leaves + bundle (never CA keys) into DEST atomically
+#   csr NAME DIR         (on an agent host) new key + CSR; the key never leaves DIR
+#   sign-csr NAME CSR    (on the CA host) sign an agent CSR as a client-only leaf
+#   install-signed DIR CRT BUNDLE  (on the agent host) put the signed cert in place
 #   check [--warn-days N]  print expiry of everything; exit 1 if any is near
 #
 # Nothing here is a secret-management system. It is the smallest honest tool
@@ -230,6 +233,84 @@ drop_retired() {
 	say "bundle now trusts only the current CA. Distribute it (install) to finish the rotation."
 }
 
+# csr NAME DIR -- run ON THE AGENT HOST. Creates DIR/tls.key (0600) and
+# DIR/tls.csr. Only the CSR travels to the CA holder, so the agent's private key
+# is never copied anywhere: it cannot be leaked by the channel used to enrol.
+make_csr() {
+	need_openssl
+	[ $# -eq 2 ] || die "usage: csr NAME DIR"
+	name="$1"; dir="$2"
+	mkdir -p "$dir"
+	chmod 700 "$dir"
+	cfg="$dir/.csr.cnf.$$"
+	printf '[req]\ndistinguished_name = dn\nprompt = no\n[dn]\nCN = %s\n' "$name" >"$cfg"
+	genkey "$dir/tls.key.new"
+	"$OPENSSL" req -new -key "$dir/tls.key.new" -config "$cfg" -out "$dir/tls.csr"
+	rm -f "$cfg"
+	chmod 644 "$dir/tls.csr"
+	say "wrote $dir/tls.csr. Send ONLY the CSR to the CA holder; the new key is $dir/tls.key.new."
+	say "when tls.crt comes back: install-signed $dir <signed.crt> <ca-bundle.pem>"
+}
+
+# install-signed DIR CRT BUNDLE -- run ON THE AGENT HOST after sign-csr. Puts
+# the pending key and the signed certificate in place, key first, each by rename;
+# the running agent reloads them without a restart.
+install_signed() {
+	need_openssl
+	[ $# -eq 3 ] || die "usage: install-signed DIR CRT BUNDLE"
+	dir="$1"; crt="$2"; bundle="$3"
+	[ -f "$dir/tls.key.new" ] || die "no pending key $dir/tls.key.new (run csr first)"
+	[ -f "$crt" ] || die "certificate $crt not found"
+	[ -f "$bundle" ] || die "CA bundle $bundle not found"
+	# Refuse a certificate that does not belong to the pending key. Installing
+	# one would give the agent a pair its reloader rejects, so it would keep the
+	# old identity while this command reported success.
+	want=$("$OPENSSL" pkey -in "$dir/tls.key.new" -pubout | "$OPENSSL" sha256)
+	got=$("$OPENSSL" x509 -in "$crt" -noout -pubkey | "$OPENSSL" sha256)
+	[ "$want" = "$got" ] || die "$crt was not issued for the key in $dir/tls.key.new"
+	"$OPENSSL" verify -CAfile "$bundle" "$crt" >/dev/null || die "$crt does not verify against $bundle"
+	cp "$bundle" "$dir/ca.crt.tmp" && chmod 644 "$dir/ca.crt.tmp" && mv -f "$dir/ca.crt.tmp" "$dir/ca.crt"
+	mv -f "$dir/tls.key.new" "$dir/tls.key"
+	cp "$crt" "$dir/tls.crt.tmp" && chmod 644 "$dir/tls.crt.tmp" && mv -f "$dir/tls.crt.tmp" "$dir/tls.crt"
+	say "installed $dir/tls.crt (serial $("$OPENSSL" x509 -in "$dir/tls.crt" -noout -serial | cut -d= -f2))"
+}
+
+# sign-csr NAME CSR [--days N] -- run ON THE CA HOST. Always client-only: an
+# agent serves nothing, and a leaf that cannot act as a server certificate
+# cannot be used to impersonate a control-plane service. The CSR's subject must
+# be exactly CN=NAME: the CA holder names the identity, and a CSR asking for a
+# different one is refused rather than signed. (Checked rather than overwritten
+# with -subj, which LibreSSL's `x509 -req` does not support.) Extensions in the
+# CSR are never copied; the ones below are the only ones the leaf gets.
+sign_csr() {
+	need_openssl
+	[ $# -ge 2 ] || die "usage: sign-csr NAME CSR [--days N]"
+	name="$1"; csr="$2"; shift 2
+	days="$LEAF_DAYS"
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--days) days="$2"; shift 2 ;;
+		*) die "sign-csr: unknown option $1" ;;
+		esac
+	done
+	[ -f "$OUT/ca/ca.key" ] || die "no CA in $OUT/ca"
+	"$OPENSSL" req -in "$csr" -noout -verify >/dev/null 2>&1 || die "$csr is not a valid, self-consistent CSR"
+	# OpenSSL 3 prints "subject=CN = x", LibreSSL "subject= /CN=x"; normalise both.
+	subj=$("$OPENSSL" req -in "$csr" -noout -subject | sed 's/^subject=//; s/ //g; s|^/||')
+	[ "$subj" = "CN=$name" ] || die "CSR subject is '$subj', expected exactly 'CN=$name'; refusing to sign an identity the CA holder did not choose"
+	dir="$OUT/enrolled/$name"
+	mkdir -p "$dir"
+	cfg="$dir/.sign.cnf.$$"
+	printf '[leaf]\nbasicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature\nextendedKeyUsage = clientAuth\nauthorityKeyIdentifier = keyid\n' >"$cfg"
+	"$OPENSSL" x509 -req -in "$csr" -CA "$OUT/ca/ca.crt" -CAkey "$OUT/ca/ca.key" \
+		-set_serial "$(serial)" -days "$days" -extfile "$cfg" -extensions leaf \
+		-out "$dir/tls.crt" 2>/dev/null || die "signing $csr failed"
+	rm -f "$cfg"
+	chmod 644 "$dir/tls.crt"
+	cp "$OUT/ca-bundle.pem" "$dir/ca-bundle.pem"
+	say "signed $dir/tls.crt (client-only, $days days). Return it and $dir/ca-bundle.pem to the agent host."
+}
+
 # install SRC DEST [--owner uid:gid]
 #
 # Copies every leaf directory and the bundle from SRC into DEST, NEVER a CA key.
@@ -283,7 +364,7 @@ check() {
 		esac
 	done
 	rc=0
-	for f in "$OUT"/ca/ca.crt "$OUT"/*/tls.crt; do
+	for f in "$OUT"/ca/ca.crt "$OUT"/*/tls.crt "$OUT"/enrolled/*/tls.crt; do
 		[ -f "$f" ] || continue
 		end=$("$OPENSSL" x509 -in "$f" -noout -enddate | cut -d= -f2)
 		if ! "$OPENSSL" x509 -in "$f" -noout -checkend 0 >/dev/null 2>&1; then
@@ -310,6 +391,9 @@ case "$cmd" in
 dev) dev ;;
 init-ca) init_ca ;;
 issue) issue "$@" ;;
+csr) make_csr "$@" ;;
+sign-csr) sign_csr "$@" ;;
+install-signed) install_signed "$@" ;;
 rotate-ca) rotate_ca ;;
 drop-retired-cas) drop_retired "$@" ;;
 install) install_certs "$@" ;;
