@@ -240,5 +240,10 @@ BEGIN
         GRANT INSERT ON cluster_scaling_events TO nexus_resource_manager;
         GRANT USAGE ON SEQUENCE cluster_reconcile_errors_id_seq, cluster_scaling_events_id_seq
             TO nexus_resource_manager;
+        -- Pool policy (min/max, slots, profile) lives in platform_config, and
+        -- the resource manager resolves each binding against it. 0010 granted
+        -- that table to the gateway only; this is a READ, which ADR-0011's
+        -- matrix already allows every service.
+        GRANT SELECT ON platform_config TO nexus_resource_manager;
     END IF;
 END $$;

@@ -402,14 +402,19 @@ func (s *RMStore) PoolDemand(ctx context.Context, b ClusterBinding) (platform.De
 	return d, nil
 }
 
-// clusterForMutation loads the cluster row under lock and refuses unless it is
+// clusterForMutation loads the cluster row and refuses unless it is
 // registered for apply with a verified identity. Checked here -- in the owning
 // service, inside the mutating transaction -- rather than trusted from the
 // controller, so a controller running in the wrong mode or against the wrong
 // cluster cannot drain anything.
 func clusterForMutation(ctx context.Context, tx pgx.Tx, clusterID, namespace, observedUID, k8sNamespace, deployment string) error {
 	var mode, expected, owner string
-	err := tx.QueryRow(ctx, `SELECT mode, expected_cluster_uid, namespace FROM clusters WHERE id = $1 FOR SHARE`, clusterID).
+	// No FOR SHARE: a row lock needs UPDATE privilege on the registry, which
+	// the resource manager deliberately lacks. The check is therefore as of
+	// this statement; an operator switching to plan concurrently takes effect
+	// on the controller's very next call, and a drain is harmless on its own
+	// (it only stops new dispatch to one pod's workers).
+	err := tx.QueryRow(ctx, `SELECT mode, expected_cluster_uid, namespace FROM clusters WHERE id = $1`, clusterID).
 		Scan(&mode, &expected, &owner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrClusterNotFound

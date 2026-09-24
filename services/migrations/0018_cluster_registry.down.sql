@@ -12,3 +12,8 @@ DROP TABLE IF EXISTS cluster_observations;
 DROP TABLE IF EXISTS cluster_status;
 DROP TABLE IF EXISTS cluster_namespace_bindings;
 DROP TABLE IF EXISTS clusters;
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_resource_manager') THEN
+        REVOKE SELECT ON platform_config FROM nexus_resource_manager;
+    END IF;
+END $$;

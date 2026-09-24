@@ -275,6 +275,7 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("GET /v1/namespaces/{ns}/platform/config", a.guard(authn.ActionAdminWrite, a.platformGet))
 	mux.Handle("PUT /v1/namespaces/{ns}/platform/config", a.guard(authn.ActionAdminWrite, a.platformPut))
 	mux.Handle("GET /v1/namespaces/{ns}/platform/plan", a.guard(authn.ActionAdminWrite, a.platformPlan))
+	a.registerClusterRoutes(mux)
 	a.registerRBACRoutes(mux)
 	a.registerIdentityRoutes(mux)
 
