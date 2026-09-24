@@ -1,0 +1,17 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Plan-mode (read-only) install:   kubectl apply -k deploy/k8s/cluster-controller/base
+# Apply mode instead:               kubectl apply -k deploy/k8s/cluster-controller/apply
+# Read docs/CLUSTER-SCALING.md and docs/OPERATIONS.md before enabling apply.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - rbac.yaml
+  - deployment.yaml
+  - scaling.yaml
+  - worker-deployment.example.yaml
+images:
+  # Replace with the release digest at deploy time; never a moving tag.
+  - name: kgf-nexus/cluster-controller
+    newTag: 0.1.0

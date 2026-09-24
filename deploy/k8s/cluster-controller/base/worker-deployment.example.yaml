@@ -1,0 +1,49 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# The shape a worker Deployment must have for the controller to scale it
+# safely. The load-bearing parts are commented; the rest is an ordinary agent.
+#
+# - NO spec.template.spec.hostname and no hostname override for the agent: the
+#   agent registers os.Hostname(), which in a pod is the pod name, and that is
+#   the only join between a pod and its worker rows.
+# - terminationGracePeriodSeconds >= NEXUS_DRAIN_GRACE: on SIGTERM (eviction,
+#   or a scale-in) the agent stops taking work and finishes what it holds
+#   within the grace.
+# - CPU and memory requests: namespace quota headroom is computed from them,
+#   and a quota on an undeclared resource makes the controller refuse to scale
+#   out rather than let the ReplicaSet fail silently.
+# - spec.replicas is omitted on purpose: once bound, the controller owns it.
+#   Do not add an HPA to this Deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workers-cpu
+  namespace: nexus-workers
+  labels: {app.kubernetes.io/name: nexus-worker, app.kubernetes.io/part-of: kgf-nexus, nexus.io/pool: cpu}
+spec:
+  selector:
+    matchLabels: {app.kubernetes.io/name: nexus-worker, nexus.io/pool: cpu}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: nexus-worker, app.kubernetes.io/part-of: kgf-nexus, nexus.io/pool: cpu}
+    spec:
+      terminationGracePeriodSeconds: 330   # NEXUS_DRAIN_GRACE (5m) + 30s
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: agent
+          image: kgf-nexus/agent:0.1.0   # pin to a digest at release
+          args: ["-namespace=acme", "-queues=cpu"]
+          env:
+            - {name: NEXUS_CONTROL_PLANE, value: "api-gateway.kgf-nexus.svc:50051"}
+            - {name: NEXUS_DRAIN_GRACE, value: 5m}
+          resources:
+            requests: {cpu: "1", memory: 1Gi}
+            limits: {memory: 2Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}

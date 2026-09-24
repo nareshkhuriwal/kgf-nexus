@@ -1,0 +1,14 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-cluster-controller
+  namespace: kgf-nexus
+spec:
+  template:
+    spec:
+      containers:
+        - name: controller
+          env:
+            - {name: NEXUS_CONTROLLER_ALLOW_APPLY, value: "true"}

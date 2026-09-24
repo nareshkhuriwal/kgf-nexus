@@ -1,0 +1,74 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Who scales what -- exactly one writer per target:
+#   scheduler Deployment  -> this HorizontalPodAutoscaler (CPU)
+#   worker Deployments    -> the Nexus cluster controller (queued demand)
+#   nodes                 -> the AKS cluster autoscaler (never Nexus)
+# Do not also put an HPA on a worker Deployment the controller is bound to:
+# two writers to one replica count fight, and the loser's drains are wasted.
+#
+# Bounds here mirror the scheduler policy saved in the console (platform
+# config); the controller reports this HPA and the console flags drift, but
+# does not rewrite it. Scheduler pods must declare CPU requests and the
+# cluster needs metrics-server, or the HPA reports ScalingActive=False.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: scheduler
+  namespace: kgf-nexus
+  labels: {app.kubernetes.io/part-of: kgf-nexus, app.kubernetes.io/component: scheduler}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: scheduler}
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 65}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies: [{type: Pods, value: 1, periodSeconds: 60}]
+---
+# Scheduler replicas are interchangeable (correctness comes from the claim
+# transaction, not leadership), so any one may go -- but never the last.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: scheduler
+  namespace: kgf-nexus
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/part-of: kgf-nexus, app.kubernetes.io/component: scheduler}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nexus-cluster-controller
+  namespace: kgf-nexus
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: nexus-cluster-controller}
+---
+# Workers: a node drain (cluster-autoscaler scale-down, AKS upgrade) evicts at
+# most one worker at a time. Eviction sends SIGTERM, and the agent then drains
+# itself within NEXUS_DRAIN_GRACE -- so the worker Deployment's
+# terminationGracePeriodSeconds must be at least that grace. This PDB does NOT
+# govern controller scale-in (a ReplicaSet scale-down is not an eviction);
+# drain-before-removal does.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: workers-cpu
+  namespace: nexus-workers
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: nexus-worker, nexus.io/pool: cpu}
