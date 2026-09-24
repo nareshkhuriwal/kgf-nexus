@@ -1,6 +1,9 @@
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 import { RegisterPage } from './pages/RegisterPage';
+import { VerifyEmailPage } from './pages/VerifyEmailPage';
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
+import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { CustomerPage } from './pages/CustomerPage';
 import { PermissionContext, PermissionBoundary } from './components/Permissions';
 import { RolesPage } from './pages/admin/RolesPage';
@@ -485,6 +488,11 @@ export function App() {
 
   return (
     <PermissionContext.Provider value={grants}><Routes><Route path="/register" element={<RegisterPage />} />
+      {/* Reached from emailed links, by people who are not signed in: outside the
+          chrome for the same reason as /login. */}
+      <Route path="/verify-email" element={<ErrorBoundary><VerifyEmailPage /></ErrorBoundary>} />
+      <Route path="/forgot-password" element={<ErrorBoundary><ForgotPasswordPage /></ErrorBoundary>} />
+      <Route path="/reset-password" element={<ErrorBoundary><ResetPasswordPage /></ErrorBoundary>} />
       {/* Outside the chrome: no nav, no namespace control, no account menu. */}
       <Route
         path="/login"

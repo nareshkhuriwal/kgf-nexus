@@ -1892,3 +1892,22 @@ Portainer host has been applied or run; the full `make up-tls` stack has not bee
 brought up end to end. `TestServerNameOverrideFixesTheComposeNameMismatch` takes
 1–9s under `-race` in a full package run (0.06s alone) — measured identical on the
 pre-change code, so not introduced here, but within reach of its 10s deadline.
+
+### F92. Registration accepted any email address, and there was no password recovery — FIXED
+
+Self-service registration (0013) created a tenant owner for any address typed in, and nothing proved the registrant controlled it. There was also no recovery path: a forgotten password needed an administrator of the same tenant, and the registrant was usually the only administrator. MULTITENANCY.md listed both as prerequisites for public registration.
+
+**Fix:** migration 0017 (`users.email_verified_at`, `email_tokens`), `internal/mail` (SMTP with STARTTLS or implicit TLS, timeouts and retry), four unguarded and rate-limited gateway routes, and console pages. The policy, the no-oracle design and the limits are in docs/MULTITENANCY.md; configuration is in docs/OPERATIONS.md §9. Decisions worth recording here:
+
+- **Existing accounts are verified by the migration, without a backfill.** `ADD COLUMN … DEFAULT now()` followed by `DROP DEFAULT` stores the value as the column's missing value for existing rows. New rows, including rows an old replica inserts mid-deploy, are unverified. This was verified on Postgres 16 and passes the migration safety gate unmodified.
+- **Unverified accounts cannot sign in**, and the 403 is returned only after the password is verified. Admin-created and address-changed accounts are unverified too; a trigger clears verification when the address changes.
+- **Link requests are answered before the lookup**, so the response does not depend on whether the account exists in body, headers or timing.
+- **A disabled mailer fails loudly.** It returns 503 `email_unavailable` and logs a WARN at startup, and never reports a successful send.
+
+**Found along the way (not fixed, outside this slice):**
+
+- The existing per-credential limiter keys unauthenticated requests on `r.RemoteAddr` *including the ephemeral port*. Each new TCP connection therefore gets a fresh bucket, so login and registration are barely limited against a client that does not reuse connections. The new per-IP limiter strips the port.
+- `clientIP()` trusts `X-Forwarded-For` from any peer. That is fine for audit notes, as its comment says, and wrong for limits, which is why the new routes use `requesterIP()` instead.
+- Several pre-0014 store integration tests create rows in namespaces that were never registered as tenants and now fail with `Namespace must belong to a registered tenant`: `TestIntegrationDisabledUserCannotAuthenticate`, `TestIntegrationDuplicateEmailIsRejected`, `TestIntegrationSpecContentAddressing`, `TestConcurrentReserveDoesNotOverCommit`, `TestConcurrentReconcileDoesNotDoubleSubtract`, `TestConcurrentTickClaimsYieldOneWinner` and `TestConcurrentEventAppendsNeverCollide`. `TestIntegrationTenantRegistrationIsolation` uses fixed emails and counts every registration in the database, so it passes only once per database.
+- The default integration DSN `localhost:55432` is, on at least one developer machine, a different product's Postgres (`polaris-postgres`). Always set `NEXUS_TEST_DATABASE_URL`.
+- `deploy/render_compose.py` deploys the development compose file, so development defaults (now including Mailpit as the SMTP host) reach deployed hosts unless they are overridden.

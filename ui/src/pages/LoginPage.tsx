@@ -42,10 +42,12 @@
  */
 
 import { useState, type FormEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { authApi, setSession } from '../api/auth';
+import { errorCode } from '../api/accountRecovery';
 import { errorMessage } from '../api/hooks';
 import { Logo } from '../components/Logo';
+import { ResendVerification } from '../components/AuthShell';
 
 /**
  * What this console actually puts in front of an operator.
@@ -76,12 +78,17 @@ export function LoginPage({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  // The gateway answers 403 email_not_verified only AFTER the password checked
+  // out, so showing the resend prompt here tells the person nothing they did not
+  // already prove they knew.
+  const [unverified, setUnverified] = useState(false);
 
   async function signIn(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
     setWarning(null);
+    setUnverified(false);
     try {
       const session = await authApi.login("", email.trim(), password);
       if (!setSession(session)) {
@@ -94,6 +101,7 @@ export function LoginPage({
       onAuthenticated();
       navigate('/runs', { replace: true });
     } catch (err) {
+      setUnverified(errorCode(err) === 'email_not_verified');
       setError(errorMessage(err));
     } finally {
       setBusy(false);
@@ -173,7 +181,11 @@ export function LoginPage({
                 <button type="submit" className="primary login-submit" disabled={busy}>
                   {busy ? 'Signing in…' : 'Sign in'}
                 </button>
-              </form><p className="login-signup">New customer? <a href="/register">Create your workspace</a></p>
+              </form>
+              <p className="login-signup">
+                <Link to="/forgot-password">Forgot your password?</Link>
+              </p>
+              <p className="login-signup">New customer? <a href="/register">Create your workspace</a></p>
 
               {error && (
                 <div className="notice error" role="alert">
@@ -181,11 +193,14 @@ export function LoginPage({
                     !
                   </span>
                   <div>
-                    <div className="notice-title">Could not sign in</div>
+                    <div className="notice-title">
+                      {unverified ? 'Confirm your email address first' : 'Could not sign in'}
+                    </div>
                     <div className="notice-detail">{error}</div>
                   </div>
                 </div>
               )}
+              {unverified && <ResendVerification initialEmail={email.trim()} compact />}
               {/* A warning, not a failure: the sign-in worked. It keeps
                   role=status so it is announced without interrupting, and takes
                   the warning tone rather than the danger tone the error uses. */}

@@ -31,6 +31,7 @@ import (
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/mail"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
@@ -126,6 +127,12 @@ func run() error {
 			"requests_per_second", cfg.RequestsPerSecond, "burst", cfg.Burst,
 			"why", "the gateway is the only ingress, so an unlimited one has no defence against a retry loop or credential stuffing")
 	}
+	emailCfg, err := emailFlowConfig(log)
+	if err != nil {
+		return err
+	}
+	api = api.WithEmailFlows(emailCfg)
+
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", api.Routes())
 
@@ -249,6 +256,12 @@ func run() error {
 	if err := restSrv.Shutdown(shutdownCtx); err != nil {
 		log.Error("REST shutdown did not complete cleanly", "error", err)
 	}
+	// After the listener: no new request can queue mail now, and anything already
+	// queued (a registration's verification, a reset link) gets the rest of the
+	// grace period to go out rather than being dropped with the process.
+	if err := api.CloseEmailFlows(shutdownCtx); err != nil {
+		log.Error("queued email was not fully delivered before shutdown", "error", err)
+	}
 
 	select {
 	case <-stopped:
@@ -359,4 +372,80 @@ func envInt(key string, def int) int {
 		return def
 	}
 	return n
+}
+
+// emailFlowConfig reads mail delivery and verification policy from the
+// environment and says, loudly, which mode the gateway is in.
+//
+// A misconfiguration (bad port, TLS mode, a From with no address, credentials
+// over plain text, SMTP without a public URL to build links from) stops startup:
+// discovering it from the first person whose reset email never arrived is worse.
+// NO configuration at all is valid and yields the disabled sender, which refuses
+// every send -- and the WARN below is the operator-facing record of that choice.
+func emailFlowConfig(log *slog.Logger) (rest.EmailFlowConfig, error) {
+	mcfg, err := mail.ConfigFromEnv(os.Getenv)
+	if err != nil {
+		return rest.EmailFlowConfig{}, fmt.Errorf("email delivery configuration: %w", err)
+	}
+	sender, err := mail.New(mcfg)
+	if err != nil {
+		return rest.EmailFlowConfig{}, fmt.Errorf("email delivery configuration: %w", err)
+	}
+	cfg := rest.DefaultEmailFlowConfig()
+	cfg.Mailer = sender
+	cfg.PublicURL = env("NEXUS_PUBLIC_URL", "")
+	cfg.VerifyTTL = time.Duration(envInt("NEXUS_EMAIL_VERIFY_TTL_SEC", int(cfg.VerifyTTL/time.Second))) * time.Second
+	cfg.ResetTTL = time.Duration(envInt("NEXUS_PASSWORD_RESET_TTL_SEC", int(cfg.ResetTTL/time.Second))) * time.Second
+	cfg.RequireVerified = envBool("NEXUS_EMAIL_VERIFICATION_REQUIRED", true)
+	if err := cfg.Validate(); err != nil {
+		return rest.EmailFlowConfig{}, fmt.Errorf("email flows: %w", err)
+	}
+
+	if !mcfg.Enabled() {
+		effect := "verification and password-reset requests answer 503 email_unavailable"
+		if cfg.RequireVerified {
+			effect += "; accounts created from now on cannot confirm their address and therefore cannot sign in"
+		}
+		log.Warn("email delivery is DISABLED: NEXUS_SMTP_HOST is not set",
+			"verification_required", cfg.RequireVerified, "effect", effect)
+		return cfg, nil
+	}
+	log.Info("email delivery configured",
+		"smtp_host", mcfg.Host, "smtp_port", mcfg.Port, "smtp_tls", string(mcfg.TLS),
+		"smtp_auth", mcfg.Username != "", "public_url", cfg.PublicURL,
+		"verify_ttl", cfg.VerifyTTL.String(), "reset_ttl", cfg.ResetTTL.String(),
+		"verification_required", cfg.RequireVerified)
+	if !cfg.RequireVerified {
+		log.Warn("NEXUS_EMAIL_VERIFICATION_REQUIRED=false: accounts may sign in before proving their email address")
+	}
+	// Probed in the background so a slow mail server never delays startup, but
+	// reported at ERROR so a wrong host, certificate or password is in the log
+	// from the first minute rather than discovered by a user.
+	if s, ok := sender.(*mail.SMTP); ok {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), mcfg.Timeout+5*time.Second)
+			defer cancel()
+			if err := s.Probe(ctx); err != nil {
+				log.Error("SMTP server probe failed; verification and reset emails will not be delivered until this is fixed",
+					"smtp_host", mcfg.Host, "smtp_port", mcfg.Port, "error", err)
+				return
+			}
+			log.Info("SMTP server probe succeeded", "smtp_host", mcfg.Host, "smtp_port", mcfg.Port)
+		}()
+	}
+	return cfg, nil
+}
+
+// envBool reads a boolean, keeping the default on an unparseable value for the
+// same reason envFloat does.
+func envBool(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
 }

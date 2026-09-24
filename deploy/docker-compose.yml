@@ -172,6 +172,26 @@ services:
         echo "minio-init: bucket $${RESULT_STORE_BUCKET} ready"
     restart: "no"
 
+  # Development mail catcher. Accepts SMTP on 1025 from the gateway and shows
+  # every message at http://localhost:8025, so verification and reset links can
+  # be followed without a real mail server. Pinned, like every other image here,
+  # so a laptop and CI catch the same behaviour. The web UI is bound to loopback:
+  # it displays live reset links, which are credentials.
+  mailpit:
+    image: axllent/mailpit:v1.27.0
+    environment:
+      MP_MAX_MESSAGES: "500"
+      MP_SMTP_AUTH_ACCEPT_ANY: "false"
+    ports:
+      - "127.0.0.1:${NEXUS_MAILPIT_UI_PORT:-8025}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
   # ── Migration job (ADR-0011 rule 4) ─────────────────────────────────────
   migrate:
     build:
@@ -216,6 +236,20 @@ services:
                                 # contends with UI queries (§3.2)
       # Static API keys are the MVP authn story (§11). `make seed` inserts one.
       AUTH_MODE: api_key
+      # Email verification and password recovery (docs/OPERATIONS.md, "Email").
+      # Defaults send to the Mailpit catcher below, so every flow is testable
+      # locally and nothing leaves the laptop. Each value is overridable because
+      # render_compose.py deploys THIS file: a real host must set NEXUS_SMTP_HOST
+      # and friends, or its users' reset mail lands in a catcher nobody reads.
+      NEXUS_SMTP_HOST: ${NEXUS_SMTP_HOST:-mailpit}
+      NEXUS_SMTP_PORT: ${NEXUS_SMTP_PORT:-1025}
+      NEXUS_SMTP_TLS: ${NEXUS_SMTP_TLS:-none}
+      NEXUS_SMTP_USERNAME: ${NEXUS_SMTP_USERNAME:-}
+      NEXUS_SMTP_PASSWORD: ${NEXUS_SMTP_PASSWORD:-}
+      NEXUS_SMTP_FROM: ${NEXUS_SMTP_FROM:-KGF Nexus <no-reply@nexus.localhost>}
+      # Links in emails point at the console, which is where the verify and
+      # reset pages live -- not at this gateway.
+      NEXUS_PUBLIC_URL: ${NEXUS_PUBLIC_URL:-http://localhost:3000}
     ports:
       - "${NEXUS_API_PORT:-8090}:8080"
       - "${NEXUS_GRPC_PORT:-9091}:9091"

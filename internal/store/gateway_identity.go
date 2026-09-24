@@ -43,6 +43,11 @@ type UserRow struct {
 	Role        string
 	CreatedAt   time.Time
 	DisabledAt  *time.Time
+	// EmailVerifiedAt is when the account proved it controls Email (migration
+	// 0017). Nil means unproven. Populated by the reads that feed a decision or a
+	// display -- password authentication, GetUser and ListUsers -- and left nil by
+	// writes that return the row they just inserted, where it is nil anyway.
+	EmailVerifiedAt *time.Time
 }
 
 // SessionRow is a live browser session.
@@ -200,11 +205,11 @@ func GatewayAuthenticatePassword(ctx context.Context, q GWQuerier, namespace, em
 	var u UserRow
 	var hash *string
 	err := q.QueryRow(ctx, `
-		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at, password_hash
+		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at, password_hash, email_verified_at
 		  FROM users
 		 WHERE namespace = $1 AND lower(email) = $2`,
 		namespace, email,
-	).Scan(&u.ID, &u.Namespace, &u.Email, &u.DisplayName, &u.Role, &u.CreatedAt, &u.DisabledAt, &hash)
+	).Scan(&u.ID, &u.Namespace, &u.Email, &u.DisplayName, &u.Role, &u.CreatedAt, &u.DisabledAt, &hash, &u.EmailVerifiedAt)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -278,7 +283,7 @@ func GatewayListUsers(ctx context.Context, q GWQuerier, namespace string, limit 
 		limit = 100
 	}
 	rows, err := q.Query(ctx, `
-		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at
+		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at, email_verified_at
 		  FROM users
 		 WHERE namespace = $1
 		 ORDER BY created_at DESC
@@ -291,7 +296,7 @@ func GatewayListUsers(ctx context.Context, q GWQuerier, namespace string, limit 
 	out := make([]UserRow, 0, 16)
 	for rows.Next() {
 		var u UserRow
-		if err := rows.Scan(&u.ID, &u.Namespace, &u.Email, &u.DisplayName, &u.Role, &u.CreatedAt, &u.DisabledAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Namespace, &u.Email, &u.DisplayName, &u.Role, &u.CreatedAt, &u.DisabledAt, &u.EmailVerifiedAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		out = append(out, u)
@@ -307,10 +312,10 @@ func GatewayListUsers(ctx context.Context, q GWQuerier, namespace string, limit 
 func GatewayGetUser(ctx context.Context, q GWQuerier, namespace, userID string) (UserRow, error) {
 	var u UserRow
 	err := q.QueryRow(ctx, `
-		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at
+		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at, email_verified_at
 		  FROM users
 		 WHERE namespace = $1 AND id = $2`, namespace, userID,
-	).Scan(&u.ID, &u.Namespace, &u.Email, &u.DisplayName, &u.Role, &u.CreatedAt, &u.DisabledAt)
+	).Scan(&u.ID, &u.Namespace, &u.Email, &u.DisplayName, &u.Role, &u.CreatedAt, &u.DisabledAt, &u.EmailVerifiedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return UserRow{}, ErrNotFound
 	}
