@@ -6,7 +6,7 @@
 // Integration tests for dynamic expansion (§5.4) and memoization (§6.4), run
 // against a real Postgres with migrations 0001-0021 applied:
 //
-//	NEXUS_POSTGRES_DSN=postgres://... go test -tags integration ./services/dag-engine/...
+//	NEXUS_TEST_DATABASE_URL=postgres://... go test -tags integration ./services/dag-engine/...
 package main
 
 import (

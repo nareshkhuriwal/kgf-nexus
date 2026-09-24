@@ -7,23 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 )
-
-// testDSN is the local schema-applied database from CONTRACT.md. Overridable so
-// CI can point at its own instance.
-func testDSN() string {
-	if v := os.Getenv("NEXUS_TEST_DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://postgres:test@localhost:55432/nexus"
-}
 
 // newTestStore connects, or SKIPS cleanly when no database is available. Skipping
 // rather than failing is deliberate: a test that fails for want of infrastructure
@@ -33,13 +24,13 @@ func newTestStore(t *testing.T) (*RMStore, *pgxpool.Pool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, testDSN())
+	pool, err := pgxpool.New(ctx, testdb.DSN(t))
 	if err != nil {
-		t.Skipf("no test database available (%v); skipping", err)
+		testdb.SkipUnreachable(t, err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		t.Skipf("test database unreachable (%v); skipping", err)
+		testdb.SkipUnreachable(t, err)
 	}
 	t.Cleanup(pool.Close)
 	return NewRMStore(pool), pool
@@ -54,6 +45,7 @@ func vec(cpu, mem int64, gpu int32) *nexusv1.ResourceVector {
 func registerTestWorker(t *testing.T, s *RMStore, capacity *nexusv1.ResourceVector) string {
 	t.Helper()
 	ns := fmt.Sprintf("test-%s-%d", t.Name(), time.Now().UnixNano())
+	testdb.RegisterTenant(t, s.Pool(), ns)
 	id, err := s.RegisterWorker(context.Background(), Worker{
 		Namespace: ns, Hostname: "test-host", Queues: []string{"default"},
 		Executors: []string{"subprocess"}, Labels: map[string]string{"zone": "a"},
@@ -79,13 +71,9 @@ func mustCommitted(t *testing.T, s *RMStore, workerID string) *nexusv1.ResourceV
 	return w.Committed
 }
 
-// insertAttemptlessReservation writes a reservation directly.
-//
-// The schema's FK on reservations.attempt_id normally requires a real attempt
-// row, which would require a whole run/spec/node graph owned by other services.
-// Tests of the LEDGER should not need the DAG, so the constraint is dropped for
-// the duration of the test transaction-free and restored after. If the FK cannot
-// be manipulated (insufficient privilege), the test skips rather than lies.
+// insertReservation writes a reservation directly, bypassing Reserve, to seed
+// the ledger in states only a crashed or restarted worker leaves behind. The
+// attempt must be real (see newAttemptID).
 func insertReservation(t *testing.T, s *RMStore, workerID, attemptID string, res *nexusv1.ResourceVector, age time.Duration) {
 	t.Helper()
 	b, err := marshalVec(res)
@@ -115,30 +103,6 @@ func setCommitted(t *testing.T, s *RMStore, workerID string, v *nexusv1.Resource
 	}
 }
 
-// dropAttemptFK removes the FK so ledger tests need no DAG rows, restoring it
-// afterwards. Skips the test if the database user cannot alter the table.
-func dropAttemptFK(t *testing.T, s *RMStore) {
-	t.Helper()
-	ctx := context.Background()
-	var name string
-	err := s.Pool().QueryRow(ctx, `
-		SELECT conname FROM pg_constraint
-		 WHERE conrelid = 'reservations'::regclass AND contype = 'f'
-		   AND confrelid = 'task_attempts'::regclass`).Scan(&name)
-	if err != nil {
-		t.Skipf("cannot inspect the reservations FK (%v); skipping ledger test", err)
-	}
-	if _, err := s.Pool().Exec(ctx,
-		fmt.Sprintf(`ALTER TABLE reservations DROP CONSTRAINT %q`, name)); err != nil {
-		t.Skipf("cannot drop the reservations FK (%v); skipping ledger test", err)
-	}
-	t.Cleanup(func() {
-		_, _ = s.Pool().Exec(context.Background(), fmt.Sprintf(
-			`ALTER TABLE reservations ADD CONSTRAINT %q FOREIGN KEY (attempt_id)
-			 REFERENCES task_attempts(id) ON DELETE CASCADE`, name))
-	})
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // THE LEAK CASE. This is the highest-value test in the resource manager.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -151,14 +115,13 @@ func dropAttemptFK(t *testing.T, s *RMStore) {
 // sitting idle.
 func TestReconcileReclaimsLeakedCapacityAfterWorkerRestart(t *testing.T) {
 	s, _ := newTestStore(t)
-	dropAttemptFK(t, s)
 	ctx := context.Background()
 
 	capacity := vec(4000, 8<<30, 4)
 	workerID := registerTestWorker(t, s, capacity)
 
 	// Three attempts were dispatched and committed by the scheduler.
-	a1, a2, a3 := newUUID(t, s), newUUID(t, s), newUUID(t, s)
+	a1, a2, a3 := newAttemptID(t, s, workerID), newAttemptID(t, s, workerID), newAttemptID(t, s, workerID)
 	r1, r2, r3 := vec(1000, 1<<30, 1), vec(1000, 1<<30, 1), vec(500, 512<<20, 0)
 	insertReservation(t, s, workerID, a1, r1, 5*time.Minute)
 	insertReservation(t, s, workerID, a2, r2, 5*time.Minute)
@@ -214,7 +177,7 @@ func TestReconcileReclaimsLeakedCapacityAfterWorkerRestart(t *testing.T) {
 
 	// And the capacity really is usable again: a request that would NOT have fit
 	// under the leaked ledger must now be granted.
-	res, err := s.Reserve(ctx, workerID, newUUID(t, s), vec(3000, 6<<30, 3))
+	res, err := s.Reserve(ctx, workerID, newAttemptID(t, s, workerID), vec(3000, 6<<30, 3))
 	if err != nil {
 		t.Fatalf("reclaimed capacity is not usable: %v", err)
 	}
@@ -229,11 +192,10 @@ func TestReconcileReclaimsLeakedCapacityAfterWorkerRestart(t *testing.T) {
 // nothing in exactly the case that matters most.
 func TestReconcileForgetsEverythingWhenWorkerReportsNothing(t *testing.T) {
 	s, _ := newTestStore(t)
-	dropAttemptFK(t, s)
 	ctx := context.Background()
 
 	workerID := registerTestWorker(t, s, vec(4000, 4<<30, 0))
-	a1, a2 := newUUID(t, s), newUUID(t, s)
+	a1, a2 := newAttemptID(t, s, workerID), newAttemptID(t, s, workerID)
 	insertReservation(t, s, workerID, a1, vec(1000, 1<<30, 0), time.Minute)
 	insertReservation(t, s, workerID, a2, vec(1000, 1<<30, 0), time.Minute)
 	setCommitted(t, s, workerID, vec(2000, 2<<30, 0))
@@ -257,12 +219,11 @@ func TestReconcileForgetsEverythingWhenWorkerReportsNothing(t *testing.T) {
 // work the instant it is scheduled.
 func TestReconcileGracePeriodProtectsFreshDispatch(t *testing.T) {
 	s, _ := newTestStore(t)
-	dropAttemptFK(t, s)
 	ctx := context.Background()
 
 	workerID := registerTestWorker(t, s, vec(4000, 4<<30, 0))
-	fresh := newUUID(t, s)
-	stale := newUUID(t, s)
+	fresh := newAttemptID(t, s, workerID)
+	stale := newAttemptID(t, s, workerID)
 	insertReservation(t, s, workerID, fresh, vec(1000, 1<<30, 0), 0)              // just now
 	insertReservation(t, s, workerID, stale, vec(1000, 1<<30, 0), 10*time.Minute) // long ago
 	setCommitted(t, s, workerID, vec(2000, 2<<30, 0))
@@ -289,11 +250,10 @@ func TestReconcileGracePeriodProtectsFreshDispatch(t *testing.T) {
 // forever.
 func TestReconcileIsIdempotent(t *testing.T) {
 	s, _ := newTestStore(t)
-	dropAttemptFK(t, s)
 	ctx := context.Background()
 
 	workerID := registerTestWorker(t, s, vec(4000, 4<<30, 0))
-	a := newUUID(t, s)
+	a := newAttemptID(t, s, workerID)
 	insertReservation(t, s, workerID, a, vec(1000, 1<<30, 0), time.Minute)
 	setCommitted(t, s, workerID, vec(1000, 1<<30, 0))
 
@@ -322,12 +282,11 @@ func TestReconcileIsIdempotent(t *testing.T) {
 // leader election).
 func TestConcurrentReconcileDoesNotDoubleSubtract(t *testing.T) {
 	s, _ := newTestStore(t)
-	dropAttemptFK(t, s)
 	ctx := context.Background()
 
 	workerID := registerTestWorker(t, s, vec(8000, 8<<30, 0))
 	for i := 0; i < 4; i++ {
-		insertReservation(t, s, workerID, newUUID(t, s), vec(1000, 1<<30, 0), time.Minute)
+		insertReservation(t, s, workerID, newAttemptID(t, s, workerID), vec(1000, 1<<30, 0), time.Minute)
 	}
 	setCommitted(t, s, workerID, vec(4000, 4<<30, 0))
 
@@ -368,11 +327,10 @@ func TestConcurrentReconcileDoesNotDoubleSubtract(t *testing.T) {
 
 func TestReserveAndRelease(t *testing.T) {
 	s, _ := newTestStore(t)
-	dropAttemptFK(t, s)
 	ctx := context.Background()
 
 	workerID := registerTestWorker(t, s, vec(2000, 2<<30, 1))
-	attemptID := newUUID(t, s)
+	attemptID := newAttemptID(t, s, workerID)
 
 	res, err := s.Reserve(ctx, workerID, attemptID, vec(1500, 1<<30, 1))
 	if err != nil {
@@ -387,7 +345,7 @@ func TestReserveAndRelease(t *testing.T) {
 
 	// A second request that no longer fits must be refused with a shortfall, not
 	// silently over-committed.
-	if _, err := s.Reserve(ctx, workerID, newUUID(t, s), vec(1000, 1<<30, 1)); err == nil {
+	if _, err := s.Reserve(ctx, workerID, newAttemptID(t, s, workerID), vec(1000, 1<<30, 1)); err == nil {
 		t.Fatal("expected the over-capacity reservation to be refused")
 	} else {
 		var ins *ErrInsufficientCapacity
@@ -411,11 +369,10 @@ func TestReserveAndRelease(t *testing.T) {
 // and reconciliation — three independent at-least-once paths.
 func TestReleaseIsIdempotent(t *testing.T) {
 	s, _ := newTestStore(t)
-	dropAttemptFK(t, s)
 	ctx := context.Background()
 
 	workerID := registerTestWorker(t, s, vec(2000, 2<<30, 0))
-	attemptID := newUUID(t, s)
+	attemptID := newAttemptID(t, s, workerID)
 	if _, err := s.Reserve(ctx, workerID, attemptID, vec(1000, 1<<30, 0)); err != nil {
 		t.Fatal(err)
 	}
@@ -436,11 +393,10 @@ func TestReleaseIsIdempotent(t *testing.T) {
 // not commit the capacity twice and permanently shrink the worker.
 func TestReserveTwiceForSameAttemptIsNotDoubleCounted(t *testing.T) {
 	s, _ := newTestStore(t)
-	dropAttemptFK(t, s)
 	ctx := context.Background()
 
 	workerID := registerTestWorker(t, s, vec(4000, 4<<30, 0))
-	attemptID := newUUID(t, s)
+	attemptID := newAttemptID(t, s, workerID)
 
 	first, err := s.Reserve(ctx, workerID, attemptID, vec(1000, 1<<30, 0))
 	if err != nil {
@@ -463,11 +419,14 @@ func TestReserveTwiceForSameAttemptIsNotDoubleCounted(t *testing.T) {
 // find room, and both commit.
 func TestConcurrentReserveDoesNotOverCommit(t *testing.T) {
 	s, _ := newTestStore(t)
-	dropAttemptFK(t, s)
 	ctx := context.Background()
 
 	// Capacity for exactly two of the three requests below.
 	workerID := registerTestWorker(t, s, vec(2000, 2<<30, 0))
+
+	// Minted up front: newAttemptID can t.Fatal, which is only legal on the
+	// test goroutine.
+	attempts := []string{newAttemptID(t, s, workerID), newAttemptID(t, s, workerID), newAttemptID(t, s, workerID)}
 
 	var wg sync.WaitGroup
 	granted := make(chan bool, 3)
@@ -475,7 +434,7 @@ func TestConcurrentReserveDoesNotOverCommit(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := s.Reserve(ctx, workerID, newUUID(t, s), vec(1000, 1<<30, 0))
+			_, err := s.Reserve(ctx, workerID, attempts[i], vec(1000, 1<<30, 0))
 			granted <- err == nil
 		}()
 	}
@@ -502,14 +461,13 @@ func TestConcurrentReserveDoesNotOverCommit(t *testing.T) {
 // a DEAD one runs nothing at all.
 func TestReserveRefusedOnNonActiveWorker(t *testing.T) {
 	s, _ := newTestStore(t)
-	dropAttemptFK(t, s)
 	ctx := context.Background()
 
 	workerID := registerTestWorker(t, s, vec(4000, 4<<30, 0))
 	if ok, err := s.SetWorkerState(ctx, workerID, WorkerDraining); err != nil || !ok {
 		t.Fatalf("SetWorkerState(DRAINING): ok=%v err=%v", ok, err)
 	}
-	if _, err := s.Reserve(ctx, workerID, newUUID(t, s), vec(100, 1<<20, 0)); err == nil {
+	if _, err := s.Reserve(ctx, workerID, newAttemptID(t, s, workerID), vec(100, 1<<20, 0)); err == nil {
 		t.Fatal("expected a DRAINING worker to refuse a new reservation")
 	}
 }
@@ -566,12 +524,11 @@ func TestTouchHeartbeatRejectsDeadWorker(t *testing.T) {
 // capacity returns to the pool.
 func TestReleaseAllForWorker(t *testing.T) {
 	s, _ := newTestStore(t)
-	dropAttemptFK(t, s)
 	ctx := context.Background()
 
 	workerID := registerTestWorker(t, s, vec(4000, 4<<30, 2))
 	for i := 0; i < 3; i++ {
-		insertReservation(t, s, workerID, newUUID(t, s), vec(1000, 1<<30, 0), 0)
+		insertReservation(t, s, workerID, newAttemptID(t, s, workerID), vec(1000, 1<<30, 0), 0)
 	}
 	setCommitted(t, s, workerID, vec(3000, 3<<30, 0))
 
@@ -594,6 +551,7 @@ func TestListWorkersForQueue(t *testing.T) {
 	ctx := context.Background()
 
 	ns := fmt.Sprintf("test-list-%d", time.Now().UnixNano())
+	testdb.RegisterTenant(t, s.Pool(), ns)
 	id, err := s.RegisterWorker(ctx, Worker{
 		Namespace: ns, Hostname: "h1", Queues: []string{"gpu", "default"},
 		Executors: []string{"docker"}, Capacity: vec(1000, 1<<30, 2), AgentVersion: "t",
@@ -682,6 +640,7 @@ func TestResourceVectorRoundTrip(t *testing.T) {
 		Custom: map[string]int64{"license_token": 4, "db_connection": 10},
 	}
 	ns := fmt.Sprintf("test-vec-%d", time.Now().UnixNano())
+	testdb.RegisterTenant(t, s.Pool(), ns)
 	id, err := s.RegisterWorker(ctx, Worker{
 		Namespace: ns, Hostname: "h", Queues: []string{"default"},
 		Capacity: want, AgentVersion: "t",
@@ -706,13 +665,19 @@ func TestResourceVectorRoundTrip(t *testing.T) {
 	}
 }
 
-// newUUID asks Postgres for a UUID so attempt ids match the column type without
-// adding a client-side dependency just for tests.
-func newUUID(t *testing.T, s *RMStore) string {
+// newAttemptID creates a real task attempt, in the worker's namespace, for a
+// reservation on that worker to hang off.
+//
+// The ledger tests do not care about the DAG, but a reservation references its
+// attempt by foreign key and, since 0014, must belong to the same tenant as
+// both its attempt and its worker -- so a random UUID is no longer enough. The
+// run behind the attempt is deleted when the test ends.
+func newAttemptID(t *testing.T, s *RMStore, workerID string) string {
 	t.Helper()
-	var id string
-	if err := s.Pool().QueryRow(context.Background(), `SELECT gen_random_uuid()::text`).Scan(&id); err != nil {
-		t.Fatalf("gen_random_uuid: %v", err)
+	var ns string
+	if err := s.Pool().QueryRow(context.Background(),
+		`SELECT namespace FROM workers WHERE id = $1`, workerID).Scan(&ns); err != nil {
+		t.Fatalf("worker namespace: %v", err)
 	}
-	return id
+	return testdb.NewAttempt(t, s.Pool(), ns)
 }

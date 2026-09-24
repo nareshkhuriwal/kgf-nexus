@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"io"
 	"log/slog"
@@ -22,6 +23,7 @@ func TestIntegrationRBACAssignmentsAndRevocation(t *testing.T) {
 	pool := attentionPool(t)
 	ctx := context.Background()
 	ns := fmt.Sprintf("rbac-test-%d", time.Now().UnixNano())
+	testdb.RegisterTenant(t, pool, ns)
 	key := "nx_rbac_test_" + ns
 	_, err := store.GatewayCreateAPIKey(ctx, pool, ns, "test-admin", "admin", key)
 	if err != nil {

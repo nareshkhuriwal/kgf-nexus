@@ -31,7 +31,7 @@ func cleanupUser(t *testing.T, ctx context.Context, pool GWQuerier, userID strin
 func TestIntegrationUserCreateAndAuthenticate(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 	const pw = "a-real-password-123"
 
 	u, err := GatewayCreateUser(ctx, pool, ns, "Alice@Example.COM", "Alice", "admin", pw)
@@ -70,7 +70,7 @@ func TestIntegrationUserCreateAndAuthenticate(t *testing.T) {
 func TestIntegrationLoginIsNotAnAccountOracle(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	u, err := GatewayCreateUser(ctx, pool, ns, "real@example.com", "Real", "reader", "the-right-password")
 	if err != nil {
@@ -98,8 +98,17 @@ func TestIntegrationLoginIsNotAnAccountOracle(t *testing.T) {
 func TestIntegrationDisabledUserCannotAuthenticate(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 	const pw = "still-a-valid-password"
+
+	// The namespace keeps another administrator: disabling the last active one
+	// is refused (ErrLastAdministrator), and that guard is not what this test is
+	// about.
+	keeper, err := GatewayCreateUser(ctx, pool, ns, "keeper@example.com", "Keeper", "admin", pw)
+	if err != nil {
+		t.Fatalf("create second admin: %v", err)
+	}
+	cleanupUser(t, ctx, pool, keeper.ID)
 
 	u, err := GatewayCreateUser(ctx, pool, ns, "leaver@example.com", "Leaver", "admin", pw)
 	if err != nil {
@@ -135,7 +144,7 @@ func TestIntegrationDisabledUserCannotAuthenticate(t *testing.T) {
 func TestIntegrationDuplicateEmailIsRejected(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	u, err := GatewayCreateUser(ctx, pool, ns, "dup@example.com", "First", "reader", "password-one")
 	if err != nil {
@@ -152,7 +161,7 @@ func TestIntegrationDuplicateEmailIsRejected(t *testing.T) {
 
 	// The same address in a DIFFERENT namespace is legitimate: namespaces are the
 	// tenancy boundary and two tenants may employ the same person.
-	otherNS := ns + "-other"
+	otherNS := uniqueNS(t, pool)
 	u2, err := GatewayCreateUser(ctx, pool, otherNS, "dup@example.com", "Other tenant", "reader", "password-three")
 	if err != nil {
 		t.Errorf("same email in another namespace was rejected: %v", err)
@@ -166,7 +175,7 @@ func TestIntegrationDuplicateEmailIsRejected(t *testing.T) {
 func TestIntegrationSessionLifecycle(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	u, err := GatewayCreateUser(ctx, pool, ns, "session@example.com", "Session", "admin", "password-here")
 	if err != nil {
@@ -220,7 +229,7 @@ func TestIntegrationSessionLifecycle(t *testing.T) {
 func TestIntegrationSessionExpiryUsesDatabaseClock(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	u, err := GatewayCreateUser(ctx, pool, ns, "expiry@example.com", "Expiry", "reader", "password-here")
 	if err != nil {
@@ -244,7 +253,7 @@ func TestIntegrationSessionExpiryUsesDatabaseClock(t *testing.T) {
 func TestIntegrationRevokeAllUserSessions(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	u, err := GatewayCreateUser(ctx, pool, ns, "many@example.com", "Many", "admin", "password-here")
 	if err != nil {
@@ -281,7 +290,7 @@ func TestIntegrationRevokeAllUserSessions(t *testing.T) {
 func TestIntegrationTouchSessionIsCoarse(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	u, err := GatewayCreateUser(ctx, pool, ns, "touch@example.com", "Touch", "reader", "password-here")
 	if err != nil {
@@ -325,7 +334,7 @@ func TestIntegrationTouchSessionIsCoarse(t *testing.T) {
 func TestIntegrationScopedTokenLifecycle(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	plaintext, row, err := GatewayCreateScopedToken(ctx, pool, ns, "ci-pipeline", "admin",
 		[]string{"read", "write"}, nil, nil)
@@ -362,7 +371,7 @@ func TestIntegrationScopedTokenLifecycle(t *testing.T) {
 func TestIntegrationScopedTokenExpiryUsesDatabaseClock(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	past := time.Now().Add(-time.Hour)
 	expired, row, err := GatewayCreateScopedToken(ctx, pool, ns, "expired", "reader", []string{"read"}, &past, nil)
@@ -392,7 +401,7 @@ func TestIntegrationScopedTokenExpiryUsesDatabaseClock(t *testing.T) {
 func TestIntegrationScopedTokenCannotBeRevokedAcrossNamespaces(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	plaintext, row, err := GatewayCreateScopedToken(ctx, pool, ns, "tenant-a", "reader", []string{"read"}, nil, nil)
 	if err != nil {
@@ -414,7 +423,7 @@ func TestIntegrationScopedTokenCannotBeRevokedAcrossNamespaces(t *testing.T) {
 func TestIntegrationAuditAppendAndList(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	entries := []AuditEntry{
 		{Namespace: ns, ActorKind: "user", ActorLabel: "alice@example.com", Action: "user.create",
@@ -467,7 +476,7 @@ func TestIntegrationAuditAppendAndList(t *testing.T) {
 func TestIntegrationAuditIsNamespaceScoped(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	nsA, nsB := uniqueNS(t)+"-a", uniqueNS(t)+"-b"
+	nsA, nsB := uniqueNS(t, pool), uniqueNS(t, pool)
 
 	if err := GatewayAppendAudit(ctx, pool, AuditEntry{Namespace: nsA, Action: "user.create"}); err != nil {
 		t.Fatalf("append to A: %v", err)
@@ -500,7 +509,7 @@ func TestIntegrationAuditIsNamespaceScoped(t *testing.T) {
 func TestIntegrationAuditDetailIsStructured(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	err := GatewayAppendAudit(ctx, pool, AuditEntry{
 		Namespace: ns, Action: "token.create", TargetKind: "token", TargetID: "abc",
@@ -535,7 +544,7 @@ func TestIntegrationAuditDetailIsStructured(t *testing.T) {
 func TestIntegrationExpiredSessionSweep(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	u, err := GatewayCreateUser(ctx, pool, ns, "sweep@example.com", "Sweep", "reader", "password-here")
 	if err != nil {

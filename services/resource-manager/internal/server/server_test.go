@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 	rmv1 "github.com/khuriwalgroup/kgf-nexus/services/resource-manager/gen/nexus/rm/v1"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
@@ -23,26 +23,19 @@ import (
 
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-func testDSN() string {
-	if v := os.Getenv("NEXUS_TEST_DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://postgres:test@localhost:55432/nexus"
-}
-
 // newTestServer connects, or SKIPS cleanly when no database is reachable.
 func newTestServer(t *testing.T) (*Server, *store.RMStore) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, testDSN())
+	pool, err := pgxpool.New(ctx, testdb.DSN(t))
 	if err != nil {
-		t.Skipf("no test database available (%v); skipping", err)
+		testdb.SkipUnreachable(t, err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		t.Skipf("test database unreachable (%v); skipping", err)
+		testdb.SkipUnreachable(t, err)
 	}
 	t.Cleanup(pool.Close)
 
@@ -81,40 +74,30 @@ func registerWorker(t *testing.T, s *Server, st *store.RMStore, capacity *nexusv
 // belong to a registered tenant, and these tests mint a namespace per test.
 func ensureTenant(t *testing.T, st *store.RMStore, ns string) {
 	t.Helper()
-	ctx := context.Background()
-	if _, err := st.Pool().Exec(ctx,
-		`INSERT INTO tenants (namespace, name) VALUES ($1, $1) ON CONFLICT (namespace) DO NOTHING`, ns); err != nil {
-		t.Fatalf("register tenant %s: %v", ns, err)
-	}
+	testdb.RegisterTenant(t, st.Pool(), ns)
 	t.Cleanup(func() {
 		_, _ = st.Pool().Exec(context.Background(), `DELETE FROM workers WHERE namespace = $1`, ns)
 		_, _ = st.Pool().Exec(context.Background(), `DELETE FROM tenants WHERE namespace = $1`, ns)
 	})
 }
 
-// dropAttemptFK lets ledger tests write reservations without a full DAG. Skips if
-// the database user cannot alter the table.
-func dropAttemptFK(t *testing.T, st *store.RMStore) {
+// newAttemptID creates a real task attempt in the worker's namespace.
+//
+// A reservation references its attempt by foreign key and, since 0014, must
+// share a tenant with both its attempt and its worker, so ledger tests can no
+// longer reserve against a random UUID (they used to drop the foreign key to do
+// so, which also altered a shared table under every other test).
+func newAttemptID(t *testing.T, st *store.RMStore, workerID string) string {
 	t.Helper()
-	ctx := context.Background()
-	var name string
-	if err := st.Pool().QueryRow(ctx, `
-		SELECT conname FROM pg_constraint
-		 WHERE conrelid = 'reservations'::regclass AND contype = 'f'
-		   AND confrelid = 'task_attempts'::regclass`).Scan(&name); err != nil {
-		t.Skipf("cannot inspect the reservations FK (%v); skipping", err)
+	var ns string
+	if err := st.Pool().QueryRow(context.Background(),
+		`SELECT namespace FROM workers WHERE id = $1`, workerID).Scan(&ns); err != nil {
+		t.Fatalf("worker namespace: %v", err)
 	}
-	if _, err := st.Pool().Exec(ctx,
-		fmt.Sprintf(`ALTER TABLE reservations DROP CONSTRAINT %q`, name)); err != nil {
-		t.Skipf("cannot drop the reservations FK (%v); skipping", err)
-	}
-	t.Cleanup(func() {
-		_, _ = st.Pool().Exec(context.Background(), fmt.Sprintf(
-			`ALTER TABLE reservations ADD CONSTRAINT %q FOREIGN KEY (attempt_id)
-			 REFERENCES task_attempts(id) ON DELETE CASCADE`, name))
-	})
+	return testdb.NewAttempt(t, st.Pool(), ns)
 }
 
+// newUUID is an id that names nothing, for lookups that must miss.
 func newUUID(t *testing.T, st *store.RMStore) string {
 	t.Helper()
 	var id string
@@ -132,6 +115,7 @@ func TestRegisterCreatesANewSessionIdentityEveryTime(t *testing.T) {
 	s, st := newTestServer(t)
 	ctx := context.Background()
 	ns := fmt.Sprintf("rmsrv-session-%d", time.Now().UnixNano())
+	ensureTenant(t, st, ns)
 
 	req := &rmv1.RegisterWorkerRequest{
 		Namespace: ns, Hostname: "same-host", Queues: []string{"default"},
@@ -178,13 +162,12 @@ func TestRegisterValidatesInput(t *testing.T) {
 // ledger holds that the worker does not acknowledge is released.
 func TestHeartbeatReconcilesLeakedCapacity(t *testing.T) {
 	s, st := newTestServer(t)
-	dropAttemptFK(t, st)
 	ctx := context.Background()
 
 	workerID := registerWorker(t, s, st, vec(4000, 4<<30, 0))
-	kept := newUUID(t, st)
-	leaked1 := newUUID(t, st)
-	leaked2 := newUUID(t, st)
+	kept := newAttemptID(t, st, workerID)
+	leaked1 := newAttemptID(t, st, workerID)
+	leaked2 := newAttemptID(t, st, workerID)
 	for _, id := range []string{kept, leaked1, leaked2} {
 		if _, err := st.Reserve(ctx, workerID, id, vec(1000, 1<<30, 0)); err != nil {
 			t.Fatalf("Reserve %s: %v", id, err)
@@ -261,12 +244,11 @@ func TestHeartbeatFromDeadWorkerRequiresReregistration(t *testing.T) {
 // free 3)" tells the operator whether to add capacity or shrink the request.
 func TestReserveRefusalCarriesAShortfall(t *testing.T) {
 	s, st := newTestServer(t)
-	dropAttemptFK(t, st)
 	ctx := context.Background()
 
 	workerID := registerWorker(t, s, st, vec(1000, 1<<30, 1))
 	resp, err := s.Reserve(ctx, &rmv1.ReserveRequest{
-		WorkerId: workerID, AttemptId: newUUID(t, st), Request: vec(4000, 8<<30, 4),
+		WorkerId: workerID, AttemptId: newAttemptID(t, st, workerID), Request: vec(4000, 8<<30, 4),
 	})
 	if err != nil {
 		t.Fatalf("a refusal is a normal outcome, not an error: %v", err)
@@ -286,11 +268,10 @@ func TestReserveRefusalCarriesAShortfall(t *testing.T) {
 // lease expiry and reconciliation — three independent at-least-once paths.
 func TestReleaseIsIdempotentThroughTheAPI(t *testing.T) {
 	s, st := newTestServer(t)
-	dropAttemptFK(t, st)
 	ctx := context.Background()
 
 	workerID := registerWorker(t, s, st, vec(2000, 2<<30, 0))
-	attemptID := newUUID(t, st)
+	attemptID := newAttemptID(t, st, workerID)
 	if _, err := s.Reserve(ctx, &rmv1.ReserveRequest{
 		WorkerId: workerID, AttemptId: attemptID, Request: vec(1000, 1<<30, 0),
 	}); err != nil {
@@ -323,12 +304,11 @@ func TestReleaseIsIdempotentThroughTheAPI(t *testing.T) {
 // released, capacity returns to the pool.
 func TestDeadWorkerReleasesAllCapacity(t *testing.T) {
 	s, st := newTestServer(t)
-	dropAttemptFK(t, st)
 	ctx := context.Background()
 
 	workerID := registerWorker(t, s, st, vec(4000, 4<<30, 0))
 	for i := 0; i < 3; i++ {
-		if _, err := st.Reserve(ctx, workerID, newUUID(t, st), vec(1000, 1<<30, 0)); err != nil {
+		if _, err := st.Reserve(ctx, workerID, newAttemptID(t, st, workerID), vec(1000, 1<<30, 0)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -448,11 +428,10 @@ func TestIllegalTransitionIsReportedNotErrored(t *testing.T) {
 
 func TestGetWorkerReportsFreeCapacity(t *testing.T) {
 	s, st := newTestServer(t)
-	dropAttemptFK(t, st)
 	ctx := context.Background()
 
 	workerID := registerWorker(t, s, st, vec(4000, 4<<30, 2))
-	if _, err := st.Reserve(ctx, workerID, newUUID(t, st), vec(1000, 1<<30, 1)); err != nil {
+	if _, err := st.Reserve(ctx, workerID, newAttemptID(t, st, workerID), vec(1000, 1<<30, 1)); err != nil {
 		t.Fatal(err)
 	}
 	resp, err := s.GetWorker(ctx, &rmv1.GetWorkerRequest{WorkerId: workerID})
@@ -486,6 +465,7 @@ func TestListWorkersExcludesDead(t *testing.T) {
 	ctx := context.Background()
 
 	ns := fmt.Sprintf("rmsrv-list-%d", time.Now().UnixNano())
+	ensureTenant(t, st, ns)
 	mk := func() string {
 		resp, err := s.RegisterWorker(ctx, &rmv1.RegisterWorkerRequest{
 			Namespace: ns, Hostname: "h", Queues: []string{"default"},
@@ -521,11 +501,10 @@ func TestListWorkersExcludesDead(t *testing.T) {
 // without the sweep its reservations stay committed forever.
 func TestSweeperDeclaresSilentWorkersDeadAndReclaimsCapacity(t *testing.T) {
 	s, st := newTestServer(t)
-	dropAttemptFK(t, st)
 	ctx := context.Background()
 
 	workerID := registerWorker(t, s, st, vec(4000, 4<<30, 0))
-	if _, err := st.Reserve(ctx, workerID, newUUID(t, st), vec(2000, 2<<30, 0)); err != nil {
+	if _, err := st.Reserve(ctx, workerID, newAttemptID(t, st, workerID), vec(2000, 2<<30, 0)); err != nil {
 		t.Fatal(err)
 	}
 	// Backdate the heartbeat past the liveness window.
@@ -585,11 +564,10 @@ func TestSweeperLeavesLiveWorkersAlone(t *testing.T) {
 // election. Correctness comes from the conditional UPDATE, not coordination.
 func TestSweeperIsSafeToRunConcurrently(t *testing.T) {
 	s, st := newTestServer(t)
-	dropAttemptFK(t, st)
 	ctx := context.Background()
 
 	workerID := registerWorker(t, s, st, vec(4000, 4<<30, 0))
-	if _, err := st.Reserve(ctx, workerID, newUUID(t, st), vec(1000, 1<<30, 0)); err != nil {
+	if _, err := st.Reserve(ctx, workerID, newAttemptID(t, st, workerID), vec(1000, 1<<30, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool().Exec(ctx,

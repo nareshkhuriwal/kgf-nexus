@@ -7,13 +7,16 @@ package rest
 import (
 	"context"
 	"encoding/json"
-	"github.com/khuriwalgroup/kgf-nexus/internal/store"
-	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 )
 
 func TestIntegrationTenantRegistrationIsolation(t *testing.T) {
@@ -49,14 +52,21 @@ func TestIntegrationTenantRegistrationIsolation(t *testing.T) {
 		}
 		return response.Tenant.ID
 	}
-	a := register("tenant-a@example.test")
-	b := register("tenant-b@example.test")
-	call("/v1/auth/register", `{"name":"Duplicate","email":"tenant-a@example.test","password":"strong-test-password"}`, "", 409)
+	// Unique per run: registration emails are globally unique, so fixed
+	// addresses made this test pass exactly once per database.
+	run := fmt.Sprintf("%d", time.Now().UnixNano())
+	emailA, emailB := "tenant-a-"+run+"@example.test", "tenant-b-"+run+"@example.test"
+	a := register(emailA)
+	b := register(emailB)
+	call("/v1/auth/register", `{"name":"Duplicate","email":"`+emailA+`","password":"strong-test-password"}`, "", 409)
+	// Scoped to this run's addresses: the database is shared with every other
+	// test that registers a tenant.
 	var count int
-	if err := db.QueryRow(ctx, `SELECT count(*) FROM tenants WHERE registration_email IS NOT NULL`).Scan(&count); err != nil || count != 2 {
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM tenants WHERE registration_email = ANY($1)`,
+		[]string{emailA, emailB}).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("registration atomicity: count=%d err=%v", count, err)
 	}
-	w := call("/v1/auth/login", `{"namespace":"`+a+`","email":"tenant-a@example.test","password":"strong-test-password"}`, "", 200)
+	w := call("/v1/auth/login", `{"namespace":"`+a+`","email":"`+emailA+`","password":"strong-test-password"}`, "", 200)
 	var login struct {
 		Token string `json:"token"`
 	}

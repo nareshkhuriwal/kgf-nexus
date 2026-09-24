@@ -18,13 +18,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 )
 
@@ -33,15 +33,12 @@ import (
 // they run only when asked for.
 func attentionPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("NEXUS_TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://postgres:test@localhost:55432/nexus"
-	}
+	dsn := testdb.DSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	pool, err := store.GWOpen(ctx, dsn, 4)
 	if err != nil {
-		t.Skipf("skipping integration test: test database unreachable at %s: %v", dsn, err)
+		testdb.SkipUnreachable(t, err)
 	}
 	t.Cleanup(pool.Close)
 	return pool
@@ -57,6 +54,7 @@ func TestIntegrationAttentionEndpointShape(t *testing.T) {
 	pool := attentionPool(t)
 
 	ns := fmt.Sprintf("rest-attn-%d", time.Now().UnixNano())
+	testdb.RegisterTenant(t, pool, ns)
 	const key = "nx_attention_probe_key"
 
 	// The gateway OWNS api_keys, so this one is created for real and removed
@@ -165,6 +163,7 @@ func TestIntegrationAttentionRequiresAuth(t *testing.T) {
 	ctx := context.Background()
 	pool := attentionPool(t)
 	ns := fmt.Sprintf("rest-attn-authz-%d", time.Now().UnixNano())
+	testdb.RegisterTenant(t, pool, ns)
 
 	readerID, err := store.GatewayCreateAPIKey(ctx, pool, ns, "reader", "reader", "nx_attn_reader")
 	if err != nil {

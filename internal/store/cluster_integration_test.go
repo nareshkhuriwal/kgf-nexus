@@ -7,7 +7,6 @@ package store
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khuriwalgroup/kgf-nexus/internal/platform"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 )
 
 // rolePool connects as the given service role (0005), so the test exercises
@@ -22,21 +22,17 @@ import (
 // any ownership mistake pass unnoticed.
 func rolePool(t *testing.T, role string) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("NEXUS_TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = defaultTestDSN
-	}
-	cfg, err := pgxpool.ParseConfig(dsn)
+	cfg, err := pgxpool.ParseConfig(testdb.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.ConnConfig.RuntimeParams["role"] = role
 	p, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
-		t.Skipf("no database: %v", err)
+		testdb.SkipUnreachable(t, err)
 	}
 	if err := p.Ping(context.Background()); err != nil {
-		t.Skipf("no database: %v", err)
+		testdb.SkipUnreachable(t, err)
 	}
 	t.Cleanup(p.Close)
 	return p

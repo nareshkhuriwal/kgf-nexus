@@ -16,7 +16,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -26,17 +25,9 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/internal/dag"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 	"google.golang.org/protobuf/encoding/protojson"
 )
-
-const defaultDSN = "postgres://postgres:test@localhost:55432/nexus"
-
-func dsn() string {
-	if v := os.Getenv("NEXUS_POSTGRES_DSN"); v != "" {
-		return v
-	}
-	return defaultDSN
-}
 
 // testPool connects or SKIPS. See the package comment.
 func testPool(t *testing.T) *pgxpool.Pool {
@@ -44,9 +35,9 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pool, err := store.NewPool(ctx, store.DefaultPoolConfig(dsn()))
+	pool, err := store.NewPool(ctx, store.DefaultPoolConfig(testdb.DSN(t)))
 	if err != nil {
-		t.Skipf("postgres unreachable at %s, skipping integration test: %v", dsn(), err)
+		testdb.SkipUnreachable(t, err)
 	}
 	t.Cleanup(pool.Close)
 	return pool
@@ -65,6 +56,9 @@ func seedRun(t *testing.T, pool *pgxpool.Pool, spec *nexusv1.WorkflowSpec) strin
 	}
 	specID := uuid.NewString()
 	name := fmt.Sprintf("dagtest-%s", specID[:8])
+	// Every row below lives in the 'default' namespace, which must be a
+	// registered tenant since 0014.
+	testdb.RegisterTenant(t, pool, "default")
 
 	_, err = pool.Exec(ctx, `
 		INSERT INTO workflow_specs (id, namespace, name, version, spec_hash, spec_json, created_by)

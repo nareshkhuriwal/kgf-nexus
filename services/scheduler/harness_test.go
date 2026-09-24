@@ -9,32 +9,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 )
-
-const defaultTestDSN = "postgres://postgres:test@localhost:55432/nexus"
 
 // newTestPool connects to the live test database, skipping rather than failing
 // when it is unreachable. A developer with no Postgres running should get a skip,
 // not a wall of connection errors that hides the unit-test result they care about.
 func newTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("NEXUS_TEST_DSN")
-	if dsn == "" {
-		dsn = defaultTestDSN
-	}
+	dsn := testdb.DSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	pool, err := store.NewPool(ctx, store.DefaultPoolConfig(dsn))
 	if err != nil {
-		t.Skipf("test database unreachable at %s: %v", dsn, err)
+		testdb.SkipUnreachable(t, err)
 	}
 	t.Cleanup(pool.Close)
 	return pool
@@ -65,6 +60,7 @@ func newFixture(t *testing.T, pool *pgxpool.Pool) *fixture {
 		ns:    "test-" + id,
 		queue: "q-" + id,
 	}
+	testdb.RegisterTenant(t, pool, f.ns)
 
 	if err := pool.QueryRow(ctx, `
 INSERT INTO workflow_specs (namespace, name, version, spec_hash, spec_json, created_by)

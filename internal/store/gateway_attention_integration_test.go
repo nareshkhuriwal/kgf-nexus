@@ -113,7 +113,7 @@ func strptr(s string) *string { return &s }
 func TestIntegrationAttentionSurfacesTheIndeterminateRefusal(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	inAttentionTx(t, pool, func(tx pgx.Tx) {
 		runID := seedRun(t, tx, ns, "nightly_etl", "RUNNING")
@@ -170,7 +170,7 @@ func TestIntegrationAttentionSurfacesTheIndeterminateRefusal(t *testing.T) {
 func TestIntegrationAttentionIgnoresALostAttemptThatWasRetried(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	inAttentionTx(t, pool, func(tx pgx.Tx) {
 		runID := seedRun(t, tx, ns, "retried_wf", "RUNNING")
@@ -199,7 +199,7 @@ func TestIntegrationAttentionIgnoresALostAttemptThatWasRetried(t *testing.T) {
 func TestIntegrationAttentionReportsCapacityBlockAfterTheThreshold(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	inAttentionTx(t, pool, func(tx pgx.Tx) {
 		runID := seedRun(t, tx, ns, "gpu_train", "RUNNING")
@@ -245,7 +245,7 @@ func TestIntegrationAttentionReportsCapacityBlockAfterTheThreshold(t *testing.T)
 func TestIntegrationAttentionIgnoresBlockedAttemptsOfDeadRuns(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	inAttentionTx(t, pool, func(tx pgx.Tx) {
 		reason := "waiting_for_resources: disk (need 42949672960, free 10737418240)"
@@ -291,7 +291,7 @@ func TestIntegrationAttentionIgnoresBlockedAttemptsOfDeadRuns(t *testing.T) {
 func TestIntegrationAttentionSurfacesAStalledRun(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	inAttentionTx(t, pool, func(tx pgx.Tx) {
 		// Matches WFMListStalledRuns' predicate exactly: non-terminal run, every
@@ -333,7 +333,7 @@ func TestIntegrationAttentionSurfacesAStalledRun(t *testing.T) {
 func TestIntegrationAttentionIsNamespaceScoped(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	mine, theirs := uniqueNS(t)+"-a", uniqueNS(t)+"-b"
+	mine, theirs := uniqueNS(t, pool), uniqueNS(t, pool)
 
 	inAttentionTx(t, pool, func(tx pgx.Tx) {
 		other := seedRun(t, tx, theirs, "secret_wf", "RUNNING")
@@ -362,7 +362,7 @@ func TestIntegrationAttentionIsNamespaceScoped(t *testing.T) {
 func TestIntegrationAttentionRankingIsDeterministic(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	inAttentionTx(t, pool, func(tx pgx.Tx) {
 		runID := seedRun(t, tx, ns, "mixed_wf", "RUNNING")
@@ -432,7 +432,7 @@ func TestIntegrationAttentionRankingIsDeterministic(t *testing.T) {
 func TestIntegrationAttentionIsBounded(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	inAttentionTx(t, pool, func(tx pgx.Tx) {
 		runID := seedRun(t, tx, ns, "noisy_wf", "RUNNING")
@@ -470,7 +470,7 @@ func TestIntegrationAttentionIsBounded(t *testing.T) {
 func TestIntegrationAttentionDoesNotInventAReasonItDoesNotKnow(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	inAttentionTx(t, pool, func(tx pgx.Tx) {
 		runID := seedRun(t, tx, ns, "future_wf", "RUNNING")
@@ -514,7 +514,7 @@ func TestIntegrationAttentionDoesNotInventAReasonItDoesNotKnow(t *testing.T) {
 func TestIntegrationAttentionBoundsFailedRunsByWindow(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
-	ns := uniqueNS(t)
+	ns := uniqueNS(t, pool)
 
 	inAttentionTx(t, pool, func(tx pgx.Tx) {
 		recent := seedRun(t, tx, ns, "recent_fail", "FAILED")

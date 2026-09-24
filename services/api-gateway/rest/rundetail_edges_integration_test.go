@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 )
 
@@ -40,6 +41,7 @@ func TestIntegrationRunDetailReturnsEdges(t *testing.T) {
 	pool := attentionPool(t)
 
 	ns := fmt.Sprintf("rest-edges-%d", time.Now().UnixNano())
+	testdb.RegisterTenant(t, pool, ns)
 	const key = "nx_edges_probe_key"
 
 	keyID, err := store.GatewayCreateAPIKey(ctx, pool, ns, "edges-test", "admin", key)
@@ -154,6 +156,7 @@ func TestIntegrationRunDetailEdgesEmptyIsList(t *testing.T) {
 	pool := attentionPool(t)
 
 	ns := fmt.Sprintf("rest-edges-empty-%d", time.Now().UnixNano())
+	testdb.RegisterTenant(t, pool, ns)
 	const key = "nx_edges_empty_probe_key"
 
 	keyID, err := store.GatewayCreateAPIKey(ctx, pool, ns, "edges-empty-test", "admin", key)

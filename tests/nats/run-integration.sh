@@ -97,7 +97,6 @@ done
 
 DSN="postgres://postgres:test@127.0.0.1:${PG_PORT}/nexus?sslmode=disable"
 export NEXUS_TEST_DATABASE_URL="$DSN"
-export NEXUS_TEST_DSN="$DSN"
 export NEXUS_TEST_NATS_URL="nats://127.0.0.1:${NATS_PORT}"
 # Lets the outage test stop and start the broker. Unset, that test SKIPS with
 # the standard "skipping integration test" marker rather than passing vacuously.

@@ -329,7 +329,7 @@ func TestScheduleUpdatePreservesHistoryAndWinsOverOldRearm(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	ns := uniqueNS(t)
+	ns := uniqueName(t)
 	if _, err := tx.Exec(ctx, `INSERT INTO tenants(namespace,name) VALUES($1,'schedule edit test')`, ns); err != nil {
 		t.Fatal(err)
 	}

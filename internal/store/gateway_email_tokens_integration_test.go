@@ -24,10 +24,7 @@ import (
 // from the namespace's tenant by trigger.
 func emailTestUser(t *testing.T, ctx context.Context, pool GWDB, email string) UserRow {
 	t.Helper()
-	ns := uniqueNS(t)
-	if _, err := pool.Exec(ctx, `INSERT INTO tenants (namespace, name) VALUES ($1, 'email test')`, ns); err != nil {
-		t.Fatalf("register tenant: %v", err)
-	}
+	ns := uniqueNS(t, pool)
 	u, err := GatewayCreateUser(ctx, pool, ns, email, "Email Test", "admin", "original-password-123")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -44,7 +41,7 @@ func emailTestUser(t *testing.T, ctx context.Context, pool GWDB, email string) U
 }
 
 func uniqueEmail(t *testing.T) string {
-	return strings.ToLower(uniqueNS(t)) + "@example.test"
+	return strings.ToLower(uniqueName(t)) + "@example.test"
 }
 
 func isVerified(t *testing.T, ctx context.Context, pool GWQuerier, userID string) bool {

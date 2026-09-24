@@ -6,15 +6,18 @@ package store
 
 import (
 	"context"
-	"github.com/jackc/pgx/v5"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 )
 
 func TestIntegrationDeletedRunHiddenButRetained(t *testing.T) {
 	pool := testPool(t)
 	inAttentionTx(t, pool, func(tx pgx.Tx) {
 		ctx := context.Background()
-		ns := "run-delete-test"
+		ns := uniqueName(t)
+		testdb.RegisterTenant(t, tx, ns)
 		id := seedRun(t, tx, ns, "deletion-spec", "SUCCEEDED")
 		if _, err := tx.Exec(ctx, `INSERT INTO run_deletions(run_id,namespace) VALUES($1,$2)`, id, ns); err != nil {
 			t.Fatal(err)
