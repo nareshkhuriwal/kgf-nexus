@@ -26,6 +26,7 @@ import (
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/worker"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
 )
 
 // version is stamped at build time (-ldflags "-X main.version=..."). It is
@@ -120,6 +121,9 @@ func main() {
 			UseTLS:          os.Getenv("NEXUS_S3_USE_TLS") == "true",
 		},
 		AllowUnenforceableLimits: *allowUnenforceable,
+		// NEXUS_NATS_URL / NEXUS_NATS_CREDS. Empty means poll-only, which is a
+		// complete, correct configuration (ADR-0003).
+		Bus: bus.ConfigFromEnv("nexus-agent"),
 	}
 
 	if err := run(ctx, cfg, *controlPlane, log); err != nil {

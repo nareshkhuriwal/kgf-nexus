@@ -3,7 +3,9 @@
 #   docker compose -f deploy/docker-compose.yml up --build
 #
 # Topology, in dependency order:
-#   postgres, minio            → infrastructure
+#   postgres, minio, nats      → infrastructure (nats is OPTIONAL: an empty
+#                                NEXUS_NATS_URL disables the bus and the
+#                                stack runs poll-only, ADR-0003)
 #   minio-init                 → creates the result bucket, then exits
 #   migrate                    → applies services/migrations/*.up.sql, then exits
 #   six control-plane services → ADR-0011; each waits for postgres AND migrate
@@ -56,6 +58,14 @@ x-service-env: &service-env
   EVENT_SERVICE_ADDR: event-service:9090
   NEXUS_EVENT_SERVICE_ADDR: event-service:9090
   API_GATEWAY_ADDR: api-gateway:9091
+
+# The event bus (ADR-0003). Only the event-service (outbox relay, SSE wake-ups)
+# and the agents (dispatch hints) connect; the scheduler, dag-engine and
+# workflow-manager write outbox rows to Postgres and never talk to NATS. Set
+# NEXUS_NATS_URL= (empty) to run without it -- nothing depends_on nats, because
+# nothing needs it to be correct.
+x-nats-env: &nats-env
+  NEXUS_NATS_URL: ${NEXUS_NATS_URL-nats://nats:4222}
 
 x-minio-env: &minio-env
   RESULT_STORE_ENDPOINT: http://minio:9000
@@ -146,6 +156,28 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  nats:
+    # Pinned to the newest patch of the 2.14 line rather than 2.15.0, which was
+    # days old when this was written; move to 2.15.x once it has a patch release.
+    image: nats:2.14.7-alpine
+    # -js enables JetStream; -sd puts its store on the volume so NEXUS_RUNS
+    # survives a restart; -m exposes /healthz and /jsz for monitoring.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "${NEXUS_NATS_PORT:-4222}:4222"
+      - "${NEXUS_NATS_MONITOR_PORT:-8222}:8222"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      # js-enabled-only: healthy means JetStream is actually serving, not merely
+      # that the process accepts connections.
+      test: ["CMD-SHELL", "wget -q -O- 'http://127.0.0.1:8222/healthz?js-enabled-only=true' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
       start_period: 5s
     restart: unless-stopped
 
@@ -401,7 +433,7 @@ services:
         SERVICE_PATH: services/event-service/cmd/event-service
     depends_on: *depends-on-db
     environment:
-      <<: *service-env
+      <<: [*service-env, *nats-env]
       HTTP_ADDR: ":8080"
       NEXUS_HTTP_ADDR: ":8080"
       NEXUS_REST_ADDR: ":8080"
@@ -411,6 +443,9 @@ services:
       NEXUS_GRPC_ADDR: ":9090"
       NEXUS_WFM_GRPC_ADDR: ":9090"
       RM_GRPC_ADDR: ":9090"
+      # Outbox relay tuning (services/event-service/relay). Defaults shown.
+      NEXUS_OUTBOX_RETENTION: 1h
+      NEXUS_OUTBOX_MAX_AGE: 24h
       # run_events is append-only (invariant 8); this service is its sole writer.
       EVENT_SSE_KEEPALIVE_MS: "15000"
     healthcheck: *service-healthcheck
@@ -431,7 +466,7 @@ services:
       api-gateway:
         condition: service_healthy
     environment:
-      <<: *minio-env
+      <<: [*minio-env, *nats-env]
       # Workers hold an API token and never database credentials: a compromised
       # worker cannot corrupt runs it never touched (§3.1 invariant 2).
       NEXUS_CONTROL_PLANE: api-gateway:9091
@@ -475,7 +510,7 @@ services:
       api-gateway:
         condition: service_healthy
     environment:
-      <<: *minio-env
+      <<: [*minio-env, *nats-env]
       NEXUS_CONTROL_PLANE: api-gateway:9091
       NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
       NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
@@ -524,7 +559,7 @@ services:
       api-gateway:
         condition: service_healthy
     environment:
-      <<: *minio-env
+      <<: [*minio-env, *nats-env]
       NEXUS_CONTROL_PLANE: api-gateway:9091
       NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
       NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
@@ -576,6 +611,7 @@ services:
 volumes:
   postgres-data:
   minio-data:
+  nats-data:
   agent-cpu-wal:
   agent-gpu-wal:
   agent-gpu-a10-wal:

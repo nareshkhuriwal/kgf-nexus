@@ -243,9 +243,16 @@ func appendEvent(
 	).Scan(&seq); err != nil {
 		return fmt.Errorf("allocate run event seq for %s: %w", kind, err)
 	}
+	// The outbox row rides in the same statement (see outbox.go): this helper is
+	// how the §5.3 claim records AttemptDispatched, so the announcement commits
+	// with the dispatch and costs no extra round trip under the claim's locks.
 	if _, err := tx.Exec(ctx, `
-INSERT INTO run_events (run_id, seq, node_id, attempt_id, kind, payload, actor)
-VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+WITH ev AS (
+  INSERT INTO run_events (run_id, seq, node_id, attempt_id, kind, payload, actor)
+  VALUES ($1, $2, $3, $4, $5, $6, $7)
+  RETURNING id
+)
+INSERT INTO outbox (topic, ref_id) SELECT 'run_event', id FROM ev`,
 		runID, seq, nullString(nodeID), attemptID, kind, body, actor,
 	); err != nil {
 		return fmt.Errorf("append run_event %s: %w", kind, err)

@@ -182,10 +182,14 @@ type WorkerCandidate struct {
 	Score     float64
 }
 
-// DispatchResult describes a committed dispatch. The NATS notification is
-// published from this, AFTER the transaction commits (invariant 4): the bus is
-// a hint, and publishing inside the transaction would demand a distributed
-// transaction across Postgres and NATS.
+// DispatchResult describes a committed dispatch.
+//
+// The bus announcement of a dispatch is NOT published from this. The claim
+// writes an outbox row (the AttemptDispatched run_event's, see outbox.go) inside
+// its own transaction, and the event-service relay publishes it after commit
+// (invariant 4). Publishing from here, after commit, would lose the message
+// whenever the process died between COMMIT and publish; publishing inside the
+// transaction would demand a distributed transaction across Postgres and NATS.
 type DispatchResult struct {
 	AttemptID  uuid.UUID
 	RunID      uuid.UUID

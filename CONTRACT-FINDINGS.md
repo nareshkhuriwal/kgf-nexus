@@ -1911,3 +1911,65 @@ Self-service registration (0013) created a tenant owner for any address typed in
 - Several pre-0014 store integration tests create rows in namespaces that were never registered as tenants and now fail with `Namespace must belong to a registered tenant`: `TestIntegrationDisabledUserCannotAuthenticate`, `TestIntegrationDuplicateEmailIsRejected`, `TestIntegrationSpecContentAddressing`, `TestConcurrentReserveDoesNotOverCommit`, `TestConcurrentReconcileDoesNotDoubleSubtract`, `TestConcurrentTickClaimsYieldOneWinner` and `TestConcurrentEventAppendsNeverCollide`. `TestIntegrationTenantRegistrationIsolation` uses fixed emails and counts every registration in the database, so it passes only once per database.
 - The default integration DSN `localhost:55432` is, on at least one developer machine, a different product's Postgres (`polaris-postgres`). Always set `NEXUS_TEST_DATABASE_URL`.
 - `deploy/render_compose.py` deploys the development compose file, so development defaults (now including Mailpit as the SMTP host) reach deployed hosts unless they are overridden.
+
+### F92. NATS was designed as publish-after-commit, which loses messages; built as an outbox instead — DONE
+
+ADR-0003 and §5.3 step 5 said: commit the claim, then publish the notification.
+That is correct about *where not to publish* (never inside the transaction) and
+wrong about what it leaves: a process that dies between COMMIT and publish drops
+the message, and nothing ever notices, because the bus is a hint and a missing
+hint is silent. The same shape applied to run-event fan-out would silently drop
+UI updates.
+
+Built instead (migration 0016, `internal/bus`, `services/event-service/relay`):
+
+- **A transactional outbox, written by the fact's own statement.** Every
+  `run_events` append (including `AttemptDispatched` inside the §5.3 claim),
+  every new `PENDING` attempt and every run state transition inserts its outbox
+  row as a data-modifying CTE of the same SQL statement. The claim gains no round
+  trip and no lock, and its isolation level is unchanged. A CTE also cannot be
+  "forgotten" by a later refactor the way a second call can.
+- **The event-service owns and relays it**, not the scheduler: the one component
+  allowed to be down stays off the one path that must never stall. Writers have
+  INSERT-only grants, like the dispatch exception's `run_events` grant.
+- **Effectively-once into JetStream** via `Nats-Msg-Id` = outbox id + created_at
+  (created_at so a restored database whose id sequence rewinds cannot collide
+  with an old id inside the duplicate window). Rows are claimed `FOR UPDATE SKIP
+  LOCKED`, marked only after the broker acks, in the same transaction.
+- **Hints mean "work may exist", not "you were dispatched X".** Dispatch is pull,
+  so the worker that wins a claim already has the attempt; what is worth
+  broadcasting is that claimable work appeared. The agent uses a hint only to cut
+  the pause *between* long polls. It never cancels a poll in flight: a cancelled
+  `PollTask` whose claim had already committed would strand a lease until expiry
+  and turn the attempt LOST.
+- **Periodic reconciliation**: the relay re-announces every queue with pending
+  work every 10s, so transitions no outbox row covers (resume, freed capacity)
+  and anything missed during an outage are re-hinted from Postgres.
+
+**Honest scale of the latency win.** The gateway already re-checks a held long
+poll every 250ms, so with a healthy control plane a hint saves at most that pause
+plus the between-poll gap. The larger payoffs -- raising the gateway's re-check
+interval to cut per-worker claim transactions, and live UI updates without the
+1s SSE poll -- are now possible but only the second is wired (SSE tails wake on
+run subjects; the 1s poll stays as the fallback).
+
+**Verification, and making it able to fail (F89).** Real NATS and real Postgres in
+throwaway containers (`make test-nats`): rollback leaves no message (with a
+committed transition as the control), duplicate re-publish is absorbed, a crash
+between ack and mark re-sends without a duplicate, a real `docker stop`/`start`
+of the broker drains a 40-row backlog written during the outage exactly once,
+two relays never publish the same row (made deterministic by holding one relay's
+batch open rather than hoping for a race, F86), and duplicate/stale hints to two
+workers produce exactly one claim. Mutation-checked: removing `WithMsgID` fails
+the dedupe and crash tests; removing `SKIP LOCKED` fails the two-relay test.
+That test first HUNG under the mutation instead of failing -- the held relay kept
+its row locks and the cleanup `DELETE` waited on them forever -- so it now
+releases on every exit path. A test that can only hang when the property breaks
+is F89's red-while-fine problem in a new shape.
+
+**Also found:** on a freshly migrated database, most pre-existing integration
+fixtures in `internal/store`, `services/scheduler`, `resource-manager` and
+`api-gateway/rest` fail with `Namespace must belong to a registered tenant`:
+they predate migration 0014 and never create a tenant row. CI applies migrations
+too, so this is worth checking there. The NATS tests register their tenants.
+Not fixed here (out of scope).

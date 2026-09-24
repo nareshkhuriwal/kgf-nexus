@@ -222,14 +222,20 @@ func (s *DAGEngineStore) ApplyNodeStateAndCreateAttempts(
 		SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM task_attempts
 		 WHERE run_id = $1::uuid AND node_id = $2`
 
+	// The CTE also writes the task_ready outbox row (a dispatch hint for idle
+	// workers, ADR-0005) in the same statement; ON CONFLICT inserting nothing
+	// writes no hint.
 	const insAttempt = `
+		WITH a AS (
 		INSERT INTO task_attempts
 		  (run_id, node_id, attempt_number, state, queue, priority,
 		   resource_request, idempotency_key, cache_key, input_refs)
 		VALUES ($1::uuid, $2, $3,
 		        'PENDING'::attempt_state, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (run_id, node_id, attempt_number) DO NOTHING
-		RETURNING id::text, attempt_number`
+		RETURNING id, run_id, queue, scheduled_at, attempt_number
+		),` + outboxTaskReadyCTE + `
+		SELECT id::text, attempt_number FROM a`
 
 	const bumpUsed = `
 		UPDATE task_nodes SET attempts_used = attempts_used + 1

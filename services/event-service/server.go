@@ -22,10 +22,27 @@ type Server struct {
 	// not durable, caps payloads at 8KB, and holds a connection per listener
 	// (ADR-0003). A 1s poll is well inside what an operator perceives as live.
 	pollInterval time.Duration
+	// waker, when attached to the bus, wakes a tail as soon as its run changes;
+	// the poll tick stays as the fallback (see RunWaker). Nil means poll only.
+	waker *RunWaker
+	// extra routes (e.g. /metrics) registered by main.
+	extra func(*http.ServeMux)
 }
 
 func NewServer(store *Store, log *slog.Logger) *Server {
 	return &Server{store: store, log: log, pollInterval: time.Second}
+}
+
+// WithWaker attaches a bus-driven waker to the SSE tails.
+func (s *Server) WithWaker(w *RunWaker) *Server {
+	s.waker = w
+	return s
+}
+
+// WithRoutes registers additional routes on the server's mux.
+func (s *Server) WithRoutes(fn func(*http.ServeMux)) *Server {
+	s.extra = fn
+	return s
 }
 
 func (s *Server) Routes() *http.ServeMux {
@@ -35,6 +52,9 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /v1/runs/{runID}/events", s.listEvents)
 	mux.HandleFunc("GET /v1/runs/{runID}/events/stream", s.streamEvents)
 	mux.HandleFunc("POST /v1/runs/{runID}/events", s.appendEvent)
+	if s.extra != nil {
+		s.extra(mux)
+	}
 	return mux
 }
 
@@ -129,6 +149,39 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	keepalive := time.NewTicker(15 * time.Second)
 	defer keepalive.Stop()
 
+	// A nil channel never fires, so with no bus the select below is exactly the
+	// poll loop it always was.
+	var wake <-chan struct{}
+	if s.waker != nil {
+		ch, cancel := s.waker.Subscribe(runID)
+		defer cancel()
+		wake = ch
+	}
+
+	// Both the tick and a wake do the same thing: re-read Postgres after the last
+	// seq sent. The bus message is never rendered, so a duplicate, stale or
+	// out-of-order wake cannot put anything wrong on the client's screen.
+	drain := func() {
+		events, err := s.store.List(r.Context(), runID, ListOpts{AfterSeq: after, Limit: 200})
+		if err != nil {
+			// Do not kill the stream on a transient read error; the client
+			// would reconnect and re-poll anyway, so retrying is cheaper.
+			s.log.WarnContext(r.Context(), "stream read failed", "run_id", runID, "error", err)
+			return
+		}
+		for _, ev := range events {
+			b, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", ev.Seq, ev.Kind, b)
+			after = ev.Seq
+		}
+		if len(events) > 0 {
+			flusher.Flush()
+		}
+	}
+
 	for {
 		select {
 		case <-r.Context().Done():
@@ -137,24 +190,9 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()
 		case <-ticker.C:
-			events, err := s.store.List(r.Context(), runID, ListOpts{AfterSeq: after, Limit: 200})
-			if err != nil {
-				// Do not kill the stream on a transient read error; the client
-				// would reconnect and re-poll anyway, so retrying is cheaper.
-				s.log.WarnContext(r.Context(), "stream read failed", "run_id", runID, "error", err)
-				continue
-			}
-			for _, ev := range events {
-				b, err := json.Marshal(ev)
-				if err != nil {
-					continue
-				}
-				fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", ev.Seq, ev.Kind, b)
-				after = ev.Seq
-			}
-			if len(events) > 0 {
-				flusher.Flush()
-			}
+			drain()
+		case <-wake:
+			drain()
 		}
 	}
 }

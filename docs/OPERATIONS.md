@@ -317,7 +317,9 @@ is made of items like these.
   all; wire the exit code into whatever alerts you.
 - **No NATS state backup**, deliberately. NATS carries notifications; Postgres
   holds truth ([ADR-0003](adr/0003-nats-as-event-bus.md)). There is nothing there
-  to restore.
+  to restore. The `outbox` table IS in the dump; after a restore the relay
+  re-publishes whatever it holds unpublished, and consumers de-duplicate by
+  run_id + seq.
 - **Postgres roles and grants are not in the dump.** `pg_dump --no-owner
   --no-privileges` is used so the archive restores cleanly as whatever role you
   have, which means role definitions are *not* carried. In the MVP there is one
@@ -962,3 +964,95 @@ Mail is sent after the database transaction commits, on a bounded background que
 ### 9.5 Upgrade
 
 Apply migration 0017 before the new gateway. Every existing account is marked verified by the migration itself. Deploy the console together with the gateway: the new pages are `/verify-email`, `/forgot-password` and `/reset-password`. Rolling back 0017 discards which accounts are verified, and re-applying it marks every account that exists at that moment as verified. Export `SELECT id FROM users WHERE email_verified_at IS NULL` first if that matters.
+
+## 9. The event bus (NATS JetStream)
+
+NATS is **optional** and **never authoritative** ([ADR-0003](adr/0003-nats-as-event-bus.md)).
+Everything on it is either a hint that work may exist or a projection of a
+fact Postgres already holds. Losing it, emptying it, or never running it costs
+latency and live-update freshness, never correctness.
+
+### 9.1 Running it
+
+- Compose ships `nats:2.14.7-alpine` with JetStream on the `nats-data` volume
+  and a `/healthz?js-enabled-only=true` healthcheck. Monitoring is on port 8222
+  (`/varz`, `/connz`, `/jsz`).
+- Configuration (F38 naming): `NEXUS_NATS_URL` (empty disables the bus) and
+  `NEXUS_NATS_CREDS` (optional `.creds` file). Only the **event-service** (relay,
+  SSE wake-ups) and the **agents** (dispatch hints) connect. The scheduler,
+  dag-engine and workflow-manager only write `outbox` rows to Postgres.
+- Nothing `depends_on` NATS and nothing needs it to start: clients connect in
+  the background and retry forever.
+- Streams are created by the relay if missing and **never modified** if present,
+  so retention retuned with the `nats` CLI sticks:
+  `NEXUS_RUNS` (`nexus.run.>`, file, 7 days, 4 GiB, 10-minute duplicate window)
+  and `NEXUS_DISPATCH` (`nexus.task.dispatch.>`, memory, 2 minutes).
+- **Production needs authorization.** The compose broker is unauthenticated, like
+  every other dev credential there. Anyone who can reach an unauthenticated
+  broker can read every tenant's run events and publish fake hints. A fake hint
+  only costs a poll; reading run events is a real disclosure. Give the
+  event-service publish rights on `nexus.>`; give each agent subscribe-only
+  rights on `nexus.task.dispatch.<its namespace>.>` and nothing else.
+
+### 9.2 Relay tuning (event-service)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NEXUS_OUTBOX_BATCH_SIZE` | 256 | rows per publish transaction |
+| `NEXUS_OUTBOX_POLL_INTERVAL` | 200ms | idle pause between polls of the outbox |
+| `NEXUS_OUTBOX_PUBLISH_TIMEOUT` | 5s | ack wait; bounds how long a batch holds row locks |
+| `NEXUS_OUTBOX_MAX_BACKOFF` | 10s | cap on the relay-wide backoff during an outage |
+| `NEXUS_OUTBOX_RETENTION` | 1h | published rows kept for inspection, then pruned |
+| `NEXUS_OUTBOX_MAX_AGE` | 24h | unpublished rows older than this are DROPPED |
+| `NEXUS_OUTBOX_HINT_INTERVAL` | 10s | periodic re-announcement of queues with PENDING work |
+
+With `NEXUS_NATS_URL` empty the relay only prunes, so the table holds at most
+`NEXUS_OUTBOX_MAX_AGE` worth of writes.
+
+### 9.3 Monitoring (event-service `/metrics`)
+
+| Metric | Alert on |
+|---|---|
+| `nexus_outbox_oldest_unpublished_seconds` | > 60 for 5m: the bus is behind (outage or relay down) |
+| `nexus_outbox_backlog_rows` | sustained growth |
+| `nexus_outbox_broker_connected` | 0 for 5m on every replica |
+| `nexus_outbox_publish_failures_total{kind="row"}` | increasing while connected: a poison row (see `outbox.last_error`) |
+| `nexus_outbox_publish_failures_total{kind="broker"}` | informational during an outage |
+| `nexus_outbox_pruned_total{reason="expired"}` | any increase with the bus enabled: announcements were dropped unpublished |
+| `nexus_outbox_publish_lag_seconds` | p99, for end-to-end freshness |
+| `nexus_outbox_duplicate_acks_total` | informational: re-sends absorbed by de-duplication |
+
+Inspect the backlog directly:
+`SELECT topic, count(*), min(created_at), max(attempts) FROM outbox WHERE published_at IS NULL GROUP BY topic;`
+
+### 9.4 Outage behaviour
+
+- **Broker down:** writers are unaffected (they write Postgres). The relay stops
+  opening transactions, backs off (jittered, capped), and the backlog waits in
+  `outbox`. Agents keep long-polling; SSE tails keep polling at 1s. Dispatch
+  latency returns to the long-poll baseline.
+- **Broker back:** clients reconnect on their own; the relay notices within
+  about 100ms, re-verifies the streams (recreating them if the broker lost its
+  storage) and drains the backlog oldest-first. Re-sends inside the duplicate
+  window are dropped by `Nats-Msg-Id`; beyond it a consumer may see a duplicate
+  and must de-duplicate by run_id + seq. Within one hint interval every queue
+  with pending work is re-announced.
+- **Down for longer than `NEXUS_OUTBOX_MAX_AGE`:** the oldest unpublished rows
+  are dropped and counted. Their facts are still in Postgres; only the
+  announcements are gone.
+- **Relay replica dies mid-batch:** its transaction rolls back and a peer (or the
+  restart) re-sends the batch; de-duplication absorbs it.
+- Ordering is not guaranteed in any of these cases.
+
+### 9.5 Upgrading
+
+Apply migration 0016 **before** rolling any service that writes outbox rows: a
+new scheduler against a schema without `outbox` fails its claim transactions.
+Rolling the migration back requires first rolling back those services (see the
+comment in `0016_outbox.down.sql`).
+
+### 9.6 Testing
+
+`make test-nats` runs the relay, outbox and hint suites against a real
+JetStream and a real Postgres in throwaway containers (`nexus-nats-agent-*`,
+ports 55511/55512), including stopping and restarting the broker.
