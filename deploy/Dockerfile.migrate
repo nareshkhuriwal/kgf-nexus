@@ -13,4 +13,11 @@ FROM postgres:16-alpine
 COPY deploy/migrate.sh /usr/local/bin/migrate.sh
 RUN chmod +x /usr/local/bin/migrate.sh
 
+# The migrations ship IN the image, versioned with the code that needs them.
+# Compose also bind-mounts services/migrations over this path, which still wins
+# locally; Kubernetes has no host path to mount, so a Job there runs exactly
+# the set this image was built with -- which is the set that is safe to run.
+COPY services/migrations /migrations
+ENV MIGRATIONS_DIR=/migrations
+
 ENTRYPOINT ["/usr/local/bin/migrate.sh"]
