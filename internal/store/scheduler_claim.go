@@ -256,8 +256,14 @@ func (s *SchedulerStore) selectCandidate(
 	// FOR UPDATE is not allowed alongside GROUP BY, and it must lock only the
 	// attempt row. idx_attempts_inflight_by_tenant (migration 0022) makes the
 	// CTE an index-only walk over the active rows of this queue.
+	//
+	// MATERIALIZED is load-bearing, measured (ADR-0018): pgx prepares this
+	// statement, and after five executions Postgres may switch to a generic
+	// plan that inlines the CTE as a correlated subquery re-run once PER
+	// PENDING ROW. With 8,000 pending and 2,000 in flight that took a claim
+	// from ~25 ms to ~1,140 ms. Materializing evaluates the count once.
 	const q = `
-WITH inflight AS (
+WITH inflight AS MATERIALIZED (
   SELECT tenant_id, count(*) AS n
     FROM task_attempts
    WHERE queue = $1 AND state IN ('DISPATCHED','RUNNING')
@@ -293,7 +299,13 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.queue, a.priority,
 	if excludeTenants == nil {
 		excludeTenants = []uuid.UUID{}
 	}
-	row := tx.QueryRow(ctx, q, s.cfg.Queue, now, s.cfg.AgingRate, skip,
+	// QueryExecModeDescribeExec (an unnamed statement, re-planned every call) instead
+	// of pgx's default cached prepared statement, measured (ADR-0018): after
+	// five executions Postgres may adopt a GENERIC plan for this query, and the
+	// one it picks nested-loops a scan of workflow_runs per pending row. At a
+	// 100k backlog that took one claim from ~270 ms (custom plan) to ~3.3 s.
+	// Planning costs ~1-3 ms per claim; a plan that is wrong by 10x costs more.
+	row := tx.QueryRow(ctx, q, pgx.QueryExecModeDescribeExec, s.cfg.Queue, now, s.cfg.AgingRate, skip,
 		excludeTenants, s.cfg.FairShare, salt)
 
 	var c Candidate
