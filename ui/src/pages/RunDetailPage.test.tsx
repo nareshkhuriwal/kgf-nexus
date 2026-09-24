@@ -420,3 +420,160 @@ it('successful runs offer a fresh execution and never cancel or retry failed tas
  expect(screen.queryByRole('button',{name:/cancel run/i})).toBeNull();
  expect(screen.queryByRole('button',{name:'Retry failed tasks'})).toBeNull();
 });
+
+describe('re-run and retry confirm in the console, not the browser', () => {
+  /**
+   * Both start real compute, so neither fires on the first click. The
+   * confirmation is the console's own dialog: window.confirm cannot be
+   * styled, says "OK" for an action that spends money, and is silently
+   * suppressed by a browser setting.
+   */
+  it('asks before starting a new run, then POSTs once confirmed', async () => {
+    const posts: string[] = [];
+    const confirmSpy = vi.spyOn(window, 'confirm');
+    mockFetch((url, init) => {
+      if (init?.method === 'POST') {
+        posts.push(url);
+        return [201, { id: 'run-bbbbbbbbbbbb', state: 'PENDING' }];
+      }
+      if (url.includes('/events')) return [200, { events: [] }];
+      return [200, failedRun];
+    });
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Re-run' }));
+    const dialog = await screen.findByRole('alertdialog', { name: /start a new run/i });
+    expect(dialog).toHaveTextContent(/original parameters/i);
+    expect(posts).toEqual([]);
+    expect(confirmSpy).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Start new run' }));
+    await waitFor(() => {
+      expect(posts.some((u) => u.endsWith('/runs'))).toBe(true);
+    });
+    confirmSpy.mockRestore();
+  });
+
+  it('backs out of a re-run without starting anything', async () => {
+    const posts: string[] = [];
+    mockFetch((url, init) => {
+      if (init?.method === 'POST') posts.push(url);
+      if (url.includes('/events')) return [200, { events: [] }];
+      return [200, failedRun];
+    });
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Re-run' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(posts).toEqual([]);
+  });
+
+  it('asks before retrying failed tasks, and says succeeded tasks are untouched', async () => {
+    const posts: string[] = [];
+    mockFetch((url, init) => {
+      if (init?.method === 'POST') {
+        posts.push(url);
+        return [204, null];
+      }
+      if (url.includes('/events')) return [200, { events: [] }];
+      return [200, failedRun];
+    });
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry failed tasks' }));
+    const dialog = await screen.findByRole('alertdialog', { name: /retry the failed tasks/i });
+    expect(dialog).toHaveTextContent(/succeeded keep their results/i);
+    expect(posts).toEqual([]);
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry failed tasks' }));
+    await waitFor(() => {
+      expect(posts.some((u) => u.endsWith('/retry'))).toBe(true);
+    });
+  });
+});
+
+describe('task placement', () => {
+  /**
+   * "Which worker is running which task" must be answerable from one table,
+   * not by clicking every node. The gateway joins the hostname onto each
+   * attempt; the panel names it, links it to the fleet page, and puts what is
+   * running now above what has finished.
+   */
+  const placedRun = {
+    ...failedRun,
+    state: 'RUNNING',
+    ended_at: null,
+    nodes: [
+      { run_id: 'run-aaaaaaaaaaaa', node_id: 'extract', task_ref: 'tasks/extract', state: 'SUCCEEDED' },
+      { run_id: 'run-aaaaaaaaaaaa', node_id: 'transform', task_ref: 'tasks/transform', state: 'RUNNING' },
+      { run_id: 'run-aaaaaaaaaaaa', node_id: 'load', task_ref: 'tasks/load', state: 'PENDING' },
+    ],
+    attempts: [
+      {
+        id: 'a1-extract', run_id: 'run-aaaaaaaaaaaa', node_id: 'extract', attempt_number: 1, state: 'SUCCEEDED',
+        worker_id: 'worker-1111-2222-3333', worker_hostname: 'cpu-node-1', queue: 'default',
+        started_at: '2026-09-12T10:00:01Z', ended_at: '2026-09-12T10:00:31Z',
+      },
+      {
+        id: 'a1-transform', run_id: 'run-aaaaaaaaaaaa', node_id: 'transform', attempt_number: 1, state: 'RUNNING',
+        worker_id: 'worker-4444-5555-6666', worker_hostname: 'gpu-node-3', queue: 'gpu',
+        started_at: '2026-09-12T10:00:40Z',
+      },
+      {
+        id: 'a1-load', run_id: 'run-aaaaaaaaaaaa', node_id: 'load', attempt_number: 1, state: 'PENDING',
+        pending_reason: 'waiting_for_resources: gpu (need 1, free 0)',
+      },
+    ],
+  };
+
+  it('names the worker for every placed task and links it to the fleet page', async () => {
+    serveRun(placedRun);
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    const panel = (await screen.findByText('task placement')).closest<HTMLElement>('.panel')!;
+    const gpu = within(panel).getByRole('link', { name: 'gpu-node-3' });
+    expect(gpu).toHaveAttribute('href', '/workers/worker-4444-5555-6666');
+    expect(within(panel).getByRole('link', { name: 'cpu-node-1' })).toBeInTheDocument();
+    // The unplaced node says why it has no worker rather than showing a dash.
+    expect(within(panel).getByText(/waiting: waiting_for_resources/)).toBeInTheDocument();
+    // One task running, on one worker: the head says so.
+    expect(within(panel).getByText('1 running on 1 worker')).toBeInTheDocument();
+  });
+
+  it('puts what is running now above what has finished', async () => {
+    serveRun(placedRun);
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    const panel = (await screen.findByText('task placement')).closest<HTMLElement>('.panel')!;
+    const rows = within(panel).getAllByRole('row').slice(1);
+    expect(rows[0]).toHaveTextContent('transform');
+    expect(rows[1]).toHaveTextContent('load');
+    expect(rows[2]).toHaveTextContent('extract');
+  });
+
+  it('selects the node in the graph when its task is clicked', async () => {
+    serveRun(placedRun);
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    const panel = (await screen.findByText('task placement')).closest<HTMLElement>('.panel')!;
+    fireEvent.click(within(panel).getByRole('button', { name: 'extract' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('search').textContent).toContain('node=extract');
+    });
+  });
+
+  it('falls back to the worker id when the gateway sends no hostname', async () => {
+    serveRun({
+      ...placedRun,
+      attempts: placedRun.attempts.map((a) => ({ ...a, worker_hostname: undefined })),
+    });
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    const panel = (await screen.findByText('task placement')).closest<HTMLElement>('.panel')!;
+    expect(within(panel).getByRole('link', { name: /worker-4444/ })).toHaveAttribute(
+      'href',
+      '/workers/worker-4444-5555-6666',
+    );
+  });
+});

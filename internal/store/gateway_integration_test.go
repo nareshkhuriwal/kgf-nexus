@@ -1230,6 +1230,26 @@ func TestIntegrationWorkerAttemptAttribution(t *testing.T) {
 		t.Errorf("task_ref/run_id = %q/%q, want test.task:v1/%s — the join to task_nodes is what makes the row nameable", r.TaskRef, r.RunID, f.runID)
 	}
 
+	// Read from the run's side, each attempt carries the worker's hostname: the
+	// run page names the machine a task is on without a trip to the fleet
+	// listing. An attempt nobody has taken carries no name, not an empty one.
+	byRun, err := GatewayListRunAttempts(ctx, pool, f.runID)
+	if err != nil {
+		t.Fatalf("list run attempts: %v", err)
+	}
+	for _, a := range byRun {
+		switch a.ID {
+		case running, dispatched, done:
+			if a.WorkerHostname == nil || *a.WorkerHostname != "host-"+f.ns {
+				t.Errorf("attempt %s on %s: worker_hostname = %v, want host-%s", a.NodeID, workerID, a.WorkerHostname, f.ns)
+			}
+		case unassigned:
+			if a.WorkerHostname != nil {
+				t.Errorf("unassigned attempt reports worker_hostname %q; nothing is running it", *a.WorkerHostname)
+			}
+		}
+	}
+
 	// active_attempts on the worker row must agree with the length of that list,
 	// or the fleet table and the page it links to disagree.
 	wk, err := GatewayGetWorker(ctx, pool, f.ns, workerID)

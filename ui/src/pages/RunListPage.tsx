@@ -1,4 +1,5 @@
 import { ActionIcon } from '../components/RowAction';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -76,8 +77,9 @@ export function RunListPage({ namespace, canAdmin = false }: { namespace: string
 
 
   useEffect(() => setSelected(new Set()), [state, spec, before, pageSize]);
+  const [deleting, setDeleting] = useState<RunSummary | null>(null);
   async function deleteOne(r: RunSummary) {
-    if (!window.confirm(`Delete run ${shortId(r.id,12)} from the list? Execution history is retained for audit and idempotency.`)) return;
+    setDeleting(null);
     setActionError('');
     try { await api.deleteRun(namespace,r.id); setCursors({state,spec,stack:[]}); await qc.invalidateQueries({queryKey:['runs',namespace]}); }
     catch(error) { setActionError(error instanceof Error ? error.message : 'Unable to delete run'); }
@@ -89,7 +91,7 @@ export function RunListPage({ namespace, canAdmin = false }: { namespace: string
   );
 
   const columns: Column<RunSummary>[] = [
-    {key:'actions', header:'Actions', cell:r=><div className="run-actions"><Link to={`/runs/${encodeURIComponent(r.id)}`} aria-label="View run" title="View run" className="icon-action"><ActionIcon name="view"/></Link>{canAdmin&&<button className="icon-action" aria-label="Delete run" disabled={cancellable(r)} title={cancellable(r)?'Cancel or finish this run before deleting':'Remove from listing; execution history is retained'} onClick={()=>void deleteOne(r)}><ActionIcon name="delete"/></button>}</div>},
+    {key:'actions', header:'Actions', cell:r=><div className="run-actions"><Link to={`/runs/${encodeURIComponent(r.id)}`} aria-label="View run" title="View run" className="icon-action"><ActionIcon name="view"/></Link>{canAdmin&&<button className="icon-action" aria-label="Delete run" disabled={cancellable(r)} title={cancellable(r)?'Cancel or finish this run before deleting':'Remove from listing; execution history is retained'} onClick={()=>setDeleting(r)}><ActionIcon name="delete"/></button>}</div>},
     {
       key: 'state',
       header: 'state',
@@ -155,6 +157,7 @@ export function RunListPage({ namespace, canAdmin = false }: { namespace: string
       />
 
       {actionError && <p role="alert">{actionError}</p>}
+      {deleting && <ConfirmDialog title={`Delete run ${shortId(deleting.id,12)}?`} confirmLabel="Delete run" tone="danger" onConfirm={() => void deleteOne(deleting)} onCancel={() => setDeleting(null)}>It disappears from this list. Execution history is retained for audit and idempotency.</ConfirmDialog>}
       <div className="panel">
 
         <div className="filterbar">
