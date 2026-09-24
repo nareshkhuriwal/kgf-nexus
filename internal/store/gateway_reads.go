@@ -481,6 +481,19 @@ type AttemptRow struct {
 	// CacheHitOf is set when the attempt was satisfied from the memo cache
 	// (§6.4) rather than executed, naming the attempt whose result it reused.
 	CacheHitOf *string
+	// ProgressMessage is the latest status line the WORKER reported through
+	// ReportProgress (migration 0024), e.g. the Kubernetes executor's "pod
+	// Pending: Unschedulable: insufficient cpu". Distinct from PendingReason,
+	// which is the SCHEDULER's own explanation for not dispatching. Already
+	// sanitized when stored. Nil when the worker never sent one.
+	ProgressMessage *string
+	// ProgressFraction is the latest valid completion fraction in [0, 1], nil
+	// when none was reported.
+	ProgressFraction *float64
+	// ProgressAt is the control-plane time of the latest accepted progress
+	// report; ProgressMessageAt is when the message last changed.
+	ProgressAt        *time.Time
+	ProgressMessageAt *time.Time
 }
 
 // GatewayListRunAttempts returns every attempt of a run, including terminal ones.
@@ -492,9 +505,11 @@ func GatewayListRunAttempts(ctx context.Context, q GWQuerier, runID string) ([]A
 	rows, err := q.Query(ctx, `
 		SELECT a.id::text, a.run_id::text, a.node_id, a.attempt_number, a.state::text, a.queue,
 		       a.worker_id::text, w.hostname, a.pending_reason, a.error::text, a.metrics::text,
-		       a.scheduled_at, a.started_at, a.ended_at, a.cache_hit_of::text
+		       a.scheduled_at, a.started_at, a.ended_at, a.cache_hit_of::text,
+		       p.message, p.fraction, p.reported_at, p.message_changed_at
 		  FROM task_attempts a
 		  LEFT JOIN workers w ON w.id = a.worker_id
+		  LEFT JOIN attempt_progress p ON p.attempt_id = a.id
 		 WHERE a.run_id = $1
 		 ORDER BY a.node_id, a.attempt_number`,
 		runID,
@@ -509,7 +524,8 @@ func GatewayListRunAttempts(ctx context.Context, q GWQuerier, runID string) ([]A
 		var a AttemptRow
 		if err := rows.Scan(&a.ID, &a.RunID, &a.NodeID, &a.AttemptNumber, &a.State, &a.Queue,
 			&a.WorkerID, &a.WorkerHostname, &a.PendingReason, &a.Error, &a.Metrics,
-			&a.ScheduledAt, &a.StartedAt, &a.EndedAt, &a.CacheHitOf); err != nil {
+			&a.ScheduledAt, &a.StartedAt, &a.EndedAt, &a.CacheHitOf,
+			&a.ProgressMessage, &a.ProgressFraction, &a.ProgressAt, &a.ProgressMessageAt); err != nil {
 			return nil, fmt.Errorf("scan attempt: %w", err)
 		}
 		out = append(out, a)
@@ -523,15 +539,18 @@ func GatewayGetAttempt(ctx context.Context, q GWQuerier, namespace, attemptID st
 	err := q.QueryRow(ctx, `
 		SELECT a.id::text, a.run_id::text, a.node_id, a.attempt_number, a.state::text, a.queue,
 		       a.worker_id::text, w.hostname, a.pending_reason, a.error::text, a.metrics::text,
-		       a.scheduled_at, a.started_at, a.ended_at, a.cache_hit_of::text
+		       a.scheduled_at, a.started_at, a.ended_at, a.cache_hit_of::text,
+		       p.message, p.fraction, p.reported_at, p.message_changed_at
 		  FROM task_attempts a
 		  JOIN workflow_runs r ON r.id = a.run_id
 		  LEFT JOIN workers w ON w.id = a.worker_id
+		  LEFT JOIN attempt_progress p ON p.attempt_id = a.id
 		 WHERE a.id = $1 AND r.namespace = $2`,
 		attemptID, namespace,
 	).Scan(&a.ID, &a.RunID, &a.NodeID, &a.AttemptNumber, &a.State, &a.Queue,
 		&a.WorkerID, &a.WorkerHostname, &a.PendingReason, &a.Error, &a.Metrics,
-		&a.ScheduledAt, &a.StartedAt, &a.EndedAt, &a.CacheHitOf)
+		&a.ScheduledAt, &a.StartedAt, &a.EndedAt, &a.CacheHitOf,
+		&a.ProgressMessage, &a.ProgressFraction, &a.ProgressAt, &a.ProgressMessageAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AttemptRow{}, ErrNotFound
 	}

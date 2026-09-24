@@ -539,12 +539,14 @@ func (c *SchedulerClient) MarkStarted(ctx context.Context, attemptID string, sta
 	return c.grpc.markStarted(ctx, attemptID)
 }
 
-// RecordProgress resets the task heartbeat deadline.
-func (c *SchedulerClient) RecordProgress(ctx context.Context, attemptID, message string, fraction float64) error {
+// RecordProgress stores the worker's latest status on the attempt and resets
+// the task heartbeat deadline. stale is true when the scheduler's own lease
+// fence rejected the report.
+func (c *SchedulerClient) RecordProgress(ctx context.Context, attemptID, leaseToken, message string, fraction float64) (bool, error) {
 	if c.grpc == nil {
-		return fmt.Errorf("record progress: %w (scheduler owns task_attempts)", ErrUpstreamNotConfigured)
+		return false, fmt.Errorf("record progress: %w (scheduler owns task_attempts)", ErrUpstreamNotConfigured)
 	}
-	return c.grpc.recordProgress(ctx, attemptID, message, fraction)
+	return c.grpc.recordProgress(ctx, attemptID, leaseToken, message, fraction)
 }
 
 // ApplyResult applies a terminal outcome, then asks the DAG engine to recompute

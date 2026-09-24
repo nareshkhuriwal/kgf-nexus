@@ -169,6 +169,21 @@ func attemptPayload(a store.AttemptRow) map[string]any {
 		// Set when the attempt reused a memoized result (§6.4) instead of
 		// executing; the console marks such nodes "cached" rather than "ran".
 		"cache_hit_of": a.CacheHitOf,
+		// The latest status the WORKER reported for this attempt (F96), e.g.
+		// "pod Pending: Unschedulable: 0/3 nodes are available: insufficient
+		// cpu" from the Kubernetes executor. Deliberately a separate field from
+		// pending_reason: that one is the scheduler explaining why it has not
+		// placed the attempt, this one is the executor explaining what the
+		// substrate is doing with an attempt that WAS placed. Sanitized by the
+		// scheduler before storage (one line, no control characters, bounded);
+		// null when the worker never sent a message.
+		"progress_message": a.ProgressMessage,
+		// In [0, 1], or null when no valid fraction was reported.
+		"progress_fraction": a.ProgressFraction,
+		// Control-plane time of the latest progress report, and of the latest
+		// CHANGE of message ("pod Pending since ...").
+		"progress_at":         a.ProgressAt,
+		"progress_message_at": a.ProgressMessageAt,
 	}
 }
 

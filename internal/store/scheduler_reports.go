@@ -20,6 +20,8 @@ import (
 // on the lease token BEFORE calling (invariant 3), so by the time execution
 // reaches this file the caller has been proven to be the attempt's current
 // owner. These functions therefore guard on STATE, not on ownership.
+// RecordProgress (scheduler_progress.go) is the exception: it also stores data
+// the worker supplied, so it re-checks the lease inside its own transaction.
 
 // MarkStarted transitions DISPATCHED -> RUNNING.
 //
@@ -69,61 +71,6 @@ UPDATE task_attempts
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit mark-started tx: %w", err)
-	}
-	return nil
-}
-
-// RecordProgress pushes out the task-level heartbeat deadline.
-//
-// This is the TASK heartbeat, distinct from worker liveness: a worker can be
-// perfectly alive while one task is wedged, and keeping the two signals separate
-// is what lets the platform time out that one task instead of declaring the
-// worker dead and losing everything else it is running.
-func (s *SchedulerStore) RecordProgress(ctx context.Context, attemptID uuid.UUID, now time.Time) error {
-	// The heartbeat timer is re-armed rather than merely touched, because the
-	// deadline is a row in `timers` and nothing else in the system knows how to
-	// move it. Delete-then-insert in one statement pair inside one transaction
-	// keeps the attempt from being briefly unguarded.
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return fmt.Errorf("begin progress tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	var specJSON []byte
-	err = tx.QueryRow(ctx, `
-SELECT n.spec_json
-  FROM task_attempts a
-  JOIN task_nodes n ON n.run_id = a.run_id AND n.node_id = a.node_id
- WHERE a.id = $1 AND a.state = 'RUNNING'`, attemptID).Scan(&specJSON)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Progress for an attempt that is not RUNNING is stale. Dropping it is
-		// correct: re-arming a timer for a terminal attempt would keep a deadline
-		// alive forever against work that is finished.
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("load attempt %s for progress: %w", attemptID, err)
-	}
-
-	var spec TaskSpecView
-	if len(specJSON) > 0 {
-		_ = json.Unmarshal(specJSON, &spec)
-	}
-	if spec.HeartbeatMs <= 0 {
-		// No heartbeat budget declared means no heartbeat timeout to push out.
-		return tx.Commit(ctx)
-	}
-
-	if err := deleteTimersFor(ctx, tx, attemptID, domain.TimerHeartbeat); err != nil {
-		return err
-	}
-	if err := insertTimer(ctx, tx, domain.TimerHeartbeat, attemptID,
-		now.Add(time.Duration(spec.HeartbeatMs)*time.Millisecond), nil); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit progress tx: %w", err)
 	}
 	return nil
 }
