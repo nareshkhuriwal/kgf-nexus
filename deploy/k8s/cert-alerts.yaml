@@ -1,0 +1,78 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Certificate alerts (docs/OPERATIONS.md §9.3). Requires the Prometheus
+# Operator CRDs. The same expressions are given in OPERATIONS.md for a plain
+# Prometheus rules file, which is what the Portainer host uses.
+#
+# Two independent sources, on purpose:
+#   - cert-manager's own metrics describe what is IN THE SECRET;
+#   - nexus_tls_* describe what each PROCESS IS SERVING.
+# A healthy secret next to a process still serving an old leaf is exactly the
+# failure hot reload exists to prevent, and only the second source can see it.
+# (nexus_tls_* is exported only by services that serve /metrics; today that is
+# workflow-manager. The other services log a warning instead -- docs/TLS.md §5.4.)
+#
+# None of these touch readiness. A certificate that is close to expiry still
+# works, and failing /readyz on it would take every replica out of service at
+# the same moment, turning a warning into an outage.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: nexus-certificates
+  namespace: kgf-nexus
+spec:
+  groups:
+    - name: nexus-certificates
+      rules:
+        # Renewal should have happened at 10 days left (renewBefore: 240h). A
+        # certificate still in the secret at 7 days left means renewal is
+        # failing, and there are 7 days to fix it.
+        - alert: NexusCertificateRenewalOverdue
+          expr: |
+            (certmanager_certificate_expiration_timestamp_seconds{namespace="kgf-nexus"} - time()) < 7 * 86400
+          for: 1h
+          labels: { severity: warning }
+          annotations:
+            summary: "cert-manager has not renewed {{ $labels.name }} ({{ $value | humanizeDuration }} left)"
+            runbook: docs/OPERATIONS.md#93-alerts-and-what-to-do
+
+        - alert: NexusCertificateNotReady
+          expr: certmanager_certificate_ready_status{namespace="kgf-nexus", condition="False"} == 1
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "Certificate {{ $labels.name }} is not Ready"
+            runbook: docs/OPERATIONS.md#93-alerts-and-what-to-do
+
+        # What a process is actually SERVING. Computed from the timestamp, not
+        # from nexus_tls_cert_expiry_seconds, so a stalled poller cannot freeze
+        # the countdown.
+        - alert: NexusServedCertificateExpiringSoon
+          expr: (nexus_tls_cert_not_after_timestamp_seconds - time()) < 3 * 86400
+          for: 15m
+          labels: { severity: critical }
+          annotations:
+            summary: "{{ $labels.pod }} is serving a {{ $labels.role }} certificate that expires in {{ $value | humanizeDuration }}"
+            runbook: docs/OPERATIONS.md#93-alerts-and-what-to-do
+
+        # The files on disk changed and the process refused them. It is still
+        # serving the previous certificate, which is safe until that one expires.
+        - alert: NexusTLSReloadRejected
+          expr: max_over_time(nexus_tls_reload_stale[10m]) == 1
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{ $labels.pod }} rejected new {{ $labels.role }} TLS material; still serving the old"
+            runbook: docs/OPERATIONS.md#93-alerts-and-what-to-do
+
+        - alert: NexusCACertificateExpiringSoon
+          expr: |
+            (certmanager_certificate_expiration_timestamp_seconds{namespace="cert-manager", name="nexus-internal-ca"} - time()) < 21 * 86400
+            or (nexus_tls_cert_not_after_timestamp_seconds{role="ca"} - time()) < 21 * 86400
+          for: 1h
+          labels: { severity: critical }
+          annotations:
+            summary: "The Nexus internal CA expires in {{ $value | humanizeDuration }}"
+            runbook: docs/OPERATIONS.md#94-rotating-the-ca-key

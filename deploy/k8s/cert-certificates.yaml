@@ -1,0 +1,188 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# One leaf per Nexus service and one for in-cluster agents, issued by the
+# nexus-internal-ca ClusterIssuer (cert-issuer.yaml).
+#
+# Every leaf:
+#   - carries BOTH serverAuth and clientAuth, so one secret serves as the
+#     service's serving identity and the identity it dials peers with
+#     (NEXUS_TLS_CERT_FILE and NEXUS_TLS_CLIENT_CERT_FILE point at the same files);
+#   - names the Kubernetes Service in its SANs. config.PeerTarget dials
+#     dns:///<service>:<port> and gRPC verifies the server certificate against
+#     <service>; the namespaced forms cover a peer configured with an FQDN;
+#   - lives 30 days and renews with 10 days left. The 10 days is the time a
+#     human has to fix a broken renewal after the "not renewed" alert fires
+#     (docs/OPERATIONS.md §9.3), before the "expires soon" page;
+#   - gets a NEW private key on every renewal (rotationPolicy: Always), so a
+#     leaked key dies with the certificate it was issued for.
+#
+# The services pick up a renewal WITHOUT a restart: cert-manager rewrites the
+# secret, kubelet swaps the mounted volume (typically within a minute), and
+# internal/transport re-reads it within NEXUS_TLS_RELOAD_INTERVAL. Do not mount
+# these secrets with subPath -- subPath mounts are never updated, which silently
+# turns hot reload back into "serve the old certificate until it expires".
+#
+# Service names below are the compose names; if the (not yet written) chart
+# names its Services differently, the dnsNames must follow.
+
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nexus-api-gateway
+  namespace: kgf-nexus
+spec:
+  secretName: nexus-api-gateway-tls
+  commonName: api-gateway
+  dnsNames:
+    - api-gateway
+    - api-gateway.kgf-nexus.svc
+    - api-gateway.kgf-nexus.svc.cluster.local
+    # The worker gRPC listener is the one hop reached from OUTSIDE the cluster.
+    # Add the external name agents dial here, e.g.:
+    # - nexus-workers.example.internal
+  duration: 720h
+  renewBefore: 240h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    rotationPolicy: Always
+  usages: [digital signature, server auth, client auth]
+  issuerRef:
+    name: nexus-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nexus-workflow-manager
+  namespace: kgf-nexus
+spec:
+  secretName: nexus-workflow-manager-tls
+  commonName: workflow-manager
+  dnsNames:
+    - workflow-manager
+    - workflow-manager.kgf-nexus.svc
+    - workflow-manager.kgf-nexus.svc.cluster.local
+  duration: 720h
+  renewBefore: 240h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    rotationPolicy: Always
+  usages: [digital signature, server auth, client auth]
+  issuerRef:
+    name: nexus-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nexus-dag-engine
+  namespace: kgf-nexus
+spec:
+  secretName: nexus-dag-engine-tls
+  commonName: dag-engine
+  dnsNames:
+    - dag-engine
+    - dag-engine.kgf-nexus.svc
+    - dag-engine.kgf-nexus.svc.cluster.local
+  duration: 720h
+  renewBefore: 240h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    rotationPolicy: Always
+  usages: [digital signature, server auth, client auth]
+  issuerRef:
+    name: nexus-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nexus-scheduler
+  namespace: kgf-nexus
+spec:
+  secretName: nexus-scheduler-tls
+  commonName: scheduler
+  # One leaf for every per-queue scheduler replica set: they are the same
+  # program with the same trust, and the gateway dials each by its Service name.
+  dnsNames:
+    - scheduler
+    - scheduler.kgf-nexus.svc
+    - scheduler.kgf-nexus.svc.cluster.local
+    - scheduler-gpu
+    - scheduler-gpu.kgf-nexus.svc
+    - scheduler-gpu.kgf-nexus.svc.cluster.local
+  duration: 720h
+  renewBefore: 240h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    rotationPolicy: Always
+  usages: [digital signature, server auth, client auth]
+  issuerRef:
+    name: nexus-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nexus-resource-manager
+  namespace: kgf-nexus
+spec:
+  secretName: nexus-resource-manager-tls
+  commonName: resource-manager
+  dnsNames:
+    - resource-manager
+    - resource-manager.kgf-nexus.svc
+    - resource-manager.kgf-nexus.svc.cluster.local
+  duration: 720h
+  renewBefore: 240h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    rotationPolicy: Always
+  usages: [digital signature, server auth, client auth]
+  issuerRef:
+    name: nexus-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# Agents running INSIDE the cluster. Client-only: an agent serves nothing, and a
+# leaf that cannot be used as a server certificate cannot be used to
+# impersonate a control-plane service either.
+#
+# Agents OUTSIDE the cluster (the usual case -- the execution plane leaves the
+# control-plane network) cannot mount this secret; see docs/TLS.md §5.5 for
+# their enrollment.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nexus-agent
+  namespace: kgf-nexus
+spec:
+  secretName: nexus-agent-tls
+  commonName: nexus-agent
+  duration: 720h
+  renewBefore: 240h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    rotationPolicy: Always
+  usages: [digital signature, client auth]
+  issuerRef:
+    name: nexus-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
