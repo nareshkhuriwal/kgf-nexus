@@ -761,3 +761,115 @@ the object durable strictly before the row is written, an object that existed at
 T1 still exists at T2. A false *negative* (an object deleted after the check) is
 acceptable and shows up next run; a false *positive* would send someone hunting
 for data loss that never happened.
+
+## 9. Kubernetes executor
+
+An agent that runs its attempts as Kubernetes Jobs (ADR-0007, Implementation
+notes). It is opt-in per agent: setting `NEXUS_K8S_NAMESPACE` enables it, and
+the agent advertises `kubernetes` (and its alias `k8s`) only after a startup
+probe passes. The probe checks that the cluster is reachable, that the server is
+1.29 or later (native sidecars), and, through SelfSubjectAccessReview, that the
+agent holds the RBAC verbs the executor uses. If the probe fails, the agent logs
+`kubernetes executor configured but not usable; not advertising it` with the
+reason and keeps serving its other executors.
+
+### 9.1 Deploying
+
+```bash
+kubectl apply -f deploy/k8s/executor-namespace.yaml   # nexus-exec, Pod Security "restricted" ENFORCED
+kubectl apply -f deploy/k8s/agent-rbac.yaml           # SA + namespace Role; no exec, no secret reads
+kubectl apply -f deploy/k8s/executor-policies.yaml    # default-deny NetworkPolicy + LimitRange for task pods
+kubectl -n nexus-exec create secret generic nexus-agent-credentials --from-literal=api-key="$NEXUS_WORKER_API_KEY"
+# Edit the image (pin a digest) and NEXUS_CONTROL_PLANE, then:
+kubectl apply -f deploy/k8s/agent-deployment.yaml
+```
+
+The agent and its task Jobs share one namespace. That is required, not a
+convenience: each Job is owned by the agent pod through the downward API, and
+Kubernetes owner references cannot cross namespaces. A cross-namespace owner is
+treated as missing, and the garbage collector would delete every Job the moment
+it was created. For that reason the executor sets the owner reference only when
+`NEXUS_K8S_OWNER_POD_NAMESPACE` equals `NEXUS_K8S_NAMESPACE`.
+
+**Capacity.** Set `NEXUS_CPU_MILLIS`, `NEXUS_MEMORY_BYTES` and `NEXUS_DISK_BYTES`
+to what the namespace can really run: its ResourceQuota, or the size of the node
+pool. Two schedulers are involved. Nexus places the attempt on this worker, then
+Kubernetes places the pod. If you over-advertise, attempts sit with pods Pending
+`Unschedulable` until `NEXUS_K8S_START_TIMEOUT` (default 10m). They then fail as
+retryable INFRASTRUCTURE. Each attempt pod also carries a collector sidecar that
+requests 50m CPU and 32Mi of memory, on top of the task's own request.
+
+### 9.2 Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NEXUS_K8S_NAMESPACE` | *(unset: disabled)* | Where Jobs are created. Setting it enables the executor. |
+| `NEXUS_K8S_KUBECONFIG`, `NEXUS_K8S_CONTEXT` | in-cluster if `KUBERNETES_SERVICE_HOST` is set, else `$KUBECONFIG` / `~/.kube/config` | Out-of-cluster access. |
+| `NEXUS_K8S_OWNER` | hostname (the pod name in-cluster) | This agent instance's identity, used for orphan reaping. It must be **stable across restarts** and **unique among agents that share the namespace**. |
+| `NEXUS_K8S_OWNER_POD_NAME` / `_UID` / `_NAMESPACE` | unset | Downward API values. When set, each Job is owned by the agent pod. |
+| `NEXUS_K8S_SERVICE_ACCOUNT` | namespace default | The service account task pods run as. Its token is never mounted. |
+| `NEXUS_K8S_HELPER_IMAGE` | `busybox:1.37.0` | The collector sidecar image. It needs `sh`, `base64`, `wc` and `sleep`. Mirror it for air-gapped clusters. |
+| `NEXUS_K8S_IMAGE_PULL_POLICY` / `_IMAGE_PULL_SECRETS` | Kubernetes default / none | Image pull settings for task images. |
+| `NEXUS_K8S_RUN_AS_USER` | `65532` | The non-root uid, gid and fsGroup for task pods. |
+| `NEXUS_K8S_WRITABLE_ROOT_FS` | `false` | Set to `true` only for images that must write outside `/nexus` and `/tmp`. |
+| `NEXUS_K8S_NODE_SELECTOR`, `NEXUS_K8S_TOLERATIONS` | none | Pins this worker's pods to a node pool. Format: `k=v,k2=v2` and `key=value:Effect,key:Effect`. |
+| `NEXUS_K8S_GPU_RESOURCE` | unset: GPU tasks are refused | The device-plugin resource, for example `nvidia.com/gpu`. |
+| `NEXUS_K8S_GPU_KIND_LABEL` | unset | A node label, for example `nvidia.com/gpu.product`. When set, `gpu_kind` becomes a nodeSelector on that label. |
+| `NEXUS_K8S_TTL_AFTER_FINISHED` | `10m` | Lets the Job controller delete Jobs the agent never cleaned up. This is also the window in which a restarted agent can harvest a finished attempt. |
+| `NEXUS_K8S_IMAGE_PULL_TIMEOUT` | `10m` | How long a **transient** pull failure may last. A pull that fails as not-found or unauthorised fails immediately. |
+| `NEXUS_K8S_START_TIMEOUT` | `10m` | How long an attempt may go unscheduled or unstarted before it fails as retryable. |
+
+### 9.3 What happens to attempts when things fail
+
+| Event | Outcome |
+|---|---|
+| Image not found / unauthorised / invalid | Prepare fails with `NOT_FOUND` / `PERMISSION_DENIED` / `VALIDATION`, all terminal. The Job is deleted. |
+| Collector sidecar crash-loops or cannot pull | `INFRASTRUCTURE`, retryable. This is an agent or cluster fault, never the task's. |
+| Task over its memory limit | `OOM`, retryable. The kernel OOM-kills the container and the runtime reports `OOMKilled`. |
+| Over `start_to_close` | `TIMED_OUT`. The Job's `activeDeadlineSeconds` sends SIGTERM, then SIGKILL after the grace period. |
+| Pod evicted or preempted | `INFRASTRUCTURE` (`Evicted`), retryable. |
+| Cancel or lease revoked | Pod deleted with the grace period (SIGTERM, grace, SIGKILL), then the Job is deleted. |
+| Agent **container** restarts | The WAL (an emptyDir) survives the restart. A Job that finished meanwhile is harvested and reported for real. A Job still running is killed, because this session cannot renew its lease and a retry is coming. Its STARTING entry is then replayed as INDETERMINATE. |
+| Agent **pod** deleted | The garbage collector deletes its Jobs. The WAL is lost, so those attempts become LOST through lease expiry and are retried. |
+
+### 9.4 Inspecting
+
+```bash
+kubectl -n nexus-exec get jobs,pods -l app.kubernetes.io/managed-by=nexus-agent
+kubectl -n nexus-exec get jobs -l nexus.dev/run=<run_id>           # everything for one run
+kubectl -n nexus-exec describe job nexus-<attempt_id>              # nexus.dev/enforced-limits annotation
+kubectl -n nexus-exec logs job/nexus-<attempt_id> -c task          # the task's log
+```
+
+Attempt ids that are not valid DNS labels are hashed into the Job name. The
+exact id is always in the `nexus.dev/attempt-id` annotation.
+
+### 9.5 Limits you will hit
+
+See CONTRACT-FINDINGS F92 for detail. In short:
+
+- Inputs are limited to about 1 MiB in total, because they are staged through a
+  Secret.
+- Outputs are limited to 4 MiB in total, because they leave the pod through the
+  collector's log.
+- `runtime.stdout_output` is rejected, because the pod log API cannot separate
+  stdout from stderr.
+- The pending reason sent through ReportProgress is not yet stored by the
+  scheduler.
+
+### 9.6 Running the executor's cluster tests
+
+```bash
+kubectl config current-context        # MUST be a local cluster (docker-desktop, kind-*, minikube, ...)
+NEXUS_K8S_CONFORMANCE=1 go test ./agent/internal/executor/ ./agent/internal/worker/ \
+  -run 'TestConformance/.*/kubernetes|TestK8s' -v
+```
+
+The tests refuse to run unless the context name is recognisably local **and**
+its API server is on a loopback address. They create namespace
+`nexus-k8s-exec-test`, with Pod Security "restricted" enforced, and delete it
+afterwards. Set `NEXUS_K8S_KEEP_NAMESPACE=1` to keep it for debugging.
+
+Check that the subtests actually ran (F89). Each `…/kubernetes` line should take
+seconds, not `0.00s`. A `-run` pattern that does not match the three-level
+subtest names skips them silently, and the run still passes.
