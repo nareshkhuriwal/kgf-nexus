@@ -76,7 +76,7 @@ type EmailFlowConfig struct {
 	MaxLinksPerHour int
 	// PerIP limits the four routes per requesting address; PerEmail limits link
 	// requests per target address. Both are in-memory token buckets (the same
-	// limiter as the gateway's per-credential limit), so they are per replica.
+	// bounded limiter as the gateway's own buckets), so they are per replica.
 	PerIP    RateLimitConfig
 	PerEmail RateLimitConfig
 	// Retry governs delivery retries after the response has been sent.
@@ -283,17 +283,15 @@ func (ef *emailFlows) flush() { ef.pending.Wait() }
 func (ef *emailFlows) mailEnabled() bool { return !mail.IsDisabled(ef.cfg.Mailer) }
 
 // allowIP applies the per-address limit, writing the 429 when refused.
+//
+// Keyed like the gateway's own per-address bucket (clientAddressKey), so an
+// IPv6 client cannot rotate through its /64 for a fresh allowance here either.
 func (ef *emailFlows) allowIP(w http.ResponseWriter, r *http.Request) bool {
-	ok, wait := ef.ipLim.allow("ip:" + requesterIP(r))
-	if ok {
+	v := ef.ipLim.take(clientAddressKey(r))
+	if v.ok {
 		return true
 	}
-	secs := int(wait.Seconds())
-	if secs < 1 {
-		secs = 1
-	}
-	w.Header().Set("Retry-After", strconv.Itoa(secs))
-	writeError(w, http.StatusTooManyRequests, "rate_limited", "Too many requests from this address. Try again in a few minutes.")
+	writeRateLimited(w, v, "Too many requests from this address. Try again in a few minutes.")
 	return false
 }
 

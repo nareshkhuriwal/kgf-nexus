@@ -1189,7 +1189,7 @@ have no backup at all.
 Separately, ARCHITECTURE.md §3.2 listed "rate limit" among the gateway's
 responsibilities with nothing implementing it, and the CLI already carried a hint
 for a 429 the server could never send. Now a per-credential token bucket, off unless
-`NEXUS_RATE_LIMIT_RPS` is set.
+`NEXUS_RATE_LIMIT_RPS` is set. (Its pre-authentication keying was bypassable; see F99.)
 
 A pattern across F67–F76 worth stating plainly: in this codebase the inline
 comments are consistently more accurate than the design documents. Several of these
@@ -2187,3 +2187,84 @@ than borrowing the index's order) but runs unindexed, and the scheduler logs a
 WARN. The scheduler detects migration 0023 at startup, not per claim, so a
 scheduler started before 0023 must be restarted to pick it up (OPERATIONS §15).
 
+### F99. The gateway rate limit could be bypassed with a random Authorization header — FIXED
+
+**Severity:** HIGH wherever `NEXUS_RATE_LIMIT_RPS` is set (it is off by default).
+The limiter ran before authentication and keyed on `"cred:" + <raw
+Authorization header>`. That header is attacker-chosen until it is verified. A
+client that sent a different random value on each request got a new, full bucket
+each time, so the limit never applied to the unauthenticated flood and credential
+stuffing it existed to stop (F76). Every such request also cost a database
+lookup, and its raw header, up to Go's 1 MB header limit, stayed in the limiter's
+map until idle eviction. So the limiter also held secret material and was a
+memory amplifier. Idle eviction ran as a full-map scan and the map had no size
+cap. IPv6 clients were keyed by full address, so one host could rotate through
+its /64.
+
+**Fix (`services/api-gateway/rest/ratelimit.go`; docs/OPERATIONS.md §16).** The
+gateway now uses three buckets:
+1. **Per address, before authentication, on every request.** The key is
+   `requesterIP`, which trusts `X-Real-IP` only from loopback or private peers.
+   IPv6 is folded to its /64 and IPv4-mapped addresses to IPv4. Nothing the
+   client sends chooses the key.
+2. **Auth failures, per address.** This bucket is stricter: 10, then 1 per 6 s.
+   It is spent once per rejected credential (guard) or rejected password
+   (login). While it is empty the address is refused authentication with 429.
+   A request with no credential is not a failure. The same rejected value
+   repeated from one address is charged once per 5 minutes, so a console tab
+   polling with a revoked session cannot 429 its owner's sign-in. That record
+   stores an HMAC under a random per-process key, never the value.
+3. **Per credential, after authentication.** The key is the verified
+   principal's kind and database ID (`cred:api_key:<id>`, `cred:session:<id>`,
+   `cred:token:<id>`), never the presented secret.
+
+Every limiter is an LRU with TTL. Idle eviction pops from the cold end in
+O(evicted) and never drops a bucket before its refill time, so eviction cannot
+forgive a throttled key. `MaxEntries` (default 100,000, about 20 MB) is a hard
+cap. Refusals are 429 `rate_limited` with `Retry-After` (rounded up; it used to
+truncate) and `RateLimit-Limit`/`-Remaining`/`-Reset`. The email-link routes'
+per-IP limit now uses the same address key and headers. Its message is
+unchanged.
+
+**Compatibility.** `NEXUS_RATE_LIMIT_RPS`/`_BURST` keep their meaning, the
+per-credential allowance, and are still the only on-switch. The address bucket
+defaults to 4× that allowance so several principals behind one egress are not
+capped at one credential's rate. New optional knobs: `NEXUS_RATE_LIMIT_IP_RPS`,
+`_IP_BURST`, `_AUTH_FAIL_RPS`, `_AUTH_FAIL_BURST`, `_MAX_KEYS`.
+`WithRateLimit(RateLimitConfig)` keeps its signature and derives all three
+buckets; `WithRateLimits(GatewayRateLimits)` sets them explicitly. No wire or
+schema change. Two behaviour changes are visible:
+- Authenticated traffic now also spends the per-address bucket.
+- A 429 can now come from an address that exceeded its failure budget, even
+  when it presents a valid key.
+
+**How it is held (`rest/ratelimit_test.go`, `cmd/api-gateway/main_test.go`, `-race`).**
+- `TestRandomAuthorizationCannotBypassTheLimit` is the regression: 50 random
+  headers from one address with burst 5 must give exactly 45 × 429, one address
+  bucket, and zero credential buckets. Reverting the key to include the header
+  turns it red, which was checked. Reverting also turns
+  `TestGuardUnderConcurrentLoadIsRaceFree` red (244 requests passed a burst of
+  100).
+- `TestAddressKeyFoldsIPv6ToItsSlash64` and
+  `TestAddressKeyTrustsXRealIPOnlyFromPrivatePeers`.
+- `TestLimiterMemoryIsBounded`: 10,000 sprayed keys against a cap of 100, and
+  the throttled hot key is never flushed. `TestIdleEvictionNeverForgivesAThrottledKey`.
+- `TestPerCredentialLimitAppliesAfterAuthentication`: two keys share one
+  address, the bare and `Bearer` spellings share one bucket, and no key
+  material is held in the map.
+- `TestFailedAuthenticationSpendsAStricterAddressBudget`,
+  `TestFailedLoginsSpendTheAddressFailureBudget`,
+  `TestRepeatingOneRejectedCredentialIsChargedOnce`.
+- `TestRateLimitedResponseCarriesRetryHeaders`, and the env-parsing tests for
+  backward compatibility.
+
+**Not addressed; documented in OPERATIONS §16.6.**
+- Buckets are in memory **per replica**: N replicas admit up to N × each rate,
+  and a restart forgets every bucket. No shared store exists.
+- Clients behind one NAT share buckets 1 and 2.
+- There is no per-target-account failure bucket for login. Such a bucket would
+  let anyone lock a victim out, so it was deliberately not added.
+- `POST /v1/auth/register` is bounded only by the address bucket and per-email
+  uniqueness.
+- The gateway still has no metrics endpoint, so 429 rates are visible only at
+  the proxy.

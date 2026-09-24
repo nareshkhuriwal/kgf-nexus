@@ -5,7 +5,7 @@
 **Scope:** Postgres backup and restore, the artifact (MinIO result store) backup
 and restore and the ordering between the two stores, the restore drills and their
 measured results, what these procedures do *not* cover, the RPO/RTO the approach
-actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), and the windowed pull claim at large backlogs (§15).
+actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), and gateway rate limiting (§16).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -1367,3 +1367,111 @@ SELECT idx_scan FROM pg_stat_user_indexes
 
 This should rise with every poll. If it stays flat while workers poll, the
 scheduler is not windowing; check the startup log (§15.2).
+
+---
+
+## 16. Gateway rate limiting
+
+The api-gateway is the only ingress, so it carries the only request limiter
+(`services/api-gateway/rest/ratelimit.go`, finding F99). It is **off unless
+`NEXUS_RATE_LIMIT_RPS` is set**. The startup line `rate limiting enabled (in
+memory, per replica)` lists the effective numbers for all three buckets.
+
+### 16.1 What is limited, in order
+
+| # | Bucket | Keyed by | When it is spent | 429 message |
+|---|---|---|---|---|
+| 1 | Per address | Client address; IPv6 folded to its /64 | Every request, before authentication | `too many requests from this address` |
+| 2 | Auth failures | Client address; IPv6 folded to its /64 | Once per **rejected** credential or login password. When it is empty, the address may not attempt authentication until it refills | `too many failed authentication attempts from this address` |
+| 3 | Per credential | Kind and database ID of the verified api key, session or scoped token | Every request, after successful authentication | `too many requests for this credential` |
+
+The pre-authentication key is always the address. Nothing in the request selects
+it, so a random `Authorization` header per request gets no fresh bucket (that was
+the F99 bypass). A request with **no** credential is not counted as a failure; it
+gets its 401 as before. The **same** rejected value repeated from one address,
+such as a console tab polling with a revoked session or a job with a rotated-out
+key, is charged once per 5 minutes rather than once per request. Distinct guesses
+are each charged.
+
+When bucket 2 is empty the whole address is refused authentication, including
+with a valid key. That is deliberate: otherwise an attacker interleaves a known
+key with guesses. It is a throttle, not a lockout. One attempt comes back each
+refill interval (6 s by default).
+
+The email-link routes (`/v1/auth/email/*`, `/v1/auth/password/*`) have their own
+per-address limit as well (§10, docs/MULTITENANCY.md), keyed the same way.
+
+### 16.2 Which address
+
+The peer address of the TCP connection, with one exception. When the peer is
+loopback or a private address (RFC 1918, RFC 4193 `fc00::/7`), such as the
+console's nginx, the gateway uses the `X-Real-IP` that proxy set.
+`X-Forwarded-For` is never used for limiting.
+
+- **Behind a load balancer or ingress on a private network**, that proxy MUST
+  overwrite `X-Real-IP` with the client address. If it does not, every client
+  shares the proxy's bucket. A client that can reach the gateway directly from a
+  private network can choose its own `X-Real-IP`. Do not expose the gateway's
+  port to an untrusted private network.
+- **Behind a public-address proxy**, the gateway sees only the proxy's address.
+  Every client then shares one address bucket. Raise
+  `NEXUS_RATE_LIMIT_IP_RPS`/`_BURST` or move the proxy onto a private network.
+
+### 16.3 Settings
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NEXUS_RATE_LIMIT_RPS` | unset (off) | Per-credential sustained rate. **Also the switch for all three buckets.** Unchanged meaning since F76. |
+| `NEXUS_RATE_LIMIT_BURST` | = RPS | Per-credential burst. Unchanged meaning. |
+| `NEXUS_RATE_LIMIT_IP_RPS` | 4 × RPS | Per-address sustained rate. Setting it without `_IP_BURST` sets the burst equal to the rate. |
+| `NEXUS_RATE_LIMIT_IP_BURST` | 4 × BURST | Per-address burst. |
+| `NEXUS_RATE_LIMIT_AUTH_FAIL_RPS` | 0.1667 (1 per 6 s) | Auth-failure refill rate per address. |
+| `NEXUS_RATE_LIMIT_AUTH_FAIL_BURST` | 10 | Failures an address may have before it is throttled. |
+| `NEXUS_RATE_LIMIT_MAX_KEYS` | 100000 | Most buckets each limiter holds. |
+
+The address default is a multiple of the credential allowance so that several
+principals behind one NAT or CI egress are not capped at one credential's rate.
+Guessing is bounded by the auth-failure bucket, not by this one.
+
+An unparseable value is ignored and the default is used, the same as every other
+gateway float setting.
+
+### 16.4 Responses
+
+A refusal is `429` with body `{"error":"rate_limited","message":"…"}` and:
+
+- `Retry-After`: whole seconds until one request is admitted, rounded up, at least 1.
+- `RateLimit-Limit`: the refusing bucket's burst.
+- `RateLimit-Remaining`: `0`.
+- `RateLimit-Reset`: same as `Retry-After`.
+
+The headers are sent on 429 only. The Python SDK retries 429 with backoff. The
+CLI does not retry; it prints a "retry with backoff" hint.
+
+### 16.5 Memory
+
+Each limiter is a map capped at `NEXUS_RATE_LIMIT_MAX_KEYS`, roughly 20 MB at the
+default. There are four maps: the three buckets and the repeat-failure record.
+Idle buckets are dropped after 10 minutes (15 minutes for auth failures), and
+never before they would have refilled, so eviction never forgives a throttled
+key early. At the cap the least recently used bucket is dropped. An actively
+throttled client stays recently used, so a spray of new addresses cannot flush
+it. Keys are addresses and credential **IDs**. No presented secret, header or
+password is stored. The repeat-failure record holds a keyed MAC whose key is
+random per process.
+
+### 16.6 Limits of this design — read before sizing
+
+- **Per replica, in memory.** Each gateway replica has its own buckets. With N
+  replicas a client can get up to N × each rate, depending on how the load
+  balancer spreads its connections. A restart or rollout forgets every bucket.
+  Size the numbers per replica. For a hard global quota you need a shared store
+  (Redis or similar) or an edge limiter in front of the gateway. Neither is
+  provided.
+- **Not a DDoS defence.** A flood from many addresses is bounded per address
+  only. Volumetric protection belongs at the network edge.
+- **NAT neighbours share buckets 1 and 2.** One misbehaving client behind an
+  office NAT can throttle its neighbours' sign-in for a few refill intervals.
+  Tune `_AUTH_FAIL_*` if that is your topology.
+- **No metrics yet.** The gateway has no `/metrics`. Watch 429 counts at your
+  proxy or in access logs.

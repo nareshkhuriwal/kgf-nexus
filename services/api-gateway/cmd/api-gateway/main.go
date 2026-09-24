@@ -132,14 +132,12 @@ func run() error {
 	// the right number depends on fleet size and the console's poll interval. Off
 	// by default keeps every existing deployment behaving exactly as before, and
 	// NEXUS_RATE_LIMIT_RPS turns it on for a deployment that has chosen a number.
-	if rps := envFloat("NEXUS_RATE_LIMIT_RPS", 0); rps > 0 {
-		cfg := rest.RateLimitConfig{
-			RequestsPerSecond: rps,
-			Burst:             envFloat("NEXUS_RATE_LIMIT_BURST", 0),
-		}
-		api = api.WithRateLimit(cfg)
-		log.Info("per-credential rate limiting enabled",
-			"requests_per_second", cfg.RequestsPerSecond, "burst", cfg.Burst,
+	if limits, ok := rateLimitsFromEnv(); ok {
+		api = api.WithRateLimits(limits)
+		log.Info("rate limiting enabled (in memory, per replica)",
+			"per_address_rps", limits.PerAddress.RequestsPerSecond, "per_address_burst", limits.PerAddress.Burst,
+			"auth_failure_rps", limits.AuthFailures.RequestsPerSecond, "auth_failure_burst", limits.AuthFailures.Burst,
+			"per_credential_rps", limits.PerCredential.RequestsPerSecond, "per_credential_burst", limits.PerCredential.Burst,
 			"why", "the gateway is the only ingress, so an unlimited one has no defence against a retry loop or credential stuffing")
 	}
 	emailCfg, err := emailFlowConfig(log)
@@ -367,6 +365,36 @@ func newLogger() *slog.Logger {
 	// read by eye.
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})).
 		With("service", "api-gateway")
+}
+
+// rateLimitsFromEnv reads the gateway limiter settings (docs/OPERATIONS.md §16).
+//
+// NEXUS_RATE_LIMIT_RPS / _BURST keep their original meaning — the per-credential
+// allowance — and remain the one switch: unset, nothing is limited. The address
+// and auth-failure buckets default from them (rest.GatewayRateLimitsFor) and each
+// can be overridden. Overriding a rate without its burst sets the burst to the
+// rate, the same rule NEXUS_RATE_LIMIT_BURST has always followed.
+func rateLimitsFromEnv() (rest.GatewayRateLimits, bool) {
+	rps := envFloat("NEXUS_RATE_LIMIT_RPS", 0)
+	if rps <= 0 {
+		return rest.GatewayRateLimits{}, false
+	}
+	limits := rest.GatewayRateLimitsFor(rest.RateLimitConfig{
+		RequestsPerSecond: rps,
+		Burst:             envFloat("NEXUS_RATE_LIMIT_BURST", 0),
+		MaxEntries:        envInt("NEXUS_RATE_LIMIT_MAX_KEYS", 0),
+	})
+	override := func(c *rest.RateLimitConfig, rpsKey, burstKey string) {
+		if v := envFloat(rpsKey, 0); v > 0 {
+			c.RequestsPerSecond = v
+			c.Burst = envFloat(burstKey, 0)
+		} else if b := envFloat(burstKey, 0); b > 0 {
+			c.Burst = b
+		}
+	}
+	override(&limits.PerAddress, "NEXUS_RATE_LIMIT_IP_RPS", "NEXUS_RATE_LIMIT_IP_BURST")
+	override(&limits.AuthFailures, "NEXUS_RATE_LIMIT_AUTH_FAIL_RPS", "NEXUS_RATE_LIMIT_AUTH_FAIL_BURST")
+	return limits, true
 }
 
 // envFloat reads a float setting, treating an unparseable value as absent rather
