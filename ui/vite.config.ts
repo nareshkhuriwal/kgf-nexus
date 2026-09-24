@@ -20,7 +20,7 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       proxy: {
         '/v1': {
-          target: env.NEXUS_API_URL || 'http://localhost:8080',
+          target: env.NEXUS_API_URL || 'http://localhost:8090',
           changeOrigin: true,
         },
       },

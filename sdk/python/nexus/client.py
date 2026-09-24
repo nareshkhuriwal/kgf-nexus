@@ -90,7 +90,7 @@ class NexusClient:
         timeout: float = 30.0,
         max_retries: int = 3,
     ) -> None:
-        self.endpoint = (endpoint or os.environ.get("NEXUS_ENDPOINT") or "http://localhost:8080").rstrip("/")
+        self.endpoint = (endpoint or os.environ.get("NEXUS_ENDPOINT") or "http://localhost:8090").rstrip("/")
         self._api_key = api_key or os.environ.get("NEXUS_API_KEY") or ""
         # `namespace` defaults to None rather than "default" so that an explicit
         # argument, the environment, and the fallback are distinguishable; a

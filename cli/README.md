@@ -15,7 +15,7 @@ Resolution order, highest wins:
 1. flags — `--endpoint`, `--namespace`, `--api-key`, `--context`
 2. environment — `NEXUS_ENDPOINT`, `NEXUS_API_KEY`, `NEXUS_NAMESPACE`, `NEXUS_CONTEXT`, `NEXUS_CONFIG`
 3. `~/.nexus/config.yaml` (or `--config`)
-4. built-in defaults (`http://localhost:8080`, namespace `default`)
+4. built-in defaults (`http://localhost:8090`, the host port `make up` publishes; namespace `default`)
 
 Flags beat the environment beats the file — otherwise a stale config file would
 silently override an explicit `--endpoint`, and you would spend an afternoon

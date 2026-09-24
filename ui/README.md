@@ -5,7 +5,7 @@ cancel** (architecture §11).
 
 ```bash
 npm install
-npm run dev      # http://localhost:5173, proxies /v1 to localhost:8080
+npm run dev      # http://localhost:5173, proxies /v1 to localhost:8090 (the gateway `make up` publishes)
 npm run build    # tsc -b && vite build
 npm test         # vitest
 ```
@@ -67,7 +67,7 @@ render bugs.
 | `VITE_NEXUS_API_BASE` | `""` (same origin) | Gateway base URL |
 | `VITE_NEXUS_NAMESPACE` | `default` | Initial namespace |
 | `VITE_NEXUS_API_KEY` | unset | Dev-only static bearer token |
-| `NEXUS_API_URL` | `http://localhost:8080` | Dev-server proxy target |
+| `NEXUS_API_URL` | `http://localhost:8090` | Dev-server proxy target |
 
 ## API contract
 
