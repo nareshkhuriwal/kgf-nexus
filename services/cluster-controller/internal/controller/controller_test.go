@@ -476,7 +476,7 @@ func TestQuotaHeadroom(t *testing.T) {
 		{"undeclared gpu", q(corev1.ResourceList{"requests.nvidia.com/gpu": mustQ("4")}, corev1.ResourceList{"requests.nvidia.com/gpu": mustQ("0")}), 0},
 		{"usage unknown", q(corev1.ResourceList{"pods": mustQ("10")}, nil), 0},
 		{"over-used", q(corev1.ResourceList{"requests.cpu": mustQ("1")}, corev1.ResourceList{"requests.cpu": mustQ("2")}), 0},
-		{"unrelated", q(corev1.ResourceList{"services": mustQ("1")}, corev1.ResourceList{"services": mustQ("1")}), 1 << 31 - 1},
+		{"unrelated", q(corev1.ResourceList{"services": mustQ("1")}, corev1.ResourceList{"services": mustQ("1")}), 1<<31 - 1},
 	}
 	for _, tc := range cases {
 		if got, why := QuotaHeadroom([]corev1.ResourceQuota{tc.quota}, tmpl); got != tc.want {
