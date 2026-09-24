@@ -330,16 +330,35 @@ func envOr(key, def string) string {
 	return def
 }
 
+// envInt reads a whole-number setting, and REFUSES to start on a malformed one.
+//
+// These are capacity figures: a value the agent cannot read must stop it, not
+// be guessed at. The previous fmt.Sscanf("%d") read "1.7179869184e+10" -- a
+// byte count a templating layer had rendered in float notation -- as 1 and
+// reported no error, so the agent registered 1 byte of memory and the whole
+// fleet sat idle with every task "waiting_for_resources". A malformed value
+// that silently became the default would hide the same mistake just as well.
 func envInt(key string, def int64) int64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	var n int64
-	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
-		return def
+	n, err := parseEnvInt(key, os.Getenv(key), def)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "nexus-agent: %v\n", err)
+		os.Exit(2)
 	}
 	return n
+}
+
+// parseEnvInt is envInt's decision, separated so it can be tested without
+// exiting: empty means the default; anything else must be a whole number.
+func parseEnvInt(key, raw string, def int64) (int64, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q is not a whole number (write plain digits, e.g. 17179869184, not 1.7179869184e+10)", key, raw)
+	}
+	return n, nil
 }
 
 func envDuration(key string, def time.Duration) time.Duration {
