@@ -18,6 +18,9 @@ NAMESPACE     ?= default
 DATABASE_URL  ?= postgres://postgres:test@localhost:55432/nexus?sslmode=disable
 MIGRATIONS    := services/migrations
 
+# test-nats has its own .PHONY line so a merge that edits the list below does
+# not conflict with it.
+.PHONY: test-nats
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
@@ -63,6 +66,13 @@ lint: ## go vet over the whole module
 chaos: ## Kill workers mid-task and assert exactly-one-logical-effect (needs `make up` + NEXUS_API_KEY)
 	@test -n "$$NEXUS_API_KEY" || { echo "NEXUS_API_KEY is unset; run 'make seed' and export it"; exit 1; }
 	$(GO) test -tags chaos -count=1 -v -timeout 20m ./tests/chaos/
+
+# The outbox relay and dispatch hints against a real NATS JetStream and a real
+# Postgres, each in a throwaway container (nexus-nats-agent-*, host ports
+# 55511/55512) so the broker-outage test cannot disturb anything else. KEEP=1
+# leaves the containers up for inspection.
+test-nats: ## Run the NATS/outbox integration tests in isolated containers (needs Docker)
+	tests/nats/run-integration.sh
 
 # ── Migrations ────────────────────────────────────────────────────────────
 # Applied by a job, never by a service at startup (ADR-0011 rule 4). These

@@ -102,6 +102,24 @@ jobs:
           NEXUS_TEST_DSN: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
           NEXUS_TEST_DATABASE_URL: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
 
+  # The outbox relay and dispatch hints against a REAL NATS JetStream server and a
+  # REAL Postgres, each in a throwaway container the script starts itself. It
+  # stops and restarts the broker (the outage test), which is why it is its own
+  # job rather than a service container shared with the suite above. The script
+  # fails if any TestNATS* test skipped (F85).
+  nats-integration:
+    name: nats integration tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Run NATS/outbox integration suite
+        run: tests/nats/run-integration.sh
+
   ui:
     name: ui tests
     runs-on: ubuntu-latest
