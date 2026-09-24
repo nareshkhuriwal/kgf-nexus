@@ -459,8 +459,8 @@ func TestValidate_MapSpecs(t *testing.T) {
 			s.Edges = append(s.Edges, &nexusv1.Edge{FromNodeId: "x", ToNodeId: "process"})
 		}), ErrMapSource, DefaultValidationOptions()},
 		"source output undeclared": {mutate(func(s *nexusv1.WorkflowSpec) { s.Tasks[1].Map.OverOutput = "nope" }), ErrMapSource, DefaultValidationOptions()},
-		"source output not json": {mutate(func(s *nexusv1.WorkflowSpec) { s.Tasks[0].Outputs["files"].Type = "string" }), ErrMapSource, DefaultValidationOptions()},
-		"item input undeclared":  {mutate(func(s *nexusv1.WorkflowSpec) { s.Tasks[1].Map.ItemInput = "nope" }), ErrMapItemInput, DefaultValidationOptions()},
+		"source output not json":   {mutate(func(s *nexusv1.WorkflowSpec) { s.Tasks[0].Outputs["files"].Type = "string" }), ErrMapSource, DefaultValidationOptions()},
+		"item input undeclared":    {mutate(func(s *nexusv1.WorkflowSpec) { s.Tasks[1].Map.ItemInput = "nope" }), ErrMapItemInput, DefaultValidationOptions()},
 		"item input bound by an edge": {mutate(func(s *nexusv1.WorkflowSpec) {
 			s.Edges[0].OutputToInput = map[string]string{"file": "files"}
 		}), ErrMapItemInput, DefaultValidationOptions()},

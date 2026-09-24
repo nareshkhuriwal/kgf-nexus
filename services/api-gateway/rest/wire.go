@@ -163,6 +163,9 @@ func attemptPayload(a store.AttemptRow) map[string]any {
 		"scheduled_at":   a.ScheduledAt,
 		"started_at":     a.StartedAt,
 		"ended_at":       a.EndedAt,
+		// Set when the attempt reused a memoized result (§6.4) instead of
+		// executing; the console marks such nodes "cached" rather than "ran".
+		"cache_hit_of": a.CacheHitOf,
 	}
 }
 

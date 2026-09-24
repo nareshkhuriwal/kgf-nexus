@@ -16,9 +16,9 @@ const AdministratorRole = "Administrator"
 
 // Exact permission catalog. Wildcards and unknown grants are never accepted.
 var ModuleActions = map[string][]string{
-	"overview": {"view"}, "workflows": {"view", "publish", "delete"}, "runs": {"view", "create", "cancel", "pause", "resume", "retry", "delete"},
+	"overview": {"view"}, "workflows": {"view", "publish", "delete", "cache.invalidate"}, "runs": {"view", "create", "cancel", "pause", "resume", "retry", "delete"},
 	"tasks": {"view", "logs.view", "results.view"}, "schedules": {"view", "create", "update", "delete"}, "backfills": {"view", "create", "update"},
-	"workers": {"view", "drain"}, "infrastructure": {"view", "configure"}, "users": {"view", "manage"}, "tokens": {"view", "manage"}, "audit": {"view"}, "roles": {"view", "manage"},
+	"workers": {"view", "drain", "quarantine"}, "infrastructure": {"view", "configure"}, "users": {"view", "manage"}, "tokens": {"view", "manage"}, "audit": {"view"}, "roles": {"view", "manage"},
 }
 
 func Catalog() []string {
@@ -34,7 +34,7 @@ func Catalog() []string {
 func Builtins() map[string][]string {
 	viewer := []string{"overview.view", "workflows.view", "runs.view", "tasks.view", "schedules.view", "backfills.view", "workers.view"}
 	operator := append(append([]string{}, viewer...), "runs.create", "runs.cancel", "runs.pause", "runs.resume", "runs.retry", "tasks.logs.view", "tasks.results.view", "schedules.create", "schedules.update", "backfills.create", "backfills.update")
-	return map[string][]string{AdministratorRole: Catalog(), "Viewer": viewer, "Workflow Operator": operator, "Workflow Developer": append(append([]string{}, operator...), "workflows.publish", "schedules.delete"), "Infrastructure Operator": {"workers.view", "workers.drain", "infrastructure.view", "infrastructure.configure"}, "Auditor": {"audit.view", "users.view", "roles.view", "tokens.view"}}
+	return map[string][]string{AdministratorRole: Catalog(), "Viewer": viewer, "Workflow Operator": operator, "Workflow Developer": append(append([]string{}, operator...), "workflows.publish", "schedules.delete", "workflows.cache.invalidate"), "Infrastructure Operator": {"workers.view", "workers.drain", "workers.quarantine", "infrastructure.view", "infrastructure.configure"}, "Auditor": {"audit.view", "users.view", "roles.view", "tokens.view"}}
 }
 func (a *Authenticator) WithRBAC() *Authenticator { a.rbac = true; return a }
 func (a *Authenticator) resolveRBAC(ctx context.Context, p Principal) (Principal, error) {
@@ -107,7 +107,7 @@ func (p Principal) Allows(permission string) bool {
 		return p.HasScope(ActionRead) && (p.Role == RoleAdmin || (p.Role == RoleReader && !strings.HasPrefix(permission, "users.") && !strings.HasPrefix(permission, "tokens.") && !strings.HasPrefix(permission, "audit.") && !strings.HasPrefix(permission, "roles.") && !strings.HasPrefix(permission, "infrastructure.")))
 	}
 	action := ActionWrite
-	if strings.HasSuffix(permission, ".manage") || permission == "workers.drain" || permission == "infrastructure.configure" || permission == "runs.delete" || permission == "workflows.delete" {
+	if strings.HasSuffix(permission, ".manage") || permission == "workers.drain" || permission == "workers.quarantine" || permission == "infrastructure.configure" || permission == "runs.delete" || permission == "workflows.delete" {
 		action = ActionAdminWrite
 	}
 	return p.Role == RoleAdmin && p.HasScope(action)

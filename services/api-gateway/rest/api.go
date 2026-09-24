@@ -110,6 +110,8 @@ type API struct {
 	// identity is nil unless WithIdentity was called, in which case the identity
 	// and admin routes are simply not registered. See admin.go.
 	identity IdentityAdmin
+	// cache is nil unless WithCacheInvalidator was called; its route answers 501.
+	cache CacheInvalidator
 }
 
 // New builds the REST API.
@@ -254,6 +256,14 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("GET /v1/namespaces/{ns}/workers/{id}", a.guard(authn.ActionRead, a.getWorker))
 	mux.Handle("POST /v1/namespaces/{ns}/workers/{id}/drain", a.guard(authn.ActionAdminWrite, a.drainWorker))
 	mux.Handle("GET /v1/namespaces/{ns}/capacity", a.guard(authn.ActionRead, a.capacity))
+	// Quarantine is the drain's sibling and sits at the same authority: it takes
+	// capacity out of the pool. The history read is a read. See quarantine.go.
+	mux.Handle("POST /v1/namespaces/{ns}/workers/{id}/quarantine", a.guard(authn.ActionAdminWrite, a.quarantineWorker))
+	mux.Handle("POST /v1/namespaces/{ns}/workers/{id}/release", a.guard(authn.ActionAdminWrite, a.releaseWorker))
+	mux.Handle("GET /v1/namespaces/{ns}/workers/{id}/quarantines", a.guard(authn.ActionRead, a.listWorkerQuarantines))
+	// Memo invalidation is a WRITE, not admin: it only ever causes work to run
+	// again, never removes a result or a run.
+	mux.Handle("POST /v1/namespaces/{ns}/cache/invalidations", a.guard(authn.ActionWrite, a.invalidateCache))
 
 	// The triage panel. A read: it aggregates conditions already visible through
 	// /runs, /capacity and a run's events, and exposes no tenant data those do
@@ -903,6 +913,7 @@ func (a *API) getRun(w http.ResponseWriter, r *http.Request, p authn.Principal) 
 			"node_id": n.NodeID, "task_ref": n.TaskRef, "state": n.State,
 			"trigger_rule": n.TriggerRule, "max_attempts": n.MaxAttempts,
 			"attempts_used": n.AttemptsUsed, "map_index": n.MapIndex,
+			"parent_node_id": n.ParentNodeID,
 		})
 	}
 	// Always a list, never null, even when empty: the console distinguishes "a
@@ -932,9 +943,28 @@ func (a *API) getRun(w http.ResponseWriter, r *http.Request, p authn.Principal) 
 			delete(at, "metrics")
 		}
 	}
+	// Dynamic-expansion records (§5.4): how many children each template made, or
+	// why it made none. Always a list, for the same reason as edges.
+	expOut := []map[string]any{}
+	if p.Allows("tasks.view") {
+		exps, err := store.GatewayListRunExpansions(r.Context(), a.db, run.ID)
+		if err != nil {
+			a.fail(w, r, "list run expansions", err)
+			return
+		}
+		for _, e := range exps {
+			expOut = append(expOut, map[string]any{
+				"template_node_id": e.TemplateNodeID, "source_node_id": e.SourceNodeID,
+				"source_output": e.SourceOutput, "item_count": e.ItemCount,
+				"max_fanout": e.MaxFanout, "outcome": e.Outcome,
+				"reason": e.Reason, "detail": e.Detail, "created_at": e.CreatedAt,
+			})
+		}
+	}
 	payload["nodes"] = nodeOut
 	payload["edges"] = edgeOut
 	payload["attempts"] = attemptOut
+	payload["expansions"] = expOut
 	writeJSON(w, http.StatusOK, payload)
 }
 

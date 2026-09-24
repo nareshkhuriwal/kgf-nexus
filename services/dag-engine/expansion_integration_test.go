@@ -746,3 +746,50 @@ func TestIntegration_NewTableGrants(t *testing.T) {
 	check("nexus_scheduler", "task_expansions", "INSERT", false)
 	check("nexus_dag_engine", "worker_quarantines", "INSERT", false)
 }
+
+// The gateway's run-detail reads must see what expansion and memoization wrote
+// (parent_node_id, the expansion record, cache_hit_of) -- exercised against the
+// real schema, since the REST unit tests use a fake database.
+func TestIntegration_GatewayReadsExpansionAndMemo(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	runID, e := startFanout(t, pool, fanoutSpec(10, nexusv1.TriggerRule_TRIGGER_RULE_ALL_SUCCESS), []any{"a", "b"})
+	if _, err := e.Reconcile(ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := store.GatewayListRunNodes(ctx, pool, runID)
+	if err != nil {
+		t.Fatalf("GatewayListRunNodes: %v", err)
+	}
+	var kids int
+	for _, n := range nodes {
+		if n.ParentNodeID != nil && *n.ParentNodeID == "process" && n.MapIndex != nil {
+			kids++
+		}
+	}
+	if kids != 2 {
+		t.Fatalf("gateway saw %d children, want 2", kids)
+	}
+	exps, err := store.GatewayListRunExpansions(ctx, pool, runID)
+	if err != nil || len(exps) != 1 || exps[0].ItemCount != 2 {
+		t.Fatalf("expansions = %+v err=%v", exps, err)
+	}
+
+	spec := memoSpec(uuid.NewString()[:8], time.Hour.Milliseconds(), nexusv1.IdempotencyMode_IDEMPOTENCY_MODE_REQUIRED)
+	run1, _ := materialize(t, pool, spec)
+	settleRef(t, pool, run1, "a", domain.AttemptSucceeded, nil)
+	run2, _ := materialize(t, pool, spec)
+	atts, err := store.GatewayListRunAttempts(ctx, pool, run2)
+	if err != nil {
+		t.Fatalf("GatewayListRunAttempts: %v", err)
+	}
+	var hit bool
+	for _, a := range atts {
+		if a.NodeID == "a" && a.CacheHitOf != nil {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Fatal("gateway did not report the memo hit")
+	}
+}
