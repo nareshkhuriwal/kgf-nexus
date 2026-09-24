@@ -236,6 +236,10 @@ Two distinct roles:
 
 Critically, **the bus is never the source of truth**. This is the Celery lesson from §2.1.
 
+**As implemented** (ADR-0003, migration 0016). Nothing publishes to NATS from inside or after a business transaction. Each announced fact -- a `run_events` row (including `AttemptDispatched` inside the §5.3 claim), a new `PENDING` attempt, a run state transition -- writes an `outbox` row *in the same SQL statement*, so the announcement exists if and only if the fact committed. The event-service runs the relay: it claims outbox rows `FOR UPDATE SKIP LOCKED`, publishes them to JetStream with a `Nats-Msg-Id` derived from the row (so a re-send after a crash is dropped as a duplicate), and marks them published only after the broker acks. The relay is deliberately *not* in the scheduler: the one component allowed to be down is kept off the one path that must not stall.
+
+Subjects: `nexus.task.dispatch.<namespace>.<queue>` (hint; stream `NEXUS_DISPATCH`, in memory, 2-minute max age), `nexus.run.events.<namespace>.<run_id>` and `nexus.run.state.<namespace>.<run_id>` (projection; stream `NEXUS_RUNS`, file, 7 days). Workers consume hints through plain core subscriptions. A hint carries no work: it only wakes the agent's poller between long polls, and the claim remains the Postgres CAS, so duplicate, stale and reordered hints are harmless. The relay also re-announces every queue that holds dispatchable `PENDING` work every 10s, which covers transitions no outbox row describes (a resume, freed capacity) and re-wakes the fleet after any outage. An empty `NEXUS_NATS_URL` disables all of it and the system runs exactly as the poll-only Phase 1 did.
+
 ### 3.3 Execution plane: the worker agent
 
 The worker agent is deliberately small. Its entire job is: register, prove liveness, obtain leased work, execute it under limits, report the outcome durably. Everything clever lives in the control plane.
@@ -888,6 +892,12 @@ COMMIT;
 --    next poll or the reconciler picks the attempt up. Latency degrades;
 --    correctness does not. Publishing *inside* would require distributed
 --    transactions across Postgres and NATS, which is the wrong trade.
+--
+--    As implemented: step 4's run_event INSERT also writes an outbox row in
+--    the same statement (no extra round trip; isolation and locking
+--    unchanged), and the event-service relay performs this step from the
+--    outbox after commit. That closes the gap a post-commit publish by the
+--    claimer leaves open: a crash between COMMIT and publish.
 ```
 
 Properties this gives us:
@@ -1285,7 +1295,7 @@ The decorator does **not** execute at DAG-build time in the control plane. It co
 | Task silently wedged | Heartbeat timeout | → `TIMED_OUT`; retry on a different worker | Progress |
 | Scheduler replica dies | Peer/orchestrator restart | Stateless; uncommitted claim rolls back; another replica proceeds | No lost or double dispatch |
 | Postgres failover | Connection error | Services retry with backoff; no ack from memory; in-flight tasks keep running and report on recovery | Durability |
-| NATS unavailable | Publish/subscribe error | Fall back to polling; reconciler is the safety net | Correctness (latency degrades) |
+| NATS unavailable | Publish/subscribe error | Fall back to polling; the outbox backlog waits in Postgres and drains, de-duplicated, when the broker returns; the relay's periodic hint re-wakes the fleet | Correctness (latency degrades) |
 | Result store unavailable | Put/get error | Attempt fails as `transient`; retried | No silent data loss |
 | Poison task (crashes every worker) | Repeated identical failures | Exhaust `max_attempts` → `FAILED`; escalate to quarantine only if worker-correlated | Fleet stays healthy |
 | Poison worker (fails every task) | Failure rate per worker | → `QUARANTINED`; stops receiving work | Retry budgets not burned |
@@ -1311,7 +1321,7 @@ In scope:
 - DAG engine: static DAGs, `all_success` and `all_done` trigger rules, `SKIPPED` propagation, terminal-state detection. Pure and property-tested.
 - Scheduler: single-queue, priority-ordered, resource-aware matching with the §5.3 atomic claim; look-ahead plus aging.
 - Resource manager: CPU / memory / GPU-count ledger; reservations; heartbeat reconciliation.
-- Worker agent: register, 5s heartbeat, poll (poll-only; NATS deferred), lease renewal, subprocess **and** Docker executors, local WAL, result reporting with retry.
+- Worker agent: register, 5s heartbeat, poll (poll-only in Phase 1; optional NATS dispatch hints since added, see §3.2 and ADR-0003), lease renewal, subprocess **and** Docker executors, local WAL, result reporting with retry.
 - Retries: exponential backoff with full jitter; `retry_on` classification; `LOST` handling per §6.5.
 - Result store: MinIO, content-addressed, small results inline in Postgres.
 - CLI: `nexusctl workflow submit | run create | run get | run cancel | worker ls | logs`.
@@ -1319,7 +1329,7 @@ In scope:
 - Docker Compose: Postgres, MinIO, control plane, 2 workers, UI.
 - Tests: DAG-engine property tests; a chaos suite that kills workers mid-task and asserts exactly-one-logical-effect.
 
-Explicitly deferred: dynamic expansion, cron schedules, backfill, NATS, k8s executor, multi-tenancy beyond a single namespace, RBAC, memoization, quarantine.
+Explicitly deferred: dynamic expansion, cron schedules, backfill, NATS (since implemented as an optional transactional-outbox relay, ADR-0003), k8s executor, multi-tenancy beyond a single namespace, RBAC, memoization, quarantine.
 
 *Exit criteria:* a 10-node DAG with mixed CPU/GPU tasks completes correctly; killing a worker mid-run yields exactly one logical effect per task; two schedulers never double-dispatch under load.
 
