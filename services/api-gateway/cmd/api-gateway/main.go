@@ -42,6 +42,11 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/workergrpc"
 )
 
+// workerMaxConnectionAge is the longest an agent connection lives before the
+// gateway asks it to redial, and so the longest a withdrawn certificate or CA
+// can keep an already-connected agent attached. See the worker listener.
+const workerMaxConnectionAge = 5 * time.Minute
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("api-gateway exited with an error", "error", err)
@@ -178,9 +183,23 @@ func run() error {
 			MinTime:             10 * time.Second,
 			PermitWithoutStream: true,
 		}),
+		// MaxConnectionAge bounds how long a credential decision made at handshake
+		// time can outlive a revocation: without it, an agent that connected
+		// before its certificate (or the CA that signed it) was withdrawn kept its
+		// connection until it happened to drop. After this age the server sends
+		// GOAWAY and the agent redials, re-presenting its certificate to the
+		// current trust bundle. Minutes rather than the control plane's 30s,
+		// because this listener carries the whole fleet and each redial is a TLS
+		// handshake per agent.
+		//
+		// The grace is derived from the long-poll cap, not picked separately: GOAWAY
+		// lets in-flight RPCs finish, and a poll cut before it returns could strand
+		// an attempt the scheduler has already claimed for this worker.
 		grpc.KeepaliveParams(keepalive.ServerParameters{
-			Time:    30 * time.Second,
-			Timeout: 10 * time.Second,
+			Time:                  30 * time.Second,
+			Timeout:               10 * time.Second,
+			MaxConnectionAge:      workerMaxConnectionAge,
+			MaxConnectionAgeGrace: workergrpc.DefaultConfig().MaxPollWait + 15*time.Second,
 		}),
 		// A chatty fleet sends small messages; capping receive size bounds the
 		// memory a misbehaving agent can make the gateway allocate.

@@ -369,10 +369,12 @@ In-cluster agents mount the `nexus-agent-tls` secret instead
 
 - **No revocation.** There is no CRL and no OCSP. A leaked leaf stays valid until
   it expires, which is why leaves are short-lived. To cut off a compromised
-  identity immediately, rotate the CA (§5.3) and re-issue everyone else. Even
-  then, an agent connection **already established** on the worker listener stays
-  up until it drops, because that listener has no `MaxConnectionAge`. Adding one
-  is a gateway change and outside this work.
+  identity immediately, rotate the CA (§5.3) and re-issue everyone else. An agent
+  connection **already established** on the worker listener survives that for at
+  most `workerMaxConnectionAge` (5 minutes, `services/api-gateway/cmd/api-gateway`):
+  the gateway then sends GOAWAY and the agent redials against the current trust
+  bundle. In-flight long polls are allowed to finish first (grace = poll cap +
+  15s). To cut agents off sooner than that, restart the gateway.
 - **No authorization by certificate identity.** A valid client certificate still
   grants nothing (§2). Nothing checks that the CN of a client leaf matches the
   service or agent that presents it.

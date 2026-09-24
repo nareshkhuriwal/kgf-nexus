@@ -1885,9 +1885,10 @@ mutations caught. **A mutation run whose failure list is shorter than expected i
 not evidence either** — count what ran.
 
 **Still open.** Only workflow-manager serves `/metrics`, so only it exports the
-served-certificate metrics (others log a WARN near expiry). No revocation; agent
-connections already open on the gateway's worker listener (which has no
-`MaxConnectionAge`) survive a CA withdrawal until they drop. Nothing on AKS or the
+served-certificate metrics (others log a WARN near expiry). No revocation. (Agent
+connections on the gateway's worker listener used to survive a CA withdrawal
+until they dropped; fixed at integration by a 5-minute `MaxConnectionAge` on that
+listener, whose grace outlasts the long-poll cap.) Nothing on AKS or the
 Portainer host has been applied or run; the full `make up-tls` stack has not been
 brought up end to end. `TestServerNameOverrideFixesTheComposeNameMismatch` takes
 1–9s under `-race` in a full package run (0.06s alone) — measured identical on the

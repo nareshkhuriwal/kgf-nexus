@@ -888,8 +888,9 @@ CA key lives):
 
 After a **compromise**, the same steps apply, done quickly. Remember that there
 is no revocation (TLS.md §5.6): agent connections already established on the
-gateway's worker listener stay up until they drop. Restart the gateway after step
-5 to force every agent to re-handshake against the new bundle.
+gateway's worker listener survive for up to 5 minutes (the listener's maximum
+connection age) before they must re-handshake against the new bundle. To close
+that window immediately, restart the gateway after step 5.
 
 ### 9.5 Portainer-managed Docker host
 

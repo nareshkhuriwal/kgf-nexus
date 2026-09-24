@@ -180,9 +180,14 @@ func (a *API) rateLimited(w http.ResponseWriter, r *http.Request) bool {
 // Falling back to the address matters for the unauthenticated case — without it
 // every credential-less request would share one bucket, so a single prober could
 // lock out all of them, which turns the limiter into the denial of service.
+//
+// The address is the HOST, via requesterIP, never raw RemoteAddr: RemoteAddr
+// carries the client's source port, and every new TCP connection gets a new
+// one, so keying on it gave each connection a fresh bucket and a prober could
+// escape the limit just by reconnecting.
 func bearerOrPeer(r *http.Request) string {
 	if cred := r.Header.Get("Authorization"); cred != "" {
 		return "cred:" + cred
 	}
-	return "peer:" + r.RemoteAddr
+	return "peer:" + requesterIP(r)
 }
