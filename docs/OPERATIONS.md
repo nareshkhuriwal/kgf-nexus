@@ -5,7 +5,7 @@
 **Scope:** Postgres backup and restore, the artifact (MinIO result store) backup
 and restore and the ordering between the two stores, the restore drills and their
 measured results, what these procedures do *not* cover, the RPO/RTO the approach
-actually delivers, and the schema-migration procedure.
+actually delivers, the schema-migration procedure, and TLS certificate rotation (§9).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -761,3 +761,165 @@ the object durable strictly before the row is written, an object that existed at
 T1 still exists at T2. A false *negative* (an object deleted after the check) is
 acceptable and shows up next run; a false *positive* would send someone hunting
 for data loss that never happened.
+
+
+---
+
+## 9. TLS certificates: rotation runbook and expiry alerts
+
+Design and rationale are in [TLS.md §5](TLS.md). This section covers what to do.
+
+**Verified:** everything this section says about processes: hot reload, rejection
+of bad material, CA overlap, agent re-enrolment. Unit and integration tests in
+`internal/transport` cover it with real gRPC handshakes, and the tests check the
+serial number actually presented. `deploy/nexus-certs.sh` has been run on
+OpenSSL 3.0 and LibreSSL 3.3, and its `install` step inside alpine.
+**Not verified:** the full `make up-tls` stack end to end; anything on AKS (the
+manifests have only been parsed, never applied); the Portainer host procedure;
+the alert rules against a real Prometheus.
+
+### 9.1 Is rotation working? (any environment)
+
+After any renewal, each process logs one line per role within
+`NEXUS_TLS_RELOAD_INTERVAL` (default 10s) plus the time the volume takes to
+update (AKS: kubelet sync, usually under a minute):
+
+```
+INFO TLS material reloaded; new handshakes use it, ... role=server old_serial=… new_serial=…
+```
+
+To confirm from outside what a server actually presents:
+
+```sh
+openssl s_client -connect <host>:9090 -servername scheduler </dev/null 2>/dev/null \
+  | openssl x509 -noout -serial -enddate
+```
+
+Compare that serial with the file: `openssl x509 -in tls.crt -noout -serial`. A
+restart is **never** needed to pick up a renewal. If you find yourself restarting
+to make a certificate take effect, something is wrong. Look for the ERROR line in
+§9.3 first.
+
+### 9.2 Routine leaf renewal
+
+| Environment | Who renews | What you do |
+|---|---|---|
+| AKS | cert-manager, at 10 days left (30-day leaves) | Nothing. Watch the alerts. |
+| Local compose | You | `deploy/nexus-certs.sh issue <svc> --dns <svc>,localhost --ip 127.0.0.1`, then `docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tls.yml run --rm tls-init`. Or `make dev-certs` then the same `tls-init` for everything. |
+| Portainer host | You, monthly (§9.5) | Issue on the CA machine, install on the host. |
+| Off-cluster agent | The agent host, monthly (cron) | `csr` → `sign-csr` → `install-signed` (TLS.md §5.5). |
+
+### 9.3 Alerts, and what to do
+
+The rules are in `deploy/k8s/cert-alerts.yaml` (a PrometheusRule). For a plain
+Prometheus, for example on the Portainer host, the equivalent rules file is:
+
+```yaml
+groups:
+  - name: nexus-certificates
+    rules:
+      - alert: NexusServedCertificateExpiringSoon
+        expr: (nexus_tls_cert_not_after_timestamp_seconds - time()) < 3 * 86400
+        for: 15m
+        labels: { severity: critical }
+      - alert: NexusTLSReloadRejected
+        expr: max_over_time(nexus_tls_reload_stale[10m]) == 1
+        for: 10m
+        labels: { severity: warning }
+      - alert: NexusCACertificateExpiringSoon
+        expr: (nexus_tls_cert_not_after_timestamp_seconds{role="ca"} - time()) < 21 * 86400
+        for: 1h
+        labels: { severity: critical }
+```
+
+Alert on the **timestamp** minus `time()`, never on `nexus_tls_cert_expiry_seconds`.
+The latter is refreshed by the process's poller and would freeze if the poller
+stalled. On hosts without Prometheus, run `deploy/nexus-certs.sh check <dir>` from
+cron. It exits non-zero when anything is within 7 days of expiry
+(`--warn-days N`).
+
+| Alert | Meaning | Do this |
+|---|---|---|
+| `NexusCertificateRenewalOverdue` (AKS) | cert-manager should have renewed 3 days ago and has not | `kubectl -n kgf-nexus describe certificate <name>`, then `kubectl get certificaterequest,order -n kgf-nexus`. The usual causes are a ClusterIssuer that is not Ready (CA secret missing or expired) or cert-manager itself down. Once fixed, `cmctl renew -n kgf-nexus <name>` forces a renewal. |
+| `NexusCertificateNotReady` (AKS) | The Certificate's last issuance failed | Same as above. |
+| `NexusServedCertificateExpiringSoon` | A **process** is serving a certificate with under 3 days left | First, is the file on disk newer? Compare `openssl x509 -in <file> -noout -enddate` with the metric. **File newer, process older:** the process is not picking it up. Look for `TLS material on disk REJECTED` in its logs; if the mount is a `subPath`, change it to a directory mount. As a last resort, restart that one pod. **File old too:** renewal is broken, so treat it as `RenewalOverdue`. |
+| `NexusTLSReloadRejected` | New files arrived and the process refused them. It is still serving the previous certificate, which is safe until that one expires | Read the ERROR log line; it names the reason. `private key does not match public key` means the key and certificate come from different issuances, so re-issue them together. `expired` or `not valid until` means an issuer clock or stale-file problem. `contains no PEM certificates` means the bundle file is wrong. The alert clears as soon as valid files land; no restart is needed. |
+| `NexusCACertificateExpiringSoon` | The CA itself expires within 3 weeks | On AKS, cert-manager renews the CA at 30 days left, keeping its key, so this firing means that renewal failed: check the `nexus-internal-ca` Certificate in the `cert-manager` namespace. With a bring-your-own intermediate, issue a new intermediate from the offline root and replace the secret (same key: no overlap needed; new key: §9.4). |
+
+**Readiness does not change** under any of these, deliberately. An expiring
+certificate still works, and failing `/readyz` would pull every replica at once.
+
+### 9.4 Rotating the CA key (planned, or after a compromise)
+
+This is the one procedure that can cause an outage if done out of order. The
+invariant: **a CA leaves the bundle only after no leaf signed by it is still in
+use.** Wait at least one reload interval plus the volume update time between steps.
+
+**Compose / Portainer host / off-cluster agents** (`nexus-certs.sh`, run where the
+CA key lives):
+
+1. `deploy/nexus-certs.sh rotate-ca`. This creates a new CA and destroys the old
+   CA key; the bundle now holds new + old.
+2. Distribute the bundle: re-run `install` (or `tls-init` in compose) on every host,
+   and ship `ca-bundle.pem` to every enrolled agent. Wait until every process has
+   logged `ca_certs=2`.
+3. Re-issue every leaf (`issue …` for services, `sign-csr` for agents) and install.
+4. `deploy/nexus-certs.sh drop-retired-cas`. It **refuses** while any leaf it knows
+   about is still from the old CA. It cannot see agents enrolled from their own
+   CSRs, so confirm those yourself with
+   `openssl verify -CAfile ca/ca.crt <agent tls.crt>`.
+5. Distribute the bundle again.
+
+**AKS:**
+
+1. Save the current CA certificate: `kubectl -n cert-manager get secret
+   nexus-internal-ca-keypair -o jsonpath='{.data.tls\.crt}' | base64 -d > old-ca.pem`.
+2. Add it to the `nexus-ca-bundle` Bundle as an `inLine` source (commented in
+   `cert-issuer.yaml`) and apply it. trust-manager updates the ConfigMap in every
+   labelled namespace.
+3. Replace the CA key: either delete the `nexus-internal-ca-keypair` secret, which
+   makes cert-manager re-issue the self-signed CA with a new key, or load a new
+   intermediate. The Bundle now contains new + old.
+4. Re-issue every leaf: `cmctl renew --all -n kgf-nexus`. Confirm that every
+   `Certificate` is Ready and that its secret verifies against the new CA.
+5. Remove the `inLine` old CA from the Bundle and apply it.
+
+After a **compromise**, the same steps apply, done quickly. Remember that there
+is no revocation (TLS.md §5.6): agent connections already established on the
+gateway's worker listener stay up until they drop. Restart the gateway after step
+5 to force every agent to re-handshake against the new bundle.
+
+### 9.5 Portainer-managed Docker host
+
+The deploy pipeline renders only the base compose file
+(`.azure-pipelines/templates/deploy-portainer-host.yml` → `deploy/render_compose.py`).
+It does not know about TLS, so TLS on this host is a one-time manual setup,
+followed by monthly renewals.
+
+**Where the CA lives:** on an admin workstation or an offline machine, **never on
+the Docker host.** The host only receives leaves.
+
+One-time setup:
+
+```sh
+# CA machine
+NEXUS_CERT_DIR=/secure/nexus-ca NEXUS_CA_NAME="Nexus <env> CA" deploy/nexus-certs.sh init-ca
+for s in api-gateway workflow-manager dag-engine scheduler scheduler-gpu resource-manager; do
+  NEXUS_CERT_DIR=/secure/nexus-ca deploy/nexus-certs.sh issue "$s" --dns "$s"
+done
+# copy everything EXCEPT ca/ to the host, e.g.:
+rsync -a --exclude 'ca/' --exclude 'ca-retired-*' /secure/nexus-ca/ host:/opt/kgf-nexus/tls-staging/
+
+# Docker host (as root)
+/opt/kgf-nexus/nexus-certs.sh install /opt/kgf-nexus/tls-staging /opt/kgf-nexus/tls --owner 10001:10001
+rm -rf /opt/kgf-nexus/tls-staging
+```
+
+Then add a host-local override next to the stack (the same shape as
+`deploy/docker-compose.tls.yml`, with a bind mount of `/opt/kgf-nexus/tls` at
+`/etc/nexus/tls:ro` instead of the `tls-init` volume) and include it when bringing
+the stack up.
+
+Renewal, monthly (leaves are 30 days): repeat the `issue` loop and the `install`.
+The services reload by themselves. Put `deploy/nexus-certs.sh check /secure/nexus-ca`
+in the CA machine's cron so that an overdue renewal emails someone.

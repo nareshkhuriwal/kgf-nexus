@@ -1844,3 +1844,51 @@ before trusting it green.
 
 **Related:** [[F89]] — the check that lies. The discipline that caught this is the one
 F89 prescribes: prove the instrument fails when the thing is broken.
+
+### F92. Certificates could not rotate without a restart, and TLS.md said NEXUS_ENV armed a guard it does not — FIXED
+
+(Number chosen by the certificate workstream on a parallel branch; renumber on merge
+if another F92 lands first — see F88.)
+
+**What was wrong.** `internal/transport` read the key pair and CA bundle once, at
+startup. A renewed certificate on disk did nothing to a running process, so every
+renewal was silently coupled to a restart, and a missed restart meant serving the
+old leaf until it expired and every handshake in the control plane failed at once.
+Nothing measured expiry. Two parts of `docs/TLS.md` were also stale in ways an
+operator would act on: §6 said nothing was wired (every server and client already
+called `ServerOptions`/`DialOption`), and §4.4 said `NEXUS_ENV=production` makes
+plaintext fatal — the code and `TestNexusEnvDoesNotArmTheTLSGuard` say the
+opposite, deliberately. An operator trusting §4.4 would believe plaintext was
+impossible in production while it was merely unguarded.
+
+**Fix.** Servers answer each handshake from `GetConfigForClient`, clients build a
+config per handshake with `GetClientCertificate`, both from a snapshot a poller
+replaces only after validation (key matches cert, within validity, bundle holds a
+valid CA). Rejected material is logged once, counted, flagged by
+`nexus_tls_reload_stale`, and the old material keeps serving. CA bundles may hold
+several CAs, which makes CA rotation hitless. Issuance: `deploy/nexus-certs.sh`
+(compose via `make dev-certs` / `make up-tls`, the Portainer host, and CSR-based
+agent enrolment where the agent's key never leaves its host), and cert-manager
+manifests for AKS (`deploy/k8s/cert-*`). Runbook and alerts: OPERATIONS §9.
+
+**The F89 part.** Every rotation test asserts on the serial number presented in a
+real handshake, in both directions, never on the reloader's own bookkeeping — a
+"reload succeeded" check could pass while handshakes still used the old leaf. Five
+mutations were then applied to prove the tests can fail: a no-op poller, a server
+pinned to its startup snapshot, a client pinned to its first snapshot, no validity
+check, no debounce. Each turned tests red. The first mutation run was itself
+misleading: M1 appeared to leave the integration tests green because the debounce
+test's writer goroutine outlived its test, panicked the binary, and hid every later
+test's result. `ok`/`FAIL` at package level said FAIL; the per-test list simply
+omitted the tests that never ran. Fixed (the goroutine is joined), re-run, all five
+mutations caught. **A mutation run whose failure list is shorter than expected is
+not evidence either** — count what ran.
+
+**Still open.** Only workflow-manager serves `/metrics`, so only it exports the
+served-certificate metrics (others log a WARN near expiry). No revocation; agent
+connections already open on the gateway's worker listener (which has no
+`MaxConnectionAge`) survive a CA withdrawal until they drop. Nothing on AKS or the
+Portainer host has been applied or run; the full `make up-tls` stack has not been
+brought up end to end. `TestServerNameOverrideFixesTheComposeNameMismatch` takes
+1–9s under `-race` in a full package run (0.06s alone) — measured identical on the
+pre-change code, so not introduced here, but within reach of its 10s deadline.

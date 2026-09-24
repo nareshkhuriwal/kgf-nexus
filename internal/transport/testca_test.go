@@ -72,6 +72,13 @@ func newTestCA(t *testing.T, name string) *testPKI {
 // for a client leaf, which is identified by its chain rather than by a name.
 func (p *testPKI) issue(t *testing.T, name string, dnsNames []string, client bool) (certFile, keyFile string) {
 	t.Helper()
+	return p.issueValid(t, name, dnsNames, client, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+}
+
+// issueValid is issue with an explicit validity window, for the expired and
+// not-yet-valid cases the reload tests need.
+func (p *testPKI) issueValid(t *testing.T, name string, dnsNames []string, client bool, notBefore, notAfter time.Time) (certFile, keyFile string) {
+	t.Helper()
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -84,8 +91,8 @@ func (p *testPKI) issue(t *testing.T, name string, dnsNames []string, client boo
 	tmpl := &x509.Certificate{
 		SerialNumber: serial(t),
 		Subject:      pkix.Name{CommonName: name},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{usage},
 		DNSNames:     dnsNames,

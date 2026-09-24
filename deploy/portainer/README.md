@@ -142,3 +142,11 @@ exactly what that release ran.
 Migrations do **not** roll back with it. `services/migrations/*.down.sql` exists
 but is a break-glass operation an operator runs deliberately — see the header of
 `deploy/migrate.sh`.
+
+## TLS certificates
+
+The deploy renders the base compose file only, so mTLS on this host is a one-time
+host-side setup: leaves issued with `deploy/nexus-certs.sh` on a machine that is
+**not** this host (the CA key never comes here), installed with `nexus-certs.sh
+install --owner 10001:10001`, and renewed monthly without restarting anything.
+The procedure is in [docs/OPERATIONS.md §9.5](../../docs/OPERATIONS.md).

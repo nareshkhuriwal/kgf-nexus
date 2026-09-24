@@ -1,0 +1,160 @@
+# Opt-in mTLS for the local compose stack (docs/TLS.md §5.1).
+#
+#   make dev-certs      # once: local CA + per-service leaves into .dev-certs/
+#   make up-tls         # = docker compose -f docker-compose.yml -f docker-compose.tls.yml up
+#
+# An OVERRIDE rather than edits to docker-compose.yml, so the default
+# `make up` stays exactly the plaintext stack it has always been and TLS is a
+# decision a developer makes, not a precondition for running anything.
+#
+# ─── How the certificates reach the containers ───────────────────────────
+#
+# The services run as uid 10001 (deploy/Dockerfile.service). The generated keys
+# are 0600 and owned by YOU on the host, so bind-mounting .dev-certs directly
+# would give the services a key they cannot read. Instead a one-shot `tls-init`
+# container (root) copies the leaves and the CA bundle -- never the CA key --
+# into a named volume, owned by 10001 with keys 0400, using the same
+# nexus-certs.sh `install` step the Portainer runbook uses.
+#
+# ─── Rotating while the stack runs (no restart) ──────────────────────────
+#
+#   deploy/nexus-certs.sh issue scheduler --dns scheduler,localhost --ip 127.0.0.1
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tls.yml run --rm tls-init
+#
+# Every service re-reads its files every NEXUS_TLS_RELOAD_INTERVAL and
+# validates before swapping; watch for "TLS material reloaded" in the logs.
+#
+# DEV ONLY: every service can read every leaf in the shared volume, and the CA
+# key sits unencrypted in .dev-certs/ca on your laptop. Neither is acceptable
+# anywhere else -- see docs/TLS.md §5 for AKS and the Portainer host.
+
+x-tls-server-env: &tls-server-env
+  # Plaintext becomes a startup failure rather than a silent downgrade.
+  NEXUS_REQUIRE_TLS: "1"
+  NEXUS_TLS_CA_FILE: /etc/nexus/tls/ca-bundle.pem
+  NEXUS_TLS_REQUIRE_CLIENT_CERT: "1"
+  # Short, so a dev rotation shows up in a couple of seconds.
+  NEXUS_TLS_RELOAD_INTERVAL: 2s
+
+x-tls-mount: &tls-mount
+  - nexus-tls:/etc/nexus/tls:ro
+
+x-tls-wait: &tls-wait
+  tls-init:
+    condition: service_completed_successfully
+
+services:
+  tls-init:
+    image: alpine:3.21
+    user: "0:0"
+    volumes:
+      - ../.dev-certs:/src:ro
+      - ./nexus-certs.sh:/usr/local/bin/nexus-certs.sh:ro
+      - nexus-tls:/tls
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        [ -f /src/ca-bundle.pem ] || { echo "tls-init: .dev-certs is empty -- run 'make dev-certs' first" >&2; exit 1; }
+        sh /usr/local/bin/nexus-certs.sh install /src /tls --owner 10001:10001
+    restart: "no"
+
+  api-gateway:
+    depends_on: *tls-wait
+    volumes: *tls-mount
+    environment:
+      <<: *tls-server-env
+      NEXUS_TLS_CERT_FILE: /etc/nexus/tls/api-gateway/tls.crt
+      NEXUS_TLS_KEY_FILE: /etc/nexus/tls/api-gateway/tls.key
+      NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/api-gateway/tls.crt
+      NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/api-gateway/tls.key
+
+  workflow-manager:
+    depends_on: *tls-wait
+    volumes: *tls-mount
+    environment:
+      <<: *tls-server-env
+      NEXUS_TLS_CERT_FILE: /etc/nexus/tls/workflow-manager/tls.crt
+      NEXUS_TLS_KEY_FILE: /etc/nexus/tls/workflow-manager/tls.key
+      NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/workflow-manager/tls.crt
+      NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/workflow-manager/tls.key
+
+  dag-engine:
+    depends_on: *tls-wait
+    volumes: *tls-mount
+    environment:
+      <<: *tls-server-env
+      NEXUS_TLS_CERT_FILE: /etc/nexus/tls/dag-engine/tls.crt
+      NEXUS_TLS_KEY_FILE: /etc/nexus/tls/dag-engine/tls.key
+      NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/dag-engine/tls.crt
+      NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/dag-engine/tls.key
+
+  scheduler:
+    depends_on: *tls-wait
+    volumes: *tls-mount
+    environment:
+      <<: *tls-server-env
+      NEXUS_TLS_CERT_FILE: /etc/nexus/tls/scheduler/tls.crt
+      NEXUS_TLS_KEY_FILE: /etc/nexus/tls/scheduler/tls.key
+      NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/scheduler/tls.crt
+      NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/scheduler/tls.key
+
+  scheduler-gpu:
+    depends_on: *tls-wait
+    volumes: *tls-mount
+    environment:
+      <<: *tls-server-env
+      NEXUS_TLS_CERT_FILE: /etc/nexus/tls/scheduler-gpu/tls.crt
+      NEXUS_TLS_KEY_FILE: /etc/nexus/tls/scheduler-gpu/tls.key
+      NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/scheduler-gpu/tls.crt
+      NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/scheduler-gpu/tls.key
+
+  resource-manager:
+    depends_on: *tls-wait
+    volumes: *tls-mount
+    environment:
+      <<: *tls-server-env
+      NEXUS_TLS_CERT_FILE: /etc/nexus/tls/resource-manager/tls.crt
+      NEXUS_TLS_KEY_FILE: /etc/nexus/tls/resource-manager/tls.key
+      NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/resource-manager/tls.crt
+      NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/resource-manager/tls.key
+
+  # event-service speaks HTTP, not gRPC, so it takes no TLS settings here; its
+  # leaf is issued anyway so turning it on later is a config change only.
+
+  # Agents are clients only: a client leaf plus the bundle to verify the
+  # gateway. They are the hop that leaves the control-plane network in a real
+  # deployment, which is why they are covered even in dev.
+  agent-cpu:
+    depends_on: *tls-wait
+    volumes: *tls-mount
+    environment:
+      NEXUS_REQUIRE_TLS: "1"
+      NEXUS_TLS_CA_FILE: /etc/nexus/tls/ca-bundle.pem
+      NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/agent-cpu/tls.crt
+      NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/agent-cpu/tls.key
+      NEXUS_TLS_RELOAD_INTERVAL: 2s
+
+  agent-gpu:
+    depends_on: *tls-wait
+    volumes: *tls-mount
+    environment:
+      NEXUS_REQUIRE_TLS: "1"
+      NEXUS_TLS_CA_FILE: /etc/nexus/tls/ca-bundle.pem
+      NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/agent-gpu/tls.crt
+      NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/agent-gpu/tls.key
+      NEXUS_TLS_RELOAD_INTERVAL: 2s
+
+  agent-gpu-a10:
+    depends_on: *tls-wait
+    volumes: *tls-mount
+    environment:
+      NEXUS_REQUIRE_TLS: "1"
+      NEXUS_TLS_CA_FILE: /etc/nexus/tls/ca-bundle.pem
+      NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/agent-gpu-a10/tls.crt
+      NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/agent-gpu-a10/tls.key
+      NEXUS_TLS_RELOAD_INTERVAL: 2s
+
+volumes:
+  nexus-tls:
