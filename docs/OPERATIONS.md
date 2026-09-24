@@ -354,8 +354,12 @@ loops.
   service_completed_successfully}}`, so nothing starts against an unmigrated
   schema.
 
-At the time of writing, five versions are applied in the dev database
-(`0001_init` … `0005_service_roles`).
+The set runs `0001_init` … `0023_dispatch_rank_index` with **no 0019**. That
+number was never used on any branch. It is not a lost migration, and it must not
+be filled in later: on an existing database a new `0019_*` would run after 0020+,
+and on a fresh one before them. See `services/migrations/README.md`.
+`internal/migrations` fails `go test` on a duplicate version, a filled or new gap,
+or a malformed filename.
 
 ### 6.2 What makes a migration safe to deploy
 
