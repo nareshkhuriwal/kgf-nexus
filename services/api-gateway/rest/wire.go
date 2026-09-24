@@ -154,6 +154,9 @@ func attemptPayload(a store.AttemptRow) map[string]any {
 		"state":          a.State,
 		"queue":          a.Queue,
 		"worker_id":      a.WorkerID,
+		// The worker's hostname, so a run page can say WHICH machine ran a task
+		// without a round trip to the fleet listing. Null until dispatched.
+		"worker_hostname": a.WorkerHostname,
 		// pending_reason is why a PENDING attempt has not dispatched, e.g.
 		// "waiting_for_resources: gpu (need 4, free 3)". Without surfacing it the UI
 		// can only show an unexplained stall.

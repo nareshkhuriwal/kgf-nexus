@@ -1,6 +1,7 @@
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 import { DetailDrawer } from './DetailDrawer';
+import { ConfirmDialog } from './ConfirmDialog';
 import { usePermission } from './Permissions';
 import { useState } from 'react';
 import type { ReactNode } from 'react';
@@ -18,9 +19,12 @@ export function ActionIcon({name}:{name:ActionGlyph}) {
 }
 export function RowAction({label,icon,onAction,confirm,permission}:{label:string;icon:ActionGlyph;onAction:()=>unknown|Promise<unknown>;confirm?:string;permission?:string}) {
  const can=usePermission();
- const [busy,setBusy]=useState(false),[error,setError]=useState('');
+ const [busy,setBusy]=useState(false),[error,setError]=useState(''),[asking,setAsking]=useState(false);
  if(permission && !can(permission)) return null;
- return <><button type="button" className="icon-action" aria-label={label} title={label} disabled={busy} onClick={async()=>{if(confirm&&!window.confirm(confirm))return;setBusy(true);setError('');try{await onAction()}catch(e){setError(e instanceof Error?e.message:'Action failed')}finally{setBusy(false)}}}><ActionIcon name={icon}/></button>{error&&<span role="alert" className="row-action-error">{error}</span>}</>;
+ const run=async()=>{setAsking(false);setBusy(true);setError('');try{await onAction()}catch(e){setError(e instanceof Error?e.message:'Action failed')}finally{setBusy(false)}};
+ // A delete or drain is confirmed in the console's own dialog: the browser's
+ // names the origin instead of the action and cannot say what is lost.
+ return <><button type="button" className="icon-action" aria-label={label} title={label} disabled={busy} onClick={()=>{if(confirm)setAsking(true);else void run();}}><ActionIcon name={icon}/></button>{asking&&confirm&&<ConfirmDialog title={label} confirmLabel={label.split(' ')[0]??'Confirm'} tone={icon==='delete'?'danger':'primary'} onConfirm={()=>void run()} onCancel={()=>setAsking(false)}>{confirm}</ConfirmDialog>}{error&&<span role="alert" className="row-action-error">{error}</span>}</>;
 }
 export function RowDetails({label,value}:{label:string;value:unknown}) {
  const [open,setOpen]=useState(false);

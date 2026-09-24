@@ -467,12 +467,17 @@ type AttemptRow struct {
 	State         string
 	Queue         string
 	WorkerID      *string
-	PendingReason *string
-	Error         []byte
-	Metrics       []byte
-	ScheduledAt   time.Time
-	StartedAt     *time.Time
-	EndedAt       *time.Time
+	// WorkerHostname is the hostname of the worker the attempt was placed on,
+	// joined from the workers table at read time. Nil when the attempt has not
+	// been dispatched, or when the worker row has since been removed: a UUID is
+	// still reported in that case, a name is not invented for it.
+	WorkerHostname *string
+	PendingReason  *string
+	Error          []byte
+	Metrics        []byte
+	ScheduledAt    time.Time
+	StartedAt      *time.Time
+	EndedAt        *time.Time
 	// CacheHitOf is set when the attempt was satisfied from the memo cache
 	// (§6.4) rather than executed, naming the attempt whose result it reused.
 	CacheHitOf *string
@@ -482,13 +487,16 @@ type AttemptRow struct {
 // History is never mutated (invariant 9), so "show me every attempt" is a plain
 // ordered read.
 func GatewayListRunAttempts(ctx context.Context, q GWQuerier, runID string) ([]AttemptRow, error) {
+	// LEFT JOIN, not JOIN: an attempt whose worker row is gone is still an
+	// attempt, and the run page must not lose it because the fleet changed.
 	rows, err := q.Query(ctx, `
-		SELECT id::text, run_id::text, node_id, attempt_number, state::text, queue,
-		       worker_id::text, pending_reason, error::text, metrics::text,
-		       scheduled_at, started_at, ended_at, cache_hit_of::text
-		  FROM task_attempts
-		 WHERE run_id = $1
-		 ORDER BY node_id, attempt_number`,
+		SELECT a.id::text, a.run_id::text, a.node_id, a.attempt_number, a.state::text, a.queue,
+		       a.worker_id::text, w.hostname, a.pending_reason, a.error::text, a.metrics::text,
+		       a.scheduled_at, a.started_at, a.ended_at, a.cache_hit_of::text
+		  FROM task_attempts a
+		  LEFT JOIN workers w ON w.id = a.worker_id
+		 WHERE a.run_id = $1
+		 ORDER BY a.node_id, a.attempt_number`,
 		runID,
 	)
 	if err != nil {
@@ -500,7 +508,7 @@ func GatewayListRunAttempts(ctx context.Context, q GWQuerier, runID string) ([]A
 	for rows.Next() {
 		var a AttemptRow
 		if err := rows.Scan(&a.ID, &a.RunID, &a.NodeID, &a.AttemptNumber, &a.State, &a.Queue,
-			&a.WorkerID, &a.PendingReason, &a.Error, &a.Metrics,
+			&a.WorkerID, &a.WorkerHostname, &a.PendingReason, &a.Error, &a.Metrics,
 			&a.ScheduledAt, &a.StartedAt, &a.EndedAt, &a.CacheHitOf); err != nil {
 			return nil, fmt.Errorf("scan attempt: %w", err)
 		}
@@ -514,14 +522,15 @@ func GatewayGetAttempt(ctx context.Context, q GWQuerier, namespace, attemptID st
 	var a AttemptRow
 	err := q.QueryRow(ctx, `
 		SELECT a.id::text, a.run_id::text, a.node_id, a.attempt_number, a.state::text, a.queue,
-		       a.worker_id::text, a.pending_reason, a.error::text, a.metrics::text,
+		       a.worker_id::text, w.hostname, a.pending_reason, a.error::text, a.metrics::text,
 		       a.scheduled_at, a.started_at, a.ended_at, a.cache_hit_of::text
 		  FROM task_attempts a
 		  JOIN workflow_runs r ON r.id = a.run_id
+		  LEFT JOIN workers w ON w.id = a.worker_id
 		 WHERE a.id = $1 AND r.namespace = $2`,
 		attemptID, namespace,
 	).Scan(&a.ID, &a.RunID, &a.NodeID, &a.AttemptNumber, &a.State, &a.Queue,
-		&a.WorkerID, &a.PendingReason, &a.Error, &a.Metrics,
+		&a.WorkerID, &a.WorkerHostname, &a.PendingReason, &a.Error, &a.Metrics,
 		&a.ScheduledAt, &a.StartedAt, &a.EndedAt, &a.CacheHitOf)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AttemptRow{}, ErrNotFound

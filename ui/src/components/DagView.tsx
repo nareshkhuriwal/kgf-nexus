@@ -356,6 +356,17 @@ export function DagView({
                   {truncate(describeGroup(group), 26)}
                 </text>
               )}
+              {/* Which worker has (or had) this task. The same slot a group
+                  uses for its summary, because a folded group has no single
+                  worker to name. Hostname when the gateway joined it, else the
+                  worker id shortened -- a machine name is what an operator
+                  matches against the fleet page. */}
+              {!group && workerLabel(node) && (
+                <text className="dag-node-sub dag-node-worker" x={NODE_W - 14} y={73} textAnchor="end">
+                  <title>{workerTitle(node)}</title>
+                  {truncate(workerLabel(node) ?? '', 22)}
+                </text>
+              )}
               {group && onToggleGroup && group.unfoldable && (
                 <text
                   className="dag-node-sub dag-group-toggle"
@@ -453,4 +464,21 @@ export function DagLegend() {
       ))}
     </div>
   );
+}
+
+/**
+ * The worker the node's latest attempt is placed on, as a name for the card.
+ * Null for a node that has not been dispatched, so the card stays quiet
+ * rather than showing a dash where a hostname would go.
+ */
+function workerLabel(node: DagNode): string | null {
+  const a = node.latestAttempt;
+  if (!a || !a.worker_id) return null;
+  return a.worker_hostname ?? a.worker_id.slice(0, 12);
+}
+
+function workerTitle(node: DagNode): string {
+  const a = node.latestAttempt;
+  if (!a || !a.worker_id) return '';
+  return `${a.worker_hostname ? a.worker_hostname + ' · ' : ''}worker ${a.worker_id}`;
 }

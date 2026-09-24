@@ -33,6 +33,8 @@ import { StateBadge } from '../components/StateBadge';
 import { AsyncPanel, ErrorBox, Loading, StaleWarning } from '../components/Status';
 import { DagView } from '../components/DagView';
 import { AttemptList } from '../components/AttemptDetail';
+import { ConfirmDialog } from '../components/ConfirmDialog';
+import { PlacementPanel } from '../components/PlacementPanel';
 import { LogTail } from '../components/LogTail';
 import { EventTimeline } from '../components/EventTimeline';
 
@@ -45,6 +47,10 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
     return api.createRun(namespace, {spec_id: current.spec_id, params: current.params, priority: current.priority, trigger_kind: 'manual'});
   }, onSuccess: (created) => navigate('/runs/' + created.id)});
   const retry = useMutation({mutationFn: () => api.runAction(namespace, runId, 'retry'), onSuccess: () => { void runQuery.refetch(); }});
+  // Which of the two terminal-run actions is awaiting confirmation. Both start
+  // real compute, so neither fires on the first click; the dialog says what
+  // each one re-executes before it does.
+  const [confirming, setConfirming] = useState<'rerun' | 'retry' | null>(null);
   const [params, setParams] = useSearchParams();
   const selectedNodeId = params.get('node');
   const selectedAttemptId = params.get('attempt');
@@ -182,9 +188,33 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
         <div className="run-head-actions">
           <Link to="/runs" className="btn">← Back to runs</Link>
           {isTerminal('run', run.state) ? <>
-            {can('runs.create') && can('workflows.view') && <button className="primary" disabled={rerun.isPending} onClick={() => { if(window.confirm('Start a new run? Every task will execute again with the original parameters.')) rerun.mutate(); }}>{rerun.isPending ? 'Starting…' : 'Re-run'}</button>}
-            {(run.state === 'FAILED' || run.state === 'TIMED_OUT') && can('runs.retry') && <button disabled={retry.isPending} onClick={() => { if(window.confirm('Retry failed tasks in this run?')) retry.mutate(); }}>Retry failed tasks</button>}
+            {can('runs.create') && can('workflows.view') && <button className="primary" disabled={rerun.isPending} onClick={() => setConfirming('rerun')}>{rerun.isPending ? 'Starting…' : 'Re-run'}</button>}
+            {(run.state === 'FAILED' || run.state === 'TIMED_OUT') && can('runs.retry') && <button disabled={retry.isPending} onClick={() => setConfirming('retry')}>{retry.isPending ? 'Retrying…' : 'Retry failed tasks'}</button>}
             {rerun.error && <ErrorBox error={rerun.error} what="re-run" />}{retry.error && <ErrorBox error={retry.error} what="retry" />}
+            {confirming === 'rerun' && (
+              <ConfirmDialog
+                title="Start a new run?"
+                confirmLabel="Start new run"
+                onConfirm={() => { setConfirming(null); rerun.mutate(); }}
+                onCancel={() => setConfirming(null)}
+              >
+                Every task in <code>{run.spec_name ?? shortId(run.spec_id, 10)}</code>
+                {run.spec_version !== undefined && <> v{run.spec_version}</>} executes again with
+                this run's original parameters, as a separate run. This run and its history are
+                left as they are.
+              </ConfirmDialog>
+            )}
+            {confirming === 'retry' && (
+              <ConfirmDialog
+                title="Retry the failed tasks?"
+                confirmLabel="Retry failed tasks"
+                onConfirm={() => { setConfirming(null); retry.mutate(); }}
+                onCancel={() => setConfirming(null)}
+              >
+                Only the nodes that failed or timed out get a new attempt, in this same run.
+                Tasks that succeeded keep their results and do not execute again.
+              </ConfirmDialog>
+            )}
           </> : can('runs.cancel') && <CancelButton
             canCancel={canCancel}
             state={run.state}
@@ -225,6 +255,15 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
           />
         ) : null}
       </div>
+
+      {graph && (
+        <PlacementPanel
+          graph={graph}
+          selectedNodeId={selectedNodeId}
+          onSelectNode={selectNode}
+          live={!terminal}
+        />
+      )}
 
       <div className="panel">
         <div className="panel-head">

@@ -229,6 +229,7 @@
 .dag-viewport .dag-node { fill: var(--bg-raised); stroke-width: 1.4px; }
 .dag-node-g .dag-node-label { font-size: 13px; font-weight: 650; letter-spacing: -.2px; }
 .dag-node-g .dag-node-sub { font-size: 10px; fill: var(--fg-muted); }
+.dag-node-g .dag-node-worker { font-family: var(--mono); }
 .dag-node-g .dag-node-state { font-size: 10px; letter-spacing: .6px; }
 .dag-card-divider { stroke: var(--border); stroke-width: 1px; }
 .dag-node-g .dag-node-shadow { fill: var(--border); opacity: .28; }

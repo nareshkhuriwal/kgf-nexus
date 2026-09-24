@@ -2419,6 +2419,9 @@ tr.version-current > td { background: var(--bg-hover); }
    The transparent default declaration these rows used to carry has moved to the
    global `tbody tr` rule, so every table in the console reserves the same 2px
    gutter and no row shifts sideways when it gains a mark. */
+/* The node currently selected in the graph, echoed in the placement table so
+   the two views read as one selection. */
+.table-fleet tbody tr.row-selected td { box-shadow: inset 3px 0 0 var(--focus); }
 .table-runs tbody tr.row-failed,
 .table-fleet tbody tr.row-failed,
 .table-runs tbody tr.row-failed:hover,
@@ -2742,6 +2745,61 @@ a.fleet-host:focus-visible .fleet-host-name { text-decoration: underline; }
   font-size: var(--text-sm);
   line-height: var(--leading-normal);
   color: var(--fg);
+}
+
+/* ── Confirm dialog ────────────────────────────────────────────────────────
+   The console's own modal confirmation (components/ConfirmDialog), for the
+   actions that are not confirmed in place: re-run, retry, row deletes. It
+   sits at --z-modal because it must interrupt; the drawer and palette stay
+   below it. Centred rather than edge-docked so it reads as a question, not as
+   an inspector. */
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  background: rgb(5 12 24 / .48);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+}
+.confirm-dialog {
+  width: min(440px, 100%);
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgb(0 0 0 / .32);
+  padding: var(--space-6) var(--space-6) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.confirm-dialog.confirm-danger { border-top: 3px solid var(--tone-danger-bd); }
+.confirm-dialog.confirm-primary { border-top: 3px solid var(--accent); }
+.confirm-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-tight);
+}
+.confirm-body {
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--fg-muted);
+}
+.confirm-body code { color: var(--fg); }
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+}
+@media (max-width: 600px) {
+  .confirm-backdrop { align-items: flex-end; padding: 0; }
+  .confirm-dialog { width: 100%; border-radius: 12px 12px 0 0; }
+  .confirm-actions button { flex: 1 1 auto; }
 }
 
 /* ── Forms ─────────────────────────────────────────────────────────────────
