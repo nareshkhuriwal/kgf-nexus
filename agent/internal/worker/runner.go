@@ -17,6 +17,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 )
 
 // LegacyOutputName is the output name given to a result produced under the
@@ -51,6 +52,12 @@ type Runner struct {
 	// it -- so no workflow spec can hold this worker longer than the operator
 	// allows. Set before the first Run; read-only afterwards.
 	UninterruptibleCeiling time.Duration
+
+	// InlineThreshold is the control plane's inline-versus-blob boundary
+	// (ADR-0016), used on the no-result-store path to decide what may be
+	// inlined at all. Zero means the platform default. Set before the first
+	// Run; read-only afterwards.
+	InlineThreshold int64
 
 	mu      sync.Mutex
 	running map[string]*runningTask
@@ -537,7 +544,11 @@ func (r *Runner) putOutput(ctx context.Context, out executor.NamedOutput) (*nexu
 		// payload above the threshold is NOT inlined here — that would push a
 		// large payload through the control plane, which is the one thing
 		// invariant 6 forbids.
-		if int64(len(out.Bytes)) > resultstore.DefaultInlineThresholdBytes {
+		//
+		// The CONFIGURED threshold, not the compiled-in default: an operator
+		// who lowered it must not have a store-less worker quietly inline past
+		// it (ADR-0016).
+		if int64(len(out.Bytes)) > domain.ClampInlineThreshold(r.InlineThreshold) {
 			return nil, fmt.Errorf("%w: output is %d bytes and no result store is configured, "+
 				"so it cannot be stored without routing the payload through the control plane",
 				executor.ErrResultStore, len(out.Bytes))

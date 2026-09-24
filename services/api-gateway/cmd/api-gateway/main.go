@@ -31,6 +31,7 @@ import (
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
@@ -53,6 +54,12 @@ func run() error {
 	slog.SetDefault(log)
 
 	cfg := loadConfig()
+	// Refuse to start rather than hand every worker a threshold that would push
+	// multi-megabyte results through ReportResult and into task_attempts. The
+	// agent clamps too; failing here is what makes the misconfiguration visible.
+	if err := domain.ValidateInlineThreshold(cfg.InlineThresholdBytes); err != nil {
+		return fmt.Errorf("NEXUS_INLINE_THRESHOLD_BYTES: %w", err)
+	}
 
 	// The shutdown context is cancelled on SIGTERM/SIGINT. Everything long-running
 	// derives from it, so one signal unwinds the whole process in order.
@@ -305,7 +312,7 @@ func loadConfig() config {
 		ResultStoreRegion:   env("NEXUS_RESULT_STORE_REGION", "us-east-1"),
 		// Results at or below this size come back inline, avoiding two round-trips
 		// for a trivial output like {"rows": 42} (ADR-0008).
-		InlineThresholdBytes: int64(envInt("NEXUS_INLINE_THRESHOLD_BYTES", 65536)),
+		InlineThresholdBytes: int64(envInt("NEXUS_INLINE_THRESHOLD_BYTES", int(domain.DefaultInlineThresholdBytes))),
 		ShutdownTimeout:      time.Duration(envInt("NEXUS_SHUTDOWN_TIMEOUT_SEC", 30)) * time.Second,
 		// A brief pause after failing readiness, so load balancers observe the
 		// change before connections start closing.

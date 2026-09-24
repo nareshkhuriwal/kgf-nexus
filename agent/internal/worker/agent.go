@@ -19,6 +19,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 )
 
 // Client is the full worker RPC surface, satisfied by the generated gRPC client
@@ -279,6 +280,10 @@ func (a *Agent) register(ctx context.Context) error {
 	a.keeper = lease.New(a.workerID, a.client, nil, ttl, a.log)
 	a.runner = NewRunner(execs, a.registry, a.keeper, reporter, a.wal, a.store, a.log)
 	a.runner.UninterruptibleCeiling = a.cfg.MaxUninterruptible
+	// The control plane's threshold, clamped, also governs the no-store path:
+	// a worker without an object store must refuse exactly what a worker with
+	// one would have sent to it (ADR-0016).
+	a.runner.InlineThreshold = domain.ClampInlineThreshold(resp.GetResultStore().GetInlineThresholdBytes())
 	// The keeper revokes into the runner and the runner renews through the
 	// keeper, so one of the two edges must be wired after construction.
 	a.keeper.SetHandler(a.runner)
