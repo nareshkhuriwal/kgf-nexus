@@ -134,6 +134,36 @@ jobs:
       - name: Run NATS/outbox integration suite
         run: tests/nats/run-integration.sh
 
+  # Terraform for the dev environment and the AKS/EKS/GKE platforms, OFFLINE:
+  # init -backend=false, validate, and `terraform test` plans with mocked
+  # providers. No state, no cloud credentials, nothing is applied. Then the
+  # linters (tflint, checkov, trivy) in pinned containers.
+  terraform:
+    name: terraform validate and lint (offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          # Same pin as deploy/terraform/validate.sh.
+          terraform_version: "1.14.3"
+          terraform_wrapper: false
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: tf-plugins-${{ runner.os }}-${{ hashFiles('deploy/terraform/**/.terraform.lock.hcl', 'deploy/terraform/**/versions.tf') }}
+      - name: make tf-validate
+        run: make tf-validate
+      - name: make tf-lint
+        run: make tf-lint
+        env:
+          # Read-only token: lifts GitHub's anonymous rate limit for tflint's
+          # plugin downloads. Grants nothing beyond `permissions` above.
+          GITHUB_TOKEN: ${{ github.token }}
+
   # The operator console: typecheck, component tests and the production build.
   # The same steps, in the same order, as the Azure gate's UserInterface stage.
   ui:

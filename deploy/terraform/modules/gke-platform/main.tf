@@ -17,10 +17,6 @@
 #   - Cloud SQL private IP only, TLS required; bucket uniform access, public
 #     access prevention enforced.
 
-data "google_project" "this" {
-  project_id = var.project_id
-}
-
 resource "random_string" "suffix" {
   length  = 6
   upper   = false

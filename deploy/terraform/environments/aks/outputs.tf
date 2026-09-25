@@ -30,7 +30,7 @@ output "object_store" {
     active              = "in-cluster MinIO (PVC on StorageClass nexus-premium-ssd)"
     blob_account        = module.platform.artifact_storage_account
     blob_container      = module.platform.artifact_container
-    blob_backend_status = "not implemented (F115)"
+    blob_backend_status = var.azure_blob_native_backend ? "enabled" : "not implemented (F115)"
   }
 }
 
