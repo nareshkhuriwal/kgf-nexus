@@ -217,7 +217,7 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.state, 'default',
   JOIN seed_blobs b ON b.idx = (abs(hashtext(a.run_id::text || a.node_id)) % $ARTIFACTS);
 
 INSERT INTO leases (attempt_id, worker_id, token, expires_at)
-SELECT id, worker_id, md5(id::text), now() + interval '5 minutes'
+SELECT id, worker_id, md5(id::text), now() + interval '30 seconds'
   FROM seed_attempts WHERE state = 'RUNNING';
 INSERT INTO reservations (worker_id, attempt_id, resources)
 SELECT worker_id, id, '{"cpu_millis": 250, "memory_bytes": 268435456}'::jsonb

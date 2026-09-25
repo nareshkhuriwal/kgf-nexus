@@ -6,7 +6,33 @@
 # Proves a restore actually recovers artifacts, then exits 0.
 #
 # Usage:
-#   deploy/restore-drill.sh [--keep]
+#   deploy/restore-drill.sh [--keep] [--report FILE]
+#   deploy/restore-drill.sh --rto --yes [--report FILE]     (DESTRUCTIVE, see below)
+#
+# Every run records per-phase timings and writes them as JSON (--report, default
+# $TMPDIR/nexus-restore-drill-<pid>.json) plus a human table at the end.
+#
+# ── --rto: a timed, full-stack recovery (docs/OPERATIONS.md §4) ───────────
+# After the scratch checks below pass, --rto measures what an outage actually
+# costs. It takes a complete backup through deploy/backup-all.sh, then simulates
+# losing BOTH stores -- the database is dropped and the result bucket removed --
+# and recovers the stack, timing each phase:
+#
+#   stop                  stop every control-plane service and agent
+#   restore_db            deploy/restore.sh of the dump into a fresh database
+#   restore_artifacts     deploy/restore-artifacts.sh of the mirror
+#   migrate_verify        the migrate job (a no-op on a current dump, but it is
+#                         the step a real recovery runs), every output_ref
+#                         resolves, a sample of objects re-hashes to its key
+#   services_healthy      start the services, wait for every /readyz
+#   fleet_reconciliation  the restored snapshot's workers declared DEAD, their
+#                         in-flight attempts expired, the live agents
+#                         re-registered (deploy/lib/nexus-stack.sh)
+#
+# RTO = wall clock from the start of `stop` to the end of `fleet_reconciliation`.
+# Rows written between the dump and the stop are LOST by design (that is the
+# logical-backup RPO) and are reported as such. It refuses the default `nexus`
+# compose project unless DRILL_ALLOW_DEFAULT_PROJECT=1: run it on a drill stack.
 #
 # Precedent: commit c9f6ede added backup/restore and proved a restore works
 # rather than asserting it. This is the same standard applied to the result
@@ -57,12 +83,30 @@ ACCESS_KEY="${RESULT_STORE_ACCESS_KEY:-${NEXUS_S3_ACCESS_KEY_ID:-${MINIO_ROOT_US
 SECRET_KEY="${RESULT_STORE_SECRET_KEY:-${NEXUS_S3_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-nexus-dev-password}}}"
 
 KEEP=0
-for arg in "$@"; do
-  case "$arg" in
-    --keep) KEEP=1 ;;
-    *) echo "restore-drill: unknown argument $arg" >&2; exit 2 ;;
+RTO=0
+FORCE=0
+REPORT=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --keep) KEEP=1; shift ;;
+    --rto) RTO=1; shift ;;
+    --yes|-y) FORCE=1; shift ;;
+    --report) REPORT="$2"; shift 2 ;;
+    *) echo "restore-drill: unknown argument $1" >&2; exit 2 ;;
   esac
 done
+REPORT="${REPORT:-${TMPDIR:-/tmp}/nexus-restore-drill-$$.json}"
+if [ "$RTO" = 1 ] && [ "$FORCE" != 1 ]; then
+  echo "restore-drill: --rto DROPS the database and the result bucket of the stack" >&2
+  echo "restore-drill: behind $PG_CONTAINER and restores them from a fresh backup." >&2
+  echo "restore-drill: Re-run with --rto --yes on a drill stack." >&2
+  exit 2
+fi
+
+# shellcheck source=deploy/lib/drill-report.sh
+. "$HERE/lib/drill-report.sh"
+# shellcheck source=deploy/lib/nexus-stack.sh
+. "$HERE/lib/nexus-stack.sh"
 
 # Scratch names. The PID suffix means a drill left behind by a crash never
 # collides with the next one, and neither can ever be mistaken for live.
@@ -102,8 +146,13 @@ cleanup() {
 trap cleanup EXIT
 
 echo "restore-drill: scratch bucket $SCRATCH_BUCKET, scratch db $SCRATCH_DB"
-echo "restore-drill: the live bucket $LIVE_BUCKET and database $PG_DB are never written"
+if [ "$RTO" = 1 ]; then
+  echo "restore-drill: --rto: after the scratch checks, $PG_DB and $LIVE_BUCKET WILL be dropped and restored"
+else
+  echo "restore-drill: the live bucket $LIVE_BUCKET and database $PG_DB are never written"
+fi
 mkdir -p "$WORK"
+report_init restore-drill "$WORK/report"
 
 docker inspect "$MINIO_CONTAINER" >/dev/null 2>&1 || {
   echo "restore-drill: container $MINIO_CONTAINER does not exist; start the compose stack" >&2
@@ -172,6 +221,7 @@ echo "restore-drill: key $KEY (content-addressed, ADR-0008)"
 # exercises a reimplementation of the procedure proves nothing about the
 # procedure.
 echo
+phase_begin artifact_backup
 echo "restore-drill: [2] backing up via deploy/backup-artifacts.sh"
 BACKUP_DIR="$WORK/backups" \
   RESULT_STORE_BUCKET="$SRC_BUCKET" \
@@ -197,7 +247,9 @@ else
 fi
 
 # ── 3. Restore into a scratch bucket, through the real script ─────────────
+phase_end artifact_backup
 echo
+phase_begin artifact_restore
 echo "restore-drill: [3] restoring via deploy/restore-artifacts.sh into $SCRATCH_BUCKET"
 MINIO_CONTAINER="$MINIO_CONTAINER" \
   sh "$HERE/restore-artifacts.sh" "$MIRROR" "$SCRATCH_BUCKET" >"$WORK/restore.log" 2>&1 || {
@@ -206,6 +258,8 @@ MINIO_CONTAINER="$MINIO_CONTAINER" \
     exit 1
   }
 
+phase_end artifact_restore
+phase_begin verify_checks
 # ── 4. CLAIM 1: the restored object is byte-identical ─────────────────────
 # Pulled back out of the restored bucket and hashed. Comparing the manifest to
 # the mirror would only prove the mirror is self-consistent; the claim is about
@@ -360,14 +414,130 @@ else
   bad "the sweep found $DANGLING dangling refs, expected exactly 1 -- it is not looking properly"
 fi
 
-# ── 9. Summary ────────────────────────────────────────────────────────────
+phase_end verify_checks
+
+# ── 9. Summary of the scratch checks ──────────────────────────────────────
 echo
 echo "restore-drill: ───────────────────────────────────────────────"
 echo "restore-drill: $PASS passed, $FAIL failed"
+report_set checks_passed "$PASS"
+report_set checks_failed "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
   echo "restore-drill: DRILL FAILED" >&2
+  report_finish "$REPORT"
   exit 1
 fi
 echo "restore-drill: DRILL PASSED -- a restored artifact is byte-identical and its"
 echo "restore-drill: output_ref resolves. Every check above was also shown to FAIL"
 echo "restore-drill: when the thing it guards was deliberately broken."
+
+if [ "$RTO" != 1 ]; then
+  report_finish "$REPORT"
+  exit 0
+fi
+
+# ── 10. --rto: timed full-stack recovery ──────────────────────────────────
+# See the header. From here on the drill IS destructive to the stack behind
+# $PG_CONTAINER / $MINIO_CONTAINER.
+PROJECT=$(stack_project)
+if [ "$PROJECT" = nexus ] && [ "${DRILL_ALLOW_DEFAULT_PROJECT:-0}" != 1 ]; then
+  echo "restore-drill: refusing --rto on the default 'nexus' compose project;" >&2
+  echo "restore-drill: use a drill stack (docker compose -p <name>) or set DRILL_ALLOW_DEFAULT_PROJECT=1" >&2
+  report_finish "$REPORT"
+  exit 1
+fi
+echo
+echo "restore-drill: [10] --rto full-stack recovery of compose project '$PROJECT'"
+report_set_str project "$PROJECT"
+report_set dataset_before "$(pg_q "SELECT json_build_object(
+  'workflow_runs', (SELECT count(*) FROM workflow_runs),
+  'task_attempts', (SELECT count(*) FROM task_attempts),
+  'run_events', (SELECT count(*) FROM run_events),
+  'db_bytes', pg_database_size(current_database()))")"
+
+# Backup -- measured, but NOT part of the RTO: it happened before the outage.
+phase_begin backup_all
+BACKUP_DIR="$WORK/full" BACKUP_STAMP=rto BACKUP_KEEP_DAYS=0 \
+  PG_CONTAINER="$PG_CONTAINER" MINIO_CONTAINER="$MINIO_CONTAINER" RESULT_STORE_BUCKET="$LIVE_BUCKET" \
+  sh "$HERE/backup-all.sh" > "$WORK/backup-all.log" 2>&1 || {
+    cat "$WORK/backup-all.log" >&2; phase_end backup_all failed; report_finish "$REPORT"; exit 1; }
+phase_end backup_all
+DUMP=$(find "$WORK/full" -maxdepth 1 -name 'nexus-*.dump' | head -n 1)
+FULL_MIRROR="$WORK/full/nexus-artifacts-rto"
+report_set backup "$(printf '{"dump_bytes":%s,"mirror_objects":%s,"mirror_bytes":%s}' \
+  "$(wc -c < "$DUMP" | tr -d ' ')" "$(find "$FULL_MIRROR" -type f | wc -l | tr -d ' ')" \
+  "$(du -sk "$FULL_MIRROR" | awk '{print $1 * 1024}')")"
+
+RECOVERY_START=$(date +%s)
+phase_begin stop
+stack_stop_app
+phase_end stop
+report_set inflight_at_stop "$(stack_inflight_json)"
+# What exists at the moment of the outage vs. what the backup brings back: the
+# difference is the RPO of a logical backup, in rows.
+AT_STOP_ATTEMPTS=$(pg_q "SELECT count(*) FROM task_attempts")
+AT_STOP_EVENTS=$(pg_q "SELECT count(*) FROM run_events")
+
+# The simulated loss. Deliberately not timed: it is the disaster, not recovery.
+echo "restore-drill: simulating loss of database $PG_DB and bucket $LIVE_BUCKET"
+docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d postgres -q -v ON_ERROR_STOP=1 \
+  -c "DROP DATABASE \"$PG_DB\" WITH (FORCE)" >/dev/null
+mc_ rb --force "$ALIAS/$LIVE_BUCKET" >/dev/null
+
+phase_begin restore_db
+PG_CONTAINER="$PG_CONTAINER" PG_USER="$PG_USER" sh "$HERE/restore.sh" "$DUMP" "$PG_DB" \
+  > "$WORK/restore-db.log" 2>&1 || { cat "$WORK/restore-db.log" >&2; phase_end restore_db failed; report_finish "$REPORT"; exit 1; }
+phase_end restore_db
+
+phase_begin restore_artifacts
+MINIO_CONTAINER="$MINIO_CONTAINER" FORCE=1 sh "$HERE/restore-artifacts.sh" "$FULL_MIRROR" "$LIVE_BUCKET" --yes \
+  > "$WORK/restore-artifacts.log" 2>&1 || { cat "$WORK/restore-artifacts.log" >&2; phase_end restore_artifacts failed; report_finish "$REPORT"; exit 1; }
+phase_end restore_artifacts
+
+phase_begin migrate_verify
+MIGRATE=$(stack_containers migrate all | head -n 1)
+if [ -n "$MIGRATE" ]; then
+  docker start -a "$MIGRATE" > "$WORK/migrate.log" 2>&1 || { cat "$WORK/migrate.log" >&2; phase_end migrate_verify failed; report_finish "$REPORT"; exit 1; }
+else
+  echo "restore-drill: no migrate container in project $PROJECT; skipping the migrate job" >&2
+fi
+MC_ALIAS="$ALIAS" stack_check_refs "$LIVE_BUCKET"
+MC_ALIAS="$ALIAS" stack_verify_sample "$LIVE_BUCKET" 25
+RESTORED_ATTEMPTS=$(pg_q "SELECT count(*) FROM task_attempts")
+RESTORED_EVENTS=$(pg_q "SELECT count(*) FROM run_events")
+verify_status=ok
+if [ "$REFS_MISSING" -ne 0 ]; then bad "$REFS_MISSING of $REFS_TOTAL referenced objects are MISSING after restore"; verify_status=failed
+else ok "all $REFS_TOTAL referenced objects exist in the restored bucket ($STORE_KEYS objects)"; fi
+if [ "$SAMPLE_BAD" -ne 0 ] || [ "$SAMPLE_OK" -eq 0 ]; then bad "sample re-hash: $SAMPLE_OK ok, $SAMPLE_BAD bad"; verify_status=failed
+else ok "sample of $SAMPLE_OK restored objects re-hash to their content-addressed keys"; fi
+if [ "$RESTORED_ATTEMPTS" -gt 0 ] && [ "$RESTORED_ATTEMPTS" -le "$AT_STOP_ATTEMPTS" ]; then
+  ok "restored $RESTORED_ATTEMPTS attempts ($((AT_STOP_ATTEMPTS - RESTORED_ATTEMPTS)) written after the dump are lost: the RPO)"
+else bad "restored attempt count $RESTORED_ATTEMPTS is implausible (had $AT_STOP_ATTEMPTS)"; verify_status=failed; fi
+phase_end migrate_verify "$verify_status"
+report_set verify "$(printf '{"refs_total":%s,"refs_missing":%s,"store_objects":%s,"sample_rehash_ok":%s,"sample_rehash_bad":%s}' \
+  "$REFS_TOTAL" "$REFS_MISSING" "$STORE_KEYS" "$SAMPLE_OK" "$SAMPLE_BAD")"
+report_set rpo_rows_lost "$(printf '{"task_attempts":%s,"run_events":%s}' \
+  "$((AT_STOP_ATTEMPTS - RESTORED_ATTEMPTS))" "$((AT_STOP_EVENTS - RESTORED_EVENTS))")"
+report_set inflight_restored "$(stack_inflight_json)"
+
+phase_begin services_healthy
+stack_start_app
+if stack_wait_healthy "${DRILL_HEALTH_TIMEOUT:-300}"; then phase_end services_healthy
+else phase_end services_healthy failed; bad "services did not become healthy"; report_finish "$REPORT" stop services_healthy; exit 1; fi
+
+phase_begin fleet_reconciliation
+if stack_wait_reconciled "${DRILL_RECONCILE_TIMEOUT:-600}" "$RECOVERY_START"; then
+  phase_end fleet_reconciliation
+  report_set fresh_workers "${RECONCILE_FRESH_WORKERS:-0}"
+else
+  phase_end fleet_reconciliation failed
+  bad "fleet did not reconcile"
+fi
+report_set checks_passed "$PASS"
+report_set checks_failed "$FAIL"
+report_finish "$REPORT" stop fleet_reconciliation
+if [ "$FAIL" -gt 0 ]; then
+  echo "restore-drill: RTO DRILL FAILED" >&2
+  exit 1
+fi
+echo "restore-drill: RTO DRILL PASSED"

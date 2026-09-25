@@ -59,6 +59,61 @@ postgres:
   resources:
     requests: { cpu: 250m, memory: 512Mi }
     limits: { memory: 1Gi }
+  # Point-in-time recovery for the IN-CLUSTER Postgres: continuous WAL archiving
+  # plus scheduled base backups with pgBackRest (docs/OPERATIONS.md §4).
+  #
+  # Only for postgres.enabled=true. A MANAGED database (Azure Database for
+  # PostgreSQL Flexible Server, Amazon RDS/Aurora, Cloud SQL) must use the
+  # provider's own automated backups and PITR instead: it does not expose the
+  # data directory or archive_command, and its PITR is the supported path. The
+  # chart refuses pitr.enabled with postgres.enabled=false for that reason.
+  pitr:
+    enabled: false
+    # Built from deploy/pgbackrest/Dockerfile: postgres 16.15-alpine3.24 +
+    # pgBackRest 2.59.1. Same major AND libc as `image` above, so an existing
+    # volume keeps working. Push it to your registry and pin it here.
+    image: kgf-nexus/postgres-pitr:16.15-pgbackrest2.59.1
+    stanza: nexus
+    # REQUIRED when enabled: a Secret in the release namespace with
+    #   s3-key          access key of a principal that can use ONLY repo.s3.bucket
+    #   s3-key-secret   its secret
+    #   cipher-pass     repository encryption passphrase. Needed to RESTORE: keep a
+    #                   copy outside this cluster (a secret manager).
+    existingSecret: ""
+    repo:
+      # A bucket SEPARATE from the result bucket (minio.bucket), with its own
+      # credentials; ideally in another failure domain (region/account).
+      path: /nexus
+      s3:
+        bucket: ""
+        endpoint: ""            # e.g. s3.eu-west-1.amazonaws.com, or a MinIO host
+        region: us-east-1
+        port: 443               # pgBackRest's S3 client is TLS-only
+        uriStyle: host          # "path" for MinIO and most S3-compatibles
+        # Optional: a Secret with key ca.crt, for a store with a private CA.
+        caSecret: ""
+    # aes-256-cbc = client-side encryption of every backup file and WAL segment
+    # before upload. "none" only if the store encrypts AND you accept the store's
+    # operators being able to read the database. Fixed at stanza creation.
+    cipherType: aes-256-cbc
+    retention:
+      full: 2                   # full backups kept (the PITR window starts at the oldest)
+      fullType: count           # or "time": full = days
+      diff: 7
+    # Upper bound on RPO for a quiet database: a partially filled WAL segment is
+    # archived after this many seconds. Busy databases fill segments faster.
+    archiveTimeoutSeconds: 60
+    processMax: 2
+    schedule:
+      fullIntervalSeconds: 604800   # weekly full
+      diffIntervalSeconds: 86400    # daily differential
+      pollSeconds: 300
+    # Anything else pgBackRest accepts as PGBACKREST_* (e.g. repo1-s3-kms-key-id
+    # for SSE-KMS, archive-push-queue-max). Names and values, as env entries.
+    extraEnv: []
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { memory: 512Mi }
 
 minio:
   enabled: true

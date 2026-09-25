@@ -71,7 +71,8 @@ done
 docker inspect "$PG_CONTAINER" >/dev/null 2>&1 || {
   echo "restore-pitr: container $PG_CONTAINER does not exist" >&2; exit 1; }
 IMAGE=$(docker inspect -f '{{.Config.Image}}' "$PG_CONTAINER")
-docker exec "$PG_CONTAINER" pgbackrest version >/dev/null 2>&1 || {
+# Checked against the IMAGE, not the container: after a crash the container is not running.
+docker run --rm --entrypoint pgbackrest "$IMAGE" version >/dev/null 2>&1 || {
   echo "restore-pitr: $PG_CONTAINER has no pgbackrest -- is the PITR overlay in use?" >&2
   echo "restore-pitr:   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.pitr.yml up -d" >&2
   exit 1
@@ -160,7 +161,7 @@ set -- --stanza="$STANZA" --delta --log-level-console=info
 case "$TYPE" in
   time|lsn)
     set -- "$@" --type="$TYPE" --target="$TARGET" --target-action=promote
-    [ "$EXCLUSIVE" = 1 ] && set -- "$@" --target-exclusive
+    if [ "$EXCLUSIVE" = 1 ]; then set -- "$@" --target-exclusive; fi
     ;;
   default) set -- "$@" --type=default ;;
 esac
@@ -212,8 +213,4 @@ echo "restore-pitr: take a new backup soon (deploy/pitr-backup.sh diff): the res
 echo "restore-pitr: point is restorable from the OLD backup + WAL, but a fresh one"
 echo "restore-pitr: shortens the next recovery."
 
-if [ -n "$REPORT" ]; then
-  report_finish "$REPORT" pg_stop pg_verify
-else
-  report_finish "$REPORT_WORK/report.json" pg_stop pg_verify
-fi
+report_finish "${REPORT:-${TMPDIR:-/tmp}/nexus-restore-pitr-$(date -u +%Y%m%dT%H%M%SZ).json}" pg_stop pg_verify

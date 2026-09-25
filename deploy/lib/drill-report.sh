@@ -93,6 +93,17 @@ report_set_str() {
 # Duration (ms) of a recorded phase, or empty.
 phase_ms() { awk -F'|' -v n="$1" '$1 == n { print $3 - $2 }' "$REPORT_PHASES" | tail -n 1; }
 
+# report_rto <key> <first-phase> <last-phase>: record a wall-clock span as an
+# extra JSON field, for drills that measure more than one scenario. Echoes the
+# seconds.
+report_rto() {
+  _a=$(awk -F'|' -v n="$2" '$1 == n { print $2 }' "$REPORT_PHASES" | tail -n 1)
+  _b=$(awk -F'|' -v n="$3" '$1 == n { print $3 }' "$REPORT_PHASES" | tail -n 1)
+  [ -n "$_a" ] && [ -n "$_b" ] || { echo "drill-report: report_rto: phase missing" >&2; return 1; }
+  report_set "$1" "$(printf '{"from_phase":"%s","to_phase":"%s","seconds":%s}' "$2" "$3" "$(ms_to_s $((_b - _a)))")"
+  ms_to_s $((_b - _a))
+}
+
 # report_finish <json-file> [first-rto-phase] [last-rto-phase]
 # The RTO total is wall clock from the START of the first RTO phase to the END of
 # the last one -- not a sum, so any untimed gap between phases is included.

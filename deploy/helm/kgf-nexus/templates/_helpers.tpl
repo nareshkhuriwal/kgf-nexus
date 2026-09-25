@@ -4,6 +4,12 @@ SPDX-License-Identifier: Apache-2.0
 */}}
 
 {{- define "nexus.required" -}}
+{{- if and .Values.postgres.pitr.enabled (not .Values.postgres.enabled) -}}
+{{- fail "postgres.pitr.enabled needs the in-cluster postgres (postgres.enabled=true). A managed database (Azure Flexible Server, RDS, Cloud SQL) must use the provider's automated backups and point-in-time restore instead -- see docs/OPERATIONS.md §4." -}}
+{{- end -}}
+{{- if and .Values.postgres.pitr.enabled (or (not .Values.postgres.pitr.existingSecret) (not .Values.postgres.pitr.repo.s3.bucket) (not .Values.postgres.pitr.repo.s3.endpoint)) -}}
+{{- fail "postgres.pitr.enabled requires postgres.pitr.existingSecret (s3-key, s3-key-secret, cipher-pass), postgres.pitr.repo.s3.bucket and postgres.pitr.repo.s3.endpoint" -}}
+{{- end -}}
 {{- if not .Values.existingSecret -}}
 {{- fail "existingSecret is required: the name of a Secret holding postgres-password, minio-root-user, minio-root-password and worker-api-key (deploy/terraform creates it)" -}}
 {{- end -}}
@@ -178,4 +184,53 @@ prefix, and reusing that name makes the upgrade fail on an immutable field.
 */}}
 {{- define "nexus.jobSuffix" -}}
 {{- .Values.image.tag | sha256sum | trunc 10 -}}
+{{- end -}}
+
+{{/*
+pgBackRest settings for the postgres container (archive-push/archive-get) and
+the pgbackrest sidecar (stanza, check, base backups). Both MUST see the same
+repository and passphrase, so they share this one definition. Same variables as
+deploy/docker-compose.pitr.yml.
+*/}}
+{{- define "nexus.pgbackrestEnv" -}}
+{{- $p := .Values.postgres.pitr -}}
+- { name: PGBACKREST_STANZA, value: {{ $p.stanza | quote }} }
+- { name: PGBACKREST_PG1_PATH, value: /var/lib/postgresql/data/pgdata }
+- { name: PGBACKREST_PG1_USER, value: {{ .Values.postgres.user | quote }} }
+- { name: PGBACKREST_PG1_SOCKET_PATH, value: /var/run/postgresql }
+- { name: PGBACKREST_REPO1_TYPE, value: s3 }
+- { name: PGBACKREST_REPO1_PATH, value: {{ $p.repo.path | quote }} }
+- { name: PGBACKREST_REPO1_S3_BUCKET, value: {{ $p.repo.s3.bucket | quote }} }
+- { name: PGBACKREST_REPO1_S3_ENDPOINT, value: {{ $p.repo.s3.endpoint | quote }} }
+- { name: PGBACKREST_REPO1_S3_REGION, value: {{ $p.repo.s3.region | quote }} }
+- { name: PGBACKREST_REPO1_STORAGE_PORT, value: {{ $p.repo.s3.port | quote }} }
+- { name: PGBACKREST_REPO1_S3_URI_STYLE, value: {{ $p.repo.s3.uriStyle | quote }} }
+- name: PGBACKREST_REPO1_S3_KEY
+  valueFrom: { secretKeyRef: { name: {{ $p.existingSecret }}, key: s3-key } }
+- name: PGBACKREST_REPO1_S3_KEY_SECRET
+  valueFrom: { secretKeyRef: { name: {{ $p.existingSecret }}, key: s3-key-secret } }
+{{- if $p.repo.s3.caSecret }}
+- { name: PGBACKREST_REPO1_STORAGE_CA_FILE, value: /etc/pgbackrest/ca/ca.crt }
+{{- end }}
+- { name: PGBACKREST_REPO1_CIPHER_TYPE, value: {{ $p.cipherType | quote }} }
+{{- if ne $p.cipherType "none" }}
+- name: PGBACKREST_REPO1_CIPHER_PASS
+  valueFrom: { secretKeyRef: { name: {{ $p.existingSecret }}, key: cipher-pass } }
+{{- end }}
+- { name: PGBACKREST_REPO1_RETENTION_FULL, value: {{ $p.retention.full | quote }} }
+- { name: PGBACKREST_REPO1_RETENTION_FULL_TYPE, value: {{ $p.retention.fullType | quote }} }
+- { name: PGBACKREST_REPO1_RETENTION_DIFF, value: {{ $p.retention.diff | quote }} }
+- { name: PGBACKREST_REPO1_BUNDLE, value: "y" }
+- { name: PGBACKREST_REPO1_BLOCK, value: "y" }
+- { name: PGBACKREST_COMPRESS_TYPE, value: zst }
+- { name: PGBACKREST_PROCESS_MAX, value: {{ $p.processMax | quote }} }
+- { name: PGBACKREST_START_FAST, value: "y" }
+- { name: PGBACKREST_DELTA, value: "y" }
+- { name: PGBACKREST_ARCHIVE_ASYNC, value: "y" }
+- { name: PGBACKREST_SPOOL_PATH, value: /var/spool/pgbackrest }
+- { name: PGBACKREST_LOG_LEVEL_CONSOLE, value: info }
+- { name: PGBACKREST_LOG_LEVEL_FILE, value: "off" }
+{{- with $p.extraEnv }}
+{{ toYaml . }}
+{{- end }}
 {{- end -}}

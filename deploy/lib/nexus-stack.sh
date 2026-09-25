@@ -15,8 +15,6 @@
 NEXUS_APP_SERVICES="${NEXUS_APP_SERVICES:-api-gateway workflow-manager dag-engine scheduler scheduler-gpu resource-manager event-service agent-cpu agent-gpu agent-gpu-a10 ui}"
 # Agents are the fleet whose re-registration "fleet reconciliation" waits for.
 NEXUS_AGENT_SERVICES="${NEXUS_AGENT_SERVICES:-agent-cpu agent-gpu agent-gpu-a10}"
-# Must match the scheduler's -liveness-window (default 30s).
-NEXUS_LIVENESS_SECONDS="${NEXUS_LIVENESS_SECONDS:-30}"
 
 pg_q() {
   docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "${2:-$PG_DB}" -v ON_ERROR_STOP=1 -tAqc "$1"
@@ -36,7 +34,7 @@ stack_containers() {
   docker ps $_flt --format '{{.Names}} {{.Label "com.docker.compose.service"}}' |
     while read -r _name _svc; do
       for _want in $1; do
-        [ "$_svc" = "$_want" ] && echo "$_name"
+        if [ "$_svc" = "$_want" ]; then echo "$_name"; fi
       done
     done
 }
@@ -55,8 +53,35 @@ stack_stop_app() {
 
 stack_start_app() {
   [ -s "$WORK/.stopped-app" ] || { echo "stack: no app containers to start"; return 0; }
-  # shellcheck disable=SC2046
-  docker start $(cat "$WORK/.stopped-app") >/dev/null
+  # Retried, per container: Docker Desktop releases a published host port a few
+  # seconds after the container that held it stops, and a start inside that
+  # window fails with "address already in use". An orchestrator retries; so do we.
+  # A start that fails that way can also leave the container DETACHED from its
+  # network (observed on Docker Desktop 29), after which every restart dies on
+  # DNS. So before each attempt, a container with no network is reattached to
+  # the project network under its compose service name.
+  _net=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$PG_CONTAINER" | awk '{print $1}')
+  _try=1
+  while :; do
+    _left=""
+    for _c in $(cat "$WORK/.stopped-app"); do
+      [ "$(docker inspect -f '{{.State.Running}}' "$_c")" = true ] && continue
+      if [ -z "$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$_c")" ]; then
+        _svc=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$_c")
+        echo "stack: $_c lost its network; reattaching to $_net as $_svc"
+        docker network connect --alias "$_svc" "$_net" "$_c" || true
+      fi
+      docker start "$_c" >/dev/null 2>"$WORK/.start-err" || _left="$_left $_c"
+    done
+    [ -z "$_left" ] && return 0
+    if [ "$_try" -ge 30 ]; then
+      echo "stack: could not start:$_left" >&2
+      cat "$WORK/.start-err" >&2
+      return 1
+    fi
+    _try=$((_try + 1))
+    sleep 1
+  done
 }
 
 # Wait until every restarted container is healthy (or running, if it has no
@@ -83,14 +108,19 @@ stack_wait_healthy() {
   done
 }
 
-# Fleet reconciliation after a restore, as three conditions read from Postgres:
+# Fleet reconciliation after a restore, as three conditions read from Postgres.
+# "Before the recovery began" is the dividing line: every worker row that has not
+# heartbeated since then came out of the restored snapshot and describes a fleet
+# that no longer exists (an agent that restarts registers a NEW worker).
 #
-#   stale     workers still ACTIVE/DRAINING/QUARANTINED whose heartbeat is older
-#             than the liveness window -- the restored snapshot's fleet, which no
-#             longer exists. The scheduler's sweep must declare them DEAD.
-#   orphaned  attempts DISPATCHED/RUNNING that are not held by a live worker. They
-#             must be expired to LOST (and retried, or failed at max_attempts).
-#   fresh     workers that heartbeated after the restore began: the real fleet
+#   stale     snapshot workers still ACTIVE/DRAINING/QUARANTINED. The scheduler's
+#             liveness sweep must declare each DEAD -- which it only does once the
+#             heartbeat is older than its liveness window (default 30s), so this
+#             term is where most of the reconciliation time goes.
+#   orphaned  attempts DISPATCHED/RUNNING not held by a worker that heartbeated
+#             since the recovery began. They must be expired to LOST (then
+#             retried, or failed at max_attempts).
+#   fresh     workers that heartbeated since the recovery began: the real fleet
 #             re-registered. Required only when agents were running before.
 #
 # Reconciled = stale = 0 AND orphaned = 0 AND fresh >= the number of agent
@@ -103,7 +133,7 @@ stack_wait_reconciled() {
   if [ -s "$WORK/.stopped-app" ]; then
     for _c in $(cat "$WORK/.stopped-app"); do
       _svc=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$_c")
-      for _a in $NEXUS_AGENT_SERVICES; do [ "$_svc" = "$_a" ] && _need=$((_need + 1)); done
+      for _a in $NEXUS_AGENT_SERVICES; do if [ "$_svc" = "$_a" ]; then _need=$((_need + 1)); fi; done
     done
   fi
   _last=""
@@ -111,13 +141,13 @@ stack_wait_reconciled() {
     _row=$(pg_q "
 SELECT (SELECT count(*) FROM workers
          WHERE state IN ('ACTIVE','DRAINING','QUARANTINED')
-           AND last_heartbeat_at < now() - interval '$NEXUS_LIVENESS_SECONDS seconds')
+           AND last_heartbeat_at < to_timestamp($_since))
     || ' ' ||
        (SELECT count(*) FROM task_attempts a
          WHERE a.state IN ('DISPATCHED','RUNNING')
            AND NOT EXISTS (SELECT 1 FROM workers w
                             WHERE w.id = a.worker_id AND w.state = 'ACTIVE'
-                              AND w.last_heartbeat_at >= now() - interval '$NEXUS_LIVENESS_SECONDS seconds'))
+                              AND w.last_heartbeat_at >= to_timestamp($_since)))
     || ' ' ||
        (SELECT count(*) FROM workers
          WHERE state = 'ACTIVE' AND last_heartbeat_at >= to_timestamp($_since))" 2>/dev/null || echo "? ? ?")

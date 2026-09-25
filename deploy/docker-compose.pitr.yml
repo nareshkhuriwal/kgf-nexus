@@ -131,6 +131,10 @@ services:
       PITR_FULL_INTERVAL_SECONDS: ${NEXUS_PITR_FULL_INTERVAL_SECONDS:-604800}
       PITR_DIFF_INTERVAL_SECONDS: ${NEXUS_PITR_DIFF_INTERVAL_SECONDS:-86400}
       PITR_POLL_SECONDS: ${NEXUS_PITR_POLL_SECONDS:-300}
+      # Archive-age guard: force a WAL switch when nothing was archived for this
+      # long. Measured necessary: archive_timeout alone did not fire for up to
+      # checkpoint_timeout after a start or promotion (OPERATIONS §4.6).
+      PITR_WAL_SWITCH_SECONDS: ${NEXUS_PITR_ARCHIVE_TIMEOUT:-60}
     volumes:
       # Backups read the data directory directly (a physical backup) and talk to
       # the server over its unix socket, so the sidecar shares both.
