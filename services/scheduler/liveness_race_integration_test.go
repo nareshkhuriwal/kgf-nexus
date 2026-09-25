@@ -107,6 +107,8 @@ func TestResourceManagerWinsTheDeadRaceAttemptsStillRecover(t *testing.T) {
 		if !contains(f.eventKinds(id), domain.EventRetryScheduled) {
 			t.Errorf("events for %s = %v, missing the retry", id, f.eventKinds(id))
 		}
+		// The already-DEAD path meters like every other end of a dispatch.
+		assertMeteredOnce(t, f, id, "LOST")
 	}
 	// Both sweepers released; the ledger must have been released exactly once.
 	if got := f.workerCommitted(doomed).CPUMillis; got != 0 {
@@ -120,6 +122,9 @@ func TestResourceManagerWinsTheDeadRaceAttemptsStillRecover(t *testing.T) {
 	again, err := st.SweepDeadWorkers(ctx, time.Now().UTC(), 10)
 	if err != nil || len(again) != 0 {
 		t.Fatalf("second sweep = %+v, %v; want nothing", again, err)
+	}
+	for _, id := range []uuid.UUID{a1, a2} {
+		assertMeteredOnce(t, f, id, "LOST")
 	}
 }
 
@@ -163,6 +168,14 @@ func TestDeadSweepContinuesPastAFailedAttempt(t *testing.T) {
 	if s := f.attemptState(poisoned); s == "LOST" {
 		t.Fatal("the poisoned attempt was expired; the test premise is broken")
 	}
+	// The per-attempt continue path meters what it expired, and the failed
+	// attempt's rolled-back transaction left no row behind.
+	for _, id := range []uuid.UUID{healthy, other} {
+		assertMeteredOnce(t, f, id, "LOST")
+	}
+	if n := f.ledgerRows(poisoned); n != 0 {
+		t.Fatalf("the failed expiry left %d ledger rows; its transaction must roll back whole", n)
+	}
 	if s := f.workerState(w1); s != "DEAD" {
 		t.Fatalf("w1 state = %s, want DEAD", s)
 	}
@@ -178,6 +191,9 @@ func TestDeadSweepContinuesPastAFailedAttempt(t *testing.T) {
 	}
 	if s := f.attemptState(poisoned); s != "LOST" {
 		t.Errorf("poisoned attempt state = %s after repair, want LOST", s)
+	}
+	for _, id := range []uuid.UUID{poisoned, healthy, other} {
+		assertMeteredOnce(t, f, id, "LOST")
 	}
 }
 
@@ -220,9 +236,15 @@ func TestLeaseReconcilerContinuesPastAFailedAttempt(t *testing.T) {
 			t.Errorf("attempt %s state = %s, want LOST", id, s)
 		}
 	}
+	if n := f.ledgerRows(ids[0]); n != 0 {
+		t.Fatalf("the failed expiry left %d ledger rows", n)
+	}
 	unpoison(t, f, ids[0])
 	if lost, err := st.ReconcileExpiredLeases(ctx, time.Now().UTC(), 10); err != nil || len(lost) != 1 {
 		t.Fatalf("second pass = %d, %v; want the repaired attempt", len(lost), err)
+	}
+	for _, id := range ids {
+		assertMeteredOnce(t, f, id, "LOST")
 	}
 }
 

@@ -195,6 +195,7 @@ func TestResultIsNotSkippedWhileMarkStartedHoldsTheAttempt(t *testing.T) {
 	if !contains(kinds, "AttemptStarted") || !contains(kinds, "AttemptSucceeded") {
 		t.Errorf("events = %v, want AttemptStarted then AttemptSucceeded", kinds)
 	}
+	assertMeteredOnce(t, f, d.id, "SUCCEEDED")
 }
 
 // TestResultWaitingOnAReclaimStaysFenced is the other side of waiting instead
@@ -260,6 +261,8 @@ func TestResultWaitingOnAReclaimStaysFenced(t *testing.T) {
 	if terminal != 1 {
 		t.Errorf("terminal events = %d (%v), want exactly 1", terminal, f.eventKinds(d.id))
 	}
+	// Metered by the reclaim that won, and not again by the fenced result.
+	assertMeteredOnce(t, f, d.id, "LOST")
 }
 
 // TestResultBusyPastTheLockTimeoutIsRetryable bounds the wait. A holder that
@@ -304,6 +307,9 @@ func TestResultBusyPastTheLockTimeoutIsRetryable(t *testing.T) {
 	if s := f.attemptState(d.id); s != "DISPATCHED" {
 		t.Fatalf("attempt state = %s, want untouched DISPATCHED", s)
 	}
+	if n := f.ledgerRows(d.id); n != 0 {
+		t.Fatalf("a busy report wrote %d ledger rows; nothing may be written when nothing was applied", n)
+	}
 
 	// The agent's resend, once the holder is gone, lands.
 	if err := holder.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
@@ -316,6 +322,12 @@ func TestResultBusyPastTheLockTimeoutIsRetryable(t *testing.T) {
 	if s := f.attemptState(d.id); s != "SUCCEEDED" {
 		t.Fatalf("attempt state = %s, want SUCCEEDED", s)
 	}
+	assertMeteredOnce(t, f, d.id, "SUCCEEDED")
+	// A duplicate resend (at-least-once delivery) is a no-op for the ledger.
+	if resp, err := d.apply(ctx); err != nil || resp.Applied {
+		t.Fatalf("duplicate resend = %+v, %v; want not applied", resp, err)
+	}
+	assertMeteredOnce(t, f, d.id, "SUCCEEDED")
 }
 
 // TestCancelIsNotSkippedWhileMarkStartedHoldsTheAttempt is the same race on
@@ -365,6 +377,7 @@ func TestCancelIsNotSkippedWhileMarkStartedHoldsTheAttempt(t *testing.T) {
 	if got := f.workerCommitted(worker).CPUMillis; got != 0 {
 		t.Errorf("committed cpu = %d, want 0 after cancel", got)
 	}
+	assertMeteredOnce(t, f, d.id, "CANCELLED")
 }
 
 // TestConcurrentStartAndResultNeverDropsTheResult races the real ReportStarted
@@ -425,8 +438,25 @@ func TestConcurrentStartAndResultNeverDropsTheResult(t *testing.T) {
 		if s := f.attemptState(d.id); s != "SUCCEEDED" {
 			t.Errorf("attempt %s state = %s, want SUCCEEDED", d.id, s)
 		}
+		assertMeteredOnce(t, f, d.id, "SUCCEEDED")
 	}
 	if got := f.workerCommitted(worker).CPUMillis; got != 0 {
 		t.Errorf("committed cpu = %d, want 0 after every result", got)
+	}
+}
+
+// assertMeteredOnce is the usage-ledger half of every race in this file and
+// liveness_race_integration_test.go: whatever path ended a dispatched attempt
+// (a result that waited for the row, a reclaim, a cancel, a dead-worker
+// sweep), it wrote exactly one ledger row, in the same transaction as the
+// terminal transition, with that transition's outcome (ADR-0021).
+func assertMeteredOnce(t *testing.T, f *fixture, id uuid.UUID, outcome string) {
+	t.Helper()
+	if n := f.ledgerRows(id); n != 1 {
+		t.Errorf("attempt %s has %d usage-ledger rows, want exactly 1", id, n)
+		return
+	}
+	if got := f.ledger(id).Outcome; got != outcome {
+		t.Errorf("attempt %s ledger outcome = %s, want %s", id, got, outcome)
 	}
 }
