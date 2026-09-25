@@ -2187,3 +2187,63 @@ than borrowing the index's order) but runs unindexed, and the scheduler logs a
 WARN. The scheduler detects migration 0023 at startup, not per claim, so a
 scheduler started before 0023 must be restarted to pick it up (OPERATIONS §15).
 
+
+### F99. Task logs were neither durable nor viewable, and the sweep would have deleted them — FIXED
+
+**Severity:** HIGH for operability. `GET …/attempts/{id}/logs` answered 501 on
+every deployment: the gateway declared a `LogStreamer` and `main.go` passed
+`nil`. Task output lived only in the attempt's work directory (subprocess
+`combined.log`), the container's own log (docker) or the pod log (kubernetes),
+and each executor's `Cleanup` deletes those. The runner's `streamLogs` copied
+up to 16 MiB into the *agent's* log, which is not per-attempt addressable or
+tenant-authorized -- and for subprocess it copied nothing, because `Logs()`
+opened the file once and read to the EOF that existed at start. The console's
+log pane used `EventSource`, which cannot send the `Authorization` header, so
+even a working endpoint would have answered 401.
+
+**Contract change (additive, ADR-0020).** One unary RPC,
+`WorkerService.ReportLogs(attempt_id, lease_token, chunks[], final)`, carrying
+chunk *metadata* only; `RegisterResponse.log_shipping` (field 6) advertises the
+policy. Migration 0025 adds `attempt_logs` and `attempt_log_chunks`, owned by
+the api-gateway (an addition to ADR-0011's matrix). Agents write chunk bytes
+directly to `<ns>/logs/<attempt_id>/` with their existing credentials, so the
+write path moves no payload through the control plane (ADR-0008). Old agents
+and old gateways both degrade to "no log recorded", stated by the API.
+
+**A latent data-loss trap, closed in the same change.** artifact-gc keys
+reachability on JSONB `blob.key` references. Log objects are named by the new
+tables, not by any `ResultRef`, so before this change every log object older
+than the grace period would have been classified an orphan and a deleting pass
+would have removed it. The log index is now a reference source
+(`LiveLogKeys`); compacted-away chunks and objects written by fenced attempts
+are ordinary orphans; `-log-retention` is opt-in and applies to logs only.
+
+**How it is held.**
+- `TestLogsOfASubprocessTaskAreReadableWhileRunningAndAfterCompletion` (real
+  Postgres + MinIO): the agent's Runner runs a subprocess task, the gateway's
+  worker server indexes it, the gateway reader serves 40 stream-tagged lines
+  *while the task is blocked*, then the final line, tail and a regex search
+  after it ends; it also asserts the log was `complete` at the moment
+  `ReportResult` arrived (finalization is fenced, so it must precede the
+  result).
+- `TestLogIndexFencingIdempotencyAndTenancy`: a stale token cannot index, a
+  redelivered chunk changes no counter, a key outside the attempt's own prefix
+  is refused (it would otherwise let a worker point the index at another
+  tenant's object), and a crashed agent's log reads back as `partial`.
+- `TestSweepCollectsOnlyOrphanedLogObjects` (real Postgres + MinIO, deleting
+  pass): live chunks and compacted objects kept; compacted-away chunks, a fenced
+  attempt's upload and a deleted run's log collected; retention collects only
+  outside the window.
+- Shipper unit tests pin the three load-bearing properties: writes never block
+  on a stalled store (drops are counted and marked), line numbers are
+  contiguous, and the cap keeps head and tail and says what it omitted.
+- Gateway tests: tail/page/filter, bounded and resumable search, SSE follow
+  with `Last-Event-ID` resume and an `end` event, plain text for the CLI, and
+  authorization (no credential 401, worker key 403, other tenant 403/404).
+
+**Not done, stated.** Redaction is wired but has no input: nothing resolves
+`SecretRef` values on the worker, so the resolver that is eventually added must
+feed `Runner.SecretValues`. `-check-refs` does not yet walk the log index.
+Kubernetes pod logs cannot separate streams and are tagged `combined`. The
+live tail is poll-based (≈ 2–3 s). Finding number chosen as the next free one
+on this branch; renumber on merge if another branch took F99.

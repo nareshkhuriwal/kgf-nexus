@@ -304,6 +304,18 @@ Design choices worth calling out:
 
 **Local write-ahead log.** Before a worker starts a task it records the intent locally; after the task finishes it records the outcome locally *before* reporting. If the agent crashes between task completion and successful report, it replays the outcome on restart instead of silently losing a completed result. This converts an expensive re-execution into a cheap re-report. §6.3.
 
+**Durable task logs.** The executor's stdout and stderr are tagged, numbered and
+sealed into NDJSON chunks that the agent writes directly to the result store
+under `<namespace>/logs/<attempt_id>/`; only chunk *metadata* crosses to the
+control plane, through the lease-fenced `ReportLogs` RPC, into a gateway-owned
+index (`attempt_logs`, `attempt_log_chunks`). Writes into the shipper never
+block the workload; a per-attempt cap keeps the head and the tail and records
+what it omitted; the log is finalized and compacted before the result is
+reported, while the lease is still valid. The gateway serves tail, pages,
+bounded search and a live follow from index plus range reads, and artifact-gc
+treats the index as a reference source. [ADR-0020](adr/0020-durable-task-logs.md),
+OPERATIONS §16.
+
 ### 3.4 Monorepo layout
 
 ```
@@ -1234,6 +1246,7 @@ service WorkerService {
   rpc ExtendLease    (ExtendLeaseRequest)  returns (ExtendLeaseResponse);
   rpc ReportResult   (ReportResultRequest) returns (Ack);
   rpc ReportProgress (ProgressRequest)     returns (Ack);   // task heartbeat
+  rpc ReportLogs     (ReportLogsRequest)   returns (Ack);   // log chunk index (ADR-0020)
 }
 
 message HeartbeatRequest {
@@ -1262,7 +1275,7 @@ GET    /v1/namespaces/{ns}/runs/{id}/events      history (SSE for live tail)
 POST   /v1/namespaces/{ns}/runs/{id}/cancel
 POST   /v1/namespaces/{ns}/runs/{id}/pause | /resume
 POST   /v1/namespaces/{ns}/runs/{id}/retry       retry from failed nodes
-GET    /v1/namespaces/{ns}/attempts/{id}/logs    stream
+GET    /v1/namespaces/{ns}/attempts/{id}/logs    tail | page | search (?q=) | SSE follow | text (ADR-0020)
 GET    /v1/namespaces/{ns}/workers               fleet view
 GET    /v1/namespaces/{ns}/workers/{id}          detail + the tasks running on it
 POST   /v1/namespaces/{ns}/workers/{id}/drain
