@@ -94,9 +94,10 @@ type API struct {
 	logs  LogStreamer
 	log   *slog.Logger
 	clock func() time.Time
-	// limiter is nil when rate limiting is disabled, which is the zero-config
-	// default and what keeps dev and the existing tests unchanged.
-	limiter *rateLimiter
+	// limits holds the per-address, auth-failure and per-credential buckets. Each
+	// is nil when disabled, which is the zero-config default and what keeps dev
+	// and the existing tests unchanged. See ratelimit.go.
+	limits gatewayLimiters
 	// schedules is nil when no schedule upstream is configured, in which case the
 	// schedule routes answer 501 rather than the gateway refusing to start. That
 	// keeps a gateway usable against a workflow-manager that predates schedules,
@@ -127,13 +128,20 @@ func New(db store.GWDB, auth *authn.Authenticator, wfm WorkflowManager, rm Resou
 	return &API{db: db, auth: auth, wfm: wfm, rm: rm, logs: logs, log: log, clock: time.Now}
 }
 
-// WithRateLimit enables per-credential rate limiting on every route.
+// WithRateLimit enables rate limiting on every route from the one
+// per-credential setting, deriving the per-address and auth-failure buckets
+// from it (GatewayRateLimitsFor).
 //
 // Opt-in rather than on by default so enabling it is a deliberate deployment
 // decision: a limit guessed wrong is itself an outage, and the right number
 // depends on the fleet's size and the console's poll interval.
 func (a *API) WithRateLimit(cfg RateLimitConfig) *API {
-	a.limiter = newRateLimiter(cfg, a.clock)
+	return a.WithRateLimits(GatewayRateLimitsFor(cfg))
+}
+
+// WithRateLimits enables the three gateway limiters with explicit settings.
+func (a *API) WithRateLimits(cfg GatewayRateLimits) *API {
+	a.limits = newGatewayLimiters(cfg, a.clock)
 	return a
 }
 
@@ -365,10 +373,20 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 // way to register a route.
 func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Request, authn.Principal)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Before authentication on purpose: an unauthenticated flood is exactly
-		// the case that needs limiting, and authenticating first would spend a
-		// database round trip per rejected request.
+		// Before authentication on purpose, and keyed on the client ADDRESS, not
+		// the presented credential: an unauthenticated flood is exactly the case
+		// that needs limiting, authenticating first would spend a database round
+		// trip per rejected request, and an unverified Authorization header is
+		// attacker-chosen, so keying on it handed out a fresh bucket per request.
 		if a.rateLimited(w, r) {
+			return
+		}
+		presented := authn.ExtractBearer(r.Header.Get("Authorization"))
+		// An address that has used up its failure budget may not try another
+		// credential until it refills. Only when one is presented: a request with
+		// no credential is not a guess, and a console loading its sign-in page
+		// must not lock its own address out.
+		if presented != "" && a.authAttemptBlocked(w, r) {
 			return
 		}
 		// AuthenticateCredential, not Authenticate: it dispatches on the credential's
@@ -376,8 +394,11 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 		// unchanged api_keys lookup. Every credential kind therefore passes through
 		// this one enforcement point, which is what keeps "who may do what"
 		// answerable by reading this function.
-		p, err := a.auth.AuthenticateCredential(r.Context(), authn.ExtractBearer(r.Header.Get("Authorization")))
+		p, err := a.auth.AuthenticateCredential(r.Context(), presented)
 		if errors.Is(err, authn.ErrUnauthenticated) {
+			if presented != "" {
+				a.recordAuthFailure(r, presented)
+			}
 			// No detail about WHY. Distinguishing "no such key" from "revoked"
 			// would make this endpoint an oracle for probing valid keys.
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "valid credentials are required")
@@ -388,6 +409,12 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 			// client to retry rather than to rotate its credential.
 			a.log.ErrorContext(r.Context(), "authentication backend failed", "error", err)
 			writeError(w, http.StatusServiceUnavailable, "unavailable", "authentication is temporarily unavailable")
+			return
+		}
+		// Only now, with a verified principal, the per-credential bucket, keyed by
+		// the credential's ID. Before authorization, so a principal hammering routes
+		// it may not use still spends its own allowance.
+		if a.credentialRateLimited(w, p) {
 			return
 		}
 
