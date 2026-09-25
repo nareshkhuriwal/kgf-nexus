@@ -43,6 +43,23 @@ type restDB struct {
 	// version list because the query under test is EXISTS: a schedule needs the
 	// name to be inhabited and has no interest in which versions inhabit it.
 	specs map[string]bool
+	// runs and nodes back the run read and node listing the retry handler makes
+	// before it asks the owner; keyed "ns\x00id" and by run id respectively. A
+	// run absent here reads as not found in that namespace.
+	runs  map[string]store.RunRow
+	nodes map[string][]store.NodeRow
+}
+
+// addRun seeds a run and its nodes (node id -> state).
+func (d *restDB) addRun(ns, id, state string, nodes map[string]string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.runs[ns+"\x00"+id] = store.RunRow{ID: id, Namespace: ns, State: state, CreatedAt: time.Now()}
+	var rows []store.NodeRow
+	for n, st := range nodes {
+		rows = append(rows, store.NodeRow{NodeID: n, State: st})
+	}
+	d.nodes[id] = rows
 }
 
 type idemRow struct {
@@ -51,7 +68,8 @@ type idemRow struct {
 }
 
 func newRestDB() *restDB {
-	return &restDB{keys: map[string][4]string{}, idem: map[string]*idemRow{}, specs: map[string]bool{}}
+	return &restDB{keys: map[string][4]string{}, idem: map[string]*idemRow{}, specs: map[string]bool{},
+		runs: map[string]store.RunRow{}, nodes: map[string][]store.NodeRow{}}
 }
 
 // addSpec declares that a workflow name exists in a namespace.
@@ -119,6 +137,14 @@ func (d *restDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row 
 		return valueRow{[]any{row.requestHash, []byte(row.response)}}
 	// The schedule create path's existence check. Matched on the FROM clause
 	// rather than on "EXISTS", so it keeps working if the query is reformatted.
+	// GatewayGetRun: the run select joined to its spec, scoped by namespace.
+	// Checked before the spec lookup below, whose FROM clause it also contains.
+	case strings.Contains(sql, "FROM workflow_runs r"):
+		run, ok := d.runs[args[0].(string)+"\x00"+args[1].(string)]
+		if !ok {
+			return errRow{pgx.ErrNoRows}
+		}
+		return runScanRow{run}
 	case strings.Contains(sql, "FROM workflow_specs"):
 		return valueRow{[]any{d.specs[args[0].(string)+"\x00"+args[1].(string)]}}
 	}
@@ -126,7 +152,46 @@ func (d *restDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row 
 }
 
 func (d *restDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if strings.Contains(sql, "FROM task_nodes") {
+		return &nodeScanRows{rows: d.nodes[args[0].(string)], i: -1}, nil
+	}
 	return nil, fmt.Errorf("restDB: unhandled Query: %s", sql)
+}
+
+// runScanRow scans a store.RunRow in the column order of store's runSelect.
+type runScanRow struct{ r store.RunRow }
+
+func (r runScanRow) Scan(dest ...any) error {
+	if len(dest) != 14 {
+		return fmt.Errorf("run scan wants 14 destinations, got %d", len(dest))
+	}
+	*dest[0].(*string), *dest[1].(*string), *dest[2].(*string) = r.r.ID, r.r.SpecID, r.r.SpecName
+	*dest[3].(*int32), *dest[4].(*string), *dest[5].(*string) = r.r.SpecVersion, r.r.Namespace, r.r.State
+	*dest[6].(*int32), *dest[7].(*string), *dest[8].(*[]byte) = r.r.Priority, r.r.TriggerKind, r.r.Params
+	*dest[9].(**time.Time), *dest[10].(*time.Time) = r.r.DeadlineAt, r.r.CreatedAt
+	*dest[11].(**time.Time), *dest[12].(**time.Time), *dest[13].(*int64) = r.r.StartedAt, r.r.EndedAt, r.r.StateVersion
+	return nil
+}
+
+// nodeScanRows serves store.GatewayListRunNodes. Only the methods that
+// function uses do anything.
+type nodeScanRows struct {
+	pgx.Rows
+	rows []store.NodeRow
+	i    int
+}
+
+func (n *nodeScanRows) Next() bool { n.i++; return n.i < len(n.rows) }
+func (n *nodeScanRows) Err() error { return nil }
+func (n *nodeScanRows) Close()     {}
+func (n *nodeScanRows) Scan(dest ...any) error {
+	row := n.rows[n.i]
+	*dest[0].(*string), *dest[1].(*string), *dest[2].(*string) = row.NodeID, row.TaskRef, row.State
+	*dest[3].(*string), *dest[4].(*int32), *dest[5].(*int32) = row.TriggerRule, row.MaxAttempts, row.AttemptsUsed
+	*dest[6].(**int32), *dest[7].(**string) = row.MapIndex, row.ParentNodeID
+	return nil
 }
 
 func (d *restDB) Begin(ctx context.Context) (pgx.Tx, error) {
@@ -174,6 +239,15 @@ type fakeWFM struct {
 	// specDeletes records what reached the owner, so a test can prove a refusal
 	// was produced by the owner rather than short-circuited in the gateway.
 	specDeletes []string
+	// retries records every retry that reached the owner, and retryFn chooses
+	// its answer; nil answers the run-state conflict a non-retryable run gets.
+	retries []retryCall
+	retryFn func(nodes []string) (store.RunRow, error)
+}
+
+type retryCall struct {
+	ns, id, actor string
+	nodes         []string
 }
 
 func (f *fakeWFM) DeleteSpec(_ context.Context, ns, name string) (int, error) {
@@ -223,7 +297,13 @@ func (f *fakeWFM) PauseRun(ctx context.Context, ns, id string) (store.RunRow, er
 func (f *fakeWFM) ResumeRun(ctx context.Context, ns, id string) (store.RunRow, error) {
 	return store.RunRow{ID: id, State: "RUNNING"}, nil
 }
-func (f *fakeWFM) RetryRun(ctx context.Context, ns, id string) (store.RunRow, error) {
+func (f *fakeWFM) RetryRun(ctx context.Context, ns, id string, nodes []string, actor string) (store.RunRow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.retries = append(f.retries, retryCall{ns: ns, id: id, nodes: nodes, actor: actor})
+	if f.retryFn != nil {
+		return f.retryFn(nodes)
+	}
 	return store.RunRow{}, store.ErrRunStateConflict
 }
 
@@ -577,7 +657,8 @@ func TestLifecycleEndpointsMapStates(t *testing.T) {
 // TestLifecycleConflictIs409: an operator who retries a run that is not retryable must
 // be told it did not apply, not given a silent success.
 func TestLifecycleConflictIs409(t *testing.T) {
-	h, _, _ := newTestAPI(t)
+	h, db, _ := newTestAPI(t)
+	db.addRun("team-ml", "run-1", "SUCCEEDED", map[string]string{"a": "SUCCEEDED"})
 	rec := post(t, h, "/v1/namespaces/team-ml/runs/run-1/retry", adminKey, "", "")
 	if rec.Code != http.StatusConflict {
 		t.Errorf("retrying a non-retryable run: status %d, want 409. body=%s", rec.Code, rec.Body)

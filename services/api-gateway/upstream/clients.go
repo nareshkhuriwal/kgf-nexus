@@ -179,8 +179,16 @@ func (c *WorkflowManagerClient) ResumeRun(ctx context.Context, namespace, runID 
 	return c.lifecycle(ctx, namespace, "ResumeRun", runID)
 }
 
-func (c *WorkflowManagerClient) RetryRun(ctx context.Context, namespace, runID string) (store.RunRow, error) {
-	return c.lifecycle(ctx, namespace, "RetryRun", runID)
+// RetryRun retries a failed run through its owner: from the named nodes, or
+// from every node that did not succeed when nodes is empty.
+func (c *WorkflowManagerClient) RetryRun(ctx context.Context, namespace, runID string, nodes []string, actor string) (store.RunRow, error) {
+	if c.grpc == nil {
+		return store.RunRow{}, fmt.Errorf("RetryRun: %w (workflow-manager owns workflow_runs)", ErrUpstreamNotConfigured)
+	}
+	if _, err := c.grpc.retry(ctx, runID, nodes, actor); err != nil {
+		return store.RunRow{}, err
+	}
+	return store.GatewayGetRun(ctx, c.db, namespace, runID)
 }
 
 func (c *WorkflowManagerClient) lifecycle(ctx context.Context, namespace, op, runID string) (store.RunRow, error) {

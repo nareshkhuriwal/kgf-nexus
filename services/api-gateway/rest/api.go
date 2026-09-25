@@ -43,7 +43,10 @@ type WorkflowManager interface {
 	CancelRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
 	PauseRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
 	ResumeRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
-	RetryRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
+	// RetryRun retries a failed run from the named nodes, or from every node
+	// that did not succeed when nodes is empty. actor attributes the retry in
+	// the run's history.
+	RetryRun(ctx context.Context, namespace, runID string, nodes []string, actor string) (store.RunRow, error)
 }
 
 // ResourceManagerAPI is the resource-manager's API as the gateway needs it.
@@ -1005,10 +1008,6 @@ func (a *API) pauseRun(w http.ResponseWriter, r *http.Request, _ authn.Principal
 
 func (a *API) resumeRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
 	a.lifecycle(w, r, "resume", a.wfm.ResumeRun)
-}
-
-func (a *API) retryRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
-	a.lifecycle(w, r, "retry", a.wfm.RetryRun)
 }
 
 func (a *API) lifecycle(w http.ResponseWriter, r *http.Request, op string, fn func(context.Context, string, string) (store.RunRow, error)) {
