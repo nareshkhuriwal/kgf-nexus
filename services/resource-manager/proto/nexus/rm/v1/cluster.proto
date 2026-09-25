@@ -127,6 +127,28 @@ message ReportObservationsRequest {
   repeated string complete_kinds = 8;
   repeated ObservedObject objects = 9;
   string last_error = 10;
+  // ADR-0031: the cluster's placement labels (operator-declared plus observed
+  // region/provider), stored in cluster_status.labels. Replaced only when
+  // labels_reported is set, so an older controller leaves them alone.
+  map<string, string> labels = 11;
+  bool labels_reported = 12;
+  // ADR-0031 §3: remaining ResourceQuota room per task namespace, observed
+  // now. Replaced only when headroom_reported is set.
+  repeated NamespaceHeadroom headroom = 13;
+  bool headroom_reported = 14;
+}
+
+// NamespaceHeadroom is min(hard - used) over a namespace's ResourceQuotas, per
+// resource. A resource no quota constrains is absent (unbounded), not zero.
+message NamespaceHeadroom {
+  string namespace = 1;
+  // -1 = unbounded.
+  int64 cpu_millis = 2;
+  int64 memory_bytes = 3;
+  int64 gpu_count = 4;
+  int64 pods = 5;
+  // Extended resources other than the GPU, e.g. nvidia.com/mig-1g.10gb.
+  map<string, int64> extended = 6;
 }
 
 message ReportObservationsResponse { int64 desired_revision = 1; }

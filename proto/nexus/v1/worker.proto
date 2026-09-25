@@ -108,6 +108,16 @@ message HeartbeatRequest {
   ResourceVector free_capacity = 3;
   double cpu_utilization = 4;
   double memory_utilization = 5;
+  // Non-empty when the agent has stopped taking work on its own, e.g.
+  // "eviction:aws" after a spot interruption notice (ADR-0030). The gateway
+  // moves an ACTIVE worker to DRAINING so the push path stops too.
+  string drain_reason = 60;
+  // Artifact keys in the agent's node-local cache, most recently used first,
+  // at most 256 (ADR-0030 §4). Only meaningful when cached_artifacts_reported
+  // is set, which distinguishes "an empty cache" from "an agent that predates
+  // the field".
+  repeated string cached_artifacts = 61;
+  bool cached_artifacts_reported = 62;
 }
 
 message HeartbeatResponse {

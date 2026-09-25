@@ -240,8 +240,13 @@ type HeartbeatWorkerRequest struct {
 	// without the grace the leak detector becomes a leak generator by cancelling
 	// work the instant it is scheduled.
 	ReconcileGraceMs int64 `protobuf:"varint,3,opt,name=reconcile_grace_ms,json=reconcileGraceMs,proto3" json:"reconcile_grace_ms,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// ADR-0030 §4: the agent's cached artifact keys, stored on the worker row
+	// only when reported (an older gateway or agent sends nothing, and the
+	// stored set is then left alone).
+	CachedArtifacts         []string `protobuf:"bytes,10,rep,name=cached_artifacts,json=cachedArtifacts,proto3" json:"cached_artifacts,omitempty"`
+	CachedArtifactsReported bool     `protobuf:"varint,11,opt,name=cached_artifacts_reported,json=cachedArtifactsReported,proto3" json:"cached_artifacts_reported,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *HeartbeatWorkerRequest) Reset() {
@@ -293,6 +298,20 @@ func (x *HeartbeatWorkerRequest) GetReconcileGraceMs() int64 {
 		return x.ReconcileGraceMs
 	}
 	return 0
+}
+
+func (x *HeartbeatWorkerRequest) GetCachedArtifacts() []string {
+	if x != nil {
+		return x.CachedArtifacts
+	}
+	return nil
+}
+
+func (x *HeartbeatWorkerRequest) GetCachedArtifactsReported() bool {
+	if x != nil {
+		return x.CachedArtifactsReported
+	}
+	return false
 }
 
 type HeartbeatWorkerResponse struct {
@@ -1302,11 +1321,14 @@ const file_nexus_rm_v1_rm_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"5\n" +
 	"\x16RegisterWorkerResponse\x12\x1b\n" +
-	"\tworker_id\x18\x01 \x01(\tR\bworkerId\"\x93\x01\n" +
+	"\tworker_id\x18\x01 \x01(\tR\bworkerId\"\xfa\x01\n" +
 	"\x16HeartbeatWorkerRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12.\n" +
 	"\x13running_attempt_ids\x18\x02 \x03(\tR\x11runningAttemptIds\x12,\n" +
-	"\x12reconcile_grace_ms\x18\x03 \x01(\x03R\x10reconcileGraceMs\"\xaa\x01\n" +
+	"\x12reconcile_grace_ms\x18\x03 \x01(\x03R\x10reconcileGraceMs\x12)\n" +
+	"\x10cached_artifacts\x18\n" +
+	" \x03(\tR\x0fcachedArtifacts\x12:\n" +
+	"\x19cached_artifacts_reported\x18\v \x01(\bR\x17cachedArtifactsReported\"\xaa\x01\n" +
 	"\x17HeartbeatWorkerResponse\x124\n" +
 	"\breleased\x18\x01 \x03(\v2\x18.nexus.rm.v1.ReservationR\breleased\x126\n" +
 	"\tcommitted\x18\x02 \x01(\v2\x18.nexus.v1.ResourceVectorR\tcommitted\x12!\n" +

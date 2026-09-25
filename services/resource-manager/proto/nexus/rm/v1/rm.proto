@@ -91,6 +91,11 @@ message HeartbeatWorkerRequest {
   // without the grace the leak detector becomes a leak generator by cancelling
   // work the instant it is scheduled.
   int64 reconcile_grace_ms = 3;
+  // ADR-0030 §4: the agent's cached artifact keys, stored on the worker row
+  // only when reported (an older gateway or agent sends nothing, and the
+  // stored set is then left alone).
+  repeated string cached_artifacts = 10;
+  bool cached_artifacts_reported = 11;
 }
 
 message HeartbeatWorkerResponse {
