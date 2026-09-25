@@ -2696,3 +2696,52 @@ uid 1000 with a read-only root filesystem: it moved `$G`, left `NEXUS` untouched
 and did nothing on a second run. On docker-desktop the upgraded StatefulSet
 retired the stranded store and the broker stopped restarting (see the commit
 that records this finding).
+
+### F118. `POST /specs?dry_run=true` registered the spec — FIXED
+
+**Severity:** HIGH for anyone following the documentation. `nexusctl workflow
+submit --dry-run` ("validate only; do not register. Use this in CI") and the
+SDK's `validate_spec` both send `?dry_run=true`, but the gateway's `submitSpec`
+never read the parameter: it compiled, validated and then called `PutSpec`
+exactly as for a real submit. Every CI validation of a changed spec therefore
+registered a new version, and the CLI printed "Dry run: nothing was registered."
+over a version that had just been created.
+
+Found while building `workflow submit --watch --dry-run`, which would have
+turned every editor save into a registered version.
+
+**Fix.** `submitSpec` honours `dry_run=true` after every check a real submit
+runs (compile, JSON Schema, DAG semantics, namespace match) and before `PutSpec`.
+It answers 200 with `{valid, dry_run, name, namespace, spec_hash, task_count}`
+and no `version`, since none was created. An invalid spec still gets the 422
+with its `problems` list. `TestSubmitSpecDryRunValidatesWithoutStoring` asserts
+the owner's store is never reached, that the reported hash is the one a real
+submit then stores, and that invalid and namespace-mismatched specs still fail.
+
+The CLI also surfaced only "spec failed validation" for a 422, because it read
+`details` and the validator sends `problems`. It now prints one line per problem
+(`/tasks/0/resources: cpu required`), capped at 20.
+
+### F119. Backfill pause, resume and cancel have no from-state guard — OPEN
+
+**Severity:** MEDIUM. `store.WFMSetBackfillState` updates `state` by id and
+namespace with no condition on the current state, and `PauseBackfill`,
+`ResumeBackfill` and `CancelBackfill` call it directly. So `resume` on a
+COMPLETED, CANCELLED or FAILED backfill sets it back to RUNNING, clears
+`ended_at`, and the driver starts generating runs again: a cancel is not final,
+although the API and console describe it as permanent. `pause` on a finished
+backfill likewise un-finishes it.
+
+**Mitigation in this change (client side only).** `nexusctl backfill
+pause|resume|cancel` and the SDK's `pause_backfill`/`resume_backfill`/
+`cancel_backfill` read the backfill first and refuse a transition that is not
+RUNNING<->PAUSED or {RUNNING,PAUSED}->CANCELLED (exit code 5 / `Conflict`),
+without sending the action. This is read-then-act and so racy, and the console
+and direct API callers are not covered.
+
+**Proposed fix.** Add `AND state = ANY($allowed)` to the UPDATE for operator
+actions (pause: RUNNING; resume: PAUSED; cancel: RUNNING or PAUSED), return a
+distinct `ErrBackfillStateConflict` when no row matches but the backfill exists,
+and map it to 409 `backfill_state_conflict` in `failBackfill`, as `lifecycle`
+already does for runs. The driver's own completion path keeps its unconditional
+transition.
