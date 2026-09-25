@@ -195,8 +195,8 @@ jobs:
           set -euo pipefail
           d=sha256:$(printf '%064d' 1)
           for mode in base apply; do
-            NAMESPACE=ci AGENT_IMAGE=ci.example/nexus/agent@$d \
-              deploy/scripts/cluster-controller-overlay.sh "$mode" ci.example/nexus/cluster-controller@$d >/dev/null
+            NAMESPACE=ci AGENT_IMAGE="ci.example/nexus/agent@$d" \
+              deploy/scripts/cluster-controller-overlay.sh "$mode" "ci.example/nexus/cluster-controller@$d" >/dev/null
           done
 
   # The operator console: typecheck, component tests and the production build.
