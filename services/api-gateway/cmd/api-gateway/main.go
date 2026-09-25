@@ -38,6 +38,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/rest"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/sessions"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/upstream"
@@ -124,8 +125,14 @@ func run() error {
 	}
 	defer schedClient.Close()
 
+	// Durable task logs (ADR-0020). The gateway reads log objects from the result
+	// store, so it needs read credentials; without them the route answers 501
+	// and agents are told not to ship, rather than filling a store nobody can
+	// read back.
+	logStreamer, logShipping := logBackend(cfg, db, log)
+
 	// ── REST listener ─────────────────────────────────────────────────────
-	api := rest.New(db, auth, wfmClient, rmClient, nil, log).
+	api := rest.New(db, auth, wfmClient, rmClient, logStreamer, log).
 		// The same client serves both: schedule writes go through workflow-manager
 		// because it owns the table, and it already holds the connection.
 		WithSchedules(wfmClient).
@@ -228,6 +235,7 @@ func run() error {
 		Region:               cfg.ResultStoreRegion,
 		InlineThresholdBytes: cfg.InlineThresholdBytes,
 	}
+	wcfg.LogShipping = logShipping
 	nexusv1.RegisterWorkerServiceServer(workerSrv,
 		workergrpc.NewServer(db, rmClient, schedClient, wcfg, log))
 
@@ -357,6 +365,17 @@ type config struct {
 	// front door minting thousands of sessions an hour.
 	SessionSweepInterval time.Duration
 	SessionSweepLimit    int
+
+	// Result-store READ credentials for serving logs (ADR-0020). The same
+	// variables the agent reads, so compose needs no new settings.
+	ResultStoreAccessKey string
+	ResultStoreSecretKey string
+	ResultStoreUseTLS    bool
+	// LogShipping turns durable task logs on (default) or off.
+	LogShipping        bool
+	LogMaxBytes        int64
+	LogChunkBytes      int64
+	LogFlushIntervalMs int
 }
 
 func loadConfig() config {
@@ -384,6 +403,14 @@ func loadConfig() config {
 		SessionSweepInterval: time.Duration(envInt("NEXUS_SESSION_SWEEP_INTERVAL_SEC",
 			int(sessions.DefaultInterval/time.Second))) * time.Second,
 		SessionSweepLimit: envInt("NEXUS_SESSION_SWEEP_LIMIT", sessions.DefaultBatchLimit),
+
+		ResultStoreAccessKey: env("NEXUS_S3_ACCESS_KEY_ID", ""),
+		ResultStoreSecretKey: env("NEXUS_S3_SECRET_ACCESS_KEY", ""),
+		ResultStoreUseTLS:    envBool("NEXUS_S3_USE_TLS", false),
+		LogShipping:          envBool("NEXUS_LOG_SHIPPING", true),
+		LogMaxBytes:          int64(envInt("NEXUS_LOG_MAX_BYTES_PER_ATTEMPT", 64<<20)),
+		LogChunkBytes:        int64(envInt("NEXUS_LOG_CHUNK_BYTES", 256<<10)),
+		LogFlushIntervalMs:   envInt("NEXUS_LOG_FLUSH_INTERVAL_MS", 2000),
 	}
 }
 
@@ -404,6 +431,35 @@ func publicHandler(api http.Handler, hc *health.Handler, m *metrics.HTTPMetrics)
 	mux.Handle("/v1/", api)
 	hc.Routes(mux)
 	return m.Middleware(mux)
+}
+
+// logBackend builds the log reader and the policy advertised to agents. Both
+// are off together: an agent is told to ship only when this gateway can serve
+// what it ships.
+func logBackend(cfg config, db store.GWDB, log *slog.Logger) (rest.LogStreamer, *nexusv1.LogShippingConfig) {
+	if !cfg.LogShipping {
+		log.Warn("durable task logs are DISABLED (NEXUS_LOG_SHIPPING=false); agents will not ship logs and the logs route answers 501")
+		return nil, nil
+	}
+	reader, err := logs.NewMinIOReader(logs.MinIOConfig{
+		Endpoint: cfg.ResultStoreEndpoint, Bucket: cfg.ResultStoreBucket, Region: cfg.ResultStoreRegion,
+		AccessKeyID: cfg.ResultStoreAccessKey, SecretAccessKey: cfg.ResultStoreSecretKey, UseTLS: cfg.ResultStoreUseTLS,
+	})
+	if err != nil {
+		log.Warn("durable task logs are unavailable: the gateway cannot read the result store; agents will not ship logs and the logs route answers 501",
+			"error", err, "fix", "set NEXUS_S3_ACCESS_KEY_ID and NEXUS_S3_SECRET_ACCESS_KEY (a read-only credential scoped to */logs/* is enough)")
+		return nil, nil
+	}
+	policy := &nexusv1.LogShippingConfig{
+		Enabled:            true,
+		MaxBytesPerAttempt: cfg.LogMaxBytes,
+		ChunkBytes:         cfg.LogChunkBytes,
+		FlushIntervalMs:    int32(cfg.LogFlushIntervalMs),
+	}
+	log.Info("durable task logs enabled", "bucket", cfg.ResultStoreBucket,
+		"max_bytes_per_attempt", cfg.LogMaxBytes, "chunk_bytes", cfg.LogChunkBytes,
+		"flush_interval_ms", cfg.LogFlushIntervalMs)
+	return logs.NewReader(logs.StoreIndex{DB: db}, reader, logs.Limits{}), policy
 }
 
 func newLogger() *slog.Logger {

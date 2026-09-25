@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/spec"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -55,13 +56,16 @@ type ResourceManagerAPI interface {
 	Capacity(ctx context.Context, namespace string) (CapacityReport, error)
 }
 
-// LogStreamer resolves an attempt's logs.
+// LogStreamer reads an attempt's durable log (ADR-0020).
 //
-// Logs live in the result store, NOT in the metadata store, and are streamed
-// through rather than buffered: task payloads never transit the control plane
-// (invariant 6), and an attempt's log can be gigabytes.
+// The bytes live in the result store, NOT in the metadata store; the index in
+// Postgres says where each line is. Implemented by *logs.Reader. Every method
+// is bounded, so a gigabyte log costs a page, not the gateway.
 type LogStreamer interface {
-	StreamAttemptLogs(ctx context.Context, namespace, attemptID string, w http.ResponseWriter) error
+	Summary(ctx context.Context, attemptID, attemptState string) (store.AttemptLogRow, bool, logs.Status, error)
+	ReadLines(ctx context.Context, attemptID string, row store.AttemptLogRow, from int64, limit int) (logs.Page, error)
+	Search(ctx context.Context, attemptID string, row store.AttemptLogRow, q logs.SearchQuery) (logs.SearchResult, error)
+	Limits() logs.Limits
 }
 
 // CreateRunRequest is the run-creation call.
@@ -1188,25 +1192,6 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request, runID string,
 }
 
 // ── attempts, workers, capacity ───────────────────────────────────────────
-
-func (a *API) attemptLogs(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
-	ns, id := r.PathValue("ns"), r.PathValue("id")
-	// Namespace-scoped existence check before streaming anything, so logs are not
-	// readable across tenants by attempt UUID.
-	if _, err := store.GatewayGetAttempt(r.Context(), a.db, ns, id); err != nil {
-		a.fail(w, r, "get attempt", err)
-		return
-	}
-	if a.logs == nil {
-		writeError(w, http.StatusNotImplemented, "logs_unavailable", "no log backend is configured")
-		return
-	}
-	if err := a.logs.StreamAttemptLogs(r.Context(), ns, id, w); err != nil {
-		// Headers may already be written, so this cannot become a clean error
-		// response; log it and let the truncated stream speak for itself.
-		a.log.ErrorContext(r.Context(), "attempt log stream failed", "attempt_id", id, "error", err)
-	}
-}
 
 func (a *API) listWorkers(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
 	rows, err := store.GatewayListWorkers(r.Context(), a.db, r.PathValue("ns"))

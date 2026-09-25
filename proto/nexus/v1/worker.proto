@@ -36,6 +36,14 @@ service WorkerService {
   // wedged, and distinguishing these lets us time out the task, not the worker.
   rpc ReportProgress(ReportProgressRequest) returns (Ack);
   rpc ReportResult(ReportResultRequest) returns (Ack);
+  // Indexes log chunks the agent has ALREADY written to the result store under
+  // <namespace>/logs/<attempt_id>/ (ADR-0020). Carries metadata only: chunk
+  // bytes never transit the control plane (ADR-0008). Fenced like every other
+  // attempt RPC, so a stale lease cannot add to an attempt's log. Idempotent by
+  // (attempt_id, seq): a redelivered chunk is a no-op. A gateway that predates
+  // this RPC answers UNIMPLEMENTED; agents only call it when RegisterResponse
+  // advertised log_shipping.enabled.
+  rpc ReportLogs(ReportLogsRequest) returns (Ack);
 }
 
 message RegisterRequest {
@@ -59,6 +67,25 @@ message RegisterResponse {
   int32 heartbeat_interval_ms = 3;
   int32 lease_ttl_ms = 4;
   ResultStoreConfig result_store = 5;
+  // Absent (or enabled=false) from a gateway that cannot index logs; the agent
+  // then ships nothing rather than uploading objects nobody can read (ADR-0020).
+  LogShippingConfig log_shipping = 6;
+}
+
+// LogShippingConfig is the control plane's log policy for this session. The
+// control plane owns it for the same reason it owns the lease TTL: a per-host
+// cap would make the retention an operator sized for depend on which worker a
+// task happened to land on.
+message LogShippingConfig {
+  bool enabled = 1;
+  // Cap on encoded log bytes shipped per attempt. Past it the agent keeps a
+  // bounded tail and records the omission explicitly. 0 = agent default.
+  int64 max_bytes_per_attempt = 2;
+  // Seal a chunk once it reaches this many bytes. 0 = agent default.
+  int64 chunk_bytes = 3;
+  // Seal a non-empty chunk at least this often, which bounds live-tail latency.
+  // 0 = agent default.
+  int32 flush_interval_ms = 4;
 }
 
 message ResultStoreConfig {
@@ -184,4 +211,50 @@ message Ack {
   bool accepted = 1;
   // Populated when accepted=false, e.g. "stale_lease_token".
   string reason = 2;
+}
+
+message ReportLogsRequest {
+  string attempt_id = 1;
+  string lease_token = 2;
+  // Chunks in seq order. Every key must be under <namespace>/logs/<attempt_id>/.
+  repeated LogChunk chunks = 3;
+  // Set exactly once, on the last report for the attempt, before ReportResult.
+  LogFinal final = 4;
+}
+
+// LogChunk describes one NDJSON object the agent wrote. Records inside carry a
+// line number that is contiguous from 1 per attempt, so (first_line,
+// line_count) locates any line without reading other chunks.
+message LogChunk {
+  // 0-based, contiguous per attempt.
+  int64 seq = 1;
+  string key = 2;
+  // 1-based number of the chunk's first record.
+  int64 first_line = 3;
+  int64 line_count = 4;
+  // Offset of this chunk within the concatenation of all chunks in seq order,
+  // which is exactly the compacted object's layout -- so the index stays valid
+  // after compaction and a read becomes a range request.
+  int64 byte_offset = 5;
+  int64 size_bytes = 6;
+  string sha256 = 7;
+  // Agent clock; informational only (invariant 7).
+  int64 first_ts_unix_ms = 8;
+  int64 last_ts_unix_ms = 9;
+}
+
+message LogFinal {
+  // The compacted object, or empty when compaction could not be uploaded (the
+  // chunks remain the source of truth then).
+  string compacted_key = 1;
+  string compacted_sha256 = 2;
+  int64 total_lines = 3;
+  int64 total_bytes = 4;
+  // Lines/bytes omitted by the per-attempt cap.
+  int64 truncated_lines = 5;
+  int64 truncated_bytes = 6;
+  // Lines lost to shipping backpressure (object store or control plane
+  // unreachable for long enough that the bounded buffer filled).
+  int64 dropped_lines = 7;
+  int64 chunk_count = 8;
 }

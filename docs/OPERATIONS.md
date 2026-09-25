@@ -5,7 +5,7 @@
 **Scope:** Postgres backup and restore, the artifact (MinIO result store) backup
 and restore and the ordering between the two stores, the restore drills and their
 measured results, what these procedures do *not* cover, the RPO/RTO the approach
-actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), and operator retry of a failed run (§18).
+actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), and durable task logs: retention and sizing (§19).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -1765,3 +1765,124 @@ Roll the dag-engine and scheduler back first (they read the column), then run
 `0026_node_retry_floor.down.sql` by hand (§6.4). Runs that were retried by node
 lose the record of which attempts were superseded; an older engine derives those
 nodes from their latest attempt, as it always did.
+
+---
+
+## 19. Durable task logs: retention and sizing
+
+Design: [ADR-0020](adr/0020-durable-task-logs.md). Agents write each attempt's
+stdout/stderr as NDJSON chunks directly to the result store under
+`<namespace>/logs/<attempt_id>/`, index them through the lease-fenced
+`ReportLogs` RPC (tables `attempt_logs`, `attempt_log_chunks`, migration 0025),
+and on completion upload one compacted `log.ndjson`. The gateway serves
+`GET /v1/namespaces/{ns}/attempts/{id}/logs` from the index plus range reads of
+the store; `nexusctl logs <attempt> [-f] [--tail N]`, the SDK's `get_logs` /
+`search_logs` and the console's log pane all use it.
+
+### 19.1 Enabling it
+
+Log shipping is ON when the gateway can read the result store. It reads the same
+variables as the agent, which compose (`x-minio-env`) and Helm
+(`nexus.resultStoreEnv`) already give it:
+
+| Setting (api-gateway) | Default | Meaning |
+|---|---|---|
+| `NEXUS_S3_ACCESS_KEY_ID`, `NEXUS_S3_SECRET_ACCESS_KEY` | unset | READ credentials for log objects. Unset: the logs route answers 501 and agents are told not to ship. |
+| `NEXUS_RESULT_STORE_ENDPOINT`, `_BUCKET`, `_REGION`, `NEXUS_S3_USE_TLS` | compose values | Where logs are read from; identical to where agents write. |
+| `NEXUS_LOG_SHIPPING` | `true` | `false` turns the feature off fleet-wide (501 + no shipping). |
+| `NEXUS_LOG_MAX_BYTES_PER_ATTEMPT` | 64 MiB | Per-attempt cap on shipped (encoded) bytes. Past it the head is kept, the last 2 MiB is kept, and the omission is written into the log and the index. |
+| `NEXUS_LOG_CHUNK_BYTES` | 256 KiB | A chunk is sealed at this size (agents clamp to 4 MiB; the gateway refuses > 8 MiB). |
+| `NEXUS_LOG_FLUSH_INTERVAL_MS` | 2000 | A non-empty chunk is sealed at least this often. This is the live-tail latency, and the per-attempt ReportLogs rate (see §19.3). Agents slow to 5× this after 300 chunks. |
+
+The policy is sent to agents in `RegisterResponse.log_shipping`, so a change
+takes effect as agents re-register (restart or `REREGISTER`), not per host.
+
+The startup line `durable task logs enabled` (or the WARN explaining why they
+are not) is the first thing to check. Agents log `durable task logs enabled`
+at registration and `attempt log shipped` (lines, bytes, chunks, finalized,
+truncated/dropped counts) per attempt.
+
+**Credential scoping (recommended for production).** The gateway needs only
+`s3:GetObject` on `arn:aws:s3:::<bucket>/*/logs/*`. Workers need `s3:PutObject`
+on `<bucket>/<their namespace>/logs/*` in addition to their existing output
+prefix. The agent refuses to write a log key outside its own namespace's
+`logs/` prefix, and the gateway refuses to index one, so a mis-scoped
+credential cannot be used through Nexus to read or index another tenant's
+objects -- but scoping the credential is what bounds a compromised host.
+
+**Upgrade order.** 0025 first (additive), then gateways, then agents. An old
+agent under a new gateway ships nothing (the API says `none` with an
+explanation); a new agent under an old gateway is not told to ship and ships
+nothing. No mixed-version combination writes objects that cannot be read.
+Rolling back: roll gateways back first; `0025_attempt_logs.down.sql` drops the
+index only, and the objects become orphans for artifact-gc.
+
+### 19.2 Retention
+
+Log objects are reference-counted by artifact-gc exactly like outputs (§7.7):
+
+- a log's objects are live while its `task_attempts` row exists, so **deleting
+  a run** (which cascades to its attempts and log index) makes its logs orphans;
+- after compaction, the chunk objects are orphans and only `log.ndjson` is
+  live -- compaction's space is reclaimed by the sweep, not inline;
+- chunks a fenced (stale) attempt uploaded but could not index, and uploads
+  whose `ReportLogs` never landed, are orphans;
+- all orphans wait out the grace period (`-grace`, default 24h).
+
+Time-based retention is opt-in and applies to logs only:
+
+```sh
+# Report what a 30-day log retention would collect (dry run, the default):
+artifact-gc -log-retention 720h
+# Collect it:
+artifact-gc -log-retention 720h -delete -i-understand-this-deletes-data
+```
+
+A log whose last write (finalization, or last indexed chunk) is older than the
+window drops out of the live set; its index rows remain, so the API reports it
+as `expired` with an explanation rather than as an empty log. Outputs are never
+subject to time retention: they are inputs to downstream tasks and retries.
+The summary line `objects examined N (M task-log objects)` shows how much of a
+pass was logs. `-check-refs` (dangling references) does not yet cover the log
+index; a log whose objects vanished out of band shows up in the API as gap
+lines or `expired`.
+
+### 19.3 Sizing
+
+Per attempt that is producing output (defaults):
+
+| Resource | Cost |
+|---|---|
+| Object store PUTs | 1 per chunk: ≤ 1 per flush interval (0.5/s), plus 1 compaction PUT at the end |
+| Gateway worker-port RPCs | 1 `ReportLogs` per upload batch (≤ 0.5/s) plus 1 final. At 1,000 concurrently *logging* attempts that is ≈ 500 small RPS and ≈ 500 single-row inserts/s into `attempt_log_chunks`; raise `NEXUS_LOG_FLUSH_INTERVAL_MS` for larger fleets. Silent attempts cost nothing. |
+| Postgres | 1 row per chunk (≈ 200 B plus index) and 1 per attempt. A 64 MiB log ≈ 256 rows; a task printing a line a second for a day ≈ 9,000 rows. Rows go with the run. |
+| Object storage | ≈ 1.2–1.6× the raw output (the NDJSON envelope is ~50 B/line), capped at 64 MiB + 2 MiB tail per attempt. Until the sweep collects compacted-away chunks, a compacted log occupies twice its size. |
+| Agent memory | ≤ 8 MiB unshipped buffer + 2 MiB tail per attempt, independent of output volume. Past the buffer, lines are dropped and counted, never blocking the task. |
+| Agent disk | A spool (for compaction) up to the per-attempt cap, under `<WAL dir>/log-spool`, deleted at the end of each attempt. |
+| Gateway per request | ≤ 32 MiB of object reads per page; search scans ≤ 64 MiB by default (256 MiB max, `scan_bytes`), ≤ 1,000 matches and 15 s; each bound is reported (`stopped_by`) and the scan is resumable via `next_line`. |
+| Result latency | Finalization (drain + compaction + final report) precedes `ReportResult` and is bounded at 30 s; normally one PUT and one RPC. If it cannot finish, the result is reported anyway and the log is `partial`. |
+
+### 19.4 Reading the states
+
+| State | Meaning | Action |
+|---|---|---|
+| `none` | Nothing indexed. Not started, no output yet, or agent/gateway predates shipping, or shipping disabled. | Check the gateway startup line and the agent's registration line. |
+| `live` | Shipping while the attempt runs. | -- |
+| `complete` | Finalized by the agent. | -- |
+| `partial` | The attempt ended without a final report: agent crash, lost lease, or object store unreachable during finalization. Everything indexed is readable. | Agent log for `log finalization ran out of time` / `log shipping stopped`. |
+| `expired` | Index rows exist, objects are gone (retention or out-of-band deletion). | Expected after `-log-retention`; otherwise investigate like a dangling ref (§7.8). |
+
+Lines on stream `nexus` are the platform's: `truncated` / `truncation_summary`
+(cap), `dropped` (backpressure), `gap` (a range the reader could not read, with
+the reason). They are never silently omitted.
+
+### 19.5 Known limits
+
+- **Redaction has no input yet.** The agent redacts known secret values from
+  every line before it leaves the host, but nothing in the platform resolves
+  `SecretRef` values on the worker today, so there is nothing to redact. The
+  resolver, when added, must feed `Runner.SecretValues`. Matching is per line.
+- Kubernetes pod logs interleave stdout and stderr; those lines are tagged
+  `combined`.
+- Live tail is poll-based (≈ flush interval + 1 s), not a pipe.
+- Timestamps are the agent's clock (informational; ordering is by line number).

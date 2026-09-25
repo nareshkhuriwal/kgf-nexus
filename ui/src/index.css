@@ -4213,6 +4213,19 @@ input:not([type='checkbox']):not([type='radio']):not([type='range']), select, te
 .log-tools > label { display: flex; gap: 6px; flex-direction: column; color: var(--fg-muted); font-size: 11px; }
 .log-tools > .log-wrap { flex-direction: row; align-items: center; }
 .log-tools input[type='search'] { min-width: 220px; }
+
+/* ── Durable task logs (ADR-0020) ─────────────────────────────────────────
+   The platform's own lines (truncation, drops, gaps) are set apart so they
+   can never be mistaken for something the task printed. */
+.log-n { color: var(--fg-faint); flex: 0 0 auto; min-width: 4ch; text-align: right; user-select: none; }
+.log-line.nexus .log-msg { color: var(--tone-warning-fg); font-style: italic; }
+.log-banner { padding: 10px 18px; border-bottom: 1px solid var(--border); color: var(--tone-warning-fg); font-size: var(--text-sm); }
+.log-stale { padding: 8px 18px; color: var(--fg-muted); font-size: var(--text-xs); border-top: 1px solid var(--border); }
+.log-earlier { display: block; margin-bottom: var(--space-2); }
+.log-search-results { padding: 10px 18px; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 12.5px; max-height: 240px; overflow: auto; }
+.log-search-results > .faint { font-family: inherit; margin-bottom: 6px; }
+.log-search-error { padding: 8px 18px; color: var(--tone-danger-fg); font-size: var(--text-sm); }
+@media (max-width: 640px) { .log-tools input[type='search'] { min-width: 0; width: 100%; } }
 .logs-wrap .log-msg { white-space: pre-wrap; overflow-wrap: anywhere; }
 .logs-nowrap .log-msg { white-space: pre; }
 .log-tools > .faint { font-size: 11px; }

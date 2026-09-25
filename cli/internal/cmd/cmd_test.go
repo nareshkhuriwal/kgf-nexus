@@ -677,6 +677,39 @@ func TestEventsFollowEmitsJSONLinesNotAnArray(t *testing.T) {
 	}
 }
 
+// TestLogsTailAndStreamFlags: the durable-log options reach the gateway as the
+// query parameters it serves (ADR-0020), and the CLI asks for raw text.
+func TestLogsTailAndStreamFlags(t *testing.T) {
+	h := newHarness(t)
+	var accept string
+	h.handler = func(w http.ResponseWriter, r *http.Request) bool {
+		accept = r.Header.Get("Accept")
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("[nexus] 3 lines were omitted by the per-attempt log cap\nlast\n"))
+		return true
+	}
+	code, out, errb := h.run("logs", "a1", "--tail", "50", "--stream", "stderr", "-f")
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errb)
+	}
+	q := h.last().Query
+	for _, want := range []string{"tail=50", "stream_name=stderr", "follow=true"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("query %q missing %q", q, want)
+		}
+	}
+	if !strings.Contains(accept, "text/plain") {
+		t.Errorf("Accept = %q; the gateway streams raw lines only for text/plain", accept)
+	}
+	if !strings.Contains(out, "[nexus] 3 lines were omitted") {
+		t.Errorf("platform markers must be printed, not filtered: %q", out)
+	}
+
+	if code, _, _ := newHarness(t).run("logs", "a1", "--stream", "bogus"); code == 0 {
+		t.Error("--stream bogus was accepted")
+	}
+}
+
 func TestLogsAreStreamedVerbatim(t *testing.T) {
 	// A log line is evidence; re-encoding it would corrupt what the task printed.
 	h := newHarness(t)

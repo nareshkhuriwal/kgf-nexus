@@ -26,6 +26,7 @@ full system design, data model, state machines, and phased plan.
 | [0017](0017-weighted-fair-share-across-namespaces.md) | Weighted fair share across namespaces; priority + aging within one (§12 Q5) | An extra index walk per claim, for no cross-tenant starvation |
 | [0018](0018-postgres-dispatch-ceiling.md) | Postgres stays the dispatch queue; measured ceiling, trigger and migration path (§12 Q6) | A known, backlog-dependent ceiling, for keeping atomic dispatch |
 | [0019](0019-metrics-exposition.md) | Metrics exposition via client_golang (pinned) behind the in-house instrument API | A new dependency tree, for spec-compliant exposition and runtime/process collectors |
+| [0020](0020-durable-task-logs.md) | Task logs: agents write chunks to the result store, index them through a lease-fenced RPC; gateway-owned index | Seconds of live-tail latency and gateway read credentials, for no log bytes through the control plane |
 
 ADRs 0013–0018 close the six open questions of ARCHITECTURE.md §12 and are
 **Proposed — pending owner sign-off**.

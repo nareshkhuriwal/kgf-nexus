@@ -95,6 +95,10 @@ type Config struct {
 	// ResultStore is handed to workers at registration so they read and write
 	// MinIO directly; task payloads never transit the control plane (invariant 6).
 	ResultStore *nexusv1.ResultStoreConfig
+	// LogShipping is advertised to workers at registration (ADR-0020). Nil or
+	// disabled means agents ship no logs -- the right answer for a gateway that
+	// cannot READ them back, since objects nobody can serve are pure cost.
+	LogShipping *nexusv1.LogShippingConfig
 }
 
 // DefaultConfig is the tuning from ADR-0010 and §5.5.
@@ -184,6 +188,7 @@ func (s *Server) Register(ctx context.Context, req *nexusv1.RegisterRequest) (*n
 		HeartbeatIntervalMs: int32(s.cfg.HeartbeatInterval.Milliseconds()),
 		LeaseTtlMs:          int32(s.cfg.LeaseTTL.Milliseconds()),
 		ResultStore:         s.cfg.ResultStore,
+		LogShipping:         s.cfg.LogShipping,
 	}, nil
 }
 
@@ -544,6 +549,85 @@ func (s *Server) ReportResult(ctx context.Context, req *nexusv1.ReportResultRequ
 	s.log.InfoContext(ctx, "attempt result applied",
 		"attempt_id", req.GetAttemptId(), "outcome", req.GetOutcome().String())
 	return &nexusv1.Ack{Accepted: true}, nil
+}
+
+// ReportLogs indexes log chunks the agent has already written to the result
+// store (ADR-0020).
+//
+// Fenced first, like every attempt RPC: a stale attempt -- one whose lease was
+// reclaimed and whose replacement may already be running -- cannot add a line
+// to what the API serves as this attempt's log. Its uploaded objects stay
+// unreferenced and artifact-gc collects them.
+//
+// Idempotent by (attempt_id, seq): the agent retries a report whose ack it did
+// not see, and the retry is a no-op. Validation failures are protocol outcomes
+// (Ack{accepted:false}) rather than transport errors, so the agent stops
+// shipping instead of retrying a report that can never be accepted.
+func (s *Server) ReportLogs(ctx context.Context, req *nexusv1.ReportLogsRequest) (*nexusv1.Ack, error) {
+	if _, err := s.requirePrincipal(ctx, ""); err != nil {
+		return nil, err
+	}
+	if s.cfg.LogShipping == nil || !s.cfg.LogShipping.GetEnabled() {
+		// Only an agent that ignored RegisterResponse gets here. Refusing keeps
+		// the index from filling on a gateway that cannot serve it.
+		return &nexusv1.Ack{Accepted: false, Reason: "log_shipping_disabled"}, nil
+	}
+	if ack := s.fence(ctx, req.GetAttemptId(), req.GetLeaseToken(), "ReportLogs"); ack != nil {
+		return ack, nil
+	}
+	chunks := make([]store.LogChunkRow, 0, len(req.GetChunks()))
+	for _, c := range req.GetChunks() {
+		chunks = append(chunks, store.LogChunkRow{
+			Seq:        c.GetSeq(),
+			ObjectKey:  c.GetKey(),
+			FirstLine:  c.GetFirstLine(),
+			LineCount:  c.GetLineCount(),
+			ByteOffset: c.GetByteOffset(),
+			SizeBytes:  c.GetSizeBytes(),
+			SHA256:     c.GetSha256(),
+			FirstTS:    unixMsPtr(c.GetFirstTsUnixMs()),
+			LastTS:     unixMsPtr(c.GetLastTsUnixMs()),
+		})
+	}
+	var final *store.LogFinalRow
+	if f := req.GetFinal(); f != nil {
+		final = &store.LogFinalRow{
+			CompactedKey:    f.GetCompactedKey(),
+			CompactedSHA256: f.GetCompactedSha256(),
+			TotalLines:      f.GetTotalLines(),
+			TotalBytes:      f.GetTotalBytes(),
+			TruncatedLines:  f.GetTruncatedLines(),
+			TruncatedBytes:  f.GetTruncatedBytes(),
+			DroppedLines:    f.GetDroppedLines(),
+			ChunkCount:      f.GetChunkCount(),
+		}
+	}
+	res, err := store.GatewayAppendLogChunks(ctx, s.db, req.GetAttemptId(), chunks, final)
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrLogFinalized):
+		return &nexusv1.Ack{Accepted: false, Reason: store.ErrLogFinalized.Error()}, nil
+	case errors.Is(err, store.ErrInvalidLogChunk):
+		s.log.WarnContext(ctx, "rejected an invalid log report", "attempt_id", req.GetAttemptId(), "error", err)
+		return &nexusv1.Ack{Accepted: false, Reason: store.ErrInvalidLogChunk.Error()}, nil
+	case errors.Is(err, store.ErrNotFound):
+		return &nexusv1.Ack{Accepted: false, Reason: store.ReasonStaleLeaseToken}, nil
+	default:
+		return nil, status.Errorf(codes.Internal, "index log chunks: %v", err)
+	}
+	if res.Finalized {
+		s.log.DebugContext(ctx, "attempt log finalized", "attempt_id", req.GetAttemptId(),
+			"inserted", res.Inserted, "duplicates", res.Duplicates)
+	}
+	return &nexusv1.Ack{Accepted: true}, nil
+}
+
+func unixMsPtr(ms int64) *time.Time {
+	if ms <= 0 {
+		return nil
+	}
+	t := time.UnixMilli(ms).UTC()
+	return &t
 }
 
 // fence is THE gate in front of every attempt RPC (invariant 3).
