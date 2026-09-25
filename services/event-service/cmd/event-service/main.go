@@ -27,7 +27,7 @@ import (
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	dsn := config.DSN("postgres://postgres:test@localhost:55432/nexus")
+	dsn := config.DSN()
 	addr := env("HTTP_ADDR", ":8085")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

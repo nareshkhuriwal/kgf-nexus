@@ -1,7 +1,7 @@
 # Nexus — Distributed Workflow Orchestration Platform
 
-**Status:** Design proposal (Phase 0). No implementation code yet.
-**Audience:** platform engineers, reviewers of this proposal.
+**Status:** Implemented and under active development. This began as the Phase 0 design proposal; the control-plane services, worker agent, CLI, Python SDK, UI and schema migrations now exist in this repository. Where this document describes something not yet built, it says so. Where it disagrees with the code, the code and [CONTRACT-FINDINGS.md](../CONTRACT-FINDINGS.md) are authoritative and this document is the bug. It is **not** a claim of production readiness (see [README.md](README.md#current-state)).
+**Audience:** platform engineers, operators, and reviewers.
 **Scope of this document:** system architecture, component boundaries, data model, state machines, execution semantics, and a phased delivery plan.
 
 ---
@@ -100,7 +100,7 @@ The central structural decision is that the system is split into two planes with
 │                             CLIENTS                                           │
 │   CLI (nexusctl)      SDK (python)      React UI      external HTTP callers   │
 └───────────────────────────────┬───────────────────────────────────────────────┘
-                                │  HTTPS / gRPC  (authn: OIDC or API key)
+                                │  HTTPS / gRPC  (authn: session, API key, scoped token)
                                 ▼
 ╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                            CONTROL PLANE                                      ║
@@ -181,7 +181,12 @@ The central structural decision is that the system is split into two planes with
 
 #### API Gateway
 The only ingress. Responsibilities:
-- **Authentication:** OIDC bearer tokens for humans, API keys (hashed at rest) for workers and machines.
+- **Authentication:** three credential kinds, all presented as `Authorization: Bearer` and resolved in `services/api-gateway/authn`:
+  - **Human sessions.** Email + password login (argon2id verifier in `users.password_hash`) issues a short-lived, revocable session token (`sessions`, migration 0007; email verification and reset, 0017). Sessions are refused on the worker protocol.
+  - **API keys** (sha256-hashed at rest, `api_keys`) for workers, the CLI and other machines.
+  - **Scoped tokens** (`scoped_tokens`): an API-key-shaped credential with an expiry and an explicit action list that *intersects* the role's grants and never extends them.
+
+  **OIDC and SAML single sign-on are not implemented; they are planned.** Migration 0007 records this as a deliberate decision (it needs an identity provider no deployment has yet) and leaves `users.password_hash` nullable so an OIDC-backed user can later be added as a new auth kind rather than a redesign. No identity-provider integration, group mapping or SCIM exists today ([RBAC-IMPLEMENTATION.md](RBAC-IMPLEMENTATION.md)).
 - **Authorization:** RBAC over `(principal, namespace, action)`. Namespaces are the tenancy and quota boundary.
 - **Validation and compilation:** accepts a `WorkflowSpec` in JSON or YAML, validates it structurally (schema), semantically (acyclicity, type compatibility across edges, resource requests within namespace quota), then content-addresses it. Submitting a byte-identical spec is a no-op returning the existing version.
 - **Two API surfaces:** a REST/JSON API for humans, CLI, and UI; a gRPC API for the high-frequency worker RPCs (`Register`, `Heartbeat`, `PollTask`, `ReportTaskResult`, `ExtendLease`). Splitting these matters: worker traffic is chatty and latency-sensitive, and it must not contend with UI queries.

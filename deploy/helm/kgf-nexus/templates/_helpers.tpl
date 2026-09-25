@@ -49,6 +49,8 @@ The database URL is assembled in the pod from the Secret, never rendered into
 a manifest: $(NEXUS_DB_PASSWORD) is Kubernetes' own env expansion, so the
 password exists only in the Secret and the container's environment.
 The password must be URL-safe (deploy/terraform generates alphanumerics).
+Required: the services have no built-in DSN and exit at startup without this
+(internal/config.DSN, docs/OPERATIONS.md §8).
 */}}
 {{- define "nexus.dbEnv" -}}
 - name: NEXUS_DB_PASSWORD

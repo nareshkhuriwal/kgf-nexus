@@ -26,6 +26,10 @@ x-postgres-env: &postgres-env
   # ownership. The MVP uses one superuser role because the roles and grants are
   # a migration that does not exist yet; the URL is per-service so switching to
   # distinct roles is a values change, not a topology change.
+  #
+  # Required, not a convenience: the services have no built-in DSN and exit at
+  # startup without one (internal/config.DSN). Every service that touches
+  # Postgres must merge this fragment, directly or through *service-env.
   DATABASE_URL: postgres://nexus:nexus-dev-password@postgres:5432/nexus?sslmode=disable
 
 x-service-env: &service-env

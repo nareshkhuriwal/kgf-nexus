@@ -43,7 +43,7 @@ func main() {
 		grpcAddr = flag.String("grpc-addr", envOr("RM_GRPC_ADDR", ":50052"), "gRPC listen address")
 		httpAddr = flag.String("http-addr", envOr("RM_HTTP_ADDR", ":8082"), "health endpoint listen address")
 		dsn      = flag.String("database-url",
-			config.DSN("postgres://postgres:test@localhost:55432/nexus"),
+			config.DSN("database-url"),
 			"Postgres DSN")
 		livenessWindow = flag.Duration("liveness-window",
 			envDuration("RM_LIVENESS_WINDOW", server.DefaultLivenessWindow),

@@ -321,7 +321,7 @@ func loadConfig() config {
 	return config{
 		GRPCAddr:         env("NEXUS_WFM_GRPC_ADDR", ":9091"),
 		HealthAddr:       env("NEXUS_WFM_HEALTH_ADDR", ":8081"),
-		DatabaseURL:      nexuscfg.DSN("postgres://postgres:test@localhost:55432/nexus"),
+		DatabaseURL:      nexuscfg.DSN(),
 		MaxConns:         int32(envInt("NEXUS_DB_MAX_CONNS", 20)),
 		DAGEngineAddr:    env("NEXUS_DAG_ENGINE_ADDR", ""),
 		SchedulerAddr:    env("NEXUS_SCHEDULER_ADDR", ""),

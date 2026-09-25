@@ -316,7 +316,9 @@ restore-drill: ## Prove a restore recovers artifacts byte-identically (needs `ma
 # run is always an explicit act and never something a tab-completed make target
 # can do by accident.
 ARTIFACT_GC_ENDPOINT ?= http://localhost:$(or $(NEXUS_MINIO_PORT),9010)
-ARTIFACT_GC_DSN      ?= postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable
+# The same database seed and migrate act on, rather than a second copy of the
+# compose URL that could drift from NEXUS_POSTGRES_PORT.
+ARTIFACT_GC_DSN      ?= $(DATABASE_URL)
 
 artifact-gc: ## Report orphaned result-store objects; deletes NOTHING (ADR-0008)
 	$(GO) run ./services/artifact-gc/cmd/artifact-gc \

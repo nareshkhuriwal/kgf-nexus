@@ -8,6 +8,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -17,11 +19,11 @@ import (
 // Six services were built in parallel and each chose its own name for the same
 // value: NEXUS_DATABASE_URL, NEXUS_POSTGRES_DSN, and DATABASE_URL all appeared.
 // Rather than renaming five services and breaking anyone's existing deployment
-// or compose file, every service accepts all three. An operator should not have
-// to remember which service wants which spelling -- that is exactly the kind of
-// incidental knowledge that makes a platform unpleasant to run, and the kind of
-// mismatch that fails at container start with a confusing "connection refused
-// to localhost" rather than a clear configuration error.
+// or compose file, every service accepts all of them. An operator should not
+// have to remember which service wants which spelling -- that is exactly the
+// kind of incidental knowledge that makes a platform unpleasant to run, and the
+// kind of mismatch that fails at container start with a confusing "connection
+// refused to localhost" rather than a clear configuration error.
 var dsnEnvNames = []string{
 	"NEXUS_DATABASE_URL",
 	"DATABASE_URL",
@@ -29,97 +31,144 @@ var dsnEnvNames = []string{
 	"NEXUS_DSN",
 }
 
-// dsnRequiredEnvNames are the spellings that turn the compiled-in default from a
-// convenience into a fatal error.
+// DSN returns the Postgres DSN the service must connect to, and exits the
+// process with an actionable message when none is configured.
 //
-// Accepting four DSN names is what makes the dev experience painless, and it is
-// also the failure mode this guards: setting NEXUS_POSTGRE_DSN, or exporting the
-// DSN in the wrong shell, leaves every service silently pointed at the
-// developer's localhost test database. In dev that is obvious within a second.
-// In production nothing is obvious -- the pool dials localhost, fails, and the
-// service reports a connection error naming a host the operator never
-// configured, so the investigation starts at the network layer instead of at the
-// one line of YAML that is actually wrong.
+// There is deliberately no compiled-in default, in any environment. Every
+// service used to fall back to postgres://postgres:test@localhost:55432/nexus
+// (artifact-gc to the compose stack on 55433) unless NEXUS_ENV named a
+// production-like environment or NEXUS_REQUIRE_DSN was set. That fallback is
+// how a service started without its DSN -- a typo such as NEXUS_POSTGRE_DSN, the
+// variable exported in the wrong shell, a manifest that forgot one container --
+// connected to whatever Postgres happened to listen on that port. On at least
+// one developer machine that is an unrelated product's database
+// (CONTRACT-FINDINGS.md), so "it started" proved nothing; in production the
+// same mistake surfaced as a connection error naming a host the operator never
+// configured. A service with no database cannot serve, so there is nothing to
+// degrade to: refusing at startup is the only honest behaviour, and it costs
+// local development one explicit variable, which deploy/docker-compose.yml, the
+// Helm chart and the Makefile already set.
 //
-// Two spellings because deployments express "this is production" differently:
-// NEXUS_ENV mirrors the ubiquitous APP_ENV/RAILS_ENV convention an operator will
-// already be setting for other reasons, while NEXUS_REQUIRE_DSN states the
-// intent directly for anyone who wants the check without claiming an
-// environment name (staging, canary, a CI job that must never touch a laptop
-// database).
-var dsnRequiredEnvNames = []string{
-	"NEXUS_REQUIRE_DSN",
-	"NEXUS_ENV",
-}
-
-// DSN returns the first Postgres DSN found among the accepted environment
-// variable names, falling back to def when none is set.
+// flagNames are the command-line flags, if any, through which the caller also
+// accepts a DSN (scheduler and dag-engine: "dsn"; resource-manager and
+// artifact-gc: "database-url"). DSN is evaluated as that flag's default, which
+// is before flag.Parse runs, so it reads os.Args itself: a DSN passed only on
+// the command line is explicit configuration and must not be refused. An
+// explicit -h/-help with no DSN anywhere returns "" so the flag package can
+// print usage instead of the process dying on a configuration error.
 //
-// When the deployment has asked for an explicit DSN (see DSNRequired) and none
-// of the accepted names is set, this exits the process rather than returning
-// def. It cannot return an error instead: the six callers use it in a
-// flag.String default or a struct literal, and threading an error through all of
-// them would be a wider change than the guard is worth. Exiting at startup is
-// also the correct behaviour -- a service with no database cannot serve, so
-// there is nothing to degrade to.
-func DSN(def string) string {
-	dsn, err := dsnOrError(def)
+// DSN exits rather than returning an error because every caller uses it in a
+// flag default or a struct literal before it has a logger; the message goes to
+// stderr for the same reason -- a configuration error the operator cannot see
+// is worse than an unstructured one.
+func DSN(flagNames ...string) string {
+	dsn, err := resolveDSN(os.Getenv, os.Args[1:], flagNames)
 	if err != nil {
-		// Written to stderr rather than through slog because every caller
-		// resolves the DSN before it has a logger, and a configuration error the
-		// operator cannot see is worse than an unstructured one.
-		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s: fatal: %v\n", filepath.Base(os.Args[0]), err)
 		os.Exit(1)
 	}
 	return dsn
 }
 
-// DSNRequired reports whether the deployment has demanded an explicit DSN.
+// resolveDSN is DSN's logic with its inputs injected and without the exit, so
+// every branch is unit-testable.
 //
-// NEXUS_ENV counts only when it names a production-like environment, because
-// NEXUS_ENV=dev must keep the built-in default working -- the whole point is
-// that the dev path is unchanged.
-func DSNRequired() bool {
-	if v := os.Getenv("NEXUS_REQUIRE_DSN"); v != "" {
-		switch strings.ToLower(strings.TrimSpace(v)) {
-		case "0", "false", "no", "off":
-			return false
-		default:
-			return true
+// Precedence: the environment spellings in dsnEnvNames order, then the named
+// flags. When both are present the environment value is returned here and the
+// flag still wins after flag.Parse, as it always has.
+func resolveDSN(getenv func(string) string, args, flagNames []string) (string, error) {
+	for _, name := range dsnEnvNames {
+		if v := strings.TrimSpace(getenv(name)); v != "" {
+			return v, nil
 		}
 	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("NEXUS_ENV"))) {
-	case "production", "prod", "staging":
-		return true
+	if v, ok := flagValue(args, flagNames); ok {
+		return v, nil
+	}
+	if len(flagNames) > 0 && helpRequested(args) {
+		return "", nil
+	}
+	// The message names every accepted spelling. An operator who set one of
+	// them almost-correctly needs to see the list to spot the typo;
+	// "DATABASE_URL must be set" would send someone who set NEXUS_POSTGRES_DSN
+	// looking in the wrong place.
+	hint := "set " + dsnEnvNames[0] + " (also accepted: " + strings.Join(dsnEnvNames[1:], ", ") + ")"
+	if len(flagNames) > 0 {
+		dashed := make([]string, len(flagNames))
+		for i, f := range flagNames {
+			dashed[i] = "-" + f
+		}
+		hint += " or pass " + strings.Join(dashed, " / ")
+	}
+	return "", fmt.Errorf(
+		"no Postgres DSN configured: %s. There is no built-in default, so a "+
+			"service never silently connects to whatever database listens on "+
+			"localhost. deploy/docker-compose.yml and the Helm chart set it for "+
+			"every service; to run one outside them, export the DSN of the "+
+			"database you mean (the compose stack's is in deploy/README.md)",
+		hint,
+	)
+}
+
+// flagValue finds the value given for any of names in args, accepting the forms
+// the standard flag package does: -name value, --name value, -name=value and
+// --name=value. The last occurrence wins, as it does in flag.Parse.
+//
+// Scanning stops at "--", after which the flag package treats everything as
+// positional. It does not stop at the first positional argument, because
+// without the flag set it cannot tell a positional argument from the value of a
+// preceding flag; the cost is that a flag-shaped argument after a positional
+// one would be misread, and no Nexus service takes positional arguments.
+func flagValue(args, names []string) (string, bool) {
+	var (
+		val   string
+		found bool
+	)
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			break
+		}
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		name, v, hasEq := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-"), "=")
+		if !slices.Contains(names, name) {
+			continue
+		}
+		if !hasEq {
+			if i+1 >= len(args) {
+				// A trailing valueless flag: flag.Parse rejects it with its own
+				// error, so there is no DSN here to honour.
+				continue
+			}
+			i++
+			v = args[i]
+		}
+		// An explicit empty value overrides an earlier one, as in flag.Parse,
+		// and is not a DSN.
+		v = strings.TrimSpace(v)
+		val, found = v, v != ""
+	}
+	return val, found
+}
+
+// helpRequested reports whether args ask the flag package for usage.
+func helpRequested(args []string) bool {
+	for _, a := range args {
+		switch a {
+		case "--":
+			return false
+		case "-h", "--h", "-help", "--help":
+			return true
+		}
 	}
 	return false
 }
 
-// dsnOrError is DSN's logic without the process exit, so the refusal is testable
-// and so a future caller that can handle an error has something to call.
-func dsnOrError(def string) (string, error) {
-	for _, name := range dsnEnvNames {
-		if v := os.Getenv(name); v != "" {
-			return v, nil
-		}
-	}
-	if DSNRequired() {
-		// The message names every spelling that was checked. An operator who set
-		// one of them almost-correctly needs to see the list to spot the typo;
-		// "DATABASE_URL must be set" would send someone who set
-		// NEXUS_POSTGRES_DSN looking in the wrong place.
-		return "", fmt.Errorf(
-			"no Postgres DSN configured, and %s requires an explicit one: set one of %s (the built-in default %q is a developer convenience and is refused here)",
-			strings.Join(dsnRequiredEnvNames, " or "),
-			strings.Join(dsnEnvNames, ", "),
-			def,
-		)
-	}
-	return def, nil
-}
-
-// AddrEnvNames maps a logical listener to its accepted environment spellings,
-// for the same reason as DSN: the services disagreed on naming.
+// Addr returns the first non-empty value among the named environment variables,
+// or def. The services disagreed on listener naming just as they did on the
+// DSN; unlike the DSN, a listen address has a safe default.
 func Addr(def string, names ...string) string {
 	for _, name := range names {
 		if v := os.Getenv(name); v != "" {

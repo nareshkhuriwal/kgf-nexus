@@ -39,7 +39,7 @@ func main() {
 
 func run() error {
 	var (
-		dsn      = flag.String("dsn", config.DSN("postgres://postgres:test@localhost:55432/nexus"), "Postgres DSN")
+		dsn      = flag.String("dsn", config.DSN("dsn"), "Postgres DSN")
 		grpcAddr = flag.String("grpc-addr", envOr("NEXUS_GRPC_ADDR", ":8092"), "gRPC listen address")
 		httpAddr = flag.String("http-addr", envOr("NEXUS_HTTP_ADDR", ":8082"), "address for /healthz and /readyz")
 		logLevel = flag.String("log-level", envOr("NEXUS_LOG_LEVEL", "info"), "debug|info|warn|error")

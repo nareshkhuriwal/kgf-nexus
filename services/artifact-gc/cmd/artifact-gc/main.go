@@ -48,7 +48,7 @@ var version = "dev"
 func main() {
 	var (
 		dsn = flag.String("database-url",
-			config.DSN("postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable"),
+			config.DSN("database-url"),
 			"Postgres DSN (the reference set is derived from here)")
 		endpoint = flag.String("endpoint",
 			firstEnv("RESULT_STORE_ENDPOINT", "NEXUS_RESULT_STORE_ENDPOINT", "NEXUS_S3_ENDPOINT"),
