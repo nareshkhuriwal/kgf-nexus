@@ -27,7 +27,7 @@ import hashlib
 import json
 from typing import Any
 
-__all__ = ["canonical_json", "canonical_bytes", "spec_hash", "CanonicalError"]
+__all__ = ["canonical_json", "canonical_bytes", "spec_hash", "normalize_enums", "CanonicalError"]
 
 
 class CanonicalError(ValueError):
@@ -80,11 +80,90 @@ def canonical_bytes(value: Any) -> bytes:
     return canonical_json(value).encode("utf-8")
 
 
-def spec_hash(value: Any) -> str:
-    """The spec's content address: sha256 of canonical JSON, hex-encoded.
+def _aliases(prefix: str, *short_forms: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for s in short_forms:
+        out[s] = s
+        out[prefix + s.upper()] = s
+    return out
 
-    Computed client-side so `nexusctl workflow compile --show` can print the
-    hash the server will independently arrive at. A mismatch between the two is
-    a canonicalization bug and should be loud.
+
+# The gateway's alias tables (internal/specenum), mirrored: BOTH spellings map
+# to the short form. A change there must land here too; the golden file
+# tests/parity/spec_hash_golden.json fails otherwise.
+_IDEMPOTENCY = _aliases("IDEMPOTENCY_MODE_", "required", "best_effort", "none")
+_TRIGGER_RULE = _aliases(
+    "TRIGGER_RULE_", "all_success", "all_done", "one_success", "one_failed", "none_failed", "all_skipped"
+)
+_BACKOFF = _aliases("BACKOFF_STRATEGY_", "fixed", "linear", "exponential")
+_ERROR_CLASS = {
+    **_aliases(
+        "ERROR_CLASS_", "transient", "timeout", "worker_lost", "validation", "permission_denied",
+        "application", "oom", "not_found", "infrastructure",
+    ),
+    # Architecture 4.3's spelling of ERROR_CLASS_VALIDATION (F20).
+    "validation_error": "validation",
+}
+
+
+def normalize_enums(spec: Any) -> Any:
+    """A copy of ``spec`` with every enum value in its SHORT spelling.
+
+    The gateway stores and content-addresses a spec only after rewriting
+    ``IDEMPOTENCY_MODE_REQUIRED`` to ``required``, ``BACKOFF_STRATEGY_LINEAR`` to
+    ``linear`` and so on (services/api-gateway/spec/normalize.go). The SDK emits
+    the proto spelling, which the gateway accepts; hashing it as emitted gave a
+    different address from the server for every spec with an enum in it
+    (CONTRACT-FINDINGS F124). The input is not modified: the compiled spec keeps
+    the proto spelling the local runner and replay read.
     """
-    return hashlib.sha256(canonical_bytes(value)).hexdigest()
+    if not isinstance(spec, dict):
+        return spec
+    out = dict(spec)
+    tasks = out.get("tasks")
+    if not isinstance(tasks, list):
+        return out
+    new_tasks: list[Any] = []
+    for raw in tasks:
+        if not isinstance(raw, dict):
+            new_tasks.append(raw)
+            continue
+        t = dict(raw)
+        _norm_field(t, "idempotency", _IDEMPOTENCY)
+        _norm_field(t, "trigger_rule", _TRIGGER_RULE)
+        retry = t.get("retry")
+        if isinstance(retry, dict):
+            r = dict(retry)
+            _norm_field(r, "strategy", _BACKOFF)
+            _norm_list(r, "retry_on", _ERROR_CLASS)
+            _norm_list(r, "no_retry_on", _ERROR_CLASS)
+            t["retry"] = r
+        new_tasks.append(t)
+    out["tasks"] = new_tasks
+    return out
+
+
+def _norm_field(m: dict[str, Any], key: str, aliases: dict[str, str]) -> None:
+    v = m.get(key)
+    if isinstance(v, str) and v in aliases:
+        m[key] = aliases[v]
+
+
+def _norm_list(m: dict[str, Any], key: str, aliases: dict[str, str]) -> None:
+    v = m.get(key)
+    if isinstance(v, list):
+        m[key] = [aliases.get(x, x) if isinstance(x, str) else x for x in v]
+
+
+def spec_hash(value: Any) -> str:
+    """The spec's content address: the hash the SERVER stores it under.
+
+    sha256 of the canonical JSON of the spec after the gateway's enum
+    normalization (:func:`normalize_enums`), hex-encoded. Computed client-side
+    so ``nexusctl workflow compile --show`` and ``CompiledWorkflow.hash`` show
+    the address the server will independently arrive at; a mismatch is a
+    canonicalization bug and should be loud. The bytes SUBMITTED are
+    :func:`canonical_bytes` of the spec as compiled; the gateway normalizes
+    them the same way before hashing.
+    """
+    return hashlib.sha256(canonical_bytes(normalize_enums(value))).hexdigest()

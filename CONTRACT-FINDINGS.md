@@ -3348,3 +3348,72 @@ the push path, so no wait cycle is possible); blocked attempts keep
 §5.3 now describe what is implemented. Tests:
 `TestQuotaHoldsUnderConcurrentReplicas` (4 push + 4 pull replicas, never over
 quota; mutation-checked), `TestIntegrationRunQuotaActiveRunsUnderConcurrency`.
+
+### F124. nexusctl and the SDK never computed the spec content address the server stores — FIXED
+
+**Severity:** medium (misleading, no data impact). Reported independently by
+the Helm/quick-start work (docs/COMPATIBILITY.md, follow-up 8) and the CLI
+templates work, while running every example through `nexusctl`.
+
+The gateway rewrites enum values to their short spelling
+(`IDEMPOTENCY_MODE_REQUIRED` → `required`, `BACKOFF_STRATEGY_LINEAR` →
+`linear`, `TRIGGER_RULE_ALL_DONE` → `all_done`, the `retry_on`/`no_retry_on`
+error classes, and `validation_error` → `validation`) before it canonicalizes
+and hashes a submitted spec (`services/api-gateway/spec/normalize.go`, F52).
+`cli/internal/spec` and `sdk/python/nexus/canonical.py` hashed the document as
+written, and the SDK always writes the proto spelling. So for every spec with
+an enum in it -- every example -- `nexusctl workflow submit` printed its
+"different content address ... canonicalization bug" warning, and
+`workflow compile --hash-only` / `CompiledWorkflow.hash` never matched the
+`spec_hash` the server returned. The server was self-consistent: versions did
+not split and resubmission stayed idempotent.
+
+**Fix.** One set of alias tables, used by every hasher:
+
+- `internal/specenum` holds the tables and `Normalize`; the gateway's
+  `NormalizeEnums` now calls it, and `cli/internal/spec.Parse` normalizes
+  before it canonicalizes, so nexusctl's hash is the server's and the bytes it
+  submits are exactly the stored form (the gateway accepts both spellings).
+- `nexus.canonical.normalize_enums` mirrors the tables in Python, and
+  `spec_hash` hashes the normalized copy. The compiled spec itself keeps the
+  proto spelling (the local runner and replay read it); only the address
+  changes.
+
+**How it is held.** `sdk/python/tests/parity/spec_hash_golden.json` pins, for
+every `examples/*/dag.py` workflow as the SDK compiles it plus hand-written
+documents in both spellings, the hash computed by the gateway's
+`spec.Compile`. `cli/internal/spec/hash_parity_test.go` asserts the gateway and
+nexusctl produce each golden hash (and that both spellings are one version),
+and that every YAML/JSON example hashes identically through nexusctl and the
+gateway, including the bytes nexusctl actually submits.
+`sdk/python/tests/test_spec_hash_golden.py` asserts the SDK's `spec_hash`
+matches, and that each example still compiles to the golden spec, so the file
+cannot go stale. Before the fix all 15 examples failed the Go test.
+Regenerate after changing an example:
+`python3 sdk/python/tests/parity/make_spec_hash_golden.py`, then
+`go test ./cli/internal/spec -run TestSpecHashGolden -update-spec-hash-golden`.
+
+### F125. The worker agent does not enforce a declared output `max_bytes` — OPEN
+
+**Severity:** medium (a declared bound that only one authoring path enforces).
+
+`ValueSpec.max_bytes` (SDK `max_bytes=`, with units such as `"4Ki"`) is an
+author's promise about an output's encoded size. The gateway relies on it at
+submit time: `internal/dag/validate.go` rejects a map whose fan-in
+(`max_fanout x max_bytes`) could exceed the platform's fan-in limit. But only
+the Python SDK's task entrypoint (`python -m nexus.entrypoint`,
+`sdk/python/nexus/entrypoint.py`) checks an output against it before writing.
+The Go worker agent (`agent/internal/worker`, `agent/internal/resultstore`)
+never reads `GetMaxBytes()`: a task run by any other executor path -- a
+container that writes its own output files, a non-Python handler, or a Python
+handler not started through the SDK entrypoint -- can return an output larger
+than it declared. The submit-time fan-in proof then no longer holds, and the
+oversized fan-in fails later, at the downstream resolve, instead of on the
+attempt that broke its promise.
+
+**Proposed fix.** Enforce it in the agent, where every output passes before it
+is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
+(inline JSON, or the uploaded blob's size) exceeds it, fail the attempt with
+`ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
+report the output. Test it in `agent/internal/worker` for both inline and blob
+outputs, and in the NATS/e2e path with a non-SDK executor.

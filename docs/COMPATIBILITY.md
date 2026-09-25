@@ -509,8 +509,10 @@ are newer than the server.
    suite, and bring up NATS/MinIO so the relay and log tests run too.
 7. ~~`docs/OPERATIONS.md` §6.4 is stale~~ -- updated in the same change to
    point here; it now says only the built-service (wire) part is untested.
-8. **The CLI and the Python SDK compute a different spec content address from
-   the server.** The gateway rewrites enum values to their short spelling
+8. ~~**The CLI and the Python SDK compute a different spec content address from
+   the server.**~~ Fixed as CONTRACT-FINDINGS F124 (shared `internal/specenum`
+   tables, `nexus.canonical.normalize_enums`, and a golden file checked from Go
+   and Python). What it was: The gateway rewrites enum values to their short spelling
    (`services/api-gateway/spec/normalize.go`, `NormalizeEnums`, called from
    `pipeline.go` before `Canonicalize`); `cli/internal/spec` and
    `sdk/python/nexus/canonical.py` hash the proto spelling

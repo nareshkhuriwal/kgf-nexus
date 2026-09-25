@@ -34,6 +34,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/specenum"
 )
 
 // Document is a loaded, canonicalized spec.
@@ -112,6 +114,15 @@ func Parse(raw []byte, source string) (*Document, error) {
 		return nil, fmt.Errorf(
 			"%s: a WorkflowSpec must be a mapping at the top level, got %T", source, normalized)
 	}
+
+	// The gateway rewrites enum spellings to their short form before it
+	// canonicalizes and hashes (services/api-gateway/spec, NormalizeEnums), so
+	// the content address is that of the NORMALIZED document. Doing the same
+	// here, with the same tables, is what makes the hash nexusctl prints the
+	// hash the server stores the spec under (CONTRACT-FINDINGS F124). The
+	// submitted bytes are the normalized document too: exactly what the server
+	// will store, and it accepts either spelling.
+	specenum.Normalize(doc)
 
 	canonical, err := Canonical(doc)
 	if err != nil {
