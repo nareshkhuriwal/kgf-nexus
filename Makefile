@@ -514,7 +514,8 @@ license-check: ## Assert every first-party source file carries an SPDX identifie
 # The previous release's database integration suite against THIS tree's schema,
 # reached by the real upgrade path (previous migrations, then these). ADR-0011
 # rule 5 says old replicas survive the new schema; this is the test that says
-# so. Disposable Postgres on 127.0.0.1:55688. docs/COMPATIBILITY.md §7.
+# so. Disposable Postgres on 127.0.0.1:55688, container nexus-compat-pg-55688;
+# NEXUS_COMPAT_PG_PORT and NEXUS_COMPAT_NAME_PREFIX move both. docs/COMPATIBILITY.md §7.
 .PHONY: compat-smoke
 compat-smoke: ## Run the previous release's DB integration suite against this tree's migrated schema
 	tests/compat/previous-release-smoke.sh

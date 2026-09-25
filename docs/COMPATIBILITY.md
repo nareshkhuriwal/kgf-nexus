@@ -346,8 +346,13 @@ b. **Checks migration history.** Every previous `*.up.sql` must exist in this
    (services/migrations/README.md). Violations exit 1.
 
 c. **Starts a disposable Postgres** (`postgres:16-alpine`, what compose ships),
-   container `nexus-w2c-compat-pg-<port>`, bound to `127.0.0.1:55688`
-   (`NEXUS_COMPAT_PG_PORT=55689` is the only alternative).
+   container `<prefix>-pg-<port>`, bound to `127.0.0.1` only. The defaults
+   are `NEXUS_COMPAT_NAME_PREFIX=nexus-compat` and `NEXUS_COMPAT_PG_PORT=55688`;
+   give concurrent runs on one host a different prefix or port. The script
+   refuses to start if the port is already in use, labels its container
+   `org.kgf-nexus.compat-smoke=<prefix>`, and refuses (exit 2) rather than
+   remove a container of the same name that lacks that label. Cleanup removes
+   only the container this run started, by id.
 
 d. **Takes the upgrade path, not a fresh install.** It applies the previous
    release's migrations with the previous release's `deploy/migrate.sh`, which
