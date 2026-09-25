@@ -58,6 +58,12 @@ func AddVec(a, b *nexusv1.ResourceVector) *nexusv1.ResourceVector {
 		out.GpuMemoryBytes = b.GetGpuMemoryBytes()
 	}
 	out.Custom = mergeCustom(a.GetCustom(), b.GetCustom(), +1)
+	// Fractional GPUs (ADR-0029): MIG instances and shared-device slices are
+	// quantities, summed like custom resources; gpu_shares per device.
+	out.Mig = mergeCustom(a.GetMig(), b.GetMig(), +1)
+	out.GpuShareMilli = a.GetGpuShareMilli() + b.GetGpuShareMilli()
+	out.GpuShareMemoryBytes = a.GetGpuShareMemoryBytes() + b.GetGpuShareMemoryBytes()
+	out.GpuShares = mergeShares(a.GetGpuShares(), b.GetGpuShares(), +1)
 	return out
 }
 
@@ -102,6 +108,10 @@ func SubVec(a, b *nexusv1.ResourceVector) *nexusv1.ResourceVector {
 		out.GpuMemoryBytes = 0
 	}
 	out.Custom = mergeCustom(a.GetCustom(), b.GetCustom(), -1)
+	out.Mig = mergeCustom(a.GetMig(), b.GetMig(), -1)
+	out.GpuShareMilli = max32(a.GetGpuShareMilli()-b.GetGpuShareMilli(), 0)
+	out.GpuShareMemoryBytes = max64(a.GetGpuShareMemoryBytes()-b.GetGpuShareMemoryBytes(), 0)
+	out.GpuShares = mergeShares(a.GetGpuShares(), b.GetGpuShares(), -1)
 	return out
 }
 
@@ -155,14 +165,16 @@ func Fits(capacity, committed, request *nexusv1.ResourceVector) (bool, []Shortfa
 
 	// GPU constraints are only meaningful when GPUs are actually requested.
 	// A CPU-only task must not be rejected because the worker has no GPU
-	// model string.
+	// model string. The model constraint covers every GPU form -- whole, MIG
+	// and shared (ADR-0029) -- because a MIG slice of an A100 is still an A100.
+	if UsesGPU(request) && !GPUKindMatches(capacity.GetGpuKind(), request.GetGpuKind()) {
+		short = append(short, Shortfall{
+			Dim:    DimGPUKind,
+			Detail: fmt.Sprintf("need %q, worker has %q", request.GetGpuKind(), capacity.GetGpuKind()),
+		})
+	}
+	short = append(short, fractionalShortfalls(orZero(capacity), orZero(committed), request)...)
 	if request.GetGpuCount() > 0 {
-		if !GPUKindMatches(capacity.GetGpuKind(), request.GetGpuKind()) {
-			short = append(short, Shortfall{
-				Dim:    DimGPUKind,
-				Detail: fmt.Sprintf("need %q, worker has %q", request.GetGpuKind(), capacity.GetGpuKind()),
-			})
-		}
 		// Per-device VRAM is a floor on the worker's device model, not a pool
 		// to subtract from: committing one A100 does not shrink the VRAM of
 		// the next one. So this is compared against capacity, never free.
@@ -264,6 +276,7 @@ func BestFitScore(capacity, committed, request *nexusv1.ResourceVector) float64 
 	for k, need := range request.GetCustom() {
 		add(need, free.GetCustom()[k], 1)
 	}
+	fractionalFitFraction(orZero(capacity), orZero(committed), request, PolicyPack, add)
 
 	// A request that asks for nothing fits everywhere equally; returning 0
 	// (perfectly tight) rather than NaN keeps the comparison total.
@@ -277,8 +290,14 @@ func BestFitScore(capacity, committed, request *nexusv1.ResourceVector) float64 
 // the scheduler treats as "no reservation needed".
 func IsZeroVec(v *nexusv1.ResourceVector) bool {
 	v = orZero(v)
-	if v.GetCpuMillis() != 0 || v.GetMemoryBytes() != 0 || v.GetGpuCount() != 0 || v.GetDiskBytes() != 0 {
+	if v.GetCpuMillis() != 0 || v.GetMemoryBytes() != 0 || v.GetGpuCount() != 0 || v.GetDiskBytes() != 0 ||
+		v.GetGpuShareMilli() != 0 || v.GetGpuShareMemoryBytes() != 0 {
 		return false
+	}
+	for _, n := range v.GetMig() {
+		if n != 0 {
+			return false
+		}
 	}
 	for _, n := range v.GetCustom() {
 		if n != 0 {
