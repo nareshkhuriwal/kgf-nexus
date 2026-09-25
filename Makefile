@@ -429,3 +429,11 @@ license-check: ## Assert every first-party source file carries an SPDX identifie
 	  fi; \
 	done; \
 	if [ $$missing -eq 0 ]; then echo "SPDX headers: OK"; else exit 1; fi
+
+# The previous release's database integration suite against THIS tree's schema,
+# reached by the real upgrade path (previous migrations, then these). ADR-0011
+# rule 5 says old replicas survive the new schema; this is the test that says
+# so. Disposable Postgres on 127.0.0.1:55688. docs/COMPATIBILITY.md §7.
+.PHONY: compat-smoke
+compat-smoke: ## Run the previous release's DB integration suite against this tree's migrated schema
+	tests/compat/previous-release-smoke.sh
