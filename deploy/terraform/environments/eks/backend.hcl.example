@@ -1,0 +1,9 @@
+# Copy to backend.hcl (gitignored) and run: terraform init -backend-config=backend.hcl
+# The state bucket is created once, outside this stack: versioned, SSE-KMS,
+# public access blocked, readable only by the deployer role.
+bucket       = "kgf-nexus-tfstate-123456789012"
+key          = "eks/kgf-nexus-prod.tfstate"
+region       = "us-east-1"
+encrypt      = true
+kms_key_id   = "alias/kgf-nexus-tfstate"
+use_lockfile = true

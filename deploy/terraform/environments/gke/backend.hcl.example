@@ -1,0 +1,5 @@
+# Copy to backend.hcl (gitignored) and run: terraform init -backend-config=backend.hcl
+# The state bucket is created once, outside this stack: versioning on, uniform
+# bucket-level access, public access prevention enforced, optional CMEK.
+bucket = "kgf-nexus-tfstate-my-project"
+prefix = "gke/kgf-nexus-prod"
