@@ -67,6 +67,10 @@ type DENodeRow struct {
 	ParentNodeID *string
 	MapIndex     *int32
 	Spec         *nexusv1.TaskSpec
+	// RetryFloor is the highest attempt_number an operator retry superseded
+	// (migration 0026). Attempts at or below it are history: LoadAttempts does
+	// not return them, and the retry budget counts from above it.
+	RetryFloor int32
 }
 
 // DEEdgeRow mirrors a task_edges row.
@@ -140,7 +144,7 @@ func (s *DAGEngineStore) LoadSpec(ctx context.Context, specID string) (*nexusv1.
 // LoadNodes reads every node of a run.
 func (s *DAGEngineStore) LoadNodes(ctx context.Context, runID string) ([]DENodeRow, error) {
 	const q = `SELECT run_id::text, node_id, task_ref, state::text, trigger_rule,
-	                  max_attempts, attempts_used, parent_node_id, map_index, spec_json
+	                  max_attempts, attempts_used, parent_node_id, map_index, spec_json, retry_floor
 	             FROM task_nodes WHERE run_id = $1::uuid ORDER BY node_id`
 	rows, err := s.pool.Query(ctx, q, runID)
 	if err != nil {
@@ -154,7 +158,7 @@ func (s *DAGEngineStore) LoadNodes(ctx context.Context, runID string) ([]DENodeR
 		var state string
 		var raw []byte
 		if err := rows.Scan(&n.RunID, &n.NodeID, &n.TaskRef, &state, &n.TriggerRule,
-			&n.MaxAttempts, &n.AttemptsUsed, &n.ParentNodeID, &n.MapIndex, &raw); err != nil {
+			&n.MaxAttempts, &n.AttemptsUsed, &n.ParentNodeID, &n.MapIndex, &raw, &n.RetryFloor); err != nil {
 			return nil, fmt.Errorf("scan node row: %w", err)
 		}
 		n.State = domain.NodeState(state)
@@ -204,7 +208,15 @@ func (s *DAGEngineStore) LoadEdges(ctx context.Context, runID string) ([]DEEdgeR
 	return out, nil
 }
 
-// LoadAttempts reads every attempt of a run, newest attempt_number last per node.
+// LoadAttempts reads the CURRENT attempts of a run, newest attempt_number last
+// per node.
+//
+// Current means above the node's retry_floor. Attempts an operator retry
+// superseded are still in task_attempts -- history is immutable (invariant 9)
+// and the run view shows them -- but they no longer describe the node: the
+// engine derives node state from the latest attempt, and a superseded FAILED
+// attempt with its budget spent would otherwise put a retried node straight
+// back to FAILED (CONTRACT-FINDINGS F100).
 func (s *DAGEngineStore) LoadAttempts(ctx context.Context, runID string) ([]DEAttemptRow, error) {
 	// Expansion CHILDREN's output_ref is deliberately NOT loaded. A run can have
 	// max_fanout children with up to the inline threshold each -- hundreds of MiB
@@ -215,6 +227,7 @@ func (s *DAGEngineStore) LoadAttempts(ctx context.Context, runID string) ([]DEAt
 	             FROM task_attempts a
 	             JOIN task_nodes n ON n.run_id = a.run_id AND n.node_id = a.node_id
 	            WHERE a.run_id = $1::uuid
+	              AND a.attempt_number > n.retry_floor
 	            ORDER BY a.node_id, a.attempt_number`
 	rows, err := s.pool.Query(ctx, q, runID)
 	if err != nil {
