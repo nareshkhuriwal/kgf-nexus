@@ -82,6 +82,15 @@ type Config struct {
 	// the same reason as Kubernetes: counters must survive a REREGISTER.
 	// Optional; nil records nothing.
 	Metrics *agentmetrics.Metrics
+
+	// RegisterBackoff tunes how registration retries a control plane that is
+	// not ready yet. The zero value is DefaultRegisterBackoff.
+	RegisterBackoff RegisterBackoff
+
+	// Readiness is set while a session is registered and cleared when it
+	// ends, for the process's /readyz. Built once by the caller, like
+	// Metrics, so it spans REREGISTER. Optional.
+	Readiness *Readiness
 }
 
 // ResultStoreCredentials are the parts of result-store access the agent holds
@@ -171,10 +180,21 @@ func (a *Agent) Registry() *Registry { return a.registry }
 // reclaimed. Identity is per-session, not per-host, precisely so a restarted
 // agent cannot resurrect stale leases (§5.5) — a genuinely nasty class of bug in
 // systems that key worker identity on hostname.
+//
+// A shutdown (ctx cancelled) while registration is still being retried is a
+// clean exit and returns nil: nothing was started, so there is nothing to
+// drain.
 func (a *Agent) Run(ctx context.Context) error {
+	a.setRegistered(false)
 	if err := a.register(ctx); err != nil {
+		if ctx.Err() != nil {
+			a.log.Info("shutdown requested before registration completed; exiting")
+			return nil
+		}
 		return err
 	}
+	a.setRegistered(true)
+	defer a.setRegistered(false)
 
 	// Kubernetes re-attach runs BEFORE the generic replay, because it can
 	// upgrade a STARTING entry (outcome unknowable) into a COMPLETED one: the
@@ -286,8 +306,8 @@ func (a *Agent) register(ctx context.Context) error {
 		kinds = append(kinds, k)
 	}
 
-	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	resp, err := a.client.Register(rctx, &nexusv1.RegisterRequest{
+	// Retried while the control plane is merely not ready; see register.go.
+	resp, err := a.registerWithRetry(ctx, &nexusv1.RegisterRequest{
 		Namespace:    a.cfg.Namespace,
 		Hostname:     a.cfg.Hostname,
 		Queues:       a.cfg.Queues,
@@ -296,7 +316,6 @@ func (a *Agent) register(ctx context.Context) error {
 		Executors:    kinds,
 		AgentVersion: a.cfg.AgentVersion,
 	})
-	cancel()
 	if err != nil {
 		return fmt.Errorf("agent: register: %w", err)
 	}

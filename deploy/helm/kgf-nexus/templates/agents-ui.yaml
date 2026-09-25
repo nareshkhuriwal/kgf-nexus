@@ -70,6 +70,14 @@ spec:
             - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" (int $root.Values.metrics.agentPort) | quote }} }
           ports:
             - { name: metrics, containerPort: {{ int $root.Values.metrics.agentPort }} }
+          # Not ready until the agent has registered with the control plane
+          # (it retries with backoff while the gateway starts), so a rollout
+          # waits for agents that can take work. No liveness probe on
+          # registration: a control-plane outage is waited out, not restarted.
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            periodSeconds: 5
+            failureThreshold: 3
           resources: {{- toYaml .resources | nindent 12 }}
           securityContext: {{- include "nexus.containerSecurity" $root | nindent 12 }}
           volumeMounts:

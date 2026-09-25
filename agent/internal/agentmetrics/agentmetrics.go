@@ -46,6 +46,9 @@ type Metrics struct {
 	sessions   *metrics.Counter
 	capacity   *metrics.GaugeVec
 	reportErrs *metrics.Counter
+
+	registrations *metrics.CounterVec
+	registered    *metrics.Gauge
 }
 
 // New registers the agent families on reg.
@@ -92,7 +95,33 @@ func New(reg *metrics.Registry) *Metrics {
 			"resource"),
 		reportErrs: reg.NewCounter("nexus_agent_result_report_failures_total",
 			"Result reports that could not be delivered; the WAL retains them for replay.").Counter(),
+		registrations: reg.NewCounter("nexus_agent_registration_attempts_total",
+			"Register calls to the control plane, by result: ok, retryable_error (retried with backoff; the agent stays not-ready) or permanent_error (the agent exits).",
+			"result"),
+		registered: reg.NewGauge("nexus_agent_registered",
+			"1 while the agent holds a registered session (the /readyz condition), else 0.").Gauge(),
 	}
+}
+
+// RegistrationAttempt records one Register call's result: ok,
+// retryable_error or permanent_error.
+func (m *Metrics) RegistrationAttempt(result string) {
+	if m == nil {
+		return
+	}
+	m.registrations.With(metrics.Labels{"result": result}).Inc()
+}
+
+// SetRegistered records whether the agent holds a registered session.
+func (m *Metrics) SetRegistered(ok bool) {
+	if m == nil {
+		return
+	}
+	if ok {
+		m.registered.Set(1)
+		return
+	}
+	m.registered.Set(0)
 }
 
 // TaskStarted records an attempt starting on executor kind.

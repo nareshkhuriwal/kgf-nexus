@@ -188,7 +188,8 @@ func main() {
 	// survive a REREGISTER (see agentmetrics).
 	reg := metrics.NewServiceRegistry("agent", version)
 	cfg.Metrics = agentmetrics.New(reg)
-	stopMetrics := serveMetrics(*metricsAddr, reg, log)
+	cfg.Readiness = &worker.Readiness{}
+	stopMetrics := serveMetrics(*metricsAddr, reg, cfg.Readiness, log)
 	defer stopMetrics()
 
 	if err := run(ctx, cfg, *controlPlane, log); err != nil {
@@ -241,17 +242,34 @@ func run(ctx context.Context, cfg worker.Config, target string, log *slog.Logger
 	}
 }
 
-// serveMetrics starts the agent's metrics listener. A failure to bind is a
-// WARNING, not fatal: refusing to run work because the metrics port is taken
-// would shrink the fleet over an observability problem.
-func serveMetrics(addr string, reg *metrics.Registry, log *slog.Logger) func() {
-	ops, err := metrics.ListenOps(addr, metrics.OpsMux(reg, func(mux *http.ServeMux) {
-		// Liveness only: the agent has no dependency whose loss should restart
-		// it (a control-plane outage is waited out, never restarted through).
+// opsMux serves /metrics, /healthz and /readyz.
+//
+// /healthz is liveness only: the agent has no dependency whose loss should
+// restart it (a control-plane outage is waited out, never restarted through).
+// /readyz is 503 until the agent holds a registered session, and again while
+// it re-registers, so a rollout waits for agents that can actually take work
+// and a gateway outage at startup shows as not-ready rather than as a crash
+// loop.
+func opsMux(reg *metrics.Registry, ready *worker.Readiness) *http.ServeMux {
+	return metrics.OpsMux(reg, func(mux *http.ServeMux) {
 		mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte("ok"))
 		})
-	}), log)
+		mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+			if !ready.Ready() {
+				http.Error(w, "not registered with the control plane", http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte("ok"))
+		})
+	})
+}
+
+// serveMetrics starts the agent's metrics listener. A failure to bind is a
+// WARNING, not fatal: refusing to run work because the metrics port is taken
+// would shrink the fleet over an observability problem.
+func serveMetrics(addr string, reg *metrics.Registry, ready *worker.Readiness, log *slog.Logger) func() {
+	ops, err := metrics.ListenOps(addr, opsMux(reg, ready), log)
 	if err != nil {
 		log.Warn("metrics listener disabled: could not bind", "addr", addr, "error", err)
 		return func() {}
