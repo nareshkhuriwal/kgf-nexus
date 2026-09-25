@@ -84,7 +84,9 @@ phase_skip() {
 }
 
 # report_set <key> <raw JSON value>;  report_set_str <key> <string>
-report_set() { printf '%s\t%s\n' "$1" "$2" >> "$REPORT_EXTRA"; }
+# Values are stored one per LINE, so a multi-line JSON value (another report
+# embedded whole) is flattened first -- JSON does not care, the store does.
+report_set() { printf '%s\t%s\n' "$1" "$(printf '%s' "$2" | tr '\n\t' '  ')" >> "$REPORT_EXTRA"; }
 report_set_str() {
   _v=$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g')
   printf '%s\t"%s"\n' "$1" "$_v" >> "$REPORT_EXTRA"
@@ -99,7 +101,7 @@ phase_ms() { awk -F'|' -v n="$1" '$1 == n { print $3 - $2 }' "$REPORT_PHASES" | 
 report_rto() {
   _a=$(awk -F'|' -v n="$2" '$1 == n { print $2 }' "$REPORT_PHASES" | tail -n 1)
   _b=$(awk -F'|' -v n="$3" '$1 == n { print $3 }' "$REPORT_PHASES" | tail -n 1)
-  [ -n "$_a" ] && [ -n "$_b" ] || { echo "drill-report: report_rto: phase missing" >&2; return 1; }
+  if [ -z "$_a" ] || [ -z "$_b" ]; then echo "drill-report: report_rto: phase missing" >&2; return 1; fi
   report_set "$1" "$(printf '{"from_phase":"%s","to_phase":"%s","seconds":%s}' "$2" "$3" "$(ms_to_s $((_b - _a)))")"
   ms_to_s $((_b - _a))
 }

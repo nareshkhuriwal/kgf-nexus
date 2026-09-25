@@ -76,13 +76,20 @@ summary=$($EXEC sh -c 'pgbackrest --stanza="$1" --output=json info | jq -r "
   .[0] | [ (.backup | length),
            ((.backup | map(.timestamp.stop) | max) // 0),
            ((.backup[0].timestamp.start) // 0),
-           (.status.message) ] | @tsv"' sh "$STANZA")
+           (.status.code // 99), (.status.message // null) ] | @tsv"' sh "$STANZA" || true)
 count=$(printf '%s' "$summary" | cut -f1)
 newest=$(printf '%s' "$summary" | cut -f2)
 oldest=$(printf '%s' "$summary" | cut -f3)
+code=$(printf '%s' "$summary" | cut -f4)
+message=$(printf '%s' "$summary" | cut -f5)
+case "$count" in ''|*[!0-9]*) count=0; newest=0; oldest=0; code=99; message="pgbackrest info produced no output" ;; esac
 now=$(date +%s)
-age=$((now - newest))
-if [ "$count" -eq 0 ]; then fail "no base backup exists -- nothing is restorable yet"
+age=-1
+[ "$newest" -gt 0 ] && age=$((now - newest))
+# Status codes (pgBackRest `info`): 0 ok, 2 no valid backups; anything else
+# means the repository itself could not be read -- a different page to send.
+if [ "$code" != 0 ] && [ "$code" != 2 ]; then fail "repository unreadable (status $code: $message)"
+elif [ "$count" -eq 0 ]; then fail "no base backup exists -- nothing is restorable yet"
 elif [ "$age" -gt "$MAX_AGE" ]; then fail "newest base backup is ${age}s old (> ${MAX_AGE}s)"
 else ok "$count backup(s); newest ${age}s old; PITR window opens at $(date -u -r "$oldest" +%FT%TZ 2>/dev/null || date -u -d "@$oldest" +%FT%TZ)"; fi
 

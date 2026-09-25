@@ -42,6 +42,7 @@ PGUSER_="${PGBACKREST_PG1_USER:-${POSTGRES_USER:-postgres}}"
 PGDB_="${PGBACKREST_PG1_DATABASE:-postgres}"
 
 log() { printf '%s nexus-pitr-scheduler: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+ago() { if [ "$1" -eq 0 ]; then echo never; else echo "$(( $(date -u +%s) - $1 ))s ago"; fi; }
 
 status() {
   # $1 result, $2 type, $3 detail. Written atomically: a healthcheck must never
@@ -136,13 +137,13 @@ while [ "$stop" = 0 ]; do
 
   type=""
   if [ "$last_full" -eq 0 ] || [ $((now - last_full)) -ge "$FULL_EVERY" ]; then
-    type=full
+    type="full"
   elif [ $((now - last_any)) -ge "$DIFF_EVERY" ]; then
-    type=diff
+    type="diff"
   fi
 
   if [ -n "$type" ]; then
-    log "taking $type backup (last full $((now - last_full))s ago, last any $((now - last_any))s ago)"
+    log "taking $type backup (last full: $(ago "$last_full"), last any: $(ago "$last_any"))"
     started=$(date -u +%s)
     if pgbackrest --stanza="$STANZA" --type="$type" backup; then
       status ok "$type" "took $(( $(date -u +%s) - started ))s"
@@ -155,7 +156,7 @@ while [ "$stop" = 0 ]; do
     # A restart with a fresh backup already in the repository: record that the
     # repository is current so the healthcheck does not report a false failure.
     status ok none "repository current at startup"
-    log "no backup due (last full $((now - last_full))s ago, last any $((now - last_any))s ago)"
+    log "no backup due (last full: $(ago "$last_full"), last any: $(ago "$last_any"))"
   fi
   nap "$TICK"
 done

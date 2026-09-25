@@ -57,9 +57,9 @@ EXCLUSIVE=0
 REPORT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --time) TYPE=time; TARGET="$2"; shift 2 ;;
-    --lsn) TYPE=lsn; TARGET="$2"; shift 2 ;;
-    --latest) TYPE=default; shift ;;
+    --time) TYPE="time"; TARGET="$2"; shift 2 ;;
+    --lsn) TYPE="lsn"; TARGET="$2"; shift 2 ;;
+    --latest) TYPE="default"; shift ;;
     --exclusive) EXCLUSIVE=1; shift ;;
     --yes|-y) FORCE=1; shift ;;
     --report) REPORT="$2"; shift 2 ;;
@@ -150,7 +150,7 @@ report_set_str target "$TARGET"
 
 # ── Stop ──────────────────────────────────────────────────────────────────
 phase_begin pg_stop
-[ -n "$SIDECAR" ] && docker stop -t 30 "$SIDECAR" >/dev/null 2>&1 || true
+if [ -n "$SIDECAR" ]; then docker stop -t 30 "$SIDECAR" >/dev/null 2>&1 || true; fi
 # A clean shutdown makes postgres archive every COMPLETE segment before exiting.
 docker stop -t 120 "$PG_CONTAINER" >/dev/null
 phase_end pg_stop
@@ -197,7 +197,7 @@ phase_begin pg_verify
 timeline=$(docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d postgres -tAc \
   "SELECT timeline_id FROM pg_control_checkpoint()")
 docker exec -i -u postgres "$PG_CONTAINER" pgbackrest --stanza="$STANZA" check
-[ -n "$SIDECAR" ] && docker start "$SIDECAR" >/dev/null
+if [ -n "$SIDECAR" ]; then docker start "$SIDECAR" >/dev/null; fi
 phase_end pg_verify
 report_set timeline "${timeline:-null}"
 

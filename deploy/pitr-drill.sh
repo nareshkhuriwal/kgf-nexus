@@ -99,7 +99,7 @@ mkdir -p "$WORK"
 TICKER_PID=""
 cleanup() {
   status=$?
-  [ -n "$TICKER_PID" ] && kill "$TICKER_PID" 2>/dev/null || true
+  if [ -n "$TICKER_PID" ]; then kill "$TICKER_PID" 2>/dev/null || true; fi
   docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d postgres -q \
     -c "DROP DATABASE IF EXISTS $TICK_DB WITH (FORCE)" >/dev/null 2>&1 || true
   rm -rf "$WORK"
@@ -127,8 +127,9 @@ if PG_CONTAINER="$PG_CONTAINER" sh "$HERE/pitr-verify.sh" --no-verify > "$WORK/v
   ok "pitr-verify: archive_command round trip works"
 else
   # No base backup yet is expected on a fresh stack; anything else is not.
-  grep -q "FAIL  no base backup" "$WORK/verify0.log" && [ "$(grep -c FAIL "$WORK/verify0.log")" = 1 ] ||
-    { cat "$WORK/verify0.log" >&2; echo "pitr-drill: archiving is not healthy" >&2; exit 1; }
+  if ! grep -q "FAIL  no base backup" "$WORK/verify0.log" || [ "$(grep -c FAIL "$WORK/verify0.log")" != 1 ]; then
+    cat "$WORK/verify0.log" >&2; echo "pitr-drill: archiving is not healthy" >&2; exit 1
+  fi
   ok "pitr-verify: archiving healthy (no base backup yet, the drill takes one)"
 fi
 

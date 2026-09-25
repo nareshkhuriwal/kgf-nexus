@@ -8,6 +8,11 @@
 # Everything here is keyed off the compose project of PG_CONTAINER, read from its
 # labels, so the same functions drive the default `nexus` stack and an isolated
 # drill project (e.g. `nexus-pitr`) without a second configuration.
+#
+# SC2034: REFS_*, STORE_KEYS, SAMPLE_*, RECONCILE_* are outputs the sourcing
+# script reads. SC2013: word-splitting a file of container names / object keys
+# is intended; neither ever contains whitespace.
+# shellcheck disable=SC2034,SC2013
 
 # The control plane and fleet: what a recovery stops before touching the
 # database and starts again afterwards. Infrastructure (postgres, minio, nats,
