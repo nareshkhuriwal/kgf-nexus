@@ -324,6 +324,34 @@ stages:
 
       - script: |
           set -euo pipefail
+          echo "=== Start a throwaway S3 store (Silo) ==="
+          # The S3 half of the integration suite (result store, durable logs,
+          # log GC). Same pinned digest as deploy/docker-compose.yml (F111),
+          # read from the Makefile so there is one place to bump it.
+          IMAGE=$(make -s print-s3-image)
+          docker rm -f nexus-ci-s3-$(Build.BuildId) >/dev/null 2>&1 || true
+          docker run -d --name nexus-ci-s3-$(Build.BuildId) \
+            -e MINIO_ROOT_USER=nexus-ci -e MINIO_ROOT_PASSWORD=nexus-ci-password \
+            -P "$IMAGE" server /data
+          S3_PORT=$(docker port nexus-ci-s3-$(Build.BuildId) 9000/tcp | head -1 | sed 's/.*://')
+          if [ -z "${S3_PORT:-}" ]; then
+            echo "could not determine the published port for 9000/tcp" >&2
+            exit 1
+          fi
+          echo "##vso[task.setvariable variable=S3_ENDPOINT]127.0.0.1:$S3_PORT"
+          for _ in $(seq 1 60); do
+            if curl -sf "http://127.0.0.1:$S3_PORT/minio/health/ready"; then
+              echo "✅ S3 store is ready on host port $S3_PORT"; exit 0
+            fi
+            sleep 1
+          done
+          echo "S3 store never became ready" >&2
+          docker logs --tail=50 nexus-ci-s3-$(Build.BuildId) >&2
+          exit 1
+        displayName: 'Start Throwaway S3 Store'
+
+      - script: |
+          set -euo pipefail
           echo "=== Apply Migrations ==="
           # Applied by a job, never by a service at startup (ADR-0011 rule 4).
           # This is that job.
@@ -338,6 +366,9 @@ stages:
         env:
           NEXUS_TEST_DSN: $(DSN)
           NEXUS_TEST_DATABASE_URL: $(DSN)
+          NEXUS_TEST_S3_ENDPOINT: $(S3_ENDPOINT)
+          NEXUS_TEST_S3_ACCESS_KEY_ID: nexus-ci
+          NEXUS_TEST_S3_SECRET_ACCESS_KEY: nexus-ci-password
 
       - script: |
           set -euo pipefail
@@ -353,15 +384,27 @@ stages:
             exit 1
           fi
           echo "✅ integration tests ran against a real database"
+          # The object-store suites print tests3.SkipMarker when
+          # NEXUS_TEST_S3_* is unset or the store is unreachable.
+          out=$(go test -tags integration -count=1 -v ./agent/internal/resultstore/ ./internal/artifactgc/ 2>&1)
+          if grep -q "skipping integration test: no test S3 store" <<<"$out"; then
+            echo "integration tests SKIPPED -- the S3 store was not reachable" >&2
+            grep "skipping integration test: no test S3 store" <<<"$out" >&2
+            exit 1
+          fi
+          echo "✅ object-store integration tests ran against a real S3 store"
         displayName: 'Fail if Integration Tests Skipped'
         env:
           NEXUS_TEST_DSN: $(DSN)
           NEXUS_TEST_DATABASE_URL: $(DSN)
+          NEXUS_TEST_S3_ENDPOINT: $(S3_ENDPOINT)
+          NEXUS_TEST_S3_ACCESS_KEY_ID: nexus-ci
+          NEXUS_TEST_S3_SECRET_ACCESS_KEY: nexus-ci-password
 
       - script: |
-          docker rm -f nexus-ci-pg-$(Build.BuildId) >/dev/null 2>&1 || true
-          echo "Throwaway PostgreSQL removed"
-        displayName: 'Stop Throwaway PostgreSQL'
+          docker rm -f nexus-ci-pg-$(Build.BuildId) nexus-ci-s3-$(Build.BuildId) >/dev/null 2>&1 || true
+          echo "Throwaway PostgreSQL and S3 store removed"
+        displayName: 'Stop Throwaway PostgreSQL and S3 Store'
         condition: always()
 
 - stage: PythonSdk

@@ -163,7 +163,7 @@ services:
     restart: "no"
 
   backup-store:
-    image: ${NEXUS_PITR_MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    image: ${NEXUS_PITR_MINIO_IMAGE:-docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46}
     command: ["server", "/data", "--console-address", ":9001", "--certs-dir", "/certs"]
     depends_on:
       backup-store-certs:
@@ -188,7 +188,7 @@ services:
     restart: unless-stopped
 
   backup-store-init:
-    image: ${NEXUS_PITR_MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z}
+    image: ${NEXUS_PITR_MC_IMAGE:-docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46}
     depends_on:
       backup-store:
         condition: service_healthy
@@ -220,8 +220,12 @@ services:
         # Idempotent without swallowing real errors: create/attach only if absent.
         mc admin policy info store nexus-pgbackrest >/dev/null 2>&1 \
           || mc admin policy create store nexus-pgbackrest /tmp/policy.json
-        mc admin user info store "$${PGBR_KEY}" | grep -q nexus-pgbackrest \
-          || mc admin policy attach store nexus-pgbackrest --user "$${PGBR_KEY}"
+        # A shell `case`, not grep: the image (ubi-micro based) has no grep.
+        user_info=$$(mc admin user info store "$${PGBR_KEY}")
+        case "$$user_info" in
+          *nexus-pgbackrest*) ;;
+          *) mc admin policy attach store nexus-pgbackrest --user "$${PGBR_KEY}" ;;
+        esac
         echo "backup-store-init: bucket $${BUCKET} ready for user $${PGBR_KEY}"
     restart: "no"
 

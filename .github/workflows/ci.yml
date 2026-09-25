@@ -76,6 +76,28 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      # The S3 half of the integration suite (result store, durable logs, log
+      # GC) needs a real S3 store. Not a `services:` entry: the image needs a
+      # `server /data` argv, which service containers cannot pass. Same pinned
+      # digest as deploy/docker-compose.yml (F111).
+      # Provenance before use: the pinned digest must carry a GitHub build
+      # attestation from pgsty/silo's release workflow (F111).
+      - name: Verify the S3 image's build provenance
+        run: make verify-s3-image
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Start a throwaway S3 store (Silo)
+        run: |
+          set -euo pipefail
+          docker run -d --name nexus-ci-s3 -p 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER=nexus-ci -e MINIO_ROOT_PASSWORD=nexus-ci-password \
+            "$(make -s print-s3-image)" server /data
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9000/minio/health/ready && exit 0
+            sleep 1
+          done
+          docker logs nexus-ci-s3 >&2
+          exit 1
       # Migrations are applied by a job, never by a service at startup
       # (ADR-0011 rule 4). This is that job.
       - name: Apply migrations
@@ -90,10 +112,11 @@ jobs:
       # A skip is indistinguishable from a pass in `go test` output (F85), so
       # the suite runs ONCE, verbosely, and the job fails if any test skipped
       # for want of a database -- in any package, not just internal/store.
-      # testdb.SkipMarker is the exact text such a skip prints. Tests that skip
-      # for a different reason -- no NATS broker (run by the nats-integration
-      # job below), no Kubernetes cluster, no Mailpit -- print a different
-      # message and are not caught here.
+      # testdb.SkipMarker is the exact text such a skip prints, and
+      # tests3.SkipMarker the object-store equivalent (NEXUS_TEST_S3_*). Tests
+      # that skip for a different reason -- no NATS broker (run by the
+      # nats-integration job below), no Kubernetes cluster, no Mailpit -- print
+      # a different message and are not caught here.
       #
       # -p 1: the packages share one database, and some assertions (timer
       # claims, reservation sums) are only meaningful without another package
@@ -109,12 +132,20 @@ jobs:
             grep "skipping integration test: no test database" integration.log >&2
             exit 1
           fi
+          if grep -q "skipping integration test: no test S3 store" integration.log; then
+            echo "integration tests SKIPPED -- NEXUS_TEST_S3_* unset or unreachable; treating as failure (F85)" >&2
+            grep "skipping integration test: no test S3 store" integration.log >&2
+            exit 1
+          fi
           if [ "$status" != 0 ]; then
             tail -300 integration.log >&2
           fi
           exit "$status"
         env:
           NEXUS_TEST_DATABASE_URL: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
+          NEXUS_TEST_S3_ENDPOINT: 127.0.0.1:9000
+          NEXUS_TEST_S3_ACCESS_KEY_ID: nexus-ci
+          NEXUS_TEST_S3_SECRET_ACCESS_KEY: nexus-ci-password
 
   # The outbox relay and dispatch hints against a REAL NATS JetStream server and a
   # REAL Postgres, each in a throwaway container the script starts itself. It

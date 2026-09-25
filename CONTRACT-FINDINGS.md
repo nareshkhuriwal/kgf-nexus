@@ -202,6 +202,8 @@ Gateway must confirm it emits bare labels.
 **Severity:** environmental, affects anyone pulling MinIO.
 `docker.io/minio/minio` no longer resolves (pull access denied). Compose now uses
 `quay.io/minio/minio` and `quay.io/minio/mc`.
+*Superseded by F111:* the quay.io repositories went private too; the store now
+runs the community fork `pgsty/silo`, pinned by digest.
 
 ### F17. §8.2 has no /capacity response shape
 Minor. The UI falls back to client-side aggregation over ACTIVE/DRAINING workers
@@ -2662,3 +2664,65 @@ attempts of workers that are already DEAD with attempts still DISPATCHED/RUNNING
 as `ReconcileExpiredLeases` does, instead of returning on the first error. Test
 with an integration test where the resource-manager wins the race, asserting
 the attempts become LOST within one sweep interval instead of one lease TTL.
+
+### F111. The pinned MinIO images stopped pulling: MinIO no longer publishes community images — FIXED
+
+**Severity:** high (environmental). A fresh `make up`, the PITR stack, the
+Helm chart's result store and `make bench-pg` could not start: both pins,
+`quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` and
+`quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z`, answer **401 UNAUTHORIZED** on
+an anonymous pull (reproduced 2026-09-25, Docker 29.6.2). Anything already
+cached kept working, which is why it went unnoticed.
+
+**Cause.** MinIO Inc. made the community edition source-only in October 2025
+(no binaries, no images), removed its Docker Hub images, privatised the quay.io
+repositories, and archived `github.com/minio/minio` ("THIS REPOSITORY IS NO
+LONGER MAINTAINED"). Its last tag, `RELEASE.2025-10-15T17-29-55Z`, fixed a
+privilege-escalation CVE (session-policy bypass in service accounts/STS) that
+the old `2025-04-22` pin also lacked. The only official images left are
+`quay.io/minio/aistor/*`, which are proprietary and need a license key even on
+the free tier.
+
+**Decision.** `docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46`
+for the server AND the `mc` init jobs (the image bundles a version-matched
+`mc`, so one attested artifact replaces two). Silo is the community fork
+(formerly `pgsty/minio`): AGPL-3.0, active (3.4k stars, releases every 1-2
+months with a public advisory ledger), drop-in compatible (S3 API, `MINIO_*`
+variables, `.minio.sys` format, `server` argv, `/minio/health/*` probes), and
+each image carries an SLSA build-provenance attestation from
+`pgsty/silo/.github/workflows/docker-release.yml`, checked by the new
+`make verify-s3-image` (also run in GitHub CI). Its sibling `pgsty/mc` image
+has no image attestation, which is another reason not to use it. Rejected:
+AIStor (license key), building the archived upstream tag (unpatched forever),
+Chainguard (free tier is `latest` only, no `mc`), Bitnami (versioned images
+moved to the unmaintained `bitnamilegacy` in August 2025). No Dockerfile is
+needed because a verifiable prebuilt image exists. Full assessment and bump
+procedure: docs/OPERATIONS.md §20.
+
+**Verified locally (2026-09-25, Apple M4 Pro, Docker Desktop 29.6.2).**
+`gh attestation verify` passes for the digest (and fails against the wrong
+repository); the server runs as UID 1000 with every capability dropped (the
+chart's security context) and passes `/minio/health/ready`; compose `minio`
+became healthy through its `mc ready local` healthcheck and `minio-init`
+created the private `nexus-results` bucket; the object-store integration tests
+(`agent/internal/resultstore`, `agent/internal/worker` logs,
+`internal/artifactgc` logs) pass against it; `deploy/backup-artifacts.sh` works
+in container mode; the PITR `backup-store` (TLS) became healthy and
+`backup-store-init` created the bucket, user and policy, twice (idempotent).
+That run exposed one incompatibility: the image is ubi-micro based and has no
+`grep`, which the init script piped `mc admin user info` into; it now uses a
+shell `case`. Not verified: the Helm chart on a real cluster.
+
+**Residual risk.** A single-organisation community fork without commercial
+support. The digest pin and the provenance check bound what can change under us;
+the fallback is AIStor under licence or a different S3 store.
+
+**Also fixed while wiring the S3 store into CI.** The integration tests now read
+only `NEXUS_TEST_S3_*` (new `internal/tests3`, the counterpart of
+`internal/testdb`): the result-store suite used to default to
+`localhost:9000` with `minioadmin/minioadmin`, and the log suites read the
+service credentials `NEXUS_S3_*`. CI now starts a throwaway store and fails on
+`skipping integration test: no test S3 store`. And `make migrate-up`, which both
+CI integration jobs run, ignored the `-- migrate: no-transaction` opt-out and
+failed on 0015 (`CREATE INDEX CONCURRENTLY cannot run inside a transaction
+block`); it now calls `deploy/migrate.sh`, the script the migration jobs use.
