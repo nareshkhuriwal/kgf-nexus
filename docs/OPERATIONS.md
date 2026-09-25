@@ -5,7 +5,7 @@
 **Scope:** Postgres backup and restore, the artifact (MinIO result store) backup
 and restore and the ordering between the two stores, the restore drills and their
 measured results, what these procedures do *not* cover, the RPO/RTO the approach
-actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), and the windowed pull claim at large backlogs (§15).
+actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), and metrics: endpoints, scrape configuration and the metrics catalogue (§16).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -1367,3 +1367,183 @@ SELECT idx_scan FROM pg_stat_user_indexes
 
 This should rise with every poll. If it stays flat while workers poll, the
 scheduler is not windowing; check the startup log (§15.2).
+
+---
+
+## 16. Metrics
+
+Every Nexus process serves Prometheus metrics at `GET /metrics` in the text
+format (0.0.4, gzip on request). The exposition is client_golang's (ADR-0019).
+A scrape answers from memory and touches no dependency, so `/metrics` keeps
+working during the database or broker outage you are trying to see.
+
+### 16.1 Where each process serves `/metrics`
+
+`/metrics` is **never** on a public port. The gateway's REST port is the
+internet-facing ingress, so the gateway has a dedicated operations listener.
+Every other service serves it on its existing health listener, which is
+already internal-only.
+
+| Process | Listener | Setting (default) | Compose (loopback) | Helm / k8s |
+|---|---|---|---|---|
+| api-gateway | ops listener: `/metrics`, `/healthz`, `/readyz` | `NEXUS_METRICS_ADDR` (`:8088`; `off` disables) | `127.0.0.1:19100` | Service port `metrics` (9464) → 8088 |
+| workflow-manager | health | `NEXUS_WFM_HEALTH_ADDR` (`:8081`) | `127.0.0.1:19101` | `metrics` (9464) → 8080 |
+| dag-engine | health | `NEXUS_HTTP_ADDR` (`:8082`) | `127.0.0.1:19102` | `metrics` → 8080 |
+| scheduler (one per queue) | health | `NEXUS_HTTP_ADDR` (`:8081`) | `127.0.0.1:19110-19119` (scalable); scheduler-gpu `19104` | `metrics` → 8080 |
+| resource-manager | health | `RM_HTTP_ADDR` (`:8082`) | `127.0.0.1:19105` | `metrics` → 8080 |
+| event-service | its internal HTTP API port | `HTTP_ADDR` (`:8085`) | `127.0.0.1:19106` | `metrics` → 8080 |
+| cluster-controller | health | `CONTROLLER_HTTP_ADDR` (`:8090`) | — | pod annotation, port 8090 |
+| agent | own listener: `/metrics`, `/healthz` | `NEXUS_METRICS_ADDR` / `-metrics-addr` (`127.0.0.1:8089`; `off` disables) | `127.0.0.1:19120-19122` | pod port `metrics` 8089 (PodMonitor) |
+| artifact-gc (batch job) | optional, only while the pass runs | `-metrics-addr` / `ARTIFACT_GC_METRICS_ADDR` (off) | — | — |
+
+The agent binds loopback by default, so an agent on a laptop or shared host
+does not publish metrics to the LAN. Deployments that scrape it set
+`NEXUS_METRICS_ADDR=:8089`, as compose and Helm do. If the agent cannot bind
+its port, it logs the error and keeps running work. If the gateway cannot bind,
+it fails to start and names the address in the error.
+
+**artifact-gc is a batch job.** A pull scrape usually misses a process that
+lives for seconds, so point it at a Pushgateway with
+`artifact-gc -metrics-pushgateway http://pushgateway:9091` (or
+`ARTIFACT_GC_PUSHGATEWAY_URL`). When the pass ends, whether it succeeded or
+failed, the job PUTs its `nexus_artifact_gc_*` families under
+`job="artifact-gc"`. It does not push Go runtime or process families. Alert on
+`time() - nexus_artifact_gc_last_success_timestamp_seconds`.
+
+### 16.2 Scrape configuration
+
+- **Helm, annotation discovery** (default): pods carry `prometheus.io/scrape`,
+  `prometheus.io/port` and `prometheus.io/path`. Set
+  `metrics.podAnnotations=false` to turn them off.
+- **Helm, prometheus-operator**: `metrics.serviceMonitor.enabled=true` renders
+  a ServiceMonitor over every Service port named `metrics`, plus a PodMonitor
+  for the agents. Set `metrics.podMonitor.enabled` to control the PodMonitor
+  separately. Add `metrics.serviceMonitor.labels.release=<your stack>` to match
+  the operator's selector. The chart does not install the CRDs; they must
+  already exist.
+- **deploy/k8s**: the standalone agent Deployment and the cluster-controller
+  pods carry the same annotations.
+- **Compose**: every metrics listener is published on `127.0.0.1` only. A local
+  Prometheus can scrape them:
+
+  ```yaml
+  scrape_configs:
+    - job_name: nexus
+      static_configs:
+        - targets: ['host.docker.internal:19100', 'host.docker.internal:19101',
+                    'host.docker.internal:19102', 'host.docker.internal:19104',
+                    'host.docker.internal:19105', 'host.docker.internal:19106',
+                    'host.docker.internal:19110', 'host.docker.internal:19120',
+                    'host.docker.internal:19121', 'host.docker.internal:19122']
+  ```
+
+To check any target by hand, run `curl -s localhost:19100/metrics | grep nexus_build_info`.
+
+### 16.3 Cardinality rules
+
+- No run, attempt, node, worker, key or host id is ever a label. Those belong
+  in logs and traces.
+- HTTP requests are labelled by the **ServeMux route template**
+  (`/v1/namespaces/{ns}/runs/{id}`), never by the raw path. Every unmatched
+  path is `route="unmatched"`, and every non-standard method is
+  `method="OTHER"`.
+- gRPC labels take only the methods registered on the server.
+- The backlog gauges report at most 50 queues by name. Any further queues are
+  summed into `queue="_other"`.
+- The cluster-controller's `pool` label is the binding name an operator
+  configured.
+
+If a caller passes labels that do not match a family's declared labels, the
+package normalizes them and logs `metrics: label set does not match` once per
+family. Treat that log line as a bug.
+
+### 16.4 Catalogue
+
+On top of the metrics below, every process exposes:
+
+- `go_*`: the Go runtime.
+- `process_*`: CPU, RSS, file descriptors and start time, on Linux.
+- `nexus_build_info{service,version,revision,go_version} 1`.
+
+Services with a Postgres pool also expose `nexus_db_pool_*`. In the T column,
+C is a counter, G a gauge and H a histogram.
+
+| Metric | T | Labels | Service | Meaning / alert on |
+|---|---|---|---|---|
+| `nexus_build_info` | G | service, version, revision, go_version | all | Always 1. Join on it to see which build a series came from |
+| `nexus_db_pool_max_conns`, `_total_conns`, `_acquired_conns`, `_idle_conns` | G | — | all DB services | Pool size and use. `acquired == max` sustained: pool exhausted |
+| `nexus_db_pool_acquires_total` | C | — | all DB services | Successful acquisitions |
+| `nexus_db_pool_acquire_duration_seconds_total` | C | — | all DB services | Cumulative wait; `rate(this)/rate(acquires)` is mean wait |
+| `nexus_db_pool_empty_acquires_total` | C | — | all DB services | Waits on an empty pool. Rising: raise the pool size or find the slow query |
+| `nexus_db_pool_canceled_acquires_total` | C | — | all DB services | Callers gave up waiting |
+| `nexus_http_requests_total` | C | method, route, code | api-gateway, event-service | REST rate and errors (`code=~"5.."`) |
+| `nexus_http_request_duration_seconds` | H | method, route, code | api-gateway, event-service | REST latency, 1 ms–60 s. SSE tails are observed when they end |
+| `nexus_http_response_size_bytes` | H | method, route | api-gateway, event-service | Response size |
+| `nexus_http_requests_in_flight` | G | — | api-gateway, event-service | Concurrent requests, open SSE tails included |
+| `grpc_server_started_total` | C | grpc_type, grpc_service, grpc_method | api-gateway (worker API), workflow-manager, dag-engine, scheduler, resource-manager | RPCs started |
+| `grpc_server_handled_total` | C | grpc_type, grpc_service, grpc_method, grpc_code | same | RPCs finished, by status. `Unauthenticated` on the gateway: bad worker keys |
+| `grpc_server_handling_seconds` | H | grpc_type, grpc_service, grpc_method | same | RPC latency, 1 ms–120 s. `PollTask` is a long poll by design |
+| `nexus_scheduler_claims_total` | C | queue, path (poll/push), outcome (dispatched/empty/blocked/race_lost/error) | scheduler | Claims per second. `outcome="error"` > 0: dispatch is failing |
+| `nexus_scheduler_claim_duration_seconds` | H | queue, path | scheduler | Claim transaction latency. p99 > 250 ms: see §15 and ADR-0018 |
+| `nexus_scheduler_attempts_dispatched_total` | C | queue, path | scheduler | Attempts leased to workers |
+| `nexus_scheduler_attempts_lost_total` | C | queue, cause (lease_expired/worker_dead), retry | scheduler | LOST attempts. Rising: worker or network trouble |
+| `nexus_scheduler_lease_expiries_total` | C | queue | scheduler | Leases the reconciler expired |
+| `nexus_scheduler_workers_declared_dead_total` | C | queue | scheduler | Workers the liveness sweep declared DEAD |
+| `nexus_scheduler_timers_fired_total` | C | queue, kind, result | scheduler | retry_backoff and schedule_to_start timers handled |
+| `nexus_scheduler_loop_errors_total` | C | queue, loop | scheduler | Background loop failures, which also fail `/readyz` |
+| `nexus_scheduler_pending_attempts` | G | queue | scheduler | PENDING backlog across the fleet, sampled every `NEXUS_BACKLOG_SAMPLE_INTERVAL` (15 s). Every replica reports every queue: aggregate with `max by (queue)` |
+| `nexus_scheduler_oldest_pending_age_seconds` | G | queue | scheduler | Queue age, the queue SLO signal. Also exposes a queue that has no scheduler replica |
+| `nexus_dag_operations_total` | C | op (materialize/reconcile), result | dag-engine | Engine operations |
+| `nexus_dag_operation_duration_seconds` | H | op | dag-engine | Operation latency |
+| `nexus_dag_node_transitions_total` | C | from, to | dag-engine | Node state transitions committed (CAS won) |
+| `nexus_dag_attempts_created_total` | C | kind (new/cache_hit) | dag-engine | Attempts created, with memo hits counted separately |
+| `nexus_dag_node_cas_misses_total` | C | — | dag-engine | Lost CAS races. Sustained: replicas are fighting over runs |
+| `nexus_dag_map_expansions_total` | C | — | dag-engine | Map templates expanded |
+| `nexus_dag_fanin_refused_total` | C | — | dag-engine | Fan-ins refused for exceeding `NEXUS_DAG_MAX_FANIN_BYTES` |
+| `nexus_dag_run_state_published_total` | C | state, result | dag-engine | Run state publishes. `result="error"` on a terminal state: a run may be stranded |
+| `nexus_rm_reservations_total` | C | result (granted/refused/not_found/error) | resource-manager | Reserve calls |
+| `nexus_rm_reserve_duration_seconds` | H | result | resource-manager | Reserve latency |
+| `nexus_rm_releases_total` | C | result (released/absent/error) | resource-manager | Releases. `absent` is expected duplicate traffic |
+| `nexus_rm_leaked_reservations_reclaimed_total` | C | source (heartbeat/reconcile/dead_worker) | resource-manager | Capacity reclaimed as leaks. Steady non-zero `heartbeat`: the ledger is drifting |
+| `nexus_rm_heartbeats_total` | C | result (ok/unknown_worker/error) | resource-manager | Heartbeats. `unknown_worker` forces a re-registration |
+| `nexus_rm_workers_declared_dead_total` | C | — | resource-manager | Workers declared DEAD by the liveness sweep |
+| `nexus_rm_quarantine_changes_total` | C | action (quarantined/expired) | resource-manager | Automatic quarantines (§14) |
+| `nexus_controller_reconcile_cycles_total` | C | result | cluster-controller | Reconcile cycles run by the leader |
+| `nexus_controller_reconcile_duration_seconds` | H | — | cluster-controller | Cycle duration |
+| `nexus_controller_pool_reconcile_errors_total` | C | pool | cluster-controller | Failed pool reconciles |
+| `nexus_controller_scale_actions_total` | C | pool, action, mode, applied | cluster-controller | Scale decisions: scale_out, scale_in, drain, hold, refused |
+| `nexus_controller_pool_replicas` | G | pool, kind (current/desired) | cluster-controller | Replicas observed and planned |
+| `nexus_controller_last_success_timestamp_seconds` | G | — | cluster-controller | Alert on the leader when `time() - this > 4 * interval` |
+| `nexus_controller_leader` | G | — | cluster-controller | 1 on the leader. Alert if `sum() != 1` for 5 minutes: no leader, or two |
+| `nexus_agent_tasks_running` | G | executor | agent | Attempts executing |
+| `nexus_agent_tasks_started_total` | C | executor | agent | Attempts started |
+| `nexus_agent_tasks_completed_total` | C | executor, outcome, error_class | agent | Attempts reported. `error_class="infrastructure"` rising on one host: a quarantine candidate |
+| `nexus_agent_task_duration_seconds` | H | executor, outcome | agent | Task wall time, 1 s–1 day |
+| `nexus_agent_heartbeats_total` | C | result | agent | Heartbeats sent |
+| `nexus_agent_heartbeat_duration_seconds` | H | — | agent | Heartbeat round trip |
+| `nexus_agent_heartbeat_consecutive_failures` | G | — | agent | Current failure streak. At 3 or more, expect the worker to be declared DEAD |
+| `nexus_agent_last_heartbeat_success_timestamp_seconds` | G | — | agent | Last acknowledged beat |
+| `nexus_agent_result_store_puts_total` | C | result (inline/uploaded/deduplicated/error) | agent | Outputs stored. `error` > 0: object store trouble |
+| `nexus_agent_result_store_upload_bytes_total` | C | result | agent | Output bytes. `uploaded` counts bytes actually transferred |
+| `nexus_agent_result_store_upload_duration_seconds` | H | result | agent | Upload latency. Inline outputs are not observed |
+| `nexus_agent_result_store_upload_size_bytes` | H | — | agent | Uploaded output sizes |
+| `nexus_agent_sessions_total` | C | — | agent | Registrations. More than 1 per process means the control plane forced a re-registration |
+| `nexus_agent_advertised_capacity` | G | resource | agent | Capacity advertised for scheduling, which the runtime does not necessarily enforce |
+| `nexus_agent_result_report_failures_total` | C | — | agent | Reports not delivered. The WAL retains them |
+| `nexus_artifact_gc_last_run_objects` | G | disposition | artifact-gc | Last sweep: scanned, live_refs, reachable, too_young, orphan, deleted, delete_error |
+| `nexus_artifact_gc_last_run_orphan_bytes` | G | — | artifact-gc | Reclaimable bytes found |
+| `nexus_artifact_gc_last_run_duration_seconds` | G | — | artifact-gc | Pass duration |
+| `nexus_artifact_gc_last_success_timestamp_seconds`, `_last_failure_timestamp_seconds` | G | — | artifact-gc | Batch-job liveness, via the Pushgateway |
+| `nexus_artifact_gc_dry_run` | G | — | artifact-gc | 1 when nothing was deleted |
+| `nexus_artifact_gc_last_check_refs` | G | kind | artifact-gc | `-check-refs` result. `missing_keys` > 0 is data loss |
+| `nexus_timer_*`, `nexus_timers_fired_total`, `nexus_stalled_runs_recovered_total` | — | — | workflow-manager | Durable timers. Unchanged by this work |
+| `nexus_outbox_*` | — | — | event-service | Outbox relay (§11.3) |
+| `nexus_tls_cert_not_after_timestamp_seconds`, `nexus_tls_cert_expiry_seconds`, `nexus_tls_reload_total`, `nexus_tls_reload_stale` | — | role | services with TLS | Certificate expiry and reloads (§9.3) |
+
+### 16.5 Verifying after an upgrade
+
+1. `curl -s <target>/metrics | head` answers 200 with `Content-Type: text/plain; version=0.0.4`.
+2. `nexus_build_info` shows the version you deployed on every target.
+3. In Prometheus, `up{job=~".*nexus.*"} == 0` returns nothing.
+4. The gateway's REST port answers 404 for `/metrics`. If it answers 200, the
+   ops listener has been routed to the public port.
