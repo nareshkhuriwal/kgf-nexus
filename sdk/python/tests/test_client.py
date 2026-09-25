@@ -304,6 +304,50 @@ def test_get_logs_yields_lines(server) -> None:
     assert "follow=true" in server.requests[-1]["full_path"]
 
 
+def test_get_logs_passes_tail_and_stream(server) -> None:
+    server.reply(
+        "GET",
+        "/v1/namespaces/prod/attempts/att-1/logs",
+        200,
+        b"[nexus] 3 lines were omitted\nlast\n",
+        {"Content-Type": "text/plain"},
+    )
+    assert list(_client(server).get_logs("att-1", tail=50, stream="stderr")) == [
+        "[nexus] 3 lines were omitted",
+        "last",
+    ]
+    path = server.requests[-1]["full_path"]
+    assert "tail=50" in path and "stream_name=stderr" in path and "follow" not in path
+
+
+def test_search_logs_sends_bounded_query(server) -> None:
+    server.reply(
+        "GET",
+        "/v1/namespaces/prod/attempts/att-1/logs",
+        200,
+        b'{"log":{"state":"complete"},"search":{"matches":[{"n":41,"message":"boom"}],"complete":true}}',
+        {"Content-Type": "application/json"},
+    )
+    res = _client(server).search_logs("att-1", "bo+m", regex=True, case_insensitive=True, from_line=10)
+    assert res["search"]["matches"][0]["n"] == 41
+    path = server.requests[-1]["full_path"]
+    for want in ("q=bo%2Bm", "regex=true", "case=insensitive", "from_line=10"):
+        assert want in path, path
+
+
+def test_get_log_page_reports_state(server) -> None:
+    server.reply(
+        "GET",
+        "/v1/namespaces/prod/attempts/att-1/logs",
+        200,
+        b'{"log":{"state":"partial","detail":"agent crashed"},"lines":[],"next_line":1,"has_more":false}',
+        {"Content-Type": "application/json"},
+    )
+    page = _client(server).get_log_page("att-1", tail=100)
+    assert page["log"]["state"] == "partial"
+    assert "tail=100" in server.requests[-1]["full_path"]
+
+
 def test_endpoint_and_key_come_from_the_environment(monkeypatch) -> None:
     monkeypatch.setenv("NEXUS_ENDPOINT", "http://env-host:9090/")
     monkeypatch.setenv("NEXUS_API_KEY", "env-key")

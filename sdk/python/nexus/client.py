@@ -304,17 +304,94 @@ class NexusClient:
             yield from _parse_sse(resp)
 
     def get_logs(
-        self, attempt_id: str, *, follow: bool = False, timeout: float = 3600.0
+        self,
+        attempt_id: str,
+        *,
+        follow: bool = False,
+        tail: int | None = None,
+        stream: str | None = None,
+        timeout: float = 3600.0,
     ) -> Iterator[str]:
-        """Stream an attempt's log lines. Yields raw lines as they arrive."""
+        """Stream an attempt's log lines as the task printed them (ADR-0020).
+
+        With ``follow=True`` the stream stays open until the attempt has ended
+        and its log is complete. ``tail`` starts at the last N lines; ``stream``
+        is ``"stdout"`` or ``"stderr"``. Lines beginning ``[nexus]`` are the
+        platform's own: output omitted by the per-attempt cap, lines dropped
+        while shipping fell behind, or a range that could not be read.
+        """
+        params: dict[str, Any] = {}
+        if follow:
+            params["follow"] = "true"
+        if tail:
+            params["tail"] = tail
+        if stream:
+            params["stream_name"] = stream
         url = self._url(
-            f"/attempts/{urllib.parse.quote(attempt_id, safe='')}/logs",
-            {"follow": "true"} if follow else None,
+            f"/attempts/{urllib.parse.quote(attempt_id, safe='')}/logs", params or None
         )
         resp = self._request("GET", url, headers={"Accept": "text/plain"}, stream=True, timeout=timeout)
         with resp:
             for raw in resp:
                 yield raw.decode("utf-8", errors="replace").rstrip("\n")
+
+    def get_log_page(
+        self,
+        attempt_id: str,
+        *,
+        tail: int | None = None,
+        from_line: int | None = None,
+        limit: int | None = None,
+        stream: str | None = None,
+    ) -> dict[str, Any]:
+        """One page of structured log lines plus the log's state.
+
+        Returns ``{"log": {"state": ..., "detail": ...}, "lines": [{"n", "ts",
+        "stream", "message"}], "next_line": ..., "has_more": ...}``. ``state`` is
+        one of none, live, complete, partial (the attempt ended without its log
+        being finalized) or expired (removed by retention). Pass ``next_line``
+        back as ``from_line`` to continue.
+        """
+        return self._request(
+            "GET",
+            self._url(
+                f"/attempts/{urllib.parse.quote(attempt_id, safe='')}/logs",
+                {"tail": tail, "from_line": from_line, "limit": limit, "stream_name": stream},
+            ),
+        )
+
+    def search_logs(
+        self,
+        attempt_id: str,
+        query: str,
+        *,
+        regex: bool = False,
+        case_insensitive: bool = False,
+        stream: str | None = None,
+        from_line: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Bounded server-side search of an attempt's log.
+
+        Returns ``{"log": {...}, "search": {"matches": [...], "next_line": ...,
+        "complete": bool, "stopped_by": "matches"|"bytes"|"time"|None}}``. When
+        ``complete`` is false, call again with ``from_line=next_line``. Regular
+        expressions use RE2 syntax (no backreferences or lookaround).
+        """
+        return self._request(
+            "GET",
+            self._url(
+                f"/attempts/{urllib.parse.quote(attempt_id, safe='')}/logs",
+                {
+                    "q": query,
+                    "regex": "true" if regex else None,
+                    "case": "insensitive" if case_insensitive else None,
+                    "stream_name": stream,
+                    "from_line": from_line,
+                    "limit": limit,
+                },
+            ),
+        )
 
     # ── fleet ───────────────────────────────────────────────────────────────
     def list_workers(self, *, state: str | None = None) -> dict[str, Any]:

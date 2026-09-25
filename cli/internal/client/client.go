@@ -439,9 +439,33 @@ func ParseSSE(r io.Reader, fn func(map[string]any) error) error {
 
 // StreamLogs streams an attempt's log lines, calling fn per line.
 func (c *Client) StreamLogs(ctx context.Context, attemptID string, follow bool, fn func(string) error) error {
+	return c.StreamLogsWith(ctx, attemptID, LogOptions{Follow: follow}, fn)
+}
+
+// LogOptions narrows a log stream (ADR-0020).
+type LogOptions struct {
+	// Follow keeps the stream open until the attempt's log ends.
+	Follow bool
+	// Tail starts at the last N lines instead of the first; 0 = whole log.
+	Tail int
+	// Stream restricts to "stdout" or "stderr".
+	Stream string
+}
+
+// StreamLogsWith streams an attempt's log lines with options, calling fn per
+// line. The gateway sends raw lines for Accept: text/plain, so what fn sees is
+// exactly what the task printed (plus "[nexus] ..." lines where the platform
+// omitted or could not read something, which it says rather than hides).
+func (c *Client) StreamLogsWith(ctx context.Context, attemptID string, o LogOptions, fn func(string) error) error {
 	q := url.Values{}
-	if follow {
+	if o.Follow {
 		q.Set("follow", "true")
+	}
+	if o.Tail > 0 {
+		q.Set("tail", fmt.Sprintf("%d", o.Tail))
+	}
+	if o.Stream != "" {
+		q.Set("stream_name", o.Stream)
 	}
 	body, err := c.stream(ctx, c.urlFor("/attempts/"+url.PathEscape(attemptID)+"/logs", q), "text/plain")
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/cli/internal/client"
 	"github.com/khuriwalgroup/kgf-nexus/cli/internal/output"
 )
 
@@ -212,27 +213,41 @@ func logsCmd() *command {
 	return &command{
 		name:    "logs",
 		summary: "Stream an attempt's logs.",
-		usage: `nexusctl logs <attempt-id> [--follow]
+		usage: `nexusctl logs <attempt-id> [--follow] [--tail N] [--stream stdout|stderr]
 
 Stream the logs of one task attempt.
 
-  -f, --follow   Keep the stream open and print new lines as they arrive.
+  -f, --follow   Keep the stream open and print new lines as they arrive; ends
+                 when the attempt has finished and its log is complete.
+  --tail N       Start at the last N lines.
+  --stream S     Only stdout or only stderr.
+
+Logs are durable (ADR-0020): they remain readable after the attempt, its
+worker and its node are gone, subject to the deployment's log retention. Lines
+starting with "[nexus]" are the platform's own: where the per-attempt size cap
+omitted output, where shipping fell behind, or where part of the log could not
+be read.
 
 Logs are per ATTEMPT, not per node, because a retried node has several attempts
 and their logs are the main evidence for why the earlier ones failed. Get attempt
 ids from ` + "`nexusctl run get <run-id>`" + `.`,
 		run: func(ctx context.Context, env *Environment, args []string) error {
-			var follow bool
+			var opts client.LogOptions
 			rest, err := env.parseFlags(args, func(fs *flag.FlagSet) {
-				fs.BoolVar(&follow, "follow", false, "Keep the stream open")
-				fs.BoolVar(&follow, "f", false, "Keep the stream open (shorthand)")
+				fs.BoolVar(&opts.Follow, "follow", false, "Keep the stream open")
+				fs.BoolVar(&opts.Follow, "f", false, "Keep the stream open (shorthand)")
+				fs.IntVar(&opts.Tail, "tail", 0, "Start at the last N lines")
+				fs.StringVar(&opts.Stream, "stream", "", "Only stdout or stderr")
 			})
 			if err != nil {
 				return err
 			}
+			if opts.Stream != "" && opts.Stream != "stdout" && opts.Stream != "stderr" {
+				return fmt.Errorf("--stream must be stdout or stderr")
+			}
 			if len(rest) != 1 {
 				return fmt.Errorf("expected exactly one attempt id\n" +
-					"Usage: nexusctl logs <attempt-id> [--follow]\n" +
+					"Usage: nexusctl logs <attempt-id> [--follow] [--tail N] [--stream stdout|stderr]\n" +
 					"Find attempt ids with: nexusctl run get <run-id>")
 			}
 			c, err := env.Client()
@@ -241,7 +256,7 @@ ids from ` + "`nexusctl run get <run-id>`" + `.`,
 			}
 			// Raw pass-through: any re-encoding would corrupt what the task
 			// actually printed, and a log line is evidence.
-			err = c.StreamLogs(ctx, rest[0], follow, func(line string) error {
+			err = c.StreamLogsWith(ctx, rest[0], opts, func(line string) error {
 				_, werr := fmt.Fprintln(env.IO.Out, line)
 				return werr
 			})
