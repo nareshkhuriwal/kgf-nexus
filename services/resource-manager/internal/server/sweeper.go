@@ -99,9 +99,12 @@ func (sw *Sweeper) sweepOnce(ctx context.Context) (dead int, released int) {
 			"liveness_window", sw.LivenessWindow)
 
 		// A dead worker is running nothing, so its entire committed vector is a
-		// leak by definition. Its held leases expire on the scheduler's own
-		// timers, turning its attempts into LOST for retry per policy (§7.2); our
-		// job is only the capacity half.
+		// leak by definition. Its attempts are the scheduler's: its liveness
+		// sweep expires the in-flight attempts of every DEAD worker, including
+		// ones this sweeper marked, within one of its intervals (F106), with
+		// lease expiry as the backstop. Our job is only the capacity half, and
+		// the scheduler's release finds these reservations gone and releases
+		// nothing twice.
 		leaked, err := sw.store.ReleaseAllForWorker(ctx, w.ID)
 		if err != nil {
 			log.Error("worker is DEAD but its capacity could not be reclaimed", "error", err)

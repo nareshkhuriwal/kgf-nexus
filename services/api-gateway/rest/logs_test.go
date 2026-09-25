@@ -52,7 +52,8 @@ func (d *logsDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row 
 		}
 		return reflectRow{[]any{id, "run-1", "node", int32(1), state, "default",
 			(*string)(nil), (*string)(nil), (*string)(nil), []byte(nil), []byte(nil),
-			time.Now(), (*time.Time)(nil), (*time.Time)(nil), (*string)(nil),
+			// scheduled_at, dispatched_at (F120), started_at, ended_at, cache_hit_of
+			time.Now(), (*time.Time)(nil), (*time.Time)(nil), (*time.Time)(nil), (*string)(nil),
 			// attempt_progress (migration 0024): no report yet.
 			(*string)(nil), (*float64)(nil), (*time.Time)(nil), (*time.Time)(nil)}}
 	}

@@ -77,6 +77,11 @@ type TaskSpec struct {
 	// to capture nothing (RuntimeSpec.stdout_output).
 	StdoutOutput string
 
+	// InlineThresholdBytes is the control plane's inline-versus-blob boundary
+	// (ADR-0016), already clamped by the agent. Exported to the workload as
+	// NEXUS_INLINE_THRESHOLD_BYTES when positive; zero exports nothing.
+	InlineThresholdBytes int64
+
 	// StartToCloseDeadline is absolute and computed from CONTROL-PLANE time.
 	// Worker clocks are never authoritative, so the executor treats this as
 	// given rather than deriving it from a local duration.
@@ -267,4 +272,9 @@ const (
 	EnvOutputNames    = "NEXUS_OUTPUT_NAMES"
 	EnvWorkDir        = "NEXUS_WORK_DIR"
 	EnvDeadlineUnixMs = "NEXUS_DEADLINE_UNIX_MS"
+	// EnvInlineThreshold is the control plane's configured inline-versus-blob
+	// boundary in bytes (ADR-0016), so an in-task result store -- the Python
+	// SDK's ctx.store -- inlines exactly what the agent itself would, instead
+	// of a compiled-in 64 KiB. Exported only when the agent knows the value.
+	EnvInlineThreshold = "NEXUS_INLINE_THRESHOLD_BYTES"
 )

@@ -34,6 +34,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/specenum"
 )
 
 // Document is a loaded, canonicalized spec.
@@ -46,6 +48,13 @@ type Document struct {
 	Hash string
 	// Source is the file it came from, for error messages.
 	Source string
+	// Raw is the document as the author wrote it (YAML or JSON), kept so a
+	// problem path can be mapped back to a line (see Locate). Nil for a
+	// compiled .py spec, whose positions come from SourceMap instead.
+	Raw []byte
+	// SourceMap, for a .py spec, maps each node id to the Python lines it came
+	// from (the SDK's CompiledWorkflow.source_map_json()). Nil otherwise.
+	SourceMap map[string]NodeSource
 }
 
 // Load reads a spec from a file path, or from `stdin` when path is "-".
@@ -106,6 +115,15 @@ func Parse(raw []byte, source string) (*Document, error) {
 			"%s: a WorkflowSpec must be a mapping at the top level, got %T", source, normalized)
 	}
 
+	// The gateway rewrites enum spellings to their short form before it
+	// canonicalizes and hashes (services/api-gateway/spec, NormalizeEnums), so
+	// the content address is that of the NORMALIZED document. Doing the same
+	// here, with the same tables, is what makes the hash nexusctl prints the
+	// hash the server stores the spec under (CONTRACT-FINDINGS F124). The
+	// submitted bytes are the normalized document too: exactly what the server
+	// will store, and it accepts either spelling.
+	specenum.Normalize(doc)
+
 	canonical, err := Canonical(doc)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", source, err)
@@ -116,6 +134,7 @@ func Parse(raw []byte, source string) (*Document, error) {
 		JSON:   canonical,
 		Hash:   hex.EncodeToString(sum[:]),
 		Source: source,
+		Raw:    raw,
 	}, nil
 }
 
@@ -346,46 +365,62 @@ func (d *Document) Name() string {
 // the document alone, so a user editing YAML is not waiting on a round trip to
 // learn they typed `taks:`.
 func (d *Document) Validate() []string {
-	var problems []string
+	ps := d.Problems()
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, p.Message)
+	}
+	return out
+}
+
+// Problems is Validate with each problem's JSON path, so a caller can place it
+// in the file (Locate). The messages are exactly Validate's.
+func (d *Document) Problems() []Problem {
+	var problems []Problem
+	add := func(path, format string, args ...any) {
+		problems = append(problems, Problem{Path: path, Message: fmt.Sprintf(format, args...)})
+	}
 	if d.Name() == "" {
-		problems = append(problems, "missing required field: name")
+		add("/name", "missing required field: name")
 	}
 	if _, ok := d.Value["api_version"]; !ok {
-		problems = append(problems, "missing required field: api_version")
+		add("/api_version", "missing required field: api_version")
 	}
 
 	tasksRaw, ok := d.Value["tasks"]
 	if !ok {
-		return append(problems, "missing required field: tasks")
+		add("", "missing required field: tasks")
+		return problems
 	}
 	tasks, ok := tasksRaw.([]any)
 	if !ok {
-		return append(problems, "tasks must be a list")
+		add("/tasks", "tasks must be a list")
+		return problems
 	}
 	if len(tasks) == 0 {
-		problems = append(problems, "tasks is empty: a workflow needs at least one task")
+		add("/tasks", "tasks is empty: a workflow needs at least one task")
 	}
 
 	ids := make(map[string]bool, len(tasks))
 	for i, t := range tasks {
 		task, ok := t.(map[string]any)
 		if !ok {
-			problems = append(problems, fmt.Sprintf("tasks[%d] must be a mapping", i))
+			add(fmt.Sprintf("/tasks/%d", i), "tasks[%d] must be a mapping", i)
 			continue
 		}
 		id, _ := task["id"].(string)
 		if id == "" {
-			problems = append(problems, fmt.Sprintf("tasks[%d] missing required field: id", i))
+			add(fmt.Sprintf("/tasks/%d", i), "tasks[%d] missing required field: id", i)
 			continue
 		}
 		if ids[id] {
 			// node_id participates in the idempotency key, so a duplicate is not
 			// a cosmetic problem -- two nodes would share one key.
-			problems = append(problems, fmt.Sprintf("duplicate task id %q", id))
+			add(fmt.Sprintf("/tasks/%d/id", i), "duplicate task id %q", id)
 		}
 		ids[id] = true
 		if ref, _ := task["task_ref"].(string); ref == "" {
-			problems = append(problems, fmt.Sprintf("task %q missing required field: task_ref", id))
+			add(fmt.Sprintf("/tasks/%d/task_ref", i), "task %q missing required field: task_ref", id)
 		}
 	}
 
@@ -395,27 +430,28 @@ func (d *Document) Validate() []string {
 	}
 	edges, ok := edgesRaw.([]any)
 	if !ok {
-		return append(problems, "edges must be a list")
+		add("/edges", "edges must be a list")
+		return problems
 	}
 	type edge struct{ from, to string }
 	var parsed []edge
 	for i, e := range edges {
 		em, ok := e.(map[string]any)
 		if !ok {
-			problems = append(problems, fmt.Sprintf("edges[%d] must be a mapping", i))
+			add(fmt.Sprintf("/edges/%d", i), "edges[%d] must be a mapping", i)
 			continue
 		}
 		from, _ := em["from_node_id"].(string)
 		to, _ := em["to_node_id"].(string)
 		if from == "" || to == "" {
-			problems = append(problems, fmt.Sprintf("edges[%d] needs both from_node_id and to_node_id", i))
+			add(fmt.Sprintf("/edges/%d", i), "edges[%d] needs both from_node_id and to_node_id", i)
 			continue
 		}
 		if !ids[from] {
-			problems = append(problems, fmt.Sprintf("edges[%d] references unknown from_node_id %q", i, from))
+			add(fmt.Sprintf("/edges/%d/from_node_id", i), "edges[%d] references unknown from_node_id %q", i, from)
 		}
 		if !ids[to] {
-			problems = append(problems, fmt.Sprintf("edges[%d] references unknown to_node_id %q", i, to))
+			add(fmt.Sprintf("/edges/%d/to_node_id", i), "edges[%d] references unknown to_node_id %q", i, to)
 		}
 		parsed = append(parsed, edge{from, to})
 	}
@@ -459,7 +495,7 @@ func (d *Document) Validate() []string {
 			}
 		}
 		sort.Strings(stuck)
-		problems = append(problems, "graph contains a cycle involving: "+strings.Join(stuck, ", "))
+		add("/edges", "graph contains a cycle involving: %s", strings.Join(stuck, ", "))
 	}
 	return problems
 }

@@ -40,6 +40,10 @@ the three idempotency mechanisms in descending order of strength.
 
 from __future__ import annotations
 
+import importlib
+from types import ModuleType
+from typing import TYPE_CHECKING
+
 from .canonical import CanonicalError, canonical_bytes, canonical_json, spec_hash
 from .client import (
     AuthError,
@@ -58,6 +62,7 @@ from .context import (
     TaskContext,
     derive_idempotency_key,
 )
+from .scheduling import Backfill, BackfillState, OverlapPolicy, Schedule, SchedulePreview
 from .task import TaskDefinition, registry, task
 from .types import (
     Cache,
@@ -71,6 +76,7 @@ from .types import (
     SpecError,
     Timeouts,
     ValueSpec,
+    ValueSpecLike,
 )
 from .units import (
     UnitParseError,
@@ -81,21 +87,38 @@ from .units import (
     parse_cpu_millis,
     parse_duration_ms,
 )
+from .sourcemap import NodeSource, SourceLocation
 from .workflow import (
     API_VERSION,
     CompiledWorkflow,
     OutputRef,
     Param,
+    Ref,
     TaskInvocation,
     WorkflowDefinition,
     workflow,
 )
+
+# Local execution without a cluster (ADR-0022): nexus.local.run(workflow, params)
+# and nexus.replay.replay(client.get_assignment(attempt_id)). Imported lazily
+# (PEP 562), so `python -m nexus.local` does not find itself half-imported.
+if TYPE_CHECKING:
+    from . import local, replay
+
+
+def __getattr__(name: str) -> ModuleType:
+    if name in ("local", "replay"):
+        return importlib.import_module(f".{name}", __name__)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __version__ = "0.1.0"
 
 __all__ = [
     "__version__",
     "API_VERSION",
+    "local",
+    "replay",
     # authoring
     "task",
     "workflow",
@@ -103,7 +126,10 @@ __all__ = [
     "WorkflowDefinition",
     "CompiledWorkflow",
     "OutputRef",
+    "Ref",
     "TaskInvocation",
+    "SourceLocation",
+    "NodeSource",
     "Param",
     "registry",
     # declaration types
@@ -117,6 +143,7 @@ __all__ = [
     "SecretRef",
     "Concurrency",
     "ValueSpec",
+    "ValueSpecLike",
     "SpecError",
     # execution
     "TaskContext",
@@ -133,6 +160,12 @@ __all__ = [
     "AuthError",
     "NotFound",
     "Conflict",
+    # schedule / backfill response types
+    "Schedule",
+    "SchedulePreview",
+    "Backfill",
+    "BackfillState",
+    "OverlapPolicy",
     # canonicalization
     "canonical_json",
     "canonical_bytes",

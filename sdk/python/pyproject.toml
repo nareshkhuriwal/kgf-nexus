@@ -29,13 +29,17 @@ yaml = ["PyYAML>=6.0"]
 # Test tooling. Lower bounds, not pins: the SDK is a library, and CI runs the
 # suite across 3.11-3.13, so the floor is what is promised to work. pytest-cov
 # produces the Cobertura XML both CI systems publish.
-dev = ["pytest>=8.3", "pytest-cov>=6.0", "PyYAML>=6.0"]
+dev = ["pytest>=8.3", "pytest-cov>=6.0", "PyYAML>=6.0", "mypy>=1.13", "types-PyYAML>=6.0"]
 
 [project.urls]
 Homepage = "https://github.com/khuriwalgroup/kgf-nexus"
 
 [tool.setuptools.packages.find]
 include = ["nexus*"]
+
+# PEP 561: ship the marker so type checkers use the SDK's inline annotations.
+[tool.setuptools.package-data]
+nexus = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -47,7 +51,10 @@ addopts = "-q"
 [tool.coverage.report]
 fail_under = 85
 
+# `make sdk-typecheck` runs this over the package AND the typed usage example,
+# which pins that a task's return type flows through tracing (assert_type).
 [tool.mypy]
 python_version = "3.11"
-strict = false
+strict = true
 warn_unused_ignores = true
+files = ["nexus", "typecheck"]

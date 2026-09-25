@@ -8,6 +8,19 @@ Everything here is **local-development only**. The credentials are deliberately
 obvious and are marked `DEV ONLY` in `docker-compose.yml`; there is no secret
 management in Phase 1.
 
+Other ways in:
+
+- `nexusctl up` wraps this compose stack: it waits for health, registers a
+  tenant through the API and prints the console URL and credentials once
+  (cli/README.md, "Local quick start").
+- Kubernetes directly: the Helm chart in `helm/kgf-nexus`, with a values
+  reference and production checklist in docs/OPERATIONS.md §20.
+  `helm/validate.sh` lints and schema-checks it.
+- Kubernetes through Terraform: [terraform/README.md](terraform/README.md). It
+  covers the Helm chart via Terraform on a local cluster, and cloud platforms
+  (AKS, EKS, GKE) with managed PostgreSQL, registries and object storage. The
+  cloud platforms have been validated offline only (F115).
+
 ---
 
 ## 1. Bring-up
@@ -229,7 +242,7 @@ file next to `docker-compose.yml`.
 |---|---|
 | `Dockerfile.service` | All six Go services **and** the agent, parameterised by `SERVICE` / `SERVICE_PATH` |
 | `Dockerfile.migrate` | The migration job (`postgres:16-alpine` + `migrate.sh`) |
-| `Dockerfile.ui` | The console (`node:20` build → `nginx:1.27` runtime) |
+| `Dockerfile.ui` | The console (`node:24` LTS build → `nginx:1.27` runtime) |
 
 `Dockerfile.service` is one parameterised file rather than seven near-identical
 ones, because the build differs only in the main-package path and seven copies

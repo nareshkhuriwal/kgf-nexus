@@ -23,6 +23,7 @@ func workflowGroup() *group {
 			workflowSubmitCmd(),
 			workflowCompileCmd(),
 			workflowVersionsCmd(),
+			workflowDeleteCmd(),
 		},
 	}
 }
@@ -45,19 +46,28 @@ A run pins its spec version for its lifetime, so editing a workflow never
 mutates a run in flight.
 
   --dry-run    Validate only; do not register. Use this in CI.
+  --watch      Keep running: re-submit every time the file changes (for a .py
+               spec, any .py file in its directory), printing the validation
+               result and the new version and content hash. Rapid saves are
+               debounced into one submit; an unchanged spec is not re-sent.
+               Errors are reported and watching continues. Ctrl-C stops it.
+               Combine with --dry-run to validate on every save without
+               registering anything.
   --python     Interpreter used to compile a .py spec (default "python3").
   --workflow   Workflow object to compile, when a .py file defines several.
 
 Examples:
   nexusctl workflow submit pipeline.yaml
   nexusctl workflow submit pipeline.yaml --dry-run
+  nexusctl workflow submit dag.py --watch --dry-run
   nexusctl workflow submit dag.py --workflow daily_etl
   cat spec.json | nexusctl workflow submit -`,
 		run: func(ctx context.Context, env *Environment, args []string) error {
-			var dryRun bool
+			var dryRun, watch bool
 			var python, wfName string
 			rest, err := env.parseFlags(args, func(fs *flag.FlagSet) {
 				fs.BoolVar(&dryRun, "dry-run", false, "Validate only; do not register the spec")
+				fs.BoolVar(&watch, "watch", false, "Re-submit whenever the file changes, until Ctrl-C")
 				fs.StringVar(&python, "python", "python3", "Interpreter used to compile a .py spec")
 				fs.StringVar(&wfName, "workflow", "", "Workflow object to compile from a .py file")
 			})
@@ -65,76 +75,99 @@ Examples:
 				return err
 			}
 			if len(rest) != 1 {
-				return fmt.Errorf("expected exactly one spec file (or \"-\" for stdin)\n" +
-					"Usage: nexusctl workflow submit <file> [--dry-run]")
+				return usagef("expected exactly one spec file (or \"-\" for stdin)\n" +
+					"Usage: nexusctl workflow submit <file> [--dry-run] [--watch]")
 			}
-
-			doc, err := loadSpec(rest[0], python, wfName, env.IO.In)
-			if err != nil {
-				return err
-			}
-
-			// Local checks first: a missing task_ref should not need a round trip.
-			// The server still runs JSON Schema and the semantic checks; this is
-			// only a faster feedback loop for the obvious mistakes.
-			if problems := doc.Validate(); len(problems) > 0 {
-				return fmt.Errorf("%s is not a valid WorkflowSpec:\n  - %s",
-					doc.Source, strings.Join(problems, "\n  - "))
-			}
-
-			c, err := env.Client()
-			if err != nil {
-				return err
-			}
-			result, err := c.SubmitSpec(ctx, doc.JSON, dryRun)
-			if err != nil {
-				return err
-			}
-
-			p, err := env.Printer()
-			if err != nil {
-				return err
-			}
-			if !env.IsTable() {
-				return p.Print(result, nil)
-			}
-
-			m, _ := result.(map[string]any)
-			if m == nil {
-				m = map[string]any{}
-			}
-			verb := "Submitted"
-			if dryRun {
-				verb = "Validated"
-			}
-			fmt.Fprintf(env.IO.Out, "%s %s\n", verb, doc.Name())
-			fmt.Fprintf(env.IO.Out, "  local spec hash:  %s\n", doc.Hash)
-			if h := output.Str(m, "spec_hash"); h != "-" {
-				fmt.Fprintf(env.IO.Out, "  server spec hash: %s\n", h)
-				if h != doc.Hash {
-					// A divergence means the two canonicalizers disagree, which
-					// would silently split one workflow into two versions. Loud
-					// on purpose.
-					fmt.Fprintf(env.IO.Err,
-						"\nWARNING: the server computed a different content address than nexusctl.\n"+
-							"This is a canonicalization bug and should be reported: the same spec\n"+
-							"would register as two different versions.\n")
+			if watch {
+				if rest[0] == "-" {
+					return usagef("--watch needs a file: stdin cannot be re-read when it changes")
 				}
+				return watchAndSubmit(ctx, env, watchOptions{
+					path: rest[0], python: python, workflow: wfName, dryRun: dryRun,
+					interval: watchInterval, debounce: watchDebounce,
+				})
 			}
-			if v := output.Str(m, "version"); v != "-" {
-				fmt.Fprintf(env.IO.Out, "  version:          %s\n", v)
-			}
-			if created, ok := m["created"].(bool); ok && !created {
-				fmt.Fprintf(env.IO.Out, "  (unchanged -- this spec was already registered)\n")
-			}
-			if dryRun {
-				fmt.Fprintf(env.IO.Out, "\nDry run: nothing was registered.\n")
-			} else {
-				fmt.Fprintf(env.IO.Out, "\nStart a run with:\n  nexusctl run create %s\n", doc.Name())
-			}
-			return nil
+			return submitSpecFile(ctx, env, rest[0], python, wfName, dryRun)
 		},
 	}
+}
+
+// submitSpec loads a spec, checks it locally, and sends it. It prints nothing,
+// so `submit` and `submit --watch` can each report in their own way.
+func submitSpec(ctx context.Context, env *Environment, file, python, wfName string, dryRun bool) (*spec.Document, any, error) {
+	doc, err := loadSpec(file, python, wfName, env.IO.In)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Local checks first: a missing task_ref should not need a round trip.
+	// The server still runs JSON Schema and the semantic checks; this is
+	// only a faster feedback loop for the obvious mistakes.
+	// Each problem is reported at its line in the author's file (F117).
+	if err := localProblems(doc); err != nil {
+		return doc, nil, err
+	}
+
+	c, err := env.Client()
+	if err != nil {
+		return doc, nil, err
+	}
+	result, err := c.SubmitSpec(ctx, doc.JSON, dryRun)
+	if err != nil {
+		return doc, nil, annotateSubmitError(err, doc)
+	}
+	return doc, result, nil
+}
+
+// submitSpecFile is one `workflow submit`: load, check locally, send, report.
+func submitSpecFile(ctx context.Context, env *Environment, file, python, wfName string, dryRun bool) error {
+	doc, result, err := submitSpec(ctx, env, file, python, wfName, dryRun)
+	if err != nil {
+		return err
+	}
+
+	p, err := env.Printer()
+	if err != nil {
+		return err
+	}
+	if !env.IsTable() {
+		return p.Print(result, nil)
+	}
+
+	m, _ := result.(map[string]any)
+	if m == nil {
+		m = map[string]any{}
+	}
+	verb := "Submitted"
+	if dryRun {
+		verb = "Validated"
+	}
+	fmt.Fprintf(env.IO.Out, "%s %s\n", verb, doc.Name())
+	fmt.Fprintf(env.IO.Out, "  local spec hash:  %s\n", doc.Hash)
+	if h := output.Str(m, "spec_hash"); h != "-" {
+		fmt.Fprintf(env.IO.Out, "  server spec hash: %s\n", h)
+		if h != doc.Hash {
+			// A divergence means the two canonicalizers disagree, which
+			// would silently split one workflow into two versions. Loud
+			// on purpose.
+			fmt.Fprintf(env.IO.Err,
+				"\nWARNING: the server computed a different content address than nexusctl.\n"+
+					"This is a canonicalization bug and should be reported: the same spec\n"+
+					"would register as two different versions.\n")
+		}
+	}
+	if v := output.Str(m, "version"); v != "-" {
+		fmt.Fprintf(env.IO.Out, "  version:          %s\n", v)
+	}
+	if created, ok := m["created"].(bool); ok && !created {
+		fmt.Fprintf(env.IO.Out, "  (unchanged -- this spec was already registered)\n")
+	}
+	if dryRun {
+		fmt.Fprintf(env.IO.Out, "\nDry run: nothing was registered.\n")
+	} else {
+		fmt.Fprintf(env.IO.Out, "\nStart a run with:\n  nexusctl run create %s\n", doc.Name())
+	}
+	return nil
 }
 
 func workflowCompileCmd() *command {
@@ -188,9 +221,8 @@ Examples:
 				return err
 			}
 			if validate {
-				if problems := doc.Validate(); len(problems) > 0 {
-					return fmt.Errorf("%s is not a valid WorkflowSpec:\n  - %s",
-						doc.Source, strings.Join(problems, "\n  - "))
+				if err := localProblems(doc); err != nil {
+					return err
 				}
 			}
 
@@ -391,11 +423,21 @@ func loadSpec(path, python, workflowName string, stdin io.Reader) (*spec.Documen
 	if python == "" {
 		python = "python3"
 	}
-	raw, err := compilePython(python, path, workflowName)
+	raw, sourceMap, err := compilePythonMapped(python, path, workflowName)
 	if err != nil {
 		return nil, err
 	}
-	return spec.Parse(raw, path)
+	doc, err := spec.Parse(raw, path)
+	if err != nil {
+		return nil, err
+	}
+	// Problems in a .py spec are reported at Python lines, not in the JSON it
+	// compiled to.
+	doc.Raw, doc.SourceMap = nil, sourceMap
+	if doc.SourceMap == nil {
+		doc.SourceMap = map[string]spec.NodeSource{}
+	}
+	return doc, nil
 }
 
 // pythonCompileScript emits the compiled spec of one @workflow in a module.

@@ -18,8 +18,9 @@
 # ─── The model ────────────────────────────────────────────────────────────
 #
 #   account NEXUS (JetStream on)
-#     event-service      publish nexus.run.> and nexus.task.dispatch.>, the
-#                        JetStream API for its two streams (INFO, CREATE), and
+#     event-service      publish nexus.run.>, nexus.task.dispatch.> and
+#                        nexus.usage.>, the JetStream API for its three
+#                        streams (INFO, CREATE), and
 #                        subscribe nexus.run.> plus its own reply inbox.
 #     agent-<ns>         subscribe nexus.task.dispatch.<ns>.> ONLY. Publish:
 #                        nothing at all. One identity per tenant namespace.
@@ -65,7 +66,8 @@ NATS_BOX_IMAGE="${NATS_BOX_IMAGE:-natsio/nats-box:0.18.0}"
 # fails if either side changes without the other.
 SUBJ_RUNS="nexus.run.>"
 SUBJ_DISPATCH="nexus.task.dispatch"
-STREAMS="NEXUS_RUNS NEXUS_DISPATCH"
+SUBJ_USAGE="nexus.usage.>"
+STREAMS="NEXUS_RUNS NEXUS_DISPATCH NEXUS_USAGE"
 EVENT_SERVICE_INBOX="_INBOX.nexus-event-service.>"
 
 die() { echo "nexus-nats-auth: $*" >&2; exit 1; }
@@ -161,7 +163,7 @@ render_auth() {
 			echo "      # event-service: outbox relay (JetStream publish) + SSE waker"
 			echo "      { nkey: $k"
 			echo "        permissions: {"
-			printf '          publish: { allow: [%s, %s' "$(q "$SUBJ_RUNS")" "$(q "$SUBJ_DISPATCH.>")"
+			printf '          publish: { allow: [%s, %s, %s' "$(q "$SUBJ_RUNS")" "$(q "$SUBJ_DISPATCH.>")" "$(q "$SUBJ_USAGE")"
 			for s in $STREAMS; do
 				printf ', %s, %s' "$(q "\$JS.API.STREAM.INFO.$s")" "$(q "\$JS.API.STREAM.CREATE.$s")"
 			done

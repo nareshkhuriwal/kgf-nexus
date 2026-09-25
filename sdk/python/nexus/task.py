@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-from typing import Any, Callable, Mapping, Sequence, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Generic, Mapping, Sequence, TypeVar, overload
 
-from .canonical import canonical_json
+from .sourcemap import SourceLocation
 from .types import (
     Cache,
     Cancellation,
@@ -36,13 +36,19 @@ from .types import (
     Timeouts,
     TriggerRule,
     ValueSpec,
+    ValueSpecLike,
     coerce_idempotency,
     coerce_trigger_rule,
 )
 
+if TYPE_CHECKING:
+    from .context import TaskContext
+    from .workflow import OutputRef, TaskInvocation
+
 __all__ = ["task", "TaskDefinition", "registry", "HandlerRegistry"]
 
-F = TypeVar("F", bound=Callable[..., Any])
+R = TypeVar("R")
+R2 = TypeVar("R2")
 
 # Platform defaults. These are chosen so that a task declaring nothing but a
 # handler is still safe to run unattended: bounded attempt time, a real
@@ -65,9 +71,9 @@ class HandlerRegistry:
     """
 
     def __init__(self) -> None:
-        self._handlers: dict[str, "TaskDefinition"] = {}
+        self._handlers: dict[str, "TaskDefinition[Any]"] = {}
 
-    def register(self, definition: "TaskDefinition") -> None:
+    def register(self, definition: "TaskDefinition[Any]") -> None:
         ref = definition.task_ref
         existing = self._handlers.get(ref)
         if existing is not None and existing.fn is not definition.fn:
@@ -81,7 +87,7 @@ class HandlerRegistry:
             )
         self._handlers[ref] = definition
 
-    def get(self, task_ref: str) -> "TaskDefinition | None":
+    def get(self, task_ref: str) -> "TaskDefinition[Any] | None":
         return self._handlers.get(task_ref)
 
     def refs(self) -> list[str]:
@@ -118,25 +124,33 @@ class _Declaration:
     outputs: Mapping[str, ValueSpec] | None
 
 
-class TaskDefinition:
+class TaskDefinition(Generic[R]):
     """A decorated task: a spec fragment plus (worker-side only) its handler.
 
     Calling a TaskDefinition inside a `@workflow` body does NOT run the handler.
     It records a node and returns handles to that node's declared outputs, which
     is how the DAG is traced. Calling it outside a workflow body runs the handler
     directly, which makes a task unit-testable without the platform.
+
+    Generic in the handler's return type ``R``, so a type checker follows it:
+    a traced call is a ``TaskInvocation[R]``, ``.map(...)`` a
+    ``TaskInvocation[list[R | None]]`` (a child that did not succeed contributes
+    null), and ``with_overrides`` keeps ``R``. A direct call whose first argument
+    is a ``TaskContext`` is typed as the handler's own ``R``.
     """
 
-    def __init__(self, fn: Callable[..., Any], decl: _Declaration) -> None:
-        self.fn = fn
+    def __init__(self, fn: Callable[..., R], decl: _Declaration) -> None:
+        self.fn: Callable[..., R] = fn
         self._decl = decl
         self.__name__ = getattr(fn, "__name__", decl.task_ref)
         self.__doc__ = fn.__doc__
         self.__wrapped__ = fn
+        self._signature: inspect.Signature | None
         try:
             self._signature = inspect.signature(fn)
         except (TypeError, ValueError):  # builtins / C callables
             self._signature = None
+        self.source: SourceLocation | None = SourceLocation.of_callable(fn)
 
     # ── identity ────────────────────────────────────────────────────────────
     @property
@@ -170,8 +184,25 @@ class TaskDefinition:
             in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
         )
 
+    @property
+    def declaration(self) -> _Declaration:
+        """The validated author declaration (read-only)."""
+        return self._decl
+
     # ── call: trace inside a workflow, execute outside one ──────────────────
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+    #
+    # The overlap is deliberate: a first positional TaskContext means "run the
+    # handler" (a unit test), anything else means "trace a node". pyright flags
+    # the overlap; mypy accepts it because the first overload is strictly narrower.
+    @overload
+    def __call__(  # pyright: ignore[reportOverlappingOverload]
+        self, ctx: "TaskContext", /, *args: Any, **kwargs: Any
+    ) -> R: ...
+
+    @overload
+    def __call__(self, *args: Any, **kwargs: Any) -> "TaskInvocation[R]": ...
+
+    def __call__(self, *args: Any, **kwargs: Any) -> "R | TaskInvocation[R]":
         from .workflow import current_builder
 
         builder = current_builder()
@@ -181,9 +212,24 @@ class TaskDefinition:
             # silently no-ops `record_effect` would make an idempotency bug pass
             # its test. Tests should pass an explicit context.
             return self.fn(*args, **kwargs)
-        return builder.add_node(self, args, kwargs)
+        return builder.add_node(self, args, dict(kwargs))
 
-    def map(self, over: Any, *args: Any, item: str, max_fanout: int, **kwargs: Any) -> Any:
+    @overload
+    def map(
+        self,
+        over: "OutputRef[Sequence[Any]] | TaskInvocation[Sequence[Any]] | OutputRef[Any] | TaskInvocation[Any]",
+        *args: Any,
+        item: str,
+        max_fanout: int,
+        **kwargs: Any,
+    ) -> "TaskInvocation[list[R | None]]": ...
+
+    @overload
+    def map(self, over: Sequence[Any], *args: Any, item: str, max_fanout: int, **kwargs: Any) -> list[R]: ...
+
+    def map(
+        self, over: object, *args: Any, item: str, max_fanout: int, **kwargs: Any
+    ) -> "TaskInvocation[list[R | None]] | list[R]":
         """Fan this task out over a runtime collection (dynamic expansion, §5.4).
 
         Inside a workflow body: `over` is an upstream output holding a JSON
@@ -201,6 +247,11 @@ class TaskDefinition:
 
         builder = current_builder()
         if builder is None:
+            if not isinstance(over, Sequence) or isinstance(over, (str, bytes)):
+                raise SpecError(
+                    f"{self.task_ref}.map outside a workflow needs a concrete list, got "
+                    f"{type(over).__name__}"
+                )
             if isinstance(max_fanout, int) and len(over) > max_fanout:
                 raise SpecError(
                     f"{self.task_ref}.map: {len(over)} items exceed max_fanout={max_fanout}"
@@ -208,18 +259,20 @@ class TaskDefinition:
             return [self.fn(*args, **{**kwargs, item: element}) for element in over]
         return builder.add_map_node(self, over, item, max_fanout, args, dict(kwargs))
 
-    def bind(self, *args: Any, **kwargs: Any) -> Any:
+    def bind(self, *args: Any, **kwargs: Any) -> "R | TaskInvocation[R]":
         """Explicit alias for __call__, for readers who find tracing surprising."""
-        return self(*args, **kwargs)
+        result: R | TaskInvocation[R] = self(*args, **kwargs)
+        return result
 
-    def with_overrides(self, **overrides: Any) -> "TaskDefinition":
+    def with_overrides(self, **overrides: Any) -> "TaskDefinition[R]":
         """A copy with some declaration fields replaced.
 
         Lets one handler appear as several nodes with different resources -- the
         common "same code, bigger box" case -- without duplicating the function.
         """
         decl = _build_declaration(self.fn, dict(_as_author_kwargs(self._decl)) | overrides)
-        return TaskDefinition(self.fn, decl)
+        clone: TaskDefinition[R] = TaskDefinition(self.fn, decl)
+        return clone
 
     # ── compilation ─────────────────────────────────────────────────────────
     def to_task_spec(self, node_id: str, inputs: Mapping[str, ValueSpec]) -> dict[str, Any]:
@@ -301,6 +354,23 @@ def _as_author_kwargs(d: _Declaration) -> dict[str, Any]:
     }
 
 
+def _coerce_values(task_ref: object, field: str, raw: object) -> dict[str, ValueSpec] | None:
+    """Coerce and eagerly validate an inputs= / outputs= mapping."""
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise SpecError(f"task {task_ref!r}: {field} must be a mapping, got {type(raw).__name__}")
+    out: dict[str, ValueSpec] = {}
+    for k, v in raw.items():
+        vs = ValueSpec.coerce(v)
+        try:
+            vs.to_wire()
+        except SpecError as e:
+            raise SpecError(f"task {task_ref!r}: {field}.{k}: {e}") from None
+        out[str(k)] = vs
+    return out
+
+
 def _build_declaration(fn: Callable[..., Any], kw: Mapping[str, Any]) -> _Declaration:
     name = getattr(fn, "__name__", None) or "task"
     task_ref = kw.get("task_ref") or kw.get("name") or name
@@ -351,29 +421,37 @@ def _build_declaration(fn: Callable[..., Any], kw: Mapping[str, Any]) -> _Declar
     if runtime is not None:
         runtime.to_wire()
 
-    resources = kw.get("resources")
-    if isinstance(resources, Mapping):
-        resources = Resources(**resources)
+    raw_resources = kw.get("resources")
+    resources: Resources | None
+    if isinstance(raw_resources, Mapping):
+        resources = Resources(**raw_resources)
+    elif raw_resources is None or isinstance(raw_resources, Resources):
+        resources = raw_resources
+    else:
+        raise SpecError(
+            f"task {task_ref!r}: resources must be a Resources or a mapping, got "
+            f"{type(raw_resources).__name__}"
+        )
     if resources is not None:
-        if not isinstance(resources, Resources):
-            raise SpecError(
-                f"task {task_ref!r}: resources must be a Resources or a mapping, got "
-                f"{type(resources).__name__}"
-            )
         resources.to_wire()
 
     concurrency = Concurrency.coerce(kw.get("concurrency"))
 
-    inputs = kw.get("inputs")
-    if inputs is not None:
-        inputs = {str(k): ValueSpec.coerce(v) for k, v in inputs.items()}
-        for k, v in inputs.items():
-            v.to_wire()
-    outputs = kw.get("outputs")
-    if outputs is not None:
-        outputs = {str(k): ValueSpec.coerce(v) for k, v in outputs.items()}
-        for k, v in outputs.items():
-            v.to_wire()
+    inputs = _coerce_values(task_ref, "inputs", kw.get("inputs"))
+    outputs = _coerce_values(task_ref, "outputs", kw.get("outputs"))
+
+    if runtime is not None and runtime.stdout_output:
+        # Mirrors the gateway's submit-time check (validateStdoutOutput): the
+        # agent collects only DECLARED outputs, so stdout captured under an
+        # undeclared name would vanish and the task would succeed producing
+        # nothing. Caught here, the traceback points at this decorator.
+        declared = sorted(outputs) if outputs else ["result"]
+        if runtime.stdout_output not in declared:
+            raise SpecError(
+                f"task {task_ref!r}: runtime.stdout_output names {runtime.stdout_output!r}, "
+                f"which is not a declared output ({', '.join(declared)}); stdout would be "
+                "captured under a name nothing can reference"
+            )
 
     unknown = set(kw) - {
         "task_ref",
@@ -421,8 +499,14 @@ def _build_declaration(fn: Callable[..., Any], kw: Mapping[str, Any]) -> _Declar
     )
 
 
+@overload
+def task(_fn: Callable[..., R], /) -> TaskDefinition[R]: ...
+
+
+@overload
 def task(
-    _fn: Callable[..., Any] | None = None,
+    _fn: None = None,
+    /,
     *,
     task_ref: str | None = None,
     version: int = 1,
@@ -439,9 +523,33 @@ def task(
     concurrency: Concurrency | Mapping[str, Any] | None = None,
     priority: int = 0,
     trigger_rule: TriggerRule = "all_success",
-    inputs: Mapping[str, Any] | None = None,
-    outputs: Mapping[str, Any] | None = None,
-) -> Any:
+    inputs: Mapping[str, ValueSpecLike] | None = None,
+    outputs: Mapping[str, ValueSpecLike] | None = None,
+) -> Callable[[Callable[..., R]], TaskDefinition[R]]: ...
+
+
+def task(
+    _fn: Callable[..., R] | None = None,
+    /,
+    *,
+    task_ref: str | None = None,
+    version: int = 1,
+    queue: str = "default",
+    resources: Resources | Mapping[str, Any] | None = None,
+    timeouts: Timeouts | Mapping[str, Any] | None = None,
+    retry: Retry | Mapping[str, Any] | int | None = None,
+    idempotency: IdempotencyMode = "required",
+    cache: Cache | Mapping[str, Any] | bool | None = None,
+    cancellation: Cancellation | Mapping[str, Any] | bool | None = None,
+    runtime: Runtime | Mapping[str, Any] | None = None,
+    node_selector: Mapping[str, str] | None = None,
+    prefer_same_worker_as: str | None = None,
+    concurrency: Concurrency | Mapping[str, Any] | None = None,
+    priority: int = 0,
+    trigger_rule: TriggerRule = "all_success",
+    inputs: Mapping[str, ValueSpecLike] | None = None,
+    outputs: Mapping[str, ValueSpecLike] | None = None,
+) -> TaskDefinition[R] | Callable[[Callable[..., R]], TaskDefinition[R]]:
     """Declare a task. Compiles to a TaskSpec; does not hook the scheduler.
 
     Units are human-friendly and parsed here, in your process: cpu accepts "2"
@@ -477,7 +585,7 @@ def task(
     `max_wait` and the worker's platform ceiling, then SIGKILLs (ADR-0015).
     """
 
-    def decorate(fn: Callable[..., Any]) -> TaskDefinition:
+    def decorate(fn: Callable[..., R]) -> TaskDefinition[R]:
         decl = _build_declaration(
             fn,
             {
@@ -500,7 +608,7 @@ def task(
                 "outputs": outputs,
             },
         )
-        definition = TaskDefinition(fn, decl)
+        definition: TaskDefinition[R] = TaskDefinition(fn, decl)
         registry.register(definition)
         return definition
 

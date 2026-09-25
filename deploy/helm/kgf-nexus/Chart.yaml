@@ -7,6 +7,6 @@ description: >-
   agents, console, and (optionally) the Postgres, MinIO, NATS and Mailpit
   dependencies. Environments are driven by deploy/terraform.
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.0"
 kubeVersion: ">=1.29.0-0"

@@ -406,11 +406,13 @@ export function DagView({
                 </text>
               )}
               {group && onToggleGroup && group.unfoldable && (
-                <text
-                  className="dag-node-sub dag-group-toggle"
-                  x={NODE_W - 12}
-                  y={25}
-                  textAnchor="end"
+                // A group, not a bare <text>: SVG text is hit-tested on its
+                // painted glyphs only, so a click on the space in "+ unfold"
+                // (or between letters) fell through to the node card and
+                // selected the node instead of unfolding it. The transparent
+                // rect gives the control its whole box as a target.
+                <g
+                  className="dag-group-toggle"
                   role="button"
                   tabIndex={0}
                   aria-label={`${group.unfolded ? 'Fold' : 'Unfold'} the ${group.total} items of ${node.node_id}`}
@@ -426,8 +428,11 @@ export function DagView({
                     }
                   }}
                 >
-                  {group.unfolded ? '− fold' : '+ unfold'}
-                </text>
+                  <rect className="dag-group-toggle-hit" x={NODE_W - 72} y={12} width={64} height={18} rx={4} />
+                  <text className="dag-node-sub" x={NODE_W - 12} y={25} textAnchor="end">
+                    {group.unfolded ? '− fold' : '+ unfold'}
+                  </text>
+                </g>
               )}
               {!group && node.failure_reason && (
                 <text className="dag-node-sub" x={NODE_W - 12} y={workerLabel(node) ? 41 : 75.5} textAnchor="end" fill="var(--tone-danger-fg)">

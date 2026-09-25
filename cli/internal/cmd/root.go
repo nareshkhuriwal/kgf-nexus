@@ -4,9 +4,10 @@
 // Package cmd implements the nexusctl command tree.
 //
 // Built on the standard library's flag package rather than cobra. The command
-// surface is a flat two-level noun-verb tree with no completion or plugin
-// requirements, which stdlib covers; taking a dependency for it would add build
-// weight to a binary that operators copy onto hosts.
+// surface is a flat two-level noun-verb tree with no plugin requirements, which
+// stdlib covers; taking a dependency for it would add build weight to a binary
+// that operators copy onto hosts. Shell completion walks this same tree (see
+// completion.go), so it needs no separate description of the commands.
 package cmd
 
 import (
@@ -158,18 +159,28 @@ func groups() []*group {
 	return []*group{
 		workflowGroup(),
 		runGroup(),
+		scheduleGroup(),
+		backfillGroup(),
 		workerGroup(),
+		cacheGroup(),
 	}
 }
 
 // topLevel are commands with no noun, for the things an operator types most.
 func topLevel() []*command {
 	return []*command{
+		upCmd(),
+		downCmd(),
+		statusCmd(),
 		capacityCmd(),
 		logsCmd(),
 		eventsCmd(),
 		configCmd(),
 		versionCmd(),
+		replayCmd(),
+		initCmd(),
+		completionCmd(),
+		completeCmd(),
 	}
 }
 
@@ -187,13 +198,13 @@ func Execute(args []string, io IO, env Env) int {
 	if err := run(ctx, args, io, env); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, errInterrupted) {
 			// A deliberate Ctrl-C is not a failure to report.
-			return 130
+			return ExitInterrupted
 		}
 		if errors.Is(err, flag.ErrHelp) {
-			return 0
+			return ExitOK
 		}
 		fmt.Fprintf(io.Err, "nexusctl: %v\n", err)
-		return 1
+		return exitCodeFor(err)
 	}
 	return 0
 }
@@ -209,7 +220,7 @@ func run(ctx context.Context, args []string, ioStreams IO, env Env) error {
 	root.Usage = func() { printRootUsage(ioStreams.Err) }
 
 	if err := root.Parse(args); err != nil {
-		return err
+		return flagError(err)
 	}
 	if *showVersion {
 		fmt.Fprintf(ioStreams.Out, "nexusctl %s\n", Version)
@@ -234,6 +245,11 @@ func run(ctx context.Context, args []string, ioStreams IO, env Env) error {
 			return dispatch(ctx, c, environment, rest[1:])
 		}
 	}
+	// `run --local <file>` executes on this machine (local.go); it is not a
+	// verb of the run group, which acts on the cluster.
+	if head == "run" && hasLocalFlag(rest[1:]) {
+		return dispatch(ctx, runLocalCmd(), environment, rest[1:])
+	}
 	for _, g := range groups() {
 		if g.name != head {
 			continue
@@ -252,17 +268,17 @@ func run(ctx context.Context, args []string, ioStreams IO, env Env) error {
 			return nil
 		}
 		if verb == "" {
-			return fmt.Errorf("no command given for %q\n\n%s", g.name, verbList(g))
+			return usagef("no command given for %q\n\n%s", g.name, verbList(g))
 		}
 		for _, c := range g.commands {
 			if c.name == verb {
 				return dispatch(ctx, c, environment, remaining)
 			}
 		}
-		return fmt.Errorf("unknown command %q for %q\n\n%s",
+		return usagef("unknown command %q for %q\n\n%s",
 			verb, g.name, verbList(g))
 	}
-	return fmt.Errorf("unknown command %q\n\nRun 'nexusctl help' to see available commands.", head)
+	return usagef("unknown command %q\n\nRun 'nexusctl help' to see available commands.", head)
 }
 
 // splitVerb picks the group's verb out of args, tolerating flags before it, and
@@ -322,7 +338,7 @@ func (e *Environment) parseFlags(args []string, register func(fs *flag.FlagSet))
 	// command would report the wrong error. Users type the operand first
 	// constantly, so permute flags ahead of operands before parsing.
 	if err := fs.Parse(permute(fs, args)); err != nil {
-		return nil, err
+		return nil, flagError(err)
 	}
 	return fs.Args(), nil
 }
@@ -372,10 +388,19 @@ Usage:
   nexusctl <command> [flags]
   nexusctl <group> <command> [flags]
 
+Local quick start (Docker):
+  up                  Start a local stack and seed a tenant (credentials shown once)
+  status              Per-service state and health of the local stack
+  down                Stop it; --volumes also deletes its data
+
+Projects:
+  init                Create a workflow project from a template (--list)
+
 Workflow specs:
-  workflow submit     Submit a spec (JSON or YAML); --dry-run validates only
+  workflow submit     Submit a spec (JSON, YAML or .py); --dry-run, --watch
   workflow compile    Print exactly the spec the server will see (--show)
   workflow versions   List registered versions of a workflow
+  workflow delete     Delete a workflow and all its versions
 
 Runs:
   run create          Start a run (--param, --idempotency-key)
@@ -383,15 +408,28 @@ Runs:
   run list            List runs in the namespace
   run cancel          Cancel a run
   run retry           Retry from failed nodes
+  run pause           Stop new dispatch; running attempts finish
+  run resume          Resume a paused run
+  run --local         Run a workflow on this machine, no cluster (ADR-0022)
+  replay              Fetch a failed attempt's inputs; --local re-runs it here
+
+Schedules and backfills:
+  schedule list|get|create|update|delete|enable|disable|preview
+  backfill start|list|get|pause|resume|cancel
 
 Fleet and diagnostics:
   worker ls           List workers
+  worker drain        Finish current work, then stop
+  worker quarantine   Take a worker out of placement (--reason)
+  worker release      Return a quarantined worker
   capacity            Advertised vs committed capacity
   logs                Stream an attempt's logs (--follow)
   events              Stream run events (--follow, via SSE)
+  cache invalidate    Stop reusing memoized results
 
 Other:
   config view         Show the resolved configuration (never prints key material)
+  completion          Shell completion script (bash, zsh, fish)
   version             Print the version
 
 Global flags:
@@ -404,6 +442,10 @@ Global flags:
 
 Scripts should use --output json; table output is formatted for humans and its
 columns may change.
+
+Exit codes: 0 ok, 1 error, 2 usage, 3 not confirmed (destructive commands
+need --yes without a terminal), 4 not found, 5 conflict, 6 auth, 7 control
+plane unreachable, 130 interrupted.
 
 Run "nexusctl help <command>" for detail on any command.
 `, Version)

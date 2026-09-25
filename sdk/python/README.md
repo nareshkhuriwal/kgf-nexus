@@ -81,6 +81,83 @@ unchanged file, and every run would pin a version nobody intended to create.
 Compiling twice — in different processes, under different `PYTHONHASHSEED` values —
 produces byte-identical JSON. There is a test for exactly that.
 
+### Typed handles
+
+The SDK ships a `py.typed` marker, and `mypy --strict` passes on it
+(`make sdk-typecheck`, which `make sdk-test` runs first). A task's return type
+flows through tracing:
+
+```python
+@task
+def extract(ctx: TaskContext, source: str) -> dict[str, int]: ...
+
+rows = extract(source)             # TaskInvocation[dict[str, int]]
+rows.primary                       # OutputRef[dict[str, int]]
+scores = score.map(ids, item="item", max_fanout=100)   # TaskInvocation[list[float | None]]
+big = extract.with_overrides(resources=Resources(cpu="4"))  # TaskDefinition[dict[str, int]]
+node["model"]                      # OutputRef[Any]; node.output("model", Model) states it
+```
+
+A fan-in is `list[R | None]` because a child that did not succeed contributes
+`null`. `Ref[T]` (`OutputRef[T] | TaskInvocation[T]`) annotates helpers that wire
+tasks together. `typecheck/typed_usage.py` is the example CI type-checks.
+
+### Value bounds and captured stdout
+
+```python
+@task(
+    outputs={"summary": {"type": "json", "max_bytes": "4Ki"}},   # or ValueSpec(max_bytes=4096)
+    runtime=Runtime(command=["sh", "-c"], args=["./report.sh"], stdout_output="summary"),
+)
+```
+
+`max_bytes` bounds a value's size. On a map template's output it lets
+validation reject a fan-in (`max_fanout x max_bytes`) that could exceed the
+platform's fan-in limit before any child runs. `stdout_output` names a
+DECLARED output that receives the task's stdout. Both are checked at the
+decorator the way the gateway checks them at submit.
+
+The in-task result store (`ctx.store`) inlines at the control plane's
+configured threshold (ADR-0016). The agent exports it as
+`NEXUS_INLINE_THRESHOLD_BYTES`, and a compiled-in 64 KiB is only the fallback.
+
+## Running locally, without a cluster
+
+```python
+from nexus import local
+result = local.run(daily_etl, {"source": "s3://in"})
+result.state                  # "SUCCEEDED" | "FAILED" | "TIMED_OUT" | ...
+result.output("load")         # a node's output value
+print(result.summary())       # per-node table
+```
+
+or `nexusctl run --local dag.py --param source=s3://in`, or
+`python -m nexus.local compiled.yaml --param source=demo`. The runner decides
+what runs next exactly as the platform's DAG engine does: trigger rules,
+SKIPPED and UPSTREAM_FAILED propagation, `fail_fast`, map expansion with
+`max_fanout`, the fan-in and its size limit, retries with backoff, timeouts,
+and memoization within the run. Fixtures shared with the Go engine keep it
+that way. Shell tasks run their `runtime.command` with the agent's NEXUS_*
+environment. Python handlers run through `python -m nexus.worker`, or
+in-process with `isolation="inprocess"` when you want a debugger. Results,
+logs, `events.jsonl` and `run.json` go to the run directory.
+
+It is not the platform: there are no leases or heartbeats, no queues,
+priorities or fair share, no resource reservation or GPU placement, no
+docker/kubernetes executors, and memoization does not cross runs. See
+ADR-0022.
+
+## Replaying a failed attempt
+
+```python
+doc = client.get_assignment(attempt_id)            # inputs + TaskSpec, no secrets
+result = nexus.replay.replay(doc, modules=["mypkg.tasks"])
+```
+
+or `nexusctl replay <attempt-id> --local`. The attempt runs again on your
+machine, with the inputs it was given and its original idempotency key. Blob
+inputs stay references; pass their bytes with `inputs={"name": "/path"}`.
+
 ## Idempotency: three mechanisms, in descending order of strength
 
 Execution is **at-least-once** (ADR-0006). Your handler can run more than once for
@@ -180,6 +257,64 @@ upstream is not also selected refuses the whole request (`NexusAPIError` 422 or
 it identifies your intent to start a run. Per-task effect keys are always
 platform-derived; do not confuse the two.
 
+### Schedules and backfills
+
+Typed methods return the gateway's JSON as `Schedule`, `SchedulePreview` and
+`Backfill` TypedDicts:
+
+```python
+from datetime import datetime, timezone
+
+c.preview_schedule("30 2 * * *", timezone="Europe/London")      # nothing created
+c.create_schedule("nightly-etl", workflow="daily-etl", cron="30 2 * * *",
+                  timezone="Europe/London", params={"source": "s3://in"},
+                  overlap_policy="skip", catchup_limit=1)
+c.update_schedule("nightly-etl", cron="0 3 * * *")   # other fields kept
+c.disable_schedule("nightly-etl"); c.enable_schedule("nightly-etl")
+
+bf = c.start_backfill("nightly-etl",
+                      start=datetime(2026, 9, 1, tzinfo=timezone.utc),
+                      end="2026-09-08T00:00:00Z", max_active=2)
+c.get_backfill(bf["id"])["cursor_at"]
+c.pause_backfill(bf["id"]); c.resume_backfill(bf["id"])
+```
+
+`update_schedule` reads, merges and writes back, because the gateway replaces a
+schedule whole; it is not atomic against a concurrent update. Backfill
+intervals are half-open, `[start, end)`, and a naive `datetime` is refused. The
+backfill actions check the current state first and raise `Conflict` for an
+invalid transition, because the server does not (CONTRACT-FINDINGS F119).
+
+## Running a handler as a container command
+
+Executors hand a task its inputs as files in `$NEXUS_INPUT_DIR` and collect
+its outputs from `$NEXUS_OUTPUT_DIR`. `nexus.entrypoint` runs a decorated
+handler under that contract, so a task's runtime can be your image plus:
+
+```python
+@task(task_ref="etl.extract",
+      runtime=Runtime(executor="docker", image="registry/etl:1.4.0",
+                      command=["python", "-m", "nexus.entrypoint", "--module", "dag"],
+                      args=["etl.extract"]))
+def extract(ctx: TaskContext, source: str) -> dict: ...
+```
+
+Each input file is JSON-decoded into the parameter of the same name; the return
+value is written to the declared output (or split by name across several). A
+declared `max_bytes` is enforced before anything is written. Exit status 1
+means the handler failed, 2 that it never started (bad module, unknown
+task_ref, no output directory). `nexusctl init` generates projects wired this
+way.
+
+### Bounding a fan-in
+
+Declare `max_bytes` on a map template's output and the gateway proves at
+submit that `max_fanout x max_bytes` fits its fan-in limit:
+
+```python
+@task(outputs={"result": {"type": "json", "required": True, "max_bytes": 1024}})
+```
+
 ## Worker entrypoint
 
 Inside a task container, the agent invokes:
@@ -195,5 +330,10 @@ lease-renewal loop alive to report the failure honestly.
 ## Tests
 
 ```bash
-python3 -m pytest sdk/python
+make sdk-test          # mypy --strict, then pytest with coverage
+make sdk-typecheck     # mypy --strict only
 ```
+
+Validation problems in a `.py` spec map to Python lines. `compiled.locate(path)`
+returns the line of the `@task`, or of the workflow-body call for a wiring
+problem, and a rejected `submit_spec` lists them in `NexusAPIError.problems`.

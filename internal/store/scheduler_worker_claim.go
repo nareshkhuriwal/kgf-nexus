@@ -158,6 +158,25 @@ func (s *SchedulerStore) claimOneForWorker(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// The namespace quota lock comes before EVERYTHING, including the worker
+	// row (ADR-0021): this is the one place the claim waits for it, and a
+	// waiter that holds no other lock cannot be part of a deadlock. nil means
+	// the namespace has no concurrent limits and nothing was locked.
+	nq, err := s.lockQuotaForWorker(ctx, tx, workerID)
+	if err != nil {
+		return nil, err
+	}
+	var quotaBlocked []string
+	// commitNoWork commits the reasons this pass recorded and returns "nothing
+	// for this worker". Shared by the two ways a pass ends empty.
+	commitNoWork := func(what string) (*WorkerAssignment, error) {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit %s: %w", what, err)
+		}
+		s.notifyQuotaBlocked(quotaBlocked)
+		return nil, nil
+	}
+
 	// Lock the worker row FIRST, before scanning candidates. Locking in a fixed
 	// order (worker, then attempt) across every pinned claim is what keeps two
 	// workers polling concurrently from deadlocking against each other.
@@ -209,10 +228,7 @@ func (s *SchedulerStore) claimOneForWorker(
 			// case the field exists for. The success path below commits for the
 			// same reason; this path was the one that did not, so a stalled queue
 			// with no claims to make stayed permanently unexplained.
-			if err := tx.Commit(ctx); err != nil {
-				return nil, fmt.Errorf("commit unschedulable explanation: %w", err)
-			}
-			return nil, nil
+			return commitNoWork("unschedulable explanation")
 		}
 		if err != nil {
 			return nil, err
@@ -233,6 +249,32 @@ func (s *SchedulerStore) claimOneForWorker(
 					return nil, err
 				}
 				// Look past it: another attempt on a different key may fit.
+				skipped = append(skipped, cand.ID)
+				continue
+			}
+		}
+
+		// §5.3 step 3: the namespace quota, checked under the lock taken at the
+		// top of this transaction, so no concurrent claim of this namespace can
+		// pass the same check against the same usage.
+		if nq != nil {
+			v, err := s.quotaViolation(ctx, tx, nq, cand)
+			if err != nil {
+				return nil, err
+			}
+			if v != nil {
+				reason := v.Reason()
+				if err := s.markBlocked(ctx, tx, cand.ID, reason); err != nil {
+					return nil, err
+				}
+				quotaBlocked = append(quotaBlocked, v.Dimension)
+				if v.Exhausted {
+					// No headroom at all on this dimension: every other attempt
+					// of this worker's namespace that uses it would get the same
+					// answer, so end the pass instead of spending the look-ahead.
+					return commitNoWork("quota explanation")
+				}
+				// Headroom exists but not for this one; a smaller attempt may fit.
 				skipped = append(skipped, cand.ID)
 				continue
 			}
@@ -273,6 +315,7 @@ func (s *SchedulerStore) claimOneForWorker(
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit worker claim tx: %w", err)
 		}
+		s.notifyQuotaBlocked(quotaBlocked)
 
 		asg := &WorkerAssignment{
 			AttemptID:      dispatch.AttemptID,
@@ -294,7 +337,10 @@ func (s *SchedulerStore) claimOneForWorker(
 		}
 		return asg, nil
 	}
-	return nil, nil
+	// The look-ahead ran out with every candidate held back by the semaphore or
+	// a quota. Commit so the reasons just recorded are kept (the deferred
+	// Rollback would discard them and leave the attempts unexplained).
+	return commitNoWork("look-ahead explanation")
 }
 
 // lockWorkerForClaim row-locks the polling worker and returns it only if it is

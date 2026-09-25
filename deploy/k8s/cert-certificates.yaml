@@ -23,8 +23,10 @@
 # these secrets with subPath -- subPath mounts are never updated, which silently
 # turns hot reload back into "serve the old certificate until it expires".
 #
-# Service names below are the compose names; if the (not yet written) chart
-# names its Services differently, the dnsNames must follow.
+# Service names below are the compose names, which the Helm chart uses too.
+# The chart renders these same Certificates itself (tls.enabled with
+# tls.certManager.issuerRef naming the ClusterIssuer below; templates/
+# certificates.yaml) -- apply this file only for a non-Helm install.
 
 apiVersion: cert-manager.io/v1
 kind: Certificate

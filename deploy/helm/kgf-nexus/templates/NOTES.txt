@@ -1,0 +1,52 @@
+KGF Nexus {{ .Values.image.tag }} -- release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}" ({{ if .Release.IsUpgrade }}upgrade, revision {{ .Release.Revision }}{{ else }}install{{ end }}).
+
+1. Wait for the schema migration and bootstrap, then the services:
+
+     kubectl -n {{ .Release.Namespace }} wait --for=condition=complete --timeout=10m job/migrate-{{ include "nexus.jobSuffix" . }} job/bootstrap-{{ include "nexus.jobSuffix" . }}
+     kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+   Every service holds in its wait-for-schema init container until the
+   migrations shipped with THIS image tag are recorded; expected, not a hang.
+
+2. Reach it:
+{{- if .Values.ui.enabled }}
+     Console:  kubectl -n {{ .Release.Namespace }} port-forward svc/ui 3000:{{ .Values.ui.service.port }}   ->  http://localhost:3000
+{{- end }}
+     REST API: kubectl -n {{ .Release.Namespace }} port-forward svc/api-gateway 8090:8080   ->  http://localhost:8090/v1
+{{- if and .Values.gateway.enabled .Values.gateway.hosts.console }}
+     Gateway:  http://{{ .Values.gateway.hosts.console }}
+{{- end }}
+{{- if and .Values.services.apiGateway.external .Values.services.apiGateway.external.enabled }}
+     External: kubectl -n {{ .Release.Namespace }} get svc api-gateway-external   (worker gRPC {{ .Values.services.apiGateway.external.grpcPort }})
+{{- end }}
+
+   Credentials are NOT printed here. The admin API key is the admin-api-key
+   entry of Secret "{{ .Values.existingSecret }}" (if you set one):
+     kubectl -n {{ .Release.Namespace }} get secret {{ .Values.existingSecret }} -o jsonpath='{.data.admin-api-key}' | base64 -d
+
+3. What is on:
+     mTLS between services     {{ if .Values.tls.enabled }}ON (issuer: {{ if .Values.tls.certManager.enabled }}{{ .Values.tls.certManager.issuerRef.name | default "self-signed bootstrap CA in this namespace -- NOT for production" }}{{ else }}your own nexus-<component>-tls Secrets{{ end }}){{ else }}off -- plaintext gRPC inside the cluster (docs/TLS.md){{ end }}
+     NATS                      {{ if .Values.nats.enabled }}on, auth={{ .Values.nats.auth.mode }}{{ if eq .Values.nats.auth.mode "none" }} (DEVELOPMENT ONLY){{ end }}, tls={{ .Values.nats.tls.enabled }}{{ else }}off (agents long-poll){{ end }}
+     Autoscaling (HPA)         {{ if .Values.autoscaling.enabled }}on for api-gateway, workflow-manager, dag-engine, event-service ({{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }}); needs metrics-server{{ else }}off{{ end }}
+     PodDisruptionBudgets      {{ if .Values.podDisruptionBudget.enabled }}on{{ else }}off{{ end }}
+     Artifact GC               {{ if .Values.artifactGC.enabled }}CronJob "{{ .Values.artifactGC.schedule }}", {{ if and (eq .Values.artifactGC.mode "delete") .Values.artifactGC.confirmDelete }}DELETE MODE -- orphans older than {{ .Values.artifactGC.grace }} are removed{{ else }}report only{{ end }}{{ else }}off{{ end }}
+{{- if .Values.artifactGC.enabled }}
+                               run now: kubectl -n {{ .Release.Namespace }} create job --from=cronjob/artifact-gc artifact-gc-manual-$(date +%s)
+{{- end }}
+     Cluster controller        {{ if .Values.clusterController.enabled }}cluster "{{ .Values.clusterController.clusterName }}", {{ if .Values.clusterController.apply.enabled }}APPLY permitted by the process and RBAC (the registry entry must also say apply){{ else }}observe-only (plan mode){{ end }}{{ else }}off{{ end }}
+{{- if .Values.clusterController.enabled }}
+                               leader: kubectl -n {{ .Release.Namespace }} get lease nexus-cluster-controller-{{ .Values.clusterController.clusterName }} -o jsonpath='{.spec.holderIdentity}'
+{{- end }}
+{{- if .Values.mailpit.enabled }}
+
+WARNING: mailpit is enabled. It is a development mail catcher; set smtp.* instead in production.
+{{- end }}
+{{- if not .Values.postgres.enabled }}
+
+External database: back it up with the provider's automated backups and PITR (docs/OPERATIONS.md §4).
+{{- else if not .Values.postgres.pitr.enabled }}
+
+NOTE: in-cluster Postgres without postgres.pitr -- no continuous archiving; see docs/OPERATIONS.md §4 before storing anything you need.
+{{- end }}
+
+Production checklist and values reference: docs/OPERATIONS.md §20.

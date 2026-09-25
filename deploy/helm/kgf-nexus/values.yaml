@@ -19,6 +19,14 @@ image:
   # Pin to an immutable tag (a git SHA or a digest-backed release tag). Never
   # "latest": a node that already has a "latest" would silently run old code.
   tag: ""
+  # Per-image digests, keyed by IMAGE name (api-gateway, workflow-manager,
+  # dag-engine, scheduler, resource-manager, event-service, agent, migrate, ui),
+  # NOT by the camelCase keys under `services`. A digest here is appended to that
+  # image's reference (<repo>:<tag>@sha256:...), so the kubelet pulls exactly the
+  # bytes the release built. The release pipeline sets the whole map from its
+  # digest map (templates/deploy-aks.yml); deploy/scripts/helm-image-digests.py
+  # fails the release if any rendered Nexus image does not resolve to it.
+  digests: {}
   pullPolicy: IfNotPresent
   pullSecrets: []
 
@@ -120,8 +128,13 @@ postgres:
 
 minio:
   enabled: true
-  image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
-  mcImage: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+  # Silo (github.com/pgsty/silo), the community-maintained MinIO fork, pinned by
+  # digest: MinIO no longer publishes pullable community images (F111). mcImage
+  # is the SAME image -- it bundles a version-matched mc -- so there is one
+  # attested artifact to trust. Verify before bumping:
+  #   gh attestation verify oci://docker.io/pgsty/silo@<digest> --repo pgsty/silo
+  image: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
+  mcImage: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
   endpoint: http://minio:9000   # used when enabled=false
   bucket: nexus-results
   region: us-east-1
@@ -238,7 +251,9 @@ services:
   eventService: {}
 
 # One scheduler Deployment per queue it drains. Replicas are safe to scale: the
-# claim is atomic in Postgres (ADR-0011, F81).
+# claim is atomic in Postgres (ADR-0011, F81). Optional per entry: resources
+# (default serviceDefaults.resources), podDisruptionBudget, and autoscaling --
+# read the ADR-0018 note under `autoscaling` before using the last one.
 schedulers:
   - name: scheduler
     queue: default
@@ -314,9 +329,204 @@ gateway:
 
 ui:
   enabled: true
+  replicas: 1
   service:
     type: ClusterIP
     port: 80
   resources:
     requests: { cpu: 25m, memory: 32Mi }
     limits: { memory: 128Mi }
+
+# ─── Pod placement (every Nexus Deployment) ──────────────────────────────
+# Applied to the control-plane services, schedulers, agents, console and the
+# cluster controller. The dependencies (postgres, minio, nats) are
+# single-replica StatefulSets and take none of this.
+placement:
+  # A PriorityClass that must already exist in the cluster -- e.g. one above
+  # the batch workloads the agents run, so node pressure evicts task pods
+  # before the control plane. Empty = the cluster default.
+  priorityClassName: ""
+  # Spread the replicas of each component across zones, then nodes.
+  # ScheduleAnyway so a single-node or single-zone cluster still schedules
+  # everything; use DoNotSchedule where losing one zone must never take out
+  # every replica.
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway
+    topologyKeys:
+      - topology.kubernetes.io/zone
+      - kubernetes.io/hostname
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ─── PodDisruptionBudgets ────────────────────────────────────────────────
+# One per control-plane Deployment, scheduler, agent Deployment, the console
+# and the cluster controller, WHATEVER its replica count. With one replica the
+# default (maxUnavailable: 1) still lets a node drain proceed; the budget
+# starts protecting as soon as you scale out. minAvailable >= the replica count
+# would block every drain, and the chart refuses to render it.
+# Per-component override (same shape): services.<key>.podDisruptionBudget,
+# schedulers[].podDisruptionBudget, agents[].podDisruptionBudget,
+# ui.podDisruptionBudget, clusterController.podDisruptionBudget.
+podDisruptionBudget:
+  enabled: true
+  # Set exactly one. maxUnavailable is safe at any size.
+  maxUnavailable: 1
+  minAvailable: null
+
+# ─── HorizontalPodAutoscalers ────────────────────────────────────────────
+# For the STATELESS request-path services: api-gateway, workflow-manager,
+# dag-engine, event-service. All four are correct at any replica count (dag
+# reconcile is compare-and-swap, the outbox relay and timers claim rows with
+# SKIP LOCKED). Needs metrics-server; every pod declares a CPU request. With an
+# HPA the Deployment omits spec.replicas, so `helm upgrade` never fights it.
+# Per-service override (merged over this): services.<key>.autoscaling.
+#
+# The SCHEDULER is not covered by this switch, on purpose. ADR-0018 measured
+# claim cost as linear in the queue's PENDING backlog and bound by Postgres
+# CPU, not the scheduler's own: past a ~10k backlog more replicas add latency.
+# Size it with schedulers[].replicas. schedulers[].autoscaling (same shape)
+# exists for operators who have measured their own curve (OPERATIONS §20).
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  # null = scale on CPU only.
+  targetMemoryUtilizationPercentage: null
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies: [{ type: Pods, value: 1, periodSeconds: 60 }]
+
+# ─── mTLS between services (docs/TLS.md) ─────────────────────────────────
+# Every gRPC hop: service <-> service, agent -> api-gateway:9091, and cluster
+# controller -> resource-manager. The HTTP listeners (REST, probes, /metrics)
+# are unaffected. event-service speaks HTTP and takes no gRPC TLS; the NATS hop
+# is nats.tls (certManager.natsLeaves issues its certificates).
+tls:
+  enabled: false
+  # NEXUS_TLS_REQUIRE_CLIENT_CERT on every gRPC server (mutual TLS). Only set
+  # false during a rollout where clients outside this release (external
+  # agents) do not have a client certificate yet (docs/TLS.md §4.2).
+  requireClientCert: true
+  # NEXUS_REQUIRE_TLS: a missing certificate is a startup failure, never a
+  # silent plaintext fallback (docs/TLS.md §4.4).
+  requirePeerTLS: true
+  # NEXUS_TLS_RELOAD_INTERVAL: renewed files are picked up without a restart.
+  reloadInterval: 10s
+  # Trust anchors. Empty = each pod verifies peers against ca.crt of its own
+  # leaf Secret (right for a single CA). For a CA KEY rotation with an overlap
+  # window, publish a trust-manager Bundle into a ConfigMap (key ca.crt) and
+  # name it here (deploy/k8s/cert-issuer.yaml, OPERATIONS §9.4).
+  caBundleConfigMap: ""
+  # Leaf Secrets are nexus-<component>-tls, the names deploy/k8s uses:
+  # api-gateway, workflow-manager, dag-engine, scheduler, resource-manager,
+  # agent, cluster-controller. To bring your own, set certManager.enabled=false
+  # and create them (tls.crt, tls.key, ca.crt; SANs as in
+  # deploy/k8s/cert-certificates.yaml).
+  certManager:
+    # Issue every leaf with cert-manager (installed; CRDs present).
+    enabled: true
+    # Issuer of the leaves. PRODUCTION: a ClusterIssuer backed by a CA whose
+    # key lives OUTSIDE this namespace (deploy/k8s/cert-issuer.yaml creates
+    # nexus-internal-ca). Empty name = bootstrap a self-signed CA in the
+    # release namespace: fine for a test cluster, NOT for production, because
+    # anyone who can read Secrets here could then mint any service identity.
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+      group: cert-manager.io
+    selfSignedCA:
+      duration: 8760h
+      renewBefore: 720h
+    # Leaves: 30 days, renewed with 10 left, new key each time (docs/TLS.md §5.2).
+    duration: 720h
+    renewBefore: 240h
+    # Extra SANs on the api-gateway leaf: the name EXTERNAL agents dial.
+    gatewayExtraDnsNames: []
+    # Also issue nexus-nats-tls (broker) and nexus-event-service-tls (client)
+    # for nats.tls.secretName / nats.tls.clientSecrets.eventService; the agent
+    # leaf (nexus-agent-tls) serves as nats.tls.clientSecrets.agent.
+    natsLeaves: false
+
+# ─── Cluster controller (docs/CLUSTER-SCALING.md, OPERATIONS §12) ────────
+# Reports this cluster to the console and -- only under the triple opt-in
+# below -- scales bound worker Deployments. Off by default.
+clusterController:
+  enabled: false
+  # REQUIRED when enabled: the registry name (clusters.name) registered in the
+  # console (Cluster & scaling -> Live cluster). Its control-plane namespace
+  # must be this release's namespace.
+  clusterName: ""
+  # Two replicas for failover; a Lease (nexus-cluster-controller-<cluster>)
+  # makes exactly one act, the other reports /readyz "standby".
+  replicas: 2
+  interval: 15s
+  jobLabelSelector: nexus.io/attempt-id
+  logLevel: info
+  # Namespaces holding the worker Deployments bound to this cluster. A
+  # read-only Role is created in each (and the apply Role under apply.enabled).
+  # Empty = this release's namespace, where the chart's own agents run. Never
+  # widened to a cluster-wide grant.
+  workerNamespaces: []
+  # Read Nodes (capacity context) and the kube-system Namespace object (its UID
+  # is the cluster identity apply mode is verified against). Cluster-scoped by
+  # nature, so one small read-only ClusterRole.
+  observeNodes: true
+  # APPLY MODE is three independent opt-ins; missing any one keeps plan mode:
+  #   1. the registry entry is in apply mode WITH the expected kube-system UID
+  #      (console; the API refuses apply without it);
+  #   2. NEXUS_CONTROLLER_ALLOW_APPLY=true on the process;
+  #   3. the apply Role (deployments/scale update, pods patch) is bound in the
+  #      worker namespaces.
+  # apply.enabled turns on 2 and 3, and requires expectedClusterUID, which the
+  # chart compares with the live cluster at install: a values file written for
+  # one cluster cannot enable apply on another.
+  apply:
+    enabled: false
+    expectedClusterUID: ""
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { memory: 256Mi }
+  podDisruptionBudget: {}
+
+# ─── Artifact GC (docs/OPERATIONS.md §7.7, §19.2) ────────────────────────
+# A CronJob that sweeps the result store for objects no row references.
+# REPORT ONLY by default: it logs what it would collect and deletes nothing.
+artifactGC:
+  enabled: true
+  schedule: "17 3 * * *"
+  # IANA zone for the schedule (CronJob spec.timeZone). Empty = the
+  # controller-manager's zone (UTC on managed clusters).
+  timeZone: ""
+  # report | delete. delete ALSO needs confirmDelete: true -- the binary's
+  # -delete -i-understand-this-deletes-data pair. The chart refuses
+  # mode=delete without the confirmation rather than quietly reporting.
+  mode: report
+  confirmDelete: false
+  # Minimum object age before collection: covers uploads whose row has not
+  # committed yet. Never lower it toward minutes.
+  grace: 24h
+  # Time-based retention for TASK LOGS only; outputs are never time-expired.
+  # Empty = logs live as long as their attempt.
+  logRetention: ""
+  maxObjects: 10000
+  # Only keys under this prefix, e.g. "default/". Empty = the whole bucket.
+  prefix: ""
+  # Push the final metrics to a Prometheus Pushgateway under job=artifact-gc,
+  # e.g. http://prometheus-pushgateway.monitoring:9091. Empty = off.
+  pushgatewayUrl: ""
+  logLevel: info
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  activeDeadlineSeconds: 3600
+  backoffLimit: 1
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }

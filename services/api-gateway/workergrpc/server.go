@@ -544,11 +544,36 @@ func (s *Server) ReportResult(ctx context.Context, req *nexusv1.ReportResultRequ
 		return ack, nil
 	}
 	if err := s.sch.ApplyResult(ctx, req); err != nil {
+		// Never Ack{accepted:true} and never Ack{accepted:false} here: the
+		// result was not applied, and both Acks make the agent drop it from its
+		// WAL. A transport error keeps it there to be resent. A scheduler that
+		// could not take the attempt row in time (CONTRACT-FINDINGS F104) or
+		// that was unreachable answers Unavailable, which is the status that
+		// says so honestly; anything else stays Internal.
+		if retryableUpstream(err) {
+			s.log.WarnContext(ctx, "attempt result not applied yet; the worker will resend",
+				"attempt_id", req.GetAttemptId(), "err", err)
+			return nil, status.Errorf(codes.Unavailable, "apply result: %v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "apply result: %v", err)
 	}
 	s.log.InfoContext(ctx, "attempt result applied",
 		"attempt_id", req.GetAttemptId(), "outcome", req.GetOutcome().String())
 	return &nexusv1.Ack{Accepted: true}, nil
+}
+
+// retryableUpstream reports whether an upstream failure is transient: the
+// scheduler asked for a resend (Unavailable), timed out, or shed load.
+func retryableUpstream(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch st.Code() {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted, codes.Aborted:
+		return true
+	}
+	return false
 }
 
 // ReportLogs indexes log chunks the agent has already written to the result

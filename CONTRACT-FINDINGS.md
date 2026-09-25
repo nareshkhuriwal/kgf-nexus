@@ -202,6 +202,8 @@ Gateway must confirm it emits bare labels.
 **Severity:** environmental, affects anyone pulling MinIO.
 `docker.io/minio/minio` no longer resolves (pull access denied). Compose now uses
 `quay.io/minio/minio` and `quay.io/minio/mc`.
+*Superseded by F111:* the quay.io repositories went private too; the store now
+runs the community fork `pgsty/silo`, pinned by digest.
 
 ### F17. §8.2 has no /capacity response shape
 Minor. The UI falls back to client-side aggregation over ACTIVE/DRAINING workers
@@ -2562,10 +2564,13 @@ wire contract (no proto or schema change).
 precedence, flag-only DSNs in both `-flag value` and `-flag=value` forms, `-h`
 with no DSN, and the refusal message.
 
-### F104. MarkStarted can make a concurrent result be skipped and reclaimed as LOST — OPEN
+### F104. MarkStarted can make a concurrent result be skipped and reclaimed as LOST — FIXED
 
-**Severity:** medium (narrow window, data loss of a completed result when hit).
-Found while building F96's progress storage; not fixed.
+**Severity:** medium (data loss of a completed result when hit). Found while
+building F96's progress storage; fixed on `fix/dispatch-races-and-agent-register`.
+The window was not narrow in practice: racing the real `MarkStarted` and
+`ApplyResult` of 24 freshly dispatched attempts dropped 5 results on the first
+run of the new test.
 
 `SchedulerStore.MarkStarted` (`internal/store/scheduler_reports.go`) moves the
 attempt DISPATCHED→RUNNING with an `UPDATE task_attempts ... WHERE state =
@@ -2588,15 +2593,83 @@ which retries or fails a task that actually succeeded.
 `TestProgressNeverBlocksTheResult` pins that. Nothing pins it for
 `MarkStarted`.
 
-**Candidate fixes, not chosen here.** (a) In `ApplyResult`, distinguish "row
-locked" from "row terminal": retry the lock without `SKIP LOCKED` (a plain
-`FOR UPDATE` with a short `lock_timeout`) when the attempt is still
-DISPATCHED/RUNNING, since a result is never contending with a peer applying the
-same result under a valid lease. (b) Have the gateway return `Accepted: false`
-with a retryable reason when `Applied` is false and the attempt is not terminal,
-so the agent's WAL keeps the result and redelivers it. Either needs a race test
-in the style of `TestProgressNeverBlocksTheResult` that holds a `MarkStarted`
-transaction open while a result arrives.
+**Fix.** Option (a), with option (b) as its bounded fallback.
+
+1. `ApplyResult` and `cancelOneAttempt` (`internal/store/scheduler_reports.go`)
+   lock the attempt with a plain `FOR UPDATE` through
+   `lockAttemptForTransition`, which sets `lock_timeout` for that one statement
+   (`ClaimConfig.AttemptLockTimeout`, default `DefaultAttemptLockTimeout` = 2 s)
+   and restores the session default afterwards, so the rest of the transition
+   waits exactly as it always did.
+2. A wait that times out, or a deadlock Postgres breaks on it (`55P03`,
+   `40P01`), returns `store.ErrAttemptBusy`. Nothing is written. The scheduler's
+   `ReportServer` maps it to `codes.Unavailable`, and the gateway's
+   `ReportResult` now answers every upstream `Unavailable`, `DeadlineExceeded`,
+   `ResourceExhausted` or `Aborted` with `Unavailable` instead of `Internal`.
+   Neither `Ack` is sent, so the agent's reporter keeps the result in its WAL
+   and resends it (`agent/internal/worker/reporter.go` retries any transport
+   error; `Ack{accepted:false}` is terminal and would drop it).
+3. `CancelRunAttempts` tries every attempt and returns the joined errors
+   instead of stopping at the first (F109).
+
+**Why this design.** A result is not a work-queue item: nothing re-delivers a
+skipped one, so "someone holds the row" has to mean "wait for them", not "they
+handled it". Telling a benign holder apart from a reclaim is unnecessary,
+because waiting is safe for both:
+
+- *Lease fencing is unchanged.* Under READ COMMITTED, when the lock is granted
+  Postgres re-evaluates `state IN ('DISPATCHED','RUNNING')` against the version
+  the holder committed. If the holder was the lease reconciler, the liveness
+  sweep or a cancel, the attempt is now terminal, the lock query returns no row,
+  and the result is ignored exactly as SKIP LOCKED ignored it. A duplicate
+  result waiting on the first sees it terminal too. The gateway's token check
+  still runs first, and expiry still deletes the lease in the same transaction.
+- *No new deadlock.* The attempt lock is the transaction's first lock, so the
+  waiter holds nothing another transaction can be waiting on and cannot close
+  a cycle there. Postgres would still detect one, and that maps to the same
+  retryable error.
+- *At-least-once is preserved.* The only outcomes are applied, ignored because
+  the attempt is terminal, or a retryable error that leaves the result in the
+  WAL. `Applied: false` is no longer reachable for a result that was merely
+  contended.
+
+Option (b) alone (always answer retryable when not applied) was rejected as
+the primary mechanism: `Applied: false` is also the answer for a genuine
+duplicate, which must stay a success or the agent would retry a delivered
+result until its budget ran out; and every contended result would pay an agent
+backoff round trip instead of a few milliseconds of lock wait.
+
+**Other SKIP LOCKED sites, checked.** `expireOne` (lease reconciler and
+liveness sweep) keeps SKIP LOCKED: it is a sweep, and a skipped attempt is
+re-selected next pass while its lease stays expired or its worker stays DEAD
+(F106 makes the second true). The claim paths (`scheduler_claim.go`,
+`scheduler_worker_claim.go`) skip PENDING attempts and worker rows, which stay
+claimable. `ClaimDueTimers`, the workflow-manager timer and schedule claims and
+the event-service relay are work queues whose skipped rows remain for the next
+pass. `ExpireScheduleToStart` uses a plain conditional UPDATE. `RecordProgress`
+never locks the attempt row. None of them can drop a result or a report.
+`cancelOneAttempt` could, and is F109.
+
+**Residual.** When the lease reconciler wins the row, the late result is
+ignored and the agent is still told `Accepted: true`, as before; its lease is
+gone, so any later RPC for the attempt is rejected as stale. Answering
+`stale_lease_token` in that case would be more precise and changes no state.
+
+**How it is held.** `services/scheduler/result_race_integration_test.go`:
+`TestResultIsNotSkippedWhileMarkStartedHoldsTheAttempt` stalls the real
+`MarkStarted` after its attempt UPDATE (by holding the run row its event
+append needs) and sends the result into that window;
+`TestResultWaitingOnAReclaimStaysFenced` does the same with the real lease
+reconciler and asserts LOST, one terminal event and a single capacity release;
+`TestResultBusyPastTheLockTimeoutIsRetryable` asserts `Unavailable` and
+`ErrAttemptBusy`, an untouched attempt, and that the resend applies;
+`TestCancelIsNotSkippedWhileMarkStartedHoldsTheAttempt` covers the cancel
+fan-out; `TestConcurrentStartAndResultNeverDropsTheResult` races 24 real
+start/result pairs. Four of them failed before the fix (the reclaim test is a
+fencing guard and passes either way), and all pass 20 of 20 runs with
+`-count=20`. `TestUnappliedResultIsNeverAcknowledged`
+(`services/api-gateway/workergrpc`) pins the gateway mapping. No proto or
+schema change.
 
 ### F105. archive_timeout did not bound the RPO after a server start or promotion — FIXED
 
@@ -2622,7 +2695,7 @@ idle database pays nothing. The measured archive intervals with the guard were
 bound is gone too. `deploy/pitr-verify.sh` fails when the newest archived
 segment is older than 15 minutes; alert on it.
 
-### F106. Two liveness sweepers, and the scheduler's gives up its in-flight recovery when it loses — OPEN
+### F106. Two liveness sweepers, and the scheduler's gives up its in-flight recovery when it loses — FIXED
 
 **Severity:** low (time, not correctness). Found by the timed full-stack restore
 drill (OPERATIONS §4.6).
@@ -2655,13 +2728,45 @@ select it again, so its remaining attempts also fall back to lease expiry.
 Nothing is lost or double-applied: lease expiry is the correctness backstop in
 both cases, and every expiry is fenced.
 
-**Proposed fix, not done.** Have the scheduler's sweep also expire the held
-attempts of workers that are already DEAD with attempts still DISPATCHED/RUNNING
-(or move the attempt half of the transition behind one owner). Also make
-`killWorker` and `SweepDeadWorkers` log and continue per attempt and per worker,
-as `ReconcileExpiredLeases` does, instead of returning on the first error. Test
-with an integration test where the resource-manager wins the race, asserting
-the attempts become LOST within one sweep interval instead of one lease TTL.
+**Fix (`internal/store/scheduler_liveness.go`).** Both halves. Attempt
+recovery stays with one owner (the scheduler); either sweeper may still make
+the DEAD transition.
+
+- `SweepDeadWorkers` now also selects workers already `DEAD` that still hold
+  DISPATCHED/RUNNING attempts on its queue (`deadWorkersHoldingAttempts`, an
+  EXISTS served by `idx_attempts_worker_active`) and expires those attempts as
+  LOST (`worker_dead`). Such a worker is reported with `DeadWorker.AlreadyDead`,
+  logged as "recovered attempts of a worker already marked dead" and not
+  counted as a newly dead worker in the scheduler's metric. The same query
+  retries attempts an earlier pass failed to expire, so a failure no longer
+  falls back to lease expiry either.
+- `killWorker` (through `expireHeldAttempts`) and `SweepDeadWorkers` try every
+  attempt and every worker in the pass and return the joined errors; the
+  scheduler logs the pass as incomplete. `ReconcileExpiredLeases` had the same
+  bug (F108) and is fixed the same way.
+
+**Fencing.** Every expiry is still `expireOne`: SKIP LOCKED plus the state CAS,
+with the lease deleted in the same transaction. DEAD is terminal
+(`SetWorkerState` never leaves it; an agent must re-register under a new id),
+so the dead session can never again be the attempt's legitimate owner, and its
+late reports find no lease. The resource-manager has already deleted the
+reservations and zeroed `committed`; `releaseCapacity` then finds no
+reservation and releases nothing, so capacity is released exactly once
+(asserted).
+
+No schema change. `services/resource-manager/internal/server/sweeper.go` is
+unchanged apart from its comment, which now says who recovers the attempts.
+
+**How it is held.** `services/scheduler/liveness_race_integration_test.go`:
+`TestResourceManagerWinsTheDeadRaceAttemptsStillRecover` runs the
+resource-manager's exact calls (`SetWorkerState(DEAD)`, `ReleaseAllForWorker`)
+with a 10-minute lease TTL, then asserts that ONE scheduler sweep moves both
+attempts (one DISPATCHED, one RUNNING) to LOST with `WorkerDead` and a
+scheduled retry, deletes their leases and leaves `committed` at 0, and that a
+second sweep does nothing. `TestDeadSweepContinuesPastAFailedAttempt` poisons
+one attempt and asserts that the worker's other attempt and a second stale
+worker are still recovered, then that the repaired attempt is recovered on the
+next pass through the already-DEAD path. Both failed before the fix.
 
 ### F107. Upgrading to NATS authorization put the broker in a liveness restart loop — FIXED
 
@@ -2696,3 +2801,619 @@ uid 1000 with a read-only root filesystem: it moved `$G`, left `NEXUS` untouched
 and did nothing on a second run. On docker-desktop the upgraded StatefulSet
 retired the stranded store and the broker stopped restarting (see the commit
 that records this finding).
+
+### F108. The lease reconciler stopped at its first failed expiry — FIXED
+
+**Severity:** low (time, not correctness). Found while fixing F106.
+
+`ReconcileExpiredLeases` (`internal/store/scheduler_reconcile.go`) carried the
+comment "one bad attempt must not stop recovery of the rest" and then returned
+on the first `expireOne` error. Every later expired lease in the batch waited
+for the next pass, and an attempt that kept failing at the head of the
+`ORDER BY expires_at` batch blocked recovery of everything behind it on every
+pass.
+
+**Fix.** Every attempt in the batch is tried and the errors are joined; the
+scheduler logs "lease reconciliation incomplete" with the number recovered.
+`TestLeaseReconcilerContinuesPastAFailedAttempt` puts a poisoned attempt at the
+head of the batch. It recovered 0 attempts before the fix and now recovers the
+other two, then the repaired one on the next pass.
+
+### F109. A run cancel skipped attempts that were being started or dispatched — FIXED (partly open)
+
+**Severity:** medium. Found while checking the SKIP LOCKED sites for F104.
+
+`cancelOneAttempt` locked with `FOR UPDATE SKIP LOCKED` and treated a locked
+row as not cancellable. An attempt whose `ReportStarted` was committing, or a
+PENDING attempt the dispatch claim held, was silently skipped by the run's
+cancel fan-out and kept running (or was dispatched) under a CANCELLING run.
+`CancelRunAttempts` also returned on the first per-attempt error.
+
+**Fix.** The cancel waits for the row with the same bounded lock as
+`ApplyResult` (F104). A claim that wins first leaves the attempt DISPATCHED,
+and the waiting cancel then cancels it. All attempts are tried and the errors
+are joined; a busy one surfaces as `Unavailable` from the scheduler.
+`TestCancelIsNotSkippedWhileMarkStartedHoldsTheAttempt` failed before the fix.
+
+**Open.** workflow-manager's `Cancel` logs a failed `CancelRunAttempts` as
+"reconciler will retry", but nothing calls it again for a CANCELLING run. The
+heartbeat still delivers CANCEL_ATTEMPT for every in-flight attempt of a
+CANCELLING run (`PendingCancellations`), so the work stops, but the attempt
+then ends through `ApplyResult` (usually FAILED) rather than CANCELLED.
+Re-issuing the fan-out periodically for CANCELLING runs would close this.
+
+### F110. Agents crash-looped when they registered before the gateway was ready — FIXED
+
+**Severity:** medium (availability). Reported from a live rollout:
+`agent: register: ... Unavailable desc = authentication temporarily
+unavailable`. The process exited 1 and Kubernetes restarted it on crash-loop
+backoff.
+
+`Agent.register` made one `Register` call and returned its error, which ended
+the process. The gateway answers `Unavailable` while its credential store is
+unreachable (`services/api-gateway/workergrpc/interceptor.go`), and the
+transport answers `Unavailable` while the gateway is not listening, so every
+fresh install, gateway rollout or database blip at agent start produced a
+crash loop.
+
+**Fix (`agent/internal/worker/register.go`).** `registerWithRetry` retries
+`Unavailable`, `DeadlineExceeded`, `ResourceExhausted`, `Aborted` and
+`Internal` (the gateway's code when the resource-manager or database fails
+while creating the worker row) with capped exponential backoff: a ceiling of
+0.5 s doubling to 30 s, full jitter, 30 s per attempt, for as long as the
+process runs. Every other code, including `Unauthenticated`,
+`PermissionDenied` and `InvalidArgument`, fails at once with
+`ErrRegistrationRejected` and a message naming the fix (for example "check
+NEXUS_API_KEY"). SIGTERM during the backoff ends the wait at once, and
+`Agent.Run` returns nil, so the process exits 0. The agent's ops listener
+serves `/readyz`, which is 503 until a session is registered and again while
+it re-registers. The Helm chart and `deploy/k8s/agent-deployment.yaml` add a
+readiness probe on it. There is deliberately no liveness probe on
+registration: an outage is waited out, not restarted through. New metrics:
+`nexus_agent_registration_attempts_total{result=ok|retryable_error|permanent_error}`
+and `nexus_agent_registered` (OPERATIONS, metrics table).
+
+**How it is held.** `agent/internal/worker/register_test.go` runs a scripted
+`WorkerService` over a real gRPC connection (bufconn). It covers three
+`Unavailable` answers then success (4 calls, the bootstrap key on each, metrics
+3 and 1); each transient code being retried; each permanent code making one
+call and returning a typed error that keeps its gRPC status and names the fix;
+cancellation during a one-minute backoff returning within milliseconds;
+`Agent.Run` returning nil and never ready when stopped before registering, and
+returning the typed error on a permanent failure; and the backoff schedule.
+`TestReadyzFollowsRegistration` covers the endpoint.
+
+### F111. The pinned MinIO images stopped pulling: MinIO no longer publishes community images — FIXED
+
+**Severity:** high (environmental). A fresh `make up`, the PITR stack, the
+Helm chart's result store and `make bench-pg` could not start: both pins,
+`quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` and
+`quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z`, answer **401 UNAUTHORIZED** on
+an anonymous pull (reproduced 2026-09-25, Docker 29.6.2). Anything already
+cached kept working, which is why it went unnoticed.
+
+**Cause.** MinIO Inc. made the community edition source-only in October 2025
+(no binaries, no images), removed its Docker Hub images, privatised the quay.io
+repositories, and archived `github.com/minio/minio` ("THIS REPOSITORY IS NO
+LONGER MAINTAINED"). Its last tag, `RELEASE.2025-10-15T17-29-55Z`, fixed a
+privilege-escalation CVE (session-policy bypass in service accounts/STS) that
+the old `2025-04-22` pin also lacked. The only official images left are
+`quay.io/minio/aistor/*`, which are proprietary and need a license key even on
+the free tier.
+
+**Decision.** `docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46`
+for the server AND the `mc` init jobs (the image bundles a version-matched
+`mc`, so one attested artifact replaces two). Silo is the community fork
+(formerly `pgsty/minio`): AGPL-3.0, active (3.4k stars, releases every 1-2
+months with a public advisory ledger), drop-in compatible (S3 API, `MINIO_*`
+variables, `.minio.sys` format, `server` argv, `/minio/health/*` probes), and
+each image carries an SLSA build-provenance attestation from
+`pgsty/silo/.github/workflows/docker-release.yml`, checked by the new
+`make verify-s3-image` (also run in GitHub CI). Its sibling `pgsty/mc` image
+has no image attestation, which is another reason not to use it. Rejected:
+AIStor (license key), building the archived upstream tag (unpatched forever),
+Chainguard (free tier is `latest` only, no `mc`), Bitnami (versioned images
+moved to the unmaintained `bitnamilegacy` in August 2025). No Dockerfile is
+needed because a verifiable prebuilt image exists. Full assessment and bump
+procedure: docs/OPERATIONS.md §22.
+
+**Verified locally (2026-09-25, Apple M4 Pro, Docker Desktop 29.6.2).**
+`gh attestation verify` passes for the digest (and fails against the wrong
+repository); the server runs as UID 1000 with every capability dropped (the
+chart's security context) and passes `/minio/health/ready`; compose `minio`
+became healthy through its `mc ready local` healthcheck and `minio-init`
+created the private `nexus-results` bucket; the object-store integration tests
+(`agent/internal/resultstore`, `agent/internal/worker` logs,
+`internal/artifactgc` logs) pass against it; `deploy/backup-artifacts.sh` works
+in container mode; the PITR `backup-store` (TLS) became healthy and
+`backup-store-init` created the bucket, user and policy, twice (idempotent).
+That run exposed one incompatibility: the image is ubi-micro based and has no
+`grep`, which the init script piped `mc admin user info` into; it now uses a
+shell `case`. Not verified: the Helm chart on a real cluster.
+
+**Residual risk.** A single-organisation community fork without commercial
+support. The digest pin and the provenance check bound what can change under us;
+the fallback is AIStor under licence or a different S3 store.
+
+**Also fixed while wiring the S3 store into CI.** The integration tests now read
+only `NEXUS_TEST_S3_*` (new `internal/tests3`, the counterpart of
+`internal/testdb`): the result-store suite used to default to
+`localhost:9000` with `minioadmin/minioadmin`, and the log suites read the
+service credentials `NEXUS_S3_*`. CI now starts a throwaway store and fails on
+`skipping integration test: no test S3 store`. And `make migrate-up`, which both
+CI integration jobs run, ignored the `-- migrate: no-transaction` opt-out and
+failed on 0015 (`CREATE INDEX CONCURRENTLY cannot run inside a transaction
+block`); it now calls `deploy/migrate.sh`, the script the migration jobs use.
+
+### F112. Release image digests never reached the Helm chart — FIXED
+
+**Severity:** high for any AKS release (none has run yet). The release
+pipeline's `templates/deploy-aks.yml` turned the digest map into
+`--set-json services={"api-gateway": {"image": {"digest": ...}}, ...}`. That
+was wrong twice over:
+
+1. the chart's `services` keys are camelCase (`apiGateway`, `workflowManager`,
+   ...) and cover only five of the images; `scheduler`, `agent`, `migrate` and
+   `ui` are not under `services` at all;
+2. nothing in the chart read an `image.digest` anywhere: `nexus.image` rendered
+   `<registry><prefix><component>:<tag>` only.
+
+So the kebab-case keys were merged into `services` as dead entries, every pod
+ran by mutable tag, and nothing noticed. The release also never set
+`image.registry`/`image.repositoryPrefix` (the chart default `kgf-nexus/` is not
+the ACR's `<acr>/nexus/`) nor `image.tag` (required by the chart), and the
+environment values files it names (`values-dev.yaml`, ...) do not exist yet.
+
+**Fix.** A new values key `image.digests`, keyed by IMAGE name (the digest map's
+own keys, so there is no renaming step to get wrong); `nexus.image` appends
+`@sha256:...` when present and fails the render on a malformed digest, and the
+per-release Job suffix includes the migrate digest so a rebuilt image under one
+tag still gets a new Job. `deploy/scripts/helm-image-digests.py values` turns the
+digest map into `image.registry`, `image.repositoryPrefix` and `image.digests`,
+passed after the environment's values file; `check` renders the release with the
+real values and fails unless every rendered Nexus image equals
+`<base><name>:<tag>@<the map's digest>` and every map entry is rendered
+(`cluster-controller` is exempt: its kustomize base deploys it; `artifact-gc` is
+exempt until the chart deploys it). deploy-aks runs `check` before
+`helm upgrade`, sets `image.tag` to the pushed tag, and fails early on a missing
+values file. GitHub CI runs `helm lint` and `self-test`, which builds a map for
+every image the chart renders and proves both that the check passes and that it
+fails for a wrong digest and for an unrendered image.
+
+**Verified locally:** `self-test` passes on this chart and FAILS on the chart
+from before the fix (every image "expected @sha256:..."); `check` with an
+11-image map shaped like the pipeline's passes. Not verified: a real release
+(no AKS environment is enabled).
+
+### F113. The Helm chart's schedulers were invisible to the cluster controller, and a chart-only upgrade could not be applied — FIXED
+
+Found while porting the cluster controller into the chart and installing it on
+docker-desktop (namespace `nexus-w2c-helm`, docs/OPERATIONS.md §20.8). Four
+chart defects, one root theme: labels and names the chart never had to agree
+with anything on before.
+
+1. **Schedulers not observed.** The controller lists scheduler Deployments with
+   `app.kubernetes.io/part-of=kgf-nexus,app.kubernetes.io/component=scheduler`
+   (`services/cluster-controller/internal/controller/observe.go`,
+   `SchedulerSelector`), matching `deploy/k8s`. The chart set no `part-of` label
+   at all and gave each scheduler Deployment its own component
+   (`scheduler-gpu`). Read-only check against the existing `nexus-dev` release:
+   `kubectl -n nexus-dev get deploy -l <selector>` returns nothing, so the
+   console's Live cluster tab would have shown no scheduler and no scheduler
+   HPA for any Helm install.
+2. **Chart-only upgrades failed on an immutable Job.** The migrate, bootstrap
+   and minio-init Jobs were named by a hash of the image tag alone. Any chart
+   change to their pod template at the same tag -- here, adding the label from
+   (1) -- made `helm upgrade` fail with `spec.template: field is immutable`
+   (reproduced upgrading an origin/main release in place).
+3. **Unquoted release name.** `app.kubernetes.io/instance: {{ .Release.Name }}`
+   renders a release named `n`, `y`, `on`, `no`, `true`… as a YAML boolean, and
+   every object carrying it is invalid (kubeconform: "got boolean, want
+   string" on all 38 objects for release `n`).
+4. **`--reuse-values` from an older chart** replays the old computed values and
+   drops the new version's defaults, which surfaced as a `deepCopy` panic on a
+   nil value deep in a template.
+
+**Fix.**
+- Every object carries `app.kubernetes.io/part-of: kgf-nexus` (not in any
+  selector, so no immutable field changes). Scheduler *Deployment objects* are
+  labelled `component=scheduler` plus `nexus.khuriwalgroup.com/queue`; their
+  pods and selectors keep the per-queue component. Verified live: the
+  controller reported both `scheduler` and `scheduler-gpu`.
+- `nexus.jobSuffix` hashes the image tag **and** the chart version (and, as
+  merged with F112, the pinned migrate digest and `minio.mcImage`); the chart
+  is now 0.2.0. migrate and bootstrap are idempotent, so a re-run per chart
+  version is harmless. Verified: origin/main's chart upgraded in place.
+- The release name is quoted everywhere; `deploy/helm/validate.sh` renders
+  with release name `on` so a regression fails kubeconform.
+- The chart detects the missing sections and fails with "upgrade with
+  --reset-then-reuse-values or -f" (OPERATIONS §20.2). Verified both paths.
+
+### F114. A worker token minted by the API cannot authenticate an agent — FIXED
+
+`POST /v1/namespaces/{ns}/tokens` accepts role `worker` and scope `worker_rpc`
+(`services/api-gateway/rest/admin.go`, `validateNewToken`) and returns an
+`nxtok_…` token. The worker gRPC listener authenticates every RPC with
+`auth.Authenticate` (`services/api-gateway/workergrpc/interceptor.go:32`), which
+only looks up the legacy `api_keys` table (`authn/authn.go:201`); only
+`AuthenticateCredential` (`authn/identity.go:110`) understands `nxtok_`. So the
+token the API issues for workers is rejected as "invalid credentials" by the one
+protocol it is scoped for.
+
+**Impact.** There is no API path to a working worker credential. Every
+installer falls back to writing a SHA-256 hash into `api_keys` directly: `make
+seed`, the chart's bootstrap Job, and now `nexusctl up` (which does everything
+else through the API -- registration, verification, login, the admin token --
+and documents this one step, cli/README.md). Worker credentials therefore also
+miss what scoped tokens have: expiry, revocation from the console, audit
+attribution.
+
+**Proposed fix.** Authenticate the worker listener with `AuthenticateCredential`
+and require `ActionWorkerRPC` on the resulting principal (legacy `api_keys` rows
+with role `worker` keep working through its default branch). Add an integration
+test that mints a worker token through the REST API and registers an agent with
+it. Then `nexusctl up` and the bootstrap Job can drop their SQL step.
+
+**Fix (wave-2 integration).** `workergrpc.AuthUnaryInterceptor` authenticates
+with `AuthenticateCredential`, so an `nxtok_` token is resolved against
+`scoped_tokens` (expiry and revocation included) and every other shape still
+reaches the unchanged `api_keys` lookup. Because the listener now accepts more
+credential kinds, the interceptor also requires `ActionWorkerRPC` before any
+handler runs: a reader token, a worker-role token without the `worker_rpc`
+scope, an admin token scoped away from it and a console session are all
+refused with PermissionDenied at the transport; each handler still checks the
+namespace (`requirePrincipal`). Tests:
+`services/api-gateway/workergrpc/interceptor_test.go` (unit, fake identity
+store) and `worker_token_integration_test.go`
+(`TestIntegrationWorkerTokenFromTheAPIAuthenticatesTheWorkerProtocol`: mints a
+worker token through `POST /tokens` with the gateway's own wiring, accepts it
+in its namespace, refuses it in another, refuses a reader token, keeps a legacy
+`api_keys` worker key working, and refuses the token once revoked through the
+API). The integration test fails with "invalid credentials" when the
+interceptor is reverted to `Authenticate`.
+
+**Still open (follow-up).** `nexusctl up` and the chart's bootstrap Job still
+seed a legacy `api_keys` worker row. `up` could now mint the agents' token
+through the API after registering the tenant; the bootstrap Job needs a key
+known before install (the Secret), so it keeps the SQL step.
+
+### F115. Cloud platforms: the result store is S3-only with static keys, the chart cannot use cloud identities or GPU pools, and nothing has been applied — OPEN
+
+**Severity:** medium (deployment blocker for Azure-native artifacts and for
+keyless and GPU operation on every cloud; not a correctness defect). Found
+while building the AKS, EKS and GKE Terraform (`deploy/terraform/modules/
+{aks,eks,gke}-platform`, `environments/{aks,eks,gke}`,
+`feat/terraform-cloud-clusters`).
+
+**1. Azure Blob has no working path.** The result store talks to storage only
+through the S3 API: minio-go in `agent/internal/resultstore`,
+`services/api-gateway/logs` and `internal/artifactgc`. Azure Blob has no S3
+endpoint, and MinIO removed its Azure gateway mode in 2022. On AKS the
+environment therefore runs the chart's **in-cluster MinIO** on a Premium SSD
+PVC, and the operator owns its capacity, backups and availability. The Blob
+account, the private container, the private endpoint and a workload identity
+with `Storage Blob Data Contributor` on that container are provisioned but
+**unused**. The `azure_blob_native_backend` variable in `environments/aks` is
+reserved and its validation refuses `true`. There are two ways forward:
+(a) a native Blob backend behind the result-store interface, using
+`azblob` with workload identity; or (b) an S3-to-Blob gateway such as s3proxy
+in front of the container, which is another component to run and secure and
+has uncertain multipart and conditional-request fidelity. (a) is the
+recommendation.
+
+**2. Only static credentials.** All three clients build
+`credentials.NewStaticV4(...)`. This means:
+- **EKS** needs an IAM user with an access key (checkov CKV_AWS_273 and
+  CKV_AWS_40, accepted and documented). It is contained as far as a key can
+  be: the policy covers one bucket and one KMS key, and an explicit deny
+  blocks any request that does not arrive through the VPC's S3 gateway
+  endpoint. The target design, an IRSA / Pod Identity role trusted for
+  `nexus/kgf-nexus` with its Pod Identity association, is provisioned and
+  unused.
+- **GKE** uses an HMAC key for GCS's S3 interoperability API. The Workload
+  Identity binding for the same service account is provisioned and unused.
+
+  Fix: use minio-go's credential chain (`credentials.NewChainCredentials`
+  with `IAM`, which understands `AWS_WEB_IDENTITY_TOKEN_FILE` / IRSA and the
+  Pod Identity container-credentials endpoint; verified present in minio-go
+  v7.3.0 `pkg/credentials/iam_aws.go`) whenever no static key is configured.
+  On GKE, a keyless path needs a native GCS client (Workload Identity
+  tokens), because minio-go can sign only S3-style HMAC requests.
+
+**3. The chart has no ServiceAccount, nodeSelector, tolerations or GPU
+resource requests.** Without a ServiceAccount, (2) cannot be adopted even
+after the client change. Without tolerations and `nvidia.com/gpu` limits, the
+tainted GPU pools that all three modules can create (`gpu_pool` /
+`gpu_node_group`, `nvidia.com/gpu=present:NoSchedule`) **cannot host a Nexus
+agent**. They default to off, or to min 0 so they cost nothing. GKE adds the
+toleration automatically only for pods that request GPUs, and the chart's
+agents request none. Fix: per-agent `serviceAccountName`, `nodeSelector`,
+`tolerations` and `resources.limits["nvidia.com/gpu"]` in `agents[]`, plus a
+chart-level ServiceAccount with annotations. GPU execution then still needs
+qualification on real hardware (production brief).
+
+**4. `sslmode=require`, not `verify-full`.** All three managed databases
+enforce TLS, but the chart cannot mount a CA bundle (Azure DigiCert/Microsoft
+roots, the RDS global bundle, the Cloud SQL instance CA), so the server's
+identity is not verified. Traffic never leaves the private network, which
+limits the risk. Fix: a `postgres.caSecret` value, mounted in each pod, with
+`sslrootcert=` added to `DATABASE_URL`.
+
+**5. The database user is the managed server's admin user.** Migrations
+create per-service NOLOGIN roles and so need CREATEROLE, which the admin
+login has: `azure_pg_admin`, `rds_superuser` or `cloudsqlsuperuser`. The
+services then run as that same login. Fix: a bootstrap step creates a
+migration login and a lower-privileged runtime login.
+
+**6. Not applied; GCS interop not exercised.** Validation is offline only:
+`make tf-validate` runs fmt, `init -backend=false`, validate, and
+`terraform test` with **mocked** providers. `make tf-lint` runs tflint,
+checkov and trivy. No cloud API has accepted these plans, and no Nexus
+workload has run on AKS, EKS or GKE. In particular, large multipart uploads
+and the GC sweep have not been run against GCS interop. Acceptance: one
+apply per cloud in a scratch account, then the fan-out/fan-in example with a
+>64 MiB artifact (multipart), the artifact GC sweep, and a PITR restore of
+the managed database, with results recorded in docs/OPERATIONS.md.
+
+### F116. The SDK derived a different idempotency key from the control plane — FIXED
+
+**Severity:** medium. Every Python worker process logged a key mismatch, and
+any SDK code that derived a key itself got a different one from the platform.
+
+`domain.IdempotencyKey` joins run id, node id, map index and task version with
+`\x1f`. `nexus.context.derive_idempotency_key` joined them with `\x00`. The
+docstrings of both functions describe the same formula, so nobody noticed.
+Consequences:
+
+- `nexus.worker.build_context` compares the key it is sent with the one it
+  derives, so for every real assignment it printed "idempotency key from
+  control plane differs from locally derived key". A warning that fires every
+  time hides the one time it matters.
+- A test or tool that called `derive_idempotency_key` to predict a task's key,
+  for example to pre-seed an effect journal, predicted the wrong one.
+- The comparison also used the child's own node id for an expansion child.
+  The dag-engine derives a child's key from the TEMPLATE id plus `map_index`
+  (`buildAttempts`), so the comparison would have mismatched for children even
+  with the right separator.
+
+Found by the local runner's parity work (ADR-0022), which derives keys
+outright and had to match the Go code byte for byte.
+
+**Fix:** the SDK joins with `\x1f`, and `build_context` strips a trailing
+`[<map_index>]` before deriving. Golden digests for a plain node and an
+expansion child are asserted in both languages:
+`internal/domain/idemkey_golden_test.go` and
+`sdk/python/tests/test_local_runner.py::test_idempotency_key_matches_the_control_plane`.
+Keys the control plane issues are unchanged. Only the SDK's derivation moved,
+and it was never authoritative.
+
+### F117. nexusctl dropped the gateway's validation problems — FIXED
+
+**Severity:** low. The error was correct but useless.
+
+For an invalid spec, the gateway answers 422 with
+`{"message": "spec failed validation", "problems": [...]}`. The CLI's error
+parser read only `message` and `details`, so `nexusctl workflow submit` printed
+`HTTP 422: spec failed validation` and threw away the list that says what was
+wrong and where. The gateway reports every problem in one response precisely so
+that authors do not fix a spec one round trip at a time.
+
+**Fix:** `problems` is carried as the error's details. For a YAML or JSON file,
+`nexusctl` places each problem at `file:line:col` in the author's file. For a
+`.py` spec, it places it at the Python line of the `@task` or of the
+workflow-body call, using the SDK's source map. The gateway also returns
+additive `line`/`column` fields on each problem, computed against the submitted
+body (`internal/specpos`). The Python client does the same for `submit_spec`
+(`NexusAPIError.problems[*].location`). Tests:
+`cli/internal/cmd/local_test.go` (`TestSubmitMapsServerProblemsToYAMLLines`,
+`TestPythonSpecProblemsPointAtPythonLines`), `services/api-gateway/spec/lines_test.go`,
+`sdk/python/tests/test_client.py::test_rejected_python_spec_points_at_python_lines`.
+
+### F118. `POST /specs?dry_run=true` registered the spec — FIXED
+
+**Severity:** HIGH for anyone following the documentation. `nexusctl workflow
+submit --dry-run` ("validate only; do not register. Use this in CI") and the
+SDK's `validate_spec` both send `?dry_run=true`, but the gateway's `submitSpec`
+never read the parameter: it compiled, validated and then called `PutSpec`
+exactly as for a real submit. Every CI validation of a changed spec therefore
+registered a new version, and the CLI printed "Dry run: nothing was registered."
+over a version that had just been created.
+
+Found while building `workflow submit --watch --dry-run`, which would have
+turned every editor save into a registered version.
+
+**Fix.** `submitSpec` honours `dry_run=true` after every check a real submit
+runs (compile, JSON Schema, DAG semantics, namespace match) and before `PutSpec`.
+It answers 200 with `{valid, dry_run, name, namespace, spec_hash, task_count}`
+and no `version`, since none was created. An invalid spec still gets the 422
+with its `problems` list. `TestSubmitSpecDryRunValidatesWithoutStoring` asserts
+the owner's store is never reached, that the reported hash is the one a real
+submit then stores, and that invalid and namespace-mismatched specs still fail.
+
+The CLI also surfaced only "spec failed validation" for a 422, because it read
+`details` and the validator sends `problems`. It now prints one line per problem
+(`/tasks/0/resources: cpu required`), capped at 20.
+
+### F119. Backfill pause, resume and cancel have no from-state guard — OPEN
+
+**Severity:** MEDIUM. `store.WFMSetBackfillState` updates `state` by id and
+namespace with no condition on the current state, and `PauseBackfill`,
+`ResumeBackfill` and `CancelBackfill` call it directly. So `resume` on a
+COMPLETED, CANCELLED or FAILED backfill sets it back to RUNNING, clears
+`ended_at`, and the driver starts generating runs again: a cancel is not final,
+although the API and console describe it as permanent. `pause` on a finished
+backfill likewise un-finishes it.
+
+**Mitigation in this change (client side only).** `nexusctl backfill
+pause|resume|cancel` and the SDK's `pause_backfill`/`resume_backfill`/
+`cancel_backfill` read the backfill first and refuse a transition that is not
+RUNNING<->PAUSED or {RUNNING,PAUSED}->CANCELLED (exit code 5 / `Conflict`),
+without sending the action. This is read-then-act and so racy, and the console
+and direct API callers are not covered.
+
+**Proposed fix.** Add `AND state = ANY($allowed)` to the UPDATE for operator
+actions (pause: RUNNING; resume: PAUSED; cancel: RUNNING or PAUSED), return a
+distinct `ErrBackfillStateConflict` when no row matches but the backfill exists,
+and map it to 409 `backfill_state_conflict` in `failBackfill`, as `lifecycle`
+already does for runs. The driver's own completion path keeps its unconditional
+transition.
+
+### F120. Attempts never carried dispatched_at on the wire, so queue wait was unmeasurable in the console — FIXED
+
+**Severity:** low (observability). Found while building the run's execution
+timeline (`feat/console-timeline-and-e2e`).
+
+`task_attempts.dispatched_at` has existed since migration 0001 and the scheduler
+sets it on every claim (`internal/store/scheduler_claim.go`), and the console's
+`Attempt` type declared it, but `GatewayListRunAttempts` / `GatewayGetAttempt`
+never selected it and `attemptPayload` never sent it. So the attempt card's
+"queue wait" and "dispatch→start" rows always read "—", and a timeline could not
+separate time spent waiting for the scheduler from time a placed attempt spent
+waiting for its worker to start it. Those are different incidents with
+different owners (capacity versus a slow executor or image pull).
+
+**Fix.** Additive: `AttemptRow.DispatchedAt`, selected by both attempt reads, and
+`"dispatched_at"` in `attemptPayload` (`services/api-gateway/rest/wire.go`),
+null until the attempt is placed. No migration, no change to existing fields.
+Clients that ignore it are unaffected; the console treats its absence (an older
+gateway) as "not reported" and draws queued straight to started, flagged as
+inferred, rather than inventing a split.
+
+### F121. `make seed` failed on a fresh database since tenant ownership (0014) — FIXED
+
+**Severity:** medium for onboarding and CI (the documented first step after
+`make up` did not work on a new stack); no production impact.
+
+Migration 0014 made every `api_keys` row name a namespace owned by a registered
+tenant (`assign_namespace_tenant`). A fresh `make up` database has no tenants,
+so `make seed` stopped at its first INSERT with `Namespace must belong to a
+registered tenant`, leaving no admin key and no worker key, and the agents in a
+restart loop. It went unnoticed because long-lived dev databases already had a
+tenant row backfilled by 0013. The Helm bootstrap job and `deploy/pitr-seed.sh`
+already insert the tenant first; `make seed` did not.
+
+**Fix.** `make seed` inserts `tenants (namespace, name)` for `$(NAMESPACE)`
+first, `ON CONFLICT (namespace) DO NOTHING`, the same statement those two
+already run. Covered end to end by `make e2e`, which seeds a brand-new stack
+on every run.
+
+### F122. Workers' measured ExecutionMetrics were sent on every result and dropped — FIXED
+
+**Severity:** medium (data loss, no correctness impact). Found while building
+the usage ledger (ADR-0021).
+
+`ReportResultRequest.metrics` (`ExecutionMetrics`: CPU seconds, peak memory,
+wall ms, OOM kill, exit code) has been populated by the agent
+(`agent/internal/worker/runner.go`) since the worker protocol existed, and
+`task_attempts.metrics` has existed since migration 0001. Nothing connected
+them: `SchedulerStore.ApplyResult` wrote state, output, error and ended_at and
+never the metrics, so every measurement was discarded at the control plane.
+The console's attempt view already had a type for the field
+(`ui/src/api/types.ts`, `ExecutionMetrics`) that could only ever be empty.
+Measured usage is exactly what cost reporting needs next to reserved usage.
+
+**Fix:** `ApplyResult` stores the metrics on the attempt in the terminal
+UPDATE, snake_case as the console reads them (`metrics = COALESCE($6,
+metrics)`, NULL when the report carried none), and the usage ledger copies
+them into `measured_*` columns. LOST and cancelled attempts have no report and
+record NULL, not zero. Test:
+`services/scheduler/quota_integration_test.go`
+`TestUsageLedgerSuccessIsMeteredOnceWithMetrics`.
+
+### F123. Namespace quotas were specified in the claim and never implemented — FIXED
+
+**Severity:** medium (a documented control that did not exist).
+
+ARCHITECTURE.md §3.2 said the resource manager "enforces namespace quotas (max
+concurrent CPU / memory / GPU per namespace) as an admission check before
+dispatch", and §5.3 showed step 3 `IF quota_would_exceed($namespace, ...)
+THEN record_reason('quota_exceeded')`. No code read a quota and there was
+nowhere to configure one: a namespace could hold any amount of in-flight work
+its workers could fit, and create runs at any rate the gateway's per-IP and
+per-credential rate limits allowed. MULTITENANCY.md already listed "tenant
+quota enforcement" as a prerequisite for public self-service registration.
+
+A naive implementation (read the namespace's in-flight sum, compare, dispatch)
+would have been advisory only: two claims of one namespace on two workers
+share no lock, both pass the check, and together exceed it. With the lock
+removed, the concurrency test below exceeds a 5-attempt quota in thousands of
+samples per run, peaking at 7.
+
+**Fix (ADR-0021, migration 0027):** quotas in the namespace's platform policy;
+concurrent limits checked in both claim paths under a per-tenant transaction
+advisory lock (blocking as the first statement on the pull path, try-only on
+the push path, so no wait cycle is possible); blocked attempts keep
+`quota_exceeded: <dimension> (used X of Y)`; run-level limits enforced in
+`WFMCreateRun` under a second lock class and answered with 429. §3.2 and
+§5.3 now describe what is implemented. Tests:
+`TestQuotaHoldsUnderConcurrentReplicas` (4 push + 4 pull replicas, never over
+quota; mutation-checked), `TestIntegrationRunQuotaActiveRunsUnderConcurrency`.
+
+### F124. nexusctl and the SDK never computed the spec content address the server stores — FIXED
+
+**Severity:** medium (misleading, no data impact). Reported independently by
+the Helm/quick-start work (docs/COMPATIBILITY.md, follow-up 8) and the CLI
+templates work, while running every example through `nexusctl`.
+
+The gateway rewrites enum values to their short spelling
+(`IDEMPOTENCY_MODE_REQUIRED` → `required`, `BACKOFF_STRATEGY_LINEAR` →
+`linear`, `TRIGGER_RULE_ALL_DONE` → `all_done`, the `retry_on`/`no_retry_on`
+error classes, and `validation_error` → `validation`) before it canonicalizes
+and hashes a submitted spec (`services/api-gateway/spec/normalize.go`, F52).
+`cli/internal/spec` and `sdk/python/nexus/canonical.py` hashed the document as
+written, and the SDK always writes the proto spelling. So for every spec with
+an enum in it -- every example -- `nexusctl workflow submit` printed its
+"different content address ... canonicalization bug" warning, and
+`workflow compile --hash-only` / `CompiledWorkflow.hash` never matched the
+`spec_hash` the server returned. The server was self-consistent: versions did
+not split and resubmission stayed idempotent.
+
+**Fix.** One set of alias tables, used by every hasher:
+
+- `internal/specenum` holds the tables and `Normalize`; the gateway's
+  `NormalizeEnums` now calls it, and `cli/internal/spec.Parse` normalizes
+  before it canonicalizes, so nexusctl's hash is the server's and the bytes it
+  submits are exactly the stored form (the gateway accepts both spellings).
+- `nexus.canonical.normalize_enums` mirrors the tables in Python, and
+  `spec_hash` hashes the normalized copy. The compiled spec itself keeps the
+  proto spelling (the local runner and replay read it); only the address
+  changes.
+
+**How it is held.** `sdk/python/tests/parity/spec_hash_golden.json` pins, for
+every `examples/*/dag.py` workflow as the SDK compiles it plus hand-written
+documents in both spellings, the hash computed by the gateway's
+`spec.Compile`. `cli/internal/spec/hash_parity_test.go` asserts the gateway and
+nexusctl produce each golden hash (and that both spellings are one version),
+and that every YAML/JSON example hashes identically through nexusctl and the
+gateway, including the bytes nexusctl actually submits.
+`sdk/python/tests/test_spec_hash_golden.py` asserts the SDK's `spec_hash`
+matches, and that each example still compiles to the golden spec, so the file
+cannot go stale. Before the fix all 15 examples failed the Go test.
+Regenerate after changing an example:
+`python3 sdk/python/tests/parity/make_spec_hash_golden.py`, then
+`go test ./cli/internal/spec -run TestSpecHashGolden -update-spec-hash-golden`.
+
+### F125. The worker agent does not enforce a declared output `max_bytes` — OPEN
+
+**Severity:** medium (a declared bound that only one authoring path enforces).
+
+`ValueSpec.max_bytes` (SDK `max_bytes=`, with units such as `"4Ki"`) is an
+author's promise about an output's encoded size. The gateway relies on it at
+submit time: `internal/dag/validate.go` rejects a map whose fan-in
+(`max_fanout x max_bytes`) could exceed the platform's fan-in limit. But only
+the Python SDK's task entrypoint (`python -m nexus.entrypoint`,
+`sdk/python/nexus/entrypoint.py`) checks an output against it before writing.
+The Go worker agent (`agent/internal/worker`, `agent/internal/resultstore`)
+never reads `GetMaxBytes()`: a task run by any other executor path -- a
+container that writes its own output files, a non-Python handler, or a Python
+handler not started through the SDK entrypoint -- can return an output larger
+than it declared. The submit-time fan-in proof then no longer holds, and the
+oversized fan-in fails later, at the downstream resolve, instead of on the
+attempt that broke its promise.
+
+**Proposed fix.** Enforce it in the agent, where every output passes before it
+is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
+(inline JSON, or the uploaded blob's size) exceeds it, fail the attempt with
+`ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
+report the output. Test it in `agent/internal/worker` for both inline and blob
+outputs, and in the NATS/e2e path with a non-SDK executor.

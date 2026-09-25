@@ -246,6 +246,9 @@ type fakeWFM struct {
 	// lifecycles records every cancel/pause/resume that reached the owner, as
 	// "op ns/id", so a test can prove a refused request never got there.
 	lifecycles []string
+	// specPuts counts specs that reached the owner's store, so a dry run can be
+	// proven to have stored nothing.
+	specPuts int
 }
 
 type retryCall struct {
@@ -264,6 +267,9 @@ func (f *fakeWFM) DeleteSpec(_ context.Context, ns, name string) (int, error) {
 }
 
 func (f *fakeWFM) PutSpec(ctx context.Context, namespace, name, hash string, canonicalJSON []byte, createdBy string) (store.SpecRow, bool, error) {
+	f.mu.Lock()
+	f.specPuts++
+	f.mu.Unlock()
 	return store.SpecRow{
 		ID: "spec-1", Namespace: namespace, Name: name, Version: 1, SpecHash: hash,
 		CreatedBy: createdBy, CreatedAt: time.Now(),
@@ -528,6 +534,50 @@ func TestSubmitSpecAcceptsJSONAndYAML(t *testing.T) {
 	_ = json.Unmarshal(yrec.Body.Bytes(), &b)
 	if a["spec_hash"] != b["spec_hash"] {
 		t.Errorf("JSON hash %v != YAML hash %v for the same workflow", a["spec_hash"], b["spec_hash"])
+	}
+}
+
+// TestSubmitSpecDryRunValidatesWithoutStoring pins CONTRACT-FINDINGS F118: a dry
+// run answers with the content address a real submit would register, stores
+// nothing, and still rejects an invalid spec exactly as a real submit does.
+func TestSubmitSpecDryRunValidatesWithoutStoring(t *testing.T) {
+	h, _, wfm := newTestAPI(t)
+	good := `{"api_version":"nexus.dev/v1","namespace":"team-ml","name":"train",
+	  "tasks":[{"id":"a","task_ref":"etl.extract:v1"}]}`
+
+	rec := post(t, h, "/v1/namespaces/team-ml/specs?dry_run=true", adminKey, "", good)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dry run: status %d, want 200. body=%s", rec.Code, rec.Body)
+	}
+	var dry map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &dry)
+	if dry["valid"] != true || dry["dry_run"] != true || dry["spec_hash"] == "" {
+		t.Errorf("dry run answer is incomplete: %s", rec.Body)
+	}
+	if _, has := dry["version"]; has {
+		t.Errorf("a dry run must not report a version it did not create: %s", rec.Body)
+	}
+	if wfm.specPuts != 0 {
+		t.Fatalf("a dry run stored %d spec(s)", wfm.specPuts)
+	}
+
+	// The hash is the one a real submit then registers.
+	reg := post(t, h, "/v1/namespaces/team-ml/specs", adminKey, "", good)
+	var stored map[string]any
+	_ = json.Unmarshal(reg.Body.Bytes(), &stored)
+	if stored["spec_hash"] != dry["spec_hash"] || wfm.specPuts != 1 {
+		t.Errorf("dry-run hash %v, stored hash %v, puts %d", dry["spec_hash"], stored["spec_hash"], wfm.specPuts)
+	}
+
+	bad := post(t, h, "/v1/namespaces/team-ml/specs?dry_run=true", adminKey, "",
+		`{"api_version":"nexus.dev/v1","namespace":"team-ml","name":"train","tasks":[]}`)
+	if bad.Code != http.StatusUnprocessableEntity {
+		t.Errorf("an invalid spec must fail a dry run with 422, got %d", bad.Code)
+	}
+	mismatch := post(t, h, "/v1/namespaces/team-ml/specs?dry_run=true", adminKey, "",
+		strings.Replace(good, `"namespace":"team-ml"`, `"namespace":"other"`, 1))
+	if mismatch.Code != http.StatusUnprocessableEntity {
+		t.Errorf("a namespace mismatch must fail a dry run too, got %d", mismatch.Code)
 	}
 }
 

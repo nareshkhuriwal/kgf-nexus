@@ -117,6 +117,16 @@ VALUES ($1,$2,ARRAY[$3],'{"cpu_millis":1000000000000,"memory_bytes":100000000000
 RETURNING id`, w.ns, fmt.Sprintf("bench-%d", i), w.queue).Scan(&wid), "worker")
 		w.workers = append(w.workers, wid)
 	}
+	// NEXUS_BENCH_QUOTA=true gives the namespace concurrent quotas far above
+	// anything the cell reaches (ADR-0021), so every claim takes the quota
+	// path -- lock, usage read, check -- without ever being refused. That is
+	// the cost a quota-bound namespace pays; without it the cell measures the
+	// unlimited namespace, which pays only the lookup.
+	if envStr("NEXUS_BENCH_QUOTA", "false") == "true" {
+		_, err = pool.Exec(ctx, `INSERT INTO platform_config (namespace, revision, config)
+VALUES ($1, 1, '{"quotas":{"max_inflight_attempts":1000000,"max_cpu_millis":1000000000000}}')`, w.ns)
+		must(err, "quotas")
+	}
 	_, err = pool.Exec(ctx, `ANALYZE task_attempts; ANALYZE task_nodes; ANALYZE workflow_runs; ANALYZE workers`)
 	must(err, "analyze")
 	return w
@@ -127,6 +137,7 @@ func (w *world) cleanup(ctx context.Context, pool *pgxpool.Pool) {
 	_, _ = pool.Exec(ctx, `DELETE FROM workflow_runs WHERE namespace=$1`, w.ns)
 	_, _ = pool.Exec(ctx, `DELETE FROM workflow_specs WHERE namespace=$1`, w.ns)
 	_, _ = pool.Exec(ctx, `DELETE FROM workers WHERE namespace=$1`, w.ns)
+	_, _ = pool.Exec(ctx, `DELETE FROM platform_config WHERE namespace=$1`, w.ns)
 	_, _ = pool.Exec(ctx, `DELETE FROM tenants WHERE namespace=$1`, w.ns)
 }
 
@@ -255,6 +266,7 @@ func run(ctx context.Context, t *testing.T, dsn, mode string, w *world, replicas
 //	NEXUS_BENCH_CLAIMS    3000   dispatches measured per cell (capped at backlog/2
 //	                             so the backlog stays roughly the size named)
 //	NEXUS_BENCH_WINDOW    true   false measures the pre-0023 exhaustive pull scan
+//	NEXUS_BENCH_QUOTA     false  true gives the namespace (unreached) quotas (ADR-0021)
 //	NEXUS_BENCH_OUT       path to also write the markdown table to
 func TestDispatchCeiling(t *testing.T) {
 	dsn := os.Getenv("NEXUS_BENCH_DSN")

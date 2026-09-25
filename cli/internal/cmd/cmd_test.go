@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -18,6 +19,7 @@ import (
 type harness struct {
 	t        *testing.T
 	server   *httptest.Server
+	mu       sync.Mutex // guards requests against a command running in a goroutine
 	requests []recorded
 	handler  func(w http.ResponseWriter, r *http.Request) bool
 	env      map[string]string
@@ -36,10 +38,12 @@ func newHarness(t *testing.T) *harness {
 	h := &harness{t: t, env: map[string]string{"HOME": t.TempDir()}}
 	h.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		h.mu.Lock()
 		h.requests = append(h.requests, recorded{
 			Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery,
 			Headers: r.Header.Clone(), Body: body,
 		})
+		h.mu.Unlock()
 		if h.handler != nil && h.handler(w, r) {
 			return
 		}

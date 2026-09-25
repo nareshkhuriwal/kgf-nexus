@@ -27,6 +27,8 @@ full system design, data model, state machines, and phased plan.
 | [0018](0018-postgres-dispatch-ceiling.md) | Postgres stays the dispatch queue; measured ceiling, trigger and migration path (§12 Q6) | A known, backlog-dependent ceiling, for keeping atomic dispatch |
 | [0019](0019-metrics-exposition.md) | Metrics exposition via client_golang (pinned) behind the in-house instrument API | A new dependency tree, for spec-compliant exposition and runtime/process collectors |
 | [0020](0020-durable-task-logs.md) | Task logs: agents write chunks to the result store, index them through a lease-fenced RPC; gateway-owned index | Seconds of live-tail latency and gateway read credentials, for no log bytes through the control plane |
+| [0021](0021-namespace-quotas-and-usage-metering.md) | Namespace quotas enforced in the claim under a per-tenant advisory lock; append-only, scheduler-owned usage ledger written with each terminal transition | Serialized dispatch for quota-bound namespaces and one lookup per claim, for exact quotas and complete metering |
+| [0022](0022-local-runner-and-replay.md) | Local runner (`nexus.local`, `nexusctl run --local`) and attempt replay reuse the DAG semantics, held to Go by shared fixtures | A second implementation of the decision logic kept aligned by tests, for a seconds-long local loop |
 
 ADRs 0013–0018 close the six open questions of ARCHITECTURE.md §12 and are
 **Proposed — pending owner sign-off**.

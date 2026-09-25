@@ -459,9 +459,10 @@ func TestProgressWithoutTokenIsHeartbeatOnly(t *testing.T) {
 }
 
 // TestProgressNeverBlocksTheResult is why progress lives in a side table: the
-// terminal transition locks the attempt row with SKIP LOCKED and treats "no
-// row" as "already handled". If progress held that row, a result arriving
-// alongside a burst of progress reports could be skipped and lost.
+// terminal transition waits for the attempt row only up to a bounded lock
+// timeout (F104). If progress held that row, a result arriving alongside a
+// burst of progress reports would be delayed and could be bounced back to the
+// agent to resend. Before F104 it was skipped and lost outright.
 func TestProgressNeverBlocksTheResult(t *testing.T) {
 	pool := newTestPool(t)
 	f := newFixture(t, pool)

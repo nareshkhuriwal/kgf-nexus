@@ -138,6 +138,9 @@ func run() error {
 		WithSchedules(wfmClient).
 		WithBackfills(wfmClient).
 		WithIdentity(rest.NewStoreIdentityAdmin(db)).
+		// Reported with each replay assignment (ADR-0022), so a replayed attempt
+		// inlines results exactly as the platform would (ADR-0016).
+		WithInlineThreshold(cfg.InlineThresholdBytes).
 		// Nothing else in the deployment aggregates per-service health: each
 		// service serves its own /healthz and /readyz, but the gateway is the only
 		// ingress, so a console has no route to them.

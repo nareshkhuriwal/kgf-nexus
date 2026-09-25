@@ -202,6 +202,11 @@ func (w *wfmGRPC) createRun(ctx context.Context, req rest.CreateRunRequest) (sto
 func reattachSentinel(err error) error {
 	switch status.Code(err) {
 	case codes.ResourceExhausted:
+		// A namespace run quota (ADR-0021) travels as ResourceExhausted with an
+		// ErrorInfo detail; without one it is the per-workflow cap.
+		if q := store.RunQuotaFromStatus(status.Convert(err)); q != nil {
+			return q
+		}
 		return fmt.Errorf("%w: %s", store.ErrMaxActiveRuns, status.Convert(err).Message())
 	case codes.NotFound:
 		return fmt.Errorf("%w: %s", store.ErrNotFound, status.Convert(err).Message())

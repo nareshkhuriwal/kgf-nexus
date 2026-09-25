@@ -1,0 +1,40 @@
+# Browser end-to-end stack: an ISOLATED copy of deploy/docker-compose.yml.
+#
+#   docker compose -p nexus-e2e \
+#     -f deploy/docker-compose.yml -f deploy/e2e/docker-compose.e2e.yml up -d --build
+#
+# Driven by `make e2e` through deploy/e2e/e2e-stack.sh (see "Browser end-to-end tests" in ui/README.md).
+# Layered on the development compose file so the suite exercises the same
+# images, wiring and migrations a developer runs. The only difference is host
+# ports:
+#
+#   * The ports the suite, or an operator debugging a failed run, needs are
+#     published through the base file's NEXUS_*_PORT variables, which
+#     e2e-stack.sh points into one reserved range (E2E_PORT_BASE, nine ports).
+#   * Every other published port (each service's /metrics listener and the
+#     agents' metrics listeners) is dropped with `!reset`, so an e2e stack can
+#     run beside a `make up` stack, or on a shared CI runner, without a
+#     collision.
+#
+# No mocked services and no test-only code paths. Requires Docker Compose
+# 2.24 or later for the `!reset` tag.
+
+services:
+  workflow-manager:
+    ports: !reset []
+  dag-engine:
+    ports: !reset []
+  scheduler:
+    ports: !reset []
+  scheduler-gpu:
+    ports: !reset []
+  resource-manager:
+    ports: !reset []
+  event-service:
+    ports: !reset []
+  agent-cpu:
+    ports: !reset []
+  agent-gpu:
+    ports: !reset []
+  agent-gpu-a10:
+    ports: !reset []

@@ -50,6 +50,10 @@ var routePermissions = map[string][]string{
 	"POST /v1/namespaces/{ns}/cache/invalidations":        {"workflows.cache.invalidate"},
 	"GET /v1/namespaces/{ns}/attention":                   {"overview.view", "runs.view", "workers.view"},
 	"GET /v1/health/fleet":                                {"workers.view"},
+	"GET /v1/namespaces/{ns}/quotas":                      {"quotas.view"},
+	"PUT /v1/namespaces/{ns}/quotas":                      {"quotas.manage"},
+	"GET /v1/namespaces/{ns}/usage":                       {"usage.view"},
+	"GET /v1/platform/usage":                              {},
 	"GET /v1/namespaces/{ns}/platform/config":             {"infrastructure.view"},
 	"PUT /v1/namespaces/{ns}/platform/config":             {"infrastructure.configure"},
 	"GET /v1/namespaces/{ns}/platform/plan":               {"infrastructure.view"},
@@ -70,4 +74,9 @@ var routePermissions = map[string][]string{
 	"POST /v1/namespaces/{ns}/tokens":                     {"tokens.manage"},
 	"POST /v1/namespaces/{ns}/tokens/{id}/revoke":         {"tokens.manage"},
 	"GET /v1/namespaces/{ns}/audit":                       {"audit.view"},
+
+	// Attempt replay input (ADR-0022). It carries upstream RESULTS (inline
+	// input values), so it needs the result-view grant as well as run and
+	// task visibility. Its own block keeps the table above aligned as is.
+	assignmentRoute: {"runs.view", "tasks.view", "tasks.results.view"},
 }

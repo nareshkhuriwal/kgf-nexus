@@ -62,6 +62,18 @@ type ClaimConfig struct {
 	// tasks) would otherwise page through the whole backlog 64 rows at a
 	// time, which is slower than scanning it once.
 	ClaimWindowPages int
+	// AttemptLockTimeout bounds how long a terminal transition driven by a
+	// report (ApplyResult, run cancel) waits for another transaction holding
+	// the attempt row -- usually the worker's own ReportStarted. Past it the
+	// report fails with ErrAttemptBusy, which the RPC layer maps to a
+	// retryable status so the agent resends from its WAL. Zero means
+	// DefaultAttemptLockTimeout. See CONTRACT-FINDINGS F104.
+	AttemptLockTimeout time.Duration
+	// Quotas enforces namespace concurrent quotas in the claim (ADR-0021). On
+	// by default: a namespace without quotas pays one indexed lookup and takes
+	// no lock. Off (NEXUS_QUOTAS=false) is the rollback step before reverting
+	// migration 0027: the claim then reads neither the view nor the usage.
+	Quotas bool
 }
 
 // DefaultClaimConfig returns the ADR-0010 recommended lease settings.
@@ -83,6 +95,7 @@ func DefaultClaimConfig(queue string) ClaimConfig {
 		FairShareMaxNamespaces: 4,
 		ClaimWindow:            64,
 		ClaimWindowPages:       4,
+		Quotas:                 true,
 	}
 }
 
@@ -99,6 +112,15 @@ type SchedulerStore struct {
 	// serves claims, by EnableWindowedClaim -- never flipped afterwards, so it
 	// needs no synchronisation.
 	windowed bool
+	// observer receives quota and metering events after commit, for metrics.
+	// Set once at startup by SetObserver; nil records nothing.
+	observer QuotaObserver
+	// quotasMissing and meteringMissing are set by DetectQuotaSchema when
+	// migration 0027 is not applied yet, so a scheduler started ahead of the
+	// migration keeps dispatching instead of failing every claim and every
+	// terminal transition. Set once at startup, never flipped afterwards.
+	quotasMissing   bool
+	meteringMissing bool
 }
 
 // NewSchedulerStore constructs the store. instanceID should be stable for the
@@ -209,6 +231,7 @@ func (s *SchedulerStore) Claim(ctx context.Context, now time.Time) (ClaimReport,
 	if err := tx.Commit(ctx); err != nil {
 		return ClaimReport{}, fmt.Errorf("commit claim tx: %w", err)
 	}
+	s.notifyQuotaBlocked(report.QuotaBlocked)
 	return report, nil
 }
 
@@ -249,6 +272,14 @@ func (s *SchedulerStore) claimInTx(ctx context.Context, tx pgx.Tx, now time.Time
 	// scramble priority order inside a namespace.
 	salt := fairShareSalt(now)
 
+	// Every attempt a namespace quota held back this cycle, by dimension, for
+	// the metrics the caller emits after commit.
+	var quotaBlocked []string
+	exclude := func(tenant uuid.UUID) bool {
+		excluded = append(excluded, tenant)
+		return len(excluded) >= maxNS
+	}
+
 	for i := 0; i < budget; i++ {
 		cand, err := s.selectCandidate(ctx, tx, now, skipped, excluded, salt)
 		if errors.Is(err, ErrNoCandidate) {
@@ -263,7 +294,22 @@ func (s *SchedulerStore) claimInTx(ctx context.Context, tx pgx.Tx, now time.Time
 			return ClaimReport{}, err
 		}
 		if rep.Outcome == ClaimDispatched || rep.Outcome == ClaimRaceLost {
+			rep.QuotaBlocked = quotaBlocked
 			return rep, nil
+		}
+		if rep.quotaContended {
+			// Another replica is dispatching this namespace under its quota
+			// lock right now (ADR-0021). Not blocked -- nothing is recorded on
+			// the attempt -- only busy, so the namespace is set aside for the
+			// rest of this cycle and the next cycle tries it again.
+			skipped = append(skipped, cand.ID)
+			if exclude(cand.TenantID) {
+				break
+			}
+			continue
+		}
+		if rep.QuotaDimension != "" {
+			quotaBlocked = append(quotaBlocked, rep.QuotaDimension)
 		}
 		// Blocked. Record the reason for the FIRST blocked attempt (the
 		// highest effective priority one, i.e. the task an operator most wants
@@ -274,18 +320,21 @@ func (s *SchedulerStore) claimInTx(ctx context.Context, tx pgx.Tx, now time.Time
 		}
 		skipped = append(skipped, cand.ID)
 		blockedIn[cand.TenantID]++
-		if blockedIn[cand.TenantID] >= lookAhead {
-			excluded = append(excluded, cand.TenantID)
-			if len(excluded) >= maxNS {
+		// A namespace with no headroom left on a quota dimension cannot place
+		// ANY attempt that uses it, so looking further into its backlog would
+		// only spend the look-ahead on the same answer (ADR-0021).
+		if blockedIn[cand.TenantID] >= lookAhead || rep.quotaExhausted {
+			if exclude(cand.TenantID) {
 				break
 			}
 		}
 	}
 
 	if firstBlocked != nil {
+		firstBlocked.QuotaBlocked = quotaBlocked
 		return *firstBlocked, nil
 	}
-	return ClaimReport{Outcome: ClaimNothingPending}, nil
+	return ClaimReport{Outcome: ClaimNothingPending, QuotaBlocked: quotaBlocked}, nil
 }
 
 // selectCandidate is §5.3 step 1: claim the highest effective-priority PENDING
@@ -437,6 +486,32 @@ func (s *SchedulerStore) placeCandidate(
 				return ClaimReport{}, err
 			}
 			return ClaimReport{Outcome: ClaimBlocked, Attempt: cand, Reason: reason}, nil
+		}
+	}
+
+	// §5.3 step 3 as specified, after placement and the semaphore for the same
+	// reason the semaphore follows placement: the resource shortfall is the
+	// more actionable explanation. See scheduler_quota.go for why the lock is
+	// only TRIED here.
+	nq, locked, err := s.tryLockQuota(ctx, tx, cand.TenantID)
+	if err != nil {
+		return ClaimReport{}, err
+	}
+	if nq != nil {
+		if !locked {
+			return ClaimReport{Outcome: ClaimBlocked, Attempt: cand, quotaContended: true}, nil
+		}
+		v, err := s.quotaViolation(ctx, tx, nq, cand)
+		if err != nil {
+			return ClaimReport{}, err
+		}
+		if v != nil {
+			reason := v.Reason()
+			if err := s.markBlocked(ctx, tx, cand.ID, reason); err != nil {
+				return ClaimReport{}, err
+			}
+			return ClaimReport{Outcome: ClaimBlocked, Attempt: cand, Reason: reason,
+				QuotaDimension: v.Dimension, quotaExhausted: v.Exhausted}, nil
 		}
 	}
 

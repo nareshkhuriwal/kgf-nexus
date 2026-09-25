@@ -1864,6 +1864,15 @@ tr.version-current > td { background: var(--bg-hover); }
 /* ── Navbar ────────────────────────────────────────────────────────────── */
 /* Same two tokens as the rail, for the same reason: the band is raised surface
    plus a hairline, whichever theme is in effect. */
+/* The sticky bar covers the top --navbar-h of the viewport, so anything the
+   browser scrolls into view (a focused control, a fragment target, an element
+   an automation clicks) must stop BELOW it, not under it. Without this a
+   keyboard user tabbing upward focused controls the bar hid (WCAG 2.2 SC
+   2.4.11, Focus Not Obscured), and the e2e suite's clicks on a graph control
+   landed on the navbar instead. */
+html {
+  scroll-padding-top: calc(var(--navbar-h) + var(--space-4, 8px));
+}
 .chrome-navbar {
   position: sticky;
   top: 0;
@@ -4313,3 +4322,10 @@ a.icon-action { color:var(--fg); text-decoration:none; border:1px solid var(--bo
 .rbac-matrix fieldset { border: 1px solid var(--border, #dce1e8); border-radius: 8px; padding: 16px; }
 .rbac-matrix label { display:flex; gap:8px; align-items:center; padding:6px 0; }
 .rbac-matrix input[type=checkbox] { width:16px; height:16px; }
+
+/* ── Quotas & usage (ADR-0021) ───────────────────────────────────────────── */
+/* The daily usage chart: bars in the accent token, so it follows the theme
+   without a second palette; the exact figures sit in the table below it. */
+.usage-chart { display: block; max-height: 220px; }
+.usage-chart rect:hover { fill: var(--focus); }
+.quotas-page .infra-fields label .sub { font-size: var(--text-xs); }

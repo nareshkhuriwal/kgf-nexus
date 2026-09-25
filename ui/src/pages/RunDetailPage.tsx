@@ -37,6 +37,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog';
 import { PlacementPanel } from '../components/PlacementPanel';
 import { LogTail } from '../components/LogTail';
 import { EventTimeline } from '../components/EventTimeline';
+import { ExecutionTimeline, type TimelineMode } from '../components/ExecutionTimeline';
 
 /**
  * The node states a retry may name. The gateway enforces the same set; offering
@@ -89,6 +90,29 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
     return buildDagGraph({ nodes: grouped.nodes, edges: grouped.edges }, attemptsQuery.data ?? []);
   }, [runQuery.data, attemptsQuery.data, unfolded]);
 
+  // The same run with every map child drawn individually. The DAG folds large
+  // fan-outs, but the timeline lists every attempt, so a child selected there
+  // (or by a deep link) must still resolve to a node with its attempts and
+  // upstream -- otherwise the attempt panel would say "pick a node" while the
+  // URL names one.
+  const detailGraph = useMemo(
+    () => (runQuery.data ? buildDagGraph(runQuery.data, attemptsQuery.data ?? []) : null),
+    [runQuery.data, attemptsQuery.data],
+  );
+  const parentOf = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const n of runQuery.data?.nodes ?? []) if (n.parent_node_id) out[n.node_id] = n.parent_node_id;
+    return out;
+  }, [runQuery.data]);
+
+  const timelineMode: TimelineMode = params.get('timeline') === 'table' ? 'table' : 'chart';
+  const setTimelineMode = (mode: TimelineMode) => {
+    const next = new URLSearchParams(params);
+    if (mode === 'table') next.set('timeline', 'table');
+    else next.delete('timeline');
+    setParams(next, { replace: true });
+  };
+
   const selectNode = (nodeId: string) => {
     const next = new URLSearchParams(params);
     next.set('node', nodeId);
@@ -97,6 +121,13 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
   };
   const selectAttempt = (attemptId: string) => {
     const next = new URLSearchParams(params);
+    next.set('attempt', attemptId);
+    setParams(next, { replace: true });
+  };
+  /** Node and attempt in one URL write, so the two never disagree mid-render. */
+  const selectNodeAttempt = (nodeId: string, attemptId: string) => {
+    const next = new URLSearchParams(params);
+    next.set('node', nodeId);
     next.set('attempt', attemptId);
     setParams(next, { replace: true });
   };
@@ -115,7 +146,13 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graph, selectedNodeId]);
 
-  const selectedNode = selectedNodeId && graph ? graph.byId[selectedNodeId] : undefined;
+  const selectedNode =
+    selectedNodeId && graph ? (graph.byId[selectedNodeId] ?? detailGraph?.byId[selectedNodeId]) : undefined;
+  // A child folded into its template highlights the template in the graph.
+  const dagSelectedId =
+    selectedNodeId && graph && !graph.byId[selectedNodeId] && parentOf[selectedNodeId]
+      ? parentOf[selectedNodeId]
+      : selectedNodeId;
   const selectedAttempt =
     selectedNode?.attempts.find((a) => a.id === selectedAttemptId) ??
     selectedNode?.latestAttempt ??
@@ -267,7 +304,7 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
         {graph ? (
           <DagView
             graph={graph}
-            selectedNodeId={selectedNodeId}
+            selectedNodeId={dagSelectedId}
             onSelect={selectNode}
             // Names the exported file and keys the graph's one-shot
             // fit-to-view, so this page's polling cannot re-fit the view under
@@ -276,6 +313,24 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
             onToggleGroup={toggleGroup}
           />
         ) : null}
+      </div>
+
+      <div className="panel" data-testid="execution-timeline">
+        {attemptsQuery.data === undefined && attemptsQuery.isPending ? (
+          <Loading rows={4} label="Loading attempts" />
+        ) : (
+          <ExecutionTimeline
+            run={run}
+            attempts={attemptsQuery.data ?? []}
+            live={!terminal}
+            selectedNodeId={selectedNodeId}
+            selectedAttemptId={selectedAttemptId}
+            onSelectAttempt={selectNodeAttempt}
+            onSelectNode={selectNode}
+            mode={timelineMode}
+            onModeChange={setTimelineMode}
+          />
+        )}
       </div>
 
       {graph && (

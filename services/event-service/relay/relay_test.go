@@ -130,6 +130,25 @@ func TestTaskReadyAndRunStateMessages(t *testing.T) {
 	}
 }
 
+// TestUsageRecordedMessage: the metering export hook (ADR-0021) goes to the
+// namespace's usage subject, outside nexus.run.>, with the ledger payload intact.
+func TestUsageRecordedMessage(t *testing.T) {
+	r := testRelay(t)
+	msg, known, gone := r.buildMessage(outboxRow{
+		id: 9, topic: store.OutboxTopicUsageRecorded, namespace: ptr("acme"), routingKey: ptr("run-1"),
+		payload: []byte(`{"ledger_id":17,"attempt_id":"a","cpu_core_seconds":2.5}`),
+	})
+	if !known || gone || msg.Subject != bus.UsageSubject("acme") {
+		t.Fatalf("usage_recorded: msg=%v known=%v gone=%v", msg, known, gone)
+	}
+	var body map[string]any
+	_ = json.Unmarshal(msg.Data, &body)
+	if body["type"] != "nexus.usage.recorded" || body["ledger_id"].(float64) != 17 ||
+		body["cpu_core_seconds"].(float64) != 2.5 || body["outbox_id"].(float64) != 9 {
+		t.Errorf("usage_recorded body = %v", body)
+	}
+}
+
 // TestUnknownTopicIsDeferredNotDropped: during a rolling deploy an OLD relay may
 // meet a topic a NEW writer introduced. It must leave the row for a newer
 // replica, not discard it and not report it as published.

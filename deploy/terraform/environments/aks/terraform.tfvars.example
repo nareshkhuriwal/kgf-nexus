@@ -1,0 +1,64 @@
+# Copy to terraform.tfvars (gitignored) and fill in. Values below are examples.
+
+subscription_id = "00000000-0000-0000-0000-000000000000"
+name            = "kgf-nexus-prod-cin"
+location        = "centralindia"
+
+tags = {
+  project     = "kgf-nexus"
+  environment = "prod"
+  owner       = "platform@khuriwalgroup.com"
+  cost-centre = "nexus"
+}
+
+# Entra ID group(s) whose members get cluster admin.
+admin_group_object_ids = ["11111111-1111-1111-1111-111111111111"]
+
+# Public API server restricted to these CIDRs (office egress, CI agents).
+# For a private cluster set private_cluster_enabled = true and run Terraform
+# from inside the VNet instead.
+api_server_authorized_ip_ranges = ["203.0.113.0/24"]
+key_vault_allowed_ip_ranges     = ["203.0.113.0/24"]
+
+kubernetes_version = "1.35"
+sku_tier           = "Standard"
+
+cpu_pool = {
+  vm_size   = "Standard_D4as_v5"
+  min_count = 2
+  max_count = 6
+}
+
+gpu_pool = {
+  enabled   = false
+  vm_size   = "Standard_NC4as_T4_v3"
+  min_count = 0
+  max_count = 2
+}
+
+postgres = {
+  version               = "16"
+  sku_name              = "GP_Standard_D2ds_v5"
+  storage_mb            = 65536
+  storage_tier          = "P6"
+  backup_retention_days = 14
+  geo_redundant_backup  = false
+  high_availability     = true # zone-redundant standby: roughly doubles the database cost
+}
+
+minio_storage_size = "200Gi"
+
+image_tag            = "0123456789abcdef0123456789abcdef01234567"
+nats_credentials_dir = "/secure/nexus-nats"
+
+# Anything else the chart takes, deep-merged last.
+chart_values_overrides = {
+  logLevel = "info"
+  smtp = {
+    host      = "smtp.example.com"
+    port      = 587
+    tls       = "starttls"
+    from      = "KGF Nexus <no-reply@example.com>"
+    publicUrl = "https://nexus.example.com"
+  }
+}

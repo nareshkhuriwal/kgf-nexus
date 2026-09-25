@@ -27,7 +27,7 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: kgf-nexus
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
   namespaceSelector:
     matchNames: [{{ .Release.Namespace | quote }}]
   endpoints:
@@ -59,7 +59,7 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: kgf-nexus
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
       nexus.khuriwalgroup.com/role: agent
   namespaceSelector:
     matchNames: [{{ .Release.Namespace | quote }}]

@@ -30,8 +30,10 @@ MIGRATIONS    := services/migrations
 # list below does not conflict with them.
 .PHONY: test-nats
 .PHONY: sdk-test
+.PHONY: sdk-typecheck
+.PHONY: check-doc-refs
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
-        ui-dev ui-build ui-test seed submit-example chaos clean \
+        ui-dev ui-build ui-test e2e e2e-up e2e-down seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
         up-pitr backup-base pitr-verify restore-pitr pitr-drill \
         license-report license-check dev-certs up-tls certs-check \
@@ -98,6 +100,21 @@ BENCH_PG_PORT     ?= 55541
 BENCH_MINIO_PORT  ?= 55542
 BENCH_DSN         ?=
 BENCH_MINIO       ?= localhost:$(BENCH_MINIO_PORT)
+# The S3 store for benchmarks and disposable test stores. Silo, the community
+# MinIO fork, pinned by digest: MinIO no longer publishes pullable images (F111).
+# Keep in step with deploy/docker-compose.yml.
+S3_IMAGE          ?= docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
+
+print-s3-image: ## Print the pinned S3 (Silo) image reference, for CI and scripts
+	@echo '$(S3_IMAGE)'
+
+verify-s3-image: ## Verify the pinned S3 image's GitHub build provenance (needs gh, network)
+	@command -v gh >/dev/null || { echo "gh not found; install the GitHub CLI"; exit 1; }
+	gh attestation verify 'oci://$(S3_IMAGE)' --repo pgsty/silo \
+	  --signer-workflow pgsty/silo/.github/workflows/docker-release.yml
+
+check-doc-refs: ## Fail if any "OPERATIONS §N" reference in the repo names a section that does not exist
+	python3 deploy/scripts/check-operations-refs.py
 
 bench-pg: ## Start a disposable, migrated Postgres + MinIO for the benchmarks
 	@docker inspect $(BENCH_NAME)-pg >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-pg \
@@ -105,7 +122,7 @@ bench-pg: ## Start a disposable, migrated Postgres + MinIO for the benchmarks
 	  postgres:16-alpine -c max_connections=300 -c shared_buffers=512MB >/dev/null
 	@docker inspect $(BENCH_NAME)-minio >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-minio \
 	  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin -p 127.0.0.1:$(BENCH_MINIO_PORT):9000 \
-	  quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data >/dev/null
+	  $(S3_IMAGE) server /data >/dev/null
 	@for i in $$(seq 1 30); do docker exec $(BENCH_NAME)-pg pg_isready -U postgres -d nexus >/dev/null 2>&1 && break; sleep 1; done
 	DATABASE_URL=postgres://postgres:bench@localhost:$(BENCH_PG_PORT)/nexus?sslmode=disable \
 	  MIGRATIONS_DIR=$(MIGRATIONS) sh deploy/migrate.sh
@@ -126,19 +143,12 @@ bench-inline: ## Postgres-inline vs MinIO round trip by payload size (needs BENC
 # targets are the local equivalent of that job.
 migrate-up: ## Apply all *.up.sql migrations to DATABASE_URL
 	@command -v psql >/dev/null || { echo "psql not found; use 'make up' to run the compose migration job instead"; exit 1; }
-	@set -euo pipefail; \
-	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
-	  "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"; \
-	for f in $(MIGRATIONS)/*.up.sql; do \
-	  v=$$(basename "$$f" .up.sql); \
-	  if [ "$$(psql "$(DATABASE_URL)" -tAc "SELECT 1 FROM schema_migrations WHERE version='$$v'")" = "1" ]; then \
-	    echo "migrate-up: $$v already applied"; continue; \
-	  fi; \
-	  echo "migrate-up: applying $$v"; \
-	  psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 --single-transaction -q -f "$$f"; \
-	  psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c "INSERT INTO schema_migrations (version) VALUES ('$$v')"; \
-	done; \
-	echo "migrate-up: done"
+	@# The SAME script the compose/Helm migration job runs, so the local target
+	@# cannot drift from it. The inline loop this replaced ignored the
+	@# `-- migrate: no-transaction` opt-out and failed on 0015 (CREATE INDEX
+	@# CONCURRENTLY inside --single-transaction), which broke every CI
+	@# integration job that runs `make migrate-up`.
+	DATABASE_URL='$(DATABASE_URL)' MIGRATIONS_DIR=$(MIGRATIONS) sh deploy/migrate.sh
 
 migrate-down: ## Roll back all *.down.sql migrations, newest first (DESTRUCTIVE)
 	@command -v psql >/dev/null || { echo "psql not found"; exit 1; }
@@ -201,6 +211,17 @@ k8s-dev-status: ## Show the dev environment's pods and URLs
 k8s-dev-down: ## Destroy the dev environment (DELETES its data volumes)
 	terraform -chdir=$(TF_DEV) destroy -input=false
 
+# ── Terraform: cloud platforms (deploy/terraform) ─────────────────────────
+# OFFLINE only: init -backend=false, validate, and `terraform test` plans with
+# mocked providers. No state, no credentials, nothing is ever applied. Needs
+# terraform >= 1.11 or Docker, plus network access to download providers.
+.PHONY: tf-validate tf-lint
+tf-validate: ## Validate every Terraform module/environment offline (fmt, validate, mocked-plan tests)
+	deploy/terraform/validate.sh
+
+tf-lint: ## tflint, checkov and trivy over deploy/terraform, in pinned containers (needs Docker)
+	deploy/terraform/validate.sh lint
+
 # ── TLS (docs/TLS.md §5) ──────────────────────────────────────────────────
 # Opt-in. `make up` stays plaintext; `make up-tls` layers the mTLS override on
 # top. The generated material, including a CA private key, lands in .dev-certs/
@@ -227,6 +248,50 @@ ui-build: ## Typecheck and production-build the UI
 ui-test: ## Run the UI component tests
 	cd ui && npm test
 
+# ── Browser end-to-end (ui/e2e, Playwright) ─────────────────────────────
+# An ISOLATED compose stack (its own project name, volumes and host ports; see
+# deploy/e2e/), seeded with fresh keys, then the Playwright suite against it.
+# Torn down afterwards, pass or fail, unless E2E_KEEP=1. Never touches the
+# `make up` stack.
+#
+#   make e2e                                  # up, test, down
+#   make e2e E2E_KEEP=1                       # leave the stack up to debug
+#   make e2e E2E_MINIO_IMAGE=<local image>    # optional: another local S3 image
+#                                             # instead of the pinned Silo digest
+E2E_PROJECT     ?= nexus-e2e
+E2E_PORT_BASE   ?= 55711
+E2E_MINIO_IMAGE ?=
+E2E_KEEP        ?=
+E2E_ENV = E2E_PROJECT='$(E2E_PROJECT)' E2E_PORT_BASE='$(E2E_PORT_BASE)' E2E_MINIO_IMAGE='$(E2E_MINIO_IMAGE)'
+
+# The cleanup trap uses absolute paths: the recipe cd's into ui/, and the trap
+# runs from there. Teardown failure is reported, never silently ignored.
+e2e: ## Browser e2e: isolated compose stack + Playwright, torn down after (E2E_KEEP=1 keeps it)
+	@set -euo pipefail; \
+	cleanup() { \
+	  status=$$?; \
+	  if [ $$status -ne 0 ]; then \
+	    mkdir -p '$(CURDIR)/ui/e2e/test-results'; \
+	    $(E2E_ENV) '$(CURDIR)/deploy/e2e/e2e-stack.sh' logs > '$(CURDIR)/ui/e2e/test-results/stack.log' 2>&1 || true; \
+	    echo "e2e: failed; service logs in ui/e2e/test-results/stack.log, traces in ui/e2e/test-results/"; \
+	  fi; \
+	  if [ '$(E2E_KEEP)' = 1 ]; then echo "e2e: stack $(E2E_PROJECT) left running (make e2e-down)"; \
+	  else $(E2E_ENV) '$(CURDIR)/deploy/e2e/e2e-stack.sh' down >/dev/null 2>&1 || echo "e2e: WARNING: teardown of $(E2E_PROJECT) failed; run make e2e-down" >&2; fi; \
+	  exit $$status; \
+	}; \
+	trap cleanup EXIT; \
+	$(E2E_ENV) deploy/e2e/e2e-stack.sh up; \
+	cd ui; \
+	test -d node_modules || npm ci --no-audit --no-fund; \
+	npx playwright install chromium; \
+	npx playwright test
+
+e2e-up: ## Start (or refresh) the isolated e2e stack and write ui/e2e/.stack.env
+	$(E2E_ENV) deploy/e2e/e2e-stack.sh up
+
+e2e-down: ## Destroy the isolated e2e stack and its volumes
+	$(E2E_ENV) deploy/e2e/e2e-stack.sh down
+
 # ── Python SDK ────────────────────────────────────────────────────────────
 # The SDK's pytest suite, in its own virtualenv so it never installs into (or
 # depends on) whatever Python the shell happens to have. .venv-sdk/ is already
@@ -248,7 +313,14 @@ $(SDK_VENV)/.installed: $(SDK_DIR)/pyproject.toml
 	$(SDK_VENV)/bin/python -m pip install --quiet -e '$(SDK_DIR)[dev]'
 	@touch $@
 
-sdk-test: $(SDK_VENV)/.installed ## Run the Python SDK tests with coverage (SDK_REPORT_DIR=<dir> adds JUnit/Cobertura XML)
+# mypy --strict over the package and typecheck/typed_usage.py, whose assert_type
+# lines pin that a task's return type flows through tracing, .map and
+# with_overrides. sdk-test runs it first, so every CI job that runs sdk-test
+# type-checks too.
+sdk-typecheck: $(SDK_VENV)/.installed ## Type-check the Python SDK (mypy --strict, package + typed usage example)
+	cd $(SDK_DIR) && '$(abspath $(SDK_VENV))/bin/python' -m mypy --strict
+
+sdk-test: $(SDK_VENV)/.installed sdk-typecheck ## Type-check, then run the Python SDK tests with coverage (SDK_REPORT_DIR=<dir> adds JUnit/Cobertura XML)
 	$(if $(SDK_REPORT_DIR),@mkdir -p '$(SDK_REPORT_DIR)')
 	cd $(SDK_DIR) && COVERAGE_FILE='$(abspath $(SDK_VENV))/.coverage' '$(abspath $(SDK_VENV))/bin/python' -m pytest \
 	  -p no:cacheprovider --cov=nexus --cov-report=term \
@@ -258,6 +330,12 @@ sdk-test: $(SDK_VENV)/.installed ## Run the Python SDK tests with coverage (SDK_
 # The key is inserted hashed (api_keys.key_hash), matching how the gateway
 # verifies it: a plaintext key in the database would defeat the point of hashing
 # at rest even in dev.
+#
+# The namespace's tenant row comes first. Since migration 0014 every api_keys
+# row must name a namespace that belongs to a registered tenant, so on a fresh
+# database (nothing registered yet) the key inserts failed with "Namespace must
+# belong to a registered tenant" (F121). Idempotent, and the same statement the
+# Helm bootstrap job and deploy/pitr-seed.sh already run.
 seed: ## Generate and install API keys (prints each plaintext exactly once)
 	@command -v psql >/dev/null || { echo "psql not found; run: $(COMPOSE) exec postgres psql -U nexus -d nexus"; exit 1; }
 	@set -euo pipefail; \
@@ -268,6 +346,9 @@ seed: ## Generate and install API keys (prints each plaintext exactly once)
 	    printf 'nxs_%s_%s' "$$1" "$$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"; \
 	  fi; \
 	}; \
+	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
+	  "INSERT INTO tenants (namespace, name) VALUES ('$(NAMESPACE)', '$(NAMESPACE)') \
+	   ON CONFLICT (namespace) DO NOTHING"; \
 	KEY="$${NEXUS_DEV_API_KEY:-$$(gen admin)}"; \
 	HASH=$$(printf '%s' "$$KEY" | shasum -a 256 | cut -d' ' -f1); \
 	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
@@ -429,3 +510,11 @@ license-check: ## Assert every first-party source file carries an SPDX identifie
 	  fi; \
 	done; \
 	if [ $$missing -eq 0 ]; then echo "SPDX headers: OK"; else exit 1; fi
+
+# The previous release's database integration suite against THIS tree's schema,
+# reached by the real upgrade path (previous migrations, then these). ADR-0011
+# rule 5 says old replicas survive the new schema; this is the test that says
+# so. Disposable Postgres on 127.0.0.1:55688. docs/COMPATIBILITY.md §7.
+.PHONY: compat-smoke
+compat-smoke: ## Run the previous release's DB integration suite against this tree's migrated schema
+	tests/compat/previous-release-smoke.sh

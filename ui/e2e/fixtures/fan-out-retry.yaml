@@ -1,0 +1,170 @@
+# Fan-out / fan-in workflow for the browser end-to-end suite.
+#
+# Same shape as examples/fan_out_map (list -> map over the list -> summarize),
+# with two changes that make it a test fixture rather than an example:
+#
+#  * A CONTROLLED FAILURE. The run's `token` param names the shards; the child
+#    whose shard ends in "-2" fails on its first execution and succeeds on the
+#    next. It remembers that it already failed through a marker file in
+#    /var/lib/nexus/effects, the volume every compose agent shares, so the
+#    retry succeeds whichever agent picks it up. max_attempts is 1, so the
+#    failure is terminal until an operator retries the node, which is exactly
+#    the control the suite exercises. A fresh token per test run means a
+#    marker from an earlier run can never make the failure disappear.
+#  * Short sleeps, so a browser can observe RUNNING before SUCCEEDED. The
+#    suite never sleeps itself; it waits for these states to appear.
+#
+# summarize is all_success (examples/fan_out_map uses all_done): it must not run
+# on a partial set, so it is UPSTREAM_FAILED after the failure and re-runs as a
+# dependent of the retried child, and its log then carries all five results.
+api_version: nexus.dev/v1
+name: e2e-fan-out-retry
+namespace: default
+description: E2E fixture - fan-out/fan-in with one controlled, retryable failure.
+params:
+  token:
+    required: true
+    type: string
+run_timeout_ms: 900000
+edges:
+- from_node_id: list_shards
+  output_to_input: {}
+  to_node_id: process_shard
+- from_node_id: process_shard
+  output_to_input:
+    results: result
+  to_node_id: summarize
+tasks:
+- id: list_shards
+  task_ref: e2e.list_shards
+  version: 1
+  queue: default
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    token: token
+  inputs:
+    token:
+      required: true
+      type: json
+  outputs:
+    shards:
+      required: true
+      type: json
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    max_attempts: 1
+    strategy: BACKOFF_STRATEGY_FIXED
+    initial_ms: 1000
+    max_ms: 1000
+  timeouts:
+    heartbeat_ms: 60000
+    schedule_to_close_ms: 600000
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  runtime:
+    executor: subprocess
+    command: [sh, -c]
+    args:
+    - |
+      set -eu
+      t=$(tr -d '"' < "$NEXUS_INPUT_DIR/token")
+      echo "listing shards for token $t"
+      sleep 2
+      printf '["%s-0","%s-1","%s-2","%s-3","%s-4"]' "$t" "$t" "$t" "$t" "$t" > "$NEXUS_OUTPUT_DIR/shards"
+      echo "listed 5 shards"
+- id: process_shard
+  task_ref: e2e.process_shard
+  version: 1
+  queue: default
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  map:
+    item_input: shard
+    max_fanout: 50
+    over_node_id: list_shards
+    over_output: shards
+  inputs:
+    shard:
+      required: true
+      type: json
+  outputs:
+    result:
+      required: true
+      type: json
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    max_attempts: 1
+    strategy: BACKOFF_STRATEGY_FIXED
+    initial_ms: 1000
+    max_ms: 1000
+  timeouts:
+    heartbeat_ms: 60000
+    schedule_to_close_ms: 600000
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  runtime:
+    executor: subprocess
+    command: [sh, -c]
+    args:
+    - |
+      set -eu
+      s=$(tr -d '"' < "$NEXUS_INPUT_DIR/shard")
+      echo "processing shard $s"
+      sleep 2
+      case "$s" in
+        *-2)
+          marker="/var/lib/nexus/effects/e2e-failed-once-$s"
+          if [ ! -e "$marker" ]; then
+            : > "$marker"
+            echo "controlled failure for shard $s (first execution)" >&2
+            exit 3
+          fi
+          echo "shard $s: second execution, succeeding"
+          ;;
+      esac
+      printf '{"shard":"%s","rows":42}' "$s" > "$NEXUS_OUTPUT_DIR/result"
+      echo "shard $s done"
+- id: summarize
+  task_ref: e2e.summarize
+  version: 1
+  queue: default
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    results:
+      required: true
+      type: json
+  outputs:
+    result:
+      required: true
+      type: json
+  resources:
+    request:
+      cpu_millis: 250
+      memory_bytes: 268435456
+  retry:
+    max_attempts: 1
+    strategy: BACKOFF_STRATEGY_FIXED
+    initial_ms: 1000
+    max_ms: 1000
+  timeouts:
+    heartbeat_ms: 60000
+    schedule_to_close_ms: 600000
+    schedule_to_start_ms: 300000
+    start_to_close_ms: 120000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  runtime:
+    executor: subprocess
+    command: [sh, -c]
+    args:
+    - |
+      set -eu
+      r=$(cat "$NEXUS_INPUT_DIR/results")
+      echo "summary: $r"
+      printf '{"shards":5,"results":%s}' "$r" > "$NEXUS_OUTPUT_DIR/result"

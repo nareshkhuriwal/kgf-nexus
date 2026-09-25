@@ -140,7 +140,9 @@ a controller in the wrong mode or pointed at the wrong cluster cannot drain.
    Worker pools) and save.
 2. Register the cluster (Live cluster → Register a cluster). It starts in plan.
 3. Install `kubectl apply -k deploy/k8s/cluster-controller/base` with
-   `NEXUS_CLUSTER_NAME` set to the registered name; confirm the Live cluster tab
+   `NEXUS_CLUSTER_NAME` set to the registered name -- or, for a Helm install,
+   `clusterController.enabled=true` with `clusterController.clusterName`
+   (docs/OPERATIONS.md §20.6, same RBAC); confirm the Live cluster tab
    shows a recent report, the observed UID and the scheduler HPA.
 4. Bind worker Deployments; watch plan-only events for a representative period.
 5. To apply: enter the kube-system UID the controller reports, confirm apply,

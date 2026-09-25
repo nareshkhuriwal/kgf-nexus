@@ -125,6 +125,12 @@ spec:
             #   value: "nvidia.com/gpu:NoSchedule"
           ports:
             - {name: metrics, containerPort: 8089}
+          # 503 until the agent has registered with the control plane (it
+          # retries with backoff while the gateway starts); see OPERATIONS.
+          readinessProbe:
+            httpGet: {path: /readyz, port: metrics}
+            periodSeconds: 5
+            failureThreshold: 3
           resources:
             requests: {cpu: 250m, memory: 256Mi}
             limits: {cpu: "1", memory: 512Mi}

@@ -86,3 +86,35 @@ func TestNilMetricsIsSafe(t *testing.T) {
 	m.observeLoopError("dispatch")
 	m.setBacklog(nil)
 }
+
+// TestQuotaAndMeteringMetrics: the store's QuotaObserver events become the two
+// ADR-0021 families, with custom dimensions collapsed to one label value so
+// tenant-chosen resource names cannot mint series.
+func TestQuotaAndMeteringMetrics(t *testing.T) {
+	reg := metrics.NewRegistry()
+	m := NewMetrics(reg, "default")
+	var obs store.QuotaObserver = m
+	obs.QuotaBlocked("cpu_millis")
+	obs.QuotaBlocked("custom:license")
+	obs.QuotaBlocked("custom:another")
+	obs.UsageRecorded("SUCCEEDED")
+	obs.UsageRecorded("LOST")
+	obs.UsageRecorded("SUCCEEDED")
+
+	var ready atomic.Bool
+	fams := metricstest.Scrape(t, withMetrics(healthMux(nil, nil, &ready), reg), "/metrics")
+	metricstest.RequireFamilies(t, fams, "nexus_scheduler_quota_blocked_total", "nexus_scheduler_usage_ledger_writes_total")
+	for labels, want := range map[string]float64{"cpu_millis": 1, "custom": 2} {
+		if s := metricstest.Find(fams, "nexus_scheduler_quota_blocked_total",
+			map[string]string{"queue": "default", "dimension": labels}); s == nil || s.GetCounter().GetValue() != want {
+			t.Errorf("quota_blocked{%s} = %v, want %v", labels, s, want)
+		}
+	}
+	if s := metricstest.Find(fams, "nexus_scheduler_usage_ledger_writes_total",
+		map[string]string{"queue": "default", "outcome": "SUCCEEDED"}); s == nil || s.GetCounter().GetValue() != 2 {
+		t.Errorf("usage writes{SUCCEEDED} = %v, want 2", s)
+	}
+	var nilMetrics *Metrics
+	nilMetrics.QuotaBlocked("cpu_millis") // a nil *Metrics records nothing and does not panic
+	nilMetrics.UsageRecorded("LOST")
+}

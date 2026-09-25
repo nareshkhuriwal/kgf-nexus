@@ -75,4 +75,4 @@ spec:
           labels: { severity: critical }
           annotations:
             summary: "The Nexus internal CA expires in {{ $value | humanizeDuration }}"
-            runbook: docs/OPERATIONS.md#94-rotating-the-ca-key
+            runbook: docs/OPERATIONS.md#94-rotating-the-ca-key-planned-or-after-a-compromise

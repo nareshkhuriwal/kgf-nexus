@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 )
@@ -75,6 +76,69 @@ UPDATE task_attempts
 	return nil
 }
 
+// DefaultAttemptLockTimeout is how long a report-driven terminal transition
+// waits for the attempt row when ClaimConfig.AttemptLockTimeout is zero.
+//
+// The transactions it waits behind (MarkStarted, a lease reclaim, a cancel, a
+// peer applying the same result) each touch a handful of rows and commit in
+// milliseconds, so two seconds is generous. It is well inside the gateway's 5 s
+// upstream call timeout, so a busy report fails with a status the agent retries
+// rather than with the gateway's own deadline.
+const DefaultAttemptLockTimeout = 2 * time.Second
+
+// ErrAttemptBusy means another transaction held the attempt row past the lock
+// timeout (or a deadlock was broken on it). Nothing was written. It is
+// retryable: the report must be resent, never treated as delivered.
+var ErrAttemptBusy = errors.New("attempt is locked by another transaction; retry the report")
+
+// lockAttemptForTransition runs lock -- a SELECT ... FOR UPDATE of the attempt
+// row that must be the transaction's FIRST lock -- with a bounded wait, and
+// restores the session's lock_timeout for the rest of the transaction.
+//
+// Why wait at all, when most of this package skips locked rows: SKIP LOCKED is
+// right for a work queue, where a skipped row is picked up by the next pass.
+// A report is not a queue item. Nothing re-delivers a skipped result on its
+// own, so "someone else holds the row" must mean "wait for them", not "they
+// handled it" (CONTRACT-FINDINGS F104).
+//
+// Why the wait is safe: it is the first lock, so this transaction holds
+// nothing another can be waiting on and cannot close a deadlock cycle here.
+// Postgres still reports any deadlock or timeout, and both become
+// ErrAttemptBusy so the caller answers with a retryable status.
+func (s *SchedulerStore) lockAttemptForTransition(ctx context.Context, tx pgx.Tx, lock func() error) error {
+	d := s.cfg.AttemptLockTimeout
+	if d <= 0 {
+		d = DefaultAttemptLockTimeout
+	}
+	if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`,
+		fmt.Sprintf("%dms", d.Milliseconds())); err != nil {
+		return fmt.Errorf("bound attempt lock wait: %w", err)
+	}
+	if err := lock(); err != nil {
+		if isLockBusy(err) {
+			return fmt.Errorf("%w: %v", ErrAttemptBusy, err)
+		}
+		return err
+	}
+	// Only the attempt lock is bounded. The rest of the transition (worker row,
+	// run row) keeps the waits it always had, so this change cannot turn a
+	// transition that used to succeed slowly into a failure.
+	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout TO DEFAULT`); err != nil {
+		return fmt.Errorf("restore lock_timeout: %w", err)
+	}
+	return nil
+}
+
+// isLockBusy reports a lock wait that Postgres gave up on: lock_not_available
+// (lock_timeout or NOWAIT) or deadlock_detected.
+func isLockBusy(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == "55P03" || pgErr.Code == "40P01"
+}
+
 // AppliedResult reports what ApplyResult did, so the caller can drive the DAG
 // engine's reconcile without re-reading the row.
 type AppliedResult struct {
@@ -88,6 +152,9 @@ type AppliedResult struct {
 	Applied bool
 	// Retry is set when the outcome was retryable and a retry was scheduled.
 	Retry bool
+	// UsageRecorded is true when the attempt's usage-ledger row was written in
+	// this transaction (ADR-0021).
+	UsageRecorded bool
 }
 
 // ApplyResult applies a terminal outcome reported by the worker.
@@ -117,8 +184,19 @@ func (s *SchedulerStore) ApplyResult(
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Re-read under a row lock. Between the gateway's fence check and here, a
-	// reconciler may have expired this attempt; SKIP LOCKED plus the state filter
-	// makes that a no-op rather than a double application.
+	// reconciler may have expired this attempt; the state filter makes that a
+	// no-op rather than a double application.
+	//
+	// This WAITS for the lock (bounded) instead of using SKIP LOCKED. It used to
+	// skip, and read "no row" as "already handled" -- so a result arriving while
+	// the worker's own ReportStarted transaction held the row was skipped,
+	// acknowledged to the agent as accepted, and later reclaimed as LOST
+	// (CONTRACT-FINDINGS F104). Waiting is safe for fencing: under READ
+	// COMMITTED, Postgres re-evaluates the state filter against the row version
+	// the holder committed, so a reclaim or cancel that won the lock turns this
+	// into a no-op exactly as skipping did, and a peer applying the same result
+	// is seen as terminal. The wait cannot deadlock on this statement because it
+	// is the transaction's first lock. See lockAttemptForTransition.
 	const lockQ = `
 SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
        a.resource_request, a.scheduled_at, a.priority, a.queue,
@@ -128,7 +206,7 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
   JOIN workflow_runs r ON r.id = a.run_id
  WHERE a.id = $1
    AND a.state IN ('DISPATCHED','RUNNING')
- FOR UPDATE OF a SKIP LOCKED`
+ FOR UPDATE OF a`
 
 	var (
 		cand                     Candidate
@@ -137,13 +215,16 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
 		attemptsUsed, maxAttempt int32
 		runDeadline              *time.Time
 	)
-	err = tx.QueryRow(ctx, lockQ, attemptID).Scan(
-		&cand.ID, &cand.RunID, &cand.NodeID, &cand.AttemptNumber, &workerID,
-		&reqJSON, &cand.ScheduledAt, &cand.Priority, &cand.Queue,
-		&specJSON, &attemptsUsed, &maxAttempt, &runDeadline, &cand.RetryFloor)
+	err = s.lockAttemptForTransition(ctx, tx, func() error {
+		return tx.QueryRow(ctx, lockQ, attemptID).Scan(
+			&cand.ID, &cand.RunID, &cand.NodeID, &cand.AttemptNumber, &workerID,
+			&reqJSON, &cand.ScheduledAt, &cand.Priority, &cand.Queue,
+			&specJSON, &attemptsUsed, &maxAttempt, &runDeadline, &cand.RetryFloor)
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Already terminal, or being handled by a peer. A duplicate report is the
-		// expected consequence of at-least-once delivery, not a fault.
+		// Already terminal: a duplicate report (the expected consequence of
+		// at-least-once delivery), or an attempt a reconciler or cancel moved
+		// first. Never "locked by someone else" any more -- that waits above.
 		return AppliedResult{Applied: false}, nil
 	}
 	if err != nil {
@@ -179,6 +260,14 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
 		}
 	}
 
+	// The measured ExecutionMetrics, which the worker has always sent and the
+	// control plane used to drop (CONTRACT-FINDINGS F122). task_attempts.metrics
+	// has existed since 0001; the usage ledger reads it below.
+	metricsJSON, err := encodeExecutionMetrics(req.GetMetrics())
+	if err != nil {
+		return AppliedResult{}, err
+	}
+
 	var errJSON []byte
 	if te := req.GetError(); te != nil {
 		if errJSON, err = protojsonMarshal(te); err != nil {
@@ -190,9 +279,10 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
 	tag, err := tx.Exec(ctx, `
 UPDATE task_attempts
    SET state = $2::attempt_state, ended_at = $3, output_ref = $4, error = $5,
+       metrics = COALESCE($6::jsonb, metrics),
        state_version = state_version + 1
  WHERE id = $1 AND state IN ('DISPATCHED','RUNNING')`,
-		attemptID, state, now, nullableJSON(outputJSON), nullableJSON(errJSON))
+		attemptID, state, now, nullableJSON(outputJSON), nullableJSON(errJSON), nullableJSON(metricsJSON))
 	if err != nil {
 		return AppliedResult{}, fmt.Errorf("cas attempt %s to %s: %w", attemptID, state, err)
 	}
@@ -239,6 +329,14 @@ UPDATE task_attempts
 
 	out := AppliedResult{RunID: cand.RunID, NodeID: cand.NodeID, State: state, Applied: true}
 
+	// The usage record, in the same transaction as the terminal transition and
+	// the release of the reservation it accounts for (ADR-0021).
+	usage, err := s.recordUsage(ctx, tx, attemptID)
+	if err != nil {
+		return AppliedResult{}, err
+	}
+	out.UsageRecorded = usage != ""
+
 	// Retry evaluation runs in the SAME transaction as the terminal write, so a
 	// crash cannot leave an attempt failed with no retry scheduled and no record
 	// that one was owed.
@@ -254,6 +352,7 @@ UPDATE task_attempts
 	if err := tx.Commit(ctx); err != nil {
 		return AppliedResult{}, fmt.Errorf("commit apply-result tx: %w", err)
 	}
+	s.notifyUsage(usage)
 	return out, nil
 }
 
@@ -385,17 +484,30 @@ func (s *SchedulerStore) CancelRunAttempts(ctx context.Context, runID uuid.UUID,
 	// One transaction per attempt, as ReconcileExpiredLeases does: a single
 	// transaction over a large run would hold locks on every worker row it
 	// touches and block the dispatch path, which is the latency that matters.
-	var cancelled int
+	//
+	// One attempt that cannot be cancelled now (busy past the lock timeout, or
+	// a transient error) does not stop the rest: they are all attempted, and
+	// the errors are returned together so the caller retries the fan-out,
+	// which is idempotent because already-cancelled attempts are filtered out.
+	var (
+		cancelled int
+		errs      []error
+	)
 	for _, id := range ids {
+		if ctx.Err() != nil {
+			errs = append(errs, ctx.Err())
+			break
+		}
 		ok, err := s.cancelOneAttempt(ctx, id, now)
 		if err != nil {
-			return cancelled, err
+			errs = append(errs, fmt.Errorf("cancel attempt %s: %w", id, err))
+			continue
 		}
 		if ok {
 			cancelled++
 		}
 	}
-	return cancelled, nil
+	return cancelled, errors.Join(errs...)
 }
 
 func (s *SchedulerStore) cancelOneAttempt(ctx context.Context, attemptID uuid.UUID, now time.Time) (bool, error) {
@@ -411,11 +523,17 @@ func (s *SchedulerStore) cancelOneAttempt(ctx context.Context, attemptID uuid.UU
 		workerID *uuid.UUID
 		reqJSON  []byte
 	)
-	err = tx.QueryRow(ctx, `
+	// Waits for the row (bounded) rather than skipping it, for the reason
+	// ApplyResult does: skipping an attempt whose ReportStarted, or whose
+	// dispatch claim, was mid-commit left it running under a cancelled run
+	// (CONTRACT-FINDINGS F104).
+	err = s.lockAttemptForTransition(ctx, tx, func() error {
+		return tx.QueryRow(ctx, `
 SELECT run_id, node_id, worker_id, resource_request
   FROM task_attempts
  WHERE id = $1 AND state IN ('PENDING','DISPATCHED','RUNNING')
- FOR UPDATE SKIP LOCKED`, attemptID).Scan(&runID, &nodeID, &workerID, &reqJSON)
+ FOR UPDATE`, attemptID).Scan(&runID, &nodeID, &workerID, &reqJSON)
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -457,9 +575,17 @@ UPDATE task_attempts
 		}); err != nil {
 		return false, err
 	}
+	// A cancelled attempt that was DISPATCHED or RUNNING held capacity until
+	// now and is metered like any other end; one cancelled while PENDING
+	// never did, and recordUsage writes nothing for it (ADR-0021).
+	usage, err := s.recordUsage(ctx, tx, attemptID)
+	if err != nil {
+		return false, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit cancel tx: %w", err)
 	}
+	s.notifyUsage(usage)
 	return true, nil
 }
 

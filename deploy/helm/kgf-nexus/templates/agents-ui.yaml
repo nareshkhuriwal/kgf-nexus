@@ -4,6 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Worker agents and the console.
 */ -}}
+{{- include "nexus.valuesComplete" . }}
 {{- $root := . -}}
 {{- range .Values.agents }}
 ---
@@ -29,6 +30,7 @@ spec:
     spec:
       {{- include "nexus.pullSecrets" $root | nindent 6 }}
       securityContext: {{- include "nexus.podSecurity" $root | nindent 8 }}
+      {{- include "nexus.placement" (list $root .name) | nindent 6 }}
       terminationGracePeriodSeconds: {{ $root.Values.agentDefaults.terminationGracePeriodSeconds }}
       containers:
         - name: agent
@@ -68,8 +70,17 @@ spec:
             # All interfaces inside the pod so Prometheus can reach it; the
             # agent's own default is loopback. No Service exposes this port.
             - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" (int $root.Values.metrics.agentPort) | quote }} }
+            {{- include "nexus.tlsEnv" (list $root "client") | nindent 12 }}
           ports:
             - { name: metrics, containerPort: {{ int $root.Values.metrics.agentPort }} }
+          # Not ready until the agent has registered with the control plane
+          # (it retries with backoff while the gateway starts), so a rollout
+          # waits for agents that can take work. No liveness probe on
+          # registration: a control-plane outage is waited out, not restarted.
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            periodSeconds: 5
+            failureThreshold: 3
           resources: {{- toYaml .resources | nindent 12 }}
           securityContext: {{- include "nexus.containerSecurity" $root | nindent 12 }}
           volumeMounts:
@@ -80,11 +91,14 @@ spec:
             - { name: work, mountPath: /var/lib/nexus/work }
             - { name: tmp, mountPath: /tmp }
             {{- include "nexus.natsVolumeMounts" $root | nindent 12 }}
+            {{- include "nexus.tlsVolumeMounts" $root | nindent 12 }}
       volumes:
         - { name: wal, emptyDir: {} }
         - { name: work, emptyDir: {} }
         - { name: tmp, emptyDir: {} }
         {{- include "nexus.natsVolumes" (list $root "agent" (.natsSeedKey | default "")) | nindent 8 }}
+        {{- include "nexus.tlsVolumes" (list $root "agent") | nindent 8 }}
+{{- include "nexus.pdb" (list $root .name .name (.replicas | default 1) .podDisruptionBudget) }}
 {{- end }}
 {{- if .Values.ui.enabled }}
 {{- $resolver := .Values.dns.resolver }}
@@ -110,7 +124,7 @@ metadata:
   name: ui
   labels: {{- include "nexus.labels" (list . "ui") | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.ui.replicas | default 1 }}
   selector:
     matchLabels: {{- include "nexus.selector" (list . "ui") | nindent 6 }}
   template:
@@ -118,6 +132,7 @@ spec:
       labels: {{- include "nexus.labels" (list . "ui") | nindent 8 }}
     spec:
       {{- include "nexus.pullSecrets" . | nindent 6 }}
+      {{- include "nexus.placement" (list . "ui") | nindent 6 }}
       containers:
         - name: ui
           image: {{ include "nexus.image" (list . "ui") }}
@@ -138,4 +153,5 @@ spec:
           resources: {{- toYaml .Values.ui.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
+{{- include "nexus.pdb" (list . "ui" "ui" (.Values.ui.replicas | default 1) .Values.ui.podDisruptionBudget) }}
 {{- end }}

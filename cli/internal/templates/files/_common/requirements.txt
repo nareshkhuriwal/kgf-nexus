@@ -1,0 +1,10 @@
+# Runtime dependencies of the task image. The handlers use only the standard
+# library, so the SDK is the only requirement.
+#
+# nexus-sdk is the Nexus Python SDK (sdk/python in the Nexus repository). If it
+# is not published to your package index, install it from a checkout instead:
+#   pip install -e /path/to/kgf-nexus/sdk/python
+nexus-sdk>=0.1.0
+
+# For the tests in tests/ (not needed in the task image).
+# pytest>=8.3

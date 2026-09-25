@@ -69,11 +69,11 @@ const progressEventKind = "AttemptProgress"
 //  2. The heartbeat timer is re-armed, for a RUNNING attempt whose spec has a
 //     heartbeat budget, as before.
 //
-// This never locks, UPDATEs or foreign-keys the task_attempts row. The
-// terminal-transition paths lock that row with SKIP LOCKED and treat "no row"
-// as "already handled", so holding it here, even briefly, could make a result
-// that arrives in the same instant be silently skipped. Migration 0024 explains
-// the side table this writes instead.
+// This never locks, UPDATEs or foreign-keys the task_attempts row. The lease
+// reclaim locks that row with SKIP LOCKED, and ApplyResult waits for it only
+// up to a bounded lock timeout (F104), so a progress burst holding it would
+// delay results and, past the timeout, make them resend. Migration 0024
+// explains the side table this writes instead.
 func (s *SchedulerStore) RecordProgress(ctx context.Context, rep ProgressReport, now time.Time) (ProgressOutcome, error) {
 	var out ProgressOutcome
 

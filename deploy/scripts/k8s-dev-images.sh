@@ -48,10 +48,17 @@ build scheduler        deploy/Dockerfile.service SERVICE=scheduler        SERVIC
 build resource-manager deploy/Dockerfile.service SERVICE=resource-manager SERVICE_PATH=services/resource-manager/cmd/resource-manager VERSION="$tag"
 build event-service    deploy/Dockerfile.service SERVICE=event-service    SERVICE_PATH=services/event-service/cmd/event-service       VERSION="$tag"
 build agent            deploy/Dockerfile.service SERVICE=agent            SERVICE_PATH=agent/cmd/nexus-agent                          VERSION="$tag"
+# The chart's artifact-gc CronJob (on by default, report-only) and the optional
+# cluster controller run these two. The controller is either rendered by the
+# chart (clusterController.enabled) or installed from deploy/k8s/cluster-controller
+# at this tag:
+#   ALLOW_TAG=1 deploy/scripts/cluster-controller-overlay.sh base kgf-nexus/cluster-controller:<tag> | kubectl apply -f -
+build artifact-gc      deploy/Dockerfile.service SERVICE=artifact-gc      SERVICE_PATH=services/artifact-gc/cmd/artifact-gc           VERSION="$tag"
+build cluster-controller deploy/Dockerfile.service SERVICE=cluster-controller SERVICE_PATH=services/cluster-controller               VERSION="$tag"
 build migrate          deploy/Dockerfile.migrate
 build ui               deploy/Dockerfile.ui      VITE_NEXUS_API_BASE= VITE_NEXUS_NAMESPACE=default
 
-components=(api-gateway workflow-manager dag-engine scheduler resource-manager event-service agent migrate ui)
+components=(api-gateway workflow-manager dag-engine scheduler resource-manager event-service agent artifact-gc cluster-controller migrate ui)
 images=()
 for c in "${components[@]}"; do images+=("${prefix}/${c}:${tag}"); done
 

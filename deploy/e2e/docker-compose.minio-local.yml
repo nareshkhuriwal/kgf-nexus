@@ -1,0 +1,28 @@
+# OPTIONAL override for the e2e stack: run the S3 store and its bucket-init job
+# from a locally available image instead of the digest-pinned Silo image that
+# deploy/docker-compose.yml uses by default.
+#
+# Not needed by default. It was written when the stack pinned quay.io MinIO
+# images, which answer 401 to anonymous pulls; the base compose file now pins
+# docker.io/pgsty/silo by digest (F111, docs/OPERATIONS.md §22), which pulls
+# anonymously. It remains for an air-gapped machine or for testing another
+# S3-compatible build. deploy/e2e/e2e-stack.sh adds this file ONLY when
+# E2E_MINIO_IMAGE is set, and prints that it did, so a green e2e run never
+# hides which image it used. The image must contain both the `minio` server and
+# the `mc` client, because the healthcheck and minio-init call `mc`.
+#
+# Such images commonly run as an unprivileged user that cannot write the
+# root-owned named volume (MinIO then exits "file access denied"), or has no
+# writable HOME for mc's config, so both services run as root here. That is
+# acceptable only because this stack is disposable and local.
+#
+# Never used by `make up`, and never in production.
+
+services:
+  minio:
+    image: ${E2E_MINIO_IMAGE:?set E2E_MINIO_IMAGE to a local MinIO image that contains mc}
+    entrypoint: ["minio"]
+    user: "0:0"
+  minio-init:
+    image: ${E2E_MINIO_IMAGE:?set E2E_MINIO_IMAGE to a local MinIO image that contains mc}
+    user: "0:0"

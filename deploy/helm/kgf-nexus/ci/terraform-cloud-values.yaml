@@ -1,0 +1,67 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# The values deploy/terraform/modules/kgf-nexus hands to helm_release for a
+# cloud environment (environments/eks here; aks and gke differ only in the
+# object store), merged in the module's order: the module's own block, the
+# NATS identities, the environment's chart_values, then chart_values_overrides.
+# Platform outputs are placeholders. The overrides exercise keys other
+# features added (image.digests, the cluster controller, artifact GC, HPAs), so
+# validate.sh proves values.schema.json accepts everything Terraform can pass.
+# Keep in step with deploy/terraform/environments/*/main.tf.
+
+# modules/kgf-nexus main.tf
+existingSecret: kgf-nexus-credentials
+nexusNamespace: default
+image:
+  registry: ""
+  repositoryPrefix: kgf-nexus/
+  tag: 0123456789ab
+  pullPolicy: IfNotPresent
+  # chart_values_overrides
+  digests:
+    migrate: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    agent: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+# nats_auth_values (from nats_credentials_dir)
+nats:
+  auth:
+    eventService: { publicKeys: [UEVENTSERVICEKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA] }
+    monitor: { publicKeys: [UMONITORKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA] }
+    tenants:
+      - namespace: default
+        publicKeys: [UAGENTKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA]
+  # environments/eks chart_values
+  storage: { storageClass: gp3 }
+
+# environments/eks chart_values
+postgres:
+  enabled: false
+  host: nexus.cluster-x.eu-west-1.rds.amazonaws.com
+  port: 5432
+  user: nexus
+  database: nexus
+  sslmode: require
+minio:
+  enabled: false
+  endpoint: https://s3.eu-west-1.amazonaws.com
+  bucket: nexus-artifacts-x
+  region: eu-west-1
+  useTLS: true
+
+# chart_values_overrides (terraform.tfvars.example, plus other features' keys)
+logLevel: info
+smtp:
+  host: smtp.example.com
+  port: 587
+  tls: starttls
+  from: KGF Nexus <no-reply@example.com>
+  publicUrl: https://nexus.example.com
+clusterController:
+  enabled: true
+  clusterName: prod
+artifactGC:
+  enabled: true
+  mode: report
+autoscaling:
+  enabled: true

@@ -125,6 +125,12 @@ type API struct {
 
 	// cache is nil unless WithCacheInvalidator was called; its route answers 501.
 	cache CacheInvalidator
+
+	// assignments reads an attempt's assignment for replay; nil means the
+	// store-backed reader. inlineThreshold is the configured ADR-0016 boundary
+	// reported alongside it. See assignment.go.
+	assignments     AssignmentReader
+	inlineThreshold int64
 }
 
 // New builds the REST API.
@@ -245,6 +251,9 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("POST /v1/namespaces/{ns}/runs/{id}/retry", a.guard(authn.ActionWrite, a.retryRun))
 
 	mux.Handle("GET /v1/namespaces/{ns}/attempts/{id}/logs", a.guard(authn.ActionRead, a.attemptLogs))
+	// Replay (ADR-0022): the attempt's resolved inputs and TaskSpec, never its
+	// lease token or a secret value. {run} may be "-".
+	mux.Handle(assignmentRoute, a.guard(authn.ActionRead, a.attemptAssignment))
 
 	// Schedules. Creating one is a write because it creates runs on a timer; the
 	// enable/disable pair and delete are writes for the same reason. The preview is
@@ -306,6 +315,7 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("PUT /v1/namespaces/{ns}/platform/config", a.guard(authn.ActionAdminWrite, a.platformPut))
 	mux.Handle("GET /v1/namespaces/{ns}/platform/plan", a.guard(authn.ActionAdminWrite, a.platformPlan))
 	a.registerClusterRoutes(mux)
+	a.registerQuotaRoutes(mux)
 	a.registerRBACRoutes(mux)
 	a.registerIdentityRoutes(mux)
 
@@ -497,6 +507,24 @@ func (a *API) submitSpec(w http.ResponseWriter, r *http.Request, p authn.Princip
 		// caller authenticated for namespace A store a spec claiming namespace B.
 		writeError(w, http.StatusUnprocessableEntity, "namespace_mismatch",
 			fmt.Sprintf("spec declares namespace %q but was submitted to %q", got, ns))
+		return
+	}
+
+	// dry_run=true validates exactly as a real submit does -- same compile, same
+	// structural and semantic checks, same namespace check -- and stops before
+	// storing anything (CONTRACT-FINDINGS F118). nexusctl `workflow submit
+	// --dry-run` and the SDK's validate_spec have always sent this parameter and
+	// documented it as "validate only; use this in CI", but it was ignored, so
+	// every CI validation registered a new version.
+	if dryRun, _ := strconv.ParseBool(r.URL.Query().Get("dry_run")); dryRun {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"namespace":  ns,
+			"name":       compiled.Proto.GetName(),
+			"spec_hash":  compiled.Hash,
+			"task_count": len(compiled.Proto.GetTasks()),
+			"valid":      true,
+			"dry_run":    true,
+		})
 		return
 	}
 
@@ -841,6 +869,11 @@ func (a *API) createRun(w http.ResponseWriter, r *http.Request, p authn.Principa
 				a.log.ErrorContext(r.Context(), "failed to release idempotency claim after a failed creation",
 					"namespace", ns, "idempotency_key", idemKey, "error", relErr)
 			}
+		}
+		var quota *store.RunQuotaError
+		if errors.As(err, &quota) {
+			writeRunQuotaExceeded(w, quota)
+			return
 		}
 		if errors.Is(err, store.ErrMaxActiveRuns) {
 			writeError(w, http.StatusTooManyRequests, "max_active_runs", err.Error())

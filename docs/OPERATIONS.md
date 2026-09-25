@@ -6,7 +6,7 @@
 and restore and the ordering between the two stores, the restore drills and their
 measured results, point-in-time recovery with pgBackRest and its timed drills
 (§4), what these procedures do *not* cover, the RPO/RTO each approach actually
-delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), and durable task logs: retention and sizing (§19).
+delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), and third-party images and toolchains: what is pinned and why (§22).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -759,16 +759,17 @@ Honest limitations, in order of how much they will surprise you:
   Neither half has been exercised.
 - **A down migration that drops a column destroys data.** Restoring from §3 is
   usually the better answer, at the cost of the RPO in §4.
-- **The backward-compatibility rule is stated but not enforced.**
+- **The backward-compatibility rule is checked at the database layer only.**
   [ADR-0011](adr/0011-microservice-decomposition.md) rule 5 requires services to
   be compatible across one schema version — additive migrations only, a column
-  dropped a release *after* its last reader is gone. Nothing checks this: no test
-  runs the previous service version against the new schema, and `migrate.sh` will
-  happily apply a `DROP COLUMN`. So a non-additive migration breaks the
-  currently-running services between step 2 and step 3 above. For a single-replica
-  dev stack that is a non-issue; for a rolling production deploy it is the thing
-  to get right, and the tooling does not help you — the discipline is yours to
-  keep.
+  dropped a release *after* its last reader is gone. Two checks now exist: the
+  syntactic gate in §6.2, and `make compat-smoke`
+  ([COMPATIBILITY.md §7](COMPATIBILITY.md)), which runs the **previous
+  release's** database integration suite against a database upgraded to this
+  tree's migrations and fails when an old query breaks on the new schema. It does
+  not run the previous *service binaries* on the wire, and `migrate.sh` will still
+  apply a `DROP COLUMN` if you let it. A non-additive migration that slips past
+  both breaks the running services between step 2 and step 3 above.
 
 ---
 
@@ -1096,6 +1097,7 @@ Where the DSN comes from in each supported way of running Nexus:
 | `make seed`, `make migrate-*`, `make artifact-gc`, `make check-refs` | The Makefile's `DATABASE_URL`, defaulting to the compose stack on `localhost:$(NEXUS_POSTGRES_PORT)` (55433). Override it to target another database. |
 | `go run ./services/<svc>/...` by hand | Export one of the four names yourself, e.g. `export DATABASE_URL='postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable'` for the compose stack. |
 | Integration tests | `NEXUS_TEST_DATABASE_URL` only (`internal/testdb`); tests skip without it and never read the service spellings. |
+| Integration tests (object store) | `NEXUS_TEST_S3_ENDPOINT`, `NEXUS_TEST_S3_ACCESS_KEY_ID`, `NEXUS_TEST_S3_SECRET_ACCESS_KEY`, optional `NEXUS_TEST_S3_BUCKET` / `NEXUS_TEST_S3_USE_TLS` only (`internal/tests3`). No default endpoint; without the endpoint the tests skip with `skipping integration test: no test S3 store`, which CI treats as a failure; an endpoint without both keys fails. They never read `NEXUS_S3_*`, `RESULT_STORE_*` or `MINIO_ROOT_*`. |
 
 `examples/run-suite.sh` and `tests/chaos` drive an already-running stack
 (Kubernetes or compose respectively) and do not start services themselves, so
@@ -1639,9 +1641,15 @@ Design and safety argument: docs/CLUSTER-SCALING.md. This section is the runbook
 - The worker Deployment follows `deploy/k8s/cluster-controller/base/worker-deployment.example.yaml`:
   no hostname override, CPU/memory requests, `terminationGracePeriodSeconds` at
   least `NEXUS_DRAIN_GRACE`, no HPA of its own.
-- The cluster-controller image built with
-  `docker build -f deploy/Dockerfile.service --build-arg SERVICE=cluster-controller .`
-  and pinned by digest (`kustomize edit set image`).
+- The cluster-controller image, pinned by digest. The release pipeline builds
+  and pushes `<acr>/nexus/cluster-controller`; `deploy/scripts/cluster-controller-overlay.sh`
+  renders `base` or `apply` with that digest (the `kustomize edit set image`
+  retarget, as a throwaway overlay) and fails if any container would run
+  something else. `templates/deploy-aks.yml` runs it when its
+  `clusterController` parameter is `base` or `apply` (default `none`). By hand:
+  `NAMESPACE=kgf-nexus deploy/scripts/cluster-controller-overlay.sh base <acr>/nexus/cluster-controller@sha256:<digest> | kubectl apply -f -`.
+  On a local kind/Docker Desktop cluster, `make k8s-dev-images` builds and loads
+  `kgf-nexus/cluster-controller:<tag>`; apply it with `ALLOW_TAG=1` and that tag.
 
 ### 12.2 Plan mode (default)
 
@@ -2073,7 +2081,7 @@ already internal-only.
 | resource-manager | health | `RM_HTTP_ADDR` (`:8082`) | `127.0.0.1:19105` | `metrics` → 8080 |
 | event-service | its internal HTTP API port | `HTTP_ADDR` (`:8085`) | `127.0.0.1:19106` | `metrics` → 8080 |
 | cluster-controller | health | `CONTROLLER_HTTP_ADDR` (`:8090`) | — | pod annotation, port 8090 |
-| agent | own listener: `/metrics`, `/healthz` | `NEXUS_METRICS_ADDR` / `-metrics-addr` (`127.0.0.1:8089`; `off` disables) | `127.0.0.1:19120-19122` | pod port `metrics` 8089 (PodMonitor) |
+| agent | own listener: `/metrics`, `/healthz`, `/readyz` (503 until registered) | `NEXUS_METRICS_ADDR` / `-metrics-addr` (`127.0.0.1:8089`; `off` disables) | `127.0.0.1:19120-19122` | pod port `metrics` 8089 (PodMonitor) |
 | artifact-gc (batch job) | optional, only while the pass runs | `-metrics-addr` / `ARTIFACT_GC_METRICS_ADDR` (off) | — | — |
 
 The agent binds loopback by default, so an agent on a laptop or shared host
@@ -2210,6 +2218,8 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_agent_sessions_total` | C | — | agent | Registrations. More than 1 per process means the control plane forced a re-registration |
 | `nexus_agent_advertised_capacity` | G | resource | agent | Capacity advertised for scheduling, which the runtime does not necessarily enforce |
 | `nexus_agent_result_report_failures_total` | C | — | agent | Reports not delivered. The WAL retains them |
+| `nexus_agent_registration_attempts_total` | C | result (ok/retryable_error/permanent_error) | agent | Register calls. An agent that starts before the gateway retries `Unavailable`, `DeadlineExceeded`, `ResourceExhausted`, `Aborted` and `Internal` with capped exponential backoff (0.5 s to 30 s, full jitter) and stays not-ready meanwhile; a rising `retryable_error` with no `ok` means the gateway is unreachable or its auth backend is down. `permanent_error` (bad API key, wrong role, invalid request) exits the process with a message naming the fix |
+| `nexus_agent_registered` | G | — | agent | 1 while the agent holds a registered session; the `/readyz` condition |
 | `nexus_artifact_gc_last_run_objects` | G | disposition | artifact-gc | Last sweep: scanned, live_refs, reachable, too_young, orphan, deleted, delete_error |
 | `nexus_artifact_gc_last_run_orphan_bytes` | G | — | artifact-gc | Reclaimable bytes found |
 | `nexus_artifact_gc_last_run_duration_seconds` | G | — | artifact-gc | Pass duration |
@@ -2414,3 +2424,548 @@ the reason). They are never silently omitted.
   `combined`.
 - Live tail is poll-based (≈ flush interval + 1 s), not a pipe.
 - Timestamps are the agent's clock (informational; ordering is by line number).
+
+---
+
+## 20. Installing with Helm
+
+The chart is `deploy/helm/kgf-nexus` (chart 0.2.0). One release per Kubernetes
+namespace: Services have fixed names (`api-gateway`, `postgres`, …) exactly as
+compose does. `deploy/terraform` drives it for the environments it owns; this
+section is for installing it directly. The design documents behind each part
+are docs/TLS.md (mTLS), docs/CLUSTER-SCALING.md (controller), §7.7/§19.2
+(artifact GC) and ADR-0018 (scheduler scaling).
+
+### 20.1 Before you install
+
+| Need | Why | Check |
+|---|---|---|
+| Kubernetes ≥ 1.29 | `kubeVersion` in Chart.yaml; `matchLabelKeys` in spread constraints | `kubectl version` |
+| Images for **one immutable tag**: api-gateway, workflow-manager, dag-engine, scheduler, resource-manager, event-service, agent, migrate, ui, **artifact-gc**, **cluster-controller** | every component renders `<registry><prefix><component>:<tag>`; the last two are new in 0.2.0 | the release pipeline builds all eleven (`.azure-pipelines/templates/images.yml`); locally `make k8s-dev-images` |
+| A credentials Secret (`existingSecret`) | no credential is ever rendered into a manifest | keys `postgres-password`, `minio-root-user`, `minio-root-password`, `worker-api-key`, optional `admin-api-key` |
+| NATS identities (`nats.auth`) | the chart refuses an unauthenticated broker | §11.7; `nats.auth.mode=none` only for a throwaway cluster |
+| metrics-server | HPAs (`autoscaling.enabled`) | `kubectl get apiservice v1beta1.metrics.k8s.io` |
+| cert-manager (v1.18+) | `tls.enabled` with `tls.certManager.enabled` | `kubectl get crd certificates.cert-manager.io` |
+| A PriorityClass | only if `placement.priorityClassName` is set | `kubectl get priorityclass` |
+
+### 20.2 Install, upgrade, uninstall
+
+```sh
+kubectl create namespace nexus
+kubectl -n nexus create secret generic nexus-credentials --from-env-file=creds.env   # generated elsewhere
+helm install nexus deploy/helm/kgf-nexus -n nexus -f my-values.yaml --wait --wait-for-jobs --timeout 15m
+kubectl -n nexus wait --for=condition=Ready pod -l 'app.kubernetes.io/component notin (migrate,bootstrap,minio-init,artifact-gc)' --timeout=5m
+```
+
+- **Do not rely on `helm --wait` alone.** With Helm 4 the release reported
+  `deployed` while an agent pod was still crash-looping (§20.8). Wait on pod
+  readiness as above.
+- **Upgrade with `-f my-values.yaml` or `--reset-then-reuse-values`, never
+  `--reuse-values`.** `--reuse-values` replays the previous release's computed
+  values and drops this version's new defaults; the chart detects the missing
+  sections and refuses with that advice rather than failing on a nil value.
+- Upgrade order is the §6.3 order: back up, then `helm upgrade` (the migrate Job
+  runs first; every service waits for it in `wait-for-schema`).
+- The migrate/bootstrap/minio-init Job names hash the image tag, the chart
+  version, the pinned `image.digests.migrate` (F112) and `minio.mcImage`, so a
+  chart-only upgrade, a re-pushed image under the same tag or a new client image
+  re-runs them (all three are idempotent) instead of failing on an immutable Job
+  template (F113).
+- `helm uninstall` keeps the StatefulSets' PVCs (your data) and, because
+  cert-manager does not delete them, the `nexus-*-tls` Secrets. Delete them
+  deliberately, or delete the namespace.
+
+### 20.3 Values reference
+
+Everything before 0.2.0 is unchanged and still accepted. The keys below are the
+ones an operator sets; `values.yaml` documents each one inline, and
+`values.schema.json` rejects wrong types, unknown enum values, malformed
+durations, a `latest` tag, and any misspelt **top-level** key at install time.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `existingSecret` | — (required) | Secret with the credentials in §20.1 |
+| `image.tag` | — (required) | immutable tag for every Nexus image; `latest` is refused |
+| `image.registry`, `image.repositoryPrefix`, `image.pullSecrets` | `""`, `kgf-nexus/`, `[]` | image location |
+| `image.digests.<component>` | `{}` | `sha256:<64 hex>` per image; renders `<ref>:<tag>@<digest>`. The release pipeline writes it (`deploy/scripts/helm-image-digests.py`, §22) |
+| `nexusNamespace` | `default` | the Nexus tenant the agents serve and bootstrap creates |
+| `postgres.enabled` / `.host` / `.sslmode` | `true` / `postgres` / `disable` | `false` + host for a managed database (use `verify-full`) |
+| `postgres.pitr.*` | off | pgBackRest archiving, §4 |
+| `minio.enabled` / `.endpoint` / `.useTLS` | `true` / `http://minio:9000` / `false` | object store |
+| `minio.image` / `.mcImage` | digest-pinned `pgsty/silo` | in-cluster S3 server and bucket-init client, §22 |
+| `nats.enabled`, `nats.auth.*`, `nats.tls.*` | on, nkey, off | event bus, §11 |
+| `services.<svc>.replicas` / `.resources` | 1 / `serviceDefaults` | per-service sizing; `<svc>` ∈ apiGateway, workflowManager, dagEngine, resourceManager, eventService |
+| `services.<svc>.autoscaling` | merged over `autoscaling` | per-service HPA override (not resourceManager) |
+| `services.<svc>.podDisruptionBudget` | merged over `podDisruptionBudget` | per-service PDB override |
+| `schedulers[]` `{name, queue, replicas, resources, autoscaling, podDisruptionBudget}` | `scheduler`/default, `scheduler-gpu`/gpu | one Deployment per queue; at least one required |
+| `agents[]` | one CPU agent | worker Deployments; `podDisruptionBudget` per entry |
+| `ui.replicas` | 1 | console replicas |
+| `placement.priorityClassName` | `""` | PriorityClass for every Nexus pod (must exist) |
+| `placement.topologySpread.*` | on, zone then hostname, `ScheduleAnyway` | spread replicas; `DoNotSchedule` makes it a hard rule |
+| `placement.nodeSelector` / `.tolerations` / `.affinity` | empty | applied to every Nexus Deployment and the GC job |
+| `podDisruptionBudget.enabled` / `.maxUnavailable` / `.minAvailable` | on / 1 / null | a PDB for every Deployment whatever its size; `minAvailable ≥ replicas` is refused |
+| `autoscaling.enabled` / `.minReplicas` / `.maxReplicas` / `.targetCPUUtilizationPercentage` / `.targetMemoryUtilizationPercentage` / `.behavior` | off / 2 / 6 / 70 / null / 1 pod per 60 s down, 300 s window | HPAs for the four stateless services |
+| `tls.enabled` / `.requireClientCert` / `.requirePeerTLS` / `.reloadInterval` / `.caBundleConfigMap` | off / true / true / 10s / `""` | gRPC mTLS, §20.4 |
+| `tls.certManager.enabled` / `.issuerRef` / `.duration` / `.renewBefore` / `.gatewayExtraDnsNames` / `.natsLeaves` | on / self-signed bootstrap / 720h / 240h / [] / false | leaf issuance |
+| `clusterController.enabled` / `.clusterName` / `.replicas` / `.interval` / `.workerNamespaces` / `.observeNodes` | off / — / 2 / 15s / [release ns] / true | §20.6 |
+| `clusterController.apply.enabled` / `.expectedClusterUID` | off / `""` | apply mode, §20.6 |
+| `artifactGC.enabled` / `.schedule` / `.timeZone` / `.mode` / `.confirmDelete` | on / `17 3 * * *` / `""` / report / false | §20.7 |
+| `artifactGC.grace` / `.logRetention` / `.maxObjects` / `.prefix` / `.pushgatewayUrl` | 24h / `""` / 10000 / `""` / `""` | sweep tuning and metrics |
+| `metrics.serviceMonitor.enabled` / `.podMonitor.enabled` | off / follows | prometheus-operator objects, §17 |
+| `gateway.*` | off | Gateway API routes |
+
+`deploy/helm/kgf-nexus/ci/*-values.yaml` are three complete, validated
+examples: minimal, every feature on, and the production shape (managed database
+and object store, external issuer, HPAs, `minAvailable` PDBs).
+
+### 20.4 mTLS between services
+
+`tls.enabled=true` wires every gRPC hop (docs/TLS.md §3 variables): each
+control-plane service serves and dials with its leaf `nexus-<component>-tls`
+(the five services; all schedulers share `nexus-scheduler-tls`), agents and the
+cluster controller dial with client-only leaves, every server requires a client
+certificate, and `NEXUS_REQUIRE_TLS=1` turns a missing certificate into a
+startup failure. Secrets are mounted without `subPath`, so renewals are picked
+up in place (TLS §5.0). REST, probes and `/metrics` stay HTTP.
+
+- **Issuer.** Production: apply `deploy/k8s/cert-issuer.yaml` once (its CA key
+  lives in the cert-manager namespace) and set
+  `tls.certManager.issuerRef: {name: nexus-internal-ca, kind: ClusterIssuer}`.
+  With no issuer name the chart bootstraps a self-signed CA **in the release
+  namespace** — anyone who can read Secrets there can mint identities, so this
+  is for test clusters only (NOTES.txt says so after install).
+- **Trust bundle.** For a CA key rotation with an overlap window, publish the
+  trust-manager Bundle to a ConfigMap and set `tls.caBundleConfigMap` (§9.4).
+- **NATS.** The agents apply `NEXUS_REQUIRE_TLS` to the broker connection too,
+  so peer TLS with a plaintext broker crash-loops them. The chart refuses that
+  combination. Set `tls.certManager.natsLeaves=true` and
+  `nats.tls: {enabled: true, secretName: nexus-nats-tls, clientSecrets: {eventService: nexus-event-service-tls, agent: nexus-agent-tls}}`.
+- **External agents** dial `api-gateway-external`: add that name to
+  `tls.certManager.gatewayExtraDnsNames` and enrol the agents per TLS §5.5.
+  During that enrolment `tls.requireClientCert=false` is the documented bridge.
+- **BYO certificates:** `tls.certManager.enabled=false` and create the
+  `nexus-<component>-tls` Secrets yourself (SANs as in
+  `deploy/k8s/cert-certificates.yaml`).
+
+### 20.5 Autoscaling, disruption budgets, placement
+
+- **HPAs** (`autoscaling.enabled`) cover api-gateway, workflow-manager,
+  dag-engine and event-service. Their correctness does not depend on replica
+  count (CAS reconcile, `SKIP LOCKED` relay and timers). With an HPA the
+  Deployment has no `replicas`, so an upgrade never resets the autoscaler.
+  Gateway rate limits are per replica (§16.6): N replicas admit up to N× a
+  client's rate.
+- **resource-manager** has no HPA and the chart refuses one.
+- **Schedulers:** not autoscaled by default. ADR-0018 measured claim cost as
+  linear in a queue's PENDING backlog and bound by **Postgres** CPU, not the
+  scheduler's: 1→16 replicas gives ~6× at a 1k backlog, ~5× at 10k, and mostly
+  adds latency at 100k. CPU on the scheduler pod is therefore the wrong signal.
+  Size `schedulers[].replicas` (2–4 per busy queue) and watch
+  `nexus_claim_seconds` / `nexus_pending_attempts` once they exist.
+  `schedulers[].autoscaling` exists for an operator who has measured their own
+  curve; the cluster controller reports scheduler HPAs either way.
+- **Workers** are scaled by the cluster controller (apply mode) or by hand.
+  Never put an HPA on a worker Deployment the controller is bound to
+  (CLUSTER-SCALING, "Who scales what").
+- **PDBs** exist for every Deployment from one replica up. `maxUnavailable: 1`
+  never blocks a node drain; `minAvailable` is safer only once replicas > it,
+  and the chart refuses a budget that would block every drain. With an HPA the
+  check uses `minReplicas`.
+- **Placement:** zone-then-hostname spread with `ScheduleAnyway` by default.
+  `DoNotSchedule` needs nodes that carry `topology.kubernetes.io/zone`; on a
+  cluster without zone labels, drop that key or pods stay Pending.
+
+### 20.6 Cluster controller via Helm
+
+`clusterController.enabled=true` with `clusterName` installs the ported
+`deploy/k8s/cluster-controller/base`: a ServiceAccount, two replicas with a Lease
+(`nexus-cluster-controller-<cluster>`), a read-only Role in the release
+namespace (leases get/create/update, Deployments and HPAs read), a read-only Role
+in each `workerNamespaces` entry (Deployments, pods, quotas, Jobs), and one
+read-only ClusterRole for Nodes plus `get` on the `kube-system` Namespace only.
+It is **observe-only**: `NEXUS_CONTROLLER_ALLOW_APPLY=false` and no mutating
+permission anywhere.
+
+1. Register the cluster first (console, or `PUT
+   /v1/namespaces/<ns>/platform/clusters/<name>` with `provider`,
+   `control_plane_namespace` = the release namespace, `mode: plan`). Until then
+   the leader logs `cluster not registered` and, after four intervals, reports
+   NotReady — which is the alert you want.
+2. Confirm in the console (Live cluster): a fresh report, effective mode `plan`,
+   the observed kube-system UID, the scheduler Deployments and HPAs.
+3. **Apply** needs all three opt-ins (CLUSTER-SCALING, "Apply is three
+   independent opt-ins"): the registry entry in apply mode with the UID
+   (console), **and** `clusterController.apply.enabled=true` with
+   `apply.expectedClusterUID` set to that UID. The chart then sets the process
+   flag and binds the apply Role (`deployments/scale` update, `pods` patch,
+   worker namespaces only). On a real install/upgrade the chart compares the
+   UID with the live cluster and refuses a mismatch, so values written for one
+   cluster cannot enable apply on another. (`helm template` cannot look it up.)
+4. Back out: console **Switch to plan**, then `apply.enabled=false` (drops the
+   flag and the Role), then `clusterController.enabled=false`. §12.4 applies.
+
+The scheduler Deployments carry `app.kubernetes.io/component=scheduler` and
+`app.kubernetes.io/part-of=kgf-nexus` on the Deployment object (pods keep their
+per-queue component), which is the selector the controller uses; before 0.2.0
+the chart's schedulers were invisible to it (F113).
+
+### 20.7 Artifact GC CronJob
+
+Report-only by default (`artifactGC.mode=report`): the nightly job logs what it
+*would* collect (the §7.7 summary) and deletes nothing. To collect, set **both**
+`mode: delete` and `confirmDelete: true` — they map to the binary's
+`-delete -i-understand-this-deletes-data`, and the chart refuses `delete`
+without the confirmation. `logRetention` (e.g. `720h`) enables §19.2 task-log
+retention; outputs are never time-expired. `pushgatewayUrl` pushes the final
+metrics under `job=artifact-gc` (alert on a stale
+`nexus_artifact_gc_last_success_timestamp_seconds`, §17). `concurrencyPolicy: Forbid`
+and the bounded `maxObjects` mean a backlog drains over several nights.
+
+```sh
+kubectl -n nexus create job --from=cronjob/artifact-gc artifact-gc-manual-$(date +%s)   # run now
+kubectl -n nexus logs job/artifact-gc-manual-<ts>                                        # read the summary
+```
+
+Run report mode for at least a week and read the summaries before enabling
+delete.
+
+### 20.8 What was verified (2026-09-25, docker-desktop, Kubernetes v1.34.3)
+
+Static, `deploy/helm/validate.sh` (Helm v4.1.1, kubeconform, K8s 1.29.0
+schemas plus the CRDs catalog for cert-manager and prometheus-operator):
+`helm lint --strict` and strict kubeconform on all three `ci/` values files
+(38, 73 and 47 objects, all valid), and 15 bad-values cases each refused with the
+expected message (misspelt section, `latest` tag, GC delete without confirmation,
+controller without a name, apply without a UID, a drain-blocking PDB, HPA
+min > max, HPA on resource-manager, bad duration, no schedulers, peer TLS with a
+plaintext broker, …).
+
+Live, in namespace `nexus-w2c-helm` (release `nexus-w2c`, images `46f491dfabb5`,
+values: mTLS with the self-signed bootstrap CA and NATS TLS, HPAs 1–3, the
+controller enabled):
+
+| Check | Result |
+|---|---|
+| Every Deployment/StatefulSet pod Ready | 14/14 pods Ready (two controller replicas); migrate, bootstrap, minio-init Complete |
+| Certificates | 10/10 Ready; every service logged `TLS material loaded` (server and client roles) |
+| mTLS end to end | agent registered over mTLS and connected to NATS with TLS; `hello_dag` submitted with `nexusctl` ran to SUCCEEDED |
+| Controller observe-only | Lease held by one replica, both Ready; registry `plan` → effective mode `plan`, observed revision 1, no error; observed 4 HPAs, both scheduler Deployments, the Node |
+| Controller RBAC | `kubectl auth can-i --as=<sa>`: update deployments/scale no, patch pods no, get secrets no, anything in another namespace no, list nodes yes |
+| Apply guard | `--dry-run=server` with a wrong `expectedClusterUID` refused with the real UID in the message; with the right one the apply Role rendered |
+| HPAs | 4 created; `ScalingActive` reported by the controller |
+| Artifact GC | `kubectl create job --from=cronjob/artifact-gc` completed; DRY RUN summary, 0 deleted |
+| Upgrade from the previous chart (origin/main, 0.1.0) | `--reuse-values` refused with the §20.2 advice; `--reset-then-reuse-values` upgraded in place, existing overrides kept (2 gateway replicas), PDBs and CronJob added |
+
+Observed and not fixed here: an agent that starts before the gateway is
+reachable exits and is restarted by the kubelet (2 restarts on a cold install)
+instead of retrying its first registration; and Helm 4's `--wait` returned while
+a pod was crash-looping, hence the readiness wait in §20.2.
+
+Not verified: a managed database or object store, a multi-node or multi-zone
+cluster (spread and PDB behaviour under a real drain), HPA scale-out under load,
+apply mode against bound worker Deployments via the chart (the controller's own
+tests cover apply, §12.6), a trust-manager bundle, and external agents over the
+external gRPC Service.
+
+### 20.9 Production checklist
+
+- [ ] `image.tag` is a release tag or SHA whose eleven images exist in your
+      registry, ideally referenced by digest; `image.pullPolicy: IfNotPresent`.
+- [ ] `existingSecret` created from a secret manager, not a shell history; the
+      Postgres password is URL-safe.
+- [ ] `postgres.enabled=false` with a managed database, `sslmode: verify-full`,
+      and the provider's PITR (§4); or `postgres.pitr.enabled` with an off-cluster
+      repository whose cipher passphrase is stored outside the cluster.
+- [ ] `minio.enabled=false` with a managed bucket and `useTLS: true`; the
+      artifact backup of §7 in place.
+- [ ] `nats.auth.mode: nkey` with keys generated off-cluster (§11.7), and
+      `nats.tls` if the network is not trusted.
+- [ ] `tls.enabled` with `issuerRef` naming a ClusterIssuer whose CA key is
+      outside the release namespace; `requireClientCert` and `requirePeerTLS`
+      true; expiry alerts (`deploy/k8s/cert-alerts.yaml`, §9.3) loaded.
+- [ ] At least 2 replicas (or an HPA with `minReplicas: 2`) for api-gateway,
+      workflow-manager, dag-engine, event-service and resource-manager;
+      2 schedulers per busy queue; PDBs on; `placement.topologySpread` on and a
+      `priorityClassName` above batch workloads.
+- [ ] metrics-server present if `autoscaling.enabled`; `metrics.serviceMonitor`
+      on where prometheus-operator runs; the §17 alerts loaded.
+- [ ] `artifactGC` in report mode, summaries read, then delete mode with a
+      grace no shorter than your longest task; `pushgatewayUrl` set.
+- [ ] Cluster controller observe-only first; apply only after a representative
+      period of plan-only events (§12.3), with registry ceilings set.
+- [ ] `mailpit.enabled=false`; `smtp.*` set with `publicUrl`.
+- [ ] Rolling upgrades follow §6.3 and COMPATIBILITY.md: migrations are
+      expand/contract, `make compat-smoke` passed for the release, upgrade with
+      `-f` values, then wait on pod readiness.
+- [ ] `deploy/helm/validate.sh` passes on your values file (copy it into
+      `ci/` or run `helm lint --strict -f`).
+
+---
+
+## 21. Namespace quotas and usage metering
+
+Design: [ADR-0021](adr/0021-namespace-quotas-and-usage-metering.md).
+Migration 0027. Findings F122 (measured metrics were dropped) and F123 (quotas
+were documented, not implemented).
+
+### 21.1 What a quota does
+
+| Limit (`quotas.*`) | Enforced | What happens when it is reached |
+|---|---|---|
+| `max_inflight_attempts` | in the dispatch claim | The attempt stays PENDING with `pending_reason = quota_exceeded: inflight_attempts (used X of Y)` and runs when one of the namespace's attempts ends. |
+| `max_cpu_millis`, `max_memory_bytes`, `max_gpu_count`, `max_custom.<name>` | in the dispatch claim | Same, with the dimension named (`cpu_millis`, `memory_bytes`, `gpu_count`, `custom:<name>`). An attempt that does not request a resource is never held back by that resource's quota. If ONE attempt asks for more than the limit, the reason adds `request R exceeds the quota`: it will never run until the quota is raised. |
+| `max_active_runs` | at run creation | `POST .../runs` answers `429 namespace_quota_exceeded` (`dimension: active_runs`). |
+| `max_runs_per_hour` | at run creation (sliding 60 min, database clock) | `429 namespace_quota_exceeded` with `Retry-After`. |
+| `storage_soft_limit_bytes` | never (reported) | Shown against measured storage. Measured = durable task-log bytes only; result-store artifacts are not metered yet. |
+
+**0 or absent means unlimited**, and every namespace starts unlimited, so
+applying 0027 changes nothing until someone sets a quota. Quotas count
+**requested** resources of DISPATCHED and RUNNING attempts on every queue of the
+namespace, not measured use. A schedule tick refused by a run quota is not
+lost: it is retried on the next scheduler pass, as for `max_active_runs` on a
+workflow. A held-back attempt spends no retry budget; if it has a
+`schedule_to_start` deadline, that deadline still runs and can time it out,
+which is the correct signal that the namespace is under-provisioned.
+
+### 21.2 Setting quotas
+
+```sh
+# Read (quotas.view): limits, current usage per dimension, and the revision.
+curl -s -H "Authorization: Bearer $TOKEN" $API/v1/namespaces/$NS/quotas
+
+# Replace (quotas.manage). The revision is required: a stale one gets 409.
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  $API/v1/namespaces/$NS/quotas -d '{
+    "revision": 4,
+    "quotas": {"max_inflight_attempts": 200, "max_cpu_millis": 256000,
+               "max_memory_bytes": 1099511627776, "max_gpu_count": 8,
+               "max_custom": {"license": 10},
+               "max_active_runs": 50, "max_runs_per_hour": 600,
+               "storage_soft_limit_bytes": 0, "locked": false}}'
+```
+
+The console has the same under **Govern → Quotas & usage**. Quotas share the
+namespace platform policy's revision: saving quotas makes an open
+Infrastructure editor's next save answer 409 (reload), and vice versa. The
+Infrastructure route keeps stored quotas when a client omits them and refuses
+(400) a request that changes them.
+
+**Locking.** Quotas start unlocked: a namespace administrator with
+`quotas.manage` can set and change them. A platform operator (a session of a
+user in `platform_operators`) can set `"locked": true`; after that a namespace
+administrator may only lower limits or add new ones (403 `quotas_locked`, with
+the list of what would have been loosened). Only an operator can lock, unlock
+or loosen. Use the lock for tenants whose limits are part of a commercial plan.
+
+Every accepted change writes a `quota.update` audit row with `before`,
+`after`, the new revision and, when applicable, what was loosened.
+
+### 21.3 Permissions
+
+| Permission | Grants | Default roles |
+|---|---|---|
+| `quotas.view` | GET quotas | Viewer, Workflow Operator/Developer, Infrastructure Operator, Auditor, Administrator; legacy reader keys |
+| `quotas.manage` | PUT quotas | Infrastructure Operator, Administrator; legacy admin keys |
+| `usage.view` | GET usage | Infrastructure Operator, Auditor, Administrator; legacy admin keys (not reader keys: usage is cost data) |
+
+`GET /v1/platform/usage` (every namespace, one bucket each) needs a platform
+operator session.
+
+### 21.4 Usage ledger
+
+`usage_ledger` has one row per attempt that held a reservation, written in the
+same transaction as the attempt's terminal transition: worker report
+(SUCCEEDED, FAILED, TIMED_OUT, LOST on INDETERMINATE), lease expiry or worker
+death (LOST), cancel of a DISPATCHED/RUNNING attempt (CANCELLED). An attempt
+that never dispatched has no row. `UNIQUE(attempt_id)` makes duplicates
+impossible. Owned by the scheduler (INSERT only); every service can read it;
+no service can UPDATE or DELETE it, and a trigger refuses UPDATE even for the
+table owner. Rows are not foreign-keyed to runs, so deleting a run keeps its
+usage.
+
+Quantities: `reserved_seconds` = ended − dispatched (what the reservation
+held); `cpu_core_seconds` = cpu_millis/1000 × reserved_seconds;
+`memory_gib_seconds` = memory_bytes/2^30 × reserved_seconds; `gpu_seconds` =
+gpu_count × reserved_seconds; `wall_seconds` = ended − started. All exact
+`NUMERIC`. `measured_*` hold the worker's ExecutionMetrics when the attempt
+ended by a worker report, NULL otherwise.
+
+```sh
+# Rollups (usage.view). group_by: day | queue | pool | worker | executor | outcome | none.
+# from/to: RFC 3339 or YYYY-MM-DD (default: last 30 days); range <= 400 days;
+# limit <= 500; follow next_cursor.
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$API/v1/namespaces/$NS/usage?group_by=day&from=2026-09-01&to=2026-10-01"
+```
+
+An attempt counts in the UTC day it **ended**; a long attempt crossing
+midnight is attributed wholly to the later day.
+
+### 21.5 Export to a billing system
+
+Two paths, both at-least-once; **deduplicate on `attempt_id`**:
+
+- **Push.** Each ledger row writes an outbox row (topic `usage_recorded`) in
+  the same statement. The event-service relay publishes it to
+  `nexus.usage.recorded.<namespace>` in stream `NEXUS_USAGE` (file storage, 30
+  days, 4 GiB). The message carries `ledger_id`, `attempt_id`, tenant,
+  namespace, run, outcome, queue, pool, `ended_at` and the four derived
+  quantities. The relay's NATS identity needs publish on `nexus.usage.>` and
+  the JetStream INFO/CREATE API for `NEXUS_USAGE`; both renderings
+  (`deploy/nats/nexus-nats-auth.sh`, the Helm `nats-config.yaml`) grant it.
+  Re-render the broker authorization when upgrading: an old authorization makes
+  every usage publish fail, the rows stay unpublished in the outbox, and
+  nothing else is affected.
+- **Pull.** `internal/metering` (`Exporter`, `Cursor`, `Pump`) reads the
+  ledger by id after a persisted cursor. Rows younger than 30 s are held back
+  so a transaction that committed late cannot be skipped. The ledger is the
+  record of truth; replay the bus from it.
+
+### 21.6 Retention
+
+The ledger grows by one row per dispatched attempt (≈ 400 bytes with
+indexes). There is no automatic pruning: it is billing data. Export first, then
+delete as the database owner:
+
+```sql
+\copy (SELECT * FROM usage_ledger WHERE ended_at < '2026-01-01') TO 'usage-2025.csv' CSV HEADER
+DELETE FROM usage_ledger WHERE ended_at < '2026-01-01';   -- as the table owner
+```
+
+The down migration drops the ledger. Export it before any rollback.
+
+### 21.7 Metrics and alerts
+
+| Series | Meaning |
+|---|---|
+| `nexus_scheduler_quota_blocked_total{queue,dimension}` | Claims that held an attempt back for a quota. Counted per examination, so one waiting attempt counts once per claim that looks at it; use `rate()` as "namespaces are pressing their quotas", not as a count of attempts. Custom resources are one label value, `custom`. |
+| `nexus_scheduler_usage_ledger_writes_total{queue,outcome}` | Ledger rows written. Should track `rate(nexus_scheduler_attempts_dispatched_total)` over hours; a sustained gap means terminal transitions are failing. |
+
+Run-level refusals are HTTP 429 with `error: namespace_quota_exceeded` in the
+gateway's request metrics and logs.
+
+Suggested alert: `sum(rate(nexus_scheduler_quota_blocked_total[15m])) > 0`
+for 1 h on a namespace that should not be quota-bound, and
+`rate(nexus_scheduler_usage_ledger_writes_total[1h]) == 0` while
+`rate(nexus_scheduler_attempts_dispatched_total[1h]) > 0`.
+
+### 21.8 Cost on the dispatch path, and rollback
+
+A namespace **without** concurrent quotas pays one indexed lookup per claim
+(returning no row) and takes no lock. A namespace **with** them serializes its
+own dispatches across replicas: one claim transaction at a time per namespace
+holds its quota lock, and on the push path a namespace being claimed by another
+replica is skipped for that cycle. Each quota-bound claim reads the namespace's
+in-flight rows through `idx_attempts_inflight_tenant`, O(in-flight attempts
+of that namespace).
+
+**Measured** (`tests/bench`, `TestDispatchCeiling`; laptop, Postgres 16.15 · client GOMAXPROCS=14 · 64 workers;
+64 workers; 1,500 dispatches per cell, 500 at the 1,000 backlog). "Before" is
+`origin/main` built from a clean export; "after" is this branch, once with the
+namespace unlimited and once with quotas set far above what the cell reaches
+(`NEXUS_BENCH_QUOTA=true`), so every claim takes the full quota path without
+being refused. Both against the same database with 0027 applied, three
+builds alternated, two rounds, mean of the two:
+
+| mode | backlog | replicas | before: claims/s | before: p50 / p99 | after, unlimited ns: claims/s | p50 / p99 | after, quota-bound ns: claims/s | p50 / p99 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| pull | 1000 | 1 | 100 | 8.9 / 30.4 ms | 162 | 5.6 / 14.2 ms | 144 | 6.1 / 20.0 ms |
+| pull | 1000 | 4 | 432 | 8.9 / 28.7 ms | 522 | 6.7 / 27.7 ms | 148 | 24.0 / 70.2 ms |
+| pull | 10000 | 1 | 184 | 4.8 / 13.6 ms | 159 | 5.2 / 22.6 ms | 142 | 6.3 / 17.2 ms |
+| pull | 10000 | 4 | 485 | 6.6 / 50.5 ms | 509 | 6.8 / 22.9 ms | 138 | 28.5 / 61.0 ms |
+| push | 1000 | 1 | 105 | 8.1 / 29.3 ms | 108 | 8.6 / 23.5 ms | 102 | 8.9 / 19.1 ms |
+| push | 1000 | 4 | 179 | 19.0 / 54.7 ms | 169 | 20.0 / 59.8 ms | 108 | 23.1 / 97.7 ms |
+| push | 10000 | 1 | 26 | 35.0 / 83.2 ms | 26 | 36.4 / 95.7 ms | 26 | 35.6 / 115.0 ms |
+| push | 10000 | 4 | 64 | 50.2 / 185.2 ms | 55 | 59.6 / 238.3 ms | 51 | 61.4 / 252.8 ms |
+
+Reading it: for an **unlimited** namespace the differences are inside the
+run-to-run noise of this machine (single cells moved by 30–60 % between rounds
+of the same build); the one extra lookup is not visible against the ADR-0018
+candidate sort. For a **quota-bound** namespace the pull path with several
+replicas is capped at about 140 dispatches/s for that namespace, and p50
+includes the wait for the namespace lock: that is the serialization the
+design chooses (ADR-0021, Negative), and it does not apply to other
+namespaces. The bench never completes work, so the quota path's usage read
+covered up to 1,500 in-flight attempts by the end of each cell, which is a
+pessimistic case for the O(in-flight) read. Reproduce with
+`make bench-pg`, `NEXUS_BENCH_QUOTA=true make bench-dispatch`.
+
+**Upgrade.** Apply 0027 (`CREATE INDEX CONCURRENTLY`, re-runnable), then roll
+services. A scheduler started before 0027 logs `namespace quotas are not
+enforced` / `usage metering is off` and runs as before; restart it after the
+migration. Attempts that end during that window have no ledger row.
+
+**Rollback.** `NEXUS_QUOTAS=false` (or `-quotas=false`) on the scheduler stops
+claim-side enforcement without a deploy of new code; run-level quotas stop when
+the quotas are set to 0. Metering cannot be switched off; roll back the
+scheduler to stop it. Before reverting 0027, export the ledger (§21.6).
+
+---
+
+## 22. Third-party images and toolchains: what is pinned, and why
+
+Every image below is pinned; a floating tag is a build that changes under you.
+Digest pins (`name:tag@sha256:...`) are used where the upstream's publication
+history has already broken us once. The tag stays beside the digest for humans;
+the digest is what Docker and Kubernetes actually resolve.
+
+| Component | Reference | Where |
+|---|---|---|
+| S3 result store and backup store (server) | `docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46` (multi-arch index: amd64 + arm64) | `deploy/docker-compose.yml` (`minio`), `deploy/docker-compose.pitr.yml` (`backup-store`, `NEXUS_PITR_MINIO_IMAGE`), Helm `minio.image`, Makefile `S3_IMAGE` (bench, CI) |
+| `mc` bucket-init jobs | the **same** Silo image (it bundles a version-matched `mc`) | compose `minio-init`, `backup-store-init` (`NEXUS_PITR_MC_IMAGE`), Helm `minio.mcImage` |
+| Console build | `node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1` | `deploy/Dockerfile.ui`; CI uses Node `24.21.0` (`.github/workflows/ci.yml`, both Azure pipelines) |
+
+### 22.1 The S3 store: why Silo, and not MinIO
+
+MinIO Inc. stopped publishing community-edition binaries and container images
+in October 2025, removed `minio/minio` and `minio/mc` from Docker Hub, then made
+the `quay.io/minio/minio` and `quay.io/minio/mc` repositories private
+(unauthenticated pulls answer **401**, reproduced 2026-09-25), and archived
+`github.com/minio/minio` as "no longer maintained". The last source tag,
+`RELEASE.2025-10-15T17-29-55Z`, fixed a privilege-escalation CVE; nothing after it
+will be fixed. The options assessed (CONTRACT-FINDINGS.md F111):
+
+| Option | Verdict |
+|---|---|
+| `quay.io/minio/aistor/minio` (MinIO AIStor) | Rejected as the default: proprietary MinIO Software License; even the free tier needs a license key and is single-node. Fine for an operator who buys it: set `minio.image`. |
+| Build the last upstream source tag ourselves | Rejected: reproducible, but frozen on an archived, unpatched codebase, and we would own the build. |
+| Chainguard `cgr.dev/chainguard/minio` | Rejected: free tier is `latest` only (versioned tags are paid), no `mc` image. |
+| Bitnami | Rejected: Bitnami's free catalogue moved to `bitnamilegacy` without updates in 2025. |
+| **`pgsty/silo` (community fork, formerly `pgsty/minio`)** | **Chosen.** AGPL-3.0 like upstream; S3 API, `MINIO_*` variables, `.minio.sys` on-disk format and the `server` argv are kept (the entrypoint maps `minio`/`server` to `silo`); released every 1-2 months with public advisories; images built in GitHub Actions from verified release binaries, with SPDX SBOMs and a **GitHub/Sigstore SLSA build-provenance attestation per image**. |
+
+Residual risk, accepted knowingly: Silo is a community fork maintained by one
+organisation (PGSTY), with no commercial support and a history of renaming
+(`pgsty/minio` → `pgsty/silo`). The digest pin means a compromised or deleted tag
+cannot change what we run; the attestation check means a new digest is only
+adopted when it was built by `pgsty/silo`'s own release workflow. If the fork
+stalls, the exits are AIStor (licensed) or another S3 store; nothing in Nexus is
+MinIO-specific beyond `mc` in the init jobs and the health-probe paths.
+
+Production note: none of this changes the production guidance. A managed S3
+store (or a supported object store) is preferred to a single-replica
+in-cluster Silo; the chart's `minio.enabled: false` + `minio.endpoint` path is
+unchanged.
+
+### 22.2 Bumping the S3 image
+
+```sh
+# 1. find the new release and its multi-arch INDEX digest
+docker buildx imagetools inspect docker.io/pgsty/silo:RELEASE.<new>
+# 2. set S3_IMAGE in the Makefile, then check its provenance
+make verify-s3-image            # gh attestation verify ... --repo pgsty/silo
+# 3. replace the same reference in deploy/docker-compose.yml,
+#    deploy/docker-compose.pitr.yml and deploy/helm/kgf-nexus/values.yaml
+git grep -n 'pgsty/silo'        # every hit must show the new digest
+# 4. run the object-store integration tests against it (tests3, §8)
+```
+
+CI runs `make verify-s3-image` before starting the store the integration job
+tests against (GitHub Actions).
+
+### 22.3 Node
+
+Node 20 reached end of life on 2026-04-30. The console builds and CI run on
+Node **24** ("Krypton"), Active LTS until 2026-10-20 and maintained until
+2028-04-30 (github.com/nodejs/Release, `schedule.json`). The exact patch
+(`24.21.0`) is pinned in all three CI definitions and in the Dockerfile, and
+they move together. Node 26 becomes LTS on 2026-10-28; move once it has.

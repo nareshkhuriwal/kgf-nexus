@@ -180,7 +180,9 @@ variables:
   # version in go.mod. Passed to `docker build` too, so the image and the agent
   # compile with the same Go.
   GO_VERSION: '1.25'
-  NODE_VERSION: '20'
+  # Node 24 LTS; the same exact patch as the PR gate, GitHub CI and
+  # deploy/Dockerfile.ui (docs/OPERATIONS.md section 22.3).
+  NODE_VERSION: '24.21.0'
 
 pool:
   # Self-hosted agents run this pipeline. Microsoft-hosted agents need purchased

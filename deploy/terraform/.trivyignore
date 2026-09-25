@@ -1,0 +1,19 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# trivy config findings accepted for deploy/terraform (make tf-lint).
+# Each is a false positive for how these modules are CALLED; see the reasons.
+
+# AKS API server IP ranges are variable-driven: a validation refuses a public
+# API server without api_server_authorized_ip_ranges (aks-platform).
+AZU-0041
+
+# Reported against the upstream terraform-aws-modules/eks defaults. Our call
+# sets endpoint_public_access_cidrs, and a validation refuses 0.0.0.0/0 or an
+# empty list while the endpoint is public (eks-platform).
+AWS-0040
+AWS-0041
+
+# Upstream eks module: node egress to 0.0.0.0/0, needed for image pulls and
+# AWS APIs through the NAT gateways (S3 goes through the gateway endpoint).
+AWS-0104

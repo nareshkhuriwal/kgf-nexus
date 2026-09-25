@@ -1,0 +1,130 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# checkov for deploy/terraform (make tf-lint). Every skip below is either a
+# false positive (the control IS in place, in a form the check does not read)
+# or a deliberate, documented trade-off. Nothing is skipped silently: remove a
+# line to see the finding again. Reasons are in the comments because checkov's
+# config file cannot carry them.
+framework:
+  - terraform
+download-external-modules: false
+compact: true
+skip-path:
+  - .terraform
+skip-check:
+  # ── False positives ──────────────────────────────────────────────────────
+  # Storage account uses public_network_access = "Disabled" (the azurerm 5.x
+  # attribute); the check reads the deprecated boolean.
+  - CKV_AZURE_59
+  # PostgreSQL uses private access (VNet injection into a delegated subnet),
+  # which has no private endpoint by design.
+  - CKV2_AZURE_57
+  # Public API server vs private cluster is a variable; a validation refuses a
+  # public server without authorized IP ranges. The check cannot evaluate the
+  # dynamic block.
+  - CKV_AZURE_6
+  - CKV_AZURE_115
+  # Dataplane V2 (ADVANCED_DATAPATH) enforces NetworkPolicy without the legacy
+  # network_policy add-on the check looks for.
+  - CKV_GCP_12
+  # GKE_METADATA is set on every node pool (asserted by the module's test);
+  # the check only reads the cluster-level default node config.
+  - CKV_GCP_69
+  # Cloud SQL ssl_mode = ENCRYPTED_ONLY rejects plaintext; the check wants the
+  # retired require_ssl flag or client certificates.
+  - CKV_GCP_6
+  # The KMS key policy's root-account statement is AWS's default key policy
+  # (delegates key access to IAM in this account); resource "*" in a key
+  # policy means "this key".
+  - CKV_AWS_109
+  - CKV_AWS_111
+  - CKV_AWS_356
+  # The AZ list is the first three available AZs (sorted); zone IDs are not
+  # needed for a single-account, single-region deployment.
+  - CKV_AWS_394
+  # The cluster has resource_labels (local.labels, a merge the check does not
+  # always resolve), and the provider sets default_labels too.
+  - CKV_GCP_21
+  # Registry modules are pinned to exact versions (eks 21.26.0, vpc 6.7.3);
+  # the registry is the distribution channel, not a git URL.
+  - CKV_TF_1
+
+  # ── Known gaps, tracked in F115 ──────────────────────────────────────────
+  # The Nexus S3 client takes static keys only, so EKS needs an IAM user for
+  # the result store today (scoped to one bucket, usable only through the VPC
+  # endpoint). The IRSA / Pod Identity role is provisioned for when F115 lands.
+  - CKV_AWS_273
+  - CKV_AWS_40
+
+  # ── Deliberate trade-offs (documented in deploy/terraform/README.md) ─────
+  # Customer-managed keys where platform-managed encryption at rest already
+  # applies (plus infrastructure double encryption on the storage account):
+  # CMK adds key-lifecycle risk (a lost key is lost data) for no gain in this
+  # threat model. EKS, RDS, S3 and ECR do use a customer-managed KMS key.
+  - CKV2_AZURE_1
+  - CKV_AZURE_117
+  - CKV_GCP_84
+  # Host-based encryption needs the EncryptionAtHost feature registered on the
+  # subscription; it is a variable (host_encryption_enabled), off by default.
+  - CKV_AZURE_227
+  # Dasv5 VMs have no local temp disk, so ephemeral OS disks are unavailable.
+  - CKV_AZURE_226
+  # Cross-region copies (geo-redundant DB backups, S3 CRR, ACR geo-replication)
+  # are a disaster-recovery decision with real cost; each is a variable or a
+  # documented follow-up, not a default.
+  - CKV_AZURE_136
+  - CKV_AWS_144
+  - CKV_AZURE_165
+  # ZRS is the default replication (zone-resilient); the check wants GRS.
+  - CKV_AZURE_206
+  # ACR public endpoint stays on (authenticated, admin user off, anonymous pull
+  # off) so CI can push; a variable turns it off for in-VNet pushes.
+  - CKV_AZURE_139
+  # ACR zone redundancy is on for Premium (the default SKU); the check cannot
+  # evaluate the expression.
+  - CKV_AZURE_233
+  # Content trust (DCT) is deprecated in ACR; image signing is planned with
+  # Notation/Ratify. Quarantine needs a scanning workflow not in place yet.
+  - CKV_AZURE_164
+  - CKV_AZURE_166
+  # Key Vault public access is enabled only when key_vault_allowed_ip_ranges
+  # is set (firewalled, default deny), so Terraform outside the VNet can write
+  # the database secret.
+  - CKV_AZURE_189
+  # No queues are used on the artifact account; blob logging is enabled via a
+  # diagnostic setting the check does not recognise.
+  - CKV_AZURE_33
+  - CKV2_AZURE_21
+  # Node subnet: AKS manages the node NSG (in the node resource group) and adds
+  # LoadBalancer rules there; a subnet NSG it does not manage would block them.
+  - CKV2_AZURE_31
+  # Bucket access logs: object-level audit comes from CloudTrail data events /
+  # Cloud Audit Logs data access, enabled at the organisation level.
+  - CKV_AWS_18
+  - CKV_GCP_62
+  # S3 event notifications have no consumer.
+  - CKV2_AWS_62
+  # Rotating the database password needs a coordinated Kubernetes Secret roll
+  # (docs: deploy/terraform/README.md "Rotating credentials"), not a Lambda.
+  - CKV2_AWS_57
+  # PostgreSQL 16 is pinned to match the chart's image and the backup
+  # scripts' pg_dump; a major upgrade is a deliberate, tested change.
+  - CKV_GCP_79
+  # Cloud SQL logging: log_min_duration_statement=1000 logs slow statements
+  # (the check wants -1, i.e. off); statement/pgAudit logging would record
+  # role passwords the migrations set, and hostname lookup costs latency.
+  - CKV_GCP_57
+  - CKV_GCP_108
+  - CKV_GCP_109
+  - CKV_GCP_110
+  - CKV_GCP_111
+  - CKV2_GCP_13
+  # Intranode visibility doubles flow-log volume; subnet flow logs are on.
+  - CKV_GCP_61
+  # Google Groups for RBAC and Binary Authorization need org-level setup
+  # (a gke-security-groups group, an attestor); follow-ups, not defaults.
+  - CKV_GCP_65
+  - CKV_GCP_66
+  # A custom VPC has an implied deny-all ingress; GKE manages its own rules.
+  - CKV2_GCP_18

@@ -36,20 +36,30 @@ func (s *SchedulerStore) ReconcileExpiredLeases(
 	if err != nil {
 		return nil, err
 	}
-	var out []LostAttempt
+	var (
+		out  []LostAttempt
+		errs []error
+	)
 	for _, id := range ids {
+		if ctx.Err() != nil {
+			errs = append(errs, ctx.Err())
+			break
+		}
 		lost, err := s.expireOne(ctx, now, id, domain.EventLeaseExpired, "lease_expired")
 		if err != nil {
 			// One bad attempt must not stop recovery of the rest: a stuck
 			// reconciler leaks capacity fleet-wide, which is far worse than one
-			// unreconciled attempt that the next pass will retry.
-			return out, fmt.Errorf("expire lease for attempt %s: %w", id, err)
+			// unreconciled attempt that the next pass will retry. This used to
+			// say so and then return on the first error anyway (F108); the
+			// errors are now joined and returned after every attempt is tried.
+			errs = append(errs, fmt.Errorf("expire lease for attempt %s: %w", id, err))
+			continue
 		}
 		if lost != nil {
 			out = append(out, *lost)
 		}
 	}
-	return out, nil
+	return out, errors.Join(errs...)
 }
 
 func (s *SchedulerStore) expiredLeaseAttempts(ctx context.Context, now time.Time, limit int) ([]uuid.UUID, error) {
@@ -111,6 +121,12 @@ func (s *SchedulerStore) expireOne(
 	// Re-read under a row lock: between the scan and here another replica may
 	// already have recovered this attempt. SKIP LOCKED makes that a no-op
 	// instead of a duplicate release that would corrupt the capacity ledger.
+	//
+	// Skipping is right here and wrong in ApplyResult (F104) because this
+	// caller is a sweep: an attempt skipped because a MarkStarted or a result
+	// held its row is re-selected on the next pass while its lease is still
+	// expired, or its worker still DEAD, and a result that won the row has
+	// made the reclaim unnecessary.
 	const lockQ = `
 SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.state, a.worker_id,
        a.resource_request, a.scheduled_at, a.priority, a.queue,
@@ -202,6 +218,14 @@ UPDATE task_attempts
 		}
 	}
 
+	// LOST is billed like any other end: the reservation held capacity from
+	// dispatch until now, whatever became of the work (ADR-0021). No measured
+	// metrics exist for it, and the ledger says so with NULLs.
+	usage, err := s.recordUsage(ctx, tx, attemptID)
+	if err != nil {
+		return nil, err
+	}
+
 	lost := LostAttempt{
 		AttemptID: attemptID, RunID: att.RunID, NodeID: att.NodeID,
 		AttemptNumber: att.AttemptNumber,
@@ -233,10 +257,12 @@ UPDATE task_attempts
 	}
 	lost.Decision = decision
 	lost.RetryAt = retryAt
+	lost.UsageRecorded = usage != ""
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit expiry tx: %w", err)
 	}
+	s.notifyUsage(usage)
 	return &lost, nil
 }
 

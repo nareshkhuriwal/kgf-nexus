@@ -64,6 +64,10 @@ type APIError struct {
 	Hint      string
 	Method    string
 	Path      string
+	// Body is the decoded JSON error body, when there was one, so a command can
+	// render route-specific structured fields (a refused delete's referencing
+	// runs and schedules) instead of only the message.
+	Body map[string]any
 }
 
 func (e *APIError) Error() string {
@@ -72,7 +76,11 @@ func (e *APIError) Error() string {
 	if e.Message != "" {
 		fmt.Fprintf(&b, ": %s", e.Message)
 	}
-	if e.Details != nil {
+	if lines := problemLines(e.Details); len(lines) > 0 {
+		for _, l := range lines {
+			fmt.Fprintf(&b, "\n  - %s", l)
+		}
+	} else if e.Details != nil {
 		if raw, err := json.Marshal(e.Details); err == nil && len(raw) > 2 {
 			fmt.Fprintf(&b, "\n  details: %s", truncate(string(raw), 600))
 		}
@@ -84,6 +92,39 @@ func (e *APIError) Error() string {
 		fmt.Fprintf(&b, "\n  %s", e.Hint)
 	}
 	return b.String()
+}
+
+// maxProblemLines bounds how many validation problems an error prints; the
+// rest are counted, so a spec with hundreds of defects stays readable.
+const maxProblemLines = 20
+
+// problemLines renders a validator problems list ([{path, message, stage}]) as
+// "path: message" lines. Anything else returns nil and is printed as JSON.
+func problemLines(details any) []string {
+	list, ok := details.([]any)
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	var out []string
+	for i, item := range list {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil
+		}
+		msg, _ := m["message"].(string)
+		if msg == "" {
+			return nil
+		}
+		if i == maxProblemLines {
+			out = append(out, fmt.Sprintf("... and %d more", len(list)-maxProblemLines))
+			break
+		}
+		if p, _ := m["path"].(string); p != "" {
+			msg = p + ": " + msg
+		}
+		out = append(out, msg)
+	}
+	return out
 }
 
 // ConnError is a failure to reach the control plane at all.
@@ -194,6 +235,7 @@ func apiError(resp *http.Response, raw []byte, method, path string) error {
 	}
 	var body map[string]any
 	if json.Unmarshal(raw, &body) == nil {
+		e.Body = body
 		for _, k := range []string{"message", "error", "detail"} {
 			if v, ok := body[k].(string); ok && v != "" {
 				e.Message = v
@@ -201,6 +243,13 @@ func apiError(resp *http.Response, raw []byte, method, path string) error {
 			}
 		}
 		if d, ok := body["details"]; ok {
+			e.Details = d
+		} else if d, ok := body["problems"]; ok {
+			// The spec validator's 422 carries a problems LIST, one entry per
+			// defect; dropping it would leave "spec failed validation" and no
+			// hint of what to fix. Kept as the list: Error() prints it as
+			// "path: message" lines, and nexusctl places each entry in the
+			// submitted file (cmd/problems.go, F117).
 			e.Details = d
 		}
 		if e.RequestID == "" {
@@ -219,9 +268,22 @@ func apiError(resp *http.Response, raw []byte, method, path string) error {
 	case http.StatusNotFound:
 		e.Hint = "Check the id and the namespace (--namespace, currently resolved from your config)."
 	case http.StatusConflict:
-		e.Hint = "An idempotency key may already be in use. Reuse the existing run, or supply a different --idempotency-key."
+		// Route-specific: a 409 from run creation is almost always a reused
+		// idempotency key, but from a lifecycle or delete route it is a state
+		// conflict that the server's own message already explains.
+		if method == http.MethodPost && strings.HasSuffix(path, "/runs") {
+			e.Hint = "An idempotency key may already be in use. Reuse the existing run, or supply a different --idempotency-key."
+		} else {
+			e.Hint = "The target is not in a state that allows this, or already exists. The message above says which."
+		}
 	case http.StatusUnprocessableEntity, http.StatusBadRequest:
-		e.Hint = "Run `nexusctl workflow submit --dry-run` to validate the spec without registering it."
+		if strings.HasSuffix(path, "/specs") {
+			e.Hint = "Run `nexusctl workflow submit --dry-run` to validate the spec without registering it."
+		} else {
+			e.Hint = "The request was rejected as invalid. The message above names the field to fix."
+		}
+	case http.StatusNotImplemented:
+		e.Hint = "This control plane does not serve this feature (it may predate it). Check the gateway version."
 	case http.StatusTooManyRequests:
 		e.Hint = "The control plane is rate limiting. Retry with backoff."
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:

@@ -641,6 +641,12 @@ func (r *Relay) buildMessage(o outboxRow) (msg *nats.Msg, known, gone bool) {
 		body = decodeObject(o.payload)
 		body["type"] = "task.ready"
 		body["namespace"] = deref(o.namespace)
+	case store.OutboxTopicUsageRecorded:
+		// The metering export hook (ADR-0021). The payload is the ledger row's
+		// identity and quantities, written by the same statement as the row.
+		subject = bus.UsageSubject(deref(o.namespace))
+		body = decodeObject(o.payload)
+		body["type"] = "nexus.usage.recorded"
 	default:
 		return nil, false, false
 	}

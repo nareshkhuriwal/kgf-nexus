@@ -57,6 +57,7 @@ import { API_BASE, DEFAULT_NAMESPACE } from './api/client';
 import { authApi, currentCredential, getSession, setSession } from './api/auth';
 import { LoginPage } from './pages/LoginPage';
 import { InfrastructurePage } from './pages/admin/InfrastructurePage';
+import { QuotasPage } from './pages/admin/QuotasPage';
 import { UsersPage } from './pages/admin/UsersPage';
 import { TokensPage } from './pages/admin/TokensPage';
 import { AuditPage } from './pages/admin/AuditPage';
@@ -532,6 +533,7 @@ export function App() {
         <Route path="/customer" element={<CustomerPage />} />
         <Route path="/admin/roles" element={<RolesPage namespace={namespace} />} />
         <Route path="/admin/infrastructure" element={<InfrastructurePage key={namespace} namespace={namespace} canAdmin={grants.includes("infrastructure.view")} />} />
+        <Route path="/admin/quotas" element={<QuotasPage key={namespace} namespace={namespace} />} />
         <Route
           path="/admin/users"
           element={<UsersPage namespace={namespace} canAdmin={grants.includes("users.view")} />}

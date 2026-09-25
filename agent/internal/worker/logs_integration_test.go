@@ -17,7 +17,7 @@ package worker
 // while the task is RUNNING and after it has finished. Run with:
 //
 //	NEXUS_TEST_DATABASE_URL=... NEXUS_TEST_S3_ENDPOINT=127.0.0.1:9000 \
-//	NEXUS_S3_ACCESS_KEY_ID=... NEXUS_S3_SECRET_ACCESS_KEY=... \
+//	NEXUS_TEST_S3_ACCESS_KEY_ID=... NEXUS_TEST_S3_SECRET_ACCESS_KEY=... \
 //	  go test -tags integration -run Logs ./agent/internal/worker/
 
 import (
@@ -40,6 +40,7 @@ import (
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
+	"github.com/khuriwalgroup/kgf-nexus/internal/tests3"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/workergrpc"
@@ -59,10 +60,8 @@ type logEnv struct {
 func newLogEnv(t *testing.T) *logEnv {
 	t.Helper()
 	dsn := testdb.DSN(t)
-	endpoint := os.Getenv("NEXUS_TEST_S3_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("skipping integration test: NEXUS_TEST_S3_ENDPOINT is not set")
-	}
+	s3 := tests3.Get(t)
+	endpoint := s3.Endpoint
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -74,18 +73,18 @@ func newLogEnv(t *testing.T) *logEnv {
 	t.Cleanup(pool.Close)
 
 	env := &logEnv{pool: pool, ns: "logs-it-" + uuid.NewString()[:8], bucket: "logs-it"}
-	access, secret := os.Getenv("NEXUS_S3_ACCESS_KEY_ID"), os.Getenv("NEXUS_S3_SECRET_ACCESS_KEY")
+	access, secret := s3.AccessKeyID, s3.SecretAccessKey
 	env.store, err = resultstore.New(resultstore.Config{
 		Endpoint: endpoint, Bucket: env.bucket, Namespace: env.ns,
-		AccessKeyID: access, SecretAccessKey: secret, Log: testLog(),
+		AccessKeyID: access, SecretAccessKey: secret, UseTLS: s3.UseTLS, Log: testLog(),
 	})
 	if err != nil {
 		t.Fatalf("result store: %v", err)
 	}
 	if err := env.store.EnsureBucket(ctx); err != nil {
-		t.Skipf("skipping integration test: MinIO unreachable: %v", err)
+		tests3.SkipUnreachable(t, err)
 	}
-	obj, err := logs.NewMinIOReader(logs.MinIOConfig{Endpoint: endpoint, Bucket: env.bucket, AccessKeyID: access, SecretAccessKey: secret})
+	obj, err := logs.NewMinIOReader(logs.MinIOConfig{Endpoint: endpoint, Bucket: env.bucket, AccessKeyID: access, SecretAccessKey: secret, UseTLS: s3.UseTLS})
 	if err != nil {
 		t.Fatalf("log reader: %v", err)
 	}
