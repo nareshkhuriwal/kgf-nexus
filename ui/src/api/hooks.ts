@@ -10,7 +10,7 @@
  * retries because a service restarting under Compose is the common case.
  */
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import {
   keepPreviousData,
   useMutation,
@@ -126,6 +126,15 @@ export function useRun(namespace: string, runId: string, transport: LiveTranspor
   const query = useQuery({
     queryKey: qk.run(namespace, runId),
     queryFn: () => api.getRun(namespace, runId),
+    // Polled on the same schedule as the run's attempts and events, and for
+    // the same reason: the event stream is a hint, not the only way the page
+    // learns of change. Without this the run (its state, and the nodes a map
+    // expands into) refreshed ONLY on an SSE message, so on the polling
+    // fallback the header sat on RUNNING and the graph never grew its map
+    // children while the attempts query, polling the same endpoint, already
+    // had them. Stops once the run is terminal.
+    refetchInterval: (q) =>
+      pollInterval({ transport, terminal: q.state.data ? isTerminal('run', q.state.data.state) : false }),
     ...base,
   });
   const terminal = query.data ? isTerminal('run', query.data.state) : false;
@@ -137,13 +146,24 @@ export function useRunPolling<T>(
   fn: () => Promise<T>,
   opts: { transport: LiveTransport; terminal: boolean; enabled?: boolean },
 ) {
-  return useQuery({
+  const query = useQuery({
     queryKey: key,
     queryFn: fn,
     enabled: opts.enabled ?? true,
     refetchInterval: pollInterval({ transport: opts.transport, terminal: opts.terminal }),
     ...base,
   });
+  // Polling stops the moment the run is seen terminal, but this query's last
+  // poll may predate the final transitions (up to one interval earlier). One
+  // last read on the flip, or a run could show FAILED over an attempt frozen
+  // at RUNNING forever -- which is what the e2e suite caught.
+  const wasTerminal = useRef(opts.terminal);
+  const { refetch } = query;
+  useEffect(() => {
+    if (opts.terminal && !wasTerminal.current && (opts.enabled ?? true)) void refetch();
+    wasTerminal.current = opts.terminal;
+  }, [opts.terminal, opts.enabled, refetch]);
+  return query;
 }
 
 export function useRunAttempts(
