@@ -20,6 +20,16 @@
 # WHY -p 1: the outage test stops the NATS container. Run in parallel with the
 # agent package's tests, it would turn their assertions red for a reason that has
 # nothing to do with what they check (F86: a red-when-fine test trains re-runs).
+#
+# AUTHORIZATION (TestNATSAuthz*, docs/OPERATIONS.md §11.7) runs against two more
+# brokers whose configuration is the one deploy/ ships, never a hand-written one:
+#   compose  keys + config from deploy/nats/nexus-nats-auth.sh, plaintext
+#   helm     the chart's nats-config ConfigMap (helm template), TLS with
+#            client verification, certificates from deploy/nexus-certs.sh
+# Both get two tenants so cross-tenant isolation is actually exercised. Keys and
+# certificates live in a temporary directory that is deleted on exit. The
+# semantic suites above run against the unauthenticated broker, as before, so
+# they keep testing relay semantics rather than permissions.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -38,10 +48,22 @@ PKGS=${PKGS:-./internal/bus/... ./internal/store/ ./services/event-service/... .
 # freshly migrated database for reasons unrelated to the bus. Override with
 # RUN= to run everything.
 RUN=${RUN-TestNATS}
+# The authorization brokers. AUTHZ=0 skips them, loudly (it is not a pass).
+AUTHZ=${AUTHZ:-1}
+AUTHZ_NAME=${AUTHZ_NAME:-nexus-nats-agent-authz}
+AUTHZ_PORT=${AUTHZ_PORT:-55513}
+HELM_NAME=${HELM_NAME:-nexus-nats-agent-authz-helm}
+HELM_PORT=${HELM_PORT:-55514}
+AUTHZ_TENANTS=${AUTHZ_TENANTS:-"authz-a authz-b"}
+AUTHZ_PKGS=${AUTHZ_PKGS:-./internal/bus/... ./services/event-service/relay/ ./agent/internal/worker/}
 
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/nexus-nats-authz.XXXXXX")
 cleanup() {
   if [ "${KEEP:-0}" != "1" ]; then
-    docker rm -f "$PG_NAME" "$NATS_NAME" >/dev/null 2>&1 || true
+    docker rm -f "$PG_NAME" "$NATS_NAME" "$AUTHZ_NAME" "$HELM_NAME" >/dev/null 2>&1 || true
+    rm -rf "$WORK"
+  else
+    echo "KEEP=1: containers and $WORK (NATS seeds, test CA) left in place"
   fi
 }
 trap cleanup EXIT
@@ -102,16 +124,88 @@ export NEXUS_TEST_NATS_URL="nats://127.0.0.1:${NATS_PORT}"
 # the standard "skipping integration test" marker rather than passing vacuously.
 export NEXUS_TEST_NATS_CONTAINER="$NATS_NAME"
 
-args=(-tags integration -count=1 -p 1 -timeout 15m)
-[ -n "$RUN" ] && args+=(-run "$RUN")
-# shellcheck disable=SC2086
-out=$(go test "${args[@]}" -v $PKGS 2>&1) && status=0 || status=$?
-echo "$out" | grep -E '^(=== RUN|--- |PASS|FAIL|ok|panic)|skipping integration test' || true
-if grep -q "skipping integration test" <<<"$out"; then
-  echo "NATS integration tests SKIPPED -- a dependency was unreachable; treating as failure (F85)" >&2
-  exit 1
+# run_suite LABEL PKGS go-test-args...: run, summarise, and fail on any skip.
+run_suite() {
+  local label=$1 pkgs=$2
+  shift 2
+  echo "── $label"
+  local out status
+  # shellcheck disable=SC2086
+  out=$(go test -tags integration -count=1 -p 1 -timeout 15m -v "$@" $pkgs 2>&1) && status=0 || status=$?
+  echo "$out" | grep -E '^(=== RUN|--- |PASS|FAIL|ok|panic)|skipping integration test' || true
+  if grep -q "skipping integration test" <<<"$out"; then
+    echo "$label: tests SKIPPED -- a dependency was unreachable; treating as failure (F85)" >&2
+    return 1
+  fi
+  if [ "$status" != 0 ]; then
+    echo "$out" | tail -200 >&2
+  fi
+  return "$status"
+}
+
+# Semantics against the unauthenticated broker. The authorization tests need a
+# broker that has authorization, so they are excluded here and run below.
+sem_args=(-skip TestNATSAuthz)
+[ -n "$RUN" ] && sem_args+=(-run "$RUN")
+run_suite "semantics (unauthenticated broker)" "$PKGS" "${sem_args[@]}"
+
+if [ "$AUTHZ" != "1" ]; then
+  echo "AUTHZ=0: the broker AUTHORIZATION tests were NOT run" >&2
+  exit 0
 fi
-if [ "$status" != 0 ]; then
-  echo "$out" | tail -200 >&2
-fi
-exit "$status"
+
+wait_healthy() { # container
+  for i in $(seq 1 30); do
+    if docker exec "$1" wget -q -O- 'http://127.0.0.1:8222/healthz?js-enabled-only=true' >/dev/null 2>&1; then return 0; fi
+    [ "$i" = 30 ] && { docker logs "$1" >&2; echo "$1 did not become healthy" >&2; return 1; }
+    sleep 1
+  done
+}
+
+# ── compose rendering ──────────────────────────────────────────────────────
+KEYS="$WORK/keys"
+tenant_args=()
+for t in $AUTHZ_TENANTS; do tenant_args+=(--tenant "$t"); done
+NEXUS_NATS_DIR="$KEYS" deploy/nats/nexus-nats-auth.sh init "${tenant_args[@]}"
+NEXUS_NATS_DIR="$KEYS" deploy/nats/nexus-nats-auth.sh render
+docker rm -f "$AUTHZ_NAME" >/dev/null 2>&1 || true
+docker run -d --name "$AUTHZ_NAME" -p "127.0.0.1:${AUTHZ_PORT}:4222" \
+  -v "$KEYS/server:/etc/nats:ro" "$NATS_IMAGE" -c /etc/nats/nats.conf >/dev/null
+wait_healthy "$AUTHZ_NAME"
+
+export NEXUS_TEST_NATS_AUTHZ_DIR="$KEYS"
+export NEXUS_TEST_NATS_AUTHZ_TENANTS="$AUTHZ_TENANTS"
+NEXUS_TEST_NATS_AUTHZ_VARIANT=compose NEXUS_TEST_NATS_AUTHZ_URL="nats://127.0.0.1:${AUTHZ_PORT}" \
+  run_suite "authorization: compose config (nexus-nats-auth.sh), plaintext" "$AUTHZ_PKGS" -run TestNATSAuthz
+
+# ── Helm rendering, with TLS and client verification ───────────────────────
+command -v helm >/dev/null || { echo "helm is required for the Helm authorization variant (AUTHZ=0 skips all authorization tests)" >&2; exit 1; }
+CERTS="$WORK/certs"
+NEXUS_CERT_DIR="$CERTS" deploy/nexus-certs.sh init-ca >/dev/null
+NEXUS_CERT_DIR="$CERTS" deploy/nexus-certs.sh issue nats --dns nats,localhost --ip 127.0.0.1 >/dev/null
+NEXUS_CERT_DIR="$CERTS" deploy/nexus-certs.sh issue authz-client --client-only >/dev/null
+first_tenant=${AUTHZ_TENANTS%% *}
+NEXUS_NATS_DIR="$KEYS" deploy/nats/nexus-nats-auth.sh helm-values >"$WORK/values.yaml"
+helm template authz deploy/helm/kgf-nexus --show-only templates/nats-config.yaml \
+  --set existingSecret=unused --set image.tag=test --set nexusNamespace="$first_tenant" \
+  --set nats.tls.enabled=true --set nats.tls.secretName=nats-tls \
+  --set nats.tls.clientSecrets.eventService=x --set nats.tls.clientSecrets.agent=y \
+  -f "$WORK/values.yaml" >"$WORK/nats-config.yaml"
+mkdir -p "$WORK/helm"
+python3 - "$WORK/nats-config.yaml" "$WORK/helm" <<'PY'
+import sys, yaml
+cm = yaml.safe_load(open(sys.argv[1]))
+for name, body in cm["data"].items():
+    open(f"{sys.argv[2]}/{name}", "w").write(body)
+PY
+docker rm -f "$HELM_NAME" >/dev/null 2>&1 || true
+docker run -d --name "$HELM_NAME" -p "127.0.0.1:${HELM_PORT}:4222" \
+  -v "$WORK/helm:/etc/nats:ro" -v "$CERTS/nats:/etc/nats-tls:ro" --tmpfs /var/run/nats \
+  "$NATS_IMAGE" -c /etc/nats/nats.conf >/dev/null
+wait_healthy "$HELM_NAME"
+
+NEXUS_TEST_NATS_AUTHZ_VARIANT=helm-tls NEXUS_TEST_NATS_AUTHZ_URL="tls://127.0.0.1:${HELM_PORT}" \
+  NEXUS_TEST_NATS_AUTHZ_CA="$CERTS/ca-bundle.pem" \
+  NEXUS_TEST_NATS_AUTHZ_CLIENT_CERT="$CERTS/authz-client/tls.crt" \
+  NEXUS_TEST_NATS_AUTHZ_CLIENT_KEY="$CERTS/authz-client/tls.key" \
+  run_suite "authorization: Helm config, TLS + client verification" "$AUTHZ_PKGS" -run TestNATSAuthz

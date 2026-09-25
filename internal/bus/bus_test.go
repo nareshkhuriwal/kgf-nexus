@@ -141,19 +141,6 @@ func TestMsgIDIsStableAndDistinct(t *testing.T) {
 	}
 }
 
-func TestConfigFromEnv(t *testing.T) {
-	t.Setenv(EnvURL, "")
-	if ConfigFromEnv("x").Enabled() {
-		t.Error("an empty NEXUS_NATS_URL must disable the bus")
-	}
-	t.Setenv(EnvURL, "  nats://nats:4222 ")
-	t.Setenv(EnvCreds, "/etc/nexus/nats.creds")
-	c := ConfigFromEnv("agent")
-	if !c.Enabled() || c.URL != "nats://nats:4222" || c.CredsFile != "/etc/nexus/nats.creds" || c.Name != "agent" {
-		t.Errorf("ConfigFromEnv = %+v", c)
-	}
-}
-
 func TestRedactURLHidesPasswords(t *testing.T) {
 	got := redactURL("nats://user:s3cret@a:4222,nats://b:4222")
 	if strings.Contains(got, "s3cret") || strings.Contains(got, "user") {

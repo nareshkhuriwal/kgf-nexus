@@ -49,7 +49,20 @@ func main() {
 	reg := metrics.NewServiceRegistry("event-service", version)
 	store.RegisterPoolMetrics(reg, pool)
 	httpMetrics := metrics.NewHTTPMetrics(reg)
-	busCfg := bus.ConfigFromEnv("nexus-event-service")
+	// A configuration the bus rejects (credentials set but unreadable, none at
+	// all where NEXUS_NATS_REQUIRE_AUTH or NEXUS_ENV=production demands them, a
+	// password over plaintext) is fatal: continuing without the bus would hide
+	// the mistake, and connecting without credentials is exactly what the
+	// broker's authorization exists to prevent. An UNREACHABLE broker is not an
+	// error here and never stops startup.
+	busCfg, err := bus.ConfigFromEnv("nexus-event-service")
+	if err != nil {
+		log.Error("invalid NATS configuration", "error", err)
+		os.Exit(1)
+	}
+	if bus.RequireAuthOverridden() {
+		log.Warn("NEXUS_NATS_REQUIRE_AUTH=false overrides NEXUS_ENV: the event bus may be used without credentials")
+	}
 	var nc *nats.Conn
 	waker := eventservice.NewRunWaker()
 	if busCfg.Enabled() {

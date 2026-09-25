@@ -122,10 +122,125 @@ two listeners (config drift recorded in F38); all are set, as compose does.
 - { name: RESULT_STORE_INLINE_THRESHOLD_BYTES, value: {{ .Values.minio.inlineThresholdBytes | int64 | toString | quote }} }
 {{- end -}}
 
+{{/*
+NATS client settings for one role ("event-service" or "agent"). Under
+nats.auth.mode=nkey the client authenticates with the seed nexus.natsVolumes
+mounts, and NEXUS_NATS_REQUIRE_AUTH makes a missing seed fatal rather than a
+quiet unauthenticated connection.
+*/}}
 {{- define "nexus.natsEnv" -}}
-{{- if .Values.nats.enabled }}
+{{- $root := index . 0 -}}{{- $role := index . 1 -}}
+{{- $n := $root.Values.nats -}}
+{{- if $n.enabled }}
 - { name: NEXUS_NATS_URL, value: "nats://nats:4222" }
+{{- if eq $n.auth.mode "none" }}
+- { name: NEXUS_NATS_REQUIRE_AUTH, value: "0" }
+{{- else }}
+- { name: NEXUS_NATS_REQUIRE_AUTH, value: "1" }
+- { name: NEXUS_NATS_NKEY_SEED_FILE, value: /etc/nexus/nats/user.nk }
 {{- end }}
+{{- if $n.tls.enabled }}
+- { name: NEXUS_NATS_TLS, value: "1" }
+- { name: NEXUS_NATS_TLS_CA_FILE, value: /etc/nexus/nats-tls/ca.crt }
+{{- if $n.tls.verifyClients }}
+- { name: NEXUS_NATS_TLS_CERT_FILE, value: /etc/nexus/nats-tls/tls.crt }
+- { name: NEXUS_NATS_TLS_KEY_FILE, value: /etc/nexus/nats-tls/tls.key }
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{- define "nexus.natsVolumeMounts" -}}
+{{- $n := .Values.nats -}}
+{{- if $n.enabled }}
+{{- if ne $n.auth.mode "none" }}
+- { name: nats-nkey, mountPath: /etc/nexus/nats, readOnly: true }
+{{- end }}
+{{- if $n.tls.enabled }}
+- { name: nats-tls, mountPath: /etc/nexus/nats-tls, readOnly: true }
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Volumes holding ONE role's NATS material. The seed is projected from the Secret
+by key, so a pod receives its own seed and nothing else; no subPath, so a
+rotated Secret is visible without recreating the pod (an NKey rotation still
+needs a restart, docs/OPERATIONS.md §11.8). args: root, role, per-agent key override.
+*/}}
+{{- define "nexus.natsVolumes" -}}
+{{- $root := index . 0 -}}{{- $role := index . 1 -}}{{- $keyOverride := index . 2 -}}
+{{- $n := $root.Values.nats -}}
+{{- if $n.enabled }}
+{{- if ne $n.auth.mode "none" }}
+{{- $key := ternary $n.auth.eventServiceSeedKey ($keyOverride | default $n.auth.agentSeedKey) (eq $role "event-service") }}
+- name: nats-nkey
+  secret:
+    secretName: {{ $n.auth.seedSecret | default $root.Values.existingSecret }}
+    defaultMode: 0400
+    items:
+      - { key: {{ $key }}, path: user.nk }
+{{- end }}
+{{- if $n.tls.enabled }}
+- name: nats-tls
+  secret:
+    secretName: {{ ternary $n.tls.clientSecrets.eventService $n.tls.clientSecrets.agent (eq $role "event-service") | default $n.tls.caSecret }}
+    defaultMode: 0400
+    {{- if not $n.tls.verifyClients }}
+    items:
+      - { key: ca.crt, path: ca.crt }
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Refuse to render a broker that would accept what it must not. Public NKeys are
+validated here because a typo would otherwise surface as every client being
+rejected at runtime, with nothing in the manifest pointing at why.
+*/}}
+{{- define "nexus.natsAuthRequired" -}}
+{{- $n := .Values.nats -}}
+{{- $a := $n.auth -}}
+{{- if not (has $a.mode (list "nkey" "none")) -}}
+{{- fail (printf "nats.auth.mode=%q: use nkey (production) or none (development only)" $a.mode) -}}
+{{- end -}}
+{{- if eq $a.mode "nkey" -}}
+{{- $keyRe := "^U[A-Z2-7]{55}$" -}}
+{{- range $role := list "eventService" "monitor" -}}
+{{- $keys := (index $a $role).publicKeys | default list -}}
+{{- if not $keys -}}
+{{- fail (printf "nats.auth.%s.publicKeys is empty: generate identities with deploy/nats/nexus-nats-auth.sh init and paste `helm-values` (or set nats.auth.mode=none for a throwaway dev cluster)" $role) -}}
+{{- end -}}
+{{- range $keys }}{{ if not (regexMatch $keyRe .) }}{{ fail (printf "nats.auth.%s.publicKeys: %q is not a user public NKey (U...)" $role .) }}{{ end }}{{ end -}}
+{{- end -}}
+{{- $seen := dict -}}
+{{- range $a.tenants -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]+$" (.namespace | default "")) -}}
+{{- fail (printf "nats.auth.tenants: namespace %q must match [A-Za-z0-9_-]+ (other names are percent-encoded on the bus; configure them by hand)" .namespace) -}}
+{{- end -}}
+{{- if not .publicKeys -}}
+{{- fail (printf "nats.auth.tenants[%s].publicKeys is empty" .namespace) -}}
+{{- end -}}
+{{- range .publicKeys }}{{ if not (regexMatch $keyRe .) }}{{ fail (printf "nats.auth.tenants: %q is not a user public NKey (U...)" .) }}{{ end }}{{ end -}}
+{{- $_ := set $seen .namespace true -}}
+{{- end -}}
+{{- if and .Values.agents (not (hasKey $seen .Values.nexusNamespace)) -}}
+{{- fail (printf "nats.auth.tenants has no entry for nexusNamespace %q, so this chart's agents could not receive dispatch hints" .Values.nexusNamespace) -}}
+{{- end -}}
+{{- end -}}
+{{- if $n.tls.enabled -}}
+{{- if not $n.tls.secretName -}}
+{{- fail "nats.tls.enabled needs nats.tls.secretName: a Secret with tls.crt, tls.key and ca.crt for the broker (cert-manager Certificate)" -}}
+{{- end -}}
+{{- if $n.tls.verifyClients -}}
+{{- if not (and $n.tls.clientSecrets.eventService $n.tls.clientSecrets.agent) -}}
+{{- fail "nats.tls.verifyClients needs nats.tls.clientSecrets.eventService and .agent (Secrets with tls.crt, tls.key, ca.crt)" -}}
+{{- end -}}
+{{- else if not (or $n.tls.caSecret (and $n.tls.clientSecrets.eventService $n.tls.clientSecrets.agent)) -}}
+{{- fail "nats.tls.enabled needs nats.tls.caSecret (a Secret with ca.crt) so clients can verify the broker" -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

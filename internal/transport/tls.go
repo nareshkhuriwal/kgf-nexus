@@ -236,7 +236,7 @@ func RequireTLS() bool {
 		}
 	}
 	// NEXUS_ENV deliberately does NOT arm this. It used to arm the DSN guard
-// (internal/config.DSN), which is now unconditional.
+	// (internal/config.DSN), which is now unconditional.
 	//
 	// The two guards look symmetrical and are not. A missing DSN is a
 	// configuration error with no working outcome -- the service cannot serve

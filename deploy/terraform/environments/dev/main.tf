@@ -91,6 +91,10 @@ module "nexus" {
   chart_path = "${path.module}/../../../helm/kgf-nexus"
   image_tag  = var.image_tag
 
+  # NATS identities from `make k8s-dev-up` (deploy/nats/nexus-nats-auth.sh
+  # into the gitignored .dev-nats/). The broker requires them.
+  nats_credentials_dir = var.nats_credentials_dir
+
   chart_values = {
     logLevel = "info"
 

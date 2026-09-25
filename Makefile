@@ -80,9 +80,10 @@ chaos: ## Kill workers mid-task and assert exactly-one-logical-effect (needs `ma
 
 # The outbox relay and dispatch hints against a real NATS JetStream and a real
 # Postgres, each in a throwaway container (nexus-nats-agent-*, host ports
-# 55511/55512) so the broker-outage test cannot disturb anything else. KEEP=1
-# leaves the containers up for inspection.
-test-nats: ## Run the NATS/outbox integration tests in isolated containers (needs Docker)
+# 55511-55514) so the broker-outage test cannot disturb anything else. Also
+# runs the broker AUTHORIZATION suite against the compose- and Helm-rendered
+# configurations (needs helm). KEEP=1 leaves the containers up for inspection.
+test-nats: ## Run the NATS/outbox and broker-authorization integration tests in isolated containers (needs Docker, helm)
 	tests/nats/run-integration.sh
 
 # ── Benchmarks (ADR-0016, ADR-0018) ───────────────────────────────────────
@@ -179,6 +180,7 @@ k8s-dev-images: ## Build every image and load it into the local kind node (print
 
 k8s-dev-up: ## Build + load images, then terraform apply the dev environment on Docker Desktop
 	@set -euo pipefail; \
+	NEXUS_NATS_DIR=.dev-nats deploy/nats/nexus-nats-auth.sh init --tenant default; \
 	tag=$$(deploy/scripts/k8s-dev-images.sh | tail -n 1); \
 	echo "image tag: $$tag"; \
 	terraform -chdir=$(TF_DEV) init -input=false -upgrade=false >/dev/null; \

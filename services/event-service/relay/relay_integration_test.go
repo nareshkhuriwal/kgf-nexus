@@ -100,10 +100,17 @@ type world struct {
 
 func newWorld(t *testing.T, pool *pgxpool.Pool) *world {
 	t.Helper()
+	return newWorldNS(t, pool, "relay-"+uuid.NewString()[:8])
+}
+
+// newWorldNS is newWorld in a given namespace, for tests whose broker
+// credentials are scoped to a particular tenant.
+func newWorldNS(t *testing.T, pool *pgxpool.Pool, ns string) *world {
+	t.Helper()
 	ctx := context.Background()
 	id := uuid.NewString()[:8]
-	w := &world{t: t, ctx: ctx, pool: pool, ns: "relay-" + id, queue: "q-" + id}
-	if _, err := pool.Exec(ctx, `INSERT INTO tenants (namespace, name) VALUES ($1,$1)`, w.ns); err != nil {
+	w := &world{t: t, ctx: ctx, pool: pool, ns: ns, queue: "q-" + id}
+	if _, err := pool.Exec(ctx, `INSERT INTO tenants (namespace, name) VALUES ($1,$1) ON CONFLICT (namespace) DO NOTHING`, w.ns); err != nil {
 		t.Fatalf("tenant: %v", err)
 	}
 	var specID string
