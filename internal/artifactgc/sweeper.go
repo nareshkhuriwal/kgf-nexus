@@ -86,6 +86,13 @@ type Config struct {
 	// Keys are <namespace>/<sha256> (ADR-0008), so the prefix is a tenancy
 	// boundary and a useful blast-radius limiter for a first real run.
 	Prefix string
+
+	// LogRetention, when positive, lets log objects (ADR-0020) of logs last
+	// written longer ago than this be collected even though their index rows
+	// remain. Zero keeps every indexed log for as long as its attempt row
+	// exists. See logs.go for why this departure from reachability is safe for
+	// logs and for nothing else.
+	LogRetention time.Duration
 }
 
 // Stats is the audit record of one pass. Every number an operator needs to
@@ -99,6 +106,7 @@ type Stats struct {
 	Deleted      int   // actually removed (always 0 in dry run)
 	DeleteErrors int   // orphans that could not be removed
 	OrphanBytes  int64 // reclaimable bytes across Orphans
+	LogObjects   int   // listed objects under a <namespace>/logs/ prefix
 	DryRun       bool
 	Duration     time.Duration
 	// OrphanKeys lists the collectable keys, capped, so a dry run is auditable
@@ -151,7 +159,18 @@ func NewSweeper(db Querier, store ObjectLister, log *slog.Logger, cfg Config) *S
 	}
 	s := &Sweeper{db: db, store: store, log: log, cfg: cfg, now: time.Now}
 	s.liveKeys = func(ctx context.Context) (map[string]struct{}, error) {
-		return LiveKeys(ctx, s.db)
+		live, err := LiveKeys(ctx, s.db)
+		if err != nil {
+			return nil, err
+		}
+		logs, err := LiveLogKeys(ctx, s.db, s.cfg.LogRetention)
+		if err != nil {
+			return nil, err
+		}
+		for k := range logs {
+			live[k] = struct{}{}
+		}
+		return live, nil
 	}
 	return s
 }
@@ -268,6 +287,11 @@ func (s *Sweeper) Once(ctx context.Context) (Stats, error) {
 		return st, fmt.Errorf("artifactgc: list objects: %w", err)
 	}
 	st.Listed = len(candidates)
+	for _, c := range candidates {
+		if IsLogKey(c.Key) {
+			st.LogObjects++
+		}
+	}
 	if len(candidates) == 0 {
 		st.Duration = time.Since(start)
 		s.log.Info("artifact GC: nothing to examine",
@@ -362,6 +386,8 @@ func (s *Sweeper) logStats(msg string, st Stats) {
 		"delete_errors", st.DeleteErrors,
 		"grace_period", s.cfg.GracePeriod,
 		"prefix", s.cfg.Prefix,
+		"log_retention", s.cfg.LogRetention,
+		"log_objects_examined", st.LogObjects,
 		"ref_sources", RefSources(),
 		"duration", st.Duration,
 	)

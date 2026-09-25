@@ -103,10 +103,11 @@ func (r refSource) String() string { return r.Table + "." + r.Column }
 // RefSources reports the (table, column) pairs the sweep treats as reference
 // sources, for logging and for the coverage test.
 func RefSources() []string {
-	out := make([]string, 0, len(refSourceColumns))
+	out := make([]string, 0, len(refSourceColumns)+len(logRefSources))
 	for _, r := range refSourceColumns {
 		out = append(out, r.String())
 	}
+	out = append(out, logRefSources...)
 	return out
 }
 
