@@ -468,8 +468,8 @@ func TestUnreadableFilesAreErrorsNotDowngrades(t *testing.T) {
 	})
 }
 
-// TestNexusEnvDoesNotArmTheTLSGuard pins a deliberate asymmetry with
-// config.DSNRequired(), which NEXUS_ENV DOES arm.
+// TestNexusEnvDoesNotArmTheTLSGuard pins a deliberate asymmetry with the DSN
+// guard, which NEXUS_ENV used to arm (it is now unconditional).
 //
 // The two guards look symmetrical and are not. A missing DSN has no working
 // outcome -- the service cannot serve without a database. Missing TLS has one:

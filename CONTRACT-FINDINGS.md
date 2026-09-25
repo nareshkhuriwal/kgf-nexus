@@ -1189,7 +1189,7 @@ have no backup at all.
 Separately, ARCHITECTURE.md §3.2 listed "rate limit" among the gateway's
 responsibilities with nothing implementing it, and the CLI already carried a hint
 for a 429 the server could never send. Now a per-credential token bucket, off unless
-`NEXUS_RATE_LIMIT_RPS` is set.
+`NEXUS_RATE_LIMIT_RPS` is set. (Its pre-authentication keying was bypassable; see F99.)
 
 A pattern across F67–F76 worth stating plainly: in this codebase the inline
 comments are consistently more accurate than the design documents. Several of these
@@ -2079,12 +2079,58 @@ than handled silently:
   merges stdout and stderr. Stream selection (KEP-3288) is alpha and is silently
   ignored where the feature is disabled, so an output built from it would carry
   the task's stderr inside its data.
-- **Pending reasons reach the control plane but go no further.** The executor
-  sends pod phase changes to `ReportProgress` (ADR-0007's nested-scheduling
-  mitigation). `scheduler.RecordProgress` stores only the heartbeat time and
-  drops the message and the fraction. Surfacing "Unschedulable: insufficient
-  cpu" in the UI needs a scheduler column and an API field. That belongs to
-  another workstream, and no proto change was made here.
+- **Pending reasons reach the control plane but go no further — RESOLVED.**
+  The executor sends pod phase changes to `ReportProgress` (ADR-0007's
+  nested-scheduling mitigation), and `scheduler.RecordProgress` used to store
+  only the heartbeat time. It now stores the latest message and fraction per
+  attempt, and the console shows them. No proto change was needed. What was
+  built, and why:
+  - **A side table, `attempt_progress` (migration 0024), not columns on
+    `task_attempts`.** ApplyResult, cancellation and lease reclaim lock the
+    attempt row with `FOR UPDATE ... SKIP LOCKED` and treat "no row" as
+    "already handled". A progress write that held that row, or a foreign key
+    to it (whose check takes `FOR KEY SHARE`), could make a result arriving
+    alongside it be skipped, and the attempt would then expire as LOST.
+    `TestProgressNeverBlocksTheResult` races progress against ApplyResult; a
+    mutation that locks the attempt row turns it red. The table is the
+    scheduler's (ADR-0011 matrix updated), cascades from the run, and every
+    service may read it.
+  - **Untrusted input.** Sanitized in one place (`domain.SanitizeProgressMessage`):
+    invalid UTF-8 replaced, newlines collapsed to spaces, control and format
+    (bidi, zero-width) characters removed, capped at 512 bytes with a visible
+    "…". A DB CHECK allows 1024. The fraction must be finite and in (0, 1]: 0
+    is proto3's unset value and never erases a stored fraction, and an invalid
+    one is dropped and logged without failing the heartbeat.
+  - **Fenced twice.** The gateway still fences first. It now forwards the
+    lease token (additive `lease_token` in the scheduler's JSON request), and
+    the scheduler re-checks it inside the write: a wrong, expired or reclaimed
+    lease is refused, and so is a report from an older lease epoch than the
+    one that last wrote the row. A stale answer from the scheduler becomes
+    `Ack{accepted:false, reason:"stale_lease_token"}`. A lease *lock* was tried
+    and deadlocked against ApplyResult (timers vs. lease order). The fence is
+    therefore a read, so a report that was current when read can commit just
+    after the lease ends. It then records the attempt's last status. It can
+    never reach another attempt.
+  - **Independent of the heartbeat budget.** Stored for DISPATCHED and RUNNING
+    attempts whether or not `heartbeat_ms` is set. The heartbeat re-arm is
+    unchanged, and runs before the event so the lock order (timers, then the
+    run row) matches every terminal path.
+  - **Bounded history.** An `AttemptProgress` run event, attributed to
+    `worker:<id>`, only for a changed message: at most one per 2 s across a
+    phase change ("pod Pending" → "pod Running"), one per 60 s within a phase,
+    and 50 per attempt. Skipped changes are counted in the next event's
+    `suppressed_changes`.
+  - **Rolling upgrade.** A gateway without the field sends no token, and the
+    new scheduler honours only the heartbeat, as before. An old scheduler
+    ignores the token and returns `{}`, which the new gateway reads as
+    "not stale". Migrations run before services (ADR-0011 rule 4), so the new
+    gateway's join always finds the table.
+  - **API and UI.** The REST attempt gains `progress_message`,
+    `progress_fraction`, `progress_at` and `progress_message_at`, all null
+    when nothing was reported. The attempt card, the placement panel ("why /
+    status") and the DAG tooltip label the scheduler's placement reason and
+    the executor's status separately. A RUNNING node whose pod is still
+    Pending gets a "pod pending" badge.
 - **Tolerations have no field in the TaskSpec proto** (§4.3 shows one; F21
   class). Pool pinning is therefore per-worker configuration
   (`NEXUS_K8S_NODE_SELECTOR` / `NEXUS_K8S_TOLERATIONS`), and a Nexus worker
@@ -2187,3 +2233,432 @@ than borrowing the index's order) but runs unindexed, and the scheduler logs a
 WARN. The scheduler detects migration 0023 at startup, not per claim, so a
 scheduler started before 0023 must be restarted to pick it up (OPERATIONS §15).
 
+### F99. The gateway rate limit could be bypassed with a random Authorization header — FIXED
+
+**Severity:** HIGH wherever `NEXUS_RATE_LIMIT_RPS` is set (it is off by default).
+The limiter ran before authentication and keyed on `"cred:" + <raw
+Authorization header>`. That header is attacker-chosen until it is verified. A
+client that sent a different random value on each request got a new, full bucket
+each time, so the limit never applied to the unauthenticated flood and credential
+stuffing it existed to stop (F76). Every such request also cost a database
+lookup, and its raw header, up to Go's 1 MB header limit, stayed in the limiter's
+map until idle eviction. So the limiter also held secret material and was a
+memory amplifier. Idle eviction ran as a full-map scan and the map had no size
+cap. IPv6 clients were keyed by full address, so one host could rotate through
+its /64.
+
+**Fix (`services/api-gateway/rest/ratelimit.go`; docs/OPERATIONS.md §16).** The
+gateway now uses three buckets:
+1. **Per address, before authentication, on every request.** The key is
+   `requesterIP`, which trusts `X-Real-IP` only from loopback or private peers.
+   IPv6 is folded to its /64 and IPv4-mapped addresses to IPv4. Nothing the
+   client sends chooses the key.
+2. **Auth failures, per address.** This bucket is stricter: 10, then 1 per 6 s.
+   It is spent once per rejected credential (guard) or rejected password
+   (login). While it is empty the address is refused authentication with 429.
+   A request with no credential is not a failure. The same rejected value
+   repeated from one address is charged once per 5 minutes, so a console tab
+   polling with a revoked session cannot 429 its owner's sign-in. That record
+   stores an HMAC under a random per-process key, never the value.
+3. **Per credential, after authentication.** The key is the verified
+   principal's kind and database ID (`cred:api_key:<id>`, `cred:session:<id>`,
+   `cred:token:<id>`), never the presented secret.
+
+Every limiter is an LRU with TTL. Idle eviction pops from the cold end in
+O(evicted) and never drops a bucket before its refill time, so eviction cannot
+forgive a throttled key. `MaxEntries` (default 100,000, about 20 MB) is a hard
+cap. Refusals are 429 `rate_limited` with `Retry-After` (rounded up; it used to
+truncate) and `RateLimit-Limit`/`-Remaining`/`-Reset`. The email-link routes'
+per-IP limit now uses the same address key and headers. Its message is
+unchanged.
+
+**Compatibility.** `NEXUS_RATE_LIMIT_RPS`/`_BURST` keep their meaning, the
+per-credential allowance, and are still the only on-switch. The address bucket
+defaults to 4× that allowance so several principals behind one egress are not
+capped at one credential's rate. New optional knobs: `NEXUS_RATE_LIMIT_IP_RPS`,
+`_IP_BURST`, `_AUTH_FAIL_RPS`, `_AUTH_FAIL_BURST`, `_MAX_KEYS`.
+`WithRateLimit(RateLimitConfig)` keeps its signature and derives all three
+buckets; `WithRateLimits(GatewayRateLimits)` sets them explicitly. No wire or
+schema change. Two behaviour changes are visible:
+- Authenticated traffic now also spends the per-address bucket.
+- A 429 can now come from an address that exceeded its failure budget, even
+  when it presents a valid key.
+
+**How it is held (`rest/ratelimit_test.go`, `cmd/api-gateway/main_test.go`, `-race`).**
+- `TestRandomAuthorizationCannotBypassTheLimit` is the regression: 50 random
+  headers from one address with burst 5 must give exactly 45 × 429, one address
+  bucket, and zero credential buckets. Reverting the key to include the header
+  turns it red, which was checked. Reverting also turns
+  `TestGuardUnderConcurrentLoadIsRaceFree` red (244 requests passed a burst of
+  100).
+- `TestAddressKeyFoldsIPv6ToItsSlash64` and
+  `TestAddressKeyTrustsXRealIPOnlyFromPrivatePeers`.
+- `TestLimiterMemoryIsBounded`: 10,000 sprayed keys against a cap of 100, and
+  the throttled hot key is never flushed. `TestIdleEvictionNeverForgivesAThrottledKey`.
+- `TestPerCredentialLimitAppliesAfterAuthentication`: two keys share one
+  address, the bare and `Bearer` spellings share one bucket, and no key
+  material is held in the map.
+- `TestFailedAuthenticationSpendsAStricterAddressBudget`,
+  `TestFailedLoginsSpendTheAddressFailureBudget`,
+  `TestRepeatingOneRejectedCredentialIsChargedOnce`.
+- `TestRateLimitedResponseCarriesRetryHeaders`, and the env-parsing tests for
+  backward compatibility.
+
+**Not addressed; documented in OPERATIONS §16.6.**
+- Buckets are in memory **per replica**: N replicas admit up to N × each rate,
+  and a restart forgets every bucket. No shared store exists.
+- Clients behind one NAT share buckets 1 and 2.
+- There is no per-target-account failure bucket for login. Such a bucket would
+  let anyone lock a victim out, so it was deliberately not added.
+- `POST /v1/auth/register` is bounded only by the address bucket and per-email
+  uniqueness.
+- There are no limiter-specific metrics. Since ADR-0019 (merged in wave 1) 429s
+  are counted in `nexus_http_requests_total{code="429"}` per route on the
+  gateway's ops listener (OPERATIONS §17), but not per bucket.
+
+### F100. Node-level retry was silently a whole-run retry, and no retry worked at all — FIXED
+
+**Severity:** high. An operator control reported success and did something else, and
+the control underneath it did nothing.
+
+`nexusctl run retry <id> --node X` and the SDK's `retry_run(id, nodes=[...])` sent
+`{"nodes": [...]}`. The gateway routed `/retry` through `a.lifecycle`, which takes a
+run id and never reads the body; `RetryRunRequest` had no field to carry a selection;
+and `RetryFromFailed` was defined as "every failed node". So the one piece of
+information that made the request node-level was dropped at the first hop, silently.
+
+Checking the rest of the path found the larger defect beneath it: the
+workflow-manager's `DAGEngineClient.ResetFailedNodes` returned `errNotWired`
+unconditionally. **Every** retry — node-level or whole-run, CLI, SDK or the console's
+"Retry failed tasks" — answered 500. ARCHITECTURE §5.4 even said so in passing
+("retry-from-failed is itself unwired"). Nobody had exercised it end to end.
+
+And wiring the reset naively would not have worked either. The engine derives a node's
+state from its LATEST attempt (attempts are the truth, `task_nodes.state` a
+projection), so writing `FAILED -> PENDING` lasts until the next reconcile, which reads
+the node's last FAILED attempt, sees its budget spent, and writes FAILED back. The only
+ways to make a reset stick without schema help are deleting or rewriting attempts —
+both break invariant 9.
+
+**Fix, end to end:**
+
+- **Proto** (additive): `RetryRunRequest.node_ids = 3`, `actor = 4`. Regenerated with
+  the pinned toolchain (protoc 29.3, protoc-gen-go 1.36.12, protoc-gen-go-grpc 1.6.2);
+  only `services.pb.go` changed.
+- **Migration 0026** (additive, metadata-only): `task_nodes.retry_floor`. The highest
+  attempt number a retry superseded. The engine loads only attempts above it, and the
+  retry budget (`max_attempts`, backoff, the scheduler's lease-expiry count) is counted
+  from it. Earlier attempts stay, unmodified, in the history and the run view; the next
+  attempt is `MAX + 1` with the same idempotency key (invariant 1, ADR-0006).
+- **Semantics** (`internal/dag/retry.go`, pure, table-tested): selected nodes must be
+  FAILED, UPSTREAM_FAILED or CANCELLED; they and every non-succeeded downstream node
+  (SKIPPED included) go back to PENDING; SUCCEEDED nodes and all upstream work are
+  untouched. A selection that would fail again at once (an UPSTREAM_FAILED node whose
+  failed cause is not selected, or any node under fail_fast while another failure
+  stands) is refused, naming the node to add, rather than applied and silently
+  re-failed. Expanded map templates reset to RUNNING (their expansion record exists);
+  a selected child resets its template but not its siblings; a refused expansion is
+  not retryable. Empty selection = whole run (the original meaning).
+- **dag-engine** `ResetNodes`: plans from stored state, applies all resets as
+  compare-and-sets in one transaction — any miss, or any attempt found in flight, rolls
+  the whole thing back (`Aborted`). It does not reconcile (see below).
+- **workflow-manager** `Retry`: locks the run row (`FOR NO KEY UPDATE`, so the engine's
+  FK checks on `task_nodes` never wait on it), checks FAILED/TIMED_OUT, calls the
+  engine, renews the deadline, moves the run to RUNNING, commits, then reconciles. A
+  second retry waits and is refused; a cancel waits and then cancels the retried run.
+  If the engine call's outcome is unknown (timeout), the run is committed RUNNING and
+  reconciled anyway — both possibilities converge — and the caller gets 503 "re-read
+  the run".
+- **gateway**: reads the body strictly (unknown field = 400), normalizes the selection,
+  checks the run exists IN THE NAMESPACE before mutating, rejects unknown nodes (422)
+  and non-retryable nodes (409) naming each one, maps the owner's refusals to
+  409/422/501/503, and writes a `run.retry` audit record either way.
+- **CLI / SDK**: flags and signatures unchanged, now honoured; help, docstrings,
+  `Sequence[str]` type hint, and the SDK refuses a bare string (which `list()` would
+  have split into one-letter node ids).
+- **Console**: "Retry this task" on the selected node of a FAILED/TIMED_OUT run, shown
+  only for retryable node states, confirmed before it fires, surfacing the gateway's
+  refusal message.
+
+**Found along the way, and fixed because the retry depends on them:**
+
+- *Retry never renewed the deadline.* `RetryFromFailed` cancelled the deadline timer
+  "for a fresh window" and armed none, leaving `deadline_at` in the past; the deadline
+  reconciler re-arms a timer for any active run with a `deadline_at`, so a retried
+  TIMED_OUT run would have timed out again on its next pass. Now renewed from the
+  pinned spec's `run_timeout_ms`, in the retry transaction. `ended_at` is cleared on
+  re-entry to RUNNING.
+- *`OnNodesTerminal` trusted a stale report.* It counted nodes without the run lock and
+  never checked they were terminal. A reconcile that concluded FAILED just before a
+  retry could therefore put the retried run back to FAILED over PENDING nodes — which
+  no scheduler dispatches (the claim admits only PENDING/RUNNING runs). The DB race test
+  caught exactly this on its first run. It now locks, counts and transitions in one
+  transaction, and refuses when any node is non-terminal.
+- *Lifecycle conflicts answered 500.* The workflow-manager mapped
+  `ErrRunStateConflict` to `Internal` and the gateway's lifecycle path re-attached no
+  sentinel, so "pause a run that just finished" was a 500. Now `FailedPrecondition` →
+  409 for cancel/pause/resume as well.
+
+**Still open at the time (reported here, fixed separately as F101):** cancel/pause/resume check the run's
+namespace only AFTER the owner has mutated it (`upstream.lifecycle` reads the run back
+scoped by namespace), and the owner acts on a run id alone. A principal of namespace A
+who knows a run UUID in namespace B can cancel it and receive a 404. Retry now checks
+first; the other three should get the same one-line reordering.
+
+**Rolling upgrade:** migration first, then dag-engine and scheduler, then
+workflow-manager and gateway (OPERATIONS §18.1). Every mixed-version combination fails
+closed — refused or degraded to a whole-run retry — never double-dispatching.
+
+**Verified:** pure planner tests (16, including a mutation that let a child retry reset
+its siblings: caught); dag-engine DB tests for the full journey, fresh budget, refusals
+changing nothing, all-or-nothing store writes, a 4-way concurrent retry ×10 rounds, and
+an expansion child; workflow-manager DB tests for the transaction, deadline renewal,
+indeterminate outcome, and a second retry / stale terminal report / cancel each fired
+while a retry holds the run. Mutations that removed the floor filter, the reset CAS or
+the non-terminal guard each turned those tests red.
+
+### F101. Cancel, pause and resume could change another tenant's run — FIXED
+
+**Severity:** high. A tenancy boundary that held for reads did not hold for three
+writes.
+
+The gateway's guard authorizes the principal for the namespace in the PATH. Nothing
+tied the run id in the path to that namespace before the mutation: `rest.lifecycle`
+called the workflow-manager — which acts on a run id alone, by design, since it owns
+`workflow_runs` and has no principal — and only afterwards did `upstream.lifecycle`
+read the run back with `GatewayGetRun(namespace, id)`. So a principal of namespace A
+that knew a run UUID from namespace B could `POST /v1/namespaces/A/runs/<B's run>/cancel`
+(or pause, or resume): B's run was cancelled, and A was answered 404. The 404 made it
+look refused. Reproduced against real Postgres with two tenants: with the check
+removed, the victim run goes RUNNING -> CANCELLING / PAUSING, PAUSED -> RUNNING.
+
+Found while fixing F100, where retry went through the same function.
+
+**Fix:** `rest.lifecycle` looks the run up with `GatewayGetRun(ns, id)` — namespace in
+the predicate — before calling the owner; a run in another namespace is 404 and the
+owner is never called. Retry already did this (F100).
+
+**Sweep of every other mutating route** in `services/api-gateway/rest`. None of the
+others had the same mutate-then-check order:
+
+| Route | Why it is safe |
+|---|---|
+| `DELETE runs/{id}` | selects and inserts `run_deletions` `WHERE id AND namespace` (principal's) in one tx |
+| `POST runs/{id}/retry` | checks the run in `ns` first (F100) |
+| `POST workers/{id}/drain`, `/quarantine`, `/release` | `GatewayGetWorker(ns, id)` before the owner call |
+| `POST backfills/{id}/pause\|resume\|cancel` | owner's `WFMSetBackfillState` updates `WHERE id AND namespace` |
+| `POST/PUT/DELETE schedules/{name}`, `/enable`, `/disable`, `/backfills` | keyed by `(namespace, name)` in every owner statement |
+| `DELETE specs/{name}`, `POST specs` | keyed by `(namespace, name)` |
+| `POST runs` | the owner refuses a spec whose namespace differs from the run's |
+| `POST cache/invalidations` | records a cutoff scoped to `ns`; touches no other tenant's rows |
+| `PUT/POST/DELETE users/{id}...`, `tokens/{id}/revoke` | every UPDATE is `WHERE namespace AND id`, or `GetUser(ns, id)` first |
+| `PUT platform/config`, `platform/clusters/{name}` | scoped to the principal's namespace |
+
+**Tests:** a unit test for each of cancel/pause/resume/retry asserting 404 and that
+the owner was never called, plus a positive test; and a DB integration test with two
+registered tenants whose fake owner mutates `workflow_runs` by id alone — exactly as
+the real one does — asserting the victim run is unchanged, a foreign namespace in the
+path is 403, and each tenant can still act on its own run. Both tests fail with the
+check removed.
+
+**Defence in depth, not done here:** the owner's lifecycle RPCs could take the
+namespace and put it in their own `WHERE`, so a future caller that forgets the check
+cannot repeat this. That is a proto change (`CancelRunRequest` etc. have no namespace
+field) and is left for a separate, additive revision.
+
+### F102. Task logs were neither durable nor viewable, and the sweep would have deleted them — FIXED
+
+**Severity:** HIGH for operability. `GET …/attempts/{id}/logs` answered 501 on
+every deployment: the gateway declared a `LogStreamer` and `main.go` passed
+`nil`. Task output lived only in the attempt's work directory (subprocess
+`combined.log`), the container's own log (docker) or the pod log (kubernetes),
+and each executor's `Cleanup` deletes those. The runner's `streamLogs` copied
+up to 16 MiB into the *agent's* log, which is not per-attempt addressable or
+tenant-authorized -- and for subprocess it copied nothing, because `Logs()`
+opened the file once and read to the EOF that existed at start. The console's
+log pane used `EventSource`, which cannot send the `Authorization` header, so
+even a working endpoint would have answered 401.
+
+**Contract change (additive, ADR-0020).** One unary RPC,
+`WorkerService.ReportLogs(attempt_id, lease_token, chunks[], final)`, carrying
+chunk *metadata* only; `RegisterResponse.log_shipping` (field 6) advertises the
+policy. Migration 0025 adds `attempt_logs` and `attempt_log_chunks`, owned by
+the api-gateway (an addition to ADR-0011's matrix). Agents write chunk bytes
+directly to `<ns>/logs/<attempt_id>/` with their existing credentials, so the
+write path moves no payload through the control plane (ADR-0008). Old agents
+and old gateways both degrade to "no log recorded", stated by the API.
+
+**A latent data-loss trap, closed in the same change.** artifact-gc keys
+reachability on JSONB `blob.key` references. Log objects are named by the new
+tables, not by any `ResultRef`, so before this change every log object older
+than the grace period would have been classified an orphan and a deleting pass
+would have removed it. The log index is now a reference source
+(`LiveLogKeys`); compacted-away chunks and objects written by fenced attempts
+are ordinary orphans; `-log-retention` is opt-in and applies to logs only.
+
+**How it is held.**
+- `TestLogsOfASubprocessTaskAreReadableWhileRunningAndAfterCompletion` (real
+  Postgres + MinIO): the agent's Runner runs a subprocess task, the gateway's
+  worker server indexes it, the gateway reader serves 40 stream-tagged lines
+  *while the task is blocked*, then the final line, tail and a regex search
+  after it ends; it also asserts the log was `complete` at the moment
+  `ReportResult` arrived (finalization is fenced, so it must precede the
+  result).
+- `TestLogIndexFencingIdempotencyAndTenancy`: a stale token cannot index, a
+  redelivered chunk changes no counter, a key outside the attempt's own prefix
+  is refused (it would otherwise let a worker point the index at another
+  tenant's object), and a crashed agent's log reads back as `partial`.
+- `TestSweepCollectsOnlyOrphanedLogObjects` (real Postgres + MinIO, deleting
+  pass): live chunks and compacted objects kept; compacted-away chunks, a fenced
+  attempt's upload and a deleted run's log collected; retention collects only
+  outside the window.
+- Shipper unit tests pin the three load-bearing properties: writes never block
+  on a stalled store (drops are counted and marked), line numbers are
+  contiguous, and the cap keeps head and tail and says what it omitted.
+- Gateway tests: tail/page/filter, bounded and resumable search, SSE follow
+  with `Last-Event-ID` resume and an `end` event, plain text for the CLI, and
+  authorization (no credential 401, worker key 403, other tenant 403/404).
+
+**Not done, stated.** Redaction is wired but has no input: nothing resolves
+`SecretRef` values on the worker, so the resolver that is eventually added must
+feed `Runner.SecretValues`. `-check-refs` does not yet walk the log index.
+Kubernetes pod logs cannot separate streams and are tagged `combined`. The
+live tail is poll-based (≈ 2–3 s). Written as F99 on its branch; renumbered
+F102 at the wave-1 merge because F99 (rate limiting), F100 and F101 were taken.
+
+### F103. Every service fell back to a compiled-in DSN outside production — FIXED
+
+**Severity:** medium. A misconfiguration was silently turned into a connection to
+the wrong database.
+
+`internal/config.DSN` returned `postgres://postgres:test@localhost:55432/nexus`
+(artifact-gc: the compose stack on 55433) whenever none of the four DSN spellings
+was set, unless `NEXUS_ENV` named a production-like environment or
+`NEXUS_REQUIRE_DSN` was set. A typo such as `NEXUS_POSTGRE_DSN`, a variable
+exported in the wrong shell or a manifest that forgot one container therefore
+started the service against whatever Postgres listened on that port. On at least
+one developer machine that is an unrelated product's database (noted under F93:
+`polaris-postgres`), so "the service started" proved nothing. F38 introduced the
+shared resolver and kept the per-service defaults; this closes that gap.
+
+**Fix (`internal/config/dsn.go`, merged in wave 1 from
+`fix/dsn-defaults-and-doc-hygiene`).** There is no default in any environment.
+With no DSN in `NEXUS_DATABASE_URL`, `DATABASE_URL`, `NEXUS_POSTGRES_DSN`,
+`NEXUS_DSN` or the service's own flag (`-dsn` on scheduler and dag-engine,
+`-database-url` on resource-manager and artifact-gc), the process exits 1 at
+startup and names every spelling it checked. A DSN given only on the command
+line is honoured (the resolver reads `os.Args`, because it runs as a flag
+default before `flag.Parse`), and `-h` still prints usage. `NEXUS_ENV` and
+`NEXUS_REQUIRE_DSN` no longer affect DSN resolution; `NEXUS_ENV` still arms the
+TLS guard (TLS.md). OPERATIONS §8 describes where each run mode gets its DSN.
+
+**Upgrade impact.** Compose, the Helm chart and the Makefile already pass
+`DATABASE_URL` to every service, so they are unaffected. A hand-run binary or a
+custom manifest that relied on the fallback now refuses to start; set one of the
+variables above. This is a deliberate behaviour change and is additive to the
+wire contract (no proto or schema change).
+
+**How it is held.** `internal/config/dsn_test.go` covers each spelling and its
+precedence, flag-only DSNs in both `-flag value` and `-flag=value` forms, `-h`
+with no DSN, and the refusal message.
+
+### F104. MarkStarted can make a concurrent result be skipped and reclaimed as LOST — OPEN
+
+**Severity:** medium (narrow window, data loss of a completed result when hit).
+Found while building F96's progress storage; not fixed.
+
+`SchedulerStore.MarkStarted` (`internal/store/scheduler_reports.go`) moves the
+attempt DISPATCHED→RUNNING with an `UPDATE task_attempts ... WHERE state =
+'DISPATCHED'`, then deletes the schedule-to-start timer and appends
+`AttemptStarted` in the same transaction. The UPDATE holds the attempt's row lock
+until that transaction commits. `ApplyResult`, cancellation and lease reclaim all
+lock the same row with `FOR UPDATE ... SKIP LOCKED` and treat "no row" as
+"already handled".
+
+So a result that arrives while a `MarkStarted` transaction is still open (a very
+short task, a `ReportStarted` that the agent timed out on after 10 s while the
+server side is still running, or a redelivered `ReportStarted`) finds no row.
+`ApplyResult` returns `Applied: false`, and the gateway still answers the agent
+`Accepted: true`, so the agent drops the result as delivered. The attempt then
+stays RUNNING until its lease expires and the reconciler reclaims it as LOST,
+which retries or fails a task that actually succeeded.
+
+`RecordProgress` (F96) avoids the same trap by writing to the side table
+`attempt_progress` and never locking the attempt row;
+`TestProgressNeverBlocksTheResult` pins that. Nothing pins it for
+`MarkStarted`.
+
+**Candidate fixes, not chosen here.** (a) In `ApplyResult`, distinguish "row
+locked" from "row terminal": retry the lock without `SKIP LOCKED` (a plain
+`FOR UPDATE` with a short `lock_timeout`) when the attempt is still
+DISPATCHED/RUNNING, since a result is never contending with a peer applying the
+same result under a valid lease. (b) Have the gateway return `Accepted: false`
+with a retryable reason when `Applied` is false and the attempt is not terminal,
+so the agent's WAL keeps the result and redelivers it. Either needs a race test
+in the style of `TestProgressNeverBlocksTheResult` that holds a `MarkStarted`
+transaction open while a result arrives.
+
+### F105. archive_timeout did not bound the RPO after a server start or promotion — FIXED
+
+**Severity:** medium. The documented RPO was wrong by a factor of five exactly
+when an operator relies on it most, straight after a restart or a restore.
+
+Found by the PITR drills (`feat/pitr-and-timed-restore`, OPERATIONS §4.6). With
+`archive_timeout=60` on PostgreSQL 16.15, after any server start or promotion
+the server did not switch WAL segments for **301 s** (that is,
+`checkpoint_timeout`) under steady writes. This was reproduced three times. A
+partially filled segment is not archived until it is switched, so the real RPO
+right after a restart or a PITR restore was about 5 minutes, not about 1.
+
+**Fix (`deploy/pgbackrest/nexus-pitr-scheduler.sh`, `wal_guard`).** The
+pgBackRest sidecar runs an archive-age guard. It checks every 10 s, and when
+nothing has been archived for `PITR_WAL_SWITCH_SECONDS` (60 s) since the later
+of `pg_stat_archiver.last_archived_time` and `pg_postmaster_start_time()`, it
+calls `pg_switch_wal()`. That call is a no-op when no WAL was written, so an
+idle database pays nothing. The measured archive intervals with the guard were
+59–69 s. The Helm chart runs the same sidecar (`templates/dependencies.yaml`).
+
+**Residual.** The guard lives in the sidecar, so if the sidecar is down the
+bound is gone too. `deploy/pitr-verify.sh` fails when the newest archived
+segment is older than 15 minutes; alert on it.
+
+### F106. Two liveness sweepers, and the scheduler's gives up its in-flight recovery when it loses — OPEN
+
+**Severity:** low (time, not correctness). Found by the timed full-stack restore
+drill (OPERATIONS §4.6).
+
+Two processes declare silent workers DEAD:
+
+- the resource-manager's sweeper, `Sweeper.sweepOnce` in
+  `services/resource-manager/internal/server/sweeper.go`, which calls
+  `SetWorkerState(..., WorkerDead)` and releases the worker's reservations but
+  deliberately leaves its attempts to the scheduler;
+- the scheduler's `SchedulerStore.SweepDeadWorkers` in
+  `internal/store/scheduler_liveness.go`, which selects only workers still in
+  `ACTIVE`, `DRAINING` or `QUARANTINED`, and whose `killWorker` expires the
+  worker's DISPATCHED/RUNNING attempts as LOST (`worker_dead`) only after its
+  own `UPDATE ... SET state = 'DEAD'` affected a row.
+
+When the resource-manager marks the worker DEAD first, the scheduler's sweep no
+longer selects it, so nothing expires its in-flight attempts early. They wait
+for lease expiry through the lease reconciler (`-lease-ttl`, 30 s by default in
+`services/scheduler/main.go`), which costs up to one lease TTL of extra
+recovery per attempt.
+
+Separately, `killWorker` returns on the first `expireOne` error and
+`SweepDeadWorkers` then returns immediately (`return out, fmt.Errorf("declare
+worker %s dead: ...")`). One attempt that fails to expire therefore stops that
+worker's remaining attempts and every other stale worker for the whole pass.
+Because the failed worker is already committed DEAD, the next pass will not
+select it again, so its remaining attempts also fall back to lease expiry.
+
+Nothing is lost or double-applied: lease expiry is the correctness backstop in
+both cases, and every expiry is fenced.
+
+**Proposed fix, not done.** Have the scheduler's sweep also expire the held
+attempts of workers that are already DEAD with attempts still DISPATCHED/RUNNING
+(or move the attempt half of the transition behind one owner). Also make
+`killWorker` and `SweepDeadWorkers` log and continue per attempt and per worker,
+as `ReconcileExpiredLeases` does, instead of returning on the first error. Test
+with an integration test where the resource-manager wins the race, asserting
+the attempts become LOST within one sweep interval instead of one lease TTL.

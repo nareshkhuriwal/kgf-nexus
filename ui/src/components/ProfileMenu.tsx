@@ -1,4 +1,4 @@
-import { IconGear, IconKey, IconUsers } from './icons';
+import { IconChevronDown, IconGear, IconKey, IconSignOut, IconUsers } from './icons';
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
@@ -251,9 +251,7 @@ export function ProfileMenu({
             this trigger's tooltip, and a labelled row inside the panel -- so
             the property that mattered survives: an operator on the wrong
             namespace can still find out why their dashboard is empty. */}
-        <span className="profile-caret" aria-hidden="true">
-          ▾
-        </span>
+        <IconChevronDown className="profile-caret" size={14} />
         <span className="sr-only">{email ? `Account menu for ${email}` : 'Account menu'}</span>
       </button>
 
@@ -265,20 +263,26 @@ export function ProfileMenu({
           ref={panelRef}
           onKeyDown={onPanelKeyDown}
         >
-          {/* Identity first, and as plain type rather than a card: organisation,
-              then the person, then the address. No role chip and no second
-              avatar — the trigger already showed one, and repeating it inside
-              the panel it opened says nothing new. */}
+          {/* Identity first: organisation, then the person beside a larger
+              avatar, then the role. The avatar repeats the trigger's on
+              purpose -- beside the name it anchors the header the way familiar
+              account menus do, where a text-only header read as an unfinished
+              form rather than as "you". */}
           <div className="profile-identity">
             {organization && <p className="profile-org">{organization}</p>}
             {email ? (
-              <>
-                <p className="profile-name">{session?.displayName || (signedIn ? email.split('@')[0] : principal?.name || email)}</p>
-                <p className="profile-email" title={email}>
-                  {signedIn ? email : 'Token authentication'}
-                </p>
-                {principal?.role && <span className="profile-role">{principal.role}</span>}
-              </>
+              <div className="profile-person">
+                <span className="avatar avatar-lg" aria-hidden="true">
+                  {avatarInitial(email, session?.displayName)}
+                </span>
+                <div className="profile-person-text">
+                  <p className="profile-name">{session?.displayName || (signedIn ? email.split('@')[0] : principal?.name || email)}</p>
+                  <p className="profile-email" title={email}>
+                    {signedIn ? email : 'Token authentication'}
+                  </p>
+                  {principal?.role && <span className="profile-role">{principal.role}</span>}
+                </div>
+              </div>
             ) : (
               // An API key is a machine credential: it names no person, so the
               // menu says so rather than inventing an identity for it.
@@ -316,7 +320,7 @@ export function ProfileMenu({
 
           <div className="profile-group">
             {signedIn ? (
-              <ProfileMenuItem onSelect={() => { setOpen(false); onSignOut?.(); }}>Sign out</ProfileMenuItem>
+              <ProfileMenuItem onSelect={() => { setOpen(false); onSignOut?.(); }}><IconSignOut />Sign out</ProfileMenuItem>
             ) : (
               <ProfileMenuItem onSelect={() => { setOpen(false); onSignIn?.(); }}>Sign in</ProfileMenuItem>
             )}

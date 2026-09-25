@@ -1,28 +1,25 @@
 // Copyright 2026 Khuriwal Group
 // SPDX-License-Identifier: Apache-2.0
 
-// Package metrics is a minimal Prometheus-text-format exposition built on the
-// standard library only.
+// Package metrics is the platform's instrumentation API: counters, gauges and
+// histograms with fixed label sets, plus the HTTP and gRPC middleware and the
+// per-service registry every Nexus process exposes at /metrics.
 //
-// It exists rather than github.com/prometheus/client_golang because that library
-// pulls in a transitive tree (protobuf extensions, expfmt, procfs, client_model)
-// for a feature this platform uses only the simplest slice of: a handful of
-// counters, gauges and histograms scraped over HTTP. The Prometheus text
-// exposition format is versioned, stable and a few dozen lines to write, so the
-// dependency would buy convenience at the cost of a supply-chain surface — the same
-// trade the Python SDK makes by declaring zero runtime dependencies.
+// The instruments are in-house (lock-free counters and gauges, a non-cumulative
+// bucket histogram); the EXPOSITION is github.com/prometheus/client_golang,
+// pinned in go.mod. ADR-0019 records why: the hand-written encoder was correct
+// on the happy path but had no Go runtime or process collectors, no content
+// negotiation or compression, and edge cases (a histogram label named `le`, a
+// duplicated bucket bound, label sets that disagreed with the declared names)
+// that produced an unparseable scrape. Keeping this package's API meant no call
+// site had to change to fix that.
 //
-// What is deliberately NOT here: exemplars, native histograms, the protobuf
-// negotiation, and process/Go runtime collectors. If any of those is ever needed,
-// swapping in client_golang behind this package's API is the right move; until then
-// the cost is not justified.
+// What is deliberately NOT here: exemplars and native histograms. Both are a
+// client_golang option away if they are ever needed.
 package metrics
 
 import (
 	"math"
-	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -164,205 +161,4 @@ func (h *Histogram) Buckets() []float64 {
 	out := make([]float64, len(h.upper))
 	copy(out, h.upper)
 	return out
-}
-
-// metricKind distinguishes the three exposition shapes.
-type metricKind string
-
-const (
-	kindCounter   metricKind = "counter"
-	kindGauge     metricKind = "gauge"
-	kindHistogram metricKind = "histogram"
-)
-
-// family groups every labelled instance that shares a name, help text and type.
-//
-// Prometheus requires that a name's `# HELP` and `# TYPE` appear once and that all
-// its series be contiguous. Modelling the family explicitly is what guarantees
-// that, instead of relying on registration order.
-type family struct {
-	name    string
-	help    string
-	kind    metricKind
-	buckets []float64
-
-	mu       sync.RWMutex
-	children map[string]*child
-	// order preserves first-registration order so the exposition is stable
-	// between scrapes. Unstable output makes diffing two scrapes — the fastest way
-	// to answer "what changed in the last minute" during an incident — useless.
-	order []string
-}
-
-type child struct {
-	labels Labels
-	key    string
-
-	counter   *Counter
-	gauge     *Gauge
-	histogram *Histogram
-}
-
-func (f *family) get(labels Labels) *child {
-	key := labelKey(labels)
-
-	f.mu.RLock()
-	c, ok := f.children[key]
-	f.mu.RUnlock()
-	if ok {
-		return c
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	// Re-check under the write lock: two goroutines can both miss the read path,
-	// and handing them different instances would silently split one series in two.
-	if c, ok := f.children[key]; ok {
-		return c
-	}
-	c = &child{labels: cloneLabels(labels), key: key}
-	switch f.kind {
-	case kindCounter:
-		c.counter = &Counter{}
-	case kindGauge:
-		c.gauge = &Gauge{}
-	case kindHistogram:
-		c.histogram = &Histogram{upper: f.buckets, counts: make([]uint64, len(f.buckets)+1)}
-	}
-	f.children[key] = c
-	f.order = append(f.order, key)
-	return c
-}
-
-// snapshot returns the family's children in registration order.
-func (f *family) snapshot() []*child {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	out := make([]*child, 0, len(f.order))
-	for _, k := range f.order {
-		out = append(out, f.children[k])
-	}
-	return out
-}
-
-// labelKey is the canonical identity of a label set.
-//
-// Sorted, so {a:1,b:2} and {b:2,a:1} are the same series. Without this, map
-// iteration order would make the same logical metric register as two series
-// whenever a caller happened to build its labels in a different order.
-func labelKey(labels Labels) string {
-	if len(labels) == 0 {
-		return ""
-	}
-	names := make([]string, 0, len(labels))
-	for k := range labels {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	var b strings.Builder
-	for i, n := range names {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(n)
-		b.WriteByte('=')
-		b.WriteString(labels[n])
-	}
-	return b.String()
-}
-
-func cloneLabels(labels Labels) Labels {
-	if len(labels) == 0 {
-		return nil
-	}
-	out := make(Labels, len(labels))
-	for k, v := range labels {
-		out[k] = v
-	}
-	return out
-}
-
-// formatFloat renders a value the way the text format expects.
-//
-// Infinities and NaN have reserved spellings that differ from Go's, and a
-// mis-rendered one makes the whole scrape fail to parse — losing every metric in
-// the process, not just the bad one.
-func formatFloat(v float64) string {
-	switch {
-	case math.IsInf(v, 1):
-		return "+Inf"
-	case math.IsInf(v, -1):
-		return "-Inf"
-	case math.IsNaN(v):
-		return "NaN"
-	}
-	return strconv.FormatFloat(v, 'g', -1, 64)
-}
-
-// escapeLabelValue escapes the three characters the text format reserves inside a
-// label value. An unescaped newline or quote from, say, a queue name would corrupt
-// every subsequent line of the scrape.
-func escapeLabelValue(v string) string {
-	if !strings.ContainsAny(v, `\"`+"\n") {
-		return v
-	}
-	var b strings.Builder
-	b.Grow(len(v) + 8)
-	for _, r := range v {
-		switch r {
-		case '\\':
-			b.WriteString(`\\`)
-		case '"':
-			b.WriteString(`\"`)
-		case '\n':
-			b.WriteString(`\n`)
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
-// escapeHelp escapes what `# HELP` reserves: backslash and newline (a quote is
-// literal there).
-func escapeHelp(v string) string {
-	v = strings.ReplaceAll(v, `\`, `\\`)
-	return strings.ReplaceAll(v, "\n", `\n`)
-}
-
-// renderLabels formats a label set as `{a="1",b="2"}`, or "" when empty.
-func renderLabels(labels Labels, extraName, extraValue string) string {
-	if len(labels) == 0 && extraName == "" {
-		return ""
-	}
-	names := make([]string, 0, len(labels))
-	for k := range labels {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-
-	var b strings.Builder
-	b.WriteByte('{')
-	for i, n := range names {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		// Built by hand rather than with %q: escapeLabelValue has already applied
-		// the text format's escaping, and %q would escape the backslashes again.
-		b.WriteString(n)
-		b.WriteString(`="`)
-		b.WriteString(escapeLabelValue(labels[n]))
-		b.WriteByte('"')
-	}
-	if extraName != "" {
-		if len(names) > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(extraName)
-		b.WriteString(`="`)
-		b.WriteString(escapeLabelValue(extraValue))
-		b.WriteByte('"')
-	}
-	b.WriteByte('}')
-	return b.String()
 }

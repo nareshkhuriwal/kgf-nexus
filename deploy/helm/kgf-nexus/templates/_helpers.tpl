@@ -4,6 +4,12 @@ SPDX-License-Identifier: Apache-2.0
 */}}
 
 {{- define "nexus.required" -}}
+{{- if and .Values.postgres.pitr.enabled (not .Values.postgres.enabled) -}}
+{{- fail "postgres.pitr.enabled needs the in-cluster postgres (postgres.enabled=true). A managed database (Azure Flexible Server, RDS, Cloud SQL) must use the provider's automated backups and point-in-time restore instead -- see docs/OPERATIONS.md §4." -}}
+{{- end -}}
+{{- if and .Values.postgres.pitr.enabled (or (not .Values.postgres.pitr.existingSecret) (not .Values.postgres.pitr.repo.s3.bucket) (not .Values.postgres.pitr.repo.s3.endpoint)) -}}
+{{- fail "postgres.pitr.enabled requires postgres.pitr.existingSecret (s3-key, s3-key-secret, cipher-pass), postgres.pitr.repo.s3.bucket and postgres.pitr.repo.s3.endpoint" -}}
+{{- end -}}
 {{- if not .Values.existingSecret -}}
 {{- fail "existingSecret is required: the name of a Secret holding postgres-password, minio-root-user, minio-root-password and worker-api-key (deploy/terraform creates it)" -}}
 {{- end -}}
@@ -49,6 +55,8 @@ The database URL is assembled in the pod from the Secret, never rendered into
 a manifest: $(NEXUS_DB_PASSWORD) is Kubernetes' own env expansion, so the
 password exists only in the Secret and the container's environment.
 The password must be URL-safe (deploy/terraform generates alphanumerics).
+Required: the services have no built-in DSN and exit at startup without this
+(internal/config.DSN, docs/OPERATIONS.md §8).
 */}}
 {{- define "nexus.dbEnv" -}}
 - name: NEXUS_DB_PASSWORD
@@ -120,10 +128,125 @@ two listeners (config drift recorded in F38); all are set, as compose does.
 - { name: RESULT_STORE_INLINE_THRESHOLD_BYTES, value: {{ .Values.minio.inlineThresholdBytes | int64 | toString | quote }} }
 {{- end -}}
 
+{{/*
+NATS client settings for one role ("event-service" or "agent"). Under
+nats.auth.mode=nkey the client authenticates with the seed nexus.natsVolumes
+mounts, and NEXUS_NATS_REQUIRE_AUTH makes a missing seed fatal rather than a
+quiet unauthenticated connection.
+*/}}
 {{- define "nexus.natsEnv" -}}
-{{- if .Values.nats.enabled }}
+{{- $root := index . 0 -}}{{- $role := index . 1 -}}
+{{- $n := $root.Values.nats -}}
+{{- if $n.enabled }}
 - { name: NEXUS_NATS_URL, value: "nats://nats:4222" }
+{{- if eq $n.auth.mode "none" }}
+- { name: NEXUS_NATS_REQUIRE_AUTH, value: "0" }
+{{- else }}
+- { name: NEXUS_NATS_REQUIRE_AUTH, value: "1" }
+- { name: NEXUS_NATS_NKEY_SEED_FILE, value: /etc/nexus/nats/user.nk }
 {{- end }}
+{{- if $n.tls.enabled }}
+- { name: NEXUS_NATS_TLS, value: "1" }
+- { name: NEXUS_NATS_TLS_CA_FILE, value: /etc/nexus/nats-tls/ca.crt }
+{{- if $n.tls.verifyClients }}
+- { name: NEXUS_NATS_TLS_CERT_FILE, value: /etc/nexus/nats-tls/tls.crt }
+- { name: NEXUS_NATS_TLS_KEY_FILE, value: /etc/nexus/nats-tls/tls.key }
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{- define "nexus.natsVolumeMounts" -}}
+{{- $n := .Values.nats -}}
+{{- if $n.enabled }}
+{{- if ne $n.auth.mode "none" }}
+- { name: nats-nkey, mountPath: /etc/nexus/nats, readOnly: true }
+{{- end }}
+{{- if $n.tls.enabled }}
+- { name: nats-tls, mountPath: /etc/nexus/nats-tls, readOnly: true }
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Volumes holding ONE role's NATS material. The seed is projected from the Secret
+by key, so a pod receives its own seed and nothing else; no subPath, so a
+rotated Secret is visible without recreating the pod (an NKey rotation still
+needs a restart, docs/OPERATIONS.md §11.8). args: root, role, per-agent key override.
+*/}}
+{{- define "nexus.natsVolumes" -}}
+{{- $root := index . 0 -}}{{- $role := index . 1 -}}{{- $keyOverride := index . 2 -}}
+{{- $n := $root.Values.nats -}}
+{{- if $n.enabled }}
+{{- if ne $n.auth.mode "none" }}
+{{- $key := ternary $n.auth.eventServiceSeedKey ($keyOverride | default $n.auth.agentSeedKey) (eq $role "event-service") }}
+- name: nats-nkey
+  secret:
+    secretName: {{ $n.auth.seedSecret | default $root.Values.existingSecret }}
+    defaultMode: 0400
+    items:
+      - { key: {{ $key }}, path: user.nk }
+{{- end }}
+{{- if $n.tls.enabled }}
+- name: nats-tls
+  secret:
+    secretName: {{ ternary $n.tls.clientSecrets.eventService $n.tls.clientSecrets.agent (eq $role "event-service") | default $n.tls.caSecret }}
+    defaultMode: 0400
+    {{- if not $n.tls.verifyClients }}
+    items:
+      - { key: ca.crt, path: ca.crt }
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Refuse to render a broker that would accept what it must not. Public NKeys are
+validated here because a typo would otherwise surface as every client being
+rejected at runtime, with nothing in the manifest pointing at why.
+*/}}
+{{- define "nexus.natsAuthRequired" -}}
+{{- $n := .Values.nats -}}
+{{- $a := $n.auth -}}
+{{- if not (has $a.mode (list "nkey" "none")) -}}
+{{- fail (printf "nats.auth.mode=%q: use nkey (production) or none (development only)" $a.mode) -}}
+{{- end -}}
+{{- if eq $a.mode "nkey" -}}
+{{- $keyRe := "^U[A-Z2-7]{55}$" -}}
+{{- range $role := list "eventService" "monitor" -}}
+{{- $keys := (index $a $role).publicKeys | default list -}}
+{{- if not $keys -}}
+{{- fail (printf "nats.auth.%s.publicKeys is empty: generate identities with deploy/nats/nexus-nats-auth.sh init and paste `helm-values` (or set nats.auth.mode=none for a throwaway dev cluster)" $role) -}}
+{{- end -}}
+{{- range $keys }}{{ if not (regexMatch $keyRe .) }}{{ fail (printf "nats.auth.%s.publicKeys: %q is not a user public NKey (U...)" $role .) }}{{ end }}{{ end -}}
+{{- end -}}
+{{- $seen := dict -}}
+{{- range $a.tenants -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]+$" (.namespace | default "")) -}}
+{{- fail (printf "nats.auth.tenants: namespace %q must match [A-Za-z0-9_-]+ (other names are percent-encoded on the bus; configure them by hand)" .namespace) -}}
+{{- end -}}
+{{- if not .publicKeys -}}
+{{- fail (printf "nats.auth.tenants[%s].publicKeys is empty" .namespace) -}}
+{{- end -}}
+{{- range .publicKeys }}{{ if not (regexMatch $keyRe .) }}{{ fail (printf "nats.auth.tenants: %q is not a user public NKey (U...)" .) }}{{ end }}{{ end -}}
+{{- $_ := set $seen .namespace true -}}
+{{- end -}}
+{{- if and .Values.agents (not (hasKey $seen .Values.nexusNamespace)) -}}
+{{- fail (printf "nats.auth.tenants has no entry for nexusNamespace %q, so this chart's agents could not receive dispatch hints" .Values.nexusNamespace) -}}
+{{- end -}}
+{{- end -}}
+{{- if $n.tls.enabled -}}
+{{- if not $n.tls.secretName -}}
+{{- fail "nats.tls.enabled needs nats.tls.secretName: a Secret with tls.crt, tls.key and ca.crt for the broker (cert-manager Certificate)" -}}
+{{- end -}}
+{{- if $n.tls.verifyClients -}}
+{{- if not (and $n.tls.clientSecrets.eventService $n.tls.clientSecrets.agent) -}}
+{{- fail "nats.tls.verifyClients needs nats.tls.clientSecrets.eventService and .agent (Secrets with tls.crt, tls.key, ca.crt)" -}}
+{{- end -}}
+{{- else if not (or $n.tls.caSecret (and $n.tls.clientSecrets.eventService $n.tls.clientSecrets.agent)) -}}
+{{- fail "nats.tls.enabled needs nats.tls.caSecret (a Secret with ca.crt) so clients can verify the broker" -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -178,4 +301,67 @@ prefix, and reusing that name makes the upgrade fail on an immutable field.
 */}}
 {{- define "nexus.jobSuffix" -}}
 {{- .Values.image.tag | sha256sum | trunc 10 -}}
+{{- end -}}
+
+{{/*
+prometheus.io/* pod annotations for annotation-based discovery. Rendered only
+when metrics.podAnnotations is true. Argument: (list $root port).
+*/}}
+{{- define "nexus.metricsAnnotations" -}}
+{{- $root := index . 0 -}}{{- $port := index . 1 -}}
+{{- if $root.Values.metrics.podAnnotations }}
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: {{ $port | quote }}
+  prometheus.io/path: /metrics
+{{- end }}
+{{- end -}}
+
+{{/*
+pgBackRest settings for the postgres container (archive-push/archive-get) and
+the pgbackrest sidecar (stanza, check, base backups). Both MUST see the same
+repository and passphrase, so they share this one definition. Same variables as
+deploy/docker-compose.pitr.yml.
+*/}}
+{{- define "nexus.pgbackrestEnv" -}}
+{{- $p := .Values.postgres.pitr -}}
+- { name: PGBACKREST_STANZA, value: {{ $p.stanza | quote }} }
+- { name: PGBACKREST_PG1_PATH, value: /var/lib/postgresql/data/pgdata }
+- { name: PGBACKREST_PG1_USER, value: {{ .Values.postgres.user | quote }} }
+- { name: PGBACKREST_PG1_SOCKET_PATH, value: /var/run/postgresql }
+- { name: PGBACKREST_REPO1_TYPE, value: s3 }
+- { name: PGBACKREST_REPO1_PATH, value: {{ $p.repo.path | quote }} }
+- { name: PGBACKREST_REPO1_S3_BUCKET, value: {{ $p.repo.s3.bucket | quote }} }
+- { name: PGBACKREST_REPO1_S3_ENDPOINT, value: {{ $p.repo.s3.endpoint | quote }} }
+- { name: PGBACKREST_REPO1_S3_REGION, value: {{ $p.repo.s3.region | quote }} }
+- { name: PGBACKREST_REPO1_STORAGE_PORT, value: {{ $p.repo.s3.port | quote }} }
+- { name: PGBACKREST_REPO1_S3_URI_STYLE, value: {{ $p.repo.s3.uriStyle | quote }} }
+- name: PGBACKREST_REPO1_S3_KEY
+  valueFrom: { secretKeyRef: { name: {{ $p.existingSecret }}, key: s3-key } }
+- name: PGBACKREST_REPO1_S3_KEY_SECRET
+  valueFrom: { secretKeyRef: { name: {{ $p.existingSecret }}, key: s3-key-secret } }
+{{- if $p.repo.s3.caSecret }}
+- { name: PGBACKREST_REPO1_STORAGE_CA_FILE, value: /etc/pgbackrest/ca/ca.crt }
+{{- end }}
+- { name: PGBACKREST_REPO1_CIPHER_TYPE, value: {{ $p.cipherType | quote }} }
+{{- if ne $p.cipherType "none" }}
+- name: PGBACKREST_REPO1_CIPHER_PASS
+  valueFrom: { secretKeyRef: { name: {{ $p.existingSecret }}, key: cipher-pass } }
+{{- end }}
+- { name: PGBACKREST_REPO1_RETENTION_FULL, value: {{ $p.retention.full | quote }} }
+- { name: PGBACKREST_REPO1_RETENTION_FULL_TYPE, value: {{ $p.retention.fullType | quote }} }
+- { name: PGBACKREST_REPO1_RETENTION_DIFF, value: {{ $p.retention.diff | quote }} }
+- { name: PGBACKREST_REPO1_BUNDLE, value: "y" }
+- { name: PGBACKREST_REPO1_BLOCK, value: "y" }
+- { name: PGBACKREST_COMPRESS_TYPE, value: zst }
+- { name: PGBACKREST_PROCESS_MAX, value: {{ $p.processMax | quote }} }
+- { name: PGBACKREST_START_FAST, value: "y" }
+- { name: PGBACKREST_DELTA, value: "y" }
+- { name: PGBACKREST_ARCHIVE_ASYNC, value: "y" }
+- { name: PGBACKREST_SPOOL_PATH, value: /var/spool/pgbackrest }
+- { name: PGBACKREST_LOG_LEVEL_CONSOLE, value: info }
+- { name: PGBACKREST_LOG_LEVEL_FILE, value: "off" }
+{{- with $p.extraEnv }}
+{{ toYaml . }}
+{{- end }}
 {{- end -}}

@@ -55,6 +55,12 @@ variable "envoy_gateway_version" {
   default     = "1.9.1"
 }
 
+variable "nats_credentials_dir" {
+  description = "NATS NKey identities written by deploy/nats/nexus-nats-auth.sh (make k8s-dev-up does it). Seeds end up in Terraform state, like every other generated credential here."
+  type        = string
+  default     = "../../../../.dev-nats"
+}
+
 # Host ports for Docker Desktop's localhost LoadBalancer. Chosen to avoid the
 # compose stack's (3000, 8090, 9091, 8025) so both can run side by side.
 variable "ports" {

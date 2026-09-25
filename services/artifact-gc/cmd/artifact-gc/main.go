@@ -48,7 +48,7 @@ var version = "dev"
 func main() {
 	var (
 		dsn = flag.String("database-url",
-			config.DSN("postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable"),
+			config.DSN("database-url"),
 			"Postgres DSN (the reference set is derived from here)")
 		endpoint = flag.String("endpoint",
 			firstEnv("RESULT_STORE_ENDPOINT", "NEXUS_RESULT_STORE_ENDPOINT", "NEXUS_S3_ENDPOINT"),
@@ -68,6 +68,8 @@ func main() {
 		prefix = flag.String("prefix", "", "only sweep keys under this prefix, e.g. \"default/\"")
 		grace  = flag.Duration("grace", envDuration("ARTIFACT_GC_GRACE", artifactgc.DefaultGracePeriod),
 			"minimum object age before it may be collected; covers objects written by an attempt whose row has not committed")
+		logRetention = flag.Duration("log-retention", envDuration("ARTIFACT_GC_LOG_RETENTION", 0),
+			"collect task log objects (ADR-0020) last written longer ago than this, e.g. 720h; 0 keeps logs as long as their attempt exists")
 		maxObjects = flag.Int("max-objects", envInt("ARTIFACT_GC_MAX_OBJECTS", artifactgc.DefaultMaxObjects),
 			"maximum objects examined in this pass")
 
@@ -84,6 +86,13 @@ func main() {
 			"instead of sweeping, report rows whose object is MISSING from the store (read-only)")
 		maxRefs = flag.Int("max-refs", envInt("ARTIFACT_GC_MAX_REFS", artifactgc.DefaultMaxRefs),
 			"maximum distinct object keys checked by -check-refs")
+
+		// Batch-job metrics (see metrics.go): push at the end, and/or serve
+		// while the pass runs. Both off by default.
+		metricsAddr = flag.String("metrics-addr", envOr("ARTIFACT_GC_METRICS_ADDR", ""),
+			"serve /metrics on this address while the pass runs (e.g. 127.0.0.1:9469); empty = off")
+		pushURL = flag.String("metrics-pushgateway", envOr("ARTIFACT_GC_PUSHGATEWAY_URL", ""),
+			"push final metrics to this Prometheus Pushgateway URL under job=artifact-gc; empty = off")
 
 		logLevel = flag.String("log-level", envOr("ARTIFACT_GC_LOG_LEVEL", "info"), "debug|info|warn|error")
 		showVer  = flag.Bool("version", false, "print the version and exit")
@@ -122,15 +131,27 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, log, runConfig{
+	gm := newGCMetrics()
+	stopMetrics, err := gm.serve(*metricsAddr, log)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "artifact-gc: %v\n", err)
+		os.Exit(2)
+	}
+	runErr := run(ctx, log, runConfig{
 		dsn: *dsn, prefix: *prefix, grace: *grace, maxObjects: *maxObjects, dryRun: dryRun,
-		checkRefs: *checkRefs, maxRefs: *maxRefs,
+		logRetention: *logRetention,
+		checkRefs:    *checkRefs, maxRefs: *maxRefs,
 		minio: artifactgc.MinIOConfig{
 			Endpoint: *endpoint, Bucket: *bucket, Region: *region,
 			AccessKeyID: *access, SecretAccessKey: *secret, UseTLS: *useTLS,
 		},
-	}); err != nil {
-		log.Error("artifact-gc failed", "error", err)
+		metrics: gm,
+	})
+	gm.finish(runErr)
+	gm.push(*pushURL, log)
+	stopMetrics()
+	if runErr != nil {
+		log.Error("artifact-gc failed", "error", runErr)
 		os.Exit(1)
 	}
 }
@@ -141,9 +162,12 @@ type runConfig struct {
 	grace      time.Duration
 	maxObjects int
 	dryRun     bool
-	checkRefs  bool
-	maxRefs    int
-	minio      artifactgc.MinIOConfig
+	// logRetention is Config.LogRetention.
+	logRetention time.Duration
+	checkRefs    bool
+	maxRefs      int
+	minio        artifactgc.MinIOConfig
+	metrics      *gcMetrics
 }
 
 func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
@@ -166,10 +190,11 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	}
 
 	sw := artifactgc.NewSweeper(pool, objects, log, artifactgc.Config{
-		DryRun:      cfg.dryRun,
-		GracePeriod: cfg.grace,
-		MaxObjects:  cfg.maxObjects,
-		Prefix:      cfg.prefix,
+		DryRun:       cfg.dryRun,
+		GracePeriod:  cfg.grace,
+		MaxObjects:   cfg.maxObjects,
+		Prefix:       cfg.prefix,
+		LogRetention: cfg.logRetention,
 	})
 
 	mode := "DRY RUN (nothing will be deleted)"
@@ -183,17 +208,19 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 		"prefix", cfg.prefix,
 		"grace_period", sw.Config().GracePeriod,
 		"max_objects", sw.Config().MaxObjects,
+		"log_retention", sw.Config().LogRetention,
 		"reference_sources", artifactgc.RefSources())
 
 	st, err := sw.Once(ctx)
 	if err != nil {
 		return err
 	}
+	cfg.metrics.sweep(st)
 
 	// A human-readable summary on stdout as well as the structured log: this is a
 	// command an operator reads, not a service whose logs get shipped.
 	fmt.Printf("\nartifact-gc summary (%s)\n", mode)
-	fmt.Printf("  objects examined      %d\n", st.Listed)
+	fmt.Printf("  objects examined      %d  (%d task-log objects)\n", st.Listed, st.LogObjects)
 	fmt.Printf("  live references       %d  (from %v)\n", st.LiveRefs, artifactgc.RefSources())
 	fmt.Printf("  reachable (kept)      %d\n", st.Reachable)
 	fmt.Printf("  too young (kept)      %d  (grace %s)\n", st.TooYoung, sw.Config().GracePeriod)
@@ -286,6 +313,7 @@ func checkDangling(
 	if err != nil {
 		return err
 	}
+	cfg.metrics.check(rep)
 
 	fmt.Printf("\nartifact-gc dangling-reference check (READ-ONLY)\n")
 	fmt.Printf("  rows scanned          %d  (from %v)\n", rep.RowsScanned, artifactgc.RefSources())

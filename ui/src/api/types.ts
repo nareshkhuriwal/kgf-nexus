@@ -216,6 +216,21 @@ export interface Attempt {
   ended_at?: string | null;
   /** Set when this attempt reused a memoized result instead of executing (§6.4). */
   cache_hit_of?: string | null;
+  /**
+   * The latest status line the WORKER's executor reported through
+   * ReportProgress (F96), e.g. "pod Pending: Unschedulable: 0/3 nodes are
+   * available: insufficient cpu". Not the same thing as pending_reason, which
+   * is the SCHEDULER's reason for not placing the attempt. Sanitized by the
+   * scheduler (one line, bounded); null when the worker never sent one, and
+   * absent from gateways that predate the field.
+   */
+  progress_message?: string | null;
+  /** Latest reported completion in [0, 1]; null when none was reported. */
+  progress_fraction?: number | null;
+  /** Control-plane time of the latest progress report. */
+  progress_at?: string | null;
+  /** Control-plane time the progress message last changed. */
+  progress_message_at?: string | null;
 }
 
 export interface RunEvent {
@@ -328,9 +343,69 @@ export interface CapacitySummary {
 }
 
 export interface LogLine {
+  /** Line number, contiguous from 1 per attempt; the paging and resume cursor. */
+  n?: number;
   ts?: string;
-  stream?: 'stdout' | 'stderr' | string;
+  /** stdout | stderr | combined (Kubernetes) | nexus (the platform's own lines). */
+  stream?: 'stdout' | 'stderr' | 'combined' | 'nexus' | string;
   message: string;
+  /** A line split at the length cap, or output without a trailing newline. */
+  partial?: boolean;
+  /** truncated | truncation_summary | dropped | gap, on the platform's lines. */
+  kind?: string;
+  /** For a gap line: the last line number it stands in for. */
+  gap_end?: number;
+}
+
+/**
+ * What the gateway knows about an attempt's durable log (ADR-0020).
+ *
+ * none: nothing recorded (not started, no output yet, or an agent/gateway older
+ * than log shipping). live: shipping while the attempt runs. complete: the
+ * agent finalized it. partial: the attempt ended without a final report (agent
+ * crash, lost lease, object store outage) -- what was shipped is readable.
+ * expired: the objects were removed by retention; the index remains.
+ */
+export type LogState = 'none' | 'live' | 'complete' | 'partial' | 'expired';
+
+export interface LogStatus {
+  state: LogState;
+  attempt_state: string;
+  lines: number;
+  bytes: number;
+  chunks: number;
+  truncated_lines: number;
+  truncated_bytes: number;
+  dropped_lines: number;
+  compacted: boolean;
+  last_chunk_at?: string;
+  finalized_at?: string;
+  /** One honest sentence about this state, meant to be shown verbatim. */
+  detail: string;
+}
+
+export interface LogPage {
+  attempt_id: string;
+  log: LogStatus;
+  lines: LogLine[];
+  first_line?: number;
+  next_line: number;
+  has_more: boolean;
+  unreadable_chunks?: number;
+}
+
+export interface LogSearchResult {
+  attempt_id: string;
+  log: LogStatus;
+  search: {
+    matches: LogLine[];
+    next_line: number;
+    scanned_lines: number;
+    scanned_bytes: number;
+    complete: boolean;
+    stopped_by?: 'matches' | 'bytes' | 'time';
+    unreadable_chunks?: number;
+  };
 }
 
 export interface Paged<T> {

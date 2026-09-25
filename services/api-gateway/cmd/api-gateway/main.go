@@ -33,10 +33,12 @@ import (
 	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 	"github.com/khuriwalgroup/kgf-nexus/internal/mail"
+	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/rest"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/sessions"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/upstream"
@@ -84,6 +86,16 @@ func run() error {
 	defer pool.Close()
 	db := store.GWDB(pool)
 
+	// Metrics. Served ONLY on the dedicated operations listener below, never on
+	// the REST port: the REST port is the internet-facing ingress, and a
+	// /metrics there would publish route inventories, error rates and build
+	// details to anyone who can reach the console.
+	reg := metrics.NewServiceRegistry("api-gateway", version)
+	transport.RegisterMetrics(reg)
+	store.RegisterPoolMetrics(reg, pool)
+	httpMetrics := metrics.NewHTTPMetrics(reg)
+	grpcMetrics := metrics.NewGRPCServerMetrics(reg)
+
 	// Identity (human sessions and scoped tokens) is resolved by the SAME
 	// authenticator that resolves API keys, so there is still exactly one place a
 	// request is authenticated. API keys are unaffected: WithIdentity only adds
@@ -113,8 +125,14 @@ func run() error {
 	}
 	defer schedClient.Close()
 
+	// Durable task logs (ADR-0020). The gateway reads log objects from the result
+	// store, so it needs read credentials; without them the route answers 501
+	// and agents are told not to ship, rather than filling a store nobody can
+	// read back.
+	logStreamer, logShipping := logBackend(cfg, db, log)
+
 	// ── REST listener ─────────────────────────────────────────────────────
-	api := rest.New(db, auth, wfmClient, rmClient, nil, log).
+	api := rest.New(db, auth, wfmClient, rmClient, logStreamer, log).
 		// The same client serves both: schedule writes go through workflow-manager
 		// because it owns the table, and it already holds the connection.
 		WithSchedules(wfmClient).
@@ -132,14 +150,12 @@ func run() error {
 	// the right number depends on fleet size and the console's poll interval. Off
 	// by default keeps every existing deployment behaving exactly as before, and
 	// NEXUS_RATE_LIMIT_RPS turns it on for a deployment that has chosen a number.
-	if rps := envFloat("NEXUS_RATE_LIMIT_RPS", 0); rps > 0 {
-		cfg := rest.RateLimitConfig{
-			RequestsPerSecond: rps,
-			Burst:             envFloat("NEXUS_RATE_LIMIT_BURST", 0),
-		}
-		api = api.WithRateLimit(cfg)
-		log.Info("per-credential rate limiting enabled",
-			"requests_per_second", cfg.RequestsPerSecond, "burst", cfg.Burst,
+	if limits, ok := rateLimitsFromEnv(); ok {
+		api = api.WithRateLimits(limits)
+		log.Info("rate limiting enabled (in memory, per replica)",
+			"per_address_rps", limits.PerAddress.RequestsPerSecond, "per_address_burst", limits.PerAddress.Burst,
+			"auth_failure_rps", limits.AuthFailures.RequestsPerSecond, "auth_failure_burst", limits.AuthFailures.Burst,
+			"per_credential_rps", limits.PerCredential.RequestsPerSecond, "per_credential_burst", limits.PerCredential.Burst,
 			"why", "the gateway is the only ingress, so an unlimited one has no defence against a retry loop or credential stuffing")
 	}
 	emailCfg, err := emailFlowConfig(log)
@@ -148,19 +164,15 @@ func run() error {
 	}
 	api = api.WithEmailFlows(emailCfg)
 
-	mux := http.NewServeMux()
-	mux.Handle("/v1/", api.Routes())
-
 	hc := health.New(map[string]health.Check{
 		// Readiness depends on the database because a gateway that cannot reach
 		// Postgres can authenticate nothing and serve nothing useful.
 		"postgres": func(ctx context.Context) error { return pool.Ping(ctx) },
 	})
-	hc.Routes(mux)
 
 	restSrv := &http.Server{
 		Addr:    cfg.RESTAddr,
-		Handler: mux,
+		Handler: publicHandler(api.Routes(), hc, httpMetrics),
 		// ReadHeaderTimeout, not ReadTimeout: a slow-header client is an attack, but
 		// a legitimately slow BODY (a large spec over a poor link) is not.
 		ReadHeaderTimeout: 10 * time.Second,
@@ -180,7 +192,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("resolve TLS server options: %w", err)
 	}
-	workerOpts := []grpc.ServerOption{
+	// Metrics interceptors FIRST, so a call the auth interceptor rejects is still
+	// counted (as Unauthenticated) rather than invisible.
+	workerOpts := append(grpcMetrics.ServerOptions(),
 		grpc.ChainUnaryInterceptor(workergrpc.AuthUnaryInterceptor(auth)),
 		// Long polling holds connections open, so the keepalive policy must tolerate
 		// a connection with no activity for the duration of a poll. Without this,
@@ -210,8 +224,8 @@ func run() error {
 		}),
 		// A chatty fleet sends small messages; capping receive size bounds the
 		// memory a misbehaving agent can make the gateway allocate.
-		grpc.MaxRecvMsgSize(4 << 20),
-	}
+		grpc.MaxRecvMsgSize(4<<20),
+	)
 	workerSrv := grpc.NewServer(append(workerOpts, workerTLS...)...)
 
 	wcfg := workergrpc.DefaultConfig()
@@ -221,6 +235,7 @@ func run() error {
 		Region:               cfg.ResultStoreRegion,
 		InlineThresholdBytes: cfg.InlineThresholdBytes,
 	}
+	wcfg.LogShipping = logShipping
 	nexusv1.RegisterWorkerServiceServer(workerSrv,
 		workergrpc.NewServer(db, rmClient, schedClient, wcfg, log))
 
@@ -229,13 +244,27 @@ func run() error {
 		return fmt.Errorf("listen on %s for worker gRPC: %w", cfg.GRPCAddr, err)
 	}
 
+	// ── operations listener: /metrics, /healthz, /readyz ──────────────────
+	// Bound before the goroutines start so a port conflict fails startup with
+	// the address in the error. Health is served here TOO, so a probe or a
+	// scraper never needs the public port.
+	opsSrv, err := metrics.ListenOps(cfg.MetricsAddr, metrics.OpsMux(reg, hc.Routes), log)
+	if err != nil {
+		return fmt.Errorf("listen on %s for metrics: %w", cfg.MetricsAddr, err)
+	}
+
 	// The sweeper derives from the same shutdown context as the listeners, so the
 	// signal that drains them ends it too and no goroutine outlives run().
 	sweeper := sessions.New(db, log)
 	sweeper.Interval = cfg.SessionSweepInterval
 	sweeper.BatchLimit = cfg.SessionSweepLimit
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
+	go func() {
+		if err := opsSrv.Serve(); err != nil {
+			errCh <- fmt.Errorf("metrics listener: %w", err)
+		}
+	}()
 	go func() {
 		log.Info("expired-session sweeper started",
 			"interval", sweeper.Interval, "limit", sweeper.BatchLimit)
@@ -300,14 +329,21 @@ func run() error {
 		log.Warn("worker gRPC did not drain within the grace period; forcing stop")
 		workerSrv.Stop()
 	}
+	// Last, so the shutdown itself stays observable until the end.
+	if err := opsSrv.Shutdown(shutdownCtx); err != nil {
+		log.Warn("metrics listener shutdown did not complete cleanly", "error", err)
+	}
 
 	log.Info("api-gateway stopped")
 	return nil
 }
 
 type config struct {
-	RESTAddr            string
-	GRPCAddr            string
+	RESTAddr string
+	GRPCAddr string
+	// MetricsAddr is the operations listener (/metrics plus the probes). It must
+	// NOT be exposed outside the cluster; "off" disables it.
+	MetricsAddr         string
 	DatabaseURL         string
 	MaxConns            int32
 	WorkflowManagerAddr string
@@ -329,6 +365,17 @@ type config struct {
 	// front door minting thousands of sessions an hour.
 	SessionSweepInterval time.Duration
 	SessionSweepLimit    int
+
+	// Result-store READ credentials for serving logs (ADR-0020). The same
+	// variables the agent reads, so compose needs no new settings.
+	ResultStoreAccessKey string
+	ResultStoreSecretKey string
+	ResultStoreUseTLS    bool
+	// LogShipping turns durable task logs on (default) or off.
+	LogShipping        bool
+	LogMaxBytes        int64
+	LogChunkBytes      int64
+	LogFlushIntervalMs int
 }
 
 func loadConfig() config {
@@ -336,7 +383,8 @@ func loadConfig() config {
 		// Separate ports, per §3.2: worker traffic must not contend with UI queries.
 		RESTAddr:            env("NEXUS_REST_ADDR", ":8080"),
 		GRPCAddr:            env("NEXUS_GRPC_ADDR", ":9090"),
-		DatabaseURL:         nexuscfg.DSN("postgres://postgres:test@localhost:55432/nexus"),
+		MetricsAddr:         env("NEXUS_METRICS_ADDR", ":8088"),
+		DatabaseURL:         nexuscfg.DSN(),
 		MaxConns:            int32(envInt("NEXUS_DB_MAX_CONNS", 20)),
 		WorkflowManagerAddr: env("NEXUS_WORKFLOW_MANAGER_ADDR", ""),
 		ResourceManagerAddr: env("NEXUS_RESOURCE_MANAGER_ADDR", ""),
@@ -355,7 +403,63 @@ func loadConfig() config {
 		SessionSweepInterval: time.Duration(envInt("NEXUS_SESSION_SWEEP_INTERVAL_SEC",
 			int(sessions.DefaultInterval/time.Second))) * time.Second,
 		SessionSweepLimit: envInt("NEXUS_SESSION_SWEEP_LIMIT", sessions.DefaultBatchLimit),
+
+		ResultStoreAccessKey: env("NEXUS_S3_ACCESS_KEY_ID", ""),
+		ResultStoreSecretKey: env("NEXUS_S3_SECRET_ACCESS_KEY", ""),
+		ResultStoreUseTLS:    envBool("NEXUS_S3_USE_TLS", false),
+		LogShipping:          envBool("NEXUS_LOG_SHIPPING", true),
+		LogMaxBytes:          int64(envInt("NEXUS_LOG_MAX_BYTES_PER_ATTEMPT", 64<<20)),
+		LogChunkBytes:        int64(envInt("NEXUS_LOG_CHUNK_BYTES", 256<<10)),
+		LogFlushIntervalMs:   envInt("NEXUS_LOG_FLUSH_INTERVAL_MS", 2000),
 	}
+}
+
+// version is stamped at build time (-ldflags "-X main.version=...").
+var version = "dev"
+
+// publicHandler is the REST listener's handler: the API mux under /v1/, the
+// probes, and route-template RED metrics around all of it.
+//
+// The API mux is mounted DIRECTLY (no wrapper between the two muxes) because
+// the metrics middleware reads the matched pattern from the request after the
+// handler returns, and net/http's ServeMux records it on the *Request it was
+// given. A wrapper that called r.WithContext between them would hide the inner
+// pattern and collapse every route into "/v1/". TestPublicHandlerRouteTemplates
+// pins this.
+func publicHandler(api http.Handler, hc *health.Handler, m *metrics.HTTPMetrics) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/v1/", api)
+	hc.Routes(mux)
+	return m.Middleware(mux)
+}
+
+// logBackend builds the log reader and the policy advertised to agents. Both
+// are off together: an agent is told to ship only when this gateway can serve
+// what it ships.
+func logBackend(cfg config, db store.GWDB, log *slog.Logger) (rest.LogStreamer, *nexusv1.LogShippingConfig) {
+	if !cfg.LogShipping {
+		log.Warn("durable task logs are DISABLED (NEXUS_LOG_SHIPPING=false); agents will not ship logs and the logs route answers 501")
+		return nil, nil
+	}
+	reader, err := logs.NewMinIOReader(logs.MinIOConfig{
+		Endpoint: cfg.ResultStoreEndpoint, Bucket: cfg.ResultStoreBucket, Region: cfg.ResultStoreRegion,
+		AccessKeyID: cfg.ResultStoreAccessKey, SecretAccessKey: cfg.ResultStoreSecretKey, UseTLS: cfg.ResultStoreUseTLS,
+	})
+	if err != nil {
+		log.Warn("durable task logs are unavailable: the gateway cannot read the result store; agents will not ship logs and the logs route answers 501",
+			"error", err, "fix", "set NEXUS_S3_ACCESS_KEY_ID and NEXUS_S3_SECRET_ACCESS_KEY (a read-only credential scoped to */logs/* is enough)")
+		return nil, nil
+	}
+	policy := &nexusv1.LogShippingConfig{
+		Enabled:            true,
+		MaxBytesPerAttempt: cfg.LogMaxBytes,
+		ChunkBytes:         cfg.LogChunkBytes,
+		FlushIntervalMs:    int32(cfg.LogFlushIntervalMs),
+	}
+	log.Info("durable task logs enabled", "bucket", cfg.ResultStoreBucket,
+		"max_bytes_per_attempt", cfg.LogMaxBytes, "chunk_bytes", cfg.LogChunkBytes,
+		"flush_interval_ms", cfg.LogFlushIntervalMs)
+	return logs.NewReader(logs.StoreIndex{DB: db}, reader, logs.Limits{}), policy
 }
 
 func newLogger() *slog.Logger {
@@ -367,6 +471,36 @@ func newLogger() *slog.Logger {
 	// read by eye.
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})).
 		With("service", "api-gateway")
+}
+
+// rateLimitsFromEnv reads the gateway limiter settings (docs/OPERATIONS.md §16).
+//
+// NEXUS_RATE_LIMIT_RPS / _BURST keep their original meaning — the per-credential
+// allowance — and remain the one switch: unset, nothing is limited. The address
+// and auth-failure buckets default from them (rest.GatewayRateLimitsFor) and each
+// can be overridden. Overriding a rate without its burst sets the burst to the
+// rate, the same rule NEXUS_RATE_LIMIT_BURST has always followed.
+func rateLimitsFromEnv() (rest.GatewayRateLimits, bool) {
+	rps := envFloat("NEXUS_RATE_LIMIT_RPS", 0)
+	if rps <= 0 {
+		return rest.GatewayRateLimits{}, false
+	}
+	limits := rest.GatewayRateLimitsFor(rest.RateLimitConfig{
+		RequestsPerSecond: rps,
+		Burst:             envFloat("NEXUS_RATE_LIMIT_BURST", 0),
+		MaxEntries:        envInt("NEXUS_RATE_LIMIT_MAX_KEYS", 0),
+	})
+	override := func(c *rest.RateLimitConfig, rpsKey, burstKey string) {
+		if v := envFloat(rpsKey, 0); v > 0 {
+			c.RequestsPerSecond = v
+			c.Burst = envFloat(burstKey, 0)
+		} else if b := envFloat(burstKey, 0); b > 0 {
+			c.Burst = b
+		}
+	}
+	override(&limits.PerAddress, "NEXUS_RATE_LIMIT_IP_RPS", "NEXUS_RATE_LIMIT_IP_BURST")
+	override(&limits.AuthFailures, "NEXUS_RATE_LIMIT_AUTH_FAIL_RPS", "NEXUS_RATE_LIMIT_AUTH_FAIL_BURST")
+	return limits, true
 }
 
 // envFloat reads a float setting, treating an unparseable value as absent rather

@@ -31,6 +31,9 @@ venv/
 *.log
 .DS_Store
 gpt_architecture.zip
+# Drill reports (make restore-drill / pitr-drill): per-run output, not source.
+/restore-drill-report.json
+/pitr-drill-report.json
 
 # nexusctl build output and the SDK test venv
 /nexusctl
@@ -52,3 +55,6 @@ deploy/.env
 # Locally generated TLS material (`make dev-certs`, deploy/nexus-certs.sh). It
 # holds a CA private key: never commit it, and never copy it off the laptop.
 /.dev-certs/
+
+# NATS NKey seeds (deploy/nats/nexus-nats-auth.sh, `make k8s-dev-up`). Never commit.
+/.dev-nats/

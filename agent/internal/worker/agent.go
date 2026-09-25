@@ -13,9 +13,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/heartbeat"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/lease"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
@@ -75,6 +77,11 @@ type Config struct {
 	// unset. Built once by the caller rather than per session: it owns
 	// long-lived informers, and a REREGISTER must not leak a watch per session.
 	Kubernetes *executor.KubernetesExecutor
+
+	// Metrics is the process-wide instrument set, built once by the caller for
+	// the same reason as Kubernetes: counters must survive a REREGISTER.
+	// Optional; nil records nothing.
+	Metrics *agentmetrics.Metrics
 }
 
 // ResultStoreCredentials are the parts of result-store access the agent holds
@@ -314,16 +321,20 @@ func (a *Agent) register(ctx context.Context) error {
 	a.execs = execs
 	a.runner = NewRunner(execs, a.registry, a.keeper, reporter, a.wal, a.store, a.log)
 	a.runner.WorkerID = a.workerID
+	a.runner.Metrics = a.cfg.Metrics
 	a.runner.UninterruptibleCeiling = a.cfg.MaxUninterruptible
 	// The control plane's threshold, clamped, also governs the no-store path:
 	// a worker without an object store must refuse exactly what a worker with
 	// one would have sent to it (ADR-0016).
 	a.runner.InlineThreshold = domain.ClampInlineThreshold(resp.GetResultStore().GetInlineThresholdBytes())
+	a.configureLogShipping(resp.GetLogShipping())
 	// The keeper revokes into the runner and the runner renews through the
 	// keeper, so one of the two edges must be wired after construction.
 	a.keeper.SetHandler(a.runner)
 
 	a.hb = heartbeat.New(a.workerID, a.client, a.registry, a, hbInterval, a.log)
+	a.hb.Observe = a.cfg.Metrics.Heartbeat
+	a.cfg.Metrics.SessionStarted(a.cfg.Capacity)
 	a.puller = NewPuller(a.workerID, a.cfg.Queues, a.client, a.registry, a.keeper, a.runner, a.log)
 	return nil
 }
@@ -421,6 +432,39 @@ func (a *Agent) reattachKubernetes(ctx context.Context) {
 	}
 }
 
+// configureLogShipping turns durable task logs on for this session when the
+// control plane advertised them and the agent can actually ship: it needs the
+// result store (the bytes go there directly) and a client that speaks
+// ReportLogs (the index). Anything missing is logged once and shipping stays
+// off, which the read API reports as "no log recorded" rather than hiding.
+func (a *Agent) configureLogShipping(cfg *nexusv1.LogShippingConfig) {
+	if !cfg.GetEnabled() {
+		a.log.Info("the control plane did not enable log shipping; task logs are not persisted")
+		return
+	}
+	idx, ok := a.client.(logship.Indexer)
+	if !ok {
+		a.log.Warn("log shipping enabled but this client cannot report logs; task logs are not persisted")
+		return
+	}
+	if a.store == nil {
+		a.log.Warn("log shipping enabled but no result store is configured; task logs are not persisted")
+		return
+	}
+	spool, err := logship.SpoolDirFor(a.cfg.WALDir)
+	if err != nil {
+		a.log.Warn("could not create the log spool directory; logs ship without compaction", "error", err)
+		spool = ""
+	}
+	a.runner.LogShipping = cfg
+	a.runner.LogIndexer = idx
+	a.runner.LogSpoolDir = spool
+	a.runner.Namespace = a.cfg.Namespace
+	a.log.Info("durable task logs enabled",
+		"max_bytes_per_attempt", cfg.GetMaxBytesPerAttempt(), "chunk_bytes", cfg.GetChunkBytes(),
+		"flush_interval_ms", cfg.GetFlushIntervalMs())
+}
+
 func (a *Agent) initResultStore(cfg *nexusv1.ResultStoreConfig) {
 	endpoint := a.cfg.ResultStore.Endpoint
 	if endpoint == "" {
@@ -441,6 +485,7 @@ func (a *Agent) initResultStore(cfg *nexusv1.ResultStoreConfig) {
 		UseTLS:          a.cfg.ResultStore.UseTLS,
 		InlineThreshold: cfg.GetInlineThresholdBytes(),
 		Log:             a.log,
+		OnPut:           a.cfg.Metrics.ResultStorePut,
 	})
 	if err != nil {
 		// Not fatal. A worker that refuses to boot because object storage is

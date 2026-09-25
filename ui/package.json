@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:ci": "vitest run --reporter=default --reporter=junit",
     "test:watch": "vitest"
   },
   "dependencies": {

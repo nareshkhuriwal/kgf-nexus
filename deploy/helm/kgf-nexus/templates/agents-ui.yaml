@@ -25,6 +25,7 @@ spec:
     metadata:
       labels: {{- include "nexus.labels" (list $root .name) | nindent 8 }}
         nexus.khuriwalgroup.com/role: agent
+      {{- include "nexus.metricsAnnotations" (list $root (int $root.Values.metrics.agentPort)) | nindent 6 }}
     spec:
       {{- include "nexus.pullSecrets" $root | nindent 6 }}
       securityContext: {{- include "nexus.podSecurity" $root | nindent 8 }}
@@ -37,7 +38,7 @@ spec:
           # float64, and a large one would otherwise print as 1.7179869184e+10.
           env:
             {{- include "nexus.resultStoreEnv" $root | nindent 12 }}
-            {{- include "nexus.natsEnv" $root | nindent 12 }}
+            {{- include "nexus.natsEnv" (list $root "agent") | nindent 12 }}
             - { name: NEXUS_CONTROL_PLANE, value: "api-gateway:9091" }
             - name: NEXUS_API_KEY
               valueFrom: { secretKeyRef: { name: {{ $root.Values.existingSecret }}, key: worker-api-key } }
@@ -64,6 +65,11 @@ spec:
             - { name: NEXUS_WORK_DIR, value: /var/lib/nexus/work }
             - { name: LOG_LEVEL, value: {{ $root.Values.logLevel | quote }} }
             - { name: NEXUS_LOG_LEVEL, value: {{ $root.Values.logLevel | quote }} }
+            # All interfaces inside the pod so Prometheus can reach it; the
+            # agent's own default is loopback. No Service exposes this port.
+            - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" (int $root.Values.metrics.agentPort) | quote }} }
+          ports:
+            - { name: metrics, containerPort: {{ int $root.Values.metrics.agentPort }} }
           resources: {{- toYaml .resources | nindent 12 }}
           securityContext: {{- include "nexus.containerSecurity" $root | nindent 12 }}
           volumeMounts:
@@ -73,10 +79,12 @@ spec:
             - { name: wal, mountPath: /var/lib/nexus/wal }
             - { name: work, mountPath: /var/lib/nexus/work }
             - { name: tmp, mountPath: /tmp }
+            {{- include "nexus.natsVolumeMounts" $root | nindent 12 }}
       volumes:
         - { name: wal, emptyDir: {} }
         - { name: work, emptyDir: {} }
         - { name: tmp, emptyDir: {} }
+        {{- include "nexus.natsVolumes" (list $root "agent" (.natsSeedKey | default "")) | nindent 8 }}
 {{- end }}
 {{- if .Values.ui.enabled }}
 {{- $resolver := .Values.dns.resolver }}

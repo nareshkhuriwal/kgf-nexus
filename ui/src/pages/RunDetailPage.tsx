@@ -38,6 +38,13 @@ import { PlacementPanel } from '../components/PlacementPanel';
 import { LogTail } from '../components/LogTail';
 import { EventTimeline } from '../components/EventTimeline';
 
+/**
+ * The node states a retry may name. The gateway enforces the same set; offering
+ * the button only where it will be accepted keeps "Retry this task" from being a
+ * control that mostly answers 409.
+ */
+const RETRYABLE_NODE_STATES: ReadonlySet<string> = new Set(['FAILED', 'UPSTREAM_FAILED', 'CANCELLED']);
+
 export function RunDetailPage({ namespace }: { namespace: string }) {
   const { runId = '' } = useParams();
   const navigate = useNavigate();
@@ -46,11 +53,13 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
     const current = await api.getRun(namespace, runId);
     return api.createRun(namespace, {spec_id: current.spec_id, params: current.params, priority: current.priority, trigger_kind: 'manual'});
   }, onSuccess: (created) => navigate('/runs/' + created.id)});
-  const retry = useMutation({mutationFn: () => api.runAction(namespace, runId, 'retry'), onSuccess: () => { void runQuery.refetch(); }});
-  // Which of the two terminal-run actions is awaiting confirmation. Both start
-  // real compute, so neither fires on the first click; the dialog says what
-  // each one re-executes before it does.
-  const [confirming, setConfirming] = useState<'rerun' | 'retry' | null>(null);
+  // One mutation for both retries: no nodes is the whole run, a node list is
+  // that node plus its dependents. Same endpoint, same refusal handling.
+  const retry = useMutation({mutationFn: (nodes?: string[]) => api.retryRun(namespace, runId, nodes), onSuccess: () => { void runQuery.refetch(); }});
+  // Which terminal-run action is awaiting confirmation. All of them start real
+  // compute, so none fires on the first click; the dialog says what each one
+  // re-executes before it does.
+  const [confirming, setConfirming] = useState<'rerun' | 'retry' | 'retry-node' | null>(null);
   const [params, setParams] = useSearchParams();
   const selectedNodeId = params.get('node');
   const selectedAttemptId = params.get('attempt');
@@ -211,8 +220,21 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
                 onConfirm={() => { setConfirming(null); retry.mutate(); }}
                 onCancel={() => setConfirming(null)}
               >
-                Only the nodes that failed or timed out get a new attempt, in this same run.
-                Tasks that succeeded keep their results and do not execute again.
+                Every task that did not succeed — failed, timed out, cancelled or never
+                reached — gets a new attempt, in this same run. Tasks that succeeded keep
+                their results and do not execute again.
+              </ConfirmDialog>
+            )}
+            {confirming === 'retry-node' && selectedNode && (
+              <ConfirmDialog
+                title={`Retry ${selectedNode.node_id}?`}
+                confirmLabel="Retry this task"
+                onConfirm={() => { setConfirming(null); retry.mutate([selectedNode.node_id]); }}
+                onCancel={() => setConfirming(null)}
+              >
+                <code>{selectedNode.node_id}</code> gets a new attempt, and so does every task
+                downstream of it that did not succeed. Other failed tasks, and every task that
+                succeeded, are left as they are.
               </ConfirmDialog>
             )}
           </> : can('runs.cancel') && <CancelButton
@@ -271,6 +293,12 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
           {selectedNode && <StateBadge kind="node" state={selectedNode.state} small />}
           {selectedNode?.isRootCause && <span className="chip warn">root cause</span>}
           <span className="spacer" />
+          {selectedNode && (run.state === 'FAILED' || run.state === 'TIMED_OUT') && can('runs.retry') &&
+            RETRYABLE_NODE_STATES.has(selectedNode.state) && (
+            <button disabled={retry.isPending} onClick={() => setConfirming('retry-node')}>
+              {retry.isPending ? 'Retrying…' : 'Retry this task'}
+            </button>
+          )}
           {selectedNode && (
             <span className="panel-note">
               <code>{selectedNode.task_ref}</code> · trigger {selectedNode.trigger_rule ?? 'all_success'} ·{' '}

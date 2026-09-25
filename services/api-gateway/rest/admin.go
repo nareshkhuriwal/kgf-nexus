@@ -84,12 +84,14 @@ const minPasswordLength = 12
 // THE ONE UNGUARDED ROUTE. A caller logging in has no credential yet, so guard()
 // cannot wrap it -- and because it is unguarded it is the endpoint most worth
 // attacking. Three things compensate:
-//   - the rate limiter runs first, keyed per credential, so a credential-stuffing
-//     run is throttled at the same place a runaway client is;
+//   - the per-address limiter runs first, and every rejected password spends
+//     the address's stricter auth-failure budget; once that is empty the address
+//     gets 429 before its guess is even checked, so a credential-stuffing run is
+//     held to a handful of attempts a minute (ratelimit.go);
 //   - every failure is ONE opaque 401 with no hint about which half was wrong;
 //   - every attempt, successful or not, lands in the audit log.
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
-	if a.rateLimited(w, r) {
+	if a.rateLimited(w, r) || a.authAttemptBlocked(w, r) {
 		return
 	}
 	body, err := readBody(r, maxLoginBytes)
@@ -113,6 +115,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	user, err := a.identity.AuthenticatePassword(r.Context(), req.Namespace, req.Email, req.Password)
 	if err != nil {
 		if errors.Is(err, store.ErrIdentityUnknown) {
+			a.recordAuthFailure(r, req.Namespace+"\x00"+req.Email+"\x00"+req.Password)
 			// Recorded as DENIED so a burst of these is visible to an operator. The
 			// email is recorded because an admin reviewing an attack needs to know
 			// which accounts were targeted; the password never is.

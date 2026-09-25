@@ -677,6 +677,39 @@ func TestEventsFollowEmitsJSONLinesNotAnArray(t *testing.T) {
 	}
 }
 
+// TestLogsTailAndStreamFlags: the durable-log options reach the gateway as the
+// query parameters it serves (ADR-0020), and the CLI asks for raw text.
+func TestLogsTailAndStreamFlags(t *testing.T) {
+	h := newHarness(t)
+	var accept string
+	h.handler = func(w http.ResponseWriter, r *http.Request) bool {
+		accept = r.Header.Get("Accept")
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("[nexus] 3 lines were omitted by the per-attempt log cap\nlast\n"))
+		return true
+	}
+	code, out, errb := h.run("logs", "a1", "--tail", "50", "--stream", "stderr", "-f")
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errb)
+	}
+	q := h.last().Query
+	for _, want := range []string{"tail=50", "stream_name=stderr", "follow=true"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("query %q missing %q", q, want)
+		}
+	}
+	if !strings.Contains(accept, "text/plain") {
+		t.Errorf("Accept = %q; the gateway streams raw lines only for text/plain", accept)
+	}
+	if !strings.Contains(out, "[nexus] 3 lines were omitted") {
+		t.Errorf("platform markers must be printed, not filtered: %q", out)
+	}
+
+	if code, _, _ := newHarness(t).run("logs", "a1", "--stream", "bogus"); code == 0 {
+		t.Error("--stream bogus was accepted")
+	}
+}
+
 func TestLogsAreStreamedVerbatim(t *testing.T) {
 	// A log line is evidence; re-encoding it would corrupt what the task printed.
 	h := newHarness(t)
@@ -813,5 +846,62 @@ func TestCompileStdin(t *testing.T) {
 	}
 	if len(strings.TrimSpace(out.String())) != 64 {
 		t.Errorf("want a hash, got %q", out.String())
+	}
+}
+
+// ── run retry (CONTRACT-FINDINGS F100) ────────────────────────────────────────
+
+// The --node selection must reach the gateway in the body. It always did; what
+// was broken was the gateway ignoring it, so this pins the CLI half of the
+// contract the gateway now honours.
+func TestRunRetrySendsTheSelectedNodes(t *testing.T) {
+	h := newHarness(t)
+	h.env["NEXUS_NAMESPACE"] = "prod"
+	h.replyJSON(200, `{"id":"r1","state":"RUNNING","retried_nodes":["load","transform"]}`)
+	code, out, errb := h.run("run", "retry", "r1", "--node", "transform", "--node", "load")
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errb)
+	}
+	req := h.last()
+	if req.Method != "POST" || req.Path != "/v1/namespaces/prod/runs/r1/retry" {
+		t.Errorf("request = %s %s", req.Method, req.Path)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		t.Fatalf("body %q: %v", req.Body, err)
+	}
+	if got, _ := json.Marshal(body["nodes"]); string(got) != `["transform","load"]` {
+		t.Errorf("body nodes = %v, want [transform load]", body["nodes"])
+	}
+	if !strings.Contains(out, "transform, load") {
+		t.Errorf("output does not name the retried nodes: %q", out)
+	}
+}
+
+func TestRunRetryWithoutNodesIsAWholeRunRetry(t *testing.T) {
+	h := newHarness(t)
+	h.replyJSON(200, `{"id":"r1","state":"RUNNING"}`)
+	if code, _, errb := h.run("run", "retry", "r1"); code != 0 {
+		t.Fatalf("exited %d: %s", code, errb)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(h.last().Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := body["nodes"]; present {
+		t.Errorf("a whole-run retry sent nodes: %v", body)
+	}
+}
+
+// A refused selection is an error the operator can act on, not a silent no-op.
+func TestRunRetryReportsARefusedSelection(t *testing.T) {
+	h := newHarness(t)
+	h.replyJSON(409, `{"error":"nodes_not_retryable","message":"only FAILED, UPSTREAM_FAILED and CANCELLED nodes can be retried; extract is SUCCEEDED","nodes":[{"node_id":"extract","state":"SUCCEEDED"}]}`)
+	code, _, errb := h.run("run", "retry", "r1", "--node", "extract")
+	if code == 0 {
+		t.Fatal("a refused retry exited 0")
+	}
+	if !strings.Contains(errb, "extract is SUCCEEDED") {
+		t.Errorf("stderr does not explain the refusal: %q", errb)
 	}
 }

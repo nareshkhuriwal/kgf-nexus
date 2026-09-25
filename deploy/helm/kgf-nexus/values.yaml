@@ -33,6 +33,9 @@ logLevel: info
 #   minio-root-password   object store secret key
 #   worker-api-key        API key the agents authenticate with (nxs_worker_...)
 #   admin-api-key         optional; bootstrap installs it as an admin key
+#   nats-event-service-nkey, nats-agent-nkey
+#                         NATS NKey seeds, unless nats.auth.seedSecret names
+#                         another Secret (see nats.auth below)
 # deploy/terraform creates this Secret with generated values.
 existingSecret: ""
 
@@ -59,6 +62,61 @@ postgres:
   resources:
     requests: { cpu: 250m, memory: 512Mi }
     limits: { memory: 1Gi }
+  # Point-in-time recovery for the IN-CLUSTER Postgres: continuous WAL archiving
+  # plus scheduled base backups with pgBackRest (docs/OPERATIONS.md §4).
+  #
+  # Only for postgres.enabled=true. A MANAGED database (Azure Database for
+  # PostgreSQL Flexible Server, Amazon RDS/Aurora, Cloud SQL) must use the
+  # provider's own automated backups and PITR instead: it does not expose the
+  # data directory or archive_command, and its PITR is the supported path. The
+  # chart refuses pitr.enabled with postgres.enabled=false for that reason.
+  pitr:
+    enabled: false
+    # Built from deploy/pgbackrest/Dockerfile: postgres 16.15-alpine3.24 +
+    # pgBackRest 2.59.1. Same major AND libc as `image` above, so an existing
+    # volume keeps working. Push it to your registry and pin it here.
+    image: kgf-nexus/postgres-pitr:16.15-pgbackrest2.59.1
+    stanza: nexus
+    # REQUIRED when enabled: a Secret in the release namespace with
+    #   s3-key          access key of a principal that can use ONLY repo.s3.bucket
+    #   s3-key-secret   its secret
+    #   cipher-pass     repository encryption passphrase. Needed to RESTORE: keep a
+    #                   copy outside this cluster (a secret manager).
+    existingSecret: ""
+    repo:
+      # A bucket SEPARATE from the result bucket (minio.bucket), with its own
+      # credentials; ideally in another failure domain (region/account).
+      path: /nexus
+      s3:
+        bucket: ""
+        endpoint: ""            # e.g. s3.eu-west-1.amazonaws.com, or a MinIO host
+        region: us-east-1
+        port: 443               # pgBackRest's S3 client is TLS-only
+        uriStyle: host          # "path" for MinIO and most S3-compatibles
+        # Optional: a Secret with key ca.crt, for a store with a private CA.
+        caSecret: ""
+    # aes-256-cbc = client-side encryption of every backup file and WAL segment
+    # before upload. "none" only if the store encrypts AND you accept the store's
+    # operators being able to read the database. Fixed at stanza creation.
+    cipherType: aes-256-cbc
+    retention:
+      full: 2                   # full backups kept (the PITR window starts at the oldest)
+      fullType: count           # or "time": full = days
+      diff: 7
+    # Upper bound on RPO for a quiet database: a partially filled WAL segment is
+    # archived after this many seconds. Busy databases fill segments faster.
+    archiveTimeoutSeconds: 60
+    processMax: 2
+    schedule:
+      fullIntervalSeconds: 604800   # weekly full
+      diffIntervalSeconds: 86400    # daily differential
+      pollSeconds: 300
+    # Anything else pgBackRest accepts as PGBACKREST_* (e.g. repo1-s3-kms-key-id
+    # for SSE-KMS, archive-push-queue-max). Names and values, as env entries.
+    extraEnv: []
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { memory: 512Mi }
 
 minio:
   enabled: true
@@ -80,6 +138,57 @@ nats:
   # The event bus is optional (ADR-0003): disabled, the agents long-poll.
   enabled: true
   image: nats:2.14.7-alpine
+  # Authorization (docs/OPERATIONS.md §11.7). REQUIRED when enabled: rendering
+  # FAILS without identities, so an unauthenticated broker cannot be installed
+  # by omission. Generate keys on an admin machine, never in the cluster:
+  #   NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh init --tenant <nexusNamespace>
+  #   NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh helm-values   # -> these values
+  # Public keys are not secret and belong here. The SEEDS go in a Secret:
+  #   kubectl create secret generic <seedSecret> \
+  #     --from-file=nats-event-service-nkey=/secure/nexus-nats/event-service/user.nk \
+  #     --from-file=nats-agent-nkey=/secure/nexus-nats/agent-<ns>/user.nk
+  auth:
+    # nkey (production) | none (a throwaway dev cluster ONLY: every client can
+    # read every tenant's run events and forge dispatch hints).
+    mode: nkey
+    eventService:
+      publicKeys: []
+    # SYS-account identity for `nats server report`, nats-surveyor and the like.
+    monitor:
+      publicKeys: []
+    # One entry per Nexus namespace whose agents may receive dispatch hints;
+    # each may subscribe to nexus.task.dispatch.<namespace>.> and nothing
+    # else. Several keys per tenant = per-agent identities, or a rotation overlap.
+    #   - namespace: default
+    #     publicKeys: [UA...]
+    tenants: []
+    # Secret holding the seeds (default: existingSecret). Each pod mounts only
+    # its own key. An agent entry may set natsSeedKey to use its own identity.
+    seedSecret: ""
+    eventServiceSeedKey: nats-event-service-nkey
+    agentSeedKey: nats-agent-nkey
+  tls:
+    enabled: false
+    # kubernetes.io/tls Secret (tls.crt, tls.key, ca.crt) the broker serves;
+    # a cert-manager Certificate with dnsNames [nats, nats.<ns>.svc].
+    secretName: ""
+    # Require a client certificate from the same CA as well as the NKey.
+    verifyClients: true
+    # Client certificates (Secrets with tls.crt, tls.key, ca.crt) when
+    # verifyClients is on; otherwise caSecret supplies only ca.crt.
+    clientSecrets:
+      eventService: ""
+      agent: ""
+    caSecret: ""
+  # Sidecar that SIGHUPs nats-server when its config, authorization or TLS files
+  # change, so adding a tenant or rotating a key or certificate needs no restart.
+  configReloader:
+    enabled: true
+    image: natsio/nats-server-config-reloader:0.21.1
+  # Only event-service and agent pods may open a connection to the broker.
+  networkPolicy:
+    enabled: true
+    extraFrom: []
   storage:
     size: 5Gi
     storageClass: ""
@@ -160,6 +269,33 @@ agentDefaults:
   # mid-drain and strands its attempts until their leases expire.
   drainGrace: 60s
   terminationGracePeriodSeconds: 90
+
+# Prometheus scraping (docs/OPERATIONS.md, "Metrics"). Every Nexus pod serves
+# /metrics on a port that no external Service exposes: the gateway on its
+# dedicated ops listener (8088), the agents on 8089, every other service on its
+# health listener (8080). Each in-cluster Service carries a port named
+# "metrics"; api-gateway-external never does.
+metrics:
+  # prometheus.io/scrape|port|path pod annotations, for annotation-based
+  # discovery (the stock Prometheus Helm chart's kubernetes-pods job).
+  podAnnotations: true
+  # Gateway ops listener port (NEXUS_METRICS_ADDR).
+  gatewayPort: 8088
+  # Agent metrics port (NEXUS_METRICS_ADDR on the agent).
+  agentPort: 8089
+  # prometheus-operator resources. Off by default: the CRDs exist only where
+  # the operator is installed, and rendering them elsewhere fails the install.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels, e.g. { release: kube-prometheus-stack } to match the
+    # operator's serviceMonitorSelector.
+    labels: {}
+  # A PodMonitor for the agents, which have no Service. Follows
+  # serviceMonitor.enabled unless set explicitly.
+  podMonitor:
+    enabled: null
 
 # Host-based routing via the Gateway API (templates/gateway.yaml). Off by
 # default: it needs a Gateway API implementation installed in the cluster.

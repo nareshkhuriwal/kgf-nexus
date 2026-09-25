@@ -204,6 +204,16 @@ type fakeSched struct {
 	results   int
 	cancels   []string
 	claimFunc func() []*nexusv1.TaskAssignment
+	// progressStale makes RecordProgress answer as a scheduler whose own lease
+	// fence rejected the report (the lease ended after the gateway's check).
+	progressStale bool
+	lastProgress  progressCall
+}
+
+// progressCall is what the gateway forwarded on the last RecordProgress.
+type progressCall struct {
+	attemptID, token, msg string
+	frac                  float64
 }
 
 func (f *fakeSched) ClaimForWorker(ctx context.Context, workerID string, free *nexusv1.ResourceVector, queues []string, maxTasks int32) ([]*nexusv1.TaskAssignment, error) {
@@ -218,11 +228,15 @@ func (f *fakeSched) MarkStarted(ctx context.Context, attemptID string, at time.T
 	f.started++
 	return nil
 }
-func (f *fakeSched) RecordProgress(ctx context.Context, attemptID, msg string, frac float64) error {
+func (f *fakeSched) RecordProgress(ctx context.Context, attemptID, token, msg string, frac float64) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.progressStale {
+		return true, nil
+	}
 	f.progress++
-	return nil
+	f.lastProgress = progressCall{attemptID: attemptID, token: token, msg: msg, frac: frac}
+	return false, nil
 }
 func (f *fakeSched) ApplyResult(ctx context.Context, req *nexusv1.ReportResultRequest) error {
 	f.mu.Lock()
@@ -337,6 +351,58 @@ func TestCurrentLeaseTokenAccepted(t *testing.T) {
 	defer sch.mu.Unlock()
 	if sch.results != 1 {
 		t.Errorf("results applied = %d, want 1", sch.results)
+	}
+}
+
+// TestReportProgressForwardsMessageFractionAndToken is F96: the executor's
+// status line and fraction must reach the scheduler, which stores them, and the
+// lease token must travel with them so the scheduler can fence inside its own
+// write. The message is forwarded unmodified: sanitizing it is the store's job,
+// so there is one place that decides what a stored message may contain.
+func TestReportProgressForwardsMessageFractionAndToken(t *testing.T) {
+	ctx := workerCtx()
+	db := newLeaseDB()
+	db.tokens["a1"] = "tok-current"
+	sch := &fakeSched{}
+	s := testServer(db, &fakeRM{exists: true, state: "ACTIVE"}, sch)
+
+	const msg = "pod Pending: Unschedulable: 0/3 nodes are available: insufficient cpu"
+	ack, err := s.ReportProgress(ctx, &nexusv1.ReportProgressRequest{
+		AttemptId: "a1", LeaseToken: "tok-current", Message: msg, FractionComplete: 0.25,
+	})
+	if err != nil {
+		t.Fatalf("ReportProgress: %v", err)
+	}
+	if !ack.GetAccepted() {
+		t.Fatalf("the lease holder's progress was rejected: %q", ack.GetReason())
+	}
+	sch.mu.Lock()
+	defer sch.mu.Unlock()
+	want := progressCall{attemptID: "a1", token: "tok-current", msg: msg, frac: 0.25}
+	if sch.progress != 1 || sch.lastProgress != want {
+		t.Fatalf("forwarded %+v (%d calls), want %+v once", sch.lastProgress, sch.progress, want)
+	}
+}
+
+// TestReportProgressStaleAtTheSchedulerIsRejected: the lease can end between
+// the gateway's fence and the scheduler's write. The scheduler fences again and
+// says so, and the worker must get the same stale_lease_token answer it would
+// have got a moment later from the gateway, not a silent "accepted".
+func TestReportProgressStaleAtTheSchedulerIsRejected(t *testing.T) {
+	ctx := workerCtx()
+	db := newLeaseDB()
+	db.tokens["a1"] = "tok-current"
+	sch := &fakeSched{progressStale: true}
+	s := testServer(db, &fakeRM{exists: true, state: "ACTIVE"}, sch)
+
+	ack, err := s.ReportProgress(ctx, &nexusv1.ReportProgressRequest{
+		AttemptId: "a1", LeaseToken: "tok-current", Message: "pod Running",
+	})
+	if err != nil {
+		t.Fatalf("a stale report is a protocol answer, not a transport error: %v", err)
+	}
+	if ack.GetAccepted() || ack.GetReason() != store.ReasonStaleLeaseToken {
+		t.Fatalf("ack = %+v, want rejected with %q", ack, store.ReasonStaleLeaseToken)
 	}
 }
 

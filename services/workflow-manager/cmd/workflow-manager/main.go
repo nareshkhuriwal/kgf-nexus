@@ -80,7 +80,9 @@ func run() error {
 	// One registry per process, served on the health listener below. The
 	// reconciler's instruments are what REPLACED the timer_backlog readiness
 	// check: see the health block for why that check was an availability hazard.
-	reg := metrics.NewRegistry()
+	reg := metrics.NewServiceRegistry("workflow-manager", version)
+	store.RegisterPoolMetrics(reg, pool)
+	grpcMetrics := metrics.NewGRPCServerMetrics(reg)
 	// Certificate expiry and reload outcomes (docs/TLS.md §5.4). Safe to call
 	// before the credentials below are resolved: values are replayed into the
 	// registry whenever they appear.
@@ -122,7 +124,8 @@ func run() error {
 		// incompletely must not quietly serve plaintext instead.
 		return fmt.Errorf("resolve TLS server options: %w", terr)
 	}
-	grpcSrv := grpc.NewServer(append(nexuscfg.PeerServerOptions(), sopts...)...)
+	grpcOpts := append(grpcMetrics.ServerOptions(), nexuscfg.PeerServerOptions()...)
+	grpcSrv := grpc.NewServer(append(grpcOpts, sopts...)...)
 	grpcapi.Register(grpcSrv, runSvc, log)
 	// Built before RegisterTyped so the backfill RPCs have a service to call. Its
 	// loop is started further down, after the listeners.
@@ -321,7 +324,7 @@ func loadConfig() config {
 	return config{
 		GRPCAddr:         env("NEXUS_WFM_GRPC_ADDR", ":9091"),
 		HealthAddr:       env("NEXUS_WFM_HEALTH_ADDR", ":8081"),
-		DatabaseURL:      nexuscfg.DSN("postgres://postgres:test@localhost:55432/nexus"),
+		DatabaseURL:      nexuscfg.DSN(),
 		MaxConns:         int32(envInt("NEXUS_DB_MAX_CONNS", 20)),
 		DAGEngineAddr:    env("NEXUS_DAG_ENGINE_ADDR", ""),
 		SchedulerAddr:    env("NEXUS_SCHEDULER_ADDR", ""),
@@ -361,6 +364,9 @@ func loadConfig() config {
 		ShutdownTimeout: time.Duration(envInt("NEXUS_SHUTDOWN_TIMEOUT_SEC", 30)) * time.Second,
 	}
 }
+
+// version is stamped at build time (-ldflags "-X main.version=...").
+var version = "dev"
 
 func newLogger() *slog.Logger {
 	level := slog.LevelInfo

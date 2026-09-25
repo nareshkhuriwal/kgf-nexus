@@ -1,0 +1,233 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# PITR overlay: continuous WAL archiving + base backups with pgBackRest.
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.pitr.yml up -d
+#   make up-pitr                          # the same thing
+#
+# Same pattern as docker-compose.tls.yml: `make up` is unchanged, and this file
+# layers the PITR pieces on top. It is an overlay rather than a compose
+# `profile` because it has to CHANGE the postgres service (image + archive
+# settings), which a profile cannot do. Procedure and numbers: OPERATIONS §4.
+#
+# What it adds:
+#   postgres        → the postgres-pitr image (deploy/pgbackrest/Dockerfile), with
+#                     archive_mode=on and archive_command = pgbackrest archive-push
+#   pgbackrest      → sidecar: stanza-create, `pgbackrest check`, then full/diff
+#                     base backups on a cadence (nexus-pitr-scheduler.sh)
+#   backup-store    → a SEPARATE S3-compatible store for the backup repository,
+#                     TLS-only because pgBackRest's S3 client is TLS-only
+#   backup-store-*  → certificate generation and bucket/user/policy setup
+#
+# Separation from task artifacts, deliberately three ways:
+#   * a different bucket (nexus-pg-backups, not nexus-results), under a prefix;
+#   * different credentials: a `pgbackrest` user whose policy allows ONLY that
+#     bucket -- the services' result-store credentials cannot read the WAL, and a
+#     compromised pgBackRest key cannot touch task artifacts;
+#   * a different store instance in dev. Production may use the same provider
+#     account, but keep bucket + credentials separate, and prefer a bucket in a
+#     different failure domain (region/account) from the database.
+#
+# DATA DIRECTORY: the pitr image is the same Postgres major AND libc (alpine/musl)
+# as the stock one, so an existing postgres-data volume keeps working when this
+# overlay is added. Swapping to a glibc image instead would silently change text
+# collation and corrupt indexes -- see the Dockerfile header.
+#
+# Credentials below are DEV-ONLY, like everything in docker-compose.yml.
+
+x-pgbackrest-env: &pgbackrest-env
+  PGBACKREST_STANZA: nexus
+  PGBACKREST_PG1_PATH: /var/lib/postgresql/data
+  PGBACKREST_PG1_USER: nexus
+  PGBACKREST_PG1_SOCKET_PATH: /var/run/postgresql
+  # ── Repository: S3-compatible, separate bucket, own credentials ─────────
+  PGBACKREST_REPO1_TYPE: s3
+  PGBACKREST_REPO1_PATH: ${NEXUS_PITR_REPO_PATH:-/nexus}
+  PGBACKREST_REPO1_S3_BUCKET: ${NEXUS_PITR_BUCKET:-nexus-pg-backups}
+  PGBACKREST_REPO1_S3_ENDPOINT: ${NEXUS_PITR_S3_ENDPOINT:-backup-store}
+  PGBACKREST_REPO1_STORAGE_PORT: ${NEXUS_PITR_S3_PORT:-9000}
+  PGBACKREST_REPO1_S3_REGION: us-east-1
+  PGBACKREST_REPO1_S3_URI_STYLE: path
+  PGBACKREST_REPO1_S3_KEY: ${NEXUS_PITR_S3_KEY:-pgbackrest}
+  PGBACKREST_REPO1_S3_KEY_SECRET: ${NEXUS_PITR_S3_KEY_SECRET:-pgbackrest-dev-secret}   # DEV ONLY
+  PGBACKREST_REPO1_STORAGE_CA_FILE: /etc/pgbackrest/ca/ca.crt
+  # ── Encryption at rest (client-side, before upload) ─────────────────────
+  # aes-256-cbc over every backup file and WAL segment. The type is fixed when the
+  # stanza is created; the passphrase is needed to RESTORE, so it must be stored
+  # somewhere that survives losing this host (a secret manager, not this file).
+  PGBACKREST_REPO1_CIPHER_TYPE: ${NEXUS_PITR_CIPHER_TYPE:-aes-256-cbc}
+  PGBACKREST_REPO1_CIPHER_PASS: ${NEXUS_PITR_CIPHER_PASS:-nexus-pitr-dev-passphrase}   # DEV ONLY
+  # ── Retention ───────────────────────────────────────────────────────────
+  # Keep N full backups (and the WAL needed to recover from each). The PITR window
+  # is therefore "from the oldest retained full backup until now".
+  PGBACKREST_REPO1_RETENTION_FULL: ${NEXUS_PITR_RETENTION_FULL:-2}
+  PGBACKREST_REPO1_RETENTION_FULL_TYPE: ${NEXUS_PITR_RETENTION_FULL_TYPE:-count}
+  PGBACKREST_REPO1_RETENTION_DIFF: ${NEXUS_PITR_RETENTION_DIFF:-7}
+  # ── Throughput ──────────────────────────────────────────────────────────
+  PGBACKREST_REPO1_BUNDLE: "y"          # pack small files: far fewer S3 requests
+  PGBACKREST_REPO1_BLOCK: "y"           # block-level incrementals
+  PGBACKREST_COMPRESS_TYPE: zst
+  PGBACKREST_PROCESS_MAX: ${NEXUS_PITR_PROCESS_MAX:-4}
+  PGBACKREST_START_FAST: "y"            # immediate checkpoint at backup start
+  PGBACKREST_DELTA: "y"                 # restore compares checksums, not wipe+copy
+  # Async archive-push: postgres's archive_command still only returns success once
+  # the segment is IN the repository; async just lets pgBackRest push several in
+  # parallel. The spool holds status files, not the only copy of any WAL.
+  PGBACKREST_ARCHIVE_ASYNC: "y"
+  PGBACKREST_SPOOL_PATH: /var/spool/pgbackrest
+  PGBACKREST_LOG_LEVEL_CONSOLE: info
+  PGBACKREST_LOG_LEVEL_FILE: "off"
+
+services:
+  postgres:
+    image: ${NEXUS_PITR_PG_IMAGE:-kgf-nexus/postgres-pitr:16.15-pgbackrest2.59.1}
+    build:
+      context: ..
+      dockerfile: deploy/pgbackrest/Dockerfile
+    depends_on:
+      backup-store-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *pgbackrest-env
+    command:
+      # The base file's two settings are repeated: `command` replaces, not merges.
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=pgbackrest --stanza=nexus archive-push %p
+      # The RPO knob for a quiet database: a WAL segment is archived when it fills
+      # (16 MiB) or after this many seconds, whichever is first. A busy database
+      # fills segments faster than this and archives continuously.
+      - -c
+      - archive_timeout=${NEXUS_PITR_ARCHIVE_TIMEOUT:-60}
+      - -c
+      - max_wal_size=2GB
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - pg-socket:/var/run/postgresql
+      - backup-store-certs:/etc/pgbackrest/ca:ro
+      - pgbackrest-spool:/var/spool/pgbackrest
+
+  pgbackrest:
+    image: ${NEXUS_PITR_PG_IMAGE:-kgf-nexus/postgres-pitr:16.15-pgbackrest2.59.1}
+    build:
+      context: ..
+      dockerfile: deploy/pgbackrest/Dockerfile
+    user: postgres
+    entrypoint: ["/usr/local/bin/nexus-pitr-scheduler"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *pgbackrest-env
+      PITR_FULL_INTERVAL_SECONDS: ${NEXUS_PITR_FULL_INTERVAL_SECONDS:-604800}
+      PITR_DIFF_INTERVAL_SECONDS: ${NEXUS_PITR_DIFF_INTERVAL_SECONDS:-86400}
+      PITR_POLL_SECONDS: ${NEXUS_PITR_POLL_SECONDS:-300}
+      # Archive-age guard: force a WAL switch when nothing was archived for this
+      # long. Measured necessary: archive_timeout alone did not fire for up to
+      # checkpoint_timeout after a start or promotion (OPERATIONS §4.6).
+      PITR_WAL_SWITCH_SECONDS: ${NEXUS_PITR_ARCHIVE_TIMEOUT:-60}
+    volumes:
+      # Backups read the data directory directly (a physical backup) and talk to
+      # the server over its unix socket, so the sidecar shares both.
+      - postgres-data:/var/lib/postgresql/data
+      - pg-socket:/var/run/postgresql
+      - backup-store-certs:/etc/pgbackrest/ca:ro
+      - pgbackrest-spool:/var/spool/pgbackrest
+      - pgbackrest-state:/var/lib/pgbackrest
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/nexus-pitr-scheduler", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Long: the first full backup runs before the first status is written.
+      start_period: 30m
+    restart: unless-stopped
+
+  backup-store-certs:
+    image: ${NEXUS_PITR_PG_IMAGE:-kgf-nexus/postgres-pitr:16.15-pgbackrest2.59.1}
+    build:
+      context: ..
+      dockerfile: deploy/pgbackrest/Dockerfile
+    entrypoint: ["/usr/local/bin/nexus-pitr-certs", "/certs", "backup-store", "localhost"]
+    volumes:
+      - backup-store-certs:/certs
+    restart: "no"
+
+  backup-store:
+    image: ${NEXUS_PITR_MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    command: ["server", "/data", "--console-address", ":9001", "--certs-dir", "/certs"]
+    depends_on:
+      backup-store-certs:
+        condition: service_completed_successfully
+    environment:
+      # Its own root credentials: nothing in the result-store env can administer it.
+      MINIO_ROOT_USER: ${NEXUS_PITR_STORE_ROOT_USER:-nexusbackupadmin}
+      MINIO_ROOT_PASSWORD: ${NEXUS_PITR_STORE_ROOT_PASSWORD:-nexus-backup-dev-password}   # DEV ONLY
+      # For the healthcheck's `mc ready`, which needs an https alias.
+      MC_HOST_local: https://localhost:9000
+      MC_CONFIG_DIR: /tmp/.mc
+    volumes:
+      - backup-store-data:/data
+      - backup-store-certs:/certs:ro
+    # Not published: only pgBackRest talks to it. `docker compose exec` for access.
+    healthcheck:
+      test: ["CMD", "mc", "ready", "--insecure", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  backup-store-init:
+    image: ${NEXUS_PITR_MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z}
+    depends_on:
+      backup-store:
+        condition: service_healthy
+    environment:
+      ROOT_USER: ${NEXUS_PITR_STORE_ROOT_USER:-nexusbackupadmin}
+      ROOT_PASSWORD: ${NEXUS_PITR_STORE_ROOT_PASSWORD:-nexus-backup-dev-password}
+      BUCKET: ${NEXUS_PITR_BUCKET:-nexus-pg-backups}
+      PGBR_KEY: ${NEXUS_PITR_S3_KEY:-pgbackrest}
+      PGBR_SECRET: ${NEXUS_PITR_S3_KEY_SECRET:-pgbackrest-dev-secret}
+    volumes:
+      - backup-store-certs:/certs:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        export MC_CONFIG_DIR=/tmp/mc
+        mkdir -p /tmp/mc/certs/CAs && cp /certs/ca.crt /tmp/mc/certs/CAs/ca.crt
+        mc alias set store https://backup-store:9000 "$${ROOT_USER}" "$${ROOT_PASSWORD}" >/dev/null
+        mc mb --ignore-existing "store/$${BUCKET}"
+        mc anonymous set none "store/$${BUCKET}"
+        # Least privilege: list the one bucket, read/write/delete its objects.
+        # pgBackRest's expire needs delete; nothing needs any other bucket.
+        cat > /tmp/policy.json <<EOF
+        {"Version":"2012-10-17","Statement":[
+          {"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket"],"Resource":["arn:aws:s3:::$${BUCKET}"]},
+          {"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::$${BUCKET}/*"]}]}
+        EOF
+        mc admin user add store "$${PGBR_KEY}" "$${PGBR_SECRET}"
+        # Idempotent without swallowing real errors: create/attach only if absent.
+        mc admin policy info store nexus-pgbackrest >/dev/null 2>&1 \
+          || mc admin policy create store nexus-pgbackrest /tmp/policy.json
+        mc admin user info store "$${PGBR_KEY}" | grep -q nexus-pgbackrest \
+          || mc admin policy attach store nexus-pgbackrest --user "$${PGBR_KEY}"
+        echo "backup-store-init: bucket $${BUCKET} ready for user $${PGBR_KEY}"
+    restart: "no"
+
+volumes:
+  pg-socket:
+  backup-store-data:
+  backup-store-certs:
+  pgbackrest-spool:
+  pgbackrest-state:

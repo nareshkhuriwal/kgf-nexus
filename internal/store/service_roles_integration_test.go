@@ -17,10 +17,13 @@ import (
 // instead of being noticed in review, which is the failure mode migration 0005
 // exists to end: the ADR claimed grants enforced ownership while none existed.
 var ownedTables = map[string][]string{
-	"nexus_api_gateway":      {"api_keys", "idempotency_keys"},
+	"nexus_api_gateway":      {"api_keys", "attempt_log_chunks", "attempt_logs", "idempotency_keys"},
 	"nexus_workflow_manager": {"timers", "workflow_runs", "workflow_specs"},
 	"nexus_dag_engine":       {"task_edges", "task_nodes"},
-	"nexus_scheduler":        {"concurrency_slots", "leases", "task_attempts"},
+	// attempt_progress (0024) is the latest ReportProgress of each attempt: part
+	// of the attempt's lifecycle, so the scheduler's, kept out of task_attempts
+	// only so a progress write never holds the attempt row (F96).
+	"nexus_scheduler":        {"attempt_progress", "concurrency_slots", "leases", "task_attempts"},
 	"nexus_resource_manager": {"reservations", "workers"},
 }
 

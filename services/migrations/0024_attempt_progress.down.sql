@@ -1,0 +1,11 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+-- Reverse 0024.
+--
+-- Roll the schedulers and gateways back BEFORE running this: a gateway built
+-- with 0024 joins attempt_progress on every attempt read, and a scheduler
+-- built with it writes the table on every ReportProgress. The stored messages
+-- are advisory status, not history (the AttemptProgress events in run_events
+-- are the history, and are kept), so dropping the table loses nothing that a
+-- rollback needs.
+DROP TABLE IF EXISTS attempt_progress;

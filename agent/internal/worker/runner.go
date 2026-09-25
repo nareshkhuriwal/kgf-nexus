@@ -13,7 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
@@ -65,6 +67,64 @@ type Runner struct {
 	// WorkerID is this session's identity, handed to executors that label
 	// their workloads with it. Set after registration.
 	WorkerID string
+
+	// Metrics records task starts, outcomes and durations. Optional: nil
+	// records nothing.
+	Metrics *agentmetrics.Metrics
+	// LogShipping is the control plane's log policy from RegisterResponse
+	// (ADR-0020). Nil or disabled ships nothing. Set before the first Run.
+	LogShipping *nexusv1.LogShippingConfig
+	// LogIndexer is the ReportLogs RPC. Nil ships nothing.
+	LogIndexer logship.Indexer
+	// LogSpoolDir holds per-attempt spools for log compaction. Empty uses the
+	// OS temp directory.
+	LogSpoolDir string
+	// LogFinalizeTimeout overrides the shipper's finalize budget; zero uses
+	// logship.DefaultFinalizeTimeout.
+	LogFinalizeTimeout time.Duration
+	// SecretValues resolves the attempt's secret VALUES for log redaction. Nil
+	// today: nothing in the platform resolves SecretRefs on the worker yet, and
+	// the resolver that does must be wired here (ADR-0020).
+	SecretValues func(a *nexusv1.TaskAssignment) map[string]string
+	// Namespace prefixes the attempt's log objects; the agent's namespace.
+	Namespace string
+}
+
+// newShipper starts the attempt's log shipper, or returns nil when shipping is
+// off (old gateway, no result store, no indexer) -- the attempt then runs
+// exactly as it did before ADR-0020.
+func (r *Runner) newShipper(a *nexusv1.TaskAssignment, log *slog.Logger) *logship.Shipper {
+	if r.LogShipping == nil || !r.LogShipping.GetEnabled() || r.LogIndexer == nil || r.store == nil || r.Namespace == "" {
+		return nil
+	}
+	var secrets map[string]string
+	if r.SecretValues != nil {
+		secrets = r.SecretValues(a)
+	}
+	return logship.New(logship.Config{
+		Namespace:       r.Namespace,
+		AttemptID:       a.GetAttemptId(),
+		MaxBytes:        r.LogShipping.GetMaxBytesPerAttempt(),
+		ChunkBytes:      r.LogShipping.GetChunkBytes(),
+		FlushInterval:   time.Duration(r.LogShipping.GetFlushIntervalMs()) * time.Millisecond,
+		FinalizeTimeout: r.LogFinalizeTimeout,
+		SpoolDir:        r.LogSpoolDir,
+		Redactor:        logship.NewRedactor(secrets),
+		Token:           func() string { return r.currentToken(a) },
+		Log:             log,
+	}, r.store, r.LogIndexer)
+}
+
+// finishLogs finalizes the attempt's log BEFORE its result is reported: the
+// final ReportLogs is lease-fenced, and the result report releases the lease.
+func (r *Runner) finishLogs(ctx context.Context, ship *logship.Shipper, log *slog.Logger) {
+	if ship == nil {
+		return
+	}
+	st := ship.Close(context.WithoutCancel(ctx))
+	log.Info("attempt log shipped", "lines", st.Lines, "bytes", st.Bytes, "chunks", st.Chunks,
+		"finalized", st.Finalized, "compacted", st.Compacted, "truncated_lines", st.TruncatedLines,
+		"dropped_lines", st.DroppedLines, "redactions", st.Redactions, "fenced", st.Fenced)
 }
 
 // DefaultUninterruptibleCeiling bounds a deferred cancellation when the agent is
@@ -115,6 +175,11 @@ type runningTask struct {
 	// context cancellation.
 	handle   *executor.Handle
 	handleMu sync.Mutex
+
+	// kind and started feed the task metrics. Written by the attempt's own
+	// goroutine before any report, and read by that goroutine only.
+	kind    string
+	started time.Time
 }
 
 // NewRunner builds a runner over the executors this worker advertises.
@@ -184,6 +249,16 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 	if kind == "" {
 		kind = "subprocess"
 	}
+	if _, known := r.executors[kind]; !known {
+		// Bounded label: an executor this worker does not run is reported as
+		// "unsupported", not by the (task-author-controlled) name it asked for.
+		rt.kind = "unsupported"
+	} else {
+		rt.kind = kind
+	}
+	rt.started = time.Now()
+	r.Metrics.TaskStarted(rt.kind)
+	defer r.Metrics.TaskFinished(rt.kind)
 	exec, ok := r.executors[kind]
 	if !ok {
 		// The scheduler should never place a task here whose executor we did not
@@ -241,7 +316,12 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 		return
 	}
 
+	ship := r.newShipper(a, log)
+	if ship != nil {
+		spec.LogSink = ship
+	}
 	outcome, prepErr := r.execute(taskCtx, exec, rt, spec, log)
+	r.finishLogs(ctx, ship, log)
 	if prepErr != nil {
 		c := executor.ClassifyError(prepErr)
 		log.Error("execution failed before or during the workload", "error", prepErr, "class", c.Class.String())
@@ -292,13 +372,50 @@ func (r *Runner) execute(ctx context.Context, exec executor.Executor, rt *runnin
 		}
 	}()
 
-	r.streamLogs(ctx, exec, handle, log)
+	var followDone chan struct{}
+	if spec.LogSink != nil {
+		followDone = r.followIntoSink(ctx, exec, handle, spec.LogSink, log)
+	} else {
+		r.streamLogs(ctx, exec, handle, log)
+	}
 
 	outcome, err := exec.Wait(ctx, handle)
+	if followDone != nil {
+		// The follower ends at the workload's EOF; bounded, because a
+		// substrate that never closes the stream must not hold the result.
+		select {
+		case <-followDone:
+		case <-time.After(10 * time.Second):
+			log.Warn("log follower did not reach EOF after the workload exited; finalizing without it")
+		}
+	}
 	if err != nil {
 		return outcome, fmt.Errorf("wait: %w", err)
 	}
 	return outcome, nil
+}
+
+// followIntoSink feeds executors that do not capture into the sink themselves
+// (kubernetes) by following Logs(), tagged "combined" because the substrate
+// has already interleaved the streams. Returns nil when the executor captures
+// on its own.
+func (r *Runner) followIntoSink(ctx context.Context, exec executor.Executor, h executor.Handle,
+	sink executor.LogSink, log *slog.Logger) chan struct{} {
+	if c, ok := exec.(executor.LogCapturer); ok && c.CapturesLogs() {
+		return nil
+	}
+	rc, err := exec.Logs(context.WithoutCancel(ctx), h)
+	if err != nil {
+		log.Warn("could not open the workload log stream; the attempt log will be empty", "error", err)
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer rc.Close()
+		_, _ = io.Copy(sink.Writer(executor.LogStreamCombined), rc)
+	}()
+	return done
 }
 
 // streamLogs tails the workload's output into the agent's log, on its own
@@ -529,7 +646,9 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 		AttemptID: a.GetAttemptId(), LeaseToken: token,
 		RunID: a.GetRunId(), NodeID: a.GetNodeId(),
 	}
-	if err := r.reporter.ReportResult(reportCtx, req, entry); err != nil {
+	err := r.reporter.ReportResult(reportCtx, req, entry)
+	r.observeReport(a.GetAttemptId(), req, err)
+	if err != nil {
 		log.Error("failed to report the attempt result", "error", err)
 	}
 }
@@ -637,7 +756,9 @@ func (r *Runner) reportFailure(ctx context.Context, a *nexusv1.TaskAssignment,
 	}
 	entry := wal.Entry{AttemptID: a.GetAttemptId(), LeaseToken: token,
 		RunID: a.GetRunId(), NodeID: a.GetNodeId()}
-	if err := r.reporter.ReportResult(reportCtx, req, entry); err != nil {
+	err := r.reporter.ReportResult(reportCtx, req, entry)
+	r.observeReport(a.GetAttemptId(), req, err)
+	if err != nil {
 		r.log.Error("failed to report a failed attempt", "attempt_id", a.GetAttemptId(), "error", err)
 	}
 }
@@ -793,4 +914,20 @@ func boolToInt32(b bool) int32 {
 		return 1
 	}
 	return 0
+}
+
+// observeReport records a result report in the task metrics. The attempt's
+// executor and start time come from its running entry; on the panic path the
+// entry is already gone, and the report is counted without a duration.
+func (r *Runner) observeReport(attemptID string, req *nexusv1.ReportResultRequest, err error) {
+	if r.Metrics == nil {
+		return
+	}
+	kind, started := "unknown", time.Time{}
+	r.mu.Lock()
+	if rt, ok := r.running[attemptID]; ok {
+		kind, started = rt.kind, rt.started
+	}
+	r.mu.Unlock()
+	r.Metrics.TaskReported(kind, req.GetOutcome(), req.GetError().GetClass(), started, err)
 }

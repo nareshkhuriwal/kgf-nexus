@@ -31,6 +31,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 
 import yaml
@@ -55,7 +56,43 @@ SERVICE_TO_IMAGE = {
 }
 
 
-def render(compose: dict, digests: dict) -> dict:
+# Scripts the dev compose file bind-mounts from deploy/ into an upstream image
+# (published path in the container -> source relative to deploy/). The host has
+# no source tree, so the rendered file carries the script's text instead: the
+# service's entrypoint becomes `sh -c <script> <name>` and its command keeps
+# supplying the arguments. One script, two deliveries -- never a second copy.
+INLINE_SCRIPTS = {
+    "/nexus/nexus-nats-auth.sh": "nats/nexus-nats-auth.sh",
+}
+
+
+def inline_scripts(services: dict, script_root: str) -> None:
+    for name, spec in services.items():
+        vols = spec.get("volumes") or []
+        kept = []
+        for v in vols:
+            target = None
+            if isinstance(v, str):
+                parts = v.split(":")
+                if len(parts) >= 2 and parts[0].startswith("./"):
+                    target = parts[1]
+            if target in INLINE_SCRIPTS:
+                ep = spec.get("entrypoint") or []
+                if ep[-1:] != [target]:
+                    raise SystemExit(
+                        f"{name}: mounts {target} but its entrypoint does not run it; cannot inline"
+                    )
+                with open(os.path.join(script_root, INLINE_SCRIPTS[target])) as fh:
+                    text = fh.read()
+                # `$` must reach the container's shell, not compose interpolation.
+                spec["entrypoint"] = ep[:-1] + ["-c", text.replace("$", "$$"), os.path.basename(target)]
+                continue
+            kept.append(v)
+        if vols:
+            spec["volumes"] = kept
+
+
+def render(compose: dict, digests: dict, script_root: str = os.path.dirname(os.path.abspath(__file__))) -> dict:
     services = compose.get("services") or {}
 
     # Every service that builds must end up with an image, or the daemon is
@@ -84,6 +121,8 @@ def render(compose: dict, digests: dict) -> dict:
         # names an image.
         spec.pop("build", None)
         spec["image"] = digests[SERVICE_TO_IMAGE[name]]
+
+    inline_scripts(services, script_root)
 
     # Anchors are already resolved by yaml.safe_load, so the rendered file is
     # flat. That is fine for a machine-read file and avoids emitting aliases

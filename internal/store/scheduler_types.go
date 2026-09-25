@@ -35,6 +35,11 @@ type Candidate struct {
 	// when fair share is off. Informational: logged, never re-used for a
 	// decision, because it is stale the moment the claim commits.
 	FairShare float64
+	// RetryFloor is the node's task_nodes.retry_floor (migration 0026): the
+	// highest attempt_number an operator retry superseded. Loaded only where a
+	// retry decision is made, so that backoff grows from the retry's own first
+	// attempt rather than from the superseded tries (CONTRACT-FINDINGS F100).
+	RetryFloor int32
 	// Spec is the node's task spec, the source of timeouts, retry policy,
 	// node_selector, executor and concurrency settings. Read from
 	// task_nodes.spec_json, which the scheduler reads but never writes.

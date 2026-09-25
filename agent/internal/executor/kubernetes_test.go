@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -461,6 +462,24 @@ func awaitJob(t *testing.T, cs *fake.Clientset, name string) *batchv1.Job {
 	return nil
 }
 
+// awaitPhase waits until an OnPhase recorder has seen want.
+func awaitPhase(t *testing.T, mu *sync.Mutex, phases *[]string, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		seen := slices.Contains(*phases, want)
+		mu.Unlock()
+		if seen {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	t.Fatalf("OnPhase never reported %q; saw %q", want, *phases)
+}
+
 func (k *kubelet) createPod() {
 	k.pod = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: k.job.Name + "-pod", Namespace: fakeNS, Labels: k.job.Spec.Template.Labels},
@@ -522,6 +541,11 @@ func TestK8sLifecycleSuccessWithOutputsAndPhases(t *testing.T) {
 
 	k := &kubelet{t: t, cs: cs, job: awaitJob(t, cs, k8sJobName("life-1"))}
 	k.createPod()
+	// Hold the pod in Pending until the executor has REPORTED Pending. OnPhase
+	// reports observed changes, not every state the pod passed through, so
+	// moving straight to Running let a slow informer sync see only Running and
+	// the assertion below failed (about a third of -race runs under load).
+	awaitPhase(t, &mu, &phases, "Pending")
 	k.setStatus(runningStatus())
 	r := <-ch
 	if r.err != nil {

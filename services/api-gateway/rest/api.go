@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/spec"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -43,7 +44,10 @@ type WorkflowManager interface {
 	CancelRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
 	PauseRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
 	ResumeRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
-	RetryRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
+	// RetryRun retries a failed run from the named nodes, or from every node
+	// that did not succeed when nodes is empty. actor attributes the retry in
+	// the run's history.
+	RetryRun(ctx context.Context, namespace, runID string, nodes []string, actor string) (store.RunRow, error)
 }
 
 // ResourceManagerAPI is the resource-manager's API as the gateway needs it.
@@ -52,13 +56,16 @@ type ResourceManagerAPI interface {
 	Capacity(ctx context.Context, namespace string) (CapacityReport, error)
 }
 
-// LogStreamer resolves an attempt's logs.
+// LogStreamer reads an attempt's durable log (ADR-0020).
 //
-// Logs live in the result store, NOT in the metadata store, and are streamed
-// through rather than buffered: task payloads never transit the control plane
-// (invariant 6), and an attempt's log can be gigabytes.
+// The bytes live in the result store, NOT in the metadata store; the index in
+// Postgres says where each line is. Implemented by *logs.Reader. Every method
+// is bounded, so a gigabyte log costs a page, not the gateway.
 type LogStreamer interface {
-	StreamAttemptLogs(ctx context.Context, namespace, attemptID string, w http.ResponseWriter) error
+	Summary(ctx context.Context, attemptID, attemptState string) (store.AttemptLogRow, bool, logs.Status, error)
+	ReadLines(ctx context.Context, attemptID string, row store.AttemptLogRow, from int64, limit int) (logs.Page, error)
+	Search(ctx context.Context, attemptID string, row store.AttemptLogRow, q logs.SearchQuery) (logs.SearchResult, error)
+	Limits() logs.Limits
 }
 
 // CreateRunRequest is the run-creation call.
@@ -94,9 +101,10 @@ type API struct {
 	logs  LogStreamer
 	log   *slog.Logger
 	clock func() time.Time
-	// limiter is nil when rate limiting is disabled, which is the zero-config
-	// default and what keeps dev and the existing tests unchanged.
-	limiter *rateLimiter
+	// limits holds the per-address, auth-failure and per-credential buckets. Each
+	// is nil when disabled, which is the zero-config default and what keeps dev
+	// and the existing tests unchanged. See ratelimit.go.
+	limits gatewayLimiters
 	// schedules is nil when no schedule upstream is configured, in which case the
 	// schedule routes answer 501 rather than the gateway refusing to start. That
 	// keeps a gateway usable against a workflow-manager that predates schedules,
@@ -127,13 +135,20 @@ func New(db store.GWDB, auth *authn.Authenticator, wfm WorkflowManager, rm Resou
 	return &API{db: db, auth: auth, wfm: wfm, rm: rm, logs: logs, log: log, clock: time.Now}
 }
 
-// WithRateLimit enables per-credential rate limiting on every route.
+// WithRateLimit enables rate limiting on every route from the one
+// per-credential setting, deriving the per-address and auth-failure buckets
+// from it (GatewayRateLimitsFor).
 //
 // Opt-in rather than on by default so enabling it is a deliberate deployment
 // decision: a limit guessed wrong is itself an outage, and the right number
 // depends on the fleet's size and the console's poll interval.
 func (a *API) WithRateLimit(cfg RateLimitConfig) *API {
-	a.limiter = newRateLimiter(cfg, a.clock)
+	return a.WithRateLimits(GatewayRateLimitsFor(cfg))
+}
+
+// WithRateLimits enables the three gateway limiters with explicit settings.
+func (a *API) WithRateLimits(cfg GatewayRateLimits) *API {
+	a.limits = newGatewayLimiters(cfg, a.clock)
 	return a
 }
 
@@ -365,10 +380,20 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 // way to register a route.
 func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Request, authn.Principal)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Before authentication on purpose: an unauthenticated flood is exactly
-		// the case that needs limiting, and authenticating first would spend a
-		// database round trip per rejected request.
+		// Before authentication on purpose, and keyed on the client ADDRESS, not
+		// the presented credential: an unauthenticated flood is exactly the case
+		// that needs limiting, authenticating first would spend a database round
+		// trip per rejected request, and an unverified Authorization header is
+		// attacker-chosen, so keying on it handed out a fresh bucket per request.
 		if a.rateLimited(w, r) {
+			return
+		}
+		presented := authn.ExtractBearer(r.Header.Get("Authorization"))
+		// An address that has used up its failure budget may not try another
+		// credential until it refills. Only when one is presented: a request with
+		// no credential is not a guess, and a console loading its sign-in page
+		// must not lock its own address out.
+		if presented != "" && a.authAttemptBlocked(w, r) {
 			return
 		}
 		// AuthenticateCredential, not Authenticate: it dispatches on the credential's
@@ -376,8 +401,11 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 		// unchanged api_keys lookup. Every credential kind therefore passes through
 		// this one enforcement point, which is what keeps "who may do what"
 		// answerable by reading this function.
-		p, err := a.auth.AuthenticateCredential(r.Context(), authn.ExtractBearer(r.Header.Get("Authorization")))
+		p, err := a.auth.AuthenticateCredential(r.Context(), presented)
 		if errors.Is(err, authn.ErrUnauthenticated) {
+			if presented != "" {
+				a.recordAuthFailure(r, presented)
+			}
 			// No detail about WHY. Distinguishing "no such key" from "revoked"
 			// would make this endpoint an oracle for probing valid keys.
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "valid credentials are required")
@@ -388,6 +416,12 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 			// client to retry rather than to rotate its credential.
 			a.log.ErrorContext(r.Context(), "authentication backend failed", "error", err)
 			writeError(w, http.StatusServiceUnavailable, "unavailable", "authentication is temporarily unavailable")
+			return
+		}
+		// Only now, with a verified principal, the per-credential bucket, keyed by
+		// the credential's ID. Before authorization, so a principal hammering routes
+		// it may not use still spends its own allowance.
+		if a.credentialRateLimited(w, p) {
 			return
 		}
 
@@ -1007,12 +1041,19 @@ func (a *API) resumeRun(w http.ResponseWriter, r *http.Request, _ authn.Principa
 	a.lifecycle(w, r, "resume", a.wfm.ResumeRun)
 }
 
-func (a *API) retryRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
-	a.lifecycle(w, r, "retry", a.wfm.RetryRun)
-}
-
 func (a *API) lifecycle(w http.ResponseWriter, r *http.Request, op string, fn func(context.Context, string, string) (store.RunRow, error)) {
-	run, err := fn(r.Context(), r.PathValue("ns"), r.PathValue("id"))
+	ns, id := r.PathValue("ns"), r.PathValue("id")
+	// Namespace-scoped existence check BEFORE the mutation (CONTRACT-FINDINGS
+	// F101). The owner acts on a run id alone, and this used to be checked only
+	// afterwards, when the upstream client read the run back scoped by
+	// namespace: a principal of namespace A who knew a UUID in namespace B could
+	// cancel, pause or resume that run and be told 404 for it. The guard only
+	// authorizes the PATH's namespace; nothing tied the run to it.
+	if _, err := store.GatewayGetRun(r.Context(), a.db, ns, id); err != nil {
+		a.fail(w, r, "get run", err)
+		return
+	}
+	run, err := fn(r.Context(), ns, id)
 	if errors.Is(err, store.ErrRunStateConflict) {
 		// 409 with the reason, not a bare rejection: an operator who clicks pause
 		// on a run that just failed deserves to be told it did not apply and why.
@@ -1151,25 +1192,6 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request, runID string,
 }
 
 // ── attempts, workers, capacity ───────────────────────────────────────────
-
-func (a *API) attemptLogs(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
-	ns, id := r.PathValue("ns"), r.PathValue("id")
-	// Namespace-scoped existence check before streaming anything, so logs are not
-	// readable across tenants by attempt UUID.
-	if _, err := store.GatewayGetAttempt(r.Context(), a.db, ns, id); err != nil {
-		a.fail(w, r, "get attempt", err)
-		return
-	}
-	if a.logs == nil {
-		writeError(w, http.StatusNotImplemented, "logs_unavailable", "no log backend is configured")
-		return
-	}
-	if err := a.logs.StreamAttemptLogs(r.Context(), ns, id, w); err != nil {
-		// Headers may already be written, so this cannot become a clean error
-		// response; log it and let the truncated stream speak for itself.
-		a.log.ErrorContext(r.Context(), "attempt log stream failed", "attempt_id", id, "error", err)
-	}
-}
 
 func (a *API) listWorkers(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
 	rows, err := store.GatewayListWorkers(r.Context(), a.db, r.PathValue("ns"))

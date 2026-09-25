@@ -20,6 +20,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
+	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	eventservice "github.com/khuriwalgroup/kgf-nexus/services/event-service"
 	"github.com/khuriwalgroup/kgf-nexus/services/event-service/relay"
 )
@@ -27,7 +28,7 @@ import (
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	dsn := config.DSN("postgres://postgres:test@localhost:55432/nexus")
+	dsn := config.DSN()
 	addr := env("HTTP_ADDR", ":8085")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -45,8 +46,23 @@ func main() {
 	// not on the dispatch path (see package relay). An empty NEXUS_NATS_URL is a
 	// supported configuration: the relay then only prunes the outbox, SSE tails
 	// poll, and agents long-poll -- the Phase 1 behaviour, fully correct.
-	reg := metrics.NewRegistry()
-	busCfg := bus.ConfigFromEnv("nexus-event-service")
+	reg := metrics.NewServiceRegistry("event-service", version)
+	store.RegisterPoolMetrics(reg, pool)
+	httpMetrics := metrics.NewHTTPMetrics(reg)
+	// A configuration the bus rejects (credentials set but unreadable, none at
+	// all where NEXUS_NATS_REQUIRE_AUTH or NEXUS_ENV=production demands them, a
+	// password over plaintext) is fatal: continuing without the bus would hide
+	// the mistake, and connecting without credentials is exactly what the
+	// broker's authorization exists to prevent. An UNREACHABLE broker is not an
+	// error here and never stops startup.
+	busCfg, err := bus.ConfigFromEnv("nexus-event-service")
+	if err != nil {
+		log.Error("invalid NATS configuration", "error", err)
+		os.Exit(1)
+	}
+	if bus.RequireAuthOverridden() {
+		log.Warn("NEXUS_NATS_REQUIRE_AUTH=false overrides NEXUS_ENV: the event bus may be used without credentials")
+	}
 	var nc *nats.Conn
 	waker := eventservice.NewRunWaker()
 	if busCfg.Enabled() {
@@ -74,10 +90,12 @@ func main() {
 	go func() { rl.Run(ctx); close(relayDone) }()
 
 	srv := &http.Server{
-		Handler: eventservice.NewServer(eventservice.NewStore(pool), log).
+		// Route-template RED metrics; the mux is passed directly so the
+		// middleware sees the matched pattern (metrics.HTTPMetrics).
+		Handler: httpMetrics.Middleware(eventservice.NewServer(eventservice.NewStore(pool), log).
 			WithWaker(waker).
 			WithRoutes(reg.Routes).
-			Routes(),
+			Routes()),
 		Addr:              addr,
 		ReadHeaderTimeout: 10 * time.Second,
 		// No WriteTimeout: SSE streams are long-lived by design and a write
@@ -108,6 +126,9 @@ func main() {
 	case <-shutdownCtx.Done():
 	}
 }
+
+// version is stamped at build time (-ldflags "-X main.version=...").
+var version = "dev"
 
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {

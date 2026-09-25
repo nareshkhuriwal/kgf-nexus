@@ -133,6 +133,15 @@ func (g *GRPCClient) ReportResult(ctx context.Context, req *nexusv1.ReportResult
 	return resp, nil
 }
 
+// ReportLogs indexes log chunks already written to the result store (ADR-0020).
+func (g *GRPCClient) ReportLogs(ctx context.Context, req *nexusv1.ReportLogsRequest) (*nexusv1.Ack, error) {
+	resp, err := g.c.ReportLogs(g.auth(ctx), req)
+	if err != nil {
+		return nil, fmt.Errorf("ReportLogs: %w", err)
+	}
+	return resp, nil
+}
+
 func (g *GRPCClient) ExtendLease(ctx context.Context, req *nexusv1.ExtendLeaseRequest) (*nexusv1.ExtendLeaseResponse, error) {
 	resp, err := g.c.ExtendLease(g.auth(ctx), req)
 	if err != nil {

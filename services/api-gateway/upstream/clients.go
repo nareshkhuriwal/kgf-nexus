@@ -179,8 +179,16 @@ func (c *WorkflowManagerClient) ResumeRun(ctx context.Context, namespace, runID 
 	return c.lifecycle(ctx, namespace, "ResumeRun", runID)
 }
 
-func (c *WorkflowManagerClient) RetryRun(ctx context.Context, namespace, runID string) (store.RunRow, error) {
-	return c.lifecycle(ctx, namespace, "RetryRun", runID)
+// RetryRun retries a failed run through its owner: from the named nodes, or
+// from every node that did not succeed when nodes is empty.
+func (c *WorkflowManagerClient) RetryRun(ctx context.Context, namespace, runID string, nodes []string, actor string) (store.RunRow, error) {
+	if c.grpc == nil {
+		return store.RunRow{}, fmt.Errorf("RetryRun: %w (workflow-manager owns workflow_runs)", ErrUpstreamNotConfigured)
+	}
+	if _, err := c.grpc.retry(ctx, runID, nodes, actor); err != nil {
+		return store.RunRow{}, err
+	}
+	return store.GatewayGetRun(ctx, c.db, namespace, runID)
 }
 
 func (c *WorkflowManagerClient) lifecycle(ctx context.Context, namespace, op, runID string) (store.RunRow, error) {
@@ -539,12 +547,14 @@ func (c *SchedulerClient) MarkStarted(ctx context.Context, attemptID string, sta
 	return c.grpc.markStarted(ctx, attemptID)
 }
 
-// RecordProgress resets the task heartbeat deadline.
-func (c *SchedulerClient) RecordProgress(ctx context.Context, attemptID, message string, fraction float64) error {
+// RecordProgress stores the worker's latest status on the attempt and resets
+// the task heartbeat deadline. stale is true when the scheduler's own lease
+// fence rejected the report.
+func (c *SchedulerClient) RecordProgress(ctx context.Context, attemptID, leaseToken, message string, fraction float64) (bool, error) {
 	if c.grpc == nil {
-		return fmt.Errorf("record progress: %w (scheduler owns task_attempts)", ErrUpstreamNotConfigured)
+		return false, fmt.Errorf("record progress: %w (scheduler owns task_attempts)", ErrUpstreamNotConfigured)
 	}
-	return c.grpc.recordProgress(ctx, attemptID, message, fraction)
+	return c.grpc.recordProgress(ctx, attemptID, leaseToken, message, fraction)
 }
 
 // ApplyResult applies a terminal outcome, then asks the DAG engine to recompute

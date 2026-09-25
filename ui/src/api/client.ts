@@ -25,7 +25,8 @@ import type {
   CreateScheduleRequest,
   CronPreview,
   FleetHealth,
-  LogLine,
+  LogPage,
+  LogSearchResult,
   RunAction,
   RunDetail,
   RunEvent,
@@ -485,6 +486,22 @@ export const api = {
     );
   },
 
+  /**
+   * Retry a FAILED or TIMED_OUT run. With `nodes`, exactly those nodes and their
+   * downstream dependents that did not succeed get a new attempt; without, every
+   * node that did not succeed does. Succeeded nodes never re-run. The gateway
+   * refuses the whole request (409/422, nothing retried) when a node is unknown,
+   * not FAILED/UPSTREAM_FAILED/CANCELLED, or would fail again because a failed
+   * upstream is not also selected -- the message names what to do instead.
+   */
+  retryRun(namespace: string, runId: string, nodes?: readonly string[]): Promise<RunSummary> {
+    return request<RunSummary>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(nodes && nodes.length > 0 ? { nodes } : {}),
+    });
+  },
+
   /** Kept as its own name: it is called from a list row as well as the detail page. */
   deleteRun(namespace: string, runId: string): Promise<void> {
     return request<void>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}`, {method: "DELETE"});
@@ -845,63 +862,61 @@ export const api = {
   },
 
   /**
-   * Non-streaming log fetch, used as the polling fallback and for the initial
-   * backfill before the stream attaches.
+   * One page of an attempt's durable log (ADR-0020): the last `tail` lines, or
+   * `limit` lines from `fromLine`. Always JSON, always carrying the log's state,
+   * so the pane can say "partial" or "expired" instead of guessing from an
+   * empty list.
    */
-  async getLogs(namespace: string, attemptId: string, tail = 500): Promise<LogLine[]> {
-    const url = `${ns(namespace)}/attempts/${encodeURIComponent(attemptId)}/logs?tail=${tail}&follow=false`;
-    const fullUrl = apiUrl(url);
+  getLogPage(
+    namespace: string,
+    attemptId: string,
+    opts: { tail?: number; fromLine?: number; limit?: number } = {},
+  ): Promise<LogPage> {
+    const q = new URLSearchParams();
+    if (opts.fromLine !== undefined) {
+      q.set('from_line', String(opts.fromLine));
+      q.set('limit', String(opts.limit ?? 1000));
+    } else {
+      q.set('tail', String(opts.tail ?? 500));
+    }
+    return request<LogPage>(`${ns(namespace)}/attempts/${encodeURIComponent(attemptId)}/logs?${q.toString()}`);
+  },
+
+  /**
+   * Bounded server-side search over the WHOLE log, not just the loaded lines.
+   * The result says whether the scan finished; if not, search again from
+   * `search.next_line`.
+   */
+  searchLogs(
+    namespace: string,
+    attemptId: string,
+    opts: { q: string; regex?: boolean; caseInsensitive?: boolean; stream?: string; fromLine?: number; limit?: number },
+  ): Promise<LogSearchResult> {
+    const q = new URLSearchParams({ q: opts.q });
+    if (opts.regex) q.set('regex', 'true');
+    if (opts.caseInsensitive) q.set('case', 'insensitive');
+    if (opts.stream) q.set('stream_name', opts.stream);
+    if (opts.fromLine) q.set('from_line', String(opts.fromLine));
+    q.set('limit', String(opts.limit ?? 200));
+    return request<LogSearchResult>(`${ns(namespace)}/attempts/${encodeURIComponent(attemptId)}/logs?${q.toString()}`);
+  },
+
+  /** The whole log as plain text, for download. Streams server-side. */
+  async downloadLogText(namespace: string, attemptId: string): Promise<Blob> {
+    const url = apiUrl(`${ns(namespace)}/attempts/${encodeURIComponent(attemptId)}/logs?format=text`);
     let res: Response;
     try {
-      res = await fetch(fullUrl, { headers: { ...authHeaders() } });
+      res = await fetch(url, { headers: { Accept: 'text/plain', ...authHeaders() } });
     } catch (cause) {
-      throw new ApiError(`Cannot reach the log endpoint at ${fullUrl}.`, {
-        status: 0,
-        url: fullUrl,
-        body: String(cause),
-      });
+      throw new ApiError(`Cannot reach the log endpoint at ${url}.`, { status: 0, url, body: String(cause) });
     }
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      throw new ApiError(serverMessage(res.status, body), { status: res.status, url: fullUrl, body });
+      throw new ApiError(serverMessage(res.status, body), { status: res.status, url, body });
     }
-    const text = await res.text();
-    return parseLogPayload(text);
+    return res.blob();
   },
 };
-
-/**
- * Logs may arrive as JSON, as NDJSON, or as plain text. Accepting all three
- * means the log tail works before the gateway's log format is finalised, which
- * it is not in Phase 1.
- */
-export function parseLogPayload(text: string): LogLine[] {
-  const trimmed = text.trim();
-  if (trimmed === '') return [];
-  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
-    try {
-      const parsed = JSON.parse(trimmed) as unknown;
-      const arr = asList<LogLine | string>(parsed, 'lines', 'logs');
-      if (arr.length > 0) {
-        return arr.map((l) => (typeof l === 'string' ? { message: l } : l));
-      }
-    } catch {
-      /* NDJSON: fall through to the line-by-line path */
-    }
-  }
-  return trimmed.split('\n').map((line) => {
-    const s = line.trim();
-    if (s.startsWith('{')) {
-      try {
-        const o = JSON.parse(s) as LogLine;
-        if (typeof o.message === 'string') return o;
-      } catch {
-        /* not JSON; treat as raw text */
-      }
-    }
-    return { message: line };
-  });
-}
 
 /**
  * SSE URL for the live event tail (§8.2: the events endpoint serves both).
@@ -914,8 +929,4 @@ export function eventStreamUrl(namespace: string, runId: string, afterSeq?: numb
   const q = new URLSearchParams({ stream: 'true' });
   if (afterSeq !== undefined) q.set('after_seq', String(afterSeq));
   return apiUrl(`${ns(namespace)}/runs/${encodeURIComponent(runId)}/events?${q.toString()}`);
-}
-
-export function logStreamUrl(namespace: string, attemptId: string): string {
-  return apiUrl(`${ns(namespace)}/attempts/${encodeURIComponent(attemptId)}/logs?follow=true`);
 }

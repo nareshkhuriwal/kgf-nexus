@@ -22,6 +22,7 @@ import { Link } from 'react-router-dom';
 import type { Attempt } from '../api/types';
 import type { DagGraph, DagNode } from '../lib/dag';
 import { EMPTY, fmtDurationMs, fmtTs, parseTs, shortId } from '../lib/format';
+import { executorStatus, isExecutorWaiting, isInFlight } from '../lib/progress';
 import { normalizeState } from '../lib/states';
 import { StateBadge } from './StateBadge';
 import { DataTable } from './DataTable';
@@ -110,6 +111,11 @@ export function PlacementPanel({
       key: 'worker',
       header: 'worker',
       cell: (r) => <WorkerCell attempt={r.attempt} />,
+    },
+    {
+      key: 'status',
+      header: 'why / status',
+      cell: (r) => <StatusCell attempt={r.attempt} />,
     },
     {
       key: 'queue',
@@ -204,6 +210,46 @@ function WorkerCell({ attempt }: { attempt: Attempt | null }) {
       </Link>
       {attempt.worker_hostname && <span className="cell-sub mono">{shortId(attempt.worker_id, 12)}</span>}
     </div>
+  );
+}
+
+/**
+ * Why a task is where it is, labelled by WHO says so. Before placement the
+ * answer is the scheduler's (pending_reason); after placement it is the
+ * worker's executor (progress_message, e.g. a Kubernetes pod still Pending).
+ * The two are different schedulers and must not read as one.
+ */
+export function StatusCell({ attempt }: { attempt: Attempt | null }) {
+  if (!attempt) return <span className="faint">{EMPTY}</span>;
+  const s = normalizeState(attempt.state);
+  if (s === 'PENDING') {
+    if (!attempt.pending_reason) return <span className="faint">{EMPTY}</span>;
+    return (
+      <span className="cell-stack">
+        <span className="chip">scheduler</span>
+        <span className="cell-sub mono" title={attempt.pending_reason}>
+          {attempt.pending_reason}
+        </span>
+      </span>
+    );
+  }
+  const status = executorStatus(attempt);
+  if (!status) {
+    // Only claim "nothing reported" when the gateway serves the field and
+    // the attempt is on a worker; otherwise there is nothing honest to say.
+    if (isInFlight(attempt) && attempt.progress_message === null) {
+      return <span className="faint">no executor status reported</span>;
+    }
+    return <span className="faint">{EMPTY}</span>;
+  }
+  const waiting = isExecutorWaiting(attempt);
+  return (
+    <span className="cell-stack">
+      <span className={`chip${waiting ? ' warn' : ''}`}>{status.stale ? 'executor · last' : 'executor'}</span>
+      <span className="cell-sub mono" title={status.message}>
+        {status.message.length > 90 ? `${status.message.slice(0, 89)}…` : status.message}
+      </span>
+    </span>
   );
 }
 

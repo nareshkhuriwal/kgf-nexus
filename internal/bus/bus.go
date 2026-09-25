@@ -20,49 +20,18 @@ package bus
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 )
-
-// Environment variable names, in the NEXUS_ prefixed convention F38 settled on.
-const (
-	// EnvURL is the broker URL (comma-separated for a cluster). EMPTY DISABLES
-	// the bus: the relay stops publishing and the agent falls back to pure long
-	// polling, which is the Phase 1 behaviour and fully correct.
-	EnvURL = "NEXUS_NATS_URL"
-	// EnvCreds is an optional NATS .creds file (JWT + NKey). Production
-	// deployments need it: an unauthenticated broker lets any worker read every
-	// tenant's run events (see docs/OPERATIONS.md).
-	EnvCreds = "NEXUS_NATS_CREDS"
-)
-
-// Config says how to reach the broker.
-type Config struct {
-	URL       string
-	CredsFile string
-	// Name identifies the connection in the broker's monitoring (connz), so an
-	// operator can tell the relay from an agent.
-	Name string
-}
-
-// ConfigFromEnv reads the NEXUS_NATS_* variables.
-func ConfigFromEnv(name string) Config {
-	return Config{
-		URL:       strings.TrimSpace(os.Getenv(EnvURL)),
-		CredsFile: strings.TrimSpace(os.Getenv(EnvCreds)),
-		Name:      name,
-	}
-}
-
-// Enabled reports whether a broker is configured at all.
-func (c Config) Enabled() bool { return c.URL != "" }
 
 // Connect dials the broker WITHOUT requiring it to be up.
 //
@@ -77,6 +46,12 @@ func (c Config) Enabled() bool { return c.URL != "" }
 func Connect(cfg Config, log *slog.Logger, extra ...nats.Option) (*nats.Conn, error) {
 	if !cfg.Enabled() {
 		return nil, errors.New("bus: NATS is not configured (NEXUS_NATS_URL is empty)")
+	}
+	// Validated again here, not only in ConfigFromEnv, because tests and future
+	// callers build a Config by hand; connecting with an invalid one must fail
+	// the same way either path.
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 	if log == nil {
 		log = slog.Default()
@@ -107,18 +82,101 @@ func Connect(cfg Config, log *slog.Logger, extra ...nats.Option) (*nats.Conn, er
 			if sub != nil {
 				subject = sub.Subject
 			}
+			// A permissions violation lands here too. It means this identity was
+			// denied something it tried, which is either a deploy/ permission
+			// that is too narrow or a process doing what its role must not --
+			// both worth an ERROR rather than a WARN.
+			if errors.Is(err, nats.ErrPermissionViolation) || errors.Is(err, nats.ErrAuthorization) {
+				log.Error("nats denied an operation for this identity", "subject", subject, "error", err)
+				return
+			}
 			log.Warn("nats async error", "subject", subject, "error", err)
 		}),
 	}
-	if cfg.CredsFile != "" {
-		opts = append(opts, nats.UserCredentials(cfg.CredsFile))
+	authTLS, err := cfg.authTLSOptions(log)
+	if err != nil {
+		return nil, err
 	}
+	opts = append(opts, authTLS...)
 	opts = append(opts, extra...)
+	log.Info("nats configured", "auth", cfg.AuthMethod(), "tls", cfg.TLS.Enabled, "name", cfg.Name)
 	nc, err := nats.Connect(cfg.URL, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("bus: connect to %s: %w", redactURL(cfg.URL), err)
 	}
 	return nc, nil
+}
+
+// authTLSOptions turns the credential and TLS settings into client options. It
+// is separate from Connect so the mapping is unit-testable without a broker.
+func (c Config) authTLSOptions(log *slog.Logger) ([]nats.Option, error) {
+	var opts []nats.Option
+	if c.InboxPrefix != "" {
+		opts = append(opts, nats.CustomInboxPrefix(c.InboxPrefix))
+	}
+	switch c.AuthMethod() {
+	case AuthCreds:
+		// Re-read at every connect by nats.go, so a rotated .creds file takes
+		// effect on the next reconnect.
+		opts = append(opts, nats.UserCredentials(c.CredsFile))
+	case AuthNKey:
+		// The public key is fixed for the life of the connection object (nats.go
+		// has no callback for it); the signing callback re-reads the seed file.
+		// So an NKey rotation is: add the new public key to the server, roll
+		// the process, remove the old key (docs/OPERATIONS.md §11.8).
+		o, err := nats.NkeyOptionFromSeed(c.NKeySeedFile)
+		if err != nil {
+			return nil, fmt.Errorf("bus: %s: %w", EnvNKeySeedFile, err)
+		}
+		opts = append(opts, o)
+	case AuthPassword:
+		if c.PasswordFile != "" {
+			user, file := c.User, c.PasswordFile
+			// Per connect, so a rotated mounted secret is picked up without a
+			// restart. A read failure sends an empty password (the server
+			// rejects it and the client retries) rather than a stale one.
+			opts = append(opts, nats.UserInfoHandler(func() (string, string) {
+				pw, err := readPasswordFile(file)
+				if err != nil {
+					log.Error("could not read the NATS password file; this connect attempt will be rejected", "error", err)
+					return user, ""
+				}
+				return user, pw
+			}))
+		} else {
+			opts = append(opts, nats.UserInfo(c.User, c.Password))
+		}
+	}
+	if c.AuthMethod() != AuthNone {
+		// nats.go's default gives up for good after the same auth error twice in
+		// a row, leaving a long-lived process permanently deaf -- including
+		// after the operator fixes the server side of a credential rotation.
+		// The bus must come back by itself (ADR-0003), so keep retrying.
+		opts = append(opts, nats.IgnoreAuthErrorAbort())
+	}
+
+	if c.TLS.Enabled {
+		base := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: c.TLS.ServerName}
+		opts = append(opts, nats.Secure(base))
+		if c.TLS.CAFile != "" || c.TLS.CertFile != "" {
+			// The same hot-reloading material the gRPC client uses: a renewed
+			// certificate or CA bundle reaches the next (re)connect.
+			m, err := transport.LoadClientMaterial(c.TLS.CertFile, c.TLS.KeyFile, c.TLS.CAFile)
+			if err != nil {
+				return nil, fmt.Errorf("bus: NATS TLS: %w", err)
+			}
+			var certCB nats.TLSCertHandler
+			var rootCB nats.RootCAsHandler
+			if m.HasCertificate() {
+				certCB = m.Certificate
+			}
+			if m.HasCA() {
+				rootCB = m.RootCAs
+			}
+			opts = append(opts, nats.ClientTLSConfig(certCB, rootCB))
+		}
+	}
+	return opts, nil
 }
 
 // redactURL drops userinfo so a password embedded in the URL never reaches a log.

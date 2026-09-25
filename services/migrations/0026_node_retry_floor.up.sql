@@ -1,0 +1,28 @@
+-- Copyright 2026 Khuriwal Group
+-- SPDX-License-Identifier: Apache-2.0
+-- Operator retry of selected nodes (CONTRACT-FINDINGS F100).
+--
+-- The DAG engine derives a node's state from its LATEST attempt, because the
+-- attempts are the record of what happened and task_nodes.state is a projection
+-- of them. That is exactly why an operator retry cannot be expressed by writing
+-- task_nodes.state alone: the next reconcile would read the node's last FAILED
+-- attempt, see its retry budget spent, and put the node straight back to FAILED.
+-- Deleting or rewriting the old attempts would make it work and would break
+-- invariant 9 (attempt history is immutable).
+--
+-- retry_floor is the highest attempt_number that an operator retry has
+-- superseded. Attempts at or below it stay in task_attempts, untouched and
+-- visible in the run's history, but the engine no longer derives the node's
+-- state from them, and the retry budget is counted from above it. The next
+-- attempt is still attempt_number = MAX + 1, and its idempotency key is the same
+-- as every earlier attempt's (the key excludes attempt_number, invariant 1), so
+-- the retried work deduplicates against its own earlier tries.
+--
+-- Additive only (ADR-0011 rule 5): one column with a constant default, which is
+-- metadata-only on PostgreSQL 11+ (no table rewrite; measured for 0002, see
+-- F77). A replica that predates it never reads it; 0 means "no attempt is
+-- superseded", which is the behaviour every existing row already has.
+--
+-- No new grant: nexus_dag_engine owns task_nodes and already holds table-level
+-- UPDATE on it (0005), and every role's table-level SELECT covers a new column.
+ALTER TABLE task_nodes ADD COLUMN IF NOT EXISTS retry_floor INT NOT NULL DEFAULT 0;

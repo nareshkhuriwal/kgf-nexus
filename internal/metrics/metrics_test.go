@@ -437,7 +437,9 @@ func TestHandlerContentTypeAndBody(t *testing.T) {
 	}
 	// A scraper that sees bare text/plain with no version may negotiate protobuf
 	// instead and drop the body entirely.
-	if got := rec.Header().Get("Content-Type"); got != ContentType {
+	// client_golang appends the name-escaping parameter (escaping=underscores);
+	// the media type and version are what a scraper keys on.
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, ContentType) {
 		t.Errorf("Content-Type = %q, want %q", got, ContentType)
 	}
 	mustContain(t, rec.Body.String(), "nexus_handler_total 1\n")

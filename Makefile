@@ -26,12 +26,14 @@ NEXUS_API_PORT ?= 8090
 NEXUS_ENDPOINT ?= http://localhost:$(NEXUS_API_PORT)
 MIGRATIONS    := services/migrations
 
-# test-nats has its own .PHONY line so a merge that edits the list below does
-# not conflict with it.
+# test-nats and sdk-test have their own .PHONY lines so a merge that edits the
+# list below does not conflict with them.
 .PHONY: test-nats
+.PHONY: sdk-test
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
+        up-pitr backup-base pitr-verify restore-pitr pitr-drill \
         license-report license-check dev-certs up-tls certs-check \
         k8s-dev-images k8s-dev-up k8s-dev-test k8s-dev-test-long k8s-dev-status k8s-dev-down bench-pg bench-dispatch bench-inline
 
@@ -60,9 +62,10 @@ proto: ## Regenerate Go bindings from proto/nexus/v1/*.proto
 build: ## Build all Go packages
 	$(GO) build ./...
 
-test: ## Run Go tests and UI tests
+test: ## Run Go, UI and Python SDK unit tests
 	$(GO) test ./...
 	$(MAKE) ui-test
+	$(MAKE) sdk-test
 
 lint: ## go vet over the whole module
 	$(GO) vet ./...
@@ -78,9 +81,10 @@ chaos: ## Kill workers mid-task and assert exactly-one-logical-effect (needs `ma
 
 # The outbox relay and dispatch hints against a real NATS JetStream and a real
 # Postgres, each in a throwaway container (nexus-nats-agent-*, host ports
-# 55511/55512) so the broker-outage test cannot disturb anything else. KEEP=1
-# leaves the containers up for inspection.
-test-nats: ## Run the NATS/outbox integration tests in isolated containers (needs Docker)
+# 55511-55514) so the broker-outage test cannot disturb anything else. Also
+# runs the broker AUTHORIZATION suite against the compose- and Helm-rendered
+# configurations (needs helm). KEEP=1 leaves the containers up for inspection.
+test-nats: ## Run the NATS/outbox and broker-authorization integration tests in isolated containers (needs Docker, helm)
 	tests/nats/run-integration.sh
 
 # ── Benchmarks (ADR-0016, ADR-0018) ───────────────────────────────────────
@@ -177,6 +181,7 @@ k8s-dev-images: ## Build every image and load it into the local kind node (print
 
 k8s-dev-up: ## Build + load images, then terraform apply the dev environment on Docker Desktop
 	@set -euo pipefail; \
+	NEXUS_NATS_DIR=.dev-nats deploy/nats/nexus-nats-auth.sh init --tenant default; \
 	tag=$$(deploy/scripts/k8s-dev-images.sh | tail -n 1); \
 	echo "image tag: $$tag"; \
 	terraform -chdir=$(TF_DEV) init -input=false -upgrade=false >/dev/null; \
@@ -221,6 +226,33 @@ ui-build: ## Typecheck and production-build the UI
 
 ui-test: ## Run the UI component tests
 	cd ui && npm test
+
+# ── Python SDK ────────────────────────────────────────────────────────────
+# The SDK's pytest suite, in its own virtualenv so it never installs into (or
+# depends on) whatever Python the shell happens to have. .venv-sdk/ is already
+# gitignored. The venv is rebuilt only when pyproject.toml changes; delete it to
+# force a clean install. SDK_PYTHON must be 3.11+ (pyproject requires-python).
+#
+# SDK_REPORT_DIR, when set, also writes JUnit and Cobertura XML there. Coverage
+# data goes inside the venv so the source tree stays clean.
+SDK_DIR        := sdk/python
+SDK_PYTHON     ?= python3
+SDK_VENV       ?= .venv-sdk
+SDK_REPORT_DIR ?=
+
+$(SDK_VENV)/.installed: $(SDK_DIR)/pyproject.toml
+	@$(SDK_PYTHON) -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
+	  || { echo "sdk-test: $(SDK_PYTHON) is $$($(SDK_PYTHON) --version 2>&1); the SDK needs 3.11+ (set SDK_PYTHON)"; exit 1; }
+	$(SDK_PYTHON) -m venv $(SDK_VENV)
+	$(SDK_VENV)/bin/python -m pip install --quiet --upgrade pip
+	$(SDK_VENV)/bin/python -m pip install --quiet -e '$(SDK_DIR)[dev]'
+	@touch $@
+
+sdk-test: $(SDK_VENV)/.installed ## Run the Python SDK tests with coverage (SDK_REPORT_DIR=<dir> adds JUnit/Cobertura XML)
+	$(if $(SDK_REPORT_DIR),@mkdir -p '$(SDK_REPORT_DIR)')
+	cd $(SDK_DIR) && COVERAGE_FILE='$(abspath $(SDK_VENV))/.coverage' '$(abspath $(SDK_VENV))/bin/python' -m pytest \
+	  -p no:cacheprovider --cov=nexus --cov-report=term \
+	  $(if $(SDK_REPORT_DIR),--junitxml='$(abspath $(SDK_REPORT_DIR))/sdk-junit.xml' --cov-report=xml:'$(abspath $(SDK_REPORT_DIR))/sdk-coverage.xml')
 
 # ── Dev data ──────────────────────────────────────────────────────────────
 # The key is inserted hashed (api_keys.key_hash), matching how the gateway
@@ -303,9 +335,40 @@ backup-artifacts: ## Mirror the MinIO result bucket only (the other half)
 backup-all: ## Back up BOTH stores in the correct order (use this one)
 	BACKUP_DIR=$(BACKUP_DIR) deploy/backup-all.sh
 
-# Uses scratch buckets and a scratch database; never touches live data.
-restore-drill: ## Prove a restore recovers artifacts byte-identically (needs `make up`)
-	deploy/restore-drill.sh
+# Uses scratch buckets and a scratch database; never touches live data. Writes
+# phase timings as JSON (DRILL_REPORT). RTO=1 adds the DESTRUCTIVE timed
+# full-stack recovery (drop DB + bucket, restore, restart, reconcile) -- run it
+# on a drill stack, see OPERATIONS §4.5.
+DRILL_REPORT ?= ./restore-drill-report.json
+restore-drill: ## Prove a restore recovers artifacts byte-identically; RTO=1 times a full recovery (DESTRUCTIVE)
+	deploy/restore-drill.sh --report $(DRILL_REPORT) $(if $(filter 1,$(RTO)),--rto --yes,)
+
+# ── Point-in-time recovery (pgBackRest; OPERATIONS §4) ────────────────────
+# Needs the PITR overlay: `make up-pitr` (compose) or postgres.pitr.enabled
+# (Helm). Managed Postgres uses the provider's PITR instead.
+COMPOSE_PITR ?= $(COMPOSE) -f deploy/docker-compose.pitr.yml
+BACKUP_TYPE  ?= full
+PITR_REPORT  ?= ./pitr-drill-report.json
+
+up-pitr: ## Bring up the stack with continuous WAL archiving + base backups (pgBackRest)
+	$(COMPOSE_PITR) up --build -d
+
+backup-base: ## Take a pgBackRest base backup now (BACKUP_TYPE=full|diff|incr)
+	deploy/pitr-backup.sh $(BACKUP_TYPE)
+
+pitr-verify: ## Check archiving, backup age and repository integrity; nonzero if broken
+	deploy/pitr-verify.sh
+
+# TARGET_TIME='2026-09-24 14:31:59+00' | TARGET_LSN=0/5A0012F8 | neither = latest.
+# Stop the Nexus services first; the script refuses without CONFIRM=yes.
+restore-pitr: ## Restore Postgres in place to TARGET_TIME / TARGET_LSN / latest (CONFIRM=yes)
+	@test "$(CONFIRM)" = yes || { echo "restore-pitr rewrites the data directory: re-run with CONFIRM=yes"; exit 1; }
+	deploy/restore-pitr.sh $(if $(TARGET_TIME),--time '$(TARGET_TIME)',$(if $(TARGET_LSN),--lsn $(TARGET_LSN),--latest)) --yes
+
+# DESTRUCTIVE to the stack it runs on (seeds data, rewinds the DB, deletes the
+# data directory in scenario 2). Sizes: PITR_DRILL_ARGS="--runs-a 3000 ...".
+pitr-drill: ## Timed PITR drill: restore to a timestamp and to latest; asserts + RTO/RPO JSON (DESTRUCTIVE)
+	deploy/pitr-drill.sh --yes --report $(PITR_REPORT) $(PITR_DRILL_ARGS)
 
 # ── Artifact GC (ADR-0008) ────────────────────────────────────────────────
 # The restore procedure in OPERATIONS §7.2 deliberately produces orphan objects
@@ -316,7 +379,9 @@ restore-drill: ## Prove a restore recovers artifacts byte-identically (needs `ma
 # run is always an explicit act and never something a tab-completed make target
 # can do by accident.
 ARTIFACT_GC_ENDPOINT ?= http://localhost:$(or $(NEXUS_MINIO_PORT),9010)
-ARTIFACT_GC_DSN      ?= postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable
+# The same database seed and migrate act on, rather than a second copy of the
+# compose URL that could drift from NEXUS_POSTGRES_PORT.
+ARTIFACT_GC_DSN      ?= $(DATABASE_URL)
 
 artifact-gc: ## Report orphaned result-store objects; deletes NOTHING (ADR-0008)
 	$(GO) run ./services/artifact-gc/cmd/artifact-gc \

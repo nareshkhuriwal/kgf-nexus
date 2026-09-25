@@ -50,7 +50,7 @@ OPENSSL="${OPENSSL:-openssl}"
 # Every compose service that serves gRPC, and the agents that dial it. The
 # SANs ARE these names: config.PeerTarget dials dns:///<service>:port and gRPC
 # verifies the certificate against <service> (docs/TLS.md §4.3).
-DEV_SERVICES="api-gateway workflow-manager dag-engine scheduler scheduler-gpu resource-manager event-service"
+DEV_SERVICES="api-gateway workflow-manager dag-engine scheduler scheduler-gpu resource-manager event-service nats"
 DEV_AGENTS="agent-cpu agent-gpu agent-gpu-a10"
 
 die() { echo "nexus-certs: $*" >&2; exit 1; }

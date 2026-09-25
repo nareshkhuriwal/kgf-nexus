@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 )
@@ -36,7 +37,7 @@ func main() {
 
 func run() error {
 	var (
-		dsn       = flag.String("dsn", config.DSN("postgres://postgres:test@localhost:55432/nexus"), "Postgres DSN")
+		dsn       = flag.String("dsn", config.DSN("dsn"), "Postgres DSN")
 		queue     = flag.String("queue", envOr("NEXUS_QUEUE", "default"), "queue this replica drains")
 		httpAddr  = flag.String("http-addr", envOr("NEXUS_HTTP_ADDR", ":8081"), "address for /healthz and /readyz")
 		grpcAddr  = flag.String("grpc-addr", envOr("NEXUS_GRPC_ADDR", envOr("GRPC_ADDR", ":9090")), "address for nexus.v1.SchedulerService")
@@ -55,6 +56,10 @@ func run() error {
 			"PENDING attempts a pull claim reads per index window before joining (0 = scan the backlog)")
 		claimWindowPages = flag.Int("claim-window-pages", 4,
 			"windows a pull claim may read before falling back to a full scan")
+		// Sampled off the scrape path (see runBacklogSampler); 0 disables.
+		backlogInterval = flag.Duration("backlog-sample-interval",
+			envDuration("NEXUS_BACKLOG_SAMPLE_INTERVAL", 15*time.Second),
+			"how often the PENDING backlog gauges are refreshed (0 = never)")
 	)
 	flag.Parse()
 
@@ -110,12 +115,21 @@ func run() error {
 	}
 	sched := NewSchedulerWithLogger(st, log)
 
+	// Metrics, served on the health listener (no extra port; docs/OPERATIONS.md).
+	reg := metrics.NewServiceRegistry("scheduler", version)
+	transport.RegisterMetrics(reg)
+	store.RegisterPoolMetrics(reg, pool)
+	schedMetrics := NewMetrics(reg, *queue)
+	sched.SetMetrics(schedMetrics)
+	grpcMetrics := metrics.NewGRPCServerMetrics(reg)
+	go runBacklogSampler(ctx, st, schedMetrics, *backlogInterval, log)
+
 	// The scheduler is live once it can reach the DB. Readiness is stricter:
 	// see readyHandler.
 	var ready atomic.Bool
 	srv := &http.Server{
 		Addr:              *httpAddr,
-		Handler:           healthMux(st, sched, &ready),
+		Handler:           withMetrics(healthMux(st, sched, &ready), reg),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	srvErr := make(chan error, 1)
@@ -149,8 +163,9 @@ func run() error {
 		// incompletely must not quietly serve plaintext instead.
 		return fmt.Errorf("resolve TLS server options: %w", terr)
 	}
-	grpcSrv := grpc.NewServer(append(config.PeerServerOptions(), sopts...)...)
-	Register(grpcSrv, NewGRPCServer(st, log))
+	grpcOpts := append(grpcMetrics.ServerOptions(), config.PeerServerOptions()...)
+	grpcSrv := grpc.NewServer(append(grpcOpts, sopts...)...)
+	Register(grpcSrv, NewGRPCServer(st, log).WithMetrics(schedMetrics))
 	RegisterReports(grpcSrv, NewReportServer(st, log))
 
 	grpcErr := make(chan error, 1)
@@ -268,6 +283,25 @@ func healthMux(st *store.SchedulerStore, sched *Scheduler, ready *atomic.Bool) *
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
 	})
 	return mux
+}
+
+// version is stamped at build time (-ldflags "-X main.version=...").
+var version = "dev"
+
+// withMetrics adds GET /metrics to the health mux, so the scrape target is the
+// same listener the probes already use.
+func withMetrics(mux *http.ServeMux, reg *metrics.Registry) *http.ServeMux {
+	reg.Routes(mux)
+	return mux
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
 }
 
 func envOr(key, fallback string) string {

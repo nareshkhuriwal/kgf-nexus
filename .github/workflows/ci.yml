@@ -22,8 +22,17 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Nothing here writes to the repository, so the token cannot either. A job that
+# genuinely needs more asks for it by name.
+permissions:
+  contents: read
+
 env:
   GO_VERSION: "1.25"
+  # The console's image builds on node:20-alpine (deploy/Dockerfile.ui) and the
+  # Azure gate pins the same major, so a lockfile that resolves here resolves
+  # in the image too. Move all three together.
+  NODE_VERSION: "20"
 
 jobs:
   # Fast feedback. Deliberately first and deliberately cheap: a build error or a
@@ -125,20 +134,78 @@ jobs:
       - name: Run NATS/outbox integration suite
         run: tests/nats/run-integration.sh
 
+  # The operator console: typecheck, component tests and the production build.
+  # The same steps, in the same order, as the Azure gate's UserInterface stage.
   ui:
-    name: ui tests
+    name: ui typecheck, tests and build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ui
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: ui/package-lock.json
-      - run: npm ci
-        working-directory: ui
-      - run: npm test
-        working-directory: ui
+      # ci, not install: exactly the lockfile, and a failure when package.json
+      # and the lockfile disagree.
+      - run: npm ci --no-audit --no-fund
+      # Its own step even though `build` runs `tsc -b` too: a type error should
+      # be reported as a type error, not as a failed build.
+      - run: npm run typecheck
+      - run: npm run test:ci -- --outputFile.junit=reports/ui-junit.xml
+      - run: npm run build
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-test-report
+          path: ui/reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # The Python SDK suite on every Python the package claims to support
+  # (pyproject: requires-python >=3.11, classifiers 3.11-3.13). Needs no
+  # services: the client tests talk to an in-process HTTP server on 127.0.0.1.
+  sdk:
+    name: python sdk tests (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # One failing interpreter should not hide whether the others pass.
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: sdk/python/pyproject.toml
+      # The same target a developer runs, so CI cannot drift from `make test`.
+      # It builds its own venv, installs the [dev] extra and enforces the
+      # coverage floor in pyproject.toml.
+      - name: Run the SDK suite (make sdk-test)
+        run: make sdk-test SDK_PYTHON=python SDK_REPORT_DIR=reports/sdk
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f .venv-sdk/.coverage ]; then
+            cd sdk/python
+            COVERAGE_FILE=../../.venv-sdk/.coverage ../../.venv-sdk/bin/python -m coverage report --format=markdown --fail-under=0 >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-test-report-py${{ matrix.python-version }}
+          path: reports/sdk/
+          if-no-files-found: warn
+          retention-days: 14
 
   # The job this file was written for.
   #

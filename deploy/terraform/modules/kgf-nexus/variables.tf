@@ -45,6 +45,12 @@ variable "nexus_namespace" {
   default     = "default"
 }
 
+variable "nats_credentials_dir" {
+  description = "Directory written by `deploy/nats/nexus-nats-auth.sh init --tenant <nexus_namespace>` (NATS NKey identities). Empty: none, and the chart refuses to render an authenticated broker without them."
+  type        = string
+  default     = ""
+}
+
 variable "chart_values" {
   description = "Environment-specific chart values, merged over the chart defaults."
   type        = any

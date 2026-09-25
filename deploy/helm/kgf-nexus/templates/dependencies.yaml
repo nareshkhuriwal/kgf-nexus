@@ -39,9 +39,29 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: postgres
-          image: {{ .Values.postgres.image }}
-          args: ["-c", "max_connections={{ .Values.postgres.maxConnections }}", "-c", "shared_buffers={{ .Values.postgres.sharedBuffers }}"]
+          {{- $pitr := .Values.postgres.pitr }}
+          image: {{ ternary $pitr.image .Values.postgres.image $pitr.enabled }}
+          args:
+            - "-c"
+            - "max_connections={{ .Values.postgres.maxConnections }}"
+            - "-c"
+            - "shared_buffers={{ .Values.postgres.sharedBuffers }}"
+            {{- if $pitr.enabled }}
+            # Continuous archiving (docs/OPERATIONS.md §4). archive_command only
+            # returns success once the segment is IN the repository.
+            - "-c"
+            - "wal_level=replica"
+            - "-c"
+            - "archive_mode=on"
+            - "-c"
+            - "archive_command=pgbackrest --stanza={{ $pitr.stanza }} archive-push %p"
+            - "-c"
+            - "archive_timeout={{ $pitr.archiveTimeoutSeconds }}"
+            {{- end }}
           env:
+            {{- if $pitr.enabled }}
+            {{- include "nexus.pgbackrestEnv" . | nindent 12 }}
+            {{- end }}
             - { name: POSTGRES_USER, value: {{ .Values.postgres.user | quote }} }
             - { name: POSTGRES_DB, value: {{ .Values.postgres.database | quote }} }
             - name: POSTGRES_PASSWORD
@@ -65,6 +85,57 @@ spec:
             allowPrivilegeEscalation: false
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql/data }
+            {{- if $pitr.enabled }}
+            - { name: pg-socket, mountPath: /var/run/postgresql }
+            - { name: pgbackrest-spool, mountPath: /var/spool/pgbackrest }
+            {{- if $pitr.repo.s3.caSecret }}
+            - { name: pgbackrest-ca, mountPath: /etc/pgbackrest/ca, readOnly: true }
+            {{- end }}
+            {{- end }}
+        {{- if $pitr.enabled }}
+        # Base backups on a cadence, read from the repository's own state
+        # (deploy/pgbackrest/nexus-pitr-scheduler.sh). It shares the data volume
+        # (a physical backup reads the files) and the unix socket. Deliberately
+        # no readiness probe: a failing backup must page someone, not take the
+        # database out of its Service. Monitor with deploy/pitr-verify.sh:
+        #   PITR_EXEC="kubectl -n <ns> exec -i postgres-0 -c pgbackrest --" deploy/pitr-verify.sh
+        - name: pgbackrest
+          image: {{ $pitr.image }}
+          command: ["/usr/local/bin/nexus-pitr-scheduler"]
+          env:
+            {{- include "nexus.pgbackrestEnv" . | nindent 12 }}
+            - { name: PITR_FULL_INTERVAL_SECONDS, value: {{ $pitr.schedule.fullIntervalSeconds | quote }} }
+            - { name: PITR_DIFF_INTERVAL_SECONDS, value: {{ $pitr.schedule.diffIntervalSeconds | quote }} }
+            - { name: PITR_POLL_SECONDS, value: {{ $pitr.schedule.pollSeconds | quote }} }
+            # Archive-age guard (OPERATIONS §4.6): archive_timeout alone was
+            # measured not to fire for up to checkpoint_timeout after a start.
+            - { name: PITR_WAL_SWITCH_SECONDS, value: {{ $pitr.archiveTimeoutSeconds | quote }} }
+          resources: {{- toYaml $pitr.resources | nindent 12 }}
+          securityContext:
+            runAsUser: 70
+            runAsGroup: 70
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: pg-socket, mountPath: /var/run/postgresql }
+            - { name: pgbackrest-spool, mountPath: /var/spool/pgbackrest }
+            - { name: pgbackrest-state, mountPath: /var/lib/pgbackrest }
+            {{- if $pitr.repo.s3.caSecret }}
+            - { name: pgbackrest-ca, mountPath: /etc/pgbackrest/ca, readOnly: true }
+            {{- end }}
+      volumes:
+        - { name: pg-socket, emptyDir: {} }
+        # The spool holds async archive-push STATUS files, never the only copy of
+        # a WAL segment: postgres keeps a segment until archive-push confirms it.
+        - { name: pgbackrest-spool, emptyDir: {} }
+        - { name: pgbackrest-state, emptyDir: {} }
+        {{- if $pitr.repo.s3.caSecret }}
+        - name: pgbackrest-ca
+          secret: { secretName: {{ $pitr.repo.s3.caSecret }} }
+        {{- end }}
+        {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -195,9 +266,38 @@ metadata:
   labels: {{- include "nexus.labels" (list . "nats") | nindent 4 }}
 spec:
   selector: {{- include "nexus.selector" (list . "nats") | nindent 4 }}
+  # Client port only. The monitoring endpoint is unauthenticated, so it is
+  # bound to the pod's loopback and deliberately not part of any Service.
   ports:
     - { name: client, port: 4222, targetPort: client }
-    - { name: monitor, port: 8222, targetPort: monitor }
+{{- if .Values.nats.networkPolicy.enabled }}
+---
+# Defence in depth beneath the broker's own authorization: only the pods that
+# have a NATS identity may open a connection at all. Agents outside the cluster
+# reach the broker through whatever ingress an operator adds to extraFrom.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nats
+  labels: {{- include "nexus.labels" (list . "nats") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "nexus.selector" (list . "nats") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - { port: 4222, protocol: TCP }
+      from:
+        - podSelector:
+            matchLabels: {{- include "nexus.selector" (list . "event-service") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              nexus.khuriwalgroup.com/role: agent
+        {{- with .Values.nats.networkPolicy.extraFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -212,6 +312,12 @@ spec:
   template:
     metadata:
       labels: {{- include "nexus.labels" (list . "nats") | nindent 8 }}
+      {{- if not .Values.nats.configReloader.enabled }}
+      # Without the reloader sidecar a changed ConfigMap (a new tenant, a
+      # rotated key) must roll the pod to take effect.
+      annotations:
+        checksum/nats-config: {{ include (print $.Template.BasePath "/nats-config.yaml") . | sha256sum }}
+      {{- end }}
     spec:
       securityContext:
         runAsNonRoot: true
@@ -219,24 +325,74 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
         seccompProfile: { type: RuntimeDefault }
+      # The reloader signals nats-server (SIGHUP) when the config, the
+      # authorization include or the TLS files change, so adding a tenant,
+      # rotating an NKey or renewing the certificate needs no restart.
+      shareProcessNamespace: {{ .Values.nats.configReloader.enabled }}
+      automountServiceAccountToken: false
       containers:
         - name: nats
           image: {{ .Values.nats.image }}
-          args: ["-js", "-sd", "/data", "-m", "8222"]
+          args: ["-c", "/etc/nats/nats.conf"]
           ports:
             - { name: client, containerPort: 4222 }
-            - { name: monitor, containerPort: 8222 }
+          # exec, not httpGet: monitoring listens on loopback only (it has no
+          # authentication), so the kubelet cannot reach it over the pod IP.
           readinessProbe:
-            httpGet: { path: "/healthz?js-enabled-only=true", port: monitor }
+            exec: { command: ["wget", "-q", "-O-", "http://127.0.0.1:8222/healthz?js-enabled-only=true"] }
             periodSeconds: 5
           livenessProbe:
-            httpGet: { path: /healthz, port: monitor }
+            exec: { command: ["wget", "-q", "-O-", "http://127.0.0.1:8222/healthz"] }
             initialDelaySeconds: 10
             periodSeconds: 10
           resources: {{- toYaml .Values.nats.resources | nindent 12 }}
-          securityContext: {{- include "nexus.containerSecurity" . | nindent 12 }}
+          securityContext:
+            {{- include "nexus.containerSecurity" . | nindent 12 }}
+            readOnlyRootFilesystem: true
           volumeMounts:
             - { name: data, mountPath: /data }
+            - { name: config, mountPath: /etc/nats, readOnly: true }
+            - { name: pid, mountPath: /var/run/nats }
+            {{- if .Values.nats.tls.enabled }}
+            - { name: tls, mountPath: /etc/nats-tls, readOnly: true }
+            {{- end }}
+        {{- if .Values.nats.configReloader.enabled }}
+        - name: reloader
+          image: {{ .Values.nats.configReloader.image }}
+          args:
+            - -pid
+            - /var/run/nats/nats.pid
+            - -config
+            - /etc/nats/nats.conf
+            - -config
+            - /etc/nats/auth.conf
+            {{- if .Values.nats.tls.enabled }}
+            {{- range list "tls.crt" "tls.key" "ca.crt" }}
+            - -config
+            - /etc/nats-tls/{{ . }}
+            {{- end }}
+            {{- end }}
+          resources:
+            requests: { cpu: 5m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          securityContext:
+            {{- include "nexus.containerSecurity" . | nindent 12 }}
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - { name: config, mountPath: /etc/nats, readOnly: true }
+            - { name: pid, mountPath: /var/run/nats }
+            {{- if .Values.nats.tls.enabled }}
+            - { name: tls, mountPath: /etc/nats-tls, readOnly: true }
+            {{- end }}
+        {{- end }}
+      volumes:
+        - name: config
+          configMap: { name: nats-config }
+        - { name: pid, emptyDir: {} }
+        {{- if .Values.nats.tls.enabled }}
+        - name: tls
+          secret: { secretName: {{ .Values.nats.tls.secretName }}, defaultMode: 0400 }
+        {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data

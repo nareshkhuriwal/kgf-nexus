@@ -97,10 +97,9 @@ const (
 	EnvServerName = "NEXUS_TLS_SERVER_NAME"
 )
 
-// requireTLSEnvNames are the spellings that make plaintext fatal, mirroring
-// dsnRequiredEnvNames in internal/config/dsn.go -- same two-spelling rationale,
-// and deliberately the same NEXUS_ENV so that one variable arms every
-// production-only guard the platform has.
+// requireTLSEnvNames are the variables the plaintext refusal message names.
+// Only NEXUS_REQUIRE_TLS actually arms the guard; see RequireTLS for why
+// NEXUS_ENV deliberately does not.
 var requireTLSEnvNames = []string{
 	"NEXUS_REQUIRE_TLS",
 	"NEXUS_ENV",
@@ -222,7 +221,7 @@ func DialOption() (grpc.DialOption, error) {
 }
 
 // RequireTLS reports whether the deployment has demanded encrypted inter-service
-// gRPC, in the same shape as config.DSNRequired.
+// gRPC.
 //
 // NEXUS_ENV counts only when it names a production-like environment, because
 // NEXUS_ENV=dev must keep the plaintext path working -- the entire point of this
@@ -236,7 +235,8 @@ func RequireTLS() bool {
 			return true
 		}
 	}
-	// NEXUS_ENV deliberately does NOT arm this, unlike config.DSNRequired().
+	// NEXUS_ENV deliberately does NOT arm this. It used to arm the DSN guard
+	// (internal/config.DSN), which is now unconditional.
 	//
 	// The two guards look symmetrical and are not. A missing DSN is a
 	// configuration error with no working outcome -- the service cannot serve
@@ -253,9 +253,9 @@ func RequireTLS() bool {
 	return false
 }
 
-// boolEnv reads an on/off switch with the same word list DSNRequired accepts, so
+// boolEnv reads an on/off switch with the same word list RequireTLS accepts, so
 // that NEXUS_TLS_REQUIRE_CLIENT_CERT=false means what an operator who has already
-// written NEXUS_REQUIRE_DSN=false expects it to.
+// written NEXUS_REQUIRE_TLS=false expects it to.
 func boolEnv(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
 	case "", "0", "false", "no", "off":

@@ -125,6 +125,9 @@ type QuarantineDetector struct {
 	log   *slog.Logger
 	cfg   QuarantineConfig
 	now   func() time.Time
+
+	// Metrics is optional; nil records nothing.
+	Metrics *Metrics
 }
 
 // NewQuarantineDetector builds a detector.
@@ -144,7 +147,10 @@ func (d *QuarantineDetector) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
-			if _, _, err := d.PassOnce(ctx); err != nil {
+			q, rel, err := d.PassOnce(ctx)
+			d.Metrics.quarantine("quarantined", q)
+			d.Metrics.quarantine("expired", rel)
+			if err != nil {
 				d.log.Error("quarantine pass failed", "error", err)
 			}
 		}

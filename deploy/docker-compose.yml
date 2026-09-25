@@ -6,6 +6,8 @@
 #   postgres, minio, nats      → infrastructure (nats is OPTIONAL: an empty
 #                                NEXUS_NATS_URL disables the bus and the
 #                                stack runs poll-only, ADR-0003)
+#   nats-init                  → NATS NKey identities + authorization config
+#                                (generated once into volumes), then exits
 #   minio-init                 → creates the result bucket, then exits
 #   migrate                    → applies services/migrations/*.up.sql, then exits
 #   six control-plane services → ADR-0011; each waits for postgres AND migrate
@@ -26,6 +28,10 @@ x-postgres-env: &postgres-env
   # ownership. The MVP uses one superuser role because the roles and grants are
   # a migration that does not exist yet; the URL is per-service so switching to
   # distinct roles is a values change, not a topology change.
+  #
+  # Required, not a convenience: the services have no built-in DSN and exit at
+  # startup without one (internal/config.DSN). Every service that touches
+  # Postgres must merge this fragment, directly or through *service-env.
   DATABASE_URL: postgres://nexus:nexus-dev-password@postgres:5432/nexus?sslmode=disable
 
 x-service-env: &service-env
@@ -64,8 +70,19 @@ x-service-env: &service-env
 # workflow-manager write outbox rows to Postgres and never talk to NATS. Set
 # NEXUS_NATS_URL= (empty) to run without it -- nothing depends_on nats, because
 # nothing needs it to be correct.
+#
+# The broker requires authentication (docs/OPERATIONS.md §11.7): each client
+# holds ONE NKey seed, installed by `nats-init` into a volume only that client
+# mounts at /etc/nexus/nats. REQUIRE_AUTH makes a missing seed a startup error
+# rather than a silent unauthenticated connection.
 x-nats-env: &nats-env
   NEXUS_NATS_URL: ${NEXUS_NATS_URL-nats://nats:4222}
+  NEXUS_NATS_NKEY_SEED_FILE: /etc/nexus/nats/user.nk
+  NEXUS_NATS_REQUIRE_AUTH: "1"
+
+x-nats-init-wait: &nats-init-wait
+  nats-init:
+    condition: service_completed_successfully
 
 x-minio-env: &minio-env
   RESULT_STORE_ENDPOINT: http://minio:9000
@@ -159,18 +176,52 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  # One-shot: NKey identities and the broker's authorization config
+  # (deploy/nats/nexus-nats-auth.sh compose-init). Keys are generated ONCE into
+  # the nats-auth-store volume and reused on every later `up`; nothing is ever
+  # written to the source tree. Each consumer gets its own volume holding only
+  # its own seed, so the event-service cannot read an agent's key or vice versa.
+  # The monitor (SYS account) seed stays in the store; use it through this
+  # container, e.g.
+  #   docker compose -f deploy/docker-compose.yml run --rm --entrypoint nats nats-init \
+  #     --server nats://nats:4222 --nkey /store/monitor/user.nk server report jetstream
+  # DEV ONLY in the sense that the store volume holds every seed; see
+  # docs/OPERATIONS.md §11.7 for where seeds live elsewhere.
+  nats-init:
+    image: natsio/nats-box:0.18.0
+    user: "0:0"
+    entrypoint: ["sh", "/nexus/nexus-nats-auth.sh"]
+    command: ["compose-init", "--tenant", "${NEXUS_NAMESPACE:-default}"]
+    environment:
+      NEXUS_NATS_DIR: /store
+    volumes:
+      # render_compose.py inlines this script for the Portainer host, which has
+      # no source tree to bind-mount it from.
+      - ./nats/nexus-nats-auth.sh:/nexus/nexus-nats-auth.sh:ro
+      - nats-auth-store:/store
+      - nats-auth-server:/out/server
+      - nats-auth-event-service:/out/event-service
+      - nats-auth-agent:/out/agent
+    restart: "no"
+
   nats:
     # Pinned to the newest patch of the 2.14 line rather than 2.15.0, which was
     # days old when this was written; move to 2.15.x once it has a patch release.
     image: nats:2.14.7-alpine
-    # -js enables JetStream; -sd puts its store on the volume so NEXUS_RUNS
-    # survives a restart; -m exposes /healthz and /jsz for monitoring.
-    command: ["-js", "-sd", "/data", "-m", "8222"]
+    depends_on: *nats-init-wait
+    # The rendered config enables JetStream on /data (NEXUS_RUNS survives a
+    # restart), requires an NKey for every client (no anonymous user) and
+    # serves monitoring on the container's LOOPBACK only: the monitoring port
+    # has no authentication and /connz lists every client. After changing
+    # identities, re-run nats-init and `docker compose kill -s HUP nats`.
+    command: ["-c", "/etc/nats/nats.conf"]
     ports:
-      - "${NEXUS_NATS_PORT:-4222}:4222"
-      - "${NEXUS_NATS_MONITOR_PORT:-8222}:8222"
+      # Loopback: host tools and agents run on the laptop reach it; nothing
+      # else on the network does. The monitoring port is not published.
+      - "127.0.0.1:${NEXUS_NATS_PORT:-4222}:4222"
     volumes:
       - nats-data:/data
+      - nats-auth-server:/etc/nats:ro
     healthcheck:
       # js-enabled-only: healthy means JetStream is actually serving, not merely
       # that the process accepts connections.
@@ -282,9 +333,14 @@ services:
       # Links in emails point at the console, which is where the verify and
       # reset pages live -- not at this gateway.
       NEXUS_PUBLIC_URL: ${NEXUS_PUBLIC_URL:-http://localhost:3000}
+      # The operations listener: /metrics, /healthz, /readyz. NOT the REST port,
+      # which is the public ingress (docs/OPERATIONS.md, "Metrics").
+      NEXUS_METRICS_ADDR: ":8088"
     ports:
       - "${NEXUS_API_PORT:-8090}:8080"
       - "${NEXUS_GRPC_PORT:-9091}:9091"
+      # Loopback only: metrics are for an operator's local Prometheus, not the LAN.
+      - "127.0.0.1:${NEXUS_GATEWAY_METRICS_PORT:-19100}:8088"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -309,6 +365,9 @@ services:
       # A single reconciler polls timers WHERE fire_at <= now() FOR UPDATE SKIP
       # LOCKED (§3.2). Every deadline in the system is a row in that table.
       TIMER_POLL_INTERVAL_MS: "1000"
+    # /metrics on the health listener, published on LOOPBACK only (docs/OPERATIONS.md, "Metrics").
+    ports:
+      - "127.0.0.1:${NEXUS_WFM_METRICS_PORT:-19101}:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -330,6 +389,9 @@ services:
       NEXUS_GRPC_ADDR: ":9090"
       NEXUS_WFM_GRPC_ADDR: ":9090"
       RM_GRPC_ADDR: ":9090"
+    # /metrics on the health listener, published on LOOPBACK only (docs/OPERATIONS.md, "Metrics").
+    ports:
+      - "127.0.0.1:${NEXUS_DAG_METRICS_PORT:-19102}:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -364,6 +426,10 @@ services:
       # replicas can be scaled up freely: `docker compose up --scale scheduler=3`.
       SCHEDULER_POLL_INTERVAL_MS: "500"
       LEASE_TTL_MS: "30000"
+    # /metrics on the health listener, loopback only. A RANGE, because this
+    # service may be scaled (`--scale scheduler=3`) and each replica needs a port.
+    ports:
+      - "127.0.0.1:19110-19119:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -397,6 +463,9 @@ services:
       SCHEDULER_AGING_MS: "30000"
       SCHEDULER_POLL_INTERVAL_MS: "500"
       LEASE_TTL_MS: "30000"
+    # /metrics on the health listener, published on LOOPBACK only (docs/OPERATIONS.md, "Metrics").
+    ports:
+      - "127.0.0.1:${NEXUS_SCHEDULER_GPU_METRICS_PORT:-19104}:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -422,6 +491,9 @@ services:
       # running_attempt_ids is what stops the capacity ledger drifting (§3.2).
       WORKER_LIVENESS_TIMEOUT_MS: "15000"
       RECONCILE_INTERVAL_MS: "10000"
+    # /metrics on the health listener, published on LOOPBACK only (docs/OPERATIONS.md, "Metrics").
+    ports:
+      - "127.0.0.1:${NEXUS_RM_METRICS_PORT:-19105}:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -431,7 +503,10 @@ services:
       args:
         SERVICE: event-service
         SERVICE_PATH: services/event-service/cmd/event-service
-    depends_on: *depends-on-db
+    depends_on:
+      <<: [*depends-on-db, *nats-init-wait]
+    volumes:
+      - nats-auth-event-service:/etc/nexus/nats:ro
     environment:
       <<: [*service-env, *nats-env]
       HTTP_ADDR: ":8080"
@@ -448,6 +523,9 @@ services:
       NEXUS_OUTBOX_MAX_AGE: 24h
       # run_events is append-only (invariant 8); this service is its sole writer.
       EVENT_SSE_KEEPALIVE_MS: "15000"
+    # /metrics on the health listener, published on LOOPBACK only (docs/OPERATIONS.md, "Metrics").
+    ports:
+      - "127.0.0.1:${NEXUS_EVENT_METRICS_PORT:-19106}:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -463,6 +541,7 @@ services:
         SERVICE: agent
         SERVICE_PATH: agent/cmd/nexus-agent
     depends_on:
+      <<: *nats-init-wait
       api-gateway:
         condition: service_healthy
     environment:
@@ -486,13 +565,19 @@ services:
       # practice and the node could never be placed.
       NEXUS_CUSTOM_RESOURCES: "license_token=2"
       NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
+      NEXUS_METRICS_ADDR: ":8089"
       # The local write-ahead log is what lets a restarted agent know it started
       # a task but not how it ended, and report INDETERMINATE rather than
       # guessing (§6.3).
       NEXUS_WAL_DIR: /var/lib/nexus/wal
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
+    ports:
+      # /metrics (agent), loopback only.
+      - "127.0.0.1:19120:8089"
     volumes:
       - agent-cpu-wal:/var/lib/nexus/wal
+      # This tenant's agent NKey only (subscribe nexus.task.dispatch.<ns>.>).
+      - nats-auth-agent:/etc/nexus/nats:ro
       - chaos-effects:/var/lib/nexus/effects
       # The docker executor runs tasks as sibling containers. Mounting the host
       # socket is effectively root on the host — acceptable on a laptop, never
@@ -507,6 +592,7 @@ services:
         SERVICE: agent
         SERVICE_PATH: agent/cmd/nexus-agent
     depends_on:
+      <<: *nats-init-wait
       api-gateway:
         condition: service_healthy
     environment:
@@ -532,10 +618,16 @@ services:
       NEXUS_GPU_MEMORY_BYTES: "42949672960"
       NEXUS_DISK_BYTES: "53687091200"
       NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
+      NEXUS_METRICS_ADDR: ":8089"
       NEXUS_WAL_DIR: /var/lib/nexus/wal
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
+    ports:
+      # /metrics (agent), loopback only.
+      - "127.0.0.1:19121:8089"
     volumes:
       - agent-gpu-wal:/var/lib/nexus/wal
+      # This tenant's agent NKey only (subscribe nexus.task.dispatch.<ns>.>).
+      - nats-auth-agent:/etc/nexus/nats:ro
       - chaos-effects:/var/lib/nexus/effects
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
@@ -556,6 +648,7 @@ services:
         SERVICE: agent
         SERVICE_PATH: agent/cmd/nexus-agent
     depends_on:
+      <<: *nats-init-wait
       api-gateway:
         condition: service_healthy
     environment:
@@ -573,11 +666,17 @@ services:
       NEXUS_GPU_MEMORY_BYTES: "25769803776"
       NEXUS_DISK_BYTES: "53687091200"
       NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
+      NEXUS_METRICS_ADDR: ":8089"
       NEXUS_WAL_DIR: /var/lib/nexus/wal
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
       NEXUS_LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
+    ports:
+      # /metrics (agent), loopback only.
+      - "127.0.0.1:19122:8089"
     volumes:
       - agent-gpu-a10-wal:/var/lib/nexus/wal
+      # This tenant's agent NKey only (subscribe nexus.task.dispatch.<ns>.>).
+      - nats-auth-agent:/etc/nexus/nats:ro
       - chaos-effects:/var/lib/nexus/effects
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
@@ -612,6 +711,12 @@ volumes:
   postgres-data:
   minio-data:
   nats-data:
+  # NATS identities (nats-init). The store holds every seed; each other volume
+  # holds exactly what its one consumer needs.
+  nats-auth-store:
+  nats-auth-server:
+  nats-auth-event-service:
+  nats-auth-agent:
   agent-cpu-wal:
   agent-gpu-wal:
   agent-gpu-a10-wal:

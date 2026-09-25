@@ -79,9 +79,19 @@ func (s *RunServer) ResumeRun(ctx context.Context, req *nexusv1.ResumeRunRequest
 	return s.action(ctx, "resume run", func() (store.RunRow, error) { return s.runs.Resume(ctx, req.GetRunId()) })
 }
 
-// RetryRun restarts a failed run from its failed nodes.
+// RetryRun restarts a failed run: from the named nodes when node_ids is set,
+// otherwise from every node that did not succeed.
+//
+// only_failed is not consulted. Retry never re-runs succeeded work in either
+// form, so the flag has no second meaning to select; it stays in the message
+// only because removing a field is not an additive change.
 func (s *RunServer) RetryRun(ctx context.Context, req *nexusv1.RetryRunRequest) (*nexusv1.RunActionResponse, error) {
-	return s.action(ctx, "retry run", func() (store.RunRow, error) { return s.runs.RetryFromFailed(ctx, req.GetRunId()) })
+	return s.action(ctx, "retry run", func() (store.RunRow, error) {
+		res, err := s.runs.Retry(ctx, runs.RetryRequest{
+			RunID: req.GetRunId(), NodeIDs: req.GetNodeIds(), Actor: req.GetActor(),
+		})
+		return res.Run, err
+	})
 }
 
 // action is the common shape of the four lifecycle RPCs.
@@ -116,10 +126,25 @@ func runError(op string, err error) error {
 		return status.Errorf(codes.NotFound, "%s: %v", op, err)
 	case errors.Is(err, store.ErrMaxActiveRuns):
 		return status.Errorf(codes.ResourceExhausted, "%s: %v", op, err)
-	case errors.Is(err, runs.ErrMissingParams):
+	case errors.Is(err, runs.ErrMissingParams), errors.Is(err, runs.ErrRetryInvalidNodes):
 		// InvalidArgument, not Internal: the caller's document is wrong, and no
 		// retry of the same request will ever succeed.
 		return status.Errorf(codes.InvalidArgument, "%s: %v", op, err)
+	case errors.Is(err, store.ErrRunStateConflict), errors.Is(err, runs.ErrRetryRefused):
+		// The state machine (or the retry planner) refusing a transition that is
+		// illegal for the run as it is now. FailedPrecondition so the gateway can
+		// answer 409 with the reason; as Internal it arrived as a 500 that told
+		// an operator the platform had broken when it had said "no".
+		return status.Errorf(codes.FailedPrecondition, "%s: %v", op, err)
+	case errors.Is(err, runs.ErrRetryConflict):
+		// A concurrent writer won; asking again after re-reading may succeed.
+		return status.Errorf(codes.Aborted, "%s: %v", op, err)
+	case errors.Is(err, runs.ErrRetryUnavailable):
+		return status.Errorf(codes.Unimplemented, "%s: %v", op, err)
+	case errors.Is(err, runs.ErrRetryIndeterminate):
+		// The run is committed RUNNING and converging; the caller should re-read
+		// it rather than assume either outcome.
+		return status.Errorf(codes.Unavailable, "%s: %v", op, err)
 	default:
 		return status.Errorf(codes.Internal, "%s: %v", op, err)
 	}

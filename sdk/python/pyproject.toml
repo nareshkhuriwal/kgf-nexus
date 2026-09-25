@@ -26,7 +26,10 @@ dependencies = []
 [project.optional-dependencies]
 # YAML is needed only to RENDER a compiled spec, never to compile one.
 yaml = ["PyYAML>=6.0"]
-dev = ["pytest>=8.0", "PyYAML>=6.0"]
+# Test tooling. Lower bounds, not pins: the SDK is a library, and CI runs the
+# suite across 3.11-3.13, so the floor is what is promised to work. pytest-cov
+# produces the Cobertura XML both CI systems publish.
+dev = ["pytest>=8.3", "pytest-cov>=6.0", "PyYAML>=6.0"]
 
 [project.urls]
 Homepage = "https://github.com/khuriwalgroup/kgf-nexus"
@@ -37,6 +40,12 @@ include = ["nexus*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+# A floor, not a target: the suite measured 91% line coverage when CI started
+# running it, so a drop below 85% is a regression worth failing on. Applies only
+# when pytest runs with --cov (make sdk-test and both CI systems do).
+[tool.coverage.report]
+fail_under = 85
 
 [tool.mypy]
 python_version = "3.11"

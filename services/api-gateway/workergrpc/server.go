@@ -62,8 +62,11 @@ type Scheduler interface {
 	ClaimForWorker(ctx context.Context, workerID string, free *nexusv1.ResourceVector, queues []string, maxTasks int32) ([]*nexusv1.TaskAssignment, error)
 	// MarkStarted transitions DISPATCHED -> RUNNING.
 	MarkStarted(ctx context.Context, attemptID string, startedAt time.Time) error
-	// RecordProgress resets the task heartbeat deadline.
-	RecordProgress(ctx context.Context, attemptID, message string, fraction float64) error
+	// RecordProgress stores the worker's latest status line and fraction on the
+	// attempt and resets the task heartbeat deadline. The lease token is
+	// forwarded so the scheduler can fence again inside its write; stale is true
+	// when that second fence rejected the report.
+	RecordProgress(ctx context.Context, attemptID, leaseToken, message string, fraction float64) (stale bool, err error)
 	// ApplyResult applies a terminal outcome.
 	ApplyResult(ctx context.Context, req *nexusv1.ReportResultRequest) error
 	// PendingCancellations lists attempts this worker must stop, delivered as
@@ -92,6 +95,10 @@ type Config struct {
 	// ResultStore is handed to workers at registration so they read and write
 	// MinIO directly; task payloads never transit the control plane (invariant 6).
 	ResultStore *nexusv1.ResultStoreConfig
+	// LogShipping is advertised to workers at registration (ADR-0020). Nil or
+	// disabled means agents ship no logs -- the right answer for a gateway that
+	// cannot READ them back, since objects nobody can serve are pure cost.
+	LogShipping *nexusv1.LogShippingConfig
 }
 
 // DefaultConfig is the tuning from ADR-0010 and §5.5.
@@ -181,6 +188,7 @@ func (s *Server) Register(ctx context.Context, req *nexusv1.RegisterRequest) (*n
 		HeartbeatIntervalMs: int32(s.cfg.HeartbeatInterval.Milliseconds()),
 		LeaseTtlMs:          int32(s.cfg.LeaseTTL.Milliseconds()),
 		ResultStore:         s.cfg.ResultStore,
+		LogShipping:         s.cfg.LogShipping,
 	}, nil
 }
 
@@ -492,6 +500,14 @@ func (s *Server) ExtendLease(ctx context.Context, req *nexusv1.ExtendLeaseReques
 // The distinction matters operationally: a worker can be perfectly alive while one
 // task is wedged. Keeping the signals separate lets us time out the TASK rather
 // than declaring the worker dead and losing every other task it is running.
+//
+// It also carries the executor's status line (F96): the Kubernetes executor
+// sends pod phase changes such as "pod Pending: Unschedulable: insufficient
+// cpu", and the scheduler stores the latest one on the attempt so the console
+// can show why a RUNNING attempt is not making progress. The message is
+// forwarded untouched; the scheduler, which stores it, is where it is
+// sanitized, so there is exactly one place that decides what a stored message
+// may contain.
 func (s *Server) ReportProgress(ctx context.Context, req *nexusv1.ReportProgressRequest) (*nexusv1.Ack, error) {
 	if _, err := s.requirePrincipal(ctx, ""); err != nil {
 		return nil, err
@@ -499,8 +515,16 @@ func (s *Server) ReportProgress(ctx context.Context, req *nexusv1.ReportProgress
 	if ack := s.fence(ctx, req.GetAttemptId(), req.GetLeaseToken(), "ReportProgress"); ack != nil {
 		return ack, nil
 	}
-	if err := s.sch.RecordProgress(ctx, req.GetAttemptId(), req.GetMessage(), req.GetFractionComplete()); err != nil {
+	stale, err := s.sch.RecordProgress(ctx, req.GetAttemptId(), req.GetLeaseToken(), req.GetMessage(), req.GetFractionComplete())
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "record progress: %v", err)
+	}
+	if stale {
+		// The lease ended between the fence above and the scheduler's write.
+		// Same answer as the fence would now give, for the same reason.
+		s.log.WarnContext(ctx, "rejected attempt RPC on stale lease token",
+			"rpc", "ReportProgress", "attempt_id", req.GetAttemptId())
+		return &nexusv1.Ack{Accepted: false, Reason: store.ReasonStaleLeaseToken}, nil
 	}
 	return &nexusv1.Ack{Accepted: true}, nil
 }
@@ -525,6 +549,85 @@ func (s *Server) ReportResult(ctx context.Context, req *nexusv1.ReportResultRequ
 	s.log.InfoContext(ctx, "attempt result applied",
 		"attempt_id", req.GetAttemptId(), "outcome", req.GetOutcome().String())
 	return &nexusv1.Ack{Accepted: true}, nil
+}
+
+// ReportLogs indexes log chunks the agent has already written to the result
+// store (ADR-0020).
+//
+// Fenced first, like every attempt RPC: a stale attempt -- one whose lease was
+// reclaimed and whose replacement may already be running -- cannot add a line
+// to what the API serves as this attempt's log. Its uploaded objects stay
+// unreferenced and artifact-gc collects them.
+//
+// Idempotent by (attempt_id, seq): the agent retries a report whose ack it did
+// not see, and the retry is a no-op. Validation failures are protocol outcomes
+// (Ack{accepted:false}) rather than transport errors, so the agent stops
+// shipping instead of retrying a report that can never be accepted.
+func (s *Server) ReportLogs(ctx context.Context, req *nexusv1.ReportLogsRequest) (*nexusv1.Ack, error) {
+	if _, err := s.requirePrincipal(ctx, ""); err != nil {
+		return nil, err
+	}
+	if s.cfg.LogShipping == nil || !s.cfg.LogShipping.GetEnabled() {
+		// Only an agent that ignored RegisterResponse gets here. Refusing keeps
+		// the index from filling on a gateway that cannot serve it.
+		return &nexusv1.Ack{Accepted: false, Reason: "log_shipping_disabled"}, nil
+	}
+	if ack := s.fence(ctx, req.GetAttemptId(), req.GetLeaseToken(), "ReportLogs"); ack != nil {
+		return ack, nil
+	}
+	chunks := make([]store.LogChunkRow, 0, len(req.GetChunks()))
+	for _, c := range req.GetChunks() {
+		chunks = append(chunks, store.LogChunkRow{
+			Seq:        c.GetSeq(),
+			ObjectKey:  c.GetKey(),
+			FirstLine:  c.GetFirstLine(),
+			LineCount:  c.GetLineCount(),
+			ByteOffset: c.GetByteOffset(),
+			SizeBytes:  c.GetSizeBytes(),
+			SHA256:     c.GetSha256(),
+			FirstTS:    unixMsPtr(c.GetFirstTsUnixMs()),
+			LastTS:     unixMsPtr(c.GetLastTsUnixMs()),
+		})
+	}
+	var final *store.LogFinalRow
+	if f := req.GetFinal(); f != nil {
+		final = &store.LogFinalRow{
+			CompactedKey:    f.GetCompactedKey(),
+			CompactedSHA256: f.GetCompactedSha256(),
+			TotalLines:      f.GetTotalLines(),
+			TotalBytes:      f.GetTotalBytes(),
+			TruncatedLines:  f.GetTruncatedLines(),
+			TruncatedBytes:  f.GetTruncatedBytes(),
+			DroppedLines:    f.GetDroppedLines(),
+			ChunkCount:      f.GetChunkCount(),
+		}
+	}
+	res, err := store.GatewayAppendLogChunks(ctx, s.db, req.GetAttemptId(), chunks, final)
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrLogFinalized):
+		return &nexusv1.Ack{Accepted: false, Reason: store.ErrLogFinalized.Error()}, nil
+	case errors.Is(err, store.ErrInvalidLogChunk):
+		s.log.WarnContext(ctx, "rejected an invalid log report", "attempt_id", req.GetAttemptId(), "error", err)
+		return &nexusv1.Ack{Accepted: false, Reason: store.ErrInvalidLogChunk.Error()}, nil
+	case errors.Is(err, store.ErrNotFound):
+		return &nexusv1.Ack{Accepted: false, Reason: store.ReasonStaleLeaseToken}, nil
+	default:
+		return nil, status.Errorf(codes.Internal, "index log chunks: %v", err)
+	}
+	if res.Finalized {
+		s.log.DebugContext(ctx, "attempt log finalized", "attempt_id", req.GetAttemptId(),
+			"inserted", res.Inserted, "duplicates", res.Duplicates)
+	}
+	return &nexusv1.Ack{Accepted: true}, nil
+}
+
+func unixMsPtr(ms int64) *time.Time {
+	if ms <= 0 {
+		return nil
+	}
+	t := time.UnixMilli(ms).UTC()
+	return &t
 }
 
 // fence is THE gate in front of every attempt RPC (invariant 3).

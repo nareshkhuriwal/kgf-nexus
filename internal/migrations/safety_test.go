@@ -6,7 +6,9 @@ package migrations
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -303,4 +305,107 @@ func TestVersionNumbersAreUnique(t *testing.T) {
 				version, len(files), files)
 		}
 	}
+}
+
+// migrationName is the only filename shape the appliers and these checks agree
+// on: a four-digit version, an underscore, a lower-case description.
+var migrationName = regexp.MustCompile(`^([0-9]{4})_[a-z0-9_]+\.(up|down)\.sql$`)
+
+// knownVersionGaps are version numbers below the current highest that no
+// migration uses, and never will.
+//
+// 0019 was skipped: no file with that number has existed on any branch of the
+// repository (services/migrations/README.md). It must stay empty. The appliers
+// run every file whose basename is not in the ledger, in lexical order, so a
+// 0019 added now would run AFTER 0020 and every later migration on every
+// existing database and BEFORE them on a fresh one, and the two would not be
+// guaranteed to agree.
+var knownVersionGaps = map[int]bool{19: true}
+
+// TestVersionGapsAreOnlyTheKnownOnes pins the version sequence.
+//
+// Two mistakes look alike to migrate.sh and this catches both. Filling a known
+// gap back-dates a migration, as described on knownVersionGaps. Opening a new
+// gap usually means a migration is missing from a merge: a branch numbered its
+// file 0025 while the 0024 it depended on stayed on another branch.
+func TestVersionGapsAreOnlyTheKnownOnes(t *testing.T) {
+	versions := migrationVersions(t)
+	highest := 0
+	for v := range versions {
+		highest = max(highest, v)
+	}
+	for v := 1; v <= highest; v++ {
+		switch {
+		case versions[v] && knownVersionGaps[v]:
+			t.Errorf("migration version %04d is a recorded gap and must stay unused: "+
+				"a file there runs after every later migration on existing databases "+
+				"but before them on fresh ones. Renumber it to %04d", v, highest+1)
+		case !versions[v] && !knownVersionGaps[v]:
+			t.Errorf("migration version %04d is missing below the highest (%04d). "+
+				"If a merge dropped it, restore it; if the number was deliberately "+
+				"skipped, record it in knownVersionGaps and services/migrations/README.md",
+				v, highest)
+		}
+	}
+	for v := range knownVersionGaps {
+		if v > highest {
+			t.Errorf("knownVersionGaps lists %04d, above the highest migration %04d; remove it", v, highest)
+		}
+	}
+}
+
+// TestMigrationFilenamesAreWellFormed keeps the version extractable. The
+// uniqueness and gap checks read the version from the name, so a file named
+// 19_x.up.sql or 0024-x.up.sql would slip past both while still being applied by
+// migrate.sh's *.up.sql glob. It also requires an .up.sql for every .down.sql,
+// the direction TestEveryUpHasADown does not cover: `make migrate-down` would
+// otherwise run a stray down against a schema nothing created.
+func TestMigrationFilenamesAreWellFormed(t *testing.T) {
+	entries, err := os.ReadDir(migrationsDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", migrationsDir, err)
+	}
+	checked := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".sql") {
+			continue // README.md is documentation, not a migration
+		}
+		checked++
+		if !migrationName.MatchString(name) {
+			t.Errorf("%s does not match NNNN_description.{up,down}.sql", name)
+			continue
+		}
+		if strings.HasSuffix(name, ".down.sql") {
+			up := strings.TrimSuffix(name, ".down.sql") + ".up.sql"
+			if _, serr := os.Stat(filepath.Join(migrationsDir, up)); serr != nil {
+				t.Errorf("%s has no matching %s", name, up)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no migrations found; the check would pass vacuously")
+	}
+}
+
+// migrationVersions returns the set of versions used by *.up.sql files.
+func migrationVersions(t *testing.T) map[int]bool {
+	t.Helper()
+	ups, err := filepath.Glob(filepath.Join(migrationsDir, "*.up.sql"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(ups) == 0 {
+		t.Fatal("no migrations found; the check would pass vacuously")
+	}
+	out := map[int]bool{}
+	for _, up := range ups {
+		m := migrationName.FindStringSubmatch(filepath.Base(up))
+		if m == nil {
+			continue // reported by TestMigrationFilenamesAreWellFormed
+		}
+		v, _ := strconv.Atoi(m[1])
+		out[v] = true
+	}
+	return out
 }

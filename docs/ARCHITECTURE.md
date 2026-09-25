@@ -1,7 +1,7 @@
 # Nexus — Distributed Workflow Orchestration Platform
 
-**Status:** Design proposal (Phase 0). No implementation code yet.
-**Audience:** platform engineers, reviewers of this proposal.
+**Status:** Implemented and under active development. This began as the Phase 0 design proposal; the control-plane services, worker agent, CLI, Python SDK, UI and schema migrations now exist in this repository. Where this document describes something not yet built, it says so. Where it disagrees with the code, the code and [CONTRACT-FINDINGS.md](../CONTRACT-FINDINGS.md) are authoritative and this document is the bug. It is **not** a claim of production readiness (see [README.md](README.md#current-state)).
+**Audience:** platform engineers, operators, and reviewers.
 **Scope of this document:** system architecture, component boundaries, data model, state machines, execution semantics, and a phased delivery plan.
 
 ---
@@ -100,7 +100,7 @@ The central structural decision is that the system is split into two planes with
 │                             CLIENTS                                           │
 │   CLI (nexusctl)      SDK (python)      React UI      external HTTP callers   │
 └───────────────────────────────┬───────────────────────────────────────────────┘
-                                │  HTTPS / gRPC  (authn: OIDC or API key)
+                                │  HTTPS / gRPC  (authn: session, API key, scoped token)
                                 ▼
 ╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                            CONTROL PLANE                                      ║
@@ -181,7 +181,12 @@ The central structural decision is that the system is split into two planes with
 
 #### API Gateway
 The only ingress. Responsibilities:
-- **Authentication:** OIDC bearer tokens for humans, API keys (hashed at rest) for workers and machines.
+- **Authentication:** three credential kinds, all presented as `Authorization: Bearer` and resolved in `services/api-gateway/authn`:
+  - **Human sessions.** Email + password login (argon2id verifier in `users.password_hash`) issues a short-lived, revocable session token (`sessions`, migration 0007; email verification and reset, 0017). Sessions are refused on the worker protocol.
+  - **API keys** (sha256-hashed at rest, `api_keys`) for workers, the CLI and other machines.
+  - **Scoped tokens** (`scoped_tokens`): an API-key-shaped credential with an expiry and an explicit action list that *intersects* the role's grants and never extends them.
+
+  **OIDC and SAML single sign-on are not implemented; they are planned.** Migration 0007 records this as a deliberate decision (it needs an identity provider no deployment has yet) and leaves `users.password_hash` nullable so an OIDC-backed user can later be added as a new auth kind rather than a redesign. No identity-provider integration, group mapping or SCIM exists today ([RBAC-IMPLEMENTATION.md](RBAC-IMPLEMENTATION.md)).
 - **Authorization:** RBAC over `(principal, namespace, action)`. Namespaces are the tenancy and quota boundary.
 - **Validation and compilation:** accepts a `WorkflowSpec` in JSON or YAML, validates it structurally (schema), semantically (acyclicity, type compatibility across edges, resource requests within namespace quota), then content-addresses it. Submitting a byte-identical spec is a no-op returning the existing version.
 - **Two API surfaces:** a REST/JSON API for humans, CLI, and UI; a gRPC API for the high-frequency worker RPCs (`Register`, `Heartbeat`, `PollTask`, `ReportTaskResult`, `ExtendLease`). Splitting these matters: worker traffic is chatty and latency-sensitive, and it must not contend with UI queries.
@@ -192,7 +197,7 @@ Stateless. Scales horizontally behind any L7 load balancer.
 Owns the lifecycle of a `WorkflowRun`. Responsibilities:
 - Creating runs from a trigger (manual, schedule, event, or API call) with idempotency-key deduplication.
 - Enforcing run-level policies: overall run timeout, concurrency limits (`max_active_runs` per workflow), failure policy (`fail_fast` vs. `continue_on_failure`).
-- Handling operator interventions: `cancel`, `pause`, `resume`, `retry_from_failed`, `rerun_task`.
+- Handling operator interventions: `cancel`, `pause`, `resume`, and `retry` — of the whole run or of selected nodes and their dependents (§5.2, Operator retry).
 - **Timer management.** A durable timer table drives all deadline-based work: schedule-to-start expiry, start-to-close expiry, heartbeat expiry, retry backoff. A single reconciler polls `timers WHERE fire_at <= now()` with `FOR UPDATE SKIP LOCKED`. Using the database as the timer store rather than in-memory timers means a control-plane restart loses nothing.
 - Backfill: generating a bounded set of runs over a historical interval with its own concurrency cap, so a backfill cannot starve live traffic.
 
@@ -303,6 +308,18 @@ Design choices worth calling out:
 **Two levels of heartbeat.** Worker-level liveness (agent is alive) and optional task-level progress (this specific long-running task is making progress, reported by the SDK via `context.heartbeat()`). A worker can be alive while one task is wedged; distinguishing these lets us time out the task without killing the worker.
 
 **Local write-ahead log.** Before a worker starts a task it records the intent locally; after the task finishes it records the outcome locally *before* reporting. If the agent crashes between task completion and successful report, it replays the outcome on restart instead of silently losing a completed result. This converts an expensive re-execution into a cheap re-report. §6.3.
+
+**Durable task logs.** The executor's stdout and stderr are tagged, numbered and
+sealed into NDJSON chunks that the agent writes directly to the result store
+under `<namespace>/logs/<attempt_id>/`; only chunk *metadata* crosses to the
+control plane, through the lease-fenced `ReportLogs` RPC, into a gateway-owned
+index (`attempt_logs`, `attempt_log_chunks`). Writes into the shipper never
+block the workload; a per-attempt cap keeps the head and the tail and records
+what it omitted; the log is finalized and compacted before the result is
+reported, while the lease is still valid. The gateway serves tail, pages,
+bounded search and a live follow from index plus range reads, and artifact-gc
+treats the index as a reference source. [ADR-0020](adr/0020-durable-task-logs.md),
+OPERATIONS §19.
 
 ### 3.4 Monorepo layout
 
@@ -825,7 +842,18 @@ PAUSING:   no NEW attempts dispatched; in-flight ones run to completion.
            Pausing does not kill work — that is cancel. Conflating them
            makes pause useless for its main job (holding a pipeline while
            you investigate without losing hours of compute).
+RETRY:     FAILED | TIMED_OUT ──operator retry──► RUNNING (see below)
 ```
+
+#### Operator retry
+
+`POST /v1/namespaces/{ns}/runs/{id}/retry` with `{"nodes": [...]}` (`nexusctl run retry <id> --node X`, SDK `retry_run(id, nodes=[...])`, the console's "Retry this task") retries a `FAILED` or `TIMED_OUT` run in place. An empty body retries the whole run. As implemented (CONTRACT-FINDINGS F100; `internal/dag/retry.go` is the specification in code):
+
+- **What is reset.** Each named node must be `FAILED`, `UPSTREAM_FAILED` or `CANCELLED`. It and every downstream node that did not succeed (`FAILED`, `UPSTREAM_FAILED`, `CANCELLED`, `SKIPPED`) return to `PENDING`; the ordinary reconcile then decides what runs, so a retried graph is evaluated by the same trigger rules as the first time. `SUCCEEDED` nodes are never reset, upstream or downstream; upstream work is never touched. A whole-run retry selects every node that did not succeed, `SKIPPED` included (fail_fast skips independent branches). An expanded map template goes back to `RUNNING`, not `PENDING` — its expansion record exists and must not be re-expanded — and a selected child resets its template but not its siblings. A template whose expansion was refused is not retryable: the same upstream output would be refused again.
+- **All or nothing.** The request is refused, and nothing is reset, if any named node is unknown (422), is in another state (409), would fail again at once because a failed or cancelled upstream is not also named (409, naming the node to add), or cannot run because the workflow is `fail_fast` and another failure is left standing (409). The gateway checks the selection first so the operator gets a precise answer; the dag-engine re-checks it in its own transaction, and applies the resets as compare-and-sets that roll back together if any node moved in between.
+- **Attempts.** History is immutable (invariant 9): earlier attempts are not touched and stay in the run view. `task_nodes.retry_floor` (migration 0026) records the highest attempt number the retry superseded; the engine derives node state only from attempts above it. The next attempt is `attempt_number = MAX + 1` with the **same** idempotency key as every earlier try (invariant 1, ADR-0006), and the node's retry budget (`max_attempts`, backoff) starts afresh from the floor.
+- **Concurrency.** The workflow-manager holds the run row (`FOR NO KEY UPDATE`) across the engine's reset, renews the run deadline, moves the run to `RUNNING` and commits, then reconciles. A second retry waits and is refused (the run is no longer failed); a cancel waits and then cancels the retried run; a stale terminal report — a reconcile that concluded `FAILED` just before the reset — waits and is then refused, because `OnNodesTerminal` counts the nodes under the same lock and finds them no longer terminal. If the engine call fails without saying whether it committed, the run is committed `RUNNING` and reconciled anyway: either the reset happened and the retry proceeds, or every node is still terminal and the reconcile restores the run's outcome. The API answers 503 in that case, meaning "re-read the run", not "it failed".
+- **Audit.** The gateway writes a `run.retry` audit record (success or failure, with the nodes); the run's history gets `RunStateChanged`, a `RunRetriedFromFailed` event (`mode`, `requested_nodes`, `selected`, `reset_nodes`, actor) and one `NodeStateChanged` (`reason: operator_retry`) per reset node.
 
 ### 5.3 Dispatch: the atomic claim
 
@@ -947,7 +975,7 @@ Rules that keep this from becoming a footgun:
 - **Fan-in.** Downstream nodes depend on the template, never on children, so a 10,000-item fan-in has one predecessor. The template's state is the aggregate of its children (any failed → `FAILED`; else any cancelled → `CANCELLED`; else any skipped → `SKIPPED`; else `SUCCEEDED`), folded in the same reconcile pass in which the last child settles. A downstream input bound to a template output receives an inline JSON array, one element per child in `map_index` order: the child's inline JSON value, `{"inline_base64": …}` for non-JSON inline bytes, `{"result_ref": …}` for a blob, `null` for a child that did not succeed.
 - **The fan-in is bounded.** The array is assembled in the control plane, so it is capped at `NEXUS_DAG_MAX_FANIN_BYTES` (default 16 MiB, allowed 64 KiB–256 MiB; the JSON payload before base64). Children's outputs are never loaded with the rest of the run; they are streamed from Postgres in `map_index` order and the size is checked **before each element is appended**, so an over-limit fan-in stops reading at the element that would cross the limit and never holds more than the limit. The consuming node is then `FAILED` without an attempt, in one transaction with a `fan_in_refusals` row (`reason = fan_in_too_large`, the limit, how many children fit, how to raise it or restructure) and a `FanInRejected` event; the run view shows it as "fan-in too large". Not retried: the same children produce the same array. At submit time, a template output declaring `max_bytes` is rejected (`map_fan_in_too_large`) when `max_fanout × max_bytes` could exceed the limit (the gateway checks against the default; the engine re-checks against its configured limit at materialize).
 - **Pause / cancel / fail_fast** withhold expansion exactly as they withhold the frontier. Cancel settles unexpanded templates and pending children `CANCELLED`; pause leaves them `PENDING` to be dispatched on resume (an expanded template does not count as in flight).
-- **Not implemented:** `min_success_ratio` (use `all_done` / `none_failed` on the fan-in); nested maps inside one template; expanding over a blob collection; single-flight between a retry-from-failed and an expansion (retry-from-failed is itself unwired, `ResetFailedNodes`).
+- **Not implemented:** `min_success_ratio` (use `all_done` / `none_failed` on the fan-in); nested maps inside one template; expanding over a blob collection; re-expanding a template on retry (an expanded template is retried through its children; a refused expansion is not retryable — §5.2, Operator retry).
 
 ### 5.5 Worker lifecycle
 
@@ -1233,7 +1261,8 @@ service WorkerService {
   rpc ReportStarted  (ReportStartedRequest)returns (Ack);
   rpc ExtendLease    (ExtendLeaseRequest)  returns (ExtendLeaseResponse);
   rpc ReportResult   (ReportResultRequest) returns (Ack);
-  rpc ReportProgress (ProgressRequest)     returns (Ack);   // task heartbeat
+  rpc ReportProgress (ProgressRequest)     returns (Ack);   // task heartbeat + executor status (F96)
+  rpc ReportLogs     (ReportLogsRequest)   returns (Ack);   // log chunk index (ADR-0020)
 }
 
 message HeartbeatRequest {
@@ -1261,8 +1290,8 @@ GET    /v1/namespaces/{ns}/runs/{id}             detail + node states
 GET    /v1/namespaces/{ns}/runs/{id}/events      history (SSE for live tail)
 POST   /v1/namespaces/{ns}/runs/{id}/cancel
 POST   /v1/namespaces/{ns}/runs/{id}/pause | /resume
-POST   /v1/namespaces/{ns}/runs/{id}/retry       retry from failed nodes
-GET    /v1/namespaces/{ns}/attempts/{id}/logs    stream
+POST   /v1/namespaces/{ns}/runs/{id}/retry       retry; body {"nodes":[...]} selects nodes
+GET    /v1/namespaces/{ns}/attempts/{id}/logs    tail | page | search (?q=) | SSE follow | text (ADR-0020)
 GET    /v1/namespaces/{ns}/workers               fleet view
 GET    /v1/namespaces/{ns}/workers/{id}          detail + the tasks running on it
 POST   /v1/namespaces/{ns}/workers/{id}/drain

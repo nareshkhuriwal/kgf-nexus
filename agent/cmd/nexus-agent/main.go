@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -24,10 +25,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/worker"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
+	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 )
 
 // version is stamped at build time (-ldflags "-X main.version=..."). It is
@@ -80,6 +83,11 @@ func main() {
 		allowUnenforceable = flag.Bool("allow-unenforceable-limits",
 			os.Getenv("NEXUS_ALLOW_UNENFORCEABLE_LIMITS") == "true",
 			"DEVELOPMENT ONLY: run tasks whose resource limits the subprocess executor cannot enforce")
+		// Loopback by default: an agent on a laptop or a shared host should not
+		// publish its metrics to the LAN unasked. Deployments that scrape it set
+		// NEXUS_METRICS_ADDR=:8089 (compose, Helm). "off" disables it.
+		metricsAddr = flag.String("metrics-addr", envOr("NEXUS_METRICS_ADDR", "127.0.0.1:8089"),
+			"address for /metrics and /healthz; \"off\" disables")
 		logLevel  = flag.String("log-level", envOr("NEXUS_LOG_LEVEL", "info"), "debug|info|warn|error")
 		showVer   = flag.Bool("version", false, "print the agent version and exit")
 		logFormat = flag.String("log-format", envOr("NEXUS_LOG_FORMAT", "json"), "json|text")
@@ -99,6 +107,20 @@ func main() {
 	// into a burst of LOST attempts and duplicated work.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// NEXUS_NATS_*: empty URL means poll-only, which is a complete, correct
+	// configuration (ADR-0003). A configuration the bus REJECTS -- credentials
+	// set but unreadable, none where NEXUS_NATS_REQUIRE_AUTH or NEXUS_ENV=
+	// production demands them -- is fatal, like a malformed NEXUS_K8S_*: an
+	// agent quietly running without hints would hide the deployment bug.
+	busCfg, err := bus.ConfigFromEnv("nexus-agent")
+	if err != nil {
+		log.Error("invalid NATS configuration", "error", err)
+		os.Exit(1)
+	}
+	if bus.RequireAuthOverridden() {
+		log.Warn("NEXUS_NATS_REQUIRE_AUTH=false overrides NEXUS_ENV: dispatch hints may be received without credentials")
+	}
 
 	cfg := worker.Config{
 		Namespace: *namespace,
@@ -125,10 +147,8 @@ func main() {
 			UseTLS:          os.Getenv("NEXUS_S3_USE_TLS") == "true",
 		},
 		AllowUnenforceableLimits: *allowUnenforceable,
-		// NEXUS_NATS_URL / NEXUS_NATS_CREDS. Empty means poll-only, which is a
-		// complete, correct configuration (ADR-0003).
-		Bus:                bus.ConfigFromEnv("nexus-agent"),
-		MaxUninterruptible: *maxUninterruptible,
+		Bus:                      busCfg,
+		MaxUninterruptible:       *maxUninterruptible,
 	}
 
 	// The kubernetes executor is opt-in: it exists only when NEXUS_K8S_NAMESPACE
@@ -163,6 +183,13 @@ func main() {
 			"uninterruptible task before its declared bound (ADR-0015)",
 			"drain_grace", *drainGrace, "max_uninterruptible", *maxUninterruptible)
 	}
+
+	// Process-wide metrics: built once, outside the session loop, so counters
+	// survive a REREGISTER (see agentmetrics).
+	reg := metrics.NewServiceRegistry("agent", version)
+	cfg.Metrics = agentmetrics.New(reg)
+	stopMetrics := serveMetrics(*metricsAddr, reg, log)
+	defer stopMetrics()
 
 	if err := run(ctx, cfg, *controlPlane, log); err != nil {
 		log.Error("agent exiting with an error", "error", err)
@@ -211,6 +238,33 @@ func run(ctx context.Context, cfg worker.Config, target string, log *slog.Logger
 			continue
 		}
 		return err
+	}
+}
+
+// serveMetrics starts the agent's metrics listener. A failure to bind is a
+// WARNING, not fatal: refusing to run work because the metrics port is taken
+// would shrink the fleet over an observability problem.
+func serveMetrics(addr string, reg *metrics.Registry, log *slog.Logger) func() {
+	ops, err := metrics.ListenOps(addr, metrics.OpsMux(reg, func(mux *http.ServeMux) {
+		// Liveness only: the agent has no dependency whose loss should restart
+		// it (a control-plane outage is waited out, never restarted through).
+		mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("ok"))
+		})
+	}), log)
+	if err != nil {
+		log.Warn("metrics listener disabled: could not bind", "addr", addr, "error", err)
+		return func() {}
+	}
+	go func() {
+		if err := ops.Serve(); err != nil {
+			log.Warn("metrics listener stopped", "error", err)
+		}
+	}()
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = ops.Shutdown(ctx)
 	}
 }
 

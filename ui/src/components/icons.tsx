@@ -412,3 +412,13 @@ export function IconCluster(props: IconProps) {
 export function IconShield(props: IconProps) {
   return <Icon {...props}><path d="M12 2.5 20 6v5.5c0 5-3.7 8-8 10-4.3-2-8-5-8-10V6z"/><path d="m8.5 11.8 2.3 2.4 4.7-4.8"/></Icon>;
 }
+
+/** Chevron down, for a disclosure trigger. Rotated by CSS when open. */
+export function IconChevronDown(props: IconProps) {
+  return <Icon {...props}><path d="m6.5 9.5 5.5 5.5 5.5-5.5" /></Icon>;
+}
+
+/** Sign out: a door frame with an arrow leaving it. */
+export function IconSignOut(props: IconProps) {
+  return <Icon {...props}><path d="M14 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2H14" /><path d="M10.5 12H20" /><path d="m16.5 8.5 3.5 3.5-3.5 3.5" /></Icon>;
+}

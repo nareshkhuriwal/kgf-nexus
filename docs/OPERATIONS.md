@@ -4,8 +4,9 @@
 **Audience:** whoever is on call.
 **Scope:** Postgres backup and restore, the artifact (MinIO result store) backup
 and restore and the ordering between the two stores, the restore drills and their
-measured results, what these procedures do *not* cover, the RPO/RTO the approach
-actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), and the windowed pull claim at large backlogs (§15).
+measured results, point-in-time recovery with pgBackRest and its timed drills
+(§4), what these procedures do *not* cover, the RPO/RTO each approach actually
+delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), and durable task logs: retention and sizing (§19).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -227,6 +228,12 @@ What the drill does **not** prove, and was not attempted:
   query), took **0.51s** for the 110 KB archive. That number says nothing useful
   about a production archive and must not be used as an RTO input.
 
+*Update (2026-09-25):* all three are now exercised by `restore-drill.sh --rto`
+and `pitr-drill.sh` — the services are started against the restored database,
+in-flight leases/reservations held by vanished workers are reconciled, and the
+phases are timed on datasets of 54k and 420k attempts. Results and their limits:
+§4.6.
+
 ### 3.4 Version skew, reproduced
 
 The host-mode path was tested too, with `pg_dump`/`pg_restore` **18.3** against
@@ -252,43 +259,328 @@ restored perfectly. The row-count comparison is the acceptance test, not
 
 ---
 
-## 4. RPO and RTO — what this approach actually gives you
+## 4. RPO, RTO and point-in-time recovery
 
 Stated plainly, because the honest numbers are more useful than aspirational
-ones.
+ones. There are now two recovery mechanisms, and which one you are relying on
+changes both numbers.
 
-**RPO (how much work you lose) = the backup interval.** With hourly dumps, up to
-one hour of run history: completed runs, attempt results, emitted events. There
-is **no point-in-time recovery**. `pg_dump` is a logical snapshot; it cannot
-replay to a chosen second. Recovering to "just before the bad deploy at 14:32"
-is not possible with this tooling — you get the 14:00 dump.
+| | Logical: `backup-all.sh` (§2, §7) | Continuous archiving: pgBackRest (§4.2) | Managed Postgres |
+|---|---|---|---|
+| What is captured | `pg_dump` + result-bucket mirror, on a schedule | every WAL segment + periodic physical base backups | provider snapshots + WAL |
+| Restore to a chosen second | no — you get the last dump | yes: timestamp, LSN, or latest | yes, via the provider |
+| RPO | the dump interval | ≤ ~1 minute on a quiet database (§4.6) | provider-defined (typically ≤ 5 min) |
+| Roles and grants | not carried (`--no-owner --no-privileges`) | carried (it is the whole cluster) | carried |
+| Where it applies | anywhere | the in-cluster/compose Postgres | Azure Flexible Server, RDS/Aurora, Cloud SQL |
 
-If a sub-hour RPO is required, `pg_dump` is the wrong mechanism and this
-procedure must be replaced (not supplemented) by continuous archiving:
-`archive_mode = on` with WAL shipping, or a managed service that does it
-(RDS/Cloud SQL automated backups plus PITR). That is **not implemented**, and
-nothing in this repository configures WAL archiving.
+**Managed Postgres must use the provider's PITR, not this.** A managed server
+does not expose its data directory or `archive_command`, so pgBackRest cannot
+run against it; its automated backups and point-in-time restore are the
+supported path. Set the backup retention there (Azure Flexible Server: 7–35
+days; RDS: up to 35), restore to a NEW server at the chosen time, and repoint
+`DATABASE_URL`. The Helm chart refuses `postgres.pitr.enabled` together with
+`postgres.enabled=false` for this reason. The logical backup and the result-store
+mirror (§7) still apply to a managed database and are still the only copy of
+task artifacts.
 
-**RTO (how long you are down) = restore time + reconciliation time**, and only
-the first term is under this procedure's control. The restore itself is
-`pg_restore -j` into a fresh database, which for a logical dump scales roughly
-with row count and index build cost — index rebuilds usually dominate. The
-measured dev restore (0.51s end to end, 110 KB archive, 632 events) is not a
-basis for any production estimate. **Measure it on your data and write the number
-here.**
+### 4.1 Why pgBackRest (and not WAL-G)
 
-The second term is unmeasured: how long the fleet takes to settle after being
-pointed at a restored database (dead workers swept, stale leases expired, timers
-re-armed) has not been tested (§3.3).
+Both are maintained and both would work. pgBackRest **2.59.1** (released
+2026-08-17; pinned by tarball digest in `deploy/pgbackrest/Dockerfile`) was
+chosen because:
 
-**What an RPO of "one hour" means for correctness, not just data.** Nexus is
-at-least-once with mandated idempotency ([ADR-0006](adr/0006-at-least-once-with-idempotency.md)).
-Restoring to an earlier snapshot re-creates attempts that already ran, so tasks
-**will be re-executed** after a restore. For idempotent handlers that is the
-designed behaviour. For a handler that is not genuinely idempotent, a restore
-duplicates its side effects — this is the strongest practical argument for taking
-the idempotency requirement seriously, and it is worth saying out loud to task
-authors.
+- `restore --type=time|lsn` picks the right base backup for the target by
+  itself; with WAL-G the operator picks the backup and writes the recovery
+  settings by hand — during an incident.
+- repository encryption (`aes-256-cbc`, client-side) and retention/expiry are
+  built in and run after every backup, instead of being a second tool on a cron;
+- `pgbackrest verify` re-checksums every backup file and WAL segment in the
+  repository, which makes "the backups are good" a checkable claim;
+- `pgbackrest check` proves the `archive_command` round trip end to end.
+
+The costs, accepted knowingly: its S3 client is **TLS-only** (so the dev backup
+store runs with a generated certificate), and it is built from source into a
+`postgres:16.15-alpine3.24` image (`kgf-nexus/postgres-pitr:16.15-pgbackrest2.59.1`).
+The image keeps the stock server's major **and libc**, so an existing volume
+keeps working — swapping to a glibc image would silently change text collation
+and corrupt indexes.
+
+### 4.2 What is configured
+
+- **Archiving.** `wal_level=replica`, `archive_mode=on`,
+  `archive_command='pgbackrest --stanza=nexus archive-push %p'` (async, so
+  several segments push in parallel; Postgres still only recycles a segment
+  after pgBackRest confirms it is in the repository), `archive_timeout=60`.
+- **Base backups.** A `pgbackrest` sidecar (`deploy/pgbackrest/nexus-pitr-scheduler.sh`)
+  creates the stanza, runs `pgbackrest check`, then takes a FULL backup when
+  none exists or the newest is older than `PITR_FULL_INTERVAL_SECONDS` (default
+  weekly), otherwise a DIFF when the newest backup is older than
+  `PITR_DIFF_INTERVAL_SECONDS` (default daily). The decision reads the
+  repository, so a restart neither skips nor duplicates a backup. It writes a
+  status line that its healthcheck reads: unhealthy if no backup has succeeded
+  within 2× the diff interval.
+- **Archive-age guard.** The sidecar also forces `pg_switch_wal()` when nothing
+  has been archived for `PITR_WAL_SWITCH_SECONDS` (= `archive_timeout`). This
+  exists because the drill measured `archive_timeout` *not* firing for up to
+  `checkpoint_timeout` (5 min) after a server start or promotion — §4.6.
+- **Separation from task artifacts.** A different bucket (`nexus-pg-backups`,
+  prefix `/nexus`), a different principal whose policy allows only that bucket
+  (`s3:ListBucket`/`GetBucketLocation` on it, `Get/Put/DeleteObject` in it), and
+  in dev a different store instance (`backup-store`). The services' result-store
+  credentials cannot read the WAL, and the pgBackRest key cannot touch
+  artifacts. In production prefer a bucket in another failure domain.
+- **Encryption at rest.** `repo1-cipher-type=aes-256-cbc` with the passphrase
+  from a secret (`NEXUS_PITR_CIPHER_PASS` / `cipher-pass`). The passphrase is
+  required to restore: keep a copy outside the cluster. Server-side KMS on top
+  is available through `extraEnv` (`PGBACKREST_REPO1_S3_KMS_KEY_ID`).
+- **Retention knobs.** `repo1-retention-full` (default 2, `count`; or `time` in
+  days), `repo1-retention-diff` (7). The PITR window is "from the start of the
+  oldest retained full backup until now"; `deploy/pitr-verify.sh` prints it.
+
+Where: compose overlay `deploy/docker-compose.pitr.yml` (`make up-pitr`), Helm
+`postgres.pitr.*` in `deploy/helm/kgf-nexus/values.yaml`.
+
+### 4.3 Running it
+
+```sh
+make up-pitr                            # compose: stack + archiving + sidecar
+make backup-base BACKUP_TYPE=full       # a base backup now (before a risky change)
+make pitr-verify                        # check + archiver + backup age + verify; nonzero = broken
+```
+
+`pitr-verify.sh` is the monitoring hook: it exits nonzero if `pgbackrest check`
+fails, the archiver's last attempt failed, nothing was archived for 15 min, the
+newest base backup is older than 2 days, or `pgbackrest verify` finds a bad
+file. Its last line is JSON. `--no-verify` skips the (slow) repository re-read
+for frequent probes. Negative control, run 2026-09-25: with the backup store
+stopped it exits 1 with `pgbackrest check` failed and "repository unreadable";
+with the store back it passes.
+
+**Restore to a point in time** (the "undo the bad change" case):
+
+1. Stop the Nexus services (not postgres): `docker compose ... stop api-gateway
+   workflow-manager dag-engine scheduler scheduler-gpu resource-manager
+   event-service agent-cpu agent-gpu agent-gpu-a10 ui`. A service connected
+   during the restore sees the database move backwards under it.
+2. `make restore-pitr CONFIRM=yes TARGET_TIME='2026-09-24 14:31:59+00'`
+   (or `TARGET_LSN=0/5A0012F8`; neither = latest). The script prints the plan
+   and the restorable window, stops postgres and the sidecar, runs
+   `pgbackrest restore --delta` in a one-off container with exactly the
+   container's volumes and repository settings, starts postgres, waits for
+   replay + promotion, and runs `pgbackrest check` on the new timeline.
+   Use the database's timezone-qualified time; `--exclusive` stops just before
+   the target instead of at it.
+3. Start the services. The scheduler sweeps the restored snapshot's workers to
+   DEAD and expires their in-flight attempts to LOST (retried per policy); the
+   agents re-register (§4.6 measures this).
+4. Take a DIFF backup soon (`make backup-base BACKUP_TYPE=diff`). The new
+   timeline is restorable from the old backup + WAL (the drill proves it), but a
+   fresh backup shortens the next recovery.
+
+The **result store is not rewound**. It does not need to be: objects are
+content-addressed and immutable (ADR-0008), so every object a pre-target row
+references is still there — the drill checks every reference. Objects written
+after the target become orphans for the GC sweep (§7.7), never dangling refs.
+
+Transactions after the target are gone from the database but stay in the WAL
+archive until retention expires them, so a second restore to a *later* target
+can recover them.
+
+### 4.4 Kubernetes (Helm) — rendered, not exercised
+
+With `postgres.pitr.enabled=true` the postgres StatefulSet runs the pitr image
+with the archive settings and a `pgbackrest` sidecar (same env, shared data
+volume and unix socket, no readiness probe on purpose: a failing backup must
+page someone, not remove the database from its Service). Required values:
+`postgres.pitr.existingSecret` (`s3-key`, `s3-key-secret`, `cipher-pass`),
+`repo.s3.bucket`, `repo.s3.endpoint`; `repo.s3.caSecret` for a private CA.
+
+```sh
+PITR_EXEC="kubectl -n nexus exec -i postgres-0 -c pgbackrest --" deploy/pitr-backup.sh diff
+PITR_EXEC="kubectl -n nexus exec -i postgres-0 -c pgbackrest --" deploy/pitr-verify.sh
+```
+
+A restore on Kubernetes needs the data volume with postgres NOT running:
+scale the control-plane Deployments and the postgres StatefulSet to 0, run a
+one-off pod from the pitr image as uid 70 that mounts the `data-postgres-0` PVC
+and the same `PGBACKREST_*` env, run
+`pgbackrest --stanza=nexus --delta --type=time --target='…' --target-action=promote restore`,
+then scale postgres back to 1, wait for `pg_is_in_recovery()=false`, and scale
+the services up. **This path has been rendered (`helm template`, `helm lint`)
+but not run on a cluster**; treat the first execution as a drill, not an
+incident.
+
+### 4.5 The drills
+
+Both drills are destructive to the stack they run on, so run them on an
+isolated compose project, never on the one you care about:
+
+```sh
+export COMPOSE_PROJECT_NAME=nexus-pitr NEXUS_POSTGRES_PORT=55631 NEXUS_MINIO_PORT=55632 \
+       NEXUS_MINIO_CONSOLE_PORT=55633 NEXUS_NATS_PORT=55634 NEXUS_NATS_MONITOR_PORT=55635 \
+       NEXUS_API_PORT=55636 NEXUS_GRPC_PORT=55637 NEXUS_MAILPIT_UI_PORT=55638 NEXUS_UI_PORT=55639
+make up-pitr        # then install a worker key (make seed) and start agent-cpu
+export PG_CONTAINER=nexus-pitr-postgres-1 MINIO_CONTAINER=nexus-pitr-minio-1
+make restore-drill RTO=1    # logical: backup-all, drop DB + bucket, restore, restart, reconcile
+make pitr-drill PITR_DRILL_ARGS="--runs-a 3000 --artifacts-a 1500"
+```
+
+Both refuse the default `nexus` project unless `DRILL_ALLOW_DEFAULT_PROJECT=1`,
+write a JSON report (`DRILL_REPORT`, `PITR_REPORT`) and print a phase table.
+
+- **`restore-drill.sh --rto`** — after the existing scratch checks (§7.4), takes
+  a real `backup-all.sh`, simulates losing both stores (DROP DATABASE, remove the
+  bucket), and times: `stop` (all services + agents) → `restore_db`
+  (`restore.sh`) → `restore_artifacts` (`restore-artifacts.sh`) →
+  `migrate_verify` (migrate job; every `output_ref` in `task_attempts` resolves;
+  a sample of objects re-hashes to its content-addressed key; restored row
+  counts vs. the moment of the outage) → `services_healthy` (every `/readyz`) →
+  `fleet_reconciliation`. RTO is wall clock from the start of `stop` to the end
+  of `fleet_reconciliation`.
+- **`pitr-drill.sh`** — seeds data with `deploy/pitr-seed.sh` (tagged batches of
+  runs × nodes, ~20% retried attempts, events, content-addressed random-byte
+  artifacts, and in-flight runs held under live leases by synthetic workers):
+  batch **A** → FULL base backup → batch **B** (exists only in WAL) → target
+  time **T** from the database clock → batch **C**. *Scenario 1* restores to T
+  and asserts A and B are present with exact counts, C is absent (with a
+  negative control that C had been committed), every ref resolves, and the
+  in-flight state at T is reconciled. *Scenario 2* runs a writer committing a
+  row every ~200 ms and recording each acknowledged commit, SIGKILLs postgres,
+  **deletes its data directory**, restores to latest and measures RPO as the
+  span of acknowledged commits that did not survive — and asserts the survivors
+  are a gap-free prefix (nothing invented, nothing reordered). It ends with
+  `pitr-verify.sh` including `pgbackrest verify`.
+
+"Fleet reconciliation" is read from Postgres (`deploy/lib/nexus-stack.sh`):
+done when no worker from the restored snapshot (no heartbeat since recovery
+began) is still ACTIVE/DRAINING/QUARANTINED, no DISPATCHED/RUNNING attempt is
+held by a worker that is not live, and every restarted agent has re-registered.
+
+### 4.6 Measured results — LAPTOP measurements, not production claims
+
+Run on 2026-09-25 in an isolated compose project (`nexus-pitr-*`, ports
+55631–55639). **Hardware:** Apple MacBook Pro `Mac16,7`, Apple M4 Pro (14 cores:
+10 performance + 4 efficiency), 24 GiB RAM, internal Apple SSD (APFS, 494 GB),
+macOS 26.6.2; Docker Desktop 29.6.2 with a Linux VM of 10 vCPU / 15.8 GiB.
+Postgres 16.15 (alpine), pgBackRest 2.59.1, MinIO RELEASE.2025-09-07 (a locally
+built image; the pinned quay.io image was not pullable from this machine). The
+backup store, database and result store all share one SSD, so every transfer
+here is a local copy — a real object store over a network is slower, and that
+difference is exactly what these numbers do NOT tell you.
+
+Reports: `docs/drills/2026-09-25-*.json` (the 54k PITR report was produced
+before a report-formatting fix and repaired by hand; its numbers are unchanged).
+
+**Datasets.** *Medium*: 4,540 runs / 54,400 attempts / 172,260 events,
+database 127 MiB; 2,000 artifacts of 1 MiB random bytes = 2.0 GiB.
+*Large*: 35,080 runs / 420,800 attempts / 1,332,640 events, database 914 MiB;
+2,140 artifacts, 2.0 GiB.
+
+**PITR, scenario 1 — restore to a timestamp** (all assertions passed both times):
+
+| phase | medium | large |
+|---|---:|---:|
+| stop (services + agents) | 0.8 s | 1.2 s |
+| restore_db (stop pg, `pgbackrest restore`, WAL replay to T, promote, check) | 5.7 s | 8.6 s |
+| &nbsp;&nbsp;of which WAL replay + promote | 2.4 s | 4.6 s |
+| restore_artifacts | skipped (not rewound; §4.3) | skipped |
+| migrate_verify (migrate job, 1,800–1,920 refs resolve, re-hash sample) | 2.5 s | 3.0 s |
+| services_healthy | 7.0 s | 7.0 s |
+| fleet_reconciliation | 4.5 s | 4.5 s |
+| **RTO** | **20.6 s** | **24.5 s** |
+
+Base backup (FULL, zstd + aes-256-cbc) before the target: 107 MiB → 15 MiB in
+the repository in 1.2 s (medium); 794 MiB → 111 MiB in 2.8 s (large). Batch C
+(500 / 1,000 runs committed after T) was absent after both restores; 200 / 220
+post-target objects remained as orphans. Segment push latency after a forced
+switch: 0.9 s.
+
+**PITR, scenario 2 — primary lost (SIGKILL + data directory deleted), restore
+to latest:**
+
+| | medium | large |
+|---|---:|---:|
+| ticking before the kill | 150 s | 90 s |
+| acknowledged commits / survived / lost | 552 / 426 / 126 | 336 / 169 / 167 |
+| **RPO** (acknowledged work lost) | **33.8 s** | **44.7 s** |
+| stop (services, already failing against a dead DB) | 14.9 s | 14.9 s |
+| restore_db (restore + replay across timelines + promote) | 6.1 s | 8.5 s |
+| services_healthy + migrate_verify | 8.0 s | 8.6 s |
+| fleet_reconciliation | 0.2 s | 0.2 s |
+| **RTO** | **29.4 s** | **32.3 s** |
+
+The RPO is the unarchived tail — the WAL written since the last segment switch
+— so on a quiet database it lies between 0 and `archive_timeout` + push time
+(~61 s) wherever the kill lands; a busy database fills 16 MiB segments faster
+and archives continuously. `stop` is long here only because services that have
+lost their database take most of `docker stop`'s grace period to exit.
+
+**Logical path — `restore-drill.sh --rto`** (DB dropped AND bucket removed):
+
+| phase | medium | large |
+|---|---:|---:|
+| backup_all (before the outage; not RTO) | 30.3 s | 34.9 s |
+| &nbsp;&nbsp;dump size | 9.7 MiB | 76 MiB |
+| stop | 0.9 s | 0.9 s |
+| restore_db (`pg_restore` into a new database) | 2.6 s | 12.3 s |
+| restore_artifacts (2,000 / 2,140 objects, 2.0 GiB) | 24.3 s | 20.0 s |
+| migrate_verify | 2.9 s | 3.3 s |
+| services_healthy | 7.1 s | 7.1 s |
+| fleet_reconciliation | 0.2 s | 0.2 s |
+| **RTO** | **39.0 s** | **45.0 s** |
+
+Its RPO is the dump interval: the drill lost 0 rows only because nothing wrote
+between the dump and the stop.
+
+**What the numbers say, and what they do not.**
+
+- On this hardware, database restore is not the long pole: 1 GiB restores and
+  replays in under 10 s. **Artifacts** (2 GiB, 20–24 s, local disk to local
+  disk) and **service start-up** (~7 s) are. For a real deployment the artifact
+  term scales with bytes and object-store bandwidth; measure it there.
+- `pg_restore` grows with row count and index builds (2.6 s → 12.3 s for 8.4×
+  the rows); PITR restore grows with the base backup and the WAL to replay
+  (5.7 s → 8.6 s). A production database of 100 GiB is a different regime
+  entirely — these runs cannot be extrapolated to it.
+- **Fleet reconciliation is bounded by the liveness window, not by data size.**
+  The scheduler declares a worker DEAD only once its heartbeat is older than 30 s
+  (`-liveness-window`); in these runs the snapshot's heartbeats were already close
+  to or past that window by the time services were up, so it took 0.2–4.5 s. Budget up to
+  ~40 s (window + a 10 s sweep interval) after services are healthy.
+- **Measured defect, mitigated:** after any server start or promotion,
+  `archive_timeout=60` did not switch segments for **301 s** (= `checkpoint_timeout`)
+  under steady writes (reproduced three times on 16.15). Without mitigation the
+  RPO right after a restart or restore is ~5 minutes, not ~1. The sidecar's
+  archive-age guard now forces the switch; measured intervals with it: 59–69 s.
+  If the sidecar is down, the guard is too — `pitr-verify.sh` flags an archive
+  older than 15 minutes.
+- **Observed platform behaviour (not fixed here):** the resource-manager's
+  liveness sweeper and the scheduler's both declare workers DEAD. When the
+  resource-manager wins, the scheduler's sweep no longer selects the worker and
+  does not expire its in-flight attempts; they are recovered by lease expiry
+  instead (the agents' lease TTL is 30 s, so this costs up to 30 s, not
+  correctness). Separately, a scheduler liveness sweep aborts on the first
+  attempt it fails to expire, which stalls the rest of that pass.
+- **Docker Desktop quirk:** restarting containers seconds after stopping them
+  intermittently failed with "port already in use", and one such failure left
+  the container detached from its network. The drill library retries starts and
+  reattaches a detached container; a real orchestrator does the equivalent.
+
+**Unverified:** Kubernetes/Helm PITR (rendered and linted only); a real remote
+object store (S3/Azure) as the repository; restore of a backup whose
+passphrase came from a real secret manager; restore across a Postgres minor
+upgrade; repository retention/expiry over weeks; RTO under concurrent
+production load.
+
+### 4.7 What an RPO means for correctness, not just data
+
+Nexus is at-least-once with mandated idempotency ([ADR-0006](adr/0006-at-least-once-with-idempotency.md)).
+Restoring to any earlier point — a dump or a PITR target — re-creates attempts
+that already ran, so tasks **will be re-executed** after a restore. For
+idempotent handlers that is the designed behaviour. For a handler that is not
+genuinely idempotent, a restore duplicates its side effects — this is the
+strongest practical argument for taking the idempotency requirement seriously,
+and it is worth saying out loud to task authors.
 
 ---
 
@@ -310,17 +602,25 @@ is made of items like these.
   here.
 - **No encryption at rest for the dump.** The archive contains `api_keys` rows and
   every workflow parameter. Treat a dump as a secret: restrict the directory, and
-  encrypt before it leaves the host.
-- **No point-in-time recovery.** See §4.
-- **No backup monitoring.** Nothing alerts if `backup.sh` stops running. A cron
-  job that fails silently for three weeks is indistinguishable from no backup at
-  all; wire the exit code into whatever alerts you.
+  encrypt before it leaves the host. (The pgBackRest repository, §4.2, IS
+  encrypted client-side; the logical dump and the artifact mirror are not.)
+- **~~No point-in-time recovery.~~** *Closed for the in-cluster/compose Postgres
+  — see §4* (pgBackRest continuous archiving, `deploy/restore-pitr.sh`, drilled
+  in §4.6). Managed Postgres uses the provider's PITR. The Helm path is rendered
+  but not yet exercised on a cluster (§4.4).
+- **Backup monitoring is partial.** For PITR, `deploy/pitr-verify.sh` exits
+  nonzero on a broken archive, a stale archive or base backup, or a corrupt
+  repository, and the sidecar's healthcheck fails when no backup has succeeded
+  within 2× the diff interval — wire either into alerting. Nothing alerts if the
+  logical `backup.sh` cron stops running; a job that fails silently for three
+  weeks is indistinguishable from no backup at all.
 - **No NATS state backup**, deliberately. NATS carries notifications; Postgres
   holds truth ([ADR-0003](adr/0003-nats-as-event-bus.md)). There is nothing there
   to restore. The `outbox` table IS in the dump; after a restore the relay
   re-publishes whatever it holds unpublished, and consumers de-duplicate by
   run_id + seq.
-- **Postgres roles and grants are not in the dump.** `pg_dump --no-owner
+- **Postgres roles and grants are not in the dump** (they ARE in a pgBackRest
+  backup, which is the whole cluster). `pg_dump --no-owner
   --no-privileges` is used so the archive restores cleanly as whatever role you
   have, which means role definitions are *not* carried. In the MVP there is one
   role, so this costs nothing; once per-service roles exist (they arrive as a
@@ -354,8 +654,13 @@ loops.
   service_completed_successfully}}`, so nothing starts against an unmigrated
   schema.
 
-At the time of writing, five versions are applied in the dev database
-(`0001_init` … `0005_service_roles`).
+The sequence has a hole: `0018_cluster_registry` is followed by
+`0020_dynamic_expansion`, and there is **no 0019**. That
+number was never used on any branch. It is not a lost migration, and it must not
+be filled in later: on an existing database a new `0019_*` would run after 0020+,
+and on a fresh one before them. See `services/migrations/README.md`.
+`internal/migrations` fails `go test` on a duplicate version, a filled or new gap,
+or a malformed filename.
 
 ### 6.2 What makes a migration safe to deploy
 
@@ -646,6 +951,9 @@ the backup ordering produces them on purpose, and a restore leaves them behind.
 # Report only. Deletes NOTHING. This is the default.
 make artifact-gc
 
+# Run directly, the DSN must be explicit (§8): there is no built-in default.
+export DATABASE_URL='postgres://nexus:...@db.internal:5432/nexus?sslmode=require'
+
 # Same, scoped to one namespace prefix, with a longer grace period.
 go run ./services/artifact-gc/cmd/artifact-gc -prefix default/ -grace 72h
 
@@ -702,29 +1010,6 @@ for the worked timeline.
 several runs. Every pass logs what it examined, kept as reachable, skipped as too
 young, and deleted, with counts.
 
----
-
-## 8. Configuration guard: an explicit DSN in production
-
-Related, because it is the same class of failure as an untested backup — a
-misconfiguration that looks fine until it is not.
-
-Six services resolve their DSN through `internal/config.DSN()`, which accepts
-four spellings (`NEXUS_DATABASE_URL`, `DATABASE_URL`, `NEXUS_POSTGRES_DSN`,
-`NEXUS_DSN`) and falls back to a compiled-in developer default pointing at
-`localhost:55432`. Accepting four names is what keeps dev painless; the fallback
-is what makes a typo in production look like a network problem instead of a
-configuration problem.
-
-Set **`NEXUS_ENV=production`** (or `prod`, or `staging`) or **`NEXUS_REQUIRE_DSN=1`**
-in any real deployment. With either set and no DSN found, every service exits at
-startup with a message naming all four spellings it checked, instead of quietly
-dialing `localhost`. `NEXUS_REQUIRE_DSN=0` overrides `NEXUS_ENV` for the case
-where the requirement is inherited from a base config that cannot be edited.
-
-With neither set, behaviour is exactly as before: the dev default applies and
-`go test` needs no environment.
-
 ### 7.8 The other direction: rows whose object is gone
 
 §7.7 reclaims objects nothing references. This is its mirror image, and the more
@@ -764,6 +1049,57 @@ T1 still exists at T2. A false *negative* (an object deleted after the check) is
 acceptable and shows up next run; a false *positive* would send someone hunting
 for data loss that never happened.
 
+---
+
+## 8. Configuration guard: every service requires an explicit DSN
+
+Related, because it is the same class of failure as an untested backup — a
+misconfiguration that looks fine until it is not.
+
+Every service that talks to Postgres (api-gateway, workflow-manager, dag-engine,
+scheduler, resource-manager, event-service, artifact-gc) resolves its DSN through
+`internal/config.DSN()`. It accepts four spellings, in this precedence order:
+
+1. `NEXUS_DATABASE_URL`
+2. `DATABASE_URL`
+3. `NEXUS_POSTGRES_DSN`
+4. `NEXUS_DSN`
+
+and, for the services that have one, the command-line flag (`-dsn` on scheduler
+and dag-engine, `-database-url` on resource-manager and artifact-gc). A flag
+given on the command line overrides the environment.
+
+**There is no built-in default, in any environment.** With none of the above
+set, the service exits with status 1 before opening anything, printing:
+
+```
+scheduler: fatal: no Postgres DSN configured: set NEXUS_DATABASE_URL (also
+accepted: DATABASE_URL, NEXUS_POSTGRES_DSN, NEXUS_DSN) or pass -dsn. There is no
+built-in default, ...
+```
+
+Services used to fall back to `postgres://postgres:test@localhost:55432/nexus`
+(artifact-gc to `localhost:55433`) unless `NEXUS_ENV` was `production`/`staging`
+or `NEXUS_REQUIRE_DSN` was set. That fallback meant a typo'd variable name, or a
+manifest that missed one container, connected the service to whatever Postgres
+listened on that port. On at least one developer machine 55432 is an unrelated
+product's database. `NEXUS_ENV` and `NEXUS_REQUIRE_DSN` no longer affect the DSN;
+setting them is harmless, and `NEXUS_REQUIRE_DSN=0` can no longer switch the
+check off.
+
+Where the DSN comes from in each supported way of running Nexus:
+
+| How you run it | DSN source |
+|---|---|
+| `make up` / `deploy/docker-compose.yml` (and the TLS overlay) | `x-postgres-env` sets `DATABASE_URL` for every service, pointing at the compose `postgres` container. |
+| Helm chart (`deploy/helm/kgf-nexus`) | `nexus.dbEnv` builds `DATABASE_URL` from `.Values.postgres.*` and the password in `existingSecret`. |
+| `make seed`, `make migrate-*`, `make artifact-gc`, `make check-refs` | The Makefile's `DATABASE_URL`, defaulting to the compose stack on `localhost:$(NEXUS_POSTGRES_PORT)` (55433). Override it to target another database. |
+| `go run ./services/<svc>/...` by hand | Export one of the four names yourself, e.g. `export DATABASE_URL='postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable'` for the compose stack. |
+| Integration tests | `NEXUS_TEST_DATABASE_URL` only (`internal/testdb`); tests skip without it and never read the service spellings. |
+
+`examples/run-suite.sh` and `tests/chaos` drive an already-running stack
+(Kubernetes or compose respectively) and do not start services themselves, so
+the DSN is whatever that stack was deployed with.
 
 ---
 
@@ -976,24 +1312,26 @@ latency and live-update freshness, never correctness.
 ### 11.1 Running it
 
 - Compose ships `nats:2.14.7-alpine` with JetStream on the `nats-data` volume
-  and a `/healthz?js-enabled-only=true` healthcheck. Monitoring is on port 8222
-  (`/varz`, `/connz`, `/jsz`).
-- Configuration (F38 naming): `NEXUS_NATS_URL` (empty disables the bus) and
-  `NEXUS_NATS_CREDS` (optional `.creds` file). Only the **event-service** (relay,
-  SSE wake-ups) and the **agents** (dispatch hints) connect. The scheduler,
-  dag-engine and workflow-manager only write `outbox` rows to Postgres.
+  and a `/healthz?js-enabled-only=true` healthcheck. The broker **requires
+  authentication** and runs a least-privilege permission model (§11.7). Its
+  monitoring endpoint (`/varz`, `/connz`, `/jsz`) listens on the container's
+  loopback only and is not published, because nats-server does not
+  authenticate it. The client port is published on `127.0.0.1` only.
+- Configuration (F38 naming): `NEXUS_NATS_URL` (empty disables the bus) plus
+  one credential and optional TLS (§11.7, §11.9). Only the **event-service**
+  (relay, SSE wake-ups) and the **agents** (dispatch hints) connect. The
+  scheduler, dag-engine, workflow-manager, resource-manager and api-gateway only
+  write `outbox` rows to Postgres and hold no NATS identity.
 - Nothing `depends_on` NATS and nothing needs it to start: clients connect in
   the background and retry forever.
 - Streams are created by the relay if missing and **never modified** if present,
   so retention retuned with the `nats` CLI sticks:
   `NEXUS_RUNS` (`nexus.run.>`, file, 7 days, 4 GiB, 10-minute duplicate window)
   and `NEXUS_DISPATCH` (`nexus.task.dispatch.>`, memory, 2 minutes).
-- **Production needs authorization.** The compose broker is unauthenticated, like
-  every other dev credential there. Anyone who can reach an unauthenticated
-  broker can read every tenant's run events and publish fake hints. A fake hint
-  only costs a poll; reading run events is a real disclosure. Give the
-  event-service publish rights on `nexus.>`; give each agent subscribe-only
-  rights on `nexus.task.dispatch.<its namespace>.>` and nothing else.
+- **Every deployment path provisions authorization.** Compose generates
+  identities in its `nats-init` step, the Helm chart refuses to render a broker
+  without them, and the services refuse to start without credentials when
+  `NEXUS_ENV` is production-like. The procedure is §11.7, rotation §11.8.
 
 ### 11.2 Relay tuning (event-service)
 
@@ -1056,7 +1394,215 @@ comment in `0016_outbox.down.sql`).
 
 `make test-nats` runs the relay, outbox and hint suites against a real
 JetStream and a real Postgres in throwaway containers (`nexus-nats-agent-*`,
-ports 55511/55512), including stopping and restarting the broker.
+ports 55511-55514), including stopping and restarting the broker. It then runs
+the authorization suite (`TestNATSAuthz*`) twice: against a broker configured
+by `deploy/nats/nexus-nats-auth.sh` (the compose path, plaintext) and against
+one running the Helm chart's rendered ConfigMap with TLS and client
+verification. Each role is exercised through the production code (`bus.Connect`,
+the real relay, `SubscribeDispatchHints`, the SSE waker), and every denial has a
+positive control. Needs Docker and `helm`. `AUTHZ=0` skips the authorization
+half and says so.
+
+### 11.7 Authorization: identities and permissions
+
+**The choice: NKeys in the server config, not decentralized JWT.** Each client
+holds one NKey seed (Ed25519). The server config lists only public keys and
+their permissions, so the config holds no secret and can live in a ConfigMap
+or in git. Authentication is challenge-response: the seed never crosses the
+wire, so it is safe even before TLS is on. Decentralized JWT (operator, account
+and user JWTs, a resolver, `nsc`) was considered and not chosen. Its strengths
+are delegated account administration and adding users without touching the
+server, and this platform has one operator and a handful of tenants. It would
+add an operator signing key and a resolver as new things to protect and back up.
+The client supports `.creds` files too (`NEXUS_NATS_CREDS`), so moving to JWT
+later is a server-side change only. Plain user and password is supported for
+brokers you do not run. It is refused over plaintext to a non-loopback host,
+because the password is sent in `CONNECT`.
+
+**The model.** It is rendered identically by `deploy/nats/nexus-nats-auth.sh`
+(compose, Portainer host) and `templates/nats-config.yaml` (Helm):
+
+| Identity | Account | Publish | Subscribe |
+|---|---|---|---|
+| `event-service` | NEXUS | `nexus.run.>`, `nexus.task.dispatch.>`, `$JS.API.STREAM.INFO.NEXUS_RUNS/NEXUS_DISPATCH`, `$JS.API.STREAM.CREATE.NEXUS_RUNS/NEXUS_DISPATCH` | `nexus.run.>` (SSE waker), `_INBOX.nexus-event-service.>` (its own JetStream acks) |
+| `agent-<ns>` (one per tenant) | NEXUS | **nothing** (`deny >`) | `nexus.task.dispatch.<ns>.>` only |
+| `monitor` | SYS (system account) | read-only `$SYS.REQ.SERVER.PING.*` / `$SYS.REQ.SERVER.*.<Z>` / `$SYS.REQ.ACCOUNT.*.<Z>` queries (no RELOAD, KICK or LDM) | `_INBOX.>`, `$SYS.SERVER.>`, `$SYS.ACCOUNT.>` |
+
+There is no anonymous user and no `no_auth_user`, so an unauthenticated
+connection is refused. The event-service can inspect and create its two streams
+and nothing else: it cannot delete, purge or update them, or create consumers.
+Each client sets a reply-inbox prefix of `_INBOX.<connection name>`, which is
+why the event-service's subscribe grant covers only its own replies. The
+scheduler, dag-engine, workflow-manager, resource-manager and api-gateway have
+no identity at all, because they never connect. They reach the bus only through
+`outbox` rows the event-service relays.
+
+**Tenants.** An agent identity is per Nexus namespace. A tenant's agents share
+it, or you list several public keys for one tenant to give each agent (or edge
+host) its own. The subject token is the namespace itself for names matching
+`[A-Za-z0-9_-]+`. Other names are percent-encoded on the bus (`bus.Token`), and
+both renderers refuse them rather than guess. To add tenant `acme`:
+
+```sh
+# compose / Portainer host (add -f deploy/docker-compose.tls.yml if you use it)
+docker compose -f deploy/docker-compose.yml run --rm nats-init init --tenant acme
+docker compose -f deploy/docker-compose.yml run --rm nats-init   # default command: render + install
+docker compose -f deploy/docker-compose.yml kill -s HUP nats
+# acme's agents need /store/agent-acme/user.nk from the nats-auth-store volume
+# Kubernetes (admin machine that holds the key directory)
+NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh add-tenant acme
+NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh helm-values  # merge into values, helm upgrade
+# give acme's agents /secure/nexus-nats/agent-acme/user.nk as NEXUS_NATS_NKEY_SEED_FILE
+```
+
+**Client settings (event-service and agent).** All are validated at startup.
+A configuration error is fatal, but an unreachable broker never is (ADR-0003).
+
+| Variable | Meaning |
+|---|---|
+| `NEXUS_NATS_URL` | `nats://` or `tls://`, comma-separated for a cluster. Empty disables the bus. |
+| `NEXUS_NATS_NKEY_SEED_FILE` | NKey user seed file (`SU…`, bare or armoured). **The shipped method.** |
+| `NEXUS_NATS_CREDS` | `.creds` file (JWT + seed) for a JWT-mode broker. Re-read on every reconnect. |
+| `NEXUS_NATS_USER` + `NEXUS_NATS_PASSWORD` or `NEXUS_NATS_PASSWORD_FILE` | Password auth. The file is re-read on every reconnect. Setting both password variables is an error. Refused without TLS unless every server is loopback. |
+| `NEXUS_NATS_REQUIRE_AUTH` | Makes "no credentials" a startup error. **Armed by `NEXUS_ENV=production/prod/staging`.** An explicit `false` overrides that and logs a WARN. Compose and Helm set it to `1`. |
+| `NEXUS_NATS_TLS`, `NEXUS_NATS_TLS_CA_FILE`, `NEXUS_NATS_TLS_CERT_FILE`, `NEXUS_NATS_TLS_KEY_FILE`, `NEXUS_NATS_TLS_SERVER_NAME` | §11.9 |
+
+Setting more than one credential method is an error, and so is a seed or creds
+file that is unreadable or not a *user* key. Error messages never include file
+contents. Clients keep retrying after authentication errors
+(`IgnoreAuthErrorAbort`), so a broker-side mistake during a rotation heals once
+it is fixed and does not leave a process permanently deaf. A permissions
+violation is logged at ERROR (`nats denied an operation for this identity`).
+Either the deployed permissions are too narrow or a process is doing something
+its role must not do.
+
+**Compose.** The one-shot `nats-init` container runs
+`nexus-nats-auth.sh compose-init`. On the first `up` it generates the
+identities into the `nats-auth-store` volume and reuses them afterwards. It
+renders the server config into `nats-auth-server` and copies each seed into a
+volume only its consumer mounts: `nats-auth-event-service` and
+`nats-auth-agent` (uid 10001, mode 0400). No setup step is needed and nothing is
+written to the source tree. `render_compose.py` inlines the script for the
+Portainer host, which has no source tree. To query the broker as the monitor:
+
+```sh
+docker compose -f deploy/docker-compose.yml run --rm --entrypoint nats nats-init \
+  --server nats://nats:4222 --nkey /store/monitor/user.nk server report jetstream
+```
+
+A host-side key directory (`NEXUS_NATS_DIR`, default `./.dev-nats`, which is
+gitignored) is used by `make k8s-dev-up` and by the Kubernetes procedure below.
+
+**Helm.** `nats.auth.mode: nkey` is the default, and rendering **fails** until
+`nats.auth.eventService.publicKeys`, `nats.auth.monitor.publicKeys` and a
+`nats.auth.tenants` entry for `nexusNamespace` are set. Public keys are also
+checked for format. The seeds go in a Secret, by default `existingSecret`,
+under the keys `nats-event-service-nkey` and `nats-agent-nkey`. Each pod
+projects only its own key to `/etc/nexus/nats/user.nk`. An agent entry may set
+`natsSeedKey` to use its own identity.
+
+```sh
+NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh init --tenant <nexusNamespace>
+NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh helm-values > nats-values.yaml
+kubectl -n <ns> create secret generic nexus-nats-seeds \
+  --from-file=nats-event-service-nkey=/secure/nexus-nats/event-service/user.nk \
+  --from-file=nats-agent-nkey=/secure/nexus-nats/agent-<nexusNamespace>/user.nk
+helm upgrade --install … -f nats-values.yaml --set nats.auth.seedSecret=nexus-nats-seeds
+```
+
+Generate keys on an admin machine, not in the cluster. The monitor seed stays
+there (or goes to whoever runs nats-surveyor). Also in the chart:
+
+- A `nats` NetworkPolicy that admits only event-service and agent pods on 4222
+  (`nats.networkPolicy.extraFrom` for anything else).
+- Monitoring on the pod's loopback only, with no `monitor` port on the Service.
+  Probes run `wget` in the container.
+- A config-reloader sidecar (`natsio/nats-server-config-reloader:0.21.1`, with
+  `shareProcessNamespace`) that sends SIGHUP to the broker when the ConfigMap or
+  its TLS files change.
+
+`nats.auth.mode: none` exists for a throwaway cluster. It sets
+`NEXUS_NATS_REQUIRE_AUTH=0` on the clients and is never appropriate where more
+than one tenant, or anything untrusted, can reach the broker. `deploy/terraform`
+reads the key directory (`nats_credentials_dir`, which `make k8s-dev-up`
+populates) and adds the seeds to its credentials Secret. Like every other
+generated credential there, they are in Terraform state.
+
+**Upgrading an existing deployment.** Provision identities first, then roll
+everything together:
+
+- **Compose:** `up` does it.
+- **Helm:** set the values and the Secret. The upgrade fails to render without them.
+- **Custom deployments:** set `NEXUS_NATS_NKEY_SEED_FILE` on the event-service
+  and agents before switching the broker to the authenticated config.
+
+Between the broker switch and the client roll, the bus is down, not the
+platform: agents long-poll and the outbox holds the backlog (§11.4). Off-cluster
+agents need their tenant's seed, and their `NEXUS_NATS_URL` must point at a
+listener they can reach.
+
+### 11.8 Rotating NATS credentials
+
+Rotate on compromise, on staff change and on a schedule (for example
+annually). Every step keeps the bus up, because the server accepts the old and
+the new key for the same role during the overlap.
+
+```sh
+# Kubernetes / host-managed key directory
+# 1. new key alongside the old one (the old public key moves to retiring.pub)
+NEXUS_NATS_DIR=<dir> deploy/nats/nexus-nats-auth.sh rotate agent-acme
+# 2. make the broker accept both keys: helm-values -> values, helm upgrade.
+#    The reloader sends SIGHUP to the broker.
+# 3. update the Secret key and IMMEDIATELY: kubectl rollout restart deploy/<agents or event-service>
+# 4. stop accepting the old key
+NEXUS_NATS_DIR=<dir> deploy/nats/nexus-nats-auth.sh retire agent-acme
+#    ...then helm-values -> values, helm upgrade
+
+# compose (C="docker compose -f deploy/docker-compose.yml", plus the TLS override if used)
+$C run --rm nats-init rotate agent-default     # 1
+$C run --rm nats-init && $C kill -s HUP nats   # 2 (also installs the new seed)
+$C up -d --force-recreate agent-cpu agent-gpu agent-gpu-a10   # 3, straight after 2
+$C run --rm nats-init retire agent-default     # 4
+$C run --rm nats-init && $C kill -s HUP nats
+```
+
+A process holding an NKey must restart to switch seeds. nats.go fixes the public
+key when the connection is created, but it re-reads the seed file each time it
+signs. Between installing a new seed and the restart, a reconnect would fail,
+so restart straight away. Nothing else breaks in the meantime. `.creds` and password files are
+re-read at every reconnect. `rotate` deletes nothing the clients still use, and
+`retire` is the step that revokes. For a **compromised** seed, skip the
+overlap: `rotate`, then `retire` straight away, re-render and reload. The
+compromised key is refused from the next connection attempt. Connections
+already open with it are dropped by the reload itself, which was verified
+against nats-server 2.14.7: the live subscriber was disconnected at the SIGHUP
+and its reconnect was refused. Confirm with `nats server report connections` as the
+monitor, or with `/connz` inside the pod. The role's clients are down until
+they have the new seed, and the platform keeps working by polling.
+
+### 11.9 TLS to the broker
+
+The NKey authenticates each client. TLS adds confidentiality, which matters
+because run events carry tenant data, and it authenticates the broker. The
+clients reuse `internal/transport`'s hot-reloading material. A renewed
+certificate or CA bundle is used at the next reconnect without a restart.
+
+- **Client:** TLS is on when `NEXUS_NATS_TLS=1`, the URL uses `tls://`, or any
+  `NEXUS_NATS_TLS_*_FILE` is set. The CA defaults to `NEXUS_TLS_CA_FILE`, and
+  the client pair defaults to `NEXUS_TLS_CLIENT_CERT_FILE`/`_KEY_FILE`: one
+  private CA for every internal hop (docs/TLS.md). **`NEXUS_REQUIRE_TLS=1`
+  makes a plaintext broker connection fatal**, just like a plaintext gRPC hop.
+  Explicitly turning TLS off while also asking for it (for example
+  `NEXUS_NATS_TLS=0` with a `tls://` URL) is an error.
+- **Compose:** `make up-tls` issues a `nats` leaf (`make dev-certs`). The broker
+  serves it and requires a client certificate from the dev CA
+  (`verify: true`). The agents and event-service dial with their leaves.
+  nats-server re-reads certificates only on reload, so after a renewal run
+  `docker compose kill -s HUP nats`.
+- **Helm:** `nats.tls.enabled=true` with `secretName` (a cert-manager
+  Certificate for `nats`, `nats.<ns>.svc`). With `verifyClients` (the default),
+  `clientSecrets.eventService` and `.agent` must also be set. Otherwise
+  `caSecret` supplies `ca.crt`. The reloader picks renewed certificates up.
 
 ---
 
@@ -1231,8 +1777,12 @@ See CONTRACT-FINDINGS F96 for detail. In short:
   collector's log.
 - `runtime.stdout_output` is rejected, because the pod log API cannot separate
   stdout from stderr.
-- The pending reason sent through ReportProgress is not yet stored by the
-  scheduler.
+- The pod status sent through ReportProgress ("pod Pending: Unschedulable:
+  ...") is stored per attempt and shown in the console as the **executor
+  status**. That is separate from the scheduler's own placement reason. It is
+  the latest status only, capped at 512 bytes. The run history keeps at most
+  50 `AttemptProgress` events per attempt, rate-limited, so read the attempt
+  card for what the pod is doing now.
 
 ### 13.6 Running the executor's cluster tests
 
@@ -1367,3 +1917,481 @@ SELECT idx_scan FROM pg_stat_user_indexes
 
 This should rise with every poll. If it stays flat while workers poll, the
 scheduler is not windowing; check the startup log (§15.2).
+
+---
+
+## 16. Gateway rate limiting
+
+The api-gateway is the only ingress, so it carries the only request limiter
+(`services/api-gateway/rest/ratelimit.go`, finding F99). It is **off unless
+`NEXUS_RATE_LIMIT_RPS` is set**. The startup line `rate limiting enabled (in
+memory, per replica)` lists the effective numbers for all three buckets.
+
+### 16.1 What is limited, in order
+
+| # | Bucket | Keyed by | When it is spent | 429 message |
+|---|---|---|---|---|
+| 1 | Per address | Client address; IPv6 folded to its /64 | Every request, before authentication | `too many requests from this address` |
+| 2 | Auth failures | Client address; IPv6 folded to its /64 | Once per **rejected** credential or login password. When it is empty, the address may not attempt authentication until it refills | `too many failed authentication attempts from this address` |
+| 3 | Per credential | Kind and database ID of the verified api key, session or scoped token | Every request, after successful authentication | `too many requests for this credential` |
+
+The pre-authentication key is always the address. Nothing in the request selects
+it, so a random `Authorization` header per request gets no fresh bucket (that was
+the F99 bypass). A request with **no** credential is not counted as a failure; it
+gets its 401 as before. The **same** rejected value repeated from one address,
+such as a console tab polling with a revoked session or a job with a rotated-out
+key, is charged once per 5 minutes rather than once per request. Distinct guesses
+are each charged.
+
+When bucket 2 is empty the whole address is refused authentication, including
+with a valid key. That is deliberate: otherwise an attacker interleaves a known
+key with guesses. It is a throttle, not a lockout. One attempt comes back each
+refill interval (6 s by default).
+
+The email-link routes (`/v1/auth/email/*`, `/v1/auth/password/*`) have their own
+per-address limit as well (§10, docs/MULTITENANCY.md), keyed the same way.
+
+### 16.2 Which address
+
+The peer address of the TCP connection, with one exception. When the peer is
+loopback or a private address (RFC 1918, RFC 4193 `fc00::/7`), such as the
+console's nginx, the gateway uses the `X-Real-IP` that proxy set.
+`X-Forwarded-For` is never used for limiting.
+
+- **Behind a load balancer or ingress on a private network**, that proxy MUST
+  overwrite `X-Real-IP` with the client address. If it does not, every client
+  shares the proxy's bucket. A client that can reach the gateway directly from a
+  private network can choose its own `X-Real-IP`. Do not expose the gateway's
+  port to an untrusted private network.
+- **Behind a public-address proxy**, the gateway sees only the proxy's address.
+  Every client then shares one address bucket. Raise
+  `NEXUS_RATE_LIMIT_IP_RPS`/`_BURST` or move the proxy onto a private network.
+
+### 16.3 Settings
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NEXUS_RATE_LIMIT_RPS` | unset (off) | Per-credential sustained rate. **Also the switch for all three buckets.** Unchanged meaning since F76. |
+| `NEXUS_RATE_LIMIT_BURST` | = RPS | Per-credential burst. Unchanged meaning. |
+| `NEXUS_RATE_LIMIT_IP_RPS` | 4 × RPS | Per-address sustained rate. Setting it without `_IP_BURST` sets the burst equal to the rate. |
+| `NEXUS_RATE_LIMIT_IP_BURST` | 4 × BURST | Per-address burst. |
+| `NEXUS_RATE_LIMIT_AUTH_FAIL_RPS` | 0.1667 (1 per 6 s) | Auth-failure refill rate per address. |
+| `NEXUS_RATE_LIMIT_AUTH_FAIL_BURST` | 10 | Failures an address may have before it is throttled. |
+| `NEXUS_RATE_LIMIT_MAX_KEYS` | 100000 | Most buckets each limiter holds. |
+
+The address default is a multiple of the credential allowance so that several
+principals behind one NAT or CI egress are not capped at one credential's rate.
+Guessing is bounded by the auth-failure bucket, not by this one.
+
+An unparseable value is ignored and the default is used, the same as every other
+gateway float setting.
+
+### 16.4 Responses
+
+A refusal is `429` with body `{"error":"rate_limited","message":"…"}` and:
+
+- `Retry-After`: whole seconds until one request is admitted, rounded up, at least 1.
+- `RateLimit-Limit`: the refusing bucket's burst.
+- `RateLimit-Remaining`: `0`.
+- `RateLimit-Reset`: same as `Retry-After`.
+
+The headers are sent on 429 only. The Python SDK retries 429 with backoff. The
+CLI does not retry; it prints a "retry with backoff" hint.
+
+### 16.5 Memory
+
+Each limiter is a map capped at `NEXUS_RATE_LIMIT_MAX_KEYS`, roughly 20 MB at the
+default. There are four maps: the three buckets and the repeat-failure record.
+Idle buckets are dropped after 10 minutes (15 minutes for auth failures), and
+never before they would have refilled, so eviction never forgives a throttled
+key early. At the cap the least recently used bucket is dropped. An actively
+throttled client stays recently used, so a spray of new addresses cannot flush
+it. Keys are addresses and credential **IDs**. No presented secret, header or
+password is stored. The repeat-failure record holds a keyed MAC whose key is
+random per process.
+
+### 16.6 Limits of this design — read before sizing
+
+- **Per replica, in memory.** Each gateway replica has its own buckets. With N
+  replicas a client can get up to N × each rate, depending on how the load
+  balancer spreads its connections. A restart or rollout forgets every bucket.
+  Size the numbers per replica. For a hard global quota you need a shared store
+  (Redis or similar) or an edge limiter in front of the gateway. Neither is
+  provided.
+- **Not a DDoS defence.** A flood from many addresses is bounded per address
+  only. Volumetric protection belongs at the network edge.
+- **NAT neighbours share buckets 1 and 2.** One misbehaving client behind an
+  office NAT can throttle its neighbours' sign-in for a few refill intervals.
+  Tune `_AUTH_FAIL_*` if that is your topology.
+- **No limiter-specific metrics.** Rejections are visible only as
+  `nexus_http_requests_total{code="429"}` on the gateway's ops listener (§17),
+  labelled by route; which bucket refused a request (credential, address or
+  auth failures) and how many keys each limiter holds are neither exported nor
+  logged. The refusing bucket's burst is in the `RateLimit-Limit` header (§16.4).
+
+---
+
+## 17. Metrics
+
+Every Nexus process serves Prometheus metrics at `GET /metrics` in the text
+format (0.0.4, gzip on request). The exposition is client_golang's (ADR-0019).
+A scrape answers from memory and touches no dependency, so `/metrics` keeps
+working during the database or broker outage you are trying to see.
+
+### 17.1 Where each process serves `/metrics`
+
+`/metrics` is **never** on a public port. The gateway's REST port is the
+internet-facing ingress, so the gateway has a dedicated operations listener.
+Every other service serves it on its existing health listener, which is
+already internal-only.
+
+| Process | Listener | Setting (default) | Compose (loopback) | Helm / k8s |
+|---|---|---|---|---|
+| api-gateway | ops listener: `/metrics`, `/healthz`, `/readyz` | `NEXUS_METRICS_ADDR` (`:8088`; `off` disables) | `127.0.0.1:19100` | Service port `metrics` (9464) → 8088 |
+| workflow-manager | health | `NEXUS_WFM_HEALTH_ADDR` (`:8081`) | `127.0.0.1:19101` | `metrics` (9464) → 8080 |
+| dag-engine | health | `NEXUS_HTTP_ADDR` (`:8082`) | `127.0.0.1:19102` | `metrics` → 8080 |
+| scheduler (one per queue) | health | `NEXUS_HTTP_ADDR` (`:8081`) | `127.0.0.1:19110-19119` (scalable); scheduler-gpu `19104` | `metrics` → 8080 |
+| resource-manager | health | `RM_HTTP_ADDR` (`:8082`) | `127.0.0.1:19105` | `metrics` → 8080 |
+| event-service | its internal HTTP API port | `HTTP_ADDR` (`:8085`) | `127.0.0.1:19106` | `metrics` → 8080 |
+| cluster-controller | health | `CONTROLLER_HTTP_ADDR` (`:8090`) | — | pod annotation, port 8090 |
+| agent | own listener: `/metrics`, `/healthz` | `NEXUS_METRICS_ADDR` / `-metrics-addr` (`127.0.0.1:8089`; `off` disables) | `127.0.0.1:19120-19122` | pod port `metrics` 8089 (PodMonitor) |
+| artifact-gc (batch job) | optional, only while the pass runs | `-metrics-addr` / `ARTIFACT_GC_METRICS_ADDR` (off) | — | — |
+
+The agent binds loopback by default, so an agent on a laptop or shared host
+does not publish metrics to the LAN. Deployments that scrape it set
+`NEXUS_METRICS_ADDR=:8089`, as compose and Helm do. If the agent cannot bind
+its port, it logs the error and keeps running work. If the gateway cannot bind,
+it fails to start and names the address in the error.
+
+**artifact-gc is a batch job.** A pull scrape usually misses a process that
+lives for seconds, so point it at a Pushgateway with
+`artifact-gc -metrics-pushgateway http://pushgateway:9091` (or
+`ARTIFACT_GC_PUSHGATEWAY_URL`). When the pass ends, whether it succeeded or
+failed, the job PUTs its `nexus_artifact_gc_*` families under
+`job="artifact-gc"`. It does not push Go runtime or process families. Alert on
+`time() - nexus_artifact_gc_last_success_timestamp_seconds`.
+
+### 17.2 Scrape configuration
+
+- **Helm, annotation discovery** (default): pods carry `prometheus.io/scrape`,
+  `prometheus.io/port` and `prometheus.io/path`. Set
+  `metrics.podAnnotations=false` to turn them off.
+- **Helm, prometheus-operator**: `metrics.serviceMonitor.enabled=true` renders
+  a ServiceMonitor over every Service port named `metrics`, plus a PodMonitor
+  for the agents. Set `metrics.podMonitor.enabled` to control the PodMonitor
+  separately. Add `metrics.serviceMonitor.labels.release=<your stack>` to match
+  the operator's selector. The chart does not install the CRDs; they must
+  already exist.
+- **deploy/k8s**: the standalone agent Deployment and the cluster-controller
+  pods carry the same annotations.
+- **Compose**: every metrics listener is published on `127.0.0.1` only. A local
+  Prometheus can scrape them:
+
+  ```yaml
+  scrape_configs:
+    - job_name: nexus
+      static_configs:
+        - targets: ['host.docker.internal:19100', 'host.docker.internal:19101',
+                    'host.docker.internal:19102', 'host.docker.internal:19104',
+                    'host.docker.internal:19105', 'host.docker.internal:19106',
+                    'host.docker.internal:19110', 'host.docker.internal:19120',
+                    'host.docker.internal:19121', 'host.docker.internal:19122']
+  ```
+
+To check any target by hand, run `curl -s localhost:19100/metrics | grep nexus_build_info`.
+
+### 17.3 Cardinality rules
+
+- No run, attempt, node, worker, key or host id is ever a label. Those belong
+  in logs and traces.
+- HTTP requests are labelled by the **ServeMux route template**
+  (`/v1/namespaces/{ns}/runs/{id}`), never by the raw path. Every unmatched
+  path is `route="unmatched"`, and every non-standard method is
+  `method="OTHER"`.
+- gRPC labels take only the methods registered on the server.
+- The backlog gauges report at most 50 queues by name. Any further queues are
+  summed into `queue="_other"`.
+- The cluster-controller's `pool` label is the binding name an operator
+  configured.
+
+If a caller passes labels that do not match a family's declared labels, the
+package normalizes them and logs `metrics: label set does not match` once per
+family. Treat that log line as a bug.
+
+### 17.4 Catalogue
+
+On top of the metrics below, every process exposes:
+
+- `go_*`: the Go runtime.
+- `process_*`: CPU, RSS, file descriptors and start time, on Linux.
+- `nexus_build_info{service,version,revision,go_version} 1`.
+
+Services with a Postgres pool also expose `nexus_db_pool_*`. In the T column,
+C is a counter, G a gauge and H a histogram.
+
+| Metric | T | Labels | Service | Meaning / alert on |
+|---|---|---|---|---|
+| `nexus_build_info` | G | service, version, revision, go_version | all | Always 1. Join on it to see which build a series came from |
+| `nexus_db_pool_max_conns`, `_total_conns`, `_acquired_conns`, `_idle_conns` | G | — | all DB services | Pool size and use. `acquired == max` sustained: pool exhausted |
+| `nexus_db_pool_acquires_total` | C | — | all DB services | Successful acquisitions |
+| `nexus_db_pool_acquire_duration_seconds_total` | C | — | all DB services | Cumulative wait; `rate(this)/rate(acquires)` is mean wait |
+| `nexus_db_pool_empty_acquires_total` | C | — | all DB services | Waits on an empty pool. Rising: raise the pool size or find the slow query |
+| `nexus_db_pool_canceled_acquires_total` | C | — | all DB services | Callers gave up waiting |
+| `nexus_http_requests_total` | C | method, route, code | api-gateway, event-service | REST rate and errors (`code=~"5.."`) |
+| `nexus_http_request_duration_seconds` | H | method, route, code | api-gateway, event-service | REST latency, 1 ms–60 s. SSE tails are observed when they end |
+| `nexus_http_response_size_bytes` | H | method, route | api-gateway, event-service | Response size |
+| `nexus_http_requests_in_flight` | G | — | api-gateway, event-service | Concurrent requests, open SSE tails included |
+| `grpc_server_started_total` | C | grpc_type, grpc_service, grpc_method | api-gateway (worker API), workflow-manager, dag-engine, scheduler, resource-manager | RPCs started |
+| `grpc_server_handled_total` | C | grpc_type, grpc_service, grpc_method, grpc_code | same | RPCs finished, by status. `Unauthenticated` on the gateway: bad worker keys |
+| `grpc_server_handling_seconds` | H | grpc_type, grpc_service, grpc_method | same | RPC latency, 1 ms–120 s. `PollTask` is a long poll by design |
+| `nexus_scheduler_claims_total` | C | queue, path (poll/push), outcome (dispatched/empty/blocked/race_lost/error) | scheduler | Claims per second. `outcome="error"` > 0: dispatch is failing |
+| `nexus_scheduler_claim_duration_seconds` | H | queue, path | scheduler | Claim transaction latency. p99 > 250 ms: see §15 and ADR-0018 |
+| `nexus_scheduler_attempts_dispatched_total` | C | queue, path | scheduler | Attempts leased to workers |
+| `nexus_scheduler_attempts_lost_total` | C | queue, cause (lease_expired/worker_dead), retry | scheduler | LOST attempts. Rising: worker or network trouble |
+| `nexus_scheduler_lease_expiries_total` | C | queue | scheduler | Leases the reconciler expired |
+| `nexus_scheduler_workers_declared_dead_total` | C | queue | scheduler | Workers the liveness sweep declared DEAD |
+| `nexus_scheduler_timers_fired_total` | C | queue, kind, result | scheduler | retry_backoff and schedule_to_start timers handled |
+| `nexus_scheduler_loop_errors_total` | C | queue, loop | scheduler | Background loop failures, which also fail `/readyz` |
+| `nexus_scheduler_pending_attempts` | G | queue | scheduler | PENDING backlog across the fleet, sampled every `NEXUS_BACKLOG_SAMPLE_INTERVAL` (15 s). Every replica reports every queue: aggregate with `max by (queue)` |
+| `nexus_scheduler_oldest_pending_age_seconds` | G | queue | scheduler | Queue age, the queue SLO signal. Also exposes a queue that has no scheduler replica |
+| `nexus_dag_operations_total` | C | op (materialize/reconcile), result | dag-engine | Engine operations |
+| `nexus_dag_operation_duration_seconds` | H | op | dag-engine | Operation latency |
+| `nexus_dag_node_transitions_total` | C | from, to | dag-engine | Node state transitions committed (CAS won) |
+| `nexus_dag_attempts_created_total` | C | kind (new/cache_hit) | dag-engine | Attempts created, with memo hits counted separately |
+| `nexus_dag_node_cas_misses_total` | C | — | dag-engine | Lost CAS races. Sustained: replicas are fighting over runs |
+| `nexus_dag_map_expansions_total` | C | — | dag-engine | Map templates expanded |
+| `nexus_dag_fanin_refused_total` | C | — | dag-engine | Fan-ins refused for exceeding `NEXUS_DAG_MAX_FANIN_BYTES` |
+| `nexus_dag_run_state_published_total` | C | state, result | dag-engine | Run state publishes. `result="error"` on a terminal state: a run may be stranded |
+| `nexus_rm_reservations_total` | C | result (granted/refused/not_found/error) | resource-manager | Reserve calls |
+| `nexus_rm_reserve_duration_seconds` | H | result | resource-manager | Reserve latency |
+| `nexus_rm_releases_total` | C | result (released/absent/error) | resource-manager | Releases. `absent` is expected duplicate traffic |
+| `nexus_rm_leaked_reservations_reclaimed_total` | C | source (heartbeat/reconcile/dead_worker) | resource-manager | Capacity reclaimed as leaks. Steady non-zero `heartbeat`: the ledger is drifting |
+| `nexus_rm_heartbeats_total` | C | result (ok/unknown_worker/error) | resource-manager | Heartbeats. `unknown_worker` forces a re-registration |
+| `nexus_rm_workers_declared_dead_total` | C | — | resource-manager | Workers declared DEAD by the liveness sweep |
+| `nexus_rm_quarantine_changes_total` | C | action (quarantined/expired) | resource-manager | Automatic quarantines (§14) |
+| `nexus_controller_reconcile_cycles_total` | C | result | cluster-controller | Reconcile cycles run by the leader |
+| `nexus_controller_reconcile_duration_seconds` | H | — | cluster-controller | Cycle duration |
+| `nexus_controller_pool_reconcile_errors_total` | C | pool | cluster-controller | Failed pool reconciles |
+| `nexus_controller_scale_actions_total` | C | pool, action, mode, applied | cluster-controller | Scale decisions: scale_out, scale_in, drain, hold, refused |
+| `nexus_controller_pool_replicas` | G | pool, kind (current/desired) | cluster-controller | Replicas observed and planned |
+| `nexus_controller_last_success_timestamp_seconds` | G | — | cluster-controller | Alert on the leader when `time() - this > 4 * interval` |
+| `nexus_controller_leader` | G | — | cluster-controller | 1 on the leader. Alert if `sum() != 1` for 5 minutes: no leader, or two |
+| `nexus_agent_tasks_running` | G | executor | agent | Attempts executing |
+| `nexus_agent_tasks_started_total` | C | executor | agent | Attempts started |
+| `nexus_agent_tasks_completed_total` | C | executor, outcome, error_class | agent | Attempts reported. `error_class="infrastructure"` rising on one host: a quarantine candidate |
+| `nexus_agent_task_duration_seconds` | H | executor, outcome | agent | Task wall time, 1 s–1 day |
+| `nexus_agent_heartbeats_total` | C | result | agent | Heartbeats sent |
+| `nexus_agent_heartbeat_duration_seconds` | H | — | agent | Heartbeat round trip |
+| `nexus_agent_heartbeat_consecutive_failures` | G | — | agent | Current failure streak. At 3 or more, expect the worker to be declared DEAD |
+| `nexus_agent_last_heartbeat_success_timestamp_seconds` | G | — | agent | Last acknowledged beat |
+| `nexus_agent_result_store_puts_total` | C | result (inline/uploaded/deduplicated/error) | agent | Outputs stored. `error` > 0: object store trouble |
+| `nexus_agent_result_store_upload_bytes_total` | C | result | agent | Output bytes. `uploaded` counts bytes actually transferred |
+| `nexus_agent_result_store_upload_duration_seconds` | H | result | agent | Upload latency. Inline outputs are not observed |
+| `nexus_agent_result_store_upload_size_bytes` | H | — | agent | Uploaded output sizes |
+| `nexus_agent_sessions_total` | C | — | agent | Registrations. More than 1 per process means the control plane forced a re-registration |
+| `nexus_agent_advertised_capacity` | G | resource | agent | Capacity advertised for scheduling, which the runtime does not necessarily enforce |
+| `nexus_agent_result_report_failures_total` | C | — | agent | Reports not delivered. The WAL retains them |
+| `nexus_artifact_gc_last_run_objects` | G | disposition | artifact-gc | Last sweep: scanned, live_refs, reachable, too_young, orphan, deleted, delete_error |
+| `nexus_artifact_gc_last_run_orphan_bytes` | G | — | artifact-gc | Reclaimable bytes found |
+| `nexus_artifact_gc_last_run_duration_seconds` | G | — | artifact-gc | Pass duration |
+| `nexus_artifact_gc_last_success_timestamp_seconds`, `_last_failure_timestamp_seconds` | G | — | artifact-gc | Batch-job liveness, via the Pushgateway |
+| `nexus_artifact_gc_dry_run` | G | — | artifact-gc | 1 when nothing was deleted |
+| `nexus_artifact_gc_last_check_refs` | G | kind | artifact-gc | `-check-refs` result. `missing_keys` > 0 is data loss |
+| `nexus_timer_*`, `nexus_timers_fired_total`, `nexus_stalled_runs_recovered_total` | — | — | workflow-manager | Durable timers. Unchanged by this work |
+| `nexus_outbox_*` | — | — | event-service | Outbox relay (§11.3) |
+| `nexus_tls_cert_not_after_timestamp_seconds`, `nexus_tls_cert_expiry_seconds`, `nexus_tls_reload_total`, `nexus_tls_reload_stale` | — | role | services with TLS | Certificate expiry and reloads (§9.3) |
+
+### 17.5 Verifying after an upgrade
+
+1. `curl -s <target>/metrics | head` answers 200 with `Content-Type: text/plain; version=0.0.4`.
+2. `nexus_build_info` shows the version you deployed on every target.
+3. In Prometheus, `up{job=~".*nexus.*"} == 0` returns nothing.
+4. The gateway's REST port answers 404 for `/metrics`. If it answers 200, the
+   ops listener has been routed to the public port.
+
+---
+
+## 18. Operator retry of a failed run
+
+`nexusctl run retry <run-id> [--node ID ...]`, the SDK's `retry_run(run_id,
+nodes=[...])` and the console's "Retry failed tasks" / "Retry this task" all call
+`POST /v1/namespaces/{ns}/runs/{id}/retry`. The semantics are in
+[ARCHITECTURE §5.2, Operator retry](ARCHITECTURE.md); CONTRACT-FINDINGS F100
+records why the endpoint used to ignore the node selection. Until F100 every
+retry, whole-run or node-level, failed with "dag-engine.ResetFailedNodes is not
+wired yet", so there is no earlier retry behaviour to stay compatible with.
+
+### 18.1 Deploy order
+
+1. Apply migration 0026. It adds one column, `task_nodes.retry_floor INT NOT NULL
+   DEFAULT 0` — metadata-only on PostgreSQL 16, no rewrite, no new grant.
+2. Roll the **dag-engine** and **scheduler**. The engine must ignore attempts at or
+   below the floor; the scheduler must count the retry budget from it. An older
+   engine reconciling a retried run derives the retried node from its superseded
+   FAILED attempt and puts it straight back to FAILED — safe (nothing runs twice)
+   but the retry is lost.
+3. Roll the **workflow-manager**, then the **api-gateway**. A gateway ahead of the
+   workflow-manager sends `node_ids`, which an older workflow-manager ignores; the
+   gateway's own selection check still refuses bad selections, but a good one
+   becomes a whole-run retry until step 3 finishes. A workflow-manager ahead of the
+   dag-engine answers `501 retry_unavailable` (the engine has no `ResetNodes`), and
+   changes nothing.
+
+### 18.2 Reading the answers
+
+| HTTP | `error` | Meaning | Action |
+|---|---|---|---|
+| 200 | — | Committed: the run is RUNNING | Watch the run |
+| 400 | `invalid_body`, `invalid_nodes` | Malformed request | Fix the request |
+| 404 | `not_found` | No such run in this namespace | Check the namespace |
+| 409 | `nodes_not_retryable` | A named node is SUCCEEDED, SKIPPED, PENDING… | Name FAILED / UPSTREAM_FAILED / CANCELLED nodes |
+| 409 | `retry_refused` | Run not FAILED/TIMED_OUT, or a node would fail again at once, or fail_fast leaves another failure standing | The message names the node to add |
+| 409 | `retry_conflict` | A concurrent change won; nothing was retried | Re-read the run, retry again |
+| 422 | `unknown_nodes` | The run has no node by that name | Fix the node id |
+| 501 | `retry_unavailable` | dag-engine too old or not configured | Finish §18.1 |
+| 503 | `retry_outcome_unknown` | The engine call timed out; the run was committed RUNNING and reconciled so it converges either way | Re-read the run before retrying again |
+
+Every attempt, successful or not, writes a `run.retry` audit record with the
+requested nodes. The run's history carries `RunRetriedFromFailed` with
+`requested_nodes`, `selected` and `reset_nodes`.
+
+### 18.3 Finding what a retry superseded
+
+```sql
+SELECT n.node_id, n.retry_floor, n.attempts_used, n.max_attempts,
+       a.attempt_number, a.state, a.attempt_number <= n.retry_floor AS superseded
+  FROM task_nodes n JOIN task_attempts a USING (run_id, node_id)
+ WHERE n.run_id = $1 ORDER BY n.node_id, a.attempt_number;
+```
+
+Superseded attempts are history, not garbage: never delete them. They share the
+retried attempt's idempotency key, which is how a handler recognises the retry of
+work it may already have done.
+
+### 18.4 Rolling back 0026
+
+Roll the dag-engine and scheduler back first (they read the column), then run
+`0026_node_retry_floor.down.sql` by hand (§6.4). Runs that were retried by node
+lose the record of which attempts were superseded; an older engine derives those
+nodes from their latest attempt, as it always did.
+
+---
+
+## 19. Durable task logs: retention and sizing
+
+Design: [ADR-0020](adr/0020-durable-task-logs.md). Agents write each attempt's
+stdout/stderr as NDJSON chunks directly to the result store under
+`<namespace>/logs/<attempt_id>/`, index them through the lease-fenced
+`ReportLogs` RPC (tables `attempt_logs`, `attempt_log_chunks`, migration 0025),
+and on completion upload one compacted `log.ndjson`. The gateway serves
+`GET /v1/namespaces/{ns}/attempts/{id}/logs` from the index plus range reads of
+the store; `nexusctl logs <attempt> [-f] [--tail N]`, the SDK's `get_logs` /
+`search_logs` and the console's log pane all use it.
+
+### 19.1 Enabling it
+
+Log shipping is ON when the gateway can read the result store. It reads the same
+variables as the agent, which compose (`x-minio-env`) and Helm
+(`nexus.resultStoreEnv`) already give it:
+
+| Setting (api-gateway) | Default | Meaning |
+|---|---|---|
+| `NEXUS_S3_ACCESS_KEY_ID`, `NEXUS_S3_SECRET_ACCESS_KEY` | unset | READ credentials for log objects. Unset: the logs route answers 501 and agents are told not to ship. |
+| `NEXUS_RESULT_STORE_ENDPOINT`, `_BUCKET`, `_REGION`, `NEXUS_S3_USE_TLS` | compose values | Where logs are read from; identical to where agents write. |
+| `NEXUS_LOG_SHIPPING` | `true` | `false` turns the feature off fleet-wide (501 + no shipping). |
+| `NEXUS_LOG_MAX_BYTES_PER_ATTEMPT` | 64 MiB | Per-attempt cap on shipped (encoded) bytes. Past it the head is kept, the last 2 MiB is kept, and the omission is written into the log and the index. |
+| `NEXUS_LOG_CHUNK_BYTES` | 256 KiB | A chunk is sealed at this size (agents clamp to 4 MiB; the gateway refuses > 8 MiB). |
+| `NEXUS_LOG_FLUSH_INTERVAL_MS` | 2000 | A non-empty chunk is sealed at least this often. This is the live-tail latency, and the per-attempt ReportLogs rate (see §19.3). Agents slow to 5× this after 300 chunks. |
+
+The policy is sent to agents in `RegisterResponse.log_shipping`, so a change
+takes effect as agents re-register (restart or `REREGISTER`), not per host.
+
+The startup line `durable task logs enabled` (or the WARN explaining why they
+are not) is the first thing to check. Agents log `durable task logs enabled`
+at registration and `attempt log shipped` (lines, bytes, chunks, finalized,
+truncated/dropped counts) per attempt.
+
+**Credential scoping (recommended for production).** The gateway needs only
+`s3:GetObject` on `arn:aws:s3:::<bucket>/*/logs/*`. Workers need `s3:PutObject`
+on `<bucket>/<their namespace>/logs/*` in addition to their existing output
+prefix. The agent refuses to write a log key outside its own namespace's
+`logs/` prefix, and the gateway refuses to index one, so a mis-scoped
+credential cannot be used through Nexus to read or index another tenant's
+objects -- but scoping the credential is what bounds a compromised host.
+
+**Upgrade order.** 0025 first (additive), then gateways, then agents. An old
+agent under a new gateway ships nothing (the API says `none` with an
+explanation); a new agent under an old gateway is not told to ship and ships
+nothing. No mixed-version combination writes objects that cannot be read.
+Rolling back: roll gateways back first; `0025_attempt_logs.down.sql` drops the
+index only, and the objects become orphans for artifact-gc.
+
+### 19.2 Retention
+
+Log objects are reference-counted by artifact-gc exactly like outputs (§7.7):
+
+- a log's objects are live while its `task_attempts` row exists, so **deleting
+  a run** (which cascades to its attempts and log index) makes its logs orphans;
+- after compaction, the chunk objects are orphans and only `log.ndjson` is
+  live -- compaction's space is reclaimed by the sweep, not inline;
+- chunks a fenced (stale) attempt uploaded but could not index, and uploads
+  whose `ReportLogs` never landed, are orphans;
+- all orphans wait out the grace period (`-grace`, default 24h).
+
+Time-based retention is opt-in and applies to logs only:
+
+```sh
+# Report what a 30-day log retention would collect (dry run, the default):
+artifact-gc -log-retention 720h
+# Collect it:
+artifact-gc -log-retention 720h -delete -i-understand-this-deletes-data
+```
+
+A log whose last write (finalization, or last indexed chunk) is older than the
+window drops out of the live set; its index rows remain, so the API reports it
+as `expired` with an explanation rather than as an empty log. Outputs are never
+subject to time retention: they are inputs to downstream tasks and retries.
+The summary line `objects examined N (M task-log objects)` shows how much of a
+pass was logs. `-check-refs` (dangling references) does not yet cover the log
+index; a log whose objects vanished out of band shows up in the API as gap
+lines or `expired`.
+
+### 19.3 Sizing
+
+Per attempt that is producing output (defaults):
+
+| Resource | Cost |
+|---|---|
+| Object store PUTs | 1 per chunk: ≤ 1 per flush interval (0.5/s), plus 1 compaction PUT at the end |
+| Gateway worker-port RPCs | 1 `ReportLogs` per upload batch (≤ 0.5/s) plus 1 final. At 1,000 concurrently *logging* attempts that is ≈ 500 small RPS and ≈ 500 single-row inserts/s into `attempt_log_chunks`; raise `NEXUS_LOG_FLUSH_INTERVAL_MS` for larger fleets. Silent attempts cost nothing. |
+| Postgres | 1 row per chunk (≈ 200 B plus index) and 1 per attempt. A 64 MiB log ≈ 256 rows; a task printing a line a second for a day ≈ 9,000 rows. Rows go with the run. |
+| Object storage | ≈ 1.2–1.6× the raw output (the NDJSON envelope is ~50 B/line), capped at 64 MiB + 2 MiB tail per attempt. Until the sweep collects compacted-away chunks, a compacted log occupies twice its size. |
+| Agent memory | ≤ 8 MiB unshipped buffer + 2 MiB tail per attempt, independent of output volume. Past the buffer, lines are dropped and counted, never blocking the task. |
+| Agent disk | A spool (for compaction) up to the per-attempt cap, under `<WAL dir>/log-spool`, deleted at the end of each attempt. |
+| Gateway per request | ≤ 32 MiB of object reads per page; search scans ≤ 64 MiB by default (256 MiB max, `scan_bytes`), ≤ 1,000 matches and 15 s; each bound is reported (`stopped_by`) and the scan is resumable via `next_line`. |
+| Result latency | Finalization (drain + compaction + final report) precedes `ReportResult` and is bounded at 30 s; normally one PUT and one RPC. If it cannot finish, the result is reported anyway and the log is `partial`. |
+
+### 19.4 Reading the states
+
+| State | Meaning | Action |
+|---|---|---|
+| `none` | Nothing indexed. Not started, no output yet, or agent/gateway predates shipping, or shipping disabled. | Check the gateway startup line and the agent's registration line. |
+| `live` | Shipping while the attempt runs. | -- |
+| `complete` | Finalized by the agent. | -- |
+| `partial` | The attempt ended without a final report: agent crash, lost lease, or object store unreachable during finalization. Everything indexed is readable. | Agent log for `log finalization ran out of time` / `log shipping stopped`. |
+| `expired` | Index rows exist, objects are gone (retention or out-of-band deletion). | Expected after `-log-retention`; otherwise investigate like a dangling ref (§7.8). |
+
+Lines on stream `nexus` are the platform's: `truncated` / `truncation_summary`
+(cap), `dropped` (backpressure), `gap` (a range the reader could not read, with
+the reason). They are never silently omitted.
+
+### 19.5 Known limits
+
+- **Redaction has no input yet.** The agent redacts known secret values from
+  every line before it leaves the host, but nothing in the platform resolves
+  `SecretRef` values on the worker today, so there is nothing to redact. The
+  resolver, when added, must feed `Runner.SecretValues`. Matching is per line.
+- Kubernetes pod logs interleave stdout and stderr; those lines are tagged
+  `combined`.
+- Live tail is poll-based (≈ flush interval + 1 s), not a pipe.
+- Timestamps are the agent's clock (informational; ordering is by line number).

@@ -85,7 +85,12 @@ type subprocState struct {
 	// output is data, while the log is a diagnostic.
 	stdoutBuf *boundedBuffer
 	pgid      int
-	waitMu    sync.Mutex
+	// logSink, when set, receives stdout and stderr separately (ADR-0020); the
+	// agent then owns the pipes and capture drains them. Nil keeps the original
+	// shared-fd capture into combined.log byte for byte.
+	logSink LogSink
+	capture *pipeCapture
+	waitMu  sync.Mutex
 	// waited memoises the wait result so Wait is safe to call twice (the
 	// deadline enforcer and the caller can race).
 	waited   bool
@@ -94,6 +99,10 @@ type subprocState struct {
 }
 
 func (e *SubprocessExecutor) Kind() string { return "subprocess" }
+
+// CapturesLogs: the subprocess executor feeds TaskSpec.LogSink itself, with
+// stdout and stderr kept apart.
+func (e *SubprocessExecutor) CapturesLogs() bool { return true }
 
 func (e *SubprocessExecutor) logger() *slog.Logger {
 	if e.Log != nil {
@@ -157,6 +166,7 @@ func (e *SubprocessExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepar
 	if spec.StdoutOutput != "" {
 		st.stdoutBuf = newBoundedBuffer(MaxStdoutOutputBytes)
 	}
+	st.logSink = spec.LogSink
 	if wd := spec.Runtime.GetWorkingDir(); wd != "" {
 		st.workDir = wd
 	}
@@ -192,8 +202,42 @@ func (e *SubprocessExecutor) Start(ctx context.Context, p Prepared) (Handle, err
 	cmd := exec.CommandContext(context.Background(), st.argv[0], st.argv[1:]...)
 	cmd.Dir = st.workDir
 	cmd.Env = st.env
+	// Pipe ends the agent must close in the parent once the child has them.
+	var childEnds []*os.File
+	closeAll := func(fs []*os.File) {
+		for _, f := range fs {
+			_ = f.Close()
+		}
+	}
 	cmd.Stderr = logF
-	if st.stdoutBuf != nil {
+	if st.logSink != nil {
+		// Separate streams need separate fds, so the agent owns two pipes and
+		// drains them itself. *os.File ends are handed to the child directly
+		// (no exec copy goroutines), so cmd.Wait does not wait on grandchildren
+		// that inherit them; the drain is bounded in Wait instead.
+		outR, outW, perr := os.Pipe()
+		if perr != nil {
+			logF.Close()
+			return Handle{}, fmt.Errorf("stdout pipe: %w", perr)
+		}
+		errR, errW, perr := os.Pipe()
+		if perr != nil {
+			closeAll([]*os.File{outR, outW})
+			logF.Close()
+			return Handle{}, fmt.Errorf("stderr pipe: %w", perr)
+		}
+		childEnds = []*os.File{outW, errW}
+		cmd.Stdout, cmd.Stderr = outW, errW
+		combined := lockedWriter{mu: &sync.Mutex{}, w: logF}
+		var stdoutBuf io.Writer
+		if st.stdoutBuf != nil {
+			stdoutBuf = st.stdoutBuf
+		}
+		st.capture = startPipeCapture(map[*os.File]io.Writer{
+			outR: teeNoFail{combined, st.logSink.Writer(LogStreamStdout), stdoutBuf},
+			errR: teeNoFail{combined, st.logSink.Writer(LogStreamStderr)},
+		})
+	} else if st.stdoutBuf != nil {
 		// Tee, not redirect: stdout is still the operator's log. Losing the log
 		// because the task opted into stdout capture would make the feature cost
 		// debuggability, which is not a trade anyone asked for.
@@ -208,11 +252,18 @@ func (e *SubprocessExecutor) Start(ctx context.Context, p Prepared) (Handle, err
 	// cmd.Path/cmd.Args into a shell trampoline that applies the limits in the
 	// child (see applyRlimits for why that indirection is necessary).
 	if err := applyRlimits(cmd, st.limit, st.deadline); err != nil {
+		closeAll(childEnds)
+		st.capture.finish(0)
 		logF.Close()
 		return Handle{}, err
 	}
 
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	// The child holds its own copies now (or never will); the parent's write
+	// ends must close either way, or the drains never see EOF.
+	closeAll(childEnds)
+	if err != nil {
+		st.capture.finish(0)
 		logF.Close()
 		if errors.Is(err, os.ErrNotExist) {
 			return Handle{}, fmt.Errorf("%w: %q: %v", ErrImageNotFound, st.argv[0], err)
@@ -323,6 +374,10 @@ enforce:
 	st.waited, st.outcome = true, o
 	close(st.waitDone)
 	st.waitMu.Unlock()
+
+	// Output still in the pipes belongs to the attempt: drain it (bounded)
+	// before the log file closes and before the caller finalizes the shipped log.
+	st.capture.finish(captureDrainGrace)
 
 	// Flush and close the log sink only after the process is reaped, so no
 	// write races the close.
@@ -444,6 +499,7 @@ func (e *SubprocessExecutor) Cleanup(ctx context.Context, h Handle) error {
 			e.logger().Warn("cleanup could not kill process group",
 				"attempt_id", h.AttemptID, "pgid", st.pgid, "error", err)
 		}
+		st.capture.finish(0)
 		if st.logF != nil {
 			_ = st.logF.Close()
 		}

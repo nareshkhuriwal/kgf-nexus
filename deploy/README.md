@@ -37,6 +37,15 @@ Then:
 Postgres is published on **55433**, not 5432, so it cannot collide with a local
 Postgres or with the 55432 dev database in `CONTRACT.md`.
 
+The services have **no built-in DSN** (docs/OPERATIONS.md §8): compose passes
+`DATABASE_URL` to every container, and a service started any other way exits at
+startup until you give it one. To run a service from source against this stack:
+
+```bash
+export DATABASE_URL='postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable'
+go run ./services/scheduler
+```
+
 ### Startup order (and why)
 
 ```
