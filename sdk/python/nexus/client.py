@@ -18,19 +18,21 @@ Endpoints implemented (all namespace-scoped, per §8.2):
     POST   /v1/namespaces/{ns}/runs/{id}/cancel
     POST   /v1/namespaces/{ns}/runs/{id}/retry
     GET    /v1/namespaces/{ns}/attempts/{id}/logs   stream
+    GET    /v1/namespaces/{ns}/runs/{run}/attempts/{id}/assignment   replay input
     GET    /v1/namespaces/{ns}/workers              fleet view
     GET    /v1/namespaces/{ns}/capacity             advertised vs committed
 """
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence, cast
 
 from .canonical import canonical_bytes
 from .workflow import CompiledWorkflow, WorkflowDefinition
@@ -56,6 +58,10 @@ class NexusAPIError(NexusError):
         self.message = message
         self.body = body
         self.request_id = request_id
+        #: For a rejected spec (422): the gateway's problems, each a dict with
+        #: path, message, stage and -- for a Python workflow -- "location", the
+        #: "file:line" of the @task or workflow-body call it concerns.
+        self.problems: list[dict[str, Any]] = []
         detail = f"HTTP {status}: {message}"
         if request_id:
             detail += f" (request_id={request_id})"
@@ -114,16 +120,44 @@ class NexusClient:
                 url += "?" + urllib.parse.urlencode(pairs)
         return url
 
-    def _request(
+    def _call(
         self,
         method: str,
         url: str,
         *,
         body: bytes | None = None,
         headers: Mapping[str, str] | None = None,
-        stream: bool = False,
         timeout: float | None = None,
-    ) -> Any:
+    ) -> dict[str, Any]:
+        """A JSON request whose response is a JSON object (every endpoint here)."""
+        resp = self._open(method, url, body=body, headers=headers, timeout=timeout)
+        with resp:
+            payload = resp.read()
+        if not payload:
+            return {}
+        try:
+            decoded = json.loads(payload)
+        except ValueError:
+            raise NexusError(
+                f"{method} {url} returned a non-JSON body "
+                f"({payload[:200]!r}); is NEXUS_ENDPOINT pointing at the API gateway?"
+            ) from None
+        if not isinstance(decoded, dict):
+            raise NexusError(
+                f"{method} {url} returned JSON {type(decoded).__name__}, expected an object"
+            )
+        return decoded
+
+    def _open(
+        self,
+        method: str,
+        url: str,
+        *,
+        body: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> http.client.HTTPResponse:
+        """Send a request with retries and return the open response."""
         hdrs: dict[str, str] = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         if self._api_key:
             hdrs["Authorization"] = f"Bearer {self._api_key}"
@@ -157,19 +191,10 @@ class NexusClient:
                     "NEXUS_ENDPOINT and that the control plane is running."
                 ) from None
 
-            if stream:
-                return resp
-            with resp:
-                payload = resp.read()
-            if not payload:
-                return {}
-            try:
-                return json.loads(payload)
-            except ValueError:
-                raise NexusError(
-                    f"{method} {url} returned a non-JSON body "
-                    f"({payload[:200]!r}); is NEXUS_ENDPOINT pointing at the API gateway?"
-                ) from None
+            # urlopen is annotated as returning Any-ish in typeshed for http(s)
+            # URLs; the object IS an HTTPResponse for every scheme this client
+            # accepts, which the cast states rather than hides.
+            return cast(http.client.HTTPResponse, resp)
 
     # ── specs ───────────────────────────────────────────────────────────────
     def submit_spec(
@@ -185,18 +210,25 @@ class NexusClient:
         that differs from the one we told the user about.
         """
         compiled = _as_compiled(spec)
-        return self._request(
-            "POST",
-            self._url("/specs", {"dry_run": "true"} if dry_run else None),
-            body=canonical_bytes(compiled.spec),
-        )
+        try:
+            return self._call(
+                "POST",
+                self._url("/specs", {"dry_run": "true"} if dry_run else None),
+                body=canonical_bytes(compiled.spec),
+            )
+        except NexusAPIError as e:
+            if e.status == 422:
+                _locate_problems(e, compiled)
+            raise
 
-    def validate_spec(self, spec: Any) -> dict[str, Any]:
+    def validate_spec(
+        self, spec: CompiledWorkflow | WorkflowDefinition | Mapping[str, Any]
+    ) -> dict[str, Any]:
         """Validate without registering. `workflow submit --dry-run`."""
         return self.submit_spec(spec, dry_run=True)
 
     def list_spec_versions(self, name: str) -> dict[str, Any]:
-        return self._request("GET", self._url(f"/specs/{urllib.parse.quote(name, safe='')}/versions"))
+        return self._call("GET", self._url(f"/specs/{urllib.parse.quote(name, safe='')}/versions"))
 
     # ── runs ────────────────────────────────────────────────────────────────
     def create_run(
@@ -225,7 +257,7 @@ class NexusClient:
         if priority is not None:
             payload["priority"] = priority
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-        return self._request(
+        return self._call(
             "POST",
             self._url("/runs"),
             body=json.dumps(payload, sort_keys=True).encode("utf-8"),
@@ -234,7 +266,7 @@ class NexusClient:
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         """Run detail including per-node states."""
-        return self._request("GET", self._url(f"/runs/{urllib.parse.quote(run_id, safe='')}"))
+        return self._call("GET", self._url(f"/runs/{urllib.parse.quote(run_id, safe='')}"))
 
     def list_runs(
         self,
@@ -244,7 +276,7 @@ class NexusClient:
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
-        return self._request(
+        return self._call(
             "GET", self._url("/runs", {"state": state, "spec": spec, "limit": limit, "cursor": cursor})
         )
 
@@ -254,7 +286,7 @@ class NexusClient:
         Distinct from pause, which stops new dispatch but lets in-flight work
         finish (§5.2). Conflating them makes pause useless for its actual job.
         """
-        return self._request(
+        return self._call(
             "POST",
             self._url(f"/runs/{urllib.parse.quote(run_id, safe='')}/cancel"),
             body=json.dumps({"reason": reason}).encode("utf-8"),
@@ -286,22 +318,22 @@ class NexusClient:
         payload: dict[str, Any] = {}
         if nodes:
             payload["nodes"] = list(nodes)
-        return self._request(
+        return self._call(
             "POST",
             self._url(f"/runs/{urllib.parse.quote(run_id, safe='')}/retry"),
             body=json.dumps(payload, sort_keys=True).encode("utf-8"),
         )
 
     def pause_run(self, run_id: str) -> dict[str, Any]:
-        return self._request("POST", self._url(f"/runs/{urllib.parse.quote(run_id, safe='')}/pause"), body=b"{}")
+        return self._call("POST", self._url(f"/runs/{urllib.parse.quote(run_id, safe='')}/pause"), body=b"{}")
 
     def resume_run(self, run_id: str) -> dict[str, Any]:
-        return self._request("POST", self._url(f"/runs/{urllib.parse.quote(run_id, safe='')}/resume"), body=b"{}")
+        return self._call("POST", self._url(f"/runs/{urllib.parse.quote(run_id, safe='')}/resume"), body=b"{}")
 
     # ── events and logs ─────────────────────────────────────────────────────
     def get_events(self, run_id: str, *, after_seq: int | None = None) -> dict[str, Any]:
         """Event history as a single response. `run_events` is append-only."""
-        return self._request(
+        return self._call(
             "GET",
             self._url(f"/runs/{urllib.parse.quote(run_id, safe='')}/events", {"after_seq": after_seq}),
         )
@@ -318,8 +350,8 @@ class NexusClient:
             f"/runs/{urllib.parse.quote(run_id, safe='')}/events",
             {"watch": "true", "after_seq": after_seq},
         )
-        resp = self._request(
-            "GET", url, headers={"Accept": "text/event-stream"}, stream=True, timeout=timeout
+        resp = self._open(
+            "GET", url, headers={"Accept": "text/event-stream"}, timeout=timeout
         )
         with resp:
             yield from _parse_sse(resp)
@@ -351,7 +383,7 @@ class NexusClient:
         url = self._url(
             f"/attempts/{urllib.parse.quote(attempt_id, safe='')}/logs", params or None
         )
-        resp = self._request("GET", url, headers={"Accept": "text/plain"}, stream=True, timeout=timeout)
+        resp = self._open("GET", url, headers={"Accept": "text/plain"}, timeout=timeout)
         with resp:
             for raw in resp:
                 yield raw.decode("utf-8", errors="replace").rstrip("\n")
@@ -373,7 +405,7 @@ class NexusClient:
         being finalized) or expired (removed by retention). Pass ``next_line``
         back as ``from_line`` to continue.
         """
-        return self._request(
+        return self._call(
             "GET",
             self._url(
                 f"/attempts/{urllib.parse.quote(attempt_id, safe='')}/logs",
@@ -399,7 +431,7 @@ class NexusClient:
         ``complete`` is false, call again with ``from_line=next_line``. Regular
         expressions use RE2 syntax (no backreferences or lookaround).
         """
-        return self._request(
+        return self._call(
             "GET",
             self._url(
                 f"/attempts/{urllib.parse.quote(attempt_id, safe='')}/logs",
@@ -414,18 +446,35 @@ class NexusClient:
             ),
         )
 
+    def get_assignment(self, attempt_id: str, *, run_id: str = "-") -> dict[str, Any]:
+        """An attempt's resolved inputs and TaskSpec, for replaying it locally.
+
+        ``run_id`` narrows the lookup; the default ``"-"`` finds the attempt in
+        any run of the namespace. The response never contains the lease token
+        or a secret value -- SecretRefs stay references -- and blob inputs stay
+        references into the object store. Pass it to ``nexus.replay.replay``.
+        Needs the runs.view, tasks.view and tasks.results.view permissions.
+        """
+        return self._call(
+            "GET",
+            self._url(
+                f"/runs/{urllib.parse.quote(run_id, safe='')}/attempts/"
+                f"{urllib.parse.quote(attempt_id, safe='')}/assignment"
+            ),
+        )
+
     # ── fleet ───────────────────────────────────────────────────────────────
     def list_workers(self, *, state: str | None = None) -> dict[str, Any]:
-        return self._request("GET", self._url("/workers", {"state": state}))
+        return self._call("GET", self._url("/workers", {"state": state}))
 
     def drain_worker(self, worker_id: str) -> dict[str, Any]:
-        return self._request(
+        return self._call(
             "POST", self._url(f"/workers/{urllib.parse.quote(worker_id, safe='')}/drain"), body=b"{}"
         )
 
     def capacity(self) -> dict[str, Any]:
         """Advertised vs committed capacity -- the ledger, as the platform sees it."""
-        return self._request("GET", self._url("/capacity"))
+        return self._call("GET", self._url("/capacity"))
 
     # ── convenience ─────────────────────────────────────────────────────────
     def submit_and_run(
@@ -460,7 +509,7 @@ class NexusClient:
             time.sleep(poll_interval)
 
 
-def _as_compiled(spec: Any) -> CompiledWorkflow:
+def _as_compiled(spec: object) -> CompiledWorkflow:
     if isinstance(spec, CompiledWorkflow):
         return spec
     if isinstance(spec, WorkflowDefinition):
@@ -473,6 +522,32 @@ def _as_compiled(spec: Any) -> CompiledWorkflow:
         f"expected a CompiledWorkflow, a @workflow, or a spec mapping, got "
         f"{type(spec).__name__}"
     )
+
+
+def _locate_problems(e: NexusAPIError, compiled: CompiledWorkflow) -> None:
+    """Attach the gateway's problems to a 422, placed in the author's Python.
+
+    The gateway's own line numbers refer to the canonical JSON this client sent
+    -- one line -- so the useful position is the one only this process knows:
+    the source map the compiler recorded while tracing.
+    """
+    body = e.body if isinstance(e.body, Mapping) else {}
+    raw = body.get("problems")
+    if not isinstance(raw, list):
+        return
+    lines = []
+    for p in raw:
+        if not isinstance(p, Mapping):
+            continue
+        problem = dict(p)
+        loc = compiled.locate(str(problem.get("path", "")))
+        if loc is not None:
+            problem["location"] = str(loc)
+        e.problems.append(problem)
+        where = problem.get("location") or "(no source line)"
+        lines.append(f"  {where}: {problem.get('message', '')} ({problem.get('path', '')})")
+    if lines:
+        e.args = (f"{e.args[0]}\n" + "\n".join(lines),)
 
 
 def _api_error(status: int, raw: bytes, headers: Mapping[str, str]) -> NexusAPIError:
@@ -504,7 +579,7 @@ def _api_error(status: int, raw: bytes, headers: Mapping[str, str]) -> NexusAPIE
     return NexusAPIError(status, message, body=body, request_id=request_id)
 
 
-def _parse_sse(stream: Any) -> Iterator[dict[str, Any]]:
+def _parse_sse(stream: Iterable[bytes]) -> Iterator[dict[str, Any]]:
     """Minimal SSE reader: accumulate `data:` lines until a blank line.
 
     Only the `data` field is used. Comment lines (`:`) are keep-alives and are

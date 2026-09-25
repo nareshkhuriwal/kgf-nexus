@@ -125,6 +125,12 @@ type API struct {
 
 	// cache is nil unless WithCacheInvalidator was called; its route answers 501.
 	cache CacheInvalidator
+
+	// assignments reads an attempt's assignment for replay; nil means the
+	// store-backed reader. inlineThreshold is the configured ADR-0016 boundary
+	// reported alongside it. See assignment.go.
+	assignments     AssignmentReader
+	inlineThreshold int64
 }
 
 // New builds the REST API.
@@ -245,6 +251,9 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("POST /v1/namespaces/{ns}/runs/{id}/retry", a.guard(authn.ActionWrite, a.retryRun))
 
 	mux.Handle("GET /v1/namespaces/{ns}/attempts/{id}/logs", a.guard(authn.ActionRead, a.attemptLogs))
+	// Replay (ADR-0022): the attempt's resolved inputs and TaskSpec, never its
+	// lease token or a secret value. {run} may be "-".
+	mux.Handle(assignmentRoute, a.guard(authn.ActionRead, a.attemptAssignment))
 
 	// Schedules. Creating one is a write because it creates runs on a timer; the
 	// enable/disable pair and delete are writes for the same reason. The preview is

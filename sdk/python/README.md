@@ -81,6 +81,83 @@ unchanged file, and every run would pin a version nobody intended to create.
 Compiling twice — in different processes, under different `PYTHONHASHSEED` values —
 produces byte-identical JSON. There is a test for exactly that.
 
+### Typed handles
+
+The SDK ships a `py.typed` marker, and `mypy --strict` passes on it
+(`make sdk-typecheck`, which `make sdk-test` runs first). A task's return type
+flows through tracing:
+
+```python
+@task
+def extract(ctx: TaskContext, source: str) -> dict[str, int]: ...
+
+rows = extract(source)             # TaskInvocation[dict[str, int]]
+rows.primary                       # OutputRef[dict[str, int]]
+scores = score.map(ids, item="item", max_fanout=100)   # TaskInvocation[list[float | None]]
+big = extract.with_overrides(resources=Resources(cpu="4"))  # TaskDefinition[dict[str, int]]
+node["model"]                      # OutputRef[Any]; node.output("model", Model) states it
+```
+
+A fan-in is `list[R | None]` because a child that did not succeed contributes
+`null`. `Ref[T]` (`OutputRef[T] | TaskInvocation[T]`) annotates helpers that wire
+tasks together. `typecheck/typed_usage.py` is the example CI type-checks.
+
+### Value bounds and captured stdout
+
+```python
+@task(
+    outputs={"summary": {"type": "json", "max_bytes": "4Ki"}},   # or ValueSpec(max_bytes=4096)
+    runtime=Runtime(command=["sh", "-c"], args=["./report.sh"], stdout_output="summary"),
+)
+```
+
+`max_bytes` bounds a value's size. On a map template's output it lets
+validation reject a fan-in (`max_fanout x max_bytes`) that could exceed the
+platform's fan-in limit before any child runs. `stdout_output` names a
+DECLARED output that receives the task's stdout. Both are checked at the
+decorator the way the gateway checks them at submit.
+
+The in-task result store (`ctx.store`) inlines at the control plane's
+configured threshold (ADR-0016). The agent exports it as
+`NEXUS_INLINE_THRESHOLD_BYTES`, and a compiled-in 64 KiB is only the fallback.
+
+## Running locally, without a cluster
+
+```python
+from nexus import local
+result = local.run(daily_etl, {"source": "s3://in"})
+result.state                  # "SUCCEEDED" | "FAILED" | "TIMED_OUT" | ...
+result.output("load")         # a node's output value
+print(result.summary())       # per-node table
+```
+
+or `nexusctl run --local dag.py --param source=s3://in`, or
+`python -m nexus.local compiled.yaml --param source=demo`. The runner decides
+what runs next exactly as the platform's DAG engine does: trigger rules,
+SKIPPED and UPSTREAM_FAILED propagation, `fail_fast`, map expansion with
+`max_fanout`, the fan-in and its size limit, retries with backoff, timeouts,
+and memoization within the run. Fixtures shared with the Go engine keep it
+that way. Shell tasks run their `runtime.command` with the agent's NEXUS_*
+environment. Python handlers run through `python -m nexus.worker`, or
+in-process with `isolation="inprocess"` when you want a debugger. Results,
+logs, `events.jsonl` and `run.json` go to the run directory.
+
+It is not the platform: there are no leases or heartbeats, no queues,
+priorities or fair share, no resource reservation or GPU placement, no
+docker/kubernetes executors, and memoization does not cross runs. See
+ADR-0022.
+
+## Replaying a failed attempt
+
+```python
+doc = client.get_assignment(attempt_id)            # inputs + TaskSpec, no secrets
+result = nexus.replay.replay(doc, modules=["mypkg.tasks"])
+```
+
+or `nexusctl replay <attempt-id> --local`. The attempt runs again on your
+machine, with the inputs it was given and its original idempotency key. Blob
+inputs stay references; pass their bytes with `inputs={"name": "/path"}`.
+
 ## Idempotency: three mechanisms, in descending order of strength
 
 Execution is **at-least-once** (ADR-0006). Your handler can run more than once for
@@ -195,5 +272,10 @@ lease-renewal loop alive to report the failure honestly.
 ## Tests
 
 ```bash
-python3 -m pytest sdk/python
+make sdk-test          # mypy --strict, then pytest with coverage
+make sdk-typecheck     # mypy --strict only
 ```
+
+Validation problems in a `.py` spec map to Python lines. `compiled.locate(path)`
+returns the line of the `@task`, or of the workflow-body call for a wiring
+problem, and a rejected `submit_spec` lists them in `NexusAPIError.problems`.

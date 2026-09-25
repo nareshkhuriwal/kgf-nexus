@@ -1,0 +1,147 @@
+{
+  "_comment": "Shared DAG-semantics fixtures (ADR-0022). Executed by internal/dag/localparity_test.go (the platform's engine) AND sdk/python/tests/test_local_parity.py (the local runner's port). Each wave dispatches the whole frontier and completes it before the next reconcile. script[node] lists attempt outcomes in order ('ok' or an ERROR_CLASS name); a node absent from script succeeds first time. collections[node] is the length of the JSON array a map source produces.",
+  "scenarios": [
+    {
+      "name": "linear_success",
+      "spec": {"tasks": [
+        {"id": "a", "task_ref": "t"},
+        {"id": "b", "task_ref": "t"},
+        {"id": "c", "task_ref": "t"}],
+        "edges": [{"from_node_id": "a", "to_node_id": "b"}, {"from_node_id": "b", "to_node_id": "c"}]},
+      "expect": {"run": "SUCCEEDED", "nodes": {"a": "SUCCEEDED", "b": "SUCCEEDED", "c": "SUCCEEDED"},
+                 "attempts": {"a": 1, "b": 1, "c": 1}}
+    },
+    {
+      "name": "transient_retried_then_succeeds",
+      "spec": {"tasks": [
+        {"id": "a", "task_ref": "t"},
+        {"id": "b", "task_ref": "t", "retry": {"max_attempts": 3}}],
+        "edges": [{"from_node_id": "a", "to_node_id": "b"}]},
+      "script": {"b": ["ERROR_CLASS_TRANSIENT", "ERROR_CLASS_TIMEOUT", "ok"]},
+      "expect": {"run": "SUCCEEDED", "nodes": {"a": "SUCCEEDED", "b": "SUCCEEDED"}, "attempts": {"b": 3}}
+    },
+    {
+      "name": "retries_exhausted_propagate_upstream_failed_and_all_done_runs",
+      "spec": {"tasks": [
+        {"id": "a", "task_ref": "t"},
+        {"id": "b", "task_ref": "t", "retry": {"max_attempts": 2}},
+        {"id": "c", "task_ref": "t"},
+        {"id": "d", "task_ref": "t"},
+        {"id": "cleanup", "task_ref": "t", "trigger_rule": "TRIGGER_RULE_ALL_DONE"}],
+        "edges": [{"from_node_id": "a", "to_node_id": "b"}, {"from_node_id": "b", "to_node_id": "c"},
+                  {"from_node_id": "c", "to_node_id": "d"}, {"from_node_id": "b", "to_node_id": "cleanup"}]},
+      "script": {"b": ["ERROR_CLASS_INFRASTRUCTURE", "ERROR_CLASS_INFRASTRUCTURE"]},
+      "expect": {"run": "FAILED", "nodes": {"a": "SUCCEEDED", "b": "FAILED", "c": "UPSTREAM_FAILED",
+                 "d": "UPSTREAM_FAILED", "cleanup": "SUCCEEDED"}, "attempts": {"b": 2, "c": 0, "cleanup": 1}}
+    },
+    {
+      "name": "application_error_is_terminal_unless_listed",
+      "spec": {"tasks": [
+        {"id": "plain", "task_ref": "t", "retry": {"max_attempts": 3}},
+        {"id": "listed", "task_ref": "t", "retry": {"max_attempts": 3, "retry_on": ["ERROR_CLASS_APPLICATION"]}}]},
+      "script": {"plain": ["ERROR_CLASS_APPLICATION", "ok"], "listed": ["ERROR_CLASS_APPLICATION", "ok"]},
+      "expect": {"run": "FAILED", "nodes": {"plain": "FAILED", "listed": "SUCCEEDED"},
+                 "attempts": {"plain": 1, "listed": 2}}
+    },
+    {
+      "name": "validation_is_terminal_even_when_listed_and_no_retry_on_vetoes",
+      "spec": {"tasks": [
+        {"id": "v", "task_ref": "t", "retry": {"max_attempts": 3, "retry_on": ["ERROR_CLASS_VALIDATION"]}},
+        {"id": "veto", "task_ref": "t", "retry": {"max_attempts": 3, "no_retry_on": ["ERROR_CLASS_TRANSIENT"]}}]},
+      "script": {"v": ["ERROR_CLASS_VALIDATION", "ok"], "veto": ["ERROR_CLASS_TRANSIENT", "ok"]},
+      "expect": {"run": "FAILED", "nodes": {"v": "FAILED", "veto": "FAILED"}, "attempts": {"v": 1, "veto": 1}}
+    },
+    {
+      "name": "lost_with_idempotency_none_waits_for_a_human",
+      "spec": {"tasks": [
+        {"id": "none", "task_ref": "t", "idempotency": "IDEMPOTENCY_MODE_NONE", "retry": {"max_attempts": 3}},
+        {"id": "req", "task_ref": "t", "idempotency": "IDEMPOTENCY_MODE_REQUIRED", "retry": {"max_attempts": 3}}]},
+      "script": {"none": ["ERROR_CLASS_WORKER_LOST", "ok"], "req": ["ERROR_CLASS_WORKER_LOST", "ok"]},
+      "expect": {"run": "FAILED", "nodes": {"none": "FAILED", "req": "SUCCEEDED"}, "attempts": {"none": 1, "req": 2}}
+    },
+    {
+      "name": "fan_out_fan_in_succeeds",
+      "spec": {"tasks": [
+        {"id": "list", "task_ref": "t", "outputs": {"ids": {"type": "json"}}},
+        {"id": "work", "task_ref": "t", "inputs": {"item": {"type": "json", "required": true}},
+         "map": {"over_node_id": "list", "over_output": "ids", "item_input": "item", "max_fanout": 5}},
+        {"id": "join", "task_ref": "t", "inputs": {"rs": {"type": "json", "required": true}}}],
+        "edges": [{"from_node_id": "list", "to_node_id": "work"},
+                  {"from_node_id": "work", "to_node_id": "join", "output_to_input": {"rs": "result"}}]},
+      "collections": {"list": 3},
+      "expect": {"run": "SUCCEEDED", "nodes": {"list": "SUCCEEDED", "work": "SUCCEEDED", "work[0]": "SUCCEEDED",
+                 "work[1]": "SUCCEEDED", "work[2]": "SUCCEEDED", "join": "SUCCEEDED"},
+                 "attempts": {"work[0]": 1, "work[2]": 1, "join": 1}}
+    },
+    {
+      "name": "failed_child_fails_template_and_all_success_fan_in",
+      "spec": {"tasks": [
+        {"id": "list", "task_ref": "t", "outputs": {"ids": {"type": "json"}}},
+        {"id": "work", "task_ref": "t", "inputs": {"item": {"type": "json", "required": true}},
+         "retry": {"max_attempts": 2},
+         "map": {"over_node_id": "list", "over_output": "ids", "item_input": "item", "max_fanout": 5}},
+        {"id": "join", "task_ref": "t", "inputs": {"rs": {"type": "json", "required": true}}},
+        {"id": "tolerant", "task_ref": "t", "trigger_rule": "TRIGGER_RULE_ALL_DONE",
+         "inputs": {"rs": {"type": "json", "required": true}}}],
+        "edges": [{"from_node_id": "list", "to_node_id": "work"},
+                  {"from_node_id": "work", "to_node_id": "join", "output_to_input": {"rs": "result"}},
+                  {"from_node_id": "work", "to_node_id": "tolerant", "output_to_input": {"rs": "result"}}]},
+      "collections": {"list": 3},
+      "script": {"work[1]": ["ERROR_CLASS_TRANSIENT", "ERROR_CLASS_TRANSIENT"]},
+      "expect": {"run": "FAILED", "nodes": {"work": "FAILED", "work[0]": "SUCCEEDED", "work[1]": "FAILED",
+                 "work[2]": "SUCCEEDED", "join": "UPSTREAM_FAILED", "tolerant": "SUCCEEDED"},
+                 "attempts": {"work[1]": 2, "join": 0, "tolerant": 1}}
+    },
+    {
+      "name": "max_fanout_exceeded_materializes_nothing",
+      "spec": {"tasks": [
+        {"id": "list", "task_ref": "t", "outputs": {"ids": {"type": "json"}}},
+        {"id": "work", "task_ref": "t", "inputs": {"item": {"type": "json", "required": true}},
+         "map": {"over_node_id": "list", "over_output": "ids", "item_input": "item", "max_fanout": 5}},
+        {"id": "join", "task_ref": "t", "inputs": {"rs": {"type": "json", "required": true}}}],
+        "edges": [{"from_node_id": "list", "to_node_id": "work"},
+                  {"from_node_id": "work", "to_node_id": "join", "output_to_input": {"rs": "result"}}]},
+      "collections": {"list": 6},
+      "expect": {"run": "FAILED", "nodes": {"list": "SUCCEEDED", "work": "FAILED", "join": "UPSTREAM_FAILED"},
+                 "attempts": {"join": 0}, "children": {"work": 0}}
+    },
+    {
+      "name": "empty_collection_lets_the_fan_in_run",
+      "spec": {"tasks": [
+        {"id": "list", "task_ref": "t", "outputs": {"ids": {"type": "json"}}},
+        {"id": "work", "task_ref": "t", "inputs": {"item": {"type": "json", "required": true}},
+         "map": {"over_node_id": "list", "over_output": "ids", "item_input": "item", "max_fanout": 5}},
+        {"id": "join", "task_ref": "t", "inputs": {"rs": {"type": "json", "required": true}}}],
+        "edges": [{"from_node_id": "list", "to_node_id": "work"},
+                  {"from_node_id": "work", "to_node_id": "join", "output_to_input": {"rs": "result"}}]},
+      "collections": {"list": 0},
+      "expect": {"run": "SUCCEEDED", "nodes": {"work": "SUCCEEDED", "join": "SUCCEEDED"},
+                 "attempts": {"join": 1}, "children": {"work": 0}}
+    },
+    {
+      "name": "fail_fast_skips_withheld_work",
+      "order_dependent": true,
+      "spec": {"fail_fast": true, "tasks": [
+        {"id": "a", "task_ref": "t"},
+        {"id": "b", "task_ref": "t"},
+        {"id": "b2", "task_ref": "t"},
+        {"id": "b3", "task_ref": "t"}],
+        "edges": [{"from_node_id": "b", "to_node_id": "b2"}, {"from_node_id": "b2", "to_node_id": "b3"}]},
+      "script": {"a": ["ERROR_CLASS_APPLICATION"]},
+      "expect": {"run": "FAILED", "nodes": {"a": "FAILED", "b": "SUCCEEDED", "b2": "SKIPPED", "b3": "SKIPPED"},
+                 "attempts": {"a": 1, "b": 1, "b2": 0}}
+    },
+    {
+      "name": "fail_fast_settles_a_whole_downstream_chain",
+      "order_dependent": true,
+      "spec": {"fail_fast": true, "tasks": [
+        {"id": "boom", "task_ref": "t"},
+        {"id": "ok", "task_ref": "t"},
+        {"id": "later", "task_ref": "t"},
+        {"id": "join", "task_ref": "t", "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS"}],
+        "edges": [{"from_node_id": "ok", "to_node_id": "later"}, {"from_node_id": "later", "to_node_id": "join"}]},
+      "script": {"boom": ["ERROR_CLASS_APPLICATION"]},
+      "expect": {"run": "FAILED", "nodes": {"boom": "FAILED", "ok": "SUCCEEDED", "later": "SKIPPED", "join": "SKIPPED"}}
+    }
+  ]
+}

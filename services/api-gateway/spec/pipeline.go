@@ -4,6 +4,7 @@
 package spec
 
 import (
+	"errors"
 	"fmt"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
@@ -43,6 +44,17 @@ type Compiled struct {
 // reject, and a retry of the same bad document would appear to be "already
 // submitted".
 func Compile(body []byte, format Format) (*Compiled, error) {
+	c, err := compile(body, format)
+	var vf *ValidationFailure
+	if errors.As(err, &vf) {
+		// Positions are computed only on failure: they cost a second parse, and
+		// a valid document has nothing to point at.
+		vf.locate(body)
+	}
+	return c, err
+}
+
+func compile(body []byte, format Format) (*Compiled, error) {
 	doc, err := Parse(body, format)
 	if err != nil {
 		return nil, &ValidationFailure{Problems: []Problem{{Path: "", Message: err.Error(), Stage: "parse"}}}

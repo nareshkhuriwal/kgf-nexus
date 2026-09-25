@@ -30,6 +30,7 @@ MIGRATIONS    := services/migrations
 # list below does not conflict with them.
 .PHONY: test-nats
 .PHONY: sdk-test
+.PHONY: sdk-typecheck
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
@@ -253,7 +254,14 @@ $(SDK_VENV)/.installed: $(SDK_DIR)/pyproject.toml
 	$(SDK_VENV)/bin/python -m pip install --quiet -e '$(SDK_DIR)[dev]'
 	@touch $@
 
-sdk-test: $(SDK_VENV)/.installed ## Run the Python SDK tests with coverage (SDK_REPORT_DIR=<dir> adds JUnit/Cobertura XML)
+# mypy --strict over the package and typecheck/typed_usage.py, whose assert_type
+# lines pin that a task's return type flows through tracing, .map and
+# with_overrides. sdk-test runs it first, so every CI job that runs sdk-test
+# type-checks too.
+sdk-typecheck: $(SDK_VENV)/.installed ## Type-check the Python SDK (mypy --strict, package + typed usage example)
+	cd $(SDK_DIR) && '$(abspath $(SDK_VENV))/bin/python' -m mypy --strict
+
+sdk-test: $(SDK_VENV)/.installed sdk-typecheck ## Type-check, then run the Python SDK tests with coverage (SDK_REPORT_DIR=<dir> adds JUnit/Cobertura XML)
 	$(if $(SDK_REPORT_DIR),@mkdir -p '$(SDK_REPORT_DIR)')
 	cd $(SDK_DIR) && COVERAGE_FILE='$(abspath $(SDK_VENV))/.coverage' '$(abspath $(SDK_VENV))/bin/python' -m pytest \
 	  -p no:cacheprovider --cov=nexus --cov-report=term \

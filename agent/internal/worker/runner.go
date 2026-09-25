@@ -510,6 +510,7 @@ func (r *Runner) buildExecutorSpec(ctx context.Context, a *nexusv1.TaskAssignmen
 		Inputs:               inputs,
 		DeclaredOutputs:      declaredOutputNames(spec),
 		StdoutOutput:         spec.GetRuntime().GetStdoutOutput(),
+		InlineThresholdBytes: domain.ClampInlineThreshold(r.InlineThreshold),
 		StartToCloseDeadline: deadline,
 		GraceAfterTerm:       executor.DefaultGraceAfterTerm,
 		WorkerID:             r.WorkerID,

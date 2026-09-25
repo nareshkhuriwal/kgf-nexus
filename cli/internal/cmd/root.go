@@ -173,6 +173,7 @@ func topLevel() []*command {
 		eventsCmd(),
 		configCmd(),
 		versionCmd(),
+		replayCmd(),
 	}
 }
 
@@ -236,6 +237,11 @@ func run(ctx context.Context, args []string, ioStreams IO, env Env) error {
 		if c.name == head {
 			return dispatch(ctx, c, environment, rest[1:])
 		}
+	}
+	// `run --local <file>` executes on this machine (local.go); it is not a
+	// verb of the run group, which acts on the cluster.
+	if head == "run" && hasLocalFlag(rest[1:]) {
+		return dispatch(ctx, runLocalCmd(), environment, rest[1:])
 	}
 	for _, g := range groups() {
 		if g.name != head {
@@ -391,6 +397,8 @@ Runs:
   run list            List runs in the namespace
   run cancel          Cancel a run
   run retry           Retry from failed nodes
+  run --local         Run a workflow on this machine, no cluster (ADR-0022)
+  replay              Fetch a failed attempt's inputs; --local re-runs it here
 
 Fleet and diagnostics:
   worker ls           List workers

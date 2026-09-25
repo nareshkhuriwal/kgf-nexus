@@ -14,14 +14,16 @@ outside the result store.
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import hashlib
 import json
 import logging
 import os
 import sys
+import threading
 import time
-from typing import Any, Callable, Iterator, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, TextIO
 
 __all__ = [
     "TaskContext",
@@ -31,6 +33,9 @@ __all__ = [
     "StructuredLogger",
     "derive_idempotency_key",
     "EffectNotRecorded",
+    "DEFAULT_INLINE_THRESHOLD_BYTES",
+    "MAX_INLINE_THRESHOLD_BYTES",
+    "resolve_inline_threshold",
 ]
 
 
@@ -59,7 +64,10 @@ def derive_idempotency_key(
     if not run_id or not node_id:
         raise ValueError("idempotency key needs a non-empty run_id and node_id")
     mi = "-" if map_index is None or map_index == "" else str(map_index)
-    payload = f"{run_id}\x00{node_id}\x00{mi}\x00{task_version}"
+    # \x1f (unit separator), exactly as domain.IdempotencyKey joins the fields.
+    # This used \x00, so every real assignment's key "differed" from the local
+    # derivation and the worker logged a mismatch (CONTRACT-FINDINGS F116).
+    payload = "\x1f".join((run_id, node_id, mi, str(task_version)))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -86,25 +94,135 @@ class ResultStore(Protocol):
 
 
 # Small results are inlined rather than stored as blobs, to avoid two network
-# round-trips for `{"rows": 42}` (ADR-0008). 64 KiB is the architecture's
-# proposed boundary (§12 open question 4).
-INLINE_MAX_BYTES = 64 * 1024
+# round-trips for `{"rows": 42}` (ADR-0008). The boundary is the CONTROL
+# PLANE's (ADR-0016): configured on the gateway, clamped into [1 B, 1 MiB] by the
+# agent, and exported to the workload as NEXUS_INLINE_THRESHOLD_BYTES. These
+# mirror internal/domain/inline.go.
+DEFAULT_INLINE_THRESHOLD_BYTES = 64 * 1024
+MAX_INLINE_THRESHOLD_BYTES = 1 << 20
+#: Deprecated alias of DEFAULT_INLINE_THRESHOLD_BYTES; stores now take the
+#: configured value (see resolve_inline_threshold).
+INLINE_MAX_BYTES = DEFAULT_INLINE_THRESHOLD_BYTES
+ENV_INLINE_THRESHOLD = "NEXUS_INLINE_THRESHOLD_BYTES"
+
+
+def clamp_inline_threshold(n: int) -> int:
+    """domain.ClampInlineThreshold: unset/invalid -> default, too large -> max."""
+    if n <= 0:
+        return DEFAULT_INLINE_THRESHOLD_BYTES
+    return min(n, MAX_INLINE_THRESHOLD_BYTES)
+
+
+def resolve_inline_threshold(
+    assignment: Mapping[str, Any] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """The inline-versus-blob boundary this worker process should apply.
+
+    In order: the assignment's ``result_store.inline_threshold_bytes`` (the
+    replay endpoint carries the gateway's value), then
+    ``NEXUS_INLINE_THRESHOLD_BYTES`` (exported by the agent to every workload),
+    then the platform default. Whatever is found is clamped exactly as the agent
+    clamps it, so a bad value can shrink or grow inlining only within the range
+    the control plane accepts.
+    """
+    env = os.environ if environ is None else environ
+    candidates: list[object] = []
+    if assignment is not None:
+        rs = assignment.get("result_store")
+        if isinstance(rs, Mapping):
+            candidates.append(rs.get("inline_threshold_bytes"))
+    candidates.append(env.get(ENV_INLINE_THRESHOLD))
+    for raw in candidates:
+        if raw is None or raw == "" or isinstance(raw, bool):
+            continue
+        try:
+            value = int(str(raw))
+        except ValueError:
+            continue
+        return clamp_inline_threshold(value)
+    return DEFAULT_INLINE_THRESHOLD_BYTES
 
 
 def _encode(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-class InMemoryResultStore:
-    """A result store backed by a dict. For unit tests and the subprocess executor."""
+def decode_payload(data: bytes, content_type: str | None = None) -> Any:
+    """Turn stored bytes back into a handler value.
 
-    def __init__(self) -> None:
+    JSON is decoded; anything else (a CSV a shell task wrote, say) is returned
+    as ``str`` when it is valid UTF-8 and as ``bytes`` otherwise. The platform
+    never interprets an output's bytes, so neither does this beyond that.
+    """
+    if content_type in (None, "", "application/json"):
+        try:
+            return json.loads(data)
+        except ValueError:
+            pass
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+
+
+def inline_ref(data: bytes, content_type: str | None = None) -> dict[str, Any]:
+    """An inline ResultRef for raw bytes, in the SDK's native form.
+
+    UTF-8 JSON rides as text under ``inline`` (what ``put`` has always
+    produced); any other payload as base64 under ``inline_base64``, so a ref
+    always says which of the two it is instead of leaving a reader to guess.
+    """
+    ct = content_type or ("application/json" if _is_json(data) else "application/octet-stream")
+    if ct == "application/json":
+        try:
+            return {"inline": data.decode("utf-8"), "content_type": ct, "size_bytes": len(data)}
+        except UnicodeDecodeError:
+            pass
+    return {
+        "inline_base64": base64.b64encode(data).decode("ascii"),
+        "content_type": ct,
+        "size_bytes": len(data),
+    }
+
+
+def _is_json(data: bytes) -> bool:
+    try:
+        json.loads(data)
+    except ValueError:
+        return False
+    return True
+
+
+def ref_payload(ref: Mapping[str, Any]) -> bytes | None:
+    """The bytes of an INLINE ref, or None for a blob ref."""
+    if "inline" in ref:
+        raw = ref["inline"]
+        return raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
+    if "inline_base64" in ref:
+        return base64.b64decode(str(ref["inline_base64"]))
+    return None
+
+
+class InMemoryResultStore:
+    """A result store backed by a dict. For unit tests and the subprocess executor.
+
+    ``inline_max_bytes`` defaults to the configured threshold
+    (:func:`resolve_inline_threshold`), not a compiled-in constant.
+    """
+
+    def __init__(self, *, inline_max_bytes: int | None = None) -> None:
         self._blobs: dict[str, bytes] = {}
+        self.inline_max_bytes = (
+            resolve_inline_threshold()
+            if inline_max_bytes is None
+            else clamp_inline_threshold(inline_max_bytes)
+        )
 
     def put(self, value: Any, *, key: str | None = None) -> dict[str, Any]:
         data = _encode(value)
         digest = hashlib.sha256(data).hexdigest()
-        if len(data) <= INLINE_MAX_BYTES and key is None:
+        if len(data) <= self.inline_max_bytes and key is None:
             return {
                 "inline": data.decode("utf-8"),
                 "content_type": "application/json",
@@ -121,10 +239,10 @@ class InMemoryResultStore:
     def get(self, ref: Mapping[str, Any] | str) -> Any:
         if isinstance(ref, str):
             return json.loads(self._blobs[ref])
-        if "inline" in ref:
-            raw = ref["inline"]
-            return json.loads(raw if isinstance(raw, str) else bytes(raw))
-        return json.loads(self._blobs[ref["blob"]["key"]])
+        inline = ref_payload(ref)
+        if inline is not None:
+            return decode_payload(inline, ref.get("content_type"))
+        return decode_payload(self._blobs[ref["blob"]["key"]], ref.get("content_type"))
 
     def exists(self, key: str) -> bool:
         return key in self._blobs
@@ -139,9 +257,14 @@ class FileResultStore:
     or absent -- a half-written journal entry would be worse than none.
     """
 
-    def __init__(self, root: str) -> None:
+    def __init__(self, root: str, *, inline_max_bytes: int | None = None) -> None:
         self.root = os.path.abspath(root)
         os.makedirs(self.root, exist_ok=True)
+        self.inline_max_bytes = (
+            resolve_inline_threshold()
+            if inline_max_bytes is None
+            else clamp_inline_threshold(inline_max_bytes)
+        )
 
     def _path(self, key: str) -> str:
         safe = key.replace("/", "_").replace("..", "_")
@@ -150,35 +273,60 @@ class FileResultStore:
     def put(self, value: Any, *, key: str | None = None) -> dict[str, Any]:
         data = _encode(value)
         digest = hashlib.sha256(data).hexdigest()
-        if len(data) <= INLINE_MAX_BYTES and key is None:
+        if len(data) <= self.inline_max_bytes and key is None:
             return {
                 "inline": data.decode("utf-8"),
                 "content_type": "application/json",
                 "size_bytes": len(data),
             }
         k = key or digest
-        path = self._path(k)
-        tmp = path + f".tmp.{os.getpid()}"
-        with open(tmp, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        self._write(k, data)
         return {
             "blob": {"bucket": "file", "key": k, "sha256": digest},
             "content_type": "application/json",
             "size_bytes": len(data),
         }
 
+    def _write(self, key: str, data: bytes) -> None:
+        path = self._path(key)
+        # pid AND thread: the local runner writes from several threads of one
+        # process, and two of them storing the same content would otherwise
+        # share a temp file.
+        tmp = path + f".tmp.{os.getpid()}.{threading.get_ident()}"
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+    def put_bytes(self, data: bytes, content_type: str | None = None) -> dict[str, Any]:
+        """Store raw bytes: inline at or under the threshold, else a
+        content-addressed blob. The byte-level twin of ``put``, for outputs that
+        are not JSON values (what a shell task writes to $NEXUS_OUTPUT_DIR)."""
+        if len(data) <= self.inline_max_bytes:
+            return inline_ref(data, content_type)
+        digest = hashlib.sha256(data).hexdigest()
+        self._write(digest, data)
+        return {
+            "blob": {"bucket": "file", "key": digest, "sha256": digest},
+            "content_type": content_type
+            or ("application/json" if _is_json(data) else "application/octet-stream"),
+            "size_bytes": len(data),
+        }
+
+    def get_bytes(self, ref: Mapping[str, Any]) -> bytes:
+        """The stored bytes of a ref, inline or blob."""
+        inline = ref_payload(ref)
+        if inline is not None:
+            return inline
+        with open(self._path(str(ref["blob"]["key"])), "rb") as f:
+            return f.read()
+
     def get(self, ref: Mapping[str, Any] | str) -> Any:
         if isinstance(ref, str):
             with open(self._path(ref), "rb") as f:
                 return json.loads(f.read())
-        if "inline" in ref:
-            raw = ref["inline"]
-            return json.loads(raw if isinstance(raw, str) else bytes(raw))
-        with open(self._path(ref["blob"]["key"]), "rb") as f:
-            return json.loads(f.read())
+        return decode_payload(self.get_bytes(ref), ref.get("content_type"))
 
     def exists(self, key: str) -> bool:
         return os.path.exists(self._path(key))
@@ -195,7 +343,7 @@ class StructuredLogger:
     when you are looking at one bad run out of ten thousand (architecture §9).
     """
 
-    def __init__(self, fields: Mapping[str, Any], stream: Any | None = None) -> None:
+    def __init__(self, fields: Mapping[str, Any], stream: TextIO | None = None) -> None:
         self._fields = dict(fields)
         self._stream = stream if stream is not None else sys.stderr
 
@@ -257,7 +405,7 @@ class TaskContext:
     worker_id: str = ""
     lease_token: str = ""
     start_to_close_deadline_unix_ms: int = 0
-    store: Any = dataclasses.field(default_factory=InMemoryResultStore)
+    store: ResultStore = dataclasses.field(default_factory=InMemoryResultStore)
     log: StructuredLogger = dataclasses.field(default=None)  # type: ignore[assignment]
     inputs: Mapping[str, Any] = dataclasses.field(default_factory=dict)
     _heartbeat_fn: HeartbeatFn | None = None

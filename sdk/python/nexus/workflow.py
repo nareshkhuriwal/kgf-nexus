@@ -29,10 +29,14 @@ from __future__ import annotations
 import contextvars
 import dataclasses
 import inspect
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Generic, Mapping, NoReturn, Sequence, TypeVar, overload
 
-from .canonical import canonical_bytes, canonical_json, spec_hash
+from .canonical import canonical_json, spec_hash
+from .sourcemap import NodeSource, SourceLocation, locate
 from .types import SpecError, ValueSpec
+
+if TYPE_CHECKING:
+    from .task import TaskDefinition
 
 __all__ = [
     "workflow",
@@ -41,10 +45,27 @@ __all__ = [
     "OutputRef",
     "TaskInvocation",
     "Param",
+    "Ref",
     "current_builder",
 ]
 
+T_co = TypeVar("T_co", covariant=True)
+_V = TypeVar("_V")
+
 API_VERSION = "nexus.dev/v1"
+
+#: internal/dag DefaultMaxFanInBytes: the fan-in limit a gateway applies unless
+#: its operator configured NEXUS_DAG_MAX_FANIN_BYTES. The local runner uses it.
+DEFAULT_MAX_FAN_IN_BYTES = 16 << 20
+#: internal/dag MaxFanInBytesCeiling: the most any operator may configure.
+MAX_FAN_IN_BYTES_CEILING = 256 << 20
+
+
+def fan_in_worst_case(max_fanout: int, max_bytes: int) -> int:
+    """Largest fan-in array max_fanout children of max_bytes each can produce:
+    the elements, the commas between them and the two brackets (internal/dag
+    validate.go uses the same arithmetic)."""
+    return max_fanout * max_bytes + (max_fanout - 1) + 2
 
 _builder: contextvars.ContextVar["_Builder | None"] = contextvars.ContextVar(
     "nexus_workflow_builder", default=None
@@ -64,8 +85,14 @@ def current_builder() -> "_Builder | None":
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class OutputRef:
+class OutputRef(Generic[T_co]):
     """A handle to one named output of one traced node.
+
+    Generic in the type the output will hold AT RUN TIME, so a type checker can
+    follow a task's return annotation through the graph: ``extract(src)`` is a
+    ``TaskInvocation[dict[str, int]]`` and its ``.primary`` an
+    ``OutputRef[dict[str, int]]``. The parameter is erased at run time; it is
+    purely a static-typing aid and never reaches the compiled document.
 
     Opaque on purpose: it holds no value, because no task has run. Attempting to
     use it as a value (arithmetic, truth-testing, iteration) raises rather than
@@ -83,14 +110,14 @@ class OutputRef:
             "branch on runtime values."
         )
 
-    def __iter__(self) -> Any:
+    def __iter__(self) -> NoReturn:
         raise SpecError(
             f"cannot iterate {self!r}: the size of a task's output is a runtime "
             "property. To fan out over a runtime collection use dynamic expansion: "
             "`some_task.map(this_output, item=\"param\", max_fanout=N)` (§5.4)."
         )
 
-    def __getattr__(self, item: str) -> Any:
+    def __getattr__(self, item: str) -> NoReturn:
         if item.startswith("_"):
             raise AttributeError(item)
         raise SpecError(
@@ -102,21 +129,26 @@ class OutputRef:
         return f"OutputRef({self.node_id}.{self.output})"
 
 
-class TaskInvocation:
+class TaskInvocation(Generic[T_co]):
     """The result of calling a task inside a workflow body.
 
     Behaves as its primary output (so `b(a())` reads naturally for single-output
     tasks) while also exposing every declared output by name via `["model"]`.
+
+    Generic in the handler's return type: ``primary`` is an ``OutputRef`` of that
+    type. A NAMED output (``node["model"]``) is ``OutputRef[Any]`` because the
+    compiler cannot know which part of a multi-output return each name holds;
+    ``node.output("model", Model)`` states it explicitly.
     """
 
     __slots__ = ("node_id", "_outputs")
 
     def __init__(self, node_id: str, outputs: Sequence[str]) -> None:
         self.node_id = node_id
-        self._outputs = {name: OutputRef(node_id, name) for name in outputs}
+        self._outputs: dict[str, OutputRef[Any]] = {name: OutputRef(node_id, name) for name in outputs}
 
     @property
-    def primary(self) -> OutputRef:
+    def primary(self) -> OutputRef[T_co]:
         if len(self._outputs) == 1:
             return next(iter(self._outputs.values()))
         if "result" in self._outputs:
@@ -127,7 +159,7 @@ class TaskInvocation:
             f"node['{sorted(self._outputs)[0]}']"
         )
 
-    def __getitem__(self, name: str) -> OutputRef:
+    def __getitem__(self, name: str) -> OutputRef[Any]:
         try:
             return self._outputs[name]
         except KeyError:
@@ -136,7 +168,16 @@ class TaskInvocation:
                 f"{', '.join(sorted(self._outputs)) or '(none)'}"
             ) from None
 
-    def outputs(self) -> Mapping[str, OutputRef]:
+    def output(self, name: str, _type: type[_V]) -> OutputRef[_V]:
+        """A named output with its run-time type stated, for type checkers.
+
+        ``node.output("model", dict)`` is ``node["model"]`` typed as
+        ``OutputRef[dict]``. The type argument is not checked at run time --
+        outputs do not exist at compile time -- it only informs static analysis.
+        """
+        return self[name]
+
+    def outputs(self) -> Mapping[str, OutputRef[Any]]:
         return dict(self._outputs)
 
     def __bool__(self) -> bool:
@@ -149,7 +190,7 @@ class TaskInvocation:
             "branch on runtime values."
         )
 
-    def __iter__(self) -> Any:
+    def __iter__(self) -> NoReturn:
         raise SpecError(
             f"cannot iterate {self!r}: the size of a task's output is a runtime "
             "property. To fan out over a runtime collection use dynamic expansion: "
@@ -158,6 +199,12 @@ class TaskInvocation:
 
     def __repr__(self) -> str:
         return f"TaskInvocation({self.node_id}: {', '.join(sorted(self._outputs))})"
+
+
+#: Anything a workflow body can pass where a task's run-time value of type T is
+#: expected: a traced node or one of its outputs. Useful for annotating helper
+#: functions that wire several tasks together.
+Ref = OutputRef[T_co] | TaskInvocation[T_co]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -182,12 +229,14 @@ class Param:
 @dataclasses.dataclass(slots=True)
 class _Node:
     node_id: str
-    definition: Any  # TaskDefinition; untyped here to avoid a circular import.
+    definition: "TaskDefinition[Any]"
     literals: dict[str, Any]
     params: dict[str, str]
     upstream: dict[str, tuple[str, str]]  # input name -> (from_node, output)
     # Set on a dynamic-expansion TEMPLATE (§5.4): the wire MapSpec.
     map_spec: dict[str, Any] | None = None
+    # The line in the workflow body whose call traced this node.
+    call_site: SourceLocation | None = None
 
 
 class _Builder:
@@ -199,7 +248,7 @@ class _Builder:
         self._by_id: dict[str, _Node] = {}
         self._ref_counts: dict[str, int] = {}
 
-    def _allocate_node_id(self, definition: Any) -> str:
+    def _allocate_node_id(self, definition: "TaskDefinition[Any]") -> str:
         """Derive a stable node id from the handler name, suffixed on reuse.
 
         Stability matters beyond neatness: node_id participates in the
@@ -208,8 +257,7 @@ class _Builder:
         The suffix is assigned by call order within the body, which is
         deterministic for a deterministic body.
         """
-        base = getattr(definition, "__name__", None) or definition.task_ref
-        base = str(base)
+        base = str(getattr(definition, "__name__", None) or definition.task_ref)
         n = self._ref_counts.get(base, 0)
         self._ref_counts[base] = n + 1
         node_id = base if n == 0 else f"{base}_{n + 1}"
@@ -220,19 +268,26 @@ class _Builder:
         return node_id
 
     def add_node(
-        self, definition: Any, args: Sequence[Any], kwargs: Mapping[str, Any]
-    ) -> TaskInvocation:
-        node_id = kwargs.pop("node_id", None) if "node_id" in kwargs else None
-        if node_id is None:
+        self, definition: "TaskDefinition[Any]", args: Sequence[Any], kwargs: dict[str, Any]
+    ) -> TaskInvocation[Any]:
+        requested = kwargs.pop("node_id", None)
+        if requested is None:
             node_id = self._allocate_node_id(definition)
         else:
-            node_id = str(node_id)
+            node_id = str(requested)
             if node_id in self._by_id:
                 raise SpecError(f"duplicate node_id {node_id!r} in workflow")
 
         bound = self._bind_arguments(definition, node_id, args, kwargs)
 
-        node = _Node(node_id=node_id, definition=definition, literals={}, params={}, upstream={})
+        node = _Node(
+            node_id=node_id,
+            definition=definition,
+            literals={},
+            params={},
+            upstream={},
+            call_site=SourceLocation.of_caller(),
+        )
         for name, value in bound.items():
             self._classify_argument(node, name, value)
 
@@ -242,13 +297,13 @@ class _Builder:
 
     def add_map_node(
         self,
-        definition: Any,
-        over: Any,
+        definition: "TaskDefinition[Any]",
+        over: object,
         item: str,
         max_fanout: int,
         args: Sequence[Any],
         kwargs: Mapping[str, Any],
-    ) -> TaskInvocation:
+    ) -> TaskInvocation[Any]:
         """Record a map TEMPLATE node (§5.4).
 
         `over` names the collection; `item` is the handler parameter each child
@@ -302,7 +357,7 @@ class _Builder:
         return inv
 
     def _bind_arguments(
-        self, definition: Any, node_id: str, args: Sequence[Any], kwargs: Mapping[str, Any]
+        self, definition: "TaskDefinition[Any]", node_id: str, args: Sequence[Any], kwargs: Mapping[str, Any]
     ) -> dict[str, Any]:
         """Map positional and keyword args onto handler parameter names.
 
@@ -374,6 +429,18 @@ class CompiledWorkflow:
     spec: Mapping[str, Any]
     json: str
     hash: str
+    #: Node id -> where the node came from in the author's Python. Carried beside
+    #: the document, never in it, so moving a line does not change the hash.
+    source_map: Mapping[str, NodeSource] = dataclasses.field(default_factory=dict)
+
+    def locate(self, path: str) -> SourceLocation | None:
+        """The Python source location for a problem path such as
+        ``/tasks/load/inputs/summary`` (semantic) or ``/tasks/2/queue`` (schema)."""
+        return locate(self.source_map, self.task_ids, path)
+
+    def source_map_json(self) -> dict[str, Any]:
+        """The source map as plain JSON, for tools such as nexusctl."""
+        return {k: v.to_json() for k, v in sorted(self.source_map.items())}
 
     def to_json(self, indent: int | None = None) -> str:
         """Canonical JSON by default; indent only for human reading.
@@ -394,16 +461,16 @@ class CompiledWorkflow:
         this is a rendering of the same object, never a separate serializer.
         """
         try:
-            import yaml  # type: ignore[import-untyped]
+            import yaml  # type: ignore[import-untyped,unused-ignore]
         except ModuleNotFoundError as e:  # pragma: no cover - optional extra
             raise RuntimeError(
                 "YAML output needs PyYAML: pip install 'nexus-sdk[yaml]'"
             ) from e
-        return yaml.safe_dump(_plain(self.spec), sort_keys=True, default_flow_style=False)
+        return str(yaml.safe_dump(_plain(self.spec), sort_keys=True, default_flow_style=False))
 
     @property
     def task_ids(self) -> list[str]:
-        return [t["id"] for t in self.spec["tasks"]]
+        return [str(t["id"]) for t in self.spec["tasks"]]
 
 
 def _plain(value: Any) -> Any:
@@ -418,7 +485,7 @@ def _plain(value: Any) -> Any:
 class WorkflowDefinition:
     """A decorated workflow. `compile()` produces the submittable document."""
 
-    def __init__(self, fn: Callable[..., Any], options: Mapping[str, Any]) -> None:
+    def __init__(self, fn: Callable[..., object], options: Mapping[str, Any]) -> None:
         self.fn = fn
         self.name: str = str(options.get("name") or getattr(fn, "__name__", "workflow"))
         self.namespace: str = str(options.get("namespace") or "default")
@@ -453,7 +520,7 @@ class WorkflowDefinition:
                 f"workflow {self.name!r}: unknown option(s) {', '.join(sorted(unknown))}"
             )
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> object:
         """Calling a workflow directly runs the body untraced.
 
         Useful for reading the body in a REPL; it does NOT submit or execute
@@ -509,7 +576,11 @@ class WorkflowDefinition:
             spec["labels"] = dict(sorted(self.labels.items()))
 
         text = canonical_json(spec)
-        return CompiledWorkflow(spec=spec, json=text, hash=spec_hash(spec))
+        source_map = {
+            n.node_id: NodeSource(definition=n.definition.source, call_site=n.call_site)
+            for n in builder.nodes
+        }
+        return CompiledWorkflow(spec=spec, json=text, hash=spec_hash(spec), source_map=source_map)
 
     def _invoke_body(self, builder: _Builder, overrides: Mapping[str, Any]) -> None:
         """Call the body with Param placeholders for each declared parameter."""
@@ -550,7 +621,7 @@ class WorkflowDefinition:
 
         for node in builder.nodes:
             inputs: dict[str, ValueSpec] = {}
-            declared = getattr(node.definition, "_decl").inputs or {}
+            declared = node.definition.declaration.inputs or {}
             bound_names = set(node.literals) | set(node.params) | set(node.upstream)
             if node.map_spec is not None:
                 bound_names.add(node.map_spec["item_input"])
@@ -596,6 +667,7 @@ class WorkflowDefinition:
                     )
                 edge_map.setdefault((from_node, node.node_id), {})[input_name] = output
 
+        self._check_fan_in_bounds(builder, edge_map)
         tasks.sort(key=lambda t: t["id"])
         edges = [
             {
@@ -607,6 +679,40 @@ class WorkflowDefinition:
         ]
         self._reject_cycles(tasks, edges)
         return tasks, edges
+
+    @staticmethod
+    def _check_fan_in_bounds(
+        builder: _Builder, edge_map: Mapping[tuple[str, str], Mapping[str, str]]
+    ) -> None:
+        """Reject a fan-in that no platform configuration could ever assemble.
+
+        When a map template declares ``max_bytes`` on an output, max_fanout
+        children of that size either fit the fan-in limit or do not. The
+        gateway checks against the limit its operator configured; the SDK
+        cannot know that value, so it checks against the CEILING no
+        configuration may exceed (MAX_FAN_IN_BYTES_CEILING) -- anything above
+        it is certain to be refused, and saying so at the decorator is cheaper
+        than a submit round trip.
+        """
+        by_id = {n.node_id: n for n in builder.nodes}
+        for (frm, to), mapping in edge_map.items():
+            src = by_id.get(frm)
+            if src is None or src.map_spec is None:
+                continue
+            outputs = src.definition.declaration.outputs or {}
+            fanout = int(src.map_spec["max_fanout"])
+            for input_name, output in mapping.items():
+                ob = outputs.get(output)
+                if ob is None or not ob.max_bytes:
+                    continue
+                worst = fan_in_worst_case(fanout, ob.max_bytes)
+                if worst > MAX_FAN_IN_BYTES_CEILING:
+                    raise SpecError(
+                        f"node {to!r} input {input_name!r}: the fan-in of {frm}.{output} can "
+                        f"reach {worst} bytes (max_fanout {fanout} x max_bytes {ob.max_bytes}), "
+                        f"over the platform ceiling of {MAX_FAN_IN_BYTES_CEILING} bytes; lower "
+                        "max_fanout, declare a smaller max_bytes, or pass references"
+                    )
 
     @staticmethod
     def _reject_cycles(tasks: Sequence[Mapping[str, Any]], edges: Sequence[Mapping[str, Any]]) -> None:
@@ -661,19 +767,41 @@ class _WorkflowContext:
         return f"<workflow-compile-context {self.workflow_name}>"
 
 
+@overload
+def workflow(_fn: Callable[..., object], /) -> WorkflowDefinition: ...
+
+
+@overload
 def workflow(
-    _fn: Callable[..., Any] | None = None,
+    _fn: None = None,
+    /,
     *,
     name: str | None = None,
     namespace: str = "default",
     description: str | None = None,
-    params: Mapping[str, Any] | None = None,
+    params: Mapping[str, ValueSpec | Mapping[str, Any] | str] | None = None,
     run_timeout: str | int | None = None,
     fail_fast: bool = False,
     max_active_runs: int = 0,
     priority: int = 0,
     labels: Mapping[str, str] | None = None,
-) -> Any:
+) -> Callable[[Callable[..., object]], WorkflowDefinition]: ...
+
+
+def workflow(
+    _fn: Callable[..., object] | None = None,
+    /,
+    *,
+    name: str | None = None,
+    namespace: str = "default",
+    description: str | None = None,
+    params: Mapping[str, ValueSpec | Mapping[str, Any] | str] | None = None,
+    run_timeout: str | int | None = None,
+    fail_fast: bool = False,
+    max_active_runs: int = 0,
+    priority: int = 0,
+    labels: Mapping[str, str] | None = None,
+) -> WorkflowDefinition | Callable[[Callable[..., object]], WorkflowDefinition]:
     """Declare a workflow. `.compile()` emits the WorkflowSpec document.
 
     The decorated body is traced once, in your process, to discover the graph.
@@ -697,7 +825,7 @@ def workflow(
         "labels": labels,
     }
 
-    def decorate(fn: Callable[..., Any]) -> WorkflowDefinition:
+    def decorate(fn: Callable[..., object]) -> WorkflowDefinition:
         return WorkflowDefinition(fn, options)
 
     if _fn is not None:

@@ -119,6 +119,9 @@ func buildEnv(spec TaskSpec, workDir, inputDir, outputFile, outputDir string) []
 		env = append(env, EnvDeadlineUnixMs+"="+
 			strconv.FormatInt(spec.StartToCloseDeadline.UnixMilli(), 10))
 	}
+	if spec.InlineThresholdBytes > 0 {
+		env = append(env, EnvInlineThreshold+"="+strconv.FormatInt(spec.InlineThresholdBytes, 10))
+	}
 	// A GPU request without device isolation is pinned by convention only; a
 	// workload can override this, which is precisely the fidelity gap that
 	// makes subprocess development-grade.

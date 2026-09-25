@@ -653,6 +653,9 @@ func dockerEnv(spec TaskSpec, containerWD string) []string {
 	if !spec.StartToCloseDeadline.IsZero() {
 		env = append(env, EnvDeadlineUnixMs+"="+strconv.FormatInt(spec.StartToCloseDeadline.UnixMilli(), 10))
 	}
+	if spec.InlineThresholdBytes > 0 {
+		env = append(env, EnvInlineThreshold+"="+strconv.FormatInt(spec.InlineThresholdBytes, 10))
+	}
 	return env
 }
 

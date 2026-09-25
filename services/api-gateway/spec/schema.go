@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/khuriwalgroup/kgf-nexus/internal/specpos"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
@@ -97,6 +98,11 @@ type Problem struct {
 	// Stage distinguishes a structural rejection from a semantic one; they mean
 	// different things to the author ("wrong shape" vs "the graph is invalid").
 	Stage string `json:"stage"`
+	// Line and Column locate Path in the SUBMITTED document (1-based), for YAML
+	// and JSON alike. Additive and omitted when unknown -- a document that did
+	// not parse, or a path above any node. See internal/specpos.
+	Line   int `json:"line,omitempty"`
+	Column int `json:"column,omitempty"`
 }
 
 func (p Problem) String() string {
@@ -104,7 +110,28 @@ func (p Problem) String() string {
 	if loc == "" {
 		loc = "(root)"
 	}
+	if p.Line > 0 {
+		loc = fmt.Sprintf("line %d:%d %s", p.Line, p.Column, loc)
+	}
 	return fmt.Sprintf("%s: %s", loc, p.Message)
+}
+
+// locate fills Line and Column from the submitted body. Parse problems carry
+// their own position in the message and are left alone.
+func (v *ValidationFailure) locate(body []byte) {
+	if v == nil || len(v.Problems) == 0 {
+		return
+	}
+	idx := specpos.New(body)
+	for i := range v.Problems {
+		p := &v.Problems[i]
+		if p.Stage == "parse" {
+			continue
+		}
+		if at, ok := idx.Lookup(p.Path); ok {
+			p.Line, p.Column = at.Line, at.Column
+		}
+	}
 }
 
 // ValidationFailure carries every problem found, not just the first.
