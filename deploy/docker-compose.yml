@@ -214,7 +214,23 @@ services:
     # serves monitoring on the container's LOOPBACK only: the monitoring port
     # has no authentication and /connz lists every client. After changing
     # identities, re-run nats-init and `docker compose kill -s HUP nats`.
-    command: ["-c", "/etc/nats/nats.conf"]
+    #
+    # Streams created before authorization live in the global account ($G),
+    # which no configured account owns, so the server could never recover
+    # them. They carry only notifications (PostgreSQL is authoritative) and
+    # the event-service recreates its streams in the NEXUS account, so the old
+    # store is moved aside -- never deleted -- before the server starts
+    # (docs/OPERATIONS.md §11.7, upgrading an existing broker).
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        legacy='/data/jetstream/$$G'
+        if [ -d "$$legacy" ]; then
+          dest="/data/retired-global-account-$$(date -u +%Y%m%dT%H%M%SZ)"
+          mv "$$legacy" "$$dest"
+          echo "moved pre-authorization JetStream store $$legacy to $$dest; delete it once the upgrade is verified"
+        fi
+        exec nats-server -c /etc/nats/nats.conf
     ports:
       # Loopback: host tools and agents run on the laptop reach it; nothing
       # else on the network does. The monitoring port is not published.

@@ -2662,3 +2662,37 @@ attempts of workers that are already DEAD with attempts still DISPATCHED/RUNNING
 as `ReconcileExpiredLeases` does, instead of returning on the first error. Test
 with an integration test where the resource-manager wins the race, asserting
 the attempts become LOST within one sweep interval instead of one lease TTL.
+
+### F107. Upgrading to NATS authorization put the broker in a liveness restart loop — FIXED
+
+Found by the first Helm upgrade of an existing deployment (the local
+docker-desktop environment) after NATS authorization landed. The broker had run
+without authorization, so its JetStream streams lived in the global account
+(`$G`). With accounts configured nothing owns `$G`, and nats-server logged
+`Healthcheck failed: "JetStream stream '$G > NEXUS_RUNS' could not be recovered"`
+on every check.
+
+The chart's liveness probe called the full `/healthz`, which fails when any
+single stream is unhealthy. A restart cannot recover a stream that belongs to no
+account, so the kubelet killed the broker every ~40 s: five restarts in the
+first four minutes, each one dropping every client connection. Compose was not
+affected because its healthcheck already used `?js-enabled-only=true`, but it
+kept the stranded store too.
+
+**Fix.**
+- Every NATS probe in the chart (a new startup probe, readiness and liveness)
+  now asks `/healthz?js-enabled-only=true`: is JetStream serving. A per-stream
+  fault is an operator problem, not a reason to restart the broker.
+- Before the server starts, the Helm init container `retire-global-account-streams`
+  and the compose `nats` entrypoint move `/data/jetstream/$G` to
+  `/data/retired-global-account-<UTC timestamp>`. Nothing is deleted. The
+  streams carried only notifications (PostgreSQL is authoritative, ADR-0003),
+  and the event-service recreates its streams in the `NEXUS` account. The step
+  is idempotent and a no-op on a fresh volume.
+- OPERATIONS §11.7 documents the step and how to delete the retired directory.
+
+**Verified.** The move step was run in the pinned `nats:2.14.7-alpine` image as
+uid 1000 with a read-only root filesystem: it moved `$G`, left `NEXUS` untouched,
+and did nothing on a second run. On docker-desktop the upgraded StatefulSet
+retired the stranded store and the broker stopped restarting (see the commit
+that records this finding).
