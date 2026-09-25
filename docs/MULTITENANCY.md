@@ -20,7 +20,7 @@ An optional, separately enrolled platform operator can use `/v1/platform/tenants
 
 ## Deployment
 
-Apply migration 0013 before the new gateway. Backfill preserves existing data. The UI can then expose customer registration. No billing subscription, cloud scaling or resource provisioning is triggered. Before exposing self-service registration publicly, add signup abuse controls and tenant quota enforcement; email verification and password recovery exist since migration 0017 but require a configured SMTP server (docs/OPERATIONS.md §10). Multi-namespace membership, customer suspension and ownership-transfer workflows require separate lifecycle work.
+Apply migration 0013 before the new gateway. Backfill preserves existing data. The UI can then expose customer registration. No billing subscription, cloud scaling or resource provisioning is triggered. Before exposing self-service registration publicly, add signup abuse controls and configure tenant quotas (namespace quotas are enforced since migration 0027, ADR-0021, but every namespace starts unlimited; see OPERATIONS §21); email verification and password recovery exist since migration 0017 but require a configured SMTP server (docs/OPERATIONS.md §10). Multi-namespace membership, customer suspension and ownership-transfer workflows require separate lifecycle work.
 
 ## Explicit row ownership (migration 0014)
 

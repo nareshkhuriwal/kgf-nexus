@@ -4313,3 +4313,10 @@ a.icon-action { color:var(--fg); text-decoration:none; border:1px solid var(--bo
 .rbac-matrix fieldset { border: 1px solid var(--border, #dce1e8); border-radius: 8px; padding: 16px; }
 .rbac-matrix label { display:flex; gap:8px; align-items:center; padding:6px 0; }
 .rbac-matrix input[type=checkbox] { width:16px; height:16px; }
+
+/* ── Quotas & usage (ADR-0021) ───────────────────────────────────────────── */
+/* The daily usage chart: bars in the accent token, so it follows the theme
+   without a second palette; the exact figures sit in the table below it. */
+.usage-chart { display: block; max-height: 220px; }
+.usage-chart rect:hover { fill: var(--focus); }
+.quotas-page .infra-fields label .sub { font-size: var(--text-xs); }

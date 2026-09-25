@@ -226,7 +226,7 @@ Multiple scheduler replicas run concurrently; correctness comes from the databas
 The capacity ledger. Responsibilities:
 - Tracking each worker's **advertised capacity** (from registration) and **committed capacity** (sum of active reservations).
 - Issuing and releasing **reservations** atomically with lease creation, so capacity accounting can never drift from actual dispatch.
-- Enforcing namespace **quotas** (max concurrent CPU / memory / GPU per namespace) as an admission check before dispatch.
+- Enforcing namespace **quotas** (max concurrent CPU / memory / GPU per namespace) as an admission check before dispatch. *As implemented ([ADR-0021](adr/0021-namespace-quotas-and-usage-metering.md), CONTRACT-FINDINGS F123):* the check runs inside the scheduler's claim transaction (§5.3 step 3), not in the resource manager, because it must be atomic with the reservation. Concurrent limits (in-flight attempts, CPU, memory, GPU, custom resources) are serialized per namespace by a transaction-scoped advisory lock; run limits (active runs, runs per hour) are enforced at run creation. Every attempt that held a reservation writes one row to the scheduler-owned, append-only `usage_ledger` in the same transaction as its terminal transition.
 - Reconciling: on worker heartbeat, the worker reports its actual running task IDs. Any reservation the control plane holds for that worker that the worker does not acknowledge is a leak, and is released. This closes the gap where a worker restarts and forgets its work but the ledger still believes the capacity is committed. Periodic reconciliation of a ledger against ground truth is the only way to keep distributed accounting honest.
 
 Resources are modelled as a **typed vector**, not scalars: `{cpu_millis, memory_bytes, gpu: {count, kind}, disk_bytes, custom: {name: qty}}`. Custom resources let users express non-obvious constraints (`license_token: 1`, `db_connection: 5`) without a code change — Ray's custom-resource model, borrowed.
@@ -899,6 +899,11 @@ BEGIN ISOLATION LEVEL READ COMMITTED;
   -- 3. Namespace quota admission.
   IF quota_would_exceed($namespace, $resource_request) THEN
       record_reason('quota_exceeded'); COMMIT; RETURN;
+  --    As implemented (ADR-0021): only for a namespace with concurrent
+  --    limits, under pg_advisory_xact_lock(<quota class>, hashtext(tenant))
+  --    -- waited for as the pull claim's FIRST statement, only tried on the
+  --    push path -- so no two claims can pass against the same usage. The
+  --    reason is 'quota_exceeded: <dimension> (used X of Y)'.
   END IF;
 
   -- 4. Commit capacity, lease, state, event, and timers atomically.

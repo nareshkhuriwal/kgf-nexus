@@ -70,9 +70,14 @@ func (a *API) platformPut(w http.ResponseWriter, r *http.Request, p authn.Princi
 	switch {
 	case c.Quotas == nil:
 		c.Quotas = cur.Quotas
-	case !c.Quotas.Equal(quotasOrZero(cur.Quotas)):
+	case !c.Quotas.Equal(quotasOrZero(cur.Quotas)) && c.Revision == cur.Revision:
 		writeError(w, 400, "invalid_policy", "quotas cannot be changed here; use PUT /v1/namespaces/{ns}/quotas")
 		return
+	case !c.Quotas.Equal(quotasOrZero(cur.Quotas)):
+		// A stale document -- quotas were changed since the client read it.
+		// Carry the stored ones; the revision check answers 409, which is
+		// the true reason, instead of a misleading "cannot change quotas".
+		c.Quotas = cur.Quotas
 	}
 	c, err = store.GatewayPlatformPut(r.Context(), a.db, p.Namespace, c, store.AuditEntry{ActorKind: string(p.Kind), ActorLabel: p.Name, ClientIP: clientIP(r)})
 	if errors.Is(err, store.ErrPlatformConflict) {

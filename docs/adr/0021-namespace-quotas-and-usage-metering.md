@@ -123,13 +123,16 @@ CAS and the single transaction all stand.
 When the check fails the attempt stays PENDING with
 `pending_reason = 'quota_exceeded: <dimension> (used X of Y)'` (dimension one
 of `inflight_attempts`, `cpu_millis`, `memory_bytes`, `gpu_count`,
-`custom:<name>`; `, request R` is appended when one attempt alone asks for
-more than the limit, so it can never run until the quota is raised). It is an
-annotation like `waiting_for_resources`, not a failure: no retry budget is
-spent. When a namespace has no headroom at all on the failing dimension, the
+`custom:<name>`; `, request R exceeds the quota` is added inside the
+parentheses when one attempt alone asks for more than the limit, so it can
+never run until the quota is raised). It is an annotation like
+`waiting_for_resources`, not a failure: no retry budget is spent. When the
+in-flight count is at its limit -- which every attempt counts against -- the
 push path sets the namespace aside for the rest of the cycle (as ADR-0017 does
 for a blocked namespace) and the pull path ends the poll, so a quota-bound
-namespace costs one usage read per cycle, not one per look-ahead slot.
+namespace costs one usage read per cycle, not one per look-ahead slot. A full
+CPU, memory, GPU or custom dimension does not end the search, because an
+attempt that does not request that resource still fits.
 
 **The index.** ADR-0017's `idx_attempts_inflight_by_tenant` is keyed
 `(queue, tenant_id)`; a quota spans queues, and PostgreSQL 16 cannot skip-scan
@@ -221,16 +224,36 @@ namespace first (F101) and every query is keyed by the principal's namespace.
 
 ## Evidence
 
-- `internal/store/quota_integration_test.go` (real Postgres 16): 8 replicas
-  on the pull path and 8 on the push path race for 200 attempts of one
-  namespace capped at 5 in flight and 2,000 CPU millis, across 16 workers; at
-  every sample and at the end the in-flight count and CPU sum stay within the
-  quota, and the blocked attempts carry the documented reason. With the lock
-  removed the same test exceeds the quota (mutation check, F89).
+- `services/scheduler/quota_integration_test.go` (real Postgres 16):
+  `TestQuotaHoldsUnderConcurrentReplicas` runs 4 pull-path and 4 push-path
+  replicas, each with its own pool, against 200 attempts of one namespace
+  capped at 5 in flight and 2,000 CPU millis (mixed 300/700 m requests)
+  across 16 workers, while a completer finishes work at random. A sampler
+  reads the namespace's in-flight count and CPU sum in one statement
+  continuously; across five consecutive runs no sample exceeded either limit,
+  both peaks sat exactly at the limit (5 and 2,000), and 28–99 claims per run
+  were held back by the quota. **Mutation check (F89):** with the advisory lock
+  replaced by a no-op in both paths, the same test fails every run, with
+  3,487–3,701 samples over quota and a peak of 7 in flight / 3,300 CPU millis.
+- `TestQuotaBlockedAttemptExplainsItself`, `TestQuotaDimensionsAndOversizeRequest`,
+  `TestNoQuotasMeansUnlimited`: the reason text on both paths, per-dimension
+  reasons (CPU, GPU, custom), the oversize message, and unchanged behaviour
+  with no quotas or all-zero quotas.
+- `internal/store/quota_integration_test.go`: 20 concurrent run creations
+  against `max_active_runs = 5` create exactly the free slots; the hourly
+  rate returns Retry-After; an idempotent replay at the limit returns its run;
+  the quota document's revision, lock and audit rules; rollups and pagination;
+  the grants (scheduler INSERT-only, nobody UPDATE/DELETE).
 - Idempotent metering: duplicate and late reports, a report racing a lease
   expiry, cancel of a DISPATCHED and of a PENDING attempt, and worker death;
   exactly one ledger row per dispatched attempt, none for the never-dispatched.
-- Claim latency before and after: `tests/bench`, recorded in OPERATIONS §21.
+- Claim latency before and after (`tests/bench`, OPERATIONS §21.8, two
+  alternated rounds): an unlimited namespace is within this laptop's
+  run-to-run noise of `origin/main` on both paths (e.g. pull, 10k backlog, 4
+  replicas: 485 vs 509 claims/s, p50 6.6 vs 6.8 ms). A quota-bound namespace
+  on the pull path with 4 replicas dispatches about 140/s with p50 24–29 ms,
+  the cost of the per-namespace serialization; single-replica and push-path
+  cells are close to baseline.
 
 ## Consequences
 

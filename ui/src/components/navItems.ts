@@ -24,6 +24,7 @@ import {
   IconCluster,
   IconShield,
   IconClock,
+  IconQuota,
   IconDag,
   IconGauge,
   IconKey,
@@ -95,6 +96,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Govern',
     items: [
       { to: '/admin/infrastructure', label: 'Infrastructure', icon: IconCluster, adminOnly: true },
+      { to: '/admin/quotas', label: 'Quotas & usage', icon: IconQuota, adminOnly: true },
       { to: '/admin/roles', label: 'Roles & permissions', icon: IconShield, adminOnly: true },
       { to: '/admin/users', label: 'Users', icon: IconUsers, adminOnly: true },
       { to: '/admin/tokens', label: 'Tokens', icon: IconKey, adminOnly: true },
