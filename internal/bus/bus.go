@@ -199,6 +199,7 @@ func redactURL(u string) string {
 // nexus.task.dispatch.<namespace>.<queue>   hint: dispatchable work may exist
 // nexus.run.events.<namespace>.<run_id>     projection of one run_events row
 // nexus.run.state.<namespace>.<run_id>      projection of a run state change
+// nexus.usage.recorded.<namespace>          one usage-ledger row (ADR-0021)
 //
 // The namespace is IN the subject so broker permissions can confine a tenant's
 // workers to their own hints (subscribe nexus.task.dispatch.<ns>.>), and so a
@@ -208,7 +209,18 @@ const (
 	prefixDispatch  = "nexus.task.dispatch"
 	prefixRunEvents = "nexus.run.events"
 	prefixRunState  = "nexus.run.state"
+	prefixUsage     = "nexus.usage.recorded"
 )
+
+// UsageSubject carries one usage-ledger row: the metering export hook
+// (ADR-0021). Outside nexus.run.> on purpose, so the SSE waker and run-stream
+// consumers never see billing records.
+func UsageSubject(namespace string) string {
+	return prefixUsage + "." + Token(namespace)
+}
+
+// AllUsageSubject matches every usage record, for a billing consumer.
+const AllUsageSubject = "nexus.usage.>"
 
 // DispatchSubject is where a hint that a queue may have dispatchable work goes.
 func DispatchSubject(namespace, queue string) string {
@@ -293,6 +305,7 @@ func MsgID(outboxID int64, createdAt time.Time) string {
 const (
 	StreamRuns     = "NEXUS_RUNS"
 	StreamDispatch = "NEXUS_DISPATCH"
+	StreamUsage    = "NEXUS_USAGE"
 )
 
 // RunsDuplicateWindow is how long JetStream remembers a Nats-Msg-Id. It bounds
@@ -333,6 +346,21 @@ func StreamConfigs() []jetstream.StreamConfig {
 			MaxAge:      2 * time.Minute,
 			MaxMsgs:     100_000,
 			Duplicates:  time.Minute,
+		},
+		{
+			// The metering export hook (ADR-0021). File-backed and kept a
+			// month, so a billing consumer that is down for a weekend catches
+			// up from the stream; beyond that it re-reads the ledger, which is
+			// the record of truth (metering.Pump).
+			Name:        StreamUsage,
+			Description: "Usage-ledger rows as they are recorded (the ledger in Postgres is authoritative)",
+			Subjects:    []string{AllUsageSubject},
+			Storage:     jetstream.FileStorage,
+			Retention:   jetstream.LimitsPolicy,
+			Discard:     jetstream.DiscardOld,
+			MaxAge:      30 * 24 * time.Hour,
+			MaxBytes:    4 << 30,
+			Duplicates:  RunsDuplicateWindow,
 		},
 	}
 }

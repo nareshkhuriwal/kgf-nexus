@@ -64,6 +64,8 @@ const MODULE_ACTIONS: Readonly<Record<string, readonly string[]>> = Object.freez
   tokens: ['view', 'manage'],
   audit: ['view'],
   roles: ['view', 'manage'],
+  quotas: ['view', 'manage'],
+  usage: ['view'],
 });
 
 /** Everything: what the Administrator role resolves to. The default for tests. */

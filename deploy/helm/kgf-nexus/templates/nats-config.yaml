@@ -12,7 +12,7 @@ Portainer host); tests/nats/run-integration.sh runs a broker with THIS output an
 checks every role against it. Change one, change both.
 
   account NEXUS (JetStream)
-    event-service   pub nexus.run.>, nexus.task.dispatch.>, $JS.API.STREAM.{INFO,CREATE}.<its two streams>
+    event-service   pub nexus.run.>, nexus.task.dispatch.>, nexus.usage.>, $JS.API.STREAM.{INFO,CREATE}.<its three streams>
                     sub nexus.run.>, _INBOX.nexus-event-service.>
     agent-<ns>      pub nothing; sub nexus.task.dispatch.<ns>.> only
   account SYS (system_account)
@@ -66,7 +66,7 @@ data:
           # event-service: outbox relay (JetStream publish) + SSE waker
           { nkey: {{ . }}
             permissions: {
-              publish: { allow: ["nexus.run.>", "nexus.task.dispatch.>"{{ range list "NEXUS_RUNS" "NEXUS_DISPATCH" }}, "$JS.API.STREAM.INFO.{{ . }}", "$JS.API.STREAM.CREATE.{{ . }}"{{ end }}] }
+              publish: { allow: ["nexus.run.>", "nexus.task.dispatch.>", "nexus.usage.>"{{ range list "NEXUS_RUNS" "NEXUS_DISPATCH" "NEXUS_USAGE" }}, "$JS.API.STREAM.INFO.{{ . }}", "$JS.API.STREAM.CREATE.{{ . }}"{{ end }}] }
               subscribe: { allow: ["nexus.run.>", "_INBOX.nexus-event-service.>"] }
             } }
           {{- end }}

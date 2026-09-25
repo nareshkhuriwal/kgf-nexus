@@ -15,6 +15,12 @@ type Config struct {
 	Scheduler Scheduler    `json:"scheduler"`
 	Pools     []Pool       `json:"pools"`
 	Profiles  []PodProfile `json:"profiles"`
+	// Quotas are the namespace's limits (ADR-0021). A pointer so a document
+	// that omits them -- an older console, a scripted PUT -- is told apart from
+	// one that sets them to unlimited: the platform-config route keeps the
+	// stored quotas in the first case, and quotas have their own route and
+	// permission in any case.
+	Quotas *Quotas `json:"quotas,omitempty"`
 }
 type Scheduler struct {
 	MinReplicas      int `json:"min_replicas"`
@@ -86,6 +92,11 @@ func (c Config) Validate() error {
 	}
 	if s.FairShareWeight < MinFairShareWeight || s.FairShareWeight > MaxFairShareWeight {
 		return fmt.Errorf("fair-share weight must be %d–%d", MinFairShareWeight, MaxFairShareWeight)
+	}
+	if c.Quotas != nil {
+		if err := c.Quotas.Validate(); err != nil {
+			return fmt.Errorf("quotas: %w", err)
+		}
 	}
 	if len(c.Pools) > 100 || len(c.Profiles) > 100 {
 		return fmt.Errorf("at most 100 pools and profiles per namespace")

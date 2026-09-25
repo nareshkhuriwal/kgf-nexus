@@ -90,6 +90,24 @@ func WFMCreateRun(ctx context.Context, db GWDB, p CreateRunParams) (row RunRow, 
 	if p.IdempotencyKey != "" {
 		idem = &p.IdempotencyKey
 	}
+
+	if qerr := wfmCheckRunQuota(ctx, tx, p.Namespace); qerr != nil {
+		var quota *RunQuotaError
+		if errors.As(qerr, &quota) && idem != nil {
+			// A replay of a run that already exists is not a new run and must
+			// not be refused for the namespace being at its limit: the client
+			// is asking "did my earlier request land?", and it did.
+			existing, err := scanRun(tx.QueryRow(ctx, runSelect+` WHERE r.namespace = $1 AND r.idempotency_key = $2`, p.Namespace, *idem))
+			if err == nil {
+				return existing, false, nil
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return RunRow{}, false, fmt.Errorf("check idempotency key under quota: %w", err)
+			}
+		}
+		return RunRow{}, false, qerr
+	}
+
 	var id string
 	insertSQL := `
 		INSERT INTO workflow_runs

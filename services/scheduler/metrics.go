@@ -7,10 +7,12 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
+	"github.com/khuriwalgroup/kgf-nexus/internal/platform"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 )
 
@@ -32,6 +34,8 @@ type Metrics struct {
 	deadWorkers   *metrics.Counter
 	timers        *metrics.CounterVec
 	loopErrors    *metrics.CounterVec
+	quotaBlocked  *metrics.CounterVec
+	usageWrites   *metrics.CounterVec
 
 	pending     *metrics.GaugeVec
 	oldestAge   *metrics.GaugeVec
@@ -78,6 +82,12 @@ func NewMetrics(reg *metrics.Registry, queue string) *Metrics {
 		loopErrors: reg.NewCounter("nexus_scheduler_loop_errors_total",
 			"Background loop iterations that failed, by loop. Any sustained rate also fails /readyz.",
 			"queue", "loop"),
+		quotaBlocked: reg.NewCounter("nexus_scheduler_quota_blocked_total",
+			"Attempts a namespace quota held PENDING in a claim, by dimension (inflight_attempts, cpu_millis, memory_bytes, gpu_count, custom). Counted per examination, so one waiting attempt counts once per claim that looks at it (ADR-0021).",
+			"queue", "dimension"),
+		usageWrites: reg.NewCounter("nexus_scheduler_usage_ledger_writes_total",
+			"Usage-ledger rows written, one per dispatched attempt that ended, by outcome (ADR-0021).",
+			"queue", "outcome"),
 		pending: reg.NewGauge("nexus_scheduler_pending_attempts",
 			"PENDING attempts per queue, fleet-wide (every replica reports every queue: aggregate with max by (queue)).",
 			"queue"),
@@ -97,6 +107,27 @@ func (m *Metrics) observeClaim(path, outcome string, d time.Duration, dispatched
 	if dispatched > 0 {
 		m.dispatched.With(metrics.Labels{"queue": m.queue, "path": path}).Add(float64(dispatched))
 	}
+}
+
+// QuotaBlocked implements store.QuotaObserver. Custom dimensions are collapsed
+// to "custom": their names are author-chosen, and a label per name would make
+// the series count depend on tenants' configuration.
+func (m *Metrics) QuotaBlocked(dimension string) {
+	if m == nil {
+		return
+	}
+	if strings.HasPrefix(dimension, platform.DimCustomPrefix) {
+		dimension = "custom"
+	}
+	m.quotaBlocked.With(metrics.Labels{"queue": m.queue, "dimension": dimension}).Inc()
+}
+
+// UsageRecorded implements store.QuotaObserver.
+func (m *Metrics) UsageRecorded(outcome string) {
+	if m == nil {
+		return
+	}
+	m.usageWrites.With(metrics.Labels{"queue": m.queue, "outcome": outcome}).Inc()
 }
 
 func (m *Metrics) observeLost(l store.LostAttempt, cause string) {

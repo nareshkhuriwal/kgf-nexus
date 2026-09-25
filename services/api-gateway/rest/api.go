@@ -306,6 +306,7 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("PUT /v1/namespaces/{ns}/platform/config", a.guard(authn.ActionAdminWrite, a.platformPut))
 	mux.Handle("GET /v1/namespaces/{ns}/platform/plan", a.guard(authn.ActionAdminWrite, a.platformPlan))
 	a.registerClusterRoutes(mux)
+	a.registerQuotaRoutes(mux)
 	a.registerRBACRoutes(mux)
 	a.registerIdentityRoutes(mux)
 
@@ -841,6 +842,11 @@ func (a *API) createRun(w http.ResponseWriter, r *http.Request, p authn.Principa
 				a.log.ErrorContext(r.Context(), "failed to release idempotency claim after a failed creation",
 					"namespace", ns, "idempotency_key", idemKey, "error", relErr)
 			}
+		}
+		var quota *store.RunQuotaError
+		if errors.As(err, &quota) {
+			writeRunQuotaExceeded(w, quota)
+			return
 		}
 		if errors.Is(err, store.ErrMaxActiveRuns) {
 			writeError(w, http.StatusTooManyRequests, "max_active_runs", err.Error())

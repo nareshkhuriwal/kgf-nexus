@@ -3053,3 +3053,55 @@ and require `ActionWorkerRPC` on the resulting principal (legacy `api_keys` rows
 with role `worker` keep working through its default branch). Add an integration
 test that mints a worker token through the REST API and registers an agent with
 it. Then `nexusctl up` and the bootstrap Job can drop their SQL step.
+
+### F122. Workers' measured ExecutionMetrics were sent on every result and dropped — FIXED
+
+**Severity:** medium (data loss, no correctness impact). Found while building
+the usage ledger (ADR-0021).
+
+`ReportResultRequest.metrics` (`ExecutionMetrics`: CPU seconds, peak memory,
+wall ms, OOM kill, exit code) has been populated by the agent
+(`agent/internal/worker/runner.go`) since the worker protocol existed, and
+`task_attempts.metrics` has existed since migration 0001. Nothing connected
+them: `SchedulerStore.ApplyResult` wrote state, output, error and ended_at and
+never the metrics, so every measurement was discarded at the control plane.
+The console's attempt view already had a type for the field
+(`ui/src/api/types.ts`, `ExecutionMetrics`) that could only ever be empty.
+Measured usage is exactly what cost reporting needs next to reserved usage.
+
+**Fix:** `ApplyResult` stores the metrics on the attempt in the terminal
+UPDATE, snake_case as the console reads them (`metrics = COALESCE($6,
+metrics)`, NULL when the report carried none), and the usage ledger copies
+them into `measured_*` columns. LOST and cancelled attempts have no report and
+record NULL, not zero. Test:
+`services/scheduler/quota_integration_test.go`
+`TestUsageLedgerSuccessIsMeteredOnceWithMetrics`.
+
+### F123. Namespace quotas were specified in the claim and never implemented — FIXED
+
+**Severity:** medium (a documented control that did not exist).
+
+ARCHITECTURE.md §3.2 said the resource manager "enforces namespace quotas (max
+concurrent CPU / memory / GPU per namespace) as an admission check before
+dispatch", and §5.3 showed step 3 `IF quota_would_exceed($namespace, ...)
+THEN record_reason('quota_exceeded')`. No code read a quota and there was
+nowhere to configure one: a namespace could hold any amount of in-flight work
+its workers could fit, and create runs at any rate the gateway's per-IP and
+per-credential rate limits allowed. MULTITENANCY.md already listed "tenant
+quota enforcement" as a prerequisite for public self-service registration.
+
+A naive implementation (read the namespace's in-flight sum, compare, dispatch)
+would have been advisory only: two claims of one namespace on two workers
+share no lock, both pass the check, and together exceed it. With the lock
+removed, the concurrency test below exceeds a 5-attempt quota in thousands of
+samples per run, peaking at 7.
+
+**Fix (ADR-0021, migration 0027):** quotas in the namespace's platform policy;
+concurrent limits checked in both claim paths under a per-tenant transaction
+advisory lock (blocking as the first statement on the pull path, try-only on
+the push path, so no wait cycle is possible); blocked attempts keep
+`quota_exceeded: <dimension> (used X of Y)`; run-level limits enforced in
+`WFMCreateRun` under a second lock class and answered with 429. §3.2 and
+§5.3 now describe what is implemented. Tests:
+`TestQuotaHoldsUnderConcurrentReplicas` (4 push + 4 pull replicas, never over
+quota; mutation-checked), `TestIntegrationRunQuotaActiveRunsUnderConcurrency`.

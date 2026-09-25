@@ -422,3 +422,12 @@ export function IconChevronDown(props: IconProps) {
 export function IconSignOut(props: IconProps) {
   return <Icon {...props}><path d="M14 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2H14" /><path d="M10.5 12H20" /><path d="m16.5 8.5 3.5 3.5-3.5 3.5" /></Icon>;
 }
+
+/**
+ * Quotas & usage -- bars under a dashed ceiling: consumption measured against a
+ * limit. Distinct from the overview gauge (a single current reading) and the
+ * audit list.
+ */
+export function IconQuota(props: IconProps) {
+  return <Icon {...props}><path d="M3 6.5h18" strokeDasharray="2.2 2.2"/><path d="M6 20v-7M12 20V9.5M18 20v-4.5"/><path d="M3 20.5h18"/></Icon>;
+}

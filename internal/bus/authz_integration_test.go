@@ -116,7 +116,7 @@ func TestNATSAuthzEventServiceDoesItsJob(t *testing.T) {
 	defer stop()
 
 	id := time.Now().UnixNano()
-	for i, subj := range []string{bus.RunEventSubject(ns, runID), bus.RunStateSubject(ns, runID), bus.DispatchSubject(ns, "default")} {
+	for i, subj := range []string{bus.RunEventSubject(ns, runID), bus.RunStateSubject(ns, runID), bus.DispatchSubject(ns, "default"), bus.UsageSubject(ns)} {
 		msg := nats.NewMsg(subj)
 		msg.Data = []byte(`{"type":"authz-test"}`)
 		fut, err := js.PublishMsgAsync(msg, jetstream.WithMsgID(bus.MsgID(id+int64(i), time.Now())))
@@ -247,6 +247,7 @@ func TestNATSAuthzAgentIsConfinedToItsTenant(t *testing.T) {
 		bus.DispatchSubject(other, "default"),
 		bus.RunEventSubject(own, uuid.NewString()),
 		bus.RunStateSubject(other, uuid.NewString()),
+		bus.UsageSubject(own),
 		"$JS.API.INFO",
 		"$JS.API.STREAM.INFO." + bus.StreamRuns,
 		"$JS.API.CONSUMER.CREATE." + bus.StreamRuns,

@@ -6,7 +6,7 @@
 and restore and the ordering between the two stores, the restore drills and their
 measured results, point-in-time recovery with pgBackRest and its timed drills
 (§4), what these procedures do *not* cover, the RPO/RTO each approach actually
-delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), and third-party images and toolchains: what is pinned and why (§22).
+delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), and third-party images and toolchains: what is pinned and why (§22).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -2699,6 +2699,206 @@ external gRPC Service.
       `-f` values, then wait on pod readiness.
 - [ ] `deploy/helm/validate.sh` passes on your values file (copy it into
       `ci/` or run `helm lint --strict -f`).
+
+---
+
+## 21. Namespace quotas and usage metering
+
+Design: [ADR-0021](adr/0021-namespace-quotas-and-usage-metering.md).
+Migration 0027. Findings F122 (measured metrics were dropped) and F123 (quotas
+were documented, not implemented).
+
+### 21.1 What a quota does
+
+| Limit (`quotas.*`) | Enforced | What happens when it is reached |
+|---|---|---|
+| `max_inflight_attempts` | in the dispatch claim | The attempt stays PENDING with `pending_reason = quota_exceeded: inflight_attempts (used X of Y)` and runs when one of the namespace's attempts ends. |
+| `max_cpu_millis`, `max_memory_bytes`, `max_gpu_count`, `max_custom.<name>` | in the dispatch claim | Same, with the dimension named (`cpu_millis`, `memory_bytes`, `gpu_count`, `custom:<name>`). An attempt that does not request a resource is never held back by that resource's quota. If ONE attempt asks for more than the limit, the reason adds `request R exceeds the quota`: it will never run until the quota is raised. |
+| `max_active_runs` | at run creation | `POST .../runs` answers `429 namespace_quota_exceeded` (`dimension: active_runs`). |
+| `max_runs_per_hour` | at run creation (sliding 60 min, database clock) | `429 namespace_quota_exceeded` with `Retry-After`. |
+| `storage_soft_limit_bytes` | never (reported) | Shown against measured storage. Measured = durable task-log bytes only; result-store artifacts are not metered yet. |
+
+**0 or absent means unlimited**, and every namespace starts unlimited, so
+applying 0027 changes nothing until someone sets a quota. Quotas count
+**requested** resources of DISPATCHED and RUNNING attempts on every queue of the
+namespace, not measured use. A schedule tick refused by a run quota is not
+lost: it is retried on the next scheduler pass, as for `max_active_runs` on a
+workflow. A held-back attempt spends no retry budget; if it has a
+`schedule_to_start` deadline, that deadline still runs and can time it out,
+which is the correct signal that the namespace is under-provisioned.
+
+### 21.2 Setting quotas
+
+```sh
+# Read (quotas.view): limits, current usage per dimension, and the revision.
+curl -s -H "Authorization: Bearer $TOKEN" $API/v1/namespaces/$NS/quotas
+
+# Replace (quotas.manage). The revision is required: a stale one gets 409.
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  $API/v1/namespaces/$NS/quotas -d '{
+    "revision": 4,
+    "quotas": {"max_inflight_attempts": 200, "max_cpu_millis": 256000,
+               "max_memory_bytes": 1099511627776, "max_gpu_count": 8,
+               "max_custom": {"license": 10},
+               "max_active_runs": 50, "max_runs_per_hour": 600,
+               "storage_soft_limit_bytes": 0, "locked": false}}'
+```
+
+The console has the same under **Govern → Quotas & usage**. Quotas share the
+namespace platform policy's revision: saving quotas makes an open
+Infrastructure editor's next save answer 409 (reload), and vice versa. The
+Infrastructure route keeps stored quotas when a client omits them and refuses
+(400) a request that changes them.
+
+**Locking.** Quotas start unlocked: a namespace administrator with
+`quotas.manage` can set and change them. A platform operator (a session of a
+user in `platform_operators`) can set `"locked": true`; after that a namespace
+administrator may only lower limits or add new ones (403 `quotas_locked`, with
+the list of what would have been loosened). Only an operator can lock, unlock
+or loosen. Use the lock for tenants whose limits are part of a commercial plan.
+
+Every accepted change writes a `quota.update` audit row with `before`,
+`after`, the new revision and, when applicable, what was loosened.
+
+### 21.3 Permissions
+
+| Permission | Grants | Default roles |
+|---|---|---|
+| `quotas.view` | GET quotas | Viewer, Workflow Operator/Developer, Infrastructure Operator, Auditor, Administrator; legacy reader keys |
+| `quotas.manage` | PUT quotas | Infrastructure Operator, Administrator; legacy admin keys |
+| `usage.view` | GET usage | Infrastructure Operator, Auditor, Administrator; legacy admin keys (not reader keys: usage is cost data) |
+
+`GET /v1/platform/usage` (every namespace, one bucket each) needs a platform
+operator session.
+
+### 21.4 Usage ledger
+
+`usage_ledger` has one row per attempt that held a reservation, written in the
+same transaction as the attempt's terminal transition: worker report
+(SUCCEEDED, FAILED, TIMED_OUT, LOST on INDETERMINATE), lease expiry or worker
+death (LOST), cancel of a DISPATCHED/RUNNING attempt (CANCELLED). An attempt
+that never dispatched has no row. `UNIQUE(attempt_id)` makes duplicates
+impossible. Owned by the scheduler (INSERT only); every service can read it;
+no service can UPDATE or DELETE it, and a trigger refuses UPDATE even for the
+table owner. Rows are not foreign-keyed to runs, so deleting a run keeps its
+usage.
+
+Quantities: `reserved_seconds` = ended − dispatched (what the reservation
+held); `cpu_core_seconds` = cpu_millis/1000 × reserved_seconds;
+`memory_gib_seconds` = memory_bytes/2^30 × reserved_seconds; `gpu_seconds` =
+gpu_count × reserved_seconds; `wall_seconds` = ended − started. All exact
+`NUMERIC`. `measured_*` hold the worker's ExecutionMetrics when the attempt
+ended by a worker report, NULL otherwise.
+
+```sh
+# Rollups (usage.view). group_by: day | queue | pool | worker | executor | outcome | none.
+# from/to: RFC 3339 or YYYY-MM-DD (default: last 30 days); range <= 400 days;
+# limit <= 500; follow next_cursor.
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$API/v1/namespaces/$NS/usage?group_by=day&from=2026-09-01&to=2026-10-01"
+```
+
+An attempt counts in the UTC day it **ended**; a long attempt crossing
+midnight is attributed wholly to the later day.
+
+### 21.5 Export to a billing system
+
+Two paths, both at-least-once; **deduplicate on `attempt_id`**:
+
+- **Push.** Each ledger row writes an outbox row (topic `usage_recorded`) in
+  the same statement. The event-service relay publishes it to
+  `nexus.usage.recorded.<namespace>` in stream `NEXUS_USAGE` (file storage, 30
+  days, 4 GiB). The message carries `ledger_id`, `attempt_id`, tenant,
+  namespace, run, outcome, queue, pool, `ended_at` and the four derived
+  quantities. The relay's NATS identity needs publish on `nexus.usage.>` and
+  the JetStream INFO/CREATE API for `NEXUS_USAGE`; both renderings
+  (`deploy/nats/nexus-nats-auth.sh`, the Helm `nats-config.yaml`) grant it.
+  Re-render the broker authorization when upgrading: an old authorization makes
+  every usage publish fail, the rows stay unpublished in the outbox, and
+  nothing else is affected.
+- **Pull.** `internal/metering` (`Exporter`, `Cursor`, `Pump`) reads the
+  ledger by id after a persisted cursor. Rows younger than 30 s are held back
+  so a transaction that committed late cannot be skipped. The ledger is the
+  record of truth; replay the bus from it.
+
+### 21.6 Retention
+
+The ledger grows by one row per dispatched attempt (≈ 400 bytes with
+indexes). There is no automatic pruning: it is billing data. Export first, then
+delete as the database owner:
+
+```sql
+\copy (SELECT * FROM usage_ledger WHERE ended_at < '2026-01-01') TO 'usage-2025.csv' CSV HEADER
+DELETE FROM usage_ledger WHERE ended_at < '2026-01-01';   -- as the table owner
+```
+
+The down migration drops the ledger. Export it before any rollback.
+
+### 21.7 Metrics and alerts
+
+| Series | Meaning |
+|---|---|
+| `nexus_scheduler_quota_blocked_total{queue,dimension}` | Claims that held an attempt back for a quota. Counted per examination, so one waiting attempt counts once per claim that looks at it; use `rate()` as "namespaces are pressing their quotas", not as a count of attempts. Custom resources are one label value, `custom`. |
+| `nexus_scheduler_usage_ledger_writes_total{queue,outcome}` | Ledger rows written. Should track `rate(nexus_scheduler_attempts_dispatched_total)` over hours; a sustained gap means terminal transitions are failing. |
+
+Run-level refusals are HTTP 429 with `error: namespace_quota_exceeded` in the
+gateway's request metrics and logs.
+
+Suggested alert: `sum(rate(nexus_scheduler_quota_blocked_total[15m])) > 0`
+for 1 h on a namespace that should not be quota-bound, and
+`rate(nexus_scheduler_usage_ledger_writes_total[1h]) == 0` while
+`rate(nexus_scheduler_attempts_dispatched_total[1h]) > 0`.
+
+### 21.8 Cost on the dispatch path, and rollback
+
+A namespace **without** concurrent quotas pays one indexed lookup per claim
+(returning no row) and takes no lock. A namespace **with** them serializes its
+own dispatches across replicas: one claim transaction at a time per namespace
+holds its quota lock, and on the push path a namespace being claimed by another
+replica is skipped for that cycle. Each quota-bound claim reads the namespace's
+in-flight rows through `idx_attempts_inflight_tenant`, O(in-flight attempts
+of that namespace).
+
+**Measured** (`tests/bench`, `TestDispatchCeiling`; laptop, Postgres 16.15 · client GOMAXPROCS=14 · 64 workers;
+64 workers; 1,500 dispatches per cell, 500 at the 1,000 backlog). "Before" is
+`origin/main` built from a clean export; "after" is this branch, once with the
+namespace unlimited and once with quotas set far above what the cell reaches
+(`NEXUS_BENCH_QUOTA=true`), so every claim takes the full quota path without
+being refused. Both against the same database with 0027 applied, three
+builds alternated, two rounds, mean of the two:
+
+| mode | backlog | replicas | before: claims/s | before: p50 / p99 | after, unlimited ns: claims/s | p50 / p99 | after, quota-bound ns: claims/s | p50 / p99 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| pull | 1000 | 1 | 100 | 8.9 / 30.4 ms | 162 | 5.6 / 14.2 ms | 144 | 6.1 / 20.0 ms |
+| pull | 1000 | 4 | 432 | 8.9 / 28.7 ms | 522 | 6.7 / 27.7 ms | 148 | 24.0 / 70.2 ms |
+| pull | 10000 | 1 | 184 | 4.8 / 13.6 ms | 159 | 5.2 / 22.6 ms | 142 | 6.3 / 17.2 ms |
+| pull | 10000 | 4 | 485 | 6.6 / 50.5 ms | 509 | 6.8 / 22.9 ms | 138 | 28.5 / 61.0 ms |
+| push | 1000 | 1 | 105 | 8.1 / 29.3 ms | 108 | 8.6 / 23.5 ms | 102 | 8.9 / 19.1 ms |
+| push | 1000 | 4 | 179 | 19.0 / 54.7 ms | 169 | 20.0 / 59.8 ms | 108 | 23.1 / 97.7 ms |
+| push | 10000 | 1 | 26 | 35.0 / 83.2 ms | 26 | 36.4 / 95.7 ms | 26 | 35.6 / 115.0 ms |
+| push | 10000 | 4 | 64 | 50.2 / 185.2 ms | 55 | 59.6 / 238.3 ms | 51 | 61.4 / 252.8 ms |
+
+Reading it: for an **unlimited** namespace the differences are inside the
+run-to-run noise of this machine (single cells moved by 30–60 % between rounds
+of the same build); the one extra lookup is not visible against the ADR-0018
+candidate sort. For a **quota-bound** namespace the pull path with several
+replicas is capped at about 140 dispatches/s for that namespace, and p50
+includes the wait for the namespace lock: that is the serialization the
+design chooses (ADR-0021, Negative), and it does not apply to other
+namespaces. The bench never completes work, so the quota path's usage read
+covered up to 1,500 in-flight attempts by the end of each cell, which is a
+pessimistic case for the O(in-flight) read. Reproduce with
+`make bench-pg`, `NEXUS_BENCH_QUOTA=true make bench-dispatch`.
+
+**Upgrade.** Apply 0027 (`CREATE INDEX CONCURRENTLY`, re-runnable), then roll
+services. A scheduler started before 0027 logs `namespace quotas are not
+enforced` / `usage metering is off` and runs as before; restart it after the
+migration. Attempts that end during that window have no ledger row.
+
+**Rollback.** `NEXUS_QUOTAS=false` (or `-quotas=false`) on the scheduler stops
+claim-side enforcement without a deploy of new code; run-level quotas stop when
+the quotas are set to 0. Metering cannot be switched off; roll back the
+scheduler to stop it. Before reverting 0027, export the ledger (§21.6).
 
 ---
 

@@ -255,6 +255,19 @@ type ClaimReport struct {
 	Dispatch *DispatchResult
 	// Reason is the structured pending_reason written for ClaimBlocked.
 	Reason string
+	// QuotaDimension is set when THIS attempt was held back by a namespace
+	// quota (ADR-0021): inflight_attempts, cpu_millis, memory_bytes,
+	// gpu_count or custom:<name>.
+	QuotaDimension string
+	// QuotaBlocked lists the dimension of every attempt a namespace quota held
+	// back during the whole claim cycle, including look-ahead candidates the
+	// report is not about. For metrics; empty in the common case.
+	QuotaBlocked []string
+
+	// quotaContended: the namespace's quota lock was held by another claim.
+	quotaContended bool
+	// quotaExhausted: the failing dimension has no headroom at all.
+	quotaExhausted bool
 }
 
 // LostAttempt is an attempt the reconciler moved to LOST, carrying what the
@@ -270,6 +283,9 @@ type LostAttempt struct {
 	RetryAt time.Time
 	// NewAttemptID is set when a retry row was created in the same transaction.
 	NewAttemptID *uuid.UUID
+	// UsageRecorded is true when the attempt's usage-ledger row was written in
+	// the same transaction (ADR-0021).
+	UsageRecorded bool
 }
 
 // UnmarshalJSON decodes task_nodes.spec_json in EITHER dialect it can arrive in.
