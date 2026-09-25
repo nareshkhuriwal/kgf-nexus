@@ -322,6 +322,15 @@ var migrationName = regexp.MustCompile(`^([0-9]{4})_[a-z0-9_]+\.(up|down)\.sql$`
 // guaranteed to agree.
 var knownVersionGaps = map[int]bool{19: true}
 
+// reservedForParallelBranches are versions handed out to wave-3 branches that
+// are developed in parallel and merged by the integrator. On any one branch
+// most of them are absent, which is expected, not a dropped migration; once the
+// integration branch holds all of them the entries can be removed. Each of these
+// migrations is independent of the others (none reads what another adds), so
+// the order in which they reach an existing database does not matter -- which
+// is the condition for reserving numbers ahead of time at all.
+var reservedForParallelBranches = map[int]bool{28: true, 29: true, 30: true, 31: true, 32: true, 33: true, 34: true}
+
 // TestVersionGapsAreOnlyTheKnownOnes pins the version sequence.
 //
 // Two mistakes look alike to migrate.sh and this catches both. Filling a known
@@ -340,7 +349,7 @@ func TestVersionGapsAreOnlyTheKnownOnes(t *testing.T) {
 			t.Errorf("migration version %04d is a recorded gap and must stay unused: "+
 				"a file there runs after every later migration on existing databases "+
 				"but before them on fresh ones. Renumber it to %04d", v, highest+1)
-		case !versions[v] && !knownVersionGaps[v]:
+		case !versions[v] && !knownVersionGaps[v] && !reservedForParallelBranches[v]:
 			t.Errorf("migration version %04d is missing below the highest (%04d). "+
 				"If a merge dropped it, restore it; if the number was deliberately "+
 				"skipped, record it in knownVersionGaps and services/migrations/README.md",

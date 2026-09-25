@@ -45,3 +45,13 @@ filenames; none of them counts files or expects consecutive numbers.
   current highest (filling 0019, for example) or when a new gap opens.
 - `TestMigrationFilenamesAreWellFormed` fails on names that break the
   `NNNN_description.{up,down}.sql` pattern, and on a `.down.sql` with no `.up.sql`.
+
+## Reserved numbers: 0028–0034
+
+These versions are reserved for wave-3 branches developed in parallel
+(0035 is `0035_gpu_spot_multicluster`, ADR-0029/0030/0031). On a branch that
+does not carry them they are absent, and `TestVersionGapsAreOnlyTheKnownOnes`
+tolerates that through `reservedForParallelBranches`. The reserved migrations
+are independent of one another, so an existing database may receive them in
+any order. Remove the reservation once the integration branch holds all of
+them.
