@@ -411,3 +411,49 @@ def test_wait_for_run_times_out_with_the_last_known_state(server) -> None:
     server.reply("GET", "/v1/namespaces/prod/runs/run-1", 200, {"id": "run-1", "state": "RUNNING"})
     with pytest.raises(NexusError, match="still RUNNING"):
         _client(server).wait_for_run("run-1", poll_interval=0.01, timeout=0.05)
+
+
+def test_get_assignment_path_and_wildcard(server) -> None:
+    c = _client(server)
+    body = {"assignment": {"attempt_id": "a-1"}, "encoding": "protojson"}
+    server.reply("GET", "/v1/namespaces/prod/runs/-/attempts/a-1/assignment", 200, body)
+    assert c.get_assignment("a-1") == body
+    server.reply("GET", "/v1/namespaces/prod/runs/r-9/attempts/a-1/assignment", 200, body)
+    c.get_assignment("a-1", run_id="r-9")
+    assert [r["path"] for r in server.requests][-2:] == [
+        "/v1/namespaces/prod/runs/-/attempts/a-1/assignment",
+        "/v1/namespaces/prod/runs/r-9/attempts/a-1/assignment",
+    ]
+
+
+def test_get_assignment_denial_is_an_auth_error(server) -> None:
+    server.reply("GET", "/v1/namespaces/prod/runs/-/attempts/a-1/assignment", 403,
+                 {"error": "forbidden", "message": "Missing permission: tasks.results.view"})
+    with pytest.raises(AuthError, match="tasks.results.view"):
+        _client(server).get_assignment("a-1")
+    server.reply("GET", "/v1/namespaces/prod/runs/-/attempts/a-2/assignment", 404, {"message": "not found"})
+    with pytest.raises(NotFound):
+        _client(server).get_assignment("a-2")
+
+
+def test_rejected_python_spec_points_at_python_lines(server) -> None:
+    @task(task_ref="c.lines")  # the definition line the problem maps to
+    def lines_task(ctx):
+        return 1
+
+    @workflow(name="lines", namespace="prod")
+    def wf():
+        lines_task()
+
+    server.reply("POST", "/v1/namespaces/prod/specs", 422, {
+        "error": "spec_invalid", "message": "spec failed validation",
+        "problems": [{"path": "/tasks/lines_task/queue", "message": "queue not served", "stage": "semantic"},
+                     {"path": "/name", "message": "bad name", "stage": "schema"}]})
+    with pytest.raises(NexusAPIError) as e:
+        _client(server).submit_spec(wf)
+    here = __file__
+    src = open(here).read().splitlines()
+    line = next(i for i, l in enumerate(src, 1) if "the definition line the problem maps to" in l)
+    assert e.value.problems[0]["location"] == f"{here}:{line}"
+    assert "location" not in e.value.problems[1]
+    assert f"{here}:{line}: queue not served" in str(e.value)

@@ -2662,3 +2662,58 @@ attempts of workers that are already DEAD with attempts still DISPATCHED/RUNNING
 as `ReconcileExpiredLeases` does, instead of returning on the first error. Test
 with an integration test where the resource-manager wins the race, asserting
 the attempts become LOST within one sweep interval instead of one lease TTL.
+
+### F116. The SDK derived a different idempotency key from the control plane — FIXED
+
+**Severity:** medium. Every Python worker process logged a key mismatch, and
+any SDK code that derived a key itself got a different one from the platform.
+
+`domain.IdempotencyKey` joins run id, node id, map index and task version with
+`\x1f`. `nexus.context.derive_idempotency_key` joined them with `\x00`. The
+docstrings of both functions describe the same formula, so nobody noticed.
+Consequences:
+
+- `nexus.worker.build_context` compares the key it is sent with the one it
+  derives, so for every real assignment it printed "idempotency key from
+  control plane differs from locally derived key". A warning that fires every
+  time hides the one time it matters.
+- A test or tool that called `derive_idempotency_key` to predict a task's key,
+  for example to pre-seed an effect journal, predicted the wrong one.
+- The comparison also used the child's own node id for an expansion child.
+  The dag-engine derives a child's key from the TEMPLATE id plus `map_index`
+  (`buildAttempts`), so the comparison would have mismatched for children even
+  with the right separator.
+
+Found by the local runner's parity work (ADR-0022), which derives keys
+outright and had to match the Go code byte for byte.
+
+**Fix:** the SDK joins with `\x1f`, and `build_context` strips a trailing
+`[<map_index>]` before deriving. Golden digests for a plain node and an
+expansion child are asserted in both languages:
+`internal/domain/idemkey_golden_test.go` and
+`sdk/python/tests/test_local_runner.py::test_idempotency_key_matches_the_control_plane`.
+Keys the control plane issues are unchanged. Only the SDK's derivation moved,
+and it was never authoritative.
+
+### F117. nexusctl dropped the gateway's validation problems — FIXED
+
+**Severity:** low. The error was correct but useless.
+
+For an invalid spec, the gateway answers 422 with
+`{"message": "spec failed validation", "problems": [...]}`. The CLI's error
+parser read only `message` and `details`, so `nexusctl workflow submit` printed
+`HTTP 422: spec failed validation` and threw away the list that says what was
+wrong and where. The gateway reports every problem in one response precisely so
+that authors do not fix a spec one round trip at a time.
+
+**Fix:** `problems` is carried as the error's details. For a YAML or JSON file,
+`nexusctl` places each problem at `file:line:col` in the author's file. For a
+`.py` spec, it places it at the Python line of the `@task` or of the
+workflow-body call, using the SDK's source map. The gateway also returns
+additive `line`/`column` fields on each problem, computed against the submitted
+body (`internal/specpos`). The Python client does the same for `submit_spec`
+(`NexusAPIError.problems[*].location`). Tests:
+`cli/internal/cmd/local_test.go` (`TestSubmitMapsServerProblemsToYAMLLines`,
+`TestPythonSpecProblemsPointAtPythonLines`), `services/api-gateway/spec/lines_test.go`,
+`sdk/python/tests/test_client.py::test_rejected_python_spec_points_at_python_lines`.
+

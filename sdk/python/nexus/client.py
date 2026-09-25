@@ -18,6 +18,7 @@ Endpoints implemented (all namespace-scoped, per §8.2):
     POST   /v1/namespaces/{ns}/runs/{id}/cancel
     POST   /v1/namespaces/{ns}/runs/{id}/retry
     GET    /v1/namespaces/{ns}/attempts/{id}/logs   stream
+    GET    /v1/namespaces/{ns}/runs/{run}/attempts/{id}/assignment   replay input
     GET    /v1/namespaces/{ns}/workers              fleet view
     GET    /v1/namespaces/{ns}/capacity             advertised vs committed
 """
@@ -57,6 +58,10 @@ class NexusAPIError(NexusError):
         self.message = message
         self.body = body
         self.request_id = request_id
+        #: For a rejected spec (422): the gateway's problems, each a dict with
+        #: path, message, stage and -- for a Python workflow -- "location", the
+        #: "file:line" of the @task or workflow-body call it concerns.
+        self.problems: list[dict[str, Any]] = []
         detail = f"HTTP {status}: {message}"
         if request_id:
             detail += f" (request_id={request_id})"
@@ -205,11 +210,16 @@ class NexusClient:
         that differs from the one we told the user about.
         """
         compiled = _as_compiled(spec)
-        return self._call(
-            "POST",
-            self._url("/specs", {"dry_run": "true"} if dry_run else None),
-            body=canonical_bytes(compiled.spec),
-        )
+        try:
+            return self._call(
+                "POST",
+                self._url("/specs", {"dry_run": "true"} if dry_run else None),
+                body=canonical_bytes(compiled.spec),
+            )
+        except NexusAPIError as e:
+            if e.status == 422:
+                _locate_problems(e, compiled)
+            raise
 
     def validate_spec(
         self, spec: CompiledWorkflow | WorkflowDefinition | Mapping[str, Any]
@@ -436,6 +446,23 @@ class NexusClient:
             ),
         )
 
+    def get_assignment(self, attempt_id: str, *, run_id: str = "-") -> dict[str, Any]:
+        """An attempt's resolved inputs and TaskSpec, for replaying it locally.
+
+        ``run_id`` narrows the lookup; the default ``"-"`` finds the attempt in
+        any run of the namespace. The response never contains the lease token
+        or a secret value -- SecretRefs stay references -- and blob inputs stay
+        references into the object store. Pass it to ``nexus.replay.replay``.
+        Needs the runs.view, tasks.view and tasks.results.view permissions.
+        """
+        return self._call(
+            "GET",
+            self._url(
+                f"/runs/{urllib.parse.quote(run_id, safe='')}/attempts/"
+                f"{urllib.parse.quote(attempt_id, safe='')}/assignment"
+            ),
+        )
+
     # ── fleet ───────────────────────────────────────────────────────────────
     def list_workers(self, *, state: str | None = None) -> dict[str, Any]:
         return self._call("GET", self._url("/workers", {"state": state}))
@@ -495,6 +522,32 @@ def _as_compiled(spec: object) -> CompiledWorkflow:
         f"expected a CompiledWorkflow, a @workflow, or a spec mapping, got "
         f"{type(spec).__name__}"
     )
+
+
+def _locate_problems(e: NexusAPIError, compiled: CompiledWorkflow) -> None:
+    """Attach the gateway's problems to a 422, placed in the author's Python.
+
+    The gateway's own line numbers refer to the canonical JSON this client sent
+    -- one line -- so the useful position is the one only this process knows:
+    the source map the compiler recorded while tracing.
+    """
+    body = e.body if isinstance(e.body, Mapping) else {}
+    raw = body.get("problems")
+    if not isinstance(raw, list):
+        return
+    lines = []
+    for p in raw:
+        if not isinstance(p, Mapping):
+            continue
+        problem = dict(p)
+        loc = compiled.locate(str(problem.get("path", "")))
+        if loc is not None:
+            problem["location"] = str(loc)
+        e.problems.append(problem)
+        where = problem.get("location") or "(no source line)"
+        lines.append(f"  {where}: {problem.get('message', '')} ({problem.get('path', '')})")
+    if lines:
+        e.args = (f"{e.args[0]}\n" + "\n".join(lines),)
 
 
 def _api_error(status: int, raw: bytes, headers: Mapping[str, str]) -> NexusAPIError:

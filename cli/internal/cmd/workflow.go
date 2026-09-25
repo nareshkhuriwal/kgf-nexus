@@ -77,9 +77,8 @@ Examples:
 			// Local checks first: a missing task_ref should not need a round trip.
 			// The server still runs JSON Schema and the semantic checks; this is
 			// only a faster feedback loop for the obvious mistakes.
-			if problems := doc.Validate(); len(problems) > 0 {
-				return fmt.Errorf("%s is not a valid WorkflowSpec:\n  - %s",
-					doc.Source, strings.Join(problems, "\n  - "))
+			if err := localProblems(doc); err != nil {
+				return err
 			}
 
 			c, err := env.Client()
@@ -88,7 +87,7 @@ Examples:
 			}
 			result, err := c.SubmitSpec(ctx, doc.JSON, dryRun)
 			if err != nil {
-				return err
+				return annotateSubmitError(err, doc)
 			}
 
 			p, err := env.Printer()
@@ -188,9 +187,8 @@ Examples:
 				return err
 			}
 			if validate {
-				if problems := doc.Validate(); len(problems) > 0 {
-					return fmt.Errorf("%s is not a valid WorkflowSpec:\n  - %s",
-						doc.Source, strings.Join(problems, "\n  - "))
+				if err := localProblems(doc); err != nil {
+					return err
 				}
 			}
 
@@ -391,11 +389,21 @@ func loadSpec(path, python, workflowName string, stdin io.Reader) (*spec.Documen
 	if python == "" {
 		python = "python3"
 	}
-	raw, err := compilePython(python, path, workflowName)
+	raw, sourceMap, err := compilePythonMapped(python, path, workflowName)
 	if err != nil {
 		return nil, err
 	}
-	return spec.Parse(raw, path)
+	doc, err := spec.Parse(raw, path)
+	if err != nil {
+		return nil, err
+	}
+	// Problems in a .py spec are reported at Python lines, not in the JSON it
+	// compiled to.
+	doc.Raw, doc.SourceMap = nil, sourceMap
+	if doc.SourceMap == nil {
+		doc.SourceMap = map[string]spec.NodeSource{}
+	}
+	return doc, nil
 }
 
 // pythonCompileScript emits the compiled spec of one @workflow in a module.

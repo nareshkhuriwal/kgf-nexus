@@ -57,6 +57,8 @@ run list [--state S] [--spec N]      List runs
 run cancel <run-id>                  Cancel
 run retry <run-id> [--node ID ...]   Retry a failed run, whole or from the
                                      named nodes and their dependents
+run --local <file> [--param K=V]     Run a workflow on this machine, no cluster
+replay <attempt-id> [--local]        Fetch a failed attempt's inputs; re-run it here
 
 worker ls                            Fleet with capacity and heartbeat age
 capacity                             Advertised vs committed
@@ -87,6 +89,28 @@ For a `.py` file, nexusctl shells out to **your** interpreter (`--python`, defau
 platform's guarantee is that only your own process executes your code, and the CLI
 keeps that true.
 
+## Local runs and replay (ADR-0022)
+
+```bash
+nexusctl run --local examples/fan_out_map/compiled.yaml --param source=demo
+nexusctl run --local dag.py --param source=s3://in --backoff-scale 0 -o json
+nexusctl replay 3f2a9c1e-... --local --module mypkg.tasks
+```
+
+`run --local` executes the workflow with the Python SDK's local runner, in
+**your** interpreter (`--python`). The decisions follow the platform's DAG
+engine: trigger rules, propagation, `fail_fast`, map expansion and fan-in,
+retries with backoff, timeouts, and memoization. Shell tasks get the agent's
+NEXUS_* environment and Python handlers run through `python -m nexus.worker`.
+It prints a per-node summary and exits 1 when the run fails. There are no
+leases, heartbeats, queues, resources or GPU placement, and no
+docker/kubernetes executors unless you pass `--host-executor`.
+
+`replay` downloads `GET .../runs/{run}/attempts/{id}/assignment` (the TaskSpec
+and resolved inputs; never the lease token or a secret value) to
+`--out/assignment.json`. With `--local` it re-runs the attempt with its
+original inputs and idempotency key. Blob inputs need `--input NAME=PATH`.
+
 ## Error messages
 
 An orchestrator CLI that prints a bare `500` is useless. Every non-2xx carries the
@@ -103,6 +127,16 @@ nexusctl: GET /v1/namespaces/prod/runs/run-xyz failed: HTTP 500: scheduler panic
 A 401 names `NEXUS_API_KEY`; a 422 suggests `--dry-run`; a 409 explains the
 idempotency key; an unreachable endpoint names the endpoint it tried. Locally
 detectable spec problems fail before any request is made.
+
+Spec problems, whether found locally or returned by the gateway, are reported
+where you would fix them. For YAML or JSON that is `file:line:col`. For a `.py`
+spec it is the Python line of the `@task` or of the workflow-body call:
+
+```
+nexusctl: the control plane rejected pipeline.yaml:
+  - pipeline.yaml:14:12: properties/queue/pattern: ... (/tasks/2/queue)
+  - pipeline.yaml:22:22: stdout_output names "reprot", which is not declared ... (/tasks/load/runtime/stdout_output)
+```
 
 ## Tests
 

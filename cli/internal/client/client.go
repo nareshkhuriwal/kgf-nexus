@@ -202,6 +202,10 @@ func apiError(resp *http.Response, raw []byte, method, path string) error {
 		}
 		if d, ok := body["details"]; ok {
 			e.Details = d
+		} else if pr, ok := body["problems"]; ok {
+			// The gateway's spec validation reports its list under "problems";
+			// carried as details so it is printed and can be placed in the file.
+			e.Details = map[string]any{"problems": pr}
 		}
 		if e.RequestID == "" {
 			if v, ok := body["request_id"].(string); ok {
