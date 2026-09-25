@@ -1,0 +1,9 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# The smallest valid install: only the required values, NATS authorization off
+# (a throwaway cluster). Everything optional stays at its default.
+existingSecret: nexus-credentials
+image: { tag: 0123456789ab }
+nats:
+  auth: { mode: none }

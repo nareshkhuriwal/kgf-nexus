@@ -8,6 +8,15 @@ Everything here is **local-development only**. The credentials are deliberately
 obvious and are marked `DEV ONLY` in `docker-compose.yml`; there is no secret
 management in Phase 1.
 
+Two other ways in:
+
+- `nexusctl up` wraps this compose stack: it waits for health, registers a
+  tenant through the API and prints the console URL and credentials once
+  (cli/README.md, "Local quick start").
+- Kubernetes: the Helm chart in `helm/kgf-nexus`, with a values reference and
+  production checklist in docs/OPERATIONS.md §20. `helm/validate.sh` lints and
+  schema-checks it.
+
 ---
 
 ## 1. Bring-up

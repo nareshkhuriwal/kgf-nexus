@@ -6,9 +6,10 @@
 # not Azure Key Vault) and the trade-offs.
 #
 # Requires cert-manager v1.18.2 and trust-manager v0.18.0 -- see
-# deploy/k8s/cert-README.md for the pinned install commands. Nothing in this
-# repository applies these manifests; the AKS release template does not yet
-# have a chart to put them in (.azure-pipelines/templates/deploy-aks.yml).
+# deploy/k8s/cert-README.md for the pinned install commands. Apply this file
+# once per cluster, then point the Helm chart at the ClusterIssuer with
+# tls.certManager.issuerRef.name=nexus-internal-ca (docs/OPERATIONS.md §20.4);
+# the chart issues the per-service leaves.
 #
 # ─── Shape ────────────────────────────────────────────────────────────────
 #

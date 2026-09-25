@@ -27,8 +27,12 @@ SPDX-License-Identifier: Apache-2.0
 {{- define "nexus.labels" -}}
 {{- $root := index . 0 -}}{{- $component := index . 1 -}}
 app.kubernetes.io/name: kgf-nexus
-app.kubernetes.io/instance: {{ $root.Release.Name }}
+app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
 app.kubernetes.io/component: {{ $component }}
+{{- /* part-of: the cluster controller finds schedulers by
+part-of=kgf-nexus,component=scheduler (SchedulerSelector). Not in the
+selector, so adding it never touches an immutable field. */}}
+app.kubernetes.io/part-of: kgf-nexus
 app.kubernetes.io/version: {{ $root.Values.image.tag | quote }}
 app.kubernetes.io/managed-by: {{ $root.Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" $root.Chart.Name $root.Chart.Version }}
@@ -37,7 +41,7 @@ helm.sh/chart: {{ printf "%s-%s" $root.Chart.Name $root.Chart.Version }}
 {{- define "nexus.selector" -}}
 {{- $root := index . 0 -}}{{- $component := index . 1 -}}
 app.kubernetes.io/name: kgf-nexus
-app.kubernetes.io/instance: {{ $root.Release.Name }}
+app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
 app.kubernetes.io/component: {{ $component }}
 {{- end -}}
 
@@ -294,13 +298,16 @@ capabilities: { drop: ["ALL"] }
 {{- end -}}
 
 {{/*
-Suffix for the per-release Jobs: a hash of the WHOLE image tag. A Job's pod
-template is immutable, so a new release needs a new Job name. A truncated tag
-is not enough -- every dirty build of one commit shares its 12-character
-prefix, and reusing that name makes the upgrade fail on an immutable field.
+Suffix for the per-release Jobs: a hash of the WHOLE image tag and the chart
+version. A Job's pod template is immutable, so anything that changes it needs a
+new Job name. A truncated tag is not enough -- every dirty build of one commit
+shares its 12-character prefix -- and neither is the tag alone: a chart upgrade
+that changes a Job template (a label) at the same image tag failed on "field is
+immutable" (F113). migrate and bootstrap are idempotent, so re-running them for
+a new chart version is harmless.
 */}}
 {{- define "nexus.jobSuffix" -}}
-{{- .Values.image.tag | sha256sum | trunc 10 -}}
+{{- printf "%s/%s" .Values.image.tag .Chart.Version | sha256sum | trunc 10 -}}
 {{- end -}}
 
 {{/*
