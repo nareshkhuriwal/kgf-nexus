@@ -199,7 +199,7 @@ Owns the lifecycle of a `WorkflowRun`. Responsibilities:
 - Enforcing run-level policies: overall run timeout, concurrency limits (`max_active_runs` per workflow), failure policy (`fail_fast` vs. `continue_on_failure`).
 - Handling operator interventions: `cancel`, `pause`, `resume`, and `retry` — of the whole run or of selected nodes and their dependents (§5.2, Operator retry).
 - **Timer management.** A durable timer table drives all deadline-based work: schedule-to-start expiry, start-to-close expiry, heartbeat expiry, retry backoff. A single reconciler polls `timers WHERE fire_at <= now()` with `FOR UPDATE SKIP LOCKED`. Using the database as the timer store rather than in-memory timers means a control-plane restart loses nothing.
-- Backfill: generating a bounded set of runs over a historical interval with its own concurrency cap, so a backfill cannot starve live traffic.
+- Backfill: generating a bounded set of runs over a historical interval with its own concurrency cap, so a backfill cannot starve live traffic. Its operator transitions are compare-and-set on the row: pause only from `RUNNING`, resume only from `PAUSED`, cancel from `RUNNING` or `PAUSED`; anything else is `409 backfill_state_conflict` naming the current state, so `COMPLETED`, `CANCELLED` and `FAILED` are final. The driver's own `COMPLETED`/`FAILED` transitions apply only to a backfill still `RUNNING`, so they never overwrite an operator's pause or cancel (F119).
 
 #### DAG Engine
 Pure dependency logic, deliberately kept free of I/O beyond its own transaction. Responsibilities:

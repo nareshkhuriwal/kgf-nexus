@@ -428,7 +428,7 @@ func TestBackfillActionsCheckTheTransition(t *testing.T) {
 		{"pause", "RUNNING", true},
 		{"pause", "PAUSED", false},
 		{"resume", "PAUSED", true},
-		{"resume", "COMPLETED", false}, // the server would revive it (F119)
+		{"resume", "COMPLETED", false}, // an older server would revive it (F119)
 		{"resume", "CANCELLED", false},
 		{"cancel", "RUNNING", true},
 		{"cancel", "PAUSED", true},
