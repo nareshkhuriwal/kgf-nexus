@@ -483,13 +483,93 @@ describe('re-run and retry confirm in the console, not the browser', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Retry failed tasks' }));
     const dialog = await screen.findByRole('alertdialog', { name: /retry the failed tasks/i });
-    expect(dialog).toHaveTextContent(/succeeded keep their results/i);
+    expect(dialog).toHaveTextContent(/succeeded keep\s+their results/i);
     expect(posts).toEqual([]);
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Retry failed tasks' }));
     await waitFor(() => {
       expect(posts.some((u) => u.endsWith('/retry'))).toBe(true);
     });
+  });
+
+  it('retries the whole run with an empty selection', async () => {
+    const bodies: string[] = [];
+    mockFetch((url, init) => {
+      if (init?.method === 'POST') {
+        bodies.push(String(init.body));
+        return [200, { ...failedRun, state: 'RUNNING' }];
+      }
+      if (url.includes('/events')) return [200, { events: [] }];
+      return [200, failedRun];
+    });
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry failed tasks' }));
+    const dialog = await screen.findByRole('alertdialog', { name: /retry the failed tasks/i });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry failed tasks' }));
+    await waitFor(() => expect(bodies).toEqual(['{}']));
+  });
+
+  it('retries only the selected task, after saying what else re-runs', async () => {
+    const posts: { url: string; body: string }[] = [];
+    mockFetch((url, init) => {
+      if (init?.method === 'POST') {
+        posts.push({ url, body: String(init.body) });
+        return [200, { ...failedRun, state: 'RUNNING' }];
+      }
+      if (url.includes('/events')) return [200, { events: [] }];
+      return [200, failedRun];
+    });
+    // extract is the root cause and therefore the default selection.
+    wrap('/runs/run-aaaaaaaaaaaa?node=extract');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry this task' }));
+    const dialog = await screen.findByRole('alertdialog', { name: /retry extract/i });
+    expect(dialog).toHaveTextContent(/downstream/i);
+    expect(posts).toEqual([]);
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry this task' }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    const [sent] = posts;
+    expect(sent?.url).toMatch(/\/runs\/run-aaaaaaaaaaaa\/retry$/);
+    expect(JSON.parse(sent?.body ?? 'null')).toEqual({ nodes: ['extract'] });
+  });
+
+  it('offers no per-task retry for a task that succeeded', async () => {
+    mockFetch((url) => {
+      if (url.includes('/events')) return [200, { events: [] }];
+      return [200, {
+        ...failedRun,
+        nodes: [
+          { ...failedRun.nodes[0], state: 'SUCCEEDED' },
+          { ...failedRun.nodes[1], state: 'FAILED' },
+          failedRun.nodes[2],
+        ],
+      }];
+    });
+    wrap('/runs/run-aaaaaaaaaaaa?node=extract');
+
+    await screen.findByRole('button', { name: 'Retry failed tasks' });
+    expect(screen.queryByRole('button', { name: 'Retry this task' })).toBeNull();
+  });
+
+  it('shows the gateway refusal when a task cannot be retried', async () => {
+    mockFetch((url, init) => {
+      if (init?.method === 'POST') {
+        return [409, {
+          error: 'retry_refused',
+          message: 'node transform is UPSTREAM_FAILED and would fail again at once: it depends on extract',
+        }];
+      }
+      if (url.includes('/events')) return [200, { events: [] }];
+      return [200, failedRun];
+    });
+    wrap('/runs/run-aaaaaaaaaaaa?node=transform');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry this task' }));
+    const dialog = await screen.findByRole('alertdialog', { name: /retry transform/i });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry this task' }));
+    expect(await screen.findByText(/would fail again at once/i)).toBeInTheDocument();
   });
 });
 
