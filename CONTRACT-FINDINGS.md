@@ -2525,3 +2525,75 @@ feed `Runner.SecretValues`. `-check-refs` does not yet walk the log index.
 Kubernetes pod logs cannot separate streams and are tagged `combined`. The
 live tail is poll-based (≈ 2–3 s). Written as F99 on its branch; renumbered
 F102 at the wave-1 merge because F99 (rate limiting), F100 and F101 were taken.
+
+### F103. Every service fell back to a compiled-in DSN outside production — FIXED
+
+**Severity:** medium. A misconfiguration was silently turned into a connection to
+the wrong database.
+
+`internal/config.DSN` returned `postgres://postgres:test@localhost:55432/nexus`
+(artifact-gc: the compose stack on 55433) whenever none of the four DSN spellings
+was set, unless `NEXUS_ENV` named a production-like environment or
+`NEXUS_REQUIRE_DSN` was set. A typo such as `NEXUS_POSTGRE_DSN`, a variable
+exported in the wrong shell or a manifest that forgot one container therefore
+started the service against whatever Postgres listened on that port. On at least
+one developer machine that is an unrelated product's database (noted under F93:
+`polaris-postgres`), so "the service started" proved nothing. F38 introduced the
+shared resolver and kept the per-service defaults; this closes that gap.
+
+**Fix (`internal/config/dsn.go`, merged in wave 1 from
+`fix/dsn-defaults-and-doc-hygiene`).** There is no default in any environment.
+With no DSN in `NEXUS_DATABASE_URL`, `DATABASE_URL`, `NEXUS_POSTGRES_DSN`,
+`NEXUS_DSN` or the service's own flag (`-dsn` on scheduler and dag-engine,
+`-database-url` on resource-manager and artifact-gc), the process exits 1 at
+startup and names every spelling it checked. A DSN given only on the command
+line is honoured (the resolver reads `os.Args`, because it runs as a flag
+default before `flag.Parse`), and `-h` still prints usage. `NEXUS_ENV` and
+`NEXUS_REQUIRE_DSN` no longer affect DSN resolution; `NEXUS_ENV` still arms the
+TLS guard (TLS.md). OPERATIONS §8 describes where each run mode gets its DSN.
+
+**Upgrade impact.** Compose, the Helm chart and the Makefile already pass
+`DATABASE_URL` to every service, so they are unaffected. A hand-run binary or a
+custom manifest that relied on the fallback now refuses to start; set one of the
+variables above. This is a deliberate behaviour change and is additive to the
+wire contract (no proto or schema change).
+
+**How it is held.** `internal/config/dsn_test.go` covers each spelling and its
+precedence, flag-only DSNs in both `-flag value` and `-flag=value` forms, `-h`
+with no DSN, and the refusal message.
+
+### F104. MarkStarted can make a concurrent result be skipped and reclaimed as LOST — OPEN
+
+**Severity:** medium (narrow window, data loss of a completed result when hit).
+Found while building F96's progress storage; not fixed.
+
+`SchedulerStore.MarkStarted` (`internal/store/scheduler_reports.go`) moves the
+attempt DISPATCHED→RUNNING with an `UPDATE task_attempts ... WHERE state =
+'DISPATCHED'`, then deletes the schedule-to-start timer and appends
+`AttemptStarted` in the same transaction. The UPDATE holds the attempt's row lock
+until that transaction commits. `ApplyResult`, cancellation and lease reclaim all
+lock the same row with `FOR UPDATE ... SKIP LOCKED` and treat "no row" as
+"already handled".
+
+So a result that arrives while a `MarkStarted` transaction is still open (a very
+short task, a `ReportStarted` that the agent timed out on after 10 s while the
+server side is still running, or a redelivered `ReportStarted`) finds no row.
+`ApplyResult` returns `Applied: false`, and the gateway still answers the agent
+`Accepted: true`, so the agent drops the result as delivered. The attempt then
+stays RUNNING until its lease expires and the reconciler reclaims it as LOST,
+which retries or fails a task that actually succeeded.
+
+`RecordProgress` (F96) avoids the same trap by writing to the side table
+`attempt_progress` and never locking the attempt row;
+`TestProgressNeverBlocksTheResult` pins that. Nothing pins it for
+`MarkStarted`.
+
+**Candidate fixes, not chosen here.** (a) In `ApplyResult`, distinguish "row
+locked" from "row terminal": retry the lock without `SKIP LOCKED` (a plain
+`FOR UPDATE` with a short `lock_timeout`) when the attempt is still
+DISPATCHED/RUNNING, since a result is never contending with a peer applying the
+same result under a valid lease. (b) Have the gateway return `Accepted: false`
+with a retryable reason when `Applied` is false and the attempt is not terminal,
+so the agent's WAL keeps the result and redelivers it. Either needs a race test
+in the style of `TestProgressNeverBlocksTheResult` that holds a `MarkStarted`
+transaction open while a result arrives.

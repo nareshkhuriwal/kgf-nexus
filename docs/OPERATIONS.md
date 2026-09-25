@@ -710,6 +710,45 @@ for the worked timeline.
 several runs. Every pass logs what it examined, kept as reachable, skipped as too
 young, and deleted, with counts.
 
+### 7.8 The other direction: rows whose object is gone
+
+§7.7 reclaims objects nothing references. This is its mirror image, and the more
+serious of the two: a **dangling reference** is a row whose `output_ref` or
+`input_refs` names a key the store does not have. An orphan wastes disk and
+breaks nothing; a dangling ref means a task's result is **unreadable**, and any
+downstream task that maps that output into its inputs will fail when it fetches.
+
+```sh
+make check-refs
+```
+
+It is **read-only by construction** and exits nonzero when it finds anything, so
+it works as a monitoring check. There is deliberately no repair mode: the object
+is gone, so the row cannot be fixed — only deleted or rewritten, and both destroy
+the evidence needed to work out what happened. Worse, the likeliest cause of a
+mass "dangling ref" report is a **misconfigured check** (wrong bucket, wrong
+endpoint, a half-finished restore), and a repairer pointed at an empty bucket
+would erase every reference in the database. A human decides.
+
+The command refuses a bucket that does not resolve, for the same reason the
+backup scripts gate every count behind `mc stat`: an empty answer from a bucket
+that is not there is indistinguishable from a bucket in perfect health.
+
+**A nonzero result is a real fault, not drift.** §7.2's ordering — objects first,
+then Postgres — is designed to produce orphans and never dangling refs. So a hit
+means a restore ran out of order, an object was deleted out of band, or the §7.7
+sweep removed something it should not have. Any of those is worth investigating
+immediately.
+
+Ordering is the reverse of the sweep's, deliberately. The sweep lists objects
+before querying Postgres so a newly written object is simply not a candidate.
+This reads Postgres **first** and checks the store **second**, so a reference
+read at T1 has its object checked at T2 > T1 — and since `resultstore.Put` makes
+the object durable strictly before the row is written, an object that existed at
+T1 still exists at T2. A false *negative* (an object deleted after the check) is
+acceptable and shows up next run; a false *positive* would send someone hunting
+for data loss that never happened.
+
 ---
 
 ## 8. Configuration guard: every service requires an explicit DSN
@@ -761,46 +800,6 @@ Where the DSN comes from in each supported way of running Nexus:
 `examples/run-suite.sh` and `tests/chaos` drive an already-running stack
 (Kubernetes or compose respectively) and do not start services themselves, so
 the DSN is whatever that stack was deployed with.
-
-### 7.8 The other direction: rows whose object is gone
-
-§7.7 reclaims objects nothing references. This is its mirror image, and the more
-serious of the two: a **dangling reference** is a row whose `output_ref` or
-`input_refs` names a key the store does not have. An orphan wastes disk and
-breaks nothing; a dangling ref means a task's result is **unreadable**, and any
-downstream task that maps that output into its inputs will fail when it fetches.
-
-```sh
-make check-refs
-```
-
-It is **read-only by construction** and exits nonzero when it finds anything, so
-it works as a monitoring check. There is deliberately no repair mode: the object
-is gone, so the row cannot be fixed — only deleted or rewritten, and both destroy
-the evidence needed to work out what happened. Worse, the likeliest cause of a
-mass "dangling ref" report is a **misconfigured check** (wrong bucket, wrong
-endpoint, a half-finished restore), and a repairer pointed at an empty bucket
-would erase every reference in the database. A human decides.
-
-The command refuses a bucket that does not resolve, for the same reason the
-backup scripts gate every count behind `mc stat`: an empty answer from a bucket
-that is not there is indistinguishable from a bucket in perfect health.
-
-**A nonzero result is a real fault, not drift.** §7.2's ordering — objects first,
-then Postgres — is designed to produce orphans and never dangling refs. So a hit
-means a restore ran out of order, an object was deleted out of band, or the §7.7
-sweep removed something it should not have. Any of those is worth investigating
-immediately.
-
-Ordering is the reverse of the sweep's, deliberately. The sweep lists objects
-before querying Postgres so a newly written object is simply not a candidate.
-This reads Postgres **first** and checks the store **second**, so a reference
-read at T1 has its object checked at T2 > T1 — and since `resultstore.Put` makes
-the object durable strictly before the row is written, an object that existed at
-T1 still exists at T2. A false *negative* (an object deleted after the check) is
-acceptable and shows up next run; a false *positive* would send someone hunting
-for data loss that never happened.
-
 
 ---
 

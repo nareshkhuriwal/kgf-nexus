@@ -317,8 +317,9 @@ var migrationName = regexp.MustCompile(`^([0-9]{4})_[a-z0-9_]+\.(up|down)\.sql$`
 // 0019 was skipped: no file with that number has existed on any branch of the
 // repository (services/migrations/README.md). It must stay empty. The appliers
 // run every file whose basename is not in the ledger, in lexical order, so a
-// 0019 added now would run AFTER 0020-0023 on every existing database and
-// BEFORE them on a fresh one, and the two would not be guaranteed to agree.
+// 0019 added now would run AFTER 0020 and every later migration on every
+// existing database and BEFORE them on a fresh one, and the two would not be
+// guaranteed to agree.
 var knownVersionGaps = map[int]bool{19: true}
 
 // TestVersionGapsAreOnlyTheKnownOnes pins the version sequence.

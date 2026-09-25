@@ -29,10 +29,10 @@ change is missing. The number was simply never used.
 
 **Do not create a 0019, not even an empty one.** The appliers pick up every file
 whose basename is not in the ledger, in lexical order. On a database already at
-0020 or later, a new `0019_*` would run *after* 0020–0023. On a fresh database
-it would run *before* them. The same file would then produce different schemas
-depending on when a database was created. The next migration takes the next
-number after the highest existing one.
+0020 or later, a new `0019_*` would run *after* 0020 and every later
+migration. On a fresh database it would run *before* them. The same file would
+then produce different schemas depending on when a database was created. The
+next migration takes the next number after the highest existing one.
 
 A gap does not affect applying migrations. `deploy/migrate.sh`, `make migrate-up`
 and `make migrate-down` glob `*.up.sql` / `*.down.sql` and key the ledger on
