@@ -39,9 +39,29 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: postgres
-          image: {{ .Values.postgres.image }}
-          args: ["-c", "max_connections={{ .Values.postgres.maxConnections }}", "-c", "shared_buffers={{ .Values.postgres.sharedBuffers }}"]
+          {{- $pitr := .Values.postgres.pitr }}
+          image: {{ ternary $pitr.image .Values.postgres.image $pitr.enabled }}
+          args:
+            - "-c"
+            - "max_connections={{ .Values.postgres.maxConnections }}"
+            - "-c"
+            - "shared_buffers={{ .Values.postgres.sharedBuffers }}"
+            {{- if $pitr.enabled }}
+            # Continuous archiving (docs/OPERATIONS.md §4). archive_command only
+            # returns success once the segment is IN the repository.
+            - "-c"
+            - "wal_level=replica"
+            - "-c"
+            - "archive_mode=on"
+            - "-c"
+            - "archive_command=pgbackrest --stanza={{ $pitr.stanza }} archive-push %p"
+            - "-c"
+            - "archive_timeout={{ $pitr.archiveTimeoutSeconds }}"
+            {{- end }}
           env:
+            {{- if $pitr.enabled }}
+            {{- include "nexus.pgbackrestEnv" . | nindent 12 }}
+            {{- end }}
             - { name: POSTGRES_USER, value: {{ .Values.postgres.user | quote }} }
             - { name: POSTGRES_DB, value: {{ .Values.postgres.database | quote }} }
             - name: POSTGRES_PASSWORD
@@ -65,6 +85,57 @@ spec:
             allowPrivilegeEscalation: false
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql/data }
+            {{- if $pitr.enabled }}
+            - { name: pg-socket, mountPath: /var/run/postgresql }
+            - { name: pgbackrest-spool, mountPath: /var/spool/pgbackrest }
+            {{- if $pitr.repo.s3.caSecret }}
+            - { name: pgbackrest-ca, mountPath: /etc/pgbackrest/ca, readOnly: true }
+            {{- end }}
+            {{- end }}
+        {{- if $pitr.enabled }}
+        # Base backups on a cadence, read from the repository's own state
+        # (deploy/pgbackrest/nexus-pitr-scheduler.sh). It shares the data volume
+        # (a physical backup reads the files) and the unix socket. Deliberately
+        # no readiness probe: a failing backup must page someone, not take the
+        # database out of its Service. Monitor with deploy/pitr-verify.sh:
+        #   PITR_EXEC="kubectl -n <ns> exec -i postgres-0 -c pgbackrest --" deploy/pitr-verify.sh
+        - name: pgbackrest
+          image: {{ $pitr.image }}
+          command: ["/usr/local/bin/nexus-pitr-scheduler"]
+          env:
+            {{- include "nexus.pgbackrestEnv" . | nindent 12 }}
+            - { name: PITR_FULL_INTERVAL_SECONDS, value: {{ $pitr.schedule.fullIntervalSeconds | quote }} }
+            - { name: PITR_DIFF_INTERVAL_SECONDS, value: {{ $pitr.schedule.diffIntervalSeconds | quote }} }
+            - { name: PITR_POLL_SECONDS, value: {{ $pitr.schedule.pollSeconds | quote }} }
+            # Archive-age guard (OPERATIONS §4.6): archive_timeout alone was
+            # measured not to fire for up to checkpoint_timeout after a start.
+            - { name: PITR_WAL_SWITCH_SECONDS, value: {{ $pitr.archiveTimeoutSeconds | quote }} }
+          resources: {{- toYaml $pitr.resources | nindent 12 }}
+          securityContext:
+            runAsUser: 70
+            runAsGroup: 70
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: pg-socket, mountPath: /var/run/postgresql }
+            - { name: pgbackrest-spool, mountPath: /var/spool/pgbackrest }
+            - { name: pgbackrest-state, mountPath: /var/lib/pgbackrest }
+            {{- if $pitr.repo.s3.caSecret }}
+            - { name: pgbackrest-ca, mountPath: /etc/pgbackrest/ca, readOnly: true }
+            {{- end }}
+      volumes:
+        - { name: pg-socket, emptyDir: {} }
+        # The spool holds async archive-push STATUS files, never the only copy of
+        # a WAL segment: postgres keeps a segment until archive-push confirms it.
+        - { name: pgbackrest-spool, emptyDir: {} }
+        - { name: pgbackrest-state, emptyDir: {} }
+        {{- if $pitr.repo.s3.caSecret }}
+        - name: pgbackrest-ca
+          secret: { secretName: {{ $pitr.repo.s3.caSecret }} }
+        {{- end }}
+        {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data

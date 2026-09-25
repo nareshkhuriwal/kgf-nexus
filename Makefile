@@ -33,6 +33,7 @@ MIGRATIONS    := services/migrations
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
+        up-pitr backup-base pitr-verify restore-pitr pitr-drill \
         license-report license-check dev-certs up-tls certs-check \
         k8s-dev-images k8s-dev-up k8s-dev-test k8s-dev-test-long k8s-dev-status k8s-dev-down bench-pg bench-dispatch bench-inline
 
@@ -334,9 +335,40 @@ backup-artifacts: ## Mirror the MinIO result bucket only (the other half)
 backup-all: ## Back up BOTH stores in the correct order (use this one)
 	BACKUP_DIR=$(BACKUP_DIR) deploy/backup-all.sh
 
-# Uses scratch buckets and a scratch database; never touches live data.
-restore-drill: ## Prove a restore recovers artifacts byte-identically (needs `make up`)
-	deploy/restore-drill.sh
+# Uses scratch buckets and a scratch database; never touches live data. Writes
+# phase timings as JSON (DRILL_REPORT). RTO=1 adds the DESTRUCTIVE timed
+# full-stack recovery (drop DB + bucket, restore, restart, reconcile) -- run it
+# on a drill stack, see OPERATIONS §4.5.
+DRILL_REPORT ?= ./restore-drill-report.json
+restore-drill: ## Prove a restore recovers artifacts byte-identically; RTO=1 times a full recovery (DESTRUCTIVE)
+	deploy/restore-drill.sh --report $(DRILL_REPORT) $(if $(filter 1,$(RTO)),--rto --yes,)
+
+# ── Point-in-time recovery (pgBackRest; OPERATIONS §4) ────────────────────
+# Needs the PITR overlay: `make up-pitr` (compose) or postgres.pitr.enabled
+# (Helm). Managed Postgres uses the provider's PITR instead.
+COMPOSE_PITR ?= $(COMPOSE) -f deploy/docker-compose.pitr.yml
+BACKUP_TYPE  ?= full
+PITR_REPORT  ?= ./pitr-drill-report.json
+
+up-pitr: ## Bring up the stack with continuous WAL archiving + base backups (pgBackRest)
+	$(COMPOSE_PITR) up --build -d
+
+backup-base: ## Take a pgBackRest base backup now (BACKUP_TYPE=full|diff|incr)
+	deploy/pitr-backup.sh $(BACKUP_TYPE)
+
+pitr-verify: ## Check archiving, backup age and repository integrity; nonzero if broken
+	deploy/pitr-verify.sh
+
+# TARGET_TIME='2026-09-24 14:31:59+00' | TARGET_LSN=0/5A0012F8 | neither = latest.
+# Stop the Nexus services first; the script refuses without CONFIRM=yes.
+restore-pitr: ## Restore Postgres in place to TARGET_TIME / TARGET_LSN / latest (CONFIRM=yes)
+	@test "$(CONFIRM)" = yes || { echo "restore-pitr rewrites the data directory: re-run with CONFIRM=yes"; exit 1; }
+	deploy/restore-pitr.sh $(if $(TARGET_TIME),--time '$(TARGET_TIME)',$(if $(TARGET_LSN),--lsn $(TARGET_LSN),--latest)) --yes
+
+# DESTRUCTIVE to the stack it runs on (seeds data, rewinds the DB, deletes the
+# data directory in scenario 2). Sizes: PITR_DRILL_ARGS="--runs-a 3000 ...".
+pitr-drill: ## Timed PITR drill: restore to a timestamp and to latest; asserts + RTO/RPO JSON (DESTRUCTIVE)
+	deploy/pitr-drill.sh --yes --report $(PITR_REPORT) $(PITR_DRILL_ARGS)
 
 # ── Artifact GC (ADR-0008) ────────────────────────────────────────────────
 # The restore procedure in OPERATIONS §7.2 deliberately produces orphan objects

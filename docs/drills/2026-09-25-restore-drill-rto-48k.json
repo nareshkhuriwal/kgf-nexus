@@ -1,0 +1,31 @@
+{
+  "drill": "restore-drill",
+  "started_at": "2026-09-25T04:47:41.167Z",
+  "finished_at": "2026-09-25T04:48:53.998Z",
+  "wall_seconds": 72.831,
+  "rto": {"from_phase": "stop", "to_phase": "fleet_reconciliation", "seconds": 39.047},
+  "phases": [
+    {"name": "artifact_backup", "status": "ok", "start": "2026-09-25T04:47:41.822Z", "end": "2026-09-25T04:47:42.315Z", "seconds": 0.493},
+    {"name": "artifact_restore", "status": "ok", "start": "2026-09-25T04:47:42.332Z", "end": "2026-09-25T04:47:42.953Z", "seconds": 0.621},
+    {"name": "verify_checks", "status": "ok", "start": "2026-09-25T04:47:42.968Z", "end": "2026-09-25T04:47:44.439Z", "seconds": 1.471},
+    {"name": "backup_all", "status": "ok", "start": "2026-09-25T04:47:44.594Z", "end": "2026-09-25T04:48:14.892Z", "seconds": 30.298},
+    {"name": "stop", "status": "ok", "start": "2026-09-25T04:48:14.928Z", "end": "2026-09-25T04:48:15.793Z", "seconds": 0.865},
+    {"name": "restore_db", "status": "ok", "start": "2026-09-25T04:48:16.763Z", "end": "2026-09-25T04:48:19.348Z", "seconds": 2.585},
+    {"name": "restore_artifacts", "status": "ok", "start": "2026-09-25T04:48:19.364Z", "end": "2026-09-25T04:48:43.693Z", "seconds": 24.329},
+    {"name": "migrate_verify", "status": "ok", "start": "2026-09-25T04:48:43.714Z", "end": "2026-09-25T04:48:46.564Z", "seconds": 2.850},
+    {"name": "services_healthy", "status": "ok", "start": "2026-09-25T04:48:46.662Z", "end": "2026-09-25T04:48:53.769Z", "seconds": 7.107},
+    {"name": "fleet_reconciliation", "status": "ok", "start": "2026-09-25T04:48:53.786Z", "end": "2026-09-25T04:48:53.975Z", "seconds": 0.189}
+  ],
+  "checks_passed": 13,
+  "checks_failed": 0,
+  "project": "nexus-pitr",
+  "dataset_before": {"workflow_runs" : 4040, "task_attempts" : 48400, "run_events" : 153320, "db_bytes" : 119512087},
+  "backup": {"dump_bytes":10201927,"mirror_objects":2000,"mirror_bytes":2097152000},
+  "inflight_at_stop": {"workers_live_state" : 1, "attempts_in_flight" : 0, "leases" : 0, "reservations" : 0},
+  "verify": {"refs_total":1800,"refs_missing":0,"store_objects":2000,"sample_rehash_ok":19,"sample_rehash_bad":0},
+  "rpo_rows_lost": {"task_attempts":0,"run_events":0},
+  "inflight_restored": {"workers_live_state" : 1, "attempts_in_flight" : 0, "leases" : 0, "reservations" : 0},
+  "fresh_workers": 1,
+  "checks_passed": 16,
+  "checks_failed": 0
+}

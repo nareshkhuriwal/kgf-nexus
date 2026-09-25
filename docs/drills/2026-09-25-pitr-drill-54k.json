@@ -1,0 +1,316 @@
+{
+ "drill": "pitr-drill",
+ "started_at": "2026-09-25T04:42:12.136Z",
+ "finished_at": "2026-09-25T04:46:45.931Z",
+ "wall_seconds": 273.795,
+ "rto": {
+  "from_phase": "s1_stop",
+  "to_phase": "s1_fleet_reconciliation",
+  "seconds": 20.562
+ },
+ "phases": [
+  {
+   "name": "seed_a",
+   "status": "ok",
+   "start": "2026-09-25T04:42:12.827Z",
+   "end": "2026-09-25T04:42:59.703Z",
+   "seconds": 46.876
+  },
+  {
+   "name": "base_backup_full",
+   "status": "ok",
+   "start": "2026-09-25T04:42:59.720Z",
+   "end": "2026-09-25T04:43:00.944Z",
+   "seconds": 1.224
+  },
+  {
+   "name": "seed_b",
+   "status": "ok",
+   "start": "2026-09-25T04:43:00.960Z",
+   "end": "2026-09-25T04:43:11.390Z",
+   "seconds": 10.43
+  },
+  {
+   "name": "archive_push",
+   "status": "ok",
+   "start": "2026-09-25T04:43:15.681Z",
+   "end": "2026-09-25T04:43:16.608Z",
+   "seconds": 0.927
+  },
+  {
+   "name": "seed_c",
+   "status": "ok",
+   "start": "2026-09-25T04:43:16.623Z",
+   "end": "2026-09-25T04:43:23.161Z",
+   "seconds": 6.538
+  },
+  {
+   "name": "s1_stop",
+   "status": "ok",
+   "start": "2026-09-25T04:43:23.318Z",
+   "end": "2026-09-25T04:43:24.154Z",
+   "seconds": 0.836
+  },
+  {
+   "name": "s1_restore_db",
+   "status": "ok",
+   "start": "2026-09-25T04:43:24.173Z",
+   "end": "2026-09-25T04:43:29.859Z",
+   "seconds": 5.686
+  },
+  {
+   "name": "s1_restore_artifacts",
+   "status": "skipped",
+   "start": "2026-09-25T04:43:29.876Z",
+   "end": "2026-09-25T04:43:29.876Z",
+   "seconds": 0.0,
+   "reason": "PITR does not rewind the result store; content-addressed objects referenced before the target are unchanged"
+  },
+  {
+   "name": "s1_migrate_verify",
+   "status": "ok",
+   "start": "2026-09-25T04:43:29.888Z",
+   "end": "2026-09-25T04:43:32.400Z",
+   "seconds": 2.512
+  },
+  {
+   "name": "s1_services_healthy",
+   "status": "ok",
+   "start": "2026-09-25T04:43:32.415Z",
+   "end": "2026-09-25T04:43:39.389Z",
+   "seconds": 6.974
+  },
+  {
+   "name": "s1_fleet_reconciliation",
+   "status": "ok",
+   "start": "2026-09-25T04:43:39.406Z",
+   "end": "2026-09-25T04:43:43.880Z",
+   "seconds": 4.474
+  },
+  {
+   "name": "s2_stop",
+   "status": "ok",
+   "start": "2026-09-25T04:46:14.993Z",
+   "end": "2026-09-25T04:46:29.915Z",
+   "seconds": 14.922
+  },
+  {
+   "name": "s2_restore_db",
+   "status": "ok",
+   "start": "2026-09-25T04:46:29.934Z",
+   "end": "2026-09-25T04:46:36.081Z",
+   "seconds": 6.147
+  },
+  {
+   "name": "s2_restore_artifacts",
+   "status": "skipped",
+   "start": "2026-09-25T04:46:36.099Z",
+   "end": "2026-09-25T04:46:36.099Z",
+   "seconds": 0.0,
+   "reason": "the result store survived; only the database host was lost"
+  },
+  {
+   "name": "s2_migrate_verify",
+   "status": "ok",
+   "start": "2026-09-25T04:46:36.111Z",
+   "end": "2026-09-25T04:46:37.137Z",
+   "seconds": 1.026
+  },
+  {
+   "name": "s2_services_healthy",
+   "status": "ok",
+   "start": "2026-09-25T04:46:37.152Z",
+   "end": "2026-09-25T04:46:44.175Z",
+   "seconds": 7.023
+  },
+  {
+   "name": "s2_fleet_reconciliation",
+   "status": "ok",
+   "start": "2026-09-25T04:46:44.193Z",
+   "end": "2026-09-25T04:46:44.402Z",
+   "seconds": 0.209
+  }
+ ],
+ "project": "nexus-pitr",
+ "pgbackrest": "pgBackRest 2.59.1",
+ "archive_timeout": "1min",
+ "postgres": "16.15",
+ "seed_a": {
+  "batch": "d4206a",
+  "runs": 3020,
+  "nodes": 30200,
+  "attempts": 36200,
+  "artifacts": 1500,
+  "artifact_bytes": 1572864000,
+  "inflight_runs": 20,
+  "upload_seconds": 38,
+  "insert_seconds": 9
+ },
+ "base_backup": {
+  "label": "20260925-044259F",
+  "type": "full",
+  "database_bytes": 111886709,
+  "repo_bytes": 15728984,
+  "wal_start": "00000001000000000000000E",
+  "wal_stop": "00000001000000000000000E",
+  "started_at": "2026-09-25T04:42:59Z",
+  "stopped_at": "2026-09-25T04:43:00Z",
+  "seconds": 1
+ },
+ "seed_b": {
+  "batch": "d4206b",
+  "runs": 1020,
+  "nodes": 10200,
+  "attempts": 12200,
+  "artifacts": 300,
+  "artifact_bytes": 314572800,
+  "inflight_runs": 20,
+  "upload_seconds": 6,
+  "insert_seconds": 4
+ },
+ "target_time": "2026-09-25 04:43:13.482738+00",
+ "target_lsn": "0/12FC3350",
+ "seed_c": {
+  "batch": "d4206c",
+  "runs": 500,
+  "nodes": 5000,
+  "attempts": 6000,
+  "artifacts": 200,
+  "artifact_bytes": 209715200,
+  "inflight_runs": 0,
+  "upload_seconds": 5,
+  "insert_seconds": 1
+ },
+ "dataset_before_restore": {
+  "workflow_runs": 4540,
+  "task_attempts": 54400,
+  "run_events": 172260,
+  "db_bytes": 132971543
+ },
+ "counts_before": "A=3020 30180 B=1020 10180 C=500 5000",
+ "s1_restore_detail": {
+  "drill": "restore-pitr",
+  "started_at": "2026-09-25T04:43:24.983Z",
+  "finished_at": "2026-09-25T04:43:29.760Z",
+  "wall_seconds": 4.777,
+  "rto": {
+   "from_phase": "pg_stop",
+   "to_phase": "pg_verify",
+   "seconds": 4.582
+  },
+  "phases": [
+   {
+    "name": "pg_stop",
+    "status": "ok",
+    "start": "2026-09-25T04:43:25.008Z",
+    "end": "2026-09-25T04:43:26.045Z",
+    "seconds": 1.037
+   },
+   {
+    "name": "pg_restore",
+    "status": "ok",
+    "start": "2026-09-25T04:43:26.064Z",
+    "end": "2026-09-25T04:43:26.865Z",
+    "seconds": 0.801
+   },
+   {
+    "name": "pg_recover",
+    "status": "ok",
+    "start": "2026-09-25T04:43:26.883Z",
+    "end": "2026-09-25T04:43:29.239Z",
+    "seconds": 2.356
+   },
+   {
+    "name": "pg_verify",
+    "status": "ok",
+    "start": "2026-09-25T04:43:29.254Z",
+    "end": "2026-09-25T04:43:29.590Z",
+    "seconds": 0.336
+   }
+  ],
+  "container": "nexus-pitr-postgres-1",
+  "target_type": "time",
+  "target": "2026-09-25 04:43:13.482738+00",
+  "timeline": 2
+ },
+ "counts_after": "A=3020 30180 B=1020 10180 C=0 0",
+ "s1_refs": {
+  "refs_total": 1800,
+  "refs_missing": 0,
+  "store_objects": 2000,
+  "orphans_after_restore": 200
+ },
+ "s1_inflight_restored": {
+  "workers_live_state": 9,
+  "attempts_in_flight": 40,
+  "leases": 40,
+  "reservations": 40
+ },
+ "s1_rto": {
+  "from_phase": "s1_stop",
+  "to_phase": "s1_fleet_reconciliation",
+  "seconds": 20.562
+ },
+ "s2_killed_at_epoch": "1790311574.144825",
+ "s2_restore_detail": {
+  "drill": "restore-pitr",
+  "started_at": "2026-09-25T04:46:30.688Z",
+  "finished_at": "2026-09-25T04:46:35.983Z",
+  "wall_seconds": 5.295,
+  "rto": {
+   "from_phase": "pg_stop",
+   "to_phase": "pg_verify",
+   "seconds": 5.148
+  },
+  "phases": [
+   {
+    "name": "pg_stop",
+    "status": "ok",
+    "start": "2026-09-25T04:46:30.707Z",
+    "end": "2026-09-25T04:46:30.867Z",
+    "seconds": 0.16
+   },
+   {
+    "name": "pg_restore",
+    "status": "ok",
+    "start": "2026-09-25T04:46:30.886Z",
+    "end": "2026-09-25T04:46:32.782Z",
+    "seconds": 1.896
+   },
+   {
+    "name": "pg_recover",
+    "status": "ok",
+    "start": "2026-09-25T04:46:32.800Z",
+    "end": "2026-09-25T04:46:35.255Z",
+    "seconds": 2.455
+   },
+   {
+    "name": "pg_verify",
+    "status": "ok",
+    "start": "2026-09-25T04:46:35.270Z",
+    "end": "2026-09-25T04:46:35.855Z",
+    "seconds": 0.585
+   }
+  ],
+  "container": "nexus-pitr-postgres-1",
+  "target_type": "default",
+  "target": "",
+  "timeline": 3
+ },
+ "s2_rpo": {
+  "tick_seconds": 150,
+  "ticks_acknowledged": 552,
+  "ticks_survived": 426,
+  "ticks_lost": 126,
+  "rpo_seconds": 33.821,
+  "rpo_is_lower_bound": false,
+  "archive_timeout": "1min"
+ },
+ "s2_rto": {
+  "from_phase": "s2_stop",
+  "to_phase": "s2_fleet_reconciliation",
+  "seconds": 29.409
+ },
+ "checks_passed": 13,
+ "checks_failed": 0
+}

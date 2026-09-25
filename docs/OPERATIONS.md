@@ -4,8 +4,9 @@
 **Audience:** whoever is on call.
 **Scope:** Postgres backup and restore, the artifact (MinIO result store) backup
 and restore and the ordering between the two stores, the restore drills and their
-measured results, what these procedures do *not* cover, the RPO/RTO the approach
-actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), and durable task logs: retention and sizing (§19).
+measured results, point-in-time recovery with pgBackRest and its timed drills
+(§4), what these procedures do *not* cover, the RPO/RTO each approach actually
+delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), and durable task logs: retention and sizing (§19).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -227,6 +228,12 @@ What the drill does **not** prove, and was not attempted:
   query), took **0.51s** for the 110 KB archive. That number says nothing useful
   about a production archive and must not be used as an RTO input.
 
+*Update (2026-09-25):* all three are now exercised by `restore-drill.sh --rto`
+and `pitr-drill.sh` — the services are started against the restored database,
+in-flight leases/reservations held by vanished workers are reconciled, and the
+phases are timed on datasets of 54k and 420k attempts. Results and their limits:
+§4.6.
+
 ### 3.4 Version skew, reproduced
 
 The host-mode path was tested too, with `pg_dump`/`pg_restore` **18.3** against
@@ -252,43 +259,328 @@ restored perfectly. The row-count comparison is the acceptance test, not
 
 ---
 
-## 4. RPO and RTO — what this approach actually gives you
+## 4. RPO, RTO and point-in-time recovery
 
 Stated plainly, because the honest numbers are more useful than aspirational
-ones.
+ones. There are now two recovery mechanisms, and which one you are relying on
+changes both numbers.
 
-**RPO (how much work you lose) = the backup interval.** With hourly dumps, up to
-one hour of run history: completed runs, attempt results, emitted events. There
-is **no point-in-time recovery**. `pg_dump` is a logical snapshot; it cannot
-replay to a chosen second. Recovering to "just before the bad deploy at 14:32"
-is not possible with this tooling — you get the 14:00 dump.
+| | Logical: `backup-all.sh` (§2, §7) | Continuous archiving: pgBackRest (§4.2) | Managed Postgres |
+|---|---|---|---|
+| What is captured | `pg_dump` + result-bucket mirror, on a schedule | every WAL segment + periodic physical base backups | provider snapshots + WAL |
+| Restore to a chosen second | no — you get the last dump | yes: timestamp, LSN, or latest | yes, via the provider |
+| RPO | the dump interval | ≤ ~1 minute on a quiet database (§4.6) | provider-defined (typically ≤ 5 min) |
+| Roles and grants | not carried (`--no-owner --no-privileges`) | carried (it is the whole cluster) | carried |
+| Where it applies | anywhere | the in-cluster/compose Postgres | Azure Flexible Server, RDS/Aurora, Cloud SQL |
 
-If a sub-hour RPO is required, `pg_dump` is the wrong mechanism and this
-procedure must be replaced (not supplemented) by continuous archiving:
-`archive_mode = on` with WAL shipping, or a managed service that does it
-(RDS/Cloud SQL automated backups plus PITR). That is **not implemented**, and
-nothing in this repository configures WAL archiving.
+**Managed Postgres must use the provider's PITR, not this.** A managed server
+does not expose its data directory or `archive_command`, so pgBackRest cannot
+run against it; its automated backups and point-in-time restore are the
+supported path. Set the backup retention there (Azure Flexible Server: 7–35
+days; RDS: up to 35), restore to a NEW server at the chosen time, and repoint
+`DATABASE_URL`. The Helm chart refuses `postgres.pitr.enabled` together with
+`postgres.enabled=false` for this reason. The logical backup and the result-store
+mirror (§7) still apply to a managed database and are still the only copy of
+task artifacts.
 
-**RTO (how long you are down) = restore time + reconciliation time**, and only
-the first term is under this procedure's control. The restore itself is
-`pg_restore -j` into a fresh database, which for a logical dump scales roughly
-with row count and index build cost — index rebuilds usually dominate. The
-measured dev restore (0.51s end to end, 110 KB archive, 632 events) is not a
-basis for any production estimate. **Measure it on your data and write the number
-here.**
+### 4.1 Why pgBackRest (and not WAL-G)
 
-The second term is unmeasured: how long the fleet takes to settle after being
-pointed at a restored database (dead workers swept, stale leases expired, timers
-re-armed) has not been tested (§3.3).
+Both are maintained and both would work. pgBackRest **2.59.1** (released
+2026-08-17; pinned by tarball digest in `deploy/pgbackrest/Dockerfile`) was
+chosen because:
 
-**What an RPO of "one hour" means for correctness, not just data.** Nexus is
-at-least-once with mandated idempotency ([ADR-0006](adr/0006-at-least-once-with-idempotency.md)).
-Restoring to an earlier snapshot re-creates attempts that already ran, so tasks
-**will be re-executed** after a restore. For idempotent handlers that is the
-designed behaviour. For a handler that is not genuinely idempotent, a restore
-duplicates its side effects — this is the strongest practical argument for taking
-the idempotency requirement seriously, and it is worth saying out loud to task
-authors.
+- `restore --type=time|lsn` picks the right base backup for the target by
+  itself; with WAL-G the operator picks the backup and writes the recovery
+  settings by hand — during an incident.
+- repository encryption (`aes-256-cbc`, client-side) and retention/expiry are
+  built in and run after every backup, instead of being a second tool on a cron;
+- `pgbackrest verify` re-checksums every backup file and WAL segment in the
+  repository, which makes "the backups are good" a checkable claim;
+- `pgbackrest check` proves the `archive_command` round trip end to end.
+
+The costs, accepted knowingly: its S3 client is **TLS-only** (so the dev backup
+store runs with a generated certificate), and it is built from source into a
+`postgres:16.15-alpine3.24` image (`kgf-nexus/postgres-pitr:16.15-pgbackrest2.59.1`).
+The image keeps the stock server's major **and libc**, so an existing volume
+keeps working — swapping to a glibc image would silently change text collation
+and corrupt indexes.
+
+### 4.2 What is configured
+
+- **Archiving.** `wal_level=replica`, `archive_mode=on`,
+  `archive_command='pgbackrest --stanza=nexus archive-push %p'` (async, so
+  several segments push in parallel; Postgres still only recycles a segment
+  after pgBackRest confirms it is in the repository), `archive_timeout=60`.
+- **Base backups.** A `pgbackrest` sidecar (`deploy/pgbackrest/nexus-pitr-scheduler.sh`)
+  creates the stanza, runs `pgbackrest check`, then takes a FULL backup when
+  none exists or the newest is older than `PITR_FULL_INTERVAL_SECONDS` (default
+  weekly), otherwise a DIFF when the newest backup is older than
+  `PITR_DIFF_INTERVAL_SECONDS` (default daily). The decision reads the
+  repository, so a restart neither skips nor duplicates a backup. It writes a
+  status line that its healthcheck reads: unhealthy if no backup has succeeded
+  within 2× the diff interval.
+- **Archive-age guard.** The sidecar also forces `pg_switch_wal()` when nothing
+  has been archived for `PITR_WAL_SWITCH_SECONDS` (= `archive_timeout`). This
+  exists because the drill measured `archive_timeout` *not* firing for up to
+  `checkpoint_timeout` (5 min) after a server start or promotion — §4.6.
+- **Separation from task artifacts.** A different bucket (`nexus-pg-backups`,
+  prefix `/nexus`), a different principal whose policy allows only that bucket
+  (`s3:ListBucket`/`GetBucketLocation` on it, `Get/Put/DeleteObject` in it), and
+  in dev a different store instance (`backup-store`). The services' result-store
+  credentials cannot read the WAL, and the pgBackRest key cannot touch
+  artifacts. In production prefer a bucket in another failure domain.
+- **Encryption at rest.** `repo1-cipher-type=aes-256-cbc` with the passphrase
+  from a secret (`NEXUS_PITR_CIPHER_PASS` / `cipher-pass`). The passphrase is
+  required to restore: keep a copy outside the cluster. Server-side KMS on top
+  is available through `extraEnv` (`PGBACKREST_REPO1_S3_KMS_KEY_ID`).
+- **Retention knobs.** `repo1-retention-full` (default 2, `count`; or `time` in
+  days), `repo1-retention-diff` (7). The PITR window is "from the start of the
+  oldest retained full backup until now"; `deploy/pitr-verify.sh` prints it.
+
+Where: compose overlay `deploy/docker-compose.pitr.yml` (`make up-pitr`), Helm
+`postgres.pitr.*` in `deploy/helm/kgf-nexus/values.yaml`.
+
+### 4.3 Running it
+
+```sh
+make up-pitr                            # compose: stack + archiving + sidecar
+make backup-base BACKUP_TYPE=full       # a base backup now (before a risky change)
+make pitr-verify                        # check + archiver + backup age + verify; nonzero = broken
+```
+
+`pitr-verify.sh` is the monitoring hook: it exits nonzero if `pgbackrest check`
+fails, the archiver's last attempt failed, nothing was archived for 15 min, the
+newest base backup is older than 2 days, or `pgbackrest verify` finds a bad
+file. Its last line is JSON. `--no-verify` skips the (slow) repository re-read
+for frequent probes. Negative control, run 2026-09-25: with the backup store
+stopped it exits 1 with `pgbackrest check` failed and "repository unreadable";
+with the store back it passes.
+
+**Restore to a point in time** (the "undo the bad change" case):
+
+1. Stop the Nexus services (not postgres): `docker compose ... stop api-gateway
+   workflow-manager dag-engine scheduler scheduler-gpu resource-manager
+   event-service agent-cpu agent-gpu agent-gpu-a10 ui`. A service connected
+   during the restore sees the database move backwards under it.
+2. `make restore-pitr CONFIRM=yes TARGET_TIME='2026-09-24 14:31:59+00'`
+   (or `TARGET_LSN=0/5A0012F8`; neither = latest). The script prints the plan
+   and the restorable window, stops postgres and the sidecar, runs
+   `pgbackrest restore --delta` in a one-off container with exactly the
+   container's volumes and repository settings, starts postgres, waits for
+   replay + promotion, and runs `pgbackrest check` on the new timeline.
+   Use the database's timezone-qualified time; `--exclusive` stops just before
+   the target instead of at it.
+3. Start the services. The scheduler sweeps the restored snapshot's workers to
+   DEAD and expires their in-flight attempts to LOST (retried per policy); the
+   agents re-register (§4.6 measures this).
+4. Take a DIFF backup soon (`make backup-base BACKUP_TYPE=diff`). The new
+   timeline is restorable from the old backup + WAL (the drill proves it), but a
+   fresh backup shortens the next recovery.
+
+The **result store is not rewound**. It does not need to be: objects are
+content-addressed and immutable (ADR-0008), so every object a pre-target row
+references is still there — the drill checks every reference. Objects written
+after the target become orphans for the GC sweep (§7.7), never dangling refs.
+
+Transactions after the target are gone from the database but stay in the WAL
+archive until retention expires them, so a second restore to a *later* target
+can recover them.
+
+### 4.4 Kubernetes (Helm) — rendered, not exercised
+
+With `postgres.pitr.enabled=true` the postgres StatefulSet runs the pitr image
+with the archive settings and a `pgbackrest` sidecar (same env, shared data
+volume and unix socket, no readiness probe on purpose: a failing backup must
+page someone, not remove the database from its Service). Required values:
+`postgres.pitr.existingSecret` (`s3-key`, `s3-key-secret`, `cipher-pass`),
+`repo.s3.bucket`, `repo.s3.endpoint`; `repo.s3.caSecret` for a private CA.
+
+```sh
+PITR_EXEC="kubectl -n nexus exec -i postgres-0 -c pgbackrest --" deploy/pitr-backup.sh diff
+PITR_EXEC="kubectl -n nexus exec -i postgres-0 -c pgbackrest --" deploy/pitr-verify.sh
+```
+
+A restore on Kubernetes needs the data volume with postgres NOT running:
+scale the control-plane Deployments and the postgres StatefulSet to 0, run a
+one-off pod from the pitr image as uid 70 that mounts the `data-postgres-0` PVC
+and the same `PGBACKREST_*` env, run
+`pgbackrest --stanza=nexus --delta --type=time --target='…' --target-action=promote restore`,
+then scale postgres back to 1, wait for `pg_is_in_recovery()=false`, and scale
+the services up. **This path has been rendered (`helm template`, `helm lint`)
+but not run on a cluster**; treat the first execution as a drill, not an
+incident.
+
+### 4.5 The drills
+
+Both drills are destructive to the stack they run on, so run them on an
+isolated compose project, never on the one you care about:
+
+```sh
+export COMPOSE_PROJECT_NAME=nexus-pitr NEXUS_POSTGRES_PORT=55631 NEXUS_MINIO_PORT=55632 \
+       NEXUS_MINIO_CONSOLE_PORT=55633 NEXUS_NATS_PORT=55634 NEXUS_NATS_MONITOR_PORT=55635 \
+       NEXUS_API_PORT=55636 NEXUS_GRPC_PORT=55637 NEXUS_MAILPIT_UI_PORT=55638 NEXUS_UI_PORT=55639
+make up-pitr        # then install a worker key (make seed) and start agent-cpu
+export PG_CONTAINER=nexus-pitr-postgres-1 MINIO_CONTAINER=nexus-pitr-minio-1
+make restore-drill RTO=1    # logical: backup-all, drop DB + bucket, restore, restart, reconcile
+make pitr-drill PITR_DRILL_ARGS="--runs-a 3000 --artifacts-a 1500"
+```
+
+Both refuse the default `nexus` project unless `DRILL_ALLOW_DEFAULT_PROJECT=1`,
+write a JSON report (`DRILL_REPORT`, `PITR_REPORT`) and print a phase table.
+
+- **`restore-drill.sh --rto`** — after the existing scratch checks (§7.4), takes
+  a real `backup-all.sh`, simulates losing both stores (DROP DATABASE, remove the
+  bucket), and times: `stop` (all services + agents) → `restore_db`
+  (`restore.sh`) → `restore_artifacts` (`restore-artifacts.sh`) →
+  `migrate_verify` (migrate job; every `output_ref` in `task_attempts` resolves;
+  a sample of objects re-hashes to its content-addressed key; restored row
+  counts vs. the moment of the outage) → `services_healthy` (every `/readyz`) →
+  `fleet_reconciliation`. RTO is wall clock from the start of `stop` to the end
+  of `fleet_reconciliation`.
+- **`pitr-drill.sh`** — seeds data with `deploy/pitr-seed.sh` (tagged batches of
+  runs × nodes, ~20% retried attempts, events, content-addressed random-byte
+  artifacts, and in-flight runs held under live leases by synthetic workers):
+  batch **A** → FULL base backup → batch **B** (exists only in WAL) → target
+  time **T** from the database clock → batch **C**. *Scenario 1* restores to T
+  and asserts A and B are present with exact counts, C is absent (with a
+  negative control that C had been committed), every ref resolves, and the
+  in-flight state at T is reconciled. *Scenario 2* runs a writer committing a
+  row every ~200 ms and recording each acknowledged commit, SIGKILLs postgres,
+  **deletes its data directory**, restores to latest and measures RPO as the
+  span of acknowledged commits that did not survive — and asserts the survivors
+  are a gap-free prefix (nothing invented, nothing reordered). It ends with
+  `pitr-verify.sh` including `pgbackrest verify`.
+
+"Fleet reconciliation" is read from Postgres (`deploy/lib/nexus-stack.sh`):
+done when no worker from the restored snapshot (no heartbeat since recovery
+began) is still ACTIVE/DRAINING/QUARANTINED, no DISPATCHED/RUNNING attempt is
+held by a worker that is not live, and every restarted agent has re-registered.
+
+### 4.6 Measured results — LAPTOP measurements, not production claims
+
+Run on 2026-09-25 in an isolated compose project (`nexus-pitr-*`, ports
+55631–55639). **Hardware:** Apple MacBook Pro `Mac16,7`, Apple M4 Pro (14 cores:
+10 performance + 4 efficiency), 24 GiB RAM, internal Apple SSD (APFS, 494 GB),
+macOS 26.6.2; Docker Desktop 29.6.2 with a Linux VM of 10 vCPU / 15.8 GiB.
+Postgres 16.15 (alpine), pgBackRest 2.59.1, MinIO RELEASE.2025-09-07 (a locally
+built image; the pinned quay.io image was not pullable from this machine). The
+backup store, database and result store all share one SSD, so every transfer
+here is a local copy — a real object store over a network is slower, and that
+difference is exactly what these numbers do NOT tell you.
+
+Reports: `docs/drills/2026-09-25-*.json` (the 54k PITR report was produced
+before a report-formatting fix and repaired by hand; its numbers are unchanged).
+
+**Datasets.** *Medium*: 4,540 runs / 54,400 attempts / 172,260 events,
+database 127 MiB; 2,000 artifacts of 1 MiB random bytes = 2.0 GiB.
+*Large*: 35,080 runs / 420,800 attempts / 1,332,640 events, database 914 MiB;
+2,140 artifacts, 2.0 GiB.
+
+**PITR, scenario 1 — restore to a timestamp** (all assertions passed both times):
+
+| phase | medium | large |
+|---|---:|---:|
+| stop (services + agents) | 0.8 s | 1.2 s |
+| restore_db (stop pg, `pgbackrest restore`, WAL replay to T, promote, check) | 5.7 s | 8.6 s |
+| &nbsp;&nbsp;of which WAL replay + promote | 2.4 s | 4.6 s |
+| restore_artifacts | skipped (not rewound; §4.3) | skipped |
+| migrate_verify (migrate job, 1,800–1,920 refs resolve, re-hash sample) | 2.5 s | 3.0 s |
+| services_healthy | 7.0 s | 7.0 s |
+| fleet_reconciliation | 4.5 s | 4.5 s |
+| **RTO** | **20.6 s** | **24.5 s** |
+
+Base backup (FULL, zstd + aes-256-cbc) before the target: 107 MiB → 15 MiB in
+the repository in 1.2 s (medium); 794 MiB → 111 MiB in 2.8 s (large). Batch C
+(500 / 1,000 runs committed after T) was absent after both restores; 200 / 220
+post-target objects remained as orphans. Segment push latency after a forced
+switch: 0.9 s.
+
+**PITR, scenario 2 — primary lost (SIGKILL + data directory deleted), restore
+to latest:**
+
+| | medium | large |
+|---|---:|---:|
+| ticking before the kill | 150 s | 90 s |
+| acknowledged commits / survived / lost | 552 / 426 / 126 | 336 / 169 / 167 |
+| **RPO** (acknowledged work lost) | **33.8 s** | **44.7 s** |
+| stop (services, already failing against a dead DB) | 14.9 s | 14.9 s |
+| restore_db (restore + replay across timelines + promote) | 6.1 s | 8.5 s |
+| services_healthy + migrate_verify | 8.0 s | 8.6 s |
+| fleet_reconciliation | 0.2 s | 0.2 s |
+| **RTO** | **29.4 s** | **32.3 s** |
+
+The RPO is the unarchived tail — the WAL written since the last segment switch
+— so on a quiet database it lies between 0 and `archive_timeout` + push time
+(~61 s) wherever the kill lands; a busy database fills 16 MiB segments faster
+and archives continuously. `stop` is long here only because services that have
+lost their database take most of `docker stop`'s grace period to exit.
+
+**Logical path — `restore-drill.sh --rto`** (DB dropped AND bucket removed):
+
+| phase | medium | large |
+|---|---:|---:|
+| backup_all (before the outage; not RTO) | 30.3 s | 34.9 s |
+| &nbsp;&nbsp;dump size | 9.7 MiB | 76 MiB |
+| stop | 0.9 s | 0.9 s |
+| restore_db (`pg_restore` into a new database) | 2.6 s | 12.3 s |
+| restore_artifacts (2,000 / 2,140 objects, 2.0 GiB) | 24.3 s | 20.0 s |
+| migrate_verify | 2.9 s | 3.3 s |
+| services_healthy | 7.1 s | 7.1 s |
+| fleet_reconciliation | 0.2 s | 0.2 s |
+| **RTO** | **39.0 s** | **45.0 s** |
+
+Its RPO is the dump interval: the drill lost 0 rows only because nothing wrote
+between the dump and the stop.
+
+**What the numbers say, and what they do not.**
+
+- On this hardware, database restore is not the long pole: 1 GiB restores and
+  replays in under 10 s. **Artifacts** (2 GiB, 20–24 s, local disk to local
+  disk) and **service start-up** (~7 s) are. For a real deployment the artifact
+  term scales with bytes and object-store bandwidth; measure it there.
+- `pg_restore` grows with row count and index builds (2.6 s → 12.3 s for 8.4×
+  the rows); PITR restore grows with the base backup and the WAL to replay
+  (5.7 s → 8.6 s). A production database of 100 GiB is a different regime
+  entirely — these runs cannot be extrapolated to it.
+- **Fleet reconciliation is bounded by the liveness window, not by data size.**
+  The scheduler declares a worker DEAD only once its heartbeat is older than 30 s
+  (`-liveness-window`); in these runs the snapshot's heartbeats were already close
+  to or past that window by the time services were up, so it took 0.2–4.5 s. Budget up to
+  ~40 s (window + a 10 s sweep interval) after services are healthy.
+- **Measured defect, mitigated:** after any server start or promotion,
+  `archive_timeout=60` did not switch segments for **301 s** (= `checkpoint_timeout`)
+  under steady writes (reproduced three times on 16.15). Without mitigation the
+  RPO right after a restart or restore is ~5 minutes, not ~1. The sidecar's
+  archive-age guard now forces the switch; measured intervals with it: 59–69 s.
+  If the sidecar is down, the guard is too — `pitr-verify.sh` flags an archive
+  older than 15 minutes.
+- **Observed platform behaviour (not fixed here):** the resource-manager's
+  liveness sweeper and the scheduler's both declare workers DEAD. When the
+  resource-manager wins, the scheduler's sweep no longer selects the worker and
+  does not expire its in-flight attempts; they are recovered by lease expiry
+  instead (the agents' lease TTL is 30 s, so this costs up to 30 s, not
+  correctness). Separately, a scheduler liveness sweep aborts on the first
+  attempt it fails to expire, which stalls the rest of that pass.
+- **Docker Desktop quirk:** restarting containers seconds after stopping them
+  intermittently failed with "port already in use", and one such failure left
+  the container detached from its network. The drill library retries starts and
+  reattaches a detached container; a real orchestrator does the equivalent.
+
+**Unverified:** Kubernetes/Helm PITR (rendered and linted only); a real remote
+object store (S3/Azure) as the repository; restore of a backup whose
+passphrase came from a real secret manager; restore across a Postgres minor
+upgrade; repository retention/expiry over weeks; RTO under concurrent
+production load.
+
+### 4.7 What an RPO means for correctness, not just data
+
+Nexus is at-least-once with mandated idempotency ([ADR-0006](adr/0006-at-least-once-with-idempotency.md)).
+Restoring to any earlier point — a dump or a PITR target — re-creates attempts
+that already ran, so tasks **will be re-executed** after a restore. For
+idempotent handlers that is the designed behaviour. For a handler that is not
+genuinely idempotent, a restore duplicates its side effects — this is the
+strongest practical argument for taking the idempotency requirement seriously,
+and it is worth saying out loud to task authors.
 
 ---
 
@@ -310,17 +602,25 @@ is made of items like these.
   here.
 - **No encryption at rest for the dump.** The archive contains `api_keys` rows and
   every workflow parameter. Treat a dump as a secret: restrict the directory, and
-  encrypt before it leaves the host.
-- **No point-in-time recovery.** See §4.
-- **No backup monitoring.** Nothing alerts if `backup.sh` stops running. A cron
-  job that fails silently for three weeks is indistinguishable from no backup at
-  all; wire the exit code into whatever alerts you.
+  encrypt before it leaves the host. (The pgBackRest repository, §4.2, IS
+  encrypted client-side; the logical dump and the artifact mirror are not.)
+- **~~No point-in-time recovery.~~** *Closed for the in-cluster/compose Postgres
+  — see §4* (pgBackRest continuous archiving, `deploy/restore-pitr.sh`, drilled
+  in §4.6). Managed Postgres uses the provider's PITR. The Helm path is rendered
+  but not yet exercised on a cluster (§4.4).
+- **Backup monitoring is partial.** For PITR, `deploy/pitr-verify.sh` exits
+  nonzero on a broken archive, a stale archive or base backup, or a corrupt
+  repository, and the sidecar's healthcheck fails when no backup has succeeded
+  within 2× the diff interval — wire either into alerting. Nothing alerts if the
+  logical `backup.sh` cron stops running; a job that fails silently for three
+  weeks is indistinguishable from no backup at all.
 - **No NATS state backup**, deliberately. NATS carries notifications; Postgres
   holds truth ([ADR-0003](adr/0003-nats-as-event-bus.md)). There is nothing there
   to restore. The `outbox` table IS in the dump; after a restore the relay
   re-publishes whatever it holds unpublished, and consumers de-duplicate by
   run_id + seq.
-- **Postgres roles and grants are not in the dump.** `pg_dump --no-owner
+- **Postgres roles and grants are not in the dump** (they ARE in a pgBackRest
+  backup, which is the whole cluster). `pg_dump --no-owner
   --no-privileges` is used so the archive restores cleanly as whatever role you
   have, which means role definitions are *not* carried. In the MVP there is one
   role, so this costs nothing; once per-service roles exist (they arrive as a

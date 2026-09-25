@@ -2597,3 +2597,68 @@ with a retryable reason when `Applied` is false and the attempt is not terminal,
 so the agent's WAL keeps the result and redelivers it. Either needs a race test
 in the style of `TestProgressNeverBlocksTheResult` that holds a `MarkStarted`
 transaction open while a result arrives.
+
+### F105. archive_timeout did not bound the RPO after a server start or promotion — FIXED
+
+**Severity:** medium. The documented RPO was wrong by a factor of five exactly
+when an operator relies on it most, straight after a restart or a restore.
+
+Found by the PITR drills (`feat/pitr-and-timed-restore`, OPERATIONS §4.6). With
+`archive_timeout=60` on PostgreSQL 16.15, after any server start or promotion
+the server did not switch WAL segments for **301 s** (that is,
+`checkpoint_timeout`) under steady writes. This was reproduced three times. A
+partially filled segment is not archived until it is switched, so the real RPO
+right after a restart or a PITR restore was about 5 minutes, not about 1.
+
+**Fix (`deploy/pgbackrest/nexus-pitr-scheduler.sh`, `wal_guard`).** The
+pgBackRest sidecar runs an archive-age guard. It checks every 10 s, and when
+nothing has been archived for `PITR_WAL_SWITCH_SECONDS` (60 s) since the later
+of `pg_stat_archiver.last_archived_time` and `pg_postmaster_start_time()`, it
+calls `pg_switch_wal()`. That call is a no-op when no WAL was written, so an
+idle database pays nothing. The measured archive intervals with the guard were
+59–69 s. The Helm chart runs the same sidecar (`templates/dependencies.yaml`).
+
+**Residual.** The guard lives in the sidecar, so if the sidecar is down the
+bound is gone too. `deploy/pitr-verify.sh` fails when the newest archived
+segment is older than 15 minutes; alert on it.
+
+### F106. Two liveness sweepers, and the scheduler's gives up its in-flight recovery when it loses — OPEN
+
+**Severity:** low (time, not correctness). Found by the timed full-stack restore
+drill (OPERATIONS §4.6).
+
+Two processes declare silent workers DEAD:
+
+- the resource-manager's sweeper, `Sweeper.sweepOnce` in
+  `services/resource-manager/internal/server/sweeper.go`, which calls
+  `SetWorkerState(..., WorkerDead)` and releases the worker's reservations but
+  deliberately leaves its attempts to the scheduler;
+- the scheduler's `SchedulerStore.SweepDeadWorkers` in
+  `internal/store/scheduler_liveness.go`, which selects only workers still in
+  `ACTIVE`, `DRAINING` or `QUARANTINED`, and whose `killWorker` expires the
+  worker's DISPATCHED/RUNNING attempts as LOST (`worker_dead`) only after its
+  own `UPDATE ... SET state = 'DEAD'` affected a row.
+
+When the resource-manager marks the worker DEAD first, the scheduler's sweep no
+longer selects it, so nothing expires its in-flight attempts early. They wait
+for lease expiry through the lease reconciler (`-lease-ttl`, 30 s by default in
+`services/scheduler/main.go`), which costs up to one lease TTL of extra
+recovery per attempt.
+
+Separately, `killWorker` returns on the first `expireOne` error and
+`SweepDeadWorkers` then returns immediately (`return out, fmt.Errorf("declare
+worker %s dead: ...")`). One attempt that fails to expire therefore stops that
+worker's remaining attempts and every other stale worker for the whole pass.
+Because the failed worker is already committed DEAD, the next pass will not
+select it again, so its remaining attempts also fall back to lease expiry.
+
+Nothing is lost or double-applied: lease expiry is the correctness backstop in
+both cases, and every expiry is fenced.
+
+**Proposed fix, not done.** Have the scheduler's sweep also expire the held
+attempts of workers that are already DEAD with attempts still DISPATCHED/RUNNING
+(or move the attempt half of the transition behind one owner). Also make
+`killWorker` and `SweepDeadWorkers` log and continue per attempt and per worker,
+as `ReconcileExpiredLeases` does, instead of returning on the first error. Test
+with an integration test where the resource-manager wins the race, asserting
+the attempts become LOST within one sweep interval instead of one lease TTL.

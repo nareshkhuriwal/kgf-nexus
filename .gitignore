@@ -31,6 +31,9 @@ venv/
 *.log
 .DS_Store
 gpt_architecture.zip
+# Drill reports (make restore-drill / pitr-drill): per-run output, not source.
+/restore-drill-report.json
+/pitr-drill-report.json
 
 # nexusctl build output and the SDK test venv
 /nexusctl
