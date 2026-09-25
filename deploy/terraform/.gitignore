@@ -1,0 +1,15 @@
+# Terraform working directories, state and real variable files never belong
+# in git: state holds generated credentials, tfvars hold environment choices.
+# *.tfvars.example files are committed (they do not match *.tfvars).
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfplan
+crash.log
+crash.*.log
+backend.hcl
+
+# Reusable modules do not pin exact provider builds; the environment roots do
+# (their .terraform.lock.hcl IS committed). `make tf-validate` creates these.
+modules/*/.terraform.lock.hcl

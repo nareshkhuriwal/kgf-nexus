@@ -57,6 +57,34 @@ variable "chart_values" {
   default     = {}
 }
 
+variable "chart_values_overrides" {
+  description = "Chart values applied after chart_values (Helm deep-merges them), for per-deployment overrides of what an environment derives from its infrastructure."
+  type        = any
+  default     = {}
+}
+
+variable "postgres_password" {
+  description = "Password of an EXTERNAL (managed) database's nexus user, from a cloud platform module. null: generate one for the in-cluster Postgres. Embedded unescaped in a postgres:// URL, so alphanumeric only."
+  type        = string
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.postgres_password == null || can(regex("^[A-Za-z0-9]{16,}$", coalesce(var.postgres_password, "x")))
+    error_message = "postgres_password must be at least 16 alphanumeric characters: it is embedded unescaped in a postgres:// URL."
+  }
+}
+
+variable "object_store_credentials" {
+  description = "Key pair for an EXTERNAL S3-compatible result store (Amazon S3, or GCS through its HMAC interoperability API). null: generate root credentials for the in-cluster MinIO."
+  type = object({
+    access_key_id     = string
+    secret_access_key = string
+  })
+  default   = null
+  sensitive = true
+}
+
 variable "helm_timeout_seconds" {
   description = "How long Helm waits for every workload and Job to become ready."
   type        = number

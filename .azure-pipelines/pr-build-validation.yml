@@ -13,6 +13,8 @@
 #                     JUnit and coverage reporting. Always on.
 #   UserInterface     npm ci, typecheck, vitest (JUnit published) and the
 #                     production build. On by default (see runUserInterface).
+#   Terraform         `make tf-validate` and `make tf-lint` over deploy/terraform,
+#                     offline (-backend=false, mocked providers). Always on.
 #   BuildValidation   one job per image; built, never pushed.
 #   EndToEnd          the real compose stack, every example run to SUCCEEDED,
 #                     and the chaos suite. Off by default; ~45 minutes.
@@ -519,6 +521,40 @@ stages:
         failIfCoverageEmpty: true
       displayName: 'Publish SDK Code Coverage'
 
+# Terraform for the dev environment and the AKS/EKS/GKE platforms, OFFLINE,
+# the same `make` targets as the GitHub workflow. No service connection, no
+# state, no cloud credentials: init -backend=false, validate, `terraform test`
+# with mocked providers, then tflint/checkov/trivy. Terraform itself runs in
+# the pinned hashicorp/terraform image (TF_USE_DOCKER=1), so the agent needs
+# only Docker, like the stages above.
+- stage: Terraform
+  displayName: 'Terraform (offline)'
+  dependsOn: []
+  jobs:
+  - job: ValidateTerraform
+    displayName: 'terraform validate, test and lint'
+    timeoutInMinutes: 25
+    workspace:
+      clean: all
+    variables:
+      # Outside the workspace so `clean: all` keeps it between runs.
+      TF_PLUGIN_CACHE_DIR: '$(Agent.ToolsDirectory)/terraform-plugin-cache'
+      TFLINT_PLUGIN_CACHE: '$(Agent.ToolsDirectory)/tflint-plugins'
+      TF_USE_DOCKER: '1'
+    steps:
+    - checkout: self
+      persistCredentials: false
+
+    - script: |
+        set -euo pipefail
+        make tf-validate
+      displayName: 'make tf-validate (init -backend=false, validate, mocked-plan tests)'
+
+    - script: |
+        set -euo pipefail
+        make tf-lint
+      displayName: 'make tf-lint (tflint, checkov, trivy)'
+
 - ${{ if parameters.runUserInterface }}:
   - stage: UserInterface
     displayName: 'Operator Console'
@@ -851,6 +887,7 @@ stages:
   dependsOn:
     - UnitTest
     - PythonSdk
+    - Terraform
     - ${{ if parameters.runIntegration }}:
       - Integration
     - ${{ if parameters.runUserInterface }}:
@@ -874,6 +911,7 @@ stages:
         echo "✅ Every first-party source file carries an SPDX identifier"
         echo "✅ Generated files are synchronized with their sources"
         echo "✅ Every image builds without errors"
+        echo "✅ Terraform modules and environments validate offline; mocked-plan tests and linters pass"
         echo "${{ parameters.runIntegration }}" | grep -qi true \
           && echo "✅ Migrations applied and the integration suite ran against a real database" \
           || echo "⏭️  PostgreSQL integration suite not run (runIntegration is false)"

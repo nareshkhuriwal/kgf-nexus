@@ -207,6 +207,17 @@ k8s-dev-status: ## Show the dev environment's pods and URLs
 k8s-dev-down: ## Destroy the dev environment (DELETES its data volumes)
 	terraform -chdir=$(TF_DEV) destroy -input=false
 
+# ── Terraform: cloud platforms (deploy/terraform) ─────────────────────────
+# OFFLINE only: init -backend=false, validate, and `terraform test` plans with
+# mocked providers. No state, no credentials, nothing is ever applied. Needs
+# terraform >= 1.11 or Docker, plus network access to download providers.
+.PHONY: tf-validate tf-lint
+tf-validate: ## Validate every Terraform module/environment offline (fmt, validate, mocked-plan tests)
+	deploy/terraform/validate.sh
+
+tf-lint: ## tflint, checkov and trivy over deploy/terraform, in pinned containers (needs Docker)
+	deploy/terraform/validate.sh lint
+
 # ── TLS (docs/TLS.md §5) ──────────────────────────────────────────────────
 # Opt-in. `make up` stays plaintext; `make up-tls` layers the mTLS override on
 # top. The generated material, including a CA private key, lands in .dev-certs/

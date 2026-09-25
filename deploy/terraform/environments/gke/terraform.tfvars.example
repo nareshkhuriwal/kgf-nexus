@@ -1,0 +1,53 @@
+# Copy to terraform.tfvars (gitignored) and fill in. Values below are examples.
+
+project_id = "my-nexus-project"
+region     = "us-central1"
+name       = "kgf-nexus-prod-usc1"
+
+labels = {
+  project     = "kgf-nexus"
+  environment = "prod"
+  owner       = "platform"
+  cost-centre = "nexus"
+}
+
+# Control plane IP endpoint restricted to these CIDRs. For a private endpoint
+# set private_endpoint = true: Terraform then uses the IAM-authorised DNS
+# endpoint instead.
+master_authorized_cidrs = ["203.0.113.0/24"]
+
+release_channel = "REGULAR"
+
+cpu_pool = {
+  machine_type = "n2d-standard-4"
+  min_per_zone = 1
+  max_per_zone = 3
+  disk_size_gb = 100
+}
+
+gpu_pool = {
+  enabled           = false
+  machine_type      = "g2-standard-8"
+  accelerator_type  = "nvidia-l4"
+  accelerator_count = 1
+  min_per_zone      = 0
+  max_per_zone      = 1
+  disk_size_gb      = 200
+  zones             = ["us-central1-a", "us-central1-b"] # zones that offer the accelerator
+}
+
+postgres = {
+  database_version   = "POSTGRES_16"
+  tier               = "db-custom-2-7680"
+  disk_size_gb       = 50
+  high_availability  = true # regional standby: roughly doubles the instance cost
+  backup_retention   = 14
+  log_retention_days = 7
+}
+
+image_tag            = "0123456789abcdef0123456789abcdef01234567"
+nats_credentials_dir = "/secure/nexus-nats"
+
+chart_values_overrides = {
+  logLevel = "info"
+}

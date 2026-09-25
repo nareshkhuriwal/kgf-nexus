@@ -3054,6 +3054,84 @@ with role `worker` keep working through its default branch). Add an integration
 test that mints a worker token through the REST API and registers an agent with
 it. Then `nexusctl up` and the bootstrap Job can drop their SQL step.
 
+### F115. Cloud platforms: the result store is S3-only with static keys, the chart cannot use cloud identities or GPU pools, and nothing has been applied — OPEN
+
+**Severity:** medium (deployment blocker for Azure-native artifacts and for
+keyless and GPU operation on every cloud; not a correctness defect). Found
+while building the AKS, EKS and GKE Terraform (`deploy/terraform/modules/
+{aks,eks,gke}-platform`, `environments/{aks,eks,gke}`,
+`feat/terraform-cloud-clusters`).
+
+**1. Azure Blob has no working path.** The result store talks to storage only
+through the S3 API: minio-go in `agent/internal/resultstore`,
+`services/api-gateway/logs` and `internal/artifactgc`. Azure Blob has no S3
+endpoint, and MinIO removed its Azure gateway mode in 2022. On AKS the
+environment therefore runs the chart's **in-cluster MinIO** on a Premium SSD
+PVC, and the operator owns its capacity, backups and availability. The Blob
+account, the private container, the private endpoint and a workload identity
+with `Storage Blob Data Contributor` on that container are provisioned but
+**unused**. The `azure_blob_native_backend` variable in `environments/aks` is
+reserved and its validation refuses `true`. There are two ways forward:
+(a) a native Blob backend behind the result-store interface, using
+`azblob` with workload identity; or (b) an S3-to-Blob gateway such as s3proxy
+in front of the container, which is another component to run and secure and
+has uncertain multipart and conditional-request fidelity. (a) is the
+recommendation.
+
+**2. Only static credentials.** All three clients build
+`credentials.NewStaticV4(...)`. This means:
+- **EKS** needs an IAM user with an access key (checkov CKV_AWS_273 and
+  CKV_AWS_40, accepted and documented). It is contained as far as a key can
+  be: the policy covers one bucket and one KMS key, and an explicit deny
+  blocks any request that does not arrive through the VPC's S3 gateway
+  endpoint. The target design, an IRSA / Pod Identity role trusted for
+  `nexus/kgf-nexus` with its Pod Identity association, is provisioned and
+  unused.
+- **GKE** uses an HMAC key for GCS's S3 interoperability API. The Workload
+  Identity binding for the same service account is provisioned and unused.
+
+  Fix: use minio-go's credential chain (`credentials.NewChainCredentials`
+  with `IAM`, which understands `AWS_WEB_IDENTITY_TOKEN_FILE` / IRSA and the
+  Pod Identity container-credentials endpoint; verified present in minio-go
+  v7.3.0 `pkg/credentials/iam_aws.go`) whenever no static key is configured.
+  On GKE, a keyless path needs a native GCS client (Workload Identity
+  tokens), because minio-go can sign only S3-style HMAC requests.
+
+**3. The chart has no ServiceAccount, nodeSelector, tolerations or GPU
+resource requests.** Without a ServiceAccount, (2) cannot be adopted even
+after the client change. Without tolerations and `nvidia.com/gpu` limits, the
+tainted GPU pools that all three modules can create (`gpu_pool` /
+`gpu_node_group`, `nvidia.com/gpu=present:NoSchedule`) **cannot host a Nexus
+agent**. They default to off, or to min 0 so they cost nothing. GKE adds the
+toleration automatically only for pods that request GPUs, and the chart's
+agents request none. Fix: per-agent `serviceAccountName`, `nodeSelector`,
+`tolerations` and `resources.limits["nvidia.com/gpu"]` in `agents[]`, plus a
+chart-level ServiceAccount with annotations. GPU execution then still needs
+qualification on real hardware (production brief).
+
+**4. `sslmode=require`, not `verify-full`.** All three managed databases
+enforce TLS, but the chart cannot mount a CA bundle (Azure DigiCert/Microsoft
+roots, the RDS global bundle, the Cloud SQL instance CA), so the server's
+identity is not verified. Traffic never leaves the private network, which
+limits the risk. Fix: a `postgres.caSecret` value, mounted in each pod, with
+`sslrootcert=` added to `DATABASE_URL`.
+
+**5. The database user is the managed server's admin user.** Migrations
+create per-service NOLOGIN roles and so need CREATEROLE, which the admin
+login has: `azure_pg_admin`, `rds_superuser` or `cloudsqlsuperuser`. The
+services then run as that same login. Fix: a bootstrap step creates a
+migration login and a lower-privileged runtime login.
+
+**6. Not applied; GCS interop not exercised.** Validation is offline only:
+`make tf-validate` runs fmt, `init -backend=false`, validate, and
+`terraform test` with **mocked** providers. `make tf-lint` runs tflint,
+checkov and trivy. No cloud API has accepted these plans, and no Nexus
+workload has run on AKS, EKS or GKE. In particular, large multipart uploads
+and the GC sweep have not been run against GCS interop. Acceptance: one
+apply per cloud in a scratch account, then the fan-out/fan-in example with a
+>64 MiB artifact (multipart), the artifact GC sweep, and a PITR restore of
+the managed database, with results recorded in docs/OPERATIONS.md.
+
 ### F116. The SDK derived a different idempotency key from the control plane — FIXED
 
 **Severity:** medium. Every Python worker process logged a key mismatch, and

@@ -1,0 +1,57 @@
+# Copy to terraform.tfvars (gitignored) and fill in. Values below are examples.
+
+region              = "us-east-1"
+allowed_account_ids = ["123456789012"]
+name                = "kgf-nexus-prod-use1"
+
+tags = {
+  project     = "kgf-nexus"
+  environment = "prod"
+  owner       = "platform@khuriwalgroup.com"
+  cost-centre = "nexus"
+}
+
+# Public API endpoint restricted to these CIDRs (office egress, CI runners).
+# For a private-only endpoint set endpoint_public_access = false and run
+# Terraform from inside the VPC.
+endpoint_public_access       = true
+endpoint_public_access_cidrs = ["203.0.113.0/24"]
+
+# SSO admin role(s) for kubectl.
+admin_principal_arns = ["arn:aws:iam::123456789012:role/AWSReservedSSO_AdministratorAccess_0123456789abcdef"]
+
+nat_gateway_per_az = true
+
+cpu_node_group = {
+  instance_types = ["m7i.xlarge"]
+  min_size       = 3
+  max_size       = 6
+  desired_size   = 3
+  disk_size_gb   = 100
+}
+
+gpu_node_group = {
+  enabled        = false
+  instance_types = ["g6.xlarge"]
+  min_size       = 0
+  max_size       = 2
+  desired_size   = 0
+  disk_size_gb   = 200
+}
+
+postgres = {
+  engine_version        = "16"
+  instance_class        = "db.m7g.large"
+  allocated_storage_gb  = 50
+  max_storage_gb        = 500
+  multi_az              = true # standby in a second AZ: roughly doubles the instance cost
+  backup_retention_days = 14
+  deletion_protection   = true
+}
+
+image_tag            = "0123456789abcdef0123456789abcdef01234567"
+nats_credentials_dir = "/secure/nexus-nats"
+
+chart_values_overrides = {
+  logLevel = "info"
+}
