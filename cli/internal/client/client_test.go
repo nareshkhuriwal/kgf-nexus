@@ -108,8 +108,9 @@ func TestStatusSpecificHints(t *testing.T) {
 		http.StatusUnauthorized:        "NEXUS_API_KEY",
 		http.StatusForbidden:           "NEXUS_API_KEY",
 		http.StatusNotFound:            "namespace",
-		http.StatusConflict:            "idempotency key",
-		http.StatusUnprocessableEntity: "--dry-run",
+		http.StatusConflict:            "not in a state",
+		http.StatusUnprocessableEntity: "names the field",
+		http.StatusNotImplemented:      "does not serve this feature",
 		http.StatusTooManyRequests:     "backoff",
 		http.StatusServiceUnavailable:  "capacity",
 		http.StatusInternalServerError: "request id",
@@ -127,6 +128,38 @@ func TestStatusSpecificHints(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("status %d hint should mention %q, got:\n%s", status, want, err.Error())
 		}
+	}
+}
+
+// The 409 and 400/422 hints depend on the route: suggesting --idempotency-key
+// for a refused schedule delete, or --dry-run for a bad cron, sends the operator
+// the wrong way.
+func TestRouteSpecificHints(t *testing.T) {
+	reply := func(status int) func(w http.ResponseWriter, r *http.Request) {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"message":"x"}`))
+		}
+	}
+	c, _ := newTestClient(t, reply(http.StatusConflict))
+	if _, err := c.CreateRun(t.Context(), CreateRunOptions{SpecName: "w"}); err == nil ||
+		!strings.Contains(err.Error(), "idempotency key") {
+		t.Errorf("a 409 from run create should name the idempotency key, got: %v", err)
+	}
+	c, _ = newTestClient(t, reply(http.StatusConflict))
+	if _, err := c.DeleteSchedule(t.Context(), "nightly"); err == nil ||
+		strings.Contains(err.Error(), "idempotency") {
+		t.Errorf("a 409 from a delete must not mention idempotency keys, got: %v", err)
+	}
+	c, _ = newTestClient(t, reply(http.StatusUnprocessableEntity))
+	if _, err := c.SubmitSpec(t.Context(), []byte(`{}`), false); err == nil ||
+		!strings.Contains(err.Error(), "--dry-run") {
+		t.Errorf("a 422 from spec submit should suggest --dry-run, got: %v", err)
+	}
+	c, _ = newTestClient(t, reply(http.StatusBadRequest))
+	if _, err := c.CreateSchedule(t.Context(), Schedule{Name: "n"}); err == nil ||
+		strings.Contains(err.Error(), "--dry-run") {
+		t.Errorf("a 400 from a schedule create must not suggest --dry-run, got: %v", err)
 	}
 }
 

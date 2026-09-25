@@ -257,6 +257,64 @@ upstream is not also selected refuses the whole request (`NexusAPIError` 422 or
 it identifies your intent to start a run. Per-task effect keys are always
 platform-derived; do not confuse the two.
 
+### Schedules and backfills
+
+Typed methods return the gateway's JSON as `Schedule`, `SchedulePreview` and
+`Backfill` TypedDicts:
+
+```python
+from datetime import datetime, timezone
+
+c.preview_schedule("30 2 * * *", timezone="Europe/London")      # nothing created
+c.create_schedule("nightly-etl", workflow="daily-etl", cron="30 2 * * *",
+                  timezone="Europe/London", params={"source": "s3://in"},
+                  overlap_policy="skip", catchup_limit=1)
+c.update_schedule("nightly-etl", cron="0 3 * * *")   # other fields kept
+c.disable_schedule("nightly-etl"); c.enable_schedule("nightly-etl")
+
+bf = c.start_backfill("nightly-etl",
+                      start=datetime(2026, 9, 1, tzinfo=timezone.utc),
+                      end="2026-09-08T00:00:00Z", max_active=2)
+c.get_backfill(bf["id"])["cursor_at"]
+c.pause_backfill(bf["id"]); c.resume_backfill(bf["id"])
+```
+
+`update_schedule` reads, merges and writes back, because the gateway replaces a
+schedule whole; it is not atomic against a concurrent update. Backfill
+intervals are half-open, `[start, end)`, and a naive `datetime` is refused. The
+backfill actions check the current state first and raise `Conflict` for an
+invalid transition, because the server does not (CONTRACT-FINDINGS F119).
+
+## Running a handler as a container command
+
+Executors hand a task its inputs as files in `$NEXUS_INPUT_DIR` and collect
+its outputs from `$NEXUS_OUTPUT_DIR`. `nexus.entrypoint` runs a decorated
+handler under that contract, so a task's runtime can be your image plus:
+
+```python
+@task(task_ref="etl.extract",
+      runtime=Runtime(executor="docker", image="registry/etl:1.4.0",
+                      command=["python", "-m", "nexus.entrypoint", "--module", "dag"],
+                      args=["etl.extract"]))
+def extract(ctx: TaskContext, source: str) -> dict: ...
+```
+
+Each input file is JSON-decoded into the parameter of the same name; the return
+value is written to the declared output (or split by name across several). A
+declared `max_bytes` is enforced before anything is written. Exit status 1
+means the handler failed, 2 that it never started (bad module, unknown
+task_ref, no output directory). `nexusctl init` generates projects wired this
+way.
+
+### Bounding a fan-in
+
+Declare `max_bytes` on a map template's output and the gateway proves at
+submit that `max_fanout x max_bytes` fits its fan-in limit:
+
+```python
+@task(outputs={"result": {"type": "json", "required": True, "max_bytes": 1024}})
+```
+
 ## Worker entrypoint
 
 Inside a task container, the agent invokes:

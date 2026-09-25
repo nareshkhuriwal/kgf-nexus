@@ -21,10 +21,18 @@ Endpoints implemented (all namespace-scoped, per §8.2):
     GET    /v1/namespaces/{ns}/runs/{run}/attempts/{id}/assignment   replay input
     GET    /v1/namespaces/{ns}/workers              fleet view
     GET    /v1/namespaces/{ns}/capacity             advertised vs committed
+    GET    /v1/namespaces/{ns}/schedules            list; POST creates
+    GET    /v1/namespaces/{ns}/schedules/preview    evaluate a cron expression
+    GET    /v1/namespaces/{ns}/schedules/{name}     PUT replaces, DELETE removes
+    POST   /v1/namespaces/{ns}/schedules/{name}/enable|disable
+    POST   /v1/namespaces/{ns}/schedules/{name}/backfills   GET lists
+    GET    /v1/namespaces/{ns}/backfills/{id}
+    POST   /v1/namespaces/{ns}/backfills/{id}/pause|resume|cancel
 """
 
 from __future__ import annotations
 
+import datetime
 import http.client
 import json
 import os
@@ -35,11 +43,91 @@ import urllib.request
 from typing import Any, Iterable, Iterator, Mapping, Sequence, cast
 
 from .canonical import canonical_bytes
+from .scheduling import (
+    MAX_BACKFILL_ACTIVE,
+    MAX_BACKFILL_RUNS,
+    OVERLAP_POLICIES,
+    Backfill,
+    OverlapPolicy,
+    Schedule,
+    SchedulePreview,
+)
 from .workflow import CompiledWorkflow, WorkflowDefinition
 
 __all__ = ["NexusClient", "NexusError", "NexusAPIError", "AuthError", "NotFound", "Conflict"]
 
 USER_AGENT = "nexus-python-sdk/0.1"
+
+
+class _Unset:
+    """Sentinel for "argument not given" where None is a meaningful value."""
+
+    def __repr__(self) -> str:
+        return "<unset>"
+
+
+_UNSET = _Unset()
+
+
+def _q(segment: str) -> str:
+    return urllib.parse.quote(segment, safe="")
+
+
+def _json(payload: Mapping[str, Any]) -> bytes:
+    return json.dumps(payload, sort_keys=True).encode("utf-8")
+
+
+def _schedule_body(
+    name: str,
+    *,
+    workflow: str,
+    cron: str,
+    timezone: str | None,
+    params: Mapping[str, Any] | None,
+    spec_version: int | None,
+    priority: int | None,
+    overlap_policy: str | None,
+    catchup_limit: int | None,
+    enabled: bool,
+) -> dict[str, Any]:
+    """The gateway's createScheduleRequest, validated where it can be locally."""
+    if not name or not workflow or not cron:
+        raise ValueError("name, workflow and cron are all required")
+    if overlap_policy is not None and overlap_policy not in OVERLAP_POLICIES:
+        raise ValueError(f"overlap_policy must be one of {', '.join(OVERLAP_POLICIES)}, got {overlap_policy!r}")
+    if catchup_limit is not None and catchup_limit < 0:
+        raise ValueError("catchup_limit must be zero or positive")
+    body: dict[str, Any] = {"name": name, "spec_name": workflow, "cron": cron, "enabled": bool(enabled)}
+    if timezone:
+        body["timezone"] = timezone
+    if params:
+        body["params"] = dict(params)
+    if spec_version is not None:
+        body["spec_version"] = spec_version
+    if priority:
+        body["priority"] = priority
+    if overlap_policy:
+        body["overlap_policy"] = overlap_policy
+    if catchup_limit:
+        body["catchup_limit"] = catchup_limit
+    return body
+
+
+def _instant(label: str, value: datetime.datetime | str) -> str:
+    """An RFC 3339 instant from an aware datetime or a string."""
+    if isinstance(value, str):
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError(f"{label} {value!r} is not an RFC 3339 timestamp") from None
+    else:
+        parsed = value
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"{label} {value!r} has no timezone; pass an aware datetime (e.g. tzinfo=timezone.utc) "
+            "or an RFC 3339 string with an offset"
+        )
+    return parsed.isoformat()
 
 
 class NexusError(Exception):
@@ -475,6 +563,170 @@ class NexusClient:
     def capacity(self) -> dict[str, Any]:
         """Advertised vs committed capacity -- the ledger, as the platform sees it."""
         return self._call("GET", self._url("/capacity"))
+
+    # ── schedules ───────────────────────────────────────────────────────────
+    def list_schedules(self, *, limit: int | None = None) -> list[Schedule]:
+        """Every schedule in the namespace."""
+        out = self._call("GET", self._url("/schedules", {"limit": limit}))
+        return [cast(Schedule, x) for x in out.get("schedules") or []]
+
+    def get_schedule(self, name: str, *, preview_count: int | None = None) -> Schedule:
+        """One schedule, with its next ``preview_count`` fire times (default 5, max 20)."""
+        return cast(Schedule, self._call("GET", self._url(f"/schedules/{_q(name)}", {"count": preview_count})))
+
+    def create_schedule(
+        self,
+        name: str,
+        *,
+        workflow: str,
+        cron: str,
+        timezone: str | None = None,
+        params: Mapping[str, Any] | None = None,
+        spec_version: int | None = None,
+        priority: int | None = None,
+        overlap_policy: OverlapPolicy | None = None,
+        catchup_limit: int | None = None,
+        enabled: bool = True,
+    ) -> Schedule:
+        """Create a schedule that starts runs of ``workflow``.
+
+        The gateway validates the cron expression, the timezone and that
+        ``workflow`` names a registered workflow before storing anything, so a
+        typo fails here rather than as a schedule that never fires. Raises
+        :class:`Conflict` if the name is taken. The response carries
+        ``next_fires``: check it.
+        """
+        body = _schedule_body(
+            name, workflow=workflow, cron=cron, timezone=timezone, params=params,
+            spec_version=spec_version, priority=priority, overlap_policy=overlap_policy,
+            catchup_limit=catchup_limit, enabled=enabled,
+        )
+        return cast(Schedule, self._call("POST", self._url("/schedules"), body=_json(body)))
+
+    def update_schedule(
+        self,
+        name: str,
+        *,
+        workflow: str | None = None,
+        cron: str | None = None,
+        timezone: str | None = None,
+        params: Mapping[str, Any] | None = None,
+        spec_version: int | None | _Unset = _UNSET,
+        priority: int | None = None,
+        overlap_policy: OverlapPolicy | None = None,
+        catchup_limit: int | None = None,
+    ) -> Schedule:
+        """Change some fields of a schedule, keeping the rest.
+
+        The gateway's PUT replaces a schedule whole, so this reads it, applies
+        the given changes and writes it back; ``enabled`` is preserved (use
+        :meth:`enable_schedule` / :meth:`disable_schedule`). ``params`` REPLACES
+        the bound parameters. ``spec_version=None`` unpins the schedule so it
+        follows the latest version; leave it out to keep the current pin.
+
+        Read-modify-write is not atomic: a concurrent update between the read
+        and the write is overwritten.
+        """
+        current = self.get_schedule(name)
+        body = _schedule_body(
+            name,
+            workflow=workflow if workflow is not None else current.get("spec_name", ""),
+            cron=cron if cron is not None else current.get("cron", ""),
+            timezone=timezone if timezone is not None else current.get("timezone"),
+            params=params if params is not None else current.get("params"),
+            spec_version=current.get("spec_version") if isinstance(spec_version, _Unset) else spec_version,
+            priority=priority if priority is not None else current.get("priority"),
+            overlap_policy=overlap_policy if overlap_policy is not None else current.get("overlap_policy"),
+            catchup_limit=catchup_limit if catchup_limit is not None else current.get("catchup_limit"),
+            enabled=bool(current.get("enabled", True)),
+        )
+        return cast(Schedule, self._call("PUT", self._url(f"/schedules/{_q(name)}"), body=_json(body)))
+
+    def delete_schedule(self, name: str) -> None:
+        """Delete a schedule and its tick history. Runs it created are kept."""
+        self._call("DELETE", self._url(f"/schedules/{_q(name)}"))
+
+    def enable_schedule(self, name: str) -> Schedule:
+        """Re-enable; the next fire time is computed from now (missed ticks are not replayed)."""
+        return cast(Schedule, self._call("POST", self._url(f"/schedules/{_q(name)}/enable"), body=b"{}"))
+
+    def disable_schedule(self, name: str) -> Schedule:
+        return cast(Schedule, self._call("POST", self._url(f"/schedules/{_q(name)}/disable"), body=b"{}"))
+
+    def preview_schedule(
+        self, cron: str, *, timezone: str | None = None, count: int | None = None
+    ) -> SchedulePreview:
+        """Evaluate a cron expression without creating anything.
+
+        An invalid expression is a normal answer (``valid`` False, ``error``
+        set), not an exception: this call exists to ask the question.
+        """
+        return cast(SchedulePreview, self._call(
+            "GET", self._url("/schedules/preview", {"cron": cron, "timezone": timezone, "count": count})
+        ))
+
+    # ── backfills ───────────────────────────────────────────────────────────
+    def start_backfill(
+        self,
+        schedule: str,
+        *,
+        start: datetime.datetime | str,
+        end: datetime.datetime | str,
+        max_active: int | None = None,
+        max_runs: int | None = None,
+    ) -> Backfill:
+        """Run ``schedule`` for every tick in the half-open interval [start, end).
+
+        ``start``/``end`` are timezone-aware datetimes or RFC 3339 strings; a
+        naive datetime is refused, because whether it means UTC or local time
+        is exactly the ambiguity that backfills the wrong week. ``max_active``
+        (default 1, at most 50) bounds runs in flight; ``max_runs`` (default
+        1000, at most 100000) bounds the total.
+        """
+        if max_active is not None and not 1 <= max_active <= MAX_BACKFILL_ACTIVE:
+            raise ValueError(f"max_active must be between 1 and {MAX_BACKFILL_ACTIVE}, got {max_active}")
+        if max_runs is not None and not 1 <= max_runs <= MAX_BACKFILL_RUNS:
+            raise ValueError(f"max_runs must be between 1 and {MAX_BACKFILL_RUNS}, got {max_runs}")
+        lo, hi = _instant("start", start), _instant("end", end)
+        if datetime.datetime.fromisoformat(lo) >= datetime.datetime.fromisoformat(hi):
+            raise ValueError(f"start ({lo}) must be before end ({hi})")
+        body: dict[str, Any] = {"from": lo, "to": hi}
+        if max_active is not None:
+            body["max_active"] = max_active
+        if max_runs is not None:
+            body["max_runs"] = max_runs
+        return cast(Backfill, self._call("POST", self._url(f"/schedules/{_q(schedule)}/backfills"), body=_json(body)))
+
+    def list_backfills(self, schedule: str, *, limit: int | None = None) -> list[Backfill]:
+        out = self._call("GET", self._url(f"/schedules/{_q(schedule)}/backfills", {"limit": limit}))
+        return [cast(Backfill, x) for x in out.get("backfills") or []]
+
+    def get_backfill(self, backfill_id: str) -> Backfill:
+        return cast(Backfill, self._call("GET", self._url(f"/backfills/{_q(backfill_id)}")))
+
+    def pause_backfill(self, backfill_id: str) -> Backfill:
+        """Stop generating runs; runs already created continue. Resume later."""
+        return self._backfill_action(backfill_id, "pause", ("RUNNING",))
+
+    def resume_backfill(self, backfill_id: str) -> Backfill:
+        return self._backfill_action(backfill_id, "resume", ("PAUSED",))
+
+    def cancel_backfill(self, backfill_id: str) -> Backfill:
+        """Stop generating runs for good. Runs already created are NOT cancelled."""
+        return self._backfill_action(backfill_id, "cancel", ("RUNNING", "PAUSED"))
+
+    def _backfill_action(self, backfill_id: str, action: str, allowed: tuple[str, ...]) -> Backfill:
+        # The server applies these without checking the current state
+        # (CONTRACT-FINDINGS F119): resuming a COMPLETED or CANCELLED backfill
+        # would revive it. Check first; racy, but it stops the common mistake.
+        state = self.get_backfill(backfill_id).get("state")
+        if state not in allowed:
+            raise Conflict(
+                409,
+                f"cannot {action} a backfill that is {state} (only {' or '.join(allowed)})",
+                body={"state": state},
+            )
+        return cast(Backfill, self._call("POST", self._url(f"/backfills/{_q(backfill_id)}/{action}"), body=b"{}"))
 
     # ── convenience ─────────────────────────────────────────────────────────
     def submit_and_run(

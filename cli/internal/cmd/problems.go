@@ -34,6 +34,9 @@ func annotateSubmitError(err error, doc *spec.Document) error {
 	if !errors.As(err, &apiErr) || apiErr.Status != 422 {
 		return err
 	}
+	// The client keeps the gateway's problems list as Details. An object
+	// wrapping it under "problems" (a server that sends it as "details") is
+	// accepted too.
 	raw, _ := json.Marshal(apiErr.Details)
 	var details struct {
 		Problems []struct {
@@ -41,7 +44,10 @@ func annotateSubmitError(err error, doc *spec.Document) error {
 			Message string `json:"message"`
 		} `json:"problems"`
 	}
-	if json.Unmarshal(raw, &details) != nil || len(details.Problems) == 0 {
+	if json.Unmarshal(raw, &details.Problems) != nil && json.Unmarshal(raw, &details) != nil {
+		return err
+	}
+	if len(details.Problems) == 0 {
 		return err
 	}
 	ps := make([]spec.Problem, 0, len(details.Problems))
@@ -53,8 +59,22 @@ func annotateSubmitError(err error, doc *spec.Document) error {
 	if apiErr.RequestID != "" {
 		fmt.Fprintf(&b, "\n  request id: %s", apiErr.RequestID)
 	}
-	return errors.New(b.String())
+	if apiErr.Hint != "" {
+		fmt.Fprintf(&b, "\n  %s", apiErr.Hint)
+	}
+	return &placedAPIError{msg: b.String(), err: apiErr}
 }
+
+// placedAPIError is a rejected submit re-worded with the problems placed in
+// the author's file. It unwraps to the APIError, so the exit code and any
+// caller matching on the status still see the original response.
+type placedAPIError struct {
+	msg string
+	err *client.APIError
+}
+
+func (e *placedAPIError) Error() string { return e.msg }
+func (e *placedAPIError) Unwrap() error { return e.err }
 
 // pythonSourceMapSuffix appends the SDK's source map to the compile script's
 // work, written to the file named by NEXUSCTL_SOURCE_MAP. A separate file, not

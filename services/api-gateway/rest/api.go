@@ -510,6 +510,24 @@ func (a *API) submitSpec(w http.ResponseWriter, r *http.Request, p authn.Princip
 		return
 	}
 
+	// dry_run=true validates exactly as a real submit does -- same compile, same
+	// structural and semantic checks, same namespace check -- and stops before
+	// storing anything (CONTRACT-FINDINGS F118). nexusctl `workflow submit
+	// --dry-run` and the SDK's validate_spec have always sent this parameter and
+	// documented it as "validate only; use this in CI", but it was ignored, so
+	// every CI validation registered a new version.
+	if dryRun, _ := strconv.ParseBool(r.URL.Query().Get("dry_run")); dryRun {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"namespace":  ns,
+			"name":       compiled.Proto.GetName(),
+			"spec_hash":  compiled.Hash,
+			"task_count": len(compiled.Proto.GetTasks()),
+			"valid":      true,
+			"dry_run":    true,
+		})
+		return
+	}
+
 	row, created, err := a.wfm.PutSpec(r.Context(), ns, compiled.Proto.GetName(), compiled.Hash, compiled.Canonical, p.Name)
 	if err != nil {
 		a.log.ErrorContext(r.Context(), "failed to store spec", "namespace", ns, "error", err)

@@ -25,6 +25,8 @@ func runGroup() *group {
 			runListCmd(),
 			runCancelCmd(),
 			runRetryCmd(),
+			runPauseCmd(),
+			runResumeCmd(),
 		},
 	}
 }

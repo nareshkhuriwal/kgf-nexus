@@ -610,6 +610,10 @@ class ValueSpec:
     required: bool = True
     default: Any = dataclasses.field(default=None)
     has_default: bool = False
+    # Author-declared upper bound on the value's encoded size. On a map
+    # template's output it lets submit-time validation prove that
+    # max_fanout x max_bytes fits the platform's fan-in limit (ARCH 5.4), so an
+    # oversized fan-in is rejected at submit instead of failing the run later.
     max_bytes: int | None = None
 
     def to_wire(self) -> dict[str, Any]:
