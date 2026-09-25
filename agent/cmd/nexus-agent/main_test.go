@@ -3,7 +3,42 @@
 
 package main
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/worker"
+	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
+)
+
+// TestReadyzFollowsRegistration: /readyz is 503 until the agent holds a
+// registered session and again after it loses it, while /healthz stays 200
+// throughout -- a control plane that is not up yet must make the agent
+// not-ready, never restart it.
+func TestReadyzFollowsRegistration(t *testing.T) {
+	ready := &worker.Readiness{}
+	mux := opsMux(metrics.NewServiceRegistry("agent", "test"), ready)
+	get := func(path string) int {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec.Code
+	}
+	if c := get("/readyz"); c != http.StatusServiceUnavailable {
+		t.Errorf("/readyz before registration = %d, want 503", c)
+	}
+	if c := get("/healthz"); c != http.StatusOK {
+		t.Errorf("/healthz before registration = %d, want 200", c)
+	}
+	ready.Set(true)
+	if c := get("/readyz"); c != http.StatusOK {
+		t.Errorf("/readyz while registered = %d, want 200", c)
+	}
+	ready.Set(false)
+	if c := get("/readyz"); c != http.StatusServiceUnavailable {
+		t.Errorf("/readyz after the session ended = %d, want 503", c)
+	}
+}
 
 // A capacity setting the agent cannot read exactly must be refused, never
 // truncated or defaulted. The float-notation case is the one that actually

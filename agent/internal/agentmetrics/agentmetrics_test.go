@@ -33,6 +33,10 @@ func TestAgentMetricsOnOpsListener(t *testing.T) {
 	m.ResultStorePut("uploaded", 5<<20, 800*time.Millisecond)
 	m.ResultStorePut("inline", 100, time.Microsecond)
 	m.ResultStorePut("error", 1<<20, 2*time.Second)
+	m.RegistrationAttempt("retryable_error")
+	m.RegistrationAttempt("retryable_error")
+	m.RegistrationAttempt("ok")
+	m.SetRegistered(true)
 
 	mux := metrics.OpsMux(reg, func(mux *http.ServeMux) {
 		mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {})
@@ -45,7 +49,16 @@ func TestAgentMetricsOnOpsListener(t *testing.T) {
 		"nexus_agent_result_store_puts_total", "nexus_agent_result_store_upload_bytes_total",
 		"nexus_agent_result_store_upload_duration_seconds", "nexus_agent_result_store_upload_size_bytes",
 		"nexus_agent_sessions_total", "nexus_agent_advertised_capacity",
-		"nexus_agent_result_report_failures_total", "go_goroutines", metrics.BuildInfoName)
+		"nexus_agent_result_report_failures_total", "nexus_agent_registration_attempts_total",
+		"nexus_agent_registered", "go_goroutines", metrics.BuildInfoName)
+
+	if s := metricstest.Find(fams, "nexus_agent_registration_attempts_total",
+		map[string]string{"result": "retryable_error"}); s == nil || s.GetCounter().GetValue() != 2 {
+		t.Errorf("registration_attempts{retryable_error} = %v, want 2", s)
+	}
+	if s := metricstest.Find(fams, "nexus_agent_registered", nil); s == nil || s.GetGauge().GetValue() != 1 {
+		t.Errorf("registered = %v, want 1", s)
+	}
 
 	if s := metricstest.Find(fams, "nexus_agent_tasks_completed_total",
 		map[string]string{"executor": "docker", "outcome": "failed", "error_class": "oom"}); s == nil {
@@ -84,6 +97,8 @@ func TestNilAgentMetricsIsSafe(t *testing.T) {
 	m.Heartbeat(true, time.Millisecond, 0)
 	m.ResultStorePut("uploaded", 1, time.Millisecond)
 	m.SessionStarted(nil)
+	m.RegistrationAttempt("ok")
+	m.SetRegistered(false)
 	// The method value the agent hands to the result store must be callable
 	// even when metrics are disabled.
 	f := m.ResultStorePut

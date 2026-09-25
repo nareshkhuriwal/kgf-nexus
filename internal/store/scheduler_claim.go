@@ -62,6 +62,13 @@ type ClaimConfig struct {
 	// tasks) would otherwise page through the whole backlog 64 rows at a
 	// time, which is slower than scanning it once.
 	ClaimWindowPages int
+	// AttemptLockTimeout bounds how long a terminal transition driven by a
+	// report (ApplyResult, run cancel) waits for another transaction holding
+	// the attempt row -- usually the worker's own ReportStarted. Past it the
+	// report fails with ErrAttemptBusy, which the RPC layer maps to a
+	// retryable status so the agent resends from its WAL. Zero means
+	// DefaultAttemptLockTimeout. See CONTRACT-FINDINGS F104.
+	AttemptLockTimeout time.Duration
 }
 
 // DefaultClaimConfig returns the ADR-0010 recommended lease settings.

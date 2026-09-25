@@ -208,6 +208,8 @@ type fakeSched struct {
 	// fence rejected the report (the lease ended after the gateway's check).
 	progressStale bool
 	lastProgress  progressCall
+	// resultErr makes ApplyResult fail as the scheduler would.
+	resultErr error
 }
 
 // progressCall is what the gateway forwarded on the last RecordProgress.
@@ -241,6 +243,9 @@ func (f *fakeSched) RecordProgress(ctx context.Context, attemptID, token, msg st
 func (f *fakeSched) ApplyResult(ctx context.Context, req *nexusv1.ReportResultRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.resultErr != nil {
+		return f.resultErr
+	}
 	f.results++
 	return nil
 }
@@ -351,6 +356,43 @@ func TestCurrentLeaseTokenAccepted(t *testing.T) {
 	defer sch.mu.Unlock()
 	if sch.results != 1 {
 		t.Errorf("results applied = %d, want 1", sch.results)
+	}
+}
+
+// TestUnappliedResultIsNeverAcknowledged is F104 at the gateway: when the
+// scheduler could not apply a result (the attempt row was busy past its lock
+// timeout, or the scheduler was unreachable) the worker must get a retryable
+// transport error, so its WAL keeps the result and resends it. Either Ack
+// would make the agent delete it.
+func TestUnappliedResultIsNeverAcknowledged(t *testing.T) {
+	ctx := workerCtx()
+	cases := []struct {
+		name string
+		err  error
+		want codes.Code
+	}{
+		{"busy", fmt.Errorf("apply result for attempt a1: %w",
+			status.Error(codes.Unavailable, "apply result: attempt is locked by another transaction")), codes.Unavailable},
+		{"timeout", fmt.Errorf("apply result for attempt a1: %w",
+			status.Error(codes.DeadlineExceeded, "context deadline exceeded")), codes.Unavailable},
+		{"fault", errors.New("scheduler exploded"), codes.Internal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newLeaseDB()
+			db.tokens["a1"] = "tok-current"
+			s := testServer(db, &fakeRM{exists: true, state: "ACTIVE"}, &fakeSched{resultErr: tc.err})
+			ack, err := s.ReportResult(ctx, &nexusv1.ReportResultRequest{
+				AttemptId: "a1", LeaseToken: "tok-current",
+				Outcome: nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED,
+			})
+			if ack != nil {
+				t.Fatalf("an unapplied result was answered with an Ack %+v; the agent would drop it", ack)
+			}
+			if got := status.Code(err); got != tc.want {
+				t.Fatalf("status = %s (%v), want %s", got, err, tc.want)
+			}
+		})
 	}
 }
 
