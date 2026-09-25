@@ -2662,3 +2662,42 @@ attempts of workers that are already DEAD with attempts still DISPATCHED/RUNNING
 as `ReconcileExpiredLeases` does, instead of returning on the first error. Test
 with an integration test where the resource-manager wins the race, asserting
 the attempts become LOST within one sweep interval instead of one lease TTL.
+
+### F120. Attempts never carried dispatched_at on the wire, so queue wait was unmeasurable in the console — FIXED
+
+**Severity:** low (observability). Found while building the run's execution
+timeline (`feat/console-timeline-and-e2e`).
+
+`task_attempts.dispatched_at` has existed since migration 0001 and the scheduler
+sets it on every claim (`internal/store/scheduler_claim.go`), and the console's
+`Attempt` type declared it, but `GatewayListRunAttempts` / `GatewayGetAttempt`
+never selected it and `attemptPayload` never sent it. So the attempt card's
+"queue wait" and "dispatch→start" rows always read "—", and a timeline could not
+separate time spent waiting for the scheduler from time a placed attempt spent
+waiting for its worker to start it. Those are different incidents with
+different owners (capacity versus a slow executor or image pull).
+
+**Fix.** Additive: `AttemptRow.DispatchedAt`, selected by both attempt reads, and
+`"dispatched_at"` in `attemptPayload` (`services/api-gateway/rest/wire.go`),
+null until the attempt is placed. No migration, no change to existing fields.
+Clients that ignore it are unaffected; the console treats its absence (an older
+gateway) as "not reported" and draws queued straight to started, flagged as
+inferred, rather than inventing a split.
+
+### F121. `make seed` failed on a fresh database since tenant ownership (0014) — FIXED
+
+**Severity:** medium for onboarding and CI (the documented first step after
+`make up` did not work on a new stack); no production impact.
+
+Migration 0014 made every `api_keys` row name a namespace owned by a registered
+tenant (`assign_namespace_tenant`). A fresh `make up` database has no tenants,
+so `make seed` stopped at its first INSERT with `Namespace must belong to a
+registered tenant`, leaving no admin key and no worker key, and the agents in a
+restart loop. It went unnoticed because long-lived dev databases already had a
+tenant row backfilled by 0013. The Helm bootstrap job and `deploy/pitr-seed.sh`
+already insert the tenant first; `make seed` did not.
+
+**Fix.** `make seed` inserts `tenants (namespace, name)` for `$(NAMESPACE)`
+first, `ON CONFLICT (namespace) DO NOTHING`, the same statement those two
+already run. Covered end to end by `make e2e`, which seeds a brand-new stack
+on every run.
