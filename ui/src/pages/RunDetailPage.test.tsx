@@ -657,3 +657,104 @@ describe('task placement', () => {
     );
   });
 });
+
+/**
+ * The execution timeline shares the page's one selection: the URL. A bar
+ * clicked in the timeline selects that node AND that attempt (so the attempt
+ * panel and log tail follow), a node picked in the graph highlights its latest
+ * attempt in the timeline, and a map child the graph has folded away still
+ * resolves to a node with its attempts.
+ */
+describe('execution timeline selection', () => {
+  const timeline = () => screen.getByRole('list', { name: /execution timeline/i });
+
+  const fanRun = {
+    ...failedRun,
+    state: 'SUCCEEDED',
+    nodes: [
+      { run_id: 'run-aaaaaaaaaaaa', node_id: 'list', task_ref: 't/list', state: 'SUCCEEDED' },
+      { run_id: 'run-aaaaaaaaaaaa', node_id: 'shard', task_ref: 't/shard', state: 'SUCCEEDED' },
+      ...Array.from({ length: 60 }, (_, i) => ({
+        run_id: 'run-aaaaaaaaaaaa',
+        node_id: `shard[${i}]`,
+        task_ref: 't/shard',
+        state: 'SUCCEEDED',
+        parent_node_id: 'shard',
+        map_index: i,
+      })),
+    ],
+    edges: [{ from_node_id: 'list', to_node_id: 'shard' }],
+    attempts: [
+      {
+        id: 'at-list', run_id: 'run-aaaaaaaaaaaa', node_id: 'list', attempt_number: 1, state: 'SUCCEEDED',
+        scheduled_at: '2026-09-12T10:00:01Z', started_at: '2026-09-12T10:00:02Z', ended_at: '2026-09-12T10:00:03Z',
+      },
+      ...Array.from({ length: 60 }, (_, i) => ({
+        id: `at-shard-${i}`,
+        run_id: 'run-aaaaaaaaaaaa',
+        node_id: `shard[${i}]`,
+        attempt_number: 1,
+        state: 'SUCCEEDED',
+        scheduled_at: '2026-09-12T10:00:04Z',
+        dispatched_at: '2026-09-12T10:00:05Z',
+        started_at: '2026-09-12T10:00:06Z',
+        ended_at: '2026-09-12T10:00:09Z',
+      })),
+    ],
+  };
+
+  it('writes node and attempt to the URL when a bar is clicked', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa');
+    await screen.findByRole('list', { name: /execution timeline/i });
+    fireEvent.click(within(timeline()).getByRole('button', { name: /^Attempt 1 of extract/ }));
+    await waitFor(() => {
+      const search = screen.getByTestId('search').textContent ?? '';
+      expect(search).toContain('node=extract');
+      expect(search).toContain('attempt=a1-extract');
+    });
+    expect(within(timeline()).getByRole('button', { name: /^Attempt 1 of extract/ })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('highlights the latest attempt of the node picked in the graph', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa?node=transform');
+    await screen.findByRole('list', { name: /execution timeline/i });
+    expect(within(timeline()).getByRole('button', { name: /^No attempt for transform/ })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /^extract,/ }));
+    await waitFor(() => {
+      expect(within(timeline()).getByRole('button', { name: /^Attempt 2 of extract/ })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+    });
+  });
+
+  it('restores a deep-linked attempt and table view', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa?node=extract&attempt=a1-extract&timeline=table');
+    const table = await screen.findByRole('table');
+    expect(
+      within(table).getByRole('button', { name: 'Select extract attempt 1' }).closest('tr'),
+    ).toHaveAttribute('aria-current', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Chart' }));
+    await waitFor(() => expect(screen.getByTestId('search').textContent).not.toContain('timeline='));
+  });
+
+  it('resolves a map child the graph keeps folded', async () => {
+    serveRun(fanRun);
+    wrap('/runs/run-aaaaaaaaaaaa');
+    await screen.findByRole('list', { name: /execution timeline/i });
+    fireEvent.click(within(timeline()).getByRole('button', { name: /^Attempt 1 of shard\[3\]/ }));
+    await waitFor(() => expect(screen.getByTestId('search').textContent).toContain('node=shard%5B3%5D'));
+    // The attempt panel names the child rather than asking for a node.
+    expect(await screen.findByText('node · shard[3]')).toBeInTheDocument();
+  });
+});
