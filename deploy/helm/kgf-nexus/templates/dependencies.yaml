@@ -330,6 +330,36 @@ spec:
       # rotating an NKey or renewing the certificate needs no restart.
       shareProcessNamespace: {{ .Values.nats.configReloader.enabled }}
       automountServiceAccountToken: false
+      {{- if ne .Values.nats.auth.mode "none" }}
+      # Streams created before authorization lived in the global account ($G).
+      # With accounts configured nothing owns $G, so nats-server can never
+      # recover those streams and reports them unhealthy forever. They carry
+      # only notifications (PostgreSQL is authoritative, ADR-0003) and the
+      # event-service recreates its streams in the NEXUS account, so the old
+      # store is MOVED aside -- never deleted -- for the operator to remove
+      # (docs/OPERATIONS.md §11.7, upgrading an existing broker).
+      initContainers:
+        - name: retire-global-account-streams
+          image: {{ .Values.nats.image }}
+          command:
+            - sh
+            - -c
+            - |
+              legacy='/data/jetstream/$G'
+              if [ -d "$legacy" ]; then
+                dest="/data/retired-global-account-$(date -u +%Y%m%dT%H%M%SZ)"
+                mv "$legacy" "$dest"
+                echo "moved pre-authorization JetStream store $legacy to $dest; delete it once the upgrade is verified"
+              fi
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 32Mi }
+          securityContext:
+            {{- include "nexus.containerSecurity" . | nindent 12 }}
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      {{- end }}
       containers:
         - name: nats
           image: {{ .Values.nats.image }}
@@ -338,13 +368,23 @@ spec:
             - { name: client, containerPort: 4222 }
           # exec, not httpGet: monitoring listens on loopback only (it has no
           # authentication), so the kubelet cannot reach it over the pod IP.
+          #
+          # Every probe asks only whether JetStream is serving. The full
+          # /healthz also fails when any single stream is unhealthy, which a
+          # restart cannot repair: as a liveness check it turned one bad stream
+          # into a broker restart loop that took the whole bus down.
+          startupProbe:
+            exec: { command: ["wget", "-q", "-O-", "http://127.0.0.1:8222/healthz?js-enabled-only=true"] }
+            periodSeconds: 2
+            failureThreshold: 30
           readinessProbe:
             exec: { command: ["wget", "-q", "-O-", "http://127.0.0.1:8222/healthz?js-enabled-only=true"] }
             periodSeconds: 5
           livenessProbe:
-            exec: { command: ["wget", "-q", "-O-", "http://127.0.0.1:8222/healthz"] }
-            initialDelaySeconds: 10
+            exec: { command: ["wget", "-q", "-O-", "http://127.0.0.1:8222/healthz?js-enabled-only=true"] }
             periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
           resources: {{- toYaml .Values.nats.resources | nindent 12 }}
           securityContext:
             {{- include "nexus.containerSecurity" . | nindent 12 }}

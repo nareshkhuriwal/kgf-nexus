@@ -1541,6 +1541,25 @@ platform: agents long-poll and the outbox holds the backlog (§11.4). Off-cluste
 agents need their tenant's seed, and their `NEXUS_NATS_URL` must point at a
 listener they can reach.
 
+**Streams from the unauthenticated broker.** A broker that ran without
+authorization kept its JetStream streams in the global account (`$G`). Once
+accounts are configured nothing owns `$G`, so the server cannot recover those
+streams and reports them unhealthy on every health check (F107). Both deploy
+paths therefore move `/data/jetstream/$G` to
+`/data/retired-global-account-<UTC timestamp>` before the server starts: the
+Helm chart in the `retire-global-account-streams` init container, compose in
+the `nats` service's entrypoint. Nothing is deleted. Those streams held only
+notifications, PostgreSQL remains authoritative, and the event-service recreates
+`NEXUS_RUNS` and `NEXUS_DISPATCH` in the `NEXUS` account on start. Once the
+upgrade is verified, delete the retired directory:
+
+```bash
+kubectl -n <ns> exec nats-0 -c nats -- sh -c 'ls -d /data/retired-global-account-*'
+kubectl -n <ns> exec nats-0 -c nats -- sh -c 'rm -rf /data/retired-global-account-*'
+```
+
+The step is a no-op on a fresh volume and on every later start.
+
 ### 11.8 Rotating NATS credentials
 
 Rotate on compromise, on staff change and on a schedule (for example
