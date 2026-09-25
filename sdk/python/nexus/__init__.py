@@ -71,6 +71,7 @@ from .types import (
     SpecError,
     Timeouts,
     ValueSpec,
+    ValueSpecLike,
 )
 from .units import (
     UnitParseError,
@@ -81,11 +82,13 @@ from .units import (
     parse_cpu_millis,
     parse_duration_ms,
 )
+from .sourcemap import NodeSource, SourceLocation
 from .workflow import (
     API_VERSION,
     CompiledWorkflow,
     OutputRef,
     Param,
+    Ref,
     TaskInvocation,
     WorkflowDefinition,
     workflow,
@@ -103,7 +106,10 @@ __all__ = [
     "WorkflowDefinition",
     "CompiledWorkflow",
     "OutputRef",
+    "Ref",
     "TaskInvocation",
+    "SourceLocation",
+    "NodeSource",
     "Param",
     "registry",
     # declaration types
@@ -117,6 +123,7 @@ __all__ = [
     "SecretRef",
     "Concurrency",
     "ValueSpec",
+    "ValueSpecLike",
     "SpecError",
     # execution
     "TaskContext",

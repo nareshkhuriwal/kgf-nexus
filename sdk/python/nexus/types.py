@@ -18,6 +18,7 @@ are the canonical ones from CONTRACT.md; they are not free to change.
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
 from .units import parse_bytes, parse_cpu_millis, parse_duration_ms
@@ -32,6 +33,7 @@ __all__ = [
     "SecretRef",
     "Concurrency",
     "ValueSpec",
+    "ValueSpecLike",
     "ErrorClass",
     "BackoffStrategy",
     "IdempotencyMode",
@@ -174,9 +176,10 @@ class Resources:
 
     def to_wire(self) -> dict[str, Any]:
         """Emit a ResourceRequest with request and limit ResourceVectors."""
-        gpu = self.gpu
-        if isinstance(gpu, int) and not isinstance(gpu, bool):
-            gpu = Gpu(count=gpu)
+        gpu: Gpu | None
+        if isinstance(self.gpu, bool):
+            raise SpecError("resources.gpu must be a Gpu or a device count, not a bool")
+        gpu = Gpu(count=self.gpu) if isinstance(self.gpu, int) else self.gpu
 
         request: dict[str, Any] = {}
         if self.cpu is not None:
@@ -371,7 +374,9 @@ class Retry:
     def coerce(value: "Retry | Mapping[str, Any] | int | None") -> "Retry | None":
         if value is None or isinstance(value, Retry):
             return value
-        if isinstance(value, int) and not isinstance(value, bool):
+        if isinstance(value, bool):
+            raise SpecError("retry must be a Retry, a max-attempts count or a mapping, not a bool")
+        if isinstance(value, int):
             return Retry(max_attempts=value)
         return Retry(**value)
 
@@ -410,6 +415,8 @@ class Cache:
             return value
         if isinstance(value, bool):
             return Cache(enabled=value)
+        if not isinstance(value, Mapping):
+            raise SpecError(f"cache must be a Cache, a bool or a mapping, got {type(value).__name__}")
         return Cache(**value)
 
 
@@ -506,6 +513,11 @@ class Runtime:
     env: Mapping[str, str] | None = None
     secrets: Sequence[SecretRef] | None = None
     working_dir: str | None = None
+    #: Name of a DECLARED output that receives the task's stdout (subprocess and
+    #: docker executors). A file of the same name in $NEXUS_OUTPUT_DIR wins over
+    #: stdout, because writing the file is deliberate while stdout also carries
+    #: incidental chatter. The task decorator checks the name is declared.
+    stdout_output: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         if self.executor not in ("subprocess", "docker", "k8s", "kubernetes"):
@@ -527,6 +539,17 @@ class Runtime:
             out["secrets"] = [s.to_wire() for s in sorted(self.secrets, key=lambda s: s.name)]
         if self.working_dir:
             out["working_dir"] = self.working_dir
+        if self.stdout_output is not None:
+            if not isinstance(self.stdout_output, str) or not self.stdout_output.strip():
+                raise SpecError("runtime.stdout_output must be a non-empty output name")
+            if self.executor in ("k8s", "kubernetes"):
+                # The kubernetes executor refuses it at run time
+                # (agent/internal/executor/kubernetes.go); say so at the decorator.
+                raise SpecError(
+                    "runtime.stdout_output is not supported by the kubernetes executor; "
+                    "write the output to $NEXUS_OUTPUT_DIR/<name> instead"
+                )
+            out["stdout_output"] = self.stdout_output
         return out
 
     @staticmethod
@@ -576,12 +599,18 @@ class ValueSpec:
 
     Declaring types is what lets an incompatible edge be rejected at submit
     rather than at 3am (Flyte's typed-interface idea, architecture §4.3).
+
+    ``max_bytes`` is an optional author-declared bound on the value's encoded
+    size. On a map template's output it lets validation reject a workflow whose
+    fan-in (``max_fanout x max_bytes``) could exceed the platform's fan-in
+    limit, instead of failing after every child has run.
     """
 
     type: str = "json"
     required: bool = True
     default: Any = dataclasses.field(default=None)
     has_default: bool = False
+    max_bytes: int | None = None
 
     def to_wire(self) -> dict[str, Any]:
         if self.type not in _VALUE_TYPES:
@@ -593,26 +622,53 @@ class ValueSpec:
         if self.required and not self.has_default:
             out["required"] = True
         if self.has_default:
-            import json
-
             out["default_json"] = json.dumps(self.default, sort_keys=True, separators=(",", ":"))
+        if self.max_bytes is not None:
+            if (
+                isinstance(self.max_bytes, bool)
+                or not isinstance(self.max_bytes, int)
+                or self.max_bytes < 1
+            ):
+                raise SpecError(
+                    f"max_bytes must be a positive integer byte count, got {self.max_bytes!r}"
+                )
+            out["max_bytes"] = self.max_bytes
         return out
 
     @staticmethod
-    def coerce(value: "ValueSpec | Mapping[str, Any] | str") -> "ValueSpec":
+    def coerce(value: "ValueSpecLike") -> "ValueSpec":
         if isinstance(value, ValueSpec):
             return value
         if isinstance(value, str):
             return ValueSpec(type=value)
         data = dict(value)
+        unknown = set(data) - {"type", "required", "default", "max_bytes"}
+        if unknown:
+            raise SpecError(
+                f"unknown value option(s) {', '.join(sorted(unknown))}; expected type, "
+                "required, default, max_bytes"
+            )
+        raw_max = data.get("max_bytes")
+        # Human units ("4Ki") are accepted like every other size in the SDK.
+        max_bytes = parse_bytes(raw_max) if isinstance(raw_max, str) else raw_max
         if "default" in data:
             return ValueSpec(
-                type=data.get("type", "json"),
+                type=str(data.get("type", "json")),
                 required=bool(data.get("required", False)),
                 default=data["default"],
                 has_default=True,
+                max_bytes=max_bytes,
             )
-        return ValueSpec(type=data.get("type", "json"), required=bool(data.get("required", True)))
+        return ValueSpec(
+            type=str(data.get("type", "json")),
+            required=bool(data.get("required", True)),
+            max_bytes=max_bytes,
+        )
+
+
+#: What an author may write for a value declaration: a ValueSpec, a type name,
+#: or a mapping such as ``{"type": "json", "required": True, "max_bytes": "4Ki"}``.
+ValueSpecLike = ValueSpec | Mapping[str, Any] | str
 
 
 def coerce_trigger_rule(value: str) -> str:

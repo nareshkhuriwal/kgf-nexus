@@ -19,6 +19,7 @@ ui/vitest.config.js
 
 # Python
 __pycache__/
+.mypy_cache/
 *.py[cod]
 .venv/
 venv/

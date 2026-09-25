@@ -88,9 +88,8 @@ produces. Above the crossover, inline is slower *and* bloats the attempt row
   multi-output report well inside the 4 MiB gRPC cap.
 - The agent **clamps** whatever it receives into the same range and applies the
   configured value on the no-store path too.
-- The Python SDK's in-task `ctx.store` keeps its own 64 KiB constant
-  (`INLINE_MAX_BYTES`); it is not yet wired to the configured value -- recorded
-  as a known gap.
+- The Python SDK's in-task `ctx.store` applies the configured value too
+  (addendum below); it used to keep its own 64 KiB constant.
 
 Tests: `internal/domain/inline_test.go` (range and clamp table),
 `agent/internal/worker/inline_test.go` (a 38-byte result with a 16-byte
@@ -110,3 +109,17 @@ revisit with real distributions (an `output_ref` size histogram query against a
 production database is the cheap way) once there is traffic.
 
 **Neutral** -- default behaviour is unchanged for every existing deployment.
+
+## Addendum (2026-09-25): the SDK's in-task store follows the configured value
+
+The gap recorded above is closed. The agent exports the clamped threshold to
+every workload as `NEXUS_INLINE_THRESHOLD_BYTES` (subprocess, docker and
+kubernetes executors; `agent/internal/executor/inline_env_test.go`), and the
+Python SDK's `FileResultStore` / `InMemoryResultStore` read it through
+`nexus.context.resolve_inline_threshold`: an assignment's
+`result_store.inline_threshold_bytes` (carried by the replay endpoint,
+ADR-0022) first, then the environment variable, then the default, clamped into
+the same [1 B, 1 MiB] range as `domain.ClampInlineThreshold`.
+`INLINE_MAX_BYTES` remains as a deprecated alias of the default. Tested in
+`sdk/python/tests/test_values_and_typing.py` (a 16-byte threshold sends a
+51-byte result to a blob, which fails if the constant is restored).

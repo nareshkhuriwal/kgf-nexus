@@ -31,7 +31,14 @@ import time
 import traceback
 from typing import Any, Mapping, Sequence
 
-from .context import FileResultStore, InMemoryResultStore, TaskContext, derive_idempotency_key
+from .context import (
+    FileResultStore,
+    InMemoryResultStore,
+    ResultStore,
+    TaskContext,
+    derive_idempotency_key,
+    resolve_inline_threshold,
+)
 from .task import TaskDefinition, registry
 
 __all__ = ["execute_assignment", "run_handler", "main", "HandlerNotFound"]
@@ -75,7 +82,7 @@ def import_modules(modules: Sequence[str]) -> None:
             importlib.import_module(name)
 
 
-def resolve(task_ref: str) -> TaskDefinition:
+def resolve(task_ref: str) -> TaskDefinition[Any]:
     definition = registry.get(task_ref)
     if definition is None:
         raise HandlerNotFound(
@@ -86,7 +93,7 @@ def resolve(task_ref: str) -> TaskDefinition:
     return definition
 
 
-def build_context(assignment: Mapping[str, Any], *, store: Any | None = None) -> TaskContext:
+def build_context(assignment: Mapping[str, Any], *, store: ResultStore | None = None) -> TaskContext:
     """Build a TaskContext from a TaskAssignment (proto/nexus/v1/task.proto).
 
     The idempotency key comes FROM THE ASSIGNMENT -- the control plane derived it
@@ -125,8 +132,14 @@ def build_context(assignment: Mapping[str, Any], *, store: Any | None = None) ->
         )
 
     if store is None:
+        # The boundary is the control plane's (ADR-0016), not a constant here.
+        threshold = resolve_inline_threshold(assignment)
         root = os.environ.get("NEXUS_RESULT_DIR")
-        store = FileResultStore(root) if root else InMemoryResultStore()
+        store = (
+            FileResultStore(root, inline_max_bytes=threshold)
+            if root
+            else InMemoryResultStore(inline_max_bytes=threshold)
+        )
 
     return TaskContext(
         run_id=run_id,
@@ -160,7 +173,7 @@ def _short_idempotency(value: Any) -> str:
     return table.get(value, "required") if value is not None else "required"
 
 
-def _resolve_inputs(ctx: TaskContext, definition: TaskDefinition, assignment: Mapping[str, Any]) -> dict[str, Any]:
+def _resolve_inputs(ctx: TaskContext, definition: TaskDefinition[Any], assignment: Mapping[str, Any]) -> dict[str, Any]:
     """Materialize handler kwargs from resolved ResultRefs and literals.
 
     Blob inputs are fetched from the result store by the handler's process, not
@@ -190,7 +203,7 @@ def _materialize(ctx: TaskContext, ref: Any) -> Any:
 
 
 def run_handler(
-    definition: TaskDefinition, ctx: TaskContext, kwargs: Mapping[str, Any]
+    definition: TaskDefinition[Any], ctx: TaskContext, kwargs: Mapping[str, Any]
 ) -> Any:
     """Invoke the handler with its context. No retry logic here -- that is the platform's.
 
@@ -202,7 +215,7 @@ def run_handler(
 
 
 def execute_assignment(
-    assignment: Mapping[str, Any], *, modules: Sequence[str] = (), store: Any | None = None
+    assignment: Mapping[str, Any], *, modules: Sequence[str] = (), store: ResultStore | None = None
 ) -> dict[str, Any]:
     """Execute one assignment and return a ReportResult-shaped outcome dict.
 
@@ -388,7 +401,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.task_ref:
         assignment.setdefault("spec", {})["task_ref"] = args.task_ref
 
-    store = FileResultStore(args.result_dir) if args.result_dir else None
+    store = (
+        FileResultStore(args.result_dir, inline_max_bytes=resolve_inline_threshold(assignment))
+        if args.result_dir
+        else None
+    )
     outcome = execute_assignment(assignment, modules=modules, store=store)
 
     text = json.dumps(outcome, sort_keys=True, indent=2)

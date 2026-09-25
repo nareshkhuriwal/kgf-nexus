@@ -21,7 +21,7 @@ import logging
 import os
 import sys
 import time
-from typing import Any, Callable, Iterator, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, TextIO
 
 __all__ = [
     "TaskContext",
@@ -31,6 +31,9 @@ __all__ = [
     "StructuredLogger",
     "derive_idempotency_key",
     "EffectNotRecorded",
+    "DEFAULT_INLINE_THRESHOLD_BYTES",
+    "MAX_INLINE_THRESHOLD_BYTES",
+    "resolve_inline_threshold",
 ]
 
 
@@ -86,9 +89,54 @@ class ResultStore(Protocol):
 
 
 # Small results are inlined rather than stored as blobs, to avoid two network
-# round-trips for `{"rows": 42}` (ADR-0008). 64 KiB is the architecture's
-# proposed boundary (§12 open question 4).
-INLINE_MAX_BYTES = 64 * 1024
+# round-trips for `{"rows": 42}` (ADR-0008). The boundary is the CONTROL
+# PLANE's (ADR-0016): configured on the gateway, clamped into [1 B, 1 MiB] by the
+# agent, and exported to the workload as NEXUS_INLINE_THRESHOLD_BYTES. These
+# mirror internal/domain/inline.go.
+DEFAULT_INLINE_THRESHOLD_BYTES = 64 * 1024
+MAX_INLINE_THRESHOLD_BYTES = 1 << 20
+#: Deprecated alias of DEFAULT_INLINE_THRESHOLD_BYTES; stores now take the
+#: configured value (see resolve_inline_threshold).
+INLINE_MAX_BYTES = DEFAULT_INLINE_THRESHOLD_BYTES
+ENV_INLINE_THRESHOLD = "NEXUS_INLINE_THRESHOLD_BYTES"
+
+
+def clamp_inline_threshold(n: int) -> int:
+    """domain.ClampInlineThreshold: unset/invalid -> default, too large -> max."""
+    if n <= 0:
+        return DEFAULT_INLINE_THRESHOLD_BYTES
+    return min(n, MAX_INLINE_THRESHOLD_BYTES)
+
+
+def resolve_inline_threshold(
+    assignment: Mapping[str, Any] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """The inline-versus-blob boundary this worker process should apply.
+
+    In order: the assignment's ``result_store.inline_threshold_bytes`` (the
+    replay endpoint carries the gateway's value), then
+    ``NEXUS_INLINE_THRESHOLD_BYTES`` (exported by the agent to every workload),
+    then the platform default. Whatever is found is clamped exactly as the agent
+    clamps it, so a bad value can shrink or grow inlining only within the range
+    the control plane accepts.
+    """
+    env = os.environ if environ is None else environ
+    candidates: list[object] = []
+    if assignment is not None:
+        rs = assignment.get("result_store")
+        if isinstance(rs, Mapping):
+            candidates.append(rs.get("inline_threshold_bytes"))
+    candidates.append(env.get(ENV_INLINE_THRESHOLD))
+    for raw in candidates:
+        if raw is None or raw == "" or isinstance(raw, bool):
+            continue
+        try:
+            value = int(str(raw))
+        except ValueError:
+            continue
+        return clamp_inline_threshold(value)
+    return DEFAULT_INLINE_THRESHOLD_BYTES
 
 
 def _encode(value: Any) -> bytes:
@@ -96,15 +144,24 @@ def _encode(value: Any) -> bytes:
 
 
 class InMemoryResultStore:
-    """A result store backed by a dict. For unit tests and the subprocess executor."""
+    """A result store backed by a dict. For unit tests and the subprocess executor.
 
-    def __init__(self) -> None:
+    ``inline_max_bytes`` defaults to the configured threshold
+    (:func:`resolve_inline_threshold`), not a compiled-in constant.
+    """
+
+    def __init__(self, *, inline_max_bytes: int | None = None) -> None:
         self._blobs: dict[str, bytes] = {}
+        self.inline_max_bytes = (
+            resolve_inline_threshold()
+            if inline_max_bytes is None
+            else clamp_inline_threshold(inline_max_bytes)
+        )
 
     def put(self, value: Any, *, key: str | None = None) -> dict[str, Any]:
         data = _encode(value)
         digest = hashlib.sha256(data).hexdigest()
-        if len(data) <= INLINE_MAX_BYTES and key is None:
+        if len(data) <= self.inline_max_bytes and key is None:
             return {
                 "inline": data.decode("utf-8"),
                 "content_type": "application/json",
@@ -139,9 +196,14 @@ class FileResultStore:
     or absent -- a half-written journal entry would be worse than none.
     """
 
-    def __init__(self, root: str) -> None:
+    def __init__(self, root: str, *, inline_max_bytes: int | None = None) -> None:
         self.root = os.path.abspath(root)
         os.makedirs(self.root, exist_ok=True)
+        self.inline_max_bytes = (
+            resolve_inline_threshold()
+            if inline_max_bytes is None
+            else clamp_inline_threshold(inline_max_bytes)
+        )
 
     def _path(self, key: str) -> str:
         safe = key.replace("/", "_").replace("..", "_")
@@ -150,7 +212,7 @@ class FileResultStore:
     def put(self, value: Any, *, key: str | None = None) -> dict[str, Any]:
         data = _encode(value)
         digest = hashlib.sha256(data).hexdigest()
-        if len(data) <= INLINE_MAX_BYTES and key is None:
+        if len(data) <= self.inline_max_bytes and key is None:
             return {
                 "inline": data.decode("utf-8"),
                 "content_type": "application/json",
@@ -195,7 +257,7 @@ class StructuredLogger:
     when you are looking at one bad run out of ten thousand (architecture §9).
     """
 
-    def __init__(self, fields: Mapping[str, Any], stream: Any | None = None) -> None:
+    def __init__(self, fields: Mapping[str, Any], stream: TextIO | None = None) -> None:
         self._fields = dict(fields)
         self._stream = stream if stream is not None else sys.stderr
 
@@ -257,7 +319,7 @@ class TaskContext:
     worker_id: str = ""
     lease_token: str = ""
     start_to_close_deadline_unix_ms: int = 0
-    store: Any = dataclasses.field(default_factory=InMemoryResultStore)
+    store: ResultStore = dataclasses.field(default_factory=InMemoryResultStore)
     log: StructuredLogger = dataclasses.field(default=None)  # type: ignore[assignment]
     inputs: Mapping[str, Any] = dataclasses.field(default_factory=dict)
     _heartbeat_fn: HeartbeatFn | None = None
