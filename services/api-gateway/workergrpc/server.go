@@ -62,8 +62,11 @@ type Scheduler interface {
 	ClaimForWorker(ctx context.Context, workerID string, free *nexusv1.ResourceVector, queues []string, maxTasks int32) ([]*nexusv1.TaskAssignment, error)
 	// MarkStarted transitions DISPATCHED -> RUNNING.
 	MarkStarted(ctx context.Context, attemptID string, startedAt time.Time) error
-	// RecordProgress resets the task heartbeat deadline.
-	RecordProgress(ctx context.Context, attemptID, message string, fraction float64) error
+	// RecordProgress stores the worker's latest status line and fraction on the
+	// attempt and resets the task heartbeat deadline. The lease token is
+	// forwarded so the scheduler can fence again inside its write; stale is true
+	// when that second fence rejected the report.
+	RecordProgress(ctx context.Context, attemptID, leaseToken, message string, fraction float64) (stale bool, err error)
 	// ApplyResult applies a terminal outcome.
 	ApplyResult(ctx context.Context, req *nexusv1.ReportResultRequest) error
 	// PendingCancellations lists attempts this worker must stop, delivered as
@@ -492,6 +495,14 @@ func (s *Server) ExtendLease(ctx context.Context, req *nexusv1.ExtendLeaseReques
 // The distinction matters operationally: a worker can be perfectly alive while one
 // task is wedged. Keeping the signals separate lets us time out the TASK rather
 // than declaring the worker dead and losing every other task it is running.
+//
+// It also carries the executor's status line (F96): the Kubernetes executor
+// sends pod phase changes such as "pod Pending: Unschedulable: insufficient
+// cpu", and the scheduler stores the latest one on the attempt so the console
+// can show why a RUNNING attempt is not making progress. The message is
+// forwarded untouched; the scheduler, which stores it, is where it is
+// sanitized, so there is exactly one place that decides what a stored message
+// may contain.
 func (s *Server) ReportProgress(ctx context.Context, req *nexusv1.ReportProgressRequest) (*nexusv1.Ack, error) {
 	if _, err := s.requirePrincipal(ctx, ""); err != nil {
 		return nil, err
@@ -499,8 +510,16 @@ func (s *Server) ReportProgress(ctx context.Context, req *nexusv1.ReportProgress
 	if ack := s.fence(ctx, req.GetAttemptId(), req.GetLeaseToken(), "ReportProgress"); ack != nil {
 		return ack, nil
 	}
-	if err := s.sch.RecordProgress(ctx, req.GetAttemptId(), req.GetMessage(), req.GetFractionComplete()); err != nil {
+	stale, err := s.sch.RecordProgress(ctx, req.GetAttemptId(), req.GetLeaseToken(), req.GetMessage(), req.GetFractionComplete())
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "record progress: %v", err)
+	}
+	if stale {
+		// The lease ended between the fence above and the scheduler's write.
+		// Same answer as the fence would now give, for the same reason.
+		s.log.WarnContext(ctx, "rejected attempt RPC on stale lease token",
+			"rpc", "ReportProgress", "attempt_id", req.GetAttemptId())
+		return &nexusv1.Ack{Accepted: false, Reason: store.ReasonStaleLeaseToken}, nil
 	}
 	return &nexusv1.Ack{Accepted: true}, nil
 }

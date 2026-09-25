@@ -38,7 +38,7 @@ schema with strict per-service table ownership.**
 | `api-gateway` | `api_keys`, `idempotency_keys` | all (read-only projections) |
 | `workflow-manager` | `workflow_specs`, `workflow_runs`, `timers` | nodes, attempts |
 | `dag-engine` | `task_nodes`, `task_edges` | attempts, runs |
-| `scheduler` | `task_attempts`, `leases`, `concurrency_slots` | nodes, workers, reservations |
+| `scheduler` | `task_attempts`, `leases`, `concurrency_slots`, `attempt_progress` | nodes, workers, reservations |
 | `resource-manager` | `workers`, `reservations` | attempts, leases |
 | `event-service` | `run_events` | — |
 

@@ -126,10 +126,21 @@ type schedMarkStartedRequest struct {
 	AttemptID string `json:"attempt_id"`
 }
 
+// schedRecordProgressRequest mirrors services/scheduler's RecordProgressRequest.
+// lease_token is additive: an older scheduler ignores it and keeps dropping the
+// message, which is exactly its behaviour today.
 type schedRecordProgressRequest struct {
-	AttemptID string  `json:"attempt_id"`
-	Message   string  `json:"message,omitempty"`
-	Fraction  float64 `json:"fraction,omitempty"`
+	AttemptID  string  `json:"attempt_id"`
+	LeaseToken string  `json:"lease_token,omitempty"`
+	Message    string  `json:"message,omitempty"`
+	Fraction   float64 `json:"fraction,omitempty"`
+}
+
+// schedRecordProgressResponse is additive over the Empty an older scheduler
+// returns, which decodes here as "not stale".
+type schedRecordProgressResponse struct {
+	StaleLease bool `json:"stale_lease,omitempty"`
+	Stored     bool `json:"stored,omitempty"`
 }
 
 type schedApplyResultRequest struct {
@@ -158,16 +169,16 @@ func (s *schedGRPC) markStarted(ctx context.Context, attemptID string) error {
 	return nil
 }
 
-func (s *schedGRPC) recordProgress(ctx context.Context, attemptID, message string, fraction float64) error {
+func (s *schedGRPC) recordProgress(ctx context.Context, attemptID, leaseToken, message string, fraction float64) (bool, error) {
 	ctx, cancel := withCallTimeout(ctx)
 	defer cancel()
-	var resp schedEmpty
+	var resp schedRecordProgressResponse
 	if err := s.conn.Invoke(ctx, "/nexus.v1.AttemptReportService/RecordProgress",
-		&schedRecordProgressRequest{AttemptID: attemptID, Message: message, Fraction: fraction},
+		&schedRecordProgressRequest{AttemptID: attemptID, LeaseToken: leaseToken, Message: message, Fraction: fraction},
 		&resp, grpc.ForceCodec(schedJSONCodec{})); err != nil {
-		return fmt.Errorf("record progress for attempt %s: %w", attemptID, err)
+		return false, fmt.Errorf("record progress for attempt %s: %w", attemptID, err)
 	}
-	return nil
+	return resp.StaleLease, nil
 }
 
 // applyResult forwards the worker's terminal report verbatim.

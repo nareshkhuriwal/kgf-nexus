@@ -42,11 +42,30 @@ type MarkStartedRequest struct {
 	AttemptID string `json:"attempt_id"`
 }
 
-// RecordProgressRequest is the task-level heartbeat.
+// RecordProgressRequest is the task-level heartbeat, plus the worker's latest
+// status line (e.g. "pod Pending: Unschedulable: insufficient cpu").
+//
+// LeaseToken is additive (F96). The gateway fences on it before calling; the
+// scheduler fences on it AGAIN inside the write, because the lease can be
+// reclaimed in between. A gateway that predates the field sends none, and then
+// only the heartbeat is honoured, as before: without a token nothing here can
+// prove the message is from the current lease holder.
 type RecordProgressRequest struct {
-	AttemptID string  `json:"attempt_id"`
-	Message   string  `json:"message,omitempty"`
-	Fraction  float64 `json:"fraction,omitempty"`
+	AttemptID  string  `json:"attempt_id"`
+	LeaseToken string  `json:"lease_token,omitempty"`
+	Message    string  `json:"message,omitempty"`
+	Fraction   float64 `json:"fraction,omitempty"`
+}
+
+// RecordProgressResponse is additive over the Empty this RPC used to return,
+// so an old gateway decodes it as Empty and an old scheduler's Empty decodes
+// here as "not stale".
+type RecordProgressResponse struct {
+	// StaleLease: the token is not the attempt's live lease. Nothing was
+	// written, and the gateway answers the worker stale_lease_token.
+	StaleLease bool `json:"stale_lease,omitempty"`
+	// Stored: the message and/or fraction were recorded on the attempt.
+	Stored bool `json:"stored,omitempty"`
 }
 
 // ApplyResultRequest carries a terminal outcome.
@@ -88,7 +107,7 @@ type Empty struct{}
 
 type attemptReportService interface {
 	MarkStarted(context.Context, *MarkStartedRequest) (*Empty, error)
-	RecordProgress(context.Context, *RecordProgressRequest) (*Empty, error)
+	RecordProgress(context.Context, *RecordProgressRequest) (*RecordProgressResponse, error)
 	ApplyResult(context.Context, *ApplyResultRequest) (*ApplyResultResponse, error)
 	CancelRunAttempts(context.Context, *CancelRunAttemptsRequest) (*CancelRunAttemptsResponse, error)
 }
@@ -126,16 +145,38 @@ func (r *ReportServer) MarkStarted(ctx context.Context, req *MarkStartedRequest)
 	return &Empty{}, nil
 }
 
-// RecordProgress pushes out the task heartbeat deadline.
-func (r *ReportServer) RecordProgress(ctx context.Context, req *RecordProgressRequest) (*Empty, error) {
+// RecordProgress stores the worker's latest status for the attempt and pushes
+// out the task heartbeat deadline.
+//
+// The message and fraction are untrusted and are sanitized and validated in the
+// store (domain.SanitizeProgressMessage, NormalizeProgressFraction). A bad
+// fraction is dropped and logged, never an error: failing the RPC would also
+// drop the heartbeat, and a task would then be timed out for a formatting
+// mistake in its progress reporting.
+func (r *ReportServer) RecordProgress(ctx context.Context, req *RecordProgressRequest) (*RecordProgressResponse, error) {
 	id, err := uuid.Parse(req.AttemptID)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "attempt_id %q is not a uuid", req.AttemptID)
 	}
-	if err := r.store.RecordProgress(ctx, id, r.now()); err != nil {
+	out, err := r.store.RecordProgress(ctx, store.ProgressReport{
+		AttemptID: id, LeaseToken: req.LeaseToken, Message: req.Message, Fraction: req.Fraction,
+	}, r.now())
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "record progress: %v", err)
 	}
-	return &Empty{}, nil
+	if out.StaleLease {
+		// No token material in the log line: the token is a credential.
+		r.log.WarnContext(ctx, "progress rejected on stale lease", "attempt_id", req.AttemptID)
+	}
+	if out.FractionRejected {
+		r.log.WarnContext(ctx, "progress fraction outside [0,1] ignored",
+			"attempt_id", req.AttemptID, "fraction", req.Fraction)
+	}
+	if out.Truncated {
+		r.log.DebugContext(ctx, "progress message truncated",
+			"attempt_id", req.AttemptID, "bytes", len(req.Message))
+	}
+	return &RecordProgressResponse{StaleLease: out.StaleLease, Stored: out.Stored}, nil
 }
 
 // ApplyResult applies a terminal outcome.

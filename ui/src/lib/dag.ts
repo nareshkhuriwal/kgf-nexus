@@ -13,6 +13,7 @@
 
 import type { Attempt, NodeState, RunDetail, RunEdge, RunNode } from '../api/types';
 import { normalizeState } from './states';
+import { isExecutorWaiting, isInFlight } from './progress';
 
 export interface DagNode extends RunNode {
   /** 0 for roots; longest-path depth, which is what makes layers read left→right. */
@@ -31,8 +32,15 @@ export interface DagNode extends RunNode {
   attempts: Attempt[];
   /** Highest attempt_number, which is the one whose state the node reflects. */
   latestAttempt: Attempt | null;
-  /** Lifted from the latest attempt so the graph can explain a stalled node. */
+  /** Lifted from the latest attempt so the graph can explain a stalled node.
+   *  The SCHEDULER's reason for not placing it. */
   pendingReason: string | null;
+  /** The latest attempt's EXECUTOR status (progress_message), only while that
+   *  attempt is in flight: a finished attempt's last pod status is history,
+   *  shown on the attempt card, not a live badge on the graph. */
+  executorStatus: string | null;
+  /** True when the in-flight attempt's executor still reports "pod Pending". */
+  executorWaiting: boolean;
 }
 
 export interface DagGraph {
@@ -215,6 +223,8 @@ export function buildDagGraph(run: Pick<RunDetail, 'nodes' | 'edges'>, attempts:
       // The node-level column wins when present; otherwise lift it from the
       // attempt, which is where the scheduler actually records it.
       pendingReason: n.pending_reason ?? latest?.pending_reason ?? null,
+      executorStatus: isInFlight(latest) ? (latest?.progress_message ?? null) : null,
+      executorWaiting: isExecutorWaiting(latest),
     };
   });
 

@@ -15,12 +15,15 @@ import type { Attempt, ResourceRequest, TaskError, ExecutionMetrics } from '../a
 import {
   EMPTY,
   durationBetween,
+  fmtAge,
   fmtBytes,
   fmtDurationMs,
+  fmtPercent,
   fmtResources,
   fmtTs,
   shortId,
 } from '../lib/format';
+import { executorStatus, isExecutorWaiting, isInFlight, progressFraction } from '../lib/progress';
 import { normalizeState } from '../lib/states';
 import { StateBadge } from './StateBadge';
 import { Empty } from './Status';
@@ -104,16 +107,18 @@ function AttemptCard({
           "waiting_for_resources: gpu (need 4, free 3)". It leads the card. */}
       {attempt.pending_reason && state === 'PENDING' && (
         <div style={{ padding: '10px 11px 0' }}>
-          <div className="attempt-section-title">Why this has not dispatched</div>
+          <div className="attempt-section-title">Why this has not dispatched (scheduler placement)</div>
           <div className="pendingbox">{attempt.pending_reason}</div>
         </div>
       )}
       {attempt.pending_reason && state !== 'PENDING' && (
         <div style={{ padding: '10px 11px 0' }}>
-          <div className="attempt-section-title">Last pending reason (historical)</div>
+          <div className="attempt-section-title">Last pending reason (scheduler placement, historical)</div>
           <div className="pendingbox muted">{attempt.pending_reason}</div>
         </div>
       )}
+
+      <ExecutorStatus attempt={attempt} />
 
       <div className="attempt-body">
         <div>
@@ -183,6 +188,80 @@ function AttemptCard({
         )}
       </div>
     </section>
+  );
+}
+
+/**
+ * What the worker's executor says about this attempt (F96), kept visibly apart
+ * from the scheduler's pending reason above: that one explains why Nexus has
+ * not placed the attempt, this one what the substrate (a Kubernetes pod, say)
+ * is doing with an attempt Nexus DID place.
+ *
+ * Shown only once the attempt has reached a worker. A PENDING attempt has no
+ * executor yet, so an empty state there would imply one was expected.
+ */
+function ExecutorStatus({ attempt }: { attempt: Attempt }) {
+  const state = normalizeState(attempt.state);
+  const status = executorStatus(attempt);
+  const fraction = progressFraction(attempt);
+  const inFlight = isInFlight(attempt);
+  if (!status && fraction === null) {
+    // `undefined` means this gateway does not serve the field at all, which is
+    // not the same as "the worker reported nothing"; say nothing rather than
+    // claim the latter.
+    if (!inFlight || attempt.progress_message === undefined) return null;
+    return (
+      <div style={{ padding: '10px 11px 0' }}>
+        <div className="attempt-section-title">Executor status (reported by the worker)</div>
+        <div className="muted">
+          No status reported. The worker has not sent a progress message for this attempt; the
+          Kubernetes executor reports pod phase changes, the subprocess and docker executors send none.
+        </div>
+      </div>
+    );
+  }
+  const waiting = isExecutorWaiting(attempt);
+  return (
+    <div style={{ padding: '10px 11px 0' }} data-testid="executor-status">
+      <div className="attempt-section-title">
+        {status?.stale ? 'Last executor status (historical, reported by the worker)' : 'Executor status (reported by the worker)'}
+      </div>
+      {status && (
+        <div className={`pendingbox${waiting ? '' : ' muted'}`} title={status.message}>
+          {status.message}
+        </div>
+      )}
+      <dl className="kv" style={{ marginTop: 6 }}>
+        {fraction !== null && (
+          <>
+            <dt>progress</dt>
+            <dd>
+              <progress max={1} value={fraction} aria-label="reported progress" /> {fmtPercent(fraction)}
+            </dd>
+          </>
+        )}
+        {attempt.progress_message_at && (
+          <>
+            <dt>{status?.stale ? 'status since' : 'in this status'}</dt>
+            <dd title={fmtTs(attempt.progress_message_at)}>
+              {status?.stale ? fmtTs(attempt.progress_message_at) : fmtAge(attempt.progress_message_at).replace(/ ago$/, '')}
+            </dd>
+          </>
+        )}
+        {attempt.progress_at && (
+          <>
+            <dt>last report</dt>
+            <dd title={fmtTs(attempt.progress_at)}>{fmtAge(attempt.progress_at)}</dd>
+          </>
+        )}
+      </dl>
+      {waiting && state === 'RUNNING' && (
+        <div className="faint" style={{ marginTop: 4 }}>
+          Nexus placed this attempt, but its pod has not started. The reason above comes from the
+          cluster's scheduler, not from Nexus.
+        </div>
+      )}
+    </div>
   );
 }
 
