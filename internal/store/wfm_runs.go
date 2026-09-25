@@ -397,6 +397,42 @@ func WFMListStalledRuns(ctx context.Context, q GWQuerier, minAge time.Duration, 
 	return out, rows.Err()
 }
 
+// WFMListCancellingRuns lists runs that are CANCELLING, oldest first, for the
+// cancel reconciler (CONTRACT-FINDINGS F109).
+//
+// A run stays CANCELLING until its in-flight attempts are terminal. When the
+// cancel's attempt fan-out failed (scheduler unreachable, an attempt busy past
+// the lock timeout), nothing else re-issues it: the heartbeat still stops the
+// work, but the attempt then ends through its late result, usually FAILED,
+// instead of CANCELLED. Listing every CANCELLING run -- including one whose
+// attempts are already terminal but whose finalize was lost -- lets one sweep
+// both re-issue and finalize. It only reads; limit bounds a pass.
+func WFMListCancellingRuns(ctx context.Context, q GWQuerier, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := q.Query(ctx, `
+		SELECT r.id::text
+		  FROM workflow_runs r
+		 WHERE r.state = 'CANCELLING'
+		 ORDER BY r.created_at
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list cancelling runs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan cancelling run id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // WFMGetRunForUpdate loads a run's state and deadline inside the caller's
 // transaction, taking a row lock so a concurrent transition cannot interleave.
 func WFMGetRunForUpdate(ctx context.Context, q GWQuerier, runID string) (state string, namespace string, deadline *time.Time, err error) {

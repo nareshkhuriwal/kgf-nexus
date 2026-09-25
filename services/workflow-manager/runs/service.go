@@ -275,8 +275,9 @@ func (s *Service) Cancel(ctx context.Context, runID string) (store.RunRow, error
 
 	if err := s.sched.CancelRunAttempts(ctx, runID); err != nil {
 		// The run is already CANCELLING and that state is durable, so a failure
-		// here delays cancellation rather than losing it: the reconciler retries.
-		s.log.ErrorContext(ctx, "failed to request attempt cancellation; reconciler will retry",
+		// here delays cancellation rather than losing it: the cancel sweep calls
+		// ReconcileCancelling for every CANCELLING run (F109).
+		s.log.ErrorContext(ctx, "failed to request attempt cancellation; the cancel sweep will re-issue it",
 			"run_id", runID, "error", err)
 	}
 
@@ -304,6 +305,39 @@ func (s *Service) Cancel(ctx context.Context, runID string) (store.RunRow, error
 	}
 
 	return s.MaybeFinalizeCancel(ctx, runID)
+}
+
+// ReconcileCancelling re-issues a CANCELLING run's attempt cancellation and
+// finalizes the run once nothing is in flight (CONTRACT-FINDINGS F109).
+//
+// Called by the cancel sweep for every CANCELLING run. Idempotent: the
+// scheduler's fan-out skips attempts that are already terminal and cancels each
+// live one in its own compare-and-set transaction, so a repeat, or two replicas
+// racing, cancel each attempt once; MaybeFinalizeCancel is a CAS too. A run that
+// is no longer CANCELLING is left alone. Bounded: one fan-out per call, over
+// the run's live attempts only. A failed fan-out is returned and the run stays
+// CANCELLING for the next sweep -- it is never finalized over live attempts.
+func (s *Service) ReconcileCancelling(ctx context.Context, runID string) error {
+	run, err := store.WFMGetRun(ctx, s.db, runID)
+	if err != nil {
+		return err
+	}
+	if run.State != string(domain.RunCancelling) {
+		return nil
+	}
+	counts, err := store.WFMCountRunAttemptsByState(ctx, s.db, runID)
+	if err != nil {
+		return err
+	}
+	if inFlight(counts) > 0 {
+		if err := s.sched.CancelRunAttempts(ctx, runID); err != nil {
+			return fmt.Errorf("re-issue attempt cancellation for run %s: %w", runID, err)
+		}
+		s.log.InfoContext(ctx, "re-issued attempt cancellation for a CANCELLING run",
+			"run_id", runID, "in_flight", inFlight(counts))
+	}
+	_, err = s.MaybeFinalizeCancel(ctx, runID)
+	return err
 }
 
 // MaybeFinalizeCancel advances CANCELLING -> CANCELLED once nothing is in flight.
