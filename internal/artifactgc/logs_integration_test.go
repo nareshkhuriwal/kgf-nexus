@@ -8,7 +8,7 @@ package artifactgc
 // Log-object collection (ADR-0020) against a REAL Postgres and a REAL MinIO.
 //
 //	NEXUS_TEST_DATABASE_URL=... NEXUS_TEST_S3_ENDPOINT=127.0.0.1:9000 \
-//	NEXUS_S3_ACCESS_KEY_ID=... NEXUS_S3_SECRET_ACCESS_KEY=... \
+//	NEXUS_TEST_S3_ACCESS_KEY_ID=... NEXUS_TEST_S3_SECRET_ACCESS_KEY=... \
 //	  go test -tags integration -run Log ./internal/artifactgc/
 //
 // The database side runs in a rolled-back transaction like every test in this
@@ -17,7 +17,6 @@ package artifactgc
 import (
 	"bytes"
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -28,23 +27,21 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
+	"github.com/khuriwalgroup/kgf-nexus/internal/tests3"
 )
 
 func logTestStore(t *testing.T) (*MinIOStore, *minio.Client) {
 	t.Helper()
-	endpoint := os.Getenv("NEXUS_TEST_S3_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("skipping integration test: NEXUS_TEST_S3_ENDPOINT is not set")
-	}
-	access, secret := os.Getenv("NEXUS_S3_ACCESS_KEY_ID"), os.Getenv("NEXUS_S3_SECRET_ACCESS_KEY")
-	mc, err := minio.New(stripScheme(endpoint), &minio.Options{Creds: credentials.NewStaticV4(access, secret, "")})
+	s3 := tests3.Get(t)
+	endpoint, access, secret := s3.Endpoint, s3.AccessKeyID, s3.SecretAccessKey
+	mc, err := minio.New(s3.HostPort(), &minio.Options{Creds: credentials.NewStaticV4(access, secret, ""), Secure: s3.UseTLS})
 	if err != nil {
 		t.Fatalf("minio client: %v", err)
 	}
 	ctx := context.Background()
 	bucket := "gc-logs-" + uuid.NewString()[:8]
 	if err := mc.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
-		t.Skipf("skipping integration test: MinIO unreachable: %v", err)
+		tests3.SkipUnreachable(t, err)
 	}
 	t.Cleanup(func() {
 		for o := range mc.ListObjects(ctx, bucket, minio.ListObjectsOptions{Recursive: true}) {
@@ -52,7 +49,7 @@ func logTestStore(t *testing.T) (*MinIOStore, *minio.Client) {
 		}
 		_ = mc.RemoveBucket(ctx, bucket)
 	})
-	st, err := NewMinIOStore(ctx, MinIOConfig{Endpoint: endpoint, Bucket: bucket, AccessKeyID: access, SecretAccessKey: secret})
+	st, err := NewMinIOStore(ctx, MinIOConfig{Endpoint: endpoint, Bucket: bucket, AccessKeyID: access, SecretAccessKey: secret, UseTLS: s3.UseTLS})
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}

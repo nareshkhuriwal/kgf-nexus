@@ -1096,6 +1096,7 @@ Where the DSN comes from in each supported way of running Nexus:
 | `make seed`, `make migrate-*`, `make artifact-gc`, `make check-refs` | The Makefile's `DATABASE_URL`, defaulting to the compose stack on `localhost:$(NEXUS_POSTGRES_PORT)` (55433). Override it to target another database. |
 | `go run ./services/<svc>/...` by hand | Export one of the four names yourself, e.g. `export DATABASE_URL='postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable'` for the compose stack. |
 | Integration tests | `NEXUS_TEST_DATABASE_URL` only (`internal/testdb`); tests skip without it and never read the service spellings. |
+| Integration tests (object store) | `NEXUS_TEST_S3_ENDPOINT`, `NEXUS_TEST_S3_ACCESS_KEY_ID`, `NEXUS_TEST_S3_SECRET_ACCESS_KEY`, optional `NEXUS_TEST_S3_BUCKET` / `NEXUS_TEST_S3_USE_TLS` only (`internal/tests3`). No default endpoint; without the endpoint the tests skip with `skipping integration test: no test S3 store`, which CI treats as a failure; an endpoint without both keys fails. They never read `NEXUS_S3_*`, `RESULT_STORE_*` or `MINIO_ROOT_*`. |
 
 `examples/run-suite.sh` and `tests/chaos` drive an already-running stack
 (Kubernetes or compose respectively) and do not start services themselves, so
@@ -1639,9 +1640,15 @@ Design and safety argument: docs/CLUSTER-SCALING.md. This section is the runbook
 - The worker Deployment follows `deploy/k8s/cluster-controller/base/worker-deployment.example.yaml`:
   no hostname override, CPU/memory requests, `terminationGracePeriodSeconds` at
   least `NEXUS_DRAIN_GRACE`, no HPA of its own.
-- The cluster-controller image built with
-  `docker build -f deploy/Dockerfile.service --build-arg SERVICE=cluster-controller .`
-  and pinned by digest (`kustomize edit set image`).
+- The cluster-controller image, pinned by digest. The release pipeline builds
+  and pushes `<acr>/nexus/cluster-controller`; `deploy/scripts/cluster-controller-overlay.sh`
+  renders `base` or `apply` with that digest (the `kustomize edit set image`
+  retarget, as a throwaway overlay) and fails if any container would run
+  something else. `templates/deploy-aks.yml` runs it when its
+  `clusterController` parameter is `base` or `apply` (default `none`). By hand:
+  `NAMESPACE=kgf-nexus deploy/scripts/cluster-controller-overlay.sh base <acr>/nexus/cluster-controller@sha256:<digest> | kubectl apply -f -`.
+  On a local kind/Docker Desktop cluster, `make k8s-dev-images` builds and loads
+  `kgf-nexus/cluster-controller:<tag>`; apply it with `ALLOW_TAG=1` and that tag.
 
 ### 12.2 Plan mode (default)
 
@@ -2414,3 +2421,71 @@ the reason). They are never silently omitted.
   `combined`.
 - Live tail is poll-based (≈ flush interval + 1 s), not a pipe.
 - Timestamps are the agent's clock (informational; ordering is by line number).
+
+## 20. Third-party images and toolchains: what is pinned, and why
+
+Every image below is pinned; a floating tag is a build that changes under you.
+Digest pins (`name:tag@sha256:...`) are used where the upstream's publication
+history has already broken us once. The tag stays beside the digest for humans;
+the digest is what Docker and Kubernetes actually resolve.
+
+| Component | Reference | Where |
+|---|---|---|
+| S3 result store and backup store (server) | `docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46` (multi-arch index: amd64 + arm64) | `deploy/docker-compose.yml` (`minio`), `deploy/docker-compose.pitr.yml` (`backup-store`, `NEXUS_PITR_MINIO_IMAGE`), Helm `minio.image`, Makefile `S3_IMAGE` (bench, CI) |
+| `mc` bucket-init jobs | the **same** Silo image (it bundles a version-matched `mc`) | compose `minio-init`, `backup-store-init` (`NEXUS_PITR_MC_IMAGE`), Helm `minio.mcImage` |
+| Console build | `node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1` | `deploy/Dockerfile.ui`; CI uses Node `24.21.0` (`.github/workflows/ci.yml`, both Azure pipelines) |
+
+### 20.1 The S3 store: why Silo, and not MinIO
+
+MinIO Inc. stopped publishing community-edition binaries and container images
+in October 2025, removed `minio/minio` and `minio/mc` from Docker Hub, then made
+the `quay.io/minio/minio` and `quay.io/minio/mc` repositories private
+(unauthenticated pulls answer **401**, reproduced 2026-09-25), and archived
+`github.com/minio/minio` as "no longer maintained". The last source tag,
+`RELEASE.2025-10-15T17-29-55Z`, fixed a privilege-escalation CVE; nothing after it
+will be fixed. The options assessed (CONTRACT-FINDINGS.md F111):
+
+| Option | Verdict |
+|---|---|
+| `quay.io/minio/aistor/minio` (MinIO AIStor) | Rejected as the default: proprietary MinIO Software License; even the free tier needs a license key and is single-node. Fine for an operator who buys it: set `minio.image`. |
+| Build the last upstream source tag ourselves | Rejected: reproducible, but frozen on an archived, unpatched codebase, and we would own the build. |
+| Chainguard `cgr.dev/chainguard/minio` | Rejected: free tier is `latest` only (versioned tags are paid), no `mc` image. |
+| Bitnami | Rejected: Bitnami's free catalogue moved to `bitnamilegacy` without updates in 2025. |
+| **`pgsty/silo` (community fork, formerly `pgsty/minio`)** | **Chosen.** AGPL-3.0 like upstream; S3 API, `MINIO_*` variables, `.minio.sys` on-disk format and the `server` argv are kept (the entrypoint maps `minio`/`server` to `silo`); released every 1-2 months with public advisories; images built in GitHub Actions from verified release binaries, with SPDX SBOMs and a **GitHub/Sigstore SLSA build-provenance attestation per image**. |
+
+Residual risk, accepted knowingly: Silo is a community fork maintained by one
+organisation (PGSTY), with no commercial support and a history of renaming
+(`pgsty/minio` → `pgsty/silo`). The digest pin means a compromised or deleted tag
+cannot change what we run; the attestation check means a new digest is only
+adopted when it was built by `pgsty/silo`'s own release workflow. If the fork
+stalls, the exits are AIStor (licensed) or another S3 store; nothing in Nexus is
+MinIO-specific beyond `mc` in the init jobs and the health-probe paths.
+
+Production note: none of this changes the production guidance. A managed S3
+store (or a supported object store) is preferred to a single-replica
+in-cluster Silo; the chart's `minio.enabled: false` + `minio.endpoint` path is
+unchanged.
+
+### 20.2 Bumping the S3 image
+
+```sh
+# 1. find the new release and its multi-arch INDEX digest
+docker buildx imagetools inspect docker.io/pgsty/silo:RELEASE.<new>
+# 2. set S3_IMAGE in the Makefile, then check its provenance
+make verify-s3-image            # gh attestation verify ... --repo pgsty/silo
+# 3. replace the same reference in deploy/docker-compose.yml,
+#    deploy/docker-compose.pitr.yml and deploy/helm/kgf-nexus/values.yaml
+git grep -n 'pgsty/silo'        # every hit must show the new digest
+# 4. run the object-store integration tests against it (tests3, §8)
+```
+
+CI runs `make verify-s3-image` before starting the store the integration job
+tests against (GitHub Actions).
+
+### 20.3 Node
+
+Node 20 reached end of life on 2026-04-30. The console builds and CI run on
+Node **24** ("Krypton"), Active LTS until 2026-10-20 and maintained until
+2028-04-30 (github.com/nodejs/Release, `schedule.json`). The exact patch
+(`24.21.0`) is pinned in all three CI definitions and in the Dockerfile, and
+they move together. Node 26 becomes LTS on 2026-10-28; move once it has.

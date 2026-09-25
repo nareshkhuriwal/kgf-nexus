@@ -19,6 +19,14 @@ image:
   # Pin to an immutable tag (a git SHA or a digest-backed release tag). Never
   # "latest": a node that already has a "latest" would silently run old code.
   tag: ""
+  # Per-image digests, keyed by IMAGE name (api-gateway, workflow-manager,
+  # dag-engine, scheduler, resource-manager, event-service, agent, migrate, ui),
+  # NOT by the camelCase keys under `services`. A digest here is appended to that
+  # image's reference (<repo>:<tag>@sha256:...), so the kubelet pulls exactly the
+  # bytes the release built. The release pipeline sets the whole map from its
+  # digest map (templates/deploy-aks.yml); deploy/scripts/helm-image-digests.py
+  # fails the release if any rendered Nexus image does not resolve to it.
+  digests: {}
   pullPolicy: IfNotPresent
   pullSecrets: []
 
@@ -120,8 +128,13 @@ postgres:
 
 minio:
   enabled: true
-  image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
-  mcImage: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+  # Silo (github.com/pgsty/silo), the community-maintained MinIO fork, pinned by
+  # digest: MinIO no longer publishes pullable community images (F111). mcImage
+  # is the SAME image -- it bundles a version-matched mc -- so there is one
+  # attested artifact to trust. Verify before bumping:
+  #   gh attestation verify oci://docker.io/pgsty/silo@<digest> --repo pgsty/silo
+  image: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
+  mcImage: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
   endpoint: http://minio:9000   # used when enabled=false
   bucket: nexus-results
   region: us-east-1

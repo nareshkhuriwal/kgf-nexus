@@ -48,10 +48,14 @@ build scheduler        deploy/Dockerfile.service SERVICE=scheduler        SERVIC
 build resource-manager deploy/Dockerfile.service SERVICE=resource-manager SERVICE_PATH=services/resource-manager/cmd/resource-manager VERSION="$tag"
 build event-service    deploy/Dockerfile.service SERVICE=event-service    SERVICE_PATH=services/event-service/cmd/event-service       VERSION="$tag"
 build agent            deploy/Dockerfile.service SERVICE=agent            SERVICE_PATH=agent/cmd/nexus-agent                          VERSION="$tag"
+# Not rendered by the chart: deploy/k8s/cluster-controller installs it. Built and
+# loaded here so a dev cluster can run it at this tag:
+#   ALLOW_TAG=1 deploy/scripts/cluster-controller-overlay.sh base kgf-nexus/cluster-controller:<tag> | kubectl apply -f -
+build cluster-controller deploy/Dockerfile.service SERVICE=cluster-controller SERVICE_PATH=services/cluster-controller                VERSION="$tag"
 build migrate          deploy/Dockerfile.migrate
 build ui               deploy/Dockerfile.ui      VITE_NEXUS_API_BASE= VITE_NEXUS_NAMESPACE=default
 
-components=(api-gateway workflow-manager dag-engine scheduler resource-manager event-service agent migrate ui)
+components=(api-gateway workflow-manager dag-engine scheduler resource-manager event-service agent cluster-controller migrate ui)
 images=()
 for c in "${components[@]}"; do images+=("${prefix}/${c}:${tag}"); done
 

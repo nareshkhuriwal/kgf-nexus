@@ -6,10 +6,12 @@
 // Integration tests for the result store. Behind the `integration` tag because
 // they need a live S3-compatible endpoint; run with:
 //
-//	go test -tags integration ./agent/internal/resultstore/...
+//	NEXUS_TEST_S3_ENDPOINT=127.0.0.1:9000 NEXUS_TEST_S3_ACCESS_KEY_ID=... \
+//	NEXUS_TEST_S3_SECRET_ACCESS_KEY=... \
+//	  go test -tags integration ./agent/internal/resultstore/...
 //
-// They SKIP cleanly rather than fail when no endpoint is reachable: a test that
-// fails for want of infrastructure teaches nobody anything.
+// With NEXUS_TEST_S3_ENDPOINT unset they skip with tests3.SkipMarker, which CI
+// treats as a failure (F85). There is no default endpoint (internal/tests3).
 package resultstore
 
 import (
@@ -18,45 +20,41 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"testing"
 	"time"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/tests3"
 )
-
-func envOr(k, d string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return d
-}
 
 func newIntegrationClient(t *testing.T, inlineThreshold int64) *Client {
 	t.Helper()
+	s3 := tests3.Get(t)
 	c, err := New(Config{
-		Endpoint:        envOr("NEXUS_S3_ENDPOINT", "localhost:9000"),
-		Bucket:          envOr("NEXUS_S3_BUCKET", "nexus-test"),
+		Endpoint:        s3.Endpoint,
+		Bucket:          s3.BucketOr("nexus-test"),
 		Namespace:       "itest",
-		AccessKeyID:     envOr("NEXUS_S3_ACCESS_KEY_ID", "minioadmin"),
-		SecretAccessKey: envOr("NEXUS_S3_SECRET_ACCESS_KEY", "minioadmin"),
+		AccessKeyID:     s3.AccessKeyID,
+		SecretAccessKey: s3.SecretAccessKey,
+		UseTLS:          s3.UseTLS,
 		InlineThreshold: inlineThreshold,
 		Log:             slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
-		t.Skipf("cannot build a result store client (%v); skipping", err)
+		t.Fatalf("cannot build a result store client: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := c.Reachable(ctx); err != nil {
 		if err2 := c.EnsureBucket(ctx); err2 != nil {
-			t.Skipf("result store unreachable (%v / %v); skipping", err, err2)
+			tests3.SkipUnreachable(t, fmt.Errorf("%v / %v", err, err2))
 		}
 	}
 	if err := c.EnsureBucket(context.Background()); err != nil {
-		t.Skipf("cannot ensure the test bucket (%v); skipping", err)
+		tests3.SkipUnreachable(t, fmt.Errorf("ensure the test bucket: %w", err))
 	}
 	return c
 }

@@ -1,22 +1,26 @@
 # Releases Nexus to one environment's AKS cluster with digest-pinned images.
 #
-# ─── This template does not work yet, and says so out loud ───────────────
+# The first step checks that the chart AND the environment's values file exist,
+# and fails with an explanation rather than letting `helm upgrade` fail with a
+# path error that reads like a typo.
 #
-# deploy/helm/kgf-nexus does not exist. Nexus's deploy/ is docker-compose, which
-# deploy/README.md states is local-development only. The first step below checks
-# for the chart and fails with an explanation rather than letting `helm upgrade`
-# fail with a path error that reads like a typo.
+# ─── How images are pinned ───────────────────────────────────────────────
 #
-# It is written now because the release pipeline's shape should not be invented
-# under time pressure on the day the chart lands, and because writing it is what
-# surfaces what the chart has to provide: a values file per environment, a
-# per-service image.digest key, and the migration job as a Helm hook.
+#   image.digests.<image-name>     the chart's nexus.image helper appends
+#                                  @sha256:... per IMAGE name (api-gateway,
+#                                  agent, migrate, ...), the same keys as the
+#                                  digest map, so the cluster pulls the exact
+#                                  image this release built and never a tag
+#                                  someone could move. (This used to be sent as
+#                                  services.<image-name>.image.digest, which
+#                                  the chart never read: its `services` keys are
+#                                  camelCase and carry no digest. See F112.)
+#   deploy/scripts/helm-image-digests.py check renders the release with the
+#                                  real values and fails it if any Nexus image
+#                                  does not resolve to its digest.
 #
-# ─── What the chart has to provide ───────────────────────────────────────
+# ─── What else the chart provides ────────────────────────────────────────
 #
-#   services.<name>.image.digest   set per service from the digest map, so the
-#                                  cluster pulls the exact image this release
-#                                  built and never a tag someone could move
 #   a pre-upgrade hook running the migrate image, because schema migrations are
 #   applied by a dedicated job and never by a service at startup (ADR-0011
 #   rule 4) -- with --wait, so no service starts against a half-migrated schema
@@ -50,6 +54,15 @@ parameters:
   - name: releaseName
     type: string
     default: kgf-nexus
+  # The cluster controller is not in the chart: deploy/k8s/cluster-controller
+  # is a kustomize base. 'none' leaves it alone; 'base' (plan mode, read-only)
+  # or 'apply' installs it with the image this release built, by digest. Off by
+  # default: the base must first be given the environment's NEXUS_CLUSTER_NAME
+  # and bindings (docs/OPERATIONS.md section 12).
+  - name: clusterController
+    type: string
+    default: none
+    values: [none, base, apply]
 
 steps:
   - script: |
@@ -73,6 +86,12 @@ steps:
         exit 1
       fi
       echo "✅ Found ${{ parameters.chartPath }}/Chart.yaml"
+      if [ ! -f '${{ parameters.valuesFile }}' ]; then
+        echo "The values file for ${{ parameters.environment }} does not exist: ${{ parameters.valuesFile }}" >&2
+        echo "Create it (existingSecret, image.tag, hosts, sizing) before enabling deployTo${{ parameters.environment }}." >&2
+        exit 1
+      fi
+      echo "✅ Found ${{ parameters.valuesFile }}"
     displayName: 'Verify the chart exists'
 
   - task: AzureCLI@2
@@ -99,26 +118,49 @@ steps:
         digests='$(imageDigests)'
         case "$digests" in \{*\}) ;; *) echo "imageDigests is not a JSON object: $digests" >&2; exit 1 ;; esac
 
-        # Turn the digest map into per-service image.digest values. Only the
-        # digest is passed, never the tag: the chart holds the repository, and
-        # the digest is the part that makes the pull unforgeable.
-        images="$(python3 - "$digests" <<'PY'
-        import json, sys
-        digests = json.loads(sys.argv[1])
-        print(json.dumps({
-            name: {"image": {"digest": ref.split("@", 1)[1]}}
-            for name, ref in digests.items()
-        }))
-        PY
-        )"
+        # The digest map becomes chart values: image.registry and
+        # image.repositoryPrefix from the common repository base, image.digests
+        # keyed by image name. The file is passed LAST, after the environment's
+        # values, so an environment file cannot override what was built.
+        release_values="$(mktemp --suffix=.yaml)"
+        trap 'rm -f "$KUBECONFIG" "$release_values"' EXIT
+        python3 deploy/scripts/helm-image-digests.py values "$digests" > "$release_values"
+
+        # Render exactly what is about to be installed and refuse the release if
+        # any Nexus image would not run the digest this pipeline built.
+        # cluster-controller is released through its kustomize base
+        # (deploy/k8s/cluster-controller), not this chart. artifact-gc is listed
+        # until the chart deploys it; drop it from here when it does.
+        python3 deploy/scripts/helm-image-digests.py check "$digests" \
+          --chart '${{ parameters.chartPath }}' \
+          --values '${{ parameters.valuesFile }}' \
+          --set image.tag='$(tag)' \
+          --not-in-chart cluster-controller \
+          --not-in-chart artifact-gc
 
         helm upgrade --install '${{ parameters.releaseName }}' '${{ parameters.chartPath }}' \
           --namespace '${{ parameters.namespace }}' --create-namespace \
           --values '${{ parameters.valuesFile }}' \
-          --set-json "services=$images" \
+          --values "$release_values" \
+          --set image.tag='$(tag)' \
           --wait --timeout 15m --atomic
         # --atomic rolls the release back if it does not become ready, so a
         # failed deploy leaves the previous version serving rather than a
         # half-updated set of deployments.
+
+        if [ '${{ parameters.clusterController }}' != none ]; then
+          # The kustomize base names kgf-nexus/cluster-controller:0.1.0, which
+          # no registry serves. The overlay script retargets it (and the
+          # example worker's kgf-nexus/agent) to this release's digests, and
+          # fails if the rendered Deployment would run anything else.
+          ref() { python3 -c 'import json,sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "$digests" "$1"; }
+          cc_manifests="$(mktemp --suffix=.yaml)"
+          trap 'rm -f "$KUBECONFIG" "$release_values" "$cc_manifests"' EXIT
+          NAMESPACE='${{ parameters.namespace }}' AGENT_IMAGE="$(ref agent)" \
+            deploy/scripts/cluster-controller-overlay.sh '${{ parameters.clusterController }}' "$(ref cluster-controller)" \
+            > "$cc_manifests"
+          kubectl apply -f "$cc_manifests"
+          kubectl -n '${{ parameters.namespace }}' rollout status deploy/nexus-cluster-controller --timeout=5m
+        fi
 
         kubectl -n '${{ parameters.namespace }}' get deployments -o wide

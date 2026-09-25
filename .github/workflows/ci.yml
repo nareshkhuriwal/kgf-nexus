@@ -29,10 +29,12 @@ permissions:
 
 env:
   GO_VERSION: "1.25"
-  # The console's image builds on node:20-alpine (deploy/Dockerfile.ui) and the
-  # Azure gate pins the same major, so a lockfile that resolves here resolves
-  # in the image too. Move all three together.
-  NODE_VERSION: "20"
+  # Node 24 (Active LTS, supported to 2028-04-30; Node 20 went EOL 2026-04-30).
+  # The exact patch, so CI and the console image (deploy/Dockerfile.ui,
+  # node:24.21.0-alpine) run the same Node and npm, and a lockfile that resolves
+  # here resolves in the image. Move all four together: this file, both Azure
+  # pipelines and the Dockerfile (docs/OPERATIONS.md section 20.3).
+  NODE_VERSION: "24.21.0"
 
 jobs:
   # Fast feedback. Deliberately first and deliberately cheap: a build error or a
@@ -76,6 +78,28 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      # The S3 half of the integration suite (result store, durable logs, log
+      # GC) needs a real S3 store. Not a `services:` entry: the image needs a
+      # `server /data` argv, which service containers cannot pass. Same pinned
+      # digest as deploy/docker-compose.yml (F111).
+      # Provenance before use: the pinned digest must carry a GitHub build
+      # attestation from pgsty/silo's release workflow (F111).
+      - name: Verify the S3 image's build provenance
+        run: make verify-s3-image
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Start a throwaway S3 store (Silo)
+        run: |
+          set -euo pipefail
+          docker run -d --name nexus-ci-s3 -p 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER=nexus-ci -e MINIO_ROOT_PASSWORD=nexus-ci-password \
+            "$(make -s print-s3-image)" server /data
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9000/minio/health/ready && exit 0
+            sleep 1
+          done
+          docker logs nexus-ci-s3 >&2
+          exit 1
       # Migrations are applied by a job, never by a service at startup
       # (ADR-0011 rule 4). This is that job.
       - name: Apply migrations
@@ -90,10 +114,11 @@ jobs:
       # A skip is indistinguishable from a pass in `go test` output (F85), so
       # the suite runs ONCE, verbosely, and the job fails if any test skipped
       # for want of a database -- in any package, not just internal/store.
-      # testdb.SkipMarker is the exact text such a skip prints. Tests that skip
-      # for a different reason -- no NATS broker (run by the nats-integration
-      # job below), no Kubernetes cluster, no Mailpit -- print a different
-      # message and are not caught here.
+      # testdb.SkipMarker is the exact text such a skip prints, and
+      # tests3.SkipMarker the object-store equivalent (NEXUS_TEST_S3_*). Tests
+      # that skip for a different reason -- no NATS broker (run by the
+      # nats-integration job below), no Kubernetes cluster, no Mailpit -- print
+      # a different message and are not caught here.
       #
       # -p 1: the packages share one database, and some assertions (timer
       # claims, reservation sums) are only meaningful without another package
@@ -109,12 +134,20 @@ jobs:
             grep "skipping integration test: no test database" integration.log >&2
             exit 1
           fi
+          if grep -q "skipping integration test: no test S3 store" integration.log; then
+            echo "integration tests SKIPPED -- NEXUS_TEST_S3_* unset or unreachable; treating as failure (F85)" >&2
+            grep "skipping integration test: no test S3 store" integration.log >&2
+            exit 1
+          fi
           if [ "$status" != 0 ]; then
             tail -300 integration.log >&2
           fi
           exit "$status"
         env:
           NEXUS_TEST_DATABASE_URL: postgres://nexus:nexus-dev-password@localhost:5432/nexus?sslmode=disable
+          NEXUS_TEST_S3_ENDPOINT: 127.0.0.1:9000
+          NEXUS_TEST_S3_ACCESS_KEY_ID: nexus-ci
+          NEXUS_TEST_S3_SECRET_ACCESS_KEY: nexus-ci-password
 
   # The outbox relay and dispatch hints against a REAL NATS JetStream server and a
   # REAL Postgres, each in a throwaway container the script starts itself. It
@@ -133,6 +166,38 @@ jobs:
           cache: true
       - name: Run NATS/outbox integration suite
         run: tests/nats/run-integration.sh
+
+  # The Helm chart: lint, then prove every Nexus image the chart renders takes
+  # its digest from image.digests -- the key the release pipeline sets from its
+  # digest map (templates/deploy-aks.yml). The release re-runs the same check
+  # against the real map and environment values before `helm upgrade` (F112).
+  helm:
+    name: helm lint and image-digest check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: helm lint
+        run: |
+          helm version
+          helm lint deploy/helm/kgf-nexus \
+            --set existingSecret=ci --set image.tag=ci --set nats.auth.mode=none
+      - name: Every rendered Nexus image resolves to its digest
+        run: |
+          python3 deploy/scripts/helm-image-digests.py self-test \
+            --chart deploy/helm/kgf-nexus \
+            --set existingSecret=ci --set image.tag=ci --set nats.auth.mode=none
+      # The cluster controller ships as a kustomize base, not in the chart; the
+      # release retargets its placeholder image to the built digest. Prove the
+      # overlay does that in both modes.
+      - name: cluster-controller overlay takes the release digest
+        run: |
+          set -euo pipefail
+          d=sha256:$(printf '%064d' 1)
+          for mode in base apply; do
+            NAMESPACE=ci AGENT_IMAGE="ci.example/nexus/agent@$d" \
+              deploy/scripts/cluster-controller-overlay.sh "$mode" "ci.example/nexus/cluster-controller@$d" >/dev/null
+          done
 
   # The operator console: typecheck, component tests and the production build.
   # The same steps, in the same order, as the Azure gate's UserInterface stage.

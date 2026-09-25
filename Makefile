@@ -98,6 +98,18 @@ BENCH_PG_PORT     ?= 55541
 BENCH_MINIO_PORT  ?= 55542
 BENCH_DSN         ?=
 BENCH_MINIO       ?= localhost:$(BENCH_MINIO_PORT)
+# The S3 store for benchmarks and disposable test stores. Silo, the community
+# MinIO fork, pinned by digest: MinIO no longer publishes pullable images (F111).
+# Keep in step with deploy/docker-compose.yml.
+S3_IMAGE          ?= docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
+
+print-s3-image: ## Print the pinned S3 (Silo) image reference, for CI and scripts
+	@echo '$(S3_IMAGE)'
+
+verify-s3-image: ## Verify the pinned S3 image's GitHub build provenance (needs gh, network)
+	@command -v gh >/dev/null || { echo "gh not found; install the GitHub CLI"; exit 1; }
+	gh attestation verify 'oci://$(S3_IMAGE)' --repo pgsty/silo \
+	  --signer-workflow pgsty/silo/.github/workflows/docker-release.yml
 
 bench-pg: ## Start a disposable, migrated Postgres + MinIO for the benchmarks
 	@docker inspect $(BENCH_NAME)-pg >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-pg \
@@ -105,7 +117,7 @@ bench-pg: ## Start a disposable, migrated Postgres + MinIO for the benchmarks
 	  postgres:16-alpine -c max_connections=300 -c shared_buffers=512MB >/dev/null
 	@docker inspect $(BENCH_NAME)-minio >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-minio \
 	  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin -p 127.0.0.1:$(BENCH_MINIO_PORT):9000 \
-	  quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data >/dev/null
+	  $(S3_IMAGE) server /data >/dev/null
 	@for i in $$(seq 1 30); do docker exec $(BENCH_NAME)-pg pg_isready -U postgres -d nexus >/dev/null 2>&1 && break; sleep 1; done
 	DATABASE_URL=postgres://postgres:bench@localhost:$(BENCH_PG_PORT)/nexus?sslmode=disable \
 	  MIGRATIONS_DIR=$(MIGRATIONS) sh deploy/migrate.sh
@@ -126,19 +138,12 @@ bench-inline: ## Postgres-inline vs MinIO round trip by payload size (needs BENC
 # targets are the local equivalent of that job.
 migrate-up: ## Apply all *.up.sql migrations to DATABASE_URL
 	@command -v psql >/dev/null || { echo "psql not found; use 'make up' to run the compose migration job instead"; exit 1; }
-	@set -euo pipefail; \
-	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
-	  "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"; \
-	for f in $(MIGRATIONS)/*.up.sql; do \
-	  v=$$(basename "$$f" .up.sql); \
-	  if [ "$$(psql "$(DATABASE_URL)" -tAc "SELECT 1 FROM schema_migrations WHERE version='$$v'")" = "1" ]; then \
-	    echo "migrate-up: $$v already applied"; continue; \
-	  fi; \
-	  echo "migrate-up: applying $$v"; \
-	  psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 --single-transaction -q -f "$$f"; \
-	  psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c "INSERT INTO schema_migrations (version) VALUES ('$$v')"; \
-	done; \
-	echo "migrate-up: done"
+	@# The SAME script the compose/Helm migration job runs, so the local target
+	@# cannot drift from it. The inline loop this replaced ignored the
+	@# `-- migrate: no-transaction` opt-out and failed on 0015 (CREATE INDEX
+	@# CONCURRENTLY inside --single-transaction), which broke every CI
+	@# integration job that runs `make migrate-up`.
+	DATABASE_URL='$(DATABASE_URL)' MIGRATIONS_DIR=$(MIGRATIONS) sh deploy/migrate.sh
 
 migrate-down: ## Roll back all *.down.sql migrations, newest first (DESTRUCTIVE)
 	@command -v psql >/dev/null || { echo "psql not found"; exit 1; }

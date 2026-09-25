@@ -56,7 +56,8 @@ instead of editing it. A silent divergence breaks every other workstream.
 `postgres://postgres:test@localhost:55432/nexus` — schema already applied.
 This is a note about one developer setup, not a default: no service or test
 falls back to it. Services require an explicit DSN (docs/OPERATIONS.md §8) and
-integration tests read only `NEXUS_TEST_DATABASE_URL`. On some machines 55432
+integration tests read only `NEXUS_TEST_DATABASE_URL` (and, for the object
+store, only `NEXUS_TEST_S3_*`; see `internal/tests3`). On some machines 55432
 belongs to an unrelated product's Postgres; check before pointing anything at it.
 
 ## MICROSERVICE DECOMPOSITION (ADR-0011) — binding

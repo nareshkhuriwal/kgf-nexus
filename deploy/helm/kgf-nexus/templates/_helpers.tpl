@@ -18,10 +18,25 @@ SPDX-License-Identifier: Apache-2.0
 {{- end -}}
 {{- end -}}
 
-{{/* <registry><prefix><component>:<tag> */}}
+{{/*
+<registry><prefix><component>:<tag>, plus @<digest> when image.digests has one
+for the component. image.digests is keyed by IMAGE name (api-gateway, agent,
+migrate, ...), the same names the release pipeline's digest map uses, so the
+map is passed straight through (--set-json image.digests=...) with no
+renaming. A digest must be sha256:<64 hex>; anything else fails the render
+rather than producing a reference the kubelet rejects at pull time.
+*/}}
 {{- define "nexus.image" -}}
 {{- $root := index . 0 -}}{{- $component := index . 1 -}}
-{{- printf "%s%s%s:%s" $root.Values.image.registry $root.Values.image.repositoryPrefix $component $root.Values.image.tag -}}
+{{- $ref := printf "%s%s%s:%s" $root.Values.image.registry $root.Values.image.repositoryPrefix $component $root.Values.image.tag -}}
+{{- $digest := index ($root.Values.image.digests | default dict) $component | default "" -}}
+{{- if $digest -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
+{{- fail (printf "image.digests.%s must be sha256:<64 hex>, got %q" $component $digest) -}}
+{{- end -}}
+{{- $ref = printf "%s@%s" $ref $digest -}}
+{{- end -}}
+{{- $ref -}}
 {{- end -}}
 
 {{- define "nexus.labels" -}}
@@ -300,7 +315,14 @@ is not enough -- every dirty build of one commit shares its 12-character
 prefix, and reusing that name makes the upgrade fail on an immutable field.
 */}}
 {{- define "nexus.jobSuffix" -}}
+{{- /* The migrate digest too, when pinned: a rebuilt image under the same tag
+       is a different pod template, so it needs a different Job name. */ -}}
+{{- $digest := index (.Values.image.digests | default dict) "migrate" | default "" -}}
+{{- if $digest -}}
+{{- printf "%s@%s" .Values.image.tag $digest | sha256sum | trunc 10 -}}
+{{- else -}}
 {{- .Values.image.tag | sha256sum | trunc 10 -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
