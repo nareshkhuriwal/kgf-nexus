@@ -2915,7 +2915,7 @@ AIStor (license key), building the archived upstream tag (unpatched forever),
 Chainguard (free tier is `latest` only, no `mc`), Bitnami (versioned images
 moved to the unmaintained `bitnamilegacy` in August 2025). No Dockerfile is
 needed because a verifiable prebuilt image exists. Full assessment and bump
-procedure: docs/OPERATIONS.md §20.
+procedure: docs/OPERATIONS.md §22.
 
 **Verified locally (2026-09-25, Apple M4 Pro, Docker Desktop 29.6.2).**
 `gh attestation verify` passes for the digest (and fails against the wrong
@@ -2984,3 +2984,72 @@ fails for a wrong digest and for an unrendered image.
 from before the fix (every image "expected @sha256:..."); `check` with an
 11-image map shaped like the pipeline's passes. Not verified: a real release
 (no AKS environment is enabled).
+
+### F113. The Helm chart's schedulers were invisible to the cluster controller, and a chart-only upgrade could not be applied — FIXED
+
+Found while porting the cluster controller into the chart and installing it on
+docker-desktop (namespace `nexus-w2c-helm`, docs/OPERATIONS.md §20.8). Four
+chart defects, one root theme: labels and names the chart never had to agree
+with anything on before.
+
+1. **Schedulers not observed.** The controller lists scheduler Deployments with
+   `app.kubernetes.io/part-of=kgf-nexus,app.kubernetes.io/component=scheduler`
+   (`services/cluster-controller/internal/controller/observe.go`,
+   `SchedulerSelector`), matching `deploy/k8s`. The chart set no `part-of` label
+   at all and gave each scheduler Deployment its own component
+   (`scheduler-gpu`). Read-only check against the existing `nexus-dev` release:
+   `kubectl -n nexus-dev get deploy -l <selector>` returns nothing, so the
+   console's Live cluster tab would have shown no scheduler and no scheduler
+   HPA for any Helm install.
+2. **Chart-only upgrades failed on an immutable Job.** The migrate, bootstrap
+   and minio-init Jobs were named by a hash of the image tag alone. Any chart
+   change to their pod template at the same tag -- here, adding the label from
+   (1) -- made `helm upgrade` fail with `spec.template: field is immutable`
+   (reproduced upgrading an origin/main release in place).
+3. **Unquoted release name.** `app.kubernetes.io/instance: {{ .Release.Name }}`
+   renders a release named `n`, `y`, `on`, `no`, `true`… as a YAML boolean, and
+   every object carrying it is invalid (kubeconform: "got boolean, want
+   string" on all 38 objects for release `n`).
+4. **`--reuse-values` from an older chart** replays the old computed values and
+   drops the new version's defaults, which surfaced as a `deepCopy` panic on a
+   nil value deep in a template.
+
+**Fix.**
+- Every object carries `app.kubernetes.io/part-of: kgf-nexus` (not in any
+  selector, so no immutable field changes). Scheduler *Deployment objects* are
+  labelled `component=scheduler` plus `nexus.khuriwalgroup.com/queue`; their
+  pods and selectors keep the per-queue component. Verified live: the
+  controller reported both `scheduler` and `scheduler-gpu`.
+- `nexus.jobSuffix` hashes the image tag **and** the chart version (and, as
+  merged with F112, the pinned migrate digest and `minio.mcImage`); the chart
+  is now 0.2.0. migrate and bootstrap are idempotent, so a re-run per chart
+  version is harmless. Verified: origin/main's chart upgraded in place.
+- The release name is quoted everywhere; `deploy/helm/validate.sh` renders
+  with release name `on` so a regression fails kubeconform.
+- The chart detects the missing sections and fails with "upgrade with
+  --reset-then-reuse-values or -f" (OPERATIONS §20.2). Verified both paths.
+
+### F114. A worker token minted by the API cannot authenticate an agent — OPEN
+
+`POST /v1/namespaces/{ns}/tokens` accepts role `worker` and scope `worker_rpc`
+(`services/api-gateway/rest/admin.go`, `validateNewToken`) and returns an
+`nxtok_…` token. The worker gRPC listener authenticates every RPC with
+`auth.Authenticate` (`services/api-gateway/workergrpc/interceptor.go:32`), which
+only looks up the legacy `api_keys` table (`authn/authn.go:201`); only
+`AuthenticateCredential` (`authn/identity.go:110`) understands `nxtok_`. So the
+token the API issues for workers is rejected as "invalid credentials" by the one
+protocol it is scoped for.
+
+**Impact.** There is no API path to a working worker credential. Every
+installer falls back to writing a SHA-256 hash into `api_keys` directly: `make
+seed`, the chart's bootstrap Job, and now `nexusctl up` (which does everything
+else through the API -- registration, verification, login, the admin token --
+and documents this one step, cli/README.md). Worker credentials therefore also
+miss what scoped tokens have: expiry, revocation from the console, audit
+attribution.
+
+**Proposed fix.** Authenticate the worker listener with `AuthenticateCredential`
+and require `ActionWorkerRPC` on the resulting principal (legacy `api_keys` rows
+with role `worker` keep working through its default branch). Add an integration
+test that mints a worker token through the REST API and registers an agent with
+it. Then `nexusctl up` and the bootstrap Job can drop their SQL step.

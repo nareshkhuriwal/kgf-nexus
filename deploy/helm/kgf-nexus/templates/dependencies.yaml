@@ -292,7 +292,7 @@ spec:
             matchLabels: {{- include "nexus.selector" (list . "event-service") | nindent 14 }}
         - podSelector:
             matchLabels:
-              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/instance: {{ .Release.Name | quote }}
               nexus.khuriwalgroup.com/role: agent
         {{- with .Values.nats.networkPolicy.extraFrom }}
         {{- toYaml . | nindent 8 }}

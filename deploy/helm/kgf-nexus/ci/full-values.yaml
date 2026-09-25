@@ -1,0 +1,53 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Every optional feature on at once: mTLS with a self-signed bootstrap CA,
+# HPAs, the cluster controller in apply mode, custom PDBs and a scheduler HPA.
+# Render-only (deploy/helm/validate.sh); apply mode's UID check is skipped by
+# `helm template` because lookup returns nothing there.
+existingSecret: nexus-credentials
+image: { tag: 0123456789ab }
+nats:
+  auth: { mode: none }
+  tls:
+    enabled: true
+    secretName: nexus-nats-tls
+    clientSecrets: { eventService: nexus-event-service-tls, agent: nexus-agent-tls }
+tls:
+  enabled: true
+  certManager:
+    natsLeaves: true
+    gatewayExtraDnsNames: [workers.example.com]
+autoscaling:
+  enabled: true
+  targetMemoryUtilizationPercentage: 80
+services:
+  eventService:
+    autoscaling: { minReplicas: 3, maxReplicas: 3 }
+clusterController:
+  enabled: true
+  clusterName: dev
+  workerNamespaces: [nexus-workers, nexus-gpu-workers]
+  apply: { enabled: true, expectedClusterUID: 00000000-0000-0000-0000-000000000000 }
+placement:
+  priorityClassName: nexus-critical
+  topologySpread: { whenUnsatisfiable: DoNotSchedule }
+schedulers:
+  - name: scheduler
+    queue: default
+    replicas: 3
+    podDisruptionBudget: { minAvailable: 2, maxUnavailable: null }
+    resources:
+      requests: { cpu: 250m, memory: 128Mi }
+      limits: { memory: 512Mi }
+  - name: scheduler-gpu
+    queue: gpu
+    autoscaling: { enabled: true, minReplicas: 2, maxReplicas: 4 }
+metrics:
+  serviceMonitor: { enabled: true }
+artifactGC:
+  mode: delete
+  confirmDelete: true
+  logRetention: 720h
+  pushgatewayUrl: http://prometheus-pushgateway.monitoring:9091
+  timeZone: Europe/London

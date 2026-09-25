@@ -127,16 +127,36 @@ steps:
         python3 deploy/scripts/helm-image-digests.py values "$digests" > "$release_values"
 
         # Render exactly what is about to be installed and refuse the release if
-        # any Nexus image would not run the digest this pipeline built.
-        # cluster-controller is released through its kustomize base
-        # (deploy/k8s/cluster-controller), not this chart. artifact-gc is listed
-        # until the chart deploys it; drop it from here when it does.
+        # any Nexus image would not run the digest this pipeline built. The
+        # chart deploys artifact-gc (its CronJob) through nexus.image, so it is
+        # checked like every other image. cluster-controller is rendered by the
+        # chart only when the environment sets clusterController.enabled; then
+        # it is checked here too (a rendered image is always checked). When
+        # this environment releases it through the kustomize base instead
+        # (parameters.clusterController), the overlay step below proves it, and
+        # the chart must not ALSO run one: two controllers would fight.
+        chart_controller=$(helm template digest-check '${{ parameters.chartPath }}' \
+            --values '${{ parameters.valuesFile }}' --set image.tag='$(tag)' \
+          | grep -c '/cluster-controller[:@]' || true)
+        if [ '${{ parameters.clusterController }}' != none ] && [ "$chart_controller" != 0 ]; then
+          echo "clusterController.enabled in the chart values AND clusterController=${{ parameters.clusterController }} (kustomize): pick one" >&2
+          exit 1
+        fi
         python3 deploy/scripts/helm-image-digests.py check "$digests" \
           --chart '${{ parameters.chartPath }}' \
           --values '${{ parameters.valuesFile }}' \
           --set image.tag='$(tag)' \
-          --not-in-chart cluster-controller \
-          --not-in-chart artifact-gc
+          --not-in-chart cluster-controller
+        # And prove the chart's controller template honours its digest even
+        # when this environment does not enable it, so switching to the chart
+        # path later cannot silently run a tag.
+        python3 deploy/scripts/helm-image-digests.py check "$digests" \
+          --chart '${{ parameters.chartPath }}' \
+          --values '${{ parameters.valuesFile }}' \
+          --set image.tag='$(tag)' \
+          --set clusterController.enabled=true \
+          --set clusterController.clusterName=digest-check \
+          --set clusterController.apply.enabled=false
 
         helm upgrade --install '${{ parameters.releaseName }}' '${{ parameters.chartPath }}' \
           --namespace '${{ parameters.namespace }}' --create-namespace \

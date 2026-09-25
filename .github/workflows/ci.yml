@@ -186,10 +186,11 @@ jobs:
         run: |
           python3 deploy/scripts/helm-image-digests.py self-test \
             --chart deploy/helm/kgf-nexus \
-            --set existingSecret=ci --set image.tag=ci --set nats.auth.mode=none
-      # The cluster controller ships as a kustomize base, not in the chart; the
-      # release retargets its placeholder image to the built digest. Prove the
-      # overlay does that in both modes.
+            --set existingSecret=ci --set image.tag=ci --set nats.auth.mode=none \
+            --set clusterController.enabled=true --set clusterController.clusterName=ci
+      # The cluster controller also ships as a kustomize base (the chart path
+      # is optional); the release retargets that base's placeholder image to
+      # the built digest. Prove the overlay does that in both modes.
       - name: cluster-controller overlay takes the release digest
         run: |
           set -euo pipefail
@@ -340,3 +341,34 @@ jobs:
       - name: Tear down
         if: always()
         run: make down
+
+  # Mixed-version skew (ADR-0011 rule 5, docs/COMPATIBILITY.md §7): the PREVIOUS
+  # release's database integration suite, run against a database upgraded to
+  # THIS tree's migrations. Previous = newest vX.Y.Z tag; without one, the main
+  # tip on a PR, or main~1 on a push to main. It needs history for that, hence
+  # fetch-depth: 0. The script starts and removes its own Postgres container.
+  compat:
+    name: previous-release skew smoke
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Run the previous release's suite against this schema
+        run: make compat-smoke
+        env:
+          NEXUS_COMPAT_LOG: ${{ runner.temp }}/compat.jsonl
+      - name: Upload the go test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-go-test-log
+          path: ${{ runner.temp }}/compat.jsonl
+          if-no-files-found: ignore
+          retention-days: 14

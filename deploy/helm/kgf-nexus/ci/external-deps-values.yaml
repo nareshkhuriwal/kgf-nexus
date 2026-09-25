@@ -1,0 +1,54 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Production shape: managed Postgres and object store, no in-cluster
+# dependencies, NATS off, mTLS through an existing ClusterIssuer, a trust
+# bundle ConfigMap, HPAs, controller observe-only, GC report-only.
+existingSecret: nexus-credentials
+image: { tag: 0123456789ab, registry: registry.example.com/ }
+postgres:
+  enabled: false
+  host: nexus.postgres.database.azure.com
+  sslmode: verify-full
+minio:
+  enabled: false
+  endpoint: https://s3.eu-west-1.amazonaws.com
+  useTLS: true
+nats:
+  enabled: false
+tls:
+  enabled: true
+  caBundleConfigMap: nexus-ca-bundle
+  certManager:
+    issuerRef: { name: nexus-internal-ca, kind: ClusterIssuer }
+autoscaling:
+  enabled: true
+podDisruptionBudget:
+  maxUnavailable: null
+  minAvailable: 1
+services:
+  apiGateway: { replicas: 2 }
+  workflowManager: { replicas: 2 }
+  dagEngine: { replicas: 2 }
+  resourceManager: { replicas: 2 }
+  eventService: { replicas: 2 }
+schedulers:
+  - { name: scheduler, queue: default, replicas: 2 }
+agents:
+  - name: agent-cpu
+    replicas: 2
+    queues: default
+    labels: "zone=cluster,accelerator=none"
+    cpuMillis: 2000
+    memoryBytes: 4294967296
+    diskBytes: 10737418240
+    resources:
+      requests: { cpu: 250m, memory: 256Mi }
+      limits: { memory: 4Gi }
+ui:
+  replicas: 2
+clusterController:
+  enabled: true
+  clusterName: prod-weu
+placement:
+  priorityClassName: nexus-critical

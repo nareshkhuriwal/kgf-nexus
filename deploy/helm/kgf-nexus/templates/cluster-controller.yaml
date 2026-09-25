@@ -1,0 +1,248 @@
+{{- /*
+Copyright 2026 Khuriwal Group
+SPDX-License-Identifier: Apache-2.0
+
+The cluster controller (services/cluster-controller), ported from
+deploy/k8s/cluster-controller/{base,apply}. Design and safety argument:
+docs/CLUSTER-SCALING.md; runbook: docs/OPERATIONS.md §12 and §20.
+
+Least privilege:
+  Role (release ns)          leases get/create/update (its own leader election),
+                             deployments + HPAs read (schedulers and their HPAs)
+  Role (each worker ns)      deployments, pods, resourcequotas, jobs: read only
+  ClusterRole                nodes read; the kube-system Namespace object, get
+                             only (the cluster identity) -- observeNodes
+  Role (each worker ns)      ONLY with apply.enabled: deployments/scale update
+                             and pods patch. Nothing else, anywhere.
+*/ -}}
+{{- include "nexus.valuesComplete" . }}
+{{- $cc := .Values.clusterController }}
+{{- if $cc.enabled }}
+{{- if not $cc.clusterName }}
+{{- fail "clusterController.clusterName is required: the registry name (clusters.name) registered in the console under Cluster & scaling -> Live cluster" }}
+{{- end }}
+{{- if $cc.apply.enabled }}
+{{- if not $cc.apply.expectedClusterUID }}
+{{- fail "clusterController.apply.enabled requires clusterController.apply.expectedClusterUID: `kubectl get namespace kube-system -o jsonpath='{.metadata.uid}'` against the INTENDED cluster (docs/OPERATIONS.md §12.3)" }}
+{{- end }}
+{{- /* lookup is empty under `helm template` and --dry-run=client; the check runs on a real install/upgrade. */}}
+{{- $ks := lookup "v1" "Namespace" "" "kube-system" }}
+{{- if and $ks (ne ($ks.metadata.uid | default "") $cc.apply.expectedClusterUID) }}
+{{- fail (printf "clusterController.apply.expectedClusterUID %q does not match this cluster's kube-system UID %q: refusing to enable apply mode on the wrong cluster" $cc.apply.expectedClusterUID $ks.metadata.uid) }}
+{{- end }}
+{{- end }}
+{{- $name := "nexus-cluster-controller" }}
+{{- $workerNamespaces := $cc.workerNamespaces | default (list .Release.Namespace) }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels: {{- include "nexus.labels" (list . "cluster-controller") | nindent 4 }}
+# The controller talks to the Kubernetes API with this token (and to Nexus
+# only over gRPC); it is the one Nexus pod that needs it mounted.
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels: {{- include "nexus.labels" (list . "cluster-controller") | nindent 4 }}
+rules:
+  # Leader election: create once, then get/update to hold and renew.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update]
+  # Observe the scheduler Deployments and their HPAs.
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels: {{- include "nexus.labels" (list . "cluster-controller") | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }} }
+subjects:
+  - { kind: ServiceAccount, name: {{ $name }}, namespace: {{ .Release.Namespace }} }
+{{- range $ns := $workerNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-observe
+  namespace: {{ $ns }}
+  labels: {{- include "nexus.labels" (list $ "cluster-controller") | nindent 4 }}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch]
+  # Pods map to worker rows (the agent's hostname is the pod name) and are
+  # checked for readiness before any scale-in.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  # Quotas bound scale-out, so an over-quota request is a visible decision.
+  - apiGroups: [""]
+    resources: [resourcequotas]
+    verbs: [get, list, watch]
+  # Task Jobs are reported, never created or deleted.
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-observe
+  namespace: {{ $ns }}
+  labels: {{- include "nexus.labels" (list $ "cluster-controller") | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-observe }
+subjects:
+  - { kind: ServiceAccount, name: {{ $name }}, namespace: {{ $.Release.Namespace }} }
+{{- if $cc.apply.enabled }}
+---
+# Opt-in 3 of 3 (docs/CLUSTER-SCALING.md): the replica count and the
+# pod-deletion-cost annotation, nothing else -- not the Deployment's image or
+# template, not create/delete/exec on pods, not the scheduler, not nodes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-apply
+  namespace: {{ $ns }}
+  labels: {{- include "nexus.labels" (list $ "cluster-controller") | nindent 4 }}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments/scale]
+    verbs: [update]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-apply
+  namespace: {{ $ns }}
+  labels: {{- include "nexus.labels" (list $ "cluster-controller") | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-apply }
+subjects:
+  - { kind: ServiceAccount, name: {{ $name }}, namespace: {{ $.Release.Namespace }} }
+{{- end }}
+{{- end }}
+{{- if $cc.observeNodes }}
+---
+# Cluster-scoped objects need a ClusterRole. Named per release namespace, so
+# two releases in one cluster do not collide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-{{ .Release.Namespace }}
+  labels: {{- include "nexus.labels" (list . "cluster-controller") | nindent 4 }}
+rules:
+  # Capacity context only; nodes are scaled by the cluster autoscaler.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  # Only the kube-system Namespace object, only get: its UID is the cluster
+  # identity that apply mode is verified against.
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [kube-system]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-{{ .Release.Namespace }}
+  labels: {{- include "nexus.labels" (list . "cluster-controller") | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $name }}-{{ .Release.Namespace }} }
+subjects:
+  - { kind: ServiceAccount, name: {{ $name }}, namespace: {{ .Release.Namespace }} }
+{{- end }}
+---
+# In-cluster only, for the ServiceMonitor's "metrics" port; nothing calls the
+# controller.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels: {{- include "nexus.labels" (list . "cluster-controller") | nindent 4 }}
+spec:
+  selector: {{- include "nexus.selector" (list . "cluster-controller") | nindent 4 }}
+  ports:
+    - { name: metrics, port: 9464, targetPort: http }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels: {{- include "nexus.labels" (list . "cluster-controller") | nindent 4 }}
+spec:
+  replicas: {{ $cc.replicas }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: {{- include "nexus.selector" (list . "cluster-controller") | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    # One at a time, so a rollout never leaves zero candidates for the Lease.
+    rollingUpdate: { maxUnavailable: 1, maxSurge: 0 }
+  template:
+    metadata:
+      labels: {{- include "nexus.labels" (list . "cluster-controller") | nindent 8 }}
+      {{- include "nexus.metricsAnnotations" (list . 8090) | nindent 6 }}
+    spec:
+      serviceAccountName: {{ $name }}
+      {{- include "nexus.pullSecrets" . | nindent 6 }}
+      # Enough for the leader to finish a cycle and release its Lease, so the
+      # standby takes over in seconds rather than a full lease duration.
+      terminationGracePeriodSeconds: {{ $cc.terminationGracePeriodSeconds }}
+      securityContext: {{- include "nexus.podSecurity" . | nindent 8 }}
+      {{- include "nexus.placement" (list . "cluster-controller") | nindent 6 }}
+      containers:
+        - name: controller
+          image: {{ include "nexus.image" (list . "cluster-controller") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - { name: NEXUS_CLUSTER_NAME, value: {{ $cc.clusterName | quote }} }
+            - { name: NEXUS_RM_ADDR, value: "resource-manager:9090" }
+            # Opt-in 2 of 3. False = plan (dry run), whatever the registry says.
+            - { name: NEXUS_CONTROLLER_ALLOW_APPLY, value: {{ ternary "true" "false" $cc.apply.enabled | quote }} }
+            - { name: NEXUS_CONTROLLER_INTERVAL, value: {{ $cc.interval | quote }} }
+            - { name: NEXUS_JOB_LABEL_SELECTOR, value: {{ $cc.jobLabelSelector | quote }} }
+            - { name: CONTROLLER_HTTP_ADDR, value: ":8090" }
+            - { name: CONTROLLER_LOG_LEVEL, value: {{ $cc.logLevel | quote }} }
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            {{- include "nexus.tlsEnv" (list . "client") | nindent 12 }}
+          ports:
+            - { name: http, containerPort: 8090 }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+          # /readyz: "standby" on the follower; fails on the leader after four
+          # intervals without a successful cycle -- alert on that.
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 15
+            failureThreshold: 4
+          resources: {{- toYaml $cc.resources | nindent 12 }}
+          securityContext:
+            {{- include "nexus.containerSecurity" . | nindent 12 }}
+            readOnlyRootFilesystem: true
+          {{- if .Values.tls.enabled }}
+          volumeMounts:
+            {{- include "nexus.tlsVolumeMounts" . | nindent 12 }}
+          {{- end }}
+      {{- if .Values.tls.enabled }}
+      volumes:
+        {{- include "nexus.tlsVolumes" (list . "cluster-controller") | nindent 8 }}
+      {{- end }}
+{{- include "nexus.pdb" (list . $name "cluster-controller" $cc.replicas $cc.podDisruptionBudget) }}
+{{- end }}

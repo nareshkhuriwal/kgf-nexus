@@ -1,0 +1,91 @@
+{{- /*
+Copyright 2026 Khuriwal Group
+SPDX-License-Identifier: Apache-2.0
+
+Scheduled result-store garbage collection (services/artifact-gc, ADR-0008,
+docs/OPERATIONS.md §7.7). Report-only unless artifactGC.mode=delete AND
+artifactGC.confirmDelete=true. Run once by hand:
+
+  kubectl create job --from=cronjob/artifact-gc artifact-gc-manual-$(date +%s)
+*/ -}}
+{{- include "nexus.valuesComplete" . }}
+{{- $gc := .Values.artifactGC }}
+{{- if $gc.enabled }}
+{{- if not (has $gc.mode (list "report" "delete")) }}
+{{- fail (printf "artifactGC.mode=%q: use report (the default) or delete" $gc.mode) }}
+{{- end }}
+{{- if and (eq $gc.mode "delete") (not $gc.confirmDelete) }}
+{{- fail "artifactGC.mode=delete permanently removes result-store objects and also needs artifactGC.confirmDelete=true. Run in report mode first and read the summary (docs/OPERATIONS.md §7.7)." }}
+{{- end }}
+{{- $delete := and (eq $gc.mode "delete") $gc.confirmDelete }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: artifact-gc
+  labels:
+    {{- include "nexus.labels" (list . "artifact-gc") | nindent 4 }}
+    nexus.khuriwalgroup.com/gc-mode: {{ ternary "delete" "report" $delete }}
+spec:
+  schedule: {{ $gc.schedule | quote }}
+  {{- with $gc.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  # Two sweeps at once would double the listing cost and race on deletes;
+  # the sweep is also bounded, so a backlog is simply finished next run.
+  concurrencyPolicy: {{ $gc.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $gc.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $gc.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $gc.failedJobsHistoryLimit }}
+  jobTemplate:
+    metadata:
+      labels: {{- include "nexus.labels" (list . "artifact-gc") | nindent 8 }}
+    spec:
+      backoffLimit: {{ $gc.backoffLimit }}
+      activeDeadlineSeconds: {{ $gc.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels: {{- include "nexus.labels" (list . "artifact-gc") | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          {{- include "nexus.pullSecrets" . | nindent 10 }}
+          securityContext: {{- include "nexus.podSecurity" . | nindent 12 }}
+          {{- with .Values.placement.priorityClassName }}
+          priorityClassName: {{ . | quote }}
+          {{- end }}
+          {{- with .Values.placement.nodeSelector }}
+          nodeSelector: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.placement.tolerations }}
+          tolerations: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: artifact-gc
+              image: {{ include "nexus.image" (list . "artifact-gc") }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args:
+                - -grace={{ $gc.grace }}
+                - -max-objects={{ $gc.maxObjects | int64 }}
+                {{- with $gc.prefix }}
+                - -prefix={{ . }}
+                {{- end }}
+                {{- with $gc.logRetention }}
+                - -log-retention={{ . }}
+                {{- end }}
+                {{- if $delete }}
+                - -delete
+                - -i-understand-this-deletes-data
+                {{- end }}
+              env:
+                {{- include "nexus.dbEnv" . | nindent 16 }}
+                {{- include "nexus.resultStoreEnv" . | nindent 16 }}
+                - { name: ARTIFACT_GC_LOG_LEVEL, value: {{ $gc.logLevel | quote }} }
+                {{- with $gc.pushgatewayUrl }}
+                - { name: ARTIFACT_GC_PUSHGATEWAY_URL, value: {{ . | quote }} }
+                {{- end }}
+              resources: {{- toYaml $gc.resources | nindent 16 }}
+              securityContext:
+                {{- include "nexus.containerSecurity" . | nindent 16 }}
+                readOnlyRootFilesystem: true
+{{- end }}

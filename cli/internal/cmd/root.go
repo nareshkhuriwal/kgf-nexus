@@ -165,6 +165,9 @@ func groups() []*group {
 // topLevel are commands with no noun, for the things an operator types most.
 func topLevel() []*command {
 	return []*command{
+		upCmd(),
+		downCmd(),
+		statusCmd(),
 		capacityCmd(),
 		logsCmd(),
 		eventsCmd(),
@@ -371,6 +374,11 @@ func printRootUsage(w io.Writer) {
 Usage:
   nexusctl <command> [flags]
   nexusctl <group> <command> [flags]
+
+Local quick start (Docker):
+  up                  Start a local stack and seed a tenant (credentials shown once)
+  status              Per-service state and health of the local stack
+  down                Stop it; --volumes also deletes its data
 
 Workflow specs:
   workflow submit     Submit a spec (JSON or YAML); --dry-run validates only

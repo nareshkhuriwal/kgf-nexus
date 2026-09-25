@@ -42,8 +42,12 @@ rather than producing a reference the kubelet rejects at pull time.
 {{- define "nexus.labels" -}}
 {{- $root := index . 0 -}}{{- $component := index . 1 -}}
 app.kubernetes.io/name: kgf-nexus
-app.kubernetes.io/instance: {{ $root.Release.Name }}
+app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
 app.kubernetes.io/component: {{ $component }}
+{{- /* part-of: the cluster controller finds schedulers by
+part-of=kgf-nexus,component=scheduler (SchedulerSelector). Not in the
+selector, so adding it never touches an immutable field. */}}
+app.kubernetes.io/part-of: kgf-nexus
 app.kubernetes.io/version: {{ $root.Values.image.tag | quote }}
 app.kubernetes.io/managed-by: {{ $root.Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" $root.Chart.Name $root.Chart.Version }}
@@ -52,7 +56,7 @@ helm.sh/chart: {{ printf "%s-%s" $root.Chart.Name $root.Chart.Version }}
 {{- define "nexus.selector" -}}
 {{- $root := index . 0 -}}{{- $component := index . 1 -}}
 app.kubernetes.io/name: kgf-nexus
-app.kubernetes.io/instance: {{ $root.Release.Name }}
+app.kubernetes.io/instance: {{ $root.Release.Name | quote }}
 app.kubernetes.io/component: {{ $component }}
 {{- end -}}
 
@@ -309,20 +313,29 @@ capabilities: { drop: ["ALL"] }
 {{- end -}}
 
 {{/*
-Suffix for the per-release Jobs: a hash of the WHOLE image tag. A Job's pod
-template is immutable, so a new release needs a new Job name. A truncated tag
-is not enough -- every dirty build of one commit shares its 12-character
-prefix, and reusing that name makes the upgrade fail on an immutable field.
+Suffix for the per-release Jobs: a hash of the WHOLE image tag and the chart
+version. A Job's pod template is immutable, so anything that changes it needs a
+new Job name. A truncated tag is not enough -- every dirty build of one commit
+shares its 12-character prefix -- and neither is the tag alone: a chart upgrade
+that changes a Job template (a label) at the same image tag failed on "field is
+immutable" (F113). migrate and bootstrap are idempotent, so re-running them for
+a new chart version is harmless.
 */}}
 {{- define "nexus.jobSuffix" -}}
-{{- /* The migrate digest too, when pinned: a rebuilt image under the same tag
-       is a different pod template, so it needs a different Job name. */ -}}
+{{- /* Every other input of a Job's pod template goes in too. The migrate
+       digest, when pinned: a rebuilt image under the same tag is a different
+       pod template (migrate and bootstrap both run it). And the minio-init
+       client image, when the chart runs MinIO: changing minio.mcImage alone
+       would otherwise hit the same immutable-field failure. */ -}}
+{{- $key := printf "%s/%s" .Values.image.tag .Chart.Version -}}
 {{- $digest := index (.Values.image.digests | default dict) "migrate" | default "" -}}
 {{- if $digest -}}
-{{- printf "%s@%s" .Values.image.tag $digest | sha256sum | trunc 10 -}}
-{{- else -}}
-{{- .Values.image.tag | sha256sum | trunc 10 -}}
+{{- $key = printf "%s@%s" $key $digest -}}
 {{- end -}}
+{{- if .Values.minio.enabled -}}
+{{- $key = printf "%s|%s" $key (.Values.minio.mcImage | default "") -}}
+{{- end -}}
+{{- $key | sha256sum | trunc 10 -}}
 {{- end -}}
 
 {{/*

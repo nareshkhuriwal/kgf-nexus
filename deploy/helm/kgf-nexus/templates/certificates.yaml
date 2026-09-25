@@ -1,0 +1,130 @@
+{{- /*
+Copyright 2026 Khuriwal Group
+SPDX-License-Identifier: Apache-2.0
+
+cert-manager Certificates for service-to-service mTLS (docs/TLS.md §5.2),
+the chart form of deploy/k8s/cert-certificates.yaml: same Secret names, SANs,
+lifetimes, key type and rotation policy.
+
+Issuer: tls.certManager.issuerRef (production: a ClusterIssuer whose CA key
+lives outside this namespace, deploy/k8s/cert-issuer.yaml). With no issuerRef
+name, a self-signed CA is bootstrapped HERE -- a test-cluster convenience.
+*/ -}}
+{{- include "nexus.valuesComplete" . }}
+{{- $t := .Values.tls }}
+{{- /* NEXUS_REQUIRE_TLS covers EVERY connection the agent makes, the NATS hop
+included (the agent refuses to start with a plaintext broker), so requiring
+peer TLS with a plaintext broker would render a release whose agents crash-loop. */}}
+{{- if and $t.enabled $t.requirePeerTLS .Values.nats.enabled (not .Values.nats.tls.enabled) (.Values.agents) }}
+{{- fail "tls.requirePeerTLS makes the agents refuse a plaintext NATS connection: enable nats.tls too (tls.certManager.natsLeaves=true issues nexus-nats-tls, nexus-event-service-tls and uses nexus-agent-tls -- see docs/OPERATIONS.md §20.4), or set tls.requirePeerTLS=false" }}
+{{- end }}
+{{- if and $t.enabled $t.certManager.enabled }}
+{{- $cm := $t.certManager }}
+{{- $ns := .Release.Namespace }}
+{{- $domain := .Values.dns.clusterDomain }}
+{{- $issuer := $cm.issuerRef }}
+{{- if not $issuer.name }}
+{{- $issuer = dict "name" "nexus-internal-ca" "kind" "Issuer" "group" "cert-manager.io" }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: nexus-ca-bootstrap
+  labels: {{- include "nexus.labels" (list . "tls") | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nexus-internal-ca
+  labels: {{- include "nexus.labels" (list . "tls") | nindent 4 }}
+spec:
+  isCA: true
+  commonName: Nexus Internal CA ({{ $ns }})
+  secretName: nexus-internal-ca-keypair
+  duration: {{ $cm.selfSignedCA.duration }}
+  renewBefore: {{ $cm.selfSignedCA.renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # Renewal re-signs the SAME key, so existing leaves keep chaining to it.
+    # CA key rotation is a planned procedure (docs/OPERATIONS.md §9.4).
+    rotationPolicy: Never
+  issuerRef: { name: nexus-ca-bootstrap, kind: Issuer, group: cert-manager.io }
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: nexus-internal-ca
+  labels: {{- include "nexus.labels" (list . "tls") | nindent 4 }}
+spec:
+  ca:
+    secretName: nexus-internal-ca-keypair
+{{- end }}
+{{- $schedNames := list }}
+{{- range .Values.schedulers }}{{ $schedNames = append $schedNames .name }}{{ end }}
+{{- $leaves := list
+  (dict "leaf" "api-gateway" "hosts" (list "api-gateway") "extra" $cm.gatewayExtraDnsNames "server" true)
+  (dict "leaf" "workflow-manager" "hosts" (list "workflow-manager") "server" true)
+  (dict "leaf" "dag-engine" "hosts" (list "dag-engine") "server" true)
+  (dict "leaf" "scheduler" "hosts" $schedNames "server" true)
+  (dict "leaf" "resource-manager" "hosts" (list "resource-manager") "server" true)
+  (dict "leaf" "agent" "cn" "nexus-agent" "server" false)
+}}
+{{- if .Values.clusterController.enabled }}
+{{- $leaves = append $leaves (dict "leaf" "cluster-controller" "cn" "nexus-cluster-controller" "server" false) }}
+{{- end }}
+{{- if $cm.natsLeaves }}
+{{- $leaves = append $leaves (dict "leaf" "nats" "hosts" (list "nats") "server" true "serverOnly" true) }}
+{{- $leaves = append $leaves (dict "leaf" "event-service" "cn" "event-service" "server" false) }}
+{{- end }}
+{{- range $leaves }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nexus-{{ .leaf }}
+  labels: {{- include "nexus.labels" (list $ "tls") | nindent 4 }}
+spec:
+  secretName: nexus-{{ .leaf }}-tls
+  {{- if .hosts }}
+  commonName: {{ first .hosts }}
+  # The names peers dial: config.PeerTarget dials dns:///<service>:<port> and
+  # verifies the certificate against <service>; the FQDN forms cover a peer
+  # configured with one.
+  dnsNames:
+    {{- range .hosts }}
+    - {{ . }}
+    - {{ . }}.{{ $ns }}.svc
+    - {{ . }}.{{ $ns }}.svc.{{ $domain }}
+    {{- end }}
+    {{- range .extra }}
+    - {{ . }}
+    {{- end }}
+  {{- else }}
+  # Client-only: it serves nothing, so it cannot impersonate a service.
+  commonName: {{ .cn }}
+  {{- end }}
+  duration: {{ $cm.duration }}
+  renewBefore: {{ $cm.renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    # A new key on every renewal: a leaked key dies with its certificate.
+    rotationPolicy: Always
+  {{- if .serverOnly }}
+  usages: [digital signature, server auth]
+  {{- else if .server }}
+  # Serving identity AND the identity it dials peers with.
+  usages: [digital signature, server auth, client auth]
+  {{- else }}
+  usages: [digital signature, client auth]
+  {{- end }}
+  issuerRef:
+    name: {{ $issuer.name }}
+    kind: {{ $issuer.kind | default "ClusterIssuer" }}
+    group: {{ $issuer.group | default "cert-manager.io" }}
+{{- end }}
+{{- end }}
