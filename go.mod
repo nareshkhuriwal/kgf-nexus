@@ -7,6 +7,9 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/nats-io/nats.go v1.53.1
+	github.com/prometheus/client_golang v1.24.1
+	github.com/prometheus/client_model v0.6.2
+	github.com/prometheus/common v0.71.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/crypto v0.55.0
 	golang.org/x/text v0.41.0
@@ -20,6 +23,7 @@ require (
 )
 
 require (
+	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -49,12 +53,13 @@ require (
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
-	go.yaml.in/yaml/v2 v2.4.3 // indirect
+	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect

@@ -92,7 +92,13 @@ type Controller struct {
 
 	lastSuccess atomic.Int64
 	cycles      atomic.Int64
+
+	// metrics is optional; nil records nothing.
+	metrics *Metrics
 }
+
+// SetMetrics attaches the reconcile-loop instruments. Called once, before Run.
+func (c *Controller) SetMetrics(m *Metrics) { c.metrics = m }
 
 // New builds a controller.
 func New(cfg Config, kube kubernetes.Interface, rm rmv1.ClusterControllerServiceClient, log *slog.Logger) (*Controller, error) {
@@ -174,6 +180,13 @@ func (c *Controller) rpcCtx(ctx context.Context) (context.Context, context.Cance
 
 // RunOnce performs one observe -> plan -> (apply) -> report cycle.
 func (c *Controller) RunOnce(ctx context.Context) error {
+	start := time.Now()
+	err := c.runOnce(ctx)
+	c.metrics.cycle(start, err, c.cfg.Now())
+	return err
+}
+
+func (c *Controller) runOnce(ctx context.Context) error {
 	c.cycles.Add(1)
 	rctx, cancel := c.rpcCtx(ctx)
 	a, err := c.rm.GetAssignment(rctx, &rmv1.GetAssignmentRequest{ClusterName: c.cfg.ClusterName})
@@ -205,6 +218,7 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 		if err := c.reconcilePool(ctx, a, b, mode, uid); err != nil {
 			target := b.GetKubernetesNamespace() + "/" + b.GetWorkerDeployment()
 			cycleErrs = append(cycleErrs, fmt.Errorf("%s: %w", target, err))
+			c.metrics.poolError(b.GetPool())
 			c.reportError(ctx, a.GetClusterId(), target, err)
 		}
 	}

@@ -77,7 +77,13 @@ type Scheduler struct {
 	// healthy tracks whether the last loop iteration succeeded, for /readyz.
 	mu      sync.RWMutex
 	lastErr error
+
+	// metrics is optional; nil records nothing (see Metrics).
+	metrics *Metrics
 }
+
+// SetMetrics attaches the service instruments. Called once, before Run.
+func (s *Scheduler) SetMetrics(m *Metrics) { s.metrics = m }
 
 // NewScheduler wires the loops. notify may be nil when no bus is configured.
 func NewScheduler(
@@ -179,16 +185,21 @@ func (s *Scheduler) dispatchBurst(ctx context.Context) (dispatched int, idle boo
 		if ctx.Err() != nil {
 			return dispatched, false
 		}
+		claimStart := time.Now()
 		rep, err := s.store.Claim(ctx, time.Now().UTC())
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return dispatched, false
 			}
+			s.metrics.observeClaim("push", "error", time.Since(claimStart), 0)
+			s.metrics.observeLoopError("dispatch")
 			s.setErr(err)
 			s.log.Error("claim cycle failed", "err", err)
 			return dispatched, true
 		}
 		s.setErr(nil)
+		s.metrics.observeClaim("push", claimOutcomeLabel(rep.Outcome), time.Since(claimStart),
+			boolToInt(rep.Outcome == store.ClaimDispatched))
 
 		switch rep.Outcome {
 		case store.ClaimDispatched:
@@ -234,9 +245,11 @@ func (s *Scheduler) reconcileLoop(ctx context.Context) {
 		lost, err := s.store.ReconcileExpiredLeases(ctx, time.Now().UTC(), 100)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			s.setErr(err)
+			s.metrics.observeLoopError("lease-reconciler")
 			s.log.Error("lease reconciliation failed", "err", err)
 		}
 		for _, l := range lost {
+			s.metrics.observeLost(l, "lease_expired")
 			s.logLost(l, "lease_expired")
 		}
 	}
@@ -251,14 +264,17 @@ func (s *Scheduler) livenessLoop(ctx context.Context) {
 		dead, err := s.store.SweepDeadWorkers(ctx, time.Now().UTC(), 50)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			s.setErr(err)
+			s.metrics.observeLoopError("liveness-sweeper")
 			s.log.Error("liveness sweep failed", "err", err)
 		}
+		s.metrics.observeDeadWorkers(len(dead))
 		for _, w := range dead {
 			s.log.Warn("worker declared dead",
 				"worker_id", w.ID, "hostname", w.Hostname,
 				"last_heartbeat_at", w.LastHeartbeat,
 				"expired_attempts", len(w.ExpiredAttempts))
 			for _, l := range w.ExpiredAttempts {
+				s.metrics.observeLost(l, "worker_dead")
 				s.logLost(l, "worker_dead")
 			}
 		}
@@ -292,6 +308,7 @@ func (s *Scheduler) timerLoop(ctx context.Context) {
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				s.setErr(err)
+				s.metrics.observeLoopError("timer-runner")
 				s.log.Error("timer claim failed", "err", err)
 			}
 			continue
@@ -323,9 +340,14 @@ func (s *Scheduler) handleTimer(ctx context.Context, now time.Time, t store.Fire
 		if rerr := s.store.ReleaseTimer(ctx, t.ID); rerr != nil {
 			s.log.Error("failed to release foreign timer", "timer_id", t.ID, "err", rerr)
 		}
+		s.metrics.observeTimer("foreign", "released")
 		return
 	}
+	if err == nil {
+		s.metrics.observeTimer(t.Kind, "ok")
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
+		s.metrics.observeTimer(t.Kind, "error")
 		s.setErr(err)
 		s.log.Error("timer handling failed", "timer_id", t.ID, "kind", t.Kind, "err", err)
 		// Return it to the pool so a transient DB error does not permanently
@@ -374,4 +396,26 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// claimOutcomeLabel maps a push-path claim outcome onto its metric label.
+func claimOutcomeLabel(o store.ClaimOutcome) string {
+	switch o {
+	case store.ClaimDispatched:
+		return "dispatched"
+	case store.ClaimBlocked:
+		return "blocked"
+	case store.ClaimRaceLost:
+		return "race_lost"
+	case store.ClaimNothingPending:
+		return "empty"
+	}
+	return "other"
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

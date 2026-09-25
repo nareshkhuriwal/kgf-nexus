@@ -90,6 +90,10 @@ type Loop struct {
 	// tell a blip from a partition.
 	consecutiveFailures atomic.Int64
 	lastSuccess         atomic.Int64
+
+	// Observe, when set, is told each beat's result, round-trip time and the
+	// failure streak after it. Set before Run; it must not block.
+	Observe func(ok bool, d time.Duration, consecutiveFailures int64)
 }
 
 // New builds a heartbeat loop. initialInterval comes from
@@ -163,7 +167,9 @@ func (l *Loop) beat(ctx context.Context) {
 	// A per-beat timeout derived from the parent context, so shutdown cancels a
 	// beat in flight but a hung control plane cannot outlast one period.
 	rpcCtx, cancel := context.WithTimeout(ctx, RPCTimeout)
+	sent := time.Now()
 	resp, err := l.client.Heartbeat(rpcCtx, req)
+	rtt := time.Since(sent)
 	cancel()
 
 	if err != nil {
@@ -171,6 +177,9 @@ func (l *Loop) beat(ctx context.Context) {
 			return // shutting down; not a failure worth counting
 		}
 		n := l.consecutiveFailures.Add(1)
+		if l.Observe != nil {
+			l.Observe(false, rtt, n)
+		}
 		// Escalate to ERROR only once the streak approaches the liveness
 		// window, so a single blip does not page anyone but a real partition
 		// does.
@@ -185,6 +194,9 @@ func (l *Loop) beat(ctx context.Context) {
 
 	if n := l.consecutiveFailures.Swap(0); n > 0 {
 		l.log.Info("heartbeat recovered", "missed_beats", n)
+	}
+	if l.Observe != nil {
+		l.Observe(true, rtt, 0)
 	}
 	l.lastSuccess.Store(time.Now().UnixMilli())
 

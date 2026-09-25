@@ -2266,5 +2266,6 @@ schema change. Two behaviour changes are visible:
   let anyone lock a victim out, so it was deliberately not added.
 - `POST /v1/auth/register` is bounded only by the address bucket and per-email
   uniqueness.
-- The gateway still has no metrics endpoint, so 429 rates are visible only at
-  the proxy.
+- There are no limiter-specific metrics. Since ADR-0019 (merged in wave 1) 429s
+  are counted in `nexus_http_requests_total{code="429"}` per route on the
+  gateway's ops listener (OPERATIONS §17), but not per bucket.

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"github.com/khuriwalgroup/kgf-nexus/services/cluster-controller/internal/controller"
 	rmv1 "github.com/khuriwalgroup/kgf-nexus/services/resource-manager/gen/nexus/rm/v1"
@@ -124,7 +125,19 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	}
 
 	var leading controller.Leading
-	httpSrv := healthServer(cfg.httpAddr, ctl, &leading, cfg.interval)
+	// Metrics, served on the health listener (docs/OPERATIONS.md).
+	reg := metrics.NewServiceRegistry("cluster-controller", version)
+	transport.RegisterMetrics(reg)
+	ctl.SetMetrics(controller.NewMetrics(reg))
+	reg.NewGaugeFunc("nexus_controller_leader",
+		"1 while this replica holds the leader-election Lease and reconciles; 0 on a standby.",
+		func() float64 {
+			if leading.Is() {
+				return 1
+			}
+			return 0
+		})
+	httpSrv := healthServer(cfg.httpAddr, ctl, &leading, cfg.interval, reg)
 	errs := make(chan error, 2)
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -170,9 +183,11 @@ func kubeConfig(path string) (*rest.Config, error) {
 // manager outage must not restart every controller replica). /readyz is true
 // for a standby, and for the leader only while cycles are succeeding, so an
 // alert on readiness means "the leader cannot reconcile".
-func healthServer(addr string, ctl *controller.Controller, leading *controller.Leading, interval time.Duration) *http.Server {
+func healthServer(addr string, ctl *controller.Controller, leading *controller.Leading, interval time.Duration,
+	reg *metrics.Registry) *http.Server {
 	start := time.Now()
 	mux := http.NewServeMux()
+	reg.Routes(mux)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})

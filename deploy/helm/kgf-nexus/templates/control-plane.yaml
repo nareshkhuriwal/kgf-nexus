@@ -40,6 +40,10 @@ so the two deployments cannot drift in behaviour.
 {{- if .key }}{{ $over = index $root.Values.services .key | default dict }}{{ end }}
 {{- $replicas := .replicas | default $over.replicas | default $root.Values.serviceDefaults.replicas }}
 {{- $resources := $over.resources | default $root.Values.serviceDefaults.resources }}
+{{- /* /metrics: the gateway's dedicated ops listener; every other service's health listener. */}}
+{{- $isGateway := eq .name "api-gateway" }}
+{{- $metricsPort := 8080 }}
+{{- if $isGateway }}{{ $metricsPort = int $root.Values.metrics.gatewayPort }}{{ end }}
 ---
 apiVersion: v1
 kind: Service
@@ -55,6 +59,9 @@ spec:
   ports:
     - { name: http, port: 8080, targetPort: http }
     - { name: grpc, port: {{ .grpc }}, targetPort: grpc }
+    # Scrape port (ServiceMonitor endpoint "metrics"). In-cluster only: the
+    # external Service below never lists it.
+    - { name: metrics, port: 9464, targetPort: {{ if $isGateway }}metrics{{ else }}http{{ end }} }
 {{- if and (eq .name "api-gateway") $over.external $over.external.enabled }}
 ---
 apiVersion: v1
@@ -82,6 +89,7 @@ spec:
   template:
     metadata:
       labels: {{- include "nexus.labels" (list $root .name) | nindent 8 }}
+      {{- include "nexus.metricsAnnotations" (list $root $metricsPort) | nindent 6 }}
     spec:
       {{- include "nexus.pullSecrets" $root | nindent 6 }}
       securityContext: {{- include "nexus.podSecurity" $root | nindent 8 }}
@@ -103,9 +111,16 @@ spec:
             {{- range .extra }}
             - { name: {{ .name }}, value: {{ .value | quote }} }
             {{- end }}
+            {{- if $isGateway }}
+            # The ops listener: /metrics and the probes, never the public port.
+            - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" $metricsPort | quote }} }
+            {{- end }}
           ports:
             - { name: http, containerPort: 8080 }
             - { name: grpc, containerPort: {{ .grpc }} }
+            {{- if $isGateway }}
+            - { name: metrics, containerPort: {{ $metricsPort }} }
+            {{- end }}
           startupProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 2

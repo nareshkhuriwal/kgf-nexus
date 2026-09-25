@@ -49,6 +49,9 @@ type Server struct {
 
 	// ReconcileGrace is the default applied when a caller supplies none.
 	ReconcileGrace time.Duration
+
+	// Metrics is optional; nil records nothing.
+	Metrics *Metrics
 }
 
 // New builds the service over a store.
@@ -124,8 +127,10 @@ func (s *Server) HeartbeatWorker(ctx context.Context, req *rmv1.HeartbeatWorkerR
 			// Returning NOT_FOUND would make a routine post-sweep heartbeat look
 			// like a fault in every dashboard.
 			log.Warn("heartbeat from an unknown or dead worker; re-registration required")
+			s.Metrics.heartbeat("unknown_worker")
 			return &rmv1.HeartbeatWorkerResponse{WorkerKnown: false}, nil
 		}
+		s.Metrics.heartbeat("error")
 		log.Error("could not record heartbeat", "error", err)
 		return nil, status.Errorf(codes.Internal, "touch heartbeat: %v", err)
 	}
@@ -142,8 +147,11 @@ func (s *Server) HeartbeatWorker(ctx context.Context, req *rmv1.HeartbeatWorkerR
 		// leases expired and its work duplicated, which is far worse than a
 		// reservation staying leaked for one more beat — and the next beat retries.
 		log.Error("reconciliation failed; the worker is alive and the ledger will be retried next beat", "error", err)
+		s.Metrics.heartbeat("ok")
 		return &rmv1.HeartbeatWorkerResponse{WorkerKnown: true}, nil
 	}
+	s.Metrics.heartbeat("ok")
+	s.Metrics.leak("heartbeat", len(leaked))
 
 	if len(leaked) > 0 {
 		freed := &nexusv1.ResourceVector{}
@@ -174,10 +182,12 @@ func (s *Server) Reserve(ctx context.Context, req *rmv1.ReserveRequest) (*rmv1.R
 	}
 	log := s.log.With("worker_id", req.GetWorkerId(), "attempt_id", req.GetAttemptId())
 
+	start := time.Now()
 	res, err := s.store.Reserve(ctx, req.GetWorkerId(), req.GetAttemptId(), req.GetRequest())
 	if err != nil {
 		var insufficient *store.ErrInsufficientCapacity
 		if errors.As(err, &insufficient) {
+			s.Metrics.reserve("refused", start)
 			// A refusal is a normal scheduling outcome, not a fault. Returning it
 			// as granted=false with the shortfall lets the caller record an
 			// operator-legible pending_reason instead of retrying blindly.
@@ -190,12 +200,15 @@ func (s *Server) Reserve(ctx context.Context, req *rmv1.ReserveRequest) (*rmv1.R
 			return resp, nil
 		}
 		if errors.Is(err, store.ErrWorkerNotFound) {
+			s.Metrics.reserve("not_found", start)
 			return nil, status.Errorf(codes.NotFound, "worker %s not found", req.GetWorkerId())
 		}
+		s.Metrics.reserve("error", start)
 		log.Error("reservation failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "reserve: %v", err)
 	}
 
+	s.Metrics.reserve("granted", start)
 	log.Info("capacity reserved", "reservation_id", res.ID,
 		"cpu_millis", res.Resources.GetCpuMillis(),
 		"memory_bytes", res.Resources.GetMemoryBytes(),
@@ -219,12 +232,15 @@ func (s *Server) Release(ctx context.Context, req *rmv1.ReleaseRequest) (*rmv1.R
 	res, err := s.store.Release(ctx, req.GetAttemptId())
 	if errors.Is(err, store.ErrReservationNotFound) {
 		s.log.Debug("release found nothing to release (already released)", "attempt_id", req.GetAttemptId())
+		s.Metrics.release("absent")
 		return &rmv1.ReleaseResponse{Released: false}, nil
 	}
 	if err != nil {
+		s.Metrics.release("error")
 		s.log.Error("release failed", "attempt_id", req.GetAttemptId(), "error", err)
 		return nil, status.Errorf(codes.Internal, "release: %v", err)
 	}
+	s.Metrics.release("released")
 	s.log.Info("capacity released", "worker_id", res.WorkerID, "attempt_id", res.AttemptID)
 	return &rmv1.ReleaseResponse{Released: true, Reservation: toProtoReservation(res)}, nil
 }
@@ -246,6 +262,7 @@ func (s *Server) Reconcile(ctx context.Context, req *rmv1.ReconcileRequest) (*rm
 		}
 		return nil, status.Errorf(codes.Internal, "reconcile: %v", err)
 	}
+	s.Metrics.leak("reconcile", len(leaked))
 	resp := &rmv1.ReconcileResponse{Released: toProtoReservations(leaked)}
 	if w, err := s.store.GetWorker(ctx, req.GetWorkerId()); err == nil {
 		resp.Committed = w.Committed
@@ -265,6 +282,7 @@ func (s *Server) ReleaseAllForWorker(ctx context.Context, req *rmv1.ReleaseAllFo
 		}
 		return nil, status.Errorf(codes.Internal, "release all: %v", err)
 	}
+	s.Metrics.leak("dead_worker", len(leaked))
 	s.log.Warn("released all reservations for a worker", "worker_id", req.GetWorkerId(), "reservations", len(leaked))
 	return &rmv1.ReconcileResponse{Released: toProtoReservations(leaked)}, nil
 }

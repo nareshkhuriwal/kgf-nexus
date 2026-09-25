@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
@@ -65,6 +66,10 @@ type Runner struct {
 	// WorkerID is this session's identity, handed to executors that label
 	// their workloads with it. Set after registration.
 	WorkerID string
+
+	// Metrics records task starts, outcomes and durations. Optional: nil
+	// records nothing.
+	Metrics *agentmetrics.Metrics
 }
 
 // DefaultUninterruptibleCeiling bounds a deferred cancellation when the agent is
@@ -115,6 +120,11 @@ type runningTask struct {
 	// context cancellation.
 	handle   *executor.Handle
 	handleMu sync.Mutex
+
+	// kind and started feed the task metrics. Written by the attempt's own
+	// goroutine before any report, and read by that goroutine only.
+	kind    string
+	started time.Time
 }
 
 // NewRunner builds a runner over the executors this worker advertises.
@@ -184,6 +194,16 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 	if kind == "" {
 		kind = "subprocess"
 	}
+	if _, known := r.executors[kind]; !known {
+		// Bounded label: an executor this worker does not run is reported as
+		// "unsupported", not by the (task-author-controlled) name it asked for.
+		rt.kind = "unsupported"
+	} else {
+		rt.kind = kind
+	}
+	rt.started = time.Now()
+	r.Metrics.TaskStarted(rt.kind)
+	defer r.Metrics.TaskFinished(rt.kind)
 	exec, ok := r.executors[kind]
 	if !ok {
 		// The scheduler should never place a task here whose executor we did not
@@ -529,7 +549,9 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 		AttemptID: a.GetAttemptId(), LeaseToken: token,
 		RunID: a.GetRunId(), NodeID: a.GetNodeId(),
 	}
-	if err := r.reporter.ReportResult(reportCtx, req, entry); err != nil {
+	err := r.reporter.ReportResult(reportCtx, req, entry)
+	r.observeReport(a.GetAttemptId(), req, err)
+	if err != nil {
 		log.Error("failed to report the attempt result", "error", err)
 	}
 }
@@ -637,7 +659,9 @@ func (r *Runner) reportFailure(ctx context.Context, a *nexusv1.TaskAssignment,
 	}
 	entry := wal.Entry{AttemptID: a.GetAttemptId(), LeaseToken: token,
 		RunID: a.GetRunId(), NodeID: a.GetNodeId()}
-	if err := r.reporter.ReportResult(reportCtx, req, entry); err != nil {
+	err := r.reporter.ReportResult(reportCtx, req, entry)
+	r.observeReport(a.GetAttemptId(), req, err)
+	if err != nil {
 		r.log.Error("failed to report a failed attempt", "attempt_id", a.GetAttemptId(), "error", err)
 	}
 }
@@ -793,4 +817,20 @@ func boolToInt32(b bool) int32 {
 		return 1
 	}
 	return 0
+}
+
+// observeReport records a result report in the task metrics. The attempt's
+// executor and start time come from its running entry; on the panic path the
+// entry is already gone, and the report is counted without a duration.
+func (r *Runner) observeReport(attemptID string, req *nexusv1.ReportResultRequest, err error) {
+	if r.Metrics == nil {
+		return
+	}
+	kind, started := "unknown", time.Time{}
+	r.mu.Lock()
+	if rt, ok := r.running[attemptID]; ok {
+		kind, started = rt.kind, rt.started
+	}
+	r.mu.Unlock()
+	r.Metrics.TaskReported(kind, req.GetOutcome(), req.GetError().GetClass(), started, err)
 }

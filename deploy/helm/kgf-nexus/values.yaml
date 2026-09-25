@@ -161,6 +161,33 @@ agentDefaults:
   drainGrace: 60s
   terminationGracePeriodSeconds: 90
 
+# Prometheus scraping (docs/OPERATIONS.md, "Metrics"). Every Nexus pod serves
+# /metrics on a port that no external Service exposes: the gateway on its
+# dedicated ops listener (8088), the agents on 8089, every other service on its
+# health listener (8080). Each in-cluster Service carries a port named
+# "metrics"; api-gateway-external never does.
+metrics:
+  # prometheus.io/scrape|port|path pod annotations, for annotation-based
+  # discovery (the stock Prometheus Helm chart's kubernetes-pods job).
+  podAnnotations: true
+  # Gateway ops listener port (NEXUS_METRICS_ADDR).
+  gatewayPort: 8088
+  # Agent metrics port (NEXUS_METRICS_ADDR on the agent).
+  agentPort: 8089
+  # prometheus-operator resources. Off by default: the CRDs exist only where
+  # the operator is installed, and rendering them elsewhere fails the install.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels, e.g. { release: kube-prometheus-stack } to match the
+    # operator's serviceMonitorSelector.
+    labels: {}
+  # A PodMonitor for the agents, which have no Service. Follows
+  # serviceMonitor.enabled unless set explicitly.
+  podMonitor:
+    enabled: null
+
 # Host-based routing via the Gateway API (templates/gateway.yaml). Off by
 # default: it needs a Gateway API implementation installed in the cluster.
 gateway:

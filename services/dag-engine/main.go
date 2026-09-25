@@ -24,6 +24,7 @@ import (
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/dag"
+	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 )
@@ -90,6 +91,13 @@ func run() error {
 	}
 
 	engine := NewEngine(st, runStates, nil, log)
+
+	// Metrics, served on the health listener (docs/OPERATIONS.md).
+	reg := metrics.NewServiceRegistry("dag-engine", version)
+	transport.RegisterMetrics(reg)
+	store.RegisterPoolMetrics(reg, pool)
+	engine.SetMetrics(NewMetrics(reg))
+	grpcMetrics := metrics.NewGRPCServerMetrics(reg)
 	fanInLimit, err := parseFanInLimit(os.Getenv("NEXUS_DAG_MAX_FANIN_BYTES"))
 	if err != nil {
 		// Refuse to start: a limit nobody chose (or one above the ceiling) is the
@@ -118,7 +126,8 @@ func run() error {
 		// incompletely must not quietly serve plaintext instead.
 		return fmt.Errorf("resolve TLS server options: %w", terr)
 	}
-	grpcSrv := grpc.NewServer(append(config.PeerServerOptions(), sopts...)...)
+	grpcOpts := append(grpcMetrics.ServerOptions(), config.PeerServerOptions()...)
+	grpcSrv := grpc.NewServer(append(grpcOpts, sopts...)...)
 	RegisterDagEngineService(grpcSrv, NewGRPCServer(engine, log))
 
 	lis, err := net.Listen("tcp", *grpcAddr)
@@ -132,7 +141,7 @@ func run() error {
 	var ready atomic.Bool
 	httpSrv := &http.Server{
 		Addr:              *httpAddr,
-		Handler:           healthMux(pool, &ready),
+		Handler:           withMetrics(healthMux(pool, &ready), reg),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -217,6 +226,17 @@ func healthMux(pinger interface{ Ping(context.Context) error }, ready *atomic.Bo
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
+	return mux
+}
+
+// version is stamped at build time (-ldflags "-X main.version=...").
+var version = "dev"
+
+// withMetrics serves GET /metrics beside the probes on the health listener.
+func withMetrics(h http.Handler, reg *metrics.Registry) http.Handler {
+	mux := http.NewServeMux()
+	reg.Routes(mux)
+	mux.Handle("/", h)
 	return mux
 }
 
