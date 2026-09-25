@@ -582,6 +582,11 @@ class ValueSpec:
     required: bool = True
     default: Any = dataclasses.field(default=None)
     has_default: bool = False
+    # Author-declared upper bound on the value's encoded size. On a map
+    # template's output it lets submit-time validation prove that
+    # max_fanout x max_bytes fits the platform's fan-in limit (ARCH 5.4), so an
+    # oversized fan-in is rejected at submit instead of failing the run later.
+    max_bytes: int | None = None
 
     def to_wire(self) -> dict[str, Any]:
         if self.type not in _VALUE_TYPES:
@@ -590,6 +595,10 @@ class ValueSpec:
                 f"{', '.join(sorted(_VALUE_TYPES))}"
             )
         out: dict[str, Any] = {"type": self.type}
+        if self.max_bytes is not None:
+            if isinstance(self.max_bytes, bool) or not isinstance(self.max_bytes, int) or self.max_bytes < 0:
+                raise SpecError(f"max_bytes must be a non-negative integer, got {self.max_bytes!r}")
+            out["max_bytes"] = self.max_bytes
         if self.required and not self.has_default:
             out["required"] = True
         if self.has_default:
@@ -605,14 +614,20 @@ class ValueSpec:
         if isinstance(value, str):
             return ValueSpec(type=value)
         data = dict(value)
+        max_bytes = data.get("max_bytes")
         if "default" in data:
             return ValueSpec(
                 type=data.get("type", "json"),
                 required=bool(data.get("required", False)),
                 default=data["default"],
                 has_default=True,
+                max_bytes=max_bytes,
             )
-        return ValueSpec(type=data.get("type", "json"), required=bool(data.get("required", True)))
+        return ValueSpec(
+            type=data.get("type", "json"),
+            required=bool(data.get("required", True)),
+            max_bytes=max_bytes,
+        )
 
 
 def coerce_trigger_rule(value: str) -> str:

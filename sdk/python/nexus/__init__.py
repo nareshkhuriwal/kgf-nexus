@@ -58,6 +58,7 @@ from .context import (
     TaskContext,
     derive_idempotency_key,
 )
+from .scheduling import Backfill, BackfillState, OverlapPolicy, Schedule, SchedulePreview
 from .task import TaskDefinition, registry, task
 from .types import (
     Cache,
@@ -133,6 +134,12 @@ __all__ = [
     "AuthError",
     "NotFound",
     "Conflict",
+    # schedule / backfill response types
+    "Schedule",
+    "SchedulePreview",
+    "Backfill",
+    "BackfillState",
+    "OverlapPolicy",
     # canonicalization
     "canonical_json",
     "canonical_bytes",
