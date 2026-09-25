@@ -192,7 +192,7 @@ Stateless. Scales horizontally behind any L7 load balancer.
 Owns the lifecycle of a `WorkflowRun`. Responsibilities:
 - Creating runs from a trigger (manual, schedule, event, or API call) with idempotency-key deduplication.
 - Enforcing run-level policies: overall run timeout, concurrency limits (`max_active_runs` per workflow), failure policy (`fail_fast` vs. `continue_on_failure`).
-- Handling operator interventions: `cancel`, `pause`, `resume`, `retry_from_failed`, `rerun_task`.
+- Handling operator interventions: `cancel`, `pause`, `resume`, and `retry` — of the whole run or of selected nodes and their dependents (§5.2, Operator retry).
 - **Timer management.** A durable timer table drives all deadline-based work: schedule-to-start expiry, start-to-close expiry, heartbeat expiry, retry backoff. A single reconciler polls `timers WHERE fire_at <= now()` with `FOR UPDATE SKIP LOCKED`. Using the database as the timer store rather than in-memory timers means a control-plane restart loses nothing.
 - Backfill: generating a bounded set of runs over a historical interval with its own concurrency cap, so a backfill cannot starve live traffic.
 
@@ -825,7 +825,18 @@ PAUSING:   no NEW attempts dispatched; in-flight ones run to completion.
            Pausing does not kill work — that is cancel. Conflating them
            makes pause useless for its main job (holding a pipeline while
            you investigate without losing hours of compute).
+RETRY:     FAILED | TIMED_OUT ──operator retry──► RUNNING (see below)
 ```
+
+#### Operator retry
+
+`POST /v1/namespaces/{ns}/runs/{id}/retry` with `{"nodes": [...]}` (`nexusctl run retry <id> --node X`, SDK `retry_run(id, nodes=[...])`, the console's "Retry this task") retries a `FAILED` or `TIMED_OUT` run in place. An empty body retries the whole run. As implemented (CONTRACT-FINDINGS F100; `internal/dag/retry.go` is the specification in code):
+
+- **What is reset.** Each named node must be `FAILED`, `UPSTREAM_FAILED` or `CANCELLED`. It and every downstream node that did not succeed (`FAILED`, `UPSTREAM_FAILED`, `CANCELLED`, `SKIPPED`) return to `PENDING`; the ordinary reconcile then decides what runs, so a retried graph is evaluated by the same trigger rules as the first time. `SUCCEEDED` nodes are never reset, upstream or downstream; upstream work is never touched. A whole-run retry selects every node that did not succeed, `SKIPPED` included (fail_fast skips independent branches). An expanded map template goes back to `RUNNING`, not `PENDING` — its expansion record exists and must not be re-expanded — and a selected child resets its template but not its siblings. A template whose expansion was refused is not retryable: the same upstream output would be refused again.
+- **All or nothing.** The request is refused, and nothing is reset, if any named node is unknown (422), is in another state (409), would fail again at once because a failed or cancelled upstream is not also named (409, naming the node to add), or cannot run because the workflow is `fail_fast` and another failure is left standing (409). The gateway checks the selection first so the operator gets a precise answer; the dag-engine re-checks it in its own transaction, and applies the resets as compare-and-sets that roll back together if any node moved in between.
+- **Attempts.** History is immutable (invariant 9): earlier attempts are not touched and stay in the run view. `task_nodes.retry_floor` (migration 0026) records the highest attempt number the retry superseded; the engine derives node state only from attempts above it. The next attempt is `attempt_number = MAX + 1` with the **same** idempotency key as every earlier try (invariant 1, ADR-0006), and the node's retry budget (`max_attempts`, backoff) starts afresh from the floor.
+- **Concurrency.** The workflow-manager holds the run row (`FOR NO KEY UPDATE`) across the engine's reset, renews the run deadline, moves the run to `RUNNING` and commits, then reconciles. A second retry waits and is refused (the run is no longer failed); a cancel waits and then cancels the retried run; a stale terminal report — a reconcile that concluded `FAILED` just before the reset — waits and is then refused, because `OnNodesTerminal` counts the nodes under the same lock and finds them no longer terminal. If the engine call fails without saying whether it committed, the run is committed `RUNNING` and reconciled anyway: either the reset happened and the retry proceeds, or every node is still terminal and the reconcile restores the run's outcome. The API answers 503 in that case, meaning "re-read the run", not "it failed".
+- **Audit.** The gateway writes a `run.retry` audit record (success or failure, with the nodes); the run's history gets `RunStateChanged`, a `RunRetriedFromFailed` event (`mode`, `requested_nodes`, `selected`, `reset_nodes`, actor) and one `NodeStateChanged` (`reason: operator_retry`) per reset node.
 
 ### 5.3 Dispatch: the atomic claim
 
@@ -947,7 +958,7 @@ Rules that keep this from becoming a footgun:
 - **Fan-in.** Downstream nodes depend on the template, never on children, so a 10,000-item fan-in has one predecessor. The template's state is the aggregate of its children (any failed → `FAILED`; else any cancelled → `CANCELLED`; else any skipped → `SKIPPED`; else `SUCCEEDED`), folded in the same reconcile pass in which the last child settles. A downstream input bound to a template output receives an inline JSON array, one element per child in `map_index` order: the child's inline JSON value, `{"inline_base64": …}` for non-JSON inline bytes, `{"result_ref": …}` for a blob, `null` for a child that did not succeed.
 - **The fan-in is bounded.** The array is assembled in the control plane, so it is capped at `NEXUS_DAG_MAX_FANIN_BYTES` (default 16 MiB, allowed 64 KiB–256 MiB; the JSON payload before base64). Children's outputs are never loaded with the rest of the run; they are streamed from Postgres in `map_index` order and the size is checked **before each element is appended**, so an over-limit fan-in stops reading at the element that would cross the limit and never holds more than the limit. The consuming node is then `FAILED` without an attempt, in one transaction with a `fan_in_refusals` row (`reason = fan_in_too_large`, the limit, how many children fit, how to raise it or restructure) and a `FanInRejected` event; the run view shows it as "fan-in too large". Not retried: the same children produce the same array. At submit time, a template output declaring `max_bytes` is rejected (`map_fan_in_too_large`) when `max_fanout × max_bytes` could exceed the limit (the gateway checks against the default; the engine re-checks against its configured limit at materialize).
 - **Pause / cancel / fail_fast** withhold expansion exactly as they withhold the frontier. Cancel settles unexpanded templates and pending children `CANCELLED`; pause leaves them `PENDING` to be dispatched on resume (an expanded template does not count as in flight).
-- **Not implemented:** `min_success_ratio` (use `all_done` / `none_failed` on the fan-in); nested maps inside one template; expanding over a blob collection; single-flight between a retry-from-failed and an expansion (retry-from-failed is itself unwired, `ResetFailedNodes`).
+- **Not implemented:** `min_success_ratio` (use `all_done` / `none_failed` on the fan-in); nested maps inside one template; expanding over a blob collection; re-expanding a template on retry (an expanded template is retried through its children; a refused expansion is not retryable — §5.2, Operator retry).
 
 ### 5.5 Worker lifecycle
 
@@ -1261,7 +1272,7 @@ GET    /v1/namespaces/{ns}/runs/{id}             detail + node states
 GET    /v1/namespaces/{ns}/runs/{id}/events      history (SSE for live tail)
 POST   /v1/namespaces/{ns}/runs/{id}/cancel
 POST   /v1/namespaces/{ns}/runs/{id}/pause | /resume
-POST   /v1/namespaces/{ns}/runs/{id}/retry       retry from failed nodes
+POST   /v1/namespaces/{ns}/runs/{id}/retry       retry; body {"nodes":[...]} selects nodes
 GET    /v1/namespaces/{ns}/attempts/{id}/logs    stream
 GET    /v1/namespaces/{ns}/workers               fleet view
 GET    /v1/namespaces/{ns}/workers/{id}          detail + the tasks running on it
