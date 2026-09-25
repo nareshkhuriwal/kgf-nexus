@@ -3029,7 +3029,7 @@ with anything on before.
 - The chart detects the missing sections and fails with "upgrade with
   --reset-then-reuse-values or -f" (OPERATIONS §20.2). Verified both paths.
 
-### F114. A worker token minted by the API cannot authenticate an agent — OPEN
+### F114. A worker token minted by the API cannot authenticate an agent — FIXED
 
 `POST /v1/namespaces/{ns}/tokens` accepts role `worker` and scope `worker_rpc`
 (`services/api-gateway/rest/admin.go`, `validateNewToken`) and returns an
@@ -3053,6 +3053,29 @@ and require `ActionWorkerRPC` on the resulting principal (legacy `api_keys` rows
 with role `worker` keep working through its default branch). Add an integration
 test that mints a worker token through the REST API and registers an agent with
 it. Then `nexusctl up` and the bootstrap Job can drop their SQL step.
+
+**Fix (wave-2 integration).** `workergrpc.AuthUnaryInterceptor` authenticates
+with `AuthenticateCredential`, so an `nxtok_` token is resolved against
+`scoped_tokens` (expiry and revocation included) and every other shape still
+reaches the unchanged `api_keys` lookup. Because the listener now accepts more
+credential kinds, the interceptor also requires `ActionWorkerRPC` before any
+handler runs: a reader token, a worker-role token without the `worker_rpc`
+scope, an admin token scoped away from it and a console session are all
+refused with PermissionDenied at the transport; each handler still checks the
+namespace (`requirePrincipal`). Tests:
+`services/api-gateway/workergrpc/interceptor_test.go` (unit, fake identity
+store) and `worker_token_integration_test.go`
+(`TestIntegrationWorkerTokenFromTheAPIAuthenticatesTheWorkerProtocol`: mints a
+worker token through `POST /tokens` with the gateway's own wiring, accepts it
+in its namespace, refuses it in another, refuses a reader token, keeps a legacy
+`api_keys` worker key working, and refuses the token once revoked through the
+API). The integration test fails with "invalid credentials" when the
+interceptor is reverted to `Authenticate`.
+
+**Still open (follow-up).** `nexusctl up` and the chart's bootstrap Job still
+seed a legacy `api_keys` worker row. `up` could now mint the agents' token
+through the API after registering the tenant; the bootstrap Job needs a key
+known before install (the Secret), so it keeps the SQL step.
 
 ### F115. Cloud platforms: the result store is S3-only with static keys, the chart cannot use cloud identities or GPU pools, and nothing has been applied — OPEN
 

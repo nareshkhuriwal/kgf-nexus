@@ -210,9 +210,10 @@ exist yet), waits until every service is healthy and the gateway answers
 3. `POST /v1/auth/login`, then `POST /v1/namespaces/{ns}/tokens` mints an admin
    API key (role `admin`, scopes `read`/`write`/`admin_write`, 90-day expiry);
    the session is logged out.
-4. The agents need a worker credential, which the API cannot currently issue in
-   a form they accept (the worker gRPC interceptor authenticates only legacy
-   `api_keys`, not scoped tokens). So, exactly as `make seed` does, `up`
+4. The agents need a worker credential. The API can issue one
+   (`POST /v1/namespaces/{ns}/tokens` with role `worker` and scope
+   `worker_rpc`, accepted by the worker protocol since F114 was fixed), but
+   `up` still does exactly what `make seed` does: it
    generates a worker key locally and inserts only its SHA-256 hash into
    `api_keys` (role `worker`, the new tenant's namespace) through
    `docker compose exec` into the stack's Postgres — no host `psql` needed. It
