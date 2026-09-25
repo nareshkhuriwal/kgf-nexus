@@ -2315,3 +2315,153 @@ schema change. Two behaviour changes are visible:
 - There are no limiter-specific metrics. Since ADR-0019 (merged in wave 1) 429s
   are counted in `nexus_http_requests_total{code="429"}` per route on the
   gateway's ops listener (OPERATIONS §17), but not per bucket.
+
+### F100. Node-level retry was silently a whole-run retry, and no retry worked at all — FIXED
+
+**Severity:** high. An operator control reported success and did something else, and
+the control underneath it did nothing.
+
+`nexusctl run retry <id> --node X` and the SDK's `retry_run(id, nodes=[...])` sent
+`{"nodes": [...]}`. The gateway routed `/retry` through `a.lifecycle`, which takes a
+run id and never reads the body; `RetryRunRequest` had no field to carry a selection;
+and `RetryFromFailed` was defined as "every failed node". So the one piece of
+information that made the request node-level was dropped at the first hop, silently.
+
+Checking the rest of the path found the larger defect beneath it: the
+workflow-manager's `DAGEngineClient.ResetFailedNodes` returned `errNotWired`
+unconditionally. **Every** retry — node-level or whole-run, CLI, SDK or the console's
+"Retry failed tasks" — answered 500. ARCHITECTURE §5.4 even said so in passing
+("retry-from-failed is itself unwired"). Nobody had exercised it end to end.
+
+And wiring the reset naively would not have worked either. The engine derives a node's
+state from its LATEST attempt (attempts are the truth, `task_nodes.state` a
+projection), so writing `FAILED -> PENDING` lasts until the next reconcile, which reads
+the node's last FAILED attempt, sees its budget spent, and writes FAILED back. The only
+ways to make a reset stick without schema help are deleting or rewriting attempts —
+both break invariant 9.
+
+**Fix, end to end:**
+
+- **Proto** (additive): `RetryRunRequest.node_ids = 3`, `actor = 4`. Regenerated with
+  the pinned toolchain (protoc 29.3, protoc-gen-go 1.36.12, protoc-gen-go-grpc 1.6.2);
+  only `services.pb.go` changed.
+- **Migration 0026** (additive, metadata-only): `task_nodes.retry_floor`. The highest
+  attempt number a retry superseded. The engine loads only attempts above it, and the
+  retry budget (`max_attempts`, backoff, the scheduler's lease-expiry count) is counted
+  from it. Earlier attempts stay, unmodified, in the history and the run view; the next
+  attempt is `MAX + 1` with the same idempotency key (invariant 1, ADR-0006).
+- **Semantics** (`internal/dag/retry.go`, pure, table-tested): selected nodes must be
+  FAILED, UPSTREAM_FAILED or CANCELLED; they and every non-succeeded downstream node
+  (SKIPPED included) go back to PENDING; SUCCEEDED nodes and all upstream work are
+  untouched. A selection that would fail again at once (an UPSTREAM_FAILED node whose
+  failed cause is not selected, or any node under fail_fast while another failure
+  stands) is refused, naming the node to add, rather than applied and silently
+  re-failed. Expanded map templates reset to RUNNING (their expansion record exists);
+  a selected child resets its template but not its siblings; a refused expansion is
+  not retryable. Empty selection = whole run (the original meaning).
+- **dag-engine** `ResetNodes`: plans from stored state, applies all resets as
+  compare-and-sets in one transaction — any miss, or any attempt found in flight, rolls
+  the whole thing back (`Aborted`). It does not reconcile (see below).
+- **workflow-manager** `Retry`: locks the run row (`FOR NO KEY UPDATE`, so the engine's
+  FK checks on `task_nodes` never wait on it), checks FAILED/TIMED_OUT, calls the
+  engine, renews the deadline, moves the run to RUNNING, commits, then reconciles. A
+  second retry waits and is refused; a cancel waits and then cancels the retried run.
+  If the engine call's outcome is unknown (timeout), the run is committed RUNNING and
+  reconciled anyway — both possibilities converge — and the caller gets 503 "re-read
+  the run".
+- **gateway**: reads the body strictly (unknown field = 400), normalizes the selection,
+  checks the run exists IN THE NAMESPACE before mutating, rejects unknown nodes (422)
+  and non-retryable nodes (409) naming each one, maps the owner's refusals to
+  409/422/501/503, and writes a `run.retry` audit record either way.
+- **CLI / SDK**: flags and signatures unchanged, now honoured; help, docstrings,
+  `Sequence[str]` type hint, and the SDK refuses a bare string (which `list()` would
+  have split into one-letter node ids).
+- **Console**: "Retry this task" on the selected node of a FAILED/TIMED_OUT run, shown
+  only for retryable node states, confirmed before it fires, surfacing the gateway's
+  refusal message.
+
+**Found along the way, and fixed because the retry depends on them:**
+
+- *Retry never renewed the deadline.* `RetryFromFailed` cancelled the deadline timer
+  "for a fresh window" and armed none, leaving `deadline_at` in the past; the deadline
+  reconciler re-arms a timer for any active run with a `deadline_at`, so a retried
+  TIMED_OUT run would have timed out again on its next pass. Now renewed from the
+  pinned spec's `run_timeout_ms`, in the retry transaction. `ended_at` is cleared on
+  re-entry to RUNNING.
+- *`OnNodesTerminal` trusted a stale report.* It counted nodes without the run lock and
+  never checked they were terminal. A reconcile that concluded FAILED just before a
+  retry could therefore put the retried run back to FAILED over PENDING nodes — which
+  no scheduler dispatches (the claim admits only PENDING/RUNNING runs). The DB race test
+  caught exactly this on its first run. It now locks, counts and transitions in one
+  transaction, and refuses when any node is non-terminal.
+- *Lifecycle conflicts answered 500.* The workflow-manager mapped
+  `ErrRunStateConflict` to `Internal` and the gateway's lifecycle path re-attached no
+  sentinel, so "pause a run that just finished" was a 500. Now `FailedPrecondition` →
+  409 for cancel/pause/resume as well.
+
+**Still open at the time (reported here, fixed separately as F101):** cancel/pause/resume check the run's
+namespace only AFTER the owner has mutated it (`upstream.lifecycle` reads the run back
+scoped by namespace), and the owner acts on a run id alone. A principal of namespace A
+who knows a run UUID in namespace B can cancel it and receive a 404. Retry now checks
+first; the other three should get the same one-line reordering.
+
+**Rolling upgrade:** migration first, then dag-engine and scheduler, then
+workflow-manager and gateway (OPERATIONS §18.1). Every mixed-version combination fails
+closed — refused or degraded to a whole-run retry — never double-dispatching.
+
+**Verified:** pure planner tests (16, including a mutation that let a child retry reset
+its siblings: caught); dag-engine DB tests for the full journey, fresh budget, refusals
+changing nothing, all-or-nothing store writes, a 4-way concurrent retry ×10 rounds, and
+an expansion child; workflow-manager DB tests for the transaction, deadline renewal,
+indeterminate outcome, and a second retry / stale terminal report / cancel each fired
+while a retry holds the run. Mutations that removed the floor filter, the reset CAS or
+the non-terminal guard each turned those tests red.
+
+### F101. Cancel, pause and resume could change another tenant's run — FIXED
+
+**Severity:** high. A tenancy boundary that held for reads did not hold for three
+writes.
+
+The gateway's guard authorizes the principal for the namespace in the PATH. Nothing
+tied the run id in the path to that namespace before the mutation: `rest.lifecycle`
+called the workflow-manager — which acts on a run id alone, by design, since it owns
+`workflow_runs` and has no principal — and only afterwards did `upstream.lifecycle`
+read the run back with `GatewayGetRun(namespace, id)`. So a principal of namespace A
+that knew a run UUID from namespace B could `POST /v1/namespaces/A/runs/<B's run>/cancel`
+(or pause, or resume): B's run was cancelled, and A was answered 404. The 404 made it
+look refused. Reproduced against real Postgres with two tenants: with the check
+removed, the victim run goes RUNNING -> CANCELLING / PAUSING, PAUSED -> RUNNING.
+
+Found while fixing F100, where retry went through the same function.
+
+**Fix:** `rest.lifecycle` looks the run up with `GatewayGetRun(ns, id)` — namespace in
+the predicate — before calling the owner; a run in another namespace is 404 and the
+owner is never called. Retry already did this (F100).
+
+**Sweep of every other mutating route** in `services/api-gateway/rest`. None of the
+others had the same mutate-then-check order:
+
+| Route | Why it is safe |
+|---|---|
+| `DELETE runs/{id}` | selects and inserts `run_deletions` `WHERE id AND namespace` (principal's) in one tx |
+| `POST runs/{id}/retry` | checks the run in `ns` first (F100) |
+| `POST workers/{id}/drain`, `/quarantine`, `/release` | `GatewayGetWorker(ns, id)` before the owner call |
+| `POST backfills/{id}/pause\|resume\|cancel` | owner's `WFMSetBackfillState` updates `WHERE id AND namespace` |
+| `POST/PUT/DELETE schedules/{name}`, `/enable`, `/disable`, `/backfills` | keyed by `(namespace, name)` in every owner statement |
+| `DELETE specs/{name}`, `POST specs` | keyed by `(namespace, name)` |
+| `POST runs` | the owner refuses a spec whose namespace differs from the run's |
+| `POST cache/invalidations` | records a cutoff scoped to `ns`; touches no other tenant's rows |
+| `PUT/POST/DELETE users/{id}...`, `tokens/{id}/revoke` | every UPDATE is `WHERE namespace AND id`, or `GetUser(ns, id)` first |
+| `PUT platform/config`, `platform/clusters/{name}` | scoped to the principal's namespace |
+
+**Tests:** a unit test for each of cancel/pause/resume/retry asserting 404 and that
+the owner was never called, plus a positive test; and a DB integration test with two
+registered tenants whose fake owner mutates `workflow_runs` by id alone — exactly as
+the real one does — asserting the victim run is unchanged, a foreign namespace in the
+path is 403, and each tenant can still act on its own run. Both tests fail with the
+check removed.
+
+**Defence in depth, not done here:** the owner's lifecycle RPCs could take the
+namespace and put it in their own `WHERE`, so a future caller that forgets the check
+cannot repeat this. That is a proto change (`CancelRunRequest` etc. have no namespace
+field) and is left for a separate, additive revision.

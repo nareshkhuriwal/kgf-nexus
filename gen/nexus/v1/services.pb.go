@@ -1260,9 +1260,21 @@ func (x *ResumeRunRequest) GetRunId() string {
 }
 
 type RetryRunRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	OnlyFailed    bool                   `protobuf:"varint,2,opt,name=only_failed,json=onlyFailed,proto3" json:"only_failed,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	RunId      string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	OnlyFailed bool                   `protobuf:"varint,2,opt,name=only_failed,json=onlyFailed,proto3" json:"only_failed,omitempty"`
+	// The nodes to retry. Empty keeps the original meaning: retry the whole run
+	// from every node that did not succeed. Non-empty retries exactly these nodes
+	// plus every downstream dependent that did not succeed; succeeded upstream
+	// work is never re-run. Unknown ids and nodes not in a retryable terminal
+	// state (FAILED, UPSTREAM_FAILED, CANCELLED) are refused as a whole, never
+	// partially applied. Added in field 3 so an older workflow-manager, which
+	// ignores it, still reads the request -- which is why the gateway checks the
+	// selection itself before calling (CONTRACT-FINDINGS F100).
+	NodeIds []string `protobuf:"bytes,3,rep,name=node_ids,json=nodeIds,proto3" json:"node_ids,omitempty"`
+	// The principal that asked, recorded as the actor of the run's retry events.
+	// Empty is attributed to the workflow-manager itself.
+	Actor         string `protobuf:"bytes,4,opt,name=actor,proto3" json:"actor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1309,6 +1321,20 @@ func (x *RetryRunRequest) GetOnlyFailed() bool {
 		return x.OnlyFailed
 	}
 	return false
+}
+
+func (x *RetryRunRequest) GetNodeIds() []string {
+	if x != nil {
+		return x.NodeIds
+	}
+	return nil
+}
+
+func (x *RetryRunRequest) GetActor() string {
+	if x != nil {
+		return x.Actor
+	}
+	return ""
 }
 
 type RunActionResponse struct {
@@ -2022,11 +2048,13 @@ const file_nexus_v1_services_proto_rawDesc = "" +
 	"\x0fPauseRunRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\")\n" +
 	"\x10ResumeRunRequest\x12\x15\n" +
-	"\x06run_id\x18\x01 \x01(\tR\x05runId\"I\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\"z\n" +
 	"\x0fRetryRunRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1f\n" +
 	"\vonly_failed\x18\x02 \x01(\bR\n" +
-	"onlyFailed\"q\n" +
+	"onlyFailed\x12\x19\n" +
+	"\bnode_ids\x18\x03 \x03(\tR\anodeIds\x12\x14\n" +
+	"\x05actor\x18\x04 \x01(\tR\x05actor\"q\n" +
 	"\x11RunActionResponse\x12(\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x12.nexus.v1.RunStateR\x05state\x12\x1a\n" +
 	"\baccepted\x18\x02 \x01(\bR\baccepted\x12\x16\n" +

@@ -5,7 +5,7 @@
 **Scope:** Postgres backup and restore, the artifact (MinIO result store) backup
 and restore and the ordering between the two stores, the restore drills and their
 measured results, what these procedures do *not* cover, the RPO/RTO the approach
-actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), and metrics: endpoints, scrape configuration and the metrics catalogue (§17).
+actually delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), and operator retry of a failed run (§18).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -1699,3 +1699,69 @@ C is a counter, G a gauge and H a histogram.
 3. In Prometheus, `up{job=~".*nexus.*"} == 0` returns nothing.
 4. The gateway's REST port answers 404 for `/metrics`. If it answers 200, the
    ops listener has been routed to the public port.
+
+---
+
+## 18. Operator retry of a failed run
+
+`nexusctl run retry <run-id> [--node ID ...]`, the SDK's `retry_run(run_id,
+nodes=[...])` and the console's "Retry failed tasks" / "Retry this task" all call
+`POST /v1/namespaces/{ns}/runs/{id}/retry`. The semantics are in
+[ARCHITECTURE §5.2, Operator retry](ARCHITECTURE.md); CONTRACT-FINDINGS F100
+records why the endpoint used to ignore the node selection. Until F100 every
+retry, whole-run or node-level, failed with "dag-engine.ResetFailedNodes is not
+wired yet", so there is no earlier retry behaviour to stay compatible with.
+
+### 18.1 Deploy order
+
+1. Apply migration 0026. It adds one column, `task_nodes.retry_floor INT NOT NULL
+   DEFAULT 0` — metadata-only on PostgreSQL 16, no rewrite, no new grant.
+2. Roll the **dag-engine** and **scheduler**. The engine must ignore attempts at or
+   below the floor; the scheduler must count the retry budget from it. An older
+   engine reconciling a retried run derives the retried node from its superseded
+   FAILED attempt and puts it straight back to FAILED — safe (nothing runs twice)
+   but the retry is lost.
+3. Roll the **workflow-manager**, then the **api-gateway**. A gateway ahead of the
+   workflow-manager sends `node_ids`, which an older workflow-manager ignores; the
+   gateway's own selection check still refuses bad selections, but a good one
+   becomes a whole-run retry until step 3 finishes. A workflow-manager ahead of the
+   dag-engine answers `501 retry_unavailable` (the engine has no `ResetNodes`), and
+   changes nothing.
+
+### 18.2 Reading the answers
+
+| HTTP | `error` | Meaning | Action |
+|---|---|---|---|
+| 200 | — | Committed: the run is RUNNING | Watch the run |
+| 400 | `invalid_body`, `invalid_nodes` | Malformed request | Fix the request |
+| 404 | `not_found` | No such run in this namespace | Check the namespace |
+| 409 | `nodes_not_retryable` | A named node is SUCCEEDED, SKIPPED, PENDING… | Name FAILED / UPSTREAM_FAILED / CANCELLED nodes |
+| 409 | `retry_refused` | Run not FAILED/TIMED_OUT, or a node would fail again at once, or fail_fast leaves another failure standing | The message names the node to add |
+| 409 | `retry_conflict` | A concurrent change won; nothing was retried | Re-read the run, retry again |
+| 422 | `unknown_nodes` | The run has no node by that name | Fix the node id |
+| 501 | `retry_unavailable` | dag-engine too old or not configured | Finish §18.1 |
+| 503 | `retry_outcome_unknown` | The engine call timed out; the run was committed RUNNING and reconciled so it converges either way | Re-read the run before retrying again |
+
+Every attempt, successful or not, writes a `run.retry` audit record with the
+requested nodes. The run's history carries `RunRetriedFromFailed` with
+`requested_nodes`, `selected` and `reset_nodes`.
+
+### 18.3 Finding what a retry superseded
+
+```sql
+SELECT n.node_id, n.retry_floor, n.attempts_used, n.max_attempts,
+       a.attempt_number, a.state, a.attempt_number <= n.retry_floor AS superseded
+  FROM task_nodes n JOIN task_attempts a USING (run_id, node_id)
+ WHERE n.run_id = $1 ORDER BY n.node_id, a.attempt_number;
+```
+
+Superseded attempts are history, not garbage: never delete them. They share the
+retried attempt's idempotency key, which is how a handler recognises the retry of
+work it may already have done.
+
+### 18.4 Rolling back 0026
+
+Roll the dag-engine and scheduler back first (they read the column), then run
+`0026_node_retry_floor.down.sql` by hand (§6.4). Runs that were retried by node
+lose the record of which attempts were superseded; an older engine derives those
+nodes from their latest attempt, as it always did.

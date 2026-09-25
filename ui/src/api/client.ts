@@ -485,6 +485,22 @@ export const api = {
     );
   },
 
+  /**
+   * Retry a FAILED or TIMED_OUT run. With `nodes`, exactly those nodes and their
+   * downstream dependents that did not succeed get a new attempt; without, every
+   * node that did not succeed does. Succeeded nodes never re-run. The gateway
+   * refuses the whole request (409/422, nothing retried) when a node is unknown,
+   * not FAILED/UPSTREAM_FAILED/CANCELLED, or would fail again because a failed
+   * upstream is not also selected -- the message names what to do instead.
+   */
+  retryRun(namespace: string, runId: string, nodes?: readonly string[]): Promise<RunSummary> {
+    return request<RunSummary>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(nodes && nodes.length > 0 ? { nodes } : {}),
+    });
+  },
+
   /** Kept as its own name: it is called from a list row as well as the detail page. */
   deleteRun(namespace: string, runId: string): Promise<void> {
     return request<void>(`${ns(namespace)}/runs/${encodeURIComponent(runId)}`, {method: "DELETE"});

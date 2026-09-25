@@ -114,7 +114,7 @@ func (s *SchedulerStore) expireOne(
 	const lockQ = `
 SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.state, a.worker_id,
        a.resource_request, a.scheduled_at, a.priority, a.queue,
-       n.spec_json, n.attempts_used, n.max_attempts, r.deadline_at
+       n.spec_json, n.attempts_used, n.max_attempts, r.deadline_at, n.retry_floor
   FROM task_attempts a
   JOIN task_nodes    n ON n.run_id = a.run_id AND n.node_id = a.node_id
   JOIN workflow_runs r ON r.id = a.run_id
@@ -135,7 +135,7 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.state, a.worker_id,
 	if err := tx.QueryRow(ctx, lockQ, attemptID).Scan(
 		&att.ID, &att.RunID, &att.NodeID, &att.AttemptNumber, &state, &workerID,
 		&reqJSON, &att.ScheduledAt, &att.Priority, &att.Queue,
-		&specJSON, &attemptsUsed, &nodeMax, &runDeadline,
+		&specJSON, &attemptsUsed, &nodeMax, &runDeadline, &att.RetryFloor,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -212,10 +212,14 @@ UPDATE task_attempts
 
 	// attempts_used from task_nodes is the DAG engine's counter and may lag; the
 	// attempt_number we just terminated is authoritative for "how many tries
-	// have there been", so take the larger.
+	// have there been", so take the larger -- counted from the node's
+	// retry_floor, because an operator retry (migration 0026, F100) resets the
+	// budget and the attempts below the floor were spent by the superseded tries.
+	// Without the subtraction a retried node's first LOST attempt would be judged
+	// out of budget and never auto-retried.
 	used := attemptsUsed
-	if att.AttemptNumber > used {
-		used = att.AttemptNumber
+	if n := att.AttemptNumber - att.RetryFloor; n > used {
+		used = n
 	}
 	maxAttempts := nodeMax
 	if spec.MaxAttempts > 0 {
@@ -368,7 +372,7 @@ func (s *SchedulerStore) evaluateAndScheduleRetry(
 		return decision, time.Time{}, nil
 	}
 
-	delay := domain.Backoff(policy, att.AttemptNumber)
+	delay := domain.Backoff(policy, att.AttemptNumber-att.RetryFloor)
 	fireAt := now.Add(delay)
 	if err := insertTimer(ctx, tx, domain.TimerRetryBackoff, att.ID, fireAt, map[string]any{
 		"run_id": att.RunID.String(), "node_id": att.NodeID,

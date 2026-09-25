@@ -234,12 +234,14 @@ func (w *wfmGRPC) lifecycle(ctx context.Context, op, runID string) (nexusv1.RunS
 	case "ResumeRun":
 		resp, err = w.runs.ResumeRun(ctx, &nexusv1.ResumeRunRequest{RunId: runID})
 	case "RetryRun":
+		// A whole-run retry. A retry naming nodes goes through retry(), which
+		// carries the selection this generic path has no argument for.
 		resp, err = w.runs.RetryRun(ctx, &nexusv1.RetryRunRequest{RunId: runID})
 	default:
 		return nexusv1.RunState_RUN_STATE_UNSPECIFIED, fmt.Errorf("%s: unknown run lifecycle operation", op)
 	}
 	if err != nil {
-		return nexusv1.RunState_RUN_STATE_UNSPECIFIED, fmt.Errorf("%s %s: %w", op, runID, err)
+		return nexusv1.RunState_RUN_STATE_UNSPECIFIED, fmt.Errorf("%s %s: %w", op, runID, reattachLifecycleSentinel(err))
 	}
 	if !resp.GetAccepted() {
 		// A refused transition is the run's state machine working (§5.2), not a
@@ -247,4 +249,47 @@ func (w *wfmGRPC) lifecycle(ctx context.Context, op, runID string) (nexusv1.RunS
 		return resp.GetState(), fmt.Errorf("%s %s refused: %s", op, runID, resp.GetReason())
 	}
 	return resp.GetState(), nil
+}
+
+// retry performs an operator retry through the owner, carrying the node
+// selection and the acting principal.
+//
+// The status is returned WRAPPED rather than reduced to a sentinel: the gateway
+// answers a refused selection, a lost race and an unavailable engine
+// differently, and only the code tells them apart. The run-state conflict is
+// re-attached as well, so a caller matching on ErrRunStateConflict still can.
+func (w *wfmGRPC) retry(ctx context.Context, runID string, nodes []string, actor string) (nexusv1.RunState, error) {
+	ctx, cancel := withCallTimeout(ctx)
+	defer cancel()
+	resp, err := w.runs.RetryRun(ctx, &nexusv1.RetryRunRequest{RunId: runID, NodeIds: nodes, Actor: actor})
+	if err != nil {
+		if status.Code(err) == codes.FailedPrecondition {
+			return nexusv1.RunState_RUN_STATE_UNSPECIFIED,
+				fmt.Errorf("%w: %s", store.ErrRunStateConflict, status.Convert(err).Message())
+		}
+		switch status.Code(err) {
+		case codes.NotFound, codes.InvalidArgument:
+			return nexusv1.RunState_RUN_STATE_UNSPECIFIED,
+				fmt.Errorf("RetryRun %s: %w", runID, reattachSentinel(err))
+		}
+		return nexusv1.RunState_RUN_STATE_UNSPECIFIED, fmt.Errorf("RetryRun %s: %w", runID, err)
+	}
+	if !resp.GetAccepted() {
+		return resp.GetState(), fmt.Errorf("RetryRun %s refused: %w: %s", runID, store.ErrRunStateConflict, resp.GetReason())
+	}
+	return resp.GetState(), nil
+}
+
+// reattachLifecycleSentinel maps the owner's "illegal for the run's current
+// state" answer back onto store.ErrRunStateConflict.
+//
+// The owner reports it as FailedPrecondition; before this the lifecycle path
+// returned the bare status, the REST layer's errors.Is(ErrRunStateConflict)
+// never matched, and pausing a run that had just finished answered 500 -- "the
+// platform broke" -- instead of 409 with the reason.
+func reattachLifecycleSentinel(err error) error {
+	if status.Code(err) == codes.FailedPrecondition {
+		return fmt.Errorf("%w: %s", store.ErrRunStateConflict, status.Convert(err).Message())
+	}
+	return reattachSentinel(err)
 }

@@ -26,7 +26,7 @@ type RunService interface {
 	Pause(ctx context.Context, runID string) (store.RunRow, error)
 	Resume(ctx context.Context, runID string) (store.RunRow, error)
 	Cancel(ctx context.Context, runID string) (store.RunRow, error)
-	RetryFromFailed(ctx context.Context, runID string) (store.RunRow, error)
+	Retry(ctx context.Context, req runs.RetryRequest) (runs.RetryResult, error)
 	OnNodesTerminal(ctx context.Context, runID string) (store.RunRow, error)
 	OnNodeFailedFailFast(ctx context.Context, runID, nodeID string) (store.RunRow, error)
 	OnRunDeadline(ctx context.Context, runID string) error

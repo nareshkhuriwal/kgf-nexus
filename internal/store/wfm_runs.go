@@ -178,8 +178,14 @@ func WFMTransitionRun(ctx context.Context, q GWQuerier, runID string, from []str
 		       -- shrinks every time it is paused.
 		       started_at = CASE WHEN $3 = 'RUNNING' AND started_at IS NULL
 		                         THEN now() ELSE started_at END,
+		       -- A retry moves a finished run back to RUNNING; an end time on a
+		       -- run that is running again would make every duration read
+		       -- negative or frozen, so it is cleared and set afresh when the
+		       -- retried run finishes.
 		       ended_at   = CASE WHEN $3 IN ('SUCCEEDED','FAILED','CANCELLED','TIMED_OUT')
-		                         THEN now() ELSE ended_at END
+		                         THEN now()
+		                         WHEN $3 = 'RUNNING' THEN NULL
+		                         ELSE ended_at END
 		 WHERE id = $1
 		   AND state::text = ANY($2)
 		RETURNING id, namespace, state, state_version
@@ -390,6 +396,57 @@ func WFMGetRunForUpdate(ctx context.Context, q GWQuerier, runID string) (state s
 		return "", "", nil, fmt.Errorf("lock run %s: %w", runID, err)
 	}
 	return state, namespace, deadline, nil
+}
+
+// WFMLockRunForRetry row-locks a run for an operator retry and returns its
+// state and pinned spec, inside the caller's transaction.
+//
+// FOR NO KEY UPDATE rather than FOR UPDATE, deliberately. The retry holds this
+// lock across a call to the dag-engine, whose transaction writes task_nodes rows
+// that reference workflow_runs. A foreign-key check takes FOR KEY SHARE on the
+// referenced row, which FOR UPDATE blocks and FOR NO KEY UPDATE does not -- so
+// FOR UPDATE would risk the engine waiting on this lock while this transaction
+// waits on the engine. NO KEY UPDATE still conflicts with every other writer of
+// the row, which is the serialization the retry needs (CONTRACT-FINDINGS F100).
+func WFMLockRunForRetry(ctx context.Context, q GWQuerier, runID string) (state, specID string, err error) {
+	err = q.QueryRow(ctx, `
+		SELECT state::text, spec_id::text
+		  FROM workflow_runs
+		 WHERE id = $1
+		 FOR NO KEY UPDATE`,
+		runID,
+	).Scan(&state, &specID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("lock run %s for retry: %w", runID, err)
+	}
+	return state, specID, nil
+}
+
+// WFMRenewRunDeadline gives a retried run a fresh deadline window, computed from
+// DATABASE time for the same reason creation does (invariant 7).
+//
+// Without it a retried TIMED_OUT run keeps the deadline that already passed, and
+// the deadline reconciler -- which arms a timer for any active run with a
+// deadline_at and no timer -- times the retry out on its next pass.
+func WFMRenewRunDeadline(ctx context.Context, q GWQuerier, runID string, timeoutMS int64) (time.Time, error) {
+	var at time.Time
+	err := q.QueryRow(ctx, `
+		UPDATE workflow_runs
+		   SET deadline_at = now() + make_interval(secs => $2::bigint / 1000.0)
+		 WHERE id = $1
+		RETURNING deadline_at`,
+		runID, timeoutMS,
+	).Scan(&at)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, ErrNotFound
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("renew deadline of run %s: %w", runID, err)
+	}
+	return at, nil
 }
 
 // WFMGetRun loads a run WITHOUT a namespace predicate.

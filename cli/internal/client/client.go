@@ -349,7 +349,10 @@ func (c *Client) CancelRun(ctx context.Context, id, reason string) (any, error) 
 	return c.do(ctx, http.MethodPost, c.urlFor("/runs/"+url.PathEscape(id)+"/cancel", nil), body, nil)
 }
 
-// RetryRun re-runs from failed nodes; successful upstream nodes are not re-run.
+// RetryRun retries a failed run. With nodes, exactly those nodes and their
+// non-succeeded downstream dependents are retried; without, every node that did
+// not succeed. Succeeded nodes are never re-run. The gateway refuses the whole
+// request (4xx, nothing retried) if a node is unknown or not retryable.
 func (c *Client) RetryRun(ctx context.Context, id string, nodes []string) (any, error) {
 	payload := map[string]any{}
 	if len(nodes) > 0 {

@@ -43,7 +43,10 @@ type WorkflowManager interface {
 	CancelRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
 	PauseRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
 	ResumeRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
-	RetryRun(ctx context.Context, namespace, runID string) (store.RunRow, error)
+	// RetryRun retries a failed run from the named nodes, or from every node
+	// that did not succeed when nodes is empty. actor attributes the retry in
+	// the run's history.
+	RetryRun(ctx context.Context, namespace, runID string, nodes []string, actor string) (store.RunRow, error)
 }
 
 // ResourceManagerAPI is the resource-manager's API as the gateway needs it.
@@ -1034,12 +1037,19 @@ func (a *API) resumeRun(w http.ResponseWriter, r *http.Request, _ authn.Principa
 	a.lifecycle(w, r, "resume", a.wfm.ResumeRun)
 }
 
-func (a *API) retryRun(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
-	a.lifecycle(w, r, "retry", a.wfm.RetryRun)
-}
-
 func (a *API) lifecycle(w http.ResponseWriter, r *http.Request, op string, fn func(context.Context, string, string) (store.RunRow, error)) {
-	run, err := fn(r.Context(), r.PathValue("ns"), r.PathValue("id"))
+	ns, id := r.PathValue("ns"), r.PathValue("id")
+	// Namespace-scoped existence check BEFORE the mutation (CONTRACT-FINDINGS
+	// F101). The owner acts on a run id alone, and this used to be checked only
+	// afterwards, when the upstream client read the run back scoped by
+	// namespace: a principal of namespace A who knew a UUID in namespace B could
+	// cancel, pause or resume that run and be told 404 for it. The guard only
+	// authorizes the PATH's namespace; nothing tied the run to it.
+	if _, err := store.GatewayGetRun(r.Context(), a.db, ns, id); err != nil {
+		a.fail(w, r, "get run", err)
+		return
+	}
+	run, err := fn(r.Context(), ns, id)
 	if errors.Is(err, store.ErrRunStateConflict) {
 		// 409 with the reason, not a bare rejection: an operator who clicks pause
 		// on a run that just failed deserves to be told it did not apply and why.

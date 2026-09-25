@@ -69,6 +69,23 @@ type ReconcileRunResponse struct {
 	UpstreamFailed []string `json:"upstream_failed,omitempty"`
 }
 
+// ResetNodesRequest applies an operator retry to a run's graph.
+type ResetNodesRequest struct {
+	RunID string `json:"run_id"`
+	// NodeIDs is the selection. Empty retries the whole run from every node
+	// that did not succeed.
+	NodeIDs []string `json:"node_ids,omitempty"`
+	// Actor attributes the per-node history entries.
+	Actor string `json:"actor,omitempty"`
+}
+
+// ResetNodesResponse reports what the retry reset.
+type ResetNodesResponse struct {
+	RunID    string   `json:"run_id"`
+	Selected []string `json:"selected"`
+	Reset    []string `json:"reset_nodes"`
+}
+
 // ValidateSpecRequest carries a spec as protojson, the same encoding used in
 // workflow_specs.spec_json, so a caller can validate exactly the bytes it intends
 // to store.
@@ -177,6 +194,19 @@ func (s *GRPCServer) ReconcileRun(ctx context.Context, req *ReconcileRunRequest)
 	return out, nil
 }
 
+// ResetNodes resets a failed run's selected nodes and their dependents for an
+// operator retry. It does not reconcile; see Engine.ResetNodes.
+func (s *GRPCServer) ResetNodes(ctx context.Context, req *ResetNodesRequest) (*ResetNodesResponse, error) {
+	if req.GetRunID() == "" {
+		return nil, status.Error(codes.InvalidArgument, "run_id is required")
+	}
+	res, err := s.engine.ResetNodes(ctx, req.RunID, req.NodeIDs, req.Actor)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &ResetNodesResponse{RunID: res.RunID, Selected: res.Selected, Reset: res.Reset}, nil
+}
+
 // ValidateSpec runs submit-time validation without touching the database, so the
 // gateway can reject a bad spec before creating anything.
 func (s *GRPCServer) ValidateSpec(ctx context.Context, req *ValidateSpecRequest) (*ValidateSpecResponse, error) {
@@ -234,6 +264,13 @@ func (r *ReconcileRunRequest) GetRunID() string {
 	return r.RunID
 }
 
+func (r *ResetNodesRequest) GetRunID() string {
+	if r == nil {
+		return ""
+	}
+	return r.RunID
+}
+
 func (r *ValidateSpecRequest) GetSpecJSON() json.RawMessage {
 	if r == nil {
 		return nil
@@ -252,7 +289,22 @@ func toStatus(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	case errorsIs(err, ErrNotMaterialized):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errorsIs(err, ErrRunNotRetryable):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errorsIs(err, store.ErrNodeRetryConflict):
+		// ABORTED, not FAILED_PRECONDITION: the request was sound and a
+		// concurrent writer won the race. Re-reading and asking again may
+		// succeed; the same request against the same state never would.
+		return status.Error(codes.Aborted, err.Error())
 	default:
+		// A refused retry selection: unknown node ids are a malformed request;
+		// nodes in the wrong state are a precondition of the run as it is now.
+		if refused, badRequest := isRetryRefusal(err); refused {
+			if badRequest {
+				return status.Error(codes.InvalidArgument, err.Error())
+			}
+			return status.Error(codes.FailedPrecondition, err.Error())
+		}
 		if isValidationError(err) {
 			return status.Error(codes.InvalidArgument, err.Error())
 		}
@@ -282,6 +334,10 @@ var DagEngineServiceDesc = grpc.ServiceDesc{
 			MethodName: "InvalidateCache",
 			Handler:    invalidateCacheHandler,
 		},
+		{
+			MethodName: "ResetNodes",
+			Handler:    resetNodesHandler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "services/dag-engine/grpcapi.go",
@@ -292,6 +348,22 @@ type dagEngineService interface {
 	ReconcileRun(context.Context, *ReconcileRunRequest) (*ReconcileRunResponse, error)
 	ValidateSpec(context.Context, *ValidateSpecRequest) (*ValidateSpecResponse, error)
 	InvalidateCache(context.Context, *InvalidateCacheRequest) (*InvalidateCacheResponse, error)
+	ResetNodes(context.Context, *ResetNodesRequest) (*ResetNodesResponse, error)
+}
+
+func resetNodesHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(ResetNodesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(dagEngineService).ResetNodes(ctx, in)
+	}
+	return interceptor(ctx, in, &grpc.UnaryServerInfo{
+		Server: srv, FullMethod: "/nexus.v1.DagEngineService/ResetNodes",
+	}, func(ctx context.Context, req any) (any, error) {
+		return srv.(dagEngineService).ResetNodes(ctx, req.(*ResetNodesRequest))
+	})
 }
 
 func invalidateCacheHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {

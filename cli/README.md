@@ -55,7 +55,8 @@ run create <name> [--param K=V]      Start a run
 run get <run-id>                     Detail with per-node states
 run list [--state S] [--spec N]      List runs
 run cancel <run-id>                  Cancel
-run retry <run-id> [--node ID]       Retry from failed nodes
+run retry <run-id> [--node ID ...]   Retry a failed run, whole or from the
+                                     named nodes and their dependents
 
 worker ls                            Fleet with capacity and heartbeat age
 capacity                             Advertised vs committed

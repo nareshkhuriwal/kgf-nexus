@@ -30,7 +30,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
 from .canonical import canonical_bytes
 from .workflow import CompiledWorkflow, WorkflowDefinition
@@ -260,8 +260,29 @@ class NexusClient:
             body=json.dumps({"reason": reason}).encode("utf-8"),
         )
 
-    def retry_run(self, run_id: str, *, nodes: list[str] | None = None) -> dict[str, Any]:
-        """Retry from failed nodes. Successful upstream nodes are not re-run."""
+    def retry_run(self, run_id: str, *, nodes: Sequence[str] | None = None) -> dict[str, Any]:
+        """Retry a FAILED or TIMED_OUT run, whole or from selected nodes.
+
+        With ``nodes``, exactly those nodes and every downstream node that did not
+        succeed are retried; upstream work is left as it is. Each named node must
+        be FAILED, UPSTREAM_FAILED or CANCELLED. Without ``nodes`` (or with an
+        empty sequence) every node that did not succeed is retried. Succeeded
+        nodes are never re-run either way.
+
+        The request is all-or-nothing. The gateway refuses it -- and retries
+        nothing -- when a node is unknown (HTTP 422), is not in a retryable state
+        or would fail again at once because an upstream failure it depends on is
+        not also selected (409, raised as :class:`Conflict`; the message names
+        the node to add), or when the run itself is not FAILED/TIMED_OUT (409).
+
+        Each retried node gets a new attempt with a fresh retry budget and the
+        same idempotency key as its earlier attempts, which stay in the run's
+        history unchanged. Returns the run, now RUNNING, with ``retried_nodes``.
+        """
+        if isinstance(nodes, (str, bytes)):
+            # A bare string is a Sequence[str] too, and list("load") would send
+            # ["l", "o", "a", "d"]: four unknown nodes instead of one.
+            raise TypeError("nodes must be a sequence of node ids, not a single string; use nodes=[...]")
         payload: dict[str, Any] = {}
         if nodes:
             payload["nodes"] = list(nodes)

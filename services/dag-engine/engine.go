@@ -743,8 +743,11 @@ func deriveNodeStates(
 		}
 		// Exhausted when no further attempt may be created. attempts_used is
 		// incremented with each attempt row, so comparing the highest
-		// attempt_number against the ceiling is the honest test.
-		exhausted := last.AttemptNumber >= maxAttempts
+		// attempt_number against the ceiling is the honest test -- counted from
+		// the node's retry_floor, because an operator retry grants the budget
+		// afresh and the attempts below the floor belong to the superseded tries
+		// (CONTRACT-FINDINGS F100). LoadAttempts has already dropped those.
+		exhausted := last.AttemptNumber-n.RetryFloor >= maxAttempts
 		out[n.NodeID] = dag.AttemptStateToNode(string(last.State), exhausted)
 	}
 	return out

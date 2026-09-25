@@ -441,18 +441,27 @@ cannot know whether its side effect landed before the signal arrived.`,
 func runRetryCmd() *command {
 	return &command{
 		name:    "retry",
-		summary: "Retry a run from its failed nodes.",
+		summary: "Retry a failed run, whole or from selected nodes.",
 		usage: `nexusctl run retry <run-id> [--node ID ...]
 
-Retry from the failed nodes. Nodes that already SUCCEEDED are not re-run, so a
-fifty-node pipeline that failed at node forty-eight resumes rather than restarts.
+Retry a FAILED or TIMED_OUT run. Nodes that already SUCCEEDED are never re-run,
+so a fifty-node pipeline that failed at node forty-eight resumes rather than
+restarts.
 
-  --node ID   Retry only this node. Repeatable. Defaults to all failed nodes.
+  --node ID   Retry this node. Repeatable. Without --node, every node that did
+              not succeed is retried.
 
-A retry creates a NEW attempt (attempt_number + 1); the terminal attempt it
-follows is never mutated, so the full history of what was tried stays intact.
-The idempotency key is unchanged across retries -- that is what makes re-running
-safe for a handler that uses it.`,
+With --node, each named node must be FAILED, UPSTREAM_FAILED or CANCELLED. The
+named nodes and every downstream node that did not succeed are retried
+together; upstream work is left as it is. The request is refused as a whole --
+nothing is retried -- if a node is unknown, is not in one of those states, or
+would fail again at once because an upstream failure it depends on is not also
+being retried (the error names the node to add).
+
+A retry creates a NEW attempt (attempt_number + 1) with a fresh retry budget;
+the attempts it follows are never mutated, so the full history of what was
+tried stays intact. The idempotency key is unchanged across retries -- that is
+what makes re-running safe for a handler that uses it.`,
 		run: func(ctx context.Context, env *Environment, args []string) error {
 			var nodes stringSlice
 			rest, err := env.parseFlags(args, func(fs *flag.FlagSet) {

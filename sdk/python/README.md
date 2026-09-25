@@ -163,6 +163,19 @@ for event in c.stream_events(run["id"]):
     print(event)
 ```
 
+Retrying a failed run re-runs only what did not succeed. Name nodes to retry
+just those and their downstream dependents; omit them to retry the whole run:
+
+```python
+c.retry_run(run["id"], nodes=["transform"])   # transform + its failed dependents
+c.retry_run(run["id"])                        # every node that did not succeed
+```
+
+A selected node must be `FAILED`, `UPSTREAM_FAILED` or `CANCELLED`. An unknown
+node, a node in another state, or one that would fail again because a failed
+upstream is not also selected refuses the whole request (`NexusAPIError` 422 or
+`Conflict` 409) and nothing is retried.
+
 `create_run`'s `idempotency_key` is the **one** place a user-chosen key is correct:
 it identifies your intent to start a run. Per-task effect keys are always
 platform-derived; do not confuse the two.

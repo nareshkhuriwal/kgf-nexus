@@ -122,7 +122,7 @@ func (s *SchedulerStore) ApplyResult(
 	const lockQ = `
 SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
        a.resource_request, a.scheduled_at, a.priority, a.queue,
-       n.spec_json, n.attempts_used, n.max_attempts, r.deadline_at
+       n.spec_json, n.attempts_used, n.max_attempts, r.deadline_at, n.retry_floor
   FROM task_attempts a
   JOIN task_nodes    n ON n.run_id = a.run_id AND n.node_id = a.node_id
   JOIN workflow_runs r ON r.id = a.run_id
@@ -140,7 +140,7 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
 	err = tx.QueryRow(ctx, lockQ, attemptID).Scan(
 		&cand.ID, &cand.RunID, &cand.NodeID, &cand.AttemptNumber, &workerID,
 		&reqJSON, &cand.ScheduledAt, &cand.Priority, &cand.Queue,
-		&specJSON, &attemptsUsed, &maxAttempt, &runDeadline)
+		&specJSON, &attemptsUsed, &maxAttempt, &runDeadline, &cand.RetryFloor)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Already terminal, or being handled by a peer. A duplicate report is the
 		// expected consequence of at-least-once delivery, not a fault.
@@ -304,7 +304,7 @@ func (s *SchedulerStore) evaluateAndScheduleRetryWithClass(
 		return decision, time.Time{}, nil
 	}
 
-	delay := domain.Backoff(policy, att.AttemptNumber)
+	delay := domain.Backoff(policy, att.AttemptNumber-att.RetryFloor)
 	fireAt := now.Add(delay)
 	if err := insertTimer(ctx, tx, domain.TimerRetryBackoff, att.ID, fireAt, map[string]any{
 		"run_id": att.RunID.String(), "node_id": att.NodeID,

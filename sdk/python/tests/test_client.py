@@ -161,6 +161,40 @@ def test_run_lifecycle_paths(server) -> None:
         assert (server.requests[-1]["method"], server.requests[-1]["path"]) == (method, path)
 
 
+def test_retry_run_sends_the_selected_nodes(server) -> None:
+    """The selection must reach the gateway in the body (CONTRACT-FINDINGS F100)."""
+    server.reply("POST", "/v1/namespaces/prod/runs/run-1/retry", 200, {"id": "run-1", "state": "RUNNING"})
+    out = _client(server).retry_run("run-1", nodes=("transform", "load"))
+    assert out["state"] == "RUNNING"
+    assert json.loads(server.requests[-1]["body"]) == {"nodes": ["transform", "load"]}
+
+
+def test_retry_run_without_nodes_is_a_whole_run_retry(server) -> None:
+    for nodes in (None, []):
+        server.reply("POST", "/v1/namespaces/prod/runs/run-1/retry", 200, {"id": "run-1"})
+        _client(server).retry_run("run-1", nodes=nodes)
+        assert json.loads(server.requests[-1]["body"]) == {}
+
+
+def test_retry_run_rejects_a_bare_string(server) -> None:
+    # list("load") would silently send four one-letter node ids.
+    with pytest.raises(TypeError):
+        _client(server).retry_run("run-1", nodes="load")  # type: ignore[arg-type]
+    assert server.requests == []
+
+
+def test_retry_run_refusal_is_a_conflict(server) -> None:
+    server.reply(
+        "POST",
+        "/v1/namespaces/prod/runs/run-1/retry",
+        409,
+        {"error": "nodes_not_retryable", "message": "extract is SUCCEEDED"},
+    )
+    with pytest.raises(Conflict) as e:
+        _client(server).retry_run("run-1", nodes=["extract"])
+    assert "extract is SUCCEEDED" in str(e.value)
+
+
 def test_namespace_is_url_encoded(server) -> None:
     c = NexusClient(server.endpoint, api_key="k", namespace="team/a", max_retries=0)
     server.reply("GET", "/v1/namespaces/team%2Fa/capacity", 200, {"ok": True})

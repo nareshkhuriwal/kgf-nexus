@@ -175,7 +175,22 @@ message CreateRunResponse {
 message CancelRunRequest { string run_id = 1; string reason = 2; }
 message PauseRunRequest  { string run_id = 1; }
 message ResumeRunRequest { string run_id = 1; }
-message RetryRunRequest  { string run_id = 1; bool only_failed = 2; }
+message RetryRunRequest {
+  string run_id = 1;
+  bool only_failed = 2;
+  // The nodes to retry. Empty keeps the original meaning: retry the whole run
+  // from every node that did not succeed. Non-empty retries exactly these nodes
+  // plus every downstream dependent that did not succeed; succeeded upstream
+  // work is never re-run. Unknown ids and nodes not in a retryable terminal
+  // state (FAILED, UPSTREAM_FAILED, CANCELLED) are refused as a whole, never
+  // partially applied. Added in field 3 so an older workflow-manager, which
+  // ignores it, still reads the request -- which is why the gateway checks the
+  // selection itself before calling (CONTRACT-FINDINGS F100).
+  repeated string node_ids = 3;
+  // The principal that asked, recorded as the actor of the run's retry events.
+  // Empty is attributed to the workflow-manager itself.
+  string actor = 4;
+}
 
 message RunActionResponse {
   RunState state = 1;
