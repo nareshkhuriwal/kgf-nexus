@@ -34,15 +34,9 @@ import (
 // passes it to a downstream system is deduplicated there, whereas a fresh key
 // would make the replay a second, distinct effect.
 
-// assignmentRoute is registered in routePermissions here rather than in
-// rbac_routes.go so this feature's permission sits next to its handler. The
-// assignment carries upstream RESULTS (inline input values), so it needs the
-// result-view grant as well as run and task visibility.
+// assignmentRoute is the replay endpoint's pattern; its permissions are in
+// rbac_routes.go with every other route's.
 const assignmentRoute = "GET /v1/namespaces/{ns}/runs/{run}/attempts/{id}/assignment"
-
-func init() {
-	routePermissions[assignmentRoute] = []string{"runs.view", "tasks.view", "tasks.results.view"}
-}
 
 // AssignmentReader reads an attempt's assignment, namespace-scoped. Satisfied
 // by the store; an interface so the handler is testable without Postgres.

@@ -31,6 +31,7 @@ MIGRATIONS    := services/migrations
 .PHONY: test-nats
 .PHONY: sdk-test
 .PHONY: sdk-typecheck
+.PHONY: check-doc-refs
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test e2e e2e-up e2e-down seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
@@ -111,6 +112,9 @@ verify-s3-image: ## Verify the pinned S3 image's GitHub build provenance (needs 
 	@command -v gh >/dev/null || { echo "gh not found; install the GitHub CLI"; exit 1; }
 	gh attestation verify 'oci://$(S3_IMAGE)' --repo pgsty/silo \
 	  --signer-workflow pgsty/silo/.github/workflows/docker-release.yml
+
+check-doc-refs: ## Fail if any "OPERATIONS §N" reference in the repo names a section that does not exist
+	python3 deploy/scripts/check-operations-refs.py
 
 bench-pg: ## Start a disposable, migrated Postgres + MinIO for the benchmarks
 	@docker inspect $(BENCH_NAME)-pg >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-pg \

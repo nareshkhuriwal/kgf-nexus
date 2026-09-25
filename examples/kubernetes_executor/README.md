@@ -45,7 +45,7 @@ NEXUS_WAL_DIR=/tmp/nexus-k8s-wal NEXUS_LOG_FORMAT=text \
 **In cluster:** apply `deploy/k8s/executor-namespace.yaml`,
 `agent-rbac.yaml`, `executor-policies.yaml` and `agent-deployment.yaml`, in that
 order. Set the agent image and `NEXUS_CONTROL_PLANE` first. See
-[docs/OPERATIONS.md](../../docs/OPERATIONS.md#9-kubernetes-executor).
+[docs/OPERATIONS.md](../../docs/OPERATIONS.md#13-kubernetes-executor).
 
 Then submit the example and start a run:
 

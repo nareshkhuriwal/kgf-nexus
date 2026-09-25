@@ -167,6 +167,16 @@ jobs:
       - name: Run NATS/outbox integration suite
         run: tests/nats/run-integration.sh
 
+  # Every "OPERATIONS §N" cited from code, charts, migrations, ADRs and
+  # findings must name a section that exists: merges renumber sections.
+  doc-refs:
+    name: OPERATIONS cross-references
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: make check-doc-refs
+
   # The Helm chart: lint, then prove every Nexus image the chart renders takes
   # its digest from image.digests -- the key the release pipeline sets from its
   # digest map (templates/deploy-aks.yml). The release re-runs the same check

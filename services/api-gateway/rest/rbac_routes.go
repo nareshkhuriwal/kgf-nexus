@@ -74,4 +74,9 @@ var routePermissions = map[string][]string{
 	"POST /v1/namespaces/{ns}/tokens":                     {"tokens.manage"},
 	"POST /v1/namespaces/{ns}/tokens/{id}/revoke":         {"tokens.manage"},
 	"GET /v1/namespaces/{ns}/audit":                       {"audit.view"},
+
+	// Attempt replay input (ADR-0022). It carries upstream RESULTS (inline
+	// input values), so it needs the result-view grant as well as run and
+	// task visibility. Its own block keeps the table above aligned as is.
+	assignmentRoute: {"runs.view", "tasks.view", "tasks.results.view"},
 }
