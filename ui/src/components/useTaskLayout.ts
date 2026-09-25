@@ -53,6 +53,12 @@ export function useTaskLayout<T extends Placement>(base: T[], identity: string) 
     onPointerDown: event => {
       const point = byId[id];
       if (event.button !== 0 || !point) return;
+      // A control INSIDE the card (the map's fold/unfold toggle) is not a drag
+      // handle. Capturing the pointer here would retarget its click to the
+      // card, so in a real browser the toggle selected the node instead of
+      // unfolding it; jsdom's synthetic clicks never showed that.
+      const control = (event.target as Element).closest?.('[role="button"]');
+      if (control && control !== event.currentTarget) return;
       event.stopPropagation();
       suppressClick.current = null;
       const matrix = event.currentTarget.closest('svg')?.querySelector<SVGGElement>('.dag-zoom')?.getScreenCTM?.();
