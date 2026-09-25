@@ -1,0 +1,151 @@
+/* Copyright 2026 Khuriwal Group
+   SPDX-License-Identifier: Apache-2.0
+
+   Execution timeline (ExecutionTimeline.tsx). Colours come only from the
+   state tones (index.css .tone-*), which already define light and dark
+   values; this file never names a colour. Phase is carried by bar height so
+   the chart survives greyscale: queued is a hairline, starting is medium,
+   running is full height. */
+
+.tl { display: flex; flex-direction: column; }
+
+.tl-toolbar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  padding: 12px 20px; border-bottom: 1px solid var(--border);
+}
+.tl-title { font-weight: 600; font-size: 13px; }
+.tl-sub { color: var(--fg-muted); font-size: 12px; }
+.tl-toolbar .spacer { flex: 1; }
+
+.tl-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.tl-seg > button {
+  border: 0; border-radius: 0; min-height: 30px; min-width: 32px; padding: 4px 10px;
+  background: transparent; color: var(--fg-muted);
+}
+.tl-seg > button + button { border-left: 1px solid var(--border); }
+.tl-seg > button[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--fg);
+}
+.tl-seg > button:disabled { opacity: .45; }
+
+.tl-empty { margin: 16px 20px; }
+
+.tl-chart { position: relative; --tl-label-w: 240px; }
+
+.tl-axis {
+  display: flex; height: 28px; border-bottom: 1px solid var(--border);
+  font-family: var(--mono); font-size: 10.5px; color: var(--fg-muted);
+  background: var(--bg-raised);
+}
+.tl-axis-label {
+  flex: 0 0 var(--tl-label-w); padding: 7px 12px 0 20px; box-sizing: border-box;
+  text-transform: uppercase; letter-spacing: .06em; font-family: inherit;
+}
+.tl-axis-track { position: relative; flex: 1; overflow: hidden; }
+.tl-tick {
+  position: absolute; top: 7px; transform: translateX(-50%); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.tl-tick.major { color: var(--fg); font-weight: 600; }
+.tl-now-flag {
+  position: absolute; bottom: 0; transform: translateX(-50%); padding: 0 4px;
+  border-radius: 3px 3px 0 0; font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em;
+  background: var(--tone-active-bd); color: var(--bg);
+}
+
+.tl-scroll {
+  position: relative; overflow-y: auto; overflow-x: hidden;
+  touch-action: pan-y; cursor: grab; overscroll-behavior: contain;
+}
+.tl-scroll:active { cursor: grabbing; }
+.tl-inner { position: relative; }
+/* The list spans the whole virtual height, so it has a real box (its rows are
+   absolutely positioned inside it) and the now-line layer sits above it. */
+.tl-list { position: absolute; inset: 0; z-index: 1; }
+
+.tl-track-layer {
+  position: absolute; top: 0; left: var(--tl-label-w); right: 0;
+  pointer-events: none; z-index: 0;
+}
+.tl-now-layer { z-index: 2; }
+.tl-grid { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--border); opacity: .6; }
+.tl-now { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px solid var(--tone-active-bd); }
+
+.tl-row { position: absolute; left: 0; right: 0; }
+.tl-row-btn {
+  display: flex; align-items: stretch; width: 100%; height: 100%; padding: 0; margin: 0;
+  border: 0; border-radius: 0; background: transparent; color: inherit; text-align: left;
+  font: inherit; cursor: pointer; min-height: 0;
+}
+.tl-row:nth-child(odd) .tl-row-btn { background: color-mix(in srgb, var(--fg) 2.5%, transparent); }
+/* Phone widths: every pixel of the label goes to the node name. */
+.tl-chart.narrow .tl-label { padding: 0 6px 0 10px; gap: 4px; }
+.tl-chart.narrow .tl-row.child .tl-label { padding-left: 18px; }
+.tl-chart.narrow .tl-row-group .tl-meta { display: none; }
+.tl-chart.narrow .tl-axis-label { padding-left: 10px; }
+.tl-row-btn:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.tl-row-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.tl-row.selected .tl-row-btn {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--focus);
+}
+.tl-row-group .tl-row-btn { border-top: 1px solid var(--border); font-weight: 600; }
+
+.tl-label {
+  flex: 0 0 var(--tl-label-w); box-sizing: border-box; display: flex; align-items: center; gap: 6px;
+  min-width: 0; padding: 0 10px 0 20px; font-size: 12px;
+  border-right: 1px solid var(--border);
+}
+.tl-row.child .tl-label { padding-left: 36px; }
+.tl-row.retry .tl-name { color: var(--fg-muted); }
+.tl-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
+.tl-meta { margin-left: auto; color: var(--fg-muted); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tl-glyph { width: 1.2em; text-align: center; color: var(--tone-fg); flex: none; }
+.tl-caret { width: 1.2em; text-align: center; color: var(--fg-muted); flex: none; }
+
+.tl-track { position: relative; flex: 1; min-width: 0; overflow: hidden; }
+.tl-bar {
+  position: absolute; top: 50%; transform: translateY(-50%); box-sizing: border-box;
+  border-radius: 2px;
+}
+.tl-phase-queued { height: 4px; background: var(--tone-bd); opacity: .45; }
+.tl-phase-starting {
+  height: 10px; border: 1px solid var(--tone-bd);
+  background: repeating-linear-gradient(135deg, var(--tone-bg) 0 3px, transparent 3px 6px);
+}
+.tl-phase-running { height: 16px; background: var(--tone-bd); }
+.tl-phase-envelope { height: 12px; border: 1px solid var(--tone-bd); background: var(--tone-bg); }
+.tl-bar.cached { background: transparent; border: 1px dashed var(--tone-bd); }
+/* An open phase fades out at its right edge: it has not ended, it only
+   reaches "now". */
+.tl-bar.open { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 10px), rgba(0,0,0,.35)); mask-image: linear-gradient(to right, #000 calc(100% - 10px), rgba(0,0,0,.35)); }
+
+.tl-tip {
+  position: absolute; z-index: 5; max-width: 320px; padding: 8px 10px;
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.25); font-size: 12px; pointer-events: none;
+}
+.tl-tip-head { margin-bottom: 6px; }
+.tl-tip dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0; }
+.tl-tip dt { color: var(--fg-muted); }
+.tl-tip dd { margin: 0; font-variant-numeric: tabular-nums; }
+.tl-tip-note { margin-top: 6px; color: var(--fg-muted); }
+
+.tl-foot {
+  display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+  padding: 10px 20px; border-top: 1px solid var(--border); color: var(--fg-muted); font-size: 11px;
+}
+.tl-legend { display: inline-flex; gap: 12px; }
+.tl-key { display: inline-flex; align-items: center; gap: 5px; }
+.tl-swatch { position: relative; display: inline-block; width: 18px; top: 0; transform: none; }
+
+.tl-table-wrap { max-height: 440px; overflow: auto; }
+.tl-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.tl-table th, .tl-table td { padding: 6px 12px; text-align: left; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.tl-table thead th { position: sticky; top: 0; background: var(--bg-raised); z-index: 1; }
+.tl-table tr.selected { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.tl-table-group th { background: var(--bg-raised); font-weight: 600; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tl-scroll { scroll-behavior: auto; }
+}

@@ -16,6 +16,12 @@ ui/src/**/*.js
 ui/src/**/*.js.map
 ui/vite.config.js
 ui/vitest.config.js
+# Browser e2e (make e2e): per-stack keys, the signed-in session, and results.
+ui/e2e/.stack.env
+ui/e2e/.auth/
+ui/e2e/test-results/
+ui/e2e/playwright-report/
+ui/playwright.config.js
 
 # Python
 __pycache__/

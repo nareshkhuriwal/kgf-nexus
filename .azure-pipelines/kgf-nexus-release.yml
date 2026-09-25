@@ -181,7 +181,7 @@ variables:
   # compile with the same Go.
   GO_VERSION: '1.25'
   # Node 24 LTS; the same exact patch as the PR gate, GitHub CI and
-  # deploy/Dockerfile.ui (docs/OPERATIONS.md section 20.3).
+  # deploy/Dockerfile.ui (docs/OPERATIONS.md section 22.3).
   NODE_VERSION: '24.21.0'
 
 pool:

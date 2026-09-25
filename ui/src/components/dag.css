@@ -308,6 +308,9 @@
 /* Dynamic expansion (§5.4): a folded map template draws a second outline
    behind itself, so "many of these" reads before any text does. */
 .dag-node-g .dag-group-stack { opacity: .45; }
-.dag-group-toggle { cursor: pointer; fill: var(--accent, currentColor); font-weight: 600; }
+.dag-group-toggle { cursor: pointer; outline: none; }
+.dag-node-g .dag-group-toggle text { fill: var(--accent, currentColor); font-weight: 600; }
+.dag-group-toggle-hit { fill: transparent; }
+.dag-group-toggle:focus-visible .dag-group-toggle-hit { stroke: var(--focus); stroke-width: 1.5px; }
 /* Memoized (§6.4): reused a prior result rather than executing. */
 .dag-cached { fill: var(--tone-info-fg, currentColor); font-style: italic; }

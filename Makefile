@@ -32,7 +32,7 @@ MIGRATIONS    := services/migrations
 .PHONY: sdk-test
 .PHONY: sdk-typecheck
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
-        ui-dev ui-build ui-test seed submit-example chaos clean \
+        ui-dev ui-build ui-test e2e e2e-up e2e-down seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
         up-pitr backup-base pitr-verify restore-pitr pitr-drill \
         license-report license-check dev-certs up-tls certs-check \
@@ -233,6 +233,50 @@ ui-build: ## Typecheck and production-build the UI
 ui-test: ## Run the UI component tests
 	cd ui && npm test
 
+# ── Browser end-to-end (ui/e2e, Playwright) ─────────────────────────────
+# An ISOLATED compose stack (its own project name, volumes and host ports; see
+# deploy/e2e/), seeded with fresh keys, then the Playwright suite against it.
+# Torn down afterwards, pass or fail, unless E2E_KEEP=1. Never touches the
+# `make up` stack.
+#
+#   make e2e                                  # up, test, down
+#   make e2e E2E_KEEP=1                       # leave the stack up to debug
+#   make e2e E2E_MINIO_IMAGE=<local image>    # optional: another local S3 image
+#                                             # instead of the pinned Silo digest
+E2E_PROJECT     ?= nexus-e2e
+E2E_PORT_BASE   ?= 55711
+E2E_MINIO_IMAGE ?=
+E2E_KEEP        ?=
+E2E_ENV = E2E_PROJECT='$(E2E_PROJECT)' E2E_PORT_BASE='$(E2E_PORT_BASE)' E2E_MINIO_IMAGE='$(E2E_MINIO_IMAGE)'
+
+# The cleanup trap uses absolute paths: the recipe cd's into ui/, and the trap
+# runs from there. Teardown failure is reported, never silently ignored.
+e2e: ## Browser e2e: isolated compose stack + Playwright, torn down after (E2E_KEEP=1 keeps it)
+	@set -euo pipefail; \
+	cleanup() { \
+	  status=$$?; \
+	  if [ $$status -ne 0 ]; then \
+	    mkdir -p '$(CURDIR)/ui/e2e/test-results'; \
+	    $(E2E_ENV) '$(CURDIR)/deploy/e2e/e2e-stack.sh' logs > '$(CURDIR)/ui/e2e/test-results/stack.log' 2>&1 || true; \
+	    echo "e2e: failed; service logs in ui/e2e/test-results/stack.log, traces in ui/e2e/test-results/"; \
+	  fi; \
+	  if [ '$(E2E_KEEP)' = 1 ]; then echo "e2e: stack $(E2E_PROJECT) left running (make e2e-down)"; \
+	  else $(E2E_ENV) '$(CURDIR)/deploy/e2e/e2e-stack.sh' down >/dev/null 2>&1 || echo "e2e: WARNING: teardown of $(E2E_PROJECT) failed; run make e2e-down" >&2; fi; \
+	  exit $$status; \
+	}; \
+	trap cleanup EXIT; \
+	$(E2E_ENV) deploy/e2e/e2e-stack.sh up; \
+	cd ui; \
+	test -d node_modules || npm ci --no-audit --no-fund; \
+	npx playwright install chromium; \
+	npx playwright test
+
+e2e-up: ## Start (or refresh) the isolated e2e stack and write ui/e2e/.stack.env
+	$(E2E_ENV) deploy/e2e/e2e-stack.sh up
+
+e2e-down: ## Destroy the isolated e2e stack and its volumes
+	$(E2E_ENV) deploy/e2e/e2e-stack.sh down
+
 # ── Python SDK ────────────────────────────────────────────────────────────
 # The SDK's pytest suite, in its own virtualenv so it never installs into (or
 # depends on) whatever Python the shell happens to have. .venv-sdk/ is already
@@ -271,6 +315,12 @@ sdk-test: $(SDK_VENV)/.installed sdk-typecheck ## Type-check, then run the Pytho
 # The key is inserted hashed (api_keys.key_hash), matching how the gateway
 # verifies it: a plaintext key in the database would defeat the point of hashing
 # at rest even in dev.
+#
+# The namespace's tenant row comes first. Since migration 0014 every api_keys
+# row must name a namespace that belongs to a registered tenant, so on a fresh
+# database (nothing registered yet) the key inserts failed with "Namespace must
+# belong to a registered tenant" (F121). Idempotent, and the same statement the
+# Helm bootstrap job and deploy/pitr-seed.sh already run.
 seed: ## Generate and install API keys (prints each plaintext exactly once)
 	@command -v psql >/dev/null || { echo "psql not found; run: $(COMPOSE) exec postgres psql -U nexus -d nexus"; exit 1; }
 	@set -euo pipefail; \
@@ -281,6 +331,9 @@ seed: ## Generate and install API keys (prints each plaintext exactly once)
 	    printf 'nxs_%s_%s' "$$1" "$$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"; \
 	  fi; \
 	}; \
+	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
+	  "INSERT INTO tenants (namespace, name) VALUES ('$(NAMESPACE)', '$(NAMESPACE)') \
+	   ON CONFLICT (namespace) DO NOTHING"; \
 	KEY="$${NEXUS_DEV_API_KEY:-$$(gen admin)}"; \
 	HASH=$$(printf '%s' "$$KEY" | shasum -a 256 | cut -d' ' -f1); \
 	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \

@@ -164,8 +164,11 @@ func attemptPayload(a store.AttemptRow) map[string]any {
 		"error":          rawJSON(a.Error),
 		"metrics":        rawJSON(a.Metrics),
 		"scheduled_at":   a.ScheduledAt,
-		"started_at":     a.StartedAt,
-		"ended_at":       a.EndedAt,
+		// When the scheduler placed it. Additive (F120): without it the console
+		// cannot tell queue wait from a slow worker start.
+		"dispatched_at": a.DispatchedAt,
+		"started_at":    a.StartedAt,
+		"ended_at":      a.EndedAt,
 		// Set when the attempt reused a memoized result (§6.4) instead of
 		// executing; the console marks such nodes "cached" rather than "ran".
 		"cache_hit_of": a.CacheHitOf,

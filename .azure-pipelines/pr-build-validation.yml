@@ -16,6 +16,9 @@
 #   BuildValidation   one job per image; built, never pushed.
 #   EndToEnd          the real compose stack, every example run to SUCCEEDED,
 #                     and the chaos suite. Off by default; ~45 minutes.
+#   BrowserEndToEnd   the operator console in Chromium (Playwright) against an
+#                     isolated compose stack: `make e2e`. Off by default
+#                     (see runBrowserE2E); ~15 minutes including image builds.
 #   QualityGate       summary once the enabled stages succeed.
 #
 # On the two stages that default to false: each needs something the agent may
@@ -73,6 +76,26 @@ parameters:
     displayName: 'Run the examples and chaos suite (~45 min)'
     type: boolean
     default: false
+  # Opt-in: needs Docker on the agent, a registry-reachable network for the
+  # base images, and Chromium's OS libraries (a self-hosted agent without them
+  # gets them from `playwright install --with-deps`, which needs sudo).
+  - name: runBrowserE2E
+    displayName: 'Run the browser e2e suite (Playwright, ~15 min)'
+    type: boolean
+    default: false
+  # Nine consecutive host ports starting here. Two concurrent runs on ONE agent
+  # need different bases; the compose project name is already per build.
+  - name: e2ePortBase
+    displayName: 'Browser e2e: first of nine host ports'
+    type: string
+    default: '55711'
+  # Empty = the digest-pinned Silo image of deploy/docker-compose.yml (F111).
+  # Optional: name another MinIO-compatible image the agent has (it must
+  # contain `mc`). See deploy/e2e/docker-compose.minio-local.yml.
+  - name: e2eMinioImage
+    displayName: 'Browser e2e: local MinIO image override (optional)'
+    type: string
+    default: ' '
 
 variables:
   - name: dockerImageTag
@@ -87,7 +110,7 @@ variables:
   # Node 24 LTS, the exact patch the console's Dockerfile builds on
   # (node:24.21.0-alpine), so a lockfile that resolves here resolves in the
   # image too. Move together with .github/workflows/ci.yml, the release
-  # pipeline and deploy/Dockerfile.ui (docs/OPERATIONS.md section 20.3).
+  # pipeline and deploy/Dockerfile.ui (docs/OPERATIONS.md section 22.3).
   - name: NODE_VERSION
     value: '24.21.0'
   # The throwaway database the integration stage runs against. Not a secret:
@@ -754,6 +777,75 @@ stages:
         displayName: 'Tear Down the Stack (make down)'
         condition: always()
 
+- ${{ if parameters.runBrowserE2E }}:
+  - stage: BrowserEndToEnd
+    displayName: 'Browser End-to-End (Playwright)'
+    # Builds its own images through compose, so it waits on nothing; it is
+    # still worth nothing if the console does not build, hence UserInterface
+    # when that stage is on.
+    ${{ if parameters.runUserInterface }}:
+      dependsOn: UserInterface
+    ${{ else }}:
+      dependsOn: []
+    jobs:
+    - job: RunBrowserE2E
+      displayName: 'Fan-out Journey in Chromium Against an Isolated Stack'
+      timeoutInMinutes: 45
+      workspace:
+        clean: all
+      variables:
+        # Per build, so this job can only ever create or destroy its own stack.
+        E2E_PROJECT: 'nexus-e2e-$(Build.BuildId)'
+        E2E_PORT_BASE: ${{ parameters.e2ePortBase }}
+      steps:
+      - checkout: self
+        persistCredentials: false
+
+      - task: NodeTool@0
+        displayName: 'Install Node'
+        inputs:
+          versionSpec: $(NODE_VERSION)
+
+      - script: |
+          set -euo pipefail
+          npm --prefix ui ci --no-audit --no-fund
+          # The Chromium build pinned by @playwright/test in the lockfile.
+          (cd ui && npx playwright install chromium)
+        displayName: 'Install Console Dependencies and Chromium'
+
+      - script: |
+          set -euo pipefail
+          minio='${{ parameters.e2eMinioImage }}'
+          minio="$(echo "$minio" | tr -d ' ')"
+          echo "compose project: $E2E_PROJECT, ports from $E2E_PORT_BASE, MinIO override: ${minio:-<pinned>}"
+          make e2e E2E_PROJECT="$E2E_PROJECT" E2E_PORT_BASE="$E2E_PORT_BASE" E2E_MINIO_IMAGE="$minio"
+        displayName: 'make e2e (stack up, Playwright, stack down)'
+        env:
+          CI: 'true'
+
+      - task: PublishTestResults@2
+        condition: succeededOrFailed()
+        inputs:
+          testResultsFormat: 'JUnit'
+          testResultsFiles: 'junit.xml'
+          searchFolder: '$(Build.SourcesDirectory)/ui/e2e/test-results'
+          testRunTitle: 'KGF Nexus Browser E2E (Playwright)'
+        displayName: 'Publish Browser E2E Results'
+
+      - task: PublishPipelineArtifact@1
+        condition: failed()
+        inputs:
+          targetPath: '$(Build.SourcesDirectory)/ui/e2e'
+          artifact: 'browser-e2e-$(System.JobAttempt)'
+        displayName: 'Publish Traces, Report and Service Logs'
+
+      - script: |
+          # make e2e already tore the stack down; this is the backstop for a
+          # job cancelled mid-run. Scoped to THIS build's project only.
+          E2E_PROJECT="$E2E_PROJECT" E2E_PORT_BASE="$E2E_PORT_BASE" deploy/e2e/e2e-stack.sh down || true
+        displayName: 'Tear Down the E2E Stack'
+        condition: always()
+
 - stage: QualityGate
   displayName: 'PR Quality Gate'
   dependsOn:
@@ -766,6 +858,8 @@ stages:
     - BuildValidation
     - ${{ if parameters.runEndToEnd }}:
       - EndToEnd
+    - ${{ if parameters.runBrowserE2E }}:
+      - BrowserEndToEnd
   condition: succeeded()
   jobs:
   - job: QualityGateValidation
@@ -789,6 +883,9 @@ stages:
         echo "${{ parameters.runEndToEnd }}" | grep -qi true \
           && echo "✅ Every example ran to SUCCEEDED and the chaos suite held" \
           || echo "⏭️  Examples and chaos suite not run (runEndToEnd is false)"
+        echo "${{ parameters.runBrowserE2E }}" | grep -qi true \
+          && echo "✅ Browser e2e: fan-out run submitted, failed, retried and verified in Chromium" \
+          || echo "⏭️  Browser e2e not run (runBrowserE2E is false)"
         echo ""
         echo "🎉 PR is ready for review and merge!"
         echo ""

@@ -11,7 +11,7 @@ function Harness() {
   const layout = useTaskLayout(base, 'test-run');
   return <><button onClick={layout.reset}>Reset layout</button><span>{layout.message}</span>
     <svg><g className="dag-zoom"><path data-testid="edge" d={edgePath(layout.places[0]!, layout.places[1]!)} />
-      {layout.places.map(p => <g key={p.id} {...layout.bindings(p.id)} role="button" aria-label={p.id} onClick={select} transform={`translate(${p.x},${p.y})`} />)}
+      {layout.places.map(p => <g key={p.id} {...layout.bindings(p.id)} role="button" aria-label={p.id} onClick={select} transform={`translate(${p.x},${p.y})`}><g role="button" aria-label={`toggle ${p.id}`} /></g>)}
     </g></svg></>;
 }
 beforeEach(() => {
@@ -59,4 +59,17 @@ it('supports keyboard repositioning and resetting saved positions', () => {
   fireEvent.click(screen.getByRole('button', { name: 'Reset layout' }));
   expect(a).toHaveAttribute('transform', 'translate(32,32)');
   expect(localStorage.getItem('nexus.task-layout.v1:test-run')).toBe('{}');
+});
+it('never captures the pointer for a control inside the card, so its click stays its own', () => {
+  const capture = vi.fn();
+  Object.defineProperty(SVGElement.prototype, 'setPointerCapture', { configurable: true, value: capture });
+  try {
+    render(<Harness />);
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'toggle a' }), { button: 0, clientX: 100, clientY: 100 });
+    expect(capture).not.toHaveBeenCalled();
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'a' }), { button: 0, clientX: 100, clientY: 100 });
+    expect(capture).toHaveBeenCalledOnce();
+  } finally {
+    delete (SVGElement.prototype as unknown as { setPointerCapture?: unknown }).setPointerCapture;
+  }
 });

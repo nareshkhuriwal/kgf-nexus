@@ -161,7 +161,7 @@ services:
     # archived minio/minio, so no official pullable image exists any more.
     # Drop-in: same S3 API, MINIO_* variables, on-disk format and `server`
     # argv; the image also bundles `mc`. Decision and supply-chain assessment:
-    # CONTRACT-FINDINGS.md F111, docs/OPERATIONS.md section 20.
+    # CONTRACT-FINDINGS.md F111, docs/OPERATIONS.md section 22.
     image: &silo-image docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
     command: server /data --console-address ":9001"
     environment:
@@ -451,7 +451,7 @@ services:
     # /metrics on the health listener, loopback only. A RANGE, because this
     # service may be scaled (`--scale scheduler=3`) and each replica needs a port.
     ports:
-      - "127.0.0.1:19110-19119:8080"
+      - "127.0.0.1:${NEXUS_SCHEDULER_METRICS_PORTS:-19110-19119}:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -595,7 +595,7 @@ services:
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     ports:
       # /metrics (agent), loopback only.
-      - "127.0.0.1:19120:8089"
+      - "127.0.0.1:${NEXUS_AGENT_CPU_METRICS_PORT:-19120}:8089"
     volumes:
       - agent-cpu-wal:/var/lib/nexus/wal
       # This tenant's agent NKey only (subscribe nexus.task.dispatch.<ns>.>).
@@ -645,7 +645,7 @@ services:
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     ports:
       # /metrics (agent), loopback only.
-      - "127.0.0.1:19121:8089"
+      - "127.0.0.1:${NEXUS_AGENT_GPU_METRICS_PORT:-19121}:8089"
     volumes:
       - agent-gpu-wal:/var/lib/nexus/wal
       # This tenant's agent NKey only (subscribe nexus.task.dispatch.<ns>.>).
@@ -694,7 +694,7 @@ services:
       NEXUS_LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     ports:
       # /metrics (agent), loopback only.
-      - "127.0.0.1:19122:8089"
+      - "127.0.0.1:${NEXUS_AGENT_GPU_A10_METRICS_PORT:-19122}:8089"
     volumes:
       - agent-gpu-a10-wal:/var/lib/nexus/wal
       # This tenant's agent NKey only (subscribe nexus.task.dispatch.<ns>.>).

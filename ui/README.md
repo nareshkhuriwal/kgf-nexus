@@ -8,6 +8,7 @@ npm install
 npm run dev      # http://localhost:5173, proxies /v1 to localhost:8090 (the gateway `make up` publishes)
 npm run build    # tsc -b && vite build
 npm test         # vitest
+npm run e2e      # Playwright, against a running stack (see below; `make e2e` does it all)
 ```
 
 ## Screens
@@ -15,7 +16,7 @@ npm test         # vitest
 | Screen | What it answers |
 |---|---|
 | Run list (`/runs`) | Which runs exist, in what state. Filter by state and spec, newest first; filters live in the URL so a view is shareable. |
-| Run detail (`/runs/:id`) | The DAG with live per-node state, the full attempt history for the selected node, a streaming log tail, and the append-only event timeline with actor attribution. Cancel lives here. |
+| Run detail (`/runs/:id`) | The DAG with live per-node state, the execution timeline (Gantt), the full attempt history for the selected node, a streaming log tail, and the append-only event timeline with actor attribution. Cancel and retry live here. |
 | Workers (`/workers`) | The fleet: state, advertised vs committed capacity per dimension, heartbeat age, queues, labels — plus a capacity summary. |
 
 ## Design decisions worth knowing
@@ -50,6 +51,20 @@ failure mode this tool can have. The event stream is treated as a *hint*: it
 invalidates queries, and the server remains the authority, so a dropped message
 costs latency and never correctness.
 
+**The execution timeline answers "where did the time go".** One row per
+attempt (retries included, grouped by node; map children collapsible under their
+template), each bar split into queued (scheduled→dispatched), starting
+(dispatched→started) and running (started→ended). Colour is the final state from
+the same state table; phase is bar height, so it reads in greyscale. Ctrl/⌘+wheel
+zooms, Shift+wheel or drag pans, and the keyboard does both (arrows, +/−, 0).
+While the run is live a now-line advances and open phases grow; an operator zoom
+survives polling until "Follow live". Selection is the page's URL selection in
+both directions, `?timeline=table` switches to the equivalent table, and rows are
+virtualised, so a fan-out of thousands of attempts mounts a few dozen rows. The
+maths is pure and unit-tested in `src/lib/timeline.ts`. It needs the gateway's
+`dispatched_at` (F120); against an older gateway queued runs straight to started
+and is marked as not reported, rather than invented.
+
 **No optimistic cancel.** Cancel is asynchronous by design (RUNNING →
 CANCELLING → CANCELLED once workers ack, §5.2). Faking a terminal state would
 show the operator a lie.
@@ -76,3 +91,48 @@ against the Go services' source. `src/api/types.ts` uses the bare Postgres enum
 labels (`UPSTREAM_FAILED`), and `normalizeState` also accepts the protobuf
 spelling (`NODE_STATE_UPSTREAM_FAILED`), so either serialisation renders
 correctly. List endpoints are accepted as `T[]`, `{items:[…]}` or `{runs:[…]}`.
+
+## Browser end-to-end tests
+
+`ui/e2e/` is a Playwright suite (pinned `@playwright/test`, Chromium) that drives
+the console against a real, isolated stack:
+
+```bash
+make e2e                                   # stack up, suite, stack down (pass or fail)
+make e2e E2E_KEEP=1                        # leave the stack up afterwards; make e2e-down
+make e2e E2E_MINIO_IMAGE=<local image>     # quay.io MinIO answers 401 on this network
+make e2e-up && (cd ui && npx playwright test --ui)   # iterate against a kept stack
+```
+
+`deploy/e2e/e2e-stack.sh` starts the dev compose file under its own project
+(`E2E_PROJECT`, default `nexus-e2e`) with every host port it needs in nine
+consecutive ports from `E2E_PORT_BASE` (default 55711: console, gateway,
+Postgres, MinIO, MinIO console, Mailpit, NATS, gRPC, gateway metrics) and every
+other published port dropped (`deploy/e2e/docker-compose.e2e.yml`), so it runs
+beside `make up`. It mints fresh keys, seeds them with `make seed`, waits for an
+ACTIVE worker and writes `ui/e2e/.stack.env` (gitignored) for the suite.
+
+What the suite covers, all through the browser:
+
+* **Setup** (`global.setup.ts`): an administrator creates an operator; the
+  console refuses the unverified sign-in; the operator confirms the address from
+  the link the gateway mailed (read from Mailpit) and signs in through the form.
+  The fixture workflow is registered the way the SDK/CLI does it (POST of the
+  document).
+* **Journey** (`fan-out-retry.spec.ts`, fixture `fixtures/fan-out-retry.yaml`):
+  catalog search, version and graph; submit with parameters; watch the live run
+  and the map expand; the run fails on a controlled, retry-only failure; open the
+  failed child from the graph; read its logs and download the full log; the
+  timeline's tooltip, keyboard, zoom and table view; retry the child with
+  "Retry this task"; the run reaches SUCCEEDED and the fan-in's log shows all
+  five results; the API agrees.
+
+Rules the suite keeps: no fixed sleeps (web-first assertions and `expect.poll`
+only), one worker, and on failure a trace, screenshot and video per test plus
+every service's log in `ui/e2e/test-results/`. `npm run e2e:report` opens the
+HTML report. CI runs it in the `e2e` job of `.github/workflows/ci.yml`; the Azure
+PR pipeline has it as the opt-in `BrowserEndToEnd` stage (`runBrowserE2E`).
+
+There is no endpoint that serves a task's output payload, so "retrieve an
+output" is covered through the attempt log (the summarising task prints what it
+received) and the log download.
