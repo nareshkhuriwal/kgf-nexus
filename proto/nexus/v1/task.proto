@@ -187,8 +187,14 @@ message RuntimeSpec {
 }
 
 message SecretRef {
+  // The variable name (inject "env") or file name under $NEXUS_SECRETS_DIR
+  // (inject "file") the resolved value is delivered as.
   string name = 1;
+  // Provider URI: env://, file://, vault://, akv:// (ADR-0025). Never a value.
   string ref = 2;
+  // How the value reaches the workload: "env" (the default when empty) or
+  // "file". Additive (ADR-0025); an agent that predates it injects nothing.
+  string inject = 3;
 }
 
 // ── Attempt: the unit of execution ────────────────────────────────────────

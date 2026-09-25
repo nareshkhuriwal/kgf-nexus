@@ -185,13 +185,14 @@ func taskToProto(t map[string]any) (*nexusv1.TaskSpec, error) {
 			if !ok {
 				continue
 			}
-			// Only name and ref are carried. There is deliberately no field here
+			// Only name, ref and inject are carried. There is deliberately no field here
 			// that could hold a secret VALUE: the worker resolves the ref at
 			// execution time, so a compromise of the metadata store leaks no
 			// credentials.
 			rs.Secrets = append(rs.Secrets, &nexusv1.SecretRef{
-				Name: str(sm, "name"),
-				Ref:  str(sm, "ref"),
+				Name:   str(sm, "name"),
+				Ref:    str(sm, "ref"),
+				Inject: str(sm, "inject"),
 			})
 		}
 		ts.Runtime = rs

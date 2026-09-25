@@ -396,6 +396,14 @@
           "minLength": 1,
           "maxLength": 2048,
           "pattern": "^[a-z][a-z0-9+.-]*://[^\\s]+$"
+        },
+        "inject": {
+          "description": "How the worker delivers the resolved value (ADR-0025): 'env' sets the environment variable `name`; 'file' writes $NEXUS_SECRETS_DIR/<name> (mode 0400) and keeps the value out of the environment. Absent means 'env'. 'file' is recommended: environment variables are visible to same-host inspection.",
+          "type": "string",
+          "enum": [
+            "env",
+            "file"
+          ]
         }
       }
     },
