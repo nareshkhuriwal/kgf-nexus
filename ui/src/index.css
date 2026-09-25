@@ -4247,17 +4247,36 @@ a.icon-action { color:var(--fg); text-decoration:none; border:1px solid var(--bo
 .navbar-tool svg { width:18px; height:18px; }
 .navbar-bell .navbar-badge { position:absolute; top:-5px; right:-6px; min-width:17px; height:17px; padding:0 4px; display:flex; align-items:center; justify-content:center; border-radius:10px; font-size:10px; font-weight:700; line-height:1; background:var(--fg); color:var(--bg); border:2px solid var(--bg-raised); }
 .navbar-ns { border-radius:8px; padding:6px 10px; }
-.profile-trigger { padding:3px 7px 3px 3px; border:1px solid var(--border); border-radius:24px; gap:6px; }
-.profile-trigger .avatar { width:30px; height:30px; font-size:13px; }
+/* The trigger is the same 36px rounded square family as the bell, theme and
+   settings tools beside it, not a pill: one outline, and the avatar inside is a
+   borderless tinted disc. Two nested outlines (pill + ringed circle) read as a
+   bug, and the global :focus-visible radius would have swapped the pill's
+   corners for --radius-sm, so the ring's radius is pinned here too. */
+.profile-trigger { height:36px; padding:0 8px 0 3px; gap:4px; border:1px solid var(--border); border-radius:10px; background:var(--bg-raised); color:var(--fg-muted); }
+.profile-trigger:hover,
+.profile-trigger[aria-expanded='true'] { background:var(--bg-hover); border-color:var(--border-strong); }
+.profile-trigger:focus-visible { border-radius:10px; outline-offset:2px; }
+.avatar { border:none; background:color-mix(in srgb, var(--accent) 16%, var(--bg-raised)); color:var(--accent); font-weight:700; letter-spacing:.02em; }
+.profile-trigger .avatar { width:28px; height:28px; border-radius:7px; font-size:12px; }
+.profile-caret { transition:transform .15s ease; }
+.profile-trigger[aria-expanded='true'] .profile-caret { transform:rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .profile-caret { transition:none; } }
+
 .profile-panel { width:300px; border-radius:14px; box-shadow:0 12px 36px #0002; }
-.profile-identity { padding:20px; background:var(--bg-inset); }
-.profile-org { margin-bottom:10px; font-size:11px; }
-.profile-name { font-size:17px; overflow-wrap:anywhere; }
-.profile-email { font-size:12px; }
-.profile-role { display:inline-block; margin-top:10px; border:1px solid var(--border); border-radius:6px; padding:2px 7px; font-size:11px; text-transform:capitalize; }
-.profile-item { display:flex; align-items:center; gap:10px; font-size:13px; padding:10px 12px; }
-.profile-item svg { width:17px; height:17px; color:var(--fg-muted); }
-.profile-fact { padding:10px 12px; font-size:12px; }
+.profile-identity { padding:18px 18px 16px; background:color-mix(in srgb, var(--bg-inset) 55%, var(--bg-raised)); border-bottom:1px solid var(--border); }
+.profile-org { margin:0 0 12px; font-size:11px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--fg-faint); }
+.profile-person { display:flex; align-items:center; gap:12px; min-width:0; }
+.profile-person-text { min-width:0; flex:1; }
+.avatar-lg { flex:0 0 auto; width:44px; height:44px; border-radius:12px; font-size:16px; }
+.profile-name { font-size:15px; line-height:1.3; overflow-wrap:anywhere; }
+.profile-email { margin-top:2px; font-size:12px; }
+.profile-role { display:inline-block; margin-top:8px; border-radius:var(--radius-pill); padding:2px 9px; font-size:11px; font-weight:600; text-transform:capitalize; background:color-mix(in srgb, var(--accent) 14%, transparent); color:var(--accent); }
+.profile-identity + .profile-group { border-top:none; }
+.profile-group { padding:6px; }
+.profile-item { display:flex; align-items:center; gap:10px; font-size:13px; padding:9px 12px; border-radius:8px; }
+.profile-item svg { width:17px; height:17px; color:var(--fg-muted); flex:0 0 auto; }
+.profile-item:hover svg { color:var(--fg); }
+.profile-fact { padding:9px 12px; font-size:12px; }
 .credential-facts { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:20px; margin:0 0 16px; }
 .credential-facts dt { color:var(--fg-muted); font-size:12px; margin-bottom:6px; }
 .credential-facts dd { margin:0; font-weight:600; overflow-wrap:anywhere; }
