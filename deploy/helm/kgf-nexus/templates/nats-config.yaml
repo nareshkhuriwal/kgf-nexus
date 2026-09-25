@@ -1,0 +1,100 @@
+{{- /*
+Copyright 2026 Khuriwal Group
+SPDX-License-Identifier: Apache-2.0
+
+The NATS broker's configuration, including its AUTHORIZATION. It holds public
+NKeys and permissions only -- nothing secret -- which is why it is a ConfigMap:
+the matching seeds live in a Secret and are mounted only into the pod whose
+identity they are.
+
+This renders the same model as deploy/nats/nexus-nats-auth.sh (compose and the
+Portainer host); tests/nats/run-integration.sh runs a broker with THIS output and
+checks every role against it. Change one, change both.
+
+  account NEXUS (JetStream)
+    event-service   pub nexus.run.>, nexus.task.dispatch.>, $JS.API.STREAM.{INFO,CREATE}.<its two streams>
+                    sub nexus.run.>, _INBOX.nexus-event-service.>
+    agent-<ns>      pub nothing; sub nexus.task.dispatch.<ns>.> only
+  account SYS (system_account)
+    monitor         read-only $SYS server/account queries
+No anonymous user exists, so an unauthenticated connection is refused.
+*/ -}}
+{{- if .Values.nats.enabled }}
+{{- include "nexus.natsAuthRequired" . }}
+{{- $a := .Values.nats.auth -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-config
+  labels: {{- include "nexus.labels" (list . "nats") | nindent 4 }}
+data:
+  nats.conf: |
+    server_name: nexus-nats
+    port: 4222
+    # nats-server's monitoring endpoint has NO authentication and /connz lists
+    # every client, so it listens on the pod's loopback only. Probes exec wget
+    # inside the container; operators use the SYS monitor identity.
+    http: "127.0.0.1:8222"
+    pid_file: "/var/run/nats/nats.pid"
+    max_payload: 1MB
+    jetstream {
+      store_dir: "/data"
+    }
+    {{- if .Values.nats.tls.enabled }}
+    tls {
+      cert_file: "/etc/nats-tls/tls.crt"
+      key_file: "/etc/nats-tls/tls.key"
+      ca_file: "/etc/nats-tls/ca.crt"
+      {{- if .Values.nats.tls.verifyClients }}
+      verify: true
+      {{- end }}
+      timeout: 2
+    }
+    {{- end }}
+    include "auth.conf"
+  auth.conf: |
+    {{- if eq $a.mode "none" }}
+    # nats.auth.mode=none: AUTHENTICATION DISABLED. Development only; every
+    # client can read every tenant's run events and forge dispatch hints.
+    {{- else }}
+    accounts {
+      NEXUS {
+        jetstream: enabled
+        users: [
+          {{- range $a.eventService.publicKeys }}
+          # event-service: outbox relay (JetStream publish) + SSE waker
+          { nkey: {{ . }}
+            permissions: {
+              publish: { allow: ["nexus.run.>", "nexus.task.dispatch.>"{{ range list "NEXUS_RUNS" "NEXUS_DISPATCH" }}, "$JS.API.STREAM.INFO.{{ . }}", "$JS.API.STREAM.CREATE.{{ . }}"{{ end }}] }
+              subscribe: { allow: ["nexus.run.>", "_INBOX.nexus-event-service.>"] }
+            } }
+          {{- end }}
+          {{- range $t := $a.tenants }}
+          {{- range $t.publicKeys }}
+          # agents of tenant {{ $t.namespace }}: its dispatch hints only, publish nothing
+          { nkey: {{ . }}
+            permissions: {
+              publish: { deny: [">"] }
+              subscribe: { allow: ["nexus.task.dispatch.{{ $t.namespace }}.>"] }
+            } }
+          {{- end }}
+          {{- end }}
+        ]
+      }
+      SYS {
+        users: [
+          {{- range $a.monitor.publicKeys }}
+          # monitor: read-only server and account queries
+          { nkey: {{ . }}
+            permissions: {
+              publish: { allow: [{{ range $i, $z := list "STATSZ" "VARZ" "SUBSZ" "CONNZ" "ROUTEZ" "GATEWAYZ" "LEAFZ" "ACCOUNTZ" "JSZ" "HEALTHZ" "IDZ" }}{{ if $i }}, {{ end }}"$SYS.REQ.SERVER.PING.{{ $z }}", "$SYS.REQ.SERVER.*.{{ $z }}"{{ end }}, "$SYS.REQ.SERVER.PING"{{ range list "CONNZ" "JSZ" "STATZ" "SUBSZ" "INFO" "LEAFZ" "CONNS" }}, "$SYS.REQ.ACCOUNT.*.{{ . }}"{{ end }}, "$SYS.REQ.ACCOUNT.PING.STATZ"] }
+              subscribe: { allow: ["_INBOX.>", "$SYS.SERVER.>", "$SYS.ACCOUNT.>"] }
+            } }
+          {{- end }}
+        ]
+      }
+    }
+    system_account: SYS
+    {{- end }}
+{{- end }}

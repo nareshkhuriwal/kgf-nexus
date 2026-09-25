@@ -33,6 +33,9 @@ logLevel: info
 #   minio-root-password   object store secret key
 #   worker-api-key        API key the agents authenticate with (nxs_worker_...)
 #   admin-api-key         optional; bootstrap installs it as an admin key
+#   nats-event-service-nkey, nats-agent-nkey
+#                         NATS NKey seeds, unless nats.auth.seedSecret names
+#                         another Secret (see nats.auth below)
 # deploy/terraform creates this Secret with generated values.
 existingSecret: ""
 
@@ -80,6 +83,57 @@ nats:
   # The event bus is optional (ADR-0003): disabled, the agents long-poll.
   enabled: true
   image: nats:2.14.7-alpine
+  # Authorization (docs/OPERATIONS.md §11.7). REQUIRED when enabled: rendering
+  # FAILS without identities, so an unauthenticated broker cannot be installed
+  # by omission. Generate keys on an admin machine, never in the cluster:
+  #   NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh init --tenant <nexusNamespace>
+  #   NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh helm-values   # -> these values
+  # Public keys are not secret and belong here. The SEEDS go in a Secret:
+  #   kubectl create secret generic <seedSecret> \
+  #     --from-file=nats-event-service-nkey=/secure/nexus-nats/event-service/user.nk \
+  #     --from-file=nats-agent-nkey=/secure/nexus-nats/agent-<ns>/user.nk
+  auth:
+    # nkey (production) | none (a throwaway dev cluster ONLY: every client can
+    # read every tenant's run events and forge dispatch hints).
+    mode: nkey
+    eventService:
+      publicKeys: []
+    # SYS-account identity for `nats server report`, nats-surveyor and the like.
+    monitor:
+      publicKeys: []
+    # One entry per Nexus namespace whose agents may receive dispatch hints;
+    # each may subscribe to nexus.task.dispatch.<namespace>.> and nothing
+    # else. Several keys per tenant = per-agent identities, or a rotation overlap.
+    #   - namespace: default
+    #     publicKeys: [UA...]
+    tenants: []
+    # Secret holding the seeds (default: existingSecret). Each pod mounts only
+    # its own key. An agent entry may set natsSeedKey to use its own identity.
+    seedSecret: ""
+    eventServiceSeedKey: nats-event-service-nkey
+    agentSeedKey: nats-agent-nkey
+  tls:
+    enabled: false
+    # kubernetes.io/tls Secret (tls.crt, tls.key, ca.crt) the broker serves;
+    # a cert-manager Certificate with dnsNames [nats, nats.<ns>.svc].
+    secretName: ""
+    # Require a client certificate from the same CA as well as the NKey.
+    verifyClients: true
+    # Client certificates (Secrets with tls.crt, tls.key, ca.crt) when
+    # verifyClients is on; otherwise caSecret supplies only ca.crt.
+    clientSecrets:
+      eventService: ""
+      agent: ""
+    caSecret: ""
+  # Sidecar that SIGHUPs nats-server when its config, authorization or TLS files
+  # change, so adding a tenant or rotating a key or certificate needs no restart.
+  configReloader:
+    enabled: true
+    image: natsio/nats-server-config-reloader:0.21.1
+  # Only event-service and agent pods may open a connection to the broker.
+  networkPolicy:
+    enabled: true
+    extraFrom: []
   storage:
     size: 5Gi
     storageClass: ""

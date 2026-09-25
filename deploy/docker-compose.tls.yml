@@ -120,8 +120,33 @@ services:
       NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/resource-manager/tls.crt
       NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/resource-manager/tls.key
 
-  # event-service speaks HTTP, not gRPC, so it takes no TLS settings here; its
-  # leaf is issued anyway so turning it on later is a config change only.
+  # event-service speaks HTTP, not gRPC, so it takes no gRPC TLS settings here.
+  # It is a NATS client, though, and dials the broker with mTLS using its leaf.
+  event-service:
+    depends_on: *tls-wait
+    volumes:
+      - nexus-tls:/etc/nexus/tls:ro
+      - nats-auth-event-service:/etc/nexus/nats:ro
+    environment:
+      NEXUS_NATS_TLS: "1"
+      NEXUS_NATS_TLS_CA_FILE: /etc/nexus/tls/ca-bundle.pem
+      NEXUS_NATS_TLS_CERT_FILE: /etc/nexus/tls/event-service/tls.crt
+      NEXUS_NATS_TLS_KEY_FILE: /etc/nexus/tls/event-service/tls.key
+      NEXUS_TLS_RELOAD_INTERVAL: 2s
+
+  # The broker serves TLS with the `nats` leaf and REQUIRES a client
+  # certificate from the same CA (verify), on top of the NKey every client
+  # already needs. nats-server reads certificates at start and on reload:
+  # after rotating the leaf, `docker compose kill -s HUP nats`.
+  nats-init:
+    command: ["compose-init", "--tenant", "${NEXUS_NAMESPACE:-default}",
+              "--tls", "/etc/nexus/tls/nats", "--tls-ca", "/etc/nexus/tls/ca-bundle.pem",
+              "--verify-clients"]
+
+  nats:
+    depends_on: *tls-wait
+    volumes:
+      - nexus-tls:/etc/nexus/tls:ro
 
   # Agents are clients only: a client leaf plus the bundle to verify the
   # gateway. They are the hop that leaves the control-plane network in a real
@@ -135,6 +160,8 @@ services:
       NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/agent-cpu/tls.crt
       NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/agent-cpu/tls.key
       NEXUS_TLS_RELOAD_INTERVAL: 2s
+      # NATS too: CA and client certificate fall back to the NEXUS_TLS_* above.
+      NEXUS_NATS_TLS: "1"
 
   agent-gpu:
     depends_on: *tls-wait
@@ -145,6 +172,8 @@ services:
       NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/agent-gpu/tls.crt
       NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/agent-gpu/tls.key
       NEXUS_TLS_RELOAD_INTERVAL: 2s
+      # NATS too: CA and client certificate fall back to the NEXUS_TLS_* above.
+      NEXUS_NATS_TLS: "1"
 
   agent-gpu-a10:
     depends_on: *tls-wait
@@ -155,6 +184,8 @@ services:
       NEXUS_TLS_CLIENT_CERT_FILE: /etc/nexus/tls/agent-gpu-a10/tls.crt
       NEXUS_TLS_CLIENT_KEY_FILE: /etc/nexus/tls/agent-gpu-a10/tls.key
       NEXUS_TLS_RELOAD_INTERVAL: 2s
+      # NATS too: CA and client certificate fall back to the NEXUS_TLS_* above.
+      NEXUS_NATS_TLS: "1"
 
 volumes:
   nexus-tls:

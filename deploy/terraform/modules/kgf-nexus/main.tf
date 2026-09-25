@@ -49,6 +49,29 @@ locals {
   worker_api_key = "nxs_worker_${random_id.worker_key.hex}"
   admin_api_key  = "nxs_admin_${random_id.admin_key.hex}"
   secret_name    = "${var.release_name}-credentials"
+
+  # NATS identities, from a directory deploy/nats/nexus-nats-auth.sh wrote
+  # (Terraform cannot mint NKeys itself). Seeds join the credentials Secret;
+  # public keys become chart values. Empty dir = no identities, and the chart
+  # then refuses to render unless nats.auth.mode=none is set explicitly.
+  nats_dir   = var.nats_credentials_dir
+  nats_agent = "agent-${var.nexus_namespace}"
+  nats_seeds = local.nats_dir == "" ? {} : {
+    "nats-event-service-nkey" = trimspace(file("${local.nats_dir}/event-service/user.nk"))
+    "nats-agent-nkey"         = trimspace(file("${local.nats_dir}/${local.nats_agent}/user.nk"))
+  }
+  nats_auth_values = local.nats_dir == "" ? {} : {
+    nats = {
+      auth = {
+        eventService = { publicKeys = [trimspace(file("${local.nats_dir}/event-service/user.pub"))] }
+        monitor      = { publicKeys = [trimspace(file("${local.nats_dir}/monitor/user.pub"))] }
+        tenants = [{
+          namespace  = var.nexus_namespace
+          publicKeys = [trimspace(file("${local.nats_dir}/${local.nats_agent}/user.pub"))]
+        }]
+      }
+    }
+  }
 }
 
 resource "kubernetes_secret_v1" "credentials" {
@@ -61,13 +84,13 @@ resource "kubernetes_secret_v1" "credentials" {
     }
   }
 
-  data = {
+  data = merge({
     "postgres-password"   = random_password.postgres.result
     "minio-root-user"     = "nexus"
     "minio-root-password" = random_password.minio.result
     "worker-api-key"      = local.worker_api_key
     "admin-api-key"       = local.admin_api_key
-  }
+  }, local.nats_seeds)
 }
 
 resource "helm_release" "nexus" {
@@ -95,6 +118,7 @@ resource "helm_release" "nexus" {
         pullPolicy       = var.image_pull_policy
       }
     }),
+    yamlencode(local.nats_auth_values),
     yamlencode(var.chart_values),
   ]
 }

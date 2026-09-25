@@ -98,7 +98,7 @@ spec:
             {{- include "nexus.resultStoreEnv" $root | nindent 12 }}
             {{- end }}
             {{- if .nats }}
-            {{- include "nexus.natsEnv" $root | nindent 12 }}
+            {{- include "nexus.natsEnv" (list $root "event-service") | nindent 12 }}
             {{- end }}
             {{- range .extra }}
             - { name: {{ .name }}, value: {{ .value | quote }} }
@@ -124,8 +124,14 @@ spec:
             readOnlyRootFilesystem: true
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            {{- if .nats }}
+            {{- include "nexus.natsVolumeMounts" $root | nindent 12 }}
+            {{- end }}
       volumes:
         - { name: tmp, emptyDir: {} }
+        {{- if .nats }}
+        {{- include "nexus.natsVolumes" (list $root "event-service" "") | nindent 8 }}
+        {{- end }}
 {{- if gt (int $replicas) 1 }}
 ---
 apiVersion: policy/v1
