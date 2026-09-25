@@ -16,7 +16,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -79,52 +78,64 @@ func (d *dispatchedAttempt) apply(ctx context.Context) (*ApplyResultResponse, er
 	return d.srv.ApplyResult(ctx, &ApplyResultRequest{ResultJSON: raw})
 }
 
-// holdRun takes the run row lock in its own transaction and returns the
-// release. Every attempt transition appends a run event, and appendEvent
-// allocates its seq with an UPDATE of that row, so a MarkStarted or a lease
-// reclaim started while this is held stalls AFTER it has locked the attempt:
-// exactly the open-transaction window the race needs, produced by the real
-// store code rather than a hand-written imitation of it.
-func holdRun(t *testing.T, f *fixture) (release func()) {
+// runHold is a transaction holding the run row lock.
+type runHold struct {
+	pid     int32
+	release func()
+}
+
+// holdRun takes the run row lock in its own transaction. Every attempt
+// transition appends a run event, and appendEvent allocates its seq with an
+// UPDATE of that row, so a MarkStarted or a lease reclaim started while this
+// is held stalls AFTER it has locked the attempt: exactly the open-transaction
+// window the race needs, produced by the real store code rather than a
+// hand-written imitation of it.
+func holdRun(t *testing.T, f *fixture) runHold {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := f.pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin run holder: %v", err)
 	}
+	var h runHold
+	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&h.pid); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("holder pid: %v", err)
+	}
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM workflow_runs WHERE id = $1 FOR UPDATE`, f.runID); err != nil {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("lock run: %v", err)
 	}
 	var once sync.Once
-	release = func() { once.Do(func() { _ = tx.Commit(ctx) }) }
-	t.Cleanup(release)
-	return release
+	h.release = func() { once.Do(func() { _ = tx.Commit(ctx) }) }
+	t.Cleanup(h.release)
+	return h
 }
 
-// waitAttemptLocked blocks until some transaction holds the attempt's row
-// lock, probing with NOWAIT so the probe never queues behind it.
-func waitAttemptLocked(t *testing.T, f *fixture, id uuid.UUID) {
+// waitStalledBehind blocks until a transition is queued behind the run lock,
+// which means it already holds its attempt's row lock (every transition locks
+// the attempt before appending its event).
+//
+// Watched through pg_blocking_pids rather than by probing the attempt row:
+// a probe that briefly locks the row would make the lease reconciler's SKIP
+// LOCKED skip the attempt, and the window would never open.
+func waitStalledBehind(t *testing.T, f *fixture, h runHold) {
 	t.Helper()
 	ctx := context.Background()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		tx, err := f.pool.Begin(ctx)
-		if err != nil {
-			t.Fatalf("begin probe: %v", err)
+		var n int
+		if err := f.pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))`,
+			h.pid).Scan(&n); err != nil {
+			t.Fatalf("probe blocked backends: %v", err)
 		}
-		_, err = tx.Exec(ctx, `SELECT 1 FROM task_attempts WHERE id = $1 FOR UPDATE NOWAIT`, id)
-		_ = tx.Rollback(ctx)
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+		if n > 0 {
 			return
-		}
-		if err != nil {
-			t.Fatalf("probe attempt lock: %v", err)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("attempt %s was never locked", id)
+	t.Fatal("no transition ever reached the run lock")
 }
 
 // TestResultIsNotSkippedWhileMarkStartedHoldsTheAttempt is F104's race: the
@@ -141,10 +152,10 @@ func TestResultIsNotSkippedWhileMarkStartedHoldsTheAttempt(t *testing.T) {
 	st := f.newStore(nil)
 	d := newDispatchedAttempt(t, f, st, worker, "short")
 
-	release := holdRun(t, f)
+	hold := holdRun(t, f)
 	started := make(chan error, 1)
 	go func() { started <- st.MarkStarted(ctx, d.id, time.Now().UTC()) }()
-	waitAttemptLocked(t, f, d.id)
+	waitStalledBehind(t, f, hold)
 
 	type result struct {
 		resp *ApplyResultResponse
@@ -159,7 +170,7 @@ func TestResultIsNotSkippedWhileMarkStartedHoldsTheAttempt(t *testing.T) {
 	// Let the result reach the lock before MarkStarted commits. Before the fix
 	// it did not wait: it returned Applied=false here, immediately.
 	time.Sleep(150 * time.Millisecond)
-	release()
+	hold.release()
 
 	if err := <-started; err != nil {
 		t.Fatalf("MarkStarted: %v", err)
@@ -201,7 +212,7 @@ func TestResultWaitingOnAReclaimStaysFenced(t *testing.T) {
 	d := newDispatchedAttempt(t, f, st, worker, "reclaimed")
 	f.expireLease(d.id)
 
-	release := holdRun(t, f)
+	hold := holdRun(t, f)
 	reclaimed := make(chan []store.LostAttempt, 1)
 	go func() {
 		lost, err := st.ReconcileExpiredLeases(ctx, time.Now().UTC(), 10)
@@ -210,7 +221,7 @@ func TestResultWaitingOnAReclaimStaysFenced(t *testing.T) {
 		}
 		reclaimed <- lost
 	}()
-	waitAttemptLocked(t, f, d.id)
+	waitStalledBehind(t, f, hold)
 
 	type result struct {
 		resp *ApplyResultResponse
@@ -222,7 +233,7 @@ func TestResultWaitingOnAReclaimStaysFenced(t *testing.T) {
 		done <- result{resp, err}
 	}()
 	time.Sleep(150 * time.Millisecond)
-	release()
+	hold.release()
 
 	if lost := <-reclaimed; len(lost) != 1 {
 		t.Fatalf("reclaimed %d attempts, want 1", len(lost))
@@ -321,10 +332,10 @@ func TestCancelIsNotSkippedWhileMarkStartedHoldsTheAttempt(t *testing.T) {
 	st := f.newStore(nil)
 	d := newDispatchedAttempt(t, f, st, worker, "cancelled")
 
-	release := holdRun(t, f)
+	hold := holdRun(t, f)
 	started := make(chan error, 1)
 	go func() { started <- st.MarkStarted(ctx, d.id, time.Now().UTC()) }()
-	waitAttemptLocked(t, f, d.id)
+	waitStalledBehind(t, f, hold)
 
 	type result struct {
 		n   int
@@ -336,7 +347,7 @@ func TestCancelIsNotSkippedWhileMarkStartedHoldsTheAttempt(t *testing.T) {
 		done <- result{n, err}
 	}()
 	time.Sleep(150 * time.Millisecond)
-	release()
+	hold.release()
 
 	if err := <-started; err != nil {
 		t.Fatalf("MarkStarted: %v", err)
