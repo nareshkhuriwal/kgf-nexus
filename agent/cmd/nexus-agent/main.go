@@ -100,6 +100,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// NEXUS_NATS_*: empty URL means poll-only, which is a complete, correct
+	// configuration (ADR-0003). A configuration the bus REJECTS -- credentials
+	// set but unreadable, none where NEXUS_NATS_REQUIRE_AUTH or NEXUS_ENV=
+	// production demands them -- is fatal, like a malformed NEXUS_K8S_*: an
+	// agent quietly running without hints would hide the deployment bug.
+	busCfg, err := bus.ConfigFromEnv("nexus-agent")
+	if err != nil {
+		log.Error("invalid NATS configuration", "error", err)
+		os.Exit(1)
+	}
+	if bus.RequireAuthOverridden() {
+		log.Warn("NEXUS_NATS_REQUIRE_AUTH=false overrides NEXUS_ENV: dispatch hints may be received without credentials")
+	}
+
 	cfg := worker.Config{
 		Namespace: *namespace,
 		Queues:    splitCSV(*queues),
@@ -125,10 +139,8 @@ func main() {
 			UseTLS:          os.Getenv("NEXUS_S3_USE_TLS") == "true",
 		},
 		AllowUnenforceableLimits: *allowUnenforceable,
-		// NEXUS_NATS_URL / NEXUS_NATS_CREDS. Empty means poll-only, which is a
-		// complete, correct configuration (ADR-0003).
-		Bus:                bus.ConfigFromEnv("nexus-agent"),
-		MaxUninterruptible: *maxUninterruptible,
+		Bus:                      busCfg,
+		MaxUninterruptible:       *maxUninterruptible,
 	}
 
 	// The kubernetes executor is opt-in: it exists only when NEXUS_K8S_NAMESPACE
