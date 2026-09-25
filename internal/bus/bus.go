@@ -222,7 +222,6 @@ func UsageSubject(namespace string) string {
 // AllUsageSubject matches every usage record, for a billing consumer.
 const AllUsageSubject = "nexus.usage.>"
 
-
 // DispatchSubject is where a hint that a queue may have dispatchable work goes.
 func DispatchSubject(namespace, queue string) string {
 	return prefixDispatch + "." + Token(namespace) + "." + Token(queue)
