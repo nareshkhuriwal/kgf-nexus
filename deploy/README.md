@@ -8,6 +8,11 @@ Everything here is **local-development only**. The credentials are deliberately
 obvious and are marked `DEV ONLY` in `docker-compose.yml`; there is no secret
 management in Phase 1.
 
+For Kubernetes, see [terraform/README.md](terraform/README.md). It covers the
+Helm chart via Terraform on a local cluster, and cloud platforms (AKS, EKS,
+GKE) with managed PostgreSQL, registries and object storage. The cloud
+platforms have been validated offline only (F115).
+
 ---
 
 ## 1. Bring-up
