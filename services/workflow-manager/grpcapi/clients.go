@@ -22,6 +22,11 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/runs"
 )
 
 // ErrPeerNotConfigured means the owning service's address was not supplied.
@@ -129,18 +134,51 @@ func (c *DAGEngineClient) ReconcileRun(ctx context.Context, runID, nodeID string
 	return resp.Frontier, resp.RunState, resp.RunTerminal, nil
 }
 
-// ResetFailedNodes prepares a retry-from-failed.
+// ResetNodes asks the engine to reset a failed run's nodes for an operator
+// retry: the named nodes (every node that did not succeed, when none are named)
+// and their non-succeeded dependents.
 //
-// Nodes that already SUCCEEDED are deliberately left alone, so a 50-node pipeline
-// that failed at node 49 does not redo 48 nodes of work.
-func (c *DAGEngineClient) ResetFailedNodes(ctx context.Context, runID string) ([]string, error) {
-	if c.addr == "" {
-		return nil, fmt.Errorf("reset failed nodes for %s: %w (dag-engine owns task_nodes)", runID, ErrPeerNotConfigured)
+// The engine's refusals are translated into the run service's sentinels here,
+// because runs.Service must tell a DEFINITE refusal (nothing changed; roll back)
+// from a failure whose outcome is unknown (commit and reconcile). A status code
+// is the only thing that survives the hop, so the mapping is by code:
+//
+//   - InvalidArgument: the request named unknown nodes.
+//   - FailedPrecondition: the run or a node is not retryable as it is now.
+//   - Aborted: a concurrent writer moved a node; nothing was applied.
+//   - Unimplemented: an engine that predates ResetNodes. Definite too -- it
+//     never reached a handler -- and reported as the retry being unavailable,
+//     not as the run refusing it.
+//
+// Anything else (a timeout, Unavailable, Internal) is returned as-is and treated
+// as indeterminate by the caller.
+func (c *DAGEngineClient) ResetNodes(ctx context.Context, runID string, nodeIDs []string, actor string) (selected, reset []string, err error) {
+	if c.conn == nil {
+		return nil, nil, fmt.Errorf("reset nodes of run %s: %w (dag-engine owns task_nodes): %w",
+			runID, ErrPeerNotConfigured, runs.ErrRetryUnavailable)
 	}
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	_ = ctx
-	return nil, fmt.Errorf("reset failed nodes for %s: %w", runID, errNotWired("dag-engine", "ResetFailedNodes"))
+
+	var resp deResetNodesResponse
+	ierr := c.conn.invoke(ctx, "/nexus.v1.DagEngineService/ResetNodes",
+		&deResetNodesRequest{RunID: runID, NodeIDs: nodeIDs, Actor: actor}, &resp)
+	if ierr != nil {
+		msg := status.Convert(ierr).Message()
+		switch status.Code(ierr) {
+		case codes.InvalidArgument:
+			return nil, nil, fmt.Errorf("%w: %s", runs.ErrRetryInvalidNodes, msg)
+		case codes.FailedPrecondition, codes.NotFound:
+			return nil, nil, fmt.Errorf("%w: %s", runs.ErrRetryRefused, msg)
+		case codes.Aborted:
+			return nil, nil, fmt.Errorf("%w: %s", runs.ErrRetryConflict, msg)
+		case codes.Unimplemented:
+			return nil, nil, fmt.Errorf("%w: this dag-engine does not implement ResetNodes; upgrade it to retry runs (%s)",
+				runs.ErrRetryUnavailable, msg)
+		}
+		return nil, nil, fmt.Errorf("reset nodes of run %s: %w", runID, ierr)
+	}
+	return resp.Selected, resp.Reset, nil
 }
 
 // SchedulerClient calls scheduler, which owns task_attempts, leases, and

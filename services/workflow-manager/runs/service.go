@@ -41,9 +41,12 @@ type DAGEngine interface {
 	// MaterializeRun compiles the pinned spec into task_nodes and task_edges. It
 	// is the dag-engine's table, so we ask rather than insert.
 	MaterializeRun(ctx context.Context, runID, specID string, specJSON []byte) error
-	// ResetFailedNodes prepares a retry-from-failed by returning failed nodes and
-	// everything downstream of them to PENDING.
-	ResetFailedNodes(ctx context.Context, runID string) (resetNodes []string, err error)
+	// ResetNodes applies an operator retry to the graph: the selected nodes (all
+	// that did not succeed, when none are named) and their non-succeeded
+	// dependents return to PENDING. It does not reconcile. The error must wrap
+	// ErrRetryRefused or ErrRetryConflict when the engine refused the request, so
+	// the caller can tell "nothing happened" from "the outcome is unknown".
+	ResetNodes(ctx context.Context, runID string, nodeIDs []string, actor string) (selected, reset []string, err error)
 	// ReconcileRun recomputes a run's frontier. Only the engine owns the graph, so
 	// nothing else in the system can work out which node became ready.
 	ReconcileRun(ctx context.Context, runID, nodeID string) (frontier []string, runState string, terminal bool, err error)
@@ -361,42 +364,191 @@ func (s *Service) ReconcileStalled(ctx context.Context, runID string) error {
 	return nil
 }
 
-// RetryFromFailed restarts a terminally failed run from its failed nodes.
+// Retry errors. Distinct sentinels because each means something different to
+// the operator and maps to a different API answer.
+var (
+	// ErrRetryRefused: the engine refused the selection -- a node is not in a
+	// retryable state, or would fail again at once. Nothing was changed.
+	ErrRetryRefused = errors.New("retry refused")
+	// ErrRetryInvalidNodes: the selection names nodes this run does not have.
+	// Nothing was changed.
+	ErrRetryInvalidNodes = errors.New("retry names unknown nodes")
+	// ErrRetryConflict: a concurrent writer moved a node while the retry was
+	// being applied. Nothing was changed; re-reading and retrying may succeed.
+	ErrRetryConflict = errors.New("retry conflicted with a concurrent change")
+	// ErrRetryUnavailable: no dag-engine that can serve a retry is reachable --
+	// none is configured, or it predates ResetNodes. Nothing was changed.
+	ErrRetryUnavailable = errors.New("retry is unavailable")
+	// ErrRetryIndeterminate: the dag-engine call failed in a way that does not
+	// say whether its reset committed. The run was moved to RUNNING anyway and
+	// reconciled, which converges on the truth either way; see Retry.
+	ErrRetryIndeterminate = errors.New("retry outcome is not known")
+)
+
+// RetryRequest is an operator retry.
+type RetryRequest struct {
+	RunID string
+	// NodeIDs selects the nodes to retry. Empty retries the whole run from
+	// every node that did not succeed (the original retry-from-failed).
+	NodeIDs []string
+	// Actor is the principal that asked, for the run's history.
+	Actor string
+}
+
+// RetryResult reports what a retry did.
+type RetryResult struct {
+	Run store.RunRow
+	// Selected is the effective selection; Reset is every node reset, which
+	// includes the selected nodes' non-succeeded dependents.
+	Selected []string
+	Reset    []string
+}
+
+// Retry restarts a terminally failed run, from the selected nodes or from every
+// node that did not succeed.
 //
-// Nodes that already SUCCEEDED are left alone, so a 50-node pipeline that failed
-// at node 49 does not redo 48 nodes of work. The run returns to RUNNING rather
-// than PENDING because its DAG is already materialized.
-func (s *Service) RetryFromFailed(ctx context.Context, runID string) (store.RunRow, error) {
-	state, _, _, err := store.WFMGetRunForUpdate(ctx, s.db, runID)
-	if err != nil {
-		return store.RunRow{}, err
+// Nodes that already SUCCEEDED are never re-run, so a 50-node pipeline that
+// failed at node 49 does not redo 48 nodes of work. The run returns to RUNNING
+// rather than PENDING because its DAG is already materialized. What a retry
+// resets is decided by the engine (dag.PlanRetry documents the semantics); this
+// method owns the run's side of it.
+//
+// ONE TRANSACTION ON THE RUN ROW. The run row is locked, its state checked, the
+// engine asked to reset the nodes, the deadline renewed and the run moved to
+// RUNNING -- and only then committed. Holding the lock across the engine call is
+// what makes the retry safe against the races around it:
+//
+//   - two concurrent retries: the second blocks on the lock and then finds the
+//     run RUNNING, so it is refused; the engine is asked once.
+//   - a stale terminal publish (a reconcile that concluded FAILED before the
+//     reset): it blocks on the lock, and OnNodesTerminal then finds reset nodes
+//     that are no longer terminal and refuses it, rather than putting the run
+//     back to FAILED under a graph that is running again.
+//   - cancel: a cancel of the FAILED run is illegal and refused; one arriving
+//     after commit cancels the retried run normally.
+//
+// The engine's transaction never waits on this lock (see WFMLockRunForRetry),
+// and ResetNodes does not reconcile or call back here, so holding it across the
+// call cannot deadlock. The reconcile that creates the retried nodes' attempts
+// runs after commit, when the engine will see the run RUNNING.
+//
+// If the engine call fails without saying whether its reset committed (a
+// timeout, a dropped connection), rolling back could leave reset nodes under a
+// FAILED run that no scheduler will ever dispatch. So the run is committed
+// RUNNING anyway and reconciled: if the reset did commit, the retry proceeds; if
+// it did not, every node is still terminal and the reconcile publishes the run's
+// outcome again. Both converge, and the caller is told the outcome was unknown.
+func (s *Service) Retry(ctx context.Context, req RetryRequest) (RetryResult, error) {
+	runID := req.RunID
+	actor := req.Actor
+	if actor == "" {
+		actor = actorFor(ctx)
 	}
-	if err := statemachine.RetryFromFailed(domain.RunState(state)); err != nil {
-		return store.RunRow{}, fmt.Errorf("%w: %s", store.ErrRunStateConflict, err)
+	log := s.log.With("run_id", runID)
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return RetryResult{}, fmt.Errorf("begin retry of run %s: %w", runID, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	state, specID, err := store.WFMLockRunForRetry(ctx, tx, runID)
+	if err != nil {
+		return RetryResult{}, err
+	}
+	from := domain.RunState(state)
+	if err := statemachine.RetryFromFailed(from); err != nil {
+		return RetryResult{}, fmt.Errorf("%w: %s", store.ErrRunStateConflict, err)
 	}
 
-	reset, err := s.dag.ResetFailedNodes(ctx, runID)
-	if err != nil {
-		return store.RunRow{}, fmt.Errorf("reset failed nodes for run %s: %w", runID, err)
+	selected, reset, rerr := s.dag.ResetNodes(ctx, runID, req.NodeIDs, actor)
+	indeterminate := false
+	if rerr != nil {
+		if errors.Is(rerr, ErrRetryRefused) || errors.Is(rerr, ErrRetryInvalidNodes) ||
+			errors.Is(rerr, ErrRetryConflict) || errors.Is(rerr, ErrRetryUnavailable) {
+			// A definite refusal: the engine changed nothing, so neither does
+			// this. The deferred rollback releases the lock.
+			return RetryResult{}, rerr
+		}
+		indeterminate = true
+		log.ErrorContext(ctx, "dag-engine reset failed without a definite outcome; committing RUNNING and reconciling so the run converges either way",
+			"error", rerr)
 	}
 
 	// A retried run gets a FRESH deadline window: the original deadline has
 	// already passed for a TIMED_OUT run, so reusing it would time the retry out
 	// the instant it started.
-	if _, err := store.WFMCancelTimers(ctx, s.db, runID, TimerRunDeadline); err != nil {
-		s.log.WarnContext(ctx, "failed to clear old run deadline on retry", "run_id", runID, "error", err)
+	if _, err := store.WFMCancelTimers(ctx, tx, runID, TimerRunDeadline); err != nil {
+		return RetryResult{}, fmt.Errorf("clear old deadline of run %s: %w", runID, err)
+	}
+	spec, err := store.WFMGetSpecByID(ctx, tx, specID)
+	if err != nil {
+		return RetryResult{}, fmt.Errorf("read spec of run %s: %w", runID, err)
+	}
+	policy, err := parsePolicy(spec.SpecJSON)
+	if err != nil {
+		return RetryResult{}, fmt.Errorf("read run policy of run %s: %w", runID, err)
+	}
+	if policy.RunTimeoutMS > 0 {
+		deadline, derr := store.WFMRenewRunDeadline(ctx, tx, runID, policy.RunTimeoutMS)
+		if derr != nil {
+			return RetryResult{}, derr
+		}
+		if _, err := store.WFMArmTimerAt(ctx, tx, TimerRunDeadline, runID, deadline, nil); err != nil {
+			return RetryResult{}, fmt.Errorf("arm deadline of retried run %s: %w", runID, err)
+		}
 	}
 
-	run, err := store.WFMTransitionRun(ctx, s.db, runID,
+	run, err := store.WFMTransitionRun(ctx, tx, runID,
 		[]string{string(domain.RunFailed), string(domain.RunTimedOut)},
 		string(domain.RunRunning))
 	if err != nil {
-		return store.RunRow{}, err
+		return RetryResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RetryResult{}, fmt.Errorf("commit retry of run %s: %w", runID, err)
 	}
 
-	s.emit(ctx, runID, "RunRetriedFromFailed", map[string]any{"reset_nodes": reset}, actorFor(ctx))
-	s.log.InfoContext(ctx, "run retried from failed nodes", "run_id", runID, "reset_nodes", len(reset))
-	return run, nil
+	// Committed. From here nothing fails the operator's call: the retry is
+	// durable, and a missed reconcile is caught by the next report or the
+	// stalled-run sweep, which reconciles any RUNNING run with nothing in flight.
+	if _, _, _, err := s.dag.ReconcileRun(ctx, runID, ""); err != nil {
+		log.ErrorContext(ctx, "run retried but its frontier could not be recomputed; the stalled-run sweep will dispatch it",
+			"error", err)
+	}
+
+	mode := "nodes"
+	if len(req.NodeIDs) == 0 {
+		mode = "whole_run"
+	}
+	s.emit(ctx, runID, "RunStateChanged", map[string]any{
+		"from": string(from), "to": string(domain.RunRunning),
+		"trigger": string(statemachine.TriggerRetryFromFailed),
+	}, actor)
+	// The retry's own audit entry: who asked, for what, and what it reset.
+	// requested_nodes is the request as given; selected and reset_nodes are
+	// what the engine resolved it to.
+	s.emit(ctx, runID, "RunRetriedFromFailed", map[string]any{
+		"mode":            mode,
+		"requested_nodes": orEmptyStrings(req.NodeIDs),
+		"selected":        orEmptyStrings(selected),
+		"reset_nodes":     orEmptyStrings(reset),
+		"indeterminate":   indeterminate,
+	}, actor)
+
+	if indeterminate {
+		return RetryResult{Run: run}, fmt.Errorf("%w: %v", ErrRetryIndeterminate, rerr)
+	}
+	log.InfoContext(ctx, "run retried",
+		"mode", mode, "selected", selected, "reset_nodes", len(reset), "actor", actor)
+	return RetryResult{Run: run, Selected: selected, Reset: reset}, nil
+}
+
+func orEmptyStrings(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
 }
 
 // OnRunDeadline handles the run_deadline timer.
@@ -421,10 +573,35 @@ func (s *Service) OnRunDeadline(ctx context.Context, runID string) error {
 }
 
 // OnNodesTerminal is the DAG engine reporting the graph is finished.
+//
+// The count and the transition happen in ONE transaction, under the run row
+// lock, and the order matters. The engine's report can be STALE: a reconcile
+// that concluded FAILED just before an operator retry reset the graph can
+// arrive while the retry holds the run, or after it committed. Counting before
+// taking the lock would count the pre-retry graph, find it terminal, and then --
+// once the retry released the lock -- put the freshly RUNNING run back to
+// FAILED over nodes that are about to run, where no scheduler would ever
+// dispatch them (CONTRACT-FINDINGS F100). Locked first, the count sees whatever
+// the retry committed.
 func (s *Service) OnNodesTerminal(ctx context.Context, runID string) (store.RunRow, error) {
-	counts, err := store.WFMCountRunNodesByState(ctx, s.db, runID)
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return store.RunRow{}, fmt.Errorf("begin terminal transition of run %s: %w", runID, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, _, _, err := store.WFMGetRunForUpdate(ctx, tx, runID); err != nil {
+		return store.RunRow{}, err
+	}
+	counts, err := store.WFMCountRunNodesByState(ctx, tx, runID)
 	if err != nil {
 		return store.RunRow{}, err
+	}
+	// The engine reports "every node is terminal"; check it rather than trust it.
+	if live := counts[string(domain.NodePending)] + counts[string(domain.NodeReady)] +
+		counts[string(domain.NodeRunning)]; live > 0 {
+		return store.RunRow{}, fmt.Errorf("%w: %d nodes of run %s are not terminal; a terminal report for it is stale",
+			store.ErrRunStateConflict, live, runID)
 	}
 	// §5.2: SUCCEEDED requires every node terminal AND none in {FAILED,
 	// UPSTREAM_FAILED, TIMED_OUT}. A CANCELLED node is not a fault, so it does not
@@ -436,13 +613,17 @@ func (s *Service) OnNodesTerminal(ctx context.Context, runID string) (store.RunR
 			counts[string(domain.NodeUpstreamFailed)] > 0,
 		AnyCancelled: counts[string(domain.NodeCancelled)] > 0,
 	}
-	run, err := s.transition(ctx, runID, statemachine.TriggerAllNodesTerminal, outcome)
+	run, from, to, err := s.applyTransition(ctx, tx, runID, statemachine.TriggerAllNodesTerminal, outcome)
 	if err != nil {
 		return store.RunRow{}, err
 	}
-	if _, err := store.WFMCancelTimers(ctx, s.db, runID, TimerRunDeadline); err != nil {
-		s.log.WarnContext(ctx, "failed to cancel deadline on a finished run", "run_id", runID, "error", err)
+	if _, err := store.WFMCancelTimers(ctx, tx, runID, TimerRunDeadline); err != nil {
+		return store.RunRow{}, fmt.Errorf("cancel deadline of finished run %s: %w", runID, err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.RunRow{}, fmt.Errorf("commit terminal transition of run %s: %w", runID, err)
+	}
+	s.announceTransition(ctx, runID, from, to, statemachine.TriggerAllNodesTerminal)
 	return run, nil
 }
 
@@ -467,23 +648,38 @@ func (s *Service) OnNodeFailedFailFast(ctx context.Context, runID, nodeID string
 // the point: the machine is exhaustively testable without a database, and the CAS
 // makes concurrent transitions from several replicas safe.
 func (s *Service) transition(ctx context.Context, runID string, trigger statemachine.Trigger, outcome statemachine.Outcome) (store.RunRow, error) {
-	state, _, _, err := store.WFMGetRunForUpdate(ctx, s.db, runID)
+	run, from, to, err := s.applyTransition(ctx, s.db, runID, trigger, outcome)
 	if err != nil {
 		return store.RunRow{}, err
+	}
+	s.announceTransition(ctx, runID, from, to, trigger)
+	return run, nil
+}
+
+// applyTransition is transition's database half, on q -- the pool, or a
+// transaction the caller commits before announcing.
+func (s *Service) applyTransition(ctx context.Context, q store.GWQuerier, runID string, trigger statemachine.Trigger, outcome statemachine.Outcome) (store.RunRow, domain.RunState, domain.RunState, error) {
+	state, _, _, err := store.WFMGetRunForUpdate(ctx, q, runID)
+	if err != nil {
+		return store.RunRow{}, "", "", err
 	}
 	from := domain.RunState(state)
 
 	to, err := statemachine.Next(from, trigger, outcome)
 	if err != nil {
-		return store.RunRow{}, fmt.Errorf("%w: %v (legal from %s: %v)",
+		return store.RunRow{}, "", "", fmt.Errorf("%w: %v (legal from %s: %v)",
 			store.ErrRunStateConflict, err, from, statemachine.LegalTriggers(from))
 	}
 
-	run, err := store.WFMTransitionRun(ctx, s.db, runID, statemachine.FromStatesFor(trigger), string(to))
+	run, err := store.WFMTransitionRun(ctx, q, runID, statemachine.FromStatesFor(trigger), string(to))
 	if err != nil {
-		return store.RunRow{}, err
+		return store.RunRow{}, "", "", err
 	}
+	return run, from, to, nil
+}
 
+// announceTransition records a committed transition in the run's history and log.
+func (s *Service) announceTransition(ctx context.Context, runID string, from, to domain.RunState, trigger statemachine.Trigger) {
 	s.emit(ctx, runID, "RunStateChanged", map[string]any{
 		"from":    string(from),
 		"to":      string(to),
@@ -492,7 +688,6 @@ func (s *Service) transition(ctx context.Context, runID string, trigger statemac
 
 	s.log.InfoContext(ctx, "run state changed",
 		"run_id", runID, "from", from, "to", to, "trigger", trigger)
-	return run, nil
 }
 
 // emit reports an event through the event-service.

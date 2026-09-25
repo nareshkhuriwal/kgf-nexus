@@ -52,6 +52,18 @@ type deReconcileRunResponse struct {
 	UpstreamFailed []string `json:"upstream_failed,omitempty"`
 }
 
+type deResetNodesRequest struct {
+	RunID   string   `json:"run_id"`
+	NodeIDs []string `json:"node_ids,omitempty"`
+	Actor   string   `json:"actor,omitempty"`
+}
+
+type deResetNodesResponse struct {
+	RunID    string   `json:"run_id"`
+	Selected []string `json:"selected"`
+	Reset    []string `json:"reset_nodes"`
+}
+
 // deJSONCodec mirrors the dag-engine's server-side codec.
 //
 // Registered PER CALL via grpc.CallContentSubtype rather than globally with
