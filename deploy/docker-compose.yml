@@ -282,9 +282,14 @@ services:
       # Links in emails point at the console, which is where the verify and
       # reset pages live -- not at this gateway.
       NEXUS_PUBLIC_URL: ${NEXUS_PUBLIC_URL:-http://localhost:3000}
+      # The operations listener: /metrics, /healthz, /readyz. NOT the REST port,
+      # which is the public ingress (docs/OPERATIONS.md, "Metrics").
+      NEXUS_METRICS_ADDR: ":8088"
     ports:
       - "${NEXUS_API_PORT:-8090}:8080"
       - "${NEXUS_GRPC_PORT:-9091}:9091"
+      # Loopback only: metrics are for an operator's local Prometheus, not the LAN.
+      - "127.0.0.1:${NEXUS_GATEWAY_METRICS_PORT:-19100}:8088"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -309,6 +314,9 @@ services:
       # A single reconciler polls timers WHERE fire_at <= now() FOR UPDATE SKIP
       # LOCKED (§3.2). Every deadline in the system is a row in that table.
       TIMER_POLL_INTERVAL_MS: "1000"
+    # /metrics on the health listener, published on LOOPBACK only (docs/OPERATIONS.md, "Metrics").
+    ports:
+      - "127.0.0.1:${NEXUS_WFM_METRICS_PORT:-19101}:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -330,6 +338,9 @@ services:
       NEXUS_GRPC_ADDR: ":9090"
       NEXUS_WFM_GRPC_ADDR: ":9090"
       RM_GRPC_ADDR: ":9090"
+    # /metrics on the health listener, published on LOOPBACK only (docs/OPERATIONS.md, "Metrics").
+    ports:
+      - "127.0.0.1:${NEXUS_DAG_METRICS_PORT:-19102}:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -364,6 +375,10 @@ services:
       # replicas can be scaled up freely: `docker compose up --scale scheduler=3`.
       SCHEDULER_POLL_INTERVAL_MS: "500"
       LEASE_TTL_MS: "30000"
+    # /metrics on the health listener, loopback only. A RANGE, because this
+    # service may be scaled (`--scale scheduler=3`) and each replica needs a port.
+    ports:
+      - "127.0.0.1:19110-19119:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -397,6 +412,9 @@ services:
       SCHEDULER_AGING_MS: "30000"
       SCHEDULER_POLL_INTERVAL_MS: "500"
       LEASE_TTL_MS: "30000"
+    # /metrics on the health listener, published on LOOPBACK only (docs/OPERATIONS.md, "Metrics").
+    ports:
+      - "127.0.0.1:${NEXUS_SCHEDULER_GPU_METRICS_PORT:-19104}:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -422,6 +440,9 @@ services:
       # running_attempt_ids is what stops the capacity ledger drifting (§3.2).
       WORKER_LIVENESS_TIMEOUT_MS: "15000"
       RECONCILE_INTERVAL_MS: "10000"
+    # /metrics on the health listener, published on LOOPBACK only (docs/OPERATIONS.md, "Metrics").
+    ports:
+      - "127.0.0.1:${NEXUS_RM_METRICS_PORT:-19105}:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -448,6 +469,9 @@ services:
       NEXUS_OUTBOX_MAX_AGE: 24h
       # run_events is append-only (invariant 8); this service is its sole writer.
       EVENT_SSE_KEEPALIVE_MS: "15000"
+    # /metrics on the health listener, published on LOOPBACK only (docs/OPERATIONS.md, "Metrics").
+    ports:
+      - "127.0.0.1:${NEXUS_EVENT_METRICS_PORT:-19106}:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -489,8 +513,12 @@ services:
       # The local write-ahead log is what lets a restarted agent know it started
       # a task but not how it ended, and report INDETERMINATE rather than
       # guessing (§6.3).
+      NEXUS_METRICS_ADDR: ":8089"
       NEXUS_WAL_DIR: /var/lib/nexus/wal
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
+    ports:
+      # /metrics (agent), loopback only.
+      - "127.0.0.1:19120:8089"
     volumes:
       - agent-cpu-wal:/var/lib/nexus/wal
       - chaos-effects:/var/lib/nexus/effects
@@ -532,8 +560,12 @@ services:
       NEXUS_GPU_MEMORY_BYTES: "42949672960"
       NEXUS_DISK_BYTES: "53687091200"
       NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
+      NEXUS_METRICS_ADDR: ":8089"
       NEXUS_WAL_DIR: /var/lib/nexus/wal
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
+    ports:
+      # /metrics (agent), loopback only.
+      - "127.0.0.1:19121:8089"
     volumes:
       - agent-gpu-wal:/var/lib/nexus/wal
       - chaos-effects:/var/lib/nexus/effects
@@ -573,9 +605,13 @@ services:
       NEXUS_GPU_MEMORY_BYTES: "25769803776"
       NEXUS_DISK_BYTES: "53687091200"
       NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
+      NEXUS_METRICS_ADDR: ":8089"
       NEXUS_WAL_DIR: /var/lib/nexus/wal
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
       NEXUS_LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
+    ports:
+      # /metrics (agent), loopback only.
+      - "127.0.0.1:19122:8089"
     volumes:
       - agent-gpu-a10-wal:/var/lib/nexus/wal
       - chaos-effects:/var/lib/nexus/effects

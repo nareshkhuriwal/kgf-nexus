@@ -38,6 +38,11 @@ spec:
       labels:
         app.kubernetes.io/name: nexus-agent
         app.kubernetes.io/part-of: nexus
+      # Annotation-based scrape discovery (docs/OPERATIONS.md, "Metrics").
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8089"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: nexus-agent
       # The agent needs its token (it talks to the API server); tasks do not.
@@ -85,6 +90,10 @@ spec:
               value: /var/lib/nexus-agent/wal
             - name: NEXUS_LOG_FORMAT
               value: json
+            # /metrics and /healthz on all pod interfaces so Prometheus can
+            # reach it (the binary defaults to loopback). No Service exposes it.
+            - name: NEXUS_METRICS_ADDR
+              value: ":8089"
             # ── Kubernetes executor ──────────────────────────────────────
             # Setting the namespace is what enables the executor. Tasks run in
             # the agent's OWN namespace, which is also what allows each Job to
@@ -114,6 +123,8 @@ spec:
             #   value: "nexus.dev/pool=gpu"
             # - name: NEXUS_K8S_TOLERATIONS
             #   value: "nvidia.com/gpu:NoSchedule"
+          ports:
+            - {name: metrics, containerPort: 8089}
           resources:
             requests: {cpu: 250m, memory: 256Mi}
             limits: {cpu: "1", memory: 512Mi}

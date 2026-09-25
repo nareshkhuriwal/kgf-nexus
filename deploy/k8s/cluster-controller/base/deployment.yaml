@@ -27,6 +27,9 @@ spec:
   template:
     metadata:
       labels: {app.kubernetes.io/name: nexus-cluster-controller, app.kubernetes.io/part-of: kgf-nexus, app.kubernetes.io/component: cluster-controller}
+      # /metrics is served on the health listener (docs/OPERATIONS.md, "Metrics").
+      # Both replicas are scraped: nexus_controller_leader tells them apart.
+      annotations: {prometheus.io/scrape: "true", prometheus.io/port: "8090", prometheus.io/path: /metrics}
     spec:
       serviceAccountName: nexus-cluster-controller
       # Enough for the leader to finish a cycle and release its Lease, so the
