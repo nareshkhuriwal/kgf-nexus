@@ -2562,10 +2562,13 @@ wire contract (no proto or schema change).
 precedence, flag-only DSNs in both `-flag value` and `-flag=value` forms, `-h`
 with no DSN, and the refusal message.
 
-### F104. MarkStarted can make a concurrent result be skipped and reclaimed as LOST — OPEN
+### F104. MarkStarted can make a concurrent result be skipped and reclaimed as LOST — FIXED
 
-**Severity:** medium (narrow window, data loss of a completed result when hit).
-Found while building F96's progress storage; not fixed.
+**Severity:** medium (data loss of a completed result when hit). Found while
+building F96's progress storage; fixed on `fix/dispatch-races-and-agent-register`.
+The window was not narrow in practice: racing the real `MarkStarted` and
+`ApplyResult` of 24 freshly dispatched attempts dropped 5 results on the first
+run of the new test.
 
 `SchedulerStore.MarkStarted` (`internal/store/scheduler_reports.go`) moves the
 attempt DISPATCHED→RUNNING with an `UPDATE task_attempts ... WHERE state =
@@ -2588,15 +2591,83 @@ which retries or fails a task that actually succeeded.
 `TestProgressNeverBlocksTheResult` pins that. Nothing pins it for
 `MarkStarted`.
 
-**Candidate fixes, not chosen here.** (a) In `ApplyResult`, distinguish "row
-locked" from "row terminal": retry the lock without `SKIP LOCKED` (a plain
-`FOR UPDATE` with a short `lock_timeout`) when the attempt is still
-DISPATCHED/RUNNING, since a result is never contending with a peer applying the
-same result under a valid lease. (b) Have the gateway return `Accepted: false`
-with a retryable reason when `Applied` is false and the attempt is not terminal,
-so the agent's WAL keeps the result and redelivers it. Either needs a race test
-in the style of `TestProgressNeverBlocksTheResult` that holds a `MarkStarted`
-transaction open while a result arrives.
+**Fix.** Option (a), with option (b) as its bounded fallback.
+
+1. `ApplyResult` and `cancelOneAttempt` (`internal/store/scheduler_reports.go`)
+   lock the attempt with a plain `FOR UPDATE` through
+   `lockAttemptForTransition`, which sets `lock_timeout` for that one statement
+   (`ClaimConfig.AttemptLockTimeout`, default `DefaultAttemptLockTimeout` = 2 s)
+   and restores the session default afterwards, so the rest of the transition
+   waits exactly as it always did.
+2. A wait that times out, or a deadlock Postgres breaks on it (`55P03`,
+   `40P01`), returns `store.ErrAttemptBusy`. Nothing is written. The scheduler's
+   `ReportServer` maps it to `codes.Unavailable`, and the gateway's
+   `ReportResult` now answers every upstream `Unavailable`, `DeadlineExceeded`,
+   `ResourceExhausted` or `Aborted` with `Unavailable` instead of `Internal`.
+   Neither `Ack` is sent, so the agent's reporter keeps the result in its WAL
+   and resends it (`agent/internal/worker/reporter.go` retries any transport
+   error; `Ack{accepted:false}` is terminal and would drop it).
+3. `CancelRunAttempts` tries every attempt and returns the joined errors
+   instead of stopping at the first (F109).
+
+**Why this design.** A result is not a work-queue item: nothing re-delivers a
+skipped one, so "someone holds the row" has to mean "wait for them", not "they
+handled it". Telling a benign holder apart from a reclaim is unnecessary,
+because waiting is safe for both:
+
+- *Lease fencing is unchanged.* Under READ COMMITTED, when the lock is granted
+  Postgres re-evaluates `state IN ('DISPATCHED','RUNNING')` against the version
+  the holder committed. If the holder was the lease reconciler, the liveness
+  sweep or a cancel, the attempt is now terminal, the lock query returns no row,
+  and the result is ignored exactly as SKIP LOCKED ignored it. A duplicate
+  result waiting on the first sees it terminal too. The gateway's token check
+  still runs first, and expiry still deletes the lease in the same transaction.
+- *No new deadlock.* The attempt lock is the transaction's first lock, so the
+  waiter holds nothing another transaction can be waiting on and cannot close
+  a cycle there. Postgres would still detect one, and that maps to the same
+  retryable error.
+- *At-least-once is preserved.* The only outcomes are applied, ignored because
+  the attempt is terminal, or a retryable error that leaves the result in the
+  WAL. `Applied: false` is no longer reachable for a result that was merely
+  contended.
+
+Option (b) alone (always answer retryable when not applied) was rejected as
+the primary mechanism: `Applied: false` is also the answer for a genuine
+duplicate, which must stay a success or the agent would retry a delivered
+result until its budget ran out; and every contended result would pay an agent
+backoff round trip instead of a few milliseconds of lock wait.
+
+**Other SKIP LOCKED sites, checked.** `expireOne` (lease reconciler and
+liveness sweep) keeps SKIP LOCKED: it is a sweep, and a skipped attempt is
+re-selected next pass while its lease stays expired or its worker stays DEAD
+(F106 makes the second true). The claim paths (`scheduler_claim.go`,
+`scheduler_worker_claim.go`) skip PENDING attempts and worker rows, which stay
+claimable. `ClaimDueTimers`, the workflow-manager timer and schedule claims and
+the event-service relay are work queues whose skipped rows remain for the next
+pass. `ExpireScheduleToStart` uses a plain conditional UPDATE. `RecordProgress`
+never locks the attempt row. None of them can drop a result or a report.
+`cancelOneAttempt` could, and is F109.
+
+**Residual.** When the lease reconciler wins the row, the late result is
+ignored and the agent is still told `Accepted: true`, as before; its lease is
+gone, so any later RPC for the attempt is rejected as stale. Answering
+`stale_lease_token` in that case would be more precise and changes no state.
+
+**How it is held.** `services/scheduler/result_race_integration_test.go`:
+`TestResultIsNotSkippedWhileMarkStartedHoldsTheAttempt` stalls the real
+`MarkStarted` after its attempt UPDATE (by holding the run row its event
+append needs) and sends the result into that window;
+`TestResultWaitingOnAReclaimStaysFenced` does the same with the real lease
+reconciler and asserts LOST, one terminal event and a single capacity release;
+`TestResultBusyPastTheLockTimeoutIsRetryable` asserts `Unavailable` and
+`ErrAttemptBusy`, an untouched attempt, and that the resend applies;
+`TestCancelIsNotSkippedWhileMarkStartedHoldsTheAttempt` covers the cancel
+fan-out; `TestConcurrentStartAndResultNeverDropsTheResult` races 24 real
+start/result pairs. Four of them failed before the fix (the reclaim test is a
+fencing guard and passes either way), and all pass 20 of 20 runs with
+`-count=20`. `TestUnappliedResultIsNeverAcknowledged`
+(`services/api-gateway/workergrpc`) pins the gateway mapping. No proto or
+schema change.
 
 ### F105. archive_timeout did not bound the RPO after a server start or promotion — FIXED
 
@@ -2622,7 +2693,7 @@ idle database pays nothing. The measured archive intervals with the guard were
 bound is gone too. `deploy/pitr-verify.sh` fails when the newest archived
 segment is older than 15 minutes; alert on it.
 
-### F106. Two liveness sweepers, and the scheduler's gives up its in-flight recovery when it loses — OPEN
+### F106. Two liveness sweepers, and the scheduler's gives up its in-flight recovery when it loses — FIXED
 
 **Severity:** low (time, not correctness). Found by the timed full-stack restore
 drill (OPERATIONS §4.6).
@@ -2655,10 +2726,123 @@ select it again, so its remaining attempts also fall back to lease expiry.
 Nothing is lost or double-applied: lease expiry is the correctness backstop in
 both cases, and every expiry is fenced.
 
-**Proposed fix, not done.** Have the scheduler's sweep also expire the held
-attempts of workers that are already DEAD with attempts still DISPATCHED/RUNNING
-(or move the attempt half of the transition behind one owner). Also make
-`killWorker` and `SweepDeadWorkers` log and continue per attempt and per worker,
-as `ReconcileExpiredLeases` does, instead of returning on the first error. Test
-with an integration test where the resource-manager wins the race, asserting
-the attempts become LOST within one sweep interval instead of one lease TTL.
+**Fix (`internal/store/scheduler_liveness.go`).** Both halves. Attempt
+recovery stays with one owner (the scheduler); either sweeper may still make
+the DEAD transition.
+
+- `SweepDeadWorkers` now also selects workers already `DEAD` that still hold
+  DISPATCHED/RUNNING attempts on its queue (`deadWorkersHoldingAttempts`, an
+  EXISTS served by `idx_attempts_worker_active`) and expires those attempts as
+  LOST (`worker_dead`). Such a worker is reported with `DeadWorker.AlreadyDead`,
+  logged as "recovered attempts of a worker already marked dead" and not
+  counted as a newly dead worker in the scheduler's metric. The same query
+  retries attempts an earlier pass failed to expire, so a failure no longer
+  falls back to lease expiry either.
+- `killWorker` (through `expireHeldAttempts`) and `SweepDeadWorkers` try every
+  attempt and every worker in the pass and return the joined errors; the
+  scheduler logs the pass as incomplete. `ReconcileExpiredLeases` had the same
+  bug (F108) and is fixed the same way.
+
+**Fencing.** Every expiry is still `expireOne`: SKIP LOCKED plus the state CAS,
+with the lease deleted in the same transaction. DEAD is terminal
+(`SetWorkerState` never leaves it; an agent must re-register under a new id),
+so the dead session can never again be the attempt's legitimate owner, and its
+late reports find no lease. The resource-manager has already deleted the
+reservations and zeroed `committed`; `releaseCapacity` then finds no
+reservation and releases nothing, so capacity is released exactly once
+(asserted).
+
+No schema change. `services/resource-manager/internal/server/sweeper.go` is
+unchanged apart from its comment, which now says who recovers the attempts.
+
+**How it is held.** `services/scheduler/liveness_race_integration_test.go`:
+`TestResourceManagerWinsTheDeadRaceAttemptsStillRecover` runs the
+resource-manager's exact calls (`SetWorkerState(DEAD)`, `ReleaseAllForWorker`)
+with a 10-minute lease TTL, then asserts that ONE scheduler sweep moves both
+attempts (one DISPATCHED, one RUNNING) to LOST with `WorkerDead` and a
+scheduled retry, deletes their leases and leaves `committed` at 0, and that a
+second sweep does nothing. `TestDeadSweepContinuesPastAFailedAttempt` poisons
+one attempt and asserts that the worker's other attempt and a second stale
+worker are still recovered, then that the repaired attempt is recovered on the
+next pass through the already-DEAD path. Both failed before the fix.
+
+### F108. The lease reconciler stopped at its first failed expiry — FIXED
+
+**Severity:** low (time, not correctness). Found while fixing F106.
+
+`ReconcileExpiredLeases` (`internal/store/scheduler_reconcile.go`) carried the
+comment "one bad attempt must not stop recovery of the rest" and then returned
+on the first `expireOne` error. Every later expired lease in the batch waited
+for the next pass, and an attempt that kept failing at the head of the
+`ORDER BY expires_at` batch blocked recovery of everything behind it on every
+pass.
+
+**Fix.** Every attempt in the batch is tried and the errors are joined; the
+scheduler logs "lease reconciliation incomplete" with the number recovered.
+`TestLeaseReconcilerContinuesPastAFailedAttempt` puts a poisoned attempt at the
+head of the batch. It recovered 0 attempts before the fix and now recovers the
+other two, then the repaired one on the next pass.
+
+### F109. A run cancel skipped attempts that were being started or dispatched — FIXED (partly open)
+
+**Severity:** medium. Found while checking the SKIP LOCKED sites for F104.
+
+`cancelOneAttempt` locked with `FOR UPDATE SKIP LOCKED` and treated a locked
+row as not cancellable. An attempt whose `ReportStarted` was committing, or a
+PENDING attempt the dispatch claim held, was silently skipped by the run's
+cancel fan-out and kept running (or was dispatched) under a CANCELLING run.
+`CancelRunAttempts` also returned on the first per-attempt error.
+
+**Fix.** The cancel waits for the row with the same bounded lock as
+`ApplyResult` (F104). A claim that wins first leaves the attempt DISPATCHED,
+and the waiting cancel then cancels it. All attempts are tried and the errors
+are joined; a busy one surfaces as `Unavailable` from the scheduler.
+`TestCancelIsNotSkippedWhileMarkStartedHoldsTheAttempt` failed before the fix.
+
+**Open.** workflow-manager's `Cancel` logs a failed `CancelRunAttempts` as
+"reconciler will retry", but nothing calls it again for a CANCELLING run. The
+heartbeat still delivers CANCEL_ATTEMPT for every in-flight attempt of a
+CANCELLING run (`PendingCancellations`), so the work stops, but the attempt
+then ends through `ApplyResult` (usually FAILED) rather than CANCELLED.
+Re-issuing the fan-out periodically for CANCELLING runs would close this.
+
+### F110. Agents crash-looped when they registered before the gateway was ready — FIXED
+
+**Severity:** medium (availability). Reported from a live rollout:
+`agent: register: ... Unavailable desc = authentication temporarily
+unavailable`. The process exited 1 and Kubernetes restarted it on crash-loop
+backoff.
+
+`Agent.register` made one `Register` call and returned its error, which ended
+the process. The gateway answers `Unavailable` while its credential store is
+unreachable (`services/api-gateway/workergrpc/interceptor.go`), and the
+transport answers `Unavailable` while the gateway is not listening, so every
+fresh install, gateway rollout or database blip at agent start produced a
+crash loop.
+
+**Fix (`agent/internal/worker/register.go`).** `registerWithRetry` retries
+`Unavailable`, `DeadlineExceeded`, `ResourceExhausted`, `Aborted` and
+`Internal` (the gateway's code when the resource-manager or database fails
+while creating the worker row) with capped exponential backoff: a ceiling of
+0.5 s doubling to 30 s, full jitter, 30 s per attempt, for as long as the
+process runs. Every other code, including `Unauthenticated`,
+`PermissionDenied` and `InvalidArgument`, fails at once with
+`ErrRegistrationRejected` and a message naming the fix (for example "check
+NEXUS_API_KEY"). SIGTERM during the backoff ends the wait at once, and
+`Agent.Run` returns nil, so the process exits 0. The agent's ops listener
+serves `/readyz`, which is 503 until a session is registered and again while
+it re-registers. The Helm chart and `deploy/k8s/agent-deployment.yaml` add a
+readiness probe on it. There is deliberately no liveness probe on
+registration: an outage is waited out, not restarted through. New metrics:
+`nexus_agent_registration_attempts_total{result=ok|retryable_error|permanent_error}`
+and `nexus_agent_registered` (OPERATIONS, metrics table).
+
+**How it is held.** `agent/internal/worker/register_test.go` runs a scripted
+`WorkerService` over a real gRPC connection (bufconn). It covers three
+`Unavailable` answers then success (4 calls, the bootstrap key on each, metrics
+3 and 1); each transient code being retried; each permanent code making one
+call and returning a typed error that keeps its gRPC status and names the fix;
+cancellation during a one-minute backoff returning within milliseconds;
+`Agent.Run` returning nil and never ready when stopped before registering, and
+returning the typed error on a permanent failure; and the backoff schedule.
+`TestReadyzFollowsRegistration` covers the endpoint.
