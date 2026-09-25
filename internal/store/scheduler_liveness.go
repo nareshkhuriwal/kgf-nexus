@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -22,6 +23,11 @@ type DeadWorker struct {
 	LastHeartbeat time.Time
 	// ExpiredAttempts are the attempts it was holding, now LOST.
 	ExpiredAttempts []LostAttempt
+	// AlreadyDead is true when this pass did not declare the worker DEAD:
+	// something else did (the resource-manager's sweeper, or an earlier pass
+	// that could not finish) and this pass only expired the attempts it still
+	// held. Callers count only the others as newly dead workers.
+	AlreadyDead bool
 }
 
 // SweepDeadWorkers implements §5.5: a worker whose last heartbeat is older than
@@ -76,14 +82,9 @@ SELECT id, hostname, last_heartbeat_at
 	if err != nil {
 		return nil, fmt.Errorf("select stale workers: %w", err)
 	}
-	type stale struct {
-		id   uuid.UUID
-		host string
-		hb   time.Time
-	}
-	var list []stale
+	var list []staleWorker
 	for rows.Next() {
-		var st stale
+		var st staleWorker
 		if err := rows.Scan(&st.id, &st.host, &st.hb); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan stale worker: %w", err)
@@ -95,17 +96,104 @@ SELECT id, hostname, last_heartbeat_at
 		return nil, fmt.Errorf("iterate stale workers: %w", err)
 	}
 
-	var out []DeadWorker
+	// Per-worker and per-attempt failures are collected, not returned on the
+	// first one. A worker is committed DEAD before its attempts are expired, so
+	// aborting here used to strand every remaining attempt of it -- and every
+	// other stale worker in the list -- until lease expiry (F106). The pass
+	// below picks the stranded ones up next time.
+	var (
+		out  []DeadWorker
+		errs []error
+		seen = make(map[uuid.UUID]bool, len(list))
+	)
 	for _, st := range list {
+		if ctx.Err() != nil {
+			errs = append(errs, ctx.Err())
+			return out, errors.Join(errs...)
+		}
+		seen[st.id] = true
 		dead, err := s.killWorker(ctx, now, st.id, st.host, st.hb, cutoff)
 		if err != nil {
-			return out, fmt.Errorf("declare worker %s dead: %w", st.id, err)
+			errs = append(errs, fmt.Errorf("declare worker %s dead: %w", st.id, err))
 		}
 		if dead != nil {
 			out = append(out, *dead)
 		}
 	}
-	return out, nil
+
+	// Workers someone else already declared DEAD but whose attempts are still
+	// DISPATCHED/RUNNING. Two processes mark workers DEAD: this sweep and the
+	// resource-manager's (services/resource-manager/.../sweeper.go), which
+	// releases the capacity and deliberately leaves the attempts to the
+	// scheduler. When it wins, the select above no longer sees the worker, and
+	// before F106 nothing expired its attempts until each lease ran out -- up to
+	// a full lease TTL of extra recovery. The same query also retries attempts a
+	// previous pass of this sweep failed to expire.
+	orphans, err := s.deadWorkersHoldingAttempts(ctx, limit)
+	if err != nil {
+		errs = append(errs, err)
+		return out, errors.Join(errs...)
+	}
+	for _, st := range orphans {
+		if seen[st.id] {
+			continue // declared DEAD above; its failures are already reported
+		}
+		if ctx.Err() != nil {
+			errs = append(errs, ctx.Err())
+			break
+		}
+		dead := &DeadWorker{ID: st.id, Hostname: st.host, LastHeartbeat: st.hb, AlreadyDead: true}
+		if err := s.expireHeldAttempts(ctx, now, dead); err != nil {
+			errs = append(errs, fmt.Errorf("expire attempts of already-DEAD worker %s: %w", st.id, err))
+		}
+		if len(dead.ExpiredAttempts) > 0 {
+			out = append(out, *dead)
+		}
+	}
+	return out, errors.Join(errs...)
+}
+
+// staleWorker is a worker row selected by a liveness pass.
+type staleWorker struct {
+	id   uuid.UUID
+	host string
+	hb   time.Time
+}
+
+// deadWorkersHoldingAttempts lists DEAD workers that still hold DISPATCHED or
+// RUNNING attempts on this replica's queue.
+//
+// Expiring those attempts is fenced exactly as for a worker this sweep kills:
+// DEAD is terminal (SetWorkerState never revives it; the agent must
+// re-register under a new id), so the worker can never again be the attempt's
+// legitimate owner, and expireOne's state CAS plus lease delete reject any
+// report its old session still sends. Scoped by the ATTEMPT's queue, like the
+// lease reconciler, so each replica recovers only its own queue's work; the
+// EXISTS is served by idx_attempts_worker_active.
+func (s *SchedulerStore) deadWorkersHoldingAttempts(ctx context.Context, limit int) ([]staleWorker, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT w.id, w.hostname, w.last_heartbeat_at
+  FROM workers w
+ WHERE w.state = 'DEAD'
+   AND EXISTS (SELECT 1 FROM task_attempts a
+                WHERE a.worker_id = w.id
+                  AND a.state IN ('DISPATCHED','RUNNING')
+                  AND a.queue = $2)
+ ORDER BY w.last_heartbeat_at
+ LIMIT $1`, limit, s.cfg.Queue)
+	if err != nil {
+		return nil, fmt.Errorf("select dead workers still holding attempts: %w", err)
+	}
+	defer rows.Close()
+	var out []staleWorker
+	for rows.Next() {
+		var st staleWorker
+		if err := rows.Scan(&st.id, &st.host, &st.hb); err != nil {
+			return nil, fmt.Errorf("scan dead worker: %w", err)
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
 }
 
 // killWorker performs the DEAD transition and expires the worker's attempts.
@@ -146,25 +234,44 @@ UPDATE workers
 	}
 
 	dead := &DeadWorker{ID: workerID, Hostname: hostname, LastHeartbeat: lastHB}
+	return dead, s.expireHeldAttempts(ctx, now, dead)
+}
 
-	// Expire everything it held. Each attempt is its own transaction (see
-	// ReconcileExpiredLeases) so one bad row cannot block the rest.
-	attemptIDs, err := s.attemptsHeldBy(ctx, workerID)
+// expireHeldAttempts expires every DISPATCHED/RUNNING attempt the DEAD worker
+// holds, appending each to dead.ExpiredAttempts.
+//
+// Each attempt is its own transaction (see ReconcileExpiredLeases), and a
+// failure on one does not stop the rest: the errors are joined and returned
+// after every attempt has been tried. An attempt that fails, or that expireOne
+// skips because another transaction holds its row, is still held by a DEAD
+// worker, so the next pass's deadWorkersHoldingAttempts selects it again.
+func (s *SchedulerStore) expireHeldAttempts(ctx context.Context, now time.Time, dead *DeadWorker) error {
+	attemptIDs, err := s.attemptsHeldBy(ctx, dead.ID)
 	if err != nil {
-		return dead, err
+		return err
 	}
+	var errs []error
 	for _, id := range attemptIDs {
+		if ctx.Err() != nil {
+			errs = append(errs, ctx.Err())
+			break
+		}
 		lost, err := s.expireOne(ctx, now, id, domain.EventWorkerDead, "worker_dead")
 		if err != nil {
-			return dead, fmt.Errorf("expire attempt %s of dead worker: %w", id, err)
+			errs = append(errs, fmt.Errorf("expire attempt %s of dead worker: %w", id, err))
+			continue
 		}
 		if lost != nil {
 			dead.ExpiredAttempts = append(dead.ExpiredAttempts, *lost)
 		}
 	}
-	return dead, nil
+	return errors.Join(errs...)
 }
 
+// attemptsHeldBy lists all of the worker's in-flight attempts. Not scoped to
+// this replica's queue: a DEAD worker's attempts on any queue are equally
+// orphaned, and a peer replica recovering the same attempt is a no-op under
+// expireOne's SKIP LOCKED and state CAS.
 func (s *SchedulerStore) attemptsHeldBy(ctx context.Context, workerID uuid.UUID) ([]uuid.UUID, error) {
 	rows, err := s.pool.Query(ctx, `
 SELECT id FROM task_attempts

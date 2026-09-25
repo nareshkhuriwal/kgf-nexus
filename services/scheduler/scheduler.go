@@ -244,9 +244,12 @@ func (s *Scheduler) reconcileLoop(ctx context.Context) {
 		}
 		lost, err := s.store.ReconcileExpiredLeases(ctx, time.Now().UTC(), 100)
 		if err != nil && !errors.Is(err, context.Canceled) {
+			// Partial: every other expiry in the pass was still attempted, and
+			// the failed ones are selected again next pass.
 			s.setErr(err)
 			s.metrics.observeLoopError("lease-reconciler")
-			s.log.Error("lease reconciliation failed", "err", err)
+			s.log.Error("lease reconciliation incomplete; failed attempts are retried next pass",
+				"err", err, "recovered", len(lost))
 		}
 		for _, l := range lost {
 			s.metrics.observeLost(l, "lease_expired")
@@ -263,13 +266,27 @@ func (s *Scheduler) livenessLoop(ctx context.Context) {
 		}
 		dead, err := s.store.SweepDeadWorkers(ctx, time.Now().UTC(), 50)
 		if err != nil && !errors.Is(err, context.Canceled) {
+			// Partial, like the lease reconciler: the rest of the pass ran, and a
+			// DEAD worker still holding attempts is selected again next pass.
 			s.setErr(err)
 			s.metrics.observeLoopError("liveness-sweeper")
-			s.log.Error("liveness sweep failed", "err", err)
+			s.log.Error("liveness sweep incomplete; unrecovered attempts are retried next pass", "err", err)
 		}
-		s.metrics.observeDeadWorkers(len(dead))
+		declared := 0
 		for _, w := range dead {
-			s.log.Warn("worker declared dead",
+			if !w.AlreadyDead {
+				declared++
+			}
+		}
+		s.metrics.observeDeadWorkers(declared)
+		for _, w := range dead {
+			msg := "worker declared dead"
+			if w.AlreadyDead {
+				// The resource-manager's sweeper (or an unfinished earlier pass)
+				// marked it DEAD; only its attempts were recovered here.
+				msg = "recovered attempts of a worker already marked dead"
+			}
+			s.log.Warn(msg,
 				"worker_id", w.ID, "hostname", w.Hostname,
 				"last_heartbeat_at", w.LastHeartbeat,
 				"expired_attempts", len(w.ExpiredAttempts))
