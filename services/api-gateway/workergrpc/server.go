@@ -544,6 +544,17 @@ func (s *Server) ReportResult(ctx context.Context, req *nexusv1.ReportResultRequ
 		return ack, nil
 	}
 	if err := s.sch.ApplyResult(ctx, req); err != nil {
+		if errors.Is(err, store.ErrStaleLeaseToken) {
+			// The lease reconciler or liveness sweep reclaimed the attempt
+			// after the fence above passed, and the scheduler ignored the
+			// result (F104). The same answer the fence gives: the agent drops
+			// the result, which is right because a retry owns the work now. A
+			// duplicate of a result that did land is not stale and falls
+			// through to Accepted below.
+			s.log.WarnContext(ctx, "attempt result arrived after its lease was reclaimed; rejected as stale",
+				"attempt_id", req.GetAttemptId())
+			return &nexusv1.Ack{Accepted: false, Reason: store.ReasonStaleLeaseToken}, nil
+		}
 		// Never Ack{accepted:true} and never Ack{accepted:false} here: the
 		// result was not applied, and both Acks make the agent drop it from its
 		// WAL. A transport error keeps it there to be resent. A scheduler that

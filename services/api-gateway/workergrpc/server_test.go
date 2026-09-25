@@ -396,6 +396,40 @@ func TestUnappliedResultIsNeverAcknowledged(t *testing.T) {
 	}
 }
 
+// TestResultFencedByAReclaimIsStale is F104's residual: when the lease
+// reconciler won the attempt row, the scheduler reports the ignored result as
+// stale and the worker is told stale_lease_token, not Accepted. The duplicate
+// of a result that did land stays Accepted.
+func TestResultFencedByAReclaimIsStale(t *testing.T) {
+	ctx := workerCtx()
+	cases := []struct {
+		name   string
+		err    error
+		accept bool
+		reason string
+	}{
+		{"reclaimed", fmt.Errorf("apply result for attempt a1: %w", store.ErrStaleLeaseToken), false, store.ReasonStaleLeaseToken},
+		{"duplicate", nil, true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newLeaseDB()
+			db.tokens["a1"] = "tok-current"
+			s := testServer(db, &fakeRM{exists: true, state: "ACTIVE"}, &fakeSched{resultErr: tc.err})
+			ack, err := s.ReportResult(ctx, &nexusv1.ReportResultRequest{
+				AttemptId: "a1", LeaseToken: "tok-current",
+				Outcome: nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED,
+			})
+			if err != nil {
+				t.Fatalf("ReportResult: %v", err)
+			}
+			if ack.GetAccepted() != tc.accept || ack.GetReason() != tc.reason {
+				t.Fatalf("ack = %+v, want accepted=%v reason=%q", ack, tc.accept, tc.reason)
+			}
+		})
+	}
+}
+
 // TestReportProgressForwardsMessageFractionAndToken is F96: the executor's
 // status line and fraction must reach the scheduler, which stores them, and the
 // lease token must travel with them so the scheduler can fence inside its own

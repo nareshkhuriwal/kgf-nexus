@@ -246,6 +246,11 @@ func TestResultWaitingOnAReclaimStaysFenced(t *testing.T) {
 	if r.resp.Applied {
 		t.Fatal("a result was applied over an attempt the reconciler had already moved to LOST")
 	}
+	// F104 residual: the late result is answered as stale, not as a
+	// duplicate the agent may consider delivered.
+	if !r.resp.StaleLease {
+		t.Error("the result fenced by a reclaim was not reported stale_lease")
+	}
 	if s := f.attemptState(d.id); s != "LOST" {
 		t.Fatalf("attempt state = %s, want LOST", s)
 	}
@@ -324,8 +329,10 @@ func TestResultBusyPastTheLockTimeoutIsRetryable(t *testing.T) {
 	}
 	assertMeteredOnce(t, f, d.id, "SUCCEEDED")
 	// A duplicate resend (at-least-once delivery) is a no-op for the ledger.
-	if resp, err := d.apply(ctx); err != nil || resp.Applied {
-		t.Fatalf("duplicate resend = %+v, %v; want not applied", resp, err)
+	// It is NOT stale: the result it duplicates landed, so the gateway keeps
+	// answering it Accepted (F104's duplicate-success rule).
+	if resp, err := d.apply(ctx); err != nil || resp.Applied || resp.StaleLease {
+		t.Fatalf("duplicate resend = %+v, %v; want not applied and not stale", resp, err)
 	}
 	assertMeteredOnce(t, f, d.id, "SUCCEEDED")
 }
