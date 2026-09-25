@@ -2726,3 +2726,43 @@ service credentials `NEXUS_S3_*`. CI now starts a throwaway store and fails on
 CI integration jobs run, ignored the `-- migrate: no-transaction` opt-out and
 failed on 0015 (`CREATE INDEX CONCURRENTLY cannot run inside a transaction
 block`); it now calls `deploy/migrate.sh`, the script the migration jobs use.
+
+### F112. Release image digests never reached the Helm chart — FIXED
+
+**Severity:** high for any AKS release (none has run yet). The release
+pipeline's `templates/deploy-aks.yml` turned the digest map into
+`--set-json services={"api-gateway": {"image": {"digest": ...}}, ...}`. That
+was wrong twice over:
+
+1. the chart's `services` keys are camelCase (`apiGateway`, `workflowManager`,
+   ...) and cover only five of the images; `scheduler`, `agent`, `migrate` and
+   `ui` are not under `services` at all;
+2. nothing in the chart read an `image.digest` anywhere: `nexus.image` rendered
+   `<registry><prefix><component>:<tag>` only.
+
+So the kebab-case keys were merged into `services` as dead entries, every pod
+ran by mutable tag, and nothing noticed. The release also never set
+`image.registry`/`image.repositoryPrefix` (the chart default `kgf-nexus/` is not
+the ACR's `<acr>/nexus/`) nor `image.tag` (required by the chart), and the
+environment values files it names (`values-dev.yaml`, ...) do not exist yet.
+
+**Fix.** A new values key `image.digests`, keyed by IMAGE name (the digest map's
+own keys, so there is no renaming step to get wrong); `nexus.image` appends
+`@sha256:...` when present and fails the render on a malformed digest, and the
+per-release Job suffix includes the migrate digest so a rebuilt image under one
+tag still gets a new Job. `deploy/scripts/helm-image-digests.py values` turns the
+digest map into `image.registry`, `image.repositoryPrefix` and `image.digests`,
+passed after the environment's values file; `check` renders the release with the
+real values and fails unless every rendered Nexus image equals
+`<base><name>:<tag>@<the map's digest>` and every map entry is rendered
+(`cluster-controller` is exempt: its kustomize base deploys it; `artifact-gc` is
+exempt until the chart deploys it). deploy-aks runs `check` before
+`helm upgrade`, sets `image.tag` to the pushed tag, and fails early on a missing
+values file. GitHub CI runs `helm lint` and `self-test`, which builds a map for
+every image the chart renders and proves both that the check passes and that it
+fails for a wrong digest and for an unrendered image.
+
+**Verified locally:** `self-test` passes on this chart and FAILS on the chart
+from before the fix (every image "expected @sha256:..."); `check` with an
+11-image map shaped like the pipeline's passes. Not verified: a real release
+(no AKS environment is enabled).

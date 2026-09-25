@@ -167,6 +167,27 @@ jobs:
       - name: Run NATS/outbox integration suite
         run: tests/nats/run-integration.sh
 
+  # The Helm chart: lint, then prove every Nexus image the chart renders takes
+  # its digest from image.digests -- the key the release pipeline sets from its
+  # digest map (templates/deploy-aks.yml). The release re-runs the same check
+  # against the real map and environment values before `helm upgrade` (F112).
+  helm:
+    name: helm lint and image-digest check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: helm lint
+        run: |
+          helm version
+          helm lint deploy/helm/kgf-nexus \
+            --set existingSecret=ci --set image.tag=ci --set nats.auth.mode=none
+      - name: Every rendered Nexus image resolves to its digest
+        run: |
+          python3 deploy/scripts/helm-image-digests.py self-test \
+            --chart deploy/helm/kgf-nexus \
+            --set existingSecret=ci --set image.tag=ci --set nats.auth.mode=none
+
   # The operator console: typecheck, component tests and the production build.
   # The same steps, in the same order, as the Azure gate's UserInterface stage.
   ui:
