@@ -596,8 +596,11 @@ class ValueSpec:
             )
         out: dict[str, Any] = {"type": self.type}
         if self.max_bytes is not None:
-            if isinstance(self.max_bytes, bool) or not isinstance(self.max_bytes, int) or self.max_bytes < 0:
-                raise SpecError(f"max_bytes must be a non-negative integer, got {self.max_bytes!r}")
+            # Same rule as feat/sdk-typing-local-run-replay's ValueSpec, which
+            # also accepts human units in coerce(); either side of that merge
+            # keeps this behaviour.
+            if isinstance(self.max_bytes, bool) or not isinstance(self.max_bytes, int) or self.max_bytes < 1:
+                raise SpecError(f"max_bytes must be a positive integer byte count, got {self.max_bytes!r}")
             out["max_bytes"] = self.max_bytes
         if self.required and not self.has_default:
             out["required"] = True

@@ -115,6 +115,11 @@ type watchEvent struct {
 	Version  any    `json:"version,omitempty"`
 	Created  *bool  `json:"created,omitempty"`
 	Error    string `json:"error,omitempty"`
+	// localHash is the content address nexusctl computed. "Unchanged" is
+	// decided on it, never on the server's: the two differ whenever the
+	// gateway normalizes the document (it rewrites SDK enum spellings), so a
+	// local hash compared with a server one would never match.
+	localHash string
 }
 
 func watchAndSubmit(ctx context.Context, env *Environment, o watchOptions) error {
@@ -127,13 +132,21 @@ func watchAndSubmit(ctx context.Context, env *Environment, o watchOptions) error
 	}
 	env.Infof("Watching %s; %s on every change. Ctrl-C to stop.", strings.Join(watchedFiles(o.path), ", "), mode)
 
-	lastSpecHash := ""
+	lastSpecHash, lastShownHash := "", ""
 	attempts := 0
 	submit := func() {
 		attempts++
 		ev := submitForWatch(ctx, env, o, lastSpecHash)
-		if ev.Event == "submitted" || ev.Event == "validated" || ev.Event == "unchanged" {
-			lastSpecHash = ev.Hash
+		switch ev.Event {
+		case "submitted", "validated":
+			lastSpecHash, lastShownHash = ev.localHash, ev.Hash
+		case "unchanged":
+			// Report the same address the last submit showed (the server's),
+			// not the local one, so the output never shows two hashes for one
+			// spec.
+			if lastShownHash != "" {
+				ev.Hash = lastShownHash
+			}
 		}
 		reportWatchEvent(env, ev)
 	}
@@ -181,7 +194,7 @@ func submitForWatch(ctx context.Context, env *Environment, o watchOptions, lastH
 		ev.Event, ev.Error = "invalid", err.Error()
 		return ev
 	}
-	ev.Workflow, ev.Hash = doc.Name(), doc.Hash
+	ev.Workflow, ev.Hash, ev.localHash = doc.Name(), doc.Hash, doc.Hash
 	if problems := doc.Validate(); len(problems) > 0 {
 		ev.Event = "invalid"
 		ev.Error = fmt.Sprintf("%s is not a valid WorkflowSpec:\n  - %s", doc.Source, strings.Join(problems, "\n  - "))

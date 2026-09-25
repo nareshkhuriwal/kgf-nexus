@@ -146,6 +146,11 @@ func TestCompletionScripts(t *testing.T) {
 			t.Errorf("%s: exit %d, script %q", shell, code, out)
 		}
 	}
+	// bash 3.2 (macOS /bin/bash) joins a quoted array slice when IFS is
+	// changed, which silently broke every multi-word completion.
+	if _, out, _ := h.run("completion", "bash"); strings.Contains(out, "IFS=$'\\n'") {
+		t.Error("the bash script must not change IFS around the array slice")
+	}
 	if code, _, errb := h.run("completion", "powershell"); code != ExitUsage || !strings.Contains(errb, "bash, zsh or fish") {
 		t.Errorf("unsupported shell: %d %q", code, errb)
 	}
@@ -387,6 +392,32 @@ func TestWatchDryRunJSONLinesAndCleanStop(t *testing.T) {
 	}
 	if strings.Contains(errb.String(), "Watching") {
 		t.Error("human notes must not appear in JSON mode")
+	}
+}
+
+// The gateway normalizes documents, so its spec_hash can differ from the local
+// one. "Unchanged" must still be detected, or every comment edit re-submits.
+func TestWatchUnchangedUsesTheLocalHashNotTheServers(t *testing.T) {
+	h := newHarness(t)
+	h.replyJSON(200, `{"valid":true,"dry_run":true,"spec_hash":"server-side-normalized-hash"}`)
+	path := writeSpec(t, watchSpecA)
+	out, _, _, done := startWatch(t, h, watchOptions{
+		path: path, python: "python3", dryRun: true, interval: 5 * time.Millisecond, debounce: 10 * time.Millisecond,
+		stopAfter: 2,
+	}, "")
+	waitFor(t, "the initial validation", func() bool { return h.count() == 1 })
+	if err := os.WriteFile(path, []byte("# comment only\n"+watchSpecA), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if h.count() != 1 || !strings.Contains(out.String(), "no change to the compiled spec") {
+		t.Errorf("comment edit was re-sent (%d requests):\n%s", h.count(), out.String())
+	}
+	// What is shown is the address the server reported.
+	if !strings.Contains(out.String(), "server-side") {
+		t.Errorf("the server's hash should be reported:\n%s", out.String())
 	}
 }
 

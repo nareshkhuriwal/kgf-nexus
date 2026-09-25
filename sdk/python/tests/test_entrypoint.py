@@ -147,7 +147,7 @@ def test_max_bytes_reaches_the_wire() -> None:
     assert ValueSpec(type="json").to_wire() == {"type": "json", "required": True}
 
 
-@pytest.mark.parametrize("bad", [-1, 1.5, True, "10"])
-def test_max_bytes_must_be_a_non_negative_int(bad) -> None:
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True])
+def test_max_bytes_must_be_a_positive_int(bad) -> None:
     with pytest.raises(SpecError, match="max_bytes"):
         ValueSpec(type="json", max_bytes=bad).to_wire()
