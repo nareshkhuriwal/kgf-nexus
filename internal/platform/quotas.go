@@ -195,9 +195,11 @@ type QuotaViolation struct {
 	Used      int64
 	Limit     int64
 	Request   int64
-	// Exhausted means the dimension has no headroom at all, so no attempt of
-	// the namespace that uses it can pass: the claim sets the namespace aside
-	// instead of trying its other candidates.
+	// Exhausted means NO attempt of the namespace can pass right now: the
+	// in-flight count is at its limit, and every attempt counts against it.
+	// The claim then sets the namespace aside instead of trying its other
+	// candidates. A full resource dimension does not qualify, because an
+	// attempt that does not request that resource still fits.
 	Exhausted bool
 }
 
@@ -244,7 +246,7 @@ func (q Quotas) CheckConcurrent(used QuotaUsage, req QuotaRequest) (QuotaViolati
 		if d.use+d.add > d.limit {
 			return QuotaViolation{
 				Dimension: d.name, Used: d.use, Limit: d.limit, Request: d.add,
-				Exhausted: d.use >= d.limit,
+				Exhausted: d.name == DimInflightAttempts,
 			}, false
 		}
 	}

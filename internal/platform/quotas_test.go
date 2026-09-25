@@ -46,6 +46,11 @@ func TestCheckConcurrentBoundaries(t *testing.T) {
 	if ok || v.Dimension != DimInflightAttempts || !v.Exhausted {
 		t.Fatalf("inflight: ok=%v %+v", ok, v)
 	}
+	// A full resource dimension is not "exhausted" for the namespace: an
+	// attempt that does not request it still fits.
+	if v, ok := q.CheckConcurrent(QuotaUsage{CPUMillis: 4000}, QuotaRequest{CPUMillis: 1}); ok || v.Exhausted {
+		t.Fatalf("full CPU: ok=%v exhausted=%v", ok, v.Exhausted)
+	}
 	// A dimension the attempt does not use never refuses it, even when full.
 	if v, ok := q.CheckConcurrent(QuotaUsage{GPUCount: 2}, QuotaRequest{CPUMillis: 1}); !ok {
 		t.Fatalf("GPU quota refused a CPU-only attempt: %+v", v)
