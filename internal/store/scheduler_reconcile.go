@@ -202,6 +202,14 @@ UPDATE task_attempts
 		}
 	}
 
+	// LOST is billed like any other end: the reservation held capacity from
+	// dispatch until now, whatever became of the work (ADR-0021). No measured
+	// metrics exist for it, and the ledger says so with NULLs.
+	usage, err := s.recordUsage(ctx, tx, attemptID)
+	if err != nil {
+		return nil, err
+	}
+
 	lost := LostAttempt{
 		AttemptID: attemptID, RunID: att.RunID, NodeID: att.NodeID,
 		AttemptNumber: att.AttemptNumber,
@@ -233,10 +241,12 @@ UPDATE task_attempts
 	}
 	lost.Decision = decision
 	lost.RetryAt = retryAt
+	lost.UsageRecorded = usage != ""
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit expiry tx: %w", err)
 	}
+	s.notifyUsage(usage)
 	return &lost, nil
 }
 

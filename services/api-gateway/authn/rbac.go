@@ -19,6 +19,9 @@ var ModuleActions = map[string][]string{
 	"overview": {"view"}, "workflows": {"view", "publish", "delete", "cache.invalidate"}, "runs": {"view", "create", "cancel", "pause", "resume", "retry", "delete"},
 	"tasks": {"view", "logs.view", "results.view"}, "schedules": {"view", "create", "update", "delete"}, "backfills": {"view", "create", "update"},
 	"workers": {"view", "drain", "quarantine"}, "infrastructure": {"view", "configure"}, "users": {"view", "manage"}, "tokens": {"view", "manage"}, "audit": {"view"}, "roles": {"view", "manage"},
+	// ADR-0021. quotas.view is broad (it explains a quota_exceeded pending
+	// reason); usage.view is cost data and is granted deliberately.
+	"quotas": {"view", "manage"}, "usage": {"view"},
 }
 
 func Catalog() []string {
@@ -32,9 +35,9 @@ func Catalog() []string {
 	return out
 }
 func Builtins() map[string][]string {
-	viewer := []string{"overview.view", "workflows.view", "runs.view", "tasks.view", "schedules.view", "backfills.view", "workers.view"}
+	viewer := []string{"overview.view", "workflows.view", "runs.view", "tasks.view", "schedules.view", "backfills.view", "workers.view", "quotas.view"}
 	operator := append(append([]string{}, viewer...), "runs.create", "runs.cancel", "runs.pause", "runs.resume", "runs.retry", "tasks.logs.view", "tasks.results.view", "schedules.create", "schedules.update", "backfills.create", "backfills.update")
-	return map[string][]string{AdministratorRole: Catalog(), "Viewer": viewer, "Workflow Operator": operator, "Workflow Developer": append(append([]string{}, operator...), "workflows.publish", "schedules.delete", "workflows.cache.invalidate"), "Infrastructure Operator": {"workers.view", "workers.drain", "workers.quarantine", "infrastructure.view", "infrastructure.configure"}, "Auditor": {"audit.view", "users.view", "roles.view", "tokens.view"}}
+	return map[string][]string{AdministratorRole: Catalog(), "Viewer": viewer, "Workflow Operator": operator, "Workflow Developer": append(append([]string{}, operator...), "workflows.publish", "schedules.delete", "workflows.cache.invalidate"), "Infrastructure Operator": {"workers.view", "workers.drain", "workers.quarantine", "infrastructure.view", "infrastructure.configure", "quotas.view", "quotas.manage", "usage.view"}, "Auditor": {"audit.view", "users.view", "roles.view", "tokens.view", "quotas.view", "usage.view"}}
 }
 func (a *Authenticator) WithRBAC() *Authenticator { a.rbac = true; return a }
 func (a *Authenticator) resolveRBAC(ctx context.Context, p Principal) (Principal, error) {
@@ -100,11 +103,11 @@ func (p Principal) Allows(permission string) bool {
 	}
 	if strings.HasSuffix(permission, ".view") {
 		module := strings.Split(permission, ".")[0]
-		if module == "users" || module == "tokens" || module == "audit" || module == "infrastructure" {
+		if module == "users" || module == "tokens" || module == "audit" || module == "infrastructure" || module == "usage" {
 			return p.Role == RoleAdmin && p.HasScope(ActionAdminWrite)
 		}
 
-		return p.HasScope(ActionRead) && (p.Role == RoleAdmin || (p.Role == RoleReader && !strings.HasPrefix(permission, "users.") && !strings.HasPrefix(permission, "tokens.") && !strings.HasPrefix(permission, "audit.") && !strings.HasPrefix(permission, "roles.") && !strings.HasPrefix(permission, "infrastructure.")))
+		return p.HasScope(ActionRead) && (p.Role == RoleAdmin || (p.Role == RoleReader && !strings.HasPrefix(permission, "users.") && !strings.HasPrefix(permission, "tokens.") && !strings.HasPrefix(permission, "audit.") && !strings.HasPrefix(permission, "roles.") && !strings.HasPrefix(permission, "infrastructure.") && !strings.HasPrefix(permission, "usage.")))
 	}
 	action := ActionWrite
 	if strings.HasSuffix(permission, ".manage") || permission == "workers.drain" || permission == "workers.quarantine" || permission == "infrastructure.configure" || permission == "runs.delete" || permission == "workflows.delete" {

@@ -50,6 +50,11 @@ func run() error {
 		// before reverting migration 0022 (ADR-0017).
 		fairShare = flag.Bool("fair-share", envOr("NEXUS_FAIR_SHARE", "true") != "false",
 			"order the dispatch scan by namespace in-flight/weight before priority (ADR-0017)")
+		// Also an escape hatch (ADR-0021): namespace quotas are enforced in the
+		// claim by default; off is the rollback step before reverting 0027.
+		// Metering is not switchable -- it is a record, not a policy.
+		quotas = flag.Bool("quotas", envOr("NEXUS_QUOTAS", "true") != "false",
+			"enforce namespace concurrent quotas in the dispatch claim (ADR-0021)")
 		// ADR-0018 Stage 1. 0 disables windowing: every pull claim then scans the
 		// queue's whole PENDING backlog, which is the pre-0023 behaviour.
 		claimWindow = flag.Int("claim-window", 64,
@@ -93,6 +98,7 @@ func run() error {
 	claimCfg.LivenessWindow = *liveness
 	claimCfg.AgingRate = *agingRate
 	claimCfg.FairShare = *fairShare
+	claimCfg.Quotas = *quotas
 	claimCfg.ClaimWindow = *claimWindow
 	claimCfg.ClaimWindowPages = *claimWindowPages
 
@@ -113,6 +119,18 @@ func run() error {
 		log.Warn("pull claims are windowed but unindexed", "aging_rate", claimCfg.AgingRate,
 			"why", "idx_attempts_dispatch_rank is built for aging rate 1; any other rate orders correctly but sorts the backlog")
 	}
+	qs, err := st.DetectQuotaSchema(ctx)
+	if err != nil {
+		return err
+	}
+	if !qs.Metering {
+		log.Warn("usage metering is off: usage_ledger is missing",
+			"why", "migration 0027 is not applied; attempts that end before the restart after it have no ledger row")
+	}
+	if claimCfg.Quotas && !qs.Quotas {
+		log.Warn("namespace quotas are not enforced: namespace_quota_limits is missing",
+			"why", "migration 0027 is not applied; apply it and restart")
+	}
 	sched := NewSchedulerWithLogger(st, log)
 
 	// Metrics, served on the health listener (no extra port; docs/OPERATIONS.md).
@@ -121,6 +139,7 @@ func run() error {
 	store.RegisterPoolMetrics(reg, pool)
 	schedMetrics := NewMetrics(reg, *queue)
 	sched.SetMetrics(schedMetrics)
+	st.SetObserver(schedMetrics)
 	grpcMetrics := metrics.NewGRPCServerMetrics(reg)
 	go runBacklogSampler(ctx, st, schedMetrics, *backlogInterval, log)
 
@@ -179,6 +198,7 @@ func run() error {
 		"lease_ttl", claimCfg.LeaseTTL, "liveness_window", claimCfg.LivenessWindow,
 		"aging_rate", claimCfg.AgingRate, "look_ahead", claimCfg.LookAhead,
 		"fair_share", claimCfg.FairShare,
+		"quotas", qs.Quotas, "metering", qs.Metering,
 		"claim_window", claimCfg.ClaimWindow, "claim_window_enabled", win.Enabled,
 		"claim_window_indexed", win.Indexed)
 

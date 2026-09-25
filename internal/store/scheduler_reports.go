@@ -88,6 +88,9 @@ type AppliedResult struct {
 	Applied bool
 	// Retry is set when the outcome was retryable and a retry was scheduled.
 	Retry bool
+	// UsageRecorded is true when the attempt's usage-ledger row was written in
+	// this transaction (ADR-0021).
+	UsageRecorded bool
 }
 
 // ApplyResult applies a terminal outcome reported by the worker.
@@ -179,6 +182,14 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
 		}
 	}
 
+	// The measured ExecutionMetrics, which the worker has always sent and the
+	// control plane used to drop (CONTRACT-FINDINGS F122). task_attempts.metrics
+	// has existed since 0001; the usage ledger reads it below.
+	metricsJSON, err := encodeExecutionMetrics(req.GetMetrics())
+	if err != nil {
+		return AppliedResult{}, err
+	}
+
 	var errJSON []byte
 	if te := req.GetError(); te != nil {
 		if errJSON, err = protojsonMarshal(te); err != nil {
@@ -190,9 +201,10 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
 	tag, err := tx.Exec(ctx, `
 UPDATE task_attempts
    SET state = $2::attempt_state, ended_at = $3, output_ref = $4, error = $5,
+       metrics = COALESCE($6::jsonb, metrics),
        state_version = state_version + 1
  WHERE id = $1 AND state IN ('DISPATCHED','RUNNING')`,
-		attemptID, state, now, nullableJSON(outputJSON), nullableJSON(errJSON))
+		attemptID, state, now, nullableJSON(outputJSON), nullableJSON(errJSON), nullableJSON(metricsJSON))
 	if err != nil {
 		return AppliedResult{}, fmt.Errorf("cas attempt %s to %s: %w", attemptID, state, err)
 	}
@@ -239,6 +251,14 @@ UPDATE task_attempts
 
 	out := AppliedResult{RunID: cand.RunID, NodeID: cand.NodeID, State: state, Applied: true}
 
+	// The usage record, in the same transaction as the terminal transition and
+	// the release of the reservation it accounts for (ADR-0021).
+	usage, err := s.recordUsage(ctx, tx, attemptID)
+	if err != nil {
+		return AppliedResult{}, err
+	}
+	out.UsageRecorded = usage != ""
+
 	// Retry evaluation runs in the SAME transaction as the terminal write, so a
 	// crash cannot leave an attempt failed with no retry scheduled and no record
 	// that one was owed.
@@ -254,6 +274,7 @@ UPDATE task_attempts
 	if err := tx.Commit(ctx); err != nil {
 		return AppliedResult{}, fmt.Errorf("commit apply-result tx: %w", err)
 	}
+	s.notifyUsage(usage)
 	return out, nil
 }
 
@@ -457,9 +478,17 @@ UPDATE task_attempts
 		}); err != nil {
 		return false, err
 	}
+	// A cancelled attempt that was DISPATCHED or RUNNING held capacity until
+	// now and is metered like any other end; one cancelled while PENDING
+	// never did, and recordUsage writes nothing for it (ADR-0021).
+	usage, err := s.recordUsage(ctx, tx, attemptID)
+	if err != nil {
+		return false, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit cancel tx: %w", err)
 	}
+	s.notifyUsage(usage)
 	return true, nil
 }
 

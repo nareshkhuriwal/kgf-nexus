@@ -63,6 +63,17 @@ func (a *API) platformPut(w http.ResponseWriter, r *http.Request, p authn.Princi
 	if cur.Scheduler.FairShareWeight != c.Scheduler.FairShareWeight && !a.platformOperator(w, r, p) {
 		return
 	}
+	// Quotas ride in this document but have their own route and permission
+	// (ADR-0021). A client that omits them -- every console before quotas, a
+	// scripted PUT -- keeps the stored ones; one that sends them must send them
+	// unchanged, so infrastructure.configure can never edit a quota.
+	switch {
+	case c.Quotas == nil:
+		c.Quotas = cur.Quotas
+	case !c.Quotas.Equal(quotasOrZero(cur.Quotas)):
+		writeError(w, 400, "invalid_policy", "quotas cannot be changed here; use PUT /v1/namespaces/{ns}/quotas")
+		return
+	}
 	c, err = store.GatewayPlatformPut(r.Context(), a.db, p.Namespace, c, store.AuditEntry{ActorKind: string(p.Kind), ActorLabel: p.Name, ClientIP: clientIP(r)})
 	if errors.Is(err, store.ErrPlatformConflict) {
 		writeError(w, 409, "revision_conflict", err.Error())
@@ -118,4 +129,11 @@ func (a *API) platformPlan(w http.ResponseWriter, r *http.Request, p authn.Princ
 		message = "This preview is computed by the gateway and is not applied. Registered cluster controllers report their own decisions and applied state under Live cluster."
 	}
 	writeJSON(w, 200, map[string]any{"revision": c.Revision, "mode": "preview", "decisions": plans, "task_job_templates": templates, "controllers": controllers, "message": message})
+}
+
+func quotasOrZero(q *platform.Quotas) platform.Quotas {
+	if q == nil {
+		return platform.Quotas{}
+	}
+	return *q
 }

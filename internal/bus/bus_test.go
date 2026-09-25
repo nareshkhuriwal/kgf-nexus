@@ -103,6 +103,7 @@ func TestStreamsCoverEveryProducedSubjectAndDoNotOverlap(t *testing.T) {
 		DispatchSubject("ns", "q"),
 		RunEventSubject("ns", "r"),
 		RunStateSubject("ns", "r"),
+		UsageSubject("ns"),
 	}
 	for _, subj := range produced {
 		n := 0

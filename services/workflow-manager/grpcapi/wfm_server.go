@@ -124,6 +124,15 @@ func runError(op string, err error) error {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return status.Errorf(codes.NotFound, "%s: %v", op, err)
+	case errors.Is(err, store.ErrRunQuotaExceeded):
+		// Before ErrMaxActiveRuns, which shares the code: the gateway tells the
+		// two apart by the ErrorInfo detail, and needs the dimension, the
+		// numbers and the retry delay to answer with a useful 429 (ADR-0021).
+		var q *store.RunQuotaError
+		if errors.As(err, &q) {
+			return store.RunQuotaStatus(op, q)
+		}
+		return status.Errorf(codes.ResourceExhausted, "%s: %v", op, err)
 	case errors.Is(err, store.ErrMaxActiveRuns):
 		return status.Errorf(codes.ResourceExhausted, "%s: %v", op, err)
 	case errors.Is(err, runs.ErrMissingParams), errors.Is(err, runs.ErrRetryInvalidNodes):
