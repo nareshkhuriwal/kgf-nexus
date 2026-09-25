@@ -29,10 +29,12 @@ permissions:
 
 env:
   GO_VERSION: "1.25"
-  # The console's image builds on node:20-alpine (deploy/Dockerfile.ui) and the
-  # Azure gate pins the same major, so a lockfile that resolves here resolves
-  # in the image too. Move all three together.
-  NODE_VERSION: "20"
+  # Node 24 (Active LTS, supported to 2028-04-30; Node 20 went EOL 2026-04-30).
+  # The exact patch, so CI and the console image (deploy/Dockerfile.ui,
+  # node:24.21.0-alpine) run the same Node and npm, and a lockfile that resolves
+  # here resolves in the image. Move all four together: this file, both Azure
+  # pipelines and the Dockerfile (docs/OPERATIONS.md section 20.3).
+  NODE_VERSION: "24.21.0"
 
 jobs:
   # Fast feedback. Deliberately first and deliberately cheap: a build error or a

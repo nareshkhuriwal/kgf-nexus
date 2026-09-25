@@ -84,11 +84,12 @@ variables:
   # new Go is released.
   - name: GO_VERSION
     value: '1.25'
-  # The operator console's Dockerfile builds on node:20-alpine. Keeping the
-  # agent's Node on the same major means a lockfile that resolves here resolves
-  # in the image too.
+  # Node 24 LTS, the exact patch the console's Dockerfile builds on
+  # (node:24.21.0-alpine), so a lockfile that resolves here resolves in the
+  # image too. Move together with .github/workflows/ci.yml, the release
+  # pipeline and deploy/Dockerfile.ui (docs/OPERATIONS.md section 20.3).
   - name: NODE_VERSION
-    value: '20'
+    value: '24.21.0'
   # The throwaway database the integration stage runs against. Not a secret:
   # it is created and destroyed inside the job and is never reachable off the
   # agent. Deliberately the same credentials as deploy/docker-compose.yml, which
