@@ -25,14 +25,34 @@ resource "kubernetes_namespace_v1" "this" {
 
 # Alphanumeric only: the password is embedded in a postgres:// URL, where a
 # special character would need escaping and silently break the connection.
+#
+# Generated only when the caller supplies none: a managed database (RDS, Azure
+# Flexible Server, Cloud SQL) is created by a cloud platform module, which owns
+# its password and passes it in through var.postgres_password.
 resource "random_password" "postgres" {
+  count   = var.postgres_password == null ? 1 : 0
   length  = 32
   special = false
 }
 
+# Root credentials for the in-cluster MinIO, unless the caller supplies a key
+# pair for an external S3-compatible store (Amazon S3, GCS HMAC interop).
 resource "random_password" "minio" {
+  count   = var.object_store_credentials == null ? 1 : 0
   length  = 32
   special = false
+}
+
+# These two gained `count`; existing state (the dev environment) moves to
+# index 0 instead of being regenerated, which would rotate live passwords.
+moved {
+  from = random_password.postgres
+  to   = random_password.postgres[0]
+}
+
+moved {
+  from = random_password.minio
+  to   = random_password.minio[0]
 }
 
 # API keys in the platform's own format (nxs_<role>_<64 hex>), with the same
@@ -49,6 +69,16 @@ locals {
   worker_api_key = "nxs_worker_${random_id.worker_key.hex}"
   admin_api_key  = "nxs_admin_${random_id.admin_key.hex}"
   secret_name    = "${var.release_name}-credentials"
+
+  postgres_password = (
+    var.postgres_password != null ? var.postgres_password : random_password.postgres[0].result
+  )
+  object_store_access_key = (
+    var.object_store_credentials != null ? var.object_store_credentials.access_key_id : "nexus"
+  )
+  object_store_secret_key = (
+    var.object_store_credentials != null ? var.object_store_credentials.secret_access_key : random_password.minio[0].result
+  )
 
   # NATS identities, from a directory deploy/nats/nexus-nats-auth.sh wrote
   # (Terraform cannot mint NKeys itself). Seeds join the credentials Secret;
@@ -85,9 +115,11 @@ resource "kubernetes_secret_v1" "credentials" {
   }
 
   data = merge({
-    "postgres-password"   = random_password.postgres.result
-    "minio-root-user"     = "nexus"
-    "minio-root-password" = random_password.minio.result
+    "postgres-password" = local.postgres_password
+    # The chart's key names predate external stores: they hold the S3 key pair
+    # whether the store is the in-cluster MinIO or not.
+    "minio-root-user"     = local.object_store_access_key
+    "minio-root-password" = local.object_store_secret_key
     "worker-api-key"      = local.worker_api_key
     "admin-api-key"       = local.admin_api_key
   }, local.nats_seeds)
@@ -120,5 +152,8 @@ resource "helm_release" "nexus" {
     }),
     yamlencode(local.nats_auth_values),
     yamlencode(var.chart_values),
+    # Last, so an operator's per-deployment overrides win over the values a
+    # cloud environment derives from its infrastructure. Helm deep-merges.
+    yamlencode(var.chart_values_overrides),
   ]
 }

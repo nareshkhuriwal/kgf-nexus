@@ -6,8 +6,10 @@ terraform {
 
   required_providers {
     kubernetes = {
-      source  = "hashicorp/kubernetes"
-      version = "~> 2.38"
+      source = "hashicorp/kubernetes"
+      # 2.38+ or 3.x: only the _v1 resources are used, which both majors keep.
+      # Each root module pins the exact line it runs with.
+      version = ">= 2.38, < 4.0"
     }
     helm = {
       source  = "hashicorp/helm"
