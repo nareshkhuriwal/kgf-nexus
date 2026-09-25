@@ -191,14 +191,14 @@ describe('a live run', () => {
       live: true,
       clock: () => Date.now(),
     });
-    const follow = screen.getByRole('button', { name: 'Follow live' });
+    const follow = screen.getByRole('button', { name: 'Follow the live run' });
     expect(follow).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
     expect(follow).toBeEnabled();
     rerenderWith({ run: { nodes: [node('extract')], created_at: iso(0) }, attempts: [...live], live: true, clock: () => Date.now() });
-    expect(screen.getByRole('button', { name: 'Follow live' })).toBeEnabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Follow live' }));
-    expect(screen.getByRole('button', { name: 'Follow live' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Follow the live run' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Follow the live run' }));
+    expect(screen.getByRole('button', { name: 'Follow the live run' })).toBeDisabled();
   });
 });
 
@@ -263,7 +263,7 @@ describe('scale and keyboard', () => {
 
   it('zooms and fits from the keyboard', () => {
     setup();
-    const fit = screen.getByRole('button', { name: 'Fit' });
+    const fit = screen.getByRole('button', { name: 'Fit the whole run' });
     expect(fit).toBeDisabled();
     const first = rowButton(/^Attempt 1 of extract/);
     fireEvent.keyDown(first, { key: '+' });

@@ -162,7 +162,7 @@ export interface GroupRow {
 
 export type TimelineRow = AttemptRow | IdleNodeRow | GroupRow;
 
-/** Worst-first tone ranking for a collapsed group's single bar. */
+/** Worst-first tone ranking for a group's envelope bar. */
 const TONE_RANK: Tone[] = ['danger', 'warning', 'blocked', 'stopped', 'active', 'queued', 'success', 'muted', 'neutral'];
 
 function worstTone(tones: Tone[]): Tone {
@@ -270,7 +270,10 @@ export function buildTimelineRows(
       end: ends.length ? Math.max(...ends) : null,
       open: spans.some((r) => r.span.open),
       counts,
-      tone: worstTone(spans.map((r) => r.tone)),
+      // The children's CURRENT outcome, not their history: a fan-out whose
+      // failed child was retried to success is a success, and painting it
+      // red forever would contradict the node states beside it.
+      tone: worstTone(kids.map((k) => stateVisual('node', k.state).tone)),
     });
     if (!isCollapsed) rows.push(...inner);
   }

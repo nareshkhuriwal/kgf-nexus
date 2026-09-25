@@ -60,7 +60,7 @@ const MAX_VIEWPORT_H = 440;
 const FALLBACK_TRACK_W = 720;
 /** Label column: wide enough for `process_shard[123]  #2`, narrower on a phone. */
 const LABEL_W = 240;
-const LABEL_W_NARROW = 136;
+const LABEL_W_NARROW = 168;
 const ZOOM_STEP = 1.5;
 const PAN_FRACTION = 0.1;
 
@@ -266,6 +266,8 @@ export function ExecutionTimeline({
             <button
               type="button"
               title="Show the whole run (0)"
+              // Named for what it fits: the graph above has its own "Fit".
+              aria-label={live ? 'Follow the live run' : 'Fit the whole run'}
               disabled={view === null}
               onClick={() => setView(null)}
             >
@@ -398,7 +400,16 @@ function TimelineChart({
   }, []);
 
   const { first, last } = virtualRange(scrollTop, viewportH, ROW_H, rows.length);
-  const ticks = useMemo(() => timeTicks(window_, Math.max(2, Math.floor(trackW / 90))), [window_, trackW]);
+  // Ticks whose label would be cut by the track edge are dropped rather than
+  // drawn half-visible ("…:02:33" reads as a different time).
+  const ticks = useMemo(
+    () =>
+      timeTicks(window_, Math.max(2, Math.floor(trackW / 90))).filter((t) => {
+        const x = xOf(t.t, window_, trackW);
+        return x >= 28 && x <= trackW - 28;
+      }),
+    [window_, trackW],
+  );
 
   // Roving focus: one row is tabbable. Kept as a KEY, so a poll that inserts a
   // row above it does not move focus to a different attempt.
@@ -581,7 +592,7 @@ function TimelineChart({
 
   return (
     <div
-      className="tl-chart"
+      className={`tl-chart${labelW === LABEL_W_NARROW ? ' narrow' : ''}`}
       onKeyDown={onKeyDown}
       style={{ ['--tl-label-w' as string]: `${labelW}px` }}
     >
@@ -621,9 +632,6 @@ function TimelineChart({
             {ticks.map((t) => (
               <span key={t.t} className="tl-grid" style={{ left: xOf(t.t, window_, trackW) }} />
             ))}
-            {nowX !== null && nowX >= 0 && nowX <= trackW && (
-              <span className="tl-now" data-testid="timeline-now" style={{ left: nowX }} />
-            )}
           </div>
           <div role="list" aria-labelledby={labelledBy} aria-describedby={describedBy} className="tl-list">
             {rows.slice(first, last + 1).map((r, i) => {
@@ -667,6 +675,12 @@ function TimelineChart({
               );
             })}
           </div>
+          {/* Above the rows, unlike the grid: "now" must never hide behind a bar. */}
+          <div className="tl-track-layer tl-now-layer" aria-hidden="true" style={{ height: innerH }}>
+            {nowX !== null && nowX >= 0 && nowX <= trackW && (
+              <span className="tl-now" data-testid="timeline-now" style={{ left: nowX }} />
+            )}
+          </div>
         </div>
       </div>
 
@@ -698,6 +712,15 @@ function tooltipLeft(
   return labelW + x;
 }
 
+/**
+ * A map child's label under its template header: "[3]" rather than repeating
+ * "process_shard" on every row, which on a phone truncated every child to the
+ * same "process_shard[…". The full id stays in the tooltip and spoken label.
+ */
+function shortName(nodeId: string, template: string | undefined): string {
+  return template && nodeId.startsWith(`${template}[`) ? nodeId.slice(template.length) : nodeId;
+}
+
 function RowLabel({ row }: { row: TimelineRow }) {
   if (row.kind === 'group') {
     return (
@@ -719,7 +742,9 @@ function RowLabel({ row }: { row: TimelineRow }) {
         <span className={`tl-glyph tone-${v.tone}`} aria-hidden="true">
           {v.glyph}
         </span>
-        <span className="tl-name">{row.nodeId}</span>
+        <span className="tl-name" title={row.nodeId}>
+          {shortName(row.nodeId, row.template)}
+        </span>
         <span className="tl-meta">{v.label.toLowerCase()}</span>
       </span>
     );
@@ -730,7 +755,9 @@ function RowLabel({ row }: { row: TimelineRow }) {
       <span className={`tl-glyph tone-${v.tone}`} aria-hidden="true">
         {v.glyph}
       </span>
-      <span className="tl-name">{row.firstOfNode ? row.nodeId : '↳ retry'}</span>
+      <span className="tl-name" title={row.nodeId}>
+        {row.firstOfNode ? shortName(row.nodeId, row.template) : '↳ retry'}
+      </span>
       <span className="tl-meta">#{row.attempt.attempt_number}</span>
     </span>
   );

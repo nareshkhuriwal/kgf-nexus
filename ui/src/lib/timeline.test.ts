@@ -160,8 +160,16 @@ describe('buildTimelineRows', () => {
     expect(rows.map((r) => r.key)).toEqual(['list#1', 'group:map', 'summarize#1', 'idle:never']);
     const g = rows[1] as GroupRow;
     expect(g).toMatchObject({ childCount: 2, attemptCount: 3, collapsed: true, start: T0 + 2000, end: T0 + 8000 });
-    // Worst outcome among the children wins the envelope's colour.
-    expect(g.tone).toBe('danger');
+    // The children's current states colour the envelope: both SUCCEEDED here,
+    // even though map[1] failed once before its retry succeeded.
+    expect(g.tone).toBe('success');
+    const failing = buildTimelineRows(
+      nodes.map((n) => (n.node_id === 'map[1]' ? { ...n, state: 'FAILED' as const } : n)),
+      attempts,
+      new Set(['map']),
+      T0,
+    )[1] as GroupRow;
+    expect(failing.tone).toBe('danger');
   });
 
   it('scales to a fan-out of thousands', () => {
