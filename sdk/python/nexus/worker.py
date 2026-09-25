@@ -109,7 +109,13 @@ def build_context(assignment: Mapping[str, Any], *, store: ResultStore | None = 
     map_index = assignment.get("map_index")
 
     key = str(assignment.get("idempotency_key") or "")
-    expected = derive_idempotency_key(run_id, node_id, map_index, task_version)
+    # An expansion child ("tmpl[3]") derives its key from the TEMPLATE id plus
+    # map_index (§6.2, dag-engine buildAttempts), so its retries and siblings
+    # never depend on how children are named.
+    key_node = node_id
+    if map_index is not None and node_id.endswith(f"[{map_index}]"):
+        key_node = node_id[: -len(f"[{map_index}]")]
+    expected = derive_idempotency_key(run_id, key_node, map_index, task_version)
     if not key:
         key = expected
     elif key != expected:
@@ -197,7 +203,7 @@ def _resolve_inputs(ctx: TaskContext, definition: TaskDefinition[Any], assignmen
 
 
 def _materialize(ctx: TaskContext, ref: Any) -> Any:
-    if isinstance(ref, Mapping) and ("inline" in ref or "blob" in ref):
+    if isinstance(ref, Mapping) and ("inline" in ref or "inline_base64" in ref or "blob" in ref):
         return ctx.store.get(ref)
     return ref
 

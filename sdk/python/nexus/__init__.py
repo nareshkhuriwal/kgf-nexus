@@ -40,6 +40,10 @@ the three idempotency mechanisms in descending order of strength.
 
 from __future__ import annotations
 
+import importlib
+from types import ModuleType
+from typing import TYPE_CHECKING
+
 from .canonical import CanonicalError, canonical_bytes, canonical_json, spec_hash
 from .client import (
     AuthError,
@@ -94,11 +98,26 @@ from .workflow import (
     workflow,
 )
 
+# Local execution without a cluster (ADR-0022): nexus.local.run(workflow, params)
+# and nexus.replay.replay(client.get_assignment(attempt_id)). Imported lazily
+# (PEP 562), so `python -m nexus.local` does not find itself half-imported.
+if TYPE_CHECKING:
+    from . import local, replay
+
+
+def __getattr__(name: str) -> ModuleType:
+    if name in ("local", "replay"):
+        return importlib.import_module(f".{name}", __name__)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __version__ = "0.1.0"
 
 __all__ = [
     "__version__",
     "API_VERSION",
+    "local",
+    "replay",
     # authoring
     "task",
     "workflow",
