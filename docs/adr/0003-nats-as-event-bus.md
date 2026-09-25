@@ -37,6 +37,7 @@ What was built, and where it deliberately differs from the decision above:
 - **The hint means "work may exist", not "attempt X was dispatched to you".** Dispatch is pull (ADR-0005): the worker that claims an attempt receives it in the same `PollTask` response, so the useful signal is that dispatchable work appeared. It is written when an attempt becomes `PENDING` (published at its `scheduled_at`), and the relay re-announces every queue with pending work every 10s so transitions no outbox row covers are still hinted. The scheduler's push dispatch loop stays disabled.
 - **Delivery is effectively-once into the stream, at-least-once beyond it, unordered.** Consumers order run events by `seq` and run state by `state_version`.
 - `NEXUS_NATS_URL` empty disables the bus; nothing needs NATS to start. Operating it: docs/OPERATIONS.md §11.
+- **The broker is authorized (2026-09).** NKey identities per role are listed in the server config: the event-service publishes `nexus.run.>` and `nexus.task.dispatch.>` and may only inspect and create its two streams. Each tenant's agents may subscribe to `nexus.task.dispatch.<ns>.>` and publish nothing. A SYS-account monitor has read-only access. No anonymous user exists. TLS to the broker is optional and can require client certificates. A credential *misconfiguration* is fatal at startup, while broker *unavailability* still is not. See OPERATIONS §11.7–11.9.
 
 ## Consequences
 

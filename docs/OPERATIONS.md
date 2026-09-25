@@ -976,24 +976,26 @@ latency and live-update freshness, never correctness.
 ### 11.1 Running it
 
 - Compose ships `nats:2.14.7-alpine` with JetStream on the `nats-data` volume
-  and a `/healthz?js-enabled-only=true` healthcheck. Monitoring is on port 8222
-  (`/varz`, `/connz`, `/jsz`).
-- Configuration (F38 naming): `NEXUS_NATS_URL` (empty disables the bus) and
-  `NEXUS_NATS_CREDS` (optional `.creds` file). Only the **event-service** (relay,
-  SSE wake-ups) and the **agents** (dispatch hints) connect. The scheduler,
-  dag-engine and workflow-manager only write `outbox` rows to Postgres.
+  and a `/healthz?js-enabled-only=true` healthcheck. The broker **requires
+  authentication** and runs a least-privilege permission model (§11.7). Its
+  monitoring endpoint (`/varz`, `/connz`, `/jsz`) listens on the container's
+  loopback only and is not published, because nats-server does not
+  authenticate it. The client port is published on `127.0.0.1` only.
+- Configuration (F38 naming): `NEXUS_NATS_URL` (empty disables the bus) plus
+  one credential and optional TLS (§11.7, §11.9). Only the **event-service**
+  (relay, SSE wake-ups) and the **agents** (dispatch hints) connect. The
+  scheduler, dag-engine, workflow-manager, resource-manager and api-gateway only
+  write `outbox` rows to Postgres and hold no NATS identity.
 - Nothing `depends_on` NATS and nothing needs it to start: clients connect in
   the background and retry forever.
 - Streams are created by the relay if missing and **never modified** if present,
   so retention retuned with the `nats` CLI sticks:
   `NEXUS_RUNS` (`nexus.run.>`, file, 7 days, 4 GiB, 10-minute duplicate window)
   and `NEXUS_DISPATCH` (`nexus.task.dispatch.>`, memory, 2 minutes).
-- **Production needs authorization.** The compose broker is unauthenticated, like
-  every other dev credential there. Anyone who can reach an unauthenticated
-  broker can read every tenant's run events and publish fake hints. A fake hint
-  only costs a poll; reading run events is a real disclosure. Give the
-  event-service publish rights on `nexus.>`; give each agent subscribe-only
-  rights on `nexus.task.dispatch.<its namespace>.>` and nothing else.
+- **Every deployment path provisions authorization.** Compose generates
+  identities in its `nats-init` step, the Helm chart refuses to render a broker
+  without them, and the services refuse to start without credentials when
+  `NEXUS_ENV` is production-like. The procedure is §11.7, rotation §11.8.
 
 ### 11.2 Relay tuning (event-service)
 
@@ -1056,7 +1058,215 @@ comment in `0016_outbox.down.sql`).
 
 `make test-nats` runs the relay, outbox and hint suites against a real
 JetStream and a real Postgres in throwaway containers (`nexus-nats-agent-*`,
-ports 55511/55512), including stopping and restarting the broker.
+ports 55511-55514), including stopping and restarting the broker. It then runs
+the authorization suite (`TestNATSAuthz*`) twice: against a broker configured
+by `deploy/nats/nexus-nats-auth.sh` (the compose path, plaintext) and against
+one running the Helm chart's rendered ConfigMap with TLS and client
+verification. Each role is exercised through the production code (`bus.Connect`,
+the real relay, `SubscribeDispatchHints`, the SSE waker), and every denial has a
+positive control. Needs Docker and `helm`. `AUTHZ=0` skips the authorization
+half and says so.
+
+### 11.7 Authorization: identities and permissions
+
+**The choice: NKeys in the server config, not decentralized JWT.** Each client
+holds one NKey seed (Ed25519). The server config lists only public keys and
+their permissions, so the config holds no secret and can live in a ConfigMap
+or in git. Authentication is challenge-response: the seed never crosses the
+wire, so it is safe even before TLS is on. Decentralized JWT (operator, account
+and user JWTs, a resolver, `nsc`) was considered and not chosen. Its strengths
+are delegated account administration and adding users without touching the
+server, and this platform has one operator and a handful of tenants. It would
+add an operator signing key and a resolver as new things to protect and back up.
+The client supports `.creds` files too (`NEXUS_NATS_CREDS`), so moving to JWT
+later is a server-side change only. Plain user and password is supported for
+brokers you do not run. It is refused over plaintext to a non-loopback host,
+because the password is sent in `CONNECT`.
+
+**The model.** It is rendered identically by `deploy/nats/nexus-nats-auth.sh`
+(compose, Portainer host) and `templates/nats-config.yaml` (Helm):
+
+| Identity | Account | Publish | Subscribe |
+|---|---|---|---|
+| `event-service` | NEXUS | `nexus.run.>`, `nexus.task.dispatch.>`, `$JS.API.STREAM.INFO.NEXUS_RUNS/NEXUS_DISPATCH`, `$JS.API.STREAM.CREATE.NEXUS_RUNS/NEXUS_DISPATCH` | `nexus.run.>` (SSE waker), `_INBOX.nexus-event-service.>` (its own JetStream acks) |
+| `agent-<ns>` (one per tenant) | NEXUS | **nothing** (`deny >`) | `nexus.task.dispatch.<ns>.>` only |
+| `monitor` | SYS (system account) | read-only `$SYS.REQ.SERVER.PING.*` / `$SYS.REQ.SERVER.*.<Z>` / `$SYS.REQ.ACCOUNT.*.<Z>` queries (no RELOAD, KICK or LDM) | `_INBOX.>`, `$SYS.SERVER.>`, `$SYS.ACCOUNT.>` |
+
+There is no anonymous user and no `no_auth_user`, so an unauthenticated
+connection is refused. The event-service can inspect and create its two streams
+and nothing else: it cannot delete, purge or update them, or create consumers.
+Each client sets a reply-inbox prefix of `_INBOX.<connection name>`, which is
+why the event-service's subscribe grant covers only its own replies. The
+scheduler, dag-engine, workflow-manager, resource-manager and api-gateway have
+no identity at all, because they never connect. They reach the bus only through
+`outbox` rows the event-service relays.
+
+**Tenants.** An agent identity is per Nexus namespace. A tenant's agents share
+it, or you list several public keys for one tenant to give each agent (or edge
+host) its own. The subject token is the namespace itself for names matching
+`[A-Za-z0-9_-]+`. Other names are percent-encoded on the bus (`bus.Token`), and
+both renderers refuse them rather than guess. To add tenant `acme`:
+
+```sh
+# compose / Portainer host (add -f deploy/docker-compose.tls.yml if you use it)
+docker compose -f deploy/docker-compose.yml run --rm nats-init init --tenant acme
+docker compose -f deploy/docker-compose.yml run --rm nats-init   # default command: render + install
+docker compose -f deploy/docker-compose.yml kill -s HUP nats
+# acme's agents need /store/agent-acme/user.nk from the nats-auth-store volume
+# Kubernetes (admin machine that holds the key directory)
+NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh add-tenant acme
+NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh helm-values  # merge into values, helm upgrade
+# give acme's agents /secure/nexus-nats/agent-acme/user.nk as NEXUS_NATS_NKEY_SEED_FILE
+```
+
+**Client settings (event-service and agent).** All are validated at startup.
+A configuration error is fatal, but an unreachable broker never is (ADR-0003).
+
+| Variable | Meaning |
+|---|---|
+| `NEXUS_NATS_URL` | `nats://` or `tls://`, comma-separated for a cluster. Empty disables the bus. |
+| `NEXUS_NATS_NKEY_SEED_FILE` | NKey user seed file (`SU…`, bare or armoured). **The shipped method.** |
+| `NEXUS_NATS_CREDS` | `.creds` file (JWT + seed) for a JWT-mode broker. Re-read on every reconnect. |
+| `NEXUS_NATS_USER` + `NEXUS_NATS_PASSWORD` or `NEXUS_NATS_PASSWORD_FILE` | Password auth. The file is re-read on every reconnect. Setting both password variables is an error. Refused without TLS unless every server is loopback. |
+| `NEXUS_NATS_REQUIRE_AUTH` | Makes "no credentials" a startup error. **Armed by `NEXUS_ENV=production/prod/staging`.** An explicit `false` overrides that and logs a WARN. Compose and Helm set it to `1`. |
+| `NEXUS_NATS_TLS`, `NEXUS_NATS_TLS_CA_FILE`, `NEXUS_NATS_TLS_CERT_FILE`, `NEXUS_NATS_TLS_KEY_FILE`, `NEXUS_NATS_TLS_SERVER_NAME` | §11.9 |
+
+Setting more than one credential method is an error, and so is a seed or creds
+file that is unreadable or not a *user* key. Error messages never include file
+contents. Clients keep retrying after authentication errors
+(`IgnoreAuthErrorAbort`), so a broker-side mistake during a rotation heals once
+it is fixed and does not leave a process permanently deaf. A permissions
+violation is logged at ERROR (`nats denied an operation for this identity`).
+Either the deployed permissions are too narrow or a process is doing something
+its role must not do.
+
+**Compose.** The one-shot `nats-init` container runs
+`nexus-nats-auth.sh compose-init`. On the first `up` it generates the
+identities into the `nats-auth-store` volume and reuses them afterwards. It
+renders the server config into `nats-auth-server` and copies each seed into a
+volume only its consumer mounts: `nats-auth-event-service` and
+`nats-auth-agent` (uid 10001, mode 0400). No setup step is needed and nothing is
+written to the source tree. `render_compose.py` inlines the script for the
+Portainer host, which has no source tree. To query the broker as the monitor:
+
+```sh
+docker compose -f deploy/docker-compose.yml run --rm --entrypoint nats nats-init \
+  --server nats://nats:4222 --nkey /store/monitor/user.nk server report jetstream
+```
+
+A host-side key directory (`NEXUS_NATS_DIR`, default `./.dev-nats`, which is
+gitignored) is used by `make k8s-dev-up` and by the Kubernetes procedure below.
+
+**Helm.** `nats.auth.mode: nkey` is the default, and rendering **fails** until
+`nats.auth.eventService.publicKeys`, `nats.auth.monitor.publicKeys` and a
+`nats.auth.tenants` entry for `nexusNamespace` are set. Public keys are also
+checked for format. The seeds go in a Secret, by default `existingSecret`,
+under the keys `nats-event-service-nkey` and `nats-agent-nkey`. Each pod
+projects only its own key to `/etc/nexus/nats/user.nk`. An agent entry may set
+`natsSeedKey` to use its own identity.
+
+```sh
+NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh init --tenant <nexusNamespace>
+NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh helm-values > nats-values.yaml
+kubectl -n <ns> create secret generic nexus-nats-seeds \
+  --from-file=nats-event-service-nkey=/secure/nexus-nats/event-service/user.nk \
+  --from-file=nats-agent-nkey=/secure/nexus-nats/agent-<nexusNamespace>/user.nk
+helm upgrade --install … -f nats-values.yaml --set nats.auth.seedSecret=nexus-nats-seeds
+```
+
+Generate keys on an admin machine, not in the cluster. The monitor seed stays
+there (or goes to whoever runs nats-surveyor). Also in the chart:
+
+- A `nats` NetworkPolicy that admits only event-service and agent pods on 4222
+  (`nats.networkPolicy.extraFrom` for anything else).
+- Monitoring on the pod's loopback only, with no `monitor` port on the Service.
+  Probes run `wget` in the container.
+- A config-reloader sidecar (`natsio/nats-server-config-reloader:0.21.1`, with
+  `shareProcessNamespace`) that sends SIGHUP to the broker when the ConfigMap or
+  its TLS files change.
+
+`nats.auth.mode: none` exists for a throwaway cluster. It sets
+`NEXUS_NATS_REQUIRE_AUTH=0` on the clients and is never appropriate where more
+than one tenant, or anything untrusted, can reach the broker. `deploy/terraform`
+reads the key directory (`nats_credentials_dir`, which `make k8s-dev-up`
+populates) and adds the seeds to its credentials Secret. Like every other
+generated credential there, they are in Terraform state.
+
+**Upgrading an existing deployment.** Provision identities first, then roll
+everything together:
+
+- **Compose:** `up` does it.
+- **Helm:** set the values and the Secret. The upgrade fails to render without them.
+- **Custom deployments:** set `NEXUS_NATS_NKEY_SEED_FILE` on the event-service
+  and agents before switching the broker to the authenticated config.
+
+Between the broker switch and the client roll, the bus is down, not the
+platform: agents long-poll and the outbox holds the backlog (§11.4). Off-cluster
+agents need their tenant's seed, and their `NEXUS_NATS_URL` must point at a
+listener they can reach.
+
+### 11.8 Rotating NATS credentials
+
+Rotate on compromise, on staff change and on a schedule (for example
+annually). Every step keeps the bus up, because the server accepts the old and
+the new key for the same role during the overlap.
+
+```sh
+# Kubernetes / host-managed key directory
+# 1. new key alongside the old one (the old public key moves to retiring.pub)
+NEXUS_NATS_DIR=<dir> deploy/nats/nexus-nats-auth.sh rotate agent-acme
+# 2. make the broker accept both keys: helm-values -> values, helm upgrade.
+#    The reloader sends SIGHUP to the broker.
+# 3. update the Secret key and IMMEDIATELY: kubectl rollout restart deploy/<agents or event-service>
+# 4. stop accepting the old key
+NEXUS_NATS_DIR=<dir> deploy/nats/nexus-nats-auth.sh retire agent-acme
+#    ...then helm-values -> values, helm upgrade
+
+# compose (C="docker compose -f deploy/docker-compose.yml", plus the TLS override if used)
+$C run --rm nats-init rotate agent-default     # 1
+$C run --rm nats-init && $C kill -s HUP nats   # 2 (also installs the new seed)
+$C up -d --force-recreate agent-cpu agent-gpu agent-gpu-a10   # 3, straight after 2
+$C run --rm nats-init retire agent-default     # 4
+$C run --rm nats-init && $C kill -s HUP nats
+```
+
+A process holding an NKey must restart to switch seeds. nats.go fixes the public
+key when the connection is created, but it re-reads the seed file each time it
+signs. Between installing a new seed and the restart, a reconnect would fail,
+so restart straight away. Nothing else breaks in the meantime. `.creds` and password files are
+re-read at every reconnect. `rotate` deletes nothing the clients still use, and
+`retire` is the step that revokes. For a **compromised** seed, skip the
+overlap: `rotate`, then `retire` straight away, re-render and reload. The
+compromised key is refused from the next connection attempt. Connections
+already open with it are dropped by the reload itself, which was verified
+against nats-server 2.14.7: the live subscriber was disconnected at the SIGHUP
+and its reconnect was refused. Confirm with `nats server report connections` as the
+monitor, or with `/connz` inside the pod. The role's clients are down until
+they have the new seed, and the platform keeps working by polling.
+
+### 11.9 TLS to the broker
+
+The NKey authenticates each client. TLS adds confidentiality, which matters
+because run events carry tenant data, and it authenticates the broker. The
+clients reuse `internal/transport`'s hot-reloading material. A renewed
+certificate or CA bundle is used at the next reconnect without a restart.
+
+- **Client:** TLS is on when `NEXUS_NATS_TLS=1`, the URL uses `tls://`, or any
+  `NEXUS_NATS_TLS_*_FILE` is set. The CA defaults to `NEXUS_TLS_CA_FILE`, and
+  the client pair defaults to `NEXUS_TLS_CLIENT_CERT_FILE`/`_KEY_FILE`: one
+  private CA for every internal hop (docs/TLS.md). **`NEXUS_REQUIRE_TLS=1`
+  makes a plaintext broker connection fatal**, just like a plaintext gRPC hop.
+  Explicitly turning TLS off while also asking for it (for example
+  `NEXUS_NATS_TLS=0` with a `tls://` URL) is an error.
+- **Compose:** `make up-tls` issues a `nats` leaf (`make dev-certs`). The broker
+  serves it and requires a client certificate from the dev CA
+  (`verify: true`). The agents and event-service dial with their leaves.
+  nats-server re-reads certificates only on reload, so after a renewal run
+  `docker compose kill -s HUP nats`.
+- **Helm:** `nats.tls.enabled=true` with `secretName` (a cert-manager
+  Certificate for `nats`, `nats.<ns>.svc`). With `verifyClients` (the default),
+  `clientSecrets.eventService` and `.agent` must also be set. Otherwise
+  `caSecret` supplies `ca.crt`. The reloader picks renewed certificates up.
 
 ---
 

@@ -47,8 +47,11 @@ read "mTLS is on" as "the control plane is authenticated"; the two layers answer
 different questions and both are needed.
 
 **It does not cover:** the REST ingress (terminate that at your load balancer or
-reverse proxy, as usual), Postgres (`sslmode` in the DSN), or NATS (its own TLS
-config). This is inter-service gRPC only.
+reverse proxy, as usual) or Postgres (`sslmode` in the DSN). The NATS client
+reuses this package's hot-reloading material (`transport.LoadClientMaterial`),
+with its own switches: `NEXUS_NATS_TLS*`, falling back to the CA and client
+pair below. `NEXUS_REQUIRE_TLS` covers the broker hop too. The broker side and
+its authorization are OPERATIONS §11.7–11.9.
 
 **Issuance and rotation** are covered in §5: hot reload in the process, cert-manager
 on AKS, and `deploy/nexus-certs.sh` elsewhere. No CA key is ever in this
