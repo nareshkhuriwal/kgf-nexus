@@ -103,6 +103,19 @@ parameters:
         dockerfile: deploy/Dockerfile.service
         servicePath: services/artifact-gc/cmd/artifact-gc
 
+      # ── Cluster controller (docs/CLUSTER-SCALING.md) ────────────────────
+      # The in-cluster controller that reports Kubernetes state to the resource
+      # manager and scales worker Deployments from queued demand. Kubernetes
+      # only: deploy/k8s/cluster-controller/base runs it, and it is deliberately
+      # NOT in deploy/docker-compose.yml, because without a Kubernetes API to
+      # observe it has nothing to do (it exits at startup). Main package at the
+      # service root, like dag-engine and scheduler. The kustomize base names it
+      # kgf-nexus/cluster-controller; a release retargets that name to this
+      # repository by digest (see the note at the top of its deployment.yaml).
+      - name: cluster-controller
+        dockerfile: deploy/Dockerfile.service
+        servicePath: services/cluster-controller
+
       # ── Operator console ────────────────────────────────────────────────
       # nginx serving the built bundle and proxying /v1 to the gateway, so the
       # browser sees one origin and the gateway needs no CORS configuration.

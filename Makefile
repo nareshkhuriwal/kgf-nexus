@@ -26,9 +26,10 @@ NEXUS_API_PORT ?= 8090
 NEXUS_ENDPOINT ?= http://localhost:$(NEXUS_API_PORT)
 MIGRATIONS    := services/migrations
 
-# test-nats has its own .PHONY line so a merge that edits the list below does
-# not conflict with it.
+# test-nats and sdk-test have their own .PHONY lines so a merge that edits the
+# list below does not conflict with them.
 .PHONY: test-nats
+.PHONY: sdk-test
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
@@ -60,9 +61,10 @@ proto: ## Regenerate Go bindings from proto/nexus/v1/*.proto
 build: ## Build all Go packages
 	$(GO) build ./...
 
-test: ## Run Go tests and UI tests
+test: ## Run Go, UI and Python SDK unit tests
 	$(GO) test ./...
 	$(MAKE) ui-test
+	$(MAKE) sdk-test
 
 lint: ## go vet over the whole module
 	$(GO) vet ./...
@@ -221,6 +223,33 @@ ui-build: ## Typecheck and production-build the UI
 
 ui-test: ## Run the UI component tests
 	cd ui && npm test
+
+# ── Python SDK ────────────────────────────────────────────────────────────
+# The SDK's pytest suite, in its own virtualenv so it never installs into (or
+# depends on) whatever Python the shell happens to have. .venv-sdk/ is already
+# gitignored. The venv is rebuilt only when pyproject.toml changes; delete it to
+# force a clean install. SDK_PYTHON must be 3.11+ (pyproject requires-python).
+#
+# SDK_REPORT_DIR, when set, also writes JUnit and Cobertura XML there. Coverage
+# data goes inside the venv so the source tree stays clean.
+SDK_DIR        := sdk/python
+SDK_PYTHON     ?= python3
+SDK_VENV       ?= .venv-sdk
+SDK_REPORT_DIR ?=
+
+$(SDK_VENV)/.installed: $(SDK_DIR)/pyproject.toml
+	@$(SDK_PYTHON) -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
+	  || { echo "sdk-test: $(SDK_PYTHON) is $$($(SDK_PYTHON) --version 2>&1); the SDK needs 3.11+ (set SDK_PYTHON)"; exit 1; }
+	$(SDK_PYTHON) -m venv $(SDK_VENV)
+	$(SDK_VENV)/bin/python -m pip install --quiet --upgrade pip
+	$(SDK_VENV)/bin/python -m pip install --quiet -e '$(SDK_DIR)[dev]'
+	@touch $@
+
+sdk-test: $(SDK_VENV)/.installed ## Run the Python SDK tests with coverage (SDK_REPORT_DIR=<dir> adds JUnit/Cobertura XML)
+	$(if $(SDK_REPORT_DIR),@mkdir -p '$(SDK_REPORT_DIR)')
+	cd $(SDK_DIR) && COVERAGE_FILE='$(abspath $(SDK_VENV))/.coverage' '$(abspath $(SDK_VENV))/bin/python' -m pytest \
+	  -p no:cacheprovider --cov=nexus --cov-report=term \
+	  $(if $(SDK_REPORT_DIR),--junitxml='$(abspath $(SDK_REPORT_DIR))/sdk-junit.xml' --cov-report=xml:'$(abspath $(SDK_REPORT_DIR))/sdk-coverage.xml')
 
 # ── Dev data ──────────────────────────────────────────────────────────────
 # The key is inserted hashed (api_keys.key_hash), matching how the gateway
