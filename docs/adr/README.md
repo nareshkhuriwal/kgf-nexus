@@ -29,6 +29,7 @@ full system design, data model, state machines, and phased plan.
 | [0020](0020-durable-task-logs.md) | Task logs: agents write chunks to the result store, index them through a lease-fenced RPC; gateway-owned index | Seconds of live-tail latency and gateway read credentials, for no log bytes through the control plane |
 | [0021](0021-namespace-quotas-and-usage-metering.md) | Namespace quotas enforced in the claim under a per-tenant advisory lock; append-only, scheduler-owned usage ledger written with each terminal transition | Serialized dispatch for quota-bound namespaces and one lookup per claim, for exact quotas and complete metering |
 | [0022](0022-local-runner-and-replay.md) | Local runner (`nexus.local`, `nexusctl run --local`) and attempt replay reuse the DAG semantics, held to Go by shared fixtures | A second implementation of the decision logic kept aligned by tests, for a seconds-long local loop |
+| [0025](0025-secret-resolution-audit-export-airgap.md) | Agent-side per-tenant secret resolution (env, file, Vault KV v2, Azure Key Vault) with declared env/file injection; paginated, exported, sink-delivered, hash-chained audit with retention and legal hold, fail-closed for security actions; digest-pinned air-gap bundle | Secret values exist on worker hosts, and security administration blocks while the audit store is down, in exchange for no credentials in the metadata store and a verifiable audit trail |
 
 ADRs 0013–0018 close the six open questions of ARCHITECTURE.md §12 and are
 **Proposed — pending owner sign-off**.
