@@ -11,7 +11,7 @@ Read them in this order.
 
 ## Workload suite
 
-Four realistic workflows that check their own results and FAIL the run if the
+Five realistic workflows that check their own results and FAIL the run if the
 check fails. They are plain `sh` + `awk`, so they run on the stock agent image.
 
 | Example | What it does | What it proves |
@@ -20,15 +20,20 @@ check fails. They are plain `sh` + `awk`, so they run on the stock agent image.
 | [`ml_training_pipeline/`](ml_training_pipeline/) | Synthetic regression data, a 24-trial hyperparameter search (real gradient descent), best-model selection, an R² quality gate | Runtime fan-out with shared blob inputs, memoization (a re-run reuses every trial), a gate that can fail the run |
 | [`gpu_scheduling/`](gpu_scheduling/) | 8 GPU jobs (1×A100, 2×A100, A10) contending for 2 A100s + 1 A10 | Queueing under GPU contention; an audit fails the run on oversubscription, a wrong GPU model, or two concurrent jobs sharing a device |
 | [`fanout_scale/`](fanout_scale/) | Fan out to N tiny tasks (500 by default) and sum them | Dispatch throughput with hundreds queued; the sum must equal the closed form exactly |
+| [`batch_inference/`](batch_inference/) | Shard 2,000 records into 8 shards, score each with a fixed logistic model (CPU), verify | A memoized map (per-shard checkpoints) with `max_fanout` and a `max_bytes`-bounded fan-in; every shard reported once, every record scored once, and the sharded positives equal one unsharded pass |
 
-Run all four on the Kubernetes dev environment:
+Run the quick five on the Kubernetes dev environment:
 
 ```bash
 make k8s-dev-up      # once: deploy the platform (deploy/terraform/environments/dev)
 make k8s-dev-test    # examples/run-suite.sh -- prints each verdict, exits non-zero on any failure
-SCALE=large make k8s-dev-test    # 1.6M CSV rows, 50k-row training set, 1,500-way fan-out
+SCALE=large make k8s-dev-test    # 1.6M CSV rows, 50k-row training set, 1,500-way fan-out, 60k records
 SUITE="gpu" make k8s-dev-test    # one workload
 ```
+
+For a Python starting point with the same shapes, `nexusctl init --list` shows
+project templates (ETL, ML training, batch inference, file fan-out) that
+generate a runnable `dag.py`, tests and a task image.
 
 On a laptop the GPUs are **simulated** (the dev agents advertise capacity and
 are labelled `simulated=true`): `gpu_scheduling` tests the scheduler's GPU

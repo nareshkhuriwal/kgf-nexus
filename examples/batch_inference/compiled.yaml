@@ -1,0 +1,193 @@
+api_version: nexus.dev/v1
+description: Shard a dataset, score each shard in parallel with memoized checkpoints,
+  verify the fan-in exactly.
+edges:
+- from_node_id: plan
+  output_to_input: {}
+  to_node_id: score_shard
+- from_node_id: score_shard
+  output_to_input:
+    summaries: summary
+  to_node_id: verify
+name: batch-inference
+namespace: default
+params:
+  records:
+    default_json: '2000'
+    type: int
+  shard_size:
+    default_json: '250'
+    type: int
+run_timeout_ms: 1800000
+tasks:
+- id: plan
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    records: records
+    shard_size: shard_size
+  inputs:
+    records:
+      required: true
+      type: json
+    shard_size:
+      required: true
+      type: json
+  outputs:
+    shards:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 100
+      memory_bytes: 67108864
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; awk -v n=\"$(v records)\"\
+      \ -v size=\"$(v shard_size)\" 'BEGIN {\n  if (n < 1 || size < 1) { print \"\
+      records and shard_size must be positive\" > \"/dev/stderr\"; exit 1 }\n  printf\
+      \ \"[\"\n  for (s = 0; s * size < n; s++) {\n    stop = (s + 1) * size; if (stop\
+      \ > n) stop = n\n    printf \"%s{\\\"shard\\\":%d,\\\"start\\\":%d,\\\"stop\\\
+      \":%d}\", (s ? \",\" : \"\"), s, s * size, stop\n  }\n  printf \"]\"\n}' > \"\
+      $NEXUS_OUTPUT_DIR/shards\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: infer.plan
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- cache:
+    enabled: true
+    ttl_ms: 3600000
+  id: score_shard
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  inputs:
+    shard:
+      required: true
+      type: json
+  map:
+    item_input: shard
+    max_fanout: 64
+    over_node_id: plan
+    over_output: shards
+  outputs:
+    summary:
+      max_bytes: 256
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 100
+      memory_bytes: 67108864
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 3
+    max_ms: 600000
+    multiplier: 2.0
+    retry_on:
+    - ERROR_CLASS_INFRASTRUCTURE
+    - ERROR_CLASS_WORKER_LOST
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "tr -d '{}\" \\n' < \"$NEXUS_INPUT_DIR/shard\" | tr ',' '\\n' | awk -F: '\n\
+      function feat(i, j) { return ((i * (7919 + 104729 * j) + 13 * j) % 1000) / 250.0\
+      \ - 2 }\nfunction positive(i,   z) {\n  z = 1.2 * feat(i, 1) - 0.8 * feat(i,\
+      \ 2) + 0.5 * feat(i, 3) - 0.1\n  return (1 / (1 + exp(-z))) >= 0.5\n}\n{ f[$1]\
+      \ = $2 }\nEND {\n  for (i = f[\"start\"]; i < f[\"stop\"]; i++) { rows++; ids\
+      \ += i; pos += positive(i) }\n  printf \"{\\\"shard\\\":%d,\\\"rows\\\":%d,\\\
+      \"positives\\\":%d,\\\"id_sum\\\":%.0f}\", f[\"shard\"], rows, pos, ids\n}'\
+      \ > \"$NEXUS_OUTPUT_DIR/summary\" && cat \"$NEXUS_OUTPUT_DIR/summary\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: infer.score_shard
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: verify
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    records: records
+    shard_size: shard_size
+  inputs:
+    records:
+      required: true
+      type: json
+    shard_size:
+      required: true
+      type: json
+    summaries:
+      required: true
+      type: json
+  outputs:
+    result:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 100
+      memory_bytes: 67108864
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 1
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - "v() { tr -d '\"\\n ' < \"$NEXUS_INPUT_DIR/$1\"; }; tr -d '[]{}\" \\n' < \"\
+      $NEXUS_INPUT_DIR/summaries\" | tr ',' '\\n' | awk -F: -v n=\"$(v records)\"\
+      \ -v size=\"$(v shard_size)\" '\nfunction feat(i, j) { return ((i * (7919 +\
+      \ 104729 * j) + 13 * j) % 1000) / 250.0 - 2 }\nfunction positive(i,   z) {\n\
+      \  z = 1.2 * feat(i, 1) - 0.8 * feat(i, 2) + 0.5 * feat(i, 3) - 0.1\n  return\
+      \ (1 / (1 + exp(-z))) >= 0.5\n}\n$0 == \"null\" { missing++; next }\n$1 == \"\
+      shard\" { shards++; shard_sum += $2 }\n$1 == \"rows\" { rows += $2 }\n$1 ==\
+      \ \"positives\" { pos += $2 }\n$1 == \"id_sum\" { ids += $2 }\nEND {\n  want_shards\
+      \ = int((n + size - 1) / size)\n  for (i = 0; i < n; i++) want_pos += positive(i)\n\
+      \  want_ids = n * (n - 1) / 2; want_shard_sum = want_shards * (want_shards -\
+      \ 1) / 2\n  ok = (missing == 0 && shards == want_shards && shard_sum == want_shard_sum\
+      \ && rows == n && ids == want_ids && pos == want_pos)\n  printf \"{\\\"records\\\
+      \":%d,\\\"shards\\\":%d,\\\"missing_shards\\\":%d,\\\"rows\\\":%d,\\\"positives\\\
+      \":%d,\\\"positives_unsharded\\\":%d,\\\"positive_rate\\\":%.4f,\\\"ok\\\":%s}\\\
+      n\", n, shards, missing, rows, pos, want_pos, (n ? want_pos / n : 0), ok ? \"\
+      true\" : \"false\"\n  if (!ok) {\n    printf \"batch inference check failed:\
+      \ %d/%d shards reported (%d missing), %d/%d rows, \" , shards, want_shards,\
+      \ missing, rows, n > \"/dev/stderr\"\n    printf \"id sum %.0f vs %.0f, positives\
+      \ %d vs %d unsharded\\n\", ids, want_ids, pos, want_pos > \"/dev/stderr\"\n\
+      \    exit 1\n  }\n}' > \"$NEXUS_OUTPUT_DIR/result\" && cat \"$NEXUS_OUTPUT_DIR/result\""
+    command:
+    - sh
+    - -c
+    executor: subprocess
+  task_ref: infer.verify
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_DONE
+  version: 1
+
