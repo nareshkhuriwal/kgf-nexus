@@ -23,9 +23,12 @@ const pollInterval = 2 * time.Second
 func workerGroup() *group {
 	return &group{
 		name:    "worker",
-		summary: "Inspect the worker fleet.",
+		summary: "Inspect and control the worker fleet.",
 		commands: []*command{
 			workerLsCmd(),
+			workerDrainCmd(),
+			workerQuarantineCmd(),
+			workerReleaseCmd(),
 		},
 	}
 }
