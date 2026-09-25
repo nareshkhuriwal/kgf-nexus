@@ -179,3 +179,17 @@ prefix, and reusing that name makes the upgrade fail on an immutable field.
 {{- define "nexus.jobSuffix" -}}
 {{- .Values.image.tag | sha256sum | trunc 10 -}}
 {{- end -}}
+
+{{/*
+prometheus.io/* pod annotations for annotation-based discovery. Rendered only
+when metrics.podAnnotations is true. Argument: (list $root port).
+*/}}
+{{- define "nexus.metricsAnnotations" -}}
+{{- $root := index . 0 -}}{{- $port := index . 1 -}}
+{{- if $root.Values.metrics.podAnnotations }}
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: {{ $port | quote }}
+  prometheus.io/path: /metrics
+{{- end }}
+{{- end -}}

@@ -25,6 +25,7 @@ spec:
     metadata:
       labels: {{- include "nexus.labels" (list $root .name) | nindent 8 }}
         nexus.khuriwalgroup.com/role: agent
+      {{- include "nexus.metricsAnnotations" (list $root (int $root.Values.metrics.agentPort)) | nindent 6 }}
     spec:
       {{- include "nexus.pullSecrets" $root | nindent 6 }}
       securityContext: {{- include "nexus.podSecurity" $root | nindent 8 }}
@@ -64,6 +65,11 @@ spec:
             - { name: NEXUS_WORK_DIR, value: /var/lib/nexus/work }
             - { name: LOG_LEVEL, value: {{ $root.Values.logLevel | quote }} }
             - { name: NEXUS_LOG_LEVEL, value: {{ $root.Values.logLevel | quote }} }
+            # All interfaces inside the pod so Prometheus can reach it; the
+            # agent's own default is loopback. No Service exposes this port.
+            - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" (int $root.Values.metrics.agentPort) | quote }} }
+          ports:
+            - { name: metrics, containerPort: {{ int $root.Values.metrics.agentPort }} }
           resources: {{- toYaml .resources | nindent 12 }}
           securityContext: {{- include "nexus.containerSecurity" $root | nindent 12 }}
           volumeMounts:

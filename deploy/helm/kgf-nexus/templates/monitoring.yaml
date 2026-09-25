@@ -1,0 +1,74 @@
+{{- /*
+Copyright 2026 Khuriwal Group
+SPDX-License-Identifier: Apache-2.0
+
+prometheus-operator scrape configuration (docs/OPERATIONS.md, "Metrics").
+
+The ServiceMonitor scrapes the "metrics" port of every control-plane Service
+(the gateway's ops listener, every other service's health listener). The agents
+have no Service, so a PodMonitor scrapes their "metrics" container port.
+Both are opt-in: the CRDs exist only where the operator is installed.
+*/ -}}
+{{- $sm := .Values.metrics.serviceMonitor }}
+{{- $pmEnabled := $sm.enabled }}
+{{- if not (kindIs "invalid" .Values.metrics.podMonitor.enabled) }}{{ $pmEnabled = .Values.metrics.podMonitor.enabled }}{{ end }}
+{{- if $sm.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kgf-nexus
+  labels:
+    {{- include "nexus.labels" (list . "control-plane") | nindent 4 }}
+    {{- with $sm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kgf-nexus
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace | quote }}]
+  endpoints:
+    # Only Services with a port named "metrics" produce targets: the six
+    # control-plane services and the schedulers. The dependencies and the
+    # console have none, and api-gateway-external never has one.
+    - port: metrics
+      path: /metrics
+      interval: {{ $sm.interval }}
+      scrapeTimeout: {{ $sm.scrapeTimeout }}
+      # The component label becomes the job-level "service" dimension
+      # dashboards group by.
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
+          targetLabel: component
+{{- end }}
+{{- if $pmEnabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kgf-nexus-agents
+  labels:
+    {{- include "nexus.labels" (list . "agent") | nindent 4 }}
+    {{- with $sm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kgf-nexus
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      nexus.khuriwalgroup.com/role: agent
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace | quote }}]
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ $sm.interval }}
+      scrapeTimeout: {{ $sm.scrapeTimeout }}
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+          targetLabel: component
+{{- end }}
