@@ -2271,7 +2271,7 @@ both break invariant 9.
   sentinel, so "pause a run that just finished" was a 500. Now `FailedPrecondition` →
   409 for cancel/pause/resume as well.
 
-**Still open (reported, not fixed here):** cancel/pause/resume check the run's
+**Still open at the time (reported here, fixed separately as F101):** cancel/pause/resume check the run's
 namespace only AFTER the owner has mutated it (`upstream.lifecycle` reads the run back
 scoped by namespace), and the owner acts on a run id alone. A principal of namespace A
 who knows a run UUID in namespace B can cancel it and receive a 404. Retry now checks
@@ -2288,3 +2288,52 @@ an expansion child; workflow-manager DB tests for the transaction, deadline rene
 indeterminate outcome, and a second retry / stale terminal report / cancel each fired
 while a retry holds the run. Mutations that removed the floor filter, the reset CAS or
 the non-terminal guard each turned those tests red.
+
+### F101. Cancel, pause and resume could change another tenant's run — FIXED
+
+**Severity:** high. A tenancy boundary that held for reads did not hold for three
+writes.
+
+The gateway's guard authorizes the principal for the namespace in the PATH. Nothing
+tied the run id in the path to that namespace before the mutation: `rest.lifecycle`
+called the workflow-manager — which acts on a run id alone, by design, since it owns
+`workflow_runs` and has no principal — and only afterwards did `upstream.lifecycle`
+read the run back with `GatewayGetRun(namespace, id)`. So a principal of namespace A
+that knew a run UUID from namespace B could `POST /v1/namespaces/A/runs/<B's run>/cancel`
+(or pause, or resume): B's run was cancelled, and A was answered 404. The 404 made it
+look refused. Reproduced against real Postgres with two tenants: with the check
+removed, the victim run goes RUNNING -> CANCELLING / PAUSING, PAUSED -> RUNNING.
+
+Found while fixing F100, where retry went through the same function.
+
+**Fix:** `rest.lifecycle` looks the run up with `GatewayGetRun(ns, id)` — namespace in
+the predicate — before calling the owner; a run in another namespace is 404 and the
+owner is never called. Retry already did this (F100).
+
+**Sweep of every other mutating route** in `services/api-gateway/rest`. None of the
+others had the same mutate-then-check order:
+
+| Route | Why it is safe |
+|---|---|
+| `DELETE runs/{id}` | selects and inserts `run_deletions` `WHERE id AND namespace` (principal's) in one tx |
+| `POST runs/{id}/retry` | checks the run in `ns` first (F100) |
+| `POST workers/{id}/drain`, `/quarantine`, `/release` | `GatewayGetWorker(ns, id)` before the owner call |
+| `POST backfills/{id}/pause\|resume\|cancel` | owner's `WFMSetBackfillState` updates `WHERE id AND namespace` |
+| `POST/PUT/DELETE schedules/{name}`, `/enable`, `/disable`, `/backfills` | keyed by `(namespace, name)` in every owner statement |
+| `DELETE specs/{name}`, `POST specs` | keyed by `(namespace, name)` |
+| `POST runs` | the owner refuses a spec whose namespace differs from the run's |
+| `POST cache/invalidations` | records a cutoff scoped to `ns`; touches no other tenant's rows |
+| `PUT/POST/DELETE users/{id}...`, `tokens/{id}/revoke` | every UPDATE is `WHERE namespace AND id`, or `GetUser(ns, id)` first |
+| `PUT platform/config`, `platform/clusters/{name}` | scoped to the principal's namespace |
+
+**Tests:** a unit test for each of cancel/pause/resume/retry asserting 404 and that
+the owner was never called, plus a positive test; and a DB integration test with two
+registered tenants whose fake owner mutates `workflow_runs` by id alone — exactly as
+the real one does — asserting the victim run is unchanged, a foreign namespace in the
+path is 403, and each tenant can still act on its own run. Both tests fail with the
+check removed.
+
+**Defence in depth, not done here:** the owner's lifecycle RPCs could take the
+namespace and put it in their own `WHERE`, so a future caller that forgets the check
+cannot repeat this. That is a proto change (`CancelRunRequest` etc. have no namespace
+field) and is left for a separate, additive revision.

@@ -243,6 +243,9 @@ type fakeWFM struct {
 	// its answer; nil answers the run-state conflict a non-retryable run gets.
 	retries []retryCall
 	retryFn func(nodes []string) (store.RunRow, error)
+	// lifecycles records every cancel/pause/resume that reached the owner, as
+	// "op ns/id", so a test can prove a refused request never got there.
+	lifecycles []string
 }
 
 type retryCall struct {
@@ -288,13 +291,22 @@ func (f *fakeWFM) callCount() int {
 	return f.creates
 }
 
+func (f *fakeWFM) recordLifecycle(op, ns, id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lifecycles = append(f.lifecycles, op+" "+ns+"/"+id)
+}
+
 func (f *fakeWFM) CancelRun(ctx context.Context, ns, id string) (store.RunRow, error) {
+	f.recordLifecycle("cancel", ns, id)
 	return store.RunRow{ID: id, State: "CANCELLING"}, nil
 }
 func (f *fakeWFM) PauseRun(ctx context.Context, ns, id string) (store.RunRow, error) {
+	f.recordLifecycle("pause", ns, id)
 	return store.RunRow{ID: id, State: "PAUSING"}, nil
 }
 func (f *fakeWFM) ResumeRun(ctx context.Context, ns, id string) (store.RunRow, error) {
+	f.recordLifecycle("resume", ns, id)
 	return store.RunRow{ID: id, State: "RUNNING"}, nil
 }
 func (f *fakeWFM) RetryRun(ctx context.Context, ns, id string, nodes []string, actor string) (store.RunRow, error) {
@@ -631,7 +643,8 @@ func TestAdminOnlyDrain(t *testing.T) {
 // PAUSED: the run has not finished draining, and reporting PAUSED early would tell an
 // operator that in-flight work had stopped when it has not.
 func TestLifecycleEndpointsMapStates(t *testing.T) {
-	h, _, _ := newTestAPI(t)
+	h, db, _ := newTestAPI(t)
+	db.addRun("team-ml", "run-1", "RUNNING", map[string]string{"a": "RUNNING"})
 	cases := []struct{ path, wantState string }{
 		{"/v1/namespaces/team-ml/runs/run-1/pause", "PAUSING"},
 		{"/v1/namespaces/team-ml/runs/run-1/cancel", "CANCELLING"},
@@ -862,5 +875,45 @@ func TestWorkerDetailIsAReadNotAnAdminAction(t *testing.T) {
 	// Same route, another tenant's namespace: the boundary still holds.
 	if cross := get(t, h, "/v1/namespaces/other-team/workers/w1", adminKey); cross.Code != http.StatusForbidden {
 		t.Errorf("a team-ml key reading other-team's worker: status %d, want 403", cross.Code)
+	}
+}
+
+// TestLifecycleOfAnotherNamespacesRunIsNotFound pins F101: cancel, pause and
+// resume used to reach the owner -- which acts on a run id alone -- before
+// anything tied the run to the caller's namespace, and only the read-back
+// afterwards was scoped. Now the run is looked up in the path's namespace
+// first, and a run that lives elsewhere is a 404 that changes nothing.
+func TestLifecycleOfAnotherNamespacesRunIsNotFound(t *testing.T) {
+	for _, op := range []string{"cancel", "pause", "resume", "retry"} {
+		t.Run(op, func(t *testing.T) {
+			h, db, wfm := newTestAPI(t)
+			// The run exists -- in a namespace the caller has no key for.
+			db.addRun("other-team", "run-1", "FAILED", map[string]string{"a": "FAILED"})
+			wfm.retryFn = okRetry
+
+			rec := post(t, h, "/v1/namespaces/team-ml/runs/run-1/"+op, adminKey, "", "")
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("%s of another namespace's run: status %d, want 404. body=%s", op, rec.Code, rec.Body)
+			}
+			if len(wfm.lifecycles) != 0 || len(wfm.retries) != 0 {
+				t.Errorf("%s reached the owner before the namespace check: %v %v", op, wfm.lifecycles, wfm.retries)
+			}
+		})
+	}
+}
+
+// And a run in the caller's own namespace still reaches the owner, with the
+// path's namespace and id.
+func TestLifecycleOfOwnRunReachesTheOwner(t *testing.T) {
+	h, db, wfm := newTestAPI(t)
+	db.addRun("team-ml", "run-1", "RUNNING", map[string]string{"a": "RUNNING"})
+	for _, op := range []string{"pause", "resume", "cancel"} {
+		if rec := post(t, h, "/v1/namespaces/team-ml/runs/run-1/"+op, adminKey, "", ""); rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d. body=%s", op, rec.Code, rec.Body)
+		}
+	}
+	want := []string{"pause team-ml/run-1", "resume team-ml/run-1", "cancel team-ml/run-1"}
+	if strings.Join(wfm.lifecycles, ",") != strings.Join(want, ",") {
+		t.Errorf("owner saw %v, want %v", wfm.lifecycles, want)
 	}
 }
