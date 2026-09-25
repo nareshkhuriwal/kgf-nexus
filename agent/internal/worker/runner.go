@@ -625,14 +625,21 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 	case o.Succeeded():
 		req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED
 		refs, err := r.storeOutputs(reportCtx, a, o, log)
-		if err != nil {
+		switch {
+		case errors.Is(err, executor.ErrOutputTooLarge):
+			// The workload broke its own declared bound: terminal VALIDATION,
+			// and nothing was uploaded (checkOutputBounds runs first).
+			log.Error("a task output exceeds its declared max_bytes; failing the attempt", "error", err)
+			req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED
+			req.Error = executor.ClassifyError(err).ToProto()
+		case err != nil:
 			// We cannot persist an output, so we cannot honestly claim success: a
 			// downstream task would read a reference to nothing. INFRASTRUCTURE +
 			// retryable is the truthful report.
 			log.Error("could not store the task outputs; reporting INFRASTRUCTURE failure", "error", err)
 			req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED
 			req.Error = executor.ClassifyError(fmt.Errorf("%w: %v", executor.ErrResultStore, err)).ToProto()
-		} else if len(refs) > 0 {
+		case len(refs) > 0:
 			req.Outputs = refs
 		}
 	case o.TimedOut:
@@ -684,6 +691,12 @@ func (r *Runner) storeOutputs(ctx context.Context, a *nexusv1.TaskAssignment,
 		return nil, nil
 	}
 
+	// Every bound is checked before ANY output is written, so an attempt that
+	// breaks one leaves no object behind for the orphan sweep.
+	if err := checkOutputBounds(a.GetSpec(), produced); err != nil {
+		return nil, err
+	}
+
 	refs := make(map[string]*nexusv1.ResultRef, len(produced))
 	for name, out := range produced {
 		ref, err := r.putOutput(ctx, out)
@@ -702,6 +715,37 @@ func (r *Runner) storeOutputs(ctx context.Context, a *nexusv1.TaskAssignment,
 		}
 	}
 	return refs, nil
+}
+
+// checkOutputBounds enforces each output's declared ValueSpec.max_bytes
+// against the bytes that would be stored: the inline payload, or the blob the
+// store would upload (F125).
+//
+// Here and not in an executor: every executor's outputs converge on
+// storeOutputs, so a container that writes its own files, a non-Python
+// handler and a Python handler not started through the SDK entrypoint are all
+// held to the bound the gateway's submit-time fan-in proof (dag/validate.go)
+// assumed. Names are checked in sorted order so the error is deterministic
+// when several outputs are oversized. 0 means undeclared, and an output the
+// spec does not declare has no bound.
+func checkOutputBounds(spec *nexusv1.TaskSpec, produced map[string]executor.NamedOutput) error {
+	decl := spec.GetOutputs()
+	if len(decl) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(produced))
+	for name := range produced {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		limit := decl[name].GetMaxBytes()
+		if size := int64(len(produced[name].Bytes)); limit > 0 && size > limit {
+			return fmt.Errorf("%w: output %q is %d bytes, over its declared max_bytes=%d",
+				executor.ErrOutputTooLarge, name, size, limit)
+		}
+	}
+	return nil
 }
 
 // putOutput inlines a small payload and writes a large one to object storage.

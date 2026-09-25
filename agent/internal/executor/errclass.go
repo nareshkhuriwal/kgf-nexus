@@ -65,6 +65,12 @@ var (
 	// distinct from ErrRuntimeUnavailable so an operator can tell "the cluster
 	// is under pressure" from "the executor is broken".
 	ErrEvicted = errors.New("executor: workload evicted by the substrate")
+	// ErrOutputTooLarge means an output exceeded the max_bytes its ValueSpec
+	// declared (F125). VALIDATION and terminal: the task broke a promise the
+	// submit-time fan-in proof relied on, and a retry produces the same bytes.
+	// Kept apart from ErrValidation so the report names the output rather than
+	// calling the spec invalid.
+	ErrOutputTooLarge = errors.New("executor: output exceeds its declared max_bytes")
 )
 
 // ClassifyOutcome maps a completed execution to an error class. This is the
@@ -112,6 +118,10 @@ func ClassifyError(err error) Classified {
 		// and deserves the same terminal NOT_FOUND rather than being retried
 		// around the fleet until the budget is gone.
 		return Classified{nexusv1.ErrorClass_ERROR_CLASS_NOT_FOUND, "NotFound",
+			err.Error(), false}
+
+	case errors.Is(err, ErrOutputTooLarge):
+		return Classified{nexusv1.ErrorClass_ERROR_CLASS_VALIDATION, "OutputTooLarge",
 			err.Error(), false}
 
 	case errors.Is(err, ErrValidation):
