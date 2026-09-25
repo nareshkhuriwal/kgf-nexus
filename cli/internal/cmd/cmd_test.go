@@ -815,3 +815,60 @@ func TestCompileStdin(t *testing.T) {
 		t.Errorf("want a hash, got %q", out.String())
 	}
 }
+
+// ── run retry (CONTRACT-FINDINGS F100) ────────────────────────────────────────
+
+// The --node selection must reach the gateway in the body. It always did; what
+// was broken was the gateway ignoring it, so this pins the CLI half of the
+// contract the gateway now honours.
+func TestRunRetrySendsTheSelectedNodes(t *testing.T) {
+	h := newHarness(t)
+	h.env["NEXUS_NAMESPACE"] = "prod"
+	h.replyJSON(200, `{"id":"r1","state":"RUNNING","retried_nodes":["load","transform"]}`)
+	code, out, errb := h.run("run", "retry", "r1", "--node", "transform", "--node", "load")
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errb)
+	}
+	req := h.last()
+	if req.Method != "POST" || req.Path != "/v1/namespaces/prod/runs/r1/retry" {
+		t.Errorf("request = %s %s", req.Method, req.Path)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		t.Fatalf("body %q: %v", req.Body, err)
+	}
+	if got, _ := json.Marshal(body["nodes"]); string(got) != `["transform","load"]` {
+		t.Errorf("body nodes = %v, want [transform load]", body["nodes"])
+	}
+	if !strings.Contains(out, "transform, load") {
+		t.Errorf("output does not name the retried nodes: %q", out)
+	}
+}
+
+func TestRunRetryWithoutNodesIsAWholeRunRetry(t *testing.T) {
+	h := newHarness(t)
+	h.replyJSON(200, `{"id":"r1","state":"RUNNING"}`)
+	if code, _, errb := h.run("run", "retry", "r1"); code != 0 {
+		t.Fatalf("exited %d: %s", code, errb)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(h.last().Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := body["nodes"]; present {
+		t.Errorf("a whole-run retry sent nodes: %v", body)
+	}
+}
+
+// A refused selection is an error the operator can act on, not a silent no-op.
+func TestRunRetryReportsARefusedSelection(t *testing.T) {
+	h := newHarness(t)
+	h.replyJSON(409, `{"error":"nodes_not_retryable","message":"only FAILED, UPSTREAM_FAILED and CANCELLED nodes can be retried; extract is SUCCEEDED","nodes":[{"node_id":"extract","state":"SUCCEEDED"}]}`)
+	code, _, errb := h.run("run", "retry", "r1", "--node", "extract")
+	if code == 0 {
+		t.Fatal("a refused retry exited 0")
+	}
+	if !strings.Contains(errb, "extract is SUCCEEDED") {
+		t.Errorf("stderr does not explain the refusal: %q", errb)
+	}
+}
