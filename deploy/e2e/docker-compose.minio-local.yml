@@ -1,0 +1,26 @@
+# OPTIONAL override for the e2e stack: run MinIO and its bucket-init job from a
+# locally available image instead of the pinned quay.io tags.
+#
+# Why this exists: quay.io/minio/minio and quay.io/minio/mc answer 401 to
+# anonymous pulls, so on a machine without cached layers the stack cannot
+# start. The e2e suite needs an S3-compatible MinIO; it does not test the
+# MinIO release. deploy/e2e/e2e-stack.sh adds this file ONLY when
+# E2E_MINIO_IMAGE is set, and prints that it did, so a green e2e run never
+# hides which image it used. The image must contain both the `minio` server and
+# the `mc` client, because the healthcheck and minio-init call `mc`.
+#
+# Such images commonly run as an unprivileged user that cannot write the
+# root-owned named volume (MinIO then exits "file access denied"), or has no
+# writable HOME for mc's config, so both services run as root here. That is
+# acceptable only because this stack is disposable and local.
+#
+# Never used by `make up`, and never in production.
+
+services:
+  minio:
+    image: ${E2E_MINIO_IMAGE:?set E2E_MINIO_IMAGE to a local MinIO image that contains mc}
+    entrypoint: ["minio"]
+    user: "0:0"
+  minio-init:
+    image: ${E2E_MINIO_IMAGE:?set E2E_MINIO_IMAGE to a local MinIO image that contains mc}
+    user: "0:0"
