@@ -54,6 +54,15 @@ parameters:
   - name: releaseName
     type: string
     default: kgf-nexus
+  # The cluster controller is not in the chart: deploy/k8s/cluster-controller
+  # is a kustomize base. 'none' leaves it alone; 'base' (plan mode, read-only)
+  # or 'apply' installs it with the image this release built, by digest. Off by
+  # default: the base must first be given the environment's NEXUS_CLUSTER_NAME
+  # and bindings (docs/OPERATIONS.md section 12).
+  - name: clusterController
+    type: string
+    default: none
+    values: [none, base, apply]
 
 steps:
   - script: |
@@ -138,5 +147,20 @@ steps:
         # --atomic rolls the release back if it does not become ready, so a
         # failed deploy leaves the previous version serving rather than a
         # half-updated set of deployments.
+
+        if [ '${{ parameters.clusterController }}' != none ]; then
+          # The kustomize base names kgf-nexus/cluster-controller:0.1.0, which
+          # no registry serves. The overlay script retargets it (and the
+          # example worker's kgf-nexus/agent) to this release's digests, and
+          # fails if the rendered Deployment would run anything else.
+          ref() { python3 -c 'import json,sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "$digests" "$1"; }
+          cc_manifests="$(mktemp --suffix=.yaml)"
+          trap 'rm -f "$KUBECONFIG" "$release_values" "$cc_manifests"' EXIT
+          NAMESPACE='${{ parameters.namespace }}' AGENT_IMAGE="$(ref agent)" \
+            deploy/scripts/cluster-controller-overlay.sh '${{ parameters.clusterController }}' "$(ref cluster-controller)" \
+            > "$cc_manifests"
+          kubectl apply -f "$cc_manifests"
+          kubectl -n '${{ parameters.namespace }}' rollout status deploy/nexus-cluster-controller --timeout=5m
+        fi
 
         kubectl -n '${{ parameters.namespace }}' get deployments -o wide

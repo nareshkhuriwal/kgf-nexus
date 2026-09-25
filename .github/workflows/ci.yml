@@ -187,6 +187,17 @@ jobs:
           python3 deploy/scripts/helm-image-digests.py self-test \
             --chart deploy/helm/kgf-nexus \
             --set existingSecret=ci --set image.tag=ci --set nats.auth.mode=none
+      # The cluster controller ships as a kustomize base, not in the chart; the
+      # release retargets its placeholder image to the built digest. Prove the
+      # overlay does that in both modes.
+      - name: cluster-controller overlay takes the release digest
+        run: |
+          set -euo pipefail
+          d=sha256:$(printf '%064d' 1)
+          for mode in base apply; do
+            NAMESPACE=ci AGENT_IMAGE=ci.example/nexus/agent@$d \
+              deploy/scripts/cluster-controller-overlay.sh "$mode" ci.example/nexus/cluster-controller@$d >/dev/null
+          done
 
   # The operator console: typecheck, component tests and the production build.
   # The same steps, in the same order, as the Azure gate's UserInterface stage.

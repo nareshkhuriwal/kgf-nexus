@@ -1621,9 +1621,15 @@ Design and safety argument: docs/CLUSTER-SCALING.md. This section is the runbook
 - The worker Deployment follows `deploy/k8s/cluster-controller/base/worker-deployment.example.yaml`:
   no hostname override, CPU/memory requests, `terminationGracePeriodSeconds` at
   least `NEXUS_DRAIN_GRACE`, no HPA of its own.
-- The cluster-controller image built with
-  `docker build -f deploy/Dockerfile.service --build-arg SERVICE=cluster-controller .`
-  and pinned by digest (`kustomize edit set image`).
+- The cluster-controller image, pinned by digest. The release pipeline builds
+  and pushes `<acr>/nexus/cluster-controller`; `deploy/scripts/cluster-controller-overlay.sh`
+  renders `base` or `apply` with that digest (the `kustomize edit set image`
+  retarget, as a throwaway overlay) and fails if any container would run
+  something else. `templates/deploy-aks.yml` runs it when its
+  `clusterController` parameter is `base` or `apply` (default `none`). By hand:
+  `NAMESPACE=kgf-nexus deploy/scripts/cluster-controller-overlay.sh base <acr>/nexus/cluster-controller@sha256:<digest> | kubectl apply -f -`.
+  On a local kind/Docker Desktop cluster, `make k8s-dev-images` builds and loads
+  `kgf-nexus/cluster-controller:<tag>`; apply it with `ALLOW_TAG=1` and that tag.
 
 ### 12.2 Plan mode (default)
 

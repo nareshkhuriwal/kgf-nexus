@@ -4,11 +4,12 @@
 # The cluster controller. Two replicas for failover; a Kubernetes Lease makes
 # exactly one of them act (the other stands by and reports /readyz "standby").
 #
-# IMAGE PINNING: the tag below is a release version, never "latest". A release
-# pins it to the built digest with
+# IMAGE PINNING: the tag below is a placeholder no registry serves, never
+# "latest". A release retargets it to the built digest -- the equivalent of
 #   kustomize edit set image kgf-nexus/cluster-controller=<acr>/nexus/cluster-controller@sha256:<digest>
-# which is the same digest discipline .azure-pipelines/templates/deploy-aks.yml
-# applies to the other services.
+# -- through deploy/scripts/cluster-controller-overlay.sh, which
+# .azure-pipelines/templates/deploy-aks.yml runs (clusterController: base|apply)
+# and which fails if the rendered Deployment would run any other image.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
