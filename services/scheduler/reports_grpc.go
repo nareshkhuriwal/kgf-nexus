@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -187,6 +188,14 @@ func (r *ReportServer) ApplyResult(ctx context.Context, req *ApplyResultRequest)
 	}
 
 	applied, err := r.store.ApplyResult(ctx, r.now(), inner)
+	if errors.Is(err, store.ErrAttemptBusy) {
+		// Nothing was written. Unavailable, not Internal and never
+		// Applied=false: the gateway passes it through and the agent keeps the
+		// result in its WAL and resends it (CONTRACT-FINDINGS F104).
+		r.log.WarnContext(ctx, "attempt busy past the lock timeout; result not applied, the worker will resend",
+			"attempt_id", inner.GetAttemptId())
+		return nil, status.Errorf(codes.Unavailable, "apply result: %v", err)
+	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "apply result: %v", err)
 	}
@@ -215,8 +224,11 @@ func (r *ReportServer) CancelRunAttempts(ctx context.Context, req *CancelRunAtte
 		return nil, status.Errorf(codes.InvalidArgument, "run_id %q is not a uuid", req.RunID)
 	}
 	n, err := r.store.CancelRunAttempts(ctx, runID, r.now())
+	if errors.Is(err, store.ErrAttemptBusy) {
+		return nil, status.Errorf(codes.Unavailable, "cancel run attempts (%d cancelled): %v", n, err)
+	}
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "cancel run attempts: %v", err)
+		return nil, status.Errorf(codes.Internal, "cancel run attempts (%d cancelled): %v", n, err)
 	}
 	return &CancelRunAttemptsResponse{Cancelled: n}, nil
 }
