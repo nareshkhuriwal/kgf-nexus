@@ -429,7 +429,7 @@ services:
     # /metrics on the health listener, loopback only. A RANGE, because this
     # service may be scaled (`--scale scheduler=3`) and each replica needs a port.
     ports:
-      - "127.0.0.1:19110-19119:8080"
+      - "127.0.0.1:${NEXUS_SCHEDULER_METRICS_PORTS:-19110-19119}:8080"
     healthcheck: *service-healthcheck
     restart: unless-stopped
 
@@ -573,7 +573,7 @@ services:
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     ports:
       # /metrics (agent), loopback only.
-      - "127.0.0.1:19120:8089"
+      - "127.0.0.1:${NEXUS_AGENT_CPU_METRICS_PORT:-19120}:8089"
     volumes:
       - agent-cpu-wal:/var/lib/nexus/wal
       # This tenant's agent NKey only (subscribe nexus.task.dispatch.<ns>.>).
@@ -623,7 +623,7 @@ services:
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     ports:
       # /metrics (agent), loopback only.
-      - "127.0.0.1:19121:8089"
+      - "127.0.0.1:${NEXUS_AGENT_GPU_METRICS_PORT:-19121}:8089"
     volumes:
       - agent-gpu-wal:/var/lib/nexus/wal
       # This tenant's agent NKey only (subscribe nexus.task.dispatch.<ns>.>).
@@ -672,7 +672,7 @@ services:
       NEXUS_LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     ports:
       # /metrics (agent), loopback only.
-      - "127.0.0.1:19122:8089"
+      - "127.0.0.1:${NEXUS_AGENT_GPU_A10_METRICS_PORT:-19122}:8089"
     volumes:
       - agent-gpu-a10-wal:/var/lib/nexus/wal
       # This tenant's agent NKey only (subscribe nexus.task.dispatch.<ns>.>).

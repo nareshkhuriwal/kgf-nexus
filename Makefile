@@ -258,6 +258,12 @@ sdk-test: $(SDK_VENV)/.installed ## Run the Python SDK tests with coverage (SDK_
 # The key is inserted hashed (api_keys.key_hash), matching how the gateway
 # verifies it: a plaintext key in the database would defeat the point of hashing
 # at rest even in dev.
+#
+# The namespace's tenant row comes first. Since migration 0014 every api_keys
+# row must name a namespace that belongs to a registered tenant, so on a fresh
+# database (nothing registered yet) the key inserts failed with "Namespace must
+# belong to a registered tenant" (F121). Idempotent, and the same statement the
+# Helm bootstrap job and deploy/pitr-seed.sh already run.
 seed: ## Generate and install API keys (prints each plaintext exactly once)
 	@command -v psql >/dev/null || { echo "psql not found; run: $(COMPOSE) exec postgres psql -U nexus -d nexus"; exit 1; }
 	@set -euo pipefail; \
@@ -268,6 +274,9 @@ seed: ## Generate and install API keys (prints each plaintext exactly once)
 	    printf 'nxs_%s_%s' "$$1" "$$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"; \
 	  fi; \
 	}; \
+	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
+	  "INSERT INTO tenants (namespace, name) VALUES ('$(NAMESPACE)', '$(NAMESPACE)') \
+	   ON CONFLICT (namespace) DO NOTHING"; \
 	KEY="$${NEXUS_DEV_API_KEY:-$$(gen admin)}"; \
 	HASH=$$(printf '%s' "$$KEY" | shasum -a 256 | cut -d' ' -f1); \
 	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
