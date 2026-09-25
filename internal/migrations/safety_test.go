@@ -322,6 +322,13 @@ var migrationName = regexp.MustCompile(`^([0-9]{4})_[a-z0-9_]+\.(up|down)\.sql$`
 // guaranteed to agree.
 var knownVersionGaps = map[int]bool{19: true}
 
+// reservedVersions are numbers handed to branches developed in parallel and
+// merged separately (wave 3: 0028-0033 are reserved while 0034 lands first).
+// A reserved number may be present or absent: absent means its branch has not
+// merged yet, which is not a missing migration. Remove an entry once its file
+// is on the integration branch, so the gap check guards it again.
+var reservedVersions = map[int]bool{28: true, 29: true, 30: true, 31: true, 32: true, 33: true}
+
 // TestVersionGapsAreOnlyTheKnownOnes pins the version sequence.
 //
 // Two mistakes look alike to migrate.sh and this catches both. Filling a known
@@ -340,7 +347,7 @@ func TestVersionGapsAreOnlyTheKnownOnes(t *testing.T) {
 			t.Errorf("migration version %04d is a recorded gap and must stay unused: "+
 				"a file there runs after every later migration on existing databases "+
 				"but before them on fresh ones. Renumber it to %04d", v, highest+1)
-		case !versions[v] && !knownVersionGaps[v]:
+		case !versions[v] && !knownVersionGaps[v] && !reservedVersions[v]:
 			t.Errorf("migration version %04d is missing below the highest (%04d). "+
 				"If a merge dropped it, restore it; if the number was deliberately "+
 				"skipped, record it in knownVersionGaps and services/migrations/README.md",
