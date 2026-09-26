@@ -256,7 +256,9 @@ func TestAuditRetentionLegalHoldAndCheckpoints(t *testing.T) {
 	}
 	three := 3
 	hold := true
-	entry := func(a string) AuditEntry { return AuditEntry{Namespace: ns, ActorKind: "user", ActorLabel: "admin", Action: a} }
+	entry := func(a string) AuditEntry {
+		return AuditEntry{Namespace: ns, ActorKind: "user", ActorLabel: "admin", Action: a}
+	}
 	if _, err := GatewayPutAuditPolicy(ctx, gw, ns, AuditPolicyChange{SetRetention: true, RetentionDays: &three, Revision: 0, Actor: "admin"},
 		entry("audit.policy.update")); err != nil {
 		t.Fatal(err)
