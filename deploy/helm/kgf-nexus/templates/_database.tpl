@@ -139,6 +139,12 @@ exit at startup without it (internal/config.DSN). args: root, key.
     secretKeyRef: { name: {{ $c.secret }}, key: {{ $c.passwordKey }} }
 - name: DATABASE_URL
   value: {{ $c.url | quote }}
+{{- with ((index . 0).Values.postgres.pool).maxConns }}
+- { name: NEXUS_DB_MAX_CONNS, value: {{ . | quote }} }
+{{- end }}
+{{- with ((index . 0).Values.postgres.pool).minConns }}
+- { name: NEXUS_DB_MIN_CONNS, value: {{ . | quote }} }
+{{- end }}
 {{- end -}}
 
 {{- define "nexus.dbVolumeMounts" -}}

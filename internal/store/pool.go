@@ -15,6 +15,9 @@ import (
 
 	"context"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -67,6 +70,9 @@ func NewPool(ctx context.Context, cfg PoolConfig) (*pgxpool.Pool, error) {
 	// (ADR-0026); parameters are never recorded.
 	pc.ConnConfig.Tracer = tracing.PgxTracer()
 	pc.MaxConnIdleTime = cfg.MaxConnIdleTime
+	if err := ApplyPoolEnv(pc); err != nil {
+		return nil, err
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, pc)
 	if err != nil {
@@ -80,4 +86,40 @@ func NewPool(ctx context.Context, cfg PoolConfig) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 	return pool, nil
+}
+
+// Operator overrides for the pool size, read by every service.
+//
+// A Postgres server shared with other workloads (a workstation's own Postgres,
+// a small managed tier) has a fixed max_connections, and a platform of several
+// services each holding its compiled-in pool can exhaust it on its own. These
+// cap every pool without a rebuild. Unset keeps the service's own default.
+const (
+	EnvDBMaxConns = "NEXUS_DB_MAX_CONNS"
+	EnvDBMinConns = "NEXUS_DB_MIN_CONNS"
+)
+
+// ApplyPoolEnv applies NEXUS_DB_MAX_CONNS and NEXUS_DB_MIN_CONNS to pc. A value
+// that is not a positive integer is an error, so a typo stops the service at
+// startup instead of silently keeping the default. MinConns is clamped to
+// MaxConns.
+func ApplyPoolEnv(pc *pgxpool.Config) error {
+	for _, v := range []struct {
+		name string
+		dst  *int32
+	}{{EnvDBMaxConns, &pc.MaxConns}, {EnvDBMinConns, &pc.MinConns}} {
+		raw := strings.TrimSpace(os.Getenv(v.name))
+		if raw == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(raw, 10, 32)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("%s=%q: want a positive integer", v.name, raw)
+		}
+		*v.dst = int32(n)
+	}
+	if pc.MinConns > pc.MaxConns {
+		pc.MinConns = pc.MaxConns
+	}
+	return nil
 }

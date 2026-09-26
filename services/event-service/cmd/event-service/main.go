@@ -45,10 +45,14 @@ func main() {
 
 	pcfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
-		log.Error("parse database url", "error", err)
+		log.Error("could not parse database url", "error", err)
 		os.Exit(1)
 	}
 	pcfg.ConnConfig.Tracer = tracing.PgxTracer() // ADR-0026; parameters never recorded
+	if err := store.ApplyPoolEnv(pcfg); err != nil {
+		log.Error("invalid pool setting", "error", err)
+		os.Exit(1)
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
 	if err != nil {
 		log.Error("could not create connection pool", "error", err)

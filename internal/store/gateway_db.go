@@ -59,6 +59,9 @@ func GWOpen(ctx context.Context, dsn string, maxConns int32) (*pgxpool.Pool, err
 		cfg.MaxConns = maxConns
 	}
 	cfg.ConnConfig.Tracer = tracing.PgxTracer() // ADR-0026; parameters never recorded
+	if err := ApplyPoolEnv(cfg); err != nil {
+		return nil, err
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("new pool: %w", err)

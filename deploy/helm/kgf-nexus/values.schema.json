@@ -168,6 +168,15 @@
           }
         },
         "maxConnections": { "type": "integer", "minimum": 10 },
+        "pool": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Per-service pool caps (NEXUS_DB_MAX_CONNS / NEXUS_DB_MIN_CONNS). Empty keeps each service's default.",
+          "properties": {
+            "maxConns": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "string", "pattern": "^([1-9][0-9]*)?$" }] },
+            "minConns": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "string", "pattern": "^([1-9][0-9]*)?$" }] }
+          }
+        },
         "resources": { "$ref": "#/definitions/resources" },
         "pitr": {
           "type": "object",

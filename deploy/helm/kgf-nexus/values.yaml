@@ -115,9 +115,9 @@ postgres:
     #   still append-only. Separate logins still give per-service passwords,
     #   connection limits and pg_stat_activity attribution.
     # service: each login joins ONLY its own group role (ADR-0011's write
-    #   matrix enforced at the database). NOT yet runnable: the services
-    #   write outside that matrix in places migration 0005 did not grant
-    #   (CONTRACT-FINDINGS F132). Use it to find those paths, not in production.
+    #   matrix enforced at the database). Migration 0037 grants the paths the
+    #   strict e2e run found (CONTRACT-FINDINGS F132); opt-in until production
+    #   installs have run it (docs/OPERATIONS.md §20.12).
     scope: union
     # Secret holding each connections.<c>.passwordKey (URL-safe, >= 16 chars:
     # A-Z a-z 0-9 . _ ~ -). Empty = existingSecret.
@@ -128,6 +128,13 @@ postgres:
     # Per-login concurrent session cap (-1 = none). Size above the pool's
     # max_conns x replicas, or scale-out fails at connect.
     connectionLimit: -1
+  # Per-service connection pool caps (NEXUS_DB_MAX_CONNS / NEXUS_DB_MIN_CONNS).
+  # Empty keeps each service's own default (16 for most). Set these when the
+  # database is shared and its max_connections is small, e.g. a workstation's
+  # own Postgres: every replica of every service holds up to maxConns.
+  pool:
+    maxConns: ""
+    minConns: ""
   maxConnections: 200
   sharedBuffers: 256MB
   storage:
