@@ -29,6 +29,7 @@ full system design, data model, state machines, and phased plan.
 | [0020](0020-durable-task-logs.md) | Task logs: agents write chunks to the result store, index them through a lease-fenced RPC; gateway-owned index | Seconds of live-tail latency and gateway read credentials, for no log bytes through the control plane |
 | [0021](0021-namespace-quotas-and-usage-metering.md) | Namespace quotas enforced in the claim under a per-tenant advisory lock; append-only, scheduler-owned usage ledger written with each terminal transition | Serialized dispatch for quota-bound namespaces and one lookup per claim, for exact quotas and complete metering |
 | [0022](0022-local-runner-and-replay.md) | Local runner (`nexus.local`, `nexusctl run --local`) and attempt replay reuse the DAG semantics, held to Go by shared fixtures | A second implementation of the decision logic kept aligned by tests, for a seconds-long local loop |
+| [0033](0033-nexus-cloud-hosted-control-plane.md) | Nexus Cloud (design only): hosted cell-based control plane, customer-run outbound-only workers with per-tenant CAs, locked plan quotas, billing from the usage ledger, open-core split into a separate `ee/` module | New work before any external tenant (certificate-to-tenant binding, shared rate limiter, cell router, billing forwarder), for bounded blast radius and no customer code on vendor infrastructure |
 
 ADRs 0013–0018 close the six open questions of ARCHITECTURE.md §12 and are
 **Proposed — pending owner sign-off**.
