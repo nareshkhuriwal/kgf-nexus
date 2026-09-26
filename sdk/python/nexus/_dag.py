@@ -548,6 +548,11 @@ def _class_allowed(error_class: str, policy: Mapping[str, Any] | None) -> tuple[
     p = policy or {}
     if error_class in (p.get("no_retry_on") or []):
         return False, "error_class_in_no_retry_on"
+    if error_class == "ERROR_CLASS_RATE_LIMITED":
+        # A throttle is the platform's concern, not the author's error: an
+        # explicit retry_on that omits it still retries it (ADR-0032 §3). The
+        # platform's free, uncharged retries are not modelled locally.
+        return True, ""
     if error_class in _ALWAYS_TERMINAL:
         return False, "error_class_terminal"
     allow = p.get("retry_on") or []

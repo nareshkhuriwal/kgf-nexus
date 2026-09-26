@@ -13,6 +13,9 @@ document (agent/internal/executor/executor.go):
     $NEXUS_OUTPUT_DIR/<output>   one file per DECLARED output, written by the task
     $NEXUS_RUN_ID, $NEXUS_NODE_ID, $NEXUS_ATTEMPT_ID, $NEXUS_IDEMPOTENCY_KEY,
     $NEXUS_DEADLINE_UNIX_MS      identity and deadline
+    $NEXUS_TASK_API(_TOKEN)      the attempt's workload API, when the agent
+                                 serves one (ADR-0032): heartbeats, usage,
+                                 permits, checkpoints and the declared error class
 
 `nexus.worker` speaks the assignment-document protocol instead. This module is
 the bridge that lets a plain decorated Python function run as a container
@@ -40,10 +43,11 @@ import sys
 import traceback
 from typing import Any, Mapping, Sequence
 
+from ._taskapi import from_environment
 from .context import FileResultStore, InMemoryResultStore, TaskContext, derive_idempotency_key
 from .task import TaskDefinition
 from .types import ValueSpec
-from .worker import HandlerNotFound, import_modules, resolve
+from .worker import HandlerNotFound, declare_error, import_modules, resolve
 
 __all__ = ["main", "run_from_environment", "OutputTooLarge", "EXIT_HANDLER_FAILED", "EXIT_SETUP_FAILED"]
 
@@ -159,6 +163,9 @@ def context_from_environment(definition: TaskDefinition[Any], env: Mapping[str, 
         start_to_close_deadline_unix_ms=int(env.get("NEXUS_DEADLINE_UNIX_MS") or 0),
         worker_id=env.get("NEXUS_WORKER_ID", ""),
         store=FileResultStore(work_dir) if work_dir else InMemoryResultStore(),
+        # The agent's per-attempt workload API (ADR-0032), when it exported one:
+        # heartbeats, usage, permits and checkpoints go through it.
+        _task_api=from_environment(env),
     )
 
 
@@ -200,7 +207,12 @@ def run_from_environment(
     except Exception as e:
         ctx.log.error("task failed", error_type=type(e).__name__, error=str(e))
         traceback.print_exc()
+        # Declare the class (rate_limited, validation, ...) before exiting
+        # non-zero; the agent applies it to the failure it reports.
+        declare_error(ctx, e)
+        ctx._finish()  # noqa: SLF001 - same package
         return EXIT_HANDLER_FAILED
+    ctx._finish()  # noqa: SLF001 - same package
     ctx.log.info("task succeeded", outputs=written)
     return 0
 

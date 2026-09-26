@@ -99,7 +99,7 @@ _BACKOFF = _aliases("BACKOFF_STRATEGY_", "fixed", "linear", "exponential")
 _ERROR_CLASS = {
     **_aliases(
         "ERROR_CLASS_", "transient", "timeout", "worker_lost", "validation", "permission_denied",
-        "application", "oom", "not_found", "infrastructure",
+        "application", "oom", "not_found", "infrastructure", "rate_limited",
     ),
     # Architecture 4.3's spelling of ERROR_CLASS_VALIDATION (F20).
     "validation_error": "validation",

@@ -35,7 +35,15 @@ WHAT IS NOT (the parity limits, stated rather than papered over):
   * memoization is within ONE run (no cross-run cache, no invalidations);
   * no pause, resume, operator retry, schedules or events API;
   * results live in a FileResultStore under the run directory, not in an
-    object store, and secrets referenced by the spec are not resolved.
+    object store, and secrets referenced by the spec are not resolved;
+  * no workload API (ADR-0032): ``ctx.report_usage`` accumulates on the
+    context and is logged, ``ctx.acquire_permits`` uses a process-local bucket
+    (unlimited unless NEXUS_LOCAL_RATE_LIMITS sets limits), and a
+    ``rate_limited`` failure is retried like a transient one, charged to the
+    retry budget and without honouring its retry_after. Checkpoints DO carry
+    across retries: every attempt of a node shares the run's result store and
+    the node's idempotency key, so ``ctx.resume()`` in attempt 2 returns what
+    attempt 1 passed to ``ctx.checkpoint()``.
 """
 
 from __future__ import annotations
@@ -579,6 +587,10 @@ class _Runner:
             "NEXUS_INLINE_THRESHOLD_BYTES": str(self.inline_threshold),
             "NEXUS_LOCAL_RUN": "1",
         })
+        # A local run has no workload API. If this runner itself runs inside a
+        # Nexus task, its children must not act on that task's attempt.
+        env.pop("NEXUS_TASK_API", None)
+        env.pop("NEXUS_TASK_API_TOKEN", None)
         deadline = self._deadline_s(spec)
         if deadline:
             env["NEXUS_DEADLINE_UNIX_MS"] = str(int((time.time() + deadline) * 1000))
@@ -697,7 +709,7 @@ class _Runner:
         with open(os.path.join(a.work_dir, "assignment.json"), "w", encoding="utf-8") as f:
             json.dump(assignment, f, sort_keys=True, indent=2)
         if self.isolation == "inprocess":
-            outcome = execute_assignment(assignment, store=self.store)
+            outcome = execute_assignment(assignment, store=self.store, task_api=None)
             return self._python_outcome(a, spec, outcome)
         outcome_path = os.path.join(a.work_dir, "outcome.json")
         argv = [self.python, "-m", "nexus.worker", "--assignment", os.path.join(a.work_dir, "assignment.json"),

@@ -62,6 +62,8 @@ from .context import (
     TaskContext,
     derive_idempotency_key,
 )
+from ._taskapi import CheckpointInfo, StaleCheckpoint, StaleLease
+from .ratelimit import PermitGrant, RateLimited
 from .scheduling import Backfill, BackfillState, OverlapPolicy, Schedule, SchedulePreview
 from .task import TaskDefinition, registry, task
 from .types import (
@@ -153,6 +155,12 @@ __all__ = [
     "StructuredLogger",
     "derive_idempotency_key",
     "EffectNotRecorded",
+    # AI workloads (ADR-0032): nexus.usage, nexus.llm, nexus.testing
+    "RateLimited",
+    "PermitGrant",
+    "CheckpointInfo",
+    "StaleLease",
+    "StaleCheckpoint",
     # client
     "NexusClient",
     "NexusError",
