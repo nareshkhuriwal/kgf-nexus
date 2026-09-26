@@ -22,6 +22,18 @@ An optional, separately enrolled platform operator can use `/v1/platform/tenants
 
 Apply migration 0013 before the new gateway. Backfill preserves existing data. The UI can then expose customer registration. No billing subscription, cloud scaling or resource provisioning is triggered. Before exposing self-service registration publicly, add signup abuse controls and configure tenant quotas (namespace quotas are enforced since migration 0027, ADR-0021, but every namespace starts unlimited; see OPERATIONS §21); email verification and password recovery exist since migration 0017 but require a configured SMTP server (docs/OPERATIONS.md §10). Multi-namespace membership, customer suspension and ownership-transfer workflows require separate lifecycle work.
 
+## Agent namespace
+
+A worker agent serves exactly one namespace: `NEXUS_NAMESPACE` (flag `-namespace`), default `default`. It registers there, polls only that namespace's queues, prefixes its result-store keys with it, and subscribes to that tenant's dispatch hints on NATS. Three things must agree with it, and each deployment path sets them together:
+
+- the worker API key must be minted for that namespace (the gateway authorizes `Register` against the requested namespace);
+- with NATS NKey authorization, the agent's NKey must be issued for that tenant (`nexus-nats-auth.sh init --tenant <ns>`); an NKey for another tenant cannot subscribe to its hints;
+- the namespace must be registered in `tenants` (migration 0014).
+
+**Compose.** `NEXUS_AGENT_NAMESPACE` selects the agents' tenant and falls back to `NEXUS_NAMESPACE`, then `default`, so the development stack is unchanged. `nats-init` issues the agent NKey for the same tenant, and `make seed AGENT_NAMESPACE=<ns>` (or with `NEXUS_AGENT_NAMESPACE` exported) registers the tenant and mints the worker key in it. The console and CLI keep using `NEXUS_NAMESPACE`. Changing the agent tenant of an existing stack needs the NKey reissued: remove the `nats-auth-*` volumes or run `nexus-nats-auth.sh init --tenant <ns>` in `nats-init`.
+
+**Helm.** Agents serve `nexusNamespace` unless an `agents[]` entry sets `namespace`. Such an entry also names its worker key in `existingSecret` (`workerApiKeySecretKey`, default `worker-api-key`) and, with NKey authorization, its seed (`natsSeedKey`). The chart refuses to render an agent whose namespace has no `nats.auth.tenants` entry; `deploy/helm/validate.sh` checks both the refusal and the rendered override.
+
 ## Explicit row ownership (migration 0014)
 
 All 24 customer-owned tables now have a non-null, indexed `tenant_id` foreign key. Namespace-based rows derive it from `tenants`; dependent rows derive it from the run, attempt, schedule or user. Database triggers support older service insert statements while rejecting supplied mismatches and ownership changes. Composite foreign keys prevent cross-tenant spec/run, worker/attempt, worker/lease, worker/reservation, schedule/backfill, token/user and owner/user relationships.

@@ -1,0 +1,53 @@
+// Copyright 2026 Khuriwal Group
+// SPDX-License-Identifier: Apache-2.0
+
+// Package repo holds checks over the repository itself rather than over any
+// one package: facts stated in several files that must agree.
+package repo
+
+import (
+	"os"
+	"path/filepath"
+	"regexp"
+	"testing"
+)
+
+const root = "../.."
+
+func read(t *testing.T, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, rel))
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	return string(b)
+}
+
+// find returns the first capture of re in the file, failing when it is absent
+// so a reworded line cannot make the check pass by matching nothing.
+func find(t *testing.T, rel, pattern string) string {
+	t.Helper()
+	m := regexp.MustCompile(pattern).FindStringSubmatch(read(t, rel))
+	if m == nil {
+		t.Fatalf("%s: no match for %s; update this check if the line moved", rel, pattern)
+	}
+	return m[1]
+}
+
+// TestGoVersionIsStatedConsistently: go.mod's `go` directive is the language
+// version and minimum toolchain. CONTRACT.md's header, the CI toolchain and
+// the service image's builder must name the same MAJOR.MINOR. CONTRACT.md said
+// "Go 1.27" while go.mod, CI and the images were on 1.25, so a reader
+// following the contract assumed language features the module does not allow.
+func TestGoVersionIsStatedConsistently(t *testing.T) {
+	mod := find(t, "go.mod", `(?m)^go\s+(\d+\.\d+)(?:\.\d+)?\s*$`)
+	for _, c := range []struct{ file, pattern string }{
+		{"CONTRACT.md", `(?m)^Module: .*·\s+Go\s+(\d+\.\d+)\b`},
+		{".github/workflows/ci.yml", `(?m)^\s*GO_VERSION:\s*"?(\d+\.\d+)`},
+		{"deploy/Dockerfile.service", `(?m)^ARG\s+GO_VERSION=(\d+\.\d+)`},
+	} {
+		if got := find(t, c.file, c.pattern); got != mod {
+			t.Errorf("%s states Go %s, but go.mod says go %s; they must agree", c.file, got, mod)
+		}
+	}
+}

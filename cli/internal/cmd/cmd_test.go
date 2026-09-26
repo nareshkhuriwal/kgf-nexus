@@ -777,6 +777,47 @@ func TestEmptyListingExplainsRatherThanShowingABareHeader(t *testing.T) {
 	}
 }
 
+// TestWorkerListShowsCapacity: `worker ls` renders committed/advertised from
+// the fields the gateway actually sends (rest.workerPayload: "capacity",
+// "committed", "active_attempts"). It read "advertised" and
+// "running_attempts", which the worker listing never had, so the cpu, memory,
+// gpu and running columns were always "-".
+func TestWorkerListShowsCapacity(t *testing.T) {
+	h := newHarness(t)
+	h.env["NEXUS_NAMESPACE"] = "prod"
+	h.replyJSON(200, `{"workers":[{
+		"id":"w-1","hostname":"node-a","queues":["default"],"executors":["subprocess"],
+		"state":"ACTIVE","labels":{},
+		"capacity":{"cpu_millis":8000,"memory_bytes":17179869184,"gpu_count":2,"gpu_kind":"","gpu_memory_bytes":0,"disk_bytes":0,"custom":null},
+		"committed":{"cpu_millis":2000,"memory_bytes":4294967296,"gpu_count":1},
+		"agent_version":"1.4.0","registered_at":"2026-09-25T10:00:00Z",
+		"last_heartbeat_at":"2026-09-25T10:00:00Z","active_attempts":3}]}`)
+	code, out, errb := h.run("worker", "ls")
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errb)
+	}
+	var row string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "w-1") {
+			row = l
+		}
+	}
+	fields := strings.Fields(row)
+	if len(fields) < 7 {
+		t.Fatalf("no worker row in:\n%s", out)
+	}
+	cpu, mem, gpu, running := fields[3], fields[4], fields[5], fields[6]
+	if cpu == "-" || mem == "-" || gpu == "-" || running == "-" {
+		t.Fatalf("capacity columns are blank: cpu=%s mem=%s gpu=%s running=%s\n%s", cpu, mem, gpu, running, out)
+	}
+	if gpu != "1/2" || running != "3" {
+		t.Errorf("gpu=%s running=%s, want 1/2 and 3\n%s", gpu, running, out)
+	}
+	if !strings.Contains(cpu, "/") || !strings.Contains(mem, "/") {
+		t.Errorf("cpu=%s mem=%s, want committed/advertised\n%s", cpu, mem, out)
+	}
+}
+
 func TestProgressNotesGoToStderrSoJSONStaysParseable(t *testing.T) {
 	// `nexusctl run get x -o json | jq` must work, which means nothing decorative
 	// may ever reach stdout.

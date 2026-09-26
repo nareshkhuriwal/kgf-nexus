@@ -1344,7 +1344,9 @@ func (a *API) capacity(w http.ResponseWriter, r *http.Request, _ authn.Principal
 // with the detail in the log, never in the response, because an error string can
 // carry SQL or internal identifiers.
 func (a *API) fail(w http.ResponseWriter, r *http.Request, op string, err error) {
-	if errors.Is(err, store.ErrNotFound) {
+	// A malformed id (not a UUID) names nothing, so it is the same 404 as an
+	// unknown one rather than the 500 Postgres' cast error used to produce.
+	if errors.Is(err, store.ErrNotFound) || store.IsMalformedID(err) {
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}

@@ -91,6 +91,11 @@ type ApplyResultResponse struct {
 	// duplicates routine.
 	Applied bool `json:"applied"`
 	Retry   bool `json:"retry"`
+	// StaleLease is set, with Applied false, when the lease reconciler or the
+	// liveness sweep reclaimed the attempt first (F104): the gateway answers
+	// the worker stale_lease_token instead of Accepted. Additive; an older
+	// gateway ignores it and keeps answering Accepted.
+	StaleLease bool `json:"stale_lease,omitempty"`
 }
 
 // CancelRunAttemptsRequest stops every in-flight attempt of a run.
@@ -203,8 +208,8 @@ func (r *ReportServer) ApplyResult(ctx context.Context, req *ApplyResultRequest)
 		// A duplicate or late report. Logged at debug because it is expected
 		// under at-least-once delivery and would otherwise be constant noise.
 		r.log.DebugContext(ctx, "attempt result ignored as already terminal",
-			"attempt_id", inner.GetAttemptId())
-		return &ApplyResultResponse{Applied: false}, nil
+			"attempt_id", inner.GetAttemptId(), "stale_lease", applied.Stale)
+		return &ApplyResultResponse{Applied: false, StaleLease: applied.Stale}, nil
 	}
 
 	r.log.InfoContext(ctx, "attempt result applied",

@@ -660,8 +660,22 @@ func (a *API) backfillAction(action string) func(http.ResponseWriter, *http.Requ
 }
 
 func (a *API) failBackfill(w http.ResponseWriter, r *http.Request, op string, err error) {
-	if errors.Is(err, store.ErrBackfillNotFound) {
+	if errors.Is(err, store.ErrBackfillNotFound) || status.Code(err) == codes.NotFound || store.IsMalformedID(err) {
 		writeError(w, http.StatusNotFound, "backfill_not_found", "no such backfill")
+		return
+	}
+	if errors.Is(err, store.ErrBackfillStateConflict) || status.Code(err) == codes.FailedPrecondition {
+		// 409 naming the state the backfill is in, so a console or script can
+		// say "it is already CANCELLED" instead of a bare refusal (F119). The
+		// state is re-read here because a gRPC error carries no response body;
+		// a failed read still answers the 409, without it.
+		body := map[string]any{"error": "backfill_state_conflict", "message": err.Error()}
+		if a.db != nil {
+			if b, gerr := store.WFMGetBackfill(r.Context(), a.db, r.PathValue("ns"), r.PathValue("id")); gerr == nil {
+				body["state"] = b.State
+			}
+		}
+		writeJSON(w, http.StatusConflict, body)
 		return
 	}
 	a.failSchedule(w, r, op, err)

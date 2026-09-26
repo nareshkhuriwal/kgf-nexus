@@ -2650,10 +2650,28 @@ pass. `ExpireScheduleToStart` uses a plain conditional UPDATE. `RecordProgress`
 never locks the attempt row. None of them can drop a result or a report.
 `cancelOneAttempt` could, and is F109.
 
-**Residual.** When the lease reconciler wins the row, the late result is
-ignored and the agent is still told `Accepted: true`, as before; its lease is
-gone, so any later RPC for the attempt is rejected as stale. Answering
-`stale_lease_token` in that case would be more precise and changes no state.
+**Residual (FIXED on `fix/control-plane-open-bugs`).** When the lease
+reconciler won the row, the late result was ignored and the agent was still
+told `Accepted: true`. Now, when `ApplyResult` finds the attempt already
+terminal, it reads the committed state in the same transaction: `LOST` --
+written only by the lease reconciler and the liveness sweep, which also
+delete the lease -- sets `AppliedResult.Stale`, reported as `stale_lease` on
+the scheduler's `ApplyResultResponse` (an additive JSON field; an older
+gateway ignores it). The gateway's `SchedulerClient.ApplyResult` turns it
+into `store.ErrStaleLeaseToken`, and `ReportResult` answers
+`Ack{accepted:false, reason:"stale_lease_token"}`, the fence's own answer.
+The agent drops the result, which is right: a retry owns the work.
+
+At-least-once delivery and the duplicate-success rule are unchanged: any
+other terminal state (`SUCCEEDED`, `FAILED`, `TIMED_OUT` from a result that
+landed, or `CANCELLED`) is still an accepted no-op, so a duplicate of a
+delivered result is never retried and never answered stale; contended rows
+still wait or return `Unavailable` as above. The read only chooses the
+answer and writes nothing. Held by `TestResultWaitingOnAReclaimStaysFenced`
+(now also asserts `StaleLease`, failed before), the duplicate resend in
+`TestResultBusyPastTheLockTimeoutIsRetryable` (asserts not stale), and
+`TestResultFencedByAReclaimIsStale` (`services/api-gateway/workergrpc`,
+failed before). The race tests pass 20 of 20 with `-race -count=20`.
 
 **How it is held.** `services/scheduler/result_race_integration_test.go`:
 `TestResultIsNotSkippedWhileMarkStartedHoldsTheAttempt` stalls the real
@@ -2819,7 +2837,7 @@ scheduler logs "lease reconciliation incomplete" with the number recovered.
 head of the batch. It recovered 0 attempts before the fix and now recovers the
 other two, then the repaired one on the next pass.
 
-### F109. A run cancel skipped attempts that were being started or dispatched — FIXED (partly open)
+### F109. A run cancel skipped attempts that were being started or dispatched — FIXED
 
 **Severity:** medium. Found while checking the SKIP LOCKED sites for F104.
 
@@ -2835,12 +2853,36 @@ and the waiting cancel then cancels it. All attempts are tried and the errors
 are joined; a busy one surfaces as `Unavailable` from the scheduler.
 `TestCancelIsNotSkippedWhileMarkStartedHoldsTheAttempt` failed before the fix.
 
-**Open.** workflow-manager's `Cancel` logs a failed `CancelRunAttempts` as
-"reconciler will retry", but nothing calls it again for a CANCELLING run. The
-heartbeat still delivers CANCEL_ATTEMPT for every in-flight attempt of a
-CANCELLING run (`PendingCancellations`), so the work stops, but the attempt
-then ends through `ApplyResult` (usually FAILED) rather than CANCELLED.
-Re-issuing the fan-out periodically for CANCELLING runs would close this.
+**Formerly open, now FIXED (`fix/control-plane-open-bugs`).** workflow-manager's
+`Cancel` logged a failed `CancelRunAttempts` as "reconciler will retry", but
+nothing called it again for a CANCELLING run. The heartbeat still delivered
+CANCEL_ATTEMPT (`PendingCancellations`), so the work stopped, but each
+attempt then ended through `ApplyResult` (usually FAILED) rather than
+CANCELLED.
+
+The timer reconciler now runs a cancel sweep every
+`NEXUS_CANCEL_SWEEP_INTERVAL_SEC` (default 5 s; short because it races the
+killed task's late result). `store.WFMListCancellingRuns` lists CANCELLING
+runs oldest first, at most `BatchSize` per pass, and
+`runs.Service.ReconcileCancelling` re-issues `CancelRunAttempts` while any
+attempt is PENDING, DISPATCHED or RUNNING, then finalizes with the existing
+`MaybeFinalizeCancel` CAS. It is idempotent and needs no leader: the fan-out
+skips terminal attempts and cancels each live one in its own compare-and-set
+transaction, so replicas racing on one run cancel each attempt once. A run
+no longer CANCELLING is left alone; a failed fan-out is logged and retried
+next pass, and never finalizes over live attempts. Bounded per pass by the
+batch size and per run by its live attempts; a run leaves the sweep as soon
+as it is CANCELLED.
+
+Held by `services/workflow-manager/runs/cancel_reconcile_integration_test.go`
+against real Postgres and the scheduler's real `CancelRunAttempts`:
+`TestCancellingRunIsReissuedUntilEveryAttemptIsCancelled` (the first fan-out
+fails; one reconcile cancels all attempts and the run; a second appends no
+events), `TestReconcileCancellingKeepsFailingUntilTheSchedulerAnswers`, and
+`TestConcurrentCancelReconcilesCancelEachAttemptOnce` (6 replicas on 12
+attempts: exactly one `AttemptCancelled` each), 20 of 20 with
+`-race -count=20`; `TestCancelSweepReissuesEveryCancellingRun` covers the
+sweep itself.
 
 ### F110. Agents crash-looped when they registered before the gateway was ready — FIXED
 
@@ -3234,7 +3276,7 @@ The CLI also surfaced only "spec failed validation" for a 422, because it read
 `details` and the validator sends `problems`. It now prints one line per problem
 (`/tasks/0/resources: cpu required`), capped at 20.
 
-### F119. Backfill pause, resume and cancel have no from-state guard — OPEN
+### F119. Backfill pause, resume and cancel have no from-state guard — FIXED
 
 **Severity:** MEDIUM. `store.WFMSetBackfillState` updates `state` by id and
 namespace with no condition on the current state, and `PauseBackfill`,
@@ -3251,12 +3293,36 @@ RUNNING<->PAUSED or {RUNNING,PAUSED}->CANCELLED (exit code 5 / `Conflict`),
 without sending the action. This is read-then-act and so racy, and the console
 and direct API callers are not covered.
 
-**Proposed fix.** Add `AND state = ANY($allowed)` to the UPDATE for operator
-actions (pause: RUNNING; resume: PAUSED; cancel: RUNNING or PAUSED), return a
-distinct `ErrBackfillStateConflict` when no row matches but the backfill exists,
-and map it to 409 `backfill_state_conflict` in `failBackfill`, as `lifecycle`
-already does for runs. The driver's own completion path keeps its unconditional
-transition.
+**Fix (`fix/control-plane-open-bugs`).** `store.WFMTransitionBackfill`
+replaces `WFMSetBackfillState` and updates only `WHERE state = ANY($from)`,
+so concurrent transitions serialize on the row lock and the loser is
+re-evaluated against what the winner committed. Operator transitions: pause
+from RUNNING; resume from PAUSED; cancel from RUNNING or PAUSED. When no row
+matches, one read tells `ErrBackfillNotFound` from
+`*BackfillStateConflict` (matched as `ErrBackfillStateConflict`, carrying
+the current state). workflow-manager maps it to `FailedPrecondition`; the
+gateway re-attaches the sentinel and answers `409 backfill_state_conflict`
+with the current `state`. A missing backfill is now `backfill_not_found`
+(it answered `schedule_not_found` over gRPC).
+
+One deliberate departure from the proposal: the driver's COMPLETED and
+FAILED transitions are also CAS, from RUNNING only. A pass claims a RUNNING
+backfill and works without its row lock, so an operator's cancel that
+committed mid-pass was overwritten by the pass's completion; a paused
+backfill that is resumed reaches completion again by observing its cursor.
+The pass also re-reads the state before each tick and stops once the
+backfill is no longer RUNNING, bounding what a mid-pass cancel can still
+create to the run in flight.
+
+The nexusctl and SDK pre-checks stay (they spare a confirmation prompt and
+protect against older servers), with their comments updated. Held by
+`services/workflow-manager/schedules/backfill_state_integration_test.go`:
+the full from-state x action table (refusals change nothing, including
+`ended_at`), cancel-then-resume-then-pass, driver completion after cancel,
+and 5 rounds of 24 concurrent pause/resume/cancel calls whose successes must
+form a legal serial history (exactly one cancel wins, pauses and resumes
+alternate, every refusal is a conflict) -- 20 of 20 with `-race -count=20`.
+`TestBackfillActionConflictIs409` pins the gateway mapping.
 
 ### F120. Attempts never carried dispatched_at on the wire, so queue wait was unmeasurable in the console — FIXED
 
@@ -3393,7 +3459,7 @@ Regenerate after changing an example:
 `python3 sdk/python/tests/parity/make_spec_hash_golden.py`, then
 `go test ./cli/internal/spec -run TestSpecHashGolden -update-spec-hash-golden`.
 
-### F125. The worker agent does not enforce a declared output `max_bytes` — OPEN
+### F125. The worker agent does not enforce a declared output `max_bytes` — FIXED
 
 **Severity:** medium (a declared bound that only one authoring path enforces).
 
@@ -3417,6 +3483,133 @@ is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
 `ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
 report the output. Test it in `agent/internal/worker` for both inline and blob
 outputs, and in the NATS/e2e path with a non-SDK executor.
+
+**Fix (`fix/control-plane-open-bugs`).** Every executor's outputs --
+subprocess, docker and kubernetes alike -- converge on
+`Runner.storeOutputs` (`agent/internal/worker/runner.go`), so the bound is
+enforced there by `checkOutputBounds`, for every output and before any is
+inlined or uploaded. An output over its `ValueSpec.max_bytes` (0 =
+undeclared; the legacy `output.json` is checked under its name `result`)
+fails the attempt with the new sentinel `executor.ErrOutputTooLarge`, which
+the existing classifier maps to `ERROR_CLASS_VALIDATION`, type
+`OutputTooLarge`, not retryable; the message names the output, its size and
+the bound, and no outputs are reported. Before, a blob-sized oversized
+output on a store-less worker failed as a retryable INFRASTRUCTURE error and
+was sent around the fleet. The agent now advertises the capability
+`output_max_bytes` (F129), so an operator can refuse agents that predate
+this.
+
+Held by `agent/internal/worker/maxbytes_test.go` (inline and blob sizes on
+each executor kind through a fake executor, a real subprocess writing its
+own output file, inclusive bound and undeclared outputs) and
+`maxbytes_integration_test.go` against a real S3 store (the oversized blob
+is never uploaded; the same output within its bound is). All failed before.
+Not done: the NATS/e2e run with a non-SDK executor the proposal mentions;
+the unit and S3 tests cover the code path every executor takes.
+
+### F126. Not-found paths answered 500 — FIXED
+
+**Severity:** medium (a client error reported as a platform fault).
+
+`POST /v1/namespaces/{ns}/runs` with a `spec_name` that names nothing
+answered 500: the gateway resolves the name through workflow-manager's
+`GetSpec`, which correctly answers `NotFound`, but `createRun` wrapped that
+status without re-attaching `store.ErrNotFound`, so the REST layer's 404
+mapping never matched. The sweep for the same class found more:
+
+- **Every id-addressed route answered 500 for an id that is not a UUID**
+  (runs, run events and lifecycle actions, run delete, spec by id, attempt
+  logs, backfills, workers, worker drain and quarantine history): Postgres
+  rejects the cast with `22P02` and `fail` mapped only `ErrNotFound`. New
+  `store.IsMalformedID` maps it to 404 in the gateway's `fail` and
+  `failBackfill`, and to `NotFound` in workflow-manager's `runError` and
+  `GetSpec`.
+- A `spec_id` from another namespace in `runs.Create` was a plain error,
+  hence `Internal` and 500; it is now `ErrNotFound` (and no longer names the
+  other tenant's namespace).
+- A missing backfill over gRPC answered `schedule_not_found` (F119).
+
+Held by `TestCreateRunWithAnUnknownSpecNameIsNotFound`
+(`services/api-gateway/upstream`, over bufconn; failed before),
+`TestIntegrationUnknownAndMalformedIDsAre404` (16 routes x unknown and
+malformed ids against real Postgres, 404 with a problem body; every
+malformed case failed before) and `TestNotFoundPathsAreNotFound`.
+
+### F127. `nexusctl worker ls` capacity columns were always "-" — FIXED
+
+**Severity:** low. The CLI was at fault, not the API: the worker listing
+sends the advertised vector as `capacity` and the in-flight count as
+`active_attempts` (`rest.workerPayload`), while `worker ls` read
+`advertised` (the name the separate capacity *report* uses) and
+`running_attempts`. It now reads the listing's names and keeps the old ones
+as fallbacks. `TestWorkerListShowsCapacity` (`cli/internal/cmd`) uses the
+gateway's payload shape and failed before.
+
+### F128. Repository gates missed what they claimed to check — FIXED
+
+**Severity:** medium (a gate that reads as protection that is not there).
+
+1. **Migration safety gate** (`internal/migrations/safety.go`). It passed
+   `DROP CONSTRAINT`, `DROP INDEX`, `DROP TRIGGER`, `DROP` of a type, domain,
+   function, procedure, view, sequence or schema, `TRUNCATE`,
+   `ALTER COLUMN ... DROP DEFAULT`, validating `ADD CONSTRAINT` (FOREIGN KEY,
+   CHECK, UNIQUE, PRIMARY KEY, EXCLUDE without `NOT VALID`/`USING INDEX`),
+   unbounded `DELETE`, and a `RENAME` of anything but a table (an index, an
+   enum value, a type, a sequence, a function, a view). All are rules now.
+   The `ALTER COLUMN TYPE` rule is anchored on `ALTER [COLUMN] <name> [SET
+   DATA] TYPE`, so a column named `type` no longer matches; `SET NOT NULL`
+   and `ADD COLUMN ... NOT NULL` without a default were already covered.
+   Exemptions read the whole file: statements on a table the migration
+   creates, and an index, trigger, function, view or type dropped and
+   re-created under the same name (the tenant-trigger and INVALID-index
+   idioms of 0017-0027). Applied migrations now flagged are accepted with
+   reasons: 0014 (validating tenant constraints, covered by its triggers),
+   0017 (`DROP DEFAULT` on a nullable column, the fail-safe direction) and
+   0023 (drops an INVALID index by a run-time name). Tests:
+   `TestDestructiveFormsAreCaught` (30 statements, all passed the gate
+   before) and `TestSafeFormsOfTheNewRulesAreNotFlagged`.
+2. **Go version.** CONTRACT.md said Go 1.27; go.mod (`go 1.25.0`), CI
+   (`GO_VERSION: "1.25"`) and `deploy/Dockerfile.service` are 1.25. The
+   header now says 1.25, and `tests/repo` (`TestGoVersionIsStatedConsistently`,
+   also `make check-go-version`) fails when any of the four disagree.
+3. **`make check-doc-refs` failed on `integrate/wave-2`**: the checker read
+   its own docstring (which spells out the anchor-link syntax) as a broken reference.
+   It now skips itself.
+
+### F129. Agents could be neither refused nor pointed at another tenant — FIXED
+
+**Severity:** medium. Two gaps in how the fleet is admitted.
+
+1. **No minimum version or capability gate.** Nothing compared
+   `agent_version` with anything (COMPATIBILITY §4.3), so an N-2 agent, or
+   one that silently ignores a task semantic (the uninterruptible-cancel
+   hazard), registered and took work. `RegisterRequest` gains
+   `repeated string capabilities = 8` (additive; regenerated with the pinned
+   protoc 29.3 / protoc-gen-go 1.36.12 / protoc-gen-go-grpc 1.6.2), and the
+   agent advertises `domain.AgentCapabilities()`: `log_shipping`,
+   `progress`, `uninterruptible_cancel`, `output_max_bytes`. The gateway's
+   `Register` applies `domain.AgentPolicy` from `NEXUS_MIN_AGENT_VERSION`
+   (semantic-version precedence; with a minimum set, a non-semver `dev`
+   build is refused) and `NEXUS_REQUIRED_AGENT_CAPABILITIES` before writing
+   any row, and answers `FAILED_PRECONDITION` naming every unmet
+   requirement. The agent's register backoff already treated that code as
+   permanent; its hint now says to upgrade the agent. Off by default; an
+   unparsable policy stops the gateway at startup and is rejected by the
+   Helm schema (`agentPolicy`). Documented in docs/COMPATIBILITY.md §4.4.
+   Tests: `TestCompareAgentVersions`, `TestAgentPolicy`,
+   `TestRegisterEnforcesTheAgentPolicy`, `TestRegisterAdvertisesCapabilities`.
+2. **Agent namespace.** The agent already read `NEXUS_NAMESPACE`, but
+   compose tied it to the stack-wide `NEXUS_NAMESPACE` (shared with the
+   console), `make seed` minted the worker key only in `NAMESPACE`, and
+   every Helm agent served `nexusNamespace` with one worker key. Now
+   `NEXUS_AGENT_NAMESPACE` selects the compose agents' tenant (falling back
+   to `NEXUS_NAMESPACE`, then `default`) and `nats-init` issues their NKey
+   for it; `make seed` registers `AGENT_NAMESPACE` and mints the worker key
+   there; Helm `agents[]` take `namespace` and `workerApiKeySecretKey`
+   (`natsSeedKey` existed), and the chart refuses an agent whose namespace
+   has no `nats.auth.tenants` entry. `deploy/helm/validate.sh` covers the
+   refusal and the rendered override. Documented in docs/MULTITENANCY.md,
+   "Agent namespace". `default` stays the development default.
 
 ### F130. `make up` failed on a fresh checkout, and both CI examples jobs with it — FIXED
 

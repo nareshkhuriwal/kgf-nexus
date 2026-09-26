@@ -99,7 +99,9 @@ func run() error {
 		// never find anything, and its counter is an alarm rather than a metric.
 		StalledRunAge:      cfg.StalledRunAge,
 		StalledRunInterval: cfg.StalledRunInterval,
-		Metrics:            timers.NewMetrics(reg),
+		// Re-issues a CANCELLING run's attempt cancellation (F109).
+		CancelSweepInterval: cfg.CancelSweepInterval,
+		Metrics:             timers.NewMetrics(reg),
 	}, log)
 
 	registerTimerHandlers(rec, runSvc, schedClient, log)
@@ -108,6 +110,7 @@ func run() error {
 	// timers package because only this file knows how to reach the run service,
 	// which is the same reason the timer handlers are injected.
 	rec.OnStalledRun(runSvc.ReconcileStalled)
+	rec.OnCancellingRun(runSvc.ReconcileCancelling)
 
 	// ── gRPC API ──────────────────────────────────────────────────────────
 	// The JSON codec must be registered before the server starts: the spec half of
@@ -311,6 +314,7 @@ type config struct {
 	TimerBacklogInterval time.Duration
 	StalledRunAge        time.Duration
 	StalledRunInterval   time.Duration
+	CancelSweepInterval  time.Duration
 
 	ScheduleInterval      time.Duration
 	ScheduleBatchSize     int
@@ -351,6 +355,8 @@ func loadConfig() config {
 		// Coarse: this is a backstop for something that should never happen, so it
 		// costs a query a minute rather than a query a second.
 		StalledRunInterval: time.Duration(envInt("NEXUS_STALLED_RUN_INTERVAL_SEC", 60)) * time.Second,
+		// Short: the cancel sweep races the killed task's late result (F109).
+		CancelSweepInterval: time.Duration(envInt("NEXUS_CANCEL_SWEEP_INTERVAL_SEC", 5)) * time.Second,
 
 		// Cron's resolution is a minute, so polling faster than this buys nothing;
 		// this bounds how late a tick can be to roughly one interval.

@@ -716,9 +716,10 @@ class NexusClient:
         return self._backfill_action(backfill_id, "cancel", ("RUNNING", "PAUSED"))
 
     def _backfill_action(self, backfill_id: str, action: str, allowed: tuple[str, ...]) -> Backfill:
-        # The server applies these without checking the current state
-        # (CONTRACT-FINDINGS F119): resuming a COMPLETED or CANCELLED backfill
-        # would revive it. Check first; racy, but it stops the common mistake.
+        # The server enforces these transitions with a compare-and-set and
+        # answers 409 backfill_state_conflict (CONTRACT-FINDINGS F119). The
+        # read-first check stays for servers older than that fix, which would
+        # revive a COMPLETED or CANCELLED backfill on resume.
         state = self.get_backfill(backfill_id).get("state")
         if state not in allowed:
             raise Conflict(

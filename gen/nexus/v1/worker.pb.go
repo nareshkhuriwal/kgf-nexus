@@ -87,8 +87,14 @@ type RegisterRequest struct {
 	// Advertised capacity; the scheduler's ledger is built from this.
 	Capacity *ResourceVector `protobuf:"bytes,5,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	// Which executors this worker can run; a placement constraint (ADR-0007).
-	Executors     []string `protobuf:"bytes,6,rep,name=executors,proto3" json:"executors,omitempty"`
-	AgentVersion  string   `protobuf:"bytes,7,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	Executors []string `protobuf:"bytes,6,rep,name=executors,proto3" json:"executors,omitempty"`
+	// Semantic version of the agent (e.g. "1.4.2"); a build without one sends
+	// "dev". The gateway may refuse agents below a configured minimum.
+	AgentVersion string `protobuf:"bytes,7,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	// Protocol features this agent implements (docs/COMPATIBILITY.md §4.4), for
+	// example "log_shipping". The gateway refuses a registration missing one it
+	// requires with FAILED_PRECONDITION. Additive: an older agent sends none.
+	Capabilities  []string `protobuf:"bytes,8,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -170,6 +176,13 @@ func (x *RegisterRequest) GetAgentVersion() string {
 		return x.AgentVersion
 	}
 	return ""
+}
+
+func (x *RegisterRequest) GetCapabilities() []string {
+	if x != nil {
+		return x.Capabilities
+	}
+	return nil
 }
 
 type RegisterResponse struct {
@@ -1534,7 +1547,7 @@ var File_nexus_v1_worker_proto protoreflect.FileDescriptor
 
 const file_nexus_v1_worker_proto_rawDesc = "" +
 	"\n" +
-	"\x15nexus/v1/worker.proto\x12\bnexus.v1\x1a\x15nexus/v1/common.proto\x1a\x13nexus/v1/task.proto\"\xd6\x02\n" +
+	"\x15nexus/v1/worker.proto\x12\bnexus.v1\x1a\x15nexus/v1/common.proto\x1a\x13nexus/v1/task.proto\"\xfa\x02\n" +
 	"\x0fRegisterRequest\x12\x1c\n" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x1a\n" +
 	"\bhostname\x18\x02 \x01(\tR\bhostname\x12\x16\n" +
@@ -1542,7 +1555,8 @@ const file_nexus_v1_worker_proto_rawDesc = "" +
 	"\x06labels\x18\x04 \x03(\v2%.nexus.v1.RegisterRequest.LabelsEntryR\x06labels\x124\n" +
 	"\bcapacity\x18\x05 \x01(\v2\x18.nexus.v1.ResourceVectorR\bcapacity\x12\x1c\n" +
 	"\texecutors\x18\x06 \x03(\tR\texecutors\x12#\n" +
-	"\ragent_version\x18\a \x01(\tR\fagentVersion\x1a9\n" +
+	"\ragent_version\x18\a \x01(\tR\fagentVersion\x12\"\n" +
+	"\fcapabilities\x18\b \x03(\tR\fcapabilities\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xaa\x02\n" +

@@ -12,6 +12,9 @@ PROTOC        ?= protoc
 # protoc plugins install into GOBIN, which is not on PATH in every shell.
 GOBIN         ?= $(shell $(GO) env GOPATH)/bin
 NAMESPACE     ?= default
+# The tenant `make seed` mints the worker (agent) key for. Defaults to NAMESPACE;
+# set it with NEXUS_AGENT_NAMESPACE when the compose agents serve another tenant.
+AGENT_NAMESPACE ?= $(or $(NEXUS_AGENT_NAMESPACE),$(NAMESPACE))
 
 # The database `make up` starts, which is what seed and the migrate targets act
 # on unless told otherwise. It used to default to a bare "local dev database"
@@ -32,6 +35,7 @@ MIGRATIONS    := services/migrations
 .PHONY: sdk-test
 .PHONY: sdk-typecheck
 .PHONY: check-doc-refs
+.PHONY: check-go-version
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test e2e e2e-up e2e-down seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
@@ -115,6 +119,9 @@ verify-s3-image: ## Verify the pinned S3 image's GitHub build provenance (needs 
 
 check-doc-refs: ## Fail if any "OPERATIONS §N" reference in the repo names a section that does not exist
 	python3 deploy/scripts/check-operations-refs.py
+
+check-go-version: ## Fail unless go.mod, CONTRACT.md, CI and the service image name the same Go version
+	$(GO) test -count=1 ./tests/repo
 
 bench-pg: ## Start a disposable, migrated Postgres + MinIO for the benchmarks
 	@docker inspect $(BENCH_NAME)-pg >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-pg \
@@ -391,15 +398,18 @@ seed: ## Generate and install API keys (prints each plaintext exactly once)
 	  "INSERT INTO api_keys (namespace, name, key_hash, role) \
 	   VALUES ('$(NAMESPACE)', 'admin-$$(date +%Y%m%d%H%M%S)', '$$HASH', 'admin') \
 	   ON CONFLICT (key_hash) DO NOTHING"; \
+	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
+	  "INSERT INTO tenants (namespace, name) VALUES ('$(AGENT_NAMESPACE)', '$(AGENT_NAMESPACE)') \
+	   ON CONFLICT (namespace) DO NOTHING"; \
 	WKEY="$${NEXUS_WORKER_API_KEY:-$$(gen worker)}"; \
 	WHASH=$$(printf '%s' "$$WKEY" | shasum -a 256 | cut -d' ' -f1); \
 	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
 	  "INSERT INTO api_keys (namespace, name, key_hash, role) \
-	   VALUES ('$(NAMESPACE)', 'worker-$$(date +%Y%m%d%H%M%S)', '$$WHASH', 'worker') \
+	   VALUES ('$(AGENT_NAMESPACE)', 'worker-$$(date +%Y%m%d%H%M%S)', '$$WHASH', 'worker') \
 	   ON CONFLICT (key_hash) DO NOTHING"; \
 	echo ""; \
 	echo "  admin  key (console, CLI):  $$KEY"; \
-	echo "  worker key (agents):        $$WKEY"; \
+	echo "  worker key (agents, namespace $(AGENT_NAMESPACE)): $$WKEY"; \
 	echo ""; \
 	echo "  Only the SHA-256 hash is stored, so these cannot be recovered."; \
 	echo "  Copy the admin key into the console via the header's \"Set API key\"."; \

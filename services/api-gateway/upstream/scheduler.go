@@ -153,6 +153,9 @@ type schedApplyResultResponse struct {
 	State   string `json:"state"`
 	Applied bool   `json:"applied"`
 	Retry   bool   `json:"retry"`
+	// StaleLease: the attempt had been reclaimed, so the result was not used
+	// (F104). Absent from an older scheduler, which decodes as false.
+	StaleLease bool `json:"stale_lease,omitempty"`
 }
 
 type schedEmpty struct{}

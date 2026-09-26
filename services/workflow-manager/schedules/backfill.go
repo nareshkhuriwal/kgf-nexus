@@ -5,6 +5,7 @@ package schedules
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -169,8 +170,11 @@ func (s *Service) BackfillPass(ctx context.Context, namespaces ...string) (int, 
 			// silently retrying it would hide that from whoever started it.
 			s.log.ErrorContext(ctx, "backfill failed; marking it so",
 				"backfill_id", bf.ID, "namespace", bf.Namespace, "error", aerr)
-			if _, serr := store.WFMSetBackfillState(ctx, s.db, bf.Namespace, bf.ID,
-				store.BackfillFailed, map[string]any{"error": aerr.Error()}); serr != nil {
+			// From RUNNING only: an operator who paused or cancelled it while
+			// this pass held it has the last word (F119).
+			if _, serr := store.WFMTransitionBackfill(ctx, s.db, bf.Namespace, bf.ID,
+				store.BackfillFailed, driverFrom, map[string]any{"error": aerr.Error()}); serr != nil &&
+				!errors.Is(serr, store.ErrBackfillStateConflict) {
 				s.log.ErrorContext(ctx, "could not mark a backfill failed", "backfill_id", bf.ID, "error", serr)
 			}
 		}
@@ -213,6 +217,14 @@ func (s *Service) advanceBackfill(ctx context.Context, bf store.Backfill) (int, 
 	remaining := int(bf.MaxRuns - bf.RunsCreated)
 
 	for active < int(bf.MaxActive) && created < remaining && cursor.Before(bf.ToTime) {
+		// Stop at the first tick after an operator paused or cancelled this
+		// backfill: the claim does not hold its row lock, so without this a cancel
+		// that commits mid-pass would still get up to max_active more runs. One
+		// primary-key read per tick; a run created in the instant between this read
+		// and the cancel is the most it can cost.
+		if cur, gerr := store.WFMGetBackfill(ctx, s.db, bf.Namespace, bf.ID); gerr == nil && cur.State != store.BackfillRunning {
+			break
+		}
 		fired, ferr := s.fireTick(ctx, sch, cursor, &bf.ID)
 		if ferr != nil {
 			// Persist the progress made before the failure. Without this the next
@@ -265,12 +277,33 @@ func (s *Service) advanceBackfill(ctx context.Context, bf store.Backfill) (int, 
 	return created, nil
 }
 
+// driverFrom is the only state the driver's own transitions (COMPLETED,
+// FAILED) may leave. A pass claims RUNNING backfills and then works without
+// the row lock, so an operator's pause or cancel can commit in between; the
+// driver must not overwrite it. A paused backfill that is later resumed
+// reaches completion again by observing its cursor.
+var driverFrom = []string{store.BackfillRunning}
+
+// The operator transitions (F119). Anything else is refused with
+// store.ErrBackfillStateConflict and changes nothing: in particular a
+// COMPLETED, CANCELLED or FAILED backfill is final.
+var (
+	pauseFrom  = []string{store.BackfillRunning}
+	resumeFrom = []string{store.BackfillPaused}
+	cancelFrom = []string{store.BackfillRunning, store.BackfillPaused}
+)
+
 func (s *Service) completeBackfill(ctx context.Context, bf store.Backfill, reason string) error {
-	if _, err := store.WFMSetBackfillState(ctx, s.db, bf.Namespace, bf.ID,
-		store.BackfillCompleted, map[string]any{
+	if _, err := store.WFMTransitionBackfill(ctx, s.db, bf.Namespace, bf.ID,
+		store.BackfillCompleted, driverFrom, map[string]any{
 			"reason":       reason,
 			"runs_created": bf.RunsCreated,
 		}); err != nil {
+		if errors.Is(err, store.ErrBackfillStateConflict) {
+			s.log.InfoContext(ctx, "backfill left RUNNING before the driver could complete it; leaving it",
+				"backfill_id", bf.ID, "namespace", bf.Namespace, "error", err)
+			return nil
+		}
 		return fmt.Errorf("complete backfill %s: %w", bf.ID, err)
 	}
 	s.log.InfoContext(ctx, "backfill completed",
@@ -284,13 +317,15 @@ func (s *Service) completeBackfill(ctx context.Context, bf store.Backfill, reaso
 // The cursor is left where it is, so resuming continues rather than restarting. That
 // is the difference from cancelling, and it is why pausing does not touch ended_at.
 func (s *Service) PauseBackfill(ctx context.Context, namespace, id string) (store.Backfill, error) {
-	return store.WFMSetBackfillState(ctx, s.db, namespace, id, store.BackfillPaused,
+	return store.WFMTransitionBackfill(ctx, s.db, namespace, id, store.BackfillPaused, pauseFrom,
 		map[string]any{"reason": "paused by operator"})
 }
 
-// ResumeBackfill returns a paused backfill to RUNNING.
+// ResumeBackfill returns a PAUSED backfill to RUNNING. Anything else is refused
+// with store.ErrBackfillStateConflict: resuming a finished backfill must not
+// revive it (F119).
 func (s *Service) ResumeBackfill(ctx context.Context, namespace, id string) (store.Backfill, error) {
-	return store.WFMSetBackfillState(ctx, s.db, namespace, id, store.BackfillRunning,
+	return store.WFMTransitionBackfill(ctx, s.db, namespace, id, store.BackfillRunning, resumeFrom,
 		map[string]any{"reason": "resumed by operator"})
 }
 
@@ -300,7 +335,7 @@ func (s *Service) ResumeBackfill(ctx context.Context, namespace, id string) (sto
 // second, much larger action -- and an operator who wants that has run cancellation
 // for it. Stopping generation is the reversible part, so it is the part this does.
 func (s *Service) CancelBackfill(ctx context.Context, namespace, id string) (store.Backfill, error) {
-	bf, err := store.WFMSetBackfillState(ctx, s.db, namespace, id, store.BackfillCancelled,
+	bf, err := store.WFMTransitionBackfill(ctx, s.db, namespace, id, store.BackfillCancelled, cancelFrom,
 		map[string]any{"reason": "cancelled by operator; runs already created are left running"})
 	if err != nil {
 		return store.Backfill{}, err

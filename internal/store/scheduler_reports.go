@@ -150,6 +150,9 @@ type AppliedResult struct {
 	// Applied is false when the CAS found nothing to move — a duplicate report,
 	// or an attempt already expired and retried elsewhere.
 	Applied bool
+	// Stale is set, with Applied false, when the attempt had been reclaimed
+	// as LOST: the reporter's lease is gone and the result was not used.
+	Stale bool
 	// Retry is set when the outcome was retryable and a retry was scheduled.
 	Retry bool
 	// UsageRecorded is true when the attempt's usage-ledger row was written in
@@ -225,6 +228,20 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
 		// Already terminal: a duplicate report (the expected consequence of
 		// at-least-once delivery), or an attempt a reconciler or cancel moved
 		// first. Never "locked by someone else" any more -- that waits above.
+		//
+		// Tell a reclaim from a duplicate (F104 residual). LOST is written only
+		// by the lease reconciler and the liveness sweep, which also delete the
+		// lease: this reporter is no longer the owner and its result was not
+		// used, so it is answered stale_lease_token. Any other terminal state
+		// means a result (this one, delivered twice) or a cancel settled the
+		// attempt, and the report stays an accepted no-op, so at-least-once
+		// delivery never makes an agent retry a result that landed. A read of
+		// the committed row: it decides only the answer, never a write.
+		var cur string
+		if serr := tx.QueryRow(ctx, `SELECT state::text FROM task_attempts WHERE id = $1`,
+			attemptID).Scan(&cur); serr == nil && cur == string(domain.AttemptLost) {
+			return AppliedResult{Applied: false, Stale: true}, nil
+		}
 		return AppliedResult{Applied: false}, nil
 	}
 	if err != nil {

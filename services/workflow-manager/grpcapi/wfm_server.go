@@ -122,7 +122,7 @@ func runStateProto(s string) nexusv1.RunState {
 // the right HTTP status instead of a blanket 500.
 func runError(op string, err error) error {
 	switch {
-	case errors.Is(err, store.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound), store.IsMalformedID(err):
 		return status.Errorf(codes.NotFound, "%s: %v", op, err)
 	case errors.Is(err, store.ErrRunQuotaExceeded):
 		// Before ErrMaxActiveRuns, which shares the code: the gateway tells the
@@ -358,7 +358,7 @@ func (s *SpecServer) GetSpec(ctx context.Context, req *GetSpecRequest) (*GetSpec
 		return nil, status.Error(codes.InvalidArgument, "either spec_id or spec_name is required")
 	}
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
+		if errors.Is(err, store.ErrNotFound) || store.IsMalformedID(err) {
 			return nil, status.Errorf(codes.NotFound, "get spec: %v", err)
 		}
 		return nil, status.Errorf(codes.Internal, "get spec: %v", err)

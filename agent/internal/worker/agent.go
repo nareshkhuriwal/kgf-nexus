@@ -315,6 +315,9 @@ func (a *Agent) register(ctx context.Context) error {
 		Capacity:     a.cfg.Capacity,
 		Executors:    kinds,
 		AgentVersion: a.cfg.AgentVersion,
+		// What this build implements, for the gateway's admission gate
+		// (docs/COMPATIBILITY.md §4.4).
+		Capabilities: domain.AgentCapabilities(),
 	})
 	if err != nil {
 		return fmt.Errorf("agent: register: %w", err)

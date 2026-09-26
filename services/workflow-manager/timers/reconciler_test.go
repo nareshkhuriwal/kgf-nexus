@@ -40,6 +40,8 @@ type timerDB struct {
 	// stalledRuns is what the stalled-run sweep's query returns.
 	stalledRuns []string
 	stalledErr  error
+	// cancellingRuns is what the cancel sweep's query returns.
+	cancellingRuns []string
 }
 
 // stringRows is a minimal pgx.Rows over single-column string results, which is
@@ -156,6 +158,13 @@ func (d *timerDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows,
 	defer d.mu.Unlock()
 	if d.claimErr != nil {
 		return nil, d.claimErr
+	}
+	if strings.Contains(sql, "r.state = 'CANCELLING'") {
+		rows := make([]any, 0, len(d.cancellingRuns))
+		for _, id := range d.cancellingRuns {
+			rows = append(rows, id)
+		}
+		return &stringRows{vals: rows}, nil
 	}
 	if strings.Contains(sql, "FROM workflow_runs r") {
 		if d.stalledErr != nil {
@@ -829,6 +838,33 @@ func TestStalledRunSweepSurvivesAFailingRepair(t *testing.T) {
 
 	if len(seen) != 2 {
 		t.Errorf("attempted %v; a failing repair must not stop the others", seen)
+	}
+}
+
+// TestCancelSweepReissuesEveryCancellingRun is F109's sweep: every CANCELLING
+// run is handed to the re-issue action, a failing one does not stop the rest,
+// and with no action registered the sweep does nothing.
+func TestCancelSweepReissuesEveryCancellingRun(t *testing.T) {
+	db := newTimerDB()
+	db.cancellingRuns = []string{"bad", "good", "also-good"}
+	r := New(db, Config{Claimant: "test", BatchSize: 10}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	r.SweepCancellingRuns(context.Background()) // unregistered: a no-op
+
+	var seen []string
+	r.OnCancellingRun(func(_ context.Context, runID string) error {
+		seen = append(seen, runID)
+		if runID == "bad" {
+			return errors.New("scheduler unavailable")
+		}
+		return nil
+	})
+	r.SweepCancellingRuns(context.Background())
+	if strings.Join(seen, ",") != "bad,good,also-good" {
+		t.Errorf("re-issued %v; every CANCELLING run must be tried, past a failure", seen)
+	}
+	if r.cfg.CancelSweepInterval != 5*time.Second {
+		t.Errorf("default CancelSweepInterval = %v, want 5s", r.cfg.CancelSweepInterval)
 	}
 }
 

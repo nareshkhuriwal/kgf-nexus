@@ -99,6 +99,10 @@ type Config struct {
 	// disabled means agents ship no logs -- the right answer for a gateway that
 	// cannot READ them back, since objects nobody can serve are pure cost.
 	LogShipping *nexusv1.LogShippingConfig
+	// AgentPolicy is the admission gate at Register: a minimum agent_version
+	// and capabilities every agent must advertise (docs/COMPATIBILITY.md §4.4).
+	// The zero value admits every agent.
+	AgentPolicy domain.AgentPolicy
 }
 
 // DefaultConfig is the tuning from ADR-0010 and §5.5.
@@ -156,6 +160,19 @@ func (s *Server) Register(ctx context.Context, req *nexusv1.RegisterRequest) (*n
 	}
 	if req.GetCapacity() == nil {
 		return nil, status.Error(codes.InvalidArgument, "advertised capacity is required")
+	}
+	// The version and capability gate, before any row is written. An agent
+	// that is too old, or lacks a behaviour the operator requires, would run
+	// tasks with older semantics without anyone noticing (the N-1 hazard,
+	// docs/COMPATIBILITY.md §4.3). FAILED_PRECONDITION because the request is
+	// well formed and the agent itself must change; the agent's register
+	// backoff treats it as permanent and exits with the reason.
+	if err := s.cfg.AgentPolicy.Check(req.GetAgentVersion(), req.GetCapabilities()); err != nil {
+		s.log.WarnContext(ctx, "refused an incompatible agent",
+			"namespace", req.GetNamespace(), "hostname", req.GetHostname(),
+			"agent_version", req.GetAgentVersion(), "capabilities", req.GetCapabilities(),
+			"principal", p.Name, "reason", err)
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 
 	sessionToken, err := newOpaqueToken()
@@ -544,6 +561,17 @@ func (s *Server) ReportResult(ctx context.Context, req *nexusv1.ReportResultRequ
 		return ack, nil
 	}
 	if err := s.sch.ApplyResult(ctx, req); err != nil {
+		if errors.Is(err, store.ErrStaleLeaseToken) {
+			// The lease reconciler or liveness sweep reclaimed the attempt
+			// after the fence above passed, and the scheduler ignored the
+			// result (F104). The same answer the fence gives: the agent drops
+			// the result, which is right because a retry owns the work now. A
+			// duplicate of a result that did land is not stale and falls
+			// through to Accepted below.
+			s.log.WarnContext(ctx, "attempt result arrived after its lease was reclaimed; rejected as stale",
+				"attempt_id", req.GetAttemptId())
+			return &nexusv1.Ack{Accepted: false, Reason: store.ReasonStaleLeaseToken}, nil
+		}
 		// Never Ack{accepted:true} and never Ack{accepted:false} here: the
 		// result was not applied, and both Acks make the agent drop it from its
 		// WAL. A transport error keeps it there to be resent. A scheduler that

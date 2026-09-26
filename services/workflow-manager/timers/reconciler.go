@@ -81,6 +81,12 @@ type Config struct {
 	// a backstop for a condition that should never occur, so paying for it every
 	// second would be a strange trade.
 	StalledRunInterval time.Duration
+	// CancelSweepInterval is how often every CANCELLING run has its attempt
+	// cancellation re-issued and its finalize retried (CONTRACT-FINDINGS F109).
+	// Short, because the sweep races the worker: an attempt it does not reach
+	// before the killed task's result arrives ends FAILED instead of CANCELLED.
+	// Idempotent, so a short interval costs one indexed query per tick.
+	CancelSweepInterval time.Duration
 	// Metrics receives backlog, lateness and dispatch-outcome observations. Nil
 	// disables instrumentation, which keeps the reconciler usable in tests without
 	// a registry.
@@ -98,8 +104,9 @@ func DefaultConfig(claimant string) Config {
 		BacklogAlert:    1000,
 		// Comfortably longer than a reconcile round trip, so the sweep can never
 		// race a run that is merely mid-conclusion.
-		StalledRunAge:      2 * time.Minute,
-		StalledRunInterval: time.Minute,
+		StalledRunAge:       2 * time.Minute,
+		StalledRunInterval:  time.Minute,
+		CancelSweepInterval: 5 * time.Second,
 	}
 }
 
@@ -169,6 +176,9 @@ type Reconciler struct {
 	// and this package must not learn how to reach it -- the same reason the
 	// timer effects are injected as handlers.
 	reconcileRun func(ctx context.Context, runID string) error
+	// reconcileCancelling re-issues a CANCELLING run's attempt cancellation.
+	// Injected for the same reason as reconcileRun.
+	reconcileCancelling func(ctx context.Context, runID string) error
 }
 
 // New builds a reconciler.
@@ -202,6 +212,9 @@ func New(db store.GWDB, cfg Config, log *slog.Logger) *Reconciler {
 	if cfg.StalledRunInterval <= 0 {
 		cfg.StalledRunInterval = time.Minute
 	}
+	if cfg.CancelSweepInterval <= 0 {
+		cfg.CancelSweepInterval = 5 * time.Second
+	}
 	return &Reconciler{db: db, cfg: cfg, log: log, handlers: make(map[string]Handler)}
 }
 
@@ -221,6 +234,14 @@ func (r *Reconciler) OnStalledRun(fn func(ctx context.Context, runID string) err
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reconcileRun = fn
+}
+
+// OnCancellingRun registers the cancel sweep's action (F109). Unset, the sweep
+// does nothing.
+func (r *Reconciler) OnCancellingRun(fn func(ctx context.Context, runID string) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reconcileCancelling = fn
 }
 
 // registeredKinds lists the kinds with a handler, for the claim filter.
@@ -260,6 +281,9 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	stalled := time.NewTicker(stalledEvery)
 	defer stalled.Stop()
 
+	cancelling := time.NewTicker(r.cfg.CancelSweepInterval)
+	defer cancelling.Stop()
+
 	r.log.InfoContext(ctx, "timer reconciler started",
 		"claimant", r.cfg.Claimant, "interval", r.cfg.Interval, "batch_size", r.cfg.BatchSize)
 
@@ -280,6 +304,8 @@ func (r *Reconciler) Run(ctx context.Context) error {
 			r.sweepStaleClaims(ctx)
 		case <-stalled.C:
 			r.sweepStalledRuns(ctx)
+		case <-cancelling.C:
+			r.SweepCancellingRuns(ctx)
 		case <-ticker.C:
 			// A cycle that errors is logged and retried on the next tick rather
 			// than killing the loop. The reconciler is the only thing that makes
@@ -440,6 +466,39 @@ func (r *Reconciler) sweepStalledRuns(ctx context.Context) {
 			// Logged and skipped, never fatal: one unrecoverable run must not
 			// stop the others being recovered, and the next sweep retries it.
 			r.log.ErrorContext(ctx, "could not reconcile a stalled run; will retry next sweep",
+				"run_id", runID, "error", err)
+		}
+	}
+}
+
+// SweepCancellingRuns re-issues attempt cancellation for every CANCELLING run
+// and finalizes those with nothing left in flight (CONTRACT-FINDINGS F109).
+//
+// Before this, a cancel whose attempt fan-out failed was logged as "will
+// retry" and never retried: the heartbeat still stopped the work, but each
+// attempt then ended through its late result, usually FAILED. The action is
+// idempotent (runs.Service.ReconcileCancelling) and needs no leader: replicas
+// that sweep the same run cancel each attempt once between them. Bounded to
+// BatchSize runs per pass, oldest first; one failing run does not stop the
+// others, and stays CANCELLING for the next pass. Exported so tests drive it.
+func (r *Reconciler) SweepCancellingRuns(ctx context.Context) {
+	r.mu.RLock()
+	fn := r.reconcileCancelling
+	r.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	ids, err := store.WFMListCancellingRuns(ctx, r.db, r.cfg.BatchSize)
+	if err != nil {
+		r.log.ErrorContext(ctx, "failed to list cancelling runs", "error", err)
+		return
+	}
+	for _, runID := range ids {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := fn(ctx, runID); err != nil {
+			r.log.WarnContext(ctx, "could not re-issue cancellation for a CANCELLING run; will retry next sweep",
 				"run_id", runID, "error", err)
 		}
 	}

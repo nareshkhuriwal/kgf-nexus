@@ -53,6 +53,29 @@ var accepted = map[string]string{
 	// do not apply 0015 in the same release as 0014.
 	"0015_enforce_tenant_ownership.up.sql/set-not-null": "deferred enforcement of 0014, applied a release later once the 0014 triggers populate tenant_id on every write",
 
+	// The entries below were found when the gate learned DROP INDEX, DROP
+	// DEFAULT and validating ADD CONSTRAINT (CONTRACT-FINDINGS F128). All three
+	// migrations are applied everywhere and cannot be edited.
+
+	// 0014 adds its tenant foreign keys and (tenant_id, id) unique constraints
+	// to populated tables without NOT VALID, so each scanned its table under a
+	// write-blocking lock. Old replicas cannot violate them: the same migration
+	// installs the triggers that assign tenant_id on every write. The cost was
+	// a one-off stall at the 0014 upgrade.
+	"0014_explicit_tenant_ownership.up.sql/validating-constraint": "applied everywhere; old writers are covered by the 0014 tenant triggers",
+
+	// 0017 adds email_verified_at with DEFAULT now() only so existing accounts
+	// read as verified, then drops the default so new ones start unverified.
+	// The column is nullable, and NULL from an old replica is the fail-safe
+	// answer ("must still prove the address"), as the migration's header says.
+	"0017_email_verification.up.sql/drop-default": "nullable column; NULL from an old replica is the intended fail-safe",
+
+	// 0023 drops only an INVALID leftover of a failed CONCURRENTLY build,
+	// which the planner never uses, and re-creates it under the same name.
+	// The name is built at run time (format('DROP INDEX %I', ix)), which is
+	// why the analyser cannot see the re-creation as it does for 0022 and 0027.
+	"0023_dispatch_rank_index.up.sql/drop-index": "drops only an INVALID index it re-creates by name; the name is dynamic",
+
 	// 0003 and 0004 are deliberately ABSENT from this list. Both carry a top-level
 	// WHERE that bounds the write set -- 0003 to rows still holding the old JSONB
 	// key spelling, 0004 to rows that actually drifted -- so the analyser does not
@@ -147,6 +170,91 @@ func TestRulesActuallyFire(t *testing.T) {
 		got := firstMatch(sql)
 		if got != want {
 			t.Errorf("%q matched rule %q, want %q", sql, got, want)
+		}
+	}
+}
+
+// TestDestructiveFormsAreCaught is the audit of what the gate used to miss.
+// Each of these passed it before, and each can break a replica of the previous
+// release still serving during a rolling deploy, or lose data outright.
+func TestDestructiveFormsAreCaught(t *testing.T) {
+	cases := []struct{ rule, sql string }{
+		// An old replica's ON CONFLICT (cols) or ON CONSTRAINT names the
+		// constraint; its writes start failing the moment it is gone.
+		{"drop-constraint", "ALTER TABLE workflow_specs DROP CONSTRAINT workflow_specs_namespace_name_version_key;"},
+		{"drop-constraint", "ALTER TABLE ONLY leases DROP CONSTRAINT IF EXISTS leases_pkey CASCADE;"},
+		{"drop-index", "DROP INDEX idx_attempts_dispatch;"},
+		{"drop-index", "DROP INDEX CONCURRENTLY IF EXISTS idx_attempts_dispatch;"},
+		{"drop-index", "DO $$ BEGIN EXECUTE 'DROP INDEX idx_x'; END $$;"},
+		// Not only tables and columns get renamed.
+		{"rename", "ALTER INDEX idx_a RENAME TO idx_b;"},
+		{"rename", "ALTER TYPE run_state RENAME VALUE 'PAUSING' TO 'SUSPENDING';"},
+		{"rename", "ALTER TYPE run_state RENAME TO run_status;"},
+		{"rename", "ALTER SEQUENCE run_events_id_seq RENAME TO ev_seq;"},
+		{"rename", "ALTER FUNCTION assign_tenant() RENAME TO assign_tenant_v2;"},
+		{"rename", "ALTER VIEW v_runs RENAME TO runs_view;"},
+		{"rename", "ALTER TABLE workflow_runs RENAME CONSTRAINT a TO b;"},
+		// Every spelling of a column type change.
+		{"alter-column-type", "ALTER TABLE t ALTER COLUMN c TYPE bigint;"},
+		{"alter-column-type", "ALTER TABLE t ALTER c TYPE bigint USING c::bigint;"},
+		{"alter-column-type", `ALTER TABLE t ALTER COLUMN "c" SET DATA TYPE text;`},
+		// Dropping other objects an old replica or a trigger still uses.
+		{"drop-object", "DROP TYPE run_state;"},
+		{"drop-object", "DROP FUNCTION IF EXISTS assign_tenant_id();"},
+		{"drop-object", "DROP VIEW v_runs;"},
+		{"drop-object", "DROP MATERIALIZED VIEW mv_usage;"},
+		{"drop-object", "DROP SEQUENCE run_events_id_seq;"},
+		{"drop-object", "DROP SCHEMA archive CASCADE;"},
+		// The 0014 tenant triggers are what let old replicas keep writing.
+		{"drop-trigger", "DROP TRIGGER tenant_assignment ON task_attempts;"},
+		{"truncate", "TRUNCATE run_events;"},
+		{"truncate", "TRUNCATE TABLE ONLY run_events RESTART IDENTITY;"},
+		{"drop-default", "ALTER TABLE users ALTER COLUMN role DROP DEFAULT;"},
+		{"unbounded-delete", "DELETE FROM run_events;"},
+		{"validating-constraint", "ALTER TABLE task_attempts ADD CONSTRAINT attempts_fk FOREIGN KEY (worker_id) REFERENCES workers(id);"},
+		{"validating-constraint", "ALTER TABLE task_attempts ADD CONSTRAINT attempts_uq UNIQUE (run_id, node_id, attempt_number);"},
+		{"validating-constraint", "ALTER TABLE task_attempts ADD CHECK (attempt_number > 0);"},
+	}
+	for _, c := range cases {
+		fs := analyseString(t, c.sql)
+		if len(fs) != 1 || fs[0].Rule != c.rule {
+			t.Errorf("%q: findings %v, want exactly one %q", c.sql, fs, c.rule)
+		}
+	}
+}
+
+// TestSafeFormsOfTheNewRulesAreNotFlagged: the additive or self-contained
+// shapes of the statements above.
+func TestSafeFormsOfTheNewRulesAreNotFlagged(t *testing.T) {
+	safe := []string{
+		// Validated later, without the scan under lock.
+		"ALTER TABLE task_attempts ADD CONSTRAINT attempts_fk FOREIGN KEY (worker_id) REFERENCES workers(id) NOT VALID;",
+		"ALTER TABLE task_attempts VALIDATE CONSTRAINT attempts_fk;",
+		// A column named "type" is not a type change.
+		"ALTER TABLE events ADD COLUMN type TEXT;",
+		"ALTER TABLE events ADD CONSTRAINT events_type_ck CHECK (type IN ('a','b')) NOT VALID;",
+		// A bounded delete.
+		"DELETE FROM idempotency_keys WHERE created_at < now() - interval '1 day';",
+		// Adding an enum value is additive.
+		"ALTER TYPE run_state ADD VALUE IF NOT EXISTS 'SUSPENDED';",
+		// Recreating a function in place keeps its name.
+		"CREATE OR REPLACE FUNCTION f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
+		// Dropped and re-created under the same name in the same migration:
+		// the idempotent re-apply idiom every tenant trigger uses.
+		`DROP TRIGGER IF EXISTS tenant_assignment ON email_tokens;
+CREATE TRIGGER tenant_assignment BEFORE INSERT ON email_tokens FOR EACH ROW EXECUTE FUNCTION assign_tenant();`,
+		`DO $$ BEGIN EXECUTE 'DROP INDEX idx_attempts_inflight_tenant'; END $$;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_attempts_inflight_tenant ON task_attempts (tenant_id);`,
+		`DROP FUNCTION IF EXISTS assign_tenant();
+CREATE FUNCTION assign_tenant() RETURNS trigger AS $$ BEGIN RETURN NEW; END $$ LANGUAGE plpgsql;`,
+		// Constraints and triggers on a table this migration created.
+		`CREATE TABLE quotas (id uuid PRIMARY KEY, ns text);
+ALTER TABLE quotas ADD CONSTRAINT quotas_ns_uq UNIQUE (ns);
+ALTER TABLE quotas DROP CONSTRAINT quotas_ns_uq;`,
+	}
+	for _, sql := range safe {
+		if fs := analyseString(t, sql); len(fs) != 0 {
+			t.Errorf("%q was flagged: %v", sql, fs)
 		}
 	}
 }

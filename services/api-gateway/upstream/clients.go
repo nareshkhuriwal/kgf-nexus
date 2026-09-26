@@ -578,6 +578,11 @@ func (c *SchedulerClient) ApplyResult(ctx context.Context, req *nexusv1.ReportRe
 	if err != nil {
 		return err
 	}
+	if applied.StaleLease {
+		// Not applied because a reclaim won the attempt: the caller answers
+		// the worker stale_lease_token (F104).
+		return fmt.Errorf("apply result for attempt %s: %w", req.GetAttemptId(), store.ErrStaleLeaseToken)
+	}
 	if !applied.Applied || c.dag == nil {
 		return nil
 	}
