@@ -97,8 +97,8 @@ func (a *API) createServiceAccount(w http.ResponseWriter, r *http.Request, p aut
 		Description string   `json:"description"`
 		Roles       []string `json:"roles"`
 	}
-	if decodeRBACBody(w, r, &b) != nil {
-		writeError(w, http.StatusBadRequest, "invalid", "Invalid service account")
+	if err := decodeRBACBody(w, r, &b); err != nil {
+		rejectBody(w, err, http.StatusBadRequest, "invalid", "Invalid service account")
 		return
 	}
 	b.Name = strings.TrimSpace(b.Name)
@@ -161,19 +161,47 @@ func (a *API) updateServiceAccount(w http.ResponseWriter, r *http.Request, p aut
 		Description string `json:"description"`
 		Revision    int64  `json:"revision"`
 	}
-	if decodeRBACBody(w, r, &b) != nil || len(b.Description) > 500 {
-		writeError(w, http.StatusBadRequest, "invalid", "Invalid service account")
+	if err := decodeRBACBody(w, r, &b); err != nil || len(b.Description) > 500 {
+		rejectBody(w, err, http.StatusBadRequest, "invalid", "Invalid service account")
+		return
+	}
+	if !revisionOK(w, b.Revision) {
 		return
 	}
 	id := r.PathValue("id")
-	tag, err := a.db.Exec(r.Context(), `UPDATE service_accounts SET description=$3, revision=revision+1 WHERE namespace=$1 AND id::text=$2 AND revision=$4`,
-		p.Namespace, id, b.Description, b.Revision)
+	// The existence check and the revision check are separate answers: an
+	// account that is not there is 404 whatever revision was sent, and only an
+	// account that IS there can have moved on (409). One conditional UPDATE
+	// cannot tell the two apart, and used to answer 409 for both, sending an
+	// operator to "reload" a list the account had already left. The row is
+	// locked so the revision read and the write are one decision.
+	tx, err := a.db.Begin(r.Context())
 	if err != nil {
 		a.fail(w, r, "update service account", err)
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		writeError(w, http.StatusConflict, "conflict", "Service account changed or does not exist; reload before saving")
+	defer tx.Rollback(r.Context())
+	var current int64
+	err = tx.QueryRow(r.Context(), `SELECT revision FROM service_accounts WHERE namespace=$1 AND id::text=$2 FOR UPDATE`,
+		p.Namespace, id).Scan(&current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "not_found", "Service account not found")
+		return
+	}
+	if err != nil {
+		a.fail(w, r, "update service account", err)
+		return
+	}
+	if current != b.Revision {
+		writeError(w, http.StatusConflict, "conflict", "Service account changed; reload before saving")
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `UPDATE service_accounts SET description=$3, revision=revision+1 WHERE namespace=$1 AND id::text=$2`,
+		p.Namespace, id, b.Description); err == nil {
+		err = tx.Commit(r.Context())
+	}
+	if err != nil {
+		a.fail(w, r, "update service account", err)
 		return
 	}
 	a.auditPrincipal(r, p, "service_account.update", "service_account", id, store.AuditSuccess, nil)
@@ -277,8 +305,11 @@ func (a *API) serviceAccountRoles(w http.ResponseWriter, r *http.Request, p auth
 		Roles    []string `json:"roles"`
 		Revision int64    `json:"revision"`
 	}
-	if decodeRBACBody(w, r, &b) != nil || len(b.Roles) > 20 {
-		writeError(w, http.StatusBadRequest, "invalid", "Invalid roles")
+	if err := decodeRBACBody(w, r, &b); err != nil || len(b.Roles) > 20 {
+		rejectBody(w, err, http.StatusBadRequest, "invalid", "Invalid roles")
+		return
+	}
+	if !revisionOK(w, b.Revision) {
 		return
 	}
 	tx, err := a.db.Begin(r.Context())

@@ -464,6 +464,47 @@ func TestIntegrationAttentionIsBounded(t *testing.T) {
 	})
 }
 
+// TestIntegrationAttentionTruncatedIsExact: `truncated` is true exactly when
+// items beyond the cap were dropped. It used to be computed as "the page is
+// full", which reports a namespace with EXACTLY limit items as truncated -- a
+// "view all" leading to nothing more -- so it is decided by fetching one row
+// past the cap instead.
+func TestIntegrationAttentionTruncatedIsExact(t *testing.T) {
+	ctx := context.Background()
+	pool := testPool(t)
+	ns := uniqueNS(t, pool)
+
+	inAttentionTx(t, pool, func(tx pgx.Tx) {
+		runID := seedRun(t, tx, ns, "exact_wf", "RUNNING")
+		for i := 0; i < 5; i++ {
+			node := fmt.Sprintf("n%02d", i)
+			seedNode(t, tx, runID, node, "READY", 0, 3)
+			seedAttemptRow(t, tx, runID, node, "PENDING", 1,
+				strptr("waiting_for_resources: cpu (need 1000, free 0)"),
+				time.Now().Add(-time.Duration(20+i)*time.Minute))
+		}
+		for _, tc := range []struct {
+			limit     int
+			wantItems int
+			truncated bool
+		}{
+			{4, 4, true},   // one more exists
+			{5, 5, false},  // exactly the cap: nothing was dropped
+			{6, 5, false},  // room to spare
+			{50, 5, false}, // the default
+		} {
+			items, truncated, err := GatewayListAttentionPage(ctx, tx, ns, AttentionFilter{Limit: tc.limit})
+			if err != nil {
+				t.Fatalf("limit %d: %v", tc.limit, err)
+			}
+			if len(items) != tc.wantItems || truncated != tc.truncated {
+				t.Errorf("limit %d: %d items, truncated=%v; want %d, %v",
+					tc.limit, len(items), truncated, tc.wantItems, tc.truncated)
+			}
+		}
+	})
+}
+
 // An unrecognised reason code is PRINTED rather than guessed at. A code added to
 // the domain package must surface as itself, not as a plausible sentence about
 // something else.

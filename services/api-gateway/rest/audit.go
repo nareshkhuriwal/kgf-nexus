@@ -258,7 +258,7 @@ func parseAuditFilter(r *http.Request) (store.AuditFilter, error) {
 	q := r.URL.Query()
 	f := store.AuditFilter{
 		Action: q.Get("action"), ActorID: q.Get("actor_id"), Outcome: q.Get("outcome"),
-		Cursor: q.Get("cursor"), Limit: intParam(r, "limit", 100),
+		Cursor: q.Get("cursor"),
 		// A KGF support reference resolves with ?request_id= (ADR-0024 §5).
 		RequestID: q.Get("request_id"),
 	}
@@ -291,6 +291,11 @@ func (a *API) listAudit(w http.ResponseWriter, r *http.Request, _ authn.Principa
 	f, err := parseAuditFilter(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error())
+		return
+	}
+	// Capped at 1000, not reset to 100 as the store used to do (F155).
+	var ok bool
+	if f.Limit, ok = listLimit(w, r, store.DefaultAuditPage, store.MaxAuditPage); !ok {
 		return
 	}
 	rows, next, err := a.identity.ListAudit(r.Context(), r.PathValue("ns"), f)
@@ -436,7 +441,10 @@ func (a *API) putAuditPolicy(w http.ResponseWriter, r *http.Request, p authn.Pri
 		Revision      int64 `json:"revision"`
 	}
 	if err := decodeRBACBody(w, r, &b); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		rejectBody(w, err, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if !revisionOK(w, b.Revision) {
 		return
 	}
 	if b.RetentionDays != nil && (*b.RetentionDays < 1 || *b.RetentionDays > 36500) {
@@ -456,7 +464,10 @@ func (a *API) setLegalHold(w http.ResponseWriter, r *http.Request, p authn.Princ
 		Revision int64  `json:"revision"`
 	}
 	if err := decodeRBACBody(w, r, &b); err != nil || b.Hold == nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", `body must be {"hold": true|false, "reason": "...", "revision": N}`)
+		rejectBody(w, err, http.StatusBadRequest, "invalid_json", `body must be {"hold": true|false, "reason": "...", "revision": N}`)
+		return
+	}
+	if !revisionOK(w, b.Revision) {
 		return
 	}
 	b.Reason = strings.TrimSpace(b.Reason)
@@ -560,6 +571,40 @@ func (a *API) sinkKeysOrFail(w http.ResponseWriter) bool {
 	return true
 }
 
+// sinkProblems collects every invalid field of a sink request.
+//
+// The 422 names the fields twice over: `fields` for a client that highlights
+// inputs, and `message` for one that prints a sentence. It used to carry only
+// `problems`, the one error body in the API without a `message`. `problems`
+// stays a list of strings, one per field, because the console already renders
+// it that way.
+type sinkProblems struct {
+	fields   []string
+	problems []string
+}
+
+func (s *sinkProblems) add(field, problem string) {
+	s.fields = append(s.fields, field)
+	s.problems = append(s.problems, problem)
+}
+
+func (s *sinkProblems) write(w http.ResponseWriter) {
+	writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+		"error":    "invalid_sink",
+		"message":  "invalid " + strings.Join(s.fields, ", ") + ": " + strings.Join(s.problems, "; "),
+		"field":    s.fields[0],
+		"fields":   s.fields,
+		"problems": s.problems,
+	})
+}
+
+// writeSinkFieldError is the one-field form, for the update route.
+func writeSinkFieldError(w http.ResponseWriter, field, problem string) {
+	var p sinkProblems
+	p.add(field, problem)
+	p.write(w)
+}
+
 func (a *API) createAuditSink(w http.ResponseWriter, r *http.Request, p authn.Principal) {
 	if !a.sinkKeysOrFail(w) {
 		return
@@ -574,31 +619,31 @@ func (a *API) createAuditSink(w http.ResponseWriter, r *http.Request, p authn.Pr
 		Format    string `json:"format"`
 	}
 	if err := decodeRBACBody(w, r, &b); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		rejectBody(w, err, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 	b.Name = strings.TrimSpace(b.Name)
-	var problems []string
+	var problems sinkProblems
 	if b.Name == "" || len(b.Name) > 100 {
-		problems = append(problems, "name is required (at most 100 characters)")
+		problems.add("name", "name is required (at most 100 characters)")
 	}
 	if err := a.sinkPolicy.CheckURL(b.URL); err != nil {
-		problems = append(problems, err.Error())
+		problems.add("url", err.Error())
 	}
 	if b.BatchSize == 0 {
 		b.BatchSize = 100
 	}
 	if b.BatchSize < 1 || b.BatchSize > 1000 {
-		problems = append(problems, "batch_size must be 1..1000")
+		problems.add("batch_size", "batch_size must be 1..1000")
 	}
 	if b.Format == "" {
 		b.Format = "nexus"
 	}
 	if b.Format != "nexus" && b.Format != "kgf" {
-		problems = append(problems, "format must be nexus or kgf")
+		problems.add("format", "format must be nexus or kgf")
 	}
-	if len(problems) > 0 {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "invalid_sink", "problems": problems})
+	if len(problems.fields) > 0 {
+		problems.write(w)
 		return
 	}
 	secret, err := auditexport.NewSecret()
@@ -645,17 +690,20 @@ func (a *API) updateAuditSink(w http.ResponseWriter, r *http.Request, p authn.Pr
 		Revision  int64   `json:"revision"`
 	}
 	if err := decodeRBACBody(w, r, &b); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		rejectBody(w, err, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if !revisionOK(w, b.Revision) {
 		return
 	}
 	if b.URL != nil {
 		if err := a.sinkPolicy.CheckURL(*b.URL); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_sink", err.Error())
+			writeSinkFieldError(w, "url", err.Error())
 			return
 		}
 	}
 	if b.BatchSize != nil && (*b.BatchSize < 1 || *b.BatchSize > 1000) {
-		writeError(w, http.StatusUnprocessableEntity, "invalid_sink", "batch_size must be 1..1000")
+		writeSinkFieldError(w, "batch_size", "batch_size must be 1..1000")
 		return
 	}
 	a.writeSinkUpdate(w, r, ns, id, store.AuditSinkUpdate{URL: b.URL, Enabled: b.Enabled, BatchSize: b.BatchSize, Revision: b.Revision},
@@ -672,7 +720,10 @@ func (a *API) rotateAuditSinkSecret(w http.ResponseWriter, r *http.Request, p au
 		Revision int64 `json:"revision"`
 	}
 	if err := decodeRBACBody(w, r, &b); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		rejectBody(w, err, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if !revisionOK(w, b.Revision) {
 		return
 	}
 	secret, err := auditexport.NewSecret()

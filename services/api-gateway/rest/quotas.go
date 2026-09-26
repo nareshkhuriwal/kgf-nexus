@@ -111,7 +111,7 @@ type quotasPutRequest struct {
 func (a *API) quotasPut(w http.ResponseWriter, r *http.Request, p authn.Principal) {
 	body, err := readBody(r, 64<<10)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req quotasPutRequest
@@ -133,6 +133,9 @@ func (a *API) quotasPut(w http.ResponseWriter, r *http.Request, p authn.Principa
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_quotas", err.Error())
+		return
+	}
+	if !revisionOK(w, *req.Revision) {
 		return
 	}
 	// rate_limits (ADR-0032) postdates the console's quota editor. A client
@@ -195,13 +198,13 @@ func quotasBodyHas(body []byte, field string) bool {
 // isPlatformOperator is platformOperator without the 403: the quotas PUT asks
 // the question to decide what a caller may do, not whether it may call.
 func (a *API) isPlatformOperator(r *http.Request, p authn.Principal) (bool, error) {
-	if p.Kind != authn.KindSession || p.Role != authn.RoleAdmin || p.Grants != nil {
+	if p.Kind != authn.KindSession || p.Role != authn.RoleAdmin || p.Grants != nil || p.KGF != nil {
 		return false, nil
 	}
 	return store.GatewayPlatformOperator(r.Context(), a.db, p.UserID)
 }
 
-// parseUsageQuery reads from, to, group_by, cursor and limit. from/to accept
+// parseUsageQuery reads from, to, group_by and cursor. from/to accept
 // RFC 3339 or a UTC date; the default range is the 30 days ending now.
 func parseUsageQuery(r *http.Request) (store.UsageQuery, error) {
 	v := r.URL.Query()
@@ -227,21 +230,31 @@ func parseUsageQuery(r *http.Request) (store.UsageQuery, error) {
 			return q, errors.New("to must be RFC 3339 or YYYY-MM-DD")
 		}
 	}
-	if s := v.Get("limit"); s != "" {
-		if q.Limit, err = strconv.Atoi(s); err != nil || q.Limit < 1 {
-			return q, errors.New("limit must be a positive integer")
-		}
-	}
 	if len(q.Cursor) > 512 {
 		return q, errors.New("cursor is too long")
 	}
 	return q, nil
 }
 
-func (a *API) usageGet(w http.ResponseWriter, r *http.Request, p authn.Principal) {
+// usageQuery is parseUsageQuery plus the shared page-size rule (listLimit),
+// writing the 400 itself.
+func usageQuery(w http.ResponseWriter, r *http.Request) (store.UsageQuery, bool) {
+	limit, ok := listLimit(w, r, store.DefaultUsagePage, store.MaxUsagePage)
+	if !ok {
+		return store.UsageQuery{}, false
+	}
 	q, err := parseUsageQuery(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
+		return q, false
+	}
+	q.Limit = limit
+	return q, true
+}
+
+func (a *API) usageGet(w http.ResponseWriter, r *http.Request, p authn.Principal) {
+	q, ok := usageQuery(w, r)
+	if !ok {
 		return
 	}
 	page, err := store.GatewayUsageRollup(r.Context(), a.db, p.Namespace, q)
@@ -252,9 +265,8 @@ func (a *API) platformUsageGet(w http.ResponseWriter, r *http.Request, p authn.P
 	if !a.platformOperator(w, r, p) {
 		return
 	}
-	q, err := parseUsageQuery(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
+	q, ok := usageQuery(w, r)
+	if !ok {
 		return
 	}
 	q.GroupBy = "namespace"

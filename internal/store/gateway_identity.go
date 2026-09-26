@@ -283,9 +283,7 @@ func GatewaySetUserPassword(ctx context.Context, q GWQuerier, userID, password s
 
 // GatewayListUsers lists accounts in a namespace, newest first.
 func GatewayListUsers(ctx context.Context, q GWQuerier, namespace string, limit int) ([]UserRow, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
+	limit = ClampLimit(limit, DefaultUserList, MaxUserList)
 	rows, err := q.Query(ctx, `
 		SELECT id::text, namespace, email, display_name, role, created_at, disabled_at, email_verified_at
 		  FROM users
@@ -525,9 +523,7 @@ func GatewayRevokeUserSessions(ctx context.Context, q GWQuerier, userID string) 
 
 // GatewayListUserSessions lists a user's sessions, live ones first.
 func GatewayListUserSessions(ctx context.Context, q GWQuerier, userID string, limit int) ([]SessionRow, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
+	limit = ClampLimit(limit, DefaultSessionPage, MaxSessionPage)
 	rows, err := q.Query(ctx, `
 		SELECT id::text, user_id::text, expires_at, created_at, revoked_at, user_agent, client_ip, last_used_at
 		  FROM sessions
@@ -719,9 +715,7 @@ func GatewayTouchScopedToken(ctx context.Context, q GWQuerier, tokenID string) e
 
 // GatewayListScopedTokens lists a namespace's tokens, newest first.
 func GatewayListScopedTokens(ctx context.Context, q GWQuerier, namespace string, limit int) ([]ScopedTokenRow, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
+	limit = ClampLimit(limit, DefaultTokenPage, MaxTokenPage)
 	rows, err := q.Query(ctx, `
 		SELECT id::text, namespace, name, scopes, role, expires_at, last_used_at,
 		       created_by::text, created_at, revoked_at, service_account_id::text, permissions

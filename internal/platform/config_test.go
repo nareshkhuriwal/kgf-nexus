@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -89,6 +90,28 @@ func TestFairShareWeightBounds(t *testing.T) {
 		c.Scheduler.FairShareWeight = tc.w
 		if err := c.Validate(); (err == nil) != tc.ok {
 			t.Errorf("weight %d: err=%v, want ok=%v", tc.w, err, tc.ok)
+		}
+	}
+}
+
+// TestNormalizedConfigHasNoNullCollections: a PUT that omits pools, or a
+// profile with no tolerations, used to be stored and served with null lists.
+func TestNormalizedConfigHasNoNullCollections(t *testing.T) {
+	var c Config
+	if err := json.Unmarshal([]byte(`{"revision":1,"pools":null,"profiles":[{"name":"cpu","tolerations":null}]}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	c.Normalize()
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "null") {
+		t.Errorf("normalized config still serialises a null: %s", b)
+	}
+	for _, want := range []string{`"pools":[]`, `"tolerations":[]`, `"node_selector":{}`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("normalized config lacks %s: %s", want, b)
 		}
 	}
 }

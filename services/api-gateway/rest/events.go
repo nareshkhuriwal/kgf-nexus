@@ -124,7 +124,7 @@ func decodeStrict(w http.ResponseWriter, r *http.Request, limit int64, out any) 
 	d.DisallowUnknownFields()
 	d.UseNumber()
 	if err := d.Decode(out); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed_json", "request body is not valid: "+err.Error())
+		rejectBody(w, err, http.StatusBadRequest, "malformed_json", "request body is not valid: "+err.Error())
 		return false
 	}
 	return true

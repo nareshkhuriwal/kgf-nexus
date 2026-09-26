@@ -327,17 +327,78 @@ func writeString(b *bytes.Buffer, s string) {
 }
 
 // YAML renders the document as YAML, for `compile --show --output yaml`.
+//
+// It must recompile to the same content address, so it goes through
+// EncodeYAML rather than encoding the map directly: yaml.v3 renders a string
+// that begins with a newline as a literal block that drops the newline, and a
+// task command "\necho hi\n" came back as "echo hi\n".
 func (d *Document) YAML() ([]byte, error) {
-	var b bytes.Buffer
-	enc := yaml.NewEncoder(&b)
-	enc.SetIndent(2)
-	if err := enc.Encode(d.Value); err != nil {
+	return EncodeYAML(d.JSON)
+}
+
+// EncodeYAML renders a JSON document as block-style YAML that parses back to
+// the SAME document (the same content address), keeping the JSON's key order.
+//
+// yaml.v3's literal block style is the readable choice for scripts, but its
+// emitter drops a leading newline and mangles some whitespace-only lines, and
+// either silently changes a command. So every rendering is checked by parsing
+// it back: multi-line strings that are known to be risky are double-quoted up
+// front, and if the result still differs, every multi-line string is. JSON is
+// valid YAML, so a document that defeats both is returned as its JSON.
+//
+// Shared with the importer, which hit the same emitter behaviour first.
+func EncodeYAML(docJSON []byte) ([]byte, error) {
+	want, err := Parse(docJSON, "document")
+	if err != nil {
 		return nil, fmt.Errorf("rendering YAML: %w", err)
 	}
-	if err := enc.Close(); err != nil {
-		return nil, fmt.Errorf("rendering YAML: %w", err)
+	for _, quoteAll := range []bool{false, true} {
+		// Built from the JSON (valid YAML, key order kept), not with
+		// Node.Encode, which round-trips through yaml.v3's own emitter and fails
+		// on the very strings this guards against.
+		var n yaml.Node
+		if err := yaml.Unmarshal(docJSON, &n); err != nil {
+			return nil, fmt.Errorf("rendering YAML: %w", err)
+		}
+		styleYAMLStrings(&n, quoteAll)
+		var b bytes.Buffer
+		enc := yaml.NewEncoder(&b)
+		enc.SetIndent(2)
+		if err := enc.Encode(&n); err != nil {
+			continue
+		}
+		if err := enc.Close(); err != nil {
+			continue
+		}
+		if got, err := Parse(b.Bytes(), "rendered"); err == nil && got.Hash == want.Hash {
+			return b.Bytes(), nil
+		}
 	}
-	return b.Bytes(), nil
+	return append([]byte(nil), docJSON...), nil
+}
+
+// styleYAMLStrings sets block style on collections, literal style on ordinary
+// multi-line strings, and double quotes on the multi-line strings the literal
+// style would change (or on every one, when quoteAll).
+func styleYAMLStrings(n *yaml.Node, quoteAll bool) {
+	switch {
+	case n.Kind == yaml.MappingNode || n.Kind == yaml.SequenceNode:
+		n.Style = 0 // block, not JSON's flow style
+	case n.Kind == yaml.ScalarNode && n.Tag == "!!str" && strings.Contains(n.Value, "\n"):
+		risky := strings.HasPrefix(n.Value, "\n") || strings.HasPrefix(n.Value, " ") ||
+			strings.Contains(n.Value, " \n") || strings.Contains(n.Value, "\t") ||
+			strings.Contains(n.Value, "\r")
+		if quoteAll || risky {
+			n.Style = yaml.DoubleQuotedStyle
+		} else {
+			n.Style = yaml.LiteralStyle
+		}
+	case n.Kind == yaml.ScalarNode:
+		n.Style = 0 // the emitter quotes only where YAML needs it
+	}
+	for _, c := range n.Content {
+		styleYAMLStrings(c, quoteAll)
+	}
 }
 
 // Indented renders the canonical document with indentation, for human reading.

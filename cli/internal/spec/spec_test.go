@@ -4,6 +4,7 @@
 package spec
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -201,6 +202,55 @@ edges:
 	if again.Hash != original.Hash {
 		t.Errorf("YAML round trip changed the hash:\n  before: %s\n  after:  %s",
 			original.Hash, again.Hash)
+	}
+}
+
+// TestYAMLKeepsEveryStringExact: `compile --show --output yaml` rendered a
+// multi-line string that STARTS with a newline in yaml.v3's literal block
+// style, which drops that newline -- so a task command "\necho hi\n" came back
+// as "echo hi\n", a different spec with a different hash. The importer hit
+// the same yaml.v3 behaviour (cli/internal/importer, specYAML). Every string
+// here must survive the round trip byte for byte.
+func TestYAMLKeepsEveryStringExact(t *testing.T) {
+	for _, s := range []string{
+		"\necho hi\n", "\n\nx", "  indented\nline\n", "a \nb", "a\n\n  \nb",
+		"x\ty\nz", "trail\n\n\n", "a\r\nb", "é\nb ", "plain", "", "---\nnot a document marker",
+		"# not a comment\n", "key: value\n", "- item\n",
+	} {
+		raw, err := json.Marshal(map[string]any{
+			"api_version": "nexus.dev/v1", "name": "strings",
+			"tasks": []any{map[string]any{"id": "t", "task_ref": "r", "version": 1, "command": s}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		original := parse(t, string(raw))
+		rendered, err := original.YAML()
+		if err != nil {
+			t.Fatalf("%q: %v", s, err)
+		}
+		again, err := Parse(rendered, "rendered.yaml")
+		if err != nil {
+			t.Errorf("%q: re-parsing our own YAML failed: %v\n%s", s, err, rendered)
+			continue
+		}
+		got := again.Value["tasks"].([]any)[0].(map[string]any)["command"]
+		if got != s || again.Hash != original.Hash {
+			t.Errorf("%q came back as %q (hash changed: %v):\n%s", s, got, again.Hash != original.Hash, rendered)
+		}
+	}
+}
+
+// TestYAMLStaysReadable: the fix must not buy exactness by quoting every
+// script; an ordinary multi-line command stays a literal block.
+func TestYAMLStaysReadable(t *testing.T) {
+	doc := parse(t, `{"api_version":"nexus.dev/v1","name":"r","tasks":[{"id":"t","task_ref":"r","version":1,"command":"set -e\necho hi\n"}]}`)
+	rendered, err := doc.YAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rendered), "command: |") {
+		t.Errorf("an ordinary script should render as a literal block:\n%s", rendered)
 	}
 }
 

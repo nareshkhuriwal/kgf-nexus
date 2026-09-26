@@ -25,6 +25,9 @@ func GatewayPlatformGet(ctx context.Context, q GWQuerier, ns string) (platform.C
 	rev := c.Revision
 	err = json.Unmarshal(raw, &c)
 	c.Revision = rev
+	// A document saved with "pools": null (before Normalize existed) would
+	// otherwise overwrite Default()'s empty list with nil.
+	c.Normalize()
 	return c, err
 }
 func GatewayPlatformPut(ctx context.Context, db GWDB, ns string, c platform.Config, audit AuditEntry) (platform.Config, error) {
@@ -38,6 +41,7 @@ func GatewayPlatformPut(ctx context.Context, db GWDB, ns string, c platform.Conf
 	defer tx.Rollback(ctx)
 	old := c.Revision
 	c.Revision++
+	c.Normalize()
 	raw, err := json.Marshal(c)
 	if err != nil {
 		return c, err

@@ -23,14 +23,18 @@ import (
 // follow-up request to render a row. That is the difference between a triage
 // list and a list of links.
 func (a *API) attention(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	limit, ok := listLimit(w, r, store.DefaultAttentionLimit, store.MaxAttentionItems)
+	if !ok {
+		return
+	}
 	f := store.AttentionFilter{
-		Limit:        intParam(r, "limit", store.DefaultAttentionLimit),
+		Limit:        limit,
 		BlockedFor:   durationParam(r, "blocked_for", store.DefaultAttentionBlockedFor),
 		FailedWithin: durationParam(r, "failed_within", store.DefaultAttentionFailedWithin),
 		StalledFor:   durationParam(r, "stalled_for", store.DefaultAttentionStalledFor),
 	}
 
-	items, err := store.GatewayListAttention(r.Context(), a.db, r.PathValue("ns"), f)
+	items, truncated, err := store.GatewayListAttentionPage(r.Context(), a.db, r.PathValue("ns"), f)
 	if err != nil {
 		a.fail(w, r, "list attention", err)
 		return
@@ -45,11 +49,11 @@ func (a *API) attention(w http.ResponseWriter, r *http.Request, _ authn.Principa
 		// The count is the number RETURNED, and the flag says whether the cap
 		// truncated it. Stated explicitly rather than left for the client to
 		// infer from len(items) == limit, because that inference is wrong
-		// exactly when the list happens to be the cap's length, and an operator
-		// who believes they are seeing everything when they are not is the
-		// failure this panel exists to prevent.
+		// exactly when the list happens to be the cap's length -- which is
+		// also the mistake this flag itself used to make, until the store
+		// began fetching one row past the cap to decide it.
 		"count":     len(items),
-		"truncated": len(items) == f.EffectiveLimit(),
+		"truncated": truncated,
 	})
 }
 

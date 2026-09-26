@@ -101,7 +101,7 @@ func (a *API) createSchedule(w http.ResponseWriter, r *http.Request, p authn.Pri
 	}
 	body, err := readBody(r, maxSpecBytes)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "unreadable_body", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req createScheduleRequest
@@ -262,7 +262,11 @@ func (a *API) createSchedule(w http.ResponseWriter, r *http.Request, p authn.Pri
 }
 
 func (a *API) listSchedules(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
-	rows, err := store.WFMListSchedules(r.Context(), a.db, r.PathValue("ns"), intParam(r, "limit", 100))
+	limit, ok := listLimit(w, r, store.DefaultSchedule, store.MaxSchedulePage)
+	if !ok {
+		return
+	}
+	rows, err := store.WFMListSchedules(r.Context(), a.db, r.PathValue("ns"), limit)
 	if err != nil {
 		a.failSchedule(w, r, "list schedules", err)
 		return
@@ -564,7 +568,7 @@ func (a *API) startBackfill(w http.ResponseWriter, r *http.Request, p authn.Prin
 
 	body, err := readBody(r, maxSpecBytes)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "unreadable_body", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req startBackfillRequest
@@ -597,12 +601,16 @@ func (a *API) startBackfill(w http.ResponseWriter, r *http.Request, p authn.Prin
 
 func (a *API) listBackfills(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
 	ns, name := r.PathValue("ns"), r.PathValue("name")
+	limit, ok := listLimit(w, r, store.DefaultBackfill, store.MaxBackfillPage)
+	if !ok {
+		return
+	}
 	sch, err := store.WFMGetSchedule(r.Context(), a.db, ns, name)
 	if err != nil {
 		a.failSchedule(w, r, "get schedule", err)
 		return
 	}
-	rows, err := store.WFMListBackfills(r.Context(), a.db, ns, sch.ID, intParam(r, "limit", 50))
+	rows, err := store.WFMListBackfills(r.Context(), a.db, ns, sch.ID, limit)
 	if err != nil {
 		a.failSchedule(w, r, "list backfills", err)
 		return

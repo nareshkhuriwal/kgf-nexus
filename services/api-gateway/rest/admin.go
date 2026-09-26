@@ -121,7 +121,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	r = a.attachKGF(r, authn.Principal{})
 	body, err := readBody(r, maxLoginBytes)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 
@@ -301,8 +301,12 @@ type usersPager interface {
 // server. next_cursor is null on the last page.
 func (a *API) listUsers(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
 	if pager, ok := a.identity.(usersPager); ok {
+		limit, ok := listLimit(w, r, store.DefaultUserList, store.MaxUsersPage)
+		if !ok {
+			return
+		}
 		q := r.URL.Query()
-		page, err := pager.ListUsersPage(r.Context(), r.PathValue("ns"), intParam(r, "limit", 100), q.Get("cursor"), q.Get("q"))
+		page, err := pager.ListUsersPage(r.Context(), r.PathValue("ns"), limit, q.Get("cursor"), q.Get("q"))
 		if errors.Is(err, store.ErrBadCursor) {
 			writeError(w, http.StatusBadRequest, "invalid_cursor", "cursor is not one this server issued; restart from the first page")
 			return
@@ -322,7 +326,11 @@ func (a *API) listUsers(w http.ResponseWriter, r *http.Request, _ authn.Principa
 		writeJSON(w, http.StatusOK, map[string]any{"users": out, "next_cursor": next})
 		return
 	}
-	rows, err := a.identity.ListUsers(r.Context(), r.PathValue("ns"), intParam(r, "limit", 100))
+	limit, ok := listLimit(w, r, store.DefaultUserList, store.MaxUserList)
+	if !ok {
+		return
+	}
+	rows, err := a.identity.ListUsers(r.Context(), r.PathValue("ns"), limit)
 	if err != nil {
 		a.fail(w, r, "list users", err)
 		return
@@ -343,7 +351,7 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request, p authn.Princip
 	ns := r.PathValue("ns")
 	body, err := readBody(r, maxLoginBytes)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req struct {
@@ -492,7 +500,7 @@ func (a *API) resetUserPassword(w http.ResponseWriter, r *http.Request, p authn.
 	ns, id := r.PathValue("ns"), r.PathValue("id")
 	body, err := readBody(r, maxLoginBytes)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req struct {
@@ -546,13 +554,17 @@ func (a *API) resetUserPassword(w http.ResponseWriter, r *http.Request, p authn.
 // listUserSessions shows where an account is currently logged in.
 func (a *API) listUserSessions(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
 	ns, id := r.PathValue("ns"), r.PathValue("id")
+	limit, ok := listLimit(w, r, store.DefaultSessionPage, store.MaxSessionPage)
+	if !ok {
+		return
+	}
 	// Namespace-scoped existence check first, so sessions are not enumerable across
 	// tenants by user UUID.
 	if _, err := a.identity.GetUser(r.Context(), ns, id); err != nil {
 		a.fail(w, r, "get user", err)
 		return
 	}
-	rows, err := a.identity.ListUserSessions(r.Context(), id, intParam(r, "limit", 50))
+	rows, err := a.identity.ListUserSessions(r.Context(), id, limit)
 	if err != nil {
 		a.fail(w, r, "list sessions", err)
 		return
@@ -606,7 +618,11 @@ func userPayload(u store.UserRow) map[string]any {
 // ── scoped tokens ────────────────────────────────────────────────────────
 
 func (a *API) listTokens(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
-	rows, err := a.identity.ListScopedTokens(r.Context(), r.PathValue("ns"), intParam(r, "limit", 100))
+	limit, ok := listLimit(w, r, store.DefaultTokenPage, store.MaxTokenPage)
+	if !ok {
+		return
+	}
+	rows, err := a.identity.ListScopedTokens(r.Context(), r.PathValue("ns"), limit)
 	if err != nil {
 		a.fail(w, r, "list tokens", err)
 		return
@@ -623,7 +639,7 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request, p authn.Princi
 	ns := r.PathValue("ns")
 	body, err := readBody(r, maxLoginBytes)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req struct {
