@@ -99,6 +99,10 @@ type Config struct {
 	// disabled means agents ship no logs -- the right answer for a gateway that
 	// cannot READ them back, since objects nobody can serve are pure cost.
 	LogShipping *nexusv1.LogShippingConfig
+	// WorkloadAPI is advertised to workers at registration (ADR-0032). Nil
+	// offers none of it: agents then expose no usage, permit or checkpoint
+	// endpoints to their tasks, and the RPCs answer Unimplemented.
+	WorkloadAPI *nexusv1.WorkloadApiConfig
 }
 
 // DefaultConfig is the tuning from ADR-0010 and §5.5.
@@ -189,6 +193,7 @@ func (s *Server) Register(ctx context.Context, req *nexusv1.RegisterRequest) (*n
 		LeaseTtlMs:          int32(s.cfg.LeaseTTL.Milliseconds()),
 		ResultStore:         s.cfg.ResultStore,
 		LogShipping:         s.cfg.LogShipping,
+		WorkloadApi:         s.advertisedWorkloadAPI(),
 	}, nil
 }
 

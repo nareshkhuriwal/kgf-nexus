@@ -746,8 +746,9 @@ func deriveNodeStates(
 		// attempt_number against the ceiling is the honest test -- counted from
 		// the node's retry_floor, because an operator retry grants the budget
 		// afresh and the attempts below the floor belong to the superseded tries
-		// (CONTRACT-FINDINGS F100). LoadAttempts has already dropped those.
-		exhausted := last.AttemptNumber-n.RetryFloor >= maxAttempts
+		// (CONTRACT-FINDINGS F100). LoadAttempts has already dropped those. Free
+		// RATE_LIMITED retries are not charged either (ADR-0032 §3).
+		exhausted := last.AttemptNumber-n.RetryFloor-n.FreeRetries >= maxAttempts
 		out[n.NodeID] = dag.AttemptStateToNode(string(last.State), exhausted)
 	}
 	return out

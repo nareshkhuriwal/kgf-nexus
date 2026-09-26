@@ -111,6 +111,7 @@ type attemptReportService interface {
 	RecordProgress(context.Context, *RecordProgressRequest) (*RecordProgressResponse, error)
 	ApplyResult(context.Context, *ApplyResultRequest) (*ApplyResultResponse, error)
 	CancelRunAttempts(context.Context, *CancelRunAttemptsRequest) (*CancelRunAttemptsResponse, error)
+	workloadService
 }
 
 // ReportServer implements the attempt-report half.
@@ -120,9 +121,16 @@ type attemptReportService interface {
 // re-checking ownership. The one exception is CancelRunAttempts, which is called
 // by workflow-manager rather than by a worker and carries no lease at all.
 type ReportServer struct {
-	store *store.SchedulerStore
-	log   *slog.Logger
-	now   func() time.Time
+	store   *store.SchedulerStore
+	log     *slog.Logger
+	now     func() time.Time
+	metrics *Metrics
+}
+
+// WithMetrics installs the workload-API instruments. Nil records nothing.
+func (r *ReportServer) WithMetrics(m *Metrics) *ReportServer {
+	r.metrics = m
+	return r
 }
 
 // NewReportServer builds the adapter.
@@ -242,6 +250,10 @@ var AttemptReportServiceDesc = grpc.ServiceDesc{
 		{MethodName: "RecordProgress", Handler: recordProgressHandler},
 		{MethodName: "ApplyResult", Handler: applyResultHandler},
 		{MethodName: "CancelRunAttempts", Handler: cancelRunAttemptsHandler},
+		// The workload API (ADR-0032), workload_grpc.go.
+		{MethodName: "RecordUsage", Handler: recordUsageHandler},
+		{MethodName: "AcquirePermits", Handler: acquirePermitsHandler},
+		{MethodName: "SaveCheckpoint", Handler: saveCheckpointHandler},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "services/scheduler/reports_grpc.go",

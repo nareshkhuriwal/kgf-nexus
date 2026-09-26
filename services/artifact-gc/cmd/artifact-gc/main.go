@@ -220,7 +220,7 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	// A human-readable summary on stdout as well as the structured log: this is a
 	// command an operator reads, not a service whose logs get shipped.
 	fmt.Printf("\nartifact-gc summary (%s)\n", mode)
-	fmt.Printf("  objects examined      %d  (%d task-log objects)\n", st.Listed, st.LogObjects)
+	fmt.Printf("  objects examined      %d  (%d task-log, %d checkpoint objects)\n", st.Listed, st.LogObjects, st.CheckpointObjects)
 	fmt.Printf("  live references       %d  (from %v)\n", st.LiveRefs, artifactgc.RefSources())
 	fmt.Printf("  reachable (kept)      %d\n", st.Reachable)
 	fmt.Printf("  too young (kept)      %d  (grace %s)\n", st.TooYoung, sw.Config().GracePeriod)

@@ -108,6 +108,7 @@ func RefSources() []string {
 		out = append(out, r.String())
 	}
 	out = append(out, logRefSources...)
+	out = append(out, checkpointRefSources...)
 	return out
 }
 

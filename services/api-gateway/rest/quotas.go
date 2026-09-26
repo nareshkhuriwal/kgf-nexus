@@ -135,6 +135,19 @@ func (a *API) quotasPut(w http.ResponseWriter, r *http.Request, p authn.Principa
 		writeError(w, http.StatusBadRequest, "invalid_quotas", err.Error())
 		return
 	}
+	// rate_limits (ADR-0032) postdates the console's quota editor. A client
+	// that omits the key keeps the stored limits instead of erasing them --
+	// the rule ADR-0021 set for quotas under the platform-config route. The
+	// revision check in the write still refuses a stale save, so the copy
+	// below cannot resurrect limits another admin removed since.
+	if !quotasBodyHas(body, "rate_limits") {
+		_, stored, gerr := store.GatewayQuotasGet(r.Context(), a.db, p.Namespace)
+		if gerr != nil && !errors.Is(gerr, store.ErrNotFound) {
+			a.fail(w, r, "load stored rate limits", gerr)
+			return
+		}
+		req.Quotas.RateLimits = stored.RateLimits
+	}
 	operator, err := a.isPlatformOperator(r, p)
 	if err != nil {
 		a.fail(w, r, "check platform operator", err)
@@ -164,6 +177,19 @@ func (a *API) quotasPut(w http.ResponseWriter, r *http.Request, p authn.Principa
 		q.MaxCustom = map[string]int64{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"namespace": p.Namespace, "revision": rev, "quotas": q})
+}
+
+// quotasBodyHas reports whether the PUT body's quotas object names field. The
+// body has already been decoded strictly, so a parse failure here means "no".
+func quotasBodyHas(body []byte, field string) bool {
+	var raw struct {
+		Quotas map[string]json.RawMessage `json:"quotas"`
+	}
+	if json.Unmarshal(body, &raw) != nil {
+		return false
+	}
+	_, ok := raw.Quotas[field]
+	return ok
 }
 
 // isPlatformOperator is platformOperator without the 403: the quotas PUT asks

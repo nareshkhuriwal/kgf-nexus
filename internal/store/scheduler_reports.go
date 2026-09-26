@@ -197,10 +197,11 @@ func (s *SchedulerStore) ApplyResult(
 	// into a no-op exactly as skipping did, and a peer applying the same result
 	// is seen as terminal. The wait cannot deadlock on this statement because it
 	// is the transaction's first lock. See lockAttemptForTransition.
-	const lockQ = `
+	lockQ := `
 SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
        a.resource_request, a.scheduled_at, a.priority, a.queue,
-       n.spec_json, n.attempts_used, n.max_attempts, r.deadline_at, n.retry_floor
+       n.spec_json, n.attempts_used, n.max_attempts, r.deadline_at, n.retry_floor,
+       ` + s.freeRetriesColumn() + `
   FROM task_attempts a
   JOIN task_nodes    n ON n.run_id = a.run_id AND n.node_id = a.node_id
   JOIN workflow_runs r ON r.id = a.run_id
@@ -219,7 +220,7 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
 		return tx.QueryRow(ctx, lockQ, attemptID).Scan(
 			&cand.ID, &cand.RunID, &cand.NodeID, &cand.AttemptNumber, &workerID,
 			&reqJSON, &cand.ScheduledAt, &cand.Priority, &cand.Queue,
-			&specJSON, &attemptsUsed, &maxAttempt, &runDeadline, &cand.RetryFloor)
+			&specJSON, &attemptsUsed, &maxAttempt, &runDeadline, &cand.RetryFloor, &cand.FreeRetries)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Already terminal: a duplicate report (the expected consequence of
@@ -341,8 +342,13 @@ UPDATE task_attempts
 	// crash cannot leave an attempt failed with no retry scheduled and no record
 	// that one was owed.
 	if state != string(domain.AttemptSucceeded) {
+		// Free RATE_LIMITED retries were never charged (ADR-0032 §3).
+		charged := attemptsUsed - cand.FreeRetries
+		if charged < 0 {
+			charged = 0
+		}
 		decision, _, rerr := s.evaluateAndScheduleRetryWithClass(
-			ctx, tx, now, &cand, errClass, attemptsUsed, maxAttempt, runDeadline)
+			ctx, tx, now, &cand, errClass, req.GetError().GetRetryAfterMs(), charged, maxAttempt, runDeadline)
 		if rerr != nil {
 			return AppliedResult{}, rerr
 		}
@@ -366,7 +372,7 @@ UPDATE task_attempts
 // told it.
 func (s *SchedulerStore) evaluateAndScheduleRetryWithClass(
 	ctx context.Context, tx pgx.Tx, now time.Time, att *Candidate,
-	class nexusv1.ErrorClass, attemptsUsed, maxAttempts int32, runDeadline *time.Time,
+	class nexusv1.ErrorClass, retryAfterMs int64, attemptsUsed, maxAttempts int32, runDeadline *time.Time,
 ) (domain.RetryDecision, time.Time, error) {
 	policy := att.Spec.RetryPolicy()
 
@@ -376,8 +382,21 @@ func (s *SchedulerStore) evaluateAndScheduleRetryWithClass(
 		stcExceeded = true
 	}
 
-	decision := domain.ShouldRetry(class, att.Spec.IdempotencyModeProto(),
-		attemptsUsed, maxAttempts, stcExceeded, policy)
+	// A provider throttle (ADR-0032 §3) is retried without charging the
+	// budget up to the node's cap, then like TRANSIENT. Needs migration 0036's
+	// free_retries; before it, RATE_LIMITED is judged by the ordinary policy.
+	rateLimited := class == nexusv1.ErrorClass_ERROR_CLASS_RATE_LIMITED && !s.workloadMissing
+	var (
+		decision domain.RetryDecision
+		free     bool
+	)
+	if rateLimited {
+		decision, free = domain.RateLimitedDecision(att.Spec.IdempotencyModeProto(),
+			attemptsUsed, maxAttempts, att.FreeRetries, s.freeRetryCap(), stcExceeded, policy)
+	} else {
+		decision = domain.ShouldRetry(class, att.Spec.IdempotencyModeProto(),
+			attemptsUsed, maxAttempts, stcExceeded, policy)
+	}
 
 	if decision.Warn {
 		if err := appendEvent(ctx, tx, att.RunID, att.NodeID, &att.ID,
@@ -404,6 +423,20 @@ func (s *SchedulerStore) evaluateAndScheduleRetryWithClass(
 	}
 
 	delay := domain.Backoff(policy, att.AttemptNumber-att.RetryFloor)
+	if rateLimited {
+		delay = domain.RateLimitedDelay(retryAfterMs, policy, att.AttemptNumber-att.RetryFloor)
+	}
+	if free {
+		// Recorded NOW, in the terminal transaction, not when the retry
+		// attempt is created: the DAG engine derives the node's exhaustion
+		// from this column while the backoff timer is still pending, and
+		// would otherwise mark the node FAILED before its free retry exists.
+		if _, err := tx.Exec(ctx, `
+UPDATE task_nodes SET free_retries = free_retries + 1
+ WHERE run_id = $1 AND node_id = $2`, att.RunID, att.NodeID); err != nil {
+			return decision, time.Time{}, fmt.Errorf("record free retry for %s/%s: %w", att.RunID, att.NodeID, err)
+		}
+	}
 	fireAt := now.Add(delay)
 	if err := insertTimer(ctx, tx, domain.TimerRetryBackoff, att.ID, fireAt, map[string]any{
 		"run_id": att.RunID.String(), "node_id": att.NodeID,
@@ -412,11 +445,19 @@ func (s *SchedulerStore) evaluateAndScheduleRetryWithClass(
 	}); err != nil {
 		return decision, time.Time{}, err
 	}
+	event := map[string]any{
+		"reason": decision.Reason, "backoff_ms": delay.Milliseconds(),
+		"next_attempt_number": att.AttemptNumber + 1,
+	}
+	if rateLimited {
+		event["charged"] = !free
+		event["free_retries_used"] = att.FreeRetries + boolToInt32(free)
+		if retryAfterMs > 0 {
+			event["retry_after_ms"] = retryAfterMs
+		}
+	}
 	if err := appendEvent(ctx, tx, att.RunID, att.NodeID, &att.ID,
-		domain.EventRetryScheduled, domain.ActorScheduler, map[string]any{
-			"reason": decision.Reason, "backoff_ms": delay.Milliseconds(),
-			"next_attempt_number": att.AttemptNumber + 1,
-		}); err != nil {
+		domain.EventRetryScheduled, domain.ActorScheduler, event); err != nil {
 		return decision, time.Time{}, err
 	}
 	return decision, fireAt, nil
@@ -596,4 +637,20 @@ func nullableJSON(b []byte) any {
 		return nil
 	}
 	return b
+}
+
+// freeRetriesColumn is the select-list expression for task_nodes.free_retries,
+// or a constant 0 before migration 0036 (DetectWorkloadSchema).
+func (s *SchedulerStore) freeRetriesColumn() string {
+	if s.workloadMissing {
+		return "0"
+	}
+	return "n.free_retries"
+}
+
+func boolToInt32(b bool) int32 {
+	if b {
+		return 1
+	}
+	return 0
 }

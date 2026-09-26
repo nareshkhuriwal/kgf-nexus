@@ -74,6 +74,11 @@ type ClaimConfig struct {
 	// no lock. Off (NEXUS_QUOTAS=false) is the rollback step before reverting
 	// migration 0027: the claim then reads neither the view nor the usage.
 	Quotas bool
+	// RateLimitedFreeRetries caps the RATE_LIMITED retries of one node that
+	// are not charged to its retry budget (ADR-0032 §3). Zero means
+	// domain.DefaultRateLimitedFreeRetries; negative disables free retries
+	// (every throttle is then charged like TRANSIENT).
+	RateLimitedFreeRetries int32
 }
 
 // DefaultClaimConfig returns the ADR-0010 recommended lease settings.
@@ -121,6 +126,11 @@ type SchedulerStore struct {
 	// terminal transition. Set once at startup, never flipped afterwards.
 	quotasMissing   bool
 	meteringMissing bool
+	// workloadMissing is set by DetectWorkloadSchema when migration 0036 is
+	// not applied yet: the ledger keeps its 0027 statement, retry accounting
+	// ignores free retries, and the workload-API writes answer
+	// ErrWorkloadUnavailable. Set once at startup.
+	workloadMissing bool
 }
 
 // NewSchedulerStore constructs the store. instanceID should be stable for the

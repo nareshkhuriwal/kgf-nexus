@@ -40,6 +40,10 @@ type Candidate struct {
 	// retry decision is made, so that backoff grows from the retry's own first
 	// attempt rather than from the superseded tries (CONTRACT-FINDINGS F100).
 	RetryFloor int32
+	// FreeRetries is the node's task_nodes.free_retries (migration 0036): the
+	// RATE_LIMITED retries not charged to its budget (ADR-0032 §3). Loaded,
+	// like RetryFloor, only where a retry decision is made.
+	FreeRetries int32
 	// Spec is the node's task spec, the source of timeouts, retry policy,
 	// node_selector, executor and concurrency settings. Read from
 	// task_nodes.spec_json, which the scheduler reads but never writes.
@@ -181,6 +185,8 @@ func errorClassFromString(s string) nexusv1.ErrorClass {
 		return nexusv1.ErrorClass_ERROR_CLASS_NOT_FOUND
 	case "infrastructure", "ERROR_CLASS_INFRASTRUCTURE":
 		return nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE
+	case "rate_limited", "ERROR_CLASS_RATE_LIMITED":
+		return nexusv1.ErrorClass_ERROR_CLASS_RATE_LIMITED
 	default:
 		return nexusv1.ErrorClass_ERROR_CLASS_UNSPECIFIED
 	}
