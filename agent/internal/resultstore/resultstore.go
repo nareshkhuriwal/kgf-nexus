@@ -21,14 +21,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"strings"
 	"time"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // DefaultInlineThresholdBytes is the fallback when the control plane does not
@@ -42,7 +43,7 @@ const DefaultInlineThresholdBytes = domain.DefaultInlineThresholdBytes
 
 // Client reads and writes content-addressed objects.
 type Client struct {
-	mc     *minio.Client
+	store  objstore.Store
 	bucket string
 	// namespace prefixes every key. It is the tenancy boundary: scoped worker
 	// credentials should permit only this prefix, so a compromised worker cannot
@@ -51,7 +52,25 @@ type Client struct {
 	inlineMax int64
 	log       *slog.Logger
 	onPut     func(result string, bytes int64, d time.Duration)
+	// refreshAge: a deduplicated object older than this is re-uploaded; see
+	// DedupeRefreshAge.
+	refreshAge time.Duration
 }
+
+// DedupeRefreshAge bounds how old an existing object may be for a Put to skip
+// the upload and reuse it (F141).
+//
+// The artifact GC deletes unreferenced objects older than its grace period
+// (24 h by default). An old ORPHAN with the same content as a new output --
+// the same bytes a pruned run produced last week -- is exactly such an object.
+// If Put deduplicated against it without touching it, the GC could delete it
+// in the window between this Put and the attempt's report committing the
+// reference, and the run would record a reference to bytes that no longer
+// exist. Re-uploading refreshes the object's modification time, which moves it
+// back inside every grace period; an hour keeps the saving for the common case
+// (a retry, or a fan-out producing identical outputs moments apart) while
+// leaving the GC grace period 23 hours of margin.
+const DedupeRefreshAge = time.Hour
 
 // PutResult values passed to Config.OnPut.
 const (
@@ -66,6 +85,13 @@ const (
 // plane — not the worker's own config file — is authoritative about where
 // results live.
 type Config struct {
+	// Store, when set, is the backend to use (s3, azblob or gcs; see
+	// internal/objstore) and every S3 field below is ignored. The agent builds
+	// it from the advertised ResultStoreConfig and its own credentials.
+	Store objstore.Store
+
+	// The S3 fields build an S3 backend when Store is nil. With no key pair
+	// the requests are unsigned, as they always were.
 	Endpoint        string
 	Bucket          string
 	Region          string
@@ -88,29 +114,40 @@ type Config struct {
 // INFRASTRUCTURE, rather than refusing to boot and silently shrinking the fleet
 // during an object-store blip.
 func New(cfg Config) (*Client, error) {
-	if cfg.Endpoint == "" {
-		return nil, errors.New("resultstore: endpoint is required")
-	}
-	if cfg.Bucket == "" {
-		return nil, errors.New("resultstore: bucket is required")
-	}
-	creds := credentials.NewStaticV4(cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken)
-	mc, err := minio.New(stripScheme(cfg.Endpoint), &minio.Options{
-		Creds:  creds,
-		Secure: cfg.UseTLS || strings.HasPrefix(cfg.Endpoint, "https://"),
-		Region: cfg.Region,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("resultstore: new client for %s: %w", cfg.Endpoint, err)
+	store := cfg.Store
+	if store == nil {
+		if cfg.Endpoint == "" {
+			return nil, errors.New("resultstore: endpoint is required")
+		}
+		if cfg.Bucket == "" {
+			return nil, errors.New("resultstore: bucket is required")
+		}
+		mode := objstore.S3CredStatic
+		if cfg.AccessKeyID == "" || cfg.SecretAccessKey == "" {
+			mode = objstore.S3CredAnonymous
+		}
+		var err error
+		store, err = objstore.Open(context.Background(), objstore.Config{
+			Backend: objstore.BackendS3, Endpoint: cfg.Endpoint, Bucket: cfg.Bucket,
+			Region: cfg.Region, UseTLS: cfg.UseTLS,
+			S3: objstore.S3Config{Credentials: mode, AccessKeyID: cfg.AccessKeyID,
+				SecretAccessKey: cfg.SecretAccessKey, SessionToken: cfg.SessionToken},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("resultstore: new client for %s: %w", cfg.Endpoint, err)
+		}
 	}
 	inline := domain.ClampInlineThreshold(cfg.InlineThreshold)
 	log := cfg.Log
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Client{mc: mc, bucket: cfg.Bucket, namespace: cfg.Namespace, inlineMax: inline, log: log,
-		onPut: cfg.OnPut}, nil
+	return &Client{store: store, bucket: store.Bucket(), namespace: cfg.Namespace, inlineMax: inline, log: log,
+		onPut: cfg.OnPut, refreshAge: DedupeRefreshAge}, nil
 }
+
+// Backend names the object-store backend in use.
+func (c *Client) Backend() string { return c.store.Backend() }
 
 // InlineThreshold reports the configured inline cutoff, for tests and logs.
 func (c *Client) InlineThreshold() int64 { return c.inlineMax }
@@ -128,7 +165,11 @@ func (c *Client) InlineThreshold() int64 { return c.inlineMax }
 // deadline.
 func (c *Client) Put(ctx context.Context, payload []byte, contentType string) (*nexusv1.ResultRef, error) {
 	start := time.Now()
+	ctx, span := tracing.Start(ctx, "resultstore.put",
+		trace.WithAttributes(attribute.Int64("nexus.result.size_bytes", int64(len(payload)))))
 	ref, result, err := c.put(ctx, payload, contentType)
+	span.SetAttributes(attribute.String("nexus.result.outcome", result))
+	tracing.End(span, err)
 	if c.onPut != nil {
 		c.onPut(result, int64(len(payload)), time.Since(start))
 	}
@@ -154,21 +195,26 @@ func (c *Client) put(ctx context.Context, payload []byte, contentType string) (*
 
 	// Content addressing makes a re-upload of identical bytes pointless: the
 	// object is already exactly what we would write. Skipping it turns a retry
-	// of a large output into a metadata call instead of a re-transfer.
-	if _, err := c.mc.StatObject(ctx, c.bucket, key, minio.StatObjectOptions{}); err == nil {
-		c.log.Debug("result already present; skipping upload",
+	// of a large output into a metadata call instead of a re-transfer -- unless
+	// the existing object is old enough to be a GC candidate (DedupeRefreshAge).
+	info, err := c.store.Stat(ctx, key)
+	switch {
+	case err == nil && time.Since(info.LastModified) < c.refreshAge:
+		c.log.DebugContext(ctx, "result already present; skipping upload",
 			"bucket", c.bucket, "key", key, "size_bytes", size)
 		return blobRef(c.bucket, key, digest, contentType, size), PutDeduplicated, nil
-	} else if !isNotFound(err) {
+	case err == nil:
+		c.log.DebugContext(ctx, "result present but old; re-uploading to refresh it ahead of the GC grace period",
+			"bucket", c.bucket, "key", key, "modified", info.LastModified)
+	case !errors.Is(err, objstore.ErrNotFound):
 		return nil, PutError, fmt.Errorf("resultstore: stat %s/%s: %w", c.bucket, key, err)
 	}
 
-	_, err := c.mc.PutObject(ctx, c.bucket, key, bytes.NewReader(payload), size,
-		minio.PutObjectOptions{ContentType: contentType})
-	if err != nil {
+	if err := c.store.Put(ctx, key, bytes.NewReader(payload), size,
+		objstore.PutOptions{ContentType: contentType}); err != nil {
 		return nil, PutError, fmt.Errorf("resultstore: put %s/%s: %w", c.bucket, key, err)
 	}
-	c.log.Debug("result stored", "bucket", c.bucket, "key", key, "size_bytes", size)
+	c.log.DebugContext(ctx, "result stored", "bucket", c.bucket, "key", key, "size_bytes", size)
 	return blobRef(c.bucket, key, digest, contentType, size), PutUploaded, nil
 }
 
@@ -187,15 +233,20 @@ func (c *Client) Get(ctx context.Context, ref *nexusv1.ResultRef) ([]byte, error
 		return k.Inline, nil
 	case *nexusv1.ResultRef_Blob:
 		bucket := k.Blob.GetBucket()
-		if bucket == "" {
-			bucket = c.bucket
+		if bucket != "" && bucket != c.bucket {
+			// A client is bound to one bucket (or container). A reference into
+			// another one means the deployment's result store moved; reading it
+			// needs that store's credentials, which this worker does not have.
+			return nil, fmt.Errorf("resultstore: %s/%s is in bucket %q, but this worker's result store is %q",
+				bucket, k.Blob.GetKey(), bucket, c.bucket)
 		}
-		obj, err := c.mc.GetObject(ctx, bucket, k.Blob.GetKey(), minio.GetObjectOptions{})
+		bucket = c.bucket
+		rc, err := c.store.Get(ctx, k.Blob.GetKey(), 0, -1)
 		if err != nil {
 			return nil, fmt.Errorf("resultstore: get %s/%s: %w", bucket, k.Blob.GetKey(), err)
 		}
-		defer obj.Close()
-		b, err := io.ReadAll(obj)
+		defer rc.Close()
+		b, err := io.ReadAll(rc)
 		if err != nil {
 			return nil, fmt.Errorf("resultstore: read %s/%s: %w", bucket, k.Blob.GetKey(), err)
 		}
@@ -225,19 +276,8 @@ func (c *Client) Key(digest string) string {
 // lifecycle policy, and a worker with permission to create buckets has far more
 // authority than a worker needs.
 func (c *Client) EnsureBucket(ctx context.Context) error {
-	ok, err := c.mc.BucketExists(ctx, c.bucket)
-	if err != nil {
-		return fmt.Errorf("resultstore: bucket exists %s: %w", c.bucket, err)
-	}
-	if ok {
-		return nil
-	}
-	if err := c.mc.MakeBucket(ctx, c.bucket, minio.MakeBucketOptions{}); err != nil {
-		// A racing worker may have created it between our check and our call.
-		if exists, ierr := c.mc.BucketExists(ctx, c.bucket); ierr == nil && exists {
-			return nil
-		}
-		return fmt.Errorf("resultstore: make bucket %s: %w", c.bucket, err)
+	if err := c.store.CreateBucket(ctx); err != nil {
+		return fmt.Errorf("resultstore: %w", err)
 	}
 	return nil
 }
@@ -246,8 +286,12 @@ func (c *Client) EnsureBucket(ctx context.Context) error {
 func (c *Client) Reachable(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if _, err := c.mc.BucketExists(ctx, c.bucket); err != nil {
+	ok, err := c.store.BucketExists(ctx)
+	if err != nil {
 		return fmt.Errorf("resultstore: unreachable: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("resultstore: bucket %q does not exist", c.bucket)
 	}
 	return nil
 }
@@ -260,14 +304,6 @@ func blobRef(bucket, key, digest, contentType string, size int64) *nexusv1.Resul
 		ContentType: contentType,
 		SizeBytes:   size,
 	}
-}
-
-func isNotFound(err error) bool {
-	var resp minio.ErrorResponse
-	if errors.As(err, &resp) {
-		return resp.StatusCode == http.StatusNotFound || resp.Code == "NoSuchKey"
-	}
-	return minio.ToErrorResponse(err).StatusCode == http.StatusNotFound
 }
 
 // ErrLogKeyOutsideNamespace refuses a log write outside this worker's own
@@ -286,15 +322,9 @@ func (c *Client) PutLogObject(ctx context.Context, key string, body io.Reader, s
 	if c.namespace == "" || !strings.HasPrefix(key, c.namespace+"/logs/") {
 		return fmt.Errorf("%w: %q", ErrLogKeyOutsideNamespace, key)
 	}
-	_, err := c.mc.PutObject(ctx, c.bucket, key, body, size,
-		minio.PutObjectOptions{ContentType: "application/x-ndjson"})
-	if err != nil {
+	if err := c.store.Put(ctx, key, body, size,
+		objstore.PutOptions{ContentType: "application/x-ndjson"}); err != nil {
 		return fmt.Errorf("resultstore: put log %s/%s: %w", c.bucket, key, err)
 	}
 	return nil
-}
-
-func stripScheme(endpoint string) string {
-	endpoint = strings.TrimPrefix(endpoint, "https://")
-	return strings.TrimPrefix(endpoint, "http://")
 }

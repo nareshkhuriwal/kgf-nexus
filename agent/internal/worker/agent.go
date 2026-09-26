@@ -23,6 +23,7 @@ import (
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
 )
 
 // Client is the full worker RPC surface, satisfied by the generated gRPC client
@@ -104,6 +105,37 @@ type ResultStoreCredentials struct {
 	SecretAccessKey string
 	SessionToken    string
 	UseTLS          bool
+
+	// Local is the rest of the agent's own result-store configuration
+	// (objstore.ConfigFromEnv): the S3 credential mode, the Azure account and
+	// auth mode, the GCS auth mode, the part size. Its Backend, when
+	// BackendSet, overrides the one the control plane advertises -- an agent
+	// in another cloud may reach the same data through a different API.
+	Local      objstore.Config
+	BackendSet bool
+}
+
+// storeConfig merges the advertised location with the local credentials.
+func (c ResultStoreCredentials) storeConfig(adv *nexusv1.ResultStoreConfig) objstore.Config {
+	oc := c.Local
+	switch {
+	case c.BackendSet && oc.Backend != "":
+	case adv.GetBackend() != "":
+		oc.Backend = adv.GetBackend()
+	default:
+		oc.Backend = objstore.BackendS3
+	}
+	oc.Endpoint = c.Endpoint
+	if oc.Endpoint == "" {
+		oc.Endpoint = adv.GetEndpoint()
+	}
+	oc.Bucket = adv.GetBucket()
+	oc.Region = adv.GetRegion()
+	oc.UseTLS = c.UseTLS
+	if c.AccessKeyID != "" || c.SecretAccessKey != "" {
+		oc.S3.AccessKeyID, oc.S3.SecretAccessKey, oc.S3.SessionToken = c.AccessKeyID, c.SecretAccessKey, c.SessionToken
+	}
+	return oc
 }
 
 // Agent is the worker agent process.
@@ -485,27 +517,24 @@ func (a *Agent) configureLogShipping(cfg *nexusv1.LogShippingConfig) {
 }
 
 func (a *Agent) initResultStore(cfg *nexusv1.ResultStoreConfig) {
-	endpoint := a.cfg.ResultStore.Endpoint
-	if endpoint == "" {
-		endpoint = cfg.GetEndpoint()
-	}
-	if endpoint == "" {
+	oc := a.cfg.ResultStore.storeConfig(cfg)
+	// An S3 store is located by its endpoint; Azure and GCS by account and
+	// bucket (their endpoints are optional), so only S3 needs one to exist.
+	if cfg.GetBucket() == "" || (oc.Backend == objstore.BackendS3 && oc.Endpoint == "") {
 		a.log.Warn("control plane supplied no result store; outputs will be inlined only")
 		return
 	}
-	c, err := resultstore.New(resultstore.Config{
-		Endpoint:        endpoint,
-		Bucket:          cfg.GetBucket(),
-		Region:          cfg.GetRegion(),
-		Namespace:       a.cfg.Namespace,
-		AccessKeyID:     a.cfg.ResultStore.AccessKeyID,
-		SecretAccessKey: a.cfg.ResultStore.SecretAccessKey,
-		SessionToken:    a.cfg.ResultStore.SessionToken,
-		UseTLS:          a.cfg.ResultStore.UseTLS,
-		InlineThreshold: cfg.GetInlineThresholdBytes(),
-		Log:             a.log,
-		OnPut:           a.cfg.Metrics.ResultStorePut,
-	})
+	store, err := objstore.Open(context.Background(), oc)
+	var c *resultstore.Client
+	if err == nil {
+		c, err = resultstore.New(resultstore.Config{
+			Store:           objstore.Instrument(store, a.cfg.Metrics.ObjectStore()),
+			Namespace:       a.cfg.Namespace,
+			InlineThreshold: cfg.GetInlineThresholdBytes(),
+			Log:             a.log,
+			OnPut:           a.cfg.Metrics.ResultStorePut,
+		})
+	}
 	if err != nil {
 		// Not fatal. A worker that refuses to boot because object storage is
 		// briefly unavailable silently shrinks the fleet; a worker that boots and

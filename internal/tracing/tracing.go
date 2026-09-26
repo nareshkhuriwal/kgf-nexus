@@ -306,3 +306,23 @@ func firstNonEmpty(vs ...string) string {
 	}
 	return ""
 }
+
+// SetupOrExit is the one line every service main uses: Setup, exiting with a
+// logged error when the OTEL_* configuration is invalid (a typo in an
+// exporter or sampler must not silently turn tracing off), and returning the
+// flush to defer. The flush is bounded at five seconds so an unreachable
+// collector cannot hold up a pod's termination.
+func SetupOrExit(ctx context.Context, service, version string, log *slog.Logger) func() {
+	shutdown, err := Setup(ctx, Options{Service: service, Version: version, Log: log})
+	if err != nil {
+		log.Error("invalid OpenTelemetry configuration", "error", err)
+		os.Exit(1)
+	}
+	return func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdown(sctx); err != nil {
+			log.Warn("could not flush traces at shutdown", "error", err)
+		}
+	}
+}

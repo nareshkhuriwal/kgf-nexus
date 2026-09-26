@@ -10,6 +10,8 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"flag"
@@ -69,6 +71,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter; flushed last.
+	defer tracing.SetupOrExit(ctx, "resource-manager", version, log)()
+
 	if err := run(ctx, log, runConfig{
 		grpcAddr: *grpcAddr, httpAddr: *httpAddr, dsn: *dsn,
 		livenessWindow: *livenessWindow, sweepInterval: *sweepInterval,
@@ -90,6 +95,7 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	if err != nil {
 		return fmt.Errorf("parse database url: %w", err)
 	}
+	pcfg.ConnConfig.Tracer = tracing.PgxTracer() // ADR-0026; parameters never recorded
 	// The ledger's hot path is short transactions under a worker row lock, so a
 	// modest pool with a health check beats a large one: more connections would
 	// just queue longer on the same locks while consuming Postgres backends.
@@ -278,7 +284,7 @@ func newLogger(level string) *slog.Logger {
 	default:
 		lv = slog.LevelInfo
 	}
-	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lv}))
+	return slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lv})))
 }
 
 func envOr(key, def string) string {

@@ -12,6 +12,8 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"fmt"
@@ -53,6 +55,9 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter; flushed last.
+	defer tracing.SetupOrExit(ctx, "workflow-manager", version, log)()
 
 	dbCtx, dbCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer dbCancel()
@@ -373,7 +378,7 @@ func newLogger() *slog.Logger {
 	if v := os.Getenv("NEXUS_LOG_LEVEL"); v != "" {
 		_ = level.UnmarshalText([]byte(v))
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})).
+	return slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))).
 		With("service", "workflow-manager")
 }
 

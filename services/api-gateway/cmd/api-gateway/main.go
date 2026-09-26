@@ -14,6 +14,10 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"fmt"
@@ -61,7 +65,10 @@ func run() error {
 	log := newLogger()
 	slog.SetDefault(log)
 
-	cfg := loadConfig()
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
 	// Refuse to start rather than hand every worker a threshold that would push
 	// multi-megabyte results through ReportResult and into task_attempts. The
 	// agent clamps too; failing here is what makes the misconfiguration visible.
@@ -73,6 +80,9 @@ func run() error {
 	// derives from it, so one signal unwinds the whole process in order.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter; flushed last.
+	defer tracing.SetupOrExit(ctx, "api-gateway", version, log)()
 
 	// A bounded startup timeout: a gateway that hangs forever on an unreachable
 	// database looks identical to one that is merely slow, and the orchestrator
@@ -129,7 +139,7 @@ func run() error {
 	// store, so it needs read credentials; without them the route answers 501
 	// and agents are told not to ship, rather than filling a store nobody can
 	// read back.
-	logStreamer, logShipping := logBackend(cfg, db, log)
+	logStreamer, logShipping := logBackend(ctx, cfg, db, reg, log)
 
 	// ── REST listener ─────────────────────────────────────────────────────
 	api := rest.New(db, auth, wfmClient, rmClient, logStreamer, log).
@@ -175,7 +185,7 @@ func run() error {
 
 	restSrv := &http.Server{
 		Addr:    cfg.RESTAddr,
-		Handler: publicHandler(api.Routes(), hc, httpMetrics),
+		Handler: tracing.HTTPMiddleware(publicHandler(api.Routes(), hc, httpMetrics)),
 		// ReadHeaderTimeout, not ReadTimeout: a slow-header client is an attack, but
 		// a legitimately slow BODY (a large spec over a poor link) is not.
 		ReadHeaderTimeout: 10 * time.Second,
@@ -237,6 +247,9 @@ func run() error {
 		Bucket:               cfg.ResultStoreBucket,
 		Region:               cfg.ResultStoreRegion,
 		InlineThresholdBytes: cfg.InlineThresholdBytes,
+		// Agents speak the same API the gateway does unless their own
+		// NEXUS_RESULT_STORE_BACKEND says otherwise (ADR-0027).
+		Backend: cfg.Store.Backend,
 	}
 	wcfg.LogShipping = logShipping
 	nexusv1.RegisterWorkerServiceServer(workerSrv,
@@ -369,11 +382,10 @@ type config struct {
 	SessionSweepInterval time.Duration
 	SessionSweepLimit    int
 
-	// Result-store READ credentials for serving logs (ADR-0020). The same
-	// variables the agent reads, so compose needs no new settings.
-	ResultStoreAccessKey string
-	ResultStoreSecretKey string
-	ResultStoreUseTLS    bool
+	// Store is the result-store configuration for serving logs (ADR-0020,
+	// ADR-0027): the same NEXUS_RESULT_STORE_* / NEXUS_S3_* / NEXUS_AZURE_* /
+	// NEXUS_GCS_* variables the agent reads, so compose needs no new settings.
+	Store objstore.Config
 	// LogShipping turns durable task logs on (default) or off.
 	LogShipping        bool
 	LogMaxBytes        int64
@@ -381,8 +393,12 @@ type config struct {
 	LogFlushIntervalMs int
 }
 
-func loadConfig() config {
-	return config{
+func loadConfig() (config, error) {
+	store, err := objstore.ConfigFromEnv(nil)
+	if err != nil {
+		return config{}, err
+	}
+	c := config{
 		// Separate ports, per §3.2: worker traffic must not contend with UI queries.
 		RESTAddr:            env("NEXUS_REST_ADDR", ":8080"),
 		GRPCAddr:            env("NEXUS_GRPC_ADDR", ":9090"),
@@ -393,7 +409,7 @@ func loadConfig() config {
 		ResourceManagerAddr: env("NEXUS_RESOURCE_MANAGER_ADDR", ""),
 		SchedulerAddr:       env("NEXUS_SCHEDULER_ADDR", ""),
 		DAGEngineAddr:       env("NEXUS_DAG_ENGINE_ADDR", env("DAG_ENGINE_ADDR", "")),
-		ResultStoreEndpoint: env("NEXUS_RESULT_STORE_ENDPOINT", "http://localhost:9000"),
+		ResultStoreEndpoint: env("NEXUS_RESULT_STORE_ENDPOINT", defaultEndpoint(store.Backend)),
 		ResultStoreBucket:   env("NEXUS_RESULT_STORE_BUCKET", "nexus-results"),
 		ResultStoreRegion:   env("NEXUS_RESULT_STORE_REGION", "us-east-1"),
 		// Results at or below this size come back inline, avoiding two round-trips
@@ -407,14 +423,24 @@ func loadConfig() config {
 			int(sessions.DefaultInterval/time.Second))) * time.Second,
 		SessionSweepLimit: envInt("NEXUS_SESSION_SWEEP_LIMIT", sessions.DefaultBatchLimit),
 
-		ResultStoreAccessKey: env("NEXUS_S3_ACCESS_KEY_ID", ""),
-		ResultStoreSecretKey: env("NEXUS_S3_SECRET_ACCESS_KEY", ""),
-		ResultStoreUseTLS:    envBool("NEXUS_S3_USE_TLS", false),
-		LogShipping:          envBool("NEXUS_LOG_SHIPPING", true),
-		LogMaxBytes:          int64(envInt("NEXUS_LOG_MAX_BYTES_PER_ATTEMPT", 64<<20)),
-		LogChunkBytes:        int64(envInt("NEXUS_LOG_CHUNK_BYTES", 256<<10)),
-		LogFlushIntervalMs:   envInt("NEXUS_LOG_FLUSH_INTERVAL_MS", 2000),
+		Store:              store,
+		LogShipping:        envBool("NEXUS_LOG_SHIPPING", true),
+		LogMaxBytes:        int64(envInt("NEXUS_LOG_MAX_BYTES_PER_ATTEMPT", 64<<20)),
+		LogChunkBytes:      int64(envInt("NEXUS_LOG_CHUNK_BYTES", 256<<10)),
+		LogFlushIntervalMs: envInt("NEXUS_LOG_FLUSH_INTERVAL_MS", 2000),
 	}
+	c.Store.Endpoint, c.Store.Bucket, c.Store.Region = c.ResultStoreEndpoint, c.ResultStoreBucket, c.ResultStoreRegion
+	return c, nil
+}
+
+// defaultEndpoint keeps the historical local default for S3 only: Azure and
+// GCS derive their endpoints from the account and the SDK, and a localhost
+// default would point them at nothing.
+func defaultEndpoint(backend string) string {
+	if backend == objstore.BackendS3 {
+		return "http://localhost:9000"
+	}
+	return ""
 }
 
 // version is stamped at build time (-ldflags "-X main.version=...").
@@ -439,27 +465,26 @@ func publicHandler(api http.Handler, hc *health.Handler, m *metrics.HTTPMetrics)
 // logBackend builds the log reader and the policy advertised to agents. Both
 // are off together: an agent is told to ship only when this gateway can serve
 // what it ships.
-func logBackend(cfg config, db store.GWDB, log *slog.Logger) (rest.LogStreamer, *nexusv1.LogShippingConfig) {
+func logBackend(ctx context.Context, cfg config, db store.GWDB, reg *metrics.Registry, log *slog.Logger) (rest.LogStreamer, *nexusv1.LogShippingConfig) {
 	if !cfg.LogShipping {
 		log.Warn("durable task logs are DISABLED (NEXUS_LOG_SHIPPING=false); agents will not ship logs and the logs route answers 501")
 		return nil, nil
 	}
-	reader, err := logs.NewMinIOReader(logs.MinIOConfig{
-		Endpoint: cfg.ResultStoreEndpoint, Bucket: cfg.ResultStoreBucket, Region: cfg.ResultStoreRegion,
-		AccessKeyID: cfg.ResultStoreAccessKey, SecretAccessKey: cfg.ResultStoreSecretKey, UseTLS: cfg.ResultStoreUseTLS,
-	})
+	store, err := objstore.Open(ctx, cfg.Store)
 	if err != nil {
 		log.Warn("durable task logs are unavailable: the gateway cannot read the result store; agents will not ship logs and the logs route answers 501",
-			"error", err, "fix", "set NEXUS_S3_ACCESS_KEY_ID and NEXUS_S3_SECRET_ACCESS_KEY (a read-only credential scoped to */logs/* is enough)")
+			"backend", cfg.Store.Backend, "error", err,
+			"fix", "give the gateway read access to */logs/*: static S3 keys, a cloud workload identity (NEXUS_S3_CREDENTIALS, NEXUS_AZURE_STORAGE_AUTH, NEXUS_GCS_AUTH), see OPERATIONS §26")
 		return nil, nil
 	}
+	reader := logs.NewStoreReader(objstore.Instrument(store, objstore.NewMetrics(reg)))
 	policy := &nexusv1.LogShippingConfig{
 		Enabled:            true,
 		MaxBytesPerAttempt: cfg.LogMaxBytes,
 		ChunkBytes:         cfg.LogChunkBytes,
 		FlushIntervalMs:    int32(cfg.LogFlushIntervalMs),
 	}
-	log.Info("durable task logs enabled", "bucket", cfg.ResultStoreBucket,
+	log.Info("durable task logs enabled", "backend", cfg.Store.Backend, "bucket", cfg.ResultStoreBucket,
 		"max_bytes_per_attempt", cfg.LogMaxBytes, "chunk_bytes", cfg.LogChunkBytes,
 		"flush_interval_ms", cfg.LogFlushIntervalMs)
 	return logs.NewReader(logs.StoreIndex{DB: db}, reader, logs.Limits{}), policy
@@ -472,7 +497,7 @@ func newLogger() *slog.Logger {
 	}
 	// JSON, because these logs are aggregated and queried by run_id rather than
 	// read by eye.
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})).
+	return slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))).
 		With("service", "api-gateway")
 }
 

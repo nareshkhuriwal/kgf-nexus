@@ -346,8 +346,14 @@ type ResultStoreConfig struct {
 	// Results at or below this size are returned inline instead of via the blob
 	// store, avoiding two round-trips for trivial outputs (ADR-0008).
 	InlineThresholdBytes int64 `protobuf:"varint,4,opt,name=inline_threshold_bytes,json=inlineThresholdBytes,proto3" json:"inline_threshold_bytes,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Which API the store speaks: "s3" (also the meaning of empty, so an old
+	// gateway's answer is unchanged), "azblob" or "gcs" (ADR-0027). The agent's
+	// own NEXUS_RESULT_STORE_BACKEND wins over this. An old agent ignores it and
+	// speaks S3, which is why agents must be upgraded before a deployment moves
+	// to a native backend (OPERATIONS §26).
+	Backend       string `protobuf:"bytes,5,opt,name=backend,proto3" json:"backend,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ResultStoreConfig) Reset() {
@@ -406,6 +412,13 @@ func (x *ResultStoreConfig) GetInlineThresholdBytes() int64 {
 		return x.InlineThresholdBytes
 	}
 	return 0
+}
+
+func (x *ResultStoreConfig) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
 }
 
 type HeartbeatRequest struct {
@@ -1559,12 +1572,13 @@ const file_nexus_v1_worker_proto_rawDesc = "" +
 	"\x15max_bytes_per_attempt\x18\x02 \x01(\x03R\x12maxBytesPerAttempt\x12\x1f\n" +
 	"\vchunk_bytes\x18\x03 \x01(\x03R\n" +
 	"chunkBytes\x12*\n" +
-	"\x11flush_interval_ms\x18\x04 \x01(\x05R\x0fflushIntervalMs\"\x95\x01\n" +
+	"\x11flush_interval_ms\x18\x04 \x01(\x05R\x0fflushIntervalMs\"\xaf\x01\n" +
 	"\x11ResultStoreConfig\x12\x1a\n" +
 	"\bendpoint\x18\x01 \x01(\tR\bendpoint\x12\x16\n" +
 	"\x06bucket\x18\x02 \x01(\tR\x06bucket\x12\x16\n" +
 	"\x06region\x18\x03 \x01(\tR\x06region\x124\n" +
-	"\x16inline_threshold_bytes\x18\x04 \x01(\x03R\x14inlineThresholdBytes\"\xf6\x01\n" +
+	"\x16inline_threshold_bytes\x18\x04 \x01(\x03R\x14inlineThresholdBytes\x12\x18\n" +
+	"\abackend\x18\x05 \x01(\tR\abackend\"\xf6\x01\n" +
 	"\x10HeartbeatRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12.\n" +
 	"\x13running_attempt_ids\x18\x02 \x03(\tR\x11runningAttemptIds\x12=\n" +

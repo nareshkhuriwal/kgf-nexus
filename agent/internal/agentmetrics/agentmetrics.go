@@ -21,6 +21,7 @@ import (
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
+	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
 )
 
 // TaskBuckets span a second to a day: tasks are batch work, and a histogram
@@ -49,11 +50,25 @@ type Metrics struct {
 
 	registrations *metrics.CounterVec
 	registered    *metrics.Gauge
+
+	// objstore holds the result-store client families shared with the gateway
+	// and the GC (nexus_objstore_*), labelled by backend and operation.
+	objstore *objstore.Metrics
+}
+
+// ObjectStore returns the result-store client instruments, or nil (record
+// nothing) on a nil Metrics.
+func (m *Metrics) ObjectStore() *objstore.Metrics {
+	if m == nil {
+		return nil
+	}
+	return m.objstore
 }
 
 // New registers the agent families on reg.
 func New(reg *metrics.Registry) *Metrics {
 	return &Metrics{
+		objstore: objstore.NewMetrics(reg),
 		running: reg.NewGauge("nexus_agent_tasks_running",
 			"Attempts currently executing on this agent, by executor.", "executor"),
 		started: reg.NewCounter("nexus_agent_tasks_started_total",
