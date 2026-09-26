@@ -28,7 +28,7 @@ MIGRATIONS    := services/migrations
 
 # test-nats and sdk-test have their own .PHONY lines so a merge that edits the
 # list below does not conflict with them.
-.PHONY: test-nats
+.PHONY: test-nats test-vault
 .PHONY: sdk-test
 .PHONY: sdk-typecheck
 .PHONY: check-doc-refs
@@ -88,6 +88,22 @@ chaos: ## Kill workers mid-task and assert exactly-one-logical-effect (needs `ma
 # configurations (needs helm). KEEP=1 leaves the containers up for inspection.
 test-nats: ## Run the NATS/outbox and broker-authorization integration tests in isolated containers (needs Docker, helm)
 	tests/nats/run-integration.sh
+
+# Worker-side secret resolution against a REAL Vault (ADR-0025, OPERATIONS
+# §25.1). A throwaway dev-mode container, pinned by digest, on its own port;
+# the test seals it at the end (NEXUS_TEST_VAULT_ALLOW_SEAL), which is why the
+# container is always removed. KEEP=1 leaves it up.
+VAULT_IMAGE      ?= docker.io/hashicorp/vault:1.21.4@sha256:4e33b126a59c0c333b76fb4e894722462659a6bec7c48c9ee8cea56fccfd2569
+VAULT_TEST_NAME  ?= nexus-test-vault
+VAULT_TEST_PORT  ?= 55561
+test-vault: ## Run the secret-provider integration tests against a pinned dev-mode Vault container (needs Docker)
+	@docker rm -f $(VAULT_TEST_NAME) >/dev/null 2>&1 || true
+	docker run -d --name $(VAULT_TEST_NAME) --cap-add IPC_LOCK -p 127.0.0.1:$(VAULT_TEST_PORT):8200 \
+	  -e VAULT_DEV_ROOT_TOKEN_ID=nexus-test-root -e VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200 '$(VAULT_IMAGE)' >/dev/null
+	@for i in $$(seq 1 30); do curl -fsS http://127.0.0.1:$(VAULT_TEST_PORT)/v1/sys/health >/dev/null 2>&1 && break; sleep 1; done
+	NEXUS_TEST_VAULT_ADDR=http://127.0.0.1:$(VAULT_TEST_PORT) NEXUS_TEST_VAULT_ROOT_TOKEN=nexus-test-root \
+	  NEXUS_TEST_VAULT_ALLOW_SEAL=1 $(GO) test -count=1 -run 'Vault' -v ./agent/internal/secrets/; \
+	  rc=$$?; [ "$(KEEP)" = "1" ] || docker rm -f $(VAULT_TEST_NAME) >/dev/null; exit $$rc
 
 # ── Benchmarks (ADR-0016, ADR-0018) ───────────────────────────────────────
 # The benchmarks write hundreds of thousands of rows, so they never default to a
