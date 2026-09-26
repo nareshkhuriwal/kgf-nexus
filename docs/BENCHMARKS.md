@@ -49,7 +49,13 @@ across tables.
 ### 2.1 Method
 
 `make bench-pg BENCH_NAME=nexus-w3l-bench BENCH_PG_PORT=55881
-BENCH_MINIO_PORT=55882`, then `make bench-dispatch`. For run 2, the same test
+BENCH_MINIO_PORT=55882`, then `make bench-dispatch`. (That was the container
+`make bench-pg` of the time. It now creates a database on the host's
+PostgreSQL instead, `NEXUS_TEST_PG_SERVER`, because nothing in the repository
+starts a Postgres container by default; to reproduce these cells, point it at a
+server configured as in §1 -- `max_connections=300`, `shared_buffers=512MB` --
+since 16 replicas need far more connections than a shared workstation server
+has free.) For run 2, the same test
 binary was built once with `go test -c -tags bench` and run directly
 (`tests/bench/dispatch_test.go`, `TestDispatchCeiling`, default knobs).
 

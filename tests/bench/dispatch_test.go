@@ -12,7 +12,8 @@
 // of B PENDING attempts. It reports claims/sec and p50/p99 latency of one claim
 // transaction for each (mode, backlog, replicas) cell.
 //
-// It needs a DISPOSABLE, migrated database: `make bench-pg` starts one. It is
+// It needs a DISPOSABLE, migrated database: `make bench-pg` creates one on the
+// host's PostgreSQL (NEXUS_TEST_PG_SERVER). It is
 // behind the `bench` build tag so `go test ./...` never runs it, and it refuses
 // to run without NEXUS_BENCH_DSN rather than defaulting to a database someone
 // may care about.

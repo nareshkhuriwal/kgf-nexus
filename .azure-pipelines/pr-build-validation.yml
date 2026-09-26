@@ -125,6 +125,13 @@ variables:
   # marks them DEV ONLY.
   - name: PG_IMAGE
     value: 'postgres:16-alpine'
+  # Locally the compose stacks use the host's PostgreSQL (make up,
+  # deploy/e2e/e2e-stack.sh); a build agent has none, so they opt in to their
+  # bundled postgres container here.
+  - name: NEXUS_BUNDLED_POSTGRES
+    value: '1'
+  - name: E2E_BUNDLED_POSTGRES
+    value: '1'
   # No fixed host port. `docker run -P` lets the kernel allocate an unused one
   # and the job reads it back, because a hardcoded port is a hard collision the
   # moment two runs share an agent pool: the second `docker run -p 55434:5432`

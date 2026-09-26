@@ -1395,8 +1395,12 @@ comment in `0016_outbox.down.sql`).
 ### 11.6 Testing
 
 `make test-nats` runs the relay, outbox and hint suites against a real
-JetStream and a real Postgres in throwaway containers (`nexus-nats-agent-*`,
-ports 55511-55514), including stopping and restarting the broker. It then runs
+JetStream in throwaway broker containers (`nexus-nats-agent-*`, ports
+55512-55514), including stopping and restarting the broker, and a throwaway
+database on the host's PostgreSQL (`NEXUS_TEST_PG_SERVER`, default
+`postgres://127.0.0.1:5432/postgres`; never a Postgres container), created,
+migrated and dropped by the script. `NEXUS_NATS_DATABASE_URL` uses an existing
+dedicated database instead. It then runs
 the authorization suite (`TestNATSAuthz*`) twice: against a broker configured
 by `deploy/nats/nexus-nats-auth.sh` (the compose path, plaintext) and against
 one running the Helm chart's rendered ConfigMap with TLS and client

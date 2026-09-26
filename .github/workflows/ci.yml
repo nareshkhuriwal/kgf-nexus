@@ -35,6 +35,13 @@ env:
   # here resolves in the image. Move all four together: this file, both Azure
   # pipelines and the Dockerfile (docs/OPERATIONS.md section 22.3).
   NODE_VERSION: "24.21.0"
+  # Locally, every stack and test script uses the host's PostgreSQL and never
+  # starts a Postgres container (tests/lib/hostpg.sh). A runner has no host
+  # server, so the compose stacks here opt in to their bundled postgres
+  # container, and the scripts that create throwaway databases get a service
+  # container as their "host" server (NEXUS_TEST_PG_SERVER, per job).
+  NEXUS_BUNDLED_POSTGRES: "1"
+  E2E_BUNDLED_POSTGRES: "1"
 
 jobs:
   # Fast feedback. Deliberately first and deliberately cheap: a build error or a
@@ -149,15 +156,28 @@ jobs:
           NEXUS_TEST_S3_ACCESS_KEY_ID: nexus-ci
           NEXUS_TEST_S3_SECRET_ACCESS_KEY: nexus-ci-password
 
-  # The outbox relay and dispatch hints against a REAL NATS JetStream server and a
-  # REAL Postgres, each in a throwaway container the script starts itself. It
-  # stops and restarts the broker (the outage test), which is why it is its own
-  # job rather than a service container shared with the suite above. The script
-  # fails if any TestNATS* test skipped (F85).
+  # The outbox relay and dispatch hints against a REAL NATS JetStream server
+  # (throwaway brokers the script starts: it stops and restarts one for the
+  # outage test, which is why it is its own job) and a REAL Postgres: a
+  # throwaway database the script creates on the job's server and drops. The
+  # script fails if any TestNATS* test skipped (F85).
   nats-integration:
     name: nats integration tests
     runs-on: ubuntu-latest
     needs: build
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: nexus
+          POSTGRES_PASSWORD: nexus-dev-password
+          POSTGRES_DB: nexus
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U nexus -d nexus"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      NEXUS_TEST_PG_SERVER: postgres://nexus:nexus-dev-password@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -518,12 +538,26 @@ jobs:
   # release's database integration suite, run against a database upgraded to
   # THIS tree's migrations. Previous = newest vX.Y.Z tag; without one, the main
   # tip on a PR, or main~1 on a push to main. It needs history for that, hence
-  # fetch-depth: 0. The script starts and removes its own Postgres container.
+  # fetch-depth: 0. The script creates and drops its two databases on the
+  # job's server.
   compat:
     name: previous-release skew smoke
     runs-on: ubuntu-latest
     needs: build
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: nexus
+          POSTGRES_PASSWORD: nexus-dev-password
+          POSTGRES_DB: nexus
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U nexus -d nexus"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      NEXUS_TEST_PG_SERVER: postgres://nexus:nexus-dev-password@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@v4
         with:

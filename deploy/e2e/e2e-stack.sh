@@ -19,12 +19,25 @@
 #   E2E_NAMESPACE    namespace the keys are minted in (default default)
 #   E2E_READY_TIMEOUT_S  seconds to wait for the stack (default 600)
 #   E2E_EXTRA_COMPOSE    optional overlay file(s), space-separated, applied last
-#   E2E_DATABASE_URL     optional: the DSN `make seed` uses from the host, for
-#                        an overlay whose services use a database outside the
-#                        stack (default: the stack's own postgres service)
+#
+# Database: the stack runs on the HOST's PostgreSQL (the project rule: Postgres
+# comes from the host, never a container), in its own database, created by `up`
+# (kept across `up` calls) and dropped by `down`:
+#   NEXUS_TEST_PG_SERVER admin DSN of the server (default the workstation's,
+#                        postgres://127.0.0.1:5432/postgres; tests/lib/hostpg.sh)
+#   E2E_DB               the database (default the project name with every
+#                        character outside [a-z0-9] turned into '_', so
+#                        nexus-e2e -> nexus_e2e)
+#   NEXUS_DB_MAX_CONNS   caps every service's pool; set it on a shared server
+#   E2E_BUNDLED_POSTGRES=1  opt in to the compose file's own postgres
+#                        container instead (a machine or CI runner with no
+#                        PostgreSQL). Only then is E2E_DATABASE_URL's default
+#                        the container's published port.
+#   E2E_DATABASE_URL     the DSN `make seed` uses from the host (default: the
+#                        database above)
 #
 # Port layout, from E2E_PORT_BASE (B):
-#   B+0 console (nginx)   B+1 REST gateway   B+2 Postgres   B+3 MinIO S3
+#   B+0 console (nginx)   B+1 REST gateway   B+2 Postgres (bundled only)   B+3 MinIO S3
 #   B+4 MinIO console     B+5 Mailpit UI     B+6 NATS       B+7 worker gRPC
 #   B+8 gateway /metrics
 # Every other published port of the dev compose file is dropped by
@@ -58,6 +71,23 @@ export NEXUS_PUBLIC_URL="http://localhost:${NEXUS_UI_PORT}"
 export NEXUS_NAMESPACE="$NS"
 
 files=(-f deploy/docker-compose.yml -f deploy/e2e/docker-compose.e2e.yml)
+BUNDLED_PG="${E2E_BUNDLED_POSTGRES:-}"
+if [[ "$BUNDLED_PG" != 1 ]]; then
+  # shellcheck source=tests/lib/hostpg.sh
+  . tests/lib/hostpg.sh
+  HOSTPG_TAG=org.kgf-nexus.e2e-stack
+  E2E_DB="${E2E_DB:-$(printf '%s' "$PROJECT" | tr -c 'a-z0-9' '_')}"
+  hostpg_valid_name "$E2E_DB" || { echo "E2E_DB '$E2E_DB' must match ^[a-z_][a-z0-9_]{0,62}\$" >&2; exit 2; }
+  host_dsn="$(hostpg_url "$HOSTPG_SERVER" "$E2E_DB")"
+  export NEXUS_HOST_DATABASE_URL="${NEXUS_HOST_DATABASE_URL:-$(hostpg_container_url "$host_dsn")}"
+  export E2E_DATABASE_URL="${E2E_DATABASE_URL:-$host_dsn}"
+  # For the per-service-login overlay: its services and db-roles job reach the
+  # same database (NEXUS_E2E_DB is host:port/database, without credentials).
+  _c="${NEXUS_HOST_DATABASE_URL#*://}"; _c="${_c#*@}"
+  export NEXUS_E2E_DB="${NEXUS_E2E_DB:-${_c%%\?*}}"
+  export NEXUS_E2E_OWNER_URL="${NEXUS_E2E_OWNER_URL:-$NEXUS_HOST_DATABASE_URL}"
+  files+=(-f deploy/docker-compose.host-db.yml)
+fi
 if [[ -n "${E2E_MINIO_IMAGE:-}" ]]; then
   files+=(-f deploy/e2e/docker-compose.minio-local.yml)
 fi
@@ -171,6 +201,7 @@ seed() {
   else
     # Same statements `make seed` runs, through the container's psql, for a
     # host without a Postgres client.
+    [[ "$BUNDLED_PG" == 1 ]] || { log "psql is required: the stack uses the host's PostgreSQL"; exit 1; }
     log "psql not on PATH; seeding through the postgres container"
     local role key hash
     compose exec -T postgres psql -U nexus -d nexus -v ON_ERROR_STOP=1 -q -c \
@@ -194,7 +225,13 @@ cmd_up() {
   if [[ -n "${E2E_MINIO_IMAGE:-}" ]]; then
     log "NOTE: the S3 store runs from local image $E2E_MINIO_IMAGE (not the pinned Silo digest)"
   fi
-  log "project $PROJECT: console :$NEXUS_UI_PORT, gateway :$NEXUS_API_PORT, postgres :$NEXUS_POSTGRES_PORT"
+  if [[ "$BUNDLED_PG" == 1 ]]; then
+    log "project $PROJECT: console :$NEXUS_UI_PORT, gateway :$NEXUS_API_PORT, bundled postgres :$NEXUS_POSTGRES_PORT"
+  else
+    hostpg_check >&2
+    hostpg_ensure "$E2E_DB"
+    log "project $PROJECT: console :$NEXUS_UI_PORT, gateway :$NEXUS_API_PORT, database $E2E_DB on $(hostpg_redact "$HOSTPG_SERVER")"
+  fi
   compose up -d --build
   deadline=$((SECONDS + READY_TIMEOUT_S))
   until migrate_done; do
@@ -213,6 +250,9 @@ cmd_up() {
 
 cmd_down() {
   compose down -v --remove-orphans
+  if [[ "$BUNDLED_PG" != 1 ]]; then
+    hostpg_drop "$E2E_DB"
+  fi
   rm -f "$STACK_ENV"
 }
 

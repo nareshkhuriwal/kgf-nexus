@@ -112,6 +112,14 @@ other published port dropped (`deploy/e2e/docker-compose.e2e.yml`), so it runs
 beside `make up`. It mints fresh keys, seeds them with `make seed`, waits for an
 ACTIVE worker and writes `ui/e2e/.stack.env` (gitignored) for the suite.
 
+The stack's database is on the host's PostgreSQL, never a container: `up`
+creates `E2E_DB` (default the project name with `-` as `_`, e.g. `nexus_e2e`)
+on the server `NEXUS_TEST_PG_SERVER` names (default
+`postgres://127.0.0.1:5432/postgres`) through `deploy/docker-compose.host-db.yml`,
+and `down` drops it. Set `NEXUS_DB_MAX_CONNS` on a server shared with other
+workloads. `E2E_BUNDLED_POSTGRES=1` opts in to the compose file's own postgres
+container (CI runners, which have no host server, set it).
+
 What the suite covers, all through the browser:
 
 * **Setup** (`global.setup.ts`): an administrator creates an operator; the

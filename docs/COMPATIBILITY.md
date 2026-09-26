@@ -394,14 +394,18 @@ b. **Checks migration history.** Every previous `*.up.sql` must exist in this
    upgraded database applies it last and a fresh one applies it earlier
    (services/migrations/README.md). Violations exit 1.
 
-c. **Starts a disposable Postgres** (`postgres:16-alpine`, what compose ships),
-   container `<prefix>-pg-<port>`, bound to `127.0.0.1` only. The defaults
-   are `NEXUS_COMPAT_NAME_PREFIX=nexus-compat` and `NEXUS_COMPAT_PG_PORT=55688`;
-   give concurrent runs on one host a different prefix or port. The script
-   refuses to start if the port is already in use, labels its container
-   `org.kgf-nexus.compat-smoke=<prefix>`, and refuses (exit 2) rather than
-   remove a container of the same name that lacks that label. Cleanup removes
-   only the container this run started, by id.
+c. **Creates two throwaway databases on the host's PostgreSQL**
+   (`<prefix>_new` and `<prefix>_base`, default prefix `nexus_compat_<pid>`,
+   `NEXUS_COMPAT_DB_PREFIX` to choose) on the server `NEXUS_TEST_PG_SERVER`
+   names: the workstation's own server by default
+   (`postgres://127.0.0.1:5432/postgres`), in CI the job's service container.
+   No Postgres container is started (the project rule: Postgres comes from the
+   host; `tests/lib/hostpg.sh`). Each database is tagged with a
+   `COMMENT` (`org.kgf-nexus.compat-smoke`); the script refuses a name that
+   exists untagged and never drops a database without its tag. It checks the
+   server has connection slots free first (`NEXUS_TEST_PG_MIN_FREE`, default
+   10) and runs the old suite with `-parallel 2` (`NEXUS_COMPAT_PARALLEL`), so a
+   server shared with other workloads is not driven into "too many clients".
 
 d. **Takes the upgrade path, not a fresh install.** It applies the previous
    release's migrations with the previous release's `deploy/migrate.sh`, which
@@ -422,23 +426,22 @@ e. **Runs the previous release's own integration suite** (`go test -tags
    database-missing skip (`testdb.SkipMarker`) fails the run (F85), and so does
    zero passing tests.
 
-f. **Triages failures automatically.** The failing tests are re-run against a
-   second database in the same container that has **only** the previous
-   release's migrations:
+f. **Triages failures automatically.** The failing tests are re-run against
+   the second database, which has **only** the previous release's migrations:
    - a test that passes there and fails on the new schema is a **skew
      incompatibility** (exit 1);
    - a test that fails on both is a pre-existing failure of the old suite, which
      makes the run inconclusive (exit 3), not a compatibility verdict.
 
-g. **Always cleans up** (trap on EXIT/INT/TERM): removes exactly the one
-   container it named and the scratch tree. `NEXUS_COMPAT_KEEP=1` keeps both
-   for debugging. The go test log is copied to `NEXUS_COMPAT_LOG` (default
+g. **Always cleans up** (trap on EXIT/INT/TERM): drops exactly the two
+   databases it created and removes the scratch tree. `NEXUS_COMPAT_KEEP=1`
+   keeps both for debugging. The go test log is copied to `NEXUS_COMPAT_LOG` (default
    `$TMPDIR/nexus-compat-<sha>.log`) so it survives cleanup. CI uploads it as
    an artifact.
 
-It is idempotent: a stale container from a crashed run is removed first, and
-every run builds its database from scratch. When `psql` is not on the host, the
-same `migrate.sh` runs inside the Postgres container.
+It is idempotent: a tagged database left by a crashed run is dropped first,
+and every run builds its databases from scratch. It needs `psql` on the host
+(the host's PostgreSQL client).
 
 ### 7.2 What "previous release" resolves to
 
