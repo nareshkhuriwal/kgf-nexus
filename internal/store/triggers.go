@@ -79,7 +79,8 @@ RETURNING `+triggerCols, t.ID, t.Namespace, t.Name, t.SpecName, t.SpecVersion, p
 		t.Priority, t.ToleranceSeconds, secret, t.Enabled, t.CreatedBy, t.CreatedByID))
 }
 
-// TriggerUpdate changes a trigger's configuration (never its secret).
+// TriggerUpdate changes a trigger's configuration (never its secret) if it is
+// still at revision (0 is always a conflict: stored triggers start at 1).
 func TriggerUpdate(ctx context.Context, q GWQuerier, t WebhookTrigger, revision int64) (WebhookTrigger, error) {
 	pm, err := jsonb(t.ParamsMapping)
 	if err != nil {
@@ -89,7 +90,7 @@ func TriggerUpdate(ctx context.Context, q GWQuerier, t WebhookTrigger, revision 
 UPDATE webhook_triggers
    SET spec_name = $3, spec_version = $4, params_mapping = $5::jsonb, idempotency_key_path = $6,
        priority = $7, tolerance_seconds = $8, enabled = $9, updated_at = now(), revision = revision + 1
- WHERE namespace = $1 AND name = $2 AND ($10 = 0 OR revision = $10)
+ WHERE namespace = $1 AND name = $2 AND revision = $10
 RETURNING `+triggerCols, t.Namespace, t.Name, t.SpecName, t.SpecVersion, pm, nullStr(t.IdempotencyKeyPath),
 		t.Priority, t.ToleranceSeconds, t.Enabled, revision))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -223,9 +224,7 @@ DELETE FROM webhook_receipts w USING (
 
 // TriggerListReceipts returns a trigger's recent deliveries.
 func TriggerListReceipts(ctx context.Context, q GWQuerier, triggerID string, limit int) ([]WebhookReceipt, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
+	limit = ClampLimit(limit, DefaultReceipts, MaxReceiptsPage)
 	rows, err := q.Query(ctx, `
 SELECT trigger_id::text, signature_digest, received_at, outcome, http_status, COALESCE(run_id::text, ''),
        COALESCE(idempotency_key, ''), detail

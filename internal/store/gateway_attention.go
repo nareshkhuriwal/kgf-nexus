@@ -121,9 +121,7 @@ const (
 )
 
 func (f AttentionFilter) withDefaults() AttentionFilter {
-	if f.Limit <= 0 || f.Limit > 200 {
-		f.Limit = DefaultAttentionLimit
-	}
+	f.Limit = ClampLimit(f.Limit, DefaultAttentionLimit, MaxAttentionItems)
 	if f.BlockedFor <= 0 {
 		f.BlockedFor = DefaultAttentionBlockedFor
 	}
@@ -135,12 +133,6 @@ func (f AttentionFilter) withDefaults() AttentionFilter {
 	}
 	return f
 }
-
-// EffectiveLimit is the cap this filter will actually apply, after defaulting
-// and clamping. Exported so the handler can tell a client whether the list was
-// truncated without re-implementing (and eventually mis-implementing) the
-// clamping rule above.
-func (f AttentionFilter) EffectiveLimit() int { return f.withDefaults().Limit }
 
 // attentionSQL is the whole panel in ONE round trip.
 //
@@ -325,6 +317,18 @@ SELECT
 // one would additionally let a single busy namespace decide how much memory this
 // query costs.
 func GatewayListAttention(ctx context.Context, q GWQuerier, namespace string, f AttentionFilter) ([]AttentionItem, error) {
+	items, _, err := GatewayListAttentionPage(ctx, q, namespace, f)
+	return items, err
+}
+
+// GatewayListAttentionPage is GatewayListAttention plus whether the cap
+// dropped anything.
+//
+// truncated is decided by asking for ONE row past the cap, not by comparing
+// the page to the cap: a namespace with exactly `limit` items fills the page
+// without anything having been dropped, and the old comparison told the
+// console there was more to see when there was not.
+func GatewayListAttentionPage(ctx context.Context, q GWQuerier, namespace string, f AttentionFilter) (items []AttentionItem, truncated bool, err error) {
 	f = f.withDefaults()
 
 	rows, err := q.Query(ctx, attentionSQL,
@@ -332,14 +336,14 @@ func GatewayListAttention(ctx context.Context, q GWQuerier, namespace string, f 
 		f.BlockedFor.String(),
 		f.FailedWithin.String(),
 		f.StalledFor.String(),
-		f.Limit,
+		f.Limit+1,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("list attention items: %w", err)
+		return nil, false, fmt.Errorf("list attention items: %w", err)
 	}
 	defer rows.Close()
 
-	out := make([]AttentionItem, 0, f.Limit)
+	out := make([]AttentionItem, 0, f.Limit+1)
 	for rows.Next() {
 		var (
 			it                        AttentionItem
@@ -348,12 +352,18 @@ func GatewayListAttention(ctx context.Context, q GWQuerier, namespace string, f 
 		if err := rows.Scan(&it.Kind, &it.Severity, &it.Reason, &it.OccurredAt,
 			&it.RunID, &it.RunState, &it.SpecName, &it.NodeID, &it.AttemptID,
 			&attemptsUsed, &maxAttempts); err != nil {
-			return nil, fmt.Errorf("scan attention item: %w", err)
+			return nil, false, fmt.Errorf("scan attention item: %w", err)
 		}
 		it.Summary, it.Detail = attentionSentence(it, attemptsUsed, maxAttempts)
 		out = append(out, it)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	if len(out) > f.Limit {
+		return out[:f.Limit], true, nil
+	}
+	return out, false, nil
 }
 
 // attentionSentence renders the human text.
