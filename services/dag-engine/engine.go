@@ -747,7 +747,14 @@ func deriveNodeStates(
 		// the node's retry_floor, because an operator retry grants the budget
 		// afresh and the attempts below the floor belong to the superseded tries
 		// (CONTRACT-FINDINGS F100). LoadAttempts has already dropped those.
-		exhausted := last.AttemptNumber-n.RetryFloor >= maxAttempts
+		//
+		// Exhausted too when the scheduler refused to retry the last attempt
+		// (a non-retryable error class, an indeterminate outcome with
+		// idempotency none, a blown schedule_to_close) while budget remained.
+		// No further attempt will ever be created, so treating the node as
+		// "between tries" left it RUNNING forever and the run never ended
+		// (CONTRACT-FINDINGS F145).
+		exhausted := last.AttemptNumber-n.RetryFloor >= maxAttempts || last.RetryRefused
 		out[n.NodeID] = dag.AttemptStateToNode(string(last.State), exhausted)
 	}
 	return out

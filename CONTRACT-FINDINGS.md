@@ -3418,44 +3418,123 @@ is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
 report the output. Test it in `agent/internal/worker` for both inline and blob
 outputs, and in the NATS/e2e path with a non-SDK executor.
 
-### F144. `nexusctl init` task images installed an unrelated PyPI package as the SDK — FIXED
+### F144. The quick-start journey was broken end to end — FIXED
 
-**Severity:** high for anyone following the templates (every task in a
-generated project failed at import). Found while running the docs-site
-quickstart for real on an isolated stack (compose project `nexus-w3i-qs`).
+**Severity:** high for anyone following the quick start: no generated project
+ran end to end. Found while running the docs-site quickstart for real on an
+isolated stack (compose project `nexus-w3i-qs`). A `nexusctl init` project
+could not run on the local stack. Four independent defects, each enough on
+its own, plus two that hid what happened:
 
-The shared template `requirements.txt` listed `nexus-sdk>=0.1.0`, and the
-template `Dockerfile` ran `pip install -r requirements.txt`. The distribution
-name `nexus-sdk` on PyPI belongs to an unrelated project (the Blue Brain Nexus
-Python SDK, version 0.3.2 at the time, top-level module `nexussdk`). So
-`docker build` "succeeded" and produced an image with the wrong package in it:
+1. **The template installed an unrelated PyPI package as the SDK.** The shared
+   `requirements.txt` listed `nexus-sdk>=0.1.0`, and the `Dockerfile` ran
+   `pip install -r requirements.txt`. On PyPI, `nexus-sdk` is the Blue Brain
+   Nexus SDK (0.3.2, module `nexussdk`), so `docker build` "succeeded":
 
-```
-$ docker run --rm --entrypoint pip orders-etl:0.1.0 show nexus-sdk
-Name: nexus-sdk
-Version: 0.3.2
-Summary: Python SDK for Blue Brain Nexus v1.
-```
+   ```
+   $ docker run --rm --entrypoint pip orders-etl:0.1.0 show nexus-sdk
+   Name: nexus-sdk
+   Version: 0.3.2
+   Summary: Python SDK for Blue Brain Nexus v1.
+   ```
 
-Every task then died with `No module named nexus` when the agent ran
-`python -m nexus.entrypoint`. The same line in a developer's
-`pip install -r requirements.txt` put the wrong package in their virtualenv.
-The Dockerfile also copied only `dag.py`, so data a handler reads from the
-project could never reach the task.
+   The same line put the wrong package in a developer's virtualenv.
+2. **The handler module was not importable in the task container.** The docker
+   executor runs with `--workdir /nexus` (the attempt mount), so
+   `python -m nexus.entrypoint --module dag` from `WORKDIR /app` failed with
+   `No module named 'dag'` (exit 2, classified APPLICATION). The image also
+   copied only `dag.py`, so project data never reached a task.
+3. **The compose agents could not run the docker executor at all.** The agent
+   image had no Docker CLI, and the agent (uid 10001) could not use the mounted
+   root-owned socket, so every agent logged "docker daemon unreachable; not
+   advertising the docker executor". Every task with `executor: docker`,
+   including every template task, stayed `READY` and never got placed.
+4. **Attempt work directories were invisible to the task container.** The
+   docker executor bind-mounts the attempt directory by path, and the daemon
+   resolves that path on the host, not inside the agent container.
+5. **`nexusctl run get` and `nexusctl events` printed `-` in most columns.**
+   They read `attempt_count`, `worker_id` and `duration_ms` off each node, and
+   `at`/`type` off each event. The gateway sends none of these: node state and
+   `attempts_used` are on the node, the execution is on `attempts[]`, and an
+   event has `occurred_at`, `kind` and `payload`. So the attempt id that
+   `nexusctl logs` needs appeared nowhere on screen.
+6. **`run --local --host-executor` could not run a template.** The local
+   runner ran a container task's command in the attempt directory, so
+   `--module dag` and relative data paths did not resolve.
 
 **Fix.**
 
-- `requirements.txt` no longer names the SDK, and says why.
-- The `Dockerfile` installs the SDK from a named build context
-  (`docker build --build-context nexus-sdk=<checkout>/sdk/python ...`). Without
-  it the build fails at the `COPY --from=nexus-sdk` instead of silently
-  installing the wrong package. It copies the whole project, filtered by a new
-  `.dockerignore`.
-- `nexusctl init` prints the next steps with the SDK path of the checkout it
-  finds (`pip install -e <checkout>/sdk/python`), falling back to a placeholder.
-- The `etl` template ships `data/orders.csv`, a 31-row sample with one invalid
-  row, so a first run needs no external data.
+- Templates: `requirements.txt` no longer names the SDK and says why. The
+  `Dockerfile` installs it from a named build context
+  (`docker build --build-context nexus-sdk=<checkout>/sdk/python ...`) and
+  fails loudly without one. It sets `PYTHONPATH=/app` and copies the project,
+  filtered by a new `.dockerignore`. `nexusctl init` prints the next steps with
+  the checkout's SDK path. The `etl` template ships `data/orders.csv`, 31 rows
+  with one invalid row, so a first run needs no external data.
+- Agent image: `deploy/Dockerfile.service` adds `docker-cli` to the agent image
+  only.
+- Compose: the three agents join the socket's group
+  (`group_add: ${NEXUS_DOCKER_SOCKET_GID:-0}`; 0 is right for Docker Desktop).
+  `nexusctl up` sets the variable from `/var/run/docker.sock` on Linux. The
+  agents keep their work directories at the same host and container path
+  (`NEXUS_AGENT_WORK_DIR`, default `/tmp/nexus-agent-work`), which `nexusctl up`
+  creates with mode 1777 before compose would create it root-owned.
+- CLI: `run get` shows `attempts_used/max_attempts` and the latest attempt's
+  id, worker and duration. `events` shows time, kind and a payload summary.
+  `run list` computes the duration from `started_at`/`ended_at`.
+- Local runner: with `--host-executor`, a docker or kubernetes task runs from
+  the directory the run was started in, which is on `PYTHONPATH`. This stands
+  in for the image's working directory.
+
+**Verified:** every quickstart command on `nexus-w3i-qs`. The agent registers
+with `"executors":["subprocess","docker"]`. The `orders-etl` run goes through
+the docker executor to `SUCCEEDED` in 6 s, with 30 rows loaded and one row
+rejected. `logs`, `events` and `run get` show the attempts, and
+`run --local dag.py --host-executor` succeeds. Tests:
+`TestRunGetShowsTheLatestAttemptFromTheGatewayDocument`,
+`TestEventsTableReadsKindTimeAndPayload` and
+`test_host_executor_runs_a_container_task_from_the_launch_directory`.
 
 **Still open.** The SDK is not published under a name the project controls. A
 package-index release under a distinct name, for example `kgf-nexus-sdk`, would
-let templates pin it by version again. That needs an owner decision.
+let templates pin it by version again. That needs an owner decision. Mounting
+the Docker socket remains a laptop-only arrangement (deploy/README.md).
+
+### F145. A failure the scheduler refused to retry left its node RUNNING forever — FIXED
+
+**Severity:** high (a run never ends). Found by the same quickstart: a task
+that failed with a non-retryable class while retry budget remained.
+
+The scheduler decides retries (`internal/store/scheduler_reports.go`,
+`evaluateAndScheduleRetryWithClass`). When it refuses, for example because
+`APPLICATION` is not in the default retry set, `VALIDATION`/`NOT_FOUND`/
+`PERMISSION_DENIED` are always terminal, `schedule_to_close` was blown, or a
+`LOST` attempt has `idempotency: none`, it writes a `RetryExhausted` (or
+`IndeterminateOutcome`) event and schedules no retry. The DAG engine, however,
+derived node state from the attempt count alone
+(`services/dag-engine/engine.go`, `deriveNodeStates`): a failed attempt with
+`attempt_number < max_attempts` meant "between tries", so the node stayed
+`RUNNING`. Nothing would ever create the next attempt, so the run never
+reached a terminal state. The default `max_attempts` is 3, so any application
+error in a task with default retries hung its run:
+
+```
+run_events: AttemptFailed {"error_class":"ERROR_CLASS_APPLICATION"}
+            RetryExhausted {"reason":"error_class_not_in_retry_on","attempts_used":1,"max_attempts":4}
+task_nodes: extract RUNNING     (run RUNNING, indefinitely)
+```
+
+**Fix.** `LoadAttempts` also reads whether a refusal event names each attempt.
+The scheduler appends that event in the same transaction as the terminal
+attempt write, so the two are never seen apart. `deriveNodeStates` treats a
+refused last attempt as exhausted. An operator retry creates new attempts
+above the retry floor, so an old refusal does not affect them.
+
+**Tests.** `TestDeriveNodeStates` has three new cases: a refused failure with
+budget left fails the node, a refused LOST fails it, and a refusal on an
+earlier attempt does not override a later success. Reverting the fix fails all
+three. `TestIntegration_RefusedRetryWithBudgetLeftFailsTheNode` runs against a
+real, migrated Postgres: without a refusal the node is `RUNNING`; with the
+scheduler's event, the node is `FAILED`, the downstream node is
+`UPSTREAM_FAILED` and the run is `FAILED`. All of `services/dag-engine`'s
+integration tests pass.

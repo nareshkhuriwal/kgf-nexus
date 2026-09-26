@@ -63,6 +63,31 @@ func TestDeriveNodeStates(t *testing.T) {
 			want: map[string]dag.NodeState{"a": dag.NodeRunning},
 		},
 		{
+			// F145: the scheduler refused the retry (a non-retryable class such
+			// as APPLICATION) with two attempts still in the budget. No further
+			// attempt will ever exist, so RUNNING here hung the run forever.
+			name: "a failed attempt whose retry the scheduler refused FAILS the node despite budget left",
+			attempts: []store.DEAttemptRow{
+				{NodeID: "a", AttemptNumber: 1, State: domain.AttemptFailed, RetryRefused: true},
+			},
+			want: map[string]dag.NodeState{"a": dag.NodeFailed},
+		},
+		{
+			name: "a LOST attempt refused as indeterminate (idempotency none) FAILS the node",
+			attempts: []store.DEAttemptRow{
+				{NodeID: "d", AttemptNumber: 1, State: domain.AttemptLost, RetryRefused: true},
+			},
+			want: map[string]dag.NodeState{"d": dag.NodeFailed},
+		},
+		{
+			name: "a refusal on an EARLIER attempt does not fail a node whose latest attempt succeeded",
+			attempts: []store.DEAttemptRow{
+				{NodeID: "a", AttemptNumber: 1, State: domain.AttemptFailed, RetryRefused: true},
+				{NodeID: "a", AttemptNumber: 2, State: domain.AttemptSucceeded},
+			},
+			want: map[string]dag.NodeState{"a": dag.NodeSucceeded},
+		},
+		{
 			name: "a failed attempt with the budget exhausted FAILS the node",
 			attempts: []store.DEAttemptRow{
 				{NodeID: "a", AttemptNumber: 3, State: domain.AttemptFailed},
