@@ -208,6 +208,31 @@ resource "azurerm_storage_container" "artifacts" {
   container_access_type = "private"
 }
 
+# Lifecycle, the Azure counterpart of the S3 and GCS rules (ADR-0027,
+# OPERATIONS §26.4). Versioning keeps every overwritten or deleted blob as a
+# noncurrent version; without an expiry those accumulate forever. Only
+# NONCURRENT versions expire: current objects are never aged out, because the
+# artifact GC alone decides reachability and an age rule would delete outputs
+# a live run still references. Uncommitted blocks (an interrupted staged
+# upload) are discarded by Azure after seven days without a rule.
+resource "azurerm_storage_management_policy" "artifacts" {
+  storage_account_id = azurerm_storage_account.artifacts.id
+
+  rule {
+    name    = "expire-noncurrent-versions"
+    enabled = true
+    filters {
+      blob_types   = ["blockBlob"]
+      prefix_match = ["${azurerm_storage_container.artifacts.name}/"]
+    }
+    actions {
+      version {
+        delete_after_days_since_creation = var.blob_noncurrent_version_days
+      }
+    }
+  }
+}
+
 resource "azurerm_private_dns_zone" "blob" {
   name                = "privatelink.blob.core.windows.net"
   resource_group_name = azurerm_resource_group.this.name

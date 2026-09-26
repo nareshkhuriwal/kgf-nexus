@@ -228,6 +228,16 @@ variable "blob_soft_delete_days" {
   default     = 30
 }
 
+variable "blob_noncurrent_version_days" {
+  description = "Days a noncurrent (overwritten or deleted) blob version is kept before the lifecycle policy removes it. Matches the S3 and GCS noncurrent expiry."
+  type        = number
+  default     = 30
+  validation {
+    condition     = var.blob_noncurrent_version_days >= 1
+    error_message = "blob_noncurrent_version_days must be at least 1."
+  }
+}
+
 # ── Key Vault ─────────────────────────────────────────────────────────────
 
 variable "key_vault_allowed_ip_ranges" {
