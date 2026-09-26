@@ -4553,3 +4553,131 @@ there; it now detects a server that accepts any password and logs instead of
 failing. PostgreSQL 15 and later no longer grant CREATE on schema `public` to
 PUBLIC, so the migrate login must own the database or hold CREATE on `public`
 (a non-owner migrate login fails with "permission denied for schema public").
+
+### F154. Tenant creation was guarded on `read`: the handler's own check was the only barrier to a new tenant — FIXED
+
+**Severity:** high by class, low as shipped. `POST /v1/platform/tenants`
+creates a tenant and its administrator account -- the most privileged write
+in the product -- and was registered with `a.guard(authn.ActionRead, ...)`.
+Its `routePermissions` entry is empty (the permission catalog is per
+namespace and this route is not), so for this route the coarse action is the
+guard's WHOLE decision, and `read` let every credential through: reader API
+keys, reader sessions, role-bound sessions, scoped tokens. What stopped them
+was `platformOperator` inside the handler (an unbound administrator's session
+listed in `platform_operators`). That check is correct today, so no
+unprivileged caller could create a tenant on 4580cae; but a route whose
+authorization lives only in its handler is one refactor away from being
+open, and the OpenAPI document advertised the route as `x-nexus-action: read`.
+
+**Fix.** The route is guarded on `admin_write`, so a read-only credential is
+refused by the guard before the body (a tenant and its administrator's
+password) is read; `platformOperator` and the quotas route's
+`isPlatformOperator` are now one function, which also refuses a KGF
+principal explicitly. The document says `admin_write`. Tests, written first:
+`TestCreatingATenantNeedsAdminWrite` (the route's guard),
+`TestAReadOnlyCredentialCannotReachTenantCreation` (refused without reading
+the body), the class check `TestMutatingRoutesWithoutAPermissionAreNotGuardedOnRead`
+(every state-changing route with an empty permission entry must be guarded on
+`write` or `admin_write`; `POST /v1/auth/logout` is the one documented
+exception), and the Postgres matrix `TestIntegrationTenantCreationAuthorization`
+(reader key, reader session, role-bound session, admin key, admin scoped
+token and a non-operator admin session all get 403 and create nothing; a
+platform operator's session gets 201). `GET /v1/platform/tenants` and
+`GET /v1/platform/usage` stay guarded on `read` with the operator check in the
+handler: they change nothing, and the class check does not cover reads.
+
+### F155. REST handler inconsistencies: limits, bodies, revisions, nulls, audit answers and the CLI — FIXED
+
+**Severity:** low to medium; one audit-trail defect. A sweep of the gateway's
+REST handlers and nexusctl, fixing each with a test written first.
+
+**List limits.** Each listing parsed `limit` its own way. The run list reset
+anything above 500 to 100, the audit store reset anything above 1000 to 100,
+the attention panel reset anything above 200 to 50 -- so asking for more than
+the cap returned FEWER rows than asking for the cap -- and negative or
+non-numeric values silently became the default. `GET .../specs/{name}/versions`
+passed the caller's limit to Postgres unbounded. Now one rule, applied by
+`rest.listLimit` on every list endpoint and by `store.ClampLimit` underneath
+(defaults and maxima declared once, `internal/store/limits.go`): absent is the
+default, a positive integer is capped at the listing's maximum, and zero,
+negative or non-integer is 400 `invalid_limit` (`invalid_recent_limit` for a
+worker's `recent_limit`). The notification-delivery `before` cursor, which
+silently ignored a malformed value, is validated too. Attempt-log `limit`/`tail`
+keep their own page semantics (ADR-0020) and are unchanged.
+
+**The attention panel's `truncated`** was `len(items) == limit`, true for a
+namespace with exactly `limit` items where nothing was dropped. The store now
+fetches one row past the cap (`GatewayListAttentionPage`).
+
+**Request bodies.** `readBody` reported every failure as "exceeds N bytes or
+could not be read", so spec submission answered a reset connection with 413
+`spec_too_large`; the routes that decoded straight from the request (roles,
+role assignments, users, service accounts, audit policy, legal hold and sinks,
+notification channels and rules, triggers, sensors) answered an OVERSIZED body
+with 400, and the schedule routes called it `unreadable_body`. Webhook
+`rotate-secret` ignored the read error entirely and rotated with the default
+24-hour grace instead of the one the caller sent (possibly 0, "revoke now").
+Now an over-size body is 413 on every route (`body_too_large`, keeping
+`spec_too_large` and the hook's `payload_too_large`) and any other read
+failure is 400 `unreadable_body`; `TestOversizedBodiesAre413OnEveryRoute`
+sends an over-size body to every POST/PUT/PATCH route and requires 413 from
+each handler that reads it.
+
+**Revisions.** Revisioned writes disagreed on what `revision: 0` meant: create
+if absent (quotas, platform config, clusters, roles, role assignments, audit
+policy) or overwrite unconditionally (notification channels and rules,
+triggers, sensors); a negative revision was 409 on some and 400 on others; and
+`PUT .../service-accounts/{id}` answered 409 for an account that does not
+exist. One rule now (api/openapi.yaml "Revisions"): the revision last read,
+409 if stale; 0 creates only if absent, so it is 409 on an object that exists
+and there is no unconditional overwrite; negative is 400 `invalid_revision`; a
+missing object is 404. This is a wire change for the four ADR-0028 update
+routes: a client that relied on omitting `revision` to overwrite now gets 409.
+The console always sent the revision it read; nexusctl's partial updates
+(`trigger update`, `sensor update|enable|disable`, and the client's channel and
+rule updates) now read the current revision just before writing, so a
+concurrent change becomes a 409 instead of a silent overwrite.
+
+**Nulls.** `GET .../platform/config` served `"pools": null`, `"tolerations":
+null` and `"node_selector": null` for a policy saved without them
+(`platform.Config.Normalize`, applied on every read and write). The cluster
+list could not return null on 4580cae -- the store already returned `[]` --
+but the handler now guarantees it too, pinned by
+`TestEmptyClusterListIsAnArray`. `GET .../users/{id}/roles` keeps its
+documented `roles: null` for a legacy (unassigned) account: there the null
+carries meaning, and `legacy` says so.
+
+**Answers.** `PUT .../users/{id}` returned `email_verified: false` for every
+account because it never read the column; it now returns the row as written,
+including migration 0017's un-verification on an address change.
+`GET /v1/account/tenant` for a namespace with no tenant row was 500; it is 404
+`tenant_not_found`. `POST .../audit/sinks` answered 422 with no `message`; the
+body now names the invalid fields (`message`, `field`, `fields`, and
+`problems` one per field), and the update route does the same. A failed audit
+write on a role save or delete, a role assignment, a user create or edit, or a
+tenant creation was 500; it is 503 `audit_unavailable` with the change rolled
+back, the F139 answer every other security grant gives.
+
+**Audit trail.** Tenant onboarding wrote its `tenant.create` rows with the
+outcome `"OK"` -- not `success` -- so no outcome filter or export found them,
+and without the client address. It now writes `success` with the address, and
+`GatewayAppendAudit` refuses any outcome other than `success`, `denied` or
+`error`. Rows already written as `OK` are left as they are (the log is
+append-only); find them with `SELECT * FROM audit_log WHERE outcome = 'OK'`.
+
+**nexusctl.** Every 429 was described as "rate limiting". A namespace quota
+(`namespace_quota_exceeded`), an exhausted budget (`budget_exceeded`) and a
+workflow's `max_active_runs` are not rate limits and backoff does not clear
+them, so the error now names the cause, the dimension, the used/limit (or
+spent/amount) figures and the `Retry-After`, which `APIError.RetryAfter` also
+carries. `compile --show --output yaml` had the yaml.v3 leading-newline bug
+the importer hit: a task command `"\necho hi\n"` rendered as a literal block
+that parsed back as `"echo hi\n"`, a different spec with a different hash.
+`spec.EncodeYAML` now checks every rendering by parsing it back and quotes
+the strings the literal style would change; the importer uses the same
+encoder.
+
+**Not changed.** 409 bodies still say `revision_conflict` on some routes and
+`conflict` on others (clients branch on the status; renaming codes would break
+the ones that do not). `run.delete` is classed operational but audited inside
+its transaction, so its audit failure is still a 500 that blocks the delete.
