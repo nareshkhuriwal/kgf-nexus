@@ -38,11 +38,21 @@ o-1,c-1,2026-09-01,10.50,USD
 
 Edit `REQUIRED_COLUMNS` and `_check_row` in `dag.py` for your own schema.
 
+`data/orders.csv` is a 31-row sample with one bad row (an impossible date),
+which `validate` rejects without failing the run. It is copied into the task
+image at `/app/data/orders.csv`, so a first run needs no external data:
+
+```bash
+nexusctl run --local dag.py --param source=data/orders.csv --param target_db=warehouse.db
+nexusctl run create __WORKFLOW_NAME__ --param source=/app/data/orders.csv \
+    --param target_db=/tmp/warehouse.db --wait   # a path the task user can write
+```
+
 ## Develop
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt pytest
+pip install -e /path/to/kgf-nexus/sdk/python -r requirements.txt pytest
 pytest                                    # runs the real task functions
 nexusctl workflow compile dag.py --show   # the exact spec the server will see
 ```
@@ -50,7 +60,8 @@ nexusctl workflow compile dag.py --show   # the exact spec the server will see
 ## Deploy and run
 
 ```bash
-docker build -t __WORKFLOW_NAME__:0.1.0 .   # then push, and set IMAGE in dag.py
+docker build --build-context nexus-sdk=/path/to/kgf-nexus/sdk/python \
+    -t __WORKFLOW_NAME__:0.1.0 .   # then push, and set IMAGE in dag.py
 nexusctl workflow submit dag.py --namespace __NAMESPACE__
 nexusctl run create __WORKFLOW_NAME__ --namespace __NAMESPACE__ \
     --param source=https://example.com/orders.csv --wait

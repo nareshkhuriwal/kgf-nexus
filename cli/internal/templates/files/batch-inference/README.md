@@ -51,7 +51,7 @@ Or `synthetic://N` to generate N records, useful for sizing the fleet.
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt pytest
+pip install -e /path/to/kgf-nexus/sdk/python -r requirements.txt pytest
 pytest
 nexusctl workflow compile dag.py --show
 ```
@@ -59,7 +59,8 @@ nexusctl workflow compile dag.py --show
 ## Deploy and run
 
 ```bash
-docker build -t __WORKFLOW_NAME__:0.1.0 .   # then push, and set IMAGE in dag.py
+docker build --build-context nexus-sdk=/path/to/kgf-nexus/sdk/python \
+    -t __WORKFLOW_NAME__:0.1.0 .   # then push, and set IMAGE in dag.py
 nexusctl workflow submit dag.py --namespace __NAMESPACE__
 nexusctl run create __WORKFLOW_NAME__ --namespace __NAMESPACE__ \
     --param source=/data/input.jsonl --param shard_size=5000 --wait

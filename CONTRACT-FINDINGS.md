@@ -3417,3 +3417,45 @@ is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
 `ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
 report the output. Test it in `agent/internal/worker` for both inline and blob
 outputs, and in the NATS/e2e path with a non-SDK executor.
+
+### F144. `nexusctl init` task images installed an unrelated PyPI package as the SDK — FIXED
+
+**Severity:** high for anyone following the templates (every task in a
+generated project failed at import). Found while running the docs-site
+quickstart for real on an isolated stack (compose project `nexus-w3i-qs`).
+
+The shared template `requirements.txt` listed `nexus-sdk>=0.1.0`, and the
+template `Dockerfile` ran `pip install -r requirements.txt`. The distribution
+name `nexus-sdk` on PyPI belongs to an unrelated project (the Blue Brain Nexus
+Python SDK, version 0.3.2 at the time, top-level module `nexussdk`). So
+`docker build` "succeeded" and produced an image with the wrong package in it:
+
+```
+$ docker run --rm --entrypoint pip orders-etl:0.1.0 show nexus-sdk
+Name: nexus-sdk
+Version: 0.3.2
+Summary: Python SDK for Blue Brain Nexus v1.
+```
+
+Every task then died with `No module named nexus` when the agent ran
+`python -m nexus.entrypoint`. The same line in a developer's
+`pip install -r requirements.txt` put the wrong package in their virtualenv.
+The Dockerfile also copied only `dag.py`, so data a handler reads from the
+project could never reach the task.
+
+**Fix.**
+
+- `requirements.txt` no longer names the SDK, and says why.
+- The `Dockerfile` installs the SDK from a named build context
+  (`docker build --build-context nexus-sdk=<checkout>/sdk/python ...`). Without
+  it the build fails at the `COPY --from=nexus-sdk` instead of silently
+  installing the wrong package. It copies the whole project, filtered by a new
+  `.dockerignore`.
+- `nexusctl init` prints the next steps with the SDK path of the checkout it
+  finds (`pip install -e <checkout>/sdk/python`), falling back to a placeholder.
+- The `etl` template ships `data/orders.csv`, a 31-row sample with one invalid
+  row, so a first run needs no external data.
+
+**Still open.** The SDK is not published under a name the project controls. A
+package-index release under a distinct name, for example `kgf-nexus-sdk`, would
+let templates pin it by version again. That needs an owner decision.
