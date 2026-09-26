@@ -57,7 +57,7 @@ func newAssignmentAPI(t *testing.T) (http.Handler, *restDB, *fakeAssignments) {
 			SpecJSON: []byte(`{"id":"load[3]","task_ref":"etl.load","version":1,` +
 				`"timeouts":{"start_to_close_ms":"600000"},` +
 				`"runtime":{"executor":"subprocess","command":["sh","-c","echo"],` +
-				`"secrets":[{"name":"db","ref":"vault://kv/db","value":"hunter2"}]}}`),
+				`"secrets":[{"name":"db","ref":"vault://kv/db","value":"hunter2"},{"name":"tls.key","ref":"file:///k","inject":"file"}]}}`),
 			InputRefsJSON: []byte(`{"summary":{"inline":"eyJ0b3RhbCI6MTM1fQ==","content_type":"application/json"},` +
 				`"big":{"blob":{"bucket":"b","key":"team-ml/ab","sha256":"ab"},"size_bytes":"900000"}}`),
 			ParentNodeID: &parent, MapIndex: &mi, SpecName: "etl", SpecVersion: 4,
@@ -120,7 +120,8 @@ func TestAttemptAssignmentReturnsInputsAndSpecWithoutCredentials(t *testing.T) {
 		if !strings.Contains(string(a.Inputs["big"]), `"blob"`) {
 			t.Errorf("blob input must stay a reference: %s", a.Inputs["big"])
 		}
-		if len(got.Secrets) != 1 || got.Secrets[0]["name"] != "db" || got.Secrets[0]["ref"] != "vault://kv/db" {
+		if len(got.Secrets) != 2 || got.Secrets[0]["name"] != "db" || got.Secrets[0]["ref"] != "vault://kv/db" || got.Secrets[0]["value"] != "" ||
+			got.Secrets[1]["inject"] != "file" || got.Secrets[0]["inject"] != "" {
 			t.Errorf("secrets = %v, want the reference only", got.Secrets)
 		}
 		if got.Encoding != "protojson" || got.ResultStore.Inline != 4096 || got.Workflow["name"] != "etl" {
