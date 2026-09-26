@@ -59,9 +59,64 @@ postgres:
   image: postgres:16-alpine
   host: postgres        # used when enabled=false
   port: 5432
+  # The OWNER login: it owns the schema and runs the migrate, bootstrap and
+  # db-roles Jobs (password: existingSecret key postgres-password). With
+  # runtimeRoles.enabled=false it is ALSO what every service connects as;
+  # production should enable runtimeRoles so no service holds DDL rights.
   user: nexus
   database: nexus
+  # disable | require | verify-ca | verify-full. PRODUCTION: verify-full with
+  # caBundle below, so every pod checks the server certificate's chain AND its
+  # host name; require encrypts but accepts any server that answers. The
+  # in-cluster postgres (enabled=true) serves no TLS, so it takes disable.
   sslmode: disable
+  # Trust anchors for verify-ca/verify-full: the managed database's ROOT CA(s),
+  # never an intermediate or the server certificate (they rotate unannounced).
+  # One of secretName / configMapName, holding `key`. Mounted read-only at
+  # /etc/nexus/postgres-ca/ca.crt in every pod that connects, and passed as
+  # sslrootcert. deploy/terraform creates it from pinned bundles
+  # (deploy/terraform/ca-bundles). Rotation: docs/OPERATIONS.md §20.8.
+  caBundle:
+    secretName: ""
+    configMapName: ""
+    key: ca.crt
+  # Extra libpq/pgx connection parameters on EVERY connection, e.g.
+  # { connect_timeout: "10", target_session_attrs: read-write }. Values are
+  # URL-encoded. user, password, host, port, dbname and the ssl* keys are
+  # refused here: they have their own settings.
+  params: {}
+  # Per-connection settings, merged over params. `user`/`passwordKey` apply only
+  # with runtimeRoles.enabled; `params` always. migrate covers the migrate,
+  # bootstrap and db-roles Jobs (always the owner login).
+  connections:
+    apiGateway:      { user: nexus_api_gateway_login,      passwordKey: postgres-password-api-gateway,      params: {} }
+    workflowManager: { user: nexus_workflow_manager_login, passwordKey: postgres-password-workflow-manager, params: {} }
+    dagEngine:       { user: nexus_dag_engine_login,       passwordKey: postgres-password-dag-engine,       params: {} }
+    scheduler:       { user: nexus_scheduler_login,        passwordKey: postgres-password-scheduler,        params: {} }
+    resourceManager: { user: nexus_resource_manager_login, passwordKey: postgres-password-resource-manager, params: {} }
+    eventService:    { user: nexus_event_service_login,    passwordKey: postgres-password-event-service,    params: {} }
+    artifactGC:      { user: nexus_artifact_gc_login,      passwordKey: postgres-password-artifact-gc,      params: {} }
+    migrate:         { params: {} }
+  # Least-privilege runtime logins (docs/OPERATIONS.md §20.9). When enabled,
+  # each service connects as its own LOGIN role, a member of the NOLOGIN group
+  # role migration 0005 created for it (nexus_api_gateway, nexus_scheduler,
+  # ...), so it holds exactly ADR-0011's grants and no DDL; artifact-gc gets a
+  # read-only login. A db-roles Job, running as the owner login inside the
+  # cluster (where a managed server's private endpoint is reachable), creates
+  # the logins and sets their passwords from SCRAM verifiers computed in the
+  # Job, so no plaintext reaches the server. The owner password then reaches
+  # only the three Jobs.
+  runtimeRoles:
+    enabled: false
+    # Secret holding each connections.<c>.passwordKey (URL-safe, >= 16 chars:
+    # A-Z a-z 0-9 . _ ~ -). Empty = existingSecret.
+    existingSecret: ""
+    # Bump after changing the passwords in the Secret: the db-roles Job re-runs
+    # under a new name and every connecting pod rolls to read the new value.
+    passwordRevision: 1
+    # Per-login concurrent session cap (-1 = none). Size above the pool's
+    # max_conns x replicas, or scale-out fails at connect.
+    connectionLimit: -1
   maxConnections: 200
   sharedBuffers: 256MB
   storage:
@@ -264,6 +319,22 @@ schedulers:
 
 # Worker agents. Real hardware only by default; simulated capacity belongs in a
 # dev environment and must be labelled as such.
+#
+# Optional per entry, beyond the capacity it advertises:
+#   gpuCount / gpuKind / gpuMemoryBytes   what the agent ADVERTISES (--gpu-count,
+#       --gpu-kind, --gpu-memory-bytes). With gpuCount > 0 the pod also REQUESTS
+#       that many devices of gpu.resourceName (default agentDefaults.
+#       gpuResourceName, nvidia.com/gpu) from the device plugin, so it lands on a
+#       node that has them and the devices are mounted: advertised == allocated.
+#       It also tolerates the <resourceName>:NoSchedule taint GPU pools carry.
+#   gpu: { requestDevices: false }   advertise without allocating: SIMULATED
+#       capacity only, and the chart then requires "simulated=true" in labels.
+#   gpu: { resourceName: amd.com/gpu }   another device plugin's resource.
+#   nodeSelector / tolerations / affinity   REPLACE placement.* for this agent
+#       (e.g. { nexus.khuriwalgroup.com/pool: gpu }).
+#   serviceAccount: { name, annotations, automountServiceAccountToken, podLabels }
+#       overrides serviceAccounts.agent for this agent.
+#   natsSeedKey, podDisruptionBudget, resources, customResources.
 agents:
   - name: agent-cpu
     replicas: 1
@@ -279,6 +350,8 @@ agents:
       limits: { memory: 4Gi }
 
 agentDefaults:
+  # Extended resource a GPU agent requests (agents[].gpu.resourceName overrides).
+  gpuResourceName: nvidia.com/gpu
   heartbeatIntervalMs: 5000
   # Must stay below terminationGracePeriodSeconds, or Kubernetes kills an agent
   # mid-drain and strands its attempts until their leases expire.
@@ -336,6 +409,42 @@ ui:
   resources:
     requests: { cpu: 25m, memory: 32Mi }
     limits: { memory: 128Mi }
+
+# ─── ServiceAccounts (one per component) ─────────────────────────────────
+# Every Nexus pod runs under its own ServiceAccount, never `default`, so a
+# cloud identity can be bound to exactly the components that need it:
+#   EKS IRSA          annotations: { eks.amazonaws.com/role-arn: arn:aws:iam::...:role/... }
+#   EKS Pod Identity  nothing here: an aws_eks_pod_identity_association names the SA
+#   GKE               annotations: { iam.gke.io/gcp-service-account: <gsa>@<project>.iam.gserviceaccount.com }
+#   AKS               annotations: { azure.workload.identity/client-id: <client-id> }
+#                     podLabels:   { azure.workload.identity/use: "true" }
+# Only the result-store users (apiGateway for logs, agent, artifactGC) need one.
+# The API token is NOT mounted unless a component sets
+# automountServiceAccountToken: true; none of them calls the Kubernetes API
+# (an agent whose executors include "kubernetes" defaults to true). IRSA,
+# Pod Identity and Azure Workload Identity inject their own projected token and
+# GKE uses the metadata server, so all of them work with the token unmounted.
+# Components may SHARE an account by naming the same `name`; the chart creates
+# it once and refuses conflicting settings. The cluster controller keeps its
+# own RBAC-bound account (clusterController).
+serviceAccounts:
+  # false = the named accounts must already exist (name "" = `default`).
+  create: true
+  automountServiceAccountToken: false
+  # Added to every account the chart creates.
+  annotations: {}
+  # Per component: name (default nexus-<component>), annotations,
+  # automountServiceAccountToken (null = the default above), podLabels.
+  apiGateway: {}
+  workflowManager: {}
+  dagEngine: {}
+  scheduler: {}        # every schedulers[] Deployment
+  resourceManager: {}
+  eventService: {}
+  agent: {}            # every agents[] entry, unless it sets serviceAccount
+  artifactGC: {}
+  ui: {}
+  jobs: {}             # migrate, bootstrap, db-roles
 
 # ─── Pod placement (every Nexus Deployment) ──────────────────────────────
 # Applied to the control-plane services, schedulers, agents, console and the

@@ -10,6 +10,8 @@ postgres:
   enabled: false
   host: nexus.postgres.database.azure.com
   sslmode: verify-full
+  # The flexible server's roots (deploy/terraform/ca-bundles/azure-postgres-roots.pem).
+  caBundle: { configMapName: nexus-postgres-ca }
 minio:
   enabled: false
   endpoint: https://s3.eu-west-1.amazonaws.com

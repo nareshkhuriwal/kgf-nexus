@@ -1,0 +1,90 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# F115 hardening all at once: a managed database over sslmode=verify-full with
+# a CA bundle Secret, per-connection parameters, least-privilege runtime logins
+# (db-roles Job), per-component ServiceAccounts with cloud-identity
+# annotations (a shared result-store account for the gateway, agents and GC,
+# Azure Workload Identity pod label), and a GPU agent on a tainted pool next
+# to a CPU agent and a labelled simulated one.
+existingSecret: nexus-credentials
+image: { tag: 0123456789ab }
+nats:
+  auth: { mode: none }
+postgres:
+  enabled: false
+  host: nexus-pg.postgres.database.azure.com
+  sslmode: verify-full
+  caBundle: { secretName: nexus-postgres-ca, key: ca.crt }
+  params: { connect_timeout: "10", application_name: kgf-nexus }
+  connections:
+    scheduler: { user: nexus_scheduler_login, passwordKey: postgres-password-scheduler, params: { statement_timeout: "30000" } }
+    migrate: { params: { connect_timeout: "30" } }
+  runtimeRoles:
+    enabled: true
+    existingSecret: nexus-db-logins
+    passwordRevision: 3
+    connectionLimit: 64
+minio:
+  enabled: false
+  endpoint: https://s3.eu-west-1.amazonaws.com
+  useTLS: true
+serviceAccounts:
+  annotations: { example.com/owner: platform }
+  apiGateway:
+    name: nexus-artifacts
+    annotations: { eks.amazonaws.com/role-arn: "arn:aws:iam::111122223333:role/nexus-artifacts" }
+    podLabels: { azure.workload.identity/use: "true" }
+  agent:
+    name: nexus-artifacts
+    annotations: { eks.amazonaws.com/role-arn: "arn:aws:iam::111122223333:role/nexus-artifacts" }
+    podLabels: { azure.workload.identity/use: "true" }
+  artifactGC:
+    name: nexus-artifacts
+    annotations: { eks.amazonaws.com/role-arn: "arn:aws:iam::111122223333:role/nexus-artifacts" }
+    podLabels: { azure.workload.identity/use: "true" }
+schedulers:
+  - { name: scheduler, queue: default }
+  - { name: scheduler-gpu, queue: gpu }
+agents:
+  - name: agent-cpu
+    queues: default
+    labels: "zone=cluster,accelerator=none"
+    cpuMillis: 2000
+    memoryBytes: 4294967296
+    diskBytes: 10737418240
+    nodeSelector: { nexus.khuriwalgroup.com/pool: cpu }
+    resources:
+      requests: { cpu: 250m, memory: 256Mi }
+      limits: { memory: 4Gi }
+  - name: agent-gpu
+    queues: gpu
+    labels: "zone=cluster,accelerator=nvidia"
+    cpuMillis: 4000
+    memoryBytes: 17179869184
+    gpuCount: 1
+    gpuKind: nvidia-l4
+    gpuMemoryBytes: 24000000000
+    diskBytes: 107374182400
+    nodeSelector: { nexus.khuriwalgroup.com/pool: gpu }
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - { key: accelerator, operator: In, values: [nvidia] }
+    resources:
+      requests: { cpu: "1", memory: 2Gi }
+      limits: { memory: 16Gi }
+  - name: agent-gpu-sim
+    queues: gpu
+    labels: "zone=cluster,accelerator=nvidia,simulated=true"
+    cpuMillis: 1000
+    memoryBytes: 2147483648
+    gpuCount: 2
+    gpu: { requestDevices: false }
+    diskBytes: 10737418240
+    serviceAccount: { name: nexus-agent-sim }
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { memory: 1Gi }

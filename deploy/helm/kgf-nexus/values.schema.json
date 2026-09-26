@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "kgf-nexus chart values",
-  "description": "Validated by Helm on install, upgrade, template and lint. Top-level keys are closed so a misspelt section fails instead of being silently ignored; sections that pre-date this schema accept extra keys (backwards compatibility), the sections added with it are closed. Cross-field rules (existingSecret, image.tag, NATS identities, PITR, apply-mode UID, GC delete confirmation, PDB vs replicas) are enforced by the templates with a message naming the fix.",
+  "description": "Validated by Helm on install, upgrade, template and lint. Top-level keys are closed so a misspelt section fails instead of being silently ignored; sections that pre-date this schema accept extra keys (backwards compatibility), the sections added with it are closed. Cross-field rules (existingSecret, image.tag, NATS identities, PITR, apply-mode UID, GC delete confirmation, database TLS and runtime logins, GPU requests vs advertised capacity, shared ServiceAccounts, PDB vs replicas) are enforced by the templates with a message naming the fix.",
   "type": "object",
   "additionalProperties": false,
   "definitions": {
@@ -49,6 +49,32 @@
     },
     "dnsName": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" },
     "k8sName": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63 },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$", "maxLength": 253 },
+        "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+        "automountServiceAccountToken": { "type": ["boolean", "null"] },
+        "podLabels": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "dbParams": {
+      "type": "object",
+      "description": "libpq/pgx connection parameters; values are URL-encoded. Connection-identity keys (user, host, sslmode, ...) are refused by the templates.",
+      "propertyNames": { "pattern": "^[a-z_]+$" },
+      "additionalProperties": { "type": ["string", "number", "boolean"] }
+    },
+    "dbConnection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "user": { "type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$" },
+        "passwordKey": { "type": "string", "pattern": "^[-._a-zA-Z0-9]+$" },
+        "params": { "$ref": "#/definitions/dbParams" }
+      }
+    },
+
     "service": {
       "type": "object",
       "additionalProperties": true,
@@ -104,6 +130,41 @@
         "user": { "type": "string", "minLength": 1 },
         "database": { "type": "string", "minLength": 1 },
         "sslmode": { "enum": ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"] },
+        "caBundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Root CA bundle for verify-ca/verify-full: a Secret OR a ConfigMap holding `key`.",
+          "properties": {
+            "secretName": { "type": "string" },
+            "configMapName": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 }
+          }
+        },
+        "params": { "$ref": "#/definitions/dbParams" },
+        "connections": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "apiGateway": { "$ref": "#/definitions/dbConnection" },
+            "workflowManager": { "$ref": "#/definitions/dbConnection" },
+            "dagEngine": { "$ref": "#/definitions/dbConnection" },
+            "scheduler": { "$ref": "#/definitions/dbConnection" },
+            "resourceManager": { "$ref": "#/definitions/dbConnection" },
+            "eventService": { "$ref": "#/definitions/dbConnection" },
+            "artifactGC": { "$ref": "#/definitions/dbConnection" },
+            "migrate": { "$ref": "#/definitions/dbConnection" }
+          }
+        },
+        "runtimeRoles": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "existingSecret": { "type": "string" },
+            "passwordRevision": { "type": "integer", "minimum": 1 },
+            "connectionLimit": { "type": "integer", "minimum": -1 }
+          }
+        },
         "maxConnections": { "type": "integer", "minimum": 10 },
         "resources": { "$ref": "#/definitions/resources" },
         "pitr": {
@@ -219,6 +280,21 @@
           "cpuMillis": { "type": "integer", "minimum": 1 },
           "memoryBytes": { "type": "integer", "minimum": 1 },
           "gpuCount": { "type": "integer", "minimum": 0 },
+          "gpuKind": { "type": "string" },
+          "gpuMemoryBytes": { "type": "integer", "minimum": 0 },
+          "gpu": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "requestDevices": { "type": "boolean", "description": "Request gpuCount devices of resourceName (default true). false = simulated capacity, which requires the label simulated=true." },
+              "resourceName": { "type": "string", "pattern": "^[a-z0-9.-]+/[a-z0-9._-]+$" },
+              "tolerate": { "type": "boolean", "description": "Tolerate the <resourceName>:NoSchedule taint (default true)." }
+            }
+          },
+          "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
+          "tolerations": { "type": "array", "items": { "type": "object" } },
+          "affinity": { "type": "object" },
+          "serviceAccount": { "$ref": "#/definitions/serviceAccount" },
           "diskBytes": { "type": "integer", "minimum": 1 },
           "resources": { "$ref": "#/definitions/resources" },
           "podDisruptionBudget": { "$ref": "#/definitions/pdb" }
@@ -229,6 +305,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "gpuResourceName": { "type": "string", "pattern": "^[a-z0-9.-]+/[a-z0-9._-]+$" },
         "heartbeatIntervalMs": { "type": "integer", "minimum": 100 },
         "drainGrace": { "$ref": "#/definitions/duration" },
         "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 }
@@ -269,6 +346,25 @@
         },
         "resources": { "$ref": "#/definitions/resources" },
         "podDisruptionBudget": { "$ref": "#/definitions/pdb" }
+      }
+    },
+    "serviceAccounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "automountServiceAccountToken": { "type": "boolean" },
+        "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+        "apiGateway": { "$ref": "#/definitions/serviceAccount" },
+        "workflowManager": { "$ref": "#/definitions/serviceAccount" },
+        "dagEngine": { "$ref": "#/definitions/serviceAccount" },
+        "scheduler": { "$ref": "#/definitions/serviceAccount" },
+        "resourceManager": { "$ref": "#/definitions/serviceAccount" },
+        "eventService": { "$ref": "#/definitions/serviceAccount" },
+        "agent": { "$ref": "#/definitions/serviceAccount" },
+        "artifactGC": { "$ref": "#/definitions/serviceAccount" },
+        "ui": { "$ref": "#/definitions/serviceAccount" },
+        "jobs": { "$ref": "#/definitions/serviceAccount" }
       }
     },
     "placement": {

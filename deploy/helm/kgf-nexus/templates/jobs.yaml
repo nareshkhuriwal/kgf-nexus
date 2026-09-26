@@ -8,6 +8,7 @@ ready, but the services wait for the schema (wait-for-schema), so the two would
 wait on each other forever. Named per image tag: a new release runs them again;
 re-applying the same release changes nothing.
 */ -}}
+{{- $sa := include "nexus.saFor" (list . "jobs" nil) | fromYaml }}
 ---
 apiVersion: batch/v1
 kind: Job
@@ -21,9 +22,12 @@ spec:
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
-      labels: {{- include "nexus.labels" (list . "migrate") | nindent 8 }}
+      labels:
+        {{- include "nexus.labels" (list . "migrate") | nindent 8 }}
+        {{- include "nexus.saPodLabels" $sa | indent 8 }}
     spec:
       restartPolicy: OnFailure
+      {{- include "nexus.podIdentity" $sa | nindent 6 }}
       {{- include "nexus.pullSecrets" . | nindent 6 }}
       securityContext: {{- include "nexus.podSecurity" . | nindent 8 }}
       containers:
@@ -31,10 +35,16 @@ spec:
           image: {{ include "nexus.image" (list . "migrate") }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
-            {{- include "nexus.dbEnv" . | nindent 12 }}
+            {{- include "nexus.dbEnv" (list . "migrate") | nindent 12 }}
             - { name: MIGRATIONS_DIR, value: /migrations }
           resources: {{- toYaml .Values.migrate.resources | nindent 12 }}
           securityContext: {{- include "nexus.containerSecurity" . | nindent 12 }}
+          {{- with include "nexus.dbVolumeMounts" . }}
+          volumeMounts: {{- . | indent 12 }}
+          {{- end }}
+      {{- with include "nexus.dbVolumes" . }}
+      volumes: {{- . | indent 8 }}
+      {{- end }}
 ---
 # Bootstrap: the facts a brand-new database lacks that the platform cannot run
 # without. A tenant row for the Nexus namespace (the 0014 trigger rejects every
@@ -52,13 +62,16 @@ spec:
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
-      labels: {{- include "nexus.labels" (list . "bootstrap") | nindent 8 }}
+      labels:
+        {{- include "nexus.labels" (list . "bootstrap") | nindent 8 }}
+        {{- include "nexus.saPodLabels" $sa | indent 8 }}
     spec:
       restartPolicy: OnFailure
+      {{- include "nexus.podIdentity" $sa | nindent 6 }}
       {{- include "nexus.pullSecrets" . | nindent 6 }}
       securityContext: {{- include "nexus.podSecurity" . | nindent 8 }}
       initContainers:
-        {{- include "nexus.waitForSchema" . | nindent 8 }}
+        {{- include "nexus.waitForSchema" (list . "migrate") | nindent 8 }}
       containers:
         - name: bootstrap
           image: {{ include "nexus.image" (list . "migrate") }}
@@ -81,7 +94,7 @@ spec:
               SQL
               echo "bootstrap: tenant and keys for namespace $NEXUS_NAMESPACE are in place"
           env:
-            {{- include "nexus.dbEnv" . | nindent 12 }}
+            {{- include "nexus.dbEnv" (list . "migrate") | nindent 12 }}
             - { name: NEXUS_NAMESPACE, value: {{ .Values.nexusNamespace | quote }} }
             - name: WORKER_API_KEY
               valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: worker-api-key } }
@@ -91,3 +104,66 @@ spec:
             requests: { cpu: 10m, memory: 16Mi }
             limits: { memory: 64Mi }
           securityContext: {{- include "nexus.containerSecurity" . | nindent 12 }}
+          {{- with include "nexus.dbVolumeMounts" . }}
+          volumeMounts: {{- . | indent 12 }}
+          {{- end }}
+      {{- with include "nexus.dbVolumes" . }}
+      volumes: {{- . | indent 8 }}
+      {{- end }}
+{{- if (.Values.postgres.runtimeRoles | default dict).enabled }}
+{{- $rr := .Values.postgres.runtimeRoles }}
+{{- $rrSecret := $rr.existingSecret | default .Values.existingSecret }}
+---
+# Runtime logins (docs/OPERATIONS.md §20.9): nexus-db-roles, as the OWNER
+# login, creates one LOGIN role per service in that service's NOLOGIN group
+# role (migration 0005) and sets its password from a SCRAM verifier computed
+# here, so the plaintext never reaches the server. Named with the password
+# revision too: bumping postgres.runtimeRoles.passwordRevision re-runs it.
+# The services wait for their own login to work (wait-for-schema connects as
+# it), so nothing starts against a login that does not exist yet.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-roles-{{ printf "%s/%v" (include "nexus.jobSuffix" .) $rr.passwordRevision | sha256sum | trunc 10 }}
+  labels: {{- include "nexus.labels" (list . "db-roles") | nindent 4 }}
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "nexus.labels" (list . "db-roles") | nindent 8 }}
+        {{- include "nexus.saPodLabels" $sa | indent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      {{- include "nexus.podIdentity" $sa | nindent 6 }}
+      {{- include "nexus.pullSecrets" . | nindent 6 }}
+      securityContext: {{- include "nexus.podSecurity" . | nindent 8 }}
+      initContainers:
+        {{- include "nexus.waitForSchema" (list . "migrate") | nindent 8 }}
+      containers:
+        - name: db-roles
+          image: {{ include "nexus.image" (list . "migrate") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/nexus-db-roles"]
+          env:
+            {{- include "nexus.dbEnv" (list . "migrate") | nindent 12 }}
+            - name: NEXUS_DB_ROLES
+              value: {{ include "nexus.dbRolesSpec" . | quote }}
+            {{- range $key := (include "nexus.dbRuntimeKeys" . | fromJsonArray) }}
+            - name: {{ printf "NEXUS_PW_%s" (snakecase $key | upper) }}
+              valueFrom: { secretKeyRef: { name: {{ $rrSecret }}, key: {{ (index $.Values.postgres.connections $key).passwordKey }} } }
+            {{- end }}
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            {{- include "nexus.containerSecurity" . | nindent 12 }}
+            readOnlyRootFilesystem: true
+          {{- with include "nexus.dbVolumeMounts" . }}
+          volumeMounts: {{- . | indent 12 }}
+          {{- end }}
+      {{- with include "nexus.dbVolumes" . }}
+      volumes: {{- . | indent 8 }}
+      {{- end }}
+{{- end }}

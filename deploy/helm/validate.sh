@@ -82,6 +82,27 @@ must_fail "malformed image digest"              "/image/digests/migrate"       -
 must_fail "bad topology policy"                 "whenUnsatisfiable"            --set placement.topologySpread.whenUnsatisfiable=Sometimes
 must_fail "no scheduler at all"                 "schedulers"                   --set-json 'schedulers=[]'
 must_fail "peer TLS with a plaintext broker"    "enable nats.tls too"          --set tls.enabled=true --set nats.auth.mode=none
+# Database TLS and runtime logins (F115, OPERATIONS §20.8-20.9).
+ext=(--set postgres.enabled=false --set postgres.host=db.example.com)
+ca=(--set postgres.sslmode=verify-full --set postgres.caBundle.secretName=pg-ca)
+must_fail "verify-full without a CA bundle"     "needs postgres.caBundle"      "${ext[@]}" --set postgres.sslmode=verify-full
+must_fail "CA bundle but no verification"       "does not verify the server"   "${ext[@]}" --set postgres.sslmode=require --set postgres.caBundle.secretName=pg-ca
+must_fail "CA from a Secret and a ConfigMap"    "not both"                     "${ext[@]}" "${ca[@]}" --set postgres.caBundle.configMapName=pg-ca
+must_fail "verify-full on in-cluster postgres"  "serves no TLS"                --set postgres.sslmode=verify-full --set postgres.caBundle.secretName=pg-ca
+must_fail "sslmode smuggled in params"          "has its own setting"          "${ext[@]}" "${ca[@]}" --set postgres.params.sslmode=disable
+must_fail "user smuggled in a connection"       "has its own setting"          "${ext[@]}" "${ca[@]}" --set postgres.connections.scheduler.params.user=nexus
+must_fail "runtime login is the owner"          "must be a separate role"      "${ext[@]}" "${ca[@]}" --set postgres.runtimeRoles.enabled=true --set postgres.connections.scheduler.user=nexus
+must_fail "two services share a login"          "each service needs its own"   "${ext[@]}" "${ca[@]}" --set postgres.runtimeRoles.enabled=true --set postgres.connections.dagEngine.user=nexus_scheduler_login
+must_fail "runtime login on owner password"     "OWNER's password"             "${ext[@]}" "${ca[@]}" --set postgres.runtimeRoles.enabled=true --set postgres.connections.eventService.passwordKey=postgres-password
+must_fail "login name not an identifier"        "/postgres/connections/scheduler/user" --set postgres.connections.scheduler.user=Bad-Name
+# Agent GPUs, placement and identity.
+gpu=(--set agents[0].name=agent-gpu --set agents[0].queues=gpu --set agents[0].cpuMillis=1000 --set agents[0].memoryBytes=1073741824 --set agents[0].diskBytes=1073741824 --set agents[0].gpuCount=2)
+must_fail "GPU limit disagrees with gpuCount"   "disagrees with gpuCount"      "${gpu[@]}" --set 'agents[0].resources.limits.nvidia\.com/gpu=1'
+must_fail "unlabelled simulated GPUs"           "simulated=true"               "${gpu[@]}" --set agents[0].gpu.requestDevices=false
+must_fail "bad GPU resource name"               "/agents/0/gpu/resourceName"   "${gpu[@]}" --set agents[0].gpu.resourceName=gpu
+must_fail "shared SA, conflicting identity"     "different annotations"        --set serviceAccounts.apiGateway.name=nexus-artifacts --set serviceAccounts.agent.name=nexus-artifacts --set-string 'serviceAccounts.agent.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::1:role/x'
+must_fail "SA taken from the cluster controller" "owns with its RBAC"          --set serviceAccounts.ui.name=nexus-cluster-controller
+must_fail "misspelt ServiceAccount key"         "additional properties 'annotation' not allowed" --set serviceAccounts.agent.annotation.x=y
 
 if [ "$fail" -ne 0 ]; then
   echo "validate: FAILED" >&2
