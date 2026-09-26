@@ -776,8 +776,12 @@ func (r *Relay) Prune(ctx context.Context) (published, expired int64, err error)
 DELETE FROM outbox o USING (
   SELECT id FROM outbox
    WHERE published_at IS NOT NULL AND published_at < now() - make_interval(secs => $1)
+     -- ADR-0028: a row the notifier has not evaluated yet is kept, up to
+     -- MaxAge, so a notifier that is behind never loses a fact to retention.
+     AND (notified_at IS NOT NULL OR topic NOT IN ('run_state', 'run_event')
+          OR created_at < now() - make_interval(secs => $3))
    ORDER BY published_at LIMIT $2
-) d WHERE o.id = d.id`, r.cfg.Retention.Seconds(), chunk)
+) d WHERE o.id = d.id`, r.cfg.Retention.Seconds(), chunk, r.cfg.MaxAge.Seconds())
 		if err != nil {
 			return published, expired, fmt.Errorf("relay: prune published rows: %w", err)
 		}

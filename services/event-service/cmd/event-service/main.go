@@ -19,9 +19,13 @@ import (
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/mail"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
+	"github.com/khuriwalgroup/kgf-nexus/internal/notify"
+	"github.com/khuriwalgroup/kgf-nexus/internal/secretbox"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	eventservice "github.com/khuriwalgroup/kgf-nexus/services/event-service"
+	"github.com/khuriwalgroup/kgf-nexus/services/event-service/notifier"
 	"github.com/khuriwalgroup/kgf-nexus/services/event-service/relay"
 )
 
@@ -89,6 +93,42 @@ func main() {
 	relayDone := make(chan struct{})
 	go func() { rl.Run(ctx); close(relayDone) }()
 
+	// ── notifications and lineage (ADR-0028) ───────────────────────────────
+	// Independent of NATS: the notifier reads the outbox rows directly. A
+	// malformed secret key or mail configuration is fatal, like a malformed
+	// NATS credential: running without it would turn every sealed channel or
+	// email rule into a dead letter at the worst moment. An ABSENT key is
+	// allowed; sealed secrets then fail with a message saying so.
+	box, err := secretbox.FromEnv(os.Getenv)
+	if err != nil {
+		log.Error("invalid secret key configuration", "error", err)
+		os.Exit(1)
+	}
+	if box == nil {
+		log.Warn("NEXUS_SECRET_KEY is not set: channels with sealed secrets cannot be delivered; secret references still work")
+	}
+	mcfg, err := mail.ConfigFromEnv(os.Getenv)
+	if err != nil {
+		log.Error("invalid SMTP configuration", "error", err)
+		os.Exit(1)
+	}
+	mailer, err := mail.New(mcfg)
+	if err != nil {
+		log.Error("invalid SMTP configuration", "error", err)
+		os.Exit(1)
+	}
+	allowPrivate := os.Getenv("NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS") == "true"
+	if allowPrivate {
+		log.Warn("NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS=true: notifications may reach private and loopback addresses")
+	}
+	sender := &notify.Sender{HTTP: notify.NewHTTPClient(allowPrivate, 10*time.Second), UserAgent: "kgf-nexus-notifier/" + version}
+	if !mail.IsDisabled(mailer) {
+		sender.Mail = notifier.MailAdapter{S: mailer}
+	}
+	nt := notifier.New(pool, box, sender, notifier.ConfigFromEnv(log), log, notifier.NewMetrics(reg))
+	notifierDone := make(chan struct{})
+	go func() { nt.Run(ctx); close(notifierDone) }()
+
 	srv := &http.Server{
 		// Route-template RED metrics; the mux is passed directly so the
 		// middleware sees the matched pattern (metrics.HTTPMetrics).
@@ -123,6 +163,12 @@ func main() {
 	// re-sent by a peer or the next start, de-duplicated by Nats-Msg-Id.
 	select {
 	case <-relayDone:
+	case <-shutdownCtx.Done():
+	}
+	// A send in flight when the context ends is recorded by nobody; its lease
+	// expires and a peer (or the next start) sends it again.
+	select {
+	case <-notifierDone:
 	case <-shutdownCtx.Done():
 	}
 }

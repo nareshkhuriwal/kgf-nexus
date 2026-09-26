@@ -68,12 +68,17 @@ func scanChannel(row pgx.Row) (NotificationChannel, error) {
 	return c, nil
 }
 
+// jsonb encodes an object column. A nil map (typed or not) is {} -- never the
+// JSON null, which would make "labels <@ ..." false and silently match nothing.
 func jsonb(v any) (string, error) {
-	if v == nil {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	if string(b) == "null" {
 		return "{}", nil
 	}
-	b, err := json.Marshal(v)
-	return string(b), err
+	return string(b), nil
 }
 
 // NotifyCreateChannel inserts a channel. The id is chosen by the caller, because

@@ -396,7 +396,8 @@ SELECT r.id::text, r.name, c.id::text, c.kind, r.sla_seconds,
    AND r.sla_seconds IS NOT NULL
    AND 'run.sla_exceeded' = ANY(r.events)
    AND (cardinality(r.workflows) = 0 OR s.name = ANY(r.workflows))
-   AND r.labels <@ COALESCE(s.spec_json->'labels', '{}'::jsonb)
+   AND r.labels <@ CASE WHEN jsonb_typeof(s.spec_json->'labels') = 'object'
+                        THEN s.spec_json->'labels' ELSE '{}'::jsonb END
    AND NOT EXISTS (SELECT 1 FROM notification_deliveries d
                     WHERE d.channel_id = c.id AND d.event_key = 'sla:' || r.id::text || ':' || ru.id::text)
  ORDER BY ru.created_at
@@ -632,11 +633,13 @@ WITH decl AS (
          COALESCE(a->>'name', '') AS name, r.namespace, s.name AS spec_name
     FROM workflow_runs r
     JOIN workflow_specs s ON s.id = r.spec_id
-    CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.spec_json->'tasks', '[]'::jsonb)) t
+    CROSS JOIN LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(s.spec_json->'tasks') = 'array' THEN s.spec_json->'tasks' ELSE '[]'::jsonb END) t
     CROSS JOIN LATERAL (VALUES ('produces'), ('consumes')) d(dir)
     CROSS JOIN LATERAL jsonb_array_elements(
-        CASE WHEN jsonb_typeof(t->'assets'->d.dir) = 'array' THEN t->'assets'->d.dir ELSE '[]'::jsonb END) a
-   WHERE r.id = $1 AND COALESCE(a->>'uri', '') <> ''
+        CASE WHEN jsonb_typeof(t) = 'object' AND jsonb_typeof(t->'assets') = 'object'
+              AND jsonb_typeof(t->'assets'->d.dir) = 'array' THEN t->'assets'->d.dir ELSE '[]'::jsonb END) a
+   WHERE r.id = $1 AND jsonb_typeof(a) = 'object' AND COALESCE(a->>'uri', '') <> ''
 ), ins AS (
   INSERT INTO asset_lineage_edges (run_id, node_id, direction, asset_uri, asset_name, namespace, spec_name)
   SELECT run_id, node_id, dir, uri, name, namespace, spec_name FROM decl
