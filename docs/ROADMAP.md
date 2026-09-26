@@ -87,6 +87,7 @@ per-service runtime logins, ServiceAccounts and GPU agents in the chart) and
 | F115 | Cloud platforms: S3-only result store with static keys; the chart lacks cloud identities and GPU pools; nothing applied to a real cloud | `feat/otel-and-storage-backends`, `fix/f115-chart-db-hardening`. A real cloud apply is still planned. |
 | F119 | Backfill pause, resume and cancel have no from-state guard | `fix/control-plane-open-bugs` |
 | F125 | The agent does not enforce a declared output `max_bytes` | `fix/control-plane-open-bugs` |
+| F150 (partly open) | From the 2026-09-26 benchmark re-run: the unwindowed push path is benchmarked but never run by the shipped scheduler; the harness does not record host noise; `gpu_scheduling` and `ml_capacity_test` fail on the compose stack for environment reasons | not started ([BENCHMARKS.md](BENCHMARKS.md)) |
 
 The early contract-review findings (F1–F60) that carry no status marker were not
 re-audited for this roadmap.
