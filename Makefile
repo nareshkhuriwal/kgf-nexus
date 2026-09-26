@@ -32,6 +32,7 @@ MIGRATIONS    := services/migrations
 .PHONY: sdk-test
 .PHONY: sdk-typecheck
 .PHONY: check-doc-refs
+.PHONY: docs docs-serve docs-clean
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test e2e e2e-up e2e-down seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
@@ -115,6 +116,39 @@ verify-s3-image: ## Verify the pinned S3 image's GitHub build provenance (needs 
 
 check-doc-refs: ## Fail if any "OPERATIONS §N" reference in the repo names a section that does not exist
 	python3 deploy/scripts/check-operations-refs.py
+
+# ── Documentation site (docs-site/README.md) ───────────────────────────────
+# MkDocs Material from a hash-locked lock file, in its own venv. The CLI
+# reference is generated from a nexusctl built here, the API reference from
+# api/openapi.yaml, the SDK reference from docstrings (static analysis). The
+# build is --strict (every warning, including a broken link or anchor, fails)
+# and is followed by a link/anchor check over the rendered HTML.
+DOCS_PYTHON   ?= python3
+DOCS_VENV     ?= docs-site/.venv
+DOCS_NEXUSCTL ?= docs-site/.venv/bin/nexusctl
+
+$(DOCS_VENV)/.installed: docs-site/requirements.txt
+	@$(DOCS_PYTHON) -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
+	  || { echo "docs: $(DOCS_PYTHON) is $$($(DOCS_PYTHON) --version 2>&1); the docs build needs 3.11+ (set DOCS_PYTHON)"; exit 1; }
+	$(DOCS_PYTHON) -m venv $(DOCS_VENV)
+	$(DOCS_VENV)/bin/python -m pip install --quiet --upgrade pip
+	$(DOCS_VENV)/bin/python -m pip install --quiet --require-hashes -r docs-site/requirements.txt
+	@touch $@
+
+docs: $(DOCS_VENV)/.installed ## Build the documentation site (strict) and check every link and anchor
+	$(GO) build -o $(DOCS_NEXUSCTL) ./cli/cmd/nexusctl
+	cd docs-site && NO_MKDOCS_2_WARNING=1 NEXUS_DOCS_NEXUSCTL='$(abspath $(DOCS_NEXUSCTL))' \
+	  '$(abspath $(DOCS_VENV))/bin/mkdocs' build --strict --clean
+	$(DOCS_VENV)/bin/python docs-site/scripts/check_links.py docs-site/site
+	@echo "docs: built docs-site/site (open docs-site/site/index.html, or run make docs-serve)"
+
+docs-serve: $(DOCS_VENV)/.installed ## Preview the documentation site at http://127.0.0.1:8000
+	$(GO) build -o $(DOCS_NEXUSCTL) ./cli/cmd/nexusctl
+	cd docs-site && NO_MKDOCS_2_WARNING=1 NEXUS_DOCS_NEXUSCTL='$(abspath $(DOCS_NEXUSCTL))' \
+	  '$(abspath $(DOCS_VENV))/bin/mkdocs' serve --strict
+
+docs-clean: ## Remove the built site and the docs venv
+	rm -rf docs-site/site $(DOCS_VENV)
 
 bench-pg: ## Start a disposable, migrated Postgres + MinIO for the benchmarks
 	@docker inspect $(BENCH_NAME)-pg >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-pg \
