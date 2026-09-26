@@ -118,13 +118,15 @@ spec:
 # login, creates one LOGIN role per service in that service's NOLOGIN group
 # role (migration 0005) and sets its password from a SCRAM verifier computed
 # here, so the plaintext never reaches the server. Named with the password
-# revision too: bumping postgres.runtimeRoles.passwordRevision re-runs it.
+# revision, the login spec and the owner connection too: bumping
+# postgres.runtimeRoles.passwordRevision re-runs it, and changing scope,
+# connectionLimit or a login never hits "field is immutable" (F113).
 # The services wait for their own login to work (wait-for-schema connects as
 # it), so nothing starts against a login that does not exist yet.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: db-roles-{{ printf "%s/%v" (include "nexus.jobSuffix" .) $rr.passwordRevision | sha256sum | trunc 10 }}
+  name: db-roles-{{ printf "%s/%v/%s/%s" (include "nexus.jobSuffix" .) $rr.passwordRevision (include "nexus.dbRolesSpec" .) (include "nexus.dbConnection" (list . "migrate")) | sha256sum | trunc 10 }}
   labels: {{- include "nexus.labels" (list . "db-roles") | nindent 4 }}
 spec:
   backoffLimit: 10
