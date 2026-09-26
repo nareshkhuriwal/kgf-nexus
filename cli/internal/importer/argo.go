@@ -1100,8 +1100,8 @@ func (c *argoConv) retry(t *IRTask, tmpl *yaml.Node, id string) {
 	switch p := scalar(mapGet(rs, "retryPolicy")); p {
 	case "", "OnFailure":
 		t.Retry.RetryOn = []string{"application", "timeout", "oom"}
-		if p != "" {
-			c.find(mapGet(rs, "retryPolicy").Line, "retryPolicy", Approximated, id+": OnFailure -> retry on "+
+		if t.Retry.MaxAttempts > 1 {
+			c.find(rs.Line, "retryPolicy", Approximated, id+": OnFailure (Argo's default) -> retry on "+
 				"application, timeout and oom errors", "retry.retry_on")
 		}
 	case "OnError":
@@ -1581,9 +1581,9 @@ func (c *argoConv) assemble(lf *argoLeaf) {
 			}
 		case len(head) >= 1 && (strings.HasSuffix(head[0], "python") || strings.HasSuffix(head[0], "python3")):
 			if runtimeRefs(src) {
-				c.find(lf.line, "script source", Unsupported, id+": the Python source contains run-time "+
-					"{{...}} references, which Argo substitutes into the code; read the value from "+
-					"$NEXUS_INPUT_DIR in the script instead", "")
+				c.find(lf.line, "script source", Approximated, id+": run-time {{...}} values are substituted "+
+					"into the Python source by sh, textually, as Argo does; reading them from $NEXUS_INPUT_DIR in "+
+					"the script is more robust", "tasks["+id+"].runtime")
 			}
 			cmd, args = append(append([][]seg{}, cmd...), []seg{{lit: "-c"}}), [][]seg{src}
 		case len(head) >= 1 && strings.HasSuffix(head[0], "node"):

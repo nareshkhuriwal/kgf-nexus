@@ -63,11 +63,11 @@ func applyPrefectYAML(path string, files []irFile) []Finding {
 			scheds = append(scheds, s)
 		}
 		if len(scheds) == 0 {
-			target.find(d.Line, "deployment", Translated, fmt.Sprintf("deployment %s has no schedule: runs start on "+
+			addTo(target, path, d.Line, "deployment", Translated, fmt.Sprintf("deployment %s has no schedule: runs start on "+
 				"demand", name), "")
 		}
 		for _, s := range scheds {
-			is := IRSchedule{Line: s.Line, Via: "prefect.yaml deployment " + name, Params: params,
+			is := IRSchedule{File: path, Line: s.Line, Via: "prefect.yaml deployment " + name, Params: params,
 				Timezone: scalar(mapGet(s, "timezone"))}
 			switch {
 			case mapGet(s, "cron") != nil:
@@ -90,12 +90,19 @@ func applyPrefectYAML(path string, files []irFile) []Finding {
 		}
 		for _, k := range []string{"work_pool", "build", "push", "pull"} {
 			if mapGet(d, k) != nil {
-				target.find(mapGet(d, k).Line, k, Approximated, fmt.Sprintf("deployment %s: %s (Prefect "+
+				addTo(target, path, mapGet(d, k).Line, k, Approximated, fmt.Sprintf("deployment %s: %s (Prefect "+
 					"infrastructure) is not part of a Nexus spec; ignored", name, k), "")
 			}
 		}
 	}
 	return out
+}
+
+// addTo records a prefect.yaml finding on the workflow it concerns, with the
+// prefect.yaml position (not the flow file's).
+func addTo(w *IRWorkflow, file string, line int, construct, status, msg, nexus string) {
+	w.Findings = append(w.Findings, Finding{File: file, Line: line, Construct: construct, Status: status,
+		Message: msg, Nexus: nexus})
 }
 
 func findFlow(files []irFile, path, fn string) *IRWorkflow {

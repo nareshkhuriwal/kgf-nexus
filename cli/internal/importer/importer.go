@@ -181,7 +181,7 @@ func convertOne(ir *IRWorkflow, opts Options, names map[string]bool) *Workflow {
 		n := uniqueName(b.Spec.Name, func(s string) bool { return names[s] })
 		b.Findings = append(b.Findings, Finding{File: ir.File, Line: ir.Line, Construct: "name", Status: Approximated,
 			Message: fmt.Sprintf("another converted workflow is already named %s; this one is %s", b.Spec.Name, n),
-			Nexus: "name"})
+			Nexus:   "name"})
 		b.Spec.Name = n
 	}
 	names[b.Spec.Name] = true

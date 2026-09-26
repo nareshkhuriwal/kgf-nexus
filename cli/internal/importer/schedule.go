@@ -41,11 +41,15 @@ var cronPresets = map[string]string{
 func schedules(ir *IRWorkflow, name, namespace, source string) ([]Companion, []Finding) {
 	var out []Companion
 	var fs []Finding
-	find := func(line int, construct, status, msg, nexus string) {
-		fs = append(fs, Finding{File: ir.File, Line: line, Construct: construct, Status: status, Message: msg,
-			Nexus: nexus})
-	}
 	for _, s := range ir.Schedules {
+		file := ir.File
+		if s.File != "" {
+			file = s.File
+		}
+		find := func(line int, construct, status, msg, nexus string) {
+			fs = append(fs, Finding{File: file, Line: line, Construct: construct, Status: status, Message: msg,
+				Nexus: nexus})
+		}
 		construct := "schedule"
 		if s.Via != "" {
 			construct = s.Via

@@ -93,18 +93,18 @@ const (
 
 // IRTask is one node.
 type IRTask struct {
-	ID          string `json:"id"`
-	Line        int    `json:"line"`
-	Kind        string `json:"kind"`
-	Script      string `json:"script,omitempty"`
-	Interpreter string `json:"interpreter,omitempty"`
+	ID          string   `json:"id"`
+	Line        int      `json:"line"`
+	Kind        string   `json:"kind"`
+	Script      string   `json:"script,omitempty"`
+	Interpreter string   `json:"interpreter,omitempty"`
 	Command     []string `json:"command,omitempty"`
 	Args        []string `json:"args,omitempty"`
-	Image       string `json:"image,omitempty"`
-	Executor    string `json:"executor,omitempty"`
-	Module      string `json:"module,omitempty"`
-	Callable    string `json:"callable,omitempty"`
-	Reason      string `json:"reason,omitempty"`
+	Image       string   `json:"image,omitempty"`
+	Executor    string   `json:"executor,omitempty"`
+	Module      string   `json:"module,omitempty"`
+	Callable    string   `json:"callable,omitempty"`
+	Reason      string   `json:"reason,omitempty"`
 
 	Env           map[string]string    `json:"env,omitempty"`
 	WorkingDir    string               `json:"working_dir,omitempty"`
@@ -137,6 +137,9 @@ type IREdge struct {
 // IRSchedule is what the source says about WHEN runs start. Nexus schedules
 // are separate API objects, so these become companion commands, never spec.
 type IRSchedule struct {
+	// File is set when the schedule comes from another file than the
+	// workflow (a prefect.yaml deployment), so its findings point there.
+	File            string         `json:"file,omitempty"`
 	Line            int            `json:"line"`
 	Cron            string         `json:"cron,omitempty"`
 	IntervalSeconds float64        `json:"interval_seconds,omitempty"`
