@@ -184,7 +184,17 @@ its password (never the password). Rendered into the db-roles Job.
 {{- $c := index $.Values.postgres.connections $key -}}
 {{- $e := dict "login" $c.user "password_env" (printf "NEXUS_PW_%s" (snakecase $key | upper)) "connection_limit" $limit -}}
 {{- $g := index $groups $key -}}
-{{- if $g }}{{ $_ := set $e "member_of" (list $g) }}{{ else }}{{ $_ := set $e "read_only" true }}{{ end -}}
+{{- if not $g -}}
+{{- $_ := set $e "read_only" true -}}
+{{- else if eq ($.Values.postgres.runtimeRoles.scope | default "union") "service" -}}
+{{- $_ := set $e "member_of" (list $g) -}}
+{{- else -}}
+{{- /* union: every service group role, i.e. the runtime DML the platform
+       grants anywhere, and still no DDL, ownership or role management. */ -}}
+{{- $all := list -}}
+{{- range $k, $v := $groups }}{{ if $v }}{{ $all = append $all $v }}{{ end }}{{ end -}}
+{{- $_ := set $e "member_of" $all -}}
+{{- end -}}
 {{- $out = append $out $e -}}
 {{- end -}}
 {{- toJson $out -}}

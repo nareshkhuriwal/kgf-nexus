@@ -108,6 +108,16 @@ postgres:
   # only the three Jobs.
   runtimeRoles:
     enabled: false
+    # union (default): every runtime login joins ALL six service group roles:
+    #   the DML the platform grants to any service, and nothing else -- no
+    #   DDL, no table ownership, no TRUNCATE, no role management, run_events
+    #   still append-only. Separate logins still give per-service passwords,
+    #   connection limits and pg_stat_activity attribution.
+    # service: each login joins ONLY its own group role (ADR-0011's write
+    #   matrix enforced at the database). NOT yet runnable: the services
+    #   write outside that matrix in places migration 0005 did not grant
+    #   (CONTRACT-FINDINGS F132). Use it to find those paths, not in production.
+    scope: union
     # Secret holding each connections.<c>.passwordKey (URL-safe, >= 16 chars:
     # A-Z a-z 0-9 . _ ~ -). Empty = existingSecret.
     existingSecret: ""

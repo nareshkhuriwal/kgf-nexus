@@ -25,6 +25,7 @@ postgres:
     existingSecret: nexus-db-logins
     passwordRevision: 3
     connectionLimit: 64
+    scope: service
 minio:
   enabled: false
   endpoint: https://s3.eu-west-1.amazonaws.com

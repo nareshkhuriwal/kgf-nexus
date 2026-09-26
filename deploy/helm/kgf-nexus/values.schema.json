@@ -161,6 +161,7 @@
           "properties": {
             "enabled": { "type": "boolean" },
             "existingSecret": { "type": "string" },
+            "scope": { "enum": ["union", "service"] },
             "passwordRevision": { "type": "integer", "minimum": 1 },
             "connectionLimit": { "type": "integer", "minimum": -1 }
           }

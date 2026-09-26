@@ -94,7 +94,8 @@ must_fail "user smuggled in a connection"       "has its own setting"          "
 must_fail "runtime login is the owner"          "must be a separate role"      "${ext[@]}" "${ca[@]}" --set postgres.runtimeRoles.enabled=true --set postgres.connections.scheduler.user=nexus
 must_fail "two services share a login"          "each service needs its own"   "${ext[@]}" "${ca[@]}" --set postgres.runtimeRoles.enabled=true --set postgres.connections.dagEngine.user=nexus_scheduler_login
 must_fail "runtime login on owner password"     "OWNER's password"             "${ext[@]}" "${ca[@]}" --set postgres.runtimeRoles.enabled=true --set postgres.connections.eventService.passwordKey=postgres-password
-must_fail "login name not an identifier"        "/postgres/connections/scheduler/user" --set postgres.connections.scheduler.user=Bad-Name
+must_fail "unknown runtime-role scope"          "/postgres/runtimeRoles/scope" --set postgres.runtimeRoles.scope=all
+must_fail "login name not an identifier"       "/postgres/connections/scheduler/user" --set postgres.connections.scheduler.user=Bad-Name
 # Agent GPUs, placement and identity.
 gpu=(--set agents[0].name=agent-gpu --set agents[0].queues=gpu --set agents[0].cpuMillis=1000 --set agents[0].memoryBytes=1073741824 --set agents[0].diskBytes=1073741824 --set agents[0].gpuCount=2)
 must_fail "GPU limit disagrees with gpuCount"   "disagrees with gpuCount"      "${gpu[@]}" --set 'agents[0].resources.limits.nvidia\.com/gpu=1'
