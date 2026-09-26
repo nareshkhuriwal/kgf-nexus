@@ -45,3 +45,14 @@ filenames; none of them counts files or expects consecutive numbers.
   current highest (filling 0019, for example) or when a new gap opens.
 - `TestMigrationFilenamesAreWellFormed` fails on names that break the
   `NNNN_description.{up,down}.sql` pattern, and on a `.down.sql` with no `.up.sql`.
+
+## Reserved versions (wave 3)
+
+Versions 0028–0033 are reserved for branches developed in parallel;
+`0034_events_triggers_notifications` (ADR-0028) may land first.
+`reservedVersions` in `internal/migrations/safety_test.go` lets a reserved
+number be absent without failing the gap check. **Merge the reserved branches
+before any database is migrated past 0034 in production.** A 0028–0033 applied
+after 0034 runs out of lexical order, which is safe only because those
+migrations do not depend on 0034. Remove each entry from `reservedVersions`
+once its file is merged.
