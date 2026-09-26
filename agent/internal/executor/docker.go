@@ -718,6 +718,7 @@ func dockerEnv(spec TaskSpec, containerWD string) []string {
 		EnvOutputNames+"="+strings.Join(spec.DeclaredOutputs, " "),
 	)
 	env = append(env, traceEnvList(spec)...)
+	env = append(env, workerEnvList(spec)...)
 	if !spec.StartToCloseDeadline.IsZero() {
 		env = append(env, EnvDeadlineUnixMs+"="+strconv.FormatInt(spec.StartToCloseDeadline.UnixMilli(), 10))
 	}

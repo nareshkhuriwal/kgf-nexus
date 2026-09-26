@@ -15,6 +15,7 @@ package executor
 import (
 	"context"
 	"io"
+	"strconv"
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
@@ -129,6 +130,12 @@ type TaskSpec struct {
 	// answers "what is this worker running"); nothing keys correctness on it,
 	// because it changes on every re-registration.
 	WorkerID string
+	// WorkerGPUKind and WorkerGPUCount are the GPU model and number of whole
+	// GPUs this worker ADVERTISES (its registered capacity), exported as
+	// EnvWorkerGPUKind / EnvWorkerGPUCount so a workload, or an audit of
+	// where work ran, need not infer the hardware from a hostname.
+	WorkerGPUKind  string
+	WorkerGPUCount int32
 
 	// OnPhase, when set, is called on every observed change in the workload's
 	// substrate-level lifecycle (for kubernetes: pod phase and the reason
@@ -329,7 +336,30 @@ const (
 	// EnvTaskAPIToken is the bearer token every request to EnvTaskAPI must
 	// carry. Exported exactly when EnvTaskAPI is.
 	EnvTaskAPIToken = "NEXUS_TASK_API_TOKEN"
+	// EnvWorkerID is the worker (agent session) running the attempt. It
+	// changes when the agent re-registers, so it identifies placement, not a
+	// machine. The Python SDK reads it into its task context.
+	EnvWorkerID = "NEXUS_WORKER_ID"
+	// EnvWorkerGPUKind and EnvWorkerGPUCount are the worker's advertised GPU
+	// model and whole-GPU count; absent on a worker that advertises none.
+	EnvWorkerGPUKind  = "NEXUS_WORKER_GPU_KIND"
+	EnvWorkerGPUCount = "NEXUS_WORKER_GPU_COUNT"
 )
+
+// workerEnvList renders the worker's identity and advertised GPUs.
+func workerEnvList(spec TaskSpec) []string {
+	var env []string
+	if spec.WorkerID != "" {
+		env = append(env, EnvWorkerID+"="+spec.WorkerID)
+	}
+	if spec.WorkerGPUCount > 0 {
+		env = append(env, EnvWorkerGPUCount+"="+strconv.FormatInt(int64(spec.WorkerGPUCount), 10))
+		if spec.WorkerGPUKind != "" {
+			env = append(env, EnvWorkerGPUKind+"="+spec.WorkerGPUKind)
+		}
+	}
+	return env
+}
 
 // traceEnvList renders TraceEnv as KEY=VALUE pairs in a fixed order. Only the
 // two convention keys are passed, whatever the map holds: the trace context

@@ -77,6 +77,11 @@ type Runner struct {
 	// WorkerID is this session's identity, handed to executors that label
 	// their workloads with it. Set after registration.
 	WorkerID string
+	// GPUKind and GPUCount are the GPUs this worker advertises, exported to
+	// every workload (executor.EnvWorkerGPUKind / EnvWorkerGPUCount). Set with
+	// WorkerID.
+	GPUKind  string
+	GPUCount int32
 
 	// Metrics records task starts, outcomes and durations. Optional: nil
 	// records nothing.
@@ -648,6 +653,8 @@ func (r *Runner) buildExecutorSpec(ctx context.Context, a *nexusv1.TaskAssignmen
 		StartToCloseDeadline: deadline,
 		GraceAfterTerm:       executor.DefaultGraceAfterTerm,
 		WorkerID:             r.WorkerID,
+		WorkerGPUKind:        r.GPUKind,
+		WorkerGPUCount:       r.GPUCount,
 		OnPhase:              r.phaseReporter(ctx, a),
 	}, nil
 }

@@ -233,6 +233,9 @@ func k8sEnv(spec TaskSpec) []corev1.EnvVar {
 		StartToCloseDeadline: spec.StartToCloseDeadline,
 		InlineThresholdBytes: spec.InlineThresholdBytes,
 		TraceEnv:             spec.TraceEnv,
+		WorkerID:             spec.WorkerID,
+		WorkerGPUKind:        spec.WorkerGPUKind,
+		WorkerGPUCount:       spec.WorkerGPUCount,
 		// TaskAPISocket and TaskAPIToken deliberately NOT copied: the pod runs
 		// on another node and has no path to this agent's socket, so exporting
 		// NEXUS_TASK_API would send the SDK to a socket that does not exist.

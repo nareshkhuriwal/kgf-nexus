@@ -3622,7 +3622,10 @@ built from an allow-list, never inherited wholesale: `PATH`, `HOME`, `LANG`,
 `NEXUS_RESULT_DIR`, then `runtime.env`, env-injected secrets and the
 platform task contract: the `NEXUS_*` variables (attempt, run, node,
 idempotency key, directories, outputs, deadline, attempt number,
-`NEXUS_INLINE_THRESHOLD_BYTES`), the attempt's `TRACEPARENT`/`TRACESTATE`
+`NEXUS_INLINE_THRESHOLD_BYTES`, and the worker: `NEXUS_WORKER_ID` and, on a
+worker that advertises GPUs, `NEXUS_WORKER_GPU_KIND` / `NEXUS_WORKER_GPU_COUNT`,
+the model and whole-GPU count it registered; every executor sets these, and a
+task's `runtime.env` cannot override them), the attempt's `TRACEPARENT`/`TRACESTATE`
 (ADR-0026) and its workload API `NEXUS_TASK_API`/`NEXUS_TASK_API_TOKEN`
 (ADR-0032), all set explicitly per attempt. Pass anything else explicitly with
 `NEXUS_SUBPROCESS_ENV_PASSTHROUGH=GLOB[,GLOB...]` (default empty; Helm

@@ -421,6 +421,8 @@ func (a *Agent) register(ctx context.Context) error {
 	a.execs = execs
 	a.runner = NewRunner(execs, a.registry, a.keeper, reporter, a.wal, a.store, a.log)
 	a.runner.WorkerID = a.workerID
+	a.runner.GPUKind = a.cfg.Capacity.GetGpuKind()
+	a.runner.GPUCount = a.cfg.Capacity.GetGpuCount()
 	a.runner.Metrics = a.cfg.Metrics
 	a.runner.UninterruptibleCeiling = a.cfg.MaxUninterruptible
 	a.runner.Secrets = a.cfg.Secrets
