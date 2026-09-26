@@ -23,7 +23,16 @@ import { Permit, usePermission } from '../components/Permissions';
 import { ActionIcon, RowAction } from '../components/RowAction';
 import { Empty, ErrorBox } from '../components/Status';
 import { WorkflowPicker } from '../components/WorkflowPicker';
-import { EventsPanel, conflictHint, mappingText, parseMapping } from '../components/EventsShared';
+import {
+  EventsPanel,
+  RunTargetInputs,
+  applyRunTarget,
+  conflictHint,
+  mappingText,
+  parseMapping,
+  runTargetErrors,
+  runTargetInitial,
+} from '../components/EventsShared';
 import { fmtAge, fmtTs } from '../lib/format';
 
 const STATUS_TONE: Record<string, string> = {
@@ -285,6 +294,8 @@ export function SensorForm({
   const [pollInterval, setPollInterval] = useState(String(sensor?.poll_interval_seconds ?? 60));
   const [backfill, setBackfill] = useState(sensor?.backfill ?? false);
   const [enabled, setEnabled] = useState(sensor?.enabled ?? true);
+  const [target, setTarget] = useState(() => runTargetInitial(sensor));
+  const targetErrors = runTargetErrors(target);
   const parsed = parseMapping(mapping);
   const intervalNum = Number(pollInterval);
   const intervalInvalid = !Number.isInteger(intervalNum) || intervalNum < 5 || intervalNum > 86400;
@@ -303,6 +314,7 @@ export function SensorForm({
       backfill,
       enabled,
     };
+    applyRunTarget(body, target, sensor);
     if (sensor) body.revision = sensor.revision;
     else {
       body.name = name.trim();
@@ -383,6 +395,8 @@ export function SensorForm({
           </label>
         </div>
 
+        <RunTargetInputs value={target} onChange={setTarget} existing={sensor} />
+
         <label className="form-field">
           <span className="form-label">params mapping (JSON)</span>
           <textarea value={mapping} onChange={(e) => setMapping(e.target.value)} rows={3} className="mono" aria-label="params mapping" placeholder={kind === 'object_store' ? '{ "path": "$.object.uri" }' : '{ "upstream_run": "$.run.id" }'} />
@@ -419,6 +433,8 @@ export function SensorForm({
               pending ||
               parsed.error !== null ||
               intervalInvalid ||
+              targetErrors.version !== null ||
+              targetErrors.priority !== null ||
               uriInvalid ||
               workflow.trim() === '' ||
               (kind === 'run_succeeded' && upstream.trim() === '')

@@ -365,6 +365,36 @@ func TestIntegrationSensorsAPI(t *testing.T) {
 	e.call("DELETE", ns+"/sensors/arrivals", "", e.adminA, 204)
 }
 
+// The console's sensor and trigger forms set priority and a version pin, and
+// clear the pin with an explicit null; absent keeps it.
+func TestIntegrationSensorAndTriggerVersionPin(t *testing.T) {
+	e := newEventsHarness(t, true)
+	ns := "/v1/namespaces/" + e.nsA
+	if _, err := e.tx.Exec(e.ctx, `INSERT INTO workflow_specs (namespace, name, version, spec_hash, spec_json, created_by)
+VALUES ($1, 'etl', 2, $2, '{}', 'test')`, e.nsA, uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ kind, create, base string }{
+		{"sensor", `{"name":"pin","kind":"object_store","workflow":"etl","workflow_version":2,"priority":250,"config":{"uri":"s3://raw/in/"}}`, ns + "/sensors"},
+		{"trigger", `{"name":"pin","workflow":"etl","workflow_version":2,"priority":250}`, ns + "/triggers"},
+	} {
+		got := e.call("POST", c.base, c.create, e.adminA, 201)
+		if got["workflow_version"] != float64(2) || got["priority"] != float64(250) {
+			t.Fatalf("%s create: %v", c.kind, got)
+		}
+		e.call("PUT", c.base+"/pin", `{"workflow_version":9}`, e.adminA, 422) // no such version
+		e.call("PUT", c.base+"/pin", `{"workflow_version":"2"}`, e.adminA, 400)
+		got = e.call("PUT", c.base+"/pin", `{"enabled":false}`, e.adminA, 200)
+		if got["workflow_version"] != float64(2) {
+			t.Fatalf("%s: an update that does not mention the pin dropped it: %v", c.kind, got)
+		}
+		got = e.call("PUT", c.base+"/pin", `{"workflow_version":null,"priority":10}`, e.adminA, 200)
+		if _, pinned := got["workflow_version"]; pinned || got["priority"] != float64(10) {
+			t.Fatalf("%s: null did not unpin: %v", c.kind, got)
+		}
+	}
+}
+
 func TestIntegrationAssetLineageAPI(t *testing.T) {
 	e := newEventsHarness(t, true)
 	var specID, runID string

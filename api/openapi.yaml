@@ -8089,7 +8089,7 @@ components:
       type: object
       properties:
         workflow: {type: string, minLength: 1, description: 'Must name an existing workflow.'}
-        workflow_version: {type: integer, minimum: 1, description: 'Pin a version; otherwise the newest runs.'}
+        workflow_version: {type: [integer, 'null'], minimum: 1, description: 'Pin a version. On an update: absent keeps the current pin, null removes it so the newest runs. Changing `workflow` without it drops the pin.'}
         params_mapping: {$ref: '#/components/schemas/ParamsMapping'}
         idempotency_key_path: {type: string, description: 'An expression naming the value that de-duplicates deliveries.'}
         priority: {type: integer, minimum: 0, maximum: 1000, default: 100}
@@ -8183,7 +8183,7 @@ components:
       type: object
       properties:
         workflow: {type: string, minLength: 1}
-        workflow_version: {type: integer, minimum: 1}
+        workflow_version: {type: [integer, 'null'], minimum: 1, description: 'Pin a version. On an update: absent keeps the current pin, null removes it so the newest runs. Changing `workflow` without it drops the pin.'}
         config:
           type: object
           description: '`object_store`: `uri` and `pattern` (a glob). `run_succeeded`: `upstream_workflow`.'

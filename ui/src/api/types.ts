@@ -972,7 +972,8 @@ export interface TriggerWithSecret extends WebhookTrigger {
 export interface TriggerRequest {
   name?: string;
   workflow?: string;
-  workflow_version?: number;
+  /** Absent keeps the current pin, null removes it, a number pins that version. */
+  workflow_version?: number | null;
   params_mapping?: Record<string, unknown>;
   idempotency_key_path?: string;
   priority?: number;
@@ -1037,10 +1038,14 @@ export interface SensorRequest {
   name?: string;
   kind?: SensorKind;
   workflow?: string;
+  /** Absent keeps the current pin, null removes it, a number pins that version. */
+  workflow_version?: number | null;
   config?: Record<string, unknown>;
   params_mapping?: Record<string, unknown>;
   poll_interval_seconds?: number;
   backfill?: boolean;
+  /** 0..1000; absent keeps the current value (100 on create). */
+  priority?: number;
   enabled?: boolean;
   revision?: number;
 }

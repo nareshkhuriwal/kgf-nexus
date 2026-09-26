@@ -76,7 +76,7 @@ func (a *API) triggerPayload(r *http.Request, t store.WebhookTrigger) map[string
 type triggerRequest struct {
 	Name               string         `json:"name"`
 	Workflow           string         `json:"workflow"`
-	WorkflowVersion    *json.Number   `json:"workflow_version"`
+	WorkflowVersion    versionPin     `json:"workflow_version"`
 	ParamsMapping      map[string]any `json:"params_mapping"`
 	IdempotencyKeyPath *string        `json:"idempotency_key_path"`
 	Priority           *json.Number   `json:"priority"`
@@ -89,18 +89,16 @@ type triggerRequest struct {
 func (a *API) buildTrigger(ctx context.Context, ns string, req triggerRequest, base store.WebhookTrigger) (store.WebhookTrigger, int, string, error) {
 	t := base
 	t.Namespace = ns
+	changed := req.Workflow != "" && req.Workflow != base.SpecName
 	if req.Workflow != "" {
 		t.SpecName = req.Workflow
 	}
 	if t.SpecName == "" {
 		return t, 422, "invalid_trigger", errors.New("workflow is required")
 	}
-	if req.WorkflowVersion != nil {
-		v, err := numToInt32(req.WorkflowVersion, 0, 1, 1<<30, "workflow_version")
-		if err != nil {
-			return t, 400, "invalid", err
-		}
-		t.SpecVersion = &v
+	var err error
+	if t.SpecVersion, err = req.WorkflowVersion.apply(t.SpecVersion, changed); err != nil {
+		return t, 400, "invalid", err
 	}
 	if ok, err := a.specExists(ctx, ns, t.SpecName, t.SpecVersion); err != nil {
 		return t, 500, "", err
@@ -121,7 +119,6 @@ func (a *API) buildTrigger(ctx context.Context, ns string, req triggerRequest, b
 			return t, 422, "invalid_mapping", fmt.Errorf("idempotency_key_path: %w", err)
 		}
 	}
-	var err error
 	if t.Priority, err = numToInt32(req.Priority, orDefault32(t.Priority, 100), 0, 1000, "priority"); err != nil {
 		return t, 400, "invalid", err
 	}
@@ -233,9 +230,6 @@ func (a *API) updateTrigger(w http.ResponseWriter, r *http.Request, p authn.Prin
 	if err != nil {
 		a.failConfig(w, r, "get trigger", err)
 		return
-	}
-	if req.WorkflowVersion == nil && req.Workflow != "" && req.Workflow != cur.SpecName {
-		cur.SpecVersion = nil // a new workflow does not inherit the old pin
 	}
 	t, code, errCode, err := a.buildTrigger(r.Context(), ns, req, cur)
 	if err != nil {

@@ -193,6 +193,23 @@ describe('the trigger detail page', () => {
     expect(calls.find((c) => c.method === 'POST')!.body).toEqual({ grace_seconds: 3600 });
   });
 
+  it('unpins the workflow version with an explicit null on edit', async () => {
+    const calls = api((c) => {
+      if (c.method === 'GET' && c.path === `${NS}/triggers/github-push`) return [200, trigger({ workflow_version: 3, priority: 400 })];
+      if (c.method === 'PUT') return [200, trigger()];
+      return undefined;
+    });
+    detail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const form = screen.getByRole('button', { name: 'Save changes' }).closest('form')!;
+    await within(form).findAllByRole('option', { name: /example-etl/ });
+    expect(within(form).getByRole('spinbutton', { name: /priority/ })).toHaveValue(400);
+    fireEvent.change(within(form).getByRole('spinbutton', { name: /workflow version/ }), { target: { value: '' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    expect(calls.find((c) => c.method === 'PUT')!.body).toMatchObject({ workflow_version: null, priority: 400, revision: 2 });
+  });
+
   it('disables the trigger with its revision', async () => {
     const calls = api((c) => (c.method === 'PUT' ? [200, trigger({ enabled: false })] : undefined));
     detail();

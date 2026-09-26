@@ -27,9 +27,13 @@ import {
   EnabledBadge,
   EventsPanel,
   OneTimeSecret,
+  RunTargetInputs,
+  applyRunTarget,
   conflictHint,
   mappingText,
   parseMapping,
+  runTargetErrors,
+  runTargetInitial,
 } from '../components/EventsShared';
 import { fmtAge, fmtTs } from '../lib/format';
 
@@ -353,10 +357,10 @@ export function TriggerForm({
 }) {
   const [name, setName] = useState(trigger?.name ?? '');
   const [workflow, setWorkflow] = useState(trigger?.workflow ?? '');
-  const [version, setVersion] = useState(trigger?.workflow_version != null ? String(trigger.workflow_version) : '');
   const [mapping, setMapping] = useState(mappingText(trigger?.params_mapping));
   const [keyPath, setKeyPath] = useState(trigger?.idempotency_key_path ?? '');
-  const [priority, setPriority] = useState(trigger ? String(trigger.priority) : '');
+  const [target, setTarget] = useState(() => runTargetInitial(trigger));
+  const targetErrors = runTargetErrors(target);
   const [tolerance, setTolerance] = useState(trigger ? String(trigger.tolerance_seconds) : '');
   const [enabled, setEnabled] = useState(trigger?.enabled ?? true);
   const parsed = parseMapping(mapping);
@@ -370,8 +374,7 @@ export function TriggerForm({
     };
     if (!trigger) body.name = name.trim();
     else body.revision = trigger.revision;
-    if (version.trim() !== '') body.workflow_version = Number(version);
-    if (priority.trim() !== '') body.priority = Number(priority);
+    applyRunTarget(body, target, trigger);
     if (tolerance.trim() !== '') body.tolerance_seconds = Number(tolerance);
     onSubmit(body);
   }
@@ -395,18 +398,19 @@ export function TriggerForm({
           </label>
           <WorkflowPicker namespace={namespace} value={workflow} onChange={setWorkflow} />
         </div>
+        <RunTargetInputs value={target} onChange={setTarget} existing={trigger} />
         <div className="form-row">
-          <label className="form-field">
-            <span className="form-label">workflow version</span>
-            <input type="number" min={1} value={version} onChange={(e) => setVersion(e.target.value)} placeholder="latest" />
-            <span className="form-hint">Blank always runs the latest version.</span>
-          </label>
           <label className="form-field">
             <span className="form-label">idempotency key path</span>
             <input value={keyPath} onChange={(e) => setKeyPath(e.target.value)} className="mono" placeholder="$.payload.delivery_id" />
             <span className="form-hint">
               JSONPath into the request. Retries carrying the same value converge on one run. Blank makes every signed call a new run.
             </span>
+          </label>
+          <label className="form-field">
+            <span className="form-label">timestamp tolerance (seconds)</span>
+            <input type="number" min={1} value={tolerance} onChange={(e) => setTolerance(e.target.value)} placeholder="server default" />
+            <span className="form-hint">How old a signed request may be. Smaller narrows the replay window.</span>
           </label>
         </div>
         <label className="form-field">
@@ -430,24 +434,23 @@ export function TriggerForm({
             </span>
           )}
         </label>
-        <div className="form-row">
-          <label className="form-field">
-            <span className="form-label">priority</span>
-            <input type="number" min={0} max={1000} value={priority} onChange={(e) => setPriority(e.target.value)} placeholder="server default" />
-          </label>
-          <label className="form-field">
-            <span className="form-label">timestamp tolerance (seconds)</span>
-            <input type="number" min={1} value={tolerance} onChange={(e) => setTolerance(e.target.value)} placeholder="server default" />
-            <span className="form-hint">How old a signed request may be. Smaller narrows the replay window.</span>
-          </label>
-        </div>
         <label className="form-check">
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
           <span>Enabled</span>
         </label>
         {error != null && <ErrorBox error={conflictHint(error) ?? error} what={trigger ? 'the trigger changes' : 'the new trigger'} />}
         <div className="form-actions">
-          <button type="submit" className="primary" disabled={pending || parsed.error !== null || workflow.trim() === ''}>
+          <button
+            type="submit"
+            className="primary"
+            disabled={
+              pending ||
+              parsed.error !== null ||
+              targetErrors.version !== null ||
+              targetErrors.priority !== null ||
+              workflow.trim() === ''
+            }
+          >
             {pending ? 'Saving…' : trigger ? 'Save changes' : 'Create trigger'}
           </button>
           <button type="button" onClick={onCancel} disabled={pending}>
