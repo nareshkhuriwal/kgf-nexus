@@ -298,6 +298,10 @@ agentDefaults:
     # client id); adds the azure.workload.identity/use label and annotation.
     workloadIdentityClientId: ""
     serviceAccountName: ""
+    # Extra agent-environment variables subprocess tasks may inherit (globs,
+    # comma-separated), beyond PATH/HOME/LANG/TZ/TMPDIR and the task contract
+    # (F151). The agent's own credentials never pass. Default: none.
+    subprocessEnvPassthrough: ""
     # Host-side secret files (docker/subprocess executors) live on a
     # memory-backed emptyDir, never on the work volume's disk.
     tmpfsSizeLimit: 64Mi

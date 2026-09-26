@@ -68,6 +68,8 @@ func MatchAny(patterns []string, name string) bool {
 var agentCredentialEnv = []string{
 	"NEXUS_API_KEY",
 	"NEXUS_S3_*",
+	"NEXUS_RESULT_STORE_*",
+	"RESULT_STORE_*",
 	"NEXUS_NATS_PASSWORD*",
 	"NEXUS_NATS_CREDS",
 	"NEXUS_NATS_NKEY_SEED_FILE",

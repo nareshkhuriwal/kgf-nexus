@@ -153,19 +153,3 @@ func removeSecrets(workDir string) error {
 	}
 	return nil
 }
-
-// scrubInheritedEnv drops the agent's own credentials, and every variable a
-// task may only obtain by DECLARING it (the env:// allow-list), from an
-// inherited environment (F138). Only the subprocess executor inherits the
-// agent's environment at all; docker and kubernetes start from empty.
-func scrubInheritedEnv(env []string, extraDeny []string) []string {
-	out := make([]string, 0, len(env))
-	for _, kv := range env {
-		name, _, _ := strings.Cut(kv, "=")
-		if secrets.IsAgentCredentialEnv(name) || secrets.MatchAny(extraDeny, name) {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return out
-}

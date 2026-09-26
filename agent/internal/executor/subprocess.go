@@ -69,6 +69,12 @@ type SubprocessExecutor struct {
 	// on hosts without PR_SET_DUMPABLE protection. This is one more reason
 	// the executor is development-grade.
 	InheritDeny []string
+
+	// EnvPassthrough are extra agent-process variables (path.Match globs)
+	// passed to subprocess tasks, on top of the minimal base set (F151).
+	// Operator configuration (NEXUS_SUBPROCESS_ENV_PASSTHROUGH), default
+	// empty. The agent's own credentials never pass, whatever it lists.
+	EnvPassthrough []string
 }
 
 // subprocState is the per-attempt private state hung off Prepared/Handle.
@@ -163,7 +169,7 @@ func (e *SubprocessExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepar
 		return Prepared{}, err
 	}
 
-	env := buildEnvScrubbed(spec, e.InheritDeny, workDir, filepath.Join(workDir, InputDirName),
+	env := buildEnvScrubbed(spec, e.EnvPassthrough, e.InheritDeny, workDir, filepath.Join(workDir, InputDirName),
 		OutputFilePath(spec, workDir), filepath.Join(workDir, OutputDirName))
 	secretFiles, err := stageSecretFiles(workDir, spec.Secrets)
 	if err != nil {

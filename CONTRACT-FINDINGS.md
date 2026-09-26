@@ -3441,7 +3441,8 @@ key files, `NEXUS_SECRETS_CONFIG`, `VAULT_TOKEN`, `VAULT_SECRET_ID`,
 `AZURE_CLIENT_SECRET`, the Azure certificate and federated-token paths, AWS and
 GCP credentials) and of every name on the tenant's `env://` allow-list
 (`SubprocessExecutor.InheritDeny`); those can never be resolved through
-`env://` either. With secret providers configured the agent also sets
+`env://` either. F151 then replaced the deny-list with an explicit allow-list
+(the subprocess environment is now built, not filtered). With secret providers configured the agent also sets
 `RLIMIT_CORE=0` and, on Linux, `PR_SET_DUMPABLE=0`, so a same-UID task cannot
 read the agent's memory through `/proc`. The subprocess executor still runs
 tasks as the agent's user and remains development-grade (ADR-0007). Test:
@@ -3477,3 +3478,45 @@ signed SIEM sinks, retention with legal hold, and `nexusctl audit verify`
 and the Postgres suites `TestAuditChainIsUnforkedUnderConcurrentReplicas`,
 `TestAuditTamperingIsDetected`, `TestAuditLogIsAppendOnlyForEveryRole`,
 `TestIntegrationAuditAPI`.
+
+### F151. Subprocess tasks inherited the agent's entire environment, including its worker credential and result-store keys — FIXED
+
+**Severity:** high (verified on a live stack: a probe task printed `NEXUS_API_KEY` and `NEXUS_S3_*` / `RESULT_STORE_*`).
+
+`executor.buildEnv` started every subprocess task's environment from
+`os.Environ()`. On the compose stack the agent carries its worker API key,
+the result-store endpoint, bucket and access keys (both the `NEXUS_S3_*` and
+`RESULT_STORE_*` spellings), NATS credential paths and everything else it was
+started with, so any subprocess task could register as a worker, claim other
+attempts in the namespace, or read and overwrite other attempts' results.
+Docker and Kubernetes tasks were not affected: both build the workload
+environment from scratch. F138's deny-list (drop known credential names)
+narrowed this but still passed every variable nobody had thought to list.
+
+**Fix:** the subprocess environment is now an explicit allow-list
+(`buildEnvScrubbed`, `subprocessBaseEnv`): `PATH` (a default when the agent
+has none), `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `USER`,
+`LOGNAME`, the SDK task contract settings `NEXUS_TASK_MODULES` and
+`NEXUS_RESULT_DIR`, then the declared `runtime.env`, the env-injected
+secrets (ADR-0025), and the platform variables the executor sets
+(`NEXUS_ATTEMPT_ID`, `NEXUS_RUN_ID`, `NEXUS_NODE_ID`, `NEXUS_IDEMPOTENCY_KEY`,
+`NEXUS_WORK_DIR`, `NEXUS_INPUT_DIR`, `NEXUS_OUTPUT_FILE`, `NEXUS_OUTPUT_DIR`,
+`NEXUS_OUTPUT_NAMES`, `NEXUS_DEADLINE_UNIX_MS`, `NEXUS_INLINE_THRESHOLD_BYTES`,
+`NEXUS_SECRETS_DIR`, `CUDA_VISIBLE_DEVICES`). Nothing else. Operators may pass
+more with `NEXUS_SUBPROCESS_ENV_PASSTHROUGH` (comma-separated globs; Helm
+`agentDefaults.secrets.subprocessEnvPassthrough`; default empty); the agent's
+own credentials (`secrets.IsAgentCredentialEnv`, now including
+`NEXUS_RESULT_STORE_*` and `RESULT_STORE_*`) never pass even when a pattern
+matches them, and names on the tenant's `env://` allow-list pass only by
+declaration. TRACEPARENT is not propagated today (no tracing context exists
+on the agent). Regression tests, written first:
+`TestSubprocessTaskEnvironmentIsMinimalAndExplicit` (a task dumps `env`),
+`TestContainerTaskEnvironmentsNeverCarryAgentCredentials` (docker and
+kubernetes env builders, and the rendered Job's containers) and
+`TestDockerContainerEnvironmentHasNoAgentCredentials` (a real container).
+
+**Local runner and replay** (`nexus.local`, `nexusctl run --local`,
+`nexusctl replay`): these run on the developer's own machine and deliberately
+start from the developer's environment plus the `NEXUS_*` task contract, so a
+task can use the tools and credentials the developer already has; they
+resolve no `SecretRef`s. Documented in OPERATIONS §25.1 rather than changed.

@@ -71,6 +71,11 @@ type Config struct {
 	// that declares a secret fails PERMISSION_DENIED.
 	Secrets *secrets.Resolver
 
+	// SubprocessEnvPassthrough are extra agent-process variables (globs)
+	// subprocess tasks may inherit beyond the minimal base set
+	// (NEXUS_SUBPROCESS_ENV_PASSTHROUGH; F151). Default empty.
+	SubprocessEnvPassthrough []string
+
 	// AllowUnenforceableLimits relaxes the subprocess executor's refusal to run
 	// tasks whose limits it cannot honour. Development only.
 	AllowUnenforceableLimits bool
@@ -378,7 +383,8 @@ func (a *Agent) buildExecutors() map[string]executor.Executor {
 			AllowUnenforceableLimits: a.cfg.AllowUnenforceableLimits,
 			// Variables a task may only receive by declaring them (env://)
 			// must not also arrive by inheritance (F138).
-			InheritDeny: a.cfg.Secrets.EnvAllowPatterns(),
+			InheritDeny:    a.cfg.Secrets.EnvAllowPatterns(),
+			EnvPassthrough: a.cfg.SubprocessEnvPassthrough,
 		},
 	}
 	probe, cancel := context.WithTimeout(context.Background(), 10*time.Second)

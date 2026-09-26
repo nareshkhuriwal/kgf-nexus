@@ -151,6 +151,17 @@ func main() {
 			"namespace", *namespace, "config", os.Getenv(secrets.EnvConfigPath))
 	}
 
+	// Subprocess tasks inherit a minimal environment (F151); an operator may
+	// pass more by name. The agent's own credentials never pass.
+	var passthrough []string
+	for _, p := range splitCSV(os.Getenv("NEXUS_SUBPROCESS_ENV_PASSTHROUGH")) {
+		if secrets.IsAgentCredentialEnv(p) {
+			log.Warn("NEXUS_SUBPROCESS_ENV_PASSTHROUGH names an agent credential; it is ignored", "pattern", p)
+			continue
+		}
+		passthrough = append(passthrough, p)
+	}
+
 	cfg := worker.Config{
 		Namespace: *namespace,
 		Queues:    splitCSV(*queues),
@@ -179,6 +190,7 @@ func main() {
 		Bus:                      busCfg,
 		MaxUninterruptible:       *maxUninterruptible,
 		Secrets:                  secretResolver,
+		SubprocessEnvPassthrough: passthrough,
 	}
 
 	// The kubernetes executor is opt-in: it exists only when NEXUS_K8S_NAMESPACE

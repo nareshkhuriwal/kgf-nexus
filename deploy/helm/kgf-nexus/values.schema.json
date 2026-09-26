@@ -252,6 +252,7 @@
             },
             "workloadIdentityClientId": { "type": "string" },
             "serviceAccountName": { "type": "string" },
+            "subprocessEnvPassthrough": { "type": "string" },
             "tmpfsSizeLimit": { "$ref": "#/definitions/quantityOrNumber" }
           }
         }

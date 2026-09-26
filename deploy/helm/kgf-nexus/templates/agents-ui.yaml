@@ -85,6 +85,9 @@ spec:
             {{- if .workloadIdentityClientId }}
             - { name: AZURE_CLIENT_ID, value: {{ .workloadIdentityClientId | quote }} }
             {{- end }}
+            {{- if .subprocessEnvPassthrough }}
+            - { name: NEXUS_SUBPROCESS_ENV_PASSTHROUGH, value: {{ .subprocessEnvPassthrough | quote }} }
+            {{- end }}
             {{- end }}
             {{- include "nexus.tlsEnv" (list $root "client") | nindent 12 }}
           ports:

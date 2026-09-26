@@ -69,7 +69,7 @@ func TestSubprocessInjectsSecretsAndScrubsAgentCredentials(t *testing.T) {
 	}
 	report := string(out.Outputs["report"].Bytes)
 	for _, want := range []string{
-		"db=pw-env-value-1", "api=unset", "s3=unset", "src=unset", "harmless=kept",
+		"db=pw-env-value-1", "api=unset", "s3=unset", "src=unset", "harmless=", // F151: not inherited either
 		"key=-----BEGIN KEY-----", "mode=-r--------",
 	} {
 		if !strings.Contains(report, want+"\n") {
@@ -89,6 +89,157 @@ func TestSubprocessInjectsSecretsAndScrubsAgentCredentials(t *testing.T) {
 	if _, err := os.Stat(secretsDir(p.WorkDir)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("secrets directory survived Cleanup: %v", err)
 	}
+}
+
+// agentCredentialFixture puts the variables a real agent carries into this
+// process's environment: its worker credential and result-store keys, both
+// spellings. No task on any executor may see any of them (F151).
+func agentCredentialFixture(t *testing.T) []string {
+	t.Helper()
+	vars := map[string]string{
+		"NEXUS_API_KEY":               "nxs_worker_leak_probe",
+		"NEXUS_S3_ACCESS_KEY_ID":      "leak-access-key",
+		"NEXUS_S3_SECRET_ACCESS_KEY":  "leak-secret-key",
+		"NEXUS_RESULT_STORE_ENDPOINT": "http://minio:9000",
+		"RESULT_STORE_BUCKET":         "leak-bucket",
+		"NEXUS_RESULT_STORE_BUCKET":   "leak-bucket",
+		"NEXUS_NATS_NKEY_SEED_FILE":   "/etc/nexus/nats/user.nk",
+		"UNRELATED_AGENT_SETTING":     "agent-only",
+	}
+	names := make([]string, 0, len(vars))
+	for k, v := range vars {
+		t.Setenv(k, v)
+		names = append(names, k)
+	}
+	return names
+}
+
+func assertNoAgentEnv(t *testing.T, where string, env []string, names []string) {
+	t.Helper()
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		for _, n := range names {
+			if name == n {
+				t.Errorf("%s: task environment contains %s", where, n)
+			}
+		}
+		if strings.HasPrefix(name, "NEXUS_S3_") || strings.Contains(name, "RESULT_STORE") {
+			t.Errorf("%s: task environment contains result-store variable %s", where, name)
+		}
+	}
+}
+
+// TestSubprocessTaskEnvironmentIsMinimalAndExplicit is F151's regression
+// test: a subprocess task that dumps its environment sees the base set, the
+// task contract, its declared env and secrets, and operator passthrough --
+// never the agent's credentials or anything else the agent was started with.
+func TestSubprocessTaskEnvironmentIsMinimalAndExplicit(t *testing.T) {
+	names := agentCredentialFixture(t)
+	t.Setenv("OPERATOR_PASSTHROUGH_X", "allowed")
+	t.Setenv("NEXUS_TASK_MODULES", "tasks.etl")
+	e := &SubprocessExecutor{Root: t.TempDir(), AllowUnenforceableLimits: true,
+		EnvPassthrough: []string{"OPERATOR_PASSTHROUGH_*", "NEXUS_API_KEY", "NEXUS_S3_*"}}
+	spec := TaskSpec{
+		AttemptID: "env-dump", RunID: "r", NodeID: "n", IdempotencyKey: "k",
+		Runtime:              &nexusv1.RuntimeSpec{Command: []string{"/bin/sh", "-c", `env > "$NEXUS_OUTPUT_DIR/env"`}, Env: map[string]string{"TASK_VAR": "t"}},
+		DeclaredOutputs:      []string{"env"},
+		StartToCloseDeadline: time.Now().Add(30 * time.Second),
+		Secrets:              testSecrets()[:1],
+	}
+	ctx := context.Background()
+	p, err := e.Prepare(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := e.Start(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Cleanup(ctx, h)
+	out, err := e.Wait(ctx, h)
+	if err != nil || out.ExitCode != 0 {
+		t.Fatalf("wait: %v %d", err, out.ExitCode)
+	}
+	env := strings.Split(strings.TrimSpace(string(out.Outputs["env"].Bytes)), "\n")
+	assertNoAgentEnv(t, "subprocess", env, names)
+	got := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = v
+	}
+	for k, want := range map[string]string{"TASK_VAR": "t", "DB_PASSWORD": "pw-env-value-1",
+		"OPERATOR_PASSTHROUGH_X": "allowed", "NEXUS_TASK_MODULES": "tasks.etl", "NEXUS_ATTEMPT_ID": "env-dump",
+		"NEXUS_IDEMPOTENCY_KEY": "k"} {
+		if got[k] != want {
+			t.Errorf("%s = %q, want %q", k, got[k], want)
+		}
+	}
+	if got["PATH"] == "" {
+		t.Error("PATH missing")
+	}
+	allowed := map[string]bool{"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true,
+		"TZ": true, "TMPDIR": true, "USER": true, "LOGNAME": true, "TASK_VAR": true, "DB_PASSWORD": true,
+		"OPERATOR_PASSTHROUGH_X": true, "PWD": true, "SHLVL": true, "_": true, "OLDPWD": true}
+	for k := range got {
+		if !allowed[k] && !strings.HasPrefix(k, "NEXUS_") {
+			t.Errorf("unexpected variable in the task environment: %s", k)
+		}
+	}
+}
+
+// Docker and Kubernetes tasks start from an empty environment; these guard it.
+func TestContainerTaskEnvironmentsNeverCarryAgentCredentials(t *testing.T) {
+	names := agentCredentialFixture(t)
+	spec := TaskSpec{AttemptID: "a", RunID: "r", NodeID: "n", Runtime: &nexusv1.RuntimeSpec{Image: "i", Env: map[string]string{"X": "y"}}}
+	assertNoAgentEnv(t, "docker", dockerEnv(spec, "/nexus"), names)
+	var k8s []string
+	for _, ev := range k8sEnv(spec) {
+		k8s = append(k8s, ev.Name+"="+ev.Value)
+	}
+	assertNoAgentEnv(t, "kubernetes", k8s, names)
+	e, _ := newFakeExecutor(t)
+	job, _, err := e.buildJob(unitSpec("env-guard"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range append(job.Spec.Template.Spec.Containers, job.Spec.Template.Spec.InitContainers...) {
+		var env []string
+		for _, ev := range c.Env {
+			env = append(env, ev.Name+"="+ev.Value)
+		}
+		assertNoAgentEnv(t, "kubernetes pod "+c.Name, env, names)
+	}
+}
+
+// TestDockerContainerEnvironmentHasNoAgentCredentials runs a real container
+// with the agent's credentials in the agent process's environment.
+func TestDockerContainerEnvironmentHasNoAgentCredentials(t *testing.T) {
+	ctx := context.Background()
+	if !DockerAvailable(ctx, "") {
+		t.Skip("docker daemon not reachable")
+	}
+	if err := ensureConformanceImage(ctx); err != nil {
+		t.Skipf("image unavailable: %v", err)
+	}
+	names := agentCredentialFixture(t)
+	e := &DockerExecutor{Root: t.TempDir()}
+	p, err := e.Prepare(ctx, TaskSpec{AttemptID: "env-dump-docker", RunID: "r", NodeID: "n",
+		Runtime:              &nexusv1.RuntimeSpec{Image: conformanceImage(), Command: []string{"/bin/sh", "-c", "env > outputs/env"}},
+		DeclaredOutputs:      []string{"env"},
+		StartToCloseDeadline: time.Now().Add(60 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := e.Start(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Cleanup(ctx, h)
+	out, err := e.Wait(ctx, h)
+	if err != nil || out.ExitCode != 0 {
+		t.Fatalf("wait: %v %d", err, out.ExitCode)
+	}
+	assertNoAgentEnv(t, "docker container", strings.Split(string(out.Outputs["env"].Bytes), "\n"), names)
 }
 
 func TestSecretsRootKeepsSecretsOffTheWorkVolume(t *testing.T) {

@@ -3049,9 +3049,24 @@ agent-log copy, progress notes and error messages pass the ADR-0020 redactor
 in a WARN). With providers configured the agent sets `RLIMIT_CORE=0` and, on
 Linux, `PR_SET_DUMPABLE=0`.
 
-**Subprocess executor (F138).** Tasks no longer inherit the agent's own
-credentials or any env:// allow-listed variable. It still runs tasks as the
-agent's user: development-grade, as ADR-0007 says.
+**Subprocess executor (F138, F151).** A subprocess task's environment is
+built from an allow-list, never inherited wholesale: `PATH`, `HOME`, `LANG`,
+`LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `USER`, `LOGNAME`, `NEXUS_TASK_MODULES`,
+`NEXUS_RESULT_DIR`, then `runtime.env`, env-injected secrets and the platform
+`NEXUS_*` variables. Pass anything else explicitly with
+`NEXUS_SUBPROCESS_ENV_PASSTHROUGH=GLOB[,GLOB...]` (default empty; Helm
+`agentDefaults.secrets.subprocessEnvPassthrough`). The agent's own credentials
+(`NEXUS_API_KEY`, `NEXUS_S3_*`, `NEXUS_RESULT_STORE_*`, `RESULT_STORE_*`, NATS,
+Vault, Azure, AWS, GCP) never pass, whatever the pattern says. Docker and
+Kubernetes tasks start from an empty environment. The subprocess executor
+still runs tasks as the agent's user: development-grade, as ADR-0007 says.
+
+**Local runs and replay** (`nexus.local`, `nexusctl run --local`,
+`nexusctl replay`) run on the developer's own machine: tasks inherit the
+developer's full environment plus the `NEXUS_*` contract (so a local task can
+use the developer's tools and credentials), and `SecretRef`s are **not**
+resolved; export the values a task needs, under the names it declares.
+Nothing from a local run leaves the machine.
 
 **Tests.** `make test-vault` (a digest-pinned Vault 1.21.4 dev container:
 token and AppRole login, KV v2 fields and versions, policy denial, revoked
