@@ -96,6 +96,9 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	pcfg.MaxConns = 16
 	pcfg.MaxConnLifetime = 30 * time.Minute
 	pcfg.HealthCheckPeriod = 30 * time.Second
+	if err := store.ApplyPoolEnv(pcfg); err != nil {
+		return err
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
 	if err != nil {

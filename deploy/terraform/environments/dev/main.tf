@@ -102,7 +102,9 @@ module "nexus" {
     logLevel = "info"
 
     # The host machine's PostgreSQL (deploy/scripts/dev-host-postgres.sh).
-    postgres = merge({ enabled = false }, var.postgres)
+    # The host Postgres is shared with other projects (max_connections is
+    # typically 100), so each service keeps a small pool.
+    postgres = merge({ enabled = false, pool = { maxConns = 3, minConns = 1 } }, var.postgres)
 
     # Laptop-sized volumes; the defaults are sized for a shared cluster.
     minio = { storage = { size = "5Gi" } }

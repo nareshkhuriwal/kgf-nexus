@@ -34,7 +34,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := pgxpool.New(ctx, dsn)
+	pcfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		log.Error("could not parse database url", "error", err)
+		os.Exit(1)
+	}
+	if err := store.ApplyPoolEnv(pcfg); err != nil {
+		log.Error("invalid pool setting", "error", err)
+		os.Exit(1)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
 	if err != nil {
 		log.Error("could not create connection pool", "error", err)
 		os.Exit(1)
