@@ -3417,3 +3417,41 @@ is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
 `ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
 report the output. Test it in `agent/internal/worker` for both inline and blob
 outputs, and in the NATS/e2e path with a non-SDK executor.
+
+### F146. `prefer_same_worker_as` was parsed and never read — FIXED
+
+**Severity:** low (a documented soft preference that did nothing).
+
+`TaskSpec.prefer_same_worker_as` ("soft data-locality hint: prefer the worker
+that ran this node", task.proto field 9) has been accepted by the schema,
+decoded by the gateway, emitted by the SDK and stored in every node spec since
+Phase 0. No scheduler code read it: `TaskSpecView` did not even have the field,
+so a task that declared it was placed exactly as one that did not, and nothing
+told the author.
+
+**Fix (ADR-0030 §5):** the claim resolves the named node's most recent
+SUCCEEDED attempt in the same run to its worker's **hostname** (worker ids are
+per session, ADR-0010 point 7; the data lives on the host) and adds it to the
+placement score. It is a soft preference like every other one: the push path
+picks the matching worker among those that fit, and the pull path defers the
+attempt to it for at most `NEXUS_PLACEMENT_WAIT`. Test:
+`TestPreferSameWorkerAsIsRead` (a worker on another host polls first and is
+refused; the preferred host gets the task).
+
+### F147. The scheduler's database role could not charge the retry budget it owns — FIXED
+
+**Severity:** medium under per-service database roles (every automatic retry
+failed); none with the single superuser role compose and the chart use today.
+
+`CreatePendingRetry` (scheduler_timers.go) creates a retry attempt and, in the
+same transaction, increments `task_nodes.attempts_used`. Migration 0005 granted
+UPDATE on that column only to `nexus_dag_engine`, so a scheduler connected as
+`nexus_scheduler` -- the ADR-0011 least-privilege deployment 0005 exists for --
+failed every retry-backoff timer with `permission denied for table
+task_nodes (SQLSTATE 42501)`: no retry was ever created, and the timer was
+retried forever. Nothing tested the scheduler role against that statement.
+
+**Fix (migration 0035):** `GRANT UPDATE (attempts_used, preemptions_used) ON
+task_nodes TO nexus_scheduler`, column-scoped like 0005's `event_seq` grant.
+`TestIntegrationSchedulerRoleChargesRetryBudgets` runs as the scheduler role;
+with the grant revoked it fails with exactly the error above.

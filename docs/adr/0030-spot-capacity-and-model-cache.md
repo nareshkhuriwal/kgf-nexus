@@ -63,15 +63,17 @@ cost hook (§5), and a fourth value would have to be defined against it.
 
 ### 2. Eviction notices: pluggable sources, one drain
 
-`agent/internal/eviction` defines `Source` (`Watch(ctx) <-chan Notice`, a
-`Notice` carrying the source, reason and the deadline by which the node will
-be gone). Implementations:
+`agent/internal/eviction` defines `Source` (`Watch(ctx, out chan<- Notice)
+error`; a `Notice` carries the source, reason and the deadline by which the
+node will be gone), and `Merge` delivers the first notice of any source.
+Every source polls (default 5 s) with capped, jittered backoff on transient
+errors. Implementations:
 
 | Source | Signal |
 |---|---|
-| `kubernetes` | the agent's own Node gains a configured taint (defaults: `cloud.google.com/impending-node-termination`, `aws-node-termination-handler/spot-itn`, `karpenter.sh/disruption`, `ToBeDeletedByClusterAutoscaler`, `DeletionCandidateOfClusterAutoscaler`), or the node's `Ready` condition flips with an eviction reason; watched through the API server |
-| `aws` | IMDSv2 `latest/meta-data/spot/instance-action` (token first; 404 = no action) |
-| `gcp` | `computeMetadata/v1/instance/preempted` with `wait_for_change=true` |
+| `kubernetes` | the agent's own Node (read with `get`) gains a configured taint (defaults: `cloud.google.com/impending-node-termination`, `aws-node-termination-handler/spot-itn`, `karpenter.sh/disruption`, `ToBeDeletedByClusterAutoscaler`), gets a deletion timestamp, or disappears. Risk signals -- `rebalance-recommendation`, `DeletionCandidateOfClusterAutoscaler` -- are deliberately not defaults: they mean "may go", and draining on them would checkpoint-kill work on nodes that usually survive |
+| `aws` | IMDSv2 `latest/meta-data/spot/instance-action` (token first, cached; 404 = no action) |
+| `gcp` | `computeMetadata/v1/instance/preempted` = `TRUE` (deadline now + 30 s) |
 | `azure` | Scheduled Events `EventType` `Preempt` or `Terminate` for this instance |
 | `file` | a file appears (`NEXUS_EVICTION_FILE`): simulation, tests, and node-local handlers |
 

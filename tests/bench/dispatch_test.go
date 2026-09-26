@@ -106,15 +106,15 @@ SELECT runs.ids[1 + i % $3], 'n'||i, 'bench.task','RUNNING',3,'{}'
 WITH runs AS (SELECT array_agg(id ORDER BY id) AS ids FROM workflow_runs WHERE namespace=$1)
 INSERT INTO task_attempts (run_id,node_id,attempt_number,state,queue,priority,resource_request,idempotency_key,scheduled_at)
 SELECT runs.ids[1 + i % $4], 'n'||i, 1, 'PENDING', $2, 100 + (i % 7),
-       '{"cpu_millis":1,"memory_bytes":1}', $1||'-'||i, now() - make_interval(secs => i % 600)
-  FROM runs, generate_series(0,$3-1) i`, w.ns, w.queue, backlog, nRuns)
+       $5::jsonb, $1||'-'||i, now() - make_interval(secs => i % 600)
+  FROM runs, generate_series(0,$3-1) i`, w.ns, w.queue, backlog, nRuns, benchRequest())
 	must(err, "attempts")
 	for i := 0; i < nWorkers; i++ {
 		var wid uuid.UUID
 		must(pool.QueryRow(ctx, `
 INSERT INTO workers (namespace,hostname,queues,capacity,committed,state,agent_version,session_token_hash,last_heartbeat_at)
-VALUES ($1,$2,ARRAY[$3],'{"cpu_millis":1000000000000,"memory_bytes":1000000000000000}','{}','ACTIVE','bench','h',now()+interval '1 hour')
-RETURNING id`, w.ns, fmt.Sprintf("bench-%d", i), w.queue).Scan(&wid), "worker")
+VALUES ($1,$2,ARRAY[$3],$4::jsonb,'{}','ACTIVE','bench','h',now()+interval '1 hour')
+RETURNING id`, w.ns, fmt.Sprintf("bench-%d", i), w.queue, benchCapacity()).Scan(&wid), "worker")
 		w.workers = append(w.workers, wid)
 	}
 	// NEXUS_BENCH_QUOTA=true gives the namespace concurrent quotas far above
@@ -139,6 +139,34 @@ func (w *world) cleanup(ctx context.Context, pool *pgxpool.Pool) {
 	_, _ = pool.Exec(ctx, `DELETE FROM workers WHERE namespace=$1`, w.ns)
 	_, _ = pool.Exec(ctx, `DELETE FROM platform_config WHERE namespace=$1`, w.ns)
 	_, _ = pool.Exec(ctx, `DELETE FROM tenants WHERE namespace=$1`, w.ns)
+}
+
+// NEXUS_BENCH_GPU=true makes every attempt a shared-GPU slice (1 byte of VRAM
+// on one of 8 effectively unbounded shared devices per worker), so each claim
+// takes the ADR-0029 path: the SQL capability clause, per-device placement,
+// the placed reservation, and pull-path deferral scoring against the other
+// workers. Without it the cell measures non-GPU work, which must not regress.
+func benchGPU() bool { return envStr("NEXUS_BENCH_GPU", "false") == "true" }
+
+func benchRequest() string {
+	if benchGPU() {
+		return `{"cpu_millis":1,"memory_bytes":1,"gpu_share_memory_bytes":1}`
+	}
+	return `{"cpu_millis":1,"memory_bytes":1}`
+}
+
+func benchCapacity() string {
+	if !benchGPU() {
+		return `{"cpu_millis":1000000000000,"memory_bytes":1000000000000000}`
+	}
+	shares := ""
+	for d := 0; d < 8; d++ {
+		if d > 0 {
+			shares += ","
+		}
+		shares += fmt.Sprintf(`"%d":{"milli":1000000000,"memory_bytes":1000000000000000}`, d)
+	}
+	return `{"cpu_millis":1000000000000,"memory_bytes":1000000000000000,"gpu_shares":{` + shares + `}}`
 }
 
 type cell struct {
@@ -267,6 +295,7 @@ func run(ctx context.Context, t *testing.T, dsn, mode string, w *world, replicas
 //	                             so the backlog stays roughly the size named)
 //	NEXUS_BENCH_WINDOW    true   false measures the pre-0023 exhaustive pull scan
 //	NEXUS_BENCH_QUOTA     false  true gives the namespace (unreached) quotas (ADR-0021)
+//	NEXUS_BENCH_GPU       false  true makes every attempt a shared-GPU slice (ADR-0029)
 //	NEXUS_BENCH_OUT       path to also write the markdown table to
 func TestDispatchCeiling(t *testing.T) {
 	dsn := os.Getenv("NEXUS_BENCH_DSN")

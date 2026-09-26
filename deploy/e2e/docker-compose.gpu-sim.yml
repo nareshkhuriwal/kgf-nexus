@@ -1,0 +1,48 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Simulated-GPU, spot and eviction overlay for the isolated e2e stack
+# (ADR-0029/0030/0031). Layered AFTER docker-compose.e2e.yml:
+#
+#   E2E_EXTRA_COMPOSE=deploy/e2e/docker-compose.gpu-sim.yml \
+#   E2E_PROJECT=nexus-w3j E2E_PORT_BASE=55861 deploy/e2e/e2e-stack.sh up
+#   go test -tags gpusim -count=1 -v ./tests/gpusim/
+#
+# Adds one SPOT agent whose eviction source is a file, so a test can deliver
+# a spot interruption notice with `docker exec ... touch`: the same code path
+# the kubernetes/aws/gcp/azure sources feed, minus the cloud. Everything here
+# is simulated capacity, and labelled so.
+
+services:
+  agent-spot:
+    extends:
+      file: ../docker-compose.yml
+      service: agent-gpu-a10
+    environment:
+      NEXUS_QUEUES: default,gpu
+      NEXUS_LABELS: "zone=local,accelerator=nvidia,simulated=true"
+      NEXUS_CAPACITY_TYPE: spot
+      NEXUS_EVICTION_SOURCES: file
+      NEXUS_EVICTION_FILE: /var/lib/nexus/evict/now
+      NEXUS_EVICTION_POLL: 500ms
+      # A short checkpoint window keeps the test quick; production notices
+      # carry their own deadline.
+      NEXUS_EVICTION_GRACE: 5s
+    ports: !reset []
+    volumes: !override
+      - agent-spot-wal:/var/lib/nexus/wal
+      - nats-auth-agent:/etc/nexus/nats:ro
+      - chaos-effects:/var/lib/nexus/effects
+    restart: "no"
+
+  # A deferral window long enough that the test's spot_preferred task reliably
+  # waits for the spot agent rather than racing to whichever agent polls first.
+  scheduler:
+    environment:
+      NEXUS_PLACEMENT_WAIT: 15s
+  scheduler-gpu:
+    environment:
+      NEXUS_PLACEMENT_WAIT: 15s
+
+volumes:
+  agent-spot-wal:

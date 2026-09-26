@@ -5962,6 +5962,995 @@
    "hash": "92efa9aca51978a506e4a28015b29ae5f76be8fa1b85d003ab75ac4e22bf48f0"
   },
   {
+   "name": "gpu_sharing:gpu_sharing",
+   "source": "examples/gpu_sharing/dag.py",
+   "workflow": "gpu_sharing",
+   "spec": {
+    "api_version": "nexus.dev/v1",
+    "description": "MIG slices and VRAM-packed shared GPUs; an audit fails the run on any per-device over-allocation.",
+    "edges": [
+     {
+      "from_node_id": "big_0",
+      "output_to_input": {
+       "big_0": "placement"
+      },
+      "to_node_id": "audit"
+     },
+     {
+      "from_node_id": "big_1",
+      "output_to_input": {
+       "big_1": "placement"
+      },
+      "to_node_id": "audit"
+     },
+     {
+      "from_node_id": "big_2",
+      "output_to_input": {
+       "big_2": "placement"
+      },
+      "to_node_id": "audit"
+     },
+     {
+      "from_node_id": "big_3",
+      "output_to_input": {
+       "big_3": "placement"
+      },
+      "to_node_id": "audit"
+     },
+     {
+      "from_node_id": "mig_large_0",
+      "output_to_input": {
+       "mig_large_0": "placement"
+      },
+      "to_node_id": "audit"
+     },
+     {
+      "from_node_id": "mig_large_1",
+      "output_to_input": {
+       "mig_large_1": "placement"
+      },
+      "to_node_id": "audit"
+     },
+     {
+      "from_node_id": "mig_small_0",
+      "output_to_input": {
+       "mig_small_0": "placement"
+      },
+      "to_node_id": "audit"
+     },
+     {
+      "from_node_id": "mig_small_1",
+      "output_to_input": {
+       "mig_small_1": "placement"
+      },
+      "to_node_id": "audit"
+     },
+     {
+      "from_node_id": "mig_small_2",
+      "output_to_input": {
+       "mig_small_2": "placement"
+      },
+      "to_node_id": "audit"
+     },
+     {
+      "from_node_id": "small_0",
+      "output_to_input": {
+       "small_0": "placement"
+      },
+      "to_node_id": "audit"
+     },
+     {
+      "from_node_id": "small_1",
+      "output_to_input": {
+       "small_1": "placement"
+      },
+      "to_node_id": "audit"
+     },
+     {
+      "from_node_id": "small_2",
+      "output_to_input": {
+       "small_2": "placement"
+      },
+      "to_node_id": "audit"
+     },
+     {
+      "from_node_id": "small_3",
+      "output_to_input": {
+       "small_3": "placement"
+      },
+      "to_node_id": "audit"
+     }
+    ],
+    "name": "gpu-sharing",
+    "namespace": "default",
+    "params": {
+     "hold_seconds": {
+      "default_json": "10",
+      "type": "int"
+     }
+    },
+    "run_timeout_ms": 3600000,
+    "tasks": [
+     {
+      "id": "audit",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "inputs": {
+       "big_0": {
+        "required": true,
+        "type": "json"
+       },
+       "big_1": {
+        "required": true,
+        "type": "json"
+       },
+       "big_2": {
+        "required": true,
+        "type": "json"
+       },
+       "big_3": {
+        "required": true,
+        "type": "json"
+       },
+       "mig_large_0": {
+        "required": true,
+        "type": "json"
+       },
+       "mig_large_1": {
+        "required": true,
+        "type": "json"
+       },
+       "mig_small_0": {
+        "required": true,
+        "type": "json"
+       },
+       "mig_small_1": {
+        "required": true,
+        "type": "json"
+       },
+       "mig_small_2": {
+        "required": true,
+        "type": "json"
+       },
+       "small_0": {
+        "required": true,
+        "type": "json"
+       },
+       "small_1": {
+        "required": true,
+        "type": "json"
+       },
+       "small_2": {
+        "required": true,
+        "type": "json"
+       },
+       "small_3": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "audit": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "default",
+      "resources": {
+       "request": {
+        "cpu_millis": 100,
+        "memory_bytes": 67108864
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "cd \"$NEXUS_INPUT_DIR\" \u0026\u0026 cat * | sed 's/}{/}\\n{/g' | awk -v cap=42949672960 -v migcap=\"1g.10gb:3 3g.40gb:1\" '\nfunction get(s, k,   m) {\n  if (match(s, \"\\\"\" k \"\\\":\\\"[^\\\"]*\\\"\")) { m = substr(s, RSTART, RLENGTH); sub(/^\"[^\"]+\":\"/, \"\", m); sub(/\"$/, \"\", m); return m }\n  if (match(s, \"\\\"\" k \"\\\":[^,}]*\")) { m = substr(s, RSTART, RLENGTH); sub(/^\"[^\"]+\":/, \"\", m); return m }\n  return \"\" }\nBEGIN { n = split(migcap, c, \" \"); for (i = 1; i \u003c= n; i++) { split(c[i], p, \":\"); mcap[p[1]] = p[2] } }\n{ j++; node[j] = get($0, \"node\"); mode[j] = get($0, \"mode\"); mem[j] = get($0, \"mem\") + 0;\n  dev[j] = get($0, \"dev\"); host[j] = get($0, \"host\"); s[j] = get($0, \"start\") + 0; e[j] = get($0, \"end\") + 0;\n  prof[j] = (node[j] ~ /^mig_small/) ? \"1g.10gb\" : ((node[j] ~ /^mig_large/) ? \"3g.40gb\" : \"\") }\nEND {\n  for (a = 1; a \u003c= j; a++) {\n    if (mode[a] ~ /^shared/) {\n      used = 0; conc = 0;\n      for (b = 1; b \u003c= j; b++) if (mode[b] ~ /^shared/ \u0026\u0026 host[b] == host[a] \u0026\u0026 dev[b] == dev[a] \u0026\u0026 s[b] \u003c= s[a] \u0026\u0026 e[b] \u003e s[a]) { used += mem[b]; conc++ }\n      if (used \u003e cap) { bad++; why = why sprintf(\"device %s on %s held %d bytes at once (capacity %d); \", dev[a], host[a], used, cap) }\n      if (conc \u003e packed) packed = conc; if (used \u003e peak) peak = used\n    } else if (mode[a] == \"mig\") {\n      inuse = 0;\n      for (b = 1; b \u003c= j; b++) if (mode[b] == \"mig\" \u0026\u0026 prof[b] == prof[a] \u0026\u0026 host[b] == host[a] \u0026\u0026 s[b] \u003c= s[a] \u0026\u0026 e[b] \u003e s[a]) inuse++;\n      if (inuse \u003e mcap[prof[a]]) { bad++; why = why sprintf(\"%d %s instances in use at once on %s (have %d); \", inuse, prof[a], host[a], mcap[prof[a]]) }\n      for (b = a + 1; b \u003c= j; b++) if (mode[b] == \"mig\" \u0026\u0026 host[b] == host[a] \u0026\u0026 s[a] \u003c e[b] \u0026\u0026 s[b] \u003c e[a] \u0026\u0026 dev[a] == dev[b]) {\n        bad++; why = why sprintf(\"%s and %s overlapped on MIG instance %s; \", node[a], node[b], dev[a]) }\n    } else { bad++; why = why sprintf(\"%s ran with GPU mode %s; \", node[a], mode[a]) }\n  }\n  if (packed \u003c 2) { bad++; why = why \"no two slices ever shared a device: nothing was packed; \" }\n  printf \"{\\\"jobs\\\":%d,\\\"violations\\\":%d,\\\"max_slices_on_one_device\\\":%d,\\\"peak_device_vram_bytes\\\":%d\", j, bad, packed, peak;\n  if (bad) { printf \",\\\"problems\\\":\\\"%s\\\"}\\n\", why; print \"GPU SHARING AUDIT FAILED: \" why \u003e \"/dev/stderr\"; exit 1 }\n  printf \"}\\n\" }' \u003e \"$NEXUS_OUTPUT_DIR/audit\" \u0026\u0026 cat \"$NEXUS_OUTPUT_DIR/audit\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.sharing_audit",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 300000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "big_0",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "gpu_share_memory_bytes": 19327352832,
+        "gpu_share_milli": 250
+       },
+       "request": {
+        "cpu_millis": 100,
+        "gpu_share_memory_bytes": 19327352832,
+        "gpu_share_milli": 250,
+        "memory_bytes": 67108864
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.share_big",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "big_1",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "gpu_share_memory_bytes": 19327352832,
+        "gpu_share_milli": 250
+       },
+       "request": {
+        "cpu_millis": 100,
+        "gpu_share_memory_bytes": 19327352832,
+        "gpu_share_milli": 250,
+        "memory_bytes": 67108864
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.share_big",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "big_2",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "gpu_share_memory_bytes": 19327352832,
+        "gpu_share_milli": 250
+       },
+       "request": {
+        "cpu_millis": 100,
+        "gpu_share_memory_bytes": 19327352832,
+        "gpu_share_milli": 250,
+        "memory_bytes": 67108864
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.share_big",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "big_3",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "gpu_share_memory_bytes": 19327352832,
+        "gpu_share_milli": 250
+       },
+       "request": {
+        "cpu_millis": 100,
+        "gpu_share_memory_bytes": 19327352832,
+        "gpu_share_milli": 250,
+        "memory_bytes": 67108864
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.share_big",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "mig_large_0",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "mig": {
+         "3g.40gb": 1
+        }
+       },
+       "request": {
+        "cpu_millis": 100,
+        "memory_bytes": 67108864,
+        "mig": {
+         "3g.40gb": 1
+        }
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.mig_large",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "mig_large_1",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "mig": {
+         "3g.40gb": 1
+        }
+       },
+       "request": {
+        "cpu_millis": 100,
+        "memory_bytes": 67108864,
+        "mig": {
+         "3g.40gb": 1
+        }
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.mig_large",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "mig_small_0",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "mig": {
+         "1g.10gb": 1
+        }
+       },
+       "request": {
+        "cpu_millis": 100,
+        "memory_bytes": 67108864,
+        "mig": {
+         "1g.10gb": 1
+        }
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.mig_small",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "mig_small_1",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "mig": {
+         "1g.10gb": 1
+        }
+       },
+       "request": {
+        "cpu_millis": 100,
+        "memory_bytes": 67108864,
+        "mig": {
+         "1g.10gb": 1
+        }
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.mig_small",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "mig_small_2",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "mig": {
+         "1g.10gb": 1
+        }
+       },
+       "request": {
+        "cpu_millis": 100,
+        "memory_bytes": 67108864,
+        "mig": {
+         "1g.10gb": 1
+        }
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.mig_small",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "small_0",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "gpu_share_memory_bytes": 10737418240,
+        "gpu_share_milli": 200
+       },
+       "request": {
+        "cpu_millis": 100,
+        "gpu_share_memory_bytes": 10737418240,
+        "gpu_share_milli": 200,
+        "memory_bytes": 67108864
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.share_small",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "small_1",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "gpu_share_memory_bytes": 10737418240,
+        "gpu_share_milli": 200
+       },
+       "request": {
+        "cpu_millis": 100,
+        "gpu_share_memory_bytes": 10737418240,
+        "gpu_share_milli": 200,
+        "memory_bytes": 67108864
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.share_small",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "small_2",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "gpu_share_memory_bytes": 10737418240,
+        "gpu_share_milli": 200
+       },
+       "request": {
+        "cpu_millis": 100,
+        "gpu_share_memory_bytes": 10737418240,
+        "gpu_share_milli": 200,
+        "memory_bytes": 67108864
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.share_small",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     },
+     {
+      "id": "small_3",
+      "idempotency": "IDEMPOTENCY_MODE_REQUIRED",
+      "input_params": {
+       "hold": "hold_seconds"
+      },
+      "inputs": {
+       "hold": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "outputs": {
+       "placement": {
+        "required": true,
+        "type": "json"
+       }
+      },
+      "queue": "gpu",
+      "resources": {
+       "limit": {
+        "gpu_share_memory_bytes": 10737418240,
+        "gpu_share_milli": 200
+       },
+       "request": {
+        "cpu_millis": 100,
+        "gpu_share_memory_bytes": 10737418240,
+        "gpu_share_milli": 200,
+        "memory_bytes": 67108864
+       }
+      },
+      "retry": {
+       "initial_ms": 10000,
+       "jitter": "full",
+       "max_attempts": 3,
+       "max_ms": 600000,
+       "multiplier": 2,
+       "strategy": "BACKOFF_STRATEGY_EXPONENTIAL"
+      },
+      "runtime": {
+       "args": [
+        "v() { tr -d '\"\\n ' \u003c \"$NEXUS_INPUT_DIR/$1\"; }; start=$(date +%s); sleep \"$(v hold)\"; end=$(date +%s); printf '{\"node\":\"%s\",\"mode\":\"%s\",\"mem\":%s,\"dev\":\"%s\",\"host\":\"%s\",\"start\":%s,\"end\":%s}' \"$NEXUS_NODE_ID\" \"${NEXUS_GPU_MODE:-none}\" \"${NEXUS_GPU_SHARE_MEMORY_BYTES:-0}\" \"${CUDA_VISIBLE_DEVICES:-}\" \"$HOSTNAME\" \"$start\" \"$end\" \u003e \"$NEXUS_OUTPUT_DIR/placement\"; cat \"$NEXUS_OUTPUT_DIR/placement\""
+       ],
+       "command": [
+        "sh",
+        "-c"
+       ],
+       "executor": "subprocess"
+      },
+      "task_ref": "gpu.share_small",
+      "timeouts": {
+       "heartbeat_ms": 300000,
+       "schedule_to_close_ms": 14400000,
+       "schedule_to_start_ms": 1800000,
+       "start_to_close_ms": 1800000
+      },
+      "trigger_rule": "TRIGGER_RULE_ALL_SUCCESS",
+      "version": 1
+     }
+    ]
+   },
+   "hash": "b6a9a39d49558e8317152945aba9fb86df985384ab6a74ef9a0dba8227f8fac5"
+  },
+  {
    "name": "hello_dag:hello_dag",
    "source": "examples/hello_dag/dag.py",
    "workflow": "hello_dag",

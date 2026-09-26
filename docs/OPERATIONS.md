@@ -2969,3 +2969,206 @@ Node **24** ("Krypton"), Active LTS until 2026-10-20 and maintained until
 2028-04-30 (github.com/nodejs/Release, `schedule.json`). The exact patch
 (`24.21.0`) is pinned in all three CI definitions and in the Dockerfile, and
 they move together. Node 26 becomes LTS on 2026-10-28; move once it has.
+
+## 28. Fractional GPUs, spot capacity, model caches and multi-cluster placement
+
+Design: [ADR-0029](adr/0029-gpu-sharing-and-packing.md) (MIG, shared GPUs,
+packing), [ADR-0030](adr/0030-spot-capacity-and-model-cache.md) (spot,
+eviction, artifact cache), [ADR-0031](adr/0031-multi-cluster-placement.md)
+(multi-cluster placement). Migration 0035. Findings F146, F147.
+
+Nothing here changes behaviour until it is configured: a task without the new
+fields, on agents without the new settings, is scheduled exactly as before.
+
+### 28.1 What a task can ask for
+
+| Author field | Meaning |
+|---|---|
+| `resources.request.mig: {"1g.10gb": 1}` | MIG instances of a profile. Exact: each instance is its own device. |
+| `resources.request.gpu_share_milli: 250` | A quarter of ONE shared GPU (MPS or time-sliced). |
+| `resources.request.gpu_share_memory_bytes` | VRAM on that ONE shared GPU, subtracted from the device, so several jobs pack onto it. |
+| `placement.capacity` | `spot_allowed` (default), `spot_preferred`, `on_demand_only` (hard). |
+| `placement.required_labels` | Hard: the worker's labels overlaid with its cluster's must contain these (e.g. `nexus.io/region`). |
+| `placement.max_cost_tier` | Hard: `nexus.io/cost-tier` at most this. |
+| `placement.preferred_data_locality`, `preferred_labels` | Soft. |
+| `placement.artifacts` | Models/datasets served from the agent's node-local cache (`$NEXUS_ARTIFACT_<NAME>`); cached workers preferred. |
+| `placement.max_preemptions` | Retries after spot evictions, which do not spend `retry.max_attempts` (default 5). |
+| `prefer_same_worker_as` | Soft: the host that ran that node's successful attempt. Read since F146. |
+
+In the SDK: `Gpu(count=0, share=0.25, share_memory="18Gi")`,
+`Gpu(count=0, mig={"1g.10gb": 1})`, `Placement(...)`, `Artifact(...)`.
+
+A soft preference is honoured by **bounded delay scheduling**: a polling
+worker skips an attempt that a strictly better live worker could take, for at
+most `NEXUS_PLACEMENT_WAIT` (default 3 s) after the attempt became due. A hard
+constraint that no worker meets leaves the attempt PENDING indefinitely -- as
+`node_selector` always has.
+
+### 28.2 Configuring GPU workers
+
+| Agent setting | Example | Notes |
+|---|---|---|
+| `NEXUS_GPU_COUNT` | `2` | Whole GPUs, indices 0..n-1 (unchanged). |
+| `NEXUS_GPU_MIG` | `1g.10gb=MIG-aaa,MIG-bbb;3g.40gb=MIG-ccc` | Real instance UUIDs. A count (`1g.10gb=3`) synthesizes UUIDs and labels the worker `simulated=true`. |
+| `NEXUS_GPU_SHARED` | `2:mps:80Gi,3:timeslice:24Gi` | Shared devices; indices must not overlap the whole ones. |
+| `NEXUS_GPU_DISCOVERY=nvidia-smi` | | Reads whole GPUs and MIG instances from `nvidia-smi -L` instead. |
+| `NEXUS_GPU_MPS_PIPE_DIR` | `/tmp/nvidia-mps` | Mounted into containers on MPS devices (with `--ipc=host`). |
+| `NEXUS_K8S_MIG_RESOURCE_PREFIX` | `nvidia.com/mig-` | Kubernetes executor, device plugin `mixed` strategy. |
+| `NEXUS_K8S_GPU_SHARED_RESOURCE` | `nvidia.com/gpu.shared` | Required for shared slices on the kubernetes executor; unset refuses them. |
+
+A device is in exactly one mode; the agent refuses to start on an inventory
+that counts one twice. Re-partitioning MIG needs an agent restart (a new
+session).
+
+**Isolation (read before enabling shared devices).** MIG isolates memory,
+compute and faults in hardware. MPS enforces the VRAM declaration
+(`CUDA_MPS_PINNED_DEVICE_MEM_LIMIT`) and a compute share
+(`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE`), but a fatal fault in one client kills
+every client on the device, and clients must share a UID. **Time-slicing
+enforces nothing**: a job that exceeds its declared VRAM can OOM its
+neighbours. Untrusted tenants belong on MIG or whole devices.
+
+**Kubernetes caveat.** On the kubernetes executor the device plugin, not the
+agent, picks the physical GPU for a shared replica: Nexus's per-device packing
+bounds the worker's total, but per-device VRAM is only enforced by MPS.
+
+### 28.3 Spot workers and eviction
+
+The agent advertises `nexus.io/capacity-type` (`NEXUS_CAPACITY_TYPE`, else read
+from its Node's `karpenter.sh/capacity-type`, `eks.amazonaws.com/capacityType`,
+`cloud.google.com/gke-spot`, `cloud.google.com/gke-preemptible` or
+`kubernetes.azure.com/scalesetpriority`; that read needs `get` on its Node and
+`NEXUS_NODE_NAME`, which the chart sets from `spec.nodeName`).
+
+`NEXUS_EVICTION_SOURCES` (comma list): `kubernetes` (own Node's taints, needs
+`get nodes`), `aws` (IMDSv2 spot instance-action), `gcp` (metadata
+`preempted`), `azure` (Scheduled Events Preempt/Terminate), `file`
+(`NEXUS_EVICTION_FILE`; for node-local handlers and tests). `NEXUS_EVICTION_TAINTS`
+replaces the default taint list; `NEXUS_EVICTION_POLL` (5 s),
+`NEXUS_EVICTION_GRACE` (25 s, for notices without a deadline) and
+`NEXUS_EVICTION_MAX_GRACE` (90 s) tune it.
+
+On a notice the agent stops polling, reports `drain_reason` (the gateway marks
+it DRAINING), and sends every running task SIGTERM with the notice's time
+minus 5 s. A task that exits non-zero is reported `PREEMPTED` and retried
+against `task_nodes.preemptions_used`; exit 0 is a success. **Checkpointing
+tasks should exit non-zero (143) after writing their checkpoint.** A spot
+worker with no eviction source logs a warning: its reclaimed tasks become LOST
+and spend the ordinary budget.
+
+Scheduler: `NEXUS_MAX_PREEMPTION_RETRIES` (5), `NEXUS_PREEMPTION_RETRY_DELAY`
+(2 s). Metrics: `nexus_agent_eviction_notices_total{source}`,
+`nexus_agent_tasks_preempted_total`; `PREEMPTED` in
+`nexus_agent_tasks_completed_total{error_class}`.
+
+### 28.4 Node-local artifact cache
+
+`NEXUS_ARTIFACT_CACHE_DIR` enables it; `NEXUS_ARTIFACT_CACHE_BYTES` bounds it
+(default 50Gi), `NEXUS_ARTIFACT_CACHE_MAX_ENTRIES` optionally bounds the count,
+`NEXUS_ARTIFACT_CACHE_VERIFY=hit` re-hashes on every hit. Entries in use are
+pinned; eviction is least-recently-used among the rest. Downloads are
+single-flight and sha256-verified before they become visible; a mismatch fails
+the attempt as VALIDATION and increments
+`nexus_agent_artifact_cache_integrity_failures_total` -- **alert on any rate**.
+Other metrics: `..._hits_total`, `..._misses_total`, `..._evictions_total`,
+`..._evicted_bytes_total`, `..._bytes`, `..._fetch_seconds`.
+
+The cache is not part of `disk_bytes`; size the volume for both. In Helm
+(`agents[].artifactCache`) it is an `emptyDir` with `sizeLimit` above the
+bound, so it does not survive pod replacement; use a local PV or hostPath (and
+accept its security review) where warm restarts matter. The kubernetes
+executor's pods run on other nodes, so its tasks get no cache (the agent
+advertises nothing for them). Presigned URIs are redacted from logs and cache
+metadata.
+
+### 28.5 Clusters
+
+Label agents with their cluster: `NEXUS_CLUSTER_NAME` (Helm
+`claimPlacement.clusterName`), which must name a cluster registered **in the
+same namespace**. The cluster-controller publishes `NEXUS_CLUSTER_LABELS`
+(Helm `clusterController.clusterLabels`, e.g.
+`nexus.io/cost-tier=1,nexus.io/data-locality=lake-eu|s3-eu-west-1`) over the
+observed `nexus.io/region` and `nexus.io/provider`, and each bound namespace's
+ResourceQuota headroom (`NEXUS_CLUSTER_GPU_RESOURCES` names what counts as a
+GPU). Check what the claim sees:
+
+```sql
+SELECT c.name, cs.labels, cs.headroom, cs.headroom_observed_at
+  FROM clusters c JOIN cluster_status cs ON cs.cluster_id = c.id;
+```
+
+Headroom gates only kubernetes-executor attempts on workers labelled
+`nexus.io/k8s-task-namespace`, only while younger than
+`NEXUS_CLUSTER_HEADROOM_TTL` (2 m), and is reduced by reservations made since
+the observation. A gated attempt reads
+`waiting_for_cluster_quota: cluster <c> namespace <ns> <dim> (need N, headroom H)`.
+It is a routing guard: the API server's quota admission remains the enforcement.
+
+### 28.6 Scheduler placement settings and their cost
+
+| Setting | Default | |
+|---|---|---|
+| `NEXUS_PLACEMENT_POLICY` | `pack` | `spread` balances load instead of minimizing waste. |
+| `NEXUS_PLACEMENT_WAIT` | `3s` | 0 disables pull-path deferral. |
+| `NEXUS_CLUSTER_HEADROOM_TTL` | `2m` | |
+
+Metric: `nexus_scheduler_placement_deferrals_total`. A sustained high rate with
+growing queue age means preferences point at workers that are always busy;
+lower the wait or relax the preference.
+
+Claim latency before and after this change, measured with `tests/bench` at the
+ADR-0018 cells on the same machine and database, alternating binaries, is
+recorded in the table below (laptop numbers: Apple M4 Pro, Postgres 16 in
+Docker Desktop, 64 workers).
+
+BENCH_TABLE_PLACEHOLDER
+
+### 28.7 Rollout and rollback
+
+1. Apply migration 0035 (additive; metadata-only column adds). A scheduler
+   started before it logs "placement facts are off" and dispatches as before.
+2. Roll the scheduler, resource manager and gateway, then agents, then the
+   cluster-controller. Old agents ignore `TaskAssignment.reserved` and place
+   shared slices locally with the same rule; old gateways drop the new
+   heartbeat fields (the stored cache set is then left alone).
+3. Rollback: `NEXUS_PLACEMENT_WAIT=0` stops deferral; removing an agent's GPU
+   settings removes its fractional capacity at its next session. Attempts
+   holding fractional reservations complete normally. Revert 0035 only after
+   every service is back on a release that does not read it.
+
+**Order hazard:** do not submit specs with `placement` or fractional requests
+to a gateway older than this release (it rejects them at the schema), and do
+not run such tasks on old schedulers (they ignore the constraints).
+
+### 28.8 What needs real hardware to qualify
+
+Everything above is verified with simulated devices (unit, property,
+integration and compose end-to-end tests). These claims are **not** qualified
+until run on the named hardware:
+
+| Area | Needs | What to verify |
+|---|---|---|
+| MIG discovery | A100/H100 with MIG enabled, mixed profiles | `NEXUS_GPU_DISCOVERY=nvidia-smi` parses the real `nvidia-smi -L` (driver branch differences), UUIDs match `nvidia-smi mig -lgi` |
+| MIG isolation, docker | Same, NVIDIA container toolkit | `--gpus device=MIG-...` exposes exactly the instance; two tasks on different instances cannot see each other's memory; `nvidia-smi` inside shows one device |
+| MIG, kubernetes | GPU operator / device plugin with `mixed` strategy | `nvidia.com/mig-<profile>` requests schedule and bind; quota headroom counts them via `NEXUS_CLUSTER_GPU_RESOURCES` |
+| MPS limits | Volta+ GPU with the MPS control daemon | `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` refuses allocations past the declared VRAM; `ACTIVE_THREAD_PERCENTAGE` caps SMs; the pipe mount and `--ipc=host` work under the container toolkit; one client's fatal fault behaviour documented |
+| MPS/time-slicing on kubernetes | Device plugin with sharing config (`replicas`) | shared replicas bind; per-device placement is advisory as documented |
+| Time-slicing | Any NVIDIA GPU | throughput interference of packed jobs, to set sane `gpu_share_milli` guidance |
+| VRAM packing economics | H100 80 GB | several vLLM/Triton servers packed by `gpu_share_memory_bytes` with `gpu_memory_utilization` derived from `NEXUS_GPU_SHARE_MEMORY_BYTES` |
+| Spot, AWS | EC2 spot instance (or AWS FIS "send spot interruption") | IMDSv2 notice seen within one poll; tasks checkpoint and report PREEMPTED before the instance stops; NTH taint path |
+| Spot, GCP | Spot/preemptible VM, `gcloud compute instances simulate-maintenance-event` | `preempted` flips; 30 s budget suffices for report |
+| Spot, Azure | Spot VMSS, `simulateEviction` API | Scheduled Events Preempt observed, `NotBefore` deadline honoured |
+| Spot, Kubernetes | Karpenter/cluster-autoscaler interruption | taint observed; `get nodes` RBAC; capacity-type discovery from Node labels |
+| Artifact cache at scale | Local NVMe, 100 GB+ models | fetch throughput, `VERIFY=hit` cost, eviction under pinned load, disk-pressure interaction with kubelet |
+| Headroom accuracy | A cluster with ResourceQuotas under concurrent dispatch | refusal rate at the quota edge vs the guard's prediction |
+
+### 28.9 Known gaps
+
+- Quotas (ADR-0021) do not count MIG instances or shared fractions yet
+  (`max_gpu_count` counts whole devices); mirror them with `max_custom` if a
+  hard cap is needed now.
+- Pull-path deferral reads at most 256 peer workers per tenant and queue.
+- Cluster labels need a running cluster-controller; without one only the
+  agent's own labels count.
+- The console does not display placement specs, fractional GPU ledgers or
+  cluster labels yet (visible through the API and SQL above).

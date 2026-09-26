@@ -199,8 +199,8 @@ ADR-0021's dimensions are unchanged. `gpu_count` quotas count whole devices
 only; MIG instances and shared fractions are **not** a quota dimension yet
 (a follow-up: `max_gpu_share_milli` and `max_mig.<profile>` fit the same
 `CheckConcurrent` shape). A namespace that must be capped on fractional GPUs
-today can use `max_custom` with a mirrored custom resource. This gap is
-recorded as F147.
+today can use `max_custom` with a mirrored custom resource. The gap is listed
+in OPERATIONS §28.9.
 
 ## Evidence
 
