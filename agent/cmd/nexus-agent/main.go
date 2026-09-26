@@ -189,6 +189,10 @@ func main() {
 	reg := metrics.NewServiceRegistry("agent", version)
 	cfg.Metrics = agentmetrics.New(reg)
 	cfg.Readiness = &worker.Readiness{}
+	if err := configurePlacement(&cfg, kcfg, kEnabled, log); err != nil {
+		log.Error("invalid placement configuration", "error", err)
+		os.Exit(1)
+	}
 	stopMetrics := serveMetrics(*metricsAddr, reg, cfg.Readiness, log)
 	defer stopMetrics()
 

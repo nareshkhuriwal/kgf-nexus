@@ -49,11 +49,13 @@ type Metrics struct {
 
 	registrations *metrics.CounterVec
 	registered    *metrics.Gauge
+
+	placement placementMetrics
 }
 
 // New registers the agent families on reg.
 func New(reg *metrics.Registry) *Metrics {
-	return &Metrics{
+	m := &Metrics{
 		running: reg.NewGauge("nexus_agent_tasks_running",
 			"Attempts currently executing on this agent, by executor.", "executor"),
 		started: reg.NewCounter("nexus_agent_tasks_started_total",
@@ -101,6 +103,8 @@ func New(reg *metrics.Registry) *Metrics {
 		registered: reg.NewGauge("nexus_agent_registered",
 			"1 while the agent holds a registered session (the /readyz condition), else 0.").Gauge(),
 	}
+	m.placement = newPlacementMetrics(reg)
+	return m
 }
 
 // RegistrationAttempt records one Register call's result: ok,

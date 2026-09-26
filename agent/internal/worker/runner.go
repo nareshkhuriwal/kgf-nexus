@@ -11,9 +11,11 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/artifactcache"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
@@ -88,6 +90,9 @@ type Runner struct {
 	SecretValues func(a *nexusv1.TaskAssignment) map[string]string
 	// Namespace prefixes the attempt's log objects; the agent's namespace.
 	Namespace string
+	// Cache is the node-local artifact cache (ADR-0030 §4). Nil disables it:
+	// artifacts are then the task's own business, as before.
+	Cache *artifactcache.Cache
 }
 
 // newShipper starts the attempt's log shipper, or returns nil when shipping is
@@ -180,6 +185,10 @@ type runningTask struct {
 	// goroutine before any report, and read by that goroutine only.
 	kind    string
 	started time.Time
+
+	// preempted is set by Preempt: the node is being reclaimed, and a
+	// non-successful outcome is reported as PREEMPTED (ADR-0030 §2).
+	preempted atomic.Bool
 }
 
 // NewRunner builds a runner over the executors this worker advertises.
@@ -308,6 +317,17 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 	token := a.GetLeaseToken()
 	r.reporter.ReportStarted(taskCtx, attemptID, token)
 
+	// Cached artifacts are pinned for the whole attempt, so LRU eviction can
+	// never pull a model out from under a running task.
+	artifacts, releaseArtifacts, aerr := r.acquireArtifacts(taskCtx, a, kind, log)
+	defer releaseArtifacts()
+	if aerr != nil {
+		c := classifyArtifactError(aerr)
+		log.Error("could not provide a declared artifact", "error", aerr, "class", c.Class.String())
+		r.reportFailure(taskCtx, a, c, executor.Outcome{})
+		return
+	}
+
 	spec, err := r.buildExecutorSpec(taskCtx, a)
 	if err != nil {
 		c := executor.ClassifyError(err)
@@ -315,6 +335,8 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 		r.reportFailure(taskCtx, a, c, executor.Outcome{})
 		return
 	}
+
+	spec.Artifacts = artifacts
 
 	ship := r.newShipper(a, log)
 	if ship != nil {
@@ -507,6 +529,7 @@ func (r *Runner) buildExecutorSpec(ctx context.Context, a *nexusv1.TaskAssignmen
 		// The devices the registry named at admission, so concurrent GPU
 		// attempts on this worker never share one.
 		GPUDevices:           r.registry.GPUDevices(a.GetAttemptId()),
+		GPU:                  r.registry.GPUAssignment(a.GetAttemptId()),
 		Inputs:               inputs,
 		DeclaredOutputs:      declaredOutputNames(spec),
 		StdoutOutput:         spec.GetRuntime().GetStdoutOutput(),
@@ -643,6 +666,10 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 		req.Error = executor.ClassifiedFromOutcome(o, "").ToProto()
 	}
 
+	if req.Outcome != nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED && r.preempted(a.GetAttemptId()) {
+		asPreempted(req)
+	}
+
 	entry := wal.Entry{
 		AttemptID: a.GetAttemptId(), LeaseToken: token,
 		RunID: a.GetRunId(), NodeID: a.GetNodeId(),
@@ -754,6 +781,9 @@ func (r *Runner) reportFailure(ctx context.Context, a *nexusv1.TaskAssignment,
 	}
 	if c.Class == nexusv1.ErrorClass_ERROR_CLASS_TIMEOUT {
 		req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_TIMED_OUT
+	}
+	if r.preempted(a.GetAttemptId()) {
+		asPreempted(req)
 	}
 	entry := wal.Entry{AttemptID: a.GetAttemptId(), LeaseToken: token,
 		RunID: a.GetRunId(), NodeID: a.GetNodeId()}

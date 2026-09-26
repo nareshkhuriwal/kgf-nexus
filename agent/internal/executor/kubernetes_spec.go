@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 )
 
 // Labels and annotations stamped on every Job, Pod and Secret this executor
@@ -150,7 +151,7 @@ func (e *KubernetesExecutor) ownerSelector() string {
 //
 // The returned slice names what is actually enforced, for the annotation and
 // the logs.
-func (e *KubernetesExecutor) k8sResources(limit *nexusv1.ResourceVector) (corev1.ResourceRequirements, []string, error) {
+func (e *KubernetesExecutor) k8sResources(limit *nexusv1.ResourceVector, gpu ...GPUAssignment) (corev1.ResourceRequirements, []string, error) {
 	rl := corev1.ResourceList{}
 	var enforced []string
 	if c := limit.GetCpuMillis(); c > 0 {
@@ -178,6 +179,35 @@ func (e *KubernetesExecutor) k8sResources(limit *nexusv1.ResourceVector) (corev1
 		// the device plugin allocates whole devices and isolates them.
 		rl[corev1.ResourceName(e.Config.GPUResourceName)] = *resource.NewQuantity(int64(g), resource.DecimalSI)
 		enforced = append(enforced, "gpu=device-plugin:"+e.Config.GPUResourceName)
+	}
+	// Fractional GPUs (ADR-0029 §2). MIG instances are the device plugin's
+	// per-profile resources: exact, because each instance is its own device.
+	// A shared slice is ONE replica of the shared resource: the device plugin,
+	// not the agent, picks the physical GPU, so Nexus's per-device choice is
+	// advisory here and VRAM is only enforced by MPS's per-replica limit.
+	migs := limit.GetMig()
+	if len(gpu) > 0 && len(gpu[0].MIGProfiles) > 0 {
+		migs = gpu[0].MIGProfiles
+	}
+	for profile, n := range migs {
+		if n <= 0 {
+			continue
+		}
+		name := e.Config.MIGResourcePrefix + profile
+		if e.Config.MIGResourcePrefix == "" {
+			name = "nvidia.com/mig-" + profile
+		}
+		rl[corev1.ResourceName(name)] = *resource.NewQuantity(n, resource.DecimalSI)
+		enforced = append(enforced, "mig=device-plugin:"+name)
+	}
+	if domain.UsesSharedGPU(limit) || (len(gpu) > 0 && gpu[0].SharedDevice != "") {
+		if e.Config.SharedGPUResourceName == "" {
+			return corev1.ResourceRequirements{}, nil, fmt.Errorf(
+				"%w: task requests a shared GPU slice but no shared-GPU device-plugin resource is configured (NEXUS_K8S_GPU_SHARED_RESOURCE)",
+				ErrLimitUnenforceable)
+		}
+		rl[corev1.ResourceName(e.Config.SharedGPUResourceName)] = *resource.NewQuantity(1, resource.DecimalSI)
+		enforced = append(enforced, "gpu-share=device-plugin-replica:"+e.Config.SharedGPUResourceName)
 	}
 	if len(rl) == 0 {
 		return corev1.ResourceRequirements{}, nil, nil
@@ -243,7 +273,7 @@ func (e *KubernetesExecutor) buildJob(spec TaskSpec, workerID string) (*batchv1.
 	name := k8sJobName(spec.AttemptID)
 	grace := orDefaultGrace(spec.GraceAfterTerm)
 
-	res, enforced, err := e.k8sResources(spec.Limit)
+	res, enforced, err := e.k8sResources(spec.Limit, spec.GPU)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -61,6 +61,16 @@ type TaskSpec struct {
 	// attempts land on different devices. Nil means none were assigned.
 	GPUDevices []int
 
+	// Artifacts maps a declared artifact name to its file in the agent's
+	// node-local cache (ADR-0030 §4). Exposed as NEXUS_ARTIFACT_<NAME>; the
+	// docker executor mounts each read-only. Nil for executors whose workload
+	// runs elsewhere (kubernetes), where a node-local path means nothing.
+	Artifacts map[string]string
+
+	// GPU is the fractional-GPU assignment (MIG instances, a shared-device
+	// slice), named by the worker's registry at admission (ADR-0029 §2).
+	GPU GPUAssignment
+
 	// Inputs are already-resolved references. Staging them is the executor's
 	// job because the payload must never transit the control plane (ADR-0008).
 	Inputs map[string]*nexusv1.ResultRef

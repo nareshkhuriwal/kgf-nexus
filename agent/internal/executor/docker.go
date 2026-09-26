@@ -19,6 +19,7 @@ import (
 	"time"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // DockerExecutor runs each attempt as a container. This is the PRODUCTION-grade
@@ -62,6 +63,8 @@ type dockerState struct {
 	containerWD string
 	limit       *nexusv1.ResourceVector
 	gpuDevices  []int
+	gpu         GPUAssignment
+	artifacts   map[string]string
 	deadline    time.Time
 	grace       time.Duration
 	name        string
@@ -209,6 +212,8 @@ func (e *DockerExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepared, 
 		containerWD:     containerWD,
 		limit:           spec.Limit,
 		gpuDevices:      spec.GPUDevices,
+		gpu:             spec.GPU,
+		artifacts:       spec.Artifacts,
 		deadline:        spec.StartToCloseDeadline,
 		grace:           orDefaultGrace(spec.GraceAfterTerm),
 		declaredOutputs: spec.DeclaredOutputs,
@@ -271,7 +276,18 @@ func (e *DockerExecutor) Start(ctx context.Context, p Prepared) (Handle, error) 
 		"--label", "nexus.attempt_id=" + p.AttemptID,
 		"--label", "nexus.managed=true",
 	}
-	args = append(args, dockerLimitArgs(st.limit, st.gpuDevices)...)
+	if st.gpu.Any() {
+		// Fractional GPUs: the assigned MIG instances / shared device (plus
+		// any whole devices) are exposed by name; the limit's --gpus count
+		// must not be emitted as well, or docker sees two device requests.
+		lim := proto.Clone(st.limit).(*nexusv1.ResourceVector)
+		lim.GpuCount = 0
+		args = append(args, dockerLimitArgs(lim, nil)...)
+		args = append(args, dockerGPUArgs(TaskSpec{Limit: st.limit, GPUDevices: st.gpuDevices, GPU: st.gpu})...)
+	} else {
+		args = append(args, dockerLimitArgs(st.limit, st.gpuDevices)...)
+	}
+	args = append(args, dockerArtifactArgs(st.artifacts)...)
 	for _, kv := range st.env {
 		args = append(args, "--env", kv)
 	}
@@ -656,6 +672,9 @@ func dockerEnv(spec TaskSpec, containerWD string) []string {
 	if spec.InlineThresholdBytes > 0 {
 		env = append(env, EnvInlineThreshold+"="+strconv.FormatInt(spec.InlineThresholdBytes, 10))
 	}
+	// Inside a container given exactly one shared device, that device is 0.
+	env = append(env, gpuSliceEnv(spec, "0")...)
+	env = append(env, artifactEnv(spec, true)...)
 	return env
 }
 
