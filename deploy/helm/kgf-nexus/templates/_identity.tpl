@@ -138,10 +138,16 @@ namespace defaulting to the release's. args: root, agent.
 */}}
 {{- define "nexus.agentK8s" -}}
 {{- $root := index . 0 -}}{{- $a := index . 1 -}}
+{{- /* Key by key with hasKey, not sprig's merge: merge treats false and ""
+       as unset, so a per-agent taskApi.enabled=false or an emptied resource
+       name would silently fall back to the default. */ -}}
 {{- $d := deepCopy ($root.Values.agentDefaults.kubernetes | default dict) -}}
-{{- $o := deepCopy ($a.kubernetes | default dict) -}}
-{{- $api := merge (deepCopy ($o.taskApi | default dict)) (deepCopy ($d.taskApi | default dict)) -}}
-{{- $k := merge $o $d -}}
+{{- $o := $a.kubernetes | default dict -}}
+{{- $k := dict -}}
+{{- range $key, $v := $d }}{{ $_ := set $k $key $v }}{{ end -}}
+{{- range $key, $v := $o }}{{ if ne $key "taskApi" }}{{ $_ := set $k $key $v }}{{ end }}{{ end -}}
+{{- $api := deepCopy ($d.taskApi | default dict) -}}
+{{- range $key, $v := ($o.taskApi | default dict) }}{{ $_ := set $api $key $v }}{{ end -}}
 {{- $_ := set $k "taskApi" $api -}}
 {{- if not $k.namespace }}{{ $_ := set $k "namespace" $root.Release.Namespace }}{{ end -}}
 {{- toYaml $k -}}
