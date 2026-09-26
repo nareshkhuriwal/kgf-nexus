@@ -53,7 +53,7 @@ func auditExportCmd() *command {
 	return &command{
 		name:    "export",
 		summary: "Download the audit trail as NDJSON or CSV.",
-		usage: `nexusctl audit export [--format ndjson|csv] [--since T] [--until T] [--action A]
+		usage: `nexusctl audit export [--format ndjson|csv|kgf] [--since T] [--until T] [--action A]
                       [--outcome O] [--actor-id ID] [--file PATH]
 
 Streams the namespace's audit trail from one consistent snapshot. NDJSON is
@@ -68,7 +68,7 @@ Needs the audit.view permission (Administrator or Auditor).`,
 			q := url.Values{}
 			format, file := "ndjson", ""
 			rest, err := env.parseFlags(args, func(fs *flag.FlagSet) {
-				fs.StringVar(&format, "format", "ndjson", "ndjson (verifiable) or csv")
+				fs.StringVar(&format, "format", "ndjson", "ndjson (verifiable), csv, or kgf (KGF Cloud audit events)")
 				fs.StringVar(&file, "file", "", "Write to PATH instead of stdout")
 				auditQueryFlags(fs, &q)
 			})
@@ -78,8 +78,8 @@ Needs the audit.view permission (Administrator or Auditor).`,
 			if len(rest) > 0 {
 				return usagef("audit export takes no operands")
 			}
-			if format != "ndjson" && format != "csv" {
-				return usagef("--format must be ndjson or csv")
+			if format != "ndjson" && format != "csv" && format != "kgf" {
+				return usagef("--format must be ndjson, csv or kgf")
 			}
 			q.Set("format", format)
 			c, err := env.Client()
