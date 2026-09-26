@@ -419,7 +419,7 @@ func (s *SchedulerStore) lockWorkerForClaim(
 	// that find nothing.
 	q := `
 SELECT w.id, w.hostname, w.capacity, w.committed, w.executors, w.labels, ` + s.placementCols() + `
-  FROM workers w
+  FROM workers w` + s.placementJoin() + `
  WHERE w.id = $1
    AND w.state = 'ACTIVE'
    AND $2 = ANY(w.queues)

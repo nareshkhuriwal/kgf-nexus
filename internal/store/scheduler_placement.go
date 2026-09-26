@@ -49,20 +49,35 @@ type headroomVec struct {
 }
 
 // placementCols is the select-list fragment that reads a worker's placement
-// facts, aliased w. With migration 0035 missing it reads constants, so a
-// scheduler started ahead of the migration keeps dispatching (the
-// DetectQuotaSchema argument).
+// facts, aliased w, from the pf join placementJoin adds. With migration 0035
+// missing it reads constants and placementJoin adds nothing, so a scheduler
+// started ahead of the migration keeps dispatching (the DetectQuotaSchema
+// argument).
 func (s *SchedulerStore) placementCols() string {
 	if s.placementMissing {
 		return `'{}'::jsonb, '{}'::text[], '{}'::jsonb, '{}'::jsonb, NULL::timestamptz`
 	}
 	return `w.labels, w.cached_artifacts,
-       COALESCE((SELECT cs.labels FROM clusters c JOIN cluster_status cs ON cs.cluster_id = c.id
-                  WHERE c.name = w.labels ->> 'nexus.io/cluster' AND c.tenant_id = w.tenant_id), '{}'::jsonb),
-       COALESCE((SELECT cs.headroom FROM clusters c JOIN cluster_status cs ON cs.cluster_id = c.id
-                  WHERE c.name = w.labels ->> 'nexus.io/cluster' AND c.tenant_id = w.tenant_id), '{}'::jsonb),
-       (SELECT cs.headroom_observed_at FROM clusters c JOIN cluster_status cs ON cs.cluster_id = c.id
-         WHERE c.name = w.labels ->> 'nexus.io/cluster' AND c.tenant_id = w.tenant_id)`
+       COALESCE(pf.labels, '{}'::jsonb), COALESCE(pf.headroom, '{}'::jsonb), pf.headroom_observed_at`
+}
+
+// placementJoin resolves the worker's cluster facts in ONE lateral lookup,
+// evaluated only for a worker that carries the cluster label: a worker without
+// one (every worker before ADR-0031, and every bench worker) pays nothing. The
+// cluster is matched by name WITHIN the worker's tenant, so naming another
+// tenant's cluster yields no labels. LEFT JOIN on the non-nullable side keeps
+// `FOR UPDATE OF w` valid.
+func (s *SchedulerStore) placementJoin() string {
+	if s.placementMissing {
+		return ""
+	}
+	return `
+  LEFT JOIN LATERAL (
+    SELECT cs.labels, cs.headroom, cs.headroom_observed_at
+      FROM clusters c JOIN cluster_status cs ON cs.cluster_id = c.id
+     WHERE w.labels ? 'nexus.io/cluster'
+       AND c.name = w.labels ->> 'nexus.io/cluster' AND c.tenant_id = w.tenant_id
+  ) pf ON true`
 }
 
 // scanFacts decodes the placementCols values. Malformed JSON degrades to "no
@@ -226,7 +241,7 @@ func (s *SchedulerStore) loadPeers(ctx context.Context, tx pgx.Tx, now time.Time
 	ps.loaded = true
 	rows, err := tx.Query(ctx, `
 SELECT w.hostname, w.capacity, w.committed, `+s.placementCols()+`
-  FROM workers w
+  FROM workers w`+s.placementJoin()+`
  WHERE w.tenant_id = (SELECT tenant_id FROM workers WHERE id = $1)
    AND w.id <> $1
    AND w.state = 'ACTIVE'

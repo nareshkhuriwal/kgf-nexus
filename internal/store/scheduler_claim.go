@@ -588,7 +588,7 @@ func (s *SchedulerStore) selectWorker(
 	// for eligibility, cached artifacts and locality for the score.
 	q := `
 SELECT w.id, w.hostname, w.capacity, w.committed, ` + s.placementCols() + `
-  FROM workers w
+  FROM workers w` + s.placementJoin() + `
  WHERE w.state = 'ACTIVE'
    AND $1 = ANY(w.queues)
    AND w.last_heartbeat_at > $2
