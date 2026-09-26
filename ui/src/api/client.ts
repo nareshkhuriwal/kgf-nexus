@@ -17,6 +17,26 @@
  */
 
 import type {
+  Asset,
+  AssetDetail,
+  AssetGraph,
+  ChannelList,
+  ChannelRequest,
+  CreatedChannel,
+  DeliveryFilter,
+  DeliveryPage,
+  NotificationChannel,
+  NotificationDelivery,
+  NotificationRule,
+  RuleList,
+  RuleRequest,
+  Sensor,
+  SensorObservation,
+  SensorRequest,
+  TriggerDelivery,
+  TriggerRequest,
+  TriggerWithSecret,
+  WebhookTrigger,
   Attempt,
   AttentionList,
   Backfill,
@@ -241,6 +261,20 @@ function asList<T>(payload: unknown, ...keys: string[]): T[] {
     for (const key of ['items', ...keys]) {
       if (Array.isArray(obj[key])) return obj[key] as T[];
     }
+  }
+  return [];
+}
+
+/** A JSON request body with the matching content type. */
+function jsonBody(method: string, body: unknown): RequestInit {
+  return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+}
+
+/** Reads `key` off an object payload as a list, or [] for any other shape. */
+function listField<T>(payload: unknown, key: string): T[] {
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const value = (payload as Record<string, unknown>)[key];
+    if (Array.isArray(value)) return value as T[];
   }
   return [];
 }
@@ -640,6 +674,223 @@ export const api = {
       status: typeof obj.status === 'string' ? obj.status : 'unknown',
       upstreams: asList<FleetHealth['upstreams'][number]>(payload, 'upstreams'),
       measures: obj.measures,
+    };
+  },
+
+  // ── notifications (ADR-0028) ──────────────────────────────────────────────
+
+  async listChannels(namespace: string): Promise<ChannelList> {
+    const payload = await request<unknown>(`${ns(namespace)}/notification-channels`);
+    const channels = asList<NotificationChannel>(payload, 'channels');
+    return {
+      channels: [...channels].sort((a, b) => a.name.localeCompare(b.name)),
+      kinds: listField<string>(payload, 'kinds'),
+    };
+  },
+
+  createChannel(namespace: string, body: ChannelRequest): Promise<CreatedChannel> {
+    return request<CreatedChannel>(`${ns(namespace)}/notification-channels`, jsonBody('POST', body));
+  },
+
+  updateChannel(namespace: string, name: string, body: ChannelRequest): Promise<NotificationChannel> {
+    return request<NotificationChannel>(
+      `${ns(namespace)}/notification-channels/${encodeURIComponent(name)}`,
+      jsonBody('PUT', body),
+    );
+  },
+
+  deleteChannel(namespace: string, name: string): Promise<void> {
+    return request<void>(`${ns(namespace)}/notification-channels/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  testChannel(namespace: string, name: string): Promise<{ delivery_id: number | string }> {
+    return request<{ delivery_id: number | string }>(
+      `${ns(namespace)}/notification-channels/${encodeURIComponent(name)}/test`,
+      jsonBody('POST', {}),
+    );
+  },
+
+  async listRules(namespace: string): Promise<RuleList> {
+    const payload = await request<unknown>(`${ns(namespace)}/notification-rules`);
+    const rules = asList<NotificationRule>(payload, 'rules');
+    return {
+      rules: [...rules].sort((a, b) => a.name.localeCompare(b.name)),
+      events: listField<string>(payload, 'events'),
+    };
+  },
+
+  createRule(namespace: string, body: RuleRequest): Promise<NotificationRule> {
+    return request<NotificationRule>(`${ns(namespace)}/notification-rules`, jsonBody('POST', body));
+  },
+
+  updateRule(namespace: string, name: string, body: RuleRequest): Promise<NotificationRule> {
+    return request<NotificationRule>(
+      `${ns(namespace)}/notification-rules/${encodeURIComponent(name)}`,
+      jsonBody('PUT', body),
+    );
+  },
+
+  deleteRule(namespace: string, name: string): Promise<void> {
+    return request<void>(`${ns(namespace)}/notification-rules/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async listDeliveries(namespace: string, filter: DeliveryFilter = {}): Promise<DeliveryPage> {
+    const q = new URLSearchParams();
+    if (filter.state) q.set('state', filter.state);
+    if (filter.channel) q.set('channel', filter.channel);
+    if (filter.run_id) q.set('run_id', filter.run_id);
+    if (filter.limit) q.set('limit', String(filter.limit));
+    if (filter.before) q.set('before', filter.before);
+    const qs = q.toString();
+    const payload = await request<unknown>(
+      `${ns(namespace)}/notification-deliveries${qs ? `?${qs}` : ''}`,
+    );
+    const deliveries = asList<NotificationDelivery>(payload, 'deliveries');
+    // The cursor is the last row's numeric id, echoed back untouched: the
+    // gateway only sets it when a full page came back.
+    let nextBefore: string | undefined;
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const raw = (payload as Record<string, unknown>).next_before;
+      if ((typeof raw === 'string' && raw !== '') || typeof raw === 'number') nextBefore = String(raw);
+    }
+    return { deliveries, nextBefore };
+  },
+
+  getDelivery(namespace: string, id: string | number): Promise<NotificationDelivery> {
+    return request<NotificationDelivery>(
+      `${ns(namespace)}/notification-deliveries/${encodeURIComponent(String(id))}`,
+    );
+  },
+
+  redriveDelivery(
+    namespace: string,
+    id: string | number,
+  ): Promise<{ delivery_id: number | string; redrive_of: number | string }> {
+    return request(
+      `${ns(namespace)}/notification-deliveries/${encodeURIComponent(String(id))}/redrive`,
+      jsonBody('POST', {}),
+    );
+  },
+
+  // ── webhook triggers ──────────────────────────────────────────────────────
+
+  async listTriggers(namespace: string): Promise<WebhookTrigger[]> {
+    const payload = await request<unknown>(`${ns(namespace)}/triggers`);
+    return [...asList<WebhookTrigger>(payload, 'triggers')].sort((a, b) => a.name.localeCompare(b.name));
+  },
+
+  getTrigger(namespace: string, name: string): Promise<WebhookTrigger> {
+    return request<WebhookTrigger>(`${ns(namespace)}/triggers/${encodeURIComponent(name)}`);
+  },
+
+  createTrigger(namespace: string, body: TriggerRequest): Promise<TriggerWithSecret> {
+    return request<TriggerWithSecret>(`${ns(namespace)}/triggers`, jsonBody('POST', body));
+  },
+
+  updateTrigger(namespace: string, name: string, body: TriggerRequest): Promise<WebhookTrigger> {
+    return request<WebhookTrigger>(
+      `${ns(namespace)}/triggers/${encodeURIComponent(name)}`,
+      jsonBody('PUT', body),
+    );
+  },
+
+  deleteTrigger(namespace: string, name: string): Promise<void> {
+    return request<void>(`${ns(namespace)}/triggers/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  },
+
+  rotateTriggerSecret(namespace: string, name: string, graceSeconds: number): Promise<TriggerWithSecret> {
+    return request<TriggerWithSecret>(
+      `${ns(namespace)}/triggers/${encodeURIComponent(name)}/rotate-secret`,
+      jsonBody('POST', { grace_seconds: graceSeconds }),
+    );
+  },
+
+  async listTriggerDeliveries(namespace: string, name: string): Promise<TriggerDelivery[]> {
+    const payload = await request<unknown>(
+      `${ns(namespace)}/triggers/${encodeURIComponent(name)}/deliveries`,
+    );
+    return asList<TriggerDelivery>(payload, 'deliveries');
+  },
+
+  // ── sensors ───────────────────────────────────────────────────────────────
+
+  async listSensors(namespace: string): Promise<Sensor[]> {
+    const payload = await request<unknown>(`${ns(namespace)}/sensors`);
+    return [...asList<Sensor>(payload, 'sensors')].sort((a, b) => a.name.localeCompare(b.name));
+  },
+
+  getSensor(namespace: string, name: string): Promise<Sensor> {
+    return request<Sensor>(`${ns(namespace)}/sensors/${encodeURIComponent(name)}`);
+  },
+
+  createSensor(namespace: string, body: SensorRequest): Promise<Sensor> {
+    return request<Sensor>(`${ns(namespace)}/sensors`, jsonBody('POST', body));
+  },
+
+  updateSensor(namespace: string, name: string, body: SensorRequest): Promise<Sensor> {
+    return request<Sensor>(
+      `${ns(namespace)}/sensors/${encodeURIComponent(name)}`,
+      jsonBody('PUT', body),
+    );
+  },
+
+  deleteSensor(namespace: string, name: string): Promise<void> {
+    return request<void>(`${ns(namespace)}/sensors/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  },
+
+  async listSensorObservations(
+    namespace: string,
+    name: string,
+    opts: { includeBaseline?: boolean; limit?: number } = {},
+  ): Promise<SensorObservation[]> {
+    const q = new URLSearchParams();
+    if (opts.includeBaseline) q.set('include_baseline', 'true');
+    q.set('limit', String(opts.limit ?? 100));
+    const payload = await request<unknown>(
+      `${ns(namespace)}/sensors/${encodeURIComponent(name)}/observations?${q.toString()}`,
+    );
+    return asList<SensorObservation>(payload, 'observations');
+  },
+
+  // ── assets and lineage ────────────────────────────────────────────────────
+
+  async listAssets(namespace: string, opts: { q?: string; limit?: number } = {}): Promise<Asset[]> {
+    const q = new URLSearchParams();
+    if (opts.q) q.set('q', opts.q);
+    q.set('limit', String(opts.limit ?? 200));
+    const payload = await request<unknown>(`${ns(namespace)}/assets?${q.toString()}`);
+    return asList<Asset>(payload, 'assets');
+  },
+
+  async getAsset(namespace: string, uri: string): Promise<AssetDetail> {
+    const d = await request<AssetDetail>(
+      `${ns(namespace)}/assets/detail?${new URLSearchParams({ uri }).toString()}`,
+    );
+    // Lists normalised, so a server that omits an empty list renders the same.
+    return {
+      ...d,
+      producer_tasks: listField(d, 'producer_tasks'),
+      consumer_tasks: listField(d, 'consumer_tasks'),
+      materializations: listField(d, 'materializations'),
+      latest_materialization: d?.latest_materialization ?? null,
+    };
+  },
+
+  async getAssetGraph(namespace: string, opts: { uri?: string; depth?: number } = {}): Promise<AssetGraph> {
+    const q = new URLSearchParams();
+    if (opts.uri) q.set('uri', opts.uri);
+    if (opts.depth) q.set('depth', String(opts.depth));
+    const qs = q.toString();
+    const payload = await request<unknown>(`${ns(namespace)}/assets/graph${qs ? `?${qs}` : ''}`);
+    return {
+      nodes: listField(payload, 'nodes'),
+      edges: listField(payload, 'edges'),
+      truncated:
+        !!payload && typeof payload === 'object' && (payload as Record<string, unknown>).truncated === true,
     };
   },
 

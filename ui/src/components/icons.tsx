@@ -428,6 +428,31 @@ export function IconSignOut(props: IconProps) {
  * limit. Distinct from the overview gauge (a single current reading) and the
  * audit list.
  */
+/**
+ * Webhook triggers -- an arrow arriving at a node: something outside calls in
+ * and a run starts. Distinct from the clock (time starts it) and the sensor
+ * (Nexus goes and looks).
+ */
+export function IconWebhook(props: IconProps) {
+  return <Icon {...props}><path d="M2.5 12h9"/><path d="m8 8.5 3.5 3.5L8 15.5"/><circle cx="17" cy="12" r="4.5"/><path d="M17 9.8v4.4"/></Icon>;
+}
+
+/**
+ * Sensors -- a point radiating arcs: a watcher that polls a source and reacts
+ * to what it finds.
+ */
+export function IconSensor(props: IconProps) {
+  return <Icon {...props}><circle cx="12" cy="12" r="2"/><path d="M8.2 8.2a5.4 5.4 0 0 0 0 7.6M15.8 8.2a5.4 5.4 0 0 1 0 7.6"/><path d="M5.2 5.2a9.6 9.6 0 0 0 0 13.6M18.8 5.2a9.6 9.6 0 0 1 0 13.6"/></Icon>;
+}
+
+/**
+ * Assets -- a stacked data cylinder: the tables and files tasks produce and
+ * consume, which lineage connects.
+ */
+export function IconAsset(props: IconProps) {
+  return <Icon {...props}><ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/></Icon>;
+}
+
 export function IconQuota(props: IconProps) {
   return <Icon {...props}><path d="M3 6.5h18" strokeDasharray="2.2 2.2"/><path d="M6 20v-7M12 20V9.5M18 20v-4.5"/><path d="M3 20.5h18"/></Icon>;
 }

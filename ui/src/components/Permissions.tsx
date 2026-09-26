@@ -12,7 +12,7 @@ export function permissionForPath(path: string): string | undefined {
   if (path === '/') return 'overview.view';
   const module = path.split('/').filter(Boolean);
   const name = module[0] === 'admin' ? module[1] : module[0];
-  if (['workflows','runs','schedules','workers','backfills','infrastructure','users','tokens','audit','roles','quotas'].includes(name ?? "")) return name + '.view';
+  if (['workflows','runs','schedules','workers','backfills','infrastructure','users','tokens','audit','roles','quotas','notifications','triggers','sensors','assets'].includes(name ?? "")) return name + '.view';
 }
 export function PermissionBoundary({children, pending = false}: {children: ReactNode; pending?: boolean}) {
   const can = usePermission();

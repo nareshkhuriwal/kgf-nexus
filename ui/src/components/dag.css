@@ -314,3 +314,20 @@
 .dag-group-toggle:focus-visible .dag-group-toggle-hit { stroke: var(--focus); stroke-width: 1.5px; }
 /* Memoized (§6.4): reused a prior result rather than executing. */
 .dag-cached { fill: var(--tone-info-fg, currentColor); font-style: italic; }
+
+/* Asset lineage (ADR-0028). Two node kinds that must read apart at a glance:
+   an ASSET is data -- a tinted, fully rounded pill with a cylinder glyph --
+   and a TASK is code, drawn as the plain spec card. Neither uses a run-state
+   tone: lineage is declared structure, not state. */
+.lineage-node-g { cursor: pointer; }
+.lineage-node-g:focus-visible { outline: none; }
+.lineage-node-g:focus-visible .lineage-asset,
+.lineage-node-g:focus-visible .lineage-task { stroke: var(--focus); stroke-width: 2px; }
+.lineage-asset { fill: var(--tone-queued-bg); stroke: var(--tone-queued-bd); stroke-width: 1.5px; }
+.lineage-asset.focus { stroke-width: 3px; }
+.lineage-task { fill: var(--bg-raised); stroke: var(--border-strong); stroke-width: 1.5px; stroke-dasharray: 5 3; }
+.lineage-node-g:hover .lineage-task { fill: var(--bg-hover); }
+.lineage-node-g:hover .lineage-asset { filter: brightness(1.05); }
+.lineage-glyph { fill: none; stroke: var(--tone-queued-fg); stroke-width: 1.5px; pointer-events: none; }
+.lineage-swatch-asset { display: inline-block; width: 18px; height: 12px; border-radius: 6px; background: var(--tone-queued-bg); border: 1px solid var(--tone-queued-bd); }
+.lineage-swatch-task { display: inline-block; width: 18px; height: 12px; border-radius: 3px; background: var(--bg-raised); border: 1px dashed var(--border-strong); }
