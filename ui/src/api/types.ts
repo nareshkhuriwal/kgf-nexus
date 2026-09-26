@@ -857,6 +857,8 @@ export interface ChannelRequest {
   config?: Record<string, unknown>;
   secret?: string;
   secret_ref?: string;
+  /** Removes the stored secret; the channel is disabled until a new one is saved. */
+  clear_secret?: boolean;
   rate_limit_per_minute?: number;
   enabled?: boolean;
   revision?: number;
@@ -954,7 +956,13 @@ export interface WebhookTrigger {
   fire_count: number;
   revision: number;
   path: string;
+  /** The absolute hook URL, decided by the gateway; absent when it is unknown. */
   url?: string;
+  /**
+   * Where `url` came from: a trusted proxy's forwarded headers, the gateway's
+   * NEXUS_PUBLIC_URL, or unknown. Absent from gateways older than F156.
+   */
+  url_source?: 'forwarded' | 'config' | 'unknown';
   signature_scheme: string;
 }
 
@@ -966,7 +974,8 @@ export interface TriggerWithSecret extends WebhookTrigger {
 export interface TriggerRequest {
   name?: string;
   workflow?: string;
-  workflow_version?: number;
+  /** Absent keeps the current pin, null removes it, a number pins that version. */
+  workflow_version?: number | null;
   params_mapping?: Record<string, unknown>;
   idempotency_key_path?: string;
   priority?: number;
@@ -1031,10 +1040,14 @@ export interface SensorRequest {
   name?: string;
   kind?: SensorKind;
   workflow?: string;
+  /** Absent keeps the current pin, null removes it, a number pins that version. */
+  workflow_version?: number | null;
   config?: Record<string, unknown>;
   params_mapping?: Record<string, unknown>;
   poll_interval_seconds?: number;
   backfill?: boolean;
+  /** 0..1000; absent keeps the current value (100 on create). */
+  priority?: number;
   enabled?: boolean;
   revision?: number;
 }

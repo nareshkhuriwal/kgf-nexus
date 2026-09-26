@@ -1395,8 +1395,12 @@ comment in `0016_outbox.down.sql`).
 ### 11.6 Testing
 
 `make test-nats` runs the relay, outbox and hint suites against a real
-JetStream and a real Postgres in throwaway containers (`nexus-nats-agent-*`,
-ports 55511-55514), including stopping and restarting the broker. It then runs
+JetStream in throwaway broker containers (`nexus-nats-agent-*`, ports
+55512-55514), including stopping and restarting the broker, and a throwaway
+database on the host's PostgreSQL (`NEXUS_TEST_PG_SERVER`, default
+`postgres://127.0.0.1:5432/postgres`; never a Postgres container), created,
+migrated and dropped by the script. `NEXUS_NATS_DATABASE_URL` uses an existing
+dedicated database instead. It then runs
 the authorization suite (`TestNATSAuthz*`) twice: against a broker configured
 by `deploy/nats/nexus-nats-auth.sh` (the compose path, plaintext) and against
 one running the Helm chart's rendered ConfigMap with TLS and client
@@ -3680,7 +3684,10 @@ built from an allow-list, never inherited wholesale: `PATH`, `HOME`, `LANG`,
 `NEXUS_RESULT_DIR`, then `runtime.env`, env-injected secrets and the
 platform task contract: the `NEXUS_*` variables (attempt, run, node,
 idempotency key, directories, outputs, deadline, attempt number,
-`NEXUS_INLINE_THRESHOLD_BYTES`), the attempt's `TRACEPARENT`/`TRACESTATE`
+`NEXUS_INLINE_THRESHOLD_BYTES`, and the worker: `NEXUS_WORKER_ID` and, on a
+worker that advertises GPUs, `NEXUS_WORKER_GPU_KIND` / `NEXUS_WORKER_GPU_COUNT`,
+the model and whole-GPU count it registered; every executor sets these, and a
+task's `runtime.env` cannot override them), the attempt's `TRACEPARENT`/`TRACESTATE`
 (ADR-0026) and its workload API `NEXUS_TASK_API`/`NEXUS_TASK_API_TOKEN`
 (ADR-0032), all set explicitly per attempt. Pass anything else explicitly with
 `NEXUS_SUBPROCESS_ENV_PASSTHROUGH=GLOB[,GLOB...]` (default empty; Helm
@@ -4053,7 +4060,8 @@ constraint.
 | `NEXUS_SECRET_KEY` / `_FILE` | gateway, event-service | unset | 32-byte key (base64 or hex) sealing channel and trigger secrets (AES-256-GCM). **Both services need the same value.** Unset: inline channel secrets and webhook triggers are refused (503 `secret_key_unconfigured`); `secret_ref` channels still work. A malformed value stops the service at startup. |
 | `NEXUS_SECRET_KEY_PREVIOUS` / `_FILE` | gateway, event-service | unset | A retired key that still opens old ciphertexts during a rotation (§27.2). |
 | `NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS` | gateway, event-service | `false` | Allows `http://` and private, loopback and link-local destinations. Keep it false in shared deployments: otherwise a channel can be aimed at internal services and at the cloud metadata endpoint. Compose sets it true for local receivers. |
-| `NEXUS_PUBLIC_URL` | gateway | unset | Turns a trigger's hook path into the absolute `url` shown to operators. |
+| `NEXUS_PUBLIC_URL` | gateway | unset | Turns a trigger's hook path into the absolute `url` shown to operators. Must be an absolute `http(s)` URL with no query, fragment or credentials; a malformed value stops the gateway at startup. |
+| `NEXUS_TRUSTED_PROXIES` | gateway | unset | Comma-separated CIDRs or addresses of the proxies in front of the gateway. When a request's TCP peer is one of them, its `Forwarded` (RFC 7239) or `X-Forwarded-Host` / `X-Forwarded-Proto` / `X-Forwarded-Prefix` headers decide the trigger `url`, ahead of `NEXUS_PUBLIC_URL`; the first element of each header is used, so name only proxies that overwrite these headers rather than append to them. A proxy that rewrites `Host` (the console's nginx) must still send `X-Forwarded-Proto`. From any other peer the headers are ignored. `0.0.0.0/0` and `::/0` are refused. Helm: `events.trustedProxies`. |
 | `NEXUS_CONSOLE_URL` | event-service | unset | Links each notification to `<console>/runs/<id>`. |
 | `NEXUS_SMTP_*` | event-service | mail disabled | Email channels. The settings are the same as the gateway's (§10). With no host, email deliveries fail permanently and say why. |
 | `NEXUS_NOTIFY_EVAL_BATCH`, `_EVAL_INTERVAL`, `_DISPATCH_BATCH`, `_DISPATCH_INTERVAL`, `_CONCURRENCY`, `_SLA_INTERVAL`, `_BASE_BACKOFF`, `_MAX_BACKOFF`, `_RETENTION` | event-service | 200, 1s, 50, 1s, 8, 30s, 30s, 1h, 720h | Notifier tuning. |
@@ -4061,6 +4069,8 @@ constraint.
 | `NEXUS_SENSOR_AZURE_STORAGE_ACCOUNT`, `_AUTH`, `_KEY`, `NEXUS_SENSOR_AZURE_CLIENT_ID`, `NEXUS_SENSOR_AZBLOB_ENDPOINT` | workflow-manager | the result store's `NEXUS_AZURE_*` and endpoint, **only when** `NEXUS_RESULT_STORE_BACKEND=azblob` | The storage account `azblob://` / `az://` sensors list. `_AUTH` takes the result store's modes (`auto`, `workload-identity`, `managed-identity`, `shared-key`). A malformed mode stops the service at startup. |
 | `NEXUS_SENSOR_GCS_AUTH`, `NEXUS_SENSOR_GCS_ENDPOINT`, `NEXUS_SENSOR_GCS_ENABLED` | workflow-manager | the result store's `NEXUS_GCS_AUTH` and endpoint, **only when** `NEXUS_RESULT_STORE_BACKEND=gcs` | `gcs://` / `gs://` sensors. `auto` is Application Default Credentials (GKE Workload Identity); `none` is for an emulator and requires `_ENDPOINT`. ADC needs no setting, so on another result-store backend opt in with `NEXUS_SENSOR_GCS_ENABLED=true`. |
 | `NEXUS_SENSOR_INTERVAL` | workflow-manager | 2s | How often a replica looks for due sensors. Each sensor's own `poll_interval_seconds` decides how often it is actually polled. |
+
+Every trigger response carries `url_source`: `forwarded`, `config` or `unknown`. With neither `NEXUS_TRUSTED_PROXIES` nor `NEXUS_PUBLIC_URL` set it is `unknown`, `url` is omitted, the gateway logs a warning at startup, and the console shows only the path with a warning rather than guessing from its own page origin (F156).
 
 In Helm, set `events.secretKey.existingSecret` (and `key`, and `previousKey`
 during a rotation) to a Secret you create. Set `events.allowPrivateTargets` only
@@ -4107,6 +4117,16 @@ hint is a URL's host or the last four characters of the secret. A `secret_ref` i
 resolved by the **event-service** in its own environment. Refs that name platform
 credentials (`NEXUS_SECRET_KEY*`, `DATABASE_URL`, `PG*`, `NEXUS_NATS*`, and the
 S3 secrets) are refused.
+
+An update with `"clear_secret": true` removes a stored secret (sealed value or
+reference) without deleting the channel, for example after a credential leaks
+and before its replacement exists. The channel is disabled in the same write,
+because it cannot deliver without one, and enabling it again is refused until a
+secret is supplied (`{"enabled": true, "secret": ...}`). It is audited as
+`notification.channel.update` with `secret_cleared: true`. A `webhook`
+channel's signing key cannot be removed, only replaced by sending a new
+`secret`, so every delivery stays signed. The console offers the same action
+("Clear secret") on the channel row, behind a confirmation.
 
 A rule matches events in its namespace:
 

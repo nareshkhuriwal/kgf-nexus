@@ -16,6 +16,7 @@ so the two deployments cannot drift in behaviour.
       (dict "name" "NEXUS_SMTP_TLS" "value" (.Values.smtp.tls | toString))
       (dict "name" "NEXUS_SMTP_FROM" "value" (.Values.smtp.from | toString))
       (dict "name" "NEXUS_PUBLIC_URL" "value" (.Values.smtp.publicUrl | toString))
+      (dict "name" "NEXUS_TRUSTED_PROXIES" "value" (join "," ((.Values.events | default dict).trustedProxies | default list)))
       (dict "name" "NEXUS_MIN_AGENT_VERSION" "value" (.Values.agentPolicy.minVersion | default "" | toString))
       (dict "name" "NEXUS_REQUIRED_AGENT_CAPABILITIES" "value" (join "," (.Values.agentPolicy.requiredCapabilities | default list)))
       (dict "name" "NEXUS_AUTH_MODE" "value" (.Values.kgf.authMode | toString))

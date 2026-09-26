@@ -4563,9 +4563,10 @@ paths:
         `name` and `kind` cannot change (400 `immutable`). Omitted fields keep
         their stored values; `config`, when given, replaces the whole object.
         Send `secret` or `secret_ref` to replace the secret (this is how a
-        generated webhook key is rotated); omit both to keep it. `revision`
-        must equal the stored revision (see Revisions: 0 or a stale value is
-        409; there is no unconditional overwrite).
+        generated webhook key is rotated); omit both to keep it; send
+        `clear_secret: true` to remove it, which also disables the channel.
+        `revision` must equal the stored revision (see Revisions: 0 or a stale
+        value is 409; there is no unconditional overwrite).
       x-nexus-action: admin_write
       x-nexus-permissions: [notifications.manage]
       requestBody:
@@ -5064,6 +5065,7 @@ paths:
                 path: /v1/hooks/default/9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
                 signature_scheme: 'X-Nexus-Signature: v1=hex(HMAC-SHA256(secret, X-Nexus-Timestamp + "." + body))'
                 url: https://nexus.example.com/v1/hooks/default/9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                url_source: config
                 secret: 5e0b9d8c7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d
         '400': {$ref: '#/components/responses/ConfigBadRequest'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
@@ -8147,6 +8149,14 @@ components:
         config: {type: object}
         secret: {type: string, minLength: 1}
         secret_ref: {type: string}
+        clear_secret:
+          type: boolean
+          description: >-
+            Remove the stored secret (sealed value or reference). Not with
+            `secret` or `secret_ref`. The channel is disabled in the same write
+            and cannot be enabled again until a secret is supplied. Refused
+            (422 `invalid_secret`) for `webhook`, whose signing key can only be
+            replaced, and for kinds that take no secret.
         rate_limit_per_minute: {type: integer, minimum: 1, maximum: 6000}
         enabled: {type: boolean}
         revision: {type: integer, minimum: 0, description: '0 skips the concurrency check.'}
@@ -8247,7 +8257,7 @@ components:
 
     WebhookTrigger:
       type: object
-      required: [id, namespace, name, workflow, params_mapping, idempotency_key_path, priority, tolerance_seconds, enabled, secret_rotated_at, previous_secret_expires_at, created_by, created_at, updated_at, last_fired_at, fire_count, revision, path, signature_scheme]
+      required: [id, namespace, name, workflow, params_mapping, idempotency_key_path, priority, tolerance_seconds, enabled, secret_rotated_at, previous_secret_expires_at, created_by, created_at, updated_at, last_fired_at, fire_count, revision, path, url_source, signature_scheme]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         namespace: {type: string}
@@ -8270,7 +8280,14 @@ components:
         fire_count: {type: integer, minimum: 0}
         revision: {type: integer, minimum: 1}
         path: {type: string, description: 'Where senders POST: `/v1/hooks/<ns>/<trigger id>`.'}
-        url: {type: string, description: 'The absolute hook URL, when the gateway is configured with its public URL.'}
+        url: {type: string, format: uri, description: 'The absolute hook URL. Present whenever the gateway knows its public address (see url_source); omitted, never guessed, when it does not.'}
+        url_source:
+          type: string
+          enum: [forwarded, config, unknown]
+          description: >-
+            Where `url` came from: `forwarded` headers of a proxy listed in
+            NEXUS_TRUSTED_PROXIES, the configured NEXUS_PUBLIC_URL, or
+            `unknown` (no url; a client must not build one from its own origin).
         signature_scheme: {type: string}
 
     WebhookTriggerWithSecret:
@@ -8285,7 +8302,7 @@ components:
       type: object
       properties:
         workflow: {type: string, minLength: 1, description: 'Must name an existing workflow.'}
-        workflow_version: {type: integer, minimum: 1, description: 'Pin a version; otherwise the newest runs.'}
+        workflow_version: {type: [integer, 'null'], minimum: 1, description: 'Pin a version. On an update: absent keeps the current pin, null removes it so the newest runs. Changing `workflow` without it drops the pin.'}
         params_mapping: {$ref: '#/components/schemas/ParamsMapping'}
         idempotency_key_path: {type: string, description: 'An expression naming the value that de-duplicates deliveries.'}
         priority: {type: integer, minimum: 0, maximum: 1000, default: 100}
@@ -8379,7 +8396,7 @@ components:
       type: object
       properties:
         workflow: {type: string, minLength: 1}
-        workflow_version: {type: integer, minimum: 1}
+        workflow_version: {type: [integer, 'null'], minimum: 1, description: 'Pin a version. On an update: absent keeps the current pin, null removes it so the newest runs. Changing `workflow` without it drops the pin.'}
         config:
           type: object
           description: '`object_store`: `uri` and `pattern` (a glob). `run_succeeded`: `upstream_workflow`.'

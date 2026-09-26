@@ -45,7 +45,10 @@ func (a *API) hookPath(ns, id string) string {
 	return "/v1/hooks/" + ns + "/" + id
 }
 
-func (a *API) triggerPayload(t store.WebhookTrigger) map[string]any {
+// triggerPayload renders a trigger. r decides the public hook URL (F156): url
+// is present whenever the gateway knows its public address, and url_source
+// always says where it came from ("forwarded", "config" or "unknown").
+func (a *API) triggerPayload(r *http.Request, t store.WebhookTrigger) map[string]any {
 	out := map[string]any{
 		"id": t.ID, "namespace": t.Namespace, "name": t.Name, "workflow": t.SpecName,
 		"params_mapping": t.ParamsMapping, "idempotency_key_path": t.IdempotencyKeyPath,
@@ -56,8 +59,13 @@ func (a *API) triggerPayload(t store.WebhookTrigger) map[string]any {
 		"path":             a.hookPath(t.Namespace, t.ID),
 		"signature_scheme": "X-Nexus-Signature: v1=hex(HMAC-SHA256(secret, X-Nexus-Timestamp + \".\" + body))",
 	}
-	if a.events != nil && a.events.PublicURL != "" {
-		out["url"] = strings.TrimRight(a.events.PublicURL, "/") + a.hookPath(t.Namespace, t.ID)
+	out["url_source"] = urlSourceUnknown
+	if a.events != nil {
+		origin, source := a.events.hookOrigin(r)
+		out["url_source"] = source
+		if origin != "" {
+			out["url"] = origin + a.hookPath(t.Namespace, t.ID)
+		}
 	}
 	if t.SpecVersion != nil {
 		out["workflow_version"] = *t.SpecVersion
@@ -68,7 +76,7 @@ func (a *API) triggerPayload(t store.WebhookTrigger) map[string]any {
 type triggerRequest struct {
 	Name               string         `json:"name"`
 	Workflow           string         `json:"workflow"`
-	WorkflowVersion    *json.Number   `json:"workflow_version"`
+	WorkflowVersion    versionPin     `json:"workflow_version"`
 	ParamsMapping      map[string]any `json:"params_mapping"`
 	IdempotencyKeyPath *string        `json:"idempotency_key_path"`
 	Priority           *json.Number   `json:"priority"`
@@ -81,18 +89,16 @@ type triggerRequest struct {
 func (a *API) buildTrigger(ctx context.Context, ns string, req triggerRequest, base store.WebhookTrigger) (store.WebhookTrigger, int, string, error) {
 	t := base
 	t.Namespace = ns
+	changed := req.Workflow != "" && req.Workflow != base.SpecName
 	if req.Workflow != "" {
 		t.SpecName = req.Workflow
 	}
 	if t.SpecName == "" {
 		return t, 422, "invalid_trigger", errors.New("workflow is required")
 	}
-	if req.WorkflowVersion != nil {
-		v, err := numToInt32(req.WorkflowVersion, 0, 1, 1<<30, "workflow_version")
-		if err != nil {
-			return t, 400, "invalid", err
-		}
-		t.SpecVersion = &v
+	var err error
+	if t.SpecVersion, err = req.WorkflowVersion.apply(t.SpecVersion, changed); err != nil {
+		return t, 400, "invalid", err
 	}
 	if ok, err := a.specExists(ctx, ns, t.SpecName, t.SpecVersion); err != nil {
 		return t, 500, "", err
@@ -113,7 +119,6 @@ func (a *API) buildTrigger(ctx context.Context, ns string, req triggerRequest, b
 			return t, 422, "invalid_mapping", fmt.Errorf("idempotency_key_path: %w", err)
 		}
 	}
-	var err error
 	if t.Priority, err = numToInt32(req.Priority, orDefault32(t.Priority, 100), 0, 1000, "priority"); err != nil {
 		return t, 400, "invalid", err
 	}
@@ -144,7 +149,7 @@ func (a *API) listTriggers(w http.ResponseWriter, r *http.Request, _ authn.Princ
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, t := range rows {
-		out = append(out, a.triggerPayload(t))
+		out = append(out, a.triggerPayload(r, t))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"triggers": out})
 }
@@ -158,7 +163,7 @@ func (a *API) getTrigger(w http.ResponseWriter, r *http.Request, _ authn.Princip
 		a.failConfig(w, r, "get trigger", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, a.triggerPayload(t))
+	writeJSON(w, http.StatusOK, a.triggerPayload(r, t))
 }
 
 func (a *API) createTrigger(w http.ResponseWriter, r *http.Request, p authn.Principal) {
@@ -202,7 +207,7 @@ func (a *API) createTrigger(w http.ResponseWriter, r *http.Request, p authn.Prin
 		a.failConfig(w, r, "create trigger", err)
 		return
 	}
-	body := a.triggerPayload(out)
+	body := a.triggerPayload(r, out)
 	// Shown ONCE. It cannot be read back; rotate it to get a new one.
 	body["secret"] = secret
 	writeJSON(w, http.StatusCreated, body)
@@ -229,9 +234,6 @@ func (a *API) updateTrigger(w http.ResponseWriter, r *http.Request, p authn.Prin
 		a.failConfig(w, r, "get trigger", err)
 		return
 	}
-	if req.WorkflowVersion == nil && req.Workflow != "" && req.Workflow != cur.SpecName {
-		cur.SpecVersion = nil // a new workflow does not inherit the old pin
-	}
 	t, code, errCode, err := a.buildTrigger(r.Context(), ns, req, cur)
 	if err != nil {
 		if code == 500 {
@@ -254,7 +256,7 @@ func (a *API) updateTrigger(w http.ResponseWriter, r *http.Request, p authn.Prin
 		a.failConfig(w, r, "update trigger", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, a.triggerPayload(out))
+	writeJSON(w, http.StatusOK, a.triggerPayload(r, out))
 }
 
 func (a *API) deleteTrigger(w http.ResponseWriter, r *http.Request, p authn.Principal) {
@@ -353,7 +355,7 @@ func (a *API) rotateTriggerSecret(w http.ResponseWriter, r *http.Request, p auth
 		a.failConfig(w, r, "rotate trigger secret", err)
 		return
 	}
-	resp := a.triggerPayload(out)
+	resp := a.triggerPayload(r, out)
 	resp["secret"] = secret
 	writeJSON(w, http.StatusOK, resp)
 }

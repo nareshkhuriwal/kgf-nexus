@@ -15,6 +15,7 @@ package executor
 import (
 	"context"
 	"io"
+	"strconv"
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
@@ -142,6 +143,12 @@ type TaskSpec struct {
 	// answers "what is this worker running"); nothing keys correctness on it,
 	// because it changes on every re-registration.
 	WorkerID string
+	// WorkerGPUKind and WorkerGPUCount are the GPU model and number of whole
+	// GPUs this worker ADVERTISES (its registered capacity), exported as
+	// EnvWorkerGPUKind / EnvWorkerGPUCount so a workload, or an audit of
+	// where work ran, need not infer the hardware from a hostname.
+	WorkerGPUKind  string
+	WorkerGPUCount int32
 
 	// OnPhase, when set, is called on every observed change in the workload's
 	// substrate-level lifecycle (for kubernetes: pod phase and the reason
@@ -217,7 +224,9 @@ type Outcome struct {
 
 	PeakMemoryBytes int64
 	CPUSeconds      float64
-	WallMs          int64
+	// WallMs is rounded UP to whole milliseconds (elapsedMs), so a workload
+	// that ran reports at least 1: 0 reads as "not measured".
+	WallMs int64
 
 	// Output is the workload's result under the SINGLE-output convention
 	// (output.json in WorkDir). Raw bytes: the executor does not interpret it.
@@ -342,10 +351,33 @@ const (
 	// EnvTaskAPIToken is the bearer token every request to EnvTaskAPI must
 	// carry. Exported exactly when EnvTaskAPI is.
 	EnvTaskAPIToken = "NEXUS_TASK_API_TOKEN"
+	// EnvWorkerID is the worker (agent session) running the attempt. It
+	// changes when the agent re-registers, so it identifies placement, not a
+	// machine. The Python SDK reads it into its task context.
+	EnvWorkerID = "NEXUS_WORKER_ID"
+	// EnvWorkerGPUKind and EnvWorkerGPUCount are the worker's advertised GPU
+	// model and whole-GPU count; absent on a worker that advertises none.
+	EnvWorkerGPUKind  = "NEXUS_WORKER_GPU_KIND"
+	EnvWorkerGPUCount = "NEXUS_WORKER_GPU_COUNT"
 	// EnvTaskAPICA is the PEM CA certificate an https EnvTaskAPI must be
 	// verified against (the agent's in-memory CA). Public.
 	EnvTaskAPICA = "NEXUS_TASK_API_CA"
 )
+
+// workerEnvList renders the worker's identity and advertised GPUs.
+func workerEnvList(spec TaskSpec) []string {
+	var env []string
+	if spec.WorkerID != "" {
+		env = append(env, EnvWorkerID+"="+spec.WorkerID)
+	}
+	if spec.WorkerGPUCount > 0 {
+		env = append(env, EnvWorkerGPUCount+"="+strconv.FormatInt(int64(spec.WorkerGPUCount), 10))
+		if spec.WorkerGPUKind != "" {
+			env = append(env, EnvWorkerGPUKind+"="+spec.WorkerGPUKind)
+		}
+	}
+	return env
+}
 
 // traceEnvList renders TraceEnv as KEY=VALUE pairs in a fixed order. Only the
 // two convention keys are passed, whatever the map holds: the trace context
@@ -370,3 +402,14 @@ const ContainerTaskAPIDir = "/run/nexus-task"
 
 // TaskAPIScheme prefixes the socket path in EnvTaskAPI.
 const TaskAPIScheme = "unix://"
+
+// elapsedMs is a wall-clock duration in whole milliseconds, rounded up. A task
+// that exits within a millisecond of starting (a trivial shell command on a
+// fast Linux host) truncated to 0, which consumers and the conformance suite
+// read as "not measured".
+func elapsedMs(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	return int64((d + time.Millisecond - 1) / time.Millisecond)
+}

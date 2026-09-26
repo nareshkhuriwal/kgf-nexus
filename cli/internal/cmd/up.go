@@ -28,12 +28,18 @@ var quickstartHost = func() (quickstart.Runner, []string, string) {
 	return quickstart.ExecRunner{}, os.Environ(), wd
 }
 
+// quickstartHostDB manages the stack's database on the host's PostgreSQL. Nil
+// uses the quickstart default (a real server); tests substitute a fake so they
+// never create a database.
+var quickstartHostDB quickstart.HostDB
+
 // stackFlags are the flags up, down and status share: which stack.
 type stackFlags struct {
 	composeFile string
 	overrides   stringSlice
 	project     string
 	stateDir    string
+	bundled     bool
 }
 
 func (f *stackFlags) register(fs *flag.FlagSet) {
@@ -43,6 +49,7 @@ func (f *stackFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.project, "project", "", "Compose project name (default: the compose file's own name, \"nexus\")")
 	fs.StringVar(&f.project, "p", "", "Compose project name (shorthand)")
 	fs.StringVar(&f.stateDir, "state-dir", "", "Where the local stack record is kept (also NEXUS_STATE_DIR; default ~/.nexus/quickstart)")
+	fs.BoolVar(&f.bundled, "bundled-postgres", false, "Run on the compose file's own Postgres container instead of the host's PostgreSQL (also NEXUS_BUNDLED_POSTGRES=1)")
 }
 
 // options builds the quickstart options common to every command.
@@ -68,11 +75,14 @@ func (f *stackFlags) options(env *Environment) (quickstart.Options, error) {
 		WorkDir:     wd,
 		Overrides:   []string(f.overrides),
 		Project:     f.project,
-		Environ:     environ,
-		Runner:      runner,
-		Store:       quickstart.StateStore{Dir: dir},
-		Out:         env.IO.Out,
-		Log:         env.IO.Err,
+		// The host's PostgreSQL unless asked otherwise: the project rule.
+		BundledPostgres: f.bundled,
+		HostDB:          quickstartHostDB,
+		Environ:         environ,
+		Runner:          runner,
+		Store:           quickstart.StateStore{Dir: dir},
+		Out:             env.IO.Out,
+		Log:             env.IO.Err,
 	}, nil
 }
 
@@ -102,6 +112,11 @@ One-command local quick start. Runs deploy/docker-compose.yml with Docker
 Compose, waits until every service is healthy, and on the FIRST run seeds a
 tenant through the product's own API:
 
+  0. creates the stack's database, nexusctl_<project>, on the HOST machine's
+     PostgreSQL (NEXUS_HOST_PG_ADMIN_URL, default postgres://127.0.0.1:5432/postgres
+     as the current OS user) and points the stack at it; if that server is
+     not reachable it stops here and says how to start it,
+
   1. registers a tenant and its administrator (POST /v1/auth/register),
   2. confirms the administrator's address from the stack's Mailpit catcher,
   3. signs in and mints an admin API key (POST /v1/namespaces/{ns}/tokens),
@@ -123,12 +138,15 @@ Which stack:
   -p, --project NAME       Compose project name (default "nexus")
   --state-dir DIR          Local stack records (also NEXUS_STATE_DIR;
                            default ~/.nexus/quickstart)
+  --bundled-postgres       Opt in to the compose file's own Postgres container
+                           instead of the host's PostgreSQL (also
+                           NEXUS_BUNDLED_POSTGRES=1); remembered for the stack
 
 Host ports (each sets the compose variable shown; defaults are the file's):
   --api-port N             NEXUS_API_PORT            (8090)
   --ui-port N              NEXUS_UI_PORT             (3000)
   --grpc-port N            NEXUS_GRPC_PORT           (9091)
-  --postgres-port N        NEXUS_POSTGRES_PORT       (55433)
+  --postgres-port N        NEXUS_POSTGRES_PORT       (55433, bundled only)
   --minio-port N           NEXUS_MINIO_PORT          (9010)
   --minio-console-port N   NEXUS_MINIO_CONSOLE_PORT  (9011)
   --mailpit-port N         NEXUS_MAILPIT_UI_PORT     (8025)
@@ -325,6 +343,9 @@ func printStatusHeader(env *Environment, rep *quickstart.StatusReport) {
 	}
 	if rep.APIURL != "" {
 		fmt.Fprintf(w, "API       %s\n", rep.APIURL)
+	}
+	if rep.Database != "" {
+		fmt.Fprintf(w, "Database  %s\n", rep.Database)
 	}
 	if rep.Seeded {
 		fmt.Fprintf(w, "Tenant    %s", rep.TenantID)

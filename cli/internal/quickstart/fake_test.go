@@ -510,12 +510,13 @@ type testEnv struct {
 	dir    string
 	out    strings.Builder
 	log    strings.Builder
+	hostDB *fakeHostDB
 }
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	api := newFakeGateway(t)
-	e := &testEnv{t: t, api: api, docker: newFakeDocker(t, api), dir: t.TempDir()}
+	e := &testEnv{t: t, api: api, docker: newFakeDocker(t, api), dir: t.TempDir(), hostDB: newFakeHostDB()}
 	checkout := filepath.Join(e.dir, "checkout")
 	if err := os.MkdirAll(filepath.Join(checkout, "deploy"), 0o755); err != nil {
 		t.Fatal(err)
@@ -537,6 +538,7 @@ func (e *testEnv) opts() Options {
 		Log:          &e.log,
 		Timeout:      2 * time.Second,
 		PollInterval: 5 * time.Millisecond,
+		HostDB:       e.hostDB,
 	}
 }
 

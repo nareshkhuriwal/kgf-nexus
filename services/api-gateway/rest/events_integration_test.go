@@ -123,6 +123,21 @@ func (e *eventsHarness) call(method, path, body, bearer string, want int) map[st
 	return out
 }
 
+// putCurrent PUTs body with the object's current revision added: updates
+// require the revision last read (F155), and these tests are about the body.
+func (e *eventsHarness) putCurrent(path, body, bearer string, want int) map[string]any {
+	e.t.Helper()
+	cur := e.call("GET", path, "", e.adminA, 200)
+	rev, _ := cur["revision"].(float64)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		e.t.Fatal(err)
+	}
+	m["revision"] = int64(rev)
+	b, _ := json.Marshal(m)
+	return e.call("PUT", path, string(b), bearer, want)
+}
+
 func (e *eventsHarness) hook(path string, body []byte, secret string, ts time.Time) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
 	tsS := strconv.FormatInt(ts.Unix(), 10)
@@ -197,6 +212,59 @@ func TestIntegrationNotificationChannelsNeverExposeSecrets(t *testing.T) {
 	}
 }
 
+// clear_secret removes a stored credential without deleting the channel. A kind
+// that cannot deliver without one is disabled in the same write and cannot be
+// re-enabled until a secret is supplied; a webhook's signing key can be
+// replaced but never removed, so every delivery stays signed.
+func TestIntegrationChannelClearSecret(t *testing.T) {
+	e := newEventsHarness(t, true)
+	base := "/v1/namespaces/" + e.nsA + "/notification-channels"
+	e.call("POST", base, `{"name":"slack","kind":"slack_webhook","secret":"https://hooks.slack.com/services/T0/B0/SUPERSECRET"}`, e.adminA, 201)
+	e.call("POST", base, `{"name":"pd","kind":"pagerduty","secret_ref":"env:PD_ROUTING_KEY"}`, e.adminA, 201)
+	e.call("POST", base, `{"name":"hook","kind":"webhook","config":{"url":"https://hooks.example/nexus"}}`, e.adminA, 201)
+	e.call("POST", base, `{"name":"mail","kind":"email","config":{"to":["x@example.com"]}}`, e.adminA, 201)
+
+	e.putCurrent(base+"/slack", `{"clear_secret":true}`, e.readerA, 403)
+	e.putCurrent(base+"/slack", `{"clear_secret":true,"secret":"https://hooks.slack.com/x"}`, e.adminA, 422)
+	e.putCurrent(base+"/slack", `{"clear_secret":true,"enabled":true}`, e.adminA, 422)
+	e.call("POST", base, `{"name":"new","kind":"slack_webhook","clear_secret":true}`, e.adminA, 422)
+
+	for _, name := range []string{"slack", "pd"} {
+		got := e.putCurrent(base+"/"+name, `{"clear_secret":true}`, e.adminA, 200)
+		sec := got["secret"].(map[string]any)
+		if sec["configured"] != false || sec["source"] != "" || sec["hint"] != "" || got["enabled"] != false {
+			t.Fatalf("%s after clear: %v", name, got)
+		}
+		var ct []byte
+		var ref *string
+		if err := e.tx.QueryRow(e.ctx, `SELECT secret_ciphertext, secret_ref FROM notification_channels WHERE namespace = $1 AND name = $2`,
+			e.nsA, name).Scan(&ct, &ref); err != nil {
+			t.Fatal(err)
+		}
+		if ct != nil || ref != nil {
+			t.Fatalf("%s: the stored secret survived the clear (ciphertext %d bytes, ref %v)", name, len(ct), ref)
+		}
+		// No secret, so it cannot be turned back on until one is supplied.
+		e.putCurrent(base+"/"+name, `{"enabled":true}`, e.adminA, 422)
+	}
+	again := e.putCurrent(base+"/slack", `{"enabled":true,"secret":"https://hooks.slack.com/services/T0/B0/NEW"}`, e.adminA, 200)
+	if again["enabled"] != true || again["secret"].(map[string]any)["configured"] != true {
+		t.Fatalf("re-armed: %v", again)
+	}
+
+	e.putCurrent(base+"/hook", `{"clear_secret":true}`, e.adminA, 422)
+	e.putCurrent(base+"/mail", `{"clear_secret":true}`, e.adminA, 422)
+
+	var cleared int
+	if err := e.tx.QueryRow(e.ctx, `SELECT count(*) FROM audit_log WHERE namespace = $1 AND action = 'notification.channel.update'
+   AND outcome = 'success' AND detail->>'secret_cleared' = 'true'`, e.nsA).Scan(&cleared); err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 2 {
+		t.Fatalf("audited clears: %d, want 2", cleared)
+	}
+}
+
 func TestIntegrationInlineSecretsNeedAKey(t *testing.T) {
 	e := newEventsHarness(t, false)
 	base := "/v1/namespaces/" + e.nsA + "/notification-channels"
@@ -255,8 +323,8 @@ func TestIntegrationWebhookTriggerSignatureReplayAndIdempotency(t *testing.T) {
 	  "params_mapping":{"repo":"$.payload.repository.name","ref":"refs: {{ $.payload.ref }}","env":"prod"}}`, e.adminA, 201)
 	secret := tr["secret"].(string)
 	path := tr["path"].(string)
-	if tr["url"] != "https://nexus.example"+path {
-		t.Fatalf("url %v", tr["url"])
+	if tr["url"] != "https://nexus.example"+path || tr["url_source"] != "config" {
+		t.Fatalf("url %v (%v)", tr["url"], tr["url_source"])
 	}
 	got := e.call("GET", ns+"/triggers/gh", "", e.readerA, 200)
 	if _, leaked := got["secret"]; leaked {
@@ -373,6 +441,36 @@ func TestIntegrationSensorsAPI(t *testing.T) {
 	e.call("GET", ns+"/sensors/arrivals/observations", "", e.readerA, 200)
 	e.call("DELETE", ns+"/sensors/arrivals", "", e.readerA, 403)
 	e.call("DELETE", ns+"/sensors/arrivals", "", e.adminA, 204)
+}
+
+// The console's sensor and trigger forms set priority and a version pin, and
+// clear the pin with an explicit null; absent keeps it.
+func TestIntegrationSensorAndTriggerVersionPin(t *testing.T) {
+	e := newEventsHarness(t, true)
+	ns := "/v1/namespaces/" + e.nsA
+	if _, err := e.tx.Exec(e.ctx, `INSERT INTO workflow_specs (namespace, name, version, spec_hash, spec_json, created_by)
+VALUES ($1, 'etl', 2, $2, '{}', 'test')`, e.nsA, uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ kind, create, base string }{
+		{"sensor", `{"name":"pin","kind":"object_store","workflow":"etl","workflow_version":2,"priority":250,"config":{"uri":"s3://raw/in/"}}`, ns + "/sensors"},
+		{"trigger", `{"name":"pin","workflow":"etl","workflow_version":2,"priority":250}`, ns + "/triggers"},
+	} {
+		got := e.call("POST", c.base, c.create, e.adminA, 201)
+		if got["workflow_version"] != float64(2) || got["priority"] != float64(250) {
+			t.Fatalf("%s create: %v", c.kind, got)
+		}
+		e.putCurrent(c.base+"/pin", `{"workflow_version":9}`, e.adminA, 422) // no such version
+		e.putCurrent(c.base+"/pin", `{"workflow_version":"2"}`, e.adminA, 400)
+		got = e.putCurrent(c.base+"/pin", `{"enabled":false}`, e.adminA, 200)
+		if got["workflow_version"] != float64(2) {
+			t.Fatalf("%s: an update that does not mention the pin dropped it: %v", c.kind, got)
+		}
+		got = e.putCurrent(c.base+"/pin", `{"workflow_version":null,"priority":10}`, e.adminA, 200)
+		if _, pinned := got["workflow_version"]; pinned || got["priority"] != float64(10) {
+			t.Fatalf("%s: null did not unpin: %v", c.kind, got)
+		}
+	}
 }
 
 func TestIntegrationAssetLineageAPI(t *testing.T) {

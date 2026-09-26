@@ -7,7 +7,8 @@ package relay
 
 // Relay tests against a REAL Postgres (migrations through 0016) and a REAL NATS
 // JetStream server. Run them through tests/nats/run-integration.sh, which starts
-// both in throwaway containers (nexus-nats-agent-*, ports 55511/55512) and fails
+// a throwaway broker container (nexus-nats-agent-*, port 55512) and a throwaway
+// database on the host's PostgreSQL, and fails
 // if anything here skipped.
 //
 // Every test asserts on the STREAM, not on the relay's own counters: the claim

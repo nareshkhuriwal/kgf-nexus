@@ -45,13 +45,43 @@ start the stack, then install the key (§2):
 
 ```bash
 export NEXUS_WORKER_API_KEY=$(make -s worker-key)
-make up                # docker compose -f deploy/docker-compose.yml up --build -d
+make up                # database on the host's PostgreSQL, then compose up --build -d
 make seed              # installs that worker key and prints a new admin key
 ```
 
 The compose file lives in deploy/ but the build context is the repo root,
 because the Go module and the shared internal/ + gen/ packages live there.
 `make down`, `make logs` and `make ps` work with or without the key set.
+
+**The database comes from the host.** Every way of starting the stack runs
+it on the machine's own PostgreSQL (the project rule: Postgres comes from the
+host, never a container); the compose file's `postgres` service is off unless
+explicitly enabled:
+
+| Start | Database |
+|---|---|
+| `docker compose -f deploy/docker-compose.yml up` | `NEXUS_HOST_DATABASE_URL`, default `postgres://$USER@host.docker.internal:5432/nexus_compose`; the migration job creates it if missing |
+| `make up` | `nexus_dev_compose` (`NEXUS_DEV_DB`) on `NEXUS_TEST_PG_SERVER` (default `postgres://127.0.0.1:5432/postgres`), created first; `make down` drops it |
+| `make quickstart` / `nexusctl up` | `nexusctl_<project>` on `NEXUS_HOST_PG_ADMIN_URL` (same default); `nexusctl down --volumes` drops it |
+| `deploy/e2e/e2e-stack.sh` | the project's own database (`E2E_DB`), dropped by `down` |
+
+If the server cannot be reached, each fails fast and says how to start it
+(`brew services start postgresql@18`, `sudo systemctl start postgresql`) or
+how to opt out. Containers reach the host at `host.docker.internal` (Docker
+Desktop; on Linux the compose file maps it to the host gateway, and the server
+must listen there and allow the Docker bridge in `pg_hba.conf`). On a server
+shared with other workloads set `NEXUS_DB_MAX_CONNS` (for example 2) to cap
+every service's pool.
+
+**The bundled container is an explicit opt-in**, through
+`deploy/docker-compose.bundled-postgres.yml`: `NEXUS_BUNDLED_POSTGRES=1 make up`,
+`nexusctl up --bundled-postgres`, `E2E_BUNDLED_POSTGRES=1` for the e2e stack,
+or `docker compose -f deploy/docker-compose.yml -f
+deploy/docker-compose.bundled-postgres.yml up`. Use it on a machine without
+PostgreSQL. CI runners, which have no host server, use it. The PITR overlay
+(`make up-pitr`) and the drills built on it always do, as does the DB TLS drill:
+they need a server whose data directory, `archive_command`, certificates and
+restarts the stack controls.
 
 Then:
 
@@ -60,18 +90,19 @@ Then:
 | Operator console | <http://localhost:3000> |
 | REST API | <http://localhost:8090/v1/namespaces/default/runs> |
 | MinIO console | <http://localhost:9011> (`nexusadmin` / `nexus-dev-password`) |
-| Postgres | `postgres://nexus:nexus-dev-password@localhost:55433/nexus` |
+| Postgres | `nexus_dev_compose` on the host's server (`make up`); the bundled container at `postgres://nexus:nexus-dev-password@localhost:55433/nexus` with `NEXUS_BUNDLED_POSTGRES=1` |
 | Worker gRPC | `localhost:9091` |
 
-Postgres is published on **55433**, not 5432, so it cannot collide with a local
-Postgres or with the 55432 dev database in `CONTRACT.md`.
+The bundled Postgres is published on **55433**, not 5432, so it cannot collide
+with a local Postgres or with the 55432 dev database in `CONTRACT.md`.
 
 The services have **no built-in DSN** (docs/OPERATIONS.md §8): compose passes
 `DATABASE_URL` to every container, and a service started any other way exits at
 startup until you give it one. To run a service from source against this stack:
 
 ```bash
-export DATABASE_URL='postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable'
+export DATABASE_URL="$(tests/lib/hostpg-db.sh url nexus_dev_compose)"
+# bundled: DATABASE_URL='postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable'
 go run ./services/scheduler
 ```
 
@@ -123,7 +154,7 @@ the CLI and the UI, and a **worker** key that the agents already carry via
 `NEXUS_WORKER_API_KEY`.
 
 ```bash
-make seed    # host psql if installed, else the stack's own postgres container
+make seed    # the host's psql; with NEXUS_BUNDLED_POSTGRES=1 and no psql, the container's
 ```
 
 It creates the `default` tenant row if missing, installs the SHA-256 of the

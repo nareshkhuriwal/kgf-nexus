@@ -239,7 +239,14 @@ func TestDownOnANeverStartedProjectIsNotAnError(t *testing.T) {
 
 func TestStaleStateIsDiscardedWhenTheDatabaseVolumeWasRecreated(t *testing.T) {
 	e := newTestEnv(t)
-	mustUp(t, e, e.opts())
+	// The volume check applies to the bundled container (opt-in); the host
+	// database has its own (TestStaleStateIsDiscardedWhenTheHostDatabaseWasDropped).
+	if err := os.WriteFile(filepath.Join(e.dir, "checkout", "deploy", bundledOverlay), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := e.opts()
+	o.BundledPostgres = true
+	mustUp(t, e, o)
 	// Simulate `docker compose down -v` outside nexusctl.
 	e.docker.containers = map[string]*Container{}
 	e.docker.volumes = map[string]string{}

@@ -51,6 +51,10 @@ func TestEveryCommittedExampleActuallyRuns(t *testing.T) {
 		t.Fatal("no examples/*/compiled.yaml found; this test would silently prove nothing")
 	}
 	t.Logf("found %d committed examples", len(examples))
+	examples, err := selectExamples(examples, os.Getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, ex := range examples {
 		ex := ex
@@ -69,17 +73,28 @@ func TestEveryCommittedExampleActuallyRuns(t *testing.T) {
 			// out of hello_dag, a name-addressed run still passed, because it
 			// ran the good version registered earlier. The test would never have
 			// caught a regression in an example, which is its entire job.
+			budget, err := exampleBudget(ex.Name, os.Getenv)
+			if err != nil {
+				t.Fatal(err)
+			}
 			specID := submitSpec(t, ex.Path)
 
 			runID := createRunFromSpec(t, specID, requiredParamsFor(t, ex.Path))
-			// Bounded well under waitForTerminalRun's budget, and non-fatal, so
-			// a broken example reports WHY rather than just timing out. A CI
-			// failure that says only "still RUNNING" sends the next person
-			// digging through the database by hand -- the diagnostic below is
-			// the pending_reason and error the platform already recorded.
-			state := waitForTerminalRunWithin(t, runID, exampleBudget)
+			// A run still going when its budget ends is cancelled and drained
+			// before the next example starts. Left running, it held the fleet,
+			// and every later example queued behind it and timed out too: in
+			// the F150 sweep one slow example cascaded into six failures.
+			t.Cleanup(func() { stopRun(t, runID) })
+			// Per example (exampleBudgets, NEXUS_CHAOS_EXAMPLE_BUDGET*), and
+			// non-fatal, so a broken example reports WHY rather than just
+			// timing out. A CI failure that says only "still RUNNING" sends the
+			// next person digging through the database by hand -- the
+			// diagnostic below is the pending_reason and error the platform
+			// already recorded.
+			start := time.Now()
+			state := waitForTerminalRunWithin(t, runID, budget)
 			if state != "SUCCEEDED" {
-				t.Errorf("example %s reached %s, want SUCCEEDED (run %s)", ex.Name, state, runID)
+				t.Errorf("example %s reached %s within its %s budget, want SUCCEEDED (run %s)", ex.Name, state, budget, runID)
 				for _, line := range failedAttempts(t, runID) {
 					t.Errorf("  %s", line)
 				}
@@ -96,20 +111,40 @@ func TestEveryCommittedExampleActuallyRuns(t *testing.T) {
 				t.Errorf("example %s SUCCEEDED but only %d of %d nodes did",
 					ex.Name, succeeded, total)
 			}
-			t.Logf("%-18s %2d/%d nodes SUCCEEDED", ex.Name, succeeded, total)
+			t.Logf("%-20s %3d/%d nodes SUCCEEDED in %s (budget %s)", ex.Name, succeeded, total,
+				time.Since(start).Round(time.Second), budget)
 		})
 	}
 }
 
-// exampleBudget is how long one example gets. Generous next to the ~36s
-// ten_node_mixed takes, but far short of runBudget: an example that is not going
-// to finish should say so while the reason is still worth printing.
-const exampleBudget = 2 * time.Minute
-
-type example struct {
-	Name     string // directory name, e.g. ten_node_mixed
-	Workflow string // spec name from the yaml, e.g. ten-node-mixed
-	Path     string
+// stopRun cancels a run that is not terminal and waits (bounded) until none of
+// its attempts still hold a worker, so the next example starts on an idle
+// fleet. A no-op for a finished run.
+func stopRun(t *testing.T, runID string) {
+	t.Helper()
+	if isTerminal(runState(t, runID)) {
+		return
+	}
+	endpoint := envOr("NEXUS_ENDPOINT", "http://localhost:8090")
+	out, err := curl(t, "-X", "POST",
+		endpoint+"/v1/namespaces/default/runs/"+runID+"/cancel",
+		"-H", "Authorization: Bearer "+os.Getenv("NEXUS_API_KEY"),
+		"-H", "Content-Type: application/json", "--data", "{}")
+	if err != nil {
+		t.Logf("warning: cancel %s: %v %s", runID, err, out)
+		return
+	}
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		n, _ := strconv.Atoi(psql(t, fmt.Sprintf(
+			`SELECT count(*)::int FROM task_attempts WHERE run_id='%s' AND state IN ('DISPATCHED','RUNNING')`, runID)))
+		if n == 0 && isTerminal(runState(t, runID)) {
+			t.Logf("cancelled run %s after its budget; the fleet is free again", runID)
+			return
+		}
+		time.Sleep(pollEvery)
+	}
+	t.Logf("warning: run %s still holds workers two minutes after its cancel", runID)
 }
 
 func discoverExamples(t *testing.T) []example {
@@ -263,10 +298,14 @@ func createRunFromSpec(t *testing.T, specID string, params map[string]any) strin
 	if key == "" {
 		t.Skip("NEXUS_API_KEY is unset")
 	}
+	// One key per logical creation, so curl's retry of a 5xx converges on
+	// the run the first attempt may already have created instead of adding a
+	// second one (the gateway replays the stored response).
 	out, err := curl(t, "-X", "POST",
 		endpoint+"/v1/namespaces/default/runs",
 		"-H", "Authorization: Bearer "+key,
 		"-H", "Content-Type: application/json",
+		"-H", "Idempotency-Key: chaos-"+strconv.FormatInt(time.Now().UnixNano(), 36)+"-"+strconv.Itoa(os.Getpid()),
 		"--data", createRunBody(t, specID, params))
 	if err != nil {
 		t.Fatalf("create run from spec %s: %v", specID, err)

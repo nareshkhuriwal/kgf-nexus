@@ -47,6 +47,10 @@ type State struct {
 	// is discarded rather than trusted.
 	DataVolume          string `json:"data_volume,omitempty"`
 	DataVolumeCreatedAt string `json:"data_volume_created_at,omitempty"`
+	// HostDatabase is the stack's database on the host's PostgreSQL (the
+	// default); if it is dropped behind nexusctl's back the record is
+	// discarded, as for a recreated volume.
+	HostDatabase string `json:"host_database,omitempty"`
 
 	TenantID     string `json:"tenant_id"`
 	Namespace    string `json:"namespace"`

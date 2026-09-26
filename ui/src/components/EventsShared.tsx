@@ -247,3 +247,113 @@ export function conflictHint(error: unknown): string | null {
   }
   return null;
 }
+
+/**
+ * The workflow-version pin and run priority a trigger or sensor starts runs
+ * with, as the form edits them. The API reads `workflow_version` three ways:
+ * absent keeps the current pin, `null` removes it, a number sets it; blank in
+ * the form therefore means "latest" on create and "unpin" on an edit of a
+ * pinned definition, and the hint says which.
+ */
+export interface RunTargetFields {
+  version: string;
+  priority: string;
+}
+
+const PRIORITY_MIN = 0;
+const PRIORITY_MAX = 1000;
+
+export function runTargetInitial(existing: { workflow_version?: number | null; priority?: number } | null): RunTargetFields {
+  return {
+    version: existing?.workflow_version != null ? String(existing.workflow_version) : '',
+    priority: existing?.priority != null ? String(existing.priority) : '',
+  };
+}
+
+export function runTargetErrors(f: RunTargetFields): { version: string | null; priority: string | null } {
+  const v = f.version.trim();
+  const p = f.priority.trim();
+  const vn = Number(v);
+  const pn = Number(p);
+  return {
+    version: v !== '' && (!Number.isInteger(vn) || vn < 1) ? 'A version is a whole number from 1; blank runs the latest.' : null,
+    priority:
+      p !== '' && (!Number.isInteger(pn) || pn < PRIORITY_MIN || pn > PRIORITY_MAX)
+        ? `Priority is ${PRIORITY_MIN} to ${PRIORITY_MAX}; higher is dispatched first.`
+        : null,
+  };
+}
+
+/** Adds `workflow_version` and `priority` to a request body. */
+export function applyRunTarget<B extends { workflow_version?: number | null; priority?: number }>(
+  body: B,
+  f: RunTargetFields,
+  existing: { workflow_version?: number | null } | null,
+): B {
+  const v = f.version.trim();
+  if (v !== '') body.workflow_version = Number(v);
+  else if (existing?.workflow_version != null) body.workflow_version = null;
+  const p = f.priority.trim();
+  if (p !== '') body.priority = Number(p);
+  return body;
+}
+
+export function RunTargetInputs({
+  value,
+  onChange,
+  existing,
+}: {
+  value: RunTargetFields;
+  onChange: (next: RunTargetFields) => void;
+  existing: { workflow_version?: number | null } | null;
+}) {
+  const errors = runTargetErrors(value);
+  const unpinning = existing?.workflow_version != null && value.version.trim() === '';
+  return (
+    <div className="form-row">
+      <label className="form-field">
+        <span className="form-label">workflow version</span>
+        <input
+          type="number"
+          min={1}
+          step={1}
+          value={value.version}
+          onChange={(e) => onChange({ ...value, version: e.target.value })}
+          placeholder="latest"
+          aria-invalid={errors.version !== null}
+        />
+        {errors.version ? (
+          <span className="form-hint invalid" role="alert">
+            {errors.version}
+          </span>
+        ) : unpinning ? (
+          <span className="form-hint">Pinned to v{existing?.workflow_version}. Saving unpins it, so each run uses the latest version.</span>
+        ) : (
+          <span className="form-hint">Blank always runs the latest version; a number pins that version.</span>
+        )}
+      </label>
+      <label className="form-field">
+        <span className="form-label">priority</span>
+        <input
+          type="number"
+          min={PRIORITY_MIN}
+          max={PRIORITY_MAX}
+          step={1}
+          value={value.priority}
+          onChange={(e) => onChange({ ...value, priority: e.target.value })}
+          placeholder="server default (100)"
+          aria-invalid={errors.priority !== null}
+        />
+        {errors.priority ? (
+          <span className="form-hint invalid" role="alert">
+            {errors.priority}
+          </span>
+        ) : (
+          <span className="form-hint">
+            For the runs this starts, {PRIORITY_MIN}–{PRIORITY_MAX}; higher is dispatched first.
+          </span>
+        )}
+      </label>
+    </div>
+  );
+}

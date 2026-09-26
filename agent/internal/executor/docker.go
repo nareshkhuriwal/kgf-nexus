@@ -56,6 +56,12 @@ type DockerExecutor struct {
 	// bridge is the quiet path by which a task reaches the control plane's own
 	// network.
 	NetworkMode string
+
+	// oomSettle overrides oomSettleWindow; zero uses it. For tests.
+	oomSettle time.Duration
+	// cli, when set, replaces running the docker CLI (output). For tests
+	// that must observe the context a call receives.
+	cli func(ctx context.Context, args ...string) (string, error)
 }
 
 type dockerState struct {
@@ -422,8 +428,51 @@ type dockerInspect struct {
 	} `json:"State"`
 }
 
+// oomSettleWindow bounds how long a SIGKILLed, memory-limited container's
+// outcome waits for the daemon to record an OOM kill.
+//
+// containerd publishes a task's exit and its OOM event separately, and the
+// daemon records OOMKilled only when it processes the OOM event. When the exit
+// is handled first -- more likely the busier the host -- `docker wait` has
+// already returned and a single inspect reads OOMKilled=false for a container
+// the kernel OOM-killed; the flag turns true a moment later. The attempt was
+// then classified as a plain SIGKILL (APPLICATION, not retried on a bigger
+// worker) instead of OOM. Only a 137 exit under a memory limit, not a deadline
+// kill, can be a late OOM, so nothing else pays for the wait.
+const oomSettleWindow = 3 * time.Second
+
+// awaitOOMFlag re-inspects until the daemon reports OOMKilled or the settle
+// window ends.
+func (e *DockerExecutor) awaitOOMFlag(ctx context.Context, st *dockerState) bool {
+	// One deadline for the whole wait, in-flight inspects included: on a
+	// loaded host a single docker CLI call can take seconds, and a per-call
+	// timeout would let the settle run far past the window.
+	window := e.oomSettle
+	if window <= 0 {
+		window = oomSettleWindow
+	}
+	ctx, cancel := context.WithTimeout(ctx, window)
+	defer cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+		raw, err := e.output(ctx, window, "inspect", "--format", "{{json .State.OOMKilled}}", st.containerID)
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(raw) == "true" {
+			e.logger().Info("container OOM kill recorded after its exit",
+				"container", shortID(st.containerID))
+			return true
+		}
+	}
+}
+
 func (e *DockerExecutor) inspectOutcome(st *dockerState, timedOut bool) Outcome {
-	o := Outcome{TimedOut: timedOut, WallMs: time.Since(st.startedA).Milliseconds()}
+	o := Outcome{TimedOut: timedOut, WallMs: elapsedMs(time.Since(st.startedA))}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -442,6 +491,9 @@ func (e *DockerExecutor) inspectOutcome(st *dockerState, timedOut bool) Outcome 
 		return o
 	}
 	insp := arr[0]
+	if insp.State.ExitCode == 137 && !insp.State.OOMKilled && !timedOut && st.limit.GetMemoryBytes() > 0 {
+		insp.State.OOMKilled = e.awaitOOMFlag(ctx, st)
+	}
 	o.ExitCode = insp.State.ExitCode
 	o.OOMKilled = insp.State.OOMKilled
 
@@ -456,7 +508,7 @@ func (e *DockerExecutor) inspectOutcome(st *dockerState, timedOut bool) Outcome 
 	}
 	if ts, err := time.Parse(time.RFC3339Nano, insp.State.StartedAt); err == nil {
 		if te, err := time.Parse(time.RFC3339Nano, insp.State.FinishedAt); err == nil && te.After(ts) {
-			o.WallMs = te.Sub(ts).Milliseconds()
+			o.WallMs = elapsedMs(te.Sub(ts))
 		}
 	}
 	if st.limit.GetMemoryBytes() > 0 && o.OOMKilled {
@@ -679,6 +731,7 @@ func dockerEnv(spec TaskSpec, containerWD string) []string {
 		EnvOutputNames+"="+strings.Join(spec.DeclaredOutputs, " "),
 	)
 	env = append(env, traceEnvList(spec)...)
+	env = append(env, workerEnvList(spec)...)
 	if !spec.StartToCloseDeadline.IsZero() {
 		env = append(env, EnvDeadlineUnixMs+"="+strconv.FormatInt(spec.StartToCloseDeadline.UnixMilli(), 10))
 	}
@@ -766,13 +819,24 @@ func (e *DockerExecutor) run(ctx context.Context, timeout time.Duration, args ..
 	return err
 }
 
+// cliWaitDelay bounds how long a docker CLI call may outlive its context.
+// CommandContext kills only the process it started; a descendant still holding
+// the output pipe kept Run (which waits for the pipe to close) blocked long
+// after the deadline -- how a 3 s OOM settle took 13 s on a loaded host.
+// After this delay the pipes are closed and Run returns.
+const cliWaitDelay = 500 * time.Millisecond
+
 func (e *DockerExecutor) output(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if e.cli != nil {
+		return e.cli(ctx, args...)
+	}
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, e.bin(), args...)
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
+	cmd.WaitDelay = cliWaitDelay
 	err := cmd.Run()
 	return buf.String(), err
 }

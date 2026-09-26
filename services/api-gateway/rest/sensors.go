@@ -65,7 +65,7 @@ type sensorRequest struct {
 	Name                string         `json:"name"`
 	Kind                string         `json:"kind"`
 	Workflow            string         `json:"workflow"`
-	WorkflowVersion     *json.Number   `json:"workflow_version"`
+	WorkflowVersion     versionPin     `json:"workflow_version"`
 	Config              map[string]any `json:"config"`
 	ParamsMapping       map[string]any `json:"params_mapping"`
 	PollIntervalSeconds *json.Number   `json:"poll_interval_seconds"`
@@ -123,18 +123,13 @@ func validateSensorConfig(kind, workflow string, cfg map[string]any) error {
 func (a *API) buildSensor(ctx context.Context, ns string, req sensorRequest, base store.Sensor) (store.Sensor, int, string, error) {
 	s := base
 	s.Namespace = ns
+	changed := req.Workflow != "" && req.Workflow != s.SpecName
 	if req.Workflow != "" {
-		if req.Workflow != s.SpecName && req.WorkflowVersion == nil {
-			s.SpecVersion = nil
-		}
 		s.SpecName = req.Workflow
 	}
-	if req.WorkflowVersion != nil {
-		v, err := numToInt32(req.WorkflowVersion, 0, 1, 1<<30, "workflow_version")
-		if err != nil {
-			return s, 400, "invalid", err
-		}
-		s.SpecVersion = &v
+	var err error
+	if s.SpecVersion, err = req.WorkflowVersion.apply(s.SpecVersion, changed); err != nil {
+		return s, 400, "invalid", err
 	}
 	if s.SpecName == "" {
 		return s, 422, "invalid_sensor", errors.New("workflow is required")
@@ -156,7 +151,6 @@ func (a *API) buildSensor(ctx context.Context, ns string, req sensorRequest, bas
 	if err := paramap.Validate(s.ParamsMapping); err != nil {
 		return s, 422, "invalid_mapping", err
 	}
-	var err error
 	if s.PollIntervalSeconds, err = numToInt32(req.PollIntervalSeconds, orDefault32(s.PollIntervalSeconds, 30), 5, 86400, "poll_interval_seconds"); err != nil {
 		return s, 400, "invalid", err
 	}

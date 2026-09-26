@@ -365,7 +365,8 @@
             "previousKey": { "type": "string" }
           }
         },
-        "allowPrivateTargets": { "type": "boolean" }
+        "allowPrivateTargets": { "type": "boolean" },
+        "trustedProxies": { "type": "array", "items": { "type": "string", "minLength": 1 } }
       }
     },
     "smtp": {

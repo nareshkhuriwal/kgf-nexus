@@ -679,12 +679,23 @@ func TestConformanceMemoryLimitEnforced(t *testing.T) {
 		}
 
 		const limit = 32 << 20 // 32 MiB
-		// Allocate far beyond the limit. `yes` piped into a growing shell variable
-		// is portable across busybox and a host shell.
+		// Allocate far beyond the limit (256 MiB against 32), in 1 MiB pieces:
+		// a 1 MiB string, then 256 variables holding a copy each. Portable
+		// across busybox and a host shell.
+		//
+		// Not one ever-doubling string, as this used to be: its last
+		// allocations are single requests of tens of MiB, which a host with
+		// heuristic overcommit (vm.overcommit_memory=0) under memory pressure
+		// can refuse outright. The shell then exits "out of memory" before
+		// the cgroup limit is reached, no OOM kill happens, and the test
+		// failed for a reason unrelated to enforcement. Small pieces are
+		// always granted, so it is the cgroup limit that stops the workload.
 		script := `
 i=0
 s="0123456789012345678901234567890123456789012345678901234567890123"
-while [ $i -lt 40 ]; do s="$s$s"; i=$((i+1)); done
+while [ $i -lt 14 ]; do s="$s$s"; i=$((i+1)); done
+j=0
+while [ $j -lt 256 ]; do eval "v$j=\$s"; j=$((j+1)); done
 printf 'allocated-without-being-killed' > "$NEXUS_OUTPUT_FILE"`
 
 		spec := baseSpec(t, tgt, script)

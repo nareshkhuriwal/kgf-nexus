@@ -47,6 +47,17 @@ Suggested runs:
 
 Static fan-out is controlled by CANDIDATES. Increase it and recompile when you
 want to test 32/64-way scheduler pressure.
+
+Runtime: every step is Python, so every step runs in the DOCKER executor from
+a pinned Python image (PYTHON_IMAGE). It used to run `python3` in the
+subprocess executor, which assumes the agent host has Python: the compose
+agents are Alpine images without it, so generate_data failed with
+ERROR_CLASS_NOT_FOUND (F150). Declaring `docker` is also a placement
+constraint -- the scheduler only offers these tasks to workers that advertise
+the docker executor (compose agents do: NEXUS_EXECUTORS=subprocess,docker) --
+so a fleet without one leaves the run PENDING with that reason instead of
+failing it. The steps need no network and run under the executor's default
+`--network none`.
 """
 
 from __future__ import annotations
@@ -62,6 +73,14 @@ _TRAIN_RES = Resources(cpu="1000m", memory="768Mi")
 _EVAL_RES = Resources(cpu="500m", memory="512Mi")
 _REPORT_RES = Resources(cpu="250m", memory="256Mi")
 _TIMEOUT = Timeouts(start_to_close="30m")
+
+# Official Python image, pinned by digest (the multi-arch index, so amd64 and
+# arm64 workers resolve the same release). Standard library only.
+PYTHON_IMAGE = "python:3.13-alpine@sha256:79e7a9b9ff1cbceff819f856fb374477792a5967759d94df266de7b7b4120e6f"
+
+
+def _python(script: str) -> Runtime:
+    return Runtime(executor="docker", image=PYTHON_IMAGE, command=["python3", "-c"], args=[script])
 
 _GENERATE_SCRIPT = r'''
 import csv
@@ -403,11 +422,11 @@ _REPORT_SCRIPT = _REPORT_SCRIPT.replace("__EXPECTED__", str(CANDIDATES))
         "dataset": {"type": "string", "required": True},
         "manifest": {"type": "json", "required": True},
     },
-    runtime=Runtime(executor="subprocess", command=["python3", "-c"], args=[_GENERATE_SCRIPT]),
+    runtime=_python(_GENERATE_SCRIPT),
 )
 def generate_data(ctx: TaskContext, rows: int, features: int, seed: int) -> dict:
     """Generate a deterministic binary-classification CSV."""
-    raise NotImplementedError("runs as a subprocess workload")
+    raise NotImplementedError("runs as a docker workload")
 
 
 @task(
@@ -423,7 +442,7 @@ def generate_data(ctx: TaskContext, rows: int, features: int, seed: int) -> dict
         "seed": {"type": "json", "required": True},
     },
     outputs={"model": {"type": "json", "required": True}},
-    runtime=Runtime(executor="subprocess", command=["python3", "-c"], args=[_TRAIN_SCRIPT]),
+    runtime=_python(_TRAIN_SCRIPT),
 )
 def train_model(
     ctx: TaskContext,
@@ -435,7 +454,7 @@ def train_model(
     seed: int,
 ) -> dict:
     """Fit one logistic-regression candidate using full in-memory training data."""
-    raise NotImplementedError("runs as a subprocess workload")
+    raise NotImplementedError("runs as a docker workload")
 
 
 @task(
@@ -447,11 +466,11 @@ def train_model(
         "model": {"type": "json", "required": True},
     },
     outputs={"metrics": {"type": "json", "required": True}},
-    runtime=Runtime(executor="subprocess", command=["python3", "-c"], args=[_EVAL_SCRIPT]),
+    runtime=_python(_EVAL_SCRIPT),
 )
 def evaluate_model(ctx: TaskContext, dataset: str, model: dict) -> dict:
     """Evaluate one candidate on the deterministic 20% holdout."""
-    raise NotImplementedError("runs as a subprocess workload")
+    raise NotImplementedError("runs as a docker workload")
 
 
 @task(
@@ -460,11 +479,11 @@ def evaluate_model(ctx: TaskContext, dataset: str, model: dict) -> dict:
     timeouts=_TIMEOUT,
     inputs=_REPORT_INPUTS,
     outputs={"report": {"type": "json", "required": True}},
-    runtime=Runtime(executor="subprocess", command=["python3", "-c"], args=[_REPORT_SCRIPT]),
+    runtime=_python(_REPORT_SCRIPT),
 )
 def capacity_report(ctx: TaskContext, **parts: dict) -> dict:
     """Merge model quality and execution-timing metrics into one capacity report."""
-    raise NotImplementedError("runs as a subprocess workload")
+    raise NotImplementedError("runs as a docker workload")
 
 
 @workflow(

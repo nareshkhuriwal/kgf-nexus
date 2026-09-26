@@ -2,8 +2,24 @@
 #
 #   docker compose -f deploy/docker-compose.yml up --build
 #
+# DATABASE. The stack runs on the HOST's PostgreSQL by default (the project
+# rule: Postgres comes from the host machine, never a container). Containers
+# reach it at host.docker.internal (Docker Desktop forwards that to the host's
+# loopback; on Linux it maps to the host gateway, and the server must listen
+# there). The database is NEXUS_HOST_DATABASE_URL, default
+# postgres://$USER@host.docker.internal:5432/nexus_compose; the migration job
+# creates it when it is missing, and fails within seconds, saying how to start
+# PostgreSQL, when the server cannot be reached. `make up`, `nexusctl up` and
+# deploy/e2e/e2e-stack.sh create a database per stack themselves.
+#
+# The bundled `postgres` container below is an explicit OPT-IN only, for a
+# machine without PostgreSQL, CI runners, and the PITR drills:
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.bundled-postgres.yml up
+#   NEXUS_BUNDLED_POSTGRES=1 make up     NEXUS_BUNDLED_POSTGRES=1 nexusctl up
+#
 # Topology, in dependency order:
-#   postgres, minio, nats      → infrastructure (nats is OPTIONAL: an empty
+#   postgres (bundled opt-in), minio, nats → infrastructure (nats is OPTIONAL: an empty
 #                                NEXUS_NATS_URL disables the bus and the
 #                                stack runs poll-only, ADR-0003)
 #   nats-init                  → NATS NKey identities + authorization config
@@ -34,7 +50,18 @@ x-postgres-env: &postgres-env
   # Required, not a convenience: the services have no built-in DSN and exit at
   # startup without one (internal/config.DSN). Every service that touches
   # Postgres must merge this fragment, directly or through *service-env.
-  DATABASE_URL: postgres://nexus:nexus-dev-password@postgres:5432/nexus?sslmode=disable
+  #
+  # The host's PostgreSQL (see the header). The bundled-postgres overlay
+  # replaces it with the container's URL.
+  DATABASE_URL: ${NEXUS_HOST_DATABASE_URL:-postgres://${USER:-postgres}@host.docker.internal:5432/nexus_compose?sslmode=disable}
+  # Caps every service's pool; set it on a server shared with other
+  # workloads (empty: the services' own defaults).
+  NEXUS_DB_MAX_CONNS: ${NEXUS_DB_MAX_CONNS:-}
+
+# host.docker.internal on Linux, where Docker does not define it (Docker
+# Desktop does, and this entry is then redundant).
+x-host-gateway: &host-gateway
+  - "host.docker.internal:host-gateway"
 
 # OpenTelemetry trace export (ADR-0026), the STANDARD variables, passed
 # through from the shell so an operator's usual OTEL_* settings apply as-is.
@@ -149,11 +176,10 @@ x-go-build: &go-build
   context: ..
   dockerfile: deploy/Dockerfile.service
 
-# Common wait: postgres healthy AND the migration job exited 0. A service that
-# starts against an unmigrated schema fails in a way that looks like a code bug.
+# Common wait: the migration job exited 0 (with the bundled-postgres overlay,
+# also the container healthy). A service that starts against an unmigrated
+# schema fails in a way that looks like a code bug.
 x-depends-on-db: &depends-on-db
-  postgres:
-    condition: service_healthy
   migrate:
     condition: service_completed_successfully
 
@@ -169,7 +195,10 @@ x-service-healthcheck: &service-healthcheck
 
 services:
   # ── Infrastructure ──────────────────────────────────────────────────────
+  # OPT-IN only (deploy/docker-compose.bundled-postgres.yml enables it): no
+  # profile of this name is ever activated by default.
   postgres:
+    profiles: ["bundled-postgres"]
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: nexus
@@ -348,12 +377,15 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.migrate
-    depends_on:
-      postgres:
-        condition: service_healthy
+    extra_hosts: *host-gateway
     environment:
       <<: *postgres-env
       MIGRATIONS_DIR: /migrations
+      # A missing database is created (the role needs CREATEDB, as a
+      # Homebrew server's owner has), and an unreachable server fails fast
+      # with what to do about it rather than after a minute of retries.
+      NEXUS_MIGRATE_CREATE_DATABASE: "true"
+      NEXUS_MIGRATE_WAIT_SECONDS: ${NEXUS_MIGRATE_WAIT_SECONDS:-15}
     volumes:
       # Read-only: the job applies the frozen migrations, it does not author them.
       - ../services/migrations:/migrations:ro
@@ -372,6 +404,7 @@ services:
         SERVICE: api-gateway
         SERVICE_PATH: services/api-gateway/cmd/api-gateway
     depends_on: *depends-on-db
+    extra_hosts: *host-gateway
     environment:
       <<: [*service-env, *minio-env, *events-env]
       # true = an inbound REST traceparent becomes a span link, not the parent,
@@ -409,6 +442,9 @@ services:
       # Links in emails point at the console, which is where the verify and
       # reset pages live -- not at this gateway.
       NEXUS_PUBLIC_URL: ${NEXUS_PUBLIC_URL:-http://localhost:3000}
+      # Proxies whose X-Forwarded-* headers decide webhook trigger URLs ahead
+      # of NEXUS_PUBLIC_URL (OPERATIONS §27.1). Empty trusts none.
+      NEXUS_TRUSTED_PROXIES: ${NEXUS_TRUSTED_PROXIES:-}
       # KGF Cloud context authentication (ADR-0024, OPERATIONS §24). Standalone
       # unless set; kgf/both need the gateway's key document or static keys.
       NEXUS_AUTH_MODE: ${NEXUS_AUTH_MODE:-standalone}
@@ -432,6 +468,7 @@ services:
         SERVICE: workflow-manager
         SERVICE_PATH: services/workflow-manager/cmd/workflow-manager
     depends_on: *depends-on-db
+    extra_hosts: *host-gateway
     environment:
       # minio-env: object-store sensors (ADR-0028) list the result store unless
       # NEXUS_SENSOR_S3_* names another endpoint.
@@ -461,6 +498,7 @@ services:
         SERVICE: dag-engine
         SERVICE_PATH: services/dag-engine
     depends_on: *depends-on-db
+    extra_hosts: *host-gateway
     environment:
       <<: *service-env
       HTTP_ADDR: ":8080"
@@ -485,6 +523,7 @@ services:
         SERVICE: scheduler
         SERVICE_PATH: services/scheduler
     depends_on: *depends-on-db
+    extra_hosts: *host-gateway
     environment:
       <<: *service-env
       HTTP_ADDR: ":8080"
@@ -529,6 +568,7 @@ services:
         SERVICE: scheduler
         SERVICE_PATH: services/scheduler
     depends_on: *depends-on-db
+    extra_hosts: *host-gateway
     environment:
       <<: *service-env
       HTTP_ADDR: ":8080"
@@ -559,6 +599,7 @@ services:
         SERVICE: resource-manager
         SERVICE_PATH: services/resource-manager/cmd/resource-manager
     depends_on: *depends-on-db
+    extra_hosts: *host-gateway
     environment:
       <<: *service-env
       HTTP_ADDR: ":8080"
@@ -588,6 +629,7 @@ services:
         SERVICE_PATH: services/event-service/cmd/event-service
     depends_on:
       <<: [*depends-on-db, *nats-init-wait]
+    extra_hosts: *host-gateway
     volumes:
       - nats-auth-event-service:/etc/nexus/nats:ro
     environment:

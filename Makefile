@@ -6,7 +6,28 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-COMPOSE       ?= docker compose -f deploy/docker-compose.yml
+# The development stack runs on the HOST's PostgreSQL (the project rule:
+# Postgres comes from the host, never a container), in its own database
+# $(NEXUS_DEV_DB), created on first `make up` and dropped by `make down`; the
+# compose file's default. NEXUS_BUNDLED_POSTGRES=1 opts in to its postgres
+# container instead (deploy/docker-compose.bundled-postgres.yml): for a
+# machine with no PostgreSQL and CI runners. The PITR overlay always uses it.
+NEXUS_BUNDLED_POSTGRES ?=
+export NEXUS_BUNDLED_POSTGRES
+NEXUS_DEV_DB  ?= nexus_dev_compose
+COMPOSE_BASE  ?= docker compose -f deploy/docker-compose.yml
+COMPOSE_BUNDLED ?= $(COMPOSE_BASE) -f deploy/docker-compose.bundled-postgres.yml
+ifeq ($(NEXUS_BUNDLED_POSTGRES),1)
+COMPOSE       ?= $(COMPOSE_BUNDLED)
+else
+COMPOSE       ?= $(COMPOSE_BASE)
+# What the stack's containers connect to; compose needs it to parse the file
+# even for down/logs/ps. Computed once (string work only, no database access).
+ifeq ($(origin NEXUS_HOST_DATABASE_URL),undefined)
+NEXUS_HOST_DATABASE_URL := $(shell tests/lib/hostpg-db.sh container-url $(NEXUS_DEV_DB))
+endif
+export NEXUS_HOST_DATABASE_URL
+endif
 GO            ?= go
 PROTOC        ?= protoc
 # protoc plugins install into GOBIN, which is not on PATH in every shell.
@@ -16,13 +37,25 @@ NAMESPACE     ?= default
 # set it with NEXUS_AGENT_NAMESPACE when the compose agents serve another tenant.
 AGENT_NAMESPACE ?= $(or $(NEXUS_AGENT_NAMESPACE),$(NAMESPACE))
 
-# The database `make up` starts, which is what seed and the migrate targets act
-# on unless told otherwise. It used to default to a bare "local dev database"
-# on 55432 that nothing here creates -- so on a machine where something else
-# owned 55432, `make seed` (and the schema-dropping `make migrate-down`) aimed
-# at an unrelated database. Override DATABASE_URL to target another one.
+# The database `make up` uses, which is what seed and the migrate targets act
+# on unless told otherwise: $(NEXUS_DEV_DB) on the host's server, or the
+# bundled container's with NEXUS_BUNDLED_POSTGRES=1. It used to default to a
+# bare "local dev database" on 55432 that nothing here creates -- so on a
+# machine where something else owned 55432, `make seed` (and the
+# schema-dropping `make migrate-down`) aimed at an unrelated database. Override
+# DATABASE_URL to target another one.
 NEXUS_POSTGRES_PORT ?= 55433
+ifeq ($(NEXUS_BUNDLED_POSTGRES),1)
 DATABASE_URL  ?= postgres://nexus:nexus-dev-password@localhost:$(NEXUS_POSTGRES_PORT)/nexus?sslmode=disable
+else
+DATABASE_URL  ?= $(shell tests/lib/hostpg-db.sh url $(NEXUS_DEV_DB))
+endif
+# The PostgreSQL server the test and bench targets create their throwaway
+# databases on: the workstation's own server by default (the project rule:
+# Postgres comes from the host, never a container; tests/lib/hostpg.sh). An
+# admin DSN for a role that may CREATE DATABASE.
+NEXUS_TEST_PG_SERVER ?= postgres://127.0.0.1:5432/postgres?sslmode=disable
+export NEXUS_TEST_PG_SERVER
 # The gateway as `make up` publishes it (deploy/docker-compose.yml maps
 # NEXUS_API_PORT on the host to the gateway's 8080 in the container).
 NEXUS_API_PORT ?= 8090
@@ -43,7 +76,7 @@ MIGRATIONS    := services/migrations
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
         up-pitr backup-base pitr-verify restore-pitr pitr-drill \
         license-report license-check dev-certs up-tls certs-check \
-        k8s-dev-images k8s-dev-up k8s-dev-test k8s-dev-test-long k8s-dev-status k8s-dev-down bench-pg bench-dispatch bench-inline
+        k8s-dev-images k8s-dev-up k8s-dev-test k8s-dev-test-long k8s-dev-status k8s-dev-down bench-pg bench-pg-down bench-dispatch bench-inline
 
 help: ## Show this help
 	@echo "Nexus — make targets"
@@ -83,16 +116,25 @@ lint: ## go vet over the whole module
 # recovered with exactly one logical effect. It needs the stack up and an admin
 # key, takes minutes, and deliberately breaks the fleet -- hence its own build
 # tag, so `go test ./...` can never trip over it.
+#
+# NEXUS_COMPOSE_FILE takes the stack's files, comma-separated, in the order it
+# was brought up with (overlays included); NEXUS_CHAOS_DATABASE_URL is the
+# stack's database as the host reaches it, for a stack on the host's
+# PostgreSQL. The example sweep gives each example its own budget
+# (tests/chaos/config.go; NEXUS_CHAOS_EXAMPLE_BUDGET, _SCALE, NEXUS_CHAOS_EXAMPLES),
+# so the whole suite can take well over the 20 minutes it once had.
+CHAOS_TIMEOUT ?= 180m
 chaos: ## Kill workers mid-task and assert exactly-one-logical-effect (needs `make up` + NEXUS_API_KEY)
 	@test -n "$$NEXUS_API_KEY" || { echo "NEXUS_API_KEY is unset; run 'make seed' and export it"; exit 1; }
-	$(GO) test -tags chaos -count=1 -v -timeout 20m ./tests/chaos/
+	$(GO) test -tags chaos -count=1 -v -timeout $(CHAOS_TIMEOUT) ./tests/chaos/
 
-# The outbox relay and dispatch hints against a real NATS JetStream and a real
-# Postgres, each in a throwaway container (nexus-nats-agent-*, host ports
-# 55511-55514) so the broker-outage test cannot disturb anything else. Also
-# runs the broker AUTHORIZATION suite against the compose- and Helm-rendered
-# configurations (needs helm). KEEP=1 leaves the containers up for inspection.
-test-nats: ## Run the NATS/outbox and broker-authorization integration tests in isolated containers (needs Docker, helm)
+# The outbox relay and dispatch hints against a real NATS JetStream (throwaway
+# brokers nexus-nats-agent-*, host ports 55512-55514, so the broker-outage test
+# cannot disturb anything else) and a throwaway database on the host's
+# PostgreSQL (NEXUS_TEST_PG_SERVER; never a Postgres container), dropped
+# afterwards. Also runs the broker AUTHORIZATION suite against the compose- and
+# Helm-rendered configurations (needs helm). KEEP=1 leaves both for inspection.
+test-nats: ## Run the NATS/outbox and broker-authorization integration tests (host PostgreSQL, throwaway brokers; needs Docker, helm, psql)
 	tests/nats/run-integration.sh
 
 # Worker-side secret resolution against a REAL Vault (ADR-0025, OPERATIONS
@@ -114,11 +156,16 @@ test-vault: ## Run the secret-provider integration tests against a pinned dev-mo
 # ── Benchmarks (ADR-0016, ADR-0018) ───────────────────────────────────────
 # The benchmarks write hundreds of thousands of rows, so they never default to a
 # database: BENCH_DSN must be set explicitly, and `make bench-pg` provides a
-# disposable Postgres (+ MinIO for bench-inline) in containers named
-# $(BENCH_NAME)-*. Numbers from a laptop locate the knee of the curve; they are
-# not production capacity figures.
+# disposable, migrated database $(BENCH_DB) on the host's PostgreSQL
+# (NEXUS_TEST_PG_SERVER; never a Postgres container) plus a MinIO container
+# for bench-inline; `make bench-pg-down` drops and removes them. Numbers from a
+# laptop locate the knee of the curve; they are not production capacity
+# figures. The dispatch benchmark at 16 replicas opens far more connections
+# than a server shared with other workloads has free: point
+# NEXUS_TEST_PG_SERVER at a dedicated server for published figures, and record
+# its settings with them.
 BENCH_NAME        ?= nexus-bench
-BENCH_PG_PORT     ?= 55541
+BENCH_DB          ?= nexus_bench
 BENCH_MINIO_PORT  ?= 55542
 BENCH_DSN         ?=
 BENCH_MINIO       ?= localhost:$(BENCH_MINIO_PORT)
@@ -134,15 +181,14 @@ AZURITE_IMAGE     ?= mcr.microsoft.com/azure-storage/azurite:3.35.0@sha256:647c6
 FAKE_GCS_IMAGE    ?= docker.io/fsouza/fake-gcs-server:1.52.3@sha256:666f86b873120818b10a5e68d99401422fcf8b00c1f27fe89599c35236f48b4c
 JAEGER_IMAGE      ?= docker.io/jaegertracing/jaeger:2.10.0@sha256:8c593d8048d86334eb52dba26633b6c846b8ecbe5c22905702c932ae97baeb42
 # Disposable test stores: container prefix and loopback ports, overridable so
-# parallel checkouts do not collide.
+# parallel checkouts do not collide. PostgreSQL is not one of them: the suites
+# that need it use the host's server (NEXUS_TEST_PG_SERVER).
 TEST_STORES_NAME  ?= nexus-teststores
-TEST_PG_PORT      ?= 55641
 TEST_S3_PORT      ?= 55642
 TEST_AZURITE_PORT ?= 55643
 TEST_GCS_PORT     ?= 55644
 TEST_OTLP_PORT    ?= 55645
 TEST_JAEGER_PORT  ?= 55646
-TEST_PG_PASSWORD  ?= teststores
 TEST_S3_USER      ?= teststores
 TEST_S3_SECRET    ?= teststores-secret
 # Azurite's published development account (not a secret; documented by Microsoft).
@@ -154,9 +200,7 @@ TEST_STORE_ENV = \
   NEXUS_TEST_AZBLOB_ACCOUNT=devstoreaccount1 NEXUS_TEST_AZBLOB_KEY='$(AZURITE_KEY)' \
   NEXUS_TEST_GCS_ENDPOINT=http://127.0.0.1:$(TEST_GCS_PORT)
 
-test-stores-up: ## Start pinned Postgres, Silo, Azurite, fake-gcs-server and Jaeger for the storage and tracing suites
-	@docker inspect $(TEST_STORES_NAME)-pg >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-pg \
-	  -e POSTGRES_PASSWORD=$(TEST_PG_PASSWORD) -p 127.0.0.1:$(TEST_PG_PORT):5432 postgres:16-alpine >/dev/null
+test-stores-up: ## Start pinned Silo, Azurite, fake-gcs-server and Jaeger for the storage and tracing suites
 	@docker inspect $(TEST_STORES_NAME)-s3 >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-s3 \
 	  -e MINIO_ROOT_USER=$(TEST_S3_USER) -e MINIO_ROOT_PASSWORD=$(TEST_S3_SECRET) \
 	  -p 127.0.0.1:$(TEST_S3_PORT):9000 $(S3_IMAGE) server /data >/dev/null
@@ -169,11 +213,10 @@ test-stores-up: ## Start pinned Postgres, Silo, Azurite, fake-gcs-server and Jae
 	  -public-host 127.0.0.1:$(TEST_GCS_PORT) -external-url http://127.0.0.1:$(TEST_GCS_PORT) -backend memory >/dev/null
 	@docker inspect $(TEST_STORES_NAME)-jaeger >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-jaeger \
 	  -p 127.0.0.1:$(TEST_OTLP_PORT):4317 -p 127.0.0.1:$(TEST_JAEGER_PORT):16686 $(JAEGER_IMAGE) >/dev/null
-	@for i in $$(seq 1 30); do docker exec $(TEST_STORES_NAME)-pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
 	@sleep 2
 
 test-stores-down: ## Remove the containers test-stores-up started
-	-docker rm -f $(TEST_STORES_NAME)-pg $(TEST_STORES_NAME)-s3 $(TEST_STORES_NAME)-azurite \
+	-docker rm -f $(TEST_STORES_NAME)-s3 $(TEST_STORES_NAME)-azurite \
 	  $(TEST_STORES_NAME)-gcs $(TEST_STORES_NAME)-jaeger
 
 objstore-conformance: test-stores-up ## Run the result-store conformance suite against Silo, Azurite and fake-gcs-server
@@ -182,8 +225,9 @@ objstore-conformance: test-stores-up ## Run the result-store conformance suite a
 	  echo "$$out" | grep -E '^(--- |ok|FAIL|PASS)|skipping'; \
 	  if echo "$$out" | grep -q "skipping integration test"; then echo "a backend was SKIPPED"; exit 1; fi; exit $$status
 
+# The test creates (and drops) its own database on the host's PostgreSQL.
 tracing-e2e: test-stores-up ## One trace from API to agent and back, read from Jaeger (ADR-0026)
-	$(TEST_STORE_ENV) NEXUS_E2E_PG_DSN='postgres://postgres:$(TEST_PG_PASSWORD)@127.0.0.1:$(TEST_PG_PORT)/postgres?sslmode=disable' \
+	$(TEST_STORE_ENV) NEXUS_E2E_PG_DSN='$(NEXUS_TEST_PG_SERVER)' \
 	  NEXUS_E2E_OTLP_GRPC=127.0.0.1:$(TEST_OTLP_PORT) NEXUS_E2E_JAEGER_QUERY=http://127.0.0.1:$(TEST_JAEGER_PORT) \
 	  $(GO) test -tags tracing_e2e -count=1 -v -timeout 10m ./tests/tracing/
 
@@ -245,17 +289,16 @@ docs-serve: $(DOCS_VENV)/.installed ## Preview the documentation site at http://
 docs-clean: ## Remove the built site and the docs venv
 	rm -rf docs-site/site $(DOCS_VENV)
 
-bench-pg: ## Start a disposable, migrated Postgres + MinIO for the benchmarks
-	@docker inspect $(BENCH_NAME)-pg >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-pg \
-	  -e POSTGRES_PASSWORD=bench -e POSTGRES_DB=nexus -p 127.0.0.1:$(BENCH_PG_PORT):5432 \
-	  postgres:16-alpine -c max_connections=300 -c shared_buffers=512MB >/dev/null
+bench-pg: ## Create a disposable, migrated database on the host's PostgreSQL + a MinIO container for the benchmarks
 	@docker inspect $(BENCH_NAME)-minio >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-minio \
 	  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin -p 127.0.0.1:$(BENCH_MINIO_PORT):9000 \
 	  $(S3_IMAGE) server /data >/dev/null
-	@for i in $$(seq 1 30); do docker exec $(BENCH_NAME)-pg pg_isready -U postgres -d nexus >/dev/null 2>&1 && break; sleep 1; done
-	DATABASE_URL=postgres://postgres:bench@localhost:$(BENCH_PG_PORT)/nexus?sslmode=disable \
-	  MIGRATIONS_DIR=$(MIGRATIONS) sh deploy/migrate.sh
-	@echo "export BENCH_DSN=postgres://postgres:bench@localhost:$(BENCH_PG_PORT)/nexus?sslmode=disable"
+	@dsn=$$(NEXUS_TEST_PG_SERVER='$(NEXUS_TEST_PG_SERVER)' HOSTPG_TAG=org.kgf-nexus.bench tests/lib/hostpg-db.sh create $(BENCH_DB)) && \
+	  echo "export BENCH_DSN='$$dsn'"
+
+bench-pg-down: ## Drop the benchmark database and remove the MinIO container
+	-NEXUS_TEST_PG_SERVER='$(NEXUS_TEST_PG_SERVER)' HOSTPG_TAG=org.kgf-nexus.bench tests/lib/hostpg-db.sh drop $(BENCH_DB)
+	-docker rm -f $(BENCH_NAME)-minio
 
 bench-dispatch: ## Claims/sec and p50/p99 claim latency vs replicas and backlog (needs BENCH_DSN)
 	@test -n "$(BENCH_DSN)" || { echo "BENCH_DSN is unset; run 'make bench-pg' and export what it prints"; exit 1; }
@@ -317,6 +360,10 @@ up: ## Bring up the full stack with your own keys (first run on a fresh checkout
 	  echo "      make up && make seed" >&2; \
 	  exit 2; \
 	fi
+	@if [ "$(NEXUS_BUNDLED_POSTGRES)" != 1 ]; then \
+	  HOSTPG_TAG=org.kgf-nexus.dev-compose tests/lib/hostpg-db.sh ensure $(NEXUS_DEV_DB) >/dev/null && \
+	  echo "make up: database $(NEXUS_DEV_DB) on the host's PostgreSQL (NEXUS_BUNDLED_POSTGRES=1 for the bundled container)"; \
+	fi
 	$(COMPOSE) up --build -d
 	@echo
 	@echo "UI      http://localhost:$${NEXUS_UI_PORT:-3000}"
@@ -339,8 +386,11 @@ worker-key: ## Print a fresh random worker key (export as NEXUS_WORKER_API_KEY b
 # These only address existing containers, but Compose still parses the whole
 # file, so they pass a placeholder when the key is unset. It reaches no
 # container: nothing is created by down, logs or ps.
-down: ## Stop the stack and remove volumes (DESTROYS local run history)
+down: ## Stop the stack and remove volumes and its host database (DESTROYS local run history)
 	NEXUS_WORKER_API_KEY="$${NEXUS_WORKER_API_KEY:-unused-by-down}" $(COMPOSE) down -v
+	@if [ "$(NEXUS_BUNDLED_POSTGRES)" != 1 ]; then \
+	  HOSTPG_TAG=org.kgf-nexus.dev-compose tests/lib/hostpg-db.sh drop $(NEXUS_DEV_DB); \
+	fi
 
 logs: ## Tail logs for all services
 	@NEXUS_WORKER_API_KEY="$${NEXUS_WORKER_API_KEY:-unused-by-logs}" $(COMPOSE) logs -f --tail=100
@@ -507,6 +557,9 @@ sdk-test: $(SDK_VENV)/.installed sdk-typecheck ## Type-check, then run the Pytho
 seed: ## Generate and install API keys (prints each plaintext exactly once)
 	@set -euo pipefail; \
 	if ! command -v psql >/dev/null 2>&1; then \
+	  if [ "$(NEXUS_BUNDLED_POSTGRES)" != 1 ]; then \
+	    echo "seed: no psql on PATH; install the PostgreSQL client (the stack uses the host's server)" >&2; exit 1; \
+	  fi; \
 	  echo "seed: no psql on PATH; using the compose stack's own postgres container" >&2; \
 	  psql() { shift; NEXUS_WORKER_API_KEY="$${NEXUS_WORKER_API_KEY:-unused}" $(COMPOSE) exec -T postgres psql -U nexus -d nexus "$$@"; }; \
 	fi; \
@@ -577,8 +630,11 @@ submit-example: ## Submit an example DAG, and create a run when PARAMS is set (E
 # against a laptop directory and a mounted backup volume.
 BACKUP_DIR ?= ./backups
 
+# On the host database (the default) the dump runs with the host's pg_dump
+# against DATABASE_URL; with NEXUS_BUNDLED_POSTGRES=1, inside the container.
+BACKUP_DSN_ENV = $(if $(filter 1,$(NEXUS_BUNDLED_POSTGRES)),,DATABASE_URL='$(DATABASE_URL)')
 backup: ## Dump Postgres only (see backup-all: this is HALF a backup)
-	BACKUP_DIR=$(BACKUP_DIR) deploy/backup.sh
+	$(BACKUP_DSN_ENV) BACKUP_DIR=$(BACKUP_DIR) deploy/backup.sh
 
 backup-artifacts: ## Mirror the MinIO result bucket only (the other half)
 	BACKUP_DIR=$(BACKUP_DIR) deploy/backup-artifacts.sh
@@ -588,7 +644,7 @@ backup-artifacts: ## Mirror the MinIO result bucket only (the other half)
 # backup-all runs both halves in the order that makes the skew safe (objects
 # first, then Postgres; see deploy/backup-artifacts.sh).
 backup-all: ## Back up BOTH stores in the correct order (use this one)
-	BACKUP_DIR=$(BACKUP_DIR) deploy/backup-all.sh
+	$(BACKUP_DSN_ENV) BACKUP_DIR=$(BACKUP_DIR) deploy/backup-all.sh
 
 # Uses scratch buckets and a scratch database; never touches live data. Writes
 # phase timings as JSON (DRILL_REPORT). RTO=1 adds the DESTRUCTIVE timed
@@ -601,7 +657,13 @@ restore-drill: ## Prove a restore recovers artifacts byte-identically; RTO=1 tim
 # ── Point-in-time recovery (pgBackRest; OPERATIONS §4) ────────────────────
 # Needs the PITR overlay: `make up-pitr` (compose) or postgres.pitr.enabled
 # (Helm). Managed Postgres uses the provider's PITR instead.
-COMPOSE_PITR ?= $(COMPOSE) -f deploy/docker-compose.pitr.yml
+#
+# The documented exception to "Postgres comes from the host": continuous WAL
+# archiving and an in-place restore need a server whose data directory,
+# archive_command and restarts the stack controls, so the PITR overlay always
+# runs on the bundled container (never the host's server), as do the
+# backup/restore drills built on it.
+COMPOSE_PITR ?= $(COMPOSE_BUNDLED) -f deploy/docker-compose.pitr.yml
 BACKUP_TYPE  ?= full
 PITR_REPORT  ?= ./pitr-drill-report.json
 
@@ -708,8 +770,8 @@ license-check: ## Assert every first-party source file carries an SPDX identifie
 # The previous release's database integration suite against THIS tree's schema,
 # reached by the real upgrade path (previous migrations, then these). ADR-0011
 # rule 5 says old replicas survive the new schema; this is the test that says
-# so. Disposable Postgres on 127.0.0.1:55688, container nexus-compat-pg-55688;
-# NEXUS_COMPAT_PG_PORT and NEXUS_COMPAT_NAME_PREFIX move both. docs/COMPATIBILITY.md §7.
+# so. Two throwaway databases on the host's PostgreSQL (NEXUS_TEST_PG_SERVER),
+# dropped afterwards; never a Postgres container. docs/COMPATIBILITY.md §7.
 .PHONY: compat-smoke
 compat-smoke: ## Run the previous release's DB integration suite against this tree's migrated schema
 	tests/compat/previous-release-smoke.sh

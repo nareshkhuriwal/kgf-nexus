@@ -176,6 +176,40 @@ describe('the sensor list', () => {
     });
   });
 
+  it('creates a sensor pinned to a workflow version with a priority', async () => {
+    const calls = stubApi((c) => {
+      if (c.method === 'POST' && c.path === `${NS}/sensors`) return [201, sensor({ workflow_version: 3, priority: 250 })];
+      if (c.path === `${NS}/sensors`) return [200, { sensors: [] }];
+      return workflows(c);
+    });
+    list();
+    fireEvent.click(await screen.findByRole('button', { name: 'New sensor' }));
+    const form = screen.getByRole('button', { name: 'Create sensor' }).closest('form')!;
+    fireEvent.change(within(form).getByRole('textbox', { name: /^name/ }), { target: { value: 'landing-files' } });
+    fireEvent.change(within(form).getByLabelText('object store URI'), { target: { value: 's3://landing/incoming/' } });
+    await within(form).findAllByRole('option', { name: /example-etl/ });
+    fireEvent.change(within(form).getByRole('combobox', { name: 'starts workflow' }), { target: { value: 'example-etl' } });
+    fireEvent.change(within(form).getByRole('spinbutton', { name: /workflow version/ }), { target: { value: '3' } });
+    fireEvent.change(within(form).getByRole('spinbutton', { name: /priority/ }), { target: { value: '250' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Create sensor' }));
+
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true));
+    expect(calls.find((c) => c.method === 'POST')!.body).toMatchObject({ workflow: 'example-etl', workflow_version: 3, priority: 250 });
+  });
+
+  it('refuses a priority outside 0..1000 and a version below 1', async () => {
+    stubApi((c) => (c.path === `${NS}/sensors` ? [200, { sensors: [] }] : workflows(c)));
+    list();
+    fireEvent.click(await screen.findByRole('button', { name: 'New sensor' }));
+    const form = screen.getByRole('button', { name: 'Create sensor' }).closest('form')!;
+    fireEvent.change(within(form).getByRole('spinbutton', { name: /priority/ }), { target: { value: '1001' } });
+    expect(within(form).getByText(/Priority is 0 to 1000/)).toBeInTheDocument();
+    fireEvent.change(within(form).getByRole('spinbutton', { name: /priority/ }), { target: { value: '5' } });
+    fireEvent.change(within(form).getByRole('spinbutton', { name: /workflow version/ }), { target: { value: '0' } });
+    expect(within(form).getByText(/A version is a whole number from 1/)).toBeInTheDocument();
+    expect(within(form).getByRole('button', { name: 'Create sensor' })).toBeDisabled();
+  });
+
   it('refuses a poll interval outside 5..86400', async () => {
     stubApi((c) => (c.path === `${NS}/sensors` ? [200, { sensors: [] }] : workflows(c)));
     list();
@@ -237,6 +271,42 @@ describe('the sensor detail page', () => {
     const put = calls.find((c) => c.method === 'PUT')!;
     expect(put.path).toBe(`${NS}/sensors/landing-files`);
     expect(put.body).toEqual({ enabled: false });
+  });
+
+  it('edits the pin and priority, and unpins with an explicit null', async () => {
+    const calls = api((c) => {
+      if (c.method === 'GET' && c.path === `${NS}/sensors/landing-files`) return [200, sensor({ workflow_version: 2, priority: 300 })];
+      if (c.method === 'PUT') return [200, sensor({ priority: 40 })];
+      return undefined;
+    });
+    detail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const form = screen.getByRole('button', { name: 'Save changes' }).closest('form')!;
+    await within(form).findAllByRole('option', { name: /example-etl/ });
+    const version = within(form).getByRole('spinbutton', { name: /workflow version/ });
+    expect(version).toHaveValue(2);
+    expect(within(form).getByRole('spinbutton', { name: /priority/ })).toHaveValue(300);
+    fireEvent.change(version, { target: { value: '' } });
+    expect(within(form).getByText(/Saving unpins it/)).toBeInTheDocument();
+    fireEvent.change(within(form).getByRole('spinbutton', { name: /priority/ }), { target: { value: '40' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    expect(calls.find((c) => c.method === 'PUT')!.body).toMatchObject({ workflow_version: null, priority: 40, revision: 4 });
+  });
+
+  it('keeps an existing pin on an edit that does not touch it', async () => {
+    const calls = api((c) => {
+      if (c.method === 'GET' && c.path === `${NS}/sensors/landing-files`) return [200, sensor({ workflow_version: 2 })];
+      if (c.method === 'PUT') return [200, sensor({ workflow_version: 2 })];
+      return undefined;
+    });
+    detail();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    await screen.findAllByRole('option', { name: /example-etl/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    expect(calls.find((c) => c.method === 'PUT')!.body).toMatchObject({ workflow_version: 2, priority: 100 });
   });
 
   it('shows an empty observation table honestly', async () => {

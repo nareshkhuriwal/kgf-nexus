@@ -37,7 +37,7 @@ import {
   conflictHint,
 } from '../components/EventsShared';
 import { EMPTY, fmtAge, fmtTs, shortId } from '../lib/format';
-import { TriggerForm, TriggerSecretDetails, triggerUrl } from './TriggersPage';
+import { TriggerForm, TriggerSecretDetails, TriggerUrlSource, triggerUrl, type TriggerUrl } from './TriggersPage';
 
 export const GRACE_CHOICES: { seconds: number; label: string }[] = [
   { seconds: 0, label: 'None — the old secret stops working now' },
@@ -279,7 +279,7 @@ export function TriggerDetailPage({ namespace }: { namespace: string }) {
             <span>configuration</span>
           </div>
           <div className="panel-body">
-            <TriggerFacts trigger={t} url={url.value} />
+            <TriggerFacts trigger={t} url={url} />
           </div>
         </div>
         <div className="panel">
@@ -329,12 +329,17 @@ export function TriggerDetailPage({ namespace }: { namespace: string }) {
   );
 }
 
-function TriggerFacts({ trigger: t, url }: { trigger: WebhookTrigger; url: string }) {
+function TriggerFacts({ trigger: t, url }: { trigger: WebhookTrigger; url: TriggerUrl }) {
   const mapping = Object.entries(t.params_mapping ?? {});
   return (
     <dl className="kv">
       <dt>URL</dt>
-      <dd>{url}</dd>
+      <dd>
+        <span className="mono">{url.value}</span>
+        <div>
+          <TriggerUrlSource url={url} />
+        </div>
+      </dd>
       <dt>idempotency key</dt>
       <dd>{t.idempotency_key_path || <span className="faint">none — every signed call is a new run</span>}</dd>
       <dt>params</dt>

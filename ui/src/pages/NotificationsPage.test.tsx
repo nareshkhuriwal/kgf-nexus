@@ -215,6 +215,67 @@ describe('notification channels', () => {
     expect(put.path).toBe(`${NS}/notification-channels/oncall-slack`);
     expect(put.body).toEqual({ enabled: false, revision: 3 });
   });
+
+  it('clears a stored secret after confirming, which disables the channel', async () => {
+    const calls = stubApi((c) => {
+      if (c.method === 'PUT') return [200, channel({ enabled: false, secret: { configured: false, source: '', hint: '' } })];
+      return listChannels([channel()])(c);
+    });
+    show();
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear secret of channel oncall-slack' }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent(/disabled until a new secret is saved/i);
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear' }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    const put = calls.find((c) => c.method === 'PUT')!;
+    expect(put.path).toBe(`${NS}/notification-channels/oncall-slack`);
+    expect(put.body).toEqual({ clear_secret: true, enabled: false, revision: 3 });
+  });
+
+  it('offers no clear for a channel without a stored secret, a webhook or an email channel', async () => {
+    stubApi(
+      listChannels([
+        channel({ id: 'a', name: 'bare', secret: { configured: false, source: '', hint: '' }, enabled: false }),
+        channel({ id: 'b', name: 'hook', kind: 'webhook', config: { url: 'https://h.example/x' } }),
+        channel({ id: 'c', name: 'mail', kind: 'email', config: { to: ['a@example.com'] }, secret: { configured: false, source: '', hint: '' } }),
+      ]),
+    );
+    show();
+    await screen.findByText('bare');
+    expect(screen.queryByRole('button', { name: /Clear secret of channel/ })).not.toBeInTheDocument();
+  });
+
+  it('hides the clear action from a view-only credential', async () => {
+    stubApi(listChannels([channel()]));
+    show('/notifications', VIEW_ONLY);
+    await screen.findByText('oncall-slack');
+    expect(screen.queryByRole('button', { name: /Clear secret of channel/ })).not.toBeInTheDocument();
+  });
+
+  it('re-arms a cleared channel only together with a new secret', async () => {
+    const calls = stubApi((c) => {
+      if (c.method === 'PUT') return [200, channel()];
+      return listChannels([channel({ enabled: false, secret: { configured: false, source: '', hint: '' } })])(c);
+    });
+    show();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit channel oncall-slack' }));
+    const form = screen.getByRole('button', { name: 'Save changes' }).closest('form')!;
+    fireEvent.click(within(form).getByRole('checkbox', { name: 'Enabled' }));
+    expect(within(form).getByRole('button', { name: 'Save changes' })).toBeDisabled();
+    fireEvent.change(within(form).getByLabelText('Slack bot token (xoxb-…)'), { target: { value: 'xoxb-new' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    expect(calls.find((c) => c.method === 'PUT')!.body).toMatchObject({ enabled: true, secret: 'xoxb-new' });
+  });
+
+  it('says a secretless channel needs a secret before it can be enabled', async () => {
+    stubApi(listChannels([channel({ enabled: false, secret: { configured: false, source: '', hint: '' } })]));
+    show();
+    const enable = await screen.findByRole('button', { name: 'Enable channel oncall-slack' });
+    expect(enable).toBeDisabled();
+    expect(enable).toHaveAttribute('title', expect.stringMatching(/needs a secret/i));
+  });
 });
 
 describe('notification rules', () => {

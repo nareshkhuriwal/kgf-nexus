@@ -3,19 +3,32 @@
 # Copyright 2026 Khuriwal Group
 # SPDX-License-Identifier: Apache-2.0
 
-# Runs the NATS/outbox integration tests against a REAL Postgres and a REAL NATS
-# JetStream server, each in its own throwaway Docker container.
+# Runs the NATS/outbox integration tests against a REAL PostgreSQL and a REAL
+# NATS JetStream server.
 #
-#   tests/nats/run-integration.sh            # start, migrate, test, tear down
-#   KEEP=1 tests/nats/run-integration.sh     # leave the containers running
+#   tests/nats/run-integration.sh            # create a DB, migrate, test, drop it
+#   KEEP=1 tests/nats/run-integration.sh     # leave the database and brokers
 #   PKGS="./internal/store/" tests/nats/run-integration.sh
 #
-# WHY ISOLATED CONTAINERS rather than the shared dev database: several of these
+# POSTGRES comes from the host, never a container (the project rule; see
+# tests/lib/hostpg.sh). By default the script creates a throwaway database on
+# the server NEXUS_TEST_PG_SERVER names (default: the workstation's PostgreSQL
+# on 127.0.0.1:5432), migrates it with deploy/migrate.sh, and drops it on exit:
+#
+#   NEXUS_TEST_PG_SERVER  admin DSN of the server   (default postgres://127.0.0.1:5432/postgres)
+#   NEXUS_NATS_DB         database name to create   (default nexus_nats_it_<pid>)
+#   NEXUS_NATS_DATABASE_URL  use THIS existing database instead (migrated, never
+#                         dropped). It must be dedicated to the run: the relay
+#                         processes every unpublished outbox row it can see, and
+#                         TestNATSRolledBackFactIsNeverPublished needs an empty
+#                         backlog (F153).
+#
+# WHY ITS OWN DATABASE AND BROKERS rather than a shared stack: several of these
 # tests stop and restart the broker on purpose (the outage test), and the relay
 # processes every unpublished outbox row it can see. Pointing either at a shared
-# stack would make one person's test run another person's outage. The names and
-# ports are fixed and distinct (nexus-nats-agent-*, 55511/55512) so they cannot
-# collide with the compose stack (55433) or the CONTRACT.md dev DB (55432).
+# stack would make one person's test run another person's outage. The broker
+# names and ports are fixed and distinct (nexus-nats-agent-*, 55512-55514) so
+# they cannot collide with the compose stack.
 #
 # WHY -p 1: the outage test stops the NATS container. Run in parallel with the
 # agent package's tests, it would turn their assertions red for a reason that has
@@ -34,13 +47,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-PG_NAME=${PG_NAME:-nexus-nats-agent-pg}
+# shellcheck source=tests/lib/hostpg.sh
+. tests/lib/hostpg.sh
+HOSTPG_TAG=org.kgf-nexus.nats-integration
+hostpg_suite_pool_floor
+
 NATS_NAME=${NATS_NAME:-nexus-nats-agent-nats}
-PG_PORT=${PG_PORT:-55511}
 NATS_PORT=${NATS_PORT:-55512}
-# Pinned to the same images compose ships, so a test green here says something
+# Pinned to the same image compose ships, so a test green here says something
 # about the stack people actually run.
-PG_IMAGE=${PG_IMAGE:-postgres:16-alpine}
 NATS_IMAGE=${NATS_IMAGE:-nats:2.14.7-alpine}
 PKGS=${PKGS:-./internal/bus/... ./internal/store/ ./services/event-service/... ./agent/internal/worker/}
 # Only the TestNATS* tests by default: the older integration fixtures in
@@ -48,6 +63,9 @@ PKGS=${PKGS:-./internal/bus/... ./internal/store/ ./services/event-service/... .
 # freshly migrated database for reasons unrelated to the bus. Override with
 # RUN= to run everything.
 RUN=${RUN-TestNATS}
+# At most this many tests at once within a package (go test -parallel), which
+# bounds the connections the suite opens on a shared server (F153).
+PARALLEL=${PARALLEL:-2}
 # The authorization brokers. AUTHZ=0 skips them, loudly (it is not a pass).
 AUTHZ=${AUTHZ:-1}
 AUTHZ_NAME=${AUTHZ_NAME:-nexus-nats-agent-authz}
@@ -58,12 +76,14 @@ AUTHZ_TENANTS=${AUTHZ_TENANTS:-"authz-a authz-b"}
 AUTHZ_PKGS=${AUTHZ_PKGS:-./internal/bus/... ./services/event-service/relay/ ./agent/internal/worker/}
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/nexus-nats-authz.XXXXXX")
+OWN_DB=""
 cleanup() {
   if [ "${KEEP:-0}" != "1" ]; then
-    docker rm -f "$PG_NAME" "$NATS_NAME" "$AUTHZ_NAME" "$HELM_NAME" >/dev/null 2>&1 || true
+    docker rm -f "$NATS_NAME" "$AUTHZ_NAME" "$HELM_NAME" >/dev/null 2>&1 || true
+    if [ -n "$OWN_DB" ]; then hostpg_drop "$OWN_DB"; fi
     rm -rf "$WORK"
   else
-    echo "KEEP=1: containers and $WORK (NATS seeds, test CA) left in place"
+    echo "KEEP=1: brokers, ${OWN_DB:-the database} and $WORK (NATS seeds, test CA) left in place"
   fi
 }
 trap cleanup EXIT
@@ -78,37 +98,23 @@ start() {
   docker run -d --name "$name" "$@" >/dev/null
 }
 
-start "$PG_NAME" -p "127.0.0.1:${PG_PORT}:5432" \
-  -e POSTGRES_PASSWORD=test -e POSTGRES_DB=nexus "$PG_IMAGE"
+if [ -n "${NEXUS_NATS_DATABASE_URL:-}" ]; then
+  DSN=$NEXUS_NATS_DATABASE_URL
+  echo "using the database in NEXUS_NATS_DATABASE_URL ($(hostpg_redact "$DSN")); it is migrated, not dropped"
+else
+  hostpg_check
+  OWN_DB=${NEXUS_NATS_DB:-nexus_nats_it_$$}
+  hostpg_create "$OWN_DB"
+  DSN=$(hostpg_url "$HOSTPG_SERVER" "$OWN_DB")
+  echo "created database $OWN_DB on $(hostpg_redact "$HOSTPG_SERVER")"
+fi
+# The same script and algorithm as the migration job, including the
+# no-transaction opt-out, so the schema under test is the one it would produce.
+hostpg_migrate "$DSN" >/dev/null
+
 # -js enables JetStream; -sd puts its store on the container filesystem, which
 # survives `docker stop`/`docker start` -- the outage test depends on that.
 start "$NATS_NAME" -p "127.0.0.1:${NATS_PORT}:4222" "$NATS_IMAGE" -js -sd /data
-
-echo "waiting for postgres"
-for i in $(seq 1 60); do
-  if docker exec "$PG_NAME" pg_isready -U postgres -d nexus >/dev/null 2>&1; then break; fi
-  [ "$i" = 60 ] && { echo "postgres did not become ready" >&2; exit 1; }
-  sleep 1
-done
-
-psql_in() { docker exec -i "$PG_NAME" psql -U postgres -d nexus -v ON_ERROR_STOP=1 -q "$@"; }
-
-psql_in -c "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
-# Same algorithm as deploy/migrate.sh, including the no-transaction opt-out, so
-# the schema under test is the one the migration job would produce.
-for file in services/migrations/*.up.sql; do
-  version=$(basename "$file" .up.sql)
-  if [ "$(psql_in -tAc "SELECT 1 FROM schema_migrations WHERE version='$version'")" = "1" ]; then
-    continue
-  fi
-  echo "applying $version"
-  if grep -qiE '^[[:space:]]*--[[:space:]]*migrate:[[:space:]]*no-transaction[[:space:]]*$' "$file"; then
-    psql_in < "$file"
-  else
-    psql_in --single-transaction < "$file"
-  fi
-  psql_in -c "INSERT INTO schema_migrations (version) VALUES ('$version')"
-done
 
 echo "waiting for nats"
 for i in $(seq 1 30); do
@@ -117,7 +123,6 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-DSN="postgres://postgres:test@127.0.0.1:${PG_PORT}/nexus?sslmode=disable"
 export NEXUS_TEST_DATABASE_URL="$DSN"
 export NEXUS_TEST_NATS_URL="nats://127.0.0.1:${NATS_PORT}"
 # Lets the outage test stop and start the broker. Unset, that test SKIPS with
@@ -131,7 +136,7 @@ run_suite() {
   echo "── $label"
   local out status
   # shellcheck disable=SC2086
-  out=$(go test -tags integration -count=1 -p 1 -timeout 15m -v "$@" $pkgs 2>&1) && status=0 || status=$?
+  out=$(go test -tags integration -count=1 -p 1 -parallel "${PARALLEL:-2}" -timeout 15m -v "$@" $pkgs 2>&1) && status=0 || status=$?
   echo "$out" | grep -E '^(=== RUN|--- |PASS|FAIL|ok|panic)|skipping integration test' || true
   if grep -q "skipping integration test" <<<"$out"; then
     echo "$label: tests SKIPPED -- a dependency was unreachable; treating as failure (F85)" >&2

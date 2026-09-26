@@ -25,16 +25,28 @@ import { RowAction, RowDetails } from '../../components/RowAction';
  * needs to know whether the trail has no such events or whether this page of it
  * does not.
  *
- * That distinction is not cosmetic here. The request is capped at 200 entries,
- * and the audit trail is the one list in this console where a missed row is a
- * missed security finding — so the count says "200+" the moment the cap binds
- * rather than presenting a page as the history.
+ * That distinction is not cosmetic here: the audit trail is the one list in
+ * this console where a missed row is a missed security finding.
+ *
+ * ── PAGING AND EXPORT ────────────────────────────────────────────────────
+ *
+ * The trail is paged by the gateway's keyset cursor, newest first: Next walks
+ * to older entries while there is a cursor, Previous back through cursors
+ * already seen, and a filter change starts again from the newest page. It used
+ * to fetch one window of 200 and stop, so anything older was unreachable here.
+ * Only the newest page polls; an older page of an append-only trail cannot
+ * change under the reader.
+ *
+ * "Export the trail" downloads the SERVER's export of every entry the filters
+ * match, not the page: NDJSON with the hash-chain header and trailer that
+ * `nexusctl audit verify` checks, CSV, or KGF Cloud's event shape. Exporting
+ * selected rows of the current page remains, as a local CSV.
  */
 
-import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { authApi, type AuditEntry } from '../../api/auth';
-import { shouldRetry } from '../../api/hooks';
+import { useEffect, useMemo, useState } from 'react';
+import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
+import { authApi, ndjsonExportComplete, type AuditEntry, type AuditExportFormat } from '../../api/auth';
+import { errorMessage, shouldRetry } from '../../api/hooks';
 import { AsyncPanel } from '../../components/Status';
 import { BulkActionBar } from '../../components/BulkActionBar';
 import { DataTable } from '../../components/DataTable';
@@ -44,14 +56,17 @@ import { PageHeader } from '../../components/PageHeader';
 import { Forbidden } from '../../components/Forbidden';
 
 /**
- * The row cap, stated once and used twice: it is sent as the request's `limit`
- * AND handed to the table so the count can disclose it. Two copies of this
- * number is how the request and the label drift apart, and a label claiming a
- * 200-row total against a 500-row request would be the exact failure this whole
- * exercise is about.
+ * A page of a keyset-paged trail has no total: the count is the rows in hand,
+ * and "more" is what the Next button says.
  */
-const AUDIT_LIMIT = 200;
-const AUDIT_COUNT: RowCountKind = { kind: 'capped', limit: AUDIT_LIMIT };
+const AUDIT_COUNT: RowCountKind = { kind: 'unknown' };
+const DEFAULT_PAGE_SIZE = 25;
+
+const EXPORT_FORMATS: { value: AuditExportFormat; label: string }[] = [
+  { value: 'ndjson', label: 'NDJSON (verifiable hash chain)' },
+  { value: 'csv', label: 'CSV' },
+  { value: 'kgf', label: 'KGF Cloud events' },
+];
 
 /**
  * One audit entry as a row of CSV fields, in the column order the table shows.
@@ -119,7 +134,15 @@ function toCsv(rows: string[][]): string {
 function downloadCsv(csv: string, filename: string) {
   // The BOM makes Excel read the file as UTF-8. Without it, an actor label with
   // a non-ASCII character is mojibake in the one tool most reviewers open.
-  const blob = new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' });
+  saveFile(`\ufeff${csv}`, 'text/csv;charset=utf-8', filename);
+}
+
+/**
+ * Hands the browser the server's export byte for byte: no BOM or re-encoding,
+ * since the NDJSON is evidence whose hash chain a verifier recomputes.
+ */
+function saveFile(text: string, type: string, filename: string) {
+  const blob = new Blob([text], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -142,6 +165,18 @@ export function AuditPage({ namespace, canAdmin }: { namespace: string; canAdmin
   const [tableControls,setTableControls] = useState<HTMLDivElement|null>(null);
   const [outcome, setOutcome] = useState('');
   const [action, setAction] = useState('');
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+
+  /**
+   * Cursors of the pages walked so far, keyed by the filters they were issued
+   * under: a cursor from one filter means nothing under another, so a filter
+   * change starts again from the newest page.
+   */
+  const [cursors, setCursors] = useState<{ key: string; stack: string[] }>({ key: '', stack: [] });
+  const filterKey = `${outcome}\u0000${action}\u0000${pageSize}`;
+  const stack = cursors.key === filterKey ? cursors.stack : [];
+  const cursor = stack[stack.length - 1];
+  const onFirstPage = stack.length === 0;
 
   /**
    * The selected entry ids.
@@ -152,15 +187,32 @@ export function AuditPage({ namespace, canAdmin }: { namespace: string; canAdmin
    */
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
 
-  const audit = useQuery({
-    queryKey: ['audit', namespace, outcome, action],
-    queryFn: () => authApi.listAudit(namespace, { outcome, action, limit: AUDIT_LIMIT }),
+  const page = useQuery({
+    queryKey: ['audit', namespace, outcome, action, pageSize, cursor ?? ''],
+    queryFn: () => authApi.listAuditPage(namespace, { outcome, action, limit: pageSize, cursor }),
     retry: shouldRetry,
     enabled: canAdmin,
-    // Refreshes on its own: during an incident this screen is being watched, and
-    // a stale audit view is actively misleading about what is happening now.
-    refetchInterval: 10_000,
+    // A page turn keeps the page being read on screen until the next arrives.
+    placeholderData: keepPreviousData,
+    // The newest page refreshes on its own: during an incident this screen is
+    // being watched, and a stale view is actively misleading about what is
+    // happening now. Older pages of an append-only trail do not change.
+    refetchInterval: onFirstPage ? 10_000 : false,
   });
+  const audit = { ...page, data: page.data?.entries };
+  const nextCursor = page.data?.nextCursor ?? null;
+  const pushCursor = (c: string) => setCursors({ key: filterKey, stack: [...stack, c] });
+  const popCursor = () => setCursors({ key: filterKey, stack: stack.slice(0, -1) });
+  useEffect(() => setSelected(new Set()), [filterKey, cursor]);
+
+  const [format, setFormat] = useState<AuditExportFormat>('ndjson');
+  const filtered = Boolean(outcome || action);
+  const exporter = useMutation({
+    mutationFn: (f: AuditExportFormat) => authApi.exportAudit(namespace, f, { outcome, action }),
+    onSuccess: (out) => saveFile(out.text, out.contentType, out.filename),
+  });
+  const exported = exporter.data;
+  const exportIncomplete = exported !== undefined && exporter.variables === 'ndjson' && !ndjsonExportComplete(exported.text);
 
   /**
    * The selected rows, resolved against the latest fetch.
@@ -323,6 +375,43 @@ export function AuditPage({ namespace, canAdmin }: { namespace: string; canAdmin
           </button>
         </div>
 
+        <div className="filterbar" role="group" aria-label="Export the trail">
+          <label className="filter-field">
+            <span className="filter-label">export</span>
+            <select aria-label="export format" value={format} onChange={(e) => setFormat(e.target.value as AuditExportFormat)}>
+              {EXPORT_FORMATS.map((f) => (
+                <option key={f.value} value={f.value}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            disabled={exporter.isPending}
+            onClick={() => exporter.mutate(format)}
+            title="Every entry the outcome and action filters match, from the server, not only this page."
+          >
+            {exporter.isPending ? 'Preparing…' : filtered ? 'Download matching events' : 'Download the whole trail'}
+          </button>
+          {exporter.error != null && (
+            <span role="alert" className="row-action-error">
+              Export failed: {errorMessage(exporter.error)}
+            </span>
+          )}
+          {exportIncomplete && (
+            <span role="alert" className="row-action-error">
+              The export is incomplete: it ends without the chain trailer, so the server stopped part way. Download it again.
+            </span>
+          )}
+          {exported && !exporter.isPending && exporter.error == null && (
+            <span role="status" className="faint">
+              Saved {exported.filename}
+              {filtered ? ' · filtered: the chain cannot be verified end to end from a filtered file' : ' · complete trail'}
+            </span>
+          )}
+        </div>
+
         <AsyncPanel
           query={audit}
           what="audit history"
@@ -383,6 +472,15 @@ export function AuditPage({ namespace, canAdmin }: { namespace: string; canAdmin
               rowKey={(e) => String(e.id)}
               noun="events"
               count={AUDIT_COUNT}
+              paging={{
+                mode: 'server',
+                pageSize,
+                onPageSize: (n) => setPageSize(n),
+                onFirst: () => setCursors({ key: filterKey, stack: [] }),
+                pageNumber: stack.length + 1,
+                onNext: nextCursor && !page.isPlaceholderData ? () => pushCursor(nextCursor) : undefined,
+                onPrev: stack.length > 0 && !page.isPlaceholderData ? popCursor : undefined,
+              }}
               /* 25, the same as every other table in the console. The trail
                  used to open at 50 on the argument that a review scrolls, but a
                  page size that differs per table makes "the second page" mean a
@@ -392,7 +490,7 @@ export function AuditPage({ namespace, canAdmin }: { namespace: string; canAdmin
                  rows selector is still there for a reviewer who wants more. */
               /* Local, over the actor and target the SQL filters do not cover.
                  It reaches only the fetched page, which is why it is declared
-                 client-side and labelled as such: on a capped 200-row trail an
+                 client-side and labelled as such: on one page of the trail an
                  unqualified "2 results" would read as a claim about the history
                  and be wrong in the direction that matters. */
               search={{

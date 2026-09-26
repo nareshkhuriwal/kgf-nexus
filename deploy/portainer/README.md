@@ -79,6 +79,12 @@ Everything else in the compose file has a default, including every published
 port (`NEXUS_API_PORT`, `NEXUS_UI_PORT`, …). Override those in the same file if
 the host already uses them.
 
+> The stack's database is the Docker host's own PostgreSQL by default
+> (`NEXUS_HOST_DATABASE_URL`; the rendered file keeps that default). Set it to
+> the database the host should use, or render with
+> `deploy/docker-compose.bundled-postgres.yml` to opt in to a Postgres
+> container.
+
 > The credentials in `deploy/docker-compose.yml` for Postgres and MinIO are
 > marked **DEV ONLY** and are deliberately obvious. They are still there in the
 > rendered file. A host reachable by anyone else needs them overridden.

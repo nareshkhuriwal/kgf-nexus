@@ -43,11 +43,12 @@
 #      diverges fresh and upgraded databases), and every new one must sort after
 #      the previous highest (otherwise upgraded and fresh databases apply it in
 #      different orders -- services/migrations/README.md).
-#   c. Starts a disposable Postgres (container <prefix>-pg-<port>, default
-#      nexus-compat-pg-55688, bound to 127.0.0.1 only). The container carries
-#      the label org.kgf-nexus.compat-smoke=<prefix>; the script never removes a
-#      container of that name WITHOUT the label (it refuses instead), and never
-#      starts on a port something else already listens on.
+#   c. Creates two throwaway databases, <prefix>_new and <prefix>_base
+#      (default prefix nexus_compat_<pid>), on the PostgreSQL server
+#      NEXUS_TEST_PG_SERVER names -- the host's own server by default; no
+#      Postgres container is started (the project rule, tests/lib/hostpg.sh).
+#      Each carries a COMMENT tag; the script never drops a database without
+#      its tag, and refuses a name that exists untagged.
 #   d. UPGRADE PATH, not a fresh install: applies the previous tree's migrations
 #      with the previous tree's deploy/migrate.sh (the database production has),
 #      then this tree's with this tree's deploy/migrate.sh
@@ -58,12 +59,12 @@
 #      their own schema (they rely on a pre-migrated database, as CI's
 #      integration job does), so they genuinely run against the new schema.
 #      A database-missing skip fails the run (F85); zero passing tests fails it.
-#   f. On failure, triages: the failing tests are re-run against a second
-#      database in the same container that has ONLY the previous tree's
-#      migrations. A test that fails there too is a pre-existing failure of the
+#   f. On failure, triages: the failing tests are re-run against the second
+#      database, which has ONLY the previous tree's migrations. A test that fails there too is a pre-existing failure of the
 #      old suite, not skew; one that passes there and fails on the new schema is
 #      a real incompatibility.
-#   g. Always removes the container and scratch tree (trap), unless KEEP=1.
+#   g. Always drops both databases and removes the scratch tree (trap),
+#      unless NEXUS_COMPAT_KEEP=1.
 #
 # EXIT CODES
 #   0  the previous release's suite passes against the new schema
@@ -86,23 +87,26 @@
 # ENVIRONMENT
 #   NEXUS_COMPAT_PREVIOUS_REF   override the previous revision
 #   NEXUS_COMPAT_MAIN_REF       main ref for the fallback (default origin/main)
-#   NEXUS_COMPAT_PG_PORT        host port for the disposable Postgres (default
-#                               55688; 1024-65535). Must be free.
-#   NEXUS_COMPAT_NAME_PREFIX    container name prefix (default nexus-compat); the
-#                               container is <prefix>-pg-<port>. Lower-case
-#                               letters, digits, '.', '_' and '-' only. Give
-#                               concurrent runs on one host distinct prefixes
-#                               or ports.
-#   NEXUS_COMPAT_PG_IMAGE       default postgres:16-alpine (what compose ships)
+#   NEXUS_TEST_PG_SERVER        admin DSN of the PostgreSQL server the two
+#                               databases are created on, as a role that may
+#                               CREATE DATABASE (default
+#                               postgres://127.0.0.1:5432/postgres?sslmode=disable,
+#                               the workstation's server; in CI, the job's
+#                               service container)
+#   NEXUS_COMPAT_DB_PREFIX      database name prefix (default nexus_compat_<pid>);
+#                               ^[a-z_][a-z0-9_]{0,50}$. Concurrent runs on one
+#                               server get distinct names from the pid.
 #   NEXUS_COMPAT_PKGS           packages of the OLD tree to test (default: every
 #                               package with an integration-tagged _test.go file)
 #   NEXUS_COMPAT_SKIP           passed to go test -skip, for a documented exclusion
 #   NEXUS_COMPAT_TIMEOUT        go test -timeout (default 20m)
+#   NEXUS_COMPAT_PARALLEL       go test -parallel (default 2), which bounds the
+#                               connections the old suite opens at once
 #   NEXUS_COMPAT_REQUIRE_SKEW   1 = fail (exit 1) when the two trees have the same
 #                               migration set, i.e. there is no schema skew to test
 #   NEXUS_COMPAT_LOG            where the full go test log is copied (survives
 #                               cleanup; default $TMPDIR/nexus-compat-<sha>.log)
-#   NEXUS_COMPAT_KEEP           1 = leave the container and scratch tree in place
+#   NEXUS_COMPAT_KEEP           1 = leave the databases and scratch tree in place
 #   NEXUS_COMPAT_MIGRATIONS_DIR the CURRENT migration set (default
 #                               services/migrations); for the negative-control
 #                               drill only, never in CI
@@ -115,31 +119,28 @@ die()  { echo "compat: ERROR: $1" >&2; exit "${2:-2}"; }
 say()  { echo "compat: $*"; }
 rule() { echo "────────────────────────────────────────────────────────────────"; }
 
-for tool in git go docker tar; do
+for tool in git go psql tar; do
   command -v "$tool" >/dev/null || die "$tool not found on PATH"
 done
 
-PG_PORT=${NEXUS_COMPAT_PG_PORT:-55688}
-case "$PG_PORT" in
-  ''|*[!0-9]*) die "NEXUS_COMPAT_PG_PORT must be a number (got '$PG_PORT')";;
-esac
-if [ "$PG_PORT" -lt 1024 ] || [ "$PG_PORT" -gt 65535 ]; then
-  die "NEXUS_COMPAT_PG_PORT must be in 1024-65535 (got $PG_PORT)"
-fi
-PG_IMAGE=${NEXUS_COMPAT_PG_IMAGE:-postgres:16-alpine}
-NAME_PREFIX=${NEXUS_COMPAT_NAME_PREFIX:-nexus-compat}
-# A docker name, and no room for a glob or a flag: the name is the only thing
-# this script ever removes, so it must not be able to match anything else.
-[[ "$NAME_PREFIX" =~ ^[a-z0-9][a-z0-9_.-]{0,40}$ ]] \
-  || die "NEXUS_COMPAT_NAME_PREFIX must match ^[a-z0-9][a-z0-9_.-]{0,40}\$ (got '$NAME_PREFIX')"
-PG_NAME="${NAME_PREFIX}-pg-${PG_PORT}"
-# Ownership label: set on the container this script starts, and required on any
-# container of the same name before the script will remove it.
-OWNER_LABEL=org.kgf-nexus.compat-smoke
-PG_USER=nexus
-PG_PASS=nexus-compat-password
+# shellcheck source=tests/lib/hostpg.sh
+. "$ROOT/tests/lib/hostpg.sh"
+HOSTPG_TAG=org.kgf-nexus.compat-smoke
+hostpg_suite_pool_floor
+DB_PREFIX=${NEXUS_COMPAT_DB_PREFIX:-nexus_compat_$$}
+# An identifier with no room for quoting tricks: the names are the only
+# databases this script ever drops, so they must not be able to match others.
+[[ "$DB_PREFIX" =~ ^[a-z_][a-z0-9_]{0,50}$ ]] \
+  || die "NEXUS_COMPAT_DB_PREFIX must match ^[a-z_][a-z0-9_]{0,50}\$ (got '$DB_PREFIX')"
+DB_NEW="${DB_PREFIX}_new"
+DB_BASE="${DB_PREFIX}_base"
 PKGS=${NEXUS_COMPAT_PKGS:-}
 TIMEOUT=${NEXUS_COMPAT_TIMEOUT:-20m}
+# Tests run one package at a time (-p 1) and at most this many at once within
+# a package: on a shared server near max_connections, the default (GOMAXPROCS)
+# fails tests at connect with "too many clients" (F153).
+PARALLEL=${NEXUS_COMPAT_PARALLEL:-2}
+[[ "$PARALLEL" =~ ^[1-9][0-9]*$ ]] || die "NEXUS_COMPAT_PARALLEL must be a positive integer (got '$PARALLEL')"
 # The migration set under test. Always services/migrations in CI; overridable
 # ONLY so the negative-control drill (docs/COMPATIBILITY.md §7.4) can prove this
 # gate fails on a breaking migration without editing the tree.
@@ -196,13 +197,14 @@ PREV="$WORK/prev"
 LOG_DEST=${NEXUS_COMPAT_LOG:-${TMPDIR:-/tmp}/nexus-compat-${prev_sha:0:12}.log}
 LOG_DEST=${LOG_DEST//\/\//\/}
 
+DBS_CREATED=""
 cleanup() {
   local rc=$?
   if [ "${NEXUS_COMPAT_KEEP:-0}" = "1" ]; then
-    say "NEXUS_COMPAT_KEEP=1: leaving container $PG_NAME and $WORK in place"
+    say "NEXUS_COMPAT_KEEP=1: leaving databases ${DBS_CREATED:-none} and $WORK in place"
   else
-    # Only the container this run started (by id), never a namesake.
-    if [ -n "${PG_ID:-}" ]; then docker rm -f "$PG_ID" >/dev/null 2>&1 || true; fi
+    # Only the databases this run created (and tagged), never a namesake.
+    for db in $DBS_CREATED; do hostpg_drop "$db" || true; done
     rm -rf "$WORK"
   fi
   exit "$rc"
@@ -255,68 +257,26 @@ else
   printf '  + %s\n' "${new_migrations[@]}"
 fi
 
-# ── c. disposable Postgres ─────────────────────────────────────────────────
-# A container of this name left by a crashed earlier run of THIS script is
-# replaced; anything else of that name is someone else's, and is left alone.
-if docker container inspect "$PG_NAME" >/dev/null 2>&1; then
-  existing_label=$(docker container inspect -f "{{ index .Config.Labels \"$OWNER_LABEL\" }}" "$PG_NAME")
-  if [ "$existing_label" = "$NAME_PREFIX" ]; then
-    say "removing $PG_NAME left behind by an earlier compat-smoke run"
-    docker rm -f "$PG_NAME" >/dev/null
-  else
-    die "a container named $PG_NAME exists and was not started by this script (label $OWNER_LABEL='${existing_label}'); refusing to remove it. Choose another NEXUS_COMPAT_NAME_PREFIX or NEXUS_COMPAT_PG_PORT"
-  fi
-fi
-# The port must be free before we claim it: docker would otherwise fail late,
-# or -- worse -- a stray local Postgres on it would answer our DSN.
-if (exec 3<>"/dev/tcp/127.0.0.1/$PG_PORT") 2>/dev/null; then
-  die "127.0.0.1:$PG_PORT is already in use; set NEXUS_COMPAT_PG_PORT to a free port"
-fi
-say "starting $PG_NAME ($PG_IMAGE) on 127.0.0.1:$PG_PORT"
-PG_ID=$(docker run -d --name "$PG_NAME" --label "$OWNER_LABEL=$NAME_PREFIX" \
-  -p "127.0.0.1:${PG_PORT}:5432" \
-  -e POSTGRES_USER="$PG_USER" -e POSTGRES_PASSWORD="$PG_PASS" -e POSTGRES_DB=nexus \
-  "$PG_IMAGE") || die "docker run failed for $PG_NAME"
-for i in $(seq 1 60); do
-  # -d nexus: the bootstrap database answers before initdb has finished.
-  docker exec "$PG_NAME" pg_isready -U "$PG_USER" -d nexus >/dev/null 2>&1 && break
-  [ "$i" = 60 ] && die "postgres did not become ready in 60s"
-  sleep 1
+# ── c. throwaway databases on the host's PostgreSQL ────────────────────
+hostpg_check | sed 's/^/compat: /'
+for db in "$DB_NEW" "$DB_BASE"; do
+  hostpg_create "$db"
+  DBS_CREATED="$DBS_CREATED $db"
 done
-# pg_isready can pass during the entrypoint's temporary (socket-only) server;
-# wait for a real query over TCP on the final one.
-for i in $(seq 1 30); do
-  docker exec "$PG_NAME" psql -h 127.0.0.1 -U "$PG_USER" -d nexus -tAc 'SELECT 1' >/dev/null 2>&1 && break
-  [ "$i" = 30 ] && die "postgres never accepted a TCP connection"
-  sleep 1
-done
-docker exec "$PG_NAME" psql -U "$PG_USER" -d nexus -v ON_ERROR_STOP=1 -q -c 'CREATE DATABASE nexus_baseline'
+say "databases $DB_NEW (upgrade path) and $DB_BASE (previous schema only) on $(hostpg_redact "$HOSTPG_SERVER")"
 
-dsn() { echo "postgres://$PG_USER:$PG_PASS@127.0.0.1:$PG_PORT/$1?sslmode=disable"; }
-DSN_NEW=$(dsn nexus)
-DSN_BASE=$(dsn nexus_baseline)
+dsn() { hostpg_url "$HOSTPG_SERVER" "$1"; }
+DSN_NEW=$(dsn "$DB_NEW")
+DSN_BASE=$(dsn "$DB_BASE")
 
 # migrate SCRIPT DIR DBNAME: run a deploy/migrate.sh over a migrations
-# directory. On the host when psql is installed (CI runners have it); otherwise
-# inside the Postgres container, which ships psql and sh -- same script either
-# way. NOTICEs ("... does not exist, skipping") are silenced; errors are not.
+# directory, the host's psql against the host's server. NOTICEs ("... does not
+# exist, skipping") are silenced; errors are not.
 migrate() {
-  local script=$1 dir=$2 db=$3
-  if command -v psql >/dev/null; then
-    DATABASE_URL=$(dsn "$db") MIGRATIONS_DIR="$dir" PGOPTIONS='-c client_min_messages=warning' \
-      sh "$script"
-  else
-    local dest="/tmp/compat-$db-$RANDOM"
-    docker exec "$PG_NAME" mkdir -p "$dest"
-    docker cp "$dir" "$PG_NAME:$dest/migrations" >/dev/null
-    docker cp "$script" "$PG_NAME:$dest/migrate.sh" >/dev/null
-    docker exec -e DATABASE_URL="postgres://$PG_USER:$PG_PASS@127.0.0.1:5432/$db?sslmode=disable" \
-      -e MIGRATIONS_DIR="$dest/migrations" -e PGOPTIONS='-c client_min_messages=warning' \
-      "$PG_NAME" sh "$dest/migrate.sh"
-  fi
+  hostpg_migrate "$(dsn "$3")" "$1" "$2"
 }
 ledger() {
-  docker exec "$PG_NAME" psql -U "$PG_USER" -d "$1" -tAc 'SELECT version FROM schema_migrations ORDER BY version'
+  hostpg_psql "$(dsn "$1")" -c 'SELECT version FROM schema_migrations ORDER BY version'
 }
 expected_ledger() {
   for f in "$1"/*.up.sql; do basename "$f" .up.sql; done | LC_ALL=C sort
@@ -325,18 +285,18 @@ expected_ledger() {
 # ── d. the upgrade path ────────────────────────────────────────────────────
 rule
 say "applying the PREVIOUS release's migrations with its own migrate.sh (the database production has)"
-migrate "$PREV/deploy/migrate.sh" "$PREV/services/migrations" nexus | sed 's/^/  /' \
+migrate "$PREV/deploy/migrate.sh" "$PREV/services/migrations" "$DB_NEW" | sed 's/^/  /' \
   || die "the previous release's own migrations failed to apply to an empty database" 3
 say "upgrading with the CURRENT tree's migrate.sh and $CUR_MIG"
-migrate "$ROOT/deploy/migrate.sh" "$CUR_MIG" nexus | sed 's/^/  /' \
+migrate "$ROOT/deploy/migrate.sh" "$CUR_MIG" "$DB_NEW" | sed 's/^/  /' \
   || die "the upgrade from the previous release's schema FAILED: a database at $prev_ref cannot be migrated to this tree" 1
-if ! diff <(ledger nexus | LC_ALL=C sort) <(expected_ledger "$CUR_MIG") >/dev/null; then
-  diff <(ledger nexus | LC_ALL=C sort) <(expected_ledger "$CUR_MIG") >&2 || true
+if ! diff <(ledger "$DB_NEW" | LC_ALL=C sort) <(expected_ledger "$CUR_MIG") >/dev/null; then
+  diff <(ledger "$DB_NEW" | LC_ALL=C sort) <(expected_ledger "$CUR_MIG") >&2 || true
   die "schema_migrations does not match this tree's migration set after the upgrade" 1
 fi
-say "ledger matches this tree ($(ledger nexus | wc -l | tr -d ' ') migrations)"
+say "ledger matches this tree ($(ledger "$DB_NEW" | wc -l | tr -d ' ') migrations)"
 say "baseline database: PREVIOUS migrations only (for triage)"
-migrate "$PREV/deploy/migrate.sh" "$PREV/services/migrations" nexus_baseline | sed 's/^/  /' \
+migrate "$PREV/deploy/migrate.sh" "$PREV/services/migrations" "$DB_BASE" | sed 's/^/  /' \
   || die "the previous release's migrations failed on the baseline database" 3
 
 # ── e. the previous release's suite against the new schema ────────────────
@@ -347,13 +307,16 @@ skip_marker=${skip_marker:-skipping integration test: no test database}
 
 run_suite() { # DSN LOG -- extra go test args...
   local dsn=$1 log=$2; shift 3
-  local args=(-tags integration -count=1 -p 1 -timeout "$TIMEOUT" -json)
+  local args=(-tags integration -count=1 -p 1 -parallel "$PARALLEL" -timeout "$TIMEOUT" -json)
   [ -n "$SKIP_RE" ] && args+=(-skip "$SKIP_RE")
   ( cd "$PREV" && NEXUS_TEST_DATABASE_URL=$dsn go test "${args[@]}" "$@" ) >"$log" 2>&1
 }
 # Pulls "pkg<TAB>Test" for every failed top-level test out of go test -json.
+# Empty output, not a failed pipeline, when only a PACKAGE failed (a test
+# timeout, a panic): under pipefail the empty grep used to end the script with
+# exit 1 and no message, before the package-level diagnosis below.
 failed_tests() {
-  grep '"Action":"fail"' "$1" | grep '"Test":"' \
+  { grep '"Action":"fail"' "$1" | grep '"Test":"' || true; } \
     | sed -E 's/.*"Package":"([^"]*)".*"Test":"([^"/]*)[^"]*".*/\1	\2/' | LC_ALL=C sort -u
 }
 # Top-level tests only (no "/" in the name): subtests would inflate the counts.

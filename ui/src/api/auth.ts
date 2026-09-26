@@ -416,16 +416,103 @@ export const authApi = {
     });
   },
 
-  async listAudit(
-    namespace: string,
-    filter: { action?: string; outcome?: string; limit?: number } = {},
-  ): Promise<AuditEntry[]> {
-    const q = new URLSearchParams();
-    if (filter.action) q.set('action', filter.action);
-    if (filter.outcome) q.set('outcome', filter.outcome);
+  /**
+   * One page of the trail, newest first, and the keyset cursor to the next
+   * (older) page; `nextCursor` is null at the end of the trail.
+   */
+  async listAuditPage(namespace: string, filter: AuditFilter & { limit?: number; cursor?: string } = {}): Promise<AuditPage> {
+    const q = auditQuery(filter);
     if (filter.limit) q.set('limit', String(filter.limit));
+    if (filter.cursor) q.set('cursor', filter.cursor);
     const qs = q.toString();
     const payload = await authRequest<unknown>(`${ns(namespace)}/audit${qs ? `?${qs}` : ''}`);
-    return list<AuditEntry>(payload, 'entries');
+    const next = payload && typeof payload === 'object' ? (payload as { next_cursor?: unknown }).next_cursor : null;
+    return { entries: list<AuditEntry>(payload, 'entries'), nextCursor: typeof next === 'string' && next !== '' ? next : null };
+  },
+
+  /**
+   * The server's export of every entry matching the filter (not one page):
+   * NDJSON carries the hash-chain header and trailer `nexusctl audit verify`
+   * checks, CSV is for spreadsheets and SIEM import, KGF is KGF Cloud's event
+   * shape. Fetched rather than linked because the export needs the credential
+   * header, which a plain link cannot send.
+   */
+  async exportAudit(namespace: string, format: AuditExportFormat, filter: AuditFilter = {}): Promise<AuditExport> {
+    const q = auditQuery(filter);
+    q.set('format', format);
+    const url = apiUrl(`${ns(namespace)}/audit/export?${q.toString()}`);
+    let res: Response;
+    try {
+      res = await fetch(url, { headers: { Accept: EXPORT_TYPES[format], ...authHeader() } });
+    } catch (cause) {
+      throw new ApiError(`Cannot reach the Nexus API at ${url || '/'}. Is the api-gateway running?`, { status: 0, url, body: String(cause) });
+    }
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new ApiError(authMessage(res.status, body), { status: res.status, url, body });
+    }
+    const text = await res.text();
+    const disposition = res.headers.get('Content-Disposition') ?? '';
+    const named = /filename="?([^";]+)"?/.exec(disposition)?.[1];
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    return {
+      text,
+      contentType: res.headers.get('Content-Type') ?? EXPORT_TYPES[format],
+      filename: named ?? `audit-${namespace}-${stamp}${EXPORT_EXTENSIONS[format]}`,
+    };
   },
 };
+
+export interface AuditFilter {
+  action?: string;
+  outcome?: string;
+}
+
+export interface AuditPage {
+  entries: AuditEntry[];
+  nextCursor: string | null;
+}
+
+export type AuditExportFormat = 'ndjson' | 'csv' | 'kgf';
+
+export interface AuditExport {
+  text: string;
+  contentType: string;
+  filename: string;
+}
+
+const EXPORT_TYPES: Record<AuditExportFormat, string> = {
+  ndjson: 'application/x-ndjson',
+  csv: 'text/csv',
+  kgf: 'application/x-ndjson',
+};
+
+const EXPORT_EXTENSIONS: Record<AuditExportFormat, string> = {
+  ndjson: '.ndjson',
+  csv: '.csv',
+  kgf: '.kgf.ndjson',
+};
+
+function auditQuery(filter: AuditFilter): URLSearchParams {
+  const q = new URLSearchParams();
+  if (filter.action) q.set('action', filter.action);
+  if (filter.outcome) q.set('outcome', filter.outcome);
+  return q;
+}
+
+/**
+ * Whether an NDJSON export ends with its trailer. The gateway streams it, so a
+ * failure after the first row cannot change the status code; the missing
+ * trailer is the only sign the file stops early (the verifier reports it as
+ * truncated).
+ */
+export function ndjsonExportComplete(text: string): boolean {
+  const lines = text.trimEnd().split('\n');
+  const last = lines[lines.length - 1];
+  if (!last) return false;
+  try {
+    return (JSON.parse(last) as { type?: unknown }).type === 'trailer';
+  } catch {
+    return false;
+  }
+}

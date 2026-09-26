@@ -416,7 +416,19 @@ func TestStaleLeaseStopsShipping(t *testing.T) {
 // outcome so the attempt cannot be counted twice.
 func TestWritesAfterFencingAreCountedAndCloseReportsOnce(t *testing.T) {
 	st, idx := newMemStore(), newFakeIndex()
+	// The fence must land AFTER the 20 lines, or some of them are (correctly)
+	// counted as fenced. With 64-byte chunks the first chunk seals and uploads
+	// while the loop is still writing, and the uploader goroutine fenced the
+	// shipper mid-loop whenever it was scheduled first: under load it counted
+	// five pre-fence lines (40 bytes) as fenced, "got 56". The shipper was
+	// right; the test assumed an ordering it never enforced. The stale ack is
+	// now withheld until the writes are done.
+	writesDone := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(writesDone) }) }
+	t.Cleanup(release) // never leave the uploader blocked on a failed test
 	idx.respond = func(*nexusv1.ReportLogsRequest) (*nexusv1.Ack, error) {
+		<-writesDone
 		return &nexusv1.Ack{Accepted: false, Reason: "stale_lease_token"}, nil
 	}
 	cfg := testConfig(t)
@@ -425,6 +437,13 @@ func TestWritesAfterFencingAreCountedAndCloseReportsOnce(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		fmt.Fprintf(s.Writer("stdout"), "line %d\n", i)
 	}
+	s.mu.Lock()
+	if s.fenced || s.fencedBytes != 0 {
+		s.mu.Unlock()
+		t.Fatal("fenced before any ack was answered")
+	}
+	s.mu.Unlock()
+	release()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		s.mu.Lock()
