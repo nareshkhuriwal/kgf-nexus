@@ -12,7 +12,7 @@ every git-tracked text file:
   * "OPERATIONS[.md] §N[.M...]" and "OPERATIONS[.md] section N[.M...]", plus
     the §-chain that follows on the same line ("OPERATIONS §12 and §20.6");
   * "OPERATIONS[.md] N.M" (the Makefile's short form);
-  * "OPERATIONS.md#anchor" links, checked against GitHub's heading slugs;
+  * "OPERATIONS.md#<anchor>" links, checked against GitHub's heading slugs;
   * inside OPERATIONS.md itself, every bare "§N[.M]";
 
 and requires each number to be a heading of OPERATIONS.md ("## N." or

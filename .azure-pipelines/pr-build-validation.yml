@@ -15,6 +15,10 @@
 #                     production build. On by default (see runUserInterface).
 #   Terraform         `make tf-validate` and `make tf-lint` over deploy/terraform,
 #                     offline (-backend=false, mocked providers). Always on.
+#   Helm              `make helm-validate`: pinned helm + kubeconform, schemas
+#                     locked by hash, render-asserted guards. Always on.
+#   Proto             `make proto-lint` and `make proto-breaking` (pinned buf)
+#                     against the previous main. Always on.
 #   BuildValidation   one job per image; built, never pushed.
 #   EndToEnd          the real compose stack, every example run to SUCCEEDED,
 #                     and the chaos suite. Off by default; ~45 minutes.
@@ -555,6 +559,64 @@ stages:
         make tf-lint
       displayName: 'make tf-lint (tflint, checkov, trivy)'
 
+# The Helm chart and the proto contract, with the tools pinned and
+# checksum-verified by deploy/scripts/pinned-tool.sh (the same make targets as
+# the GitHub workflow's `helm` and `proto` jobs). Tools and Kubernetes/CRD
+# schemas are cached under $(Agent.ToolsDirectory), which `clean: all` keeps,
+# so a warm agent needs no network for either stage; every cached file is
+# re-verified against its pin on use. docs/OPERATIONS.md §20.10.
+- stage: Helm
+  displayName: 'Helm chart (lint, render, schema-check)'
+  dependsOn: []
+  jobs:
+  - job: ValidateChart
+    displayName: 'deploy/helm/validate.sh'
+    timeoutInMinutes: 15
+    workspace:
+      clean: all
+    variables:
+      NEXUS_TOOLS_DIR: '$(Agent.ToolsDirectory)/nexus-pinned-tools'
+      KUBECONFORM_SCHEMA_CACHE: '$(Agent.ToolsDirectory)/kubeconform-schemas'
+    steps:
+    - checkout: self
+      persistCredentials: false
+    - script: |
+        set -euo pipefail
+        make helm-validate
+      displayName: 'make helm-validate (pinned helm + kubeconform, locked schemas)'
+
+- stage: Proto
+  displayName: 'Proto contract (buf lint, buf breaking)'
+  dependsOn: []
+  jobs:
+  - job: CheckProto
+    displayName: 'buf lint and breaking against the previous main'
+    timeoutInMinutes: 10
+    workspace:
+      clean: all
+    variables:
+      NEXUS_TOOLS_DIR: '$(Agent.ToolsDirectory)/nexus-pinned-tools'
+    steps:
+    # Full history: the previous main is extracted with `git archive`.
+    - checkout: self
+      persistCredentials: false
+      fetchDepth: 0
+    - script: |
+        set -euo pipefail
+        make proto-lint
+      displayName: 'make proto-lint'
+    # On a PR the previous main is the target branch tip; on a push to main,
+    # its first parent. Azure checks out a merge commit for a PR, so name the
+    # target explicitly rather than guessing from HEAD.
+    - script: |
+        set -euo pipefail
+        if [ "$(Build.Reason)" = "PullRequest" ]; then
+          target="$(System.PullRequest.TargetBranch)"
+          export BUF_AGAINST="origin/${target#refs/heads/}"
+        fi
+        make proto-breaking
+      displayName: 'make proto-breaking'
+
 - ${{ if parameters.runUserInterface }}:
   - stage: UserInterface
     displayName: 'Operator Console'
@@ -727,6 +789,17 @@ stages:
           echo "##vso[task.setvariable variable=NEXUS_MINIO_CONSOLE_PORT]$MINIO_CONSOLE"
         displayName: 'Allocate Host Ports'
 
+      # deploy/docker-compose.yml requires NEXUS_WORKER_API_KEY, so both keys
+      # exist before the stack does. Secret variables: masked in the log, and
+      # passed to each step that needs them explicitly (Azure does not export
+      # secrets to the environment on its own).
+      - script: |
+          set -euo pipefail
+          echo "=== Generate This Run's API Keys ==="
+          echo "##vso[task.setvariable variable=NEXUS_WORKER_API_KEY;issecret=true]$(make -s worker-key)"
+          echo "##vso[task.setvariable variable=NEXUS_API_KEY;issecret=true]nxs_admin_$(openssl rand -hex 32)"
+        displayName: 'Generate API Keys'
+
       - script: |
           set -euo pipefail
           echo "=== Bring Up the Full Stack ==="
@@ -734,6 +807,7 @@ stages:
           make up
         displayName: 'Bring Up the Stack (make up)'
         env:
+          NEXUS_WORKER_API_KEY: $(NEXUS_WORKER_API_KEY)
           # Exported so compose substitutes them into its `ports:` defaults.
           NEXUS_UI_PORT: $(NEXUS_UI_PORT)
           NEXUS_API_PORT: $(NEXUS_API_PORT)
@@ -742,23 +816,18 @@ stages:
           NEXUS_MINIO_PORT: $(NEXUS_MINIO_PORT)
           NEXUS_MINIO_CONSOLE_PORT: $(NEXUS_MINIO_CONSOLE_PORT)
 
+      # The default tenant row, then both key hashes: the same target a
+      # developer runs. It uses the stack's own psql when the agent has none,
+      # and the allocated Postgres port otherwise.
       - script: |
           set -euo pipefail
-          echo "=== Seed an Admin API Key ==="
-          KEY="nxs_admin_$(openssl rand -hex 32)"
-          HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
-          # Only the SHA-256 hash is stored, matching how the gateway verifies
-          # it: a plaintext key in the database would defeat hashing at rest
-          # even in a throwaway stack.
-          docker compose -f deploy/docker-compose.yml exec -T postgres \
-            psql -U nexus -d nexus -v ON_ERROR_STOP=1 -q -c \
-            "INSERT INTO api_keys (namespace, name, key_hash, role)
-             VALUES ('default','ci-admin','$HASH','admin')
-             ON CONFLICT (key_hash) DO NOTHING"
-          # Masked so a re-read of the log cannot leak it, even though it is
-          # scoped to a stack that is destroyed at the end of this job.
-          echo "##vso[task.setvariable variable=NEXUS_API_KEY;issecret=true]$KEY"
-        displayName: 'Seed an API Key'
+          echo "=== Install the Keys (make seed) ==="
+          make seed
+        displayName: 'Install the Keys (make seed)'
+        env:
+          NEXUS_WORKER_API_KEY: $(NEXUS_WORKER_API_KEY)
+          NEXUS_DEV_API_KEY: $(NEXUS_API_KEY)
+          NEXUS_POSTGRES_PORT: $(NEXUS_POSTGRES_PORT)
 
       - script: |
           set -euo pipefail
@@ -776,6 +845,9 @@ stages:
           docker compose -f deploy/docker-compose.yml logs --tail=50 agent-cpu >&2
           exit 1
         displayName: 'Wait for the Fleet to Register'
+        env:
+          # Compose parses the whole file even for `exec`.
+          NEXUS_WORKER_API_KEY: $(NEXUS_WORKER_API_KEY)
 
       - script: |
           set -euo pipefail
@@ -800,6 +872,8 @@ stages:
           docker compose -f deploy/docker-compose.yml logs --tail=200
         displayName: 'Dump Service Logs on Failure'
         condition: failed()
+        env:
+          NEXUS_WORKER_API_KEY: $(NEXUS_WORKER_API_KEY)
 
       - script: |
           # COMPOSE_PROJECT_NAME is a job variable, so it is already exported
@@ -888,6 +962,8 @@ stages:
     - UnitTest
     - PythonSdk
     - Terraform
+    - Helm
+    - Proto
     - ${{ if parameters.runIntegration }}:
       - Integration
     - ${{ if parameters.runUserInterface }}:
@@ -912,6 +988,8 @@ stages:
         echo "✅ Generated files are synchronized with their sources"
         echo "✅ Every image builds without errors"
         echo "✅ Terraform modules and environments validate offline; mocked-plan tests and linters pass"
+        echo "✅ Helm chart lints, renders and schema-checks with pinned tools; every bad value is refused"
+        echo "✅ Protos pass buf lint, with no breaking change against the previous main"
         echo "${{ parameters.runIntegration }}" | grep -qi true \
           && echo "✅ Migrations applied and the integration suite ran against a real database" \
           || echo "⏭️  PostgreSQL integration suite not run (runIntegration is false)"

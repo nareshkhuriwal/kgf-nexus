@@ -2698,7 +2698,80 @@ external gRPC Service.
       expand/contract, `make compat-smoke` passed for the release, upgrade with
       `-f` values, then wait on pod readiness.
 - [ ] `deploy/helm/validate.sh` passes on your values file (copy it into
-      `ci/` or run `helm lint --strict -f`).
+      `ci/`). Running `helm lint --strict -f` by hand is **not** enough on
+      Helm 4 (§20.10); `helm template -f` must exit 0.
+- [ ] After every install or upgrade, readiness and restart counts were
+      checked as in §20.10, not only Helm's `--wait`.
+
+### 20.10 Helm 4: what lint and `--wait` do not tell you
+
+Two Helm 4 behaviours make its own exit codes weaker gates than they look.
+`deploy/helm/validate.sh` (CI: GitHub job `helm`, Azure stage `Helm`) is built
+around both. Helm and kubeconform are pinned and checksum-verified
+(`deploy/scripts/pinned-tool.sh`), and so are the Kubernetes and CRD schemas
+(`deploy/helm/schemas.lock`).
+
+**`helm lint` does not fail on the chart's guards.** Every guard in the chart
+(`existingSecret is required`, `confirmDelete=true`, the PDB and HPA checks, …)
+is a template `fail`. Helm 4's lint logs such a `fail` at INFO
+(`level=INFO msg="funcMap fail" message=...`) and still reports
+`0 chart(s) failed`, exit 0. Helm 3 printed it as an `[ERROR]`. A lint-only gate
+therefore passes values the chart would refuse at install time. Lint also does
+not apply `key: null` overrides from `-f` files the way install and template
+do. With `ci/external-deps-values.yaml` (which nulls
+`podDisruptionBudget.maxUnavailable`), lint "fails" the PDB guard on every
+service although the real render is fine. So:
+
+- The gate is `helm template` with the same values and `--kube-version`. It
+  coalesces values exactly as `helm install` does, and exits 1 with
+  `execution error at (...): <message>` when a guard fires. `validate.sh`
+  asserts that exit status and prints the error. It then checks the output with
+  kubeconform. It still runs `helm lint --strict` for lint's own findings, and
+  prints lint's `funcMap fail` lines as a note when the render passed.
+- `validate.sh` proves the gate itself with a probe:
+  `artifactGC.mode=delete` without `confirmDelete` must fail the render step,
+  although `helm lint` exits 0 on it.
+- By hand: `helm template nexus deploy/helm/kgf-nexus -f my-values.yaml
+  --kube-version <your cluster's> >/dev/null && echo OK`. Treat lint's exit code
+  as advisory.
+
+**`helm install/upgrade --wait` can return while a pod is crash-looping.** Seen
+in §20.8: the release reported `deployed` with an agent in `CrashLoopBackOff`.
+`--wait` considers a Deployment ready once enough replicas were Ready at some
+point, and a container that passes its probes briefly and then restarts
+satisfies it. After every install or upgrade:
+
+```sh
+for d in $(kubectl -n nexus get deploy -o name); do
+  kubectl -n nexus rollout status "$d" --timeout=5m || exit 1
+done
+kubectl -n nexus wait --for=condition=Ready pod \
+  -l 'app.kubernetes.io/component notin (migrate,bootstrap,minio-init,artifact-gc)' --timeout=5m
+# Then, a minute later: nothing restarting.
+kubectl -n nexus get pods -o custom-columns='POD:.metadata.name,RESTARTS:.status.containerStatuses[*].restartCount,STATE:.status.containerStatuses[*].state.waiting.reason' \
+  | awk 'NR==1 || $2 ~ /[1-9]/ || $3 ~ /CrashLoop|Error/'
+```
+
+A non-empty list after the header means the upgrade is not done. Read
+`kubectl -n nexus logs <pod> --previous` before retrying or rolling back
+(§6.3). An agent restarting once or twice on a cold install is the known
+first-registration race noted in §20.8. More restarts than that, or any
+restarting control-plane pod, is a failed rollout.
+
+**Why the chart's bootstrap Job writes to the database.** The `bootstrap` Job
+inserts the tenant row and the hashes of `worker-api-key` (and
+`admin-api-key`, if set) from `existingSecret` directly into Postgres. This is
+the one place a credential is created by SQL rather than by the API, because
+nothing can call the API yet. The agents need a worker credential when they
+first start, a fresh install has no user or token to authenticate a
+`POST /tokens`, and self-registration (what `nexusctl up` uses locally) needs
+e-mail verification, which a production install cannot automate. The Job uses
+the chart's database credentials, is idempotent, and stores only SHA-256 hashes.
+Once the release is up, mint further credentials, including rotated worker
+tokens (role `worker`, scope `worker_rpc`, F114), through the console or
+`POST /v1/namespaces/{ns}/tokens`, and revoke the bootstrap keys. Locally,
+`nexusctl up` mints both of its credentials through the API and writes nothing
+to the database (cli/README.md, "Local quick start").
 
 ---
 

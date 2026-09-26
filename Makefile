@@ -537,10 +537,13 @@ license-report: ## List the license of every module compiled into the binaries
 
 # Fails when a first-party source file is missing its SPDX identifier. Generated
 # code is exempt: it is rewritten by protoc and would lose the header anyway.
+# So are the `nexusctl init` scaffolds (cli/internal/templates/files/): they are
+# copied into the user's own project, where our header would mislabel their code.
 license-check: ## Assert every first-party source file carries an SPDX identifier
 	@missing=0; \
 	for f in $$(git ls-files '*.go' '*.ts' '*.tsx' '*.py' '*.sh' '*.sql' '*.proto' \
-	            | grep -v '/gen/' | grep -v '^gen/'); do \
+	            | grep -v '/gen/' | grep -v '^gen/' \
+	            | grep -v '^cli/internal/templates/files/'); do \
 	  if ! head -5 "$$f" | grep -q 'SPDX-License-Identifier'; then \
 	    echo "missing SPDX header: $$f"; missing=1; \
 	  fi; \
@@ -555,3 +558,27 @@ license-check: ## Assert every first-party source file carries an SPDX identifie
 .PHONY: compat-smoke
 compat-smoke: ## Run the previous release's DB integration suite against this tree's migrated schema
 	tests/compat/previous-release-smoke.sh
+
+# ── Pinned tools, chart and proto checks ──────────────────────────────────
+# Every tool is one exact release, downloaded into .tools/ and refused unless
+# its SHA-256 matches the pin in deploy/scripts/pinned-tool.sh.
+.PHONY: tools helm-validate proto-lint proto-breaking proto-check actionlint
+tools: ## Install the pinned, checksum-verified helm, kubeconform and buf into .tools/
+	@for t in helm kubeconform buf; do deploy/scripts/pinned-tool.sh $$t; done
+
+helm-validate: ## Lint, render and schema-check the Helm chart offline-capable (deploy/helm/validate.sh)
+	deploy/helm/validate.sh
+
+proto-lint: ## buf lint over proto/ (exceptions in proto/buf.yaml)
+	proto/check.sh lint
+
+proto-breaking: ## buf breaking against the previous main (BUF_AGAINST=<rev> overrides)
+	proto/check.sh breaking
+
+proto-check: ## buf lint and buf breaking
+	proto/check.sh all
+
+# actionlint in its digest-pinned image, over .github/workflows (needs Docker).
+ACTIONLINT_IMAGE ?= rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+actionlint: ## Lint the GitHub workflows with the pinned actionlint image
+	docker run --rm -v "$(CURDIR):/repo:ro" -w /repo $(ACTIONLINT_IMAGE) -color
