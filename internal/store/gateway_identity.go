@@ -75,6 +75,10 @@ type ScopedTokenRow struct {
 	CreatedBy  *string
 	CreatedAt  time.Time
 	RevokedAt  *time.Time
+	// ServiceAccountID and Permissions are migration 0032's additions; nil for
+	// a pre-0032 token.
+	ServiceAccountID *string
+	Permissions      []string
 }
 
 // ── credential generation ────────────────────────────────────────────────
@@ -397,6 +401,9 @@ type ResolvedSession struct {
 	SessionID string
 	User      UserRow
 	ExpiresAt time.Time
+	// SSOProviderID is the identity provider that minted the session (0032),
+	// empty for a password session.
+	SSOProviderID string
 }
 
 // GatewayCreateSession mints a session token for a user and stores its hash.
@@ -441,7 +448,7 @@ func GatewayCreateSession(ctx context.Context, q GWQuerier, userID string, ttl t
 func GatewayResolveSession(ctx context.Context, q GWQuerier, presented string) (ResolvedSession, error) {
 	var rs ResolvedSession
 	err := q.QueryRow(ctx, `
-		SELECT s.id::text, s.expires_at,
+		SELECT s.id::text, s.expires_at, COALESCE(s.sso_provider_id::text, ''),
 		       u.id::text, u.namespace, u.email, u.display_name, u.role, u.created_at, u.disabled_at
 		  FROM sessions s
 		  JOIN users u ON u.id = s.user_id
@@ -450,7 +457,7 @@ func GatewayResolveSession(ctx context.Context, q GWQuerier, presented string) (
 		   AND s.expires_at > now()
 		   AND u.disabled_at IS NULL`,
 		HashAPIKey(presented),
-	).Scan(&rs.SessionID, &rs.ExpiresAt,
+	).Scan(&rs.SessionID, &rs.ExpiresAt, &rs.SSOProviderID,
 		&rs.User.ID, &rs.User.Namespace, &rs.User.Email, &rs.User.DisplayName,
 		&rs.User.Role, &rs.User.CreatedAt, &rs.User.DisabledAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -579,6 +586,12 @@ type ResolvedToken struct {
 	Name      string
 	Role      string
 	Scopes    []string
+	// ServiceAccountID is set when the token belongs to a service account
+	// (migration 0032). Its grants then come from the account's role bindings.
+	ServiceAccountID string
+	// Permissions is the token's explicit ceiling, nil when it has none. A
+	// non-nil empty slice is a ceiling of nothing.
+	Permissions []string
 }
 
 // GatewayCreateScopedToken mints a scoped token, returning the plaintext once.
@@ -587,6 +600,32 @@ type ResolvedToken struct {
 // authorizer intersects it with the role. Failing closed matters here: a token
 // created with a typo'd scope must be useless rather than accidentally broad.
 func GatewayCreateScopedToken(ctx context.Context, q GWQuerier, namespace, name, role string, scopes []string, expiresAt *time.Time, createdBy *string) (plaintext string, row ScopedTokenRow, err error) {
+	return GatewayCreateScopedTokenWith(ctx, q, TokenSpec{Namespace: namespace, Name: name, Role: role, Scopes: scopes, ExpiresAt: expiresAt, CreatedBy: createdBy})
+}
+
+// TokenSpec describes a scoped token to mint.
+type TokenSpec struct {
+	Namespace        string
+	Name             string
+	Role             string
+	Scopes           []string
+	ExpiresAt        *time.Time
+	CreatedBy        *string
+	ServiceAccountID *string
+	// Permissions is the explicit ceiling; nil stores SQL NULL (no ceiling).
+	Permissions []string
+}
+
+// GatewayCreateScopedTokenWith mints a token, optionally owned by a service
+// account and carrying a permission ceiling (migration 0032).
+func GatewayCreateScopedTokenWith(ctx context.Context, q GWQuerier, spec TokenSpec) (plaintext string, row ScopedTokenRow, err error) {
+	namespace, name, role, scopes, expiresAt, createdBy := spec.Namespace, spec.Name, spec.Role, spec.Scopes, spec.ExpiresAt, spec.CreatedBy
+	var perms []byte
+	if spec.Permissions != nil {
+		if perms, err = json.Marshal(spec.Permissions); err != nil {
+			return "", ScopedTokenRow{}, fmt.Errorf("encode permissions: %w", err)
+		}
+	}
 	plaintext, err = GenerateSecret("nxtok")
 	if err != nil {
 		return "", ScopedTokenRow{}, err
@@ -599,20 +638,25 @@ func GatewayCreateScopedToken(ctx context.Context, q GWQuerier, namespace, name,
 		return "", ScopedTokenRow{}, fmt.Errorf("encode scopes: %w", err)
 	}
 
-	var rawScopes []byte
+	var rawScopes, rawPerms []byte
 	err = q.QueryRow(ctx, `
-		INSERT INTO scoped_tokens (namespace, name, token_hash, scopes, role, expires_at, created_by)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
+		INSERT INTO scoped_tokens (namespace, name, token_hash, scopes, role, expires_at, created_by, service_account_id, permissions)
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9::jsonb)
 		RETURNING id::text, namespace, name, scopes, role, expires_at, last_used_at,
-		          created_by::text, created_at, revoked_at`,
-		namespace, name, HashAPIKey(plaintext), encoded, role, expiresAt, createdBy,
+		          created_by::text, created_at, revoked_at, service_account_id::text, permissions`,
+		namespace, name, HashAPIKey(plaintext), encoded, role, expiresAt, createdBy, spec.ServiceAccountID, perms,
 	).Scan(&row.ID, &row.Namespace, &row.Name, &rawScopes, &row.Role, &row.ExpiresAt,
-		&row.LastUsedAt, &row.CreatedBy, &row.CreatedAt, &row.RevokedAt)
+		&row.LastUsedAt, &row.CreatedBy, &row.CreatedAt, &row.RevokedAt, &row.ServiceAccountID, &rawPerms)
 	if err != nil {
 		return "", ScopedTokenRow{}, fmt.Errorf("create scoped token: %w", err)
 	}
 	if err := json.Unmarshal(rawScopes, &row.Scopes); err != nil {
 		return "", ScopedTokenRow{}, fmt.Errorf("decode scopes: %w", err)
+	}
+	if rawPerms != nil {
+		if err := json.Unmarshal(rawPerms, &row.Permissions); err != nil {
+			return "", ScopedTokenRow{}, fmt.Errorf("decode permissions: %w", err)
+		}
 	}
 	return plaintext, row, nil
 }
@@ -624,15 +668,29 @@ func GatewayCreateScopedToken(ctx context.Context, q GWQuerier, namespace, name,
 // no expiry, which is what `OR expires_at > now()` expresses.
 func GatewayResolveScopedToken(ctx context.Context, q GWQuerier, presented string) (ResolvedToken, error) {
 	var rt ResolvedToken
-	var rawScopes []byte
+	var rawScopes, rawPerms []byte
+	var saID *string
+	// A service-account token is live only while its account is enabled: the
+	// join is the revocation, so disabling the account needs no token sweep.
 	err := q.QueryRow(ctx, `
-		SELECT id::text, namespace, name, role, scopes
-		  FROM scoped_tokens
-		 WHERE token_hash = $1
-		   AND revoked_at IS NULL
-		   AND (expires_at IS NULL OR expires_at > now())`,
+		SELECT t.id::text, t.namespace, t.name, t.role, t.scopes, t.service_account_id::text, t.permissions
+		  FROM scoped_tokens t
+		  LEFT JOIN service_accounts sa ON sa.id = t.service_account_id
+		 WHERE t.token_hash = $1
+		   AND t.revoked_at IS NULL
+		   AND (t.expires_at IS NULL OR t.expires_at > now())
+		   AND (t.service_account_id IS NULL OR (sa.id IS NOT NULL AND sa.disabled_at IS NULL))`,
 		HashAPIKey(presented),
-	).Scan(&rt.TokenID, &rt.Namespace, &rt.Name, &rt.Role, &rawScopes)
+	).Scan(&rt.TokenID, &rt.Namespace, &rt.Name, &rt.Role, &rawScopes, &saID, &rawPerms)
+	if saID != nil {
+		rt.ServiceAccountID = *saID
+	}
+	if err == nil && rawPerms != nil {
+		rt.Permissions = []string{}
+		if err = json.Unmarshal(rawPerms, &rt.Permissions); err != nil {
+			return ResolvedToken{}, fmt.Errorf("decode permissions for token %s: %w", rt.TokenID, err)
+		}
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ResolvedToken{}, ErrIdentityUnknown
 	}
@@ -669,7 +727,7 @@ func GatewayListScopedTokens(ctx context.Context, q GWQuerier, namespace string,
 	}
 	rows, err := q.Query(ctx, `
 		SELECT id::text, namespace, name, scopes, role, expires_at, last_used_at,
-		       created_by::text, created_at, revoked_at
+		       created_by::text, created_at, revoked_at, service_account_id::text, permissions
 		  FROM scoped_tokens
 		 WHERE namespace = $1
 		 ORDER BY created_at DESC
@@ -682,10 +740,15 @@ func GatewayListScopedTokens(ctx context.Context, q GWQuerier, namespace string,
 	out := make([]ScopedTokenRow, 0, 16)
 	for rows.Next() {
 		var t ScopedTokenRow
-		var rawScopes []byte
+		var rawScopes, rawPerms []byte
 		if err := rows.Scan(&t.ID, &t.Namespace, &t.Name, &rawScopes, &t.Role, &t.ExpiresAt,
-			&t.LastUsedAt, &t.CreatedBy, &t.CreatedAt, &t.RevokedAt); err != nil {
+			&t.LastUsedAt, &t.CreatedBy, &t.CreatedAt, &t.RevokedAt, &t.ServiceAccountID, &rawPerms); err != nil {
 			return nil, fmt.Errorf("scan scoped token: %w", err)
+		}
+		if rawPerms != nil {
+			if err := json.Unmarshal(rawPerms, &t.Permissions); err != nil {
+				return nil, fmt.Errorf("decode permissions for token %s: %w", t.ID, err)
+			}
 		}
 		if err := json.Unmarshal(rawScopes, &t.Scopes); err != nil {
 			return nil, fmt.Errorf("decode scopes for token %s: %w", t.ID, err)

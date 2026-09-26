@@ -32,10 +32,10 @@ func (a *API) registerRBACRoutes(m *http.ServeMux) {
 		handler           func(http.ResponseWriter, *http.Request, authn.Principal)
 	}{
 		{"GET /v1/namespaces/{ns}/roles", "roles.view", a.listRoles},
-		{"PUT /v1/namespaces/{ns}/roles/{name}", "roles.manage", a.putRole},
-		{"DELETE /v1/namespaces/{ns}/roles/{name}", "roles.manage", a.deleteRole},
+		{"PUT /v1/namespaces/{ns}/roles/{name}", "roles.view", a.putRole},
+		{"DELETE /v1/namespaces/{ns}/roles/{name}", "roles.delete", a.deleteRole},
 		{"GET /v1/namespaces/{ns}/users/{id}/roles", "users.view", a.userRoles},
-		{"PUT /v1/namespaces/{ns}/users/{id}/roles", "roles.manage", a.userRoles},
+		{"PUT /v1/namespaces/{ns}/users/{id}/roles", "users.roles.assign", a.userRoles},
 	} {
 		// Permissions are declared statically; concurrent router creation is read-only.
 		m.Handle(x.route, a.guard(authn.ActionRead, x.handler))
@@ -96,15 +96,20 @@ func (a *API) putRole(w http.ResponseWriter, r *http.Request, p authn.Principal)
 		writeError(w, 409, "builtin", "Built-in roles cannot be edited")
 		return
 	}
-	allowed := map[string]bool{}
-	for _, g := range authn.Catalog() {
-		allowed[g] = true
+	// Creating and editing are separate grants (ADR-0024 §7). Editing a role
+	// changes every account that holds it, so it is checked against the same
+	// delegation rule as an assignment: every grant must be one the actor holds.
+	need := "roles.update"
+	if b.Revision == 0 {
+		need = "roles.create"
 	}
-	for _, g := range b.Permissions {
-		if !allowed[g] || !p.Allows(g) || g == "users.manage" || g == "tokens.manage" || g == "roles.manage" {
-			writeError(w, 403, "invalid_grant", "Cannot delegate permission: "+g)
-			return
-		}
+	if !p.Allows(need) {
+		writeError(w, 403, "forbidden", "Missing permission: "+need)
+		return
+	}
+	if g, ok := checkDelegable(p, b.Permissions); !ok {
+		writeError(w, 403, "invalid_grant", "Cannot delegate permission: "+g)
+		return
 	}
 	grants := map[string]bool{}
 	for _, g := range b.Permissions {
@@ -169,13 +174,18 @@ func (a *API) deleteRole(w http.ResponseWriter, r *http.Request, p authn.Princip
 		return
 	}
 	var bound bool
-	err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM rbac_user_access WHERE namespace=$1 AND roles ? $2)`, p.Namespace, name).Scan(&bound)
+	// A role in use anywhere cannot be deleted: user bindings (assigned or
+	// IdP-synced), service-account bindings, and IdP group mappings, which would
+	// otherwise silently grant nothing at the next login.
+	err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM rbac_user_access WHERE namespace=$1 AND (roles ? $2 OR idp_roles ? $2))
+		OR EXISTS(SELECT 1 FROM service_account_roles WHERE namespace=$1 AND roles ? $2)
+		OR EXISTS(SELECT 1 FROM sso_group_mappings WHERE namespace=$1 AND role_name=$2)`, p.Namespace, name).Scan(&bound)
 	if err != nil {
 		a.fail(w, r, "delete role", err)
 		return
 	}
 	if bound {
-		writeError(w, 409, "assigned", "Remove user assignments before deleting this role")
+		writeError(w, 409, "assigned", "Remove user and service-account assignments and IdP group mappings before deleting this role")
 		return
 	}
 	revision, parseErr := strconv.ParseInt(r.URL.Query().Get("revision"), 10, 64)
@@ -203,10 +213,10 @@ func (a *API) deleteRole(w http.ResponseWriter, r *http.Request, p authn.Princip
 func (a *API) userRoles(w http.ResponseWriter, r *http.Request, p authn.Principal) {
 	id := r.PathValue("id")
 	if r.Method == "GET" {
-		var roles json.RawMessage
+		var roles, idpRoles json.RawMessage
 		var revision int64
 		var accountRole string
-		err := a.db.QueryRow(r.Context(), `SELECT a.roles,COALESCE(a.revision,0),u.role FROM users u LEFT JOIN rbac_user_access a ON a.user_id=u.id AND a.namespace=u.namespace WHERE u.id::text=$1 AND u.namespace=$2`, id, p.Namespace).Scan(&roles, &revision, &accountRole)
+		err := a.db.QueryRow(r.Context(), `SELECT a.roles,a.idp_roles,COALESCE(a.revision,0),u.role FROM users u LEFT JOIN rbac_user_access a ON a.user_id=u.id AND a.namespace=u.namespace WHERE u.id::text=$1 AND u.namespace=$2`, id, p.Namespace).Scan(&roles, &idpRoles, &revision, &accountRole)
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, 404, "not_found", "User not found")
 			return
@@ -219,7 +229,12 @@ func (a *API) userRoles(w http.ResponseWriter, r *http.Request, p authn.Principa
 			writeJSON(w, 200, map[string]any{"roles": []string{authn.AdministratorRole}, "legacy": false, "revision": 0, "protected": true})
 			return
 		}
-		writeJSON(w, 200, map[string]any{"roles": roles, "legacy": roles == nil, "revision": revision})
+		if idpRoles == nil {
+			idpRoles = json.RawMessage("[]")
+		}
+		// idp_roles are granted by the identity provider's groups at each login
+		// (ADR-0024 §6) and are read-only here; roles are the administrator's.
+		writeJSON(w, 200, map[string]any{"roles": roles, "idp_roles": idpRoles, "legacy": roles == nil, "revision": revision})
 		return
 	}
 	if id == p.UserID {
@@ -260,6 +275,11 @@ func (a *API) userRoles(w http.ResponseWriter, r *http.Request, p authn.Principa
 		writeError(w, 409, "protected_admin", "Existing administrator accounts retain recovery access; assign module roles to a reader account")
 		return
 	}
+	// A delegate may only re-bind an account no more powerful than itself;
+	// otherwise it could strip a peer with broader authority.
+	if a.refuseTarget(w, r, p, "user.roles.assign", id, checkTargetAuthority(r.Context(), tx, p, p.Namespace, id)) {
+		return
+	}
 
 	for _, name := range b.Roles {
 		if strings.EqualFold(strings.TrimSpace(name), authn.AdministratorRole) {
@@ -283,11 +303,9 @@ func (a *API) userRoles(w http.ResponseWriter, r *http.Request, p authn.Principa
 				return
 			}
 		}
-		for _, grant := range grants {
-			if !p.Allows(grant) {
-				writeError(w, 403, "invalid_grant", "Cannot delegate permission: "+grant)
-				return
-			}
+		if g, ok := checkDelegable(p, grants); !ok {
+			writeError(w, 403, "invalid_grant", "Cannot delegate permission: "+g)
+			return
 		}
 	}
 
@@ -364,8 +382,14 @@ func isProtectedRole(name string) bool {
 // Create the identity and initial assignment in one transaction: a failed role
 // lookup/assignment must never leave an account with legacy reader permissions.
 func (a *API) createUserWithRole(w http.ResponseWriter, r *http.Request, p authn.Principal, email, displayName, roleName, password string) {
-	if !p.Allows("roles.manage") {
-		writeError(w, 403, "forbidden", "Role assignment requires roles.manage")
+	if !p.Allows("users.roles.assign") {
+		writeError(w, 403, "forbidden", "Creating an account with a role requires users.roles.assign")
+		return
+	}
+	// An Administrator account is a recovery principal; only an Administrator
+	// (or Owner) may create one, never a delegate (ADR-0024 §7).
+	if roleName == authn.AdministratorRole && !p.IsAdministrator() {
+		writeError(w, 403, "forbidden", "Only an administrator can create an administrator account")
 		return
 	}
 	tx, err := a.db.Begin(r.Context())
@@ -395,9 +419,9 @@ func (a *API) createUserWithRole(w http.ResponseWriter, r *http.Request, p authn
 			return
 		}
 	}
-	for _, grant := range grants {
-		if !p.Allows(grant) {
-			writeError(w, 403, "invalid_grant", "Cannot delegate permission: "+grant)
+	if roleName != authn.AdministratorRole {
+		if g, ok := checkDelegable(p, grants); !ok {
+			writeError(w, 403, "invalid_grant", "Cannot delegate permission: "+g)
 			return
 		}
 	}

@@ -50,6 +50,11 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request, p authn.Princip
 		a.fail(w, r, "edit user", err)
 		return
 	}
+	// Changing an account's email changes who can recover it; a delegate may do
+	// that only to accounts no more powerful than itself (ADR-0024 §7).
+	if a.refuseTarget(w, r, p, "user.update", current.ID, checkTargetAuthority(r.Context(), tx, p, p.Namespace, current.ID)) {
+		return
+	}
 	if current.Email != *b.PreviousEmail || current.DisplayName != *b.PreviousDisplayName {
 		writeError(w, 409, "conflict", "This user changed. Close the editor, refresh the list, and reopen it before saving.")
 		return

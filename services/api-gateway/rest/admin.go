@@ -189,7 +189,15 @@ func (a *API) logout(w http.ResponseWriter, r *http.Request, p authn.Principal) 
 		return
 	}
 	a.auditPrincipal(r, p, "session.logout", "session", p.KeyID, store.AuditSuccess, nil)
-	writeJSON(w, http.StatusOK, map[string]any{"logged_out": true})
+	out := map[string]any{"logged_out": true}
+	// The local session is already gone. For an SSO session, also offer the
+	// IdP's logout (RP-initiated OIDC logout or a SAML LogoutRequest) so the
+	// browser does not walk straight back in through the IdP's session
+	// (ADR-0024 §11). Absent means the IdP offers none.
+	if u := a.ssoLogoutURL(r.Context(), p); u != "" {
+		out["end_session_url"] = u
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // whoami reports the calling principal.
@@ -236,6 +244,16 @@ func (a *API) whoami(w http.ResponseWriter, r *http.Request, p authn.Principal) 
 	if p.UserID != "" {
 		out["user_id"] = p.UserID
 	}
+	if p.HomeNamespace != "" {
+		// Acting in another namespace through an owner grant (ADR-0024 §9).
+		out["home_namespace"] = p.HomeNamespace
+	}
+	if p.ServiceAccountID != "" {
+		out["service_account_id"] = p.ServiceAccountID
+	}
+	if p.SSOProviderID != "" {
+		out["sso_provider_id"] = p.SSOProviderID
+	}
 	if p.Scopes != nil {
 		scopes := make([]string, 0, len(p.Scopes))
 		for _, s := range p.Scopes {
@@ -248,7 +266,39 @@ func (a *API) whoami(w http.ResponseWriter, r *http.Request, p authn.Principal) 
 
 // ── users ────────────────────────────────────────────────────────────────
 
+// usersPager is the keyset-paginated listing (ADR-0024 §10). Optional on the
+// interface so test doubles that predate it keep compiling; the store adapter
+// implements it.
+type usersPager interface {
+	ListUsersPage(ctx context.Context, namespace string, limit int, cursor, search string) (store.UsersPage, error)
+}
+
+// listUsers serves one page of accounts: ?limit (max 200), ?cursor from the
+// previous page's next_cursor, and ?q to match email or display name on the
+// server. next_cursor is null on the last page.
 func (a *API) listUsers(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	if pager, ok := a.identity.(usersPager); ok {
+		q := r.URL.Query()
+		page, err := pager.ListUsersPage(r.Context(), r.PathValue("ns"), intParam(r, "limit", 100), q.Get("cursor"), q.Get("q"))
+		if errors.Is(err, store.ErrBadCursor) {
+			writeError(w, http.StatusBadRequest, "invalid_cursor", "cursor is not one this server issued; restart from the first page")
+			return
+		}
+		if err != nil {
+			a.fail(w, r, "list users", err)
+			return
+		}
+		out := make([]map[string]any, 0, len(page.Users))
+		for _, u := range page.Users {
+			out = append(out, userPayload(u))
+		}
+		var next any
+		if page.NextCursor != "" {
+			next = page.NextCursor
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"users": out, "next_cursor": next})
+		return
+	}
 	rows, err := a.identity.ListUsers(r.Context(), r.PathValue("ns"), intParam(r, "limit", 100))
 	if err != nil {
 		a.fail(w, r, "list users", err)
@@ -303,6 +353,12 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request, p authn.Princip
 
 	if req.RoleName != "" {
 		a.createUserWithRole(w, r, p, req.Email, req.DisplayName, req.RoleName, req.Password)
+		return
+	}
+	// A legacy admin-role account is the Administrator system role: only an
+	// Administrator may mint one (ADR-0024 §7).
+	if req.Role == string(authn.RoleAdmin) && !p.IsAdministrator() {
+		writeError(w, http.StatusForbidden, "forbidden", "Only an administrator can create an administrator account")
 		return
 	}
 	user, err := a.identity.CreateUser(r.Context(), ns, req.Email, req.DisplayName, req.Role, req.Password)
@@ -369,6 +425,13 @@ func (a *API) setUserDisabled(w http.ResponseWriter, r *http.Request, p authn.Pr
 		return
 	}
 
+	action := "user.enable"
+	if disabled {
+		action = "user.disable"
+	}
+	if a.targetCheck(w, r, p, action, id) {
+		return
+	}
 	user, err := a.identity.SetUserDisabled(r.Context(), ns, id, disabled)
 	if errors.Is(err, store.ErrLastAdministrator) {
 		writeError(w, 409, "last_administrator", err.Error())
@@ -377,10 +440,6 @@ func (a *API) setUserDisabled(w http.ResponseWriter, r *http.Request, p authn.Pr
 	if err != nil {
 		a.fail(w, r, "set user disabled", err)
 		return
-	}
-	action := "user.enable"
-	if disabled {
-		action = "user.disable"
 	}
 	a.auditPrincipal(r, p, action, "user", user.ID, store.AuditSuccess,
 		map[string]any{"email": user.Email})
@@ -420,6 +479,10 @@ func (a *API) resetUserPassword(w http.ResponseWriter, r *http.Request, p authn.
 	user, err := a.identity.GetUser(r.Context(), ns, id)
 	if err != nil {
 		a.fail(w, r, "get user", err)
+		return
+	}
+	// Resetting a more powerful account's password is taking it over.
+	if a.targetCheck(w, r, p, "user.password_reset", user.ID) {
 		return
 	}
 	if err := a.identity.SetUserPassword(r.Context(), user.ID, req.Password); err != nil {
@@ -481,6 +544,9 @@ func (a *API) revokeUserSessions(w http.ResponseWriter, r *http.Request, p authn
 		a.fail(w, r, "get user", err)
 		return
 	}
+	if a.targetCheck(w, r, p, "user.sessions_revoked", user.ID) {
+		return
+	}
 	n, err := a.identity.RevokeUserSessions(r.Context(), user.ID)
 	if err != nil {
 		a.fail(w, r, "revoke sessions", err)
@@ -533,6 +599,10 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request, p authn.Princi
 		Role          string   `json:"role"`
 		Scopes        []string `json:"scopes"`
 		ExpiresInDays int      `json:"expires_in_days"`
+		// ADR-0024 §8: a token may belong to a service account and may carry
+		// an explicit permission ceiling. Pointer so "absent" and "[]" differ.
+		ServiceAccountID string    `json:"service_account_id"`
+		Permissions      *[]string `json:"permissions"`
 	}
 	if err := json.Unmarshal(nonEmptyJSON(body), &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", "request body is not valid JSON")
@@ -540,6 +610,18 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request, p authn.Princi
 	}
 	req.Name = strings.TrimSpace(req.Name)
 	req.Role = orDefault(strings.TrimSpace(req.Role), string(authn.RoleReader))
+	if req.ServiceAccountID != "" || req.Permissions != nil {
+		a.createCeilingToken(w, r, p, ns, req.Name, req.Role, req.Scopes, req.ExpiresInDays, req.ServiceAccountID, req.Permissions)
+		return
+	}
+	// An unceilinged token carries its role's full legacy authority. Minting
+	// one is therefore reserved to Administrators; a delegate with tokens.create
+	// must name a ceiling it holds (ADR-0024 §8).
+	if !p.IsAdministrator() {
+		writeError(w, http.StatusForbidden, "ceiling_required",
+			"Delegated token creation must set permissions (a ceiling within your own permissions)")
+		return
+	}
 
 	problems := validateNewToken(req.Name, req.Role, req.Scopes)
 	if len(problems) > 0 {
@@ -637,6 +719,8 @@ func tokenPayload(t store.ScopedTokenRow) map[string]any {
 		"scopes": t.Scopes, "role": t.Role,
 		"expires_at": t.ExpiresAt, "last_used_at": t.LastUsedAt,
 		"created_by": t.CreatedBy, "created_at": t.CreatedAt, "revoked_at": t.RevokedAt,
+		// ADR-0024 §8. permissions is null when the token has no ceiling.
+		"service_account_id": t.ServiceAccountID, "permissions": t.Permissions,
 		// Derived server-side: "can this credential be used right now" has one
 		// answer, and it is the one the authenticator's query computes.
 		"live": t.RevokedAt == nil && (t.ExpiresAt == nil || t.ExpiresAt.After(time.Now())),

@@ -41,6 +41,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/rest"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/sessions"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/sso"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/upstream"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/workergrpc"
 )
@@ -166,6 +167,11 @@ func run() error {
 		return err
 	}
 	api = api.WithEmailFlows(emailCfg)
+	ssoCfg, err := ssoConfig(log)
+	if err != nil {
+		return err
+	}
+	api = api.WithSSO(ssoCfg)
 
 	hc := health.New(map[string]health.Check{
 		// Readiness depends on the database because a gateway that cannot reach
@@ -598,6 +604,36 @@ func emailFlowConfig(log *slog.Logger) (rest.EmailFlowConfig, error) {
 			}
 			log.Info("SMTP server probe succeeded", "smtp_host", mcfg.Host, "smtp_port", mcfg.Port)
 		}()
+	}
+	return cfg, nil
+}
+
+// ssoConfig reads the installation's single sign-on policy (ADR-0024,
+// docs/OPERATIONS.md §24). SSO needs NEXUS_PUBLIC_URL: redirect URIs, the SAML
+// ACS and entity IDs are built from it. Without it the SSO routes answer 503
+// and the console shows no SSO buttons.
+func ssoConfig(log *slog.Logger) (*sso.Config, error) {
+	cfg := &sso.Config{
+		PublicURL:            env("NEXUS_PUBLIC_URL", ""),
+		SecretDir:            env("NEXUS_SSO_SECRET_DIR", "/var/run/secrets/nexus-sso"),
+		AllowEnvSecrets:      envBool("NEXUS_SSO_ALLOW_ENV_SECRETS", false),
+		AllowInsecureIssuers: envBool("NEXUS_SSO_ALLOW_INSECURE_ISSUERS", false),
+		AllowPrivateIssuers:  envBool("NEXUS_SSO_ALLOW_PRIVATE_ISSUERS", false),
+		ClockSkew:            time.Duration(envInt("NEXUS_SSO_CLOCK_SKEW_SEC", int(sso.DefaultClockSkew/time.Second))) * time.Second,
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("sso configuration: %w", err)
+	}
+	if !cfg.Enabled() {
+		log.Warn("single sign-on is DISABLED: NEXUS_PUBLIC_URL is not set")
+		return cfg, nil
+	}
+	log.Info("single sign-on configured", "public_url", cfg.PublicURL, "secret_dir", cfg.SecretDir,
+		"env_secrets", cfg.AllowEnvSecrets, "clock_skew", cfg.ClockSkew.String())
+	if cfg.AllowInsecureIssuers || cfg.AllowPrivateIssuers || cfg.AllowEnvSecrets {
+		log.Warn("single sign-on is running with DEVELOPMENT relaxations; do not use in a multi-tenant production installation",
+			"allow_insecure_issuers", cfg.AllowInsecureIssuers, "allow_private_issuers", cfg.AllowPrivateIssuers,
+			"allow_env_secrets", cfg.AllowEnvSecrets)
 	}
 	return cfg, nil
 }

@@ -11,7 +11,7 @@ import (
 )
 
 func TestEveryProtectedRouteHasPermission(t *testing.T) {
-	for _, file := range []string{"api.go", "platform.go"} {
+	for _, file := range []string{"api.go", "platform.go", "sso.go", "service_accounts.go", "owners.go", "clusters.go", "quotas.go", "rbac.go"} {
 		b, e := os.ReadFile(file)
 		if e != nil {
 			t.Fatal(e)

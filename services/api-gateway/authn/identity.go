@@ -14,11 +14,13 @@ package authn
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 )
 
@@ -172,6 +174,8 @@ func (a *Authenticator) authenticateSession(ctx context.Context, presented strin
 		Role:      role,
 		Kind:      KindSession,
 		UserID:    rs.User.ID,
+		// Which IdP minted the session, so logout can offer the IdP's logout.
+		SSOProviderID: rs.SSOProviderID,
 		// A session carries no scope narrowing: a logged-in human has their role's
 		// full authority. Scopes exist to narrow MACHINE credentials, which are the
 		// ones that sit unattended in a CI config.
@@ -199,14 +203,80 @@ func (a *Authenticator) authenticateScopedToken(ctx context.Context, presented s
 		a.touchFailed(ctx, "token", rt.TokenID, err)
 	}
 
-	return Principal{
+	p := Principal{
 		KeyID:     rt.TokenID,
 		Namespace: rt.Namespace,
 		Name:      rt.Name,
 		Role:      role,
 		Kind:      KindScopedToken,
 		Scopes:    parseScopes(rt.Scopes),
-	}, nil
+	}
+	return a.applyTokenCeiling(ctx, p, rt)
+}
+
+// applyTokenCeiling turns a service-account token or a ceilinged token into a
+// grant-bearing principal (ADR-0024 §8).
+//
+//   - Service-account token: grants = (the account's CURRENT roles) ∩ ceiling.
+//     Read on every request, so narrowing the account's roles narrows every
+//     token at once; disabling it is handled by the resolve query.
+//   - Legacy token with a ceiling: grants = (legacy role/scope allowances) ∩
+//     ceiling.
+//
+// The ceiling only ever removes permissions. A principal with Grants set can
+// never speak the worker protocol (Authorize refuses it).
+func (a *Authenticator) applyTokenCeiling(ctx context.Context, p Principal, rt store.ResolvedToken) (Principal, error) {
+	if rt.ServiceAccountID == "" && rt.Permissions == nil {
+		return p, nil
+	}
+	var base map[string]bool
+	if rt.ServiceAccountID != "" {
+		p.ServiceAccountID = rt.ServiceAccountID
+		if a.db == nil {
+			return Principal{}, ErrUnauthenticated
+		}
+		var raw []byte
+		err := a.db.QueryRow(ctx, `SELECT roles FROM service_account_roles WHERE service_account_id=$1 AND namespace=$2`, rt.ServiceAccountID, rt.Namespace).Scan(&raw)
+		var names []string
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			// No binding: the account holds nothing.
+		case err != nil:
+			return Principal{}, fmt.Errorf("resolve service account roles: %w", err)
+		default:
+			if err := json.Unmarshal(raw, &names); err != nil {
+				return Principal{}, fmt.Errorf("decode service account roles: %w", err)
+			}
+		}
+		p.RoleNames = names
+		base, err = grantsFor(ctx, a.db, rt.Namespace, names, true)
+		if err != nil {
+			return Principal{}, err
+		}
+	} else {
+		base = map[string]bool{}
+		for _, g := range Catalog() {
+			if legacyAllows(p, g) {
+				base[g] = true
+			}
+		}
+	}
+	grants := map[string]bool{}
+	if rt.Permissions != nil {
+		for _, g := range rt.Permissions {
+			if base[g] && Delegable(g) {
+				grants[g] = true
+			}
+		}
+	} else {
+		for g := range base {
+			if Delegable(g) {
+				grants[g] = true
+			}
+		}
+	}
+	p.Grants = grants
+	return p, nil
 }
 
 // parseScopes converts stored scope strings to Actions, DISCARDING any the

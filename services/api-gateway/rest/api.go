@@ -126,6 +126,10 @@ type API struct {
 	// cache is nil unless WithCacheInvalidator was called; its route answers 501.
 	cache CacheInvalidator
 
+	// sso is nil unless WithSSO was called; the SSO routes then answer 503
+	// sso_unavailable (ADR-0024).
+	sso *ssoService
+
 	// assignments reads an attempt's assignment for replay; nil means the
 	// store-backed reader. inlineThreshold is the configured ADR-0016 boundary
 	// reported alongside it. See assignment.go.
@@ -381,6 +385,13 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 	// The audit trail records who changed what. Admin-only: it names accounts and
 	// the actions taken against them.
 	mux.Handle("GET /v1/namespaces/{ns}/audit", a.guard(authn.ActionAdminWrite, a.listAudit))
+
+	// ADR-0024. Single sign-on (its public flow routes are unguarded like
+	// login, rate limited and audited in their handlers), service accounts and
+	// cross-namespace owners. Exact permissions come from routePermissions.
+	a.registerSSORoutes(mux)
+	a.registerServiceAccountRoutes(mux)
+	a.registerOwnerRoutes(mux)
 }
 
 // guard authenticates, authorizes for the path's namespace, and then dispatches.
@@ -436,6 +447,21 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 		}
 
 		ns := r.PathValue("ns")
+		// A session acting in ANOTHER namespace needs an explicit owner grant
+		// there (ADR-0024 §9). Resolved here, before Authorize, so the rest of
+		// the chain sees an ordinary principal of the target namespace and every
+		// downstream check (namespace match, permissions, audit namespace) holds.
+		if ns != "" && ns != p.Namespace && p.Kind == authn.KindSession && p.UserID != "" {
+			owner, ok, oerr := a.ownerPrincipal(r.Context(), p, ns)
+			if oerr != nil {
+				a.log.ErrorContext(r.Context(), "owner grant lookup failed", "error", oerr)
+				writeError(w, http.StatusServiceUnavailable, "unavailable", "authorization is temporarily unavailable")
+				return
+			}
+			if ok {
+				p = owner
+			}
+		}
 		if err := p.Authorize(ns, action); err != nil {
 			writeError(w, http.StatusForbidden, "forbidden", "not permitted for this namespace")
 			return
@@ -452,15 +478,12 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 				return
 			}
 		}
-		// Identity mutation and delegation remain restricted to unbound administrators.
-		if p.Grants != nil {
-			for _, permission := range required {
-				if permission == "users.manage" || permission == "tokens.manage" || permission == "roles.manage" {
-					writeError(w, 403, "forbidden", "Delegation requires a namespace administrator")
-					return
-				}
-			}
-		}
+		// Identity administration may be delegated to custom roles since
+		// ADR-0024 §7. What replaced the blanket refusal lives in the handlers,
+		// inside the namespace's advisory-lock transaction: grants can only be
+		// delegated if the actor holds them (content), a delegate can only act on
+		// accounts no more powerful than itself (target), and owners.grant is
+		// never delegable (reserved).
 		h(w, r.WithContext(authn.WithPrincipal(r.Context(), p)), p)
 	})
 }
