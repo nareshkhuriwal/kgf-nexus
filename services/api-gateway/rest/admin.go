@@ -52,6 +52,25 @@ type IdentityAdmin interface {
 	ListAudit(ctx context.Context, namespace string, f store.AuditFilter) ([]store.AuditRow, error)
 }
 
+// attributeKGF records the KGF identity on an audit entry written for a KGF
+// principal (ADR-0024 §5): actor kind "kgf", the effective KGF principal as
+// the label, the KGF request id in its own column, and the scope, role, token
+// id and any delegating service under detail.kgf.
+func attributeKGF(p authn.Principal, e *store.AuditEntry) {
+	if p.KGF == nil {
+		return
+	}
+	e.ActorKind = string(authn.KindKGF)
+	e.ActorLabel = p.KGF.Principal
+	e.RequestID = p.KGF.RequestID
+	d := map[string]any{}
+	for k, v := range e.Detail {
+		d[k] = v
+	}
+	d["kgf"] = p.KGF.AuditDetail()
+	e.Detail = d
+}
+
 // WithIdentity enables the identity and admin routes.
 //
 // Opt-in and nil-safe: a gateway built without it serves exactly the route set it
@@ -236,6 +255,14 @@ func (a *API) whoami(w http.ResponseWriter, r *http.Request, p authn.Principal) 
 	if p.UserID != "" {
 		out["user_id"] = p.UserID
 	}
+	if p.ServiceAccountID != "" {
+		out["service_account_id"] = p.ServiceAccountID
+	}
+	if p.KGF != nil {
+		// Who KGF says this is, and the scope the namespace was mapped from
+		// (ADR-0024 §3): the readable form of an opaque kgf-<hash> namespace.
+		out["kgf"] = p.KGF
+	}
 	if p.Scopes != nil {
 		scopes := make([]string, 0, len(p.Scopes))
 		for _, s := range p.Scopes {
@@ -248,7 +275,39 @@ func (a *API) whoami(w http.ResponseWriter, r *http.Request, p authn.Principal) 
 
 // ── users ────────────────────────────────────────────────────────────────
 
+// usersPager is the keyset-paginated listing (ADR-0024 §6). Optional on the
+// interface so test doubles that predate it keep compiling; the store adapter
+// implements it.
+type usersPager interface {
+	ListUsersPage(ctx context.Context, namespace string, limit int, cursor, search string) (store.UsersPage, error)
+}
+
+// listUsers serves one page of accounts: ?limit (max 200), ?cursor from the
+// previous page's next_cursor, and ?q to match email or display name on the
+// server. next_cursor is null on the last page.
 func (a *API) listUsers(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	if pager, ok := a.identity.(usersPager); ok {
+		q := r.URL.Query()
+		page, err := pager.ListUsersPage(r.Context(), r.PathValue("ns"), intParam(r, "limit", 100), q.Get("cursor"), q.Get("q"))
+		if errors.Is(err, store.ErrBadCursor) {
+			writeError(w, http.StatusBadRequest, "invalid_cursor", "cursor is not one this server issued; restart from the first page")
+			return
+		}
+		if err != nil {
+			a.fail(w, r, "list users", err)
+			return
+		}
+		out := make([]map[string]any, 0, len(page.Users))
+		for _, u := range page.Users {
+			out = append(out, userPayload(u))
+		}
+		var next any
+		if page.NextCursor != "" {
+			next = page.NextCursor
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"users": out, "next_cursor": next})
+		return
+	}
 	rows, err := a.identity.ListUsers(r.Context(), r.PathValue("ns"), intParam(r, "limit", 100))
 	if err != nil {
 		a.fail(w, r, "list users", err)
@@ -533,6 +592,10 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request, p authn.Princi
 		Role          string   `json:"role"`
 		Scopes        []string `json:"scopes"`
 		ExpiresInDays int      `json:"expires_in_days"`
+		// ADR-0024 §6: a token may belong to a service account and may carry
+		// an explicit permission ceiling. Pointer so "absent" and "[]" differ.
+		ServiceAccountID string    `json:"service_account_id"`
+		Permissions      *[]string `json:"permissions"`
 	}
 	if err := json.Unmarshal(nonEmptyJSON(body), &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", "request body is not valid JSON")
@@ -540,6 +603,18 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request, p authn.Princi
 	}
 	req.Name = strings.TrimSpace(req.Name)
 	req.Role = orDefault(strings.TrimSpace(req.Role), string(authn.RoleReader))
+	if req.ServiceAccountID != "" || req.Permissions != nil {
+		a.createCeilingToken(w, r, p, ns, req.Name, req.Role, req.Scopes, req.ExpiresInDays, req.ServiceAccountID, req.Permissions)
+		return
+	}
+	// An unceilinged token carries its role's full legacy authority, so only a
+	// Nexus administrator may mint one. A KGF principal must name a ceiling
+	// within its own grants, or use a service account (ADR-0024 §6).
+	if !isAdministrator(p) {
+		writeError(w, http.StatusForbidden, "ceiling_required",
+			"Set permissions (a ceiling within your own permissions) or mint the token for a service account")
+		return
+	}
 
 	problems := validateNewToken(req.Name, req.Role, req.Scopes)
 	if len(problems) > 0 {
@@ -637,6 +712,8 @@ func tokenPayload(t store.ScopedTokenRow) map[string]any {
 		"scopes": t.Scopes, "role": t.Role,
 		"expires_at": t.ExpiresAt, "last_used_at": t.LastUsedAt,
 		"created_by": t.CreatedBy, "created_at": t.CreatedAt, "revoked_at": t.RevokedAt,
+		// ADR-0024 §6. permissions is null when the token has no ceiling.
+		"service_account_id": t.ServiceAccountID, "permissions": t.Permissions,
 		// Derived server-side: "can this credential be used right now" has one
 		// answer, and it is the one the authenticator's query computes.
 		"live": t.RevokedAt == nil && (t.ExpiresAt == nil || t.ExpiresAt.After(time.Now())),
@@ -650,7 +727,9 @@ func (a *API) listAudit(w http.ResponseWriter, r *http.Request, _ authn.Principa
 		Action:  r.URL.Query().Get("action"),
 		ActorID: r.URL.Query().Get("actor_id"),
 		Outcome: r.URL.Query().Get("outcome"),
-		Limit:   intParam(r, "limit", 100),
+		// A KGF support reference resolves with ?request_id= (ADR-0024 §5).
+		RequestID: r.URL.Query().Get("request_id"),
+		Limit:     intParam(r, "limit", 100),
 	})
 	if err != nil {
 		a.fail(w, r, "list audit", err)
@@ -663,7 +742,7 @@ func (a *API) listAudit(w http.ResponseWriter, r *http.Request, _ authn.Principa
 			"actor_id": e.ActorID, "actor_kind": e.ActorKind, "actor_label": e.ActorLabel,
 			"action": e.Action, "target_kind": e.TargetKind, "target_id": e.TargetID,
 			"outcome": e.Outcome, "detail": rawJSON(e.Detail),
-			"client_ip": e.ClientIP, "occurred_at": e.OccurredAt,
+			"client_ip": e.ClientIP, "occurred_at": e.OccurredAt, "request_id": e.RequestID,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": out})
@@ -692,6 +771,7 @@ func (a *API) auditPrincipal(r *http.Request, p authn.Principal, action, targetK
 	if p.UserID != "" {
 		e.ActorID = &p.UserID
 	}
+	attributeKGF(p, &e)
 	a.auditAttempt(r, e)
 }
 

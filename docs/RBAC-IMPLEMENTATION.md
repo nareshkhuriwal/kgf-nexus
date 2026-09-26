@@ -12,19 +12,25 @@ Role changes are read from PostgreSQL for every authenticated session request. T
 
 Role writes and assignments serialize within the namespace; revisions reject stale saves. Assigned roles cannot be deleted. An administrator cannot change their own role bindings, delegate grants their credential does not hold, or disable the last active human administrator. Role/assignment writes and their audit entries commit together.
 
+## Added with KGF Cloud integration (ADR-0024, migration 0032)
+
+- **Service accounts** (`service_accounts.view`, `service_accounts.manage`): non-human identities for agents and CI with role bindings (`/v1/namespaces/{ns}/service-accounts`, `.../{id}/roles`). Their tokens (`POST .../tokens` with `service_account_id` and `permissions`) carry a permission ceiling; effective grants are the account's current roles intersected with the ceiling, re-read on every request, and disabling the account refuses its tokens immediately. Legacy scoped tokens may also carry a ceiling. Bindings and ceilings may hold only grants the actor holds and never `users.manage`, `roles.manage`, `tokens.manage` or `service_accounts.manage`; an unceilinged token can be minted only by an Administrator.
+- **Users pagination:** `GET /v1/namespaces/{ns}/users?limit=&cursor=&q=` is keyset-paginated (newest first, at most 200 per page) with server-side search.
+- **KGF principals:** in `NEXUS_AUTH_MODE=kgf|both`, a request with a verified `X-KGF-Context` becomes a principal of the namespace mapped from its KGF organization/subscription/resource group, holding the Nexus permissions whose `KGF.Nexus/*` action its KGF role (operator = Contributor, viewer = Reader) covers. Unmapped permissions are denied, and `users.*` is never granted: KGF owns people. A KGF operator may manage roles, service accounts and tokens in its namespace (there is no Nexus Administrator there), bounded by the same delegation rule. The mapping table is ADR-0024 §4; configuration is OPERATIONS §24.
+
 ## Current boundary against the broader design
 
-This is namespace-scoped **human-account module RBAC**. The larger RBAC-DESIGN.md remains the target contract, not a claim that every proposed feature exists:
+This is namespace-scoped **human-account module RBAC**, plus service accounts and KGF principals. The larger RBAC-DESIGN.md remains the target contract, not a claim that every proposed feature exists:
 
-- Existing static/scoped machine tokens retain their existing role/scope intersection. Service-account role bindings and per-token granular ceilings are not implemented.
-- Identity administration is reserved for existing namespace administrators. Custom roles cannot delegate user/token/role management. Several mutations currently share `manage`, `update`, or `configure` grants rather than the more granular proposed catalog.
-- Cross-namespace Owner roles, identity-provider group mapping, membership management, separate cluster/budget permissions, and cloud application controllers are not implemented.
-- User assignment picker shows up to 500 recent accounts. The existing users API does not support cursor pagination.
+- Identity administration for Nexus accounts is reserved for existing namespace administrators; custom roles cannot hold `users.manage`, `tokens.manage`, `roles.manage` or `service_accounts.manage`. Several mutations share `manage`, `update` or `configure` grants rather than the more granular proposed catalog. Inside KGF Cloud, people and their delegation are KGF's (kgf-identity), not Nexus's.
+- Cross-namespace Owner roles, identity-provider group mapping and membership management are not implemented in Nexus; in KGF Cloud they belong to kgf-identity.
+- Separate cluster/budget permissions are not implemented: cluster registration uses `infrastructure.*`, and the namespace budget is the quota (`quotas.*`, `usage.view`).
+- Binding expiry, authorization revisions and the evaluate endpoint are not implemented.
 - This change does not start AKS, provision resources, or apply infrastructure scaling plans.
 
 ## Migration and deployment
 
-Apply `services/migrations/0012_rbac.up.sql` before deploying the new gateway. It adds roles and account assignments without changing existing users or credentials. Deploy UI and gateway together: the UI uses the gateway's `effective_permissions`. Rollback requires reverting gateway/UI before dropping the new tables; export assignments before dropping them.
+Apply `services/migrations/0012_rbac.up.sql` (and, for service accounts, token ceilings and KGF mode, `0032_kgf_context_and_service_accounts.up.sql`) before deploying the new gateway. It adds roles and account assignments without changing existing users or credentials. Deploy UI and gateway together: the UI uses the gateway's `effective_permissions`. Rollback requires reverting gateway/UI before dropping the new tables; export assignments before dropping them.
 
 ## Validation
 

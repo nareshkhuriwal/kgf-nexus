@@ -16,17 +16,15 @@ import { ActionIcon, RowDetails } from '../../components/RowAction';
  * rather than reporting it afterwards, because that consequence is the actual
  * reason an operator is on this screen during an offboarding.
  *
- * THE ACCOUNT COUNT IS EXACT HERE, which is unusual in this console and worth
- * saying. /users takes no `limit` parameter at all, so what comes back is the
- * namespace's accounts rather than a page of them — "12 accounts" is a fact and
- * the table is told so. Every other list on these screens is a capped fetch and
- * gets a count that admits it. The claim is pinned to the endpoint's shape, so
- * if pagination is ever added to /users this constant is what has to change
- * with it.
+ * PAGINATION. /users is keyset-paginated (ADR-0024 §6): the page loads the
+ * newest accounts and "Load more accounts" follows the server's next_cursor.
+ * The count is exact only once the last page is in hand; before that the
+ * table is told the count is partial, so "100 accounts" never claims to be
+ * everyone.
  */
 
 import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { authApi, type User } from '../../api/auth';
 import { errorMessage, shouldRetry } from '../../api/hooks';
 import { AsyncPanel, ErrorBox } from '../../components/Status';
@@ -36,8 +34,8 @@ import { fmtTs } from '../../lib/format';
 import { PageHeader } from '../../components/PageHeader';
 import { Forbidden } from '../../components/Forbidden';
 
-/** /users sends every account: no `limit`, so no cap to disclose. */
-const USERS_COUNT: RowCountKind = { kind: 'exact' };
+/** Accounts per page of /users. */
+const USERS_PAGE = 100;
 
 export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin: boolean }) {
   const [selected,setSelected] = useState<ReadonlySet<string>>(new Set());
@@ -48,15 +46,24 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const users = useQuery({
+  const pages = useInfiniteQuery({
     queryKey: ['users', namespace],
-    queryFn: () => authApi.listUsers(namespace),
+    queryFn: ({ pageParam }) => authApi.listUsersPage(namespace, { limit: USERS_PAGE, cursor: pageParam }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.next_cursor,
     retry: shouldRetry,
     // Only attempted when the credential may actually read it: firing a request
     // we know will 403 just to render an error is noise in the gateway's logs
     // and in the audit trail.
     enabled: canAdmin,
   });
+  const users = {
+    data: pages.data ? pages.data.pages.flatMap((p) => p.users) : undefined,
+    isLoading: pages.isLoading,
+    error: pages.error,
+    refetch: () => void pages.refetch(),
+  };
+  const usersCount: RowCountKind = pages.hasNextPage ? { kind: 'unknown' } : { kind: 'exact' };
 
   const disable = useMutation({
     mutationFn: (u: User) => authApi.setUserDisabled(namespace, u.id, !u.disabled),
@@ -262,17 +269,21 @@ export function UsersPage({ namespace, canAdmin }: { namespace: string; canAdmin
               columns={columns}
               rowKey={(u) => u.id}
               noun="accounts"
-              /* Exact, uniquely on this page: see the constant's note. */
-              count={USERS_COUNT}
-              /* Client-side, and honestly so. /users has no `search`
-                 parameter — but unlike the capped lists this one holds every
-                 account, so filtering it really does search the whole
-                 namespace. The table still labels the filter as local, which
-                 understates rather than overstates what it did: the failure
-                 mode worth preventing is a filter that claims more reach than
-                 it has, never one that claims less. */
+              /* Exact only once the last page is loaded. */
+              count={usersCount}
+              /* Client-side over the pages loaded so far, and labelled as
+                 local: it claims no more reach than it has. Load more pages
+                 to widen it. */
               search={{ mode: 'client', fields: (u) => [u.email, u.display_name, u.role] }}
             />
+            {pages.hasNextPage && (
+              <div className="panel-body">
+                <button type="button" onClick={() => void pages.fetchNextPage()} disabled={pages.isFetchingNextPage}>
+                  {pages.isFetchingNextPage ? 'Loading more accounts…' : 'Load more accounts'}
+                </button>
+              </div>
+            )}
+            {pages.isFetchNextPageError && <ErrorBox error={pages.error} what="more accounts" />}
             </>
           )}
         </AsyncPanel>

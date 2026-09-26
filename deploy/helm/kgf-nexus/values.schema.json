@@ -310,6 +310,18 @@
         "tls": { "enum": ["starttls", "implicit", "none"] }
       }
     },
+    "kgf": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "authMode": { "enum": ["standalone", "kgf", "both"] },
+        "contextKeysUrl": { "type": "string" },
+        "contextPublicKeys": { "type": "string" },
+        "audience": { "type": "string", "minLength": 1 },
+        "userIssuers": { "type": "string" },
+        "servicePrincipals": { "type": "string" }
+      }
+    },
     "migrate": {
       "type": "object",
       "additionalProperties": false,

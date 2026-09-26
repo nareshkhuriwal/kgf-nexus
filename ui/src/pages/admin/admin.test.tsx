@@ -12,7 +12,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { WithPermissions } from '../../test/permissions';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
@@ -110,6 +110,28 @@ describe('UsersPage', () => {
     // Status is rendered from the server-derived `disabled` flag, not re-derived.
     expect(screen.getByText('disabled')).toBeInTheDocument();
     expect(screen.getByText('active')).toBeInTheDocument();
+  });
+
+  it('pages accounts with the server cursor instead of claiming the first page is everyone', async () => {
+    const user = (id: string, email: string) => ({
+      id, namespace: 'default', email, display_name: '', role: 'reader',
+      created_at: '2026-09-12T10:00:00Z', disabled_at: null, disabled: false,
+    });
+    const seen: string[] = [];
+    mockFetch((url) => {
+      seen.push(url);
+      return url.includes('cursor=c2')
+        ? [200, { users: [user('u2', 'second@example.com')], next_cursor: null }]
+        : [200, { users: [user('u1', 'first@example.com')], next_cursor: 'c2' }];
+    });
+
+    wrap(<UsersPage namespace="default" canAdmin />);
+
+    expect(await screen.findByText('first@example.com')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Load more accounts' }));
+    expect(await screen.findByText('second@example.com')).toBeInTheDocument();
+    expect(seen.some((u) => u.includes('limit=100'))).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Load more accounts' })).toBeNull();
   });
 
   it('teaches rather than blanking when there are no users', async () => {

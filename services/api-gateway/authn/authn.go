@@ -72,6 +72,13 @@ type Principal struct {
 	// narrowing" -- the role's full grant -- which is why an API key, whose Scopes
 	// is always nil, is authorized by exactly the pre-existing rule.
 	Scopes []Action
+
+	// ServiceAccountID is set for a service-account token (ADR-0024 §6).
+	ServiceAccountID string
+	// KGF is set when the caller was authenticated by a KGF context
+	// (ADR-0024): the verified KGF identity behind this principal, recorded on
+	// every audit row it writes.
+	KGF *KGFIdentity
 }
 
 // HasScope reports whether the credential's scopes permit an action.

@@ -199,14 +199,15 @@ func (a *Authenticator) authenticateScopedToken(ctx context.Context, presented s
 		a.touchFailed(ctx, "token", rt.TokenID, err)
 	}
 
-	return Principal{
+	p := Principal{
 		KeyID:     rt.TokenID,
 		Namespace: rt.Namespace,
 		Name:      rt.Name,
 		Role:      role,
 		Kind:      KindScopedToken,
 		Scopes:    parseScopes(rt.Scopes),
-	}, nil
+	}
+	return a.applyTokenCeiling(ctx, p, rt)
 }
 
 // parseScopes converts stored scope strings to Actions, DISCARDING any the

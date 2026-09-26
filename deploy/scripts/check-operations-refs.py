@@ -71,7 +71,7 @@ def main():
     bad, seen = [], 0
     for path in files:
         # This script's own docstring spells out the reference syntax
-        # ("OPERATIONS.md#anchor"), which is not a reference.
+        # ("OPERATIONS.md#anchor"), which is an example, not a reference.
         if path == "deploy/scripts/check-operations-refs.py":
             continue
         if path.startswith(("ui/node_modules/", "gen/")) or path.endswith((".png", ".jpg", ".svg", ".ico", ".woff2", ".lock")):

@@ -269,6 +269,24 @@ export function IconKey(props: IconProps) {
 }
 
 /**
+ * Service account — a machine: a square head with an antenna and two eyes.
+ *
+ * Distinct from Users on purpose: a service account is the non-human identity
+ * agents and CI act as, and the rail must not suggest it is a person.
+ */
+export function IconBot(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="4.5" y="8" width="15" height="11" rx="2.5" />
+      <path d="M12 8V4.5" />
+      <circle cx="12" cy="4" r="0.6" />
+      <path d="M9 13h.01M15 13h.01" />
+      <path d="M9.5 16.2h5" />
+    </Icon>
+  );
+}
+
+/**
  * Audit — a document with a tick.
  *
  * A document because the audit log is a written record, and the tick because

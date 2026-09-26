@@ -60,6 +60,7 @@ import { InfrastructurePage } from './pages/admin/InfrastructurePage';
 import { QuotasPage } from './pages/admin/QuotasPage';
 import { UsersPage } from './pages/admin/UsersPage';
 import { TokensPage } from './pages/admin/TokensPage';
+import { ServiceAccountsPage } from './pages/admin/ServiceAccountsPage';
 import { AuditPage } from './pages/admin/AuditPage';
 import { OverviewPage } from './pages/OverviewPage';
 import { SettingsPage } from './pages/SettingsPage';
@@ -542,6 +543,7 @@ export function App() {
           path="/admin/tokens"
           element={<TokensPage namespace={namespace} canAdmin={grants.includes("tokens.view")} />}
         />
+        <Route path="/admin/service-accounts" element={<ServiceAccountsPage key={namespace} namespace={namespace} />} />
         <Route
           path="/admin/audit"
           element={<AuditPage namespace={namespace} canAdmin={grants.includes("audit.view")} />}

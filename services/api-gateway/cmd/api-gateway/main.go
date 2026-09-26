@@ -43,6 +43,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/rest"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/sessions"
@@ -180,12 +181,23 @@ func run() error {
 		return err
 	}
 	api = api.WithEmailFlows(emailCfg)
+	mode, kgfAuth, kgfReady, err := kgfConfig(ctx, db, log)
+	if err != nil {
+		return err
+	}
+	api = api.WithKGF(mode, kgfAuth)
 
-	hc := health.New(map[string]health.Check{
+	checks := map[string]health.Check{
 		// Readiness depends on the database because a gateway that cannot reach
 		// Postgres can authenticate nothing and serve nothing useful.
 		"postgres": func(ctx context.Context) error { return pool.Ping(ctx) },
-	})
+	}
+	if kgfReady != nil {
+		// In KGF mode a gateway without the context verification keys can
+		// authenticate no person, so it is not ready (ADR-0024 §2).
+		checks["kgf_context_keys"] = kgfReady
+	}
+	hc := health.New(checks)
 
 	restSrv := &http.Server{
 		Addr:    cfg.RESTAddr,
@@ -653,6 +665,70 @@ func emailFlowConfig(log *slog.Logger) (rest.EmailFlowConfig, error) {
 		}()
 	}
 	return cfg, nil
+}
+
+// kgfConfig reads KGF Cloud context authentication (ADR-0024,
+// docs/OPERATIONS.md §24). NEXUS_AUTH_MODE=standalone (the default) returns a
+// nil authenticator and changes nothing. In kgf or both mode a key source is
+// mandatory: a gateway that could verify no context would refuse every KGF
+// request, so a misconfiguration stops startup instead.
+func kgfConfig(ctx context.Context, db store.GWDB, log *slog.Logger) (rest.AuthMode, *authn.KGFAuthenticator, health.Check, error) {
+	mode, err := rest.ParseAuthMode(os.Getenv("NEXUS_AUTH_MODE"))
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if mode == rest.AuthStandalone {
+		log.Info("authentication mode: standalone (Nexus credentials only)")
+		return mode, nil, nil, nil
+	}
+	var keys kgfctx.KeySource
+	var ready health.Check
+	static, url := env("NEXUS_KGF_CONTEXT_PUBLIC_KEYS", ""), env("NEXUS_KGF_CONTEXT_KEYS_URL", "")
+	switch {
+	case static != "" && url != "":
+		return "", nil, nil, errors.New("set NEXUS_KGF_CONTEXT_PUBLIC_KEYS or NEXUS_KGF_CONTEXT_KEYS_URL, not both")
+	case static != "":
+		sk, err := kgfctx.ParseStaticKeys(static)
+		if err != nil || len(sk) == 0 {
+			return "", nil, nil, fmt.Errorf("NEXUS_KGF_CONTEXT_PUBLIC_KEYS: %v", err)
+		}
+		keys = sk
+	case url != "":
+		rk := kgfctx.NewRemoteKeys(url, &http.Client{Timeout: 5 * time.Second}, log)
+		rk.Refresh = time.Duration(envInt("NEXUS_KGF_CONTEXT_KEYS_REFRESH_SEC", 300)) * time.Second
+		keys, ready = rk, rk.Ready
+		if err := rk.Ready(ctx); err != nil {
+			// Not fatal: KGF's gateway may start after Nexus. /readyz reports it.
+			log.Warn("KGF context keys are not available yet; KGF requests are refused until they are", "url", url, "error", err)
+		}
+	default:
+		return "", nil, nil, errors.New("NEXUS_AUTH_MODE=" + string(mode) + " needs NEXUS_KGF_CONTEXT_KEYS_URL or NEXUS_KGF_CONTEXT_PUBLIC_KEYS")
+	}
+	services, err := authn.ParseServicePrincipals(env("NEXUS_KGF_SERVICE_PRINCIPALS", ""))
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("NEXUS_KGF_SERVICE_PRINCIPALS: %w", err)
+	}
+	var issuers []string
+	for _, i := range strings.Split(env("NEXUS_KGF_USER_ISSUERS", "kgf-gateway"), ",") {
+		if i = strings.TrimSpace(i); i != "" {
+			issuers = append(issuers, i)
+		}
+	}
+	k := &authn.KGFAuthenticator{
+		Verifier: kgfctx.Verifier{
+			Keys: keys, Audience: env("NEXUS_KGF_AUDIENCE", "kgf-nexus"),
+			AcceptAnyAudience: envBool("NEXUS_KGF_ACCEPT_ANY_AUDIENCE", false),
+			UserIssuers:       issuers, Seen: kgfctx.NewMemoryReplayGuard(),
+		},
+		Provisioner:       authn.StoreProvisioner{DB: db},
+		ServicePrincipals: services,
+	}
+	log.Info("authentication mode: KGF context", "mode", string(mode), "audience", k.Verifier.Audience,
+		"user_issuers", issuers, "keys_url", url, "static_keys", static != "", "service_principals", len(services))
+	if k.Verifier.AcceptAnyAudience {
+		log.Warn("NEXUS_KGF_ACCEPT_ANY_AUDIENCE=true: contexts minted for every KGF service are accepted here")
+	}
+	return mode, k, ready, nil
 }
 
 // envBool reads a boolean, keeping the default on an unparseable value for the
