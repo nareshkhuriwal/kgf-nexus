@@ -1,5 +1,5 @@
-# Hand-written test input for `nexusctl import airflow` (original to this
-# repository). Mapping, and the constructs a static converter must refuse.
+# Copyright 2026 Khuriwal Group. SPDX-License-Identifier: Apache-2.0
+# Hand-written test input for `nexusctl import airflow` (original to this repository). Mapping, and the constructs a static converter must refuse.
 from datetime import datetime, timedelta
 
 from kubernetes.client import models as k8s

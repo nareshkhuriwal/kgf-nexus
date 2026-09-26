@@ -1,5 +1,5 @@
-# Hand-written test input for `nexusctl import airflow` (original to this
-# repository). Dependency shapes that are easy to get wrong.
+# Copyright 2026 Khuriwal Group. SPDX-License-Identifier: Apache-2.0
+# Hand-written test input for `nexusctl import airflow` (original to this repository). Dependency shapes that are easy to get wrong.
 from datetime import timedelta
 
 import pendulum

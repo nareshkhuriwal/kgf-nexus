@@ -681,10 +681,13 @@ license-report: ## List the license of every module compiled into the binaries
 # So are the `nexusctl init` scaffolds (cli/internal/templates/files/): they are
 # copied into the user's own project, where our header would mislabel their code.
 license-check: ## Assert every first-party source file carries an SPDX identifier
+	@# testdata/upstream/ holds byte-for-byte, sha256-pinned copies of upstream
+	@# example DAGs (Apache-2.0, original ASF headers kept; see each README), not first-party code.
 	@missing=0; \
 	for f in $$(git ls-files '*.go' '*.ts' '*.tsx' '*.py' '*.sh' '*.sql' '*.proto' \
 	            | grep -v '/gen/' | grep -v '^gen/' \
-	            | grep -v '^cli/internal/templates/files/'); do \
+	            | grep -v '^cli/internal/templates/files/' \
+            | grep -v '^cli/internal/importer/testdata/upstream/'); do \
 	  if ! head -5 "$$f" | grep -q 'SPDX-License-Identifier'; then \
 	    echo "missing SPDX header: $$f"; missing=1; \
 	  fi; \

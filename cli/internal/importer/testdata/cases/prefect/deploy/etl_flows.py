@@ -1,5 +1,5 @@
-# Hand-written test input for `nexusctl import prefect` (original to this
-# repository). Futures, .map with unmapped and wait_for, retries, caching,
+# Copyright 2026 Khuriwal Group. SPDX-License-Identifier: Apache-2.0
+# Hand-written test input for `nexusctl import prefect` (original to this repository). Futures, .map with unmapped and wait_for, retries, caching,
 # a subflow, a runtime branch, and serve(cron=...).
 from datetime import timedelta
 

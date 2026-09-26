@@ -716,7 +716,11 @@ func TestIntegration_NewTableGrants(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	var roles int
-	_ = pool.QueryRow(ctx, `SELECT count(*) FROM pg_roles WHERE rolname LIKE 'nexus\_%'`).Scan(&roles)
+	// The six group roles by name: roles are cluster-wide, and a shared server
+	// also holds other installations' nexus_*_login roles (F153).
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM pg_roles WHERE rolname = ANY($1) AND NOT rolcanlogin`,
+		[]string{"nexus_api_gateway", "nexus_workflow_manager", "nexus_dag_engine",
+			"nexus_scheduler", "nexus_resource_manager", "nexus_event_service"}).Scan(&roles)
 	if roles != 6 {
 		t.Skip("per-service roles (0005) not applied")
 	}

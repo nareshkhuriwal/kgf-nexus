@@ -1,5 +1,5 @@
-# Hand-written test input for `nexusctl import airflow` (original to this
-# repository). Fully translatable, and run for real by TestConvertedPipelinesRunLocally.
+# Copyright 2026 Khuriwal Group. SPDX-License-Identifier: Apache-2.0
+# Hand-written test input for `nexusctl import airflow` (original to this repository). Fully translatable, and run for real by TestConvertedPipelinesRunLocally.
 from datetime import timedelta
 
 import pendulum
