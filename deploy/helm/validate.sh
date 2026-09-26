@@ -82,6 +82,7 @@ must_fail "malformed image digest"              "/image/digests/migrate"       -
 must_fail "bad topology policy"                 "whenUnsatisfiable"            --set placement.topologySpread.whenUnsatisfiable=Sometimes
 must_fail "no scheduler at all"                 "schedulers"                   --set-json 'schedulers=[]'
 must_fail "peer TLS with a plaintext broker"    "enable nats.tls too"          --set tls.enabled=true --set nats.auth.mode=none
+must_fail "unparsable minimum agent version"   "/agentPolicy/minVersion"      --set agentPolicy.minVersion=latest
 
 # An agent serving another tenant (agents[].namespace) needs that tenant's NATS
 # identity: refused without it, rendered with the tenant's key and worker key.

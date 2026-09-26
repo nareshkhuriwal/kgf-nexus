@@ -289,6 +289,16 @@ agents:
       requests: { cpu: 250m, memory: 256Mi }
       limits: { memory: 4Gi }
 
+# Agent admission gate at Register (docs/COMPATIBILITY.md §4.4). Off by default.
+# An agent older than minVersion (a semantic version; a "dev" build then never
+# qualifies), or missing any requiredCapabilities, is refused with
+# FAILED_PRECONDITION and exits instead of retrying. Capabilities of this
+# release's agent: log_shipping, progress, uninterruptible_cancel,
+# output_max_bytes.
+agentPolicy:
+  minVersion: ""
+  requiredCapabilities: []
+
 agentDefaults:
   heartbeatIntervalMs: 5000
   # Must stay below terminationGracePeriodSeconds, or Kubernetes kills an agent

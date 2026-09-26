@@ -216,11 +216,11 @@ Downgrade is not a supported path. Restoring (OPERATIONS.md §3, §6.4) is.
 
 ### 4.3 How the product behaves today
 
-- **No version negotiation.** `RegisterRequest.agent_version` is logged
-  (`services/api-gateway/workergrpc/server.go:179`), stored
-  (`internal/store/rm_workers.go:104`) and displayed. Nothing compares it with
-  anything. There is no minimum agent version and no rejection of a
-  too-old or too-new agent.
+- **No version negotiation, but an optional admission gate.**
+  `RegisterRequest.agent_version` is logged, stored
+  (`internal/store/rm_workers.go`) and displayed. Nothing negotiates on it.
+  An operator can refuse agents below a minimum version, or missing a
+  capability, at Register (§4.4); by default every agent is admitted.
 - **Capability, not version.** New agent-facing behaviour is gated on what the
   control plane advertises. Log shipping is on only when `RegisterResponse.log_shipping.enabled`
   (`agent/internal/worker/agent.go:440`). An agent calling a
@@ -238,12 +238,49 @@ Downgrade is not a supported path. Restoring (OPERATIONS.md §3, §6.4) is.
   silently. **Policy:** a new task-level feature that an agent must honour must
   either be safe to ignore, or be gated at dispatch on an agent capability.
   The gating would work like `executors`: the agent advertises a capability,
-  the task requires it, and the claim filters on it. **Gap:** there is no
-  generic capability list in `RegisterRequest` yet. Adding
-  `repeated string capabilities = 8;` is the recommended mechanism, preferred
-  over parsing `agent_version`.
+  the task requires it, and the claim filters on it. `RegisterRequest`
+  carries `repeated string capabilities = 8` since this change (§4.4), and
+  the gateway can require capabilities fleet-wide at Register. **Gap:**
+  per-task capability requirements, filtered at dispatch, are not built.
 - **Untested:** no test starts an N-1 agent binary against an N gateway. The
   closest evidence is unit tests of the tolerant paths above.
+
+### 4.4 Minimum agent version and required capabilities
+
+The gateway applies an admission gate in `Register`
+(`services/api-gateway/workergrpc/server.go`, `domain.AgentPolicy` in
+`internal/domain/agentcompat.go`) before any worker row is written:
+
+| Setting (gateway env / Helm value) | Effect |
+|---|---|
+| `NEXUS_MIN_AGENT_VERSION` / `agentPolicy.minVersion` | Refuse an agent whose `agent_version` is older, by semantic-version precedence (`1.4.0-rc.1` < `1.4.0`; build metadata ignored). With a minimum set, an agent whose version is not a semantic version -- a `dev` build -- is refused, since nothing shows it is new enough. |
+| `NEXUS_REQUIRED_AGENT_CAPABILITIES` / `agentPolicy.requiredCapabilities` | Comma-separated; refuse an agent that does not advertise every one. An agent older than this change advertises none, so requiring any capability also refuses it. |
+
+Both are empty by default, which admits every agent: nothing changes for a
+deployment that does not opt in. The gateway refuses to start with an
+unparsable minimum or a malformed capability name, rather than refusing
+every agent; the Helm schema rejects them at install.
+
+A refusal is `FAILED_PRECONDITION` naming each unmet requirement, logged at
+WARN on the gateway with the agent's host, version and capabilities. The
+agent's register backoff treats `FAILED_PRECONDITION` as permanent
+(`agent/internal/worker/register.go`, `RegistrationRetryable`): it does not
+retry, counts `permanent_error`, and exits with "upgrade the agent" and the
+reason. Retrying could not make an old binary new.
+
+Capabilities this release's agent advertises (`domain.AgentCapabilities`):
+
+| Capability | Meaning |
+|---|---|
+| `log_shipping` | Ships task logs through `ReportLogs` (ADR-0020). |
+| `progress` | Reports executor phase and progress through `ReportProgress` (F96). |
+| `uninterruptible_cancel` | Honours `cancellation.uninterruptible` and the operator's ceiling (ADR-0015); an agent without it SIGTERMs such a task. |
+| `output_max_bytes` | Enforces each output's declared `max_bytes` before storing it (CONTRACT-FINDINGS F125). |
+
+Capability names are stable wire strings: new ones are added, none is
+renamed or reused. Upgrade order is unchanged (§4.2): raise the minimum, or
+add a required capability, only after the fleet runs a version that meets
+it, or the agents still on the old version stop at their next restart.
 
 ## 5. Workflow spec `api_version`
 
@@ -498,8 +535,9 @@ are newer than the server.
    highest-value missing check.
 2. A test that runs an N-1 **agent binary** against an N gateway. It would
    extend §7 from the store layer to the wire.
-3. `RegisterRequest.capabilities` and capability-gated dispatch for task
-   semantics an old agent would silently ignore (§4.3).
+3. Capability-gated **dispatch** for task semantics an old agent would
+   silently ignore (§4.3). `RegisterRequest.capabilities` and the fleet-wide
+   admission gate exist (§4.4); per-task requirements do not.
 4. A release process: `vX.Y.Z` tags, versioned images, a changelog with a
    deprecations section. §7 then tests against real releases instead of
    `main~1`.

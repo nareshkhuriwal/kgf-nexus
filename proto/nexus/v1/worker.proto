@@ -55,7 +55,13 @@ message RegisterRequest {
   ResourceVector capacity = 5;
   // Which executors this worker can run; a placement constraint (ADR-0007).
   repeated string executors = 6;
+  // Semantic version of the agent (e.g. "1.4.2"); a build without one sends
+  // "dev". The gateway may refuse agents below a configured minimum.
   string agent_version = 7;
+  // Protocol features this agent implements (docs/COMPATIBILITY.md §4.4), for
+  // example "log_shipping". The gateway refuses a registration missing one it
+  // requires with FAILED_PRECONDITION. Additive: an older agent sends none.
+  repeated string capabilities = 8;
 }
 
 message RegisterResponse {

@@ -99,6 +99,10 @@ type Config struct {
 	// disabled means agents ship no logs -- the right answer for a gateway that
 	// cannot READ them back, since objects nobody can serve are pure cost.
 	LogShipping *nexusv1.LogShippingConfig
+	// AgentPolicy is the admission gate at Register: a minimum agent_version
+	// and capabilities every agent must advertise (docs/COMPATIBILITY.md §4.4).
+	// The zero value admits every agent.
+	AgentPolicy domain.AgentPolicy
 }
 
 // DefaultConfig is the tuning from ADR-0010 and §5.5.
@@ -156,6 +160,19 @@ func (s *Server) Register(ctx context.Context, req *nexusv1.RegisterRequest) (*n
 	}
 	if req.GetCapacity() == nil {
 		return nil, status.Error(codes.InvalidArgument, "advertised capacity is required")
+	}
+	// The version and capability gate, before any row is written. An agent
+	// that is too old, or lacks a behaviour the operator requires, would run
+	// tasks with older semantics without anyone noticing (the N-1 hazard,
+	// docs/COMPATIBILITY.md §4.3). FAILED_PRECONDITION because the request is
+	// well formed and the agent itself must change; the agent's register
+	// backoff treats it as permanent and exits with the reason.
+	if err := s.cfg.AgentPolicy.Check(req.GetAgentVersion(), req.GetCapabilities()); err != nil {
+		s.log.WarnContext(ctx, "refused an incompatible agent",
+			"namespace", req.GetNamespace(), "hostname", req.GetHostname(),
+			"agent_version", req.GetAgentVersion(), "capabilities", req.GetCapabilities(),
+			"principal", p.Name, "reason", err)
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 
 	sessionToken, err := newOpaqueToken()

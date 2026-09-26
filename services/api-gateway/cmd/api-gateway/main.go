@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -239,6 +240,18 @@ func run() error {
 		InlineThresholdBytes: cfg.InlineThresholdBytes,
 	}
 	wcfg.LogShipping = logShipping
+	// The agent admission gate (docs/COMPATIBILITY.md §4.4). Both off by
+	// default. A policy that cannot be applied (an unparsable minimum) stops
+	// the gateway here instead of refusing every agent at Register.
+	wcfg.AgentPolicy = agentPolicyFromEnv()
+	if err := wcfg.AgentPolicy.Validate(); err != nil {
+		return fmt.Errorf("NEXUS_MIN_AGENT_VERSION / NEXUS_REQUIRED_AGENT_CAPABILITIES: %w", err)
+	}
+	if wcfg.AgentPolicy.MinVersion != "" || len(wcfg.AgentPolicy.RequiredCapabilities) > 0 {
+		log.Info("agent admission gate enabled",
+			"min_agent_version", wcfg.AgentPolicy.MinVersion,
+			"required_agent_capabilities", wcfg.AgentPolicy.RequiredCapabilities)
+	}
 	nexusv1.RegisterWorkerServiceServer(workerSrv,
 		workergrpc.NewServer(db, rmClient, schedClient, wcfg, log))
 
@@ -519,6 +532,18 @@ func envFloat(key string, def float64) float64 {
 		return def
 	}
 	return f
+}
+
+// agentPolicyFromEnv reads the agent admission gate: NEXUS_MIN_AGENT_VERSION
+// (a semantic version) and NEXUS_REQUIRED_AGENT_CAPABILITIES (comma-separated).
+func agentPolicyFromEnv() domain.AgentPolicy {
+	p := domain.AgentPolicy{MinVersion: strings.TrimSpace(os.Getenv("NEXUS_MIN_AGENT_VERSION"))}
+	for _, c := range strings.Split(os.Getenv("NEXUS_REQUIRED_AGENT_CAPABILITIES"), ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			p.RequiredCapabilities = append(p.RequiredCapabilities, c)
+		}
+	}
+	return p
 }
 
 func env(key, def string) string {

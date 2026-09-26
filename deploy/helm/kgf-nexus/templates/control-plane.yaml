@@ -15,7 +15,9 @@ so the two deployments cannot drift in behaviour.
       (dict "name" "NEXUS_SMTP_PORT" "value" (.Values.smtp.port | toString))
       (dict "name" "NEXUS_SMTP_TLS" "value" (.Values.smtp.tls | toString))
       (dict "name" "NEXUS_SMTP_FROM" "value" (.Values.smtp.from | toString))
-      (dict "name" "NEXUS_PUBLIC_URL" "value" (.Values.smtp.publicUrl | toString))))
+      (dict "name" "NEXUS_PUBLIC_URL" "value" (.Values.smtp.publicUrl | toString))
+      (dict "name" "NEXUS_MIN_AGENT_VERSION" "value" (.Values.agentPolicy.minVersion | default "" | toString))
+      (dict "name" "NEXUS_REQUIRED_AGENT_CAPABILITIES" "value" (join "," (.Values.agentPolicy.requiredCapabilities | default list)))))
   (dict "name" "workflow-manager" "key" "workflowManager" "image" "workflow-manager" "grpc" 9090 "hpa" true "tls" true "extra" (list
       (dict "name" "TIMER_POLL_INTERVAL_MS" "value" "1000")))
   (dict "name" "dag-engine" "key" "dagEngine" "image" "dag-engine" "grpc" 9090 "hpa" true "tls" true "extra" (list))
