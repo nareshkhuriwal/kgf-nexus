@@ -220,6 +220,9 @@
           "memoryBytes": { "type": "integer", "minimum": 1 },
           "gpuCount": { "type": "integer", "minimum": 0 },
           "diskBytes": { "type": "integer", "minimum": 1 },
+          "namespace": { "type": "string", "minLength": 1 },
+          "workerApiKeySecretKey": { "type": "string", "minLength": 1 },
+          "natsSeedKey": { "type": "string", "minLength": 1 },
           "resources": { "$ref": "#/definitions/resources" },
           "podDisruptionBudget": { "$ref": "#/definitions/pdb" }
         }

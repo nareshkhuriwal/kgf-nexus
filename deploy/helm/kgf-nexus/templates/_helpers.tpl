@@ -250,8 +250,11 @@ rejected at runtime, with nothing in the manifest pointing at why.
 {{- range .publicKeys }}{{ if not (regexMatch $keyRe .) }}{{ fail (printf "nats.auth.tenants: %q is not a user public NKey (U...)" .) }}{{ end }}{{ end -}}
 {{- $_ := set $seen .namespace true -}}
 {{- end -}}
-{{- if and .Values.agents (not (hasKey $seen .Values.nexusNamespace)) -}}
-{{- fail (printf "nats.auth.tenants has no entry for nexusNamespace %q, so this chart's agents could not receive dispatch hints" .Values.nexusNamespace) -}}
+{{- range .Values.agents -}}
+{{- $ns := .namespace | default $.Values.nexusNamespace -}}
+{{- if not (hasKey $seen $ns) -}}
+{{- fail (printf "nats.auth.tenants has no entry for namespace %q (agent %s), so that agent could not receive dispatch hints" $ns .name) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if $n.tls.enabled -}}

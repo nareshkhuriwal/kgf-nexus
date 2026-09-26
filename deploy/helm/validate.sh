@@ -83,6 +83,25 @@ must_fail "bad topology policy"                 "whenUnsatisfiable"            -
 must_fail "no scheduler at all"                 "schedulers"                   --set-json 'schedulers=[]'
 must_fail "peer TLS with a plaintext broker"    "enable nats.tls too"          --set tls.enabled=true --set nats.auth.mode=none
 
+# An agent serving another tenant (agents[].namespace) needs that tenant's NATS
+# identity: refused without it, rendered with the tenant's key and worker key.
+nkeys=(--set nats.auth.mode=nkey
+  --set-json 'nats.auth.eventService={"publicKeys":["UEVENTSERVICEKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}'
+  --set-json 'nats.auth.monitor={"publicKeys":["UMONITORKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}')
+team_agent='agents=[{"name":"agent-team","namespace":"team-ml","workerApiKeySecretKey":"worker-api-key-team-ml","natsSeedKey":"nats-agent-nkey-team-ml","queues":"default","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824}]'
+must_fail "agent namespace without a NATS tenant" 'no entry for namespace "team-ml"' "${nkeys[@]}" \
+  --set-json 'nats.auth.tenants=[{"namespace":"default","publicKeys":["UAGENTKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}]' \
+  --set-json "$team_agent"
+if helm template nexus "$chart" -f "$chart/ci/minimal-values.yaml" "${nkeys[@]}" \
+    --set-json 'nats.auth.tenants=[{"namespace":"team-ml","publicKeys":["UAGENTKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}]' \
+    --set-json "$team_agent" >"$tmp/team" 2>&1 &&
+   grep -qF 'name: NEXUS_NAMESPACE, value: "team-ml"' "$tmp/team" &&
+   grep -qF 'key: worker-api-key-team-ml' "$tmp/team"; then
+  echo "ok   rendered: agent in namespace team-ml with its own worker key"
+else
+  echo "FAIL: an agent's namespace and worker key override did not render"; tail -3 "$tmp/team"; fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "validate: FAILED" >&2
   exit 1

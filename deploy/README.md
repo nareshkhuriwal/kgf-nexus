@@ -229,6 +229,7 @@ file next to `docker-compose.yml`.
 | `NEXUS_POSTGRES_PORT` | `55433` | Published Postgres port |
 | `NEXUS_MINIO_PORT` / `_CONSOLE_PORT` | `9000` / `9001` | MinIO |
 | `NEXUS_NAMESPACE` | `default` | Single namespace for the MVP |
+| `NEXUS_AGENT_NAMESPACE` | `$NEXUS_NAMESPACE` | Tenant the compose agents serve; `make seed` mints the worker key and nats-init the agent NKey for it (docs/MULTITENANCY.md, "Agent namespace") |
 | `NEXUS_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `NEXUS_RESULT_BUCKET` | `nexus-results` | MinIO bucket (auto-created) |
 | `NEXUS_WORKER_API_KEY` | `dev-worker-key` | Agent credential |

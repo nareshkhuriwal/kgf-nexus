@@ -195,7 +195,8 @@ services:
     image: natsio/nats-box:0.18.0
     user: "0:0"
     entrypoint: ["sh", "/nexus/nexus-nats-auth.sh"]
-    command: ["compose-init", "--tenant", "${NEXUS_NAMESPACE:-default}"]
+    # The agents' tenant: their NKey may subscribe to its dispatch hints only.
+    command: ["compose-init", "--tenant", "${NEXUS_AGENT_NAMESPACE:-${NEXUS_NAMESPACE:-default}}"]
     environment:
       NEXUS_NATS_DIR: /store
     volumes:
@@ -572,7 +573,11 @@ services:
       # worker cannot corrupt runs it never touched (§3.1 invariant 2).
       NEXUS_CONTROL_PLANE: api-gateway:9091
       NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
-      NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
+      # The tenant this agent serves: NEXUS_AGENT_NAMESPACE, else the stack's
+      # NEXUS_NAMESPACE, else "default". The worker key must belong to it
+      # (`make seed AGENT_NAMESPACE=...`), and nats-init issues the agent NKey
+      # for the same tenant.
+      NEXUS_NAMESPACE: ${NEXUS_AGENT_NAMESPACE:-${NEXUS_NAMESPACE:-default}}
       NEXUS_QUEUES: default
       NEXUS_LABELS: "zone=local,accelerator=none"
       NEXUS_EXECUTORS: subprocess,docker
@@ -621,7 +626,11 @@ services:
       <<: [*minio-env, *nats-env]
       NEXUS_CONTROL_PLANE: api-gateway:9091
       NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
-      NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
+      # The tenant this agent serves: NEXUS_AGENT_NAMESPACE, else the stack's
+      # NEXUS_NAMESPACE, else "default". The worker key must belong to it
+      # (`make seed AGENT_NAMESPACE=...`), and nats-init issues the agent NKey
+      # for the same tenant.
+      NEXUS_NAMESPACE: ${NEXUS_AGENT_NAMESPACE:-${NEXUS_NAMESPACE:-default}}
       # Subscribes to BOTH queues so gpu work has somewhere to go while the
       # cpu-only agent still handles the default queue.
       NEXUS_QUEUES: default,gpu
@@ -677,7 +686,11 @@ services:
       <<: [*minio-env, *nats-env]
       NEXUS_CONTROL_PLANE: api-gateway:9091
       NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
-      NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
+      # The tenant this agent serves: NEXUS_AGENT_NAMESPACE, else the stack's
+      # NEXUS_NAMESPACE, else "default". The worker key must belong to it
+      # (`make seed AGENT_NAMESPACE=...`), and nats-init issues the agent NKey
+      # for the same tenant.
+      NEXUS_NAMESPACE: ${NEXUS_AGENT_NAMESPACE:-${NEXUS_NAMESPACE:-default}}
       NEXUS_QUEUES: default,gpu
       NEXUS_LABELS: "zone=local,accelerator=nvidia"
       NEXUS_EXECUTORS: subprocess,docker

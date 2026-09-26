@@ -264,6 +264,17 @@ schedulers:
 
 # Worker agents. Real hardware only by default; simulated capacity belongs in a
 # dev environment and must be labelled as such.
+#
+# Each agent serves nexusNamespace unless it sets `namespace`. An agent of
+# another tenant also needs a worker key minted for that tenant
+# (`workerApiKeySecretKey`, a key in existingSecret; default worker-api-key),
+# a nats.auth.tenants entry for it and, with NKey auth, that tenant's seed
+# (`natsSeedKey`). The chart refuses to render an agent whose namespace has no
+# tenant entry. See docs/MULTITENANCY.md, "Agent namespace".
+#   - name: agent-team-ml
+#     namespace: team-ml
+#     workerApiKeySecretKey: worker-api-key-team-ml
+#     natsSeedKey: nats-agent-nkey-team-ml
 agents:
   - name: agent-cpu
     replicas: 1
