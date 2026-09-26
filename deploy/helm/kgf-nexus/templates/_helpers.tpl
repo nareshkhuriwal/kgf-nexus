@@ -273,7 +273,19 @@ exactly "the migration job for this release has finished".
       set -eu
       latest=$(ls /migrations/*.up.sql | sort | tail -n 1 | xargs basename | sed 's/\.up\.sql$//')
       echo "waiting for migration $latest"
-      until [ "$(psql "$DATABASE_URL" -tAc "SELECT 1 FROM schema_migrations WHERE version = '$latest'" 2>/dev/null)" = "1" ]; do
+      # Say WHY it is still waiting: a wrong CA bundle, a host name the
+      # certificate lacks or a runtime login not created yet otherwise shows
+      # only as a pod stuck in Init (F133). libpq never prints the password.
+      last=""; n=0
+      while :; do
+        out=$(psql "$DATABASE_URL" -tAc "SELECT 1 FROM schema_migrations WHERE version = '$latest'" 2>&1 | head -n 1) || true
+        [ "$out" = "1" ] && break
+        [ -n "$out" ] || out="migration $latest not recorded yet"
+        if [ "$out" != "$last" ] || [ $((n % 30)) -eq 0 ]; then
+          echo "wait-for-schema: not ready: $out"
+          last=$out
+        fi
+        n=$((n + 1))
         sleep 2
       done
       echo "schema at $latest"

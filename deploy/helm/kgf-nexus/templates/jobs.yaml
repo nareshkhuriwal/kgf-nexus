@@ -114,7 +114,7 @@ spec:
 {{- $rr := .Values.postgres.runtimeRoles }}
 {{- $rrSecret := $rr.existingSecret | default .Values.existingSecret }}
 ---
-# Runtime logins (docs/OPERATIONS.md §20.9): nexus-db-roles, as the OWNER
+# Runtime logins (docs/OPERATIONS.md §20.11): nexus-db-roles, as the OWNER
 # login, creates one LOGIN role per service in that service's NOLOGIN group
 # role (migration 0005) and sets its password from a SCRAM verifier computed
 # here, so the plaintext never reaches the server. Named with the password

@@ -153,7 +153,7 @@ variable "postgres_password_version" {
 # ── Database hardening and agent pools (F115) ─────────────────────────────
 
 variable "runtime_db_roles" {
-  description = "Services connect as their own least-privilege logins, created by the chart's db-roles Job; the managed server's admin login then reaches only the migrate, bootstrap and db-roles Jobs (docs/OPERATIONS.md §20.9)."
+  description = "Services connect as their own least-privilege logins, created by the chart's db-roles Job; the managed server's admin login then reaches only the migrate, bootstrap and db-roles Jobs (docs/OPERATIONS.md §20.11)."
   type        = bool
   default     = true
 }

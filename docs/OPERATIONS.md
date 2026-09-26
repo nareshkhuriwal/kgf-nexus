@@ -2490,6 +2490,11 @@ durations, a `latest` tag, and any misspelt **top-level** key at install time.
 | `image.digests.<component>` | `{}` | `sha256:<64 hex>` per image; renders `<ref>:<tag>@<digest>`. The release pipeline writes it (`deploy/scripts/helm-image-digests.py`, §22) |
 | `nexusNamespace` | `default` | the Nexus tenant the agents serve and bootstrap creates |
 | `postgres.enabled` / `.host` / `.sslmode` | `true` / `postgres` / `disable` | `false` + host for a managed database (use `verify-full`) |
+| `postgres.caBundle.secretName` / `.configMapName` / `.key` | `""` / `""` / `ca.crt` | root CAs for `verify-ca`/`verify-full`, mounted as `sslrootcert`, §20.10 |
+| `postgres.params`, `postgres.connections.<c>.params` | `{}` | extra libpq parameters, global and per connection (`apiGateway` … `artifactGC`, `migrate`), §20.10 |
+| `postgres.runtimeRoles.enabled` / `.scope` / `.existingSecret` / `.passwordRevision` / `.connectionLimit` | off / union / `existingSecret` / 1 / -1 | per-service logins instead of the owner, §20.11 |
+| `serviceAccounts.<component>` `{name, annotations, automountServiceAccountToken, podLabels}` | `nexus-<component>`, token not mounted | per-component identity (IRSA, Workload Identity), §20.12 |
+| `agents[].nodeSelector` / `.tolerations` / `.affinity` / `.gpu` / `.serviceAccount` | global placement; GPUs requested when `gpuCount > 0` | agent pools and GPU devices, §20.13 |
 | `postgres.pitr.*` | off | pgBackRest archiving, §4 |
 | `minio.enabled` / `.endpoint` / `.useTLS` | `true` / `http://minio:9000` / `false` | object store |
 | `minio.image` / `.mcImage` | digest-pinned `pgsty/silo` | in-cluster S3 server and bucket-init client, §22 |
@@ -2673,9 +2678,15 @@ external gRPC Service.
       registry, ideally referenced by digest; `image.pullPolicy: IfNotPresent`.
 - [ ] `existingSecret` created from a secret manager, not a shell history; the
       Postgres password is URL-safe.
-- [ ] `postgres.enabled=false` with a managed database, `sslmode: verify-full`,
-      and the provider's PITR (§4); or `postgres.pitr.enabled` with an off-cluster
+- [ ] `postgres.enabled=false` with a managed database, `sslmode: verify-full`
+      with `postgres.caBundle` holding the provider's ROOT CAs (§20.10), and the
+      provider's PITR (§4); or `postgres.pitr.enabled` with an off-cluster
       repository whose cipher passphrase is stored outside the cluster.
+- [ ] `postgres.runtimeRoles.enabled` so no service connects as the owner
+      (§20.11); the owner password is then used only by the three Jobs.
+- [ ] Cloud identity bound to `serviceAccounts.{apiGateway,agent,artifactGC}`
+      only (§20.12); GPU agents request their devices and sit on the GPU pool
+      (§20.13); simulated GPUs never in production.
 - [ ] `minio.enabled=false` with a managed bucket and `useTLS: true`; the
       artifact backup of §7 in place.
 - [ ] `nats.auth.mode: nkey` with keys generated off-cluster (§11.7), and
@@ -2699,6 +2710,207 @@ external gRPC Service.
       `-f` values, then wait on pod readiness.
 - [ ] `deploy/helm/validate.sh` passes on your values file (copy it into
       `ci/` or run `helm lint --strict -f`).
+
+### 20.10 Database TLS: verify-full and the CA bundle
+
+`sslmode=require` encrypts but accepts any server that answers, so anyone who
+can redirect the database's address (DNS, a compromised pod on the path)
+collects every service's password. `verify-full` checks the certificate chain
+against a CA the operator chose **and** that the certificate names the host in
+the DSN.
+
+```yaml
+postgres:
+  enabled: false
+  host: nexus-pg.postgres.database.azure.com   # the name the certificate carries
+  sslmode: verify-full
+  caBundle: { secretName: nexus-postgres-ca, key: ca.crt }   # or configMapName
+  params: { connect_timeout: "10" }                          # optional, every connection
+  connections:
+    scheduler: { params: { statement_timeout: "30000" } }    # optional, one connection
+```
+
+The bundle is mounted read-only at `/etc/nexus/postgres-ca/ca.crt` in every pod
+that connects (services, their `wait-for-schema` init containers, the migrate,
+bootstrap and db-roles Jobs, artifact-gc) and every `DATABASE_URL` carries
+`sslmode=verify-full&sslrootcert=/etc/nexus/postgres-ca/ca.crt`. The Go
+services (pgx) then trust exactly that file, verify the host name and have no
+fallback; psql (libpq) in the Jobs does the same
+(`internal/config/dsn_tls_test.go`). The chart refuses `verify-*` without a
+bundle, a bundle with a non-verifying mode, both a Secret and a ConfigMap, TLS
+modes against the in-cluster postgres (it serves none), and identity keys
+(`user`, `host`, `sslmode`, `sslrootcert`, …) smuggled through `params`.
+
+**What goes in the bundle: root CAs only, never an intermediate or the server
+certificate** (providers rotate those unannounced). deploy/terraform supplies:
+
+| Cloud | Bundle | Source and pinning |
+|---|---|---|
+| AKS (Flexible Server) | `ca-bundles/azure-postgres-roots.pem`: DigiCert Global Root G2 + Microsoft RSA Root CA 2017 | vendored; `ca-bundles/refresh.sh` pins each download's SHA-256 and each root's fingerprint; environments refuse a file that no longer matches `SHA256SUMS` |
+| EKS (RDS) | `ca-bundles/rds-global-bundle.pem`: every RDS CA in every commercial region (the instance uses `rds-ca-rsa2048-g1`) | vendored, pinned the same way |
+| GKE (Cloud SQL) | every CA the instance trusts (`google_sql_ca_certs`: current, upcoming, previous) | read from the Cloud SQL Admin API at plan time. The instance uses the shared CA hierarchy (`GOOGLE_MANAGED_CAS_CA`), whose server certificates carry the instance DNS name; a private Cloud DNS zone resolves that name to the private IP and it is the host Nexus uses. The per-instance CA puts no usable name in the certificate for private services access, so verify-full was impossible with it. |
+
+**Rotation.** pgx reads `sslrootcert` when a pool is built, so the Go services
+need a restart to pick up a new bundle; the Jobs read it per connection.
+
+1. *New root announced / RDS bundle changed.* `ca-bundles/refresh.sh` fails
+   its check. Review the change (a new root, not a removed one), update the pin
+   in `refresh.sh`, `refresh.sh --write`, commit, `terraform apply` (updates the
+   `<release>-postgres-ca` Secret), then
+   `kubectl -n <ns> rollout restart deploy` so every pool trusts old **and** new.
+   Only after that switch the server (RDS: `ca_cert_identifier`; Azure/Cloud SQL:
+   the provider's rotation). Remove the old root in a later release.
+2. *Cloud SQL CA rotation.* `gcloud sql ssl server-ca-certs create --instance …`
+   (adds the upcoming CA), `terraform apply` (the bundle now has both), restart
+   the Deployments, then `gcloud sql ssl server-ca-certs rotate`. Server
+   *certificates* renew automatically in the maintenance window
+   (`AUTOMATIC_ROTATION_DURING_MAINTENANCE`) and need nothing.
+3. *Your own CA (self-managed Postgres).* Put old and new root in one bundle,
+   restart, switch the server certificate, drop the old root later.
+
+**Prove it** before relying on it: `TAG=<tag> deploy/scripts/db-tls-drill.sh`
+starts a TLS-only Postgres with a private CA and checks, with the real images,
+migrate (libpq), db-roles (pgx) and every service connecting over verify-full
+as their own logins, and refusal of a wrong CA, a host name the certificate
+lacks and plaintext. After an install: `SELECT usename, ssl, version FROM
+pg_stat_activity JOIN pg_stat_ssl USING (pid)` shows every Nexus session.
+
+### 20.11 Runtime logins: services never connect as the owner
+
+Migration 0005 created one NOLOGIN group role per service carrying ADR-0011's
+grants, but nothing created logins, so every service ran as the owner login —
+on a managed server, the provider's admin (`azure_pg_admin`, `rds_superuser`,
+`cloudsqlsuperuser` member) with DDL, CREATEROLE and every table.
+
+```yaml
+postgres:
+  user: nexus                  # owner: migrate, bootstrap, db-roles Jobs only
+  runtimeRoles:
+    enabled: true
+    existingSecret: nexus-db-logins   # keys: postgres-password-<component>
+    scope: union
+```
+
+`nexus-db-logins` holds one URL-safe password (≥ 16 of `A-Z a-z 0-9 . _ ~ -`)
+per `postgres.connections.<c>.passwordKey`: api-gateway, workflow-manager,
+dag-engine, scheduler, resource-manager, event-service, and artifact-gc when the
+CronJob is on. The **db-roles Job** (`nexus-db-roles` in the migrate image) runs
+as the owner **inside the cluster** — the only place a managed server's private
+endpoint is reachable, which is why Terraform does not run this SQL — and in
+one transaction:
+
+- creates each login `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
+  NOBYPASSRLS`, or refuses to adopt an existing role with any of those;
+- sets its password from a **SCRAM-SHA-256 verifier computed in the Job**, so
+  the plaintext never reaches the server, its statement log or pgaudit;
+- grants the `nexus_*` group roles of the chosen scope and revokes any other
+  `nexus_*` membership; artifact-gc gets SELECT on every table plus default
+  privileges for tables later migrations create, and nothing else.
+
+Services wait in `wait-for-schema` until their own login works, so ordering
+needs nothing extra. The owner password is then mounted only by the three Jobs.
+
+`scope`:
+
+- `union` (default): every login joins all six group roles — the union of the
+  DML the platform grants, still with no DDL, no ownership, no TRUNCATE, no role
+  management, and `run_events` still append-only. Verified live (§20.14).
+- `service`: each login joins only its own group role, ADR-0011's write matrix
+  enforced at the database. **Not production-ready**: the scheduler's timer
+  claim (`UPDATE timers`) and dead-worker reaping (`DELETE FROM workers`) are not
+  granted to `nexus_scheduler` (F132). Use it to find such paths.
+
+**Rotation.** Put new passwords in the Secret (Terraform:
+`runtime_db_password_version += 1`), bump `postgres.runtimeRoles.passwordRevision`
+(Terraform does both). The db-roles Job re-runs under a new name and every
+connecting pod rolls (the revision is a pod annotation). Existing sessions
+survive a password change; each pod reconnects with the new one after its
+restart. The owner password rotates as before (deploy/terraform README), and
+now restarts only the Jobs' next run.
+
+### 20.12 ServiceAccounts and cloud identity
+
+Every Nexus pod runs under its own ServiceAccount (`nexus-api-gateway`,
+`nexus-scheduler`, `nexus-agent`, `nexus-artifact-gc`, `nexus-jobs`, …), never
+`default`, with **no API token mounted** (`automountServiceAccountToken:
+false`); none of them calls the Kubernetes API. An agent whose `executors`
+include `kubernetes` defaults to a mounted token (it launches task Jobs; bind
+its RBAC yourself). The cluster controller keeps its own RBAC-bound account.
+
+A cloud identity is bound by naming one account for the components that use
+the result store — api-gateway (task logs), agents, artifact-gc — and nothing
+else. The chart creates a shared account once and refuses two components
+naming it with different settings:
+
+```yaml
+serviceAccounts:
+  apiGateway: &artifacts
+    name: nexus-artifacts
+    annotations: { eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/<name>-nexus-artifacts }
+    # GKE: { iam.gke.io/gcp-service-account: <gsa>@<project>.iam.gserviceaccount.com }
+    # AKS: { azure.workload.identity/client-id: <id> } plus
+    # podLabels: { azure.workload.identity/use: "true" }
+  agent: *artifacts
+  artifactGC: *artifacts
+```
+
+IRSA, EKS Pod Identity and Azure Workload Identity inject their own projected
+token and GKE uses the metadata server, so all work with the API token
+unmounted. The Terraform environments set exactly this, with the platform
+modules' trust (`nexus_service_account = "nexus-artifacts"`). **The object-store
+client does not use these credentials yet** (static keys remain configured) —
+that is a separate change (F115 part 2); the accounts are ready for it.
+
+### 20.13 Agent pools and GPUs
+
+An `agents[]` entry may set `nodeSelector`, `tolerations` and `affinity`; each
+replaces the global `placement.*` value for that agent. With `gpuCount > 0` the
+agent pod **requests `gpuCount` devices** of `gpu.resourceName`
+(`agentDefaults.gpuResourceName`, `nvidia.com/gpu`) in requests and limits, and
+tolerates the `<resourceName>:NoSchedule` taint the deploy/terraform GPU pools
+carry. So what the agent advertises (`NEXUS_GPU_COUNT`, `--gpu-kind`,
+`--gpu-memory-bytes`) is what the kubelet allocated and mounted, and task
+subprocesses see those devices. An explicit device limit different from
+`gpuCount` is refused. `gpu: { requestDevices: false }` advertises without
+allocating — **simulated** capacity — and the chart then requires the label
+`simulated=true` (the dev environment's agents use it).
+
+```yaml
+agents:
+  - name: agent-gpu
+    queues: gpu
+    labels: zone=cluster,accelerator=nvidia
+    cpuMillis: 3000
+    memoryBytes: 10737418240
+    gpuCount: 1
+    gpuKind: nvidia-l4
+    gpuMemoryBytes: 25769803776
+    diskBytes: 161061273600
+    nodeSelector: { nexus.khuriwalgroup.com/pool: gpu }
+    resources: { requests: { cpu: 500m, memory: 1Gi }, limits: { memory: 12Gi } }
+```
+
+The AKS/EKS/GKE environments add exactly such an agent (variable `gpu_agent`)
+when their GPU pool is enabled, next to a CPU agent pinned to the cpu pool.
+Size the agent inside one GPU node. GPU execution itself is still unqualified
+on real hardware (production brief).
+
+### 20.14 What was verified for F115 (2026-09-26, docker-desktop)
+
+| Check | Result |
+|---|---|
+| `deploy/helm/validate.sh` | 5 values files lint and validate strictly (57, 83, 47, 48, 58 objects); 33 refusals with the expected message, 17 of them new (TLS without a bundle, bundle without verification, TLS on in-cluster postgres, reserved params, owner as runtime login, shared login, owner password key, bad scope and login names, GPU limit mismatch, unlabelled simulated GPUs, bad resource name, conflicting shared ServiceAccount, the controller's account, a misspelt key) |
+| `deploy/scripts/db-tls-drill.sh` (containers `nexus-w3c-drill-*`, port 55791) | 18/18: migrate (libpq) and db-roles (pgx) over verify-full; the six services as their own logins with TLSv1.3 sessions and event-service `/readyz` 200; wrong CA, wrong host name and plaintext refused (libpq, pgx and a running service, which stays unready); runtime login refused DDL |
+| `internal/dbroles` integration (migrated Postgres 16) | logins authenticate with client-side verifiers; attributes and connection limit; own-table writes allowed, other writes, DDL and `run_events` DELETE refused; read-only login reads later tables and writes none; rotation invalidates the old password and moves membership; privileged or missing roles refused with no partial change |
+| Helm install, namespace `nexus-w3c-helm`, images `w3c-f115a` | external TLS-only Postgres with a private CA in the namespace; `verify-full`, `runtimeRoles` (union), a shared `nexus-artifacts` account for gateway/agents/GC, a simulated GPU agent. All pods Ready; migrate, bootstrap, db-roles Complete; `hello_dag` SUCCEEDED; every service session in `pg_stat_ssl` was TLSv1.3 as its own `*_login`, none as the owner; artifact-gc ran as the read-only login under `nexus-artifacts` with no token; from a pod, a rogue CA, a wrong host name, a bare IP and plaintext were refused and the runtime login could neither `CREATE TABLE` nor `TRUNCATE run_events` |
+| `scope: service` on the same release | `hello_dag` SUCCEEDED, but the scheduler's timer claim and dead-worker reaping were denied (F132) |
+| `make tf-validate` / `make tf-lint` | all modules and environments valid, mocked-plan tests pass (new: CA Secret, runtime logins, non-PEM refusal, Cloud SQL shared CA and private DNS, GPU agent on the GPU pool, pinned bundle); tflint clean, checkov 296 passed / 0 failed, trivy clean |
+
+Not verified: any managed database (no cloud apply, F115 part 6), in
+particular that Cloud SQL's `google_sql_ca_certs` returns the shared-CA root
+and that the PSA DNS name resolves through the private zone; real GPU
+scheduling (no GPU node); IRSA/Workload Identity tokens reaching the object
+store (the client change is separate).
 
 ---
 

@@ -28,7 +28,7 @@
 //
 // Managed servers (Azure Flexible Server, RDS, Cloud SQL) cannot be reached by
 // Terraform, which runs outside their private network; the Helm chart runs this
-// as a Job inside the cluster instead (deploy/helm, OPERATIONS §20.9).
+// as a Job inside the cluster instead (deploy/helm, OPERATIONS §20.11).
 package dbroles
 
 import (

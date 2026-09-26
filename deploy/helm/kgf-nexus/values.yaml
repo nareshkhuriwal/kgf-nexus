@@ -75,7 +75,7 @@ postgres:
   # One of secretName / configMapName, holding `key`. Mounted read-only at
   # /etc/nexus/postgres-ca/ca.crt in every pod that connects, and passed as
   # sslrootcert. deploy/terraform creates it from pinned bundles
-  # (deploy/terraform/ca-bundles). Rotation: docs/OPERATIONS.md §20.8.
+  # (deploy/terraform/ca-bundles). Rotation: docs/OPERATIONS.md §20.10.
   caBundle:
     secretName: ""
     configMapName: ""
@@ -97,7 +97,7 @@ postgres:
     eventService:    { user: nexus_event_service_login,    passwordKey: postgres-password-event-service,    params: {} }
     artifactGC:      { user: nexus_artifact_gc_login,      passwordKey: postgres-password-artifact-gc,      params: {} }
     migrate:         { params: {} }
-  # Least-privilege runtime logins (docs/OPERATIONS.md §20.9). When enabled,
+  # Least-privilege runtime logins (docs/OPERATIONS.md §20.11). When enabled,
   # each service connects as its own LOGIN role, a member of the NOLOGIN group
   # role migration 0005 created for it (nexus_api_gateway, nexus_scheduler,
   # ...), so it holds exactly ADR-0011's grants and no DDL; artifact-gc gets a

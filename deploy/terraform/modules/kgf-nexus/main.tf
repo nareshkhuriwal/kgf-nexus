@@ -144,7 +144,7 @@ resource "kubernetes_secret_v1" "postgres_ca" {
   data = { "ca.crt" = var.postgres_ca_bundle }
 }
 
-# One login per service, never the owner (docs/OPERATIONS.md §20.9). The chart's
+# One login per service, never the owner (docs/OPERATIONS.md §20.11). The chart's
 # db-roles Job creates them inside the cluster, because Terraform cannot reach
 # a managed server's private endpoint to run SQL. Alphanumeric: embedded in a
 # postgres:// URL, and nexus-db-roles accepts only URL-safe passwords.

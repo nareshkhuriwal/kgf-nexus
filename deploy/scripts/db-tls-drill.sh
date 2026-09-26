@@ -4,7 +4,7 @@
 #
 # Database TLS drill: prove sslmode=verify-full end to end against a real
 # Postgres that serves a certificate from a private CA, with the SAME images
-# the chart runs (docs/OPERATIONS.md §20.8).
+# the chart runs (docs/OPERATIONS.md §20.10).
 #
 #   TAG=<image tag> deploy/scripts/db-tls-drill.sh
 #

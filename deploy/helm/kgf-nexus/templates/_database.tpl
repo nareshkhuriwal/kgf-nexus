@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 Database connections: TLS server verification (postgres.caBundle), per-
 connection parameters (postgres.params, postgres.connections.<c>.params) and
 least-privilege runtime logins (postgres.runtimeRoles). docs/OPERATIONS.md
-§20.8 and §20.9.
+§20.10 and §20.11.
 
 Connection keys: apiGateway workflowManager dagEngine scheduler
 resourceManager eventService artifactGC, and migrate (the migrate, bootstrap
@@ -47,7 +47,7 @@ not at all. Called from nexus.required.
 {{- fail "postgres.caBundle: set secretName OR configMapName, not both" -}}
 {{- end -}}
 {{- if and $verify (not (include "nexus.dbCAEnabled" .)) -}}
-{{- fail (printf "postgres.sslmode=%s needs postgres.caBundle.secretName or .configMapName: the database's root CA bundle to verify the server against (docs/OPERATIONS.md §20.8)" $pg.sslmode) -}}
+{{- fail (printf "postgres.sslmode=%s needs postgres.caBundle.secretName or .configMapName: the database's root CA bundle to verify the server against (docs/OPERATIONS.md §20.10)" $pg.sslmode) -}}
 {{- end -}}
 {{- if and (include "nexus.dbCAEnabled" .) (not $verify) -}}
 {{- fail (printf "postgres.caBundle is set but postgres.sslmode=%s does not verify the server; use verify-full" $pg.sslmode) -}}
@@ -151,7 +151,7 @@ exit at startup without it (internal/config.DSN). args: root, key.
 The CA bundle, projected to ca.crt whatever its key is called. No subPath, so
 an updated Secret/ConfigMap reaches the file in place: libpq (the Jobs) reads
 it per connection; the Go services read it when their pool is built, so a CA
-ROTATION still needs a rollout restart (OPERATIONS §20.8).
+ROTATION still needs a rollout restart (OPERATIONS §20.10).
 */}}
 {{- define "nexus.dbVolumes" -}}
 {{- $ca := .Values.postgres.caBundle | default dict -}}

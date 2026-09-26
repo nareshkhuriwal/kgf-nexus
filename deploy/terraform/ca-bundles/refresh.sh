@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Rebuild (or check) the managed-database CA bundles the cloud environments
-# mount for sslmode=verify-full (docs/OPERATIONS.md §20.8).
+# mount for sslmode=verify-full (docs/OPERATIONS.md §20.10).
 #
 #   deploy/terraform/ca-bundles/refresh.sh           # check: download, verify, compare
 #   deploy/terraform/ca-bundles/refresh.sh --write   # rewrite the bundles and SHA256SUMS
@@ -14,7 +14,7 @@
 # not match refuses to write anything. When a provider publishes a new bundle
 # (AWS adds a CA to the RDS bundle; Microsoft announces a new root), the check
 # fails: review the change, update the pin below in the same commit, rerun
-# with --write, and roll it out as in OPERATIONS §20.8.
+# with --write, and roll it out as in OPERATIONS §20.10.
 #
 # Terraform reads the bundles with file() and refuses one whose SHA-256 is not
 # the one in SHA256SUMS, so a hand edit of a .pem cannot slip through either.

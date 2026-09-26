@@ -82,7 +82,7 @@ must_fail "malformed image digest"              "/image/digests/migrate"       -
 must_fail "bad topology policy"                 "whenUnsatisfiable"            --set placement.topologySpread.whenUnsatisfiable=Sometimes
 must_fail "no scheduler at all"                 "schedulers"                   --set-json 'schedulers=[]'
 must_fail "peer TLS with a plaintext broker"    "enable nats.tls too"          --set tls.enabled=true --set nats.auth.mode=none
-# Database TLS and runtime logins (F115, OPERATIONS §20.8-20.9).
+# Database TLS and runtime logins (F115, OPERATIONS §20.10-20.11).
 ext=(--set postgres.enabled=false --set postgres.host=db.example.com)
 ca=(--set postgres.sslmode=verify-full --set postgres.caBundle.secretName=pg-ca)
 must_fail "verify-full without a CA bundle"     "needs postgres.caBundle"      "${ext[@]}" --set postgres.sslmode=verify-full

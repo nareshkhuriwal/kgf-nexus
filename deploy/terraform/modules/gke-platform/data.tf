@@ -140,7 +140,7 @@ resource "google_dns_record_set" "postgres" {
 # certificate, one added for an upcoming rotation, and one rotated out. The
 # bundle Nexus mounts is all of them, so a CA rotation started with
 # `gcloud sql ssl server-ca-certs create` reaches the pods (next apply) before
-# the instance switches (docs/OPERATIONS.md §20.8).
+# the instance switches (docs/OPERATIONS.md §20.10).
 data "google_sql_ca_certs" "postgres" {
   project  = var.project_id
   instance = google_sql_database_instance.this.name
