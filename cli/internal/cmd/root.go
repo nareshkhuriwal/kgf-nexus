@@ -163,6 +163,7 @@ func groups() []*group {
 		backfillGroup(),
 		workerGroup(),
 		cacheGroup(),
+		importGroup(),
 	}
 }
 
@@ -395,6 +396,8 @@ Local quick start (Docker):
 
 Projects:
   init                Create a workflow project from a template (--list)
+  import              Convert Airflow, Prefect or Argo pipelines into specs
+                      (import airflow|prefect|argo <path>)
 
 Workflow specs:
   workflow submit     Submit a spec (JSON, YAML or .py); --dry-run, --watch
