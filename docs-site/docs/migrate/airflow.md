@@ -23,7 +23,7 @@ rule that nothing is written while a construct is unsupported.
 | `description`, `doc_md`, DAG docstring | `description` | translated |
 | `tags` | `labels.tags` | translated |
 | `params={...}`, `Param(default, type=...)`, `@dag` function arguments | `params` with type and `default_json` | translated; JSON-schema constraints (`minLength`, `enum`...) approximated (not enforced) |
-| `BashOperator(bash_command=...)` | task with `bash -c <command>`, subprocess executor | translated |
+| `BashOperator(bash_command=...)` | task with `bash -c <command>`, subprocess executor; the worker needs `bash` (the stock agent image has it) | translated |
 | `{{ params.x }}` in `bash_command` | input bound to param `x`, read from `$NEXUS_INPUT_DIR` by a shell helper | approximated (string quotes stripped; inside single quotes it does not expand) |
 | `{{ dag.dag_id }}`, `{{ task.task_id }}` | literal text | translated |
 | `{{ run_id }}`, `{{ task_instance_key_str }}` | `$NEXUS_RUN_ID` | approximated (a UUID) |
@@ -231,3 +231,25 @@ params:
    configuration.
 6. Review idempotency: every retry, and every lost-worker recovery, runs a task
    again. See [Migrating to Nexus](index.md#what-every-migration-needs-afterwards).
+
+## Verified end to end
+
+The hand-written `runnable_bash` test DAG
+(`cli/internal/importer/testdata/cases/airflow/runnable_bash.py`) has a
+TaskGroup, `{{ params.greeting }}`, `default_args` retries and a cron
+schedule. It was converted, submitted and run on a local stack:
+
+```console
+$ nexusctl import airflow runnable_bash.py --out runnable_bash.yaml --report report.md
+Imported 1 Airflow workflow(s) from runnable_bash.py: 12 translated, 2 approximated, 0 unsupported.
+…
+  schedule: nexusctl schedule create runnable_bash --workflow runnable_bash --cron '30 2 * * *' --timezone UTC --overlap allow …
+$ nexusctl workflow submit runnable_bash.yaml && nexusctl run create runnable_bash --wait
+  RUNNING
+  SUCCEEDED
+$ nexusctl logs <prepare.make attempt>
+hello from make
+```
+
+The same DAG, plus five other converted pipelines, also runs under the local
+runner in `go test ./cli/internal/importer` (`TestConvertedPipelinesRunLocally`).
