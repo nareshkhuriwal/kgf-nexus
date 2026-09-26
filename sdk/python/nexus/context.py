@@ -15,7 +15,7 @@ The context is also the task's only channel to the control plane (ADR-0032):
 heartbeats and progress, usage units, shared rate-limit permits and
 checkpoints go through the agent's per-attempt workload API when there is one
 (``NEXUS_TASK_API``), and fall back to in-process behaviour when there is not
-(the local runner, unit tests, the kubernetes executor). Handlers call the same
+(the local runner, unit tests, a kubernetes agent with no listener). Handlers call the same
 methods either way.
 """
 

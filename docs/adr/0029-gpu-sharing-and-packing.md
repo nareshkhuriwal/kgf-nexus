@@ -120,6 +120,12 @@ Every workload also sees `NEXUS_GPU_MODE`, `NEXUS_GPU_SHARE_MILLI` and
 `NEXUS_GPU_SHARE_MEMORY_BYTES` so a framework can size itself (for example
 `PYTORCH_CUDA_ALLOC_CONF` or vLLM's `gpu_memory_utilization`).
 
+**On Kubernetes the pod requests the reservation.** The device plugin
+allocates exactly what the pod spec requests, so the request is built from
+what the agent's registry admitted (whole-GPU count, MIG instances per
+profile, the shared slice), never from the enforcement ceiling, which may
+name no GPU at all (F158). Resource names are validated when the agent starts.
+
 **On Kubernetes the per-device choice is advisory.** The device plugin, not
 the agent, decides which physical GPU a pod's replica lands on. The Nexus
 ledger still bounds how much is packed onto the *worker*, and MIG profiles are
