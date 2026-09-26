@@ -93,6 +93,11 @@ const (
 	AuditError   = "error"
 )
 
+// ValidAuditOutcome reports whether s is one of the three audit outcomes.
+func ValidAuditOutcome(s string) bool {
+	return s == AuditSuccess || s == AuditDenied || s == AuditError
+}
+
 // auditNow is the audit clock; a variable only so integration tests can write
 // back-dated rows to exercise retention.
 var auditNow = time.Now
@@ -144,6 +149,12 @@ func appendChained(ctx context.Context, q GWQuerier, e AuditEntry) error {
 	}
 	if e.Outcome == "" {
 		e.Outcome = AuditSuccess
+	}
+	// The trail is filtered and exported by outcome, so an outcome outside the
+	// three is a row no filter finds. Tenant onboarding wrote "OK" for every
+	// tenant it created until this was checked (F155).
+	if !ValidAuditOutcome(e.Outcome) {
+		return fmt.Errorf("append audit %s: %w: outcome %q is not success, denied or error", e.Action, ErrInvalidRequest, e.Outcome)
 	}
 	if e.ActorKind == "" {
 		e.ActorKind = "anonymous"
@@ -288,9 +299,7 @@ func scanAudit(rows pgx.Rows) (AuditRow, error) {
 // entries, and page N costs the same as page 1.
 func GatewayListAudit(ctx context.Context, q GWQuerier, namespace string, f AuditFilter) ([]AuditRow, string, error) {
 	limit := f.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
+	limit = ClampLimit(limit, DefaultAuditPage, MaxAuditPage)
 	cur, err := decodeAuditCursor(f.Cursor)
 	if err != nil {
 		return nil, "", err

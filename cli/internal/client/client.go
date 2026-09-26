@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +69,9 @@ type APIError struct {
 	// render route-specific structured fields (a refused delete's referencing
 	// runs and schedules) instead of only the message.
 	Body map[string]any
+	// RetryAfter is the response's Retry-After, zero when it had none: how long
+	// the server says to wait before the same request can succeed.
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -227,11 +231,12 @@ func (c *Client) stream(ctx context.Context, u string, accept string) (io.ReadCl
 
 func apiError(resp *http.Response, raw []byte, method, path string) error {
 	e := &APIError{
-		Status:    resp.StatusCode,
-		Method:    method,
-		Path:      path,
-		RequestID: firstHeader(resp, "X-Request-Id", "X-Request-ID", "Request-Id"),
-		Message:   truncate(strings.TrimSpace(string(raw)), 400),
+		Status:     resp.StatusCode,
+		Method:     method,
+		Path:       path,
+		RequestID:  firstHeader(resp, "X-Request-Id", "X-Request-ID", "Request-Id"),
+		Message:    truncate(strings.TrimSpace(string(raw)), 400),
+		RetryAfter: retryAfter(resp.Header.Get("Retry-After"), time.Now()),
 	}
 	var body map[string]any
 	if json.Unmarshal(raw, &body) == nil {
@@ -285,7 +290,7 @@ func apiError(resp *http.Response, raw []byte, method, path string) error {
 	case http.StatusNotImplemented:
 		e.Hint = "This control plane does not serve this feature (it may predate it). Check the gateway version."
 	case http.StatusTooManyRequests:
-		e.Hint = "The control plane is rate limiting. Retry with backoff."
+		e.Hint = tooManyRequestsHint(e.Body, e.RetryAfter)
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		e.Hint = "The control plane is unreachable or starting up. Check service health with `nexusctl capacity`."
 	case http.StatusInternalServerError:
@@ -297,6 +302,86 @@ func apiError(resp *http.Response, raw []byte, method, path string) error {
 		e.Message = http.StatusText(resp.StatusCode)
 	}
 	return e
+}
+
+// tooManyRequestsHint explains a 429 by its cause. The gateway answers 429 for
+// four different reasons, and only one of them is rate limiting:
+//
+//   - namespace_quota_exceeded: a namespace quota (ADR-0021) is used up; the
+//     body names the dimension and the used/limit figures;
+//   - budget_exceeded: a spending budget (ADR-0023) is exhausted until its
+//     period ends; the body names the budget and spent/amount/currency;
+//   - max_active_runs: the workflow already has its maximum of active runs;
+//   - rate_limited (or anything else): request rate limiting.
+//
+// Calling the first three "rate limiting" sent operators retrying with backoff
+// against a limit that backoff cannot clear.
+func tooManyRequestsHint(body map[string]any, wait time.Duration) string {
+	retry := ""
+	if wait > 0 {
+		retry = " The server says retry after " + wait.String() + "."
+	}
+	code, _ := body["error"].(string)
+	switch code {
+	case "namespace_quota_exceeded":
+		h := "Refused by a namespace quota (not a request rate limit)"
+		if dim, _ := body["dimension"].(string); dim != "" {
+			h += ": " + dim
+			if used, limit := number(body["used"]), number(body["limit"]); used != "" && limit != "" {
+				h += " is at " + used + " of " + limit
+			}
+		}
+		h += "." + retry
+		return h + " Wait for running work to finish, or ask a namespace administrator to raise the quota."
+	case "budget_exceeded":
+		h := "Refused by a namespace budget (not a request rate limit)"
+		if name, _ := body["budget"].(string); name != "" {
+			h += ": " + name
+		}
+		if spent, amount := number(body["spent"]), number(body["amount"]); spent != "" && amount != "" {
+			cur, _ := body["currency"].(string)
+			h += " has spent " + strings.TrimSpace(spent+" of "+amount+" "+cur)
+		}
+		h += "." + retry
+		return h + " New runs are refused until the budget period ends or an administrator raises the budget."
+	case "max_active_runs":
+		return "Refused by the workflow's max_active_runs limit (not a request rate limit): it already has its maximum of active runs. Retry once one finishes." + retry
+	}
+	h := "The control plane is rate limiting."
+	if retry != "" {
+		return h + retry
+	}
+	return h + " Retry with backoff."
+}
+
+// number renders a JSON number (or a numeric string) without a trailing ".0".
+func number(v any) string {
+	switch n := v.(type) {
+	case float64:
+		return strconv.FormatFloat(n, 'f', -1, 64)
+	case string:
+		return n
+	}
+	return ""
+}
+
+// retryAfter parses a Retry-After header: delay-seconds or an HTTP date
+// (RFC 9110 §10.2.3). Zero when absent or unparseable.
+func retryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil && t.After(now) {
+		return t.Sub(now).Round(time.Second)
+	}
+	return 0
 }
 
 func firstHeader(resp *http.Response, names ...string) string {

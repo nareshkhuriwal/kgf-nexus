@@ -109,6 +109,11 @@ type Config struct {
 	// DefaultRoot.
 	Root string
 
+	// Network serves this attempt on the agent's TLS listener, routed by its
+	// token, instead of on a Unix socket: for attempts whose workload runs
+	// on another node (the kubernetes executor, F148). Root is then unused.
+	Network *Network
+
 	// Workload is RegisterResponse.workload_api. Nil offers the workload no
 	// usage, rate limits or checkpoints (a gateway that predates ADR-0032).
 	Workload *nexusv1.WorkloadApiConfig
@@ -167,6 +172,16 @@ type Server struct {
 
 	closeOnce sync.Once
 
+	// network is set for a remote attempt (Config.Network).
+	network *Network
+	// reqMu guards reqClosed; reqWG counts requests inside ServeHTTP. Close
+	// sets reqClosed first, so no request can start after it and Close can
+	// wait for the ones that did: FinalFlush's snapshot must follow every
+	// increment the workload was told succeeded.
+	reqMu     sync.Mutex
+	reqClosed bool
+	reqWG     sync.WaitGroup
+
 	// stale is set once any upstream call reports that the attempt no longer
 	// owns its lease. Every later usage report is refused with 409 at once.
 	stale atomic.Bool
@@ -208,24 +223,12 @@ func Start(cfg Config) (*Server, error) {
 	if cfg.LeaseToken == nil {
 		cfg.LeaseToken = func() string { return "" }
 	}
-	root := cfg.Root
-	if root == "" {
-		root = DefaultRoot
-	}
-	dir, sock, err := SocketPathFor(root, cfg.AttemptID)
-	if err != nil {
-		return nil, err
-	}
-	if err := ensureRoot(root); err != nil {
-		return nil, err
-	}
 	tok, err := newToken()
 	if err != nil {
 		return nil, err
 	}
-
 	s := &Server{
-		cfg: cfg, token: tok, dir: dir, sock: sock,
+		cfg: cfg, token: tok, network: cfg.Network,
 		log:      cfg.Log.With("attempt_id", cfg.AttemptID, "component", "taskapi"),
 		serveErr: make(chan error, 1),
 		sem:      make(chan struct{}, maxConcurrent),
@@ -236,24 +239,55 @@ func Start(cfg Config) (*Server, error) {
 		s.maxCheckpoint = DefaultMaxCheckpointBytes
 	}
 	s.usage.init()
+	s.baseCtx, s.cancel = context.WithCancel(context.Background())
+
+	if s.network != nil {
+		if err := s.network.register(s); err != nil {
+			s.cancel()
+			return nil, err
+		}
+		if s.caps.Usage {
+			go s.flushLoop()
+		}
+		s.log.Debug("workload API serving on the network listener", "url", s.network.URL(),
+			"usage", s.caps.Usage, "rate_limits", s.caps.RateLimits, "checkpoints", s.caps.Checkpoints)
+		return s, nil
+	}
+
+	root := cfg.Root
+	if root == "" {
+		root = DefaultRoot
+	}
+	dir, sock, err := SocketPathFor(root, cfg.AttemptID)
+	if err != nil {
+		s.cancel()
+		return nil, err
+	}
+	if err := ensureRoot(root); err != nil {
+		s.cancel()
+		return nil, err
+	}
+	s.dir, s.sock = dir, sock
 
 	if err := makeAttemptDir(dir, sock); err != nil {
+		s.cancel()
 		return nil, err
 	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
+		s.cancel()
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("taskapi: listen on %s: %w", sock, err)
 	}
 	// 0666: the token is the credential. The docker task image runs as uid
 	// 10001, which must be able to connect to a socket the agent's uid owns.
 	if err := os.Chmod(sock, 0o666); err != nil {
+		s.cancel()
 		_ = ln.Close()
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("taskapi: chmod %s: %w", sock, err)
 	}
 	s.ln = ln
-	s.baseCtx, s.cancel = context.WithCancel(context.Background())
 	s.srv = &http.Server{
 		Handler:           s,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -295,8 +329,24 @@ func newToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// SocketPath is the socket's host path.
+// SocketPath is the socket's host path, "" for a remote attempt.
 func (s *Server) SocketPath() string { return s.sock }
+
+// URL is the network listener's base URL for a remote attempt, "" otherwise.
+func (s *Server) URL() string {
+	if s.network == nil {
+		return ""
+	}
+	return s.network.URL()
+}
+
+// CAPEM is the CA certificate a remote attempt pins, nil otherwise.
+func (s *Server) CAPEM() []byte {
+	if s.network == nil {
+		return nil
+	}
+	return s.network.CAPEM()
+}
 
 // Dir is the directory holding the socket (what the docker executor mounts).
 func (s *Server) Dir() string { return s.dir }
@@ -311,23 +361,69 @@ func (s *Server) Capabilities() Capabilities { return s.caps }
 // removes the socket and its directory. Idempotent. It does NOT flush usage:
 // the runner calls FinalFlush after Close, so no increment can arrive after
 // the snapshot that precedes the result report.
+//
+// For a remote attempt the token is revoked FIRST: from that instant the
+// network listener answers 401 for it, whatever the pod is still doing.
 func (s *Server) Close() {
 	s.closeOnce.Do(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-		if err := s.srv.Shutdown(ctx); err != nil {
-			s.log.Warn("workload API did not drain in time; closing connections", "error", err)
+		s.reqMu.Lock()
+		s.reqClosed = true
+		s.reqMu.Unlock()
+		if s.network != nil {
+			s.network.unregister(s)
 		}
-		cancel()
+		if s.srv != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+			if err := s.srv.Shutdown(ctx); err != nil {
+				s.log.Warn("workload API did not drain in time; closing connections", "error", err)
+			}
+			cancel()
+		} else if !waitTimeout(&s.reqWG, shutdownGrace) {
+			s.log.Warn("workload API requests did not drain in time; aborting them")
+		}
 		// Abort whatever is still running (an upload stuck on the object
 		// store) and force-close its connection.
 		s.cancel()
-		_ = s.srv.Close()
-		<-s.serveErr
+		if s.srv != nil {
+			_ = s.srv.Close()
+			<-s.serveErr
+		}
+		if !waitTimeout(&s.reqWG, shutdownGrace) {
+			s.log.Error("workload API requests still running after cancellation; " +
+				"a usage increment may follow the final snapshot")
+		}
 		s.usage.stopFlusher()
-		if err := os.RemoveAll(s.dir); err != nil {
-			s.log.Warn("could not remove the workload API socket directory", "dir", s.dir, "error", err)
+		if s.dir != "" {
+			if err := os.RemoveAll(s.dir); err != nil {
+				s.log.Warn("could not remove the workload API socket directory", "dir", s.dir, "error", err)
+			}
 		}
 	})
+}
+
+// waitTimeout waits for wg at most d, reporting whether it finished.
+func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
+// enter admits a request unless Close has begun.
+func (s *Server) enter() bool {
+	s.reqMu.Lock()
+	defer s.reqMu.Unlock()
+	if s.reqClosed {
+		return false
+	}
+	s.reqWG.Add(1)
+	return true
 }
 
 // ServeHTTP authenticates, bounds concurrency, routes, and records metrics.
@@ -335,6 +431,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec := &statusRecorder{ResponseWriter: w}
 	endpoint := endpointFor(r.Method, r.URL.Path)
 	defer func() { s.cfg.Metrics.WorkloadAPIRequest(endpoint, rec.status()) }()
+
+	if !s.enter() {
+		// Revoked: the attempt has ended on this agent.
+		rec.Header().Set("WWW-Authenticate", `Bearer realm="nexus-task"`)
+		writeError(rec, http.StatusUnauthorized, "unauthorized", "missing, invalid or revoked bearer token")
+		return
+	}
+	defer s.reqWG.Done()
+	if s.network != nil {
+		// Requests on the shared listener carry that server's context; tie
+		// them to this attempt's, so Close aborts them like the socket's.
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		stop := context.AfterFunc(s.baseCtx, cancel)
+		defer stop()
+		r = r.WithContext(ctx)
+	}
 
 	if !s.authorized(r) {
 		rec.Header().Set("WWW-Authenticate", `Bearer realm="nexus-task"`)

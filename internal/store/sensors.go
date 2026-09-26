@@ -121,7 +121,8 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12) RETURNI
 	return SensorGet(ctx, q, s.Namespace, id)
 }
 
-// SensorUpdate changes a definition. The kind is immutable.
+// SensorUpdate changes a definition if it is still at revision (0 is always a
+// conflict: stored sensors start at 1). The kind is immutable.
 func SensorUpdate(ctx context.Context, q GWQuerier, s Sensor, revision int64) (Sensor, error) {
 	cfg, err := jsonb(s.Config)
 	if err != nil {
@@ -137,7 +138,7 @@ UPDATE sensors
    SET spec_name = $3, spec_version = $4, config = $5::jsonb, params_mapping = $6::jsonb,
        poll_interval_seconds = $7, backfill = $8, priority = $9, enabled = $10,
        updated_at = now(), revision = revision + 1
- WHERE namespace = $1 AND name = $2 AND ($11 = 0 OR revision = $11)
+ WHERE namespace = $1 AND name = $2 AND revision = $11
 RETURNING id::text`, s.Namespace, s.Name, s.SpecName, s.SpecVersion, cfg, pm, s.PollIntervalSeconds,
 		s.Backfill, s.Priority, s.Enabled, revision).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -225,9 +226,7 @@ const observationCols = `sensor_id::text, item_key, item, outcome, idempotency_k
 // SensorListObservations returns a sensor's most recent observations,
 // optionally excluding baseline rows.
 func SensorListObservations(ctx context.Context, q GWQuerier, sensorID string, includeBaseline bool, limit int) ([]SensorObservation, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 50
-	}
+	limit = ClampLimit(limit, DefaultObservation, MaxObservationPage)
 	rows, err := q.Query(ctx, `SELECT `+observationCols+` FROM sensor_observations
  WHERE sensor_id = $1 AND ($2 OR outcome <> 'baseline') ORDER BY observed_at DESC, item_key LIMIT $3`, sensorID, includeBaseline, limit)
 	if err != nil {

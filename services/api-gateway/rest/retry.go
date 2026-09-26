@@ -53,7 +53,7 @@ func (a *API) retryRun(w http.ResponseWriter, r *http.Request, p authn.Principal
 
 	body, err := readBody(r, 1<<20)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req retryRequest

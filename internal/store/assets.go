@@ -42,9 +42,7 @@ func scanAsset(row pgx.Row) (Asset, error) {
 // AssetList lists a namespace's assets, optionally filtered by a substring of
 // the URI or name.
 func AssetList(ctx context.Context, q GWQuerier, ns, search string, limit int) ([]Asset, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 200
-	}
+	limit = ClampLimit(limit, DefaultAssetPage, MaxAssetPage)
 	rows, err := q.Query(ctx, `SELECT `+assetCols+` FROM assets a
  WHERE a.namespace = $1 AND ($2 = '' OR a.uri ILIKE '%' || $2 || '%' OR a.name ILIKE '%' || $2 || '%')
  ORDER BY a.uri LIMIT $3`, ns, search, limit)

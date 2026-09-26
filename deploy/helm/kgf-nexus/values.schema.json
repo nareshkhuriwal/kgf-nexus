@@ -11,6 +11,28 @@
       "description": "A Go duration, e.g. 30s, 15m, 24h."
     },
     "quantityOrNumber": { "type": ["string", "number"] },
+    "agentKubernetes": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The kubernetes executor (agentDefaults.kubernetes, overridden per agent).",
+      "properties": {
+        "namespace": { "type": "string", "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" },
+        "serviceAccount": { "type": "string" },
+        "helperImage": { "type": "string" },
+        "gpuResourceName": { "type": "string", "pattern": "^$|^[a-z0-9.-]+/[A-Za-z0-9._-]+$" },
+        "migResourcePrefix": { "type": "string", "pattern": "^$|^[a-z0-9.-]+/[A-Za-z0-9._-]*[-/._]$", "description": "Joined to a MIG profile: nvidia.com/mig- + 1g.10gb." },
+        "sharedGpuResourceName": { "type": "string", "pattern": "^$|^[a-z0-9.-]+/[A-Za-z0-9._-]+$" },
+        "gpuKindLabel": { "type": "string" },
+        "taskApi": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "port": { "type": "integer", "minimum": 1024, "maximum": 65535 }
+          }
+        }
+      }
+    },
     "resources": {
       "type": "object",
       "additionalProperties": false,
@@ -164,8 +186,15 @@
             "existingSecret": { "type": "string" },
             "scope": { "enum": ["union", "service"] },
             "passwordRevision": { "type": "integer", "minimum": 1 },
-            "connectionLimit": { "type": "integer", "minimum": -1 }
+            "connectionLimit": { "type": "integer", "minimum": -1 },
+            "revokePublicConnect": { "type": "boolean", "description": "REVOKE CONNECT ON DATABASE FROM PUBLIC in the db-roles Job (F153)." }
           }
+        },
+        "groupRolePrefix": {
+          "type": "string",
+          "pattern": "^$|^[a-z][a-z0-9_]{0,39}$",
+          "not": { "const": "nexus" },
+          "description": "Per-installation service group roles <prefix>_scheduler ... (migration 0038, F153). Empty = the shared nexus_* roles. Fixed once applied."
         },
         "maxConnections": { "type": "integer", "minimum": 10 },
         "pool": {
@@ -429,6 +458,7 @@
           "gpuMig": { "type": "string" },
           "gpuShared": { "type": "string" },
           "gpuDiscovery": { "enum": ["", "nvidia-smi"] },
+          "kubernetes": { "$ref": "#/definitions/agentKubernetes" },
           "capacityType": { "enum": ["", "on-demand", "spot"] },
           "eviction": {
             "type": "object",
@@ -465,6 +495,7 @@
       "additionalProperties": false,
       "properties": {
         "gpuResourceName": { "type": "string", "pattern": "^[a-z0-9.-]+/[a-z0-9._-]+$" },
+        "kubernetes": { "$ref": "#/definitions/agentKubernetes" },
         "heartbeatIntervalMs": { "type": "integer", "minimum": 100 },
         "drainGrace": { "$ref": "#/definitions/duration" },
         "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 },

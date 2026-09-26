@@ -31,8 +31,19 @@ import (
 )
 
 // Namespace is the ONLY namespace the integration tests use. It is created on
-// first use and deleted by Teardown.
-const Namespace = "nexus-k8s-exec-test"
+// first use and deleted by Teardown. NamespaceEnv overrides the default, so
+// checkouts sharing one local cluster each keep to their own namespace.
+var Namespace = namespaceFromEnv()
+
+// NamespaceEnv names the variable that overrides Namespace.
+const NamespaceEnv = "NEXUS_K8S_TEST_NAMESPACE"
+
+func namespaceFromEnv() string {
+	if ns := strings.TrimSpace(os.Getenv(NamespaceEnv)); ns != "" {
+		return ns
+	}
+	return "nexus-k8s-exec-test"
+}
 
 // OptInEnv must be "1" for any cluster-touching test to run.
 const OptInEnv = "NEXUS_K8S_CONFORMANCE"

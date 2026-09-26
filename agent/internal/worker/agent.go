@@ -113,6 +113,13 @@ type Config struct {
 	// socket path is limited to 104 bytes on Darwin and 108 on Linux.
 	TaskAPIRoot string
 
+	// TaskAPINetwork serves the workload API of kubernetes attempts, whose
+	// pods run on other nodes, over TLS (F148; ADR-0032 addendum). Built once
+	// by the caller: it outlives sessions like the kubernetes executor. Nil
+	// leaves those attempts without a workload API (the SDK's in-process
+	// fallback).
+	TaskAPINetwork *taskapi.Network
+
 	// GPU is the fractional-GPU inventory (ADR-0029); Capacity must already
 	// include it. The zero value means whole GPUs only.
 	GPU gpu.Inventory
@@ -593,6 +600,7 @@ func (a *Agent) configureLogShipping(cfg *nexusv1.LogShippingConfig) {
 func (a *Agent) configureWorkloadAPI(cfg *nexusv1.WorkloadApiConfig) {
 	a.runner.Namespace = a.cfg.Namespace
 	a.runner.TaskAPIRoot = a.cfg.TaskAPIRoot
+	a.runner.TaskAPINetwork = a.cfg.TaskAPINetwork
 	if err := taskapi.CheckRoot(a.cfg.TaskAPIRoot); err != nil {
 		// Not fatal: the attempts still run, without a workload API, and the
 		// SDK falls back to its in-process behaviour. But usage units reported

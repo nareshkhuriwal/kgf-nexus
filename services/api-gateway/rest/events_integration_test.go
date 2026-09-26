@@ -123,6 +123,21 @@ func (e *eventsHarness) call(method, path, body, bearer string, want int) map[st
 	return out
 }
 
+// putCurrent PUTs body with the object's current revision added: updates
+// require the revision last read (F155), and these tests are about the body.
+func (e *eventsHarness) putCurrent(path, body, bearer string, want int) map[string]any {
+	e.t.Helper()
+	cur := e.call("GET", path, "", e.adminA, 200)
+	rev, _ := cur["revision"].(float64)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		e.t.Fatal(err)
+	}
+	m["revision"] = int64(rev)
+	b, _ := json.Marshal(m)
+	return e.call("PUT", path, string(b), bearer, want)
+}
+
 func (e *eventsHarness) hook(path string, body []byte, secret string, ts time.Time) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
 	tsS := strconv.FormatInt(ts.Unix(), 10)
@@ -184,8 +199,11 @@ func TestIntegrationNotificationChannelsNeverExposeSecrets(t *testing.T) {
 	e.call("POST", base, `{"name":"x","kind":"webhook","config":{"url":"https://h.example"}}`, e.readerA, 403)
 	e.call("GET", "/v1/namespaces/"+e.nsB+"/notification-channels", "", e.adminA, 403)
 	e.call("POST", base, `{"name":"ops-hook","kind":"webhook","config":{"url":"https://h.example"}}`, e.adminA, 409)
-	// Update keeps the secret unless replaced.
-	upd := e.call("PUT", base+"/slack", `{"enabled":false,"rate_limit_per_minute":5}`, e.adminA, 200)
+	// Update keeps the secret unless replaced. The revision rule (F155): an
+	// update names the revision it read; omitting it (0, "create only if
+	// absent") on a channel that exists is a conflict, not an overwrite.
+	e.call("PUT", base+"/slack", `{"enabled":false,"rate_limit_per_minute":5}`, e.adminA, 409)
+	upd := e.call("PUT", base+"/slack", `{"enabled":false,"rate_limit_per_minute":5,"revision":1}`, e.adminA, 200)
 	if upd["enabled"] != false || upd["secret"].(map[string]any)["configured"] != true {
 		t.Fatalf("update %v", upd)
 	}
@@ -206,13 +224,13 @@ func TestIntegrationChannelClearSecret(t *testing.T) {
 	e.call("POST", base, `{"name":"hook","kind":"webhook","config":{"url":"https://hooks.example/nexus"}}`, e.adminA, 201)
 	e.call("POST", base, `{"name":"mail","kind":"email","config":{"to":["x@example.com"]}}`, e.adminA, 201)
 
-	e.call("PUT", base+"/slack", `{"clear_secret":true}`, e.readerA, 403)
-	e.call("PUT", base+"/slack", `{"clear_secret":true,"secret":"https://hooks.slack.com/x"}`, e.adminA, 422)
-	e.call("PUT", base+"/slack", `{"clear_secret":true,"enabled":true}`, e.adminA, 422)
+	e.putCurrent(base+"/slack", `{"clear_secret":true}`, e.readerA, 403)
+	e.putCurrent(base+"/slack", `{"clear_secret":true,"secret":"https://hooks.slack.com/x"}`, e.adminA, 422)
+	e.putCurrent(base+"/slack", `{"clear_secret":true,"enabled":true}`, e.adminA, 422)
 	e.call("POST", base, `{"name":"new","kind":"slack_webhook","clear_secret":true}`, e.adminA, 422)
 
 	for _, name := range []string{"slack", "pd"} {
-		got := e.call("PUT", base+"/"+name, `{"clear_secret":true}`, e.adminA, 200)
+		got := e.putCurrent(base+"/"+name, `{"clear_secret":true}`, e.adminA, 200)
 		sec := got["secret"].(map[string]any)
 		if sec["configured"] != false || sec["source"] != "" || sec["hint"] != "" || got["enabled"] != false {
 			t.Fatalf("%s after clear: %v", name, got)
@@ -227,15 +245,15 @@ func TestIntegrationChannelClearSecret(t *testing.T) {
 			t.Fatalf("%s: the stored secret survived the clear (ciphertext %d bytes, ref %v)", name, len(ct), ref)
 		}
 		// No secret, so it cannot be turned back on until one is supplied.
-		e.call("PUT", base+"/"+name, `{"enabled":true}`, e.adminA, 422)
+		e.putCurrent(base+"/"+name, `{"enabled":true}`, e.adminA, 422)
 	}
-	again := e.call("PUT", base+"/slack", `{"enabled":true,"secret":"https://hooks.slack.com/services/T0/B0/NEW"}`, e.adminA, 200)
+	again := e.putCurrent(base+"/slack", `{"enabled":true,"secret":"https://hooks.slack.com/services/T0/B0/NEW"}`, e.adminA, 200)
 	if again["enabled"] != true || again["secret"].(map[string]any)["configured"] != true {
 		t.Fatalf("re-armed: %v", again)
 	}
 
-	e.call("PUT", base+"/hook", `{"clear_secret":true}`, e.adminA, 422)
-	e.call("PUT", base+"/mail", `{"clear_secret":true}`, e.adminA, 422)
+	e.putCurrent(base+"/hook", `{"clear_secret":true}`, e.adminA, 422)
+	e.putCurrent(base+"/mail", `{"clear_secret":true}`, e.adminA, 422)
 
 	var cleared int
 	if err := e.tx.QueryRow(e.ctx, `SELECT count(*) FROM audit_log WHERE namespace = $1 AND action = 'notification.channel.update'
@@ -268,7 +286,10 @@ func TestIntegrationRulesTestSendAndRedrive(t *testing.T) {
 		t.Fatalf("rule %v", rule)
 	}
 	e.call("PUT", ns+"/notification-rules/r", `{"events":["run.failed"],"channels":["hook"],"revision":999}`, e.adminA, 409)
-	e.call("PUT", ns+"/notification-rules/r", `{"events":["run.failed"],"channels":["hook"]}`, e.adminA, 200)
+	e.call("PUT", ns+"/notification-rules/r", `{"events":["run.failed"],"channels":["hook"]}`, e.adminA, 409)
+	e.call("PUT", ns+"/notification-rules/r", `{"events":["run.failed"],"channels":["hook"],"revision":-1}`, e.adminA, 400)
+	e.call("PUT", ns+"/notification-rules/r", `{"events":["run.failed"],"channels":["hook"],"revision":1}`, e.adminA, 200)
+	e.call("PUT", ns+"/notification-rules/gone", `{"events":["run.failed"],"channels":["hook"],"revision":1}`, e.adminA, 404)
 
 	test := e.call("POST", ns+"/notification-channels/hook/test", "", e.adminA, 202)
 	id := int64(test["delivery_id"].(float64))
@@ -382,7 +403,9 @@ func TestIntegrationWebhookTriggerSignatureReplayAndIdempotency(t *testing.T) {
 		t.Fatalf("revoked secret still verifies: %d", w.Code)
 	}
 	// Disabled triggers are indistinguishable from unknown ones.
-	e.call("PUT", ns+"/triggers/gh", `{"enabled":false}`, e.adminA, 200)
+	e.call("PUT", ns+"/triggers/gh", `{"enabled":false}`, e.adminA, 409) // no revision: not an overwrite
+	rev := e.call("GET", ns+"/triggers/gh", "", e.readerA, 200)["revision"].(float64)
+	e.call("PUT", ns+"/triggers/gh", fmt.Sprintf(`{"enabled":false,"revision":%d}`, int64(rev)), e.adminA, 200)
 	if w := e.hook(path, body, secret, now.Add(9*time.Second)); w.Code != 404 {
 		t.Fatalf("disabled: %d", w.Code)
 	}
@@ -408,7 +431,9 @@ func TestIntegrationSensorsAPI(t *testing.T) {
 		t.Fatalf("sensor %v", s)
 	}
 	e.call("PUT", ns+"/sensors/arrivals", `{"kind":"run_succeeded"}`, e.adminA, 400)
-	e.call("PUT", ns+"/sensors/arrivals", `{"enabled":false}`, e.adminA, 200)
+	e.call("PUT", ns+"/sensors/arrivals", `{"enabled":false}`, e.adminA, 409)
+	e.call("PUT", ns+"/sensors/arrivals", `{"enabled":false,"revision":-2}`, e.adminA, 400)
+	e.call("PUT", ns+"/sensors/arrivals", `{"enabled":false,"revision":1}`, e.adminA, 200)
 	list := e.call("GET", ns+"/sensors", "", e.readerA, 200)
 	if len(list["sensors"].([]any)) != 1 || list["sensors"].([]any)[0].(map[string]any)["status"] != "disabled" {
 		t.Fatalf("list %v", list)
@@ -435,13 +460,13 @@ VALUES ($1, 'etl', 2, $2, '{}', 'test')`, e.nsA, uuid.NewString()); err != nil {
 		if got["workflow_version"] != float64(2) || got["priority"] != float64(250) {
 			t.Fatalf("%s create: %v", c.kind, got)
 		}
-		e.call("PUT", c.base+"/pin", `{"workflow_version":9}`, e.adminA, 422) // no such version
-		e.call("PUT", c.base+"/pin", `{"workflow_version":"2"}`, e.adminA, 400)
-		got = e.call("PUT", c.base+"/pin", `{"enabled":false}`, e.adminA, 200)
+		e.putCurrent(c.base+"/pin", `{"workflow_version":9}`, e.adminA, 422) // no such version
+		e.putCurrent(c.base+"/pin", `{"workflow_version":"2"}`, e.adminA, 400)
+		got = e.putCurrent(c.base+"/pin", `{"enabled":false}`, e.adminA, 200)
 		if got["workflow_version"] != float64(2) {
 			t.Fatalf("%s: an update that does not mention the pin dropped it: %v", c.kind, got)
 		}
-		got = e.call("PUT", c.base+"/pin", `{"workflow_version":null,"priority":10}`, e.adminA, 200)
+		got = e.putCurrent(c.base+"/pin", `{"workflow_version":null,"priority":10}`, e.adminA, 200)
 		if _, pinned := got["workflow_version"]; pinned || got["priority"] != float64(10) {
 			t.Fatalf("%s: null did not unpin: %v", c.kind, got)
 		}

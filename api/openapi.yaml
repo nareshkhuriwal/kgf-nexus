@@ -75,6 +75,42 @@ info:
     `message`. Authentication failures are one opaque 401 by design, and a
     failing authentication BACKEND is 503, never 401.
 
+    **Request bodies.** A body over its route's limit is 413 on every route
+    (`body_too_large`; spec submission says `spec_too_large` and webhook
+    deliveries `payload_too_large`). A body that could not be read at all - a
+    reset connection, a broken chunked encoding - is 400 `unreadable_body`, not
+    413: it is not a size the client can reduce.
+
+    **Fail-closed audit.** A change that grants access or changes security
+    configuration commits with its audit record or not at all; when the record
+    cannot be written the change is rolled back and the answer is 503
+    `audit_unavailable` (retry shortly). This includes role, role-assignment,
+    user, tenant, token, service-account and audit-configuration changes.
+
+    ## Revisions
+
+    Every revisioned write follows ONE rule. `revision` (`desired_revision` for
+    a cluster) is the revision the client last read:
+
+    * **N ≥ 1**: the write applies only if the stored revision is still N;
+      otherwise 409 (`revision_conflict` or `conflict`), and the client
+      re-reads and retries. Stored revisions start at 1 and every accepted
+      write increments them.
+    * **0**: "I read nothing" - create only if absent. Where a PUT can create
+      (namespace quotas, platform config, a cluster, a role, a user's role
+      assignment, the audit policy and legal hold) it creates; if the object
+      already exists, 409. Where the object is created by a POST (service
+      accounts and their bindings, audit sinks, notification channels and
+      rules, triggers, sensors) the object always exists, so 0 is always 409 -
+      there is no unconditional overwrite.
+    * **negative**: 400 `invalid_revision`.
+    * An update of an object that does not exist is 404, whatever the
+      revision.
+
+    Deletes that are revisioned (`DELETE .../roles/{name}`,
+    `DELETE .../platform/clusters/{name}`) require `?revision=` ≥ 1 (400
+    otherwise) and answer 409 when it is stale.
+
     ## Rate limiting
 
     When enabled, 429 responses carry `Retry-After` and `RateLimit-Limit`,
@@ -82,7 +118,13 @@ info:
 
     ## Pagination
 
-    Most listings take `limit` and return the newest rows first. The run and
+    Most listings take `limit` and return the newest rows first. `limit` means
+    the same on every listing: absent is the listing's default page, a positive
+    integer is that many rows CAPPED at the listing's maximum (a larger value
+    gets the largest page, never a smaller default one), and zero, a negative
+    number or a non-integer is 400 `invalid_limit`. Each listing's parameter
+    states its default and maximum. A list in a response is always an array,
+    `[]` when empty, never null. The run and
     notification-delivery listings are keyset-paginated: pass the response's
     `next_before` back as `before`. The user and audit listings, and usage
     rollups, page with an opaque `cursor`/`next_cursor` (`next_cursor` is null,
@@ -275,10 +317,15 @@ paths:
                 spec_hash: 4f9d1c0e7b2a6d58c3e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9
                 created: true
                 task_count: 3
+        '400':
+          description: '`unreadable_body`: the body could not be read (not a size problem; see 413).'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '413':
-          description: '`spec_too_large`: the body exceeds 4 MiB.'
+          description: '`spec_too_large`: the body exceeds 4 MiB. Only an over-size body; a failed read is 400.'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -330,7 +377,7 @@ paths:
           in: query
           description: Case-insensitive substring filter on the workflow name.
           schema: {type: string}
-        - $ref: '#/components/parameters/limit100'
+        - $ref: '#/components/parameters/limitCatalog'
       responses:
         '200':
           description: The catalog.
@@ -354,6 +401,7 @@ paths:
                     updated_at: '2026-09-24T09:12:03Z'
                     version_count: 3
                     first_created_at: '2026-08-02T14:40:11Z'
+        '400': {$ref: '#/components/responses/InvalidLimit'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -371,7 +419,7 @@ paths:
       x-nexus-action: read
       x-nexus-permissions: [workflows.view]
       parameters:
-        - $ref: '#/components/parameters/limit50'
+        - $ref: '#/components/parameters/limitVersions'
       responses:
         '200':
           description: Versions, newest first. An unknown name yields an empty list.
@@ -384,6 +432,7 @@ paths:
                   versions:
                     type: array
                     items: {$ref: '#/components/schemas/SpecVersion'}
+        '400': {$ref: '#/components/responses/InvalidLimit'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -605,10 +654,7 @@ paths:
           in: query
           description: RFC 3339 cursor; only runs created strictly before it.
           schema: {type: string, format: date-time}
-        - name: limit
-          in: query
-          description: Page size, 1-500. Values outside that range fall back to 100.
-          schema: {type: integer, minimum: 1, maximum: 500, default: 100}
+        - $ref: '#/components/parameters/limitRuns'
       responses:
         '200':
           description: A page of runs.
@@ -634,7 +680,7 @@ paths:
                 total: 118
                 next_before: '2026-09-24T09:12:03.418227Z'
         '400':
-          description: '`invalid_before`: `before` is not RFC 3339.'
+          description: '`invalid_before`: `before` is not RFC 3339; or `invalid_limit`.'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -777,10 +823,7 @@ paths:
           in: query
           description: Only events with a sequence greater than this.
           schema: {type: integer, minimum: 0, default: 0}
-        - name: limit
-          in: query
-          description: Maximum events in a JSON response.
-          schema: {type: integer, minimum: 0, default: 500}
+        - $ref: '#/components/parameters/limitEvents'
         - name: stream
           in: query
           description: '`true` streams server-sent events (same as `Accept: text/event-stream`).'
@@ -823,6 +866,7 @@ paths:
 
                 : keepalive
 
+        '400': {$ref: '#/components/responses/InvalidLimit'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
@@ -1207,6 +1251,7 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
         '501': {$ref: '#/components/responses/SchedulesUnavailable'}
@@ -1218,7 +1263,7 @@ paths:
       x-nexus-action: read
       x-nexus-permissions: [schedules.view]
       parameters:
-        - $ref: '#/components/parameters/limit100'
+        - $ref: '#/components/parameters/limitSchedules'
       responses:
         '200':
           description: The schedules.
@@ -1231,6 +1276,7 @@ paths:
                   schedules:
                     type: array
                     items: {$ref: '#/components/schemas/Schedule'}
+        '400': {$ref: '#/components/responses/InvalidLimit'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -1323,6 +1369,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/ScheduleNotFound'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
         '501': {$ref: '#/components/responses/SchedulesUnavailable'}
@@ -1470,6 +1517,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/ScheduleNotFound'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
         '501': {$ref: '#/components/responses/SchedulesUnavailable'}
@@ -1481,7 +1529,7 @@ paths:
       x-nexus-action: read
       x-nexus-permissions: [backfills.view]
       parameters:
-        - $ref: '#/components/parameters/limit50'
+        - $ref: '#/components/parameters/limitBackfills'
       responses:
         '200':
           description: The backfills.
@@ -1494,6 +1542,7 @@ paths:
                   backfills:
                     type: array
                     items: {$ref: '#/components/schemas/Backfill'}
+        '400': {$ref: '#/components/responses/InvalidLimit'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/ScheduleNotFound'}
@@ -1655,16 +1704,14 @@ paths:
       x-nexus-action: read
       x-nexus-permissions: [workers.view]
       parameters:
-        - name: recent_limit
-          in: query
-          description: How many terminal attempts to include; the store clamps large values.
-          schema: {type: integer, minimum: 0, default: 25}
+        - $ref: '#/components/parameters/recentLimit'
       responses:
         '200':
           description: The worker.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/WorkerDetail'}
+        '400': {$ref: '#/components/responses/InvalidLimit'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
@@ -1887,9 +1934,7 @@ paths:
       x-nexus-action: read
       x-nexus-permissions: [overview.view, runs.view, workers.view]
       parameters:
-        - name: limit
-          in: query
-          schema: {type: integer, minimum: 0}
+        - $ref: '#/components/parameters/limitAttention'
         - name: blocked_for
           in: query
           description: How long an attempt must be unplaceable to be listed.
@@ -1926,6 +1971,7 @@ paths:
                     attempt_id: 5a1e9c0d-3f2b-4d6a-8e7c-9b0a1f2e3d4c
                 count: 1
                 truncated: false
+        '400': {$ref: '#/components/responses/InvalidLimit'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -2062,7 +2108,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/PlatformConfig'}
         '400':
-          description: '`invalid_policy`.'
+          description: '`invalid_policy` (a negative `revision` included).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -2159,7 +2205,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ClusterSpec'}
         '400':
-          description: '`invalid_cluster`.'
+          description: '`invalid_cluster` or `invalid_revision` (a negative revision).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -2293,7 +2339,7 @@ paths:
                   revision: {type: integer}
                   quotas: {$ref: '#/components/schemas/Quotas'}
         '400':
-          description: '`invalid_quotas`.'
+          description: '`invalid_quotas` or `invalid_revision` (a negative revision).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -2438,7 +2484,7 @@ paths:
                 properties:
                   saved: {const: true}
         '400':
-          description: '`invalid` (body or role name) or `invalid_grants`.'
+          description: '`invalid` (body or role name) or `invalid_grants` or `invalid_revision` (a negative revision).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -2453,9 +2499,10 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
-        '503': {$ref: '#/components/responses/AuthUnavailable'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
     delete:
       tags: [RBAC]
       operationId: deleteRole
@@ -2483,7 +2530,7 @@ paths:
               schema: {$ref: '#/components/schemas/Error'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
-        '503': {$ref: '#/components/responses/AuthUnavailable'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
 
   /v1/namespaces/{ns}/users/{id}/roles:
     parameters:
@@ -2533,7 +2580,7 @@ paths:
                     type: array
                     items: {type: string}
         '400':
-          description: '`invalid` or `unknown_role`.'
+          description: '`invalid` or `unknown_role` or `invalid_revision` (a negative revision).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -2549,9 +2596,10 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
-        '503': {$ref: '#/components/responses/AuthUnavailable'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
 
   # ── auth ─────────────────────────────────────────────────────────────────
   /v1/auth/login:
@@ -2663,6 +2711,11 @@ paths:
               schema: {$ref: '#/components/schemas/Error'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
+        '503':
+          description: '`audit_unavailable`: the registration was NOT made because its audit record could not be written; retry shortly.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
 
   /v1/auth/email/verification:
     post:
@@ -2925,12 +2978,14 @@ paths:
                   platform_operator: {type: boolean}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
-        '429': {$ref: '#/components/responses/RateLimited'}
-        '500':
-          description: '`internal`. A namespace with no tenant row (for example a seeded dev namespace) currently lands here too.'
+        '404':
+          description: '`tenant_not_found`: the caller''s namespace has no tenant row (for example a seeded dev namespace, or a KGF organization never onboarded here).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
+              example: {error: tenant_not_found, message: namespace default is not registered to a tenant}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
         '503': {$ref: '#/components/responses/AuthUnavailable'}
 
   /v1/platform/tenants:
@@ -2964,9 +3019,13 @@ paths:
       tags: [Tenants]
       operationId: createTenant
       summary: Onboard a tenant (platform operators)
-      description: Requires a platform-operator session. Same body and result as self-service registration.
+      description: |
+        Requires a platform-operator session: an unbound administrator's
+        session whose account is a platform operator. Guarded on
+        `admin_write` (F154): a read-only credential is refused before the
+        body is read. Same body and result as self-service registration.
       x-nexus-conditional: identity
-      x-nexus-action: read
+      x-nexus-action: admin_write
       x-nexus-permissions: []
       requestBody:
         required: true
@@ -2999,7 +3058,7 @@ paths:
               schema: {$ref: '#/components/schemas/Error'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
-        '503': {$ref: '#/components/responses/AuthUnavailable'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
 
   # ── users ────────────────────────────────────────────────────────────────
   /v1/namespaces/{ns}/users:
@@ -3018,10 +3077,7 @@ paths:
       x-nexus-action: admin_write
       x-nexus-permissions: [users.view]
       parameters:
-        - name: limit
-          in: query
-          description: Rows per page; 0 or absent means 100, larger values are capped at 200.
-          schema: {type: integer, minimum: 0, maximum: 200, default: 100}
+        - $ref: '#/components/parameters/limitUsers'
         - $ref: '#/components/parameters/cursor'
         - name: q
           in: query
@@ -3056,7 +3112,7 @@ paths:
                     email_verified: true
                 next_cursor: MjAyNi0wOS0yMFQwODowMDowMFp8MWQyYzNiNGEtNWU2Zi00YTdiLThjOWQtMGUxZjJhM2I0YzVk
         '400':
-          description: '`invalid_cursor`: the cursor was not issued by this server; restart from the first page.'
+          description: '`invalid_cursor` (the cursor was not issued by this server; restart from the first page) or `invalid_limit`.'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -3153,9 +3209,10 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
-        '503': {$ref: '#/components/responses/AuthUnavailable'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
 
   /v1/namespaces/{ns}/users/{id}/disable:
     parameters:
@@ -3271,7 +3328,7 @@ paths:
       x-nexus-action: admin_write
       x-nexus-permissions: [users.view]
       parameters:
-        - $ref: '#/components/parameters/limit50'
+        - $ref: '#/components/parameters/limitSessions'
       responses:
         '200':
           description: The sessions.
@@ -3284,6 +3341,7 @@ paths:
                   sessions:
                     type: array
                     items: {$ref: '#/components/schemas/Session'}
+        '400': {$ref: '#/components/responses/InvalidLimit'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
@@ -3327,7 +3385,7 @@ paths:
       x-nexus-action: admin_write
       x-nexus-permissions: [tokens.view]
       parameters:
-        - $ref: '#/components/parameters/limit100'
+        - $ref: '#/components/parameters/limitTokens'
       responses:
         '200':
           description: The tokens.
@@ -3340,6 +3398,7 @@ paths:
                   tokens:
                     type: array
                     items: {$ref: '#/components/schemas/Token'}
+        '400': {$ref: '#/components/responses/InvalidLimit'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -3512,10 +3571,7 @@ paths:
         - $ref: '#/components/parameters/auditUntil'
         - $ref: '#/components/parameters/auditRequestId'
         - $ref: '#/components/parameters/cursor'
-        - name: limit
-          in: query
-          description: Rows per page; 0, absent or more than 1000 means 100.
-          schema: {type: integer, minimum: 0, maximum: 1000, default: 100}
+        - $ref: '#/components/parameters/limitAudit'
       responses:
         '200':
           description: One page of entries.
@@ -3551,7 +3607,7 @@ paths:
                     kgf: null
                 next_cursor: eyJ0IjoiMjAyNi0wOS0yNFQwOTo1MDowMFoiLCJpIjo0MjExfQ
         '400':
-          description: '`invalid_filter` (`since`/`until` is not RFC 3339) or `invalid_cursor`.'
+          description: '`invalid_filter` (`since`/`until` is not RFC 3339), `invalid_cursor` or `invalid_limit`.'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -3691,7 +3747,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/AuditPolicy'}
         '400':
-          description: '`invalid_json` (unknown fields are rejected).'
+          description: '`invalid_json` (unknown fields are rejected) or `invalid_revision` (a negative revision).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -3753,7 +3809,7 @@ paths:
                 updated_at: '2026-09-26T10:15:00Z'
                 last_purge_at: '2026-09-26T09:00:00Z'
         '400':
-          description: '`invalid_json`: the body must be `{"hold": true|false, "reason": "...", "revision": N}`.'
+          description: '`invalid_json`: the body must be `{"hold": true|false, "reason": "...", "revision": N}` or `invalid_revision` (a negative revision).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -3918,12 +3974,15 @@ paths:
               schema: {$ref: '#/components/schemas/Error'}
         '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '422':
-          description: '`invalid_sink`, with every problem found.'
+          description: '`invalid_sink`, naming every invalid field.'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/InvalidSinkError'}
               example:
                 error: invalid_sink
+                message: 'invalid url, batch_size: url must be https (plain http is refused unless NEXUS_AUDIT_SINK_ALLOW_HTTP=true); batch_size must be 1..1000'
+                field: url
+                fields: [url, batch_size]
                 problems: ['url must be https (plain http is refused unless NEXUS_AUDIT_SINK_ALLOW_HTTP=true)', batch_size must be 1..1000]
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
@@ -3957,7 +4016,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/AuditSink'}
         '400':
-          description: '`invalid_json` (unknown fields are rejected).'
+          description: '`invalid_json` (unknown fields are rejected) or `invalid_revision` (a negative revision).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -3971,10 +4030,16 @@ paths:
               schema: {$ref: '#/components/schemas/Error'}
         '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '422':
-          description: '`invalid_sink`: a refused `url` or a `batch_size` outside 1-1000.'
+          description: '`invalid_sink`: a refused `url` or a `batch_size` outside 1-1000, named in `field`.'
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/Error'}
+              schema: {$ref: '#/components/schemas/InvalidSinkError'}
+              example:
+                error: invalid_sink
+                message: 'invalid batch_size: batch_size must be 1..1000'
+                field: batch_size
+                fields: [batch_size]
+                problems: [batch_size must be 1..1000]
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
         '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
@@ -4035,7 +4100,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/AuditSinkWithSecret'}
         '400':
-          description: '`invalid_json`.'
+          description: '`invalid_json` or `invalid_revision` (a negative revision).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -4189,16 +4254,15 @@ paths:
                   updated: {const: true}
               example: {id: 7c6b5a49-3827-4165-9f4e-3d2c1b0a9f8e, updated: true}
         '400':
-          description: '`invalid`: not one JSON object, an unknown field, or a description over 500 characters.'
+          description: '`invalid`: not one JSON object, an unknown field, or a description over 500 characters or `invalid_revision` (a negative revision).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
         '409':
-          description: |
-            `conflict`: the account changed since it was read, OR does not exist
-            (this route does not distinguish the two).
+          description: '`conflict`: the account changed since `revision` was read (0 included: the account exists). A missing account is 404, not 409.'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -4322,7 +4386,7 @@ paths:
                     items: {type: string}
               example: {roles: [Workflow Publisher, Workflow Operator]}
         '400':
-          description: '`invalid` (not one JSON object, an unknown field, or more than 20 roles) or `unknown_role`.'
+          description: '`invalid` (not one JSON object, an unknown field, or more than 20 roles) or `unknown_role` or `invalid_revision` (a negative revision).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -4456,6 +4520,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '409': {$ref: '#/components/responses/ConfigConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '422':
           description: '`invalid_secret` (both or an empty secret, a bad `secret_ref`), `invalid_channel` (config or secret does not fit the kind) or `invalid`.'
           content:
@@ -4500,9 +4565,8 @@ paths:
         Send `secret` or `secret_ref` to replace the secret (this is how a
         generated webhook key is rotated); omit both to keep it; send
         `clear_secret: true` to remove it, which also disables the channel.
-        `revision`,
-        when non-zero, must equal the stored revision (409 otherwise); 0
-        overwrites unconditionally.
+        `revision` must equal the stored revision (see Revisions: 0 or a stale
+        value is 409; there is no unconditional overwrite).
       x-nexus-action: admin_write
       x-nexus-permissions: [notifications.manage]
       requestBody:
@@ -4522,6 +4586,7 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/ConfigConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '422':
           description: '`invalid_secret` or `invalid_channel`.'
           content:
@@ -4670,6 +4735,7 @@ paths:
               schema: {$ref: '#/components/schemas/Error'}
               example: {error: not_found, message: 'channel "oncall-pagerduty"'}
         '409': {$ref: '#/components/responses/ConfigConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '422':
           description: '`invalid_rule`: no or unknown events, 0 or more than 20 channels, more than 100 workflows or 20 labels, or `sla_seconds` (60-2592000) without `run.sla_exceeded` or vice versa.'
           content:
@@ -4710,7 +4776,8 @@ paths:
       description: |
         A full replacement: the body is validated exactly like a create, and an
         omitted `enabled` means true. `name`, if given, must equal the path.
-        `revision`, when non-zero, must equal the stored revision.
+        `revision` must equal the stored revision (see Revisions: 0 or a stale
+        value is 409).
       x-nexus-action: admin_write
       x-nexus-permissions: [notifications.manage]
       requestBody:
@@ -4730,6 +4797,7 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/ConfigConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '422':
           description: '`invalid_rule`.'
           content:
@@ -4782,10 +4850,7 @@ paths:
           in: query
           description: The previous page's `next_before`.
           schema: {type: integer, format: int64}
-        - name: limit
-          in: query
-          description: Rows per page; values outside 1-500 mean 100.
-          schema: {type: integer, default: 100}
+        - $ref: '#/components/parameters/limitDeliveries'
       responses:
         '200':
           description: One page of deliveries.
@@ -4824,7 +4889,7 @@ paths:
                     delivered_at: null
                     dead_at: '2026-09-26T03:10:00Z'
         '400':
-          description: '`invalid`: a bad `state` or a `run_id` that is not a UUID.'
+          description: '`invalid` (a bad `state`, a `run_id` that is not a UUID, or a `before` that is not a positive delivery id) or `invalid_limit`.'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -5006,6 +5071,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '409': {$ref: '#/components/responses/ConfigConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '422': {$ref: '#/components/responses/InvalidTrigger'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
@@ -5044,8 +5110,8 @@ paths:
         replaces the whole mapping. Pointing the trigger at a different
         `workflow` drops a `workflow_version` pin unless one is given. The
         secret is unchanged (rotate it separately). `name`, if given, must
-        equal the path. `revision`, when non-zero, must equal the stored
-        revision.
+        equal the path. `revision` must equal the stored revision (see
+        Revisions: 0 or a stale value is 409).
       x-nexus-action: write
       x-nexus-permissions: [triggers.update, workflows.view, runs.create]
       requestBody:
@@ -5065,6 +5131,7 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/ConfigConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '422': {$ref: '#/components/responses/InvalidTrigger'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
@@ -5125,6 +5192,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
         '501': {$ref: '#/components/responses/EventsNotConfigured'}
@@ -5142,10 +5210,7 @@ paths:
       x-nexus-action: read
       x-nexus-permissions: [triggers.view]
       parameters:
-        - name: limit
-          in: query
-          description: Values outside 1-200 mean 50.
-          schema: {type: integer, default: 50}
+        - $ref: '#/components/parameters/limitReceipts'
       responses:
         '200':
           description: The receipts.
@@ -5167,6 +5232,7 @@ paths:
                     idempotency_key: 'webhook:9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d:3f9a1c2b7e'
                     detail: ''
                     signature_digest: 7d1e0c9b8a7f6e5d
+        '400': {$ref: '#/components/responses/InvalidLimit'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
@@ -5393,6 +5459,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '409': {$ref: '#/components/responses/ConfigConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '422': {$ref: '#/components/responses/InvalidSensor'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
@@ -5465,8 +5532,8 @@ paths:
         replace the whole object. Pointing the sensor at a different
         `workflow` drops a `workflow_version` pin unless one is given. A
         changed definition restarts the sensor's baseline on its next poll
-        (`state.definition_current` is false until then). `revision`, when
-        non-zero, must equal the stored revision.
+        (`state.definition_current` is false until then). `revision` must
+        equal the stored revision (see Revisions: 0 or a stale value is 409).
       x-nexus-action: write
       x-nexus-permissions: [sensors.update, workflows.view, runs.create]
       requestBody:
@@ -5486,6 +5553,7 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/ConfigConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
         '422': {$ref: '#/components/responses/InvalidSensor'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
@@ -5522,10 +5590,7 @@ paths:
         - name: include_baseline
           in: query
           schema: {type: boolean, default: false}
-        - name: limit
-          in: query
-          description: Values outside 1-500 mean 50.
-          schema: {type: integer, default: 50}
+        - $ref: '#/components/parameters/limitObservations'
       responses:
         '200':
           description: The observations.
@@ -5548,6 +5613,7 @@ paths:
                     last_error: ''
                     observed_at: '2026-09-26T11:30:00Z'
                     triggered_at: '2026-09-26T11:30:01Z'
+        '400': {$ref: '#/components/responses/InvalidLimit'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
@@ -5575,10 +5641,7 @@ paths:
           in: query
           description: Case-insensitive substring of the URI or name.
           schema: {type: string}
-        - name: limit
-          in: query
-          description: Values outside 1-1000 mean 200.
-          schema: {type: integer, default: 200}
+        - $ref: '#/components/parameters/limitAssets'
       responses:
         '200':
           description: The assets.
@@ -5601,6 +5664,7 @@ paths:
                     last_materialized_run_id: 0b6f3a52-91c4-4f0e-8a77-3c5d2e1f9a40
                     producers: 1
                     consumers: 2
+        '400': {$ref: '#/components/responses/InvalidLimit'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -5855,16 +5919,134 @@ components:
       description: The cluster name (a DNS label).
       schema: {type: string}
       example: prod-weu
-    limit100:
+    limitAssets:
       name: limit
       in: query
-      description: Maximum rows.
-      schema: {type: integer, minimum: 0, default: 100}
-    limit50:
+      description: >-
+        How many assets to return: default 200, at most 1000 (a larger value is
+        capped at 1000). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 200}
+    limitAttention:
       name: limit
       in: query
-      description: Maximum rows.
-      schema: {type: integer, minimum: 0, default: 50}
+      description: >-
+        How many items to return: default 50, at most 200 (a larger value is
+        capped at 200). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 50}
+    limitAudit:
+      name: limit
+      in: query
+      description: >-
+        How many entries to return: default 100, at most 1000 (a larger value is
+        capped at 1000). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 100}
+    limitBackfills:
+      name: limit
+      in: query
+      description: >-
+        How many backfills to return: default 50, at most 200 (a larger value is
+        capped at 200). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 50}
+    limitCatalog:
+      name: limit
+      in: query
+      description: >-
+        How many workflows to return: default 100, at most 500 (a larger value is
+        capped at 500). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 100}
+    limitDeliveries:
+      name: limit
+      in: query
+      description: >-
+        How many deliveries to return: default 100, at most 500 (a larger value is
+        capped at 500). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 100}
+    limitEvents:
+      name: limit
+      in: query
+      description: >-
+        How many events in a JSON response to return: default 500, at most 1000 (a larger value is
+        capped at 1000). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 500}
+    limitObservations:
+      name: limit
+      in: query
+      description: >-
+        How many observations to return: default 50, at most 500 (a larger value is
+        capped at 500). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 50}
+    limitReceipts:
+      name: limit
+      in: query
+      description: >-
+        How many receipts to return: default 50, at most 200 (a larger value is
+        capped at 200). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 50}
+    limitRuns:
+      name: limit
+      in: query
+      description: >-
+        How many runs to return: default 100, at most 500 (a larger value is
+        capped at 500). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 100}
+    limitSchedules:
+      name: limit
+      in: query
+      description: >-
+        How many schedules to return: default 100, at most 500 (a larger value is
+        capped at 500). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 100}
+    limitSessions:
+      name: limit
+      in: query
+      description: >-
+        How many sessions to return: default 50, at most 200 (a larger value is
+        capped at 200). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 50}
+    limitTokens:
+      name: limit
+      in: query
+      description: >-
+        How many tokens to return: default 100, at most 500 (a larger value is
+        capped at 500). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 100}
+    limitUsers:
+      name: limit
+      in: query
+      description: >-
+        How many accounts to return: default 100, at most 200 (a larger value is
+        capped at 200). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 100}
+    limitVersions:
+      name: limit
+      in: query
+      description: >-
+        How many versions to return: default 50, at most 500 (a larger value is
+        capped at 500). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 50}
+    recentLimit:
+      name: recent_limit
+      in: query
+      description: >-
+        How many terminal attempts to include: default 25, at most 200 (a
+        larger value is capped). Zero, a negative number or a non-integer is
+        400 `invalid_recent_limit`.
+      schema: {type: integer, minimum: 1, default: 25}
     previewCount:
       name: count
       in: query
@@ -5894,7 +6076,11 @@ components:
     usageLimit:
       name: limit
       in: query
-      schema: {type: integer, minimum: 1}
+      description: >-
+        How many buckets to return: default 100, at most 500 (a larger value
+        is capped). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 100}
     cursor:
       name: cursor
       in: query
@@ -6032,6 +6218,12 @@ components:
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
+    InvalidLimit:
+      description: '`invalid_limit` (or `invalid_recent_limit`): the page size is not a positive integer.'
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {error: invalid_limit, message: limit must be a positive integer (at most 500; larger values are capped)}
     Unauthenticated:
       description: '`unauthenticated`: no valid credential. Deliberately opaque.'
       content:
@@ -6071,7 +6263,7 @@ components:
           schema: {$ref: '#/components/schemas/Error'}
           example: {error: backfill_not_found, message: no such backfill}
     PayloadTooLarge:
-      description: 'The body exceeds the route''s limit (`body_too_large`, `too_large`).'
+      description: '`body_too_large`: the body exceeds the route''s limit. Every route answers an over-size body this way; a body that could not be read at all (a reset connection, a broken chunked encoding) is 400 `unreadable_body` instead.'
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -6130,7 +6322,7 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Backfill'}
     InvalidQuery:
-      description: '`invalid_query`: a bad `from`, `to`, `group_by`, `limit` or `cursor`.'
+      description: '`invalid_query` (a bad `from`, `to`, `group_by` or `cursor`) or `invalid_limit`.'
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -6188,10 +6380,11 @@ components:
           example: {error: not_configured, message: 'notifications, triggers and sensors are not enabled on this gateway'}
     ConfigBadRequest:
       description: |
-        `malformed_json` (not JSON, larger than 64 KiB, or an unknown field),
-        `invalid_name` (1-63 lower-case letters, digits, `.`, `_` or `-`,
-        starting with a letter or digit), `invalid` (a number out of range) or
-        `immutable` (a field that cannot change on update).
+        `malformed_json` (not JSON, or an unknown field; a body larger than
+        64 KiB is 413), `invalid_name` (1-63 lower-case letters, digits, `.`,
+        `_` or `-`, starting with a letter or digit), `invalid` (a number out
+        of range), `immutable` (a field that cannot change on update) or
+        `invalid_revision` (a negative revision).
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -7810,14 +8003,24 @@ components:
         revision: {type: integer, minimum: 1}
 
     InvalidSinkError:
-      type: object
-      description: The one error body without a `message`; `problems` lists every reason.
-      required: [error, problems]
-      properties:
-        error: {const: invalid_sink}
-        problems:
-          type: array
-          items: {type: string}
+      description: |
+        A refused sink request. `field` is the first invalid field, `fields`
+        every one, and `problems` the reason for each, in the same order.
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required: [field, fields, problems]
+          properties:
+            error: {const: invalid_sink}
+            field: {type: string, enum: [name, url, batch_size, format]}
+            fields:
+              type: array
+              minItems: 1
+              items: {type: string, enum: [name, url, batch_size, format]}
+            problems:
+              type: array
+              minItems: 1
+              items: {type: string}
 
     ServiceAccount:
       type: object

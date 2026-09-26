@@ -128,6 +128,18 @@ postgres:
     # Per-login concurrent session cap (-1 = none). Size above the pool's
     # max_conns x replicas, or scale-out fails at connect.
     connectionLimit: -1
+    # On a server shared by several Nexus installations (F153, OPERATIONS
+    # §20.12): the db-roles Job revokes PUBLIC's CONNECT on this database after
+    # granting CONNECT to every login above, so another installation's logins
+    # cannot connect here at all. Any other role that must connect (backups,
+    # monitoring) then needs its own GRANT CONNECT.
+    revokePublicConnect: false
+  # Per-installation service group roles (migration 0038, F153): with "acme",
+  # the migrate Job creates acme_api_gateway ... acme_event_service and moves
+  # every grant this database gave the shared nexus_* roles onto them, so no
+  # other installation's logins inherit it. Empty = the shared nexus_* roles
+  # (every existing installation). Unique per server; fixed once applied.
+  groupRolePrefix: ""
   # Per-service connection pool caps (NEXUS_DB_MAX_CONNS / NEXUS_DB_MIN_CONNS).
   # Empty keeps each service's own default (16 for most). Set these when the
   # database is shared and its max_connections is small, e.g. a workstation's
@@ -584,6 +596,12 @@ agentPolicy:
 #   gpuMig: "1g.10gb=MIG-...,MIG-...;3g.40gb=MIG-..."   MIG instances by profile
 #   gpuShared: "4:mps:80Gi"                             shared devices (mps|timeslice)
 #   gpuDiscovery: nvidia-smi                            read GPUs/MIG from nvidia-smi -L
+#   kubernetes: { namespace, serviceAccount, helperImage, gpuResourceName,
+#                 migResourcePrefix, sharedGpuResourceName, gpuKindLabel,
+#                 taskApi: { enabled, port } }       agentDefaults.kubernetes, per agent
+#       (only for an agent whose executors include kubernetes; gpuMig is then
+#       profile=count, e.g. "1g.10gb=7": the task pool's instances, allocated
+#       per pod by the device plugin)
 #   capacityType: spot                                  else discovered from the Node, else on-demand
 #   eviction: { sources: "kubernetes,aws", taints: "", grace: 25s }
 #   artifactCache: { bytes: 200Gi, sizeLimit: 220Gi, verify: "" }
@@ -610,6 +628,43 @@ claimPlacement:
 agentDefaults:
   # Extended resource a GPU agent requests (agents[].gpu.resourceName overrides).
   gpuResourceName: nvidia.com/gpu
+  # The kubernetes executor (an agent whose `executors` include kubernetes;
+  # agents[].kubernetes overrides any key). Its GPU capacity (gpuCount, gpuMig,
+  # gpuShared) describes the TASK pool: the agent pod itself requests no GPU,
+  # and each task pod requests exactly its reservation from the device plugin
+  # (ADR-0029 §2):
+  kubernetes:
+    # Namespace task Jobs run in. Empty = the release namespace. The chart
+    # grants the agent a Role there (jobs, pods, pods/log, secrets).
+    namespace: ""
+    # ServiceAccount task pods run as (its token is never mounted). Empty =
+    # the namespace default.
+    serviceAccount: ""
+    # Output-collector sidecar image (needs /bin/sh, base64, wc, sleep). Pin
+    # it; mirror it for air-gapped clusters.
+    helperImage: busybox:1.37.0
+    # Whole GPUs: the device plugin's resource (NEXUS_K8S_GPU_RESOURCE).
+    gpuResourceName: nvidia.com/gpu
+    # MIG instances: prefix + profile, e.g. nvidia.com/mig-1g.10gb, the NVIDIA
+    # device plugin's `mixed` strategy (NEXUS_K8S_MIG_RESOURCE_PREFIX).
+    migResourcePrefix: nvidia.com/mig-
+    # Shared (MPS or time-sliced) GPUs: ONE replica of this resource per
+    # slice, e.g. nvidia.com/gpu.shared with the plugin's renameByDefault.
+    # Empty refuses shared-GPU tasks rather than running them with no GPU
+    # (NEXUS_K8S_GPU_SHARED_RESOURCE).
+    sharedGpuResourceName: ""
+    # Node label carrying the GPU model; gpu_kind becomes a nodeSelector on it
+    # (e.g. nvidia.com/gpu.product). Empty = no pinning.
+    gpuKindLabel: ""
+    # The workload API for task pods (usage units, shared rate limits,
+    # checkpoints, heartbeats; ADR-0032 addendum, OPERATIONS §29.10): a TLS
+    # listener on the agent pod's IP, per-attempt tokens delivered through the
+    # attempt's Secret. A NetworkPolicy in the task namespace lets task pods
+    # reach it (and nothing else it opens). false leaves tasks on the SDK's
+    # in-process fallback: usage then never reaches the ledger.
+    taskApi:
+      enabled: true
+      port: 9443
   heartbeatIntervalMs: 5000
   # Must stay below terminationGracePeriodSeconds, or Kubernetes kills an agent
   # mid-drain and strands its attempts until their leases expire.

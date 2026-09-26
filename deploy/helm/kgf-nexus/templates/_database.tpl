@@ -14,12 +14,13 @@ and db-roles Jobs, always the owner login).
 
 {{/* The group role each runtime login joins; artifactGC is read-only. */}}
 {{- define "nexus.dbGroupRoles" -}}
-apiGateway: nexus_api_gateway
-workflowManager: nexus_workflow_manager
-dagEngine: nexus_dag_engine
-scheduler: nexus_scheduler
-resourceManager: nexus_resource_manager
-eventService: nexus_event_service
+{{- $p := .Values.postgres.groupRolePrefix | default "nexus" -}}
+apiGateway: {{ $p }}_api_gateway
+workflowManager: {{ $p }}_workflow_manager
+dagEngine: {{ $p }}_dag_engine
+scheduler: {{ $p }}_scheduler
+resourceManager: {{ $p }}_resource_manager
+eventService: {{ $p }}_event_service
 artifactGC: ""
 {{- end -}}
 

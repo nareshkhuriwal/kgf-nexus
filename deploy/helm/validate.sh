@@ -213,6 +213,40 @@ must_fail "no scheduler at all"                 "schedulers"                   -
 must_fail "peer TLS with a plaintext broker"    "enable nats.tls too"          --set tls.enabled=true --set nats.auth.mode=none
 must_fail "unparsable minimum agent version"   "/agentPolicy/minVersion"      --set agentPolicy.minVersion=latest
 
+# The kubernetes executor (ADR-0029 §2, F148): a MIG prefix that no device
+# plugin could ever advertise is refused; a pool agent renders the device-plugin
+# names, the workload-API listener and its task-namespace RBAC, and its OWN pod
+# requests no GPU (the task pods do).
+k8s_agent='agents=[{"name":"agent-k8s","queues":"gpu","executors":"kubernetes","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824,"gpuCount":2,"gpuMig":"1g.10gb=7","kubernetes":{"namespace":"nexus-tasks","sharedGpuResourceName":"nvidia.com/gpu.shared"}}]'
+must_fail "MIG prefix without a separator"      "/migResourcePrefix"           --set agentDefaults.kubernetes.migResourcePrefix=nvidia.com/mig
+must_fail "shared GPU resource not qualified"   "/sharedGpuResourceName"       --set agentDefaults.kubernetes.sharedGpuResourceName=gpu-shared
+if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set-json "$k8s_agent" >"$tmp/k8s" 2>&1 &&
+   grep -qF 'name: NEXUS_K8S_NAMESPACE, value: "nexus-tasks"' "$tmp/k8s" &&
+   grep -qF 'name: NEXUS_K8S_MIG_RESOURCE_PREFIX, value: "nvidia.com/mig-"' "$tmp/k8s" &&
+   grep -qF 'name: NEXUS_K8S_GPU_SHARED_RESOURCE, value: "nvidia.com/gpu.shared"' "$tmp/k8s" &&
+   grep -qF 'name: NEXUS_K8S_TASK_API_ADVERTISE, value: "$(NEXUS_POD_IP):9443"' "$tmp/k8s" &&
+   grep -qF 'name: agent-k8s-task-api' "$tmp/k8s" &&
+   grep -qF 'name: agent-k8s-executor' "$tmp/k8s" &&
+   ! grep -qE '^\s+nvidia.com/gpu: "?2' "$tmp/k8s"; then
+  echo "ok   rendered: kubernetes pool agent with device-plugin names, workload API and no GPU of its own"
+else
+  echo "FAIL: the kubernetes pool agent did not render as expected"; tail -5 "$tmp/k8s"; fail=1
+fi
+
+# Per-installation group roles and PUBLIC CONNECT (F153): the prefix reaches
+# the migrate Job and db-roles, and the logins join the prefixed roles.
+must_fail "group role prefix is the shared name" "/postgres/groupRolePrefix"   --set postgres.groupRolePrefix=nexus
+must_fail "group role prefix malformed"          "/postgres/groupRolePrefix"   --set postgres.groupRolePrefix=Acme-1
+if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set postgres.groupRolePrefix=acme \
+    --set postgres.runtimeRoles.enabled=true --set postgres.runtimeRoles.revokePublicConnect=true >"$tmp/prefix" 2>&1 &&
+   [ "$(grep -cF 'name: NEXUS_DB_ROLE_PREFIX, value: "acme"' "$tmp/prefix")" = 2 ] &&
+   grep -qF 'name: NEXUS_DB_REVOKE_PUBLIC_CONNECT, value: "true"' "$tmp/prefix" &&
+   grep -qF 'acme_scheduler' "$tmp/prefix" && ! grep -qF '\"nexus_scheduler\"' "$tmp/prefix"; then
+  echo "ok   rendered: group role prefix acme on migrate and db-roles, PUBLIC CONNECT revoked"
+else
+  echo "FAIL: the group role prefix did not render as expected"; tail -5 "$tmp/prefix"; fail=1
+fi
+
 # An agent serving another tenant (agents[].namespace) needs that tenant's NATS
 # identity: refused without it, rendered with the tenant's key and worker key.
 nkeys=(--set nats.auth.mode=nkey

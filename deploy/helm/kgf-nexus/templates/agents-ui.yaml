@@ -56,6 +56,48 @@ spec:
             - { name: NEXUS_QUEUES, value: {{ .queues | quote }} }
             - { name: NEXUS_LABELS, value: {{ .labels | quote }} }
             - { name: NEXUS_EXECUTORS, value: {{ .executors | default "subprocess" | quote }} }
+            {{- if include "nexus.agentUsesKubernetes" . }}
+            {{- $k := include "nexus.agentK8s" (list $root .) | fromYaml }}
+            # The kubernetes executor (OPERATIONS §13). The pod name is the
+            # agent's orphan-reaping identity; the Jobs it creates are owned by
+            # this pod when they run in its own namespace.
+            - { name: NEXUS_K8S_NAMESPACE, value: {{ $k.namespace | quote }} }
+            - name: NEXUS_K8S_OWNER
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: NEXUS_K8S_OWNER_POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: NEXUS_K8S_OWNER_POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+            - name: NEXUS_K8S_OWNER_POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            {{- with $k.serviceAccount }}
+            - { name: NEXUS_K8S_SERVICE_ACCOUNT, value: {{ . | quote }} }
+            {{- end }}
+            {{- with $k.helperImage }}
+            - { name: NEXUS_K8S_HELPER_IMAGE, value: {{ . | quote }} }
+            {{- end }}
+            {{- /* Device-plugin resources task pods request (ADR-0029 §2). */}}
+            {{- with $k.gpuResourceName }}
+            - { name: NEXUS_K8S_GPU_RESOURCE, value: {{ . | quote }} }
+            {{- end }}
+            {{- with $k.migResourcePrefix }}
+            - { name: NEXUS_K8S_MIG_RESOURCE_PREFIX, value: {{ . | quote }} }
+            {{- end }}
+            {{- with $k.sharedGpuResourceName }}
+            - { name: NEXUS_K8S_GPU_SHARED_RESOURCE, value: {{ . | quote }} }
+            {{- end }}
+            {{- with $k.gpuKindLabel }}
+            - { name: NEXUS_K8S_GPU_KIND_LABEL, value: {{ . | quote }} }
+            {{- end }}
+            {{- if $k.taskApi.enabled }}
+            # The workload API for task pods, on this pod's IP (F148). Declared
+            # before the $(VAR) reference that expands it.
+            - name: NEXUS_POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - { name: NEXUS_K8S_TASK_API_ADVERTISE, value: {{ printf "$(NEXUS_POD_IP):%d" (int $k.taskApi.port) | quote }} }
+            - { name: NEXUS_K8S_TASK_API_LISTEN, value: {{ printf ":%d" (int $k.taskApi.port) | quote }} }
+            {{- end }}
+            {{- end }}
             - { name: NEXUS_CPU_MILLIS, value: {{ .cpuMillis | int64 | toString | quote }} }
             - { name: NEXUS_MEMORY_BYTES, value: {{ .memoryBytes | int64 | toString | quote }} }
             - { name: NEXUS_GPU_COUNT, value: {{ .gpuCount | default 0 | int64 | toString | quote }} }
@@ -131,6 +173,12 @@ spec:
             {{- include "nexus.tracingEnv" $root | nindent 12 }}
           ports:
             - { name: metrics, containerPort: {{ int $root.Values.metrics.agentPort }} }
+            {{- if include "nexus.agentUsesKubernetes" . }}
+            {{- $k := include "nexus.agentK8s" (list $root .) | fromYaml }}
+            {{- if $k.taskApi.enabled }}
+            - { name: task-api, containerPort: {{ int $k.taskApi.port }} }
+            {{- end }}
+            {{- end }}
           # Not ready until the agent has registered with the control plane
           # (it retries with backoff while the gateway starts), so a rollout
           # waits for agents that can take work. No liveness probe on

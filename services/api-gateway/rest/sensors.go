@@ -238,6 +238,9 @@ func (a *API) updateSensor(w http.ResponseWriter, r *http.Request, p authn.Princ
 	if !decodeStrict(w, r, maxConfigBody, &req) {
 		return
 	}
+	if !revisionOK(w, req.Revision) {
+		return
+	}
 	ns, name := r.PathValue("ns"), r.PathValue("name")
 	cur, err := store.SensorGet(r.Context(), a.db, ns, name)
 	if err != nil {
@@ -296,13 +299,16 @@ func (a *API) listSensorObservations(w http.ResponseWriter, r *http.Request, _ a
 	if !a.eventsEnabled(w) {
 		return
 	}
+	limit, ok := listLimit(w, r, store.DefaultObservation, store.MaxObservationPage)
+	if !ok {
+		return
+	}
 	s, err := store.SensorGet(r.Context(), a.db, r.PathValue("ns"), r.PathValue("name"))
 	if err != nil {
 		a.failConfig(w, r, "get sensor", err)
 		return
 	}
 	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
 	withBaseline, _ := strconv.ParseBool(q.Get("include_baseline"))
 	rows, err := store.SensorListObservations(r.Context(), a.db, s.ID, withBaseline, limit)
 	if err != nil {

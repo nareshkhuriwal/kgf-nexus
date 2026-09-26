@@ -14,7 +14,7 @@ import pytest
 
 import nexus.context as context_mod
 import nexus.ratelimit as ratelimit_mod
-from fake_taskapi import FakeTaskAPI
+from fake_taskapi import FakeTaskAPI, make_ca_and_cert, openssl_available
 from nexus import RateLimited, StaleCheckpoint, StaleLease, StructuredLogger, TaskContext
 from nexus._taskapi import (
     CheckpointTooLarge,
@@ -62,6 +62,67 @@ def test_from_environment_parses_only_unix_addresses(api):
     assert parse_address("unix:///x/y.sock") == "/x/y.sock"
     with pytest.raises(ValueError):
         TaskAPIClient("", "t")
+
+
+# ── the network transport (kubernetes pods, F148) ────────────────────────────
+
+needs_openssl = pytest.mark.skipif(not openssl_available(), reason="needs the openssl CLI to mint a test CA")
+
+
+@pytest.fixture
+def tls_api():
+    with FakeTaskAPI(tls=True) as fake:
+        yield fake
+
+
+@needs_openssl
+def test_https_address_with_pinned_ca_round_trips(tls_api):
+    c = from_environment(tls_api.env)
+    assert c is not None and c.socket_path == "" and c.url == tls_api.url
+    assert "test-token" not in repr(c) and "BEGIN CERTIFICATE" not in repr(c)
+    ctx = make_ctx(c)
+    ctx.report_tokens("mock", "m", input_tokens=4, output_tokens=2)
+    assert tls_api.usage["tokens:mock/m:input"] == 4
+    ctx.checkpoint({"done": 3})
+    assert make_ctx(c).resume() == {"done": 3}
+    ctx.heartbeat("working")
+    assert tls_api.progress[-1][0] == "working"
+
+
+@needs_openssl
+def test_https_never_trusts_an_unpinned_or_wrong_ca(tls_api, tmp_path):
+    # No CA: the system roots, which do not know the agent's private CA.
+    env = dict(tls_api.env)
+    del env["NEXUS_TASK_API_CA"]
+    with pytest.raises(Unavailable):
+        from_environment(env).info()
+    # Another agent's CA: refused, never "verify=False".
+    other_ca, _, _ = make_ca_and_cert(str(tmp_path))
+    env["NEXUS_TASK_API_CA"] = other_ca
+    with pytest.raises(Unavailable):
+        from_environment(env).info()
+    # A malformed CA is a configuration error surfaced at once.
+    env["NEXUS_TASK_API_CA"] = "not a certificate"
+    with pytest.raises(ValueError):
+        from_environment(env)
+
+
+@needs_openssl
+def test_https_bad_token_is_unauthorized(tls_api):
+    bad = TaskAPIClient.https(tls_api.url, "wrong", ca_pem=tls_api.ca_pem)
+    with pytest.raises(TaskAPIError) as ei:
+        bad.info()
+    assert ei.value.status == 401
+
+
+def test_plain_http_is_never_used():
+    # A bearer token must not cross a pod network in clear.
+    assert from_environment({"NEXUS_TASK_API": "http://10.0.0.1:9443", "NEXUS_TASK_API_TOKEN": "t"}) is None
+    with pytest.raises(ValueError):
+        TaskAPIClient.https("http://10.0.0.1:9443", "t")
+    for bad in ("https://", "https://host", "https://host:0", "https://host:99999", "https://host:1/path"):
+        with pytest.raises(ValueError):
+            TaskAPIClient.https(bad, "t")
 
 
 def test_info_and_bad_token(api):

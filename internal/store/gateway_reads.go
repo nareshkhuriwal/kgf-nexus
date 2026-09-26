@@ -102,9 +102,7 @@ type CatalogEntry struct {
 // would make the list cost scale with total workflow SIZE rather than count.
 // GatewayGetSpec serves the definition when something actually needs it.
 func GatewayListCatalog(ctx context.Context, q GWQuerier, namespace, search string, limit int) ([]CatalogEntry, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
+	limit = ClampLimit(limit, DefaultCatalogPage, MaxCatalogPage)
 	// The search is a case-insensitive substring on the workflow name. Matching
 	// on the name alone, not the definition: an operator looking for "retrain"
 	// means the workflow called retrain, and a body match would return every
@@ -143,6 +141,9 @@ func GatewayListCatalog(ctx context.Context, q GWQuerier, namespace, search stri
 
 // GatewayListSpecVersions returns versions newest-first.
 func GatewayListSpecVersions(ctx context.Context, q GWQuerier, namespace, name string, limit int) ([]SpecRow, error) {
+	// Bounded like every other listing; this one used to pass the caller's limit
+	// straight to Postgres.
+	limit = ClampLimit(limit, DefaultVersionPage, MaxVersionPage)
 	rows, err := q.Query(ctx, `
 		SELECT id::text, namespace, name, version, spec_hash, created_by, created_at
 		  FROM workflow_specs
@@ -263,9 +264,7 @@ func GatewayListRuns(ctx context.Context, q GWQuerier, namespace string, f RunFi
 		conds = append(conds, fmt.Sprintf("r.created_at < $%d", len(args)))
 	}
 	limit := f.Limit
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
+	limit = ClampLimit(limit, DefaultRunPage, MaxRunPage)
 	if f.Lookahead {
 		limit++
 	}
@@ -607,9 +606,7 @@ type EventRow struct {
 // ties and no clock dependency, which is exactly what an SSE live tail needs to
 // resume without gaps or duplicates across a reconnect.
 func GatewayListRunEvents(ctx context.Context, q GWQuerier, runID string, afterSeq int32, limit int) ([]EventRow, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 500
-	}
+	limit = ClampLimit(limit, DefaultEventPage, MaxEventPage)
 	rows, err := q.Query(ctx, `
 		SELECT id, run_id::text, seq, node_id, attempt_id::text, kind, payload::text, actor, occurred_at
 		  FROM run_events
@@ -810,9 +807,7 @@ func GatewayWorkerRunningAttempts(ctx context.Context, q GWQuerier, workerID str
 // still trivial to sort — but an unbounded read here would grow without ceiling
 // over a worker's lifetime, and a detail page is not a history export.
 func GatewayWorkerRecentAttempts(ctx context.Context, q GWQuerier, workerID string, limit int) ([]WorkerAttemptRow, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
+	limit = ClampLimit(limit, DefaultWorkerTail, MaxWorkerTail)
 	rows, err := q.Query(ctx, workerAttemptSelect+`
 	 WHERE a.worker_id = $1
 	   AND a.state NOT IN ('DISPATCHED','RUNNING')

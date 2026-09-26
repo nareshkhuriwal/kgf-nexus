@@ -212,6 +212,9 @@ func (a *API) updateChannel(w http.ResponseWriter, r *http.Request, p authn.Prin
 	if !decodeStrict(w, r, maxConfigBody, &req) {
 		return
 	}
+	if !revisionOK(w, req.Revision) {
+		return
+	}
 	ns, name := r.PathValue("ns"), r.PathValue("name")
 	cur, err := store.NotifyGetChannel(r.Context(), a.db, ns, name)
 	if err != nil {
@@ -435,6 +438,9 @@ func (a *API) saveRule(w http.ResponseWriter, r *http.Request, p authn.Principal
 	if !decodeStrict(w, r, maxConfigBody, &req) {
 		return
 	}
+	if !create && !revisionOK(w, req.Revision) {
+		return
+	}
 	ns := r.PathValue("ns")
 	if !create {
 		if req.Name != "" && req.Name != r.PathValue("name") {
@@ -527,6 +533,18 @@ func (a *API) listDeliveries(w http.ResponseWriter, r *http.Request, _ authn.Pri
 	}
 	q := r.URL.Query()
 	f := store.DeliveryFilter{State: q.Get("state"), RunID: q.Get("run_id")}
+	var ok bool
+	if f.Limit, ok = listLimit(w, r, store.DefaultDelivery, store.MaxDeliveryPage); !ok {
+		return
+	}
+	if b := q.Get("before"); b != "" {
+		id, err := strconv.ParseInt(b, 10, 64)
+		if err != nil || id < 1 {
+			writeError(w, http.StatusBadRequest, "invalid", "before must be a delivery id (a positive integer)")
+			return
+		}
+		f.BeforeID = id
+	}
 	if f.State != "" && !slices.Contains([]string{"pending", "delivered", "dead"}, f.State) {
 		writeError(w, http.StatusBadRequest, "invalid", "state must be pending, delivered or dead")
 		return
@@ -545,8 +563,6 @@ func (a *API) listDeliveries(w http.ResponseWriter, r *http.Request, _ authn.Pri
 		}
 		f.ChannelID = c.ID
 	}
-	f.BeforeID, _ = strconv.ParseInt(q.Get("before"), 10, 64)
-	f.Limit, _ = strconv.Atoi(q.Get("limit"))
 	rows, err := store.NotifyListDeliveries(r.Context(), a.db, r.PathValue("ns"), f)
 	if err != nil {
 		a.failConfig(w, r, "list deliveries", err)
@@ -557,11 +573,7 @@ func (a *API) listDeliveries(w http.ResponseWriter, r *http.Request, _ authn.Pri
 		out = append(out, deliveryPayload(d))
 	}
 	resp := map[string]any{"deliveries": out}
-	lim := f.Limit
-	if lim <= 0 || lim > 500 {
-		lim = 100
-	}
-	if len(rows) == lim {
+	if len(rows) == f.Limit {
 		resp["next_before"] = rows[len(rows)-1].ID
 	}
 	writeJSON(w, http.StatusOK, resp)

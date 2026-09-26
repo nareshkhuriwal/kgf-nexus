@@ -24,7 +24,7 @@ func (a *API) platformGet(w http.ResponseWriter, r *http.Request, p authn.Princi
 func (a *API) platformPut(w http.ResponseWriter, r *http.Request, p authn.Principal) {
 	body, err := readBody(r, 128<<10)
 	if err != nil {
-		writeError(w, 413, "body_too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var c platform.Config

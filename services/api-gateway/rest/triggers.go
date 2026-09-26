@@ -221,6 +221,9 @@ func (a *API) updateTrigger(w http.ResponseWriter, r *http.Request, p authn.Prin
 	if !decodeStrict(w, r, maxConfigBody, &req) {
 		return
 	}
+	if !revisionOK(w, req.Revision) {
+		return
+	}
 	ns, name := r.PathValue("ns"), r.PathValue("name")
 	if req.Name != "" && req.Name != name {
 		writeError(w, http.StatusBadRequest, "immutable", "a trigger's name cannot be changed")
@@ -284,7 +287,14 @@ func (a *API) rotateTriggerSecret(w http.ResponseWriter, r *http.Request, p auth
 	var req struct {
 		GraceSeconds *json.Number `json:"grace_seconds"`
 	}
-	body, _ := readBody(r, maxConfigBody)
+	// The error is NOT ignored: an oversized or broken body used to read as an
+	// empty one, rotating with the default 24h grace instead of the grace the
+	// caller asked for (possibly 0, "revoke now").
+	body, err := readBody(r, maxConfigBody)
+	if err != nil {
+		writeBodyError(w, err)
+		return
+	}
 	if len(bytes.TrimSpace(body)) > 0 {
 		d := json.NewDecoder(bytes.NewReader(body))
 		d.DisallowUnknownFields()
@@ -354,12 +364,15 @@ func (a *API) listTriggerDeliveries(w http.ResponseWriter, r *http.Request, _ au
 	if !a.eventsEnabled(w) {
 		return
 	}
+	limit, ok := listLimit(w, r, store.DefaultReceipts, store.MaxReceiptsPage)
+	if !ok {
+		return
+	}
 	t, err := store.TriggerGet(r.Context(), a.db, r.PathValue("ns"), r.PathValue("name"))
 	if err != nil {
 		a.failConfig(w, r, "get trigger", err)
 		return
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	rows, err := store.TriggerListReceipts(r.Context(), a.db, t.ID, limit)
 	if err != nil {
 		a.failConfig(w, r, "list trigger deliveries", err)
@@ -409,7 +422,11 @@ func (a *API) receiveHook(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := readBody(r, maxHookBody)
 	if err != nil {
-		deny(http.StatusRequestEntityTooLarge, "payload_too_large", err.Error(), t.ID)
+		if isBodyTooLarge(err) {
+			deny(http.StatusRequestEntityTooLarge, "payload_too_large", err.Error(), t.ID)
+		} else {
+			deny(http.StatusBadRequest, "unreadable_body", err.Error(), t.ID)
+		}
 		return
 	}
 	tsHeader, sigHeader := r.Header.Get("X-Nexus-Timestamp"), r.Header.Get("X-Nexus-Signature")

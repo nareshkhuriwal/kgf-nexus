@@ -32,8 +32,11 @@ private API on a Unix socket, `NEXUS_TASK_API`, with a per-attempt bearer
 token in `NEXUS_TASK_API_TOKEN`. The agent adds the lease token and forwards
 to the control plane, so the task never holds a platform credential, and a
 task whose lease was taken away is refused. The context methods use it when it
-is there; nothing in a handler needs to know. The kubernetes executor does not
-offer it yet, and the SDK falls back to in-process behaviour there.
+is there; nothing in a handler needs to know. A kubernetes pod runs on another
+node, so it gets the same API from its agent over TLS instead
+(`NEXUS_TASK_API=https://...`, verified against the agent's own CA in
+`NEXUS_TASK_API_CA`) when the agent is configured for it; otherwise the SDK
+falls back to in-process behaviour there.
 
 | Call | Effect |
 | --- | --- |

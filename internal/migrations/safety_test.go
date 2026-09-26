@@ -533,3 +533,48 @@ func migrationVersions(t *testing.T) map[int]bool {
 	}
 	return out
 }
+
+// TestNoLiteralGroupRolesAfterThePrefixMigration: since 0038 an installation
+// may rename its group roles (F153), so a later migration that grants to (or
+// revokes from) nexus_scheduler literally would miss a prefixed installation's
+// roles -- silently, for a REVOKE. They must name nexus_role('scheduler').
+func TestNoLiteralGroupRolesAfterThePrefixMigration(t *testing.T) {
+	fs, err := LiteralGroupRoles(migrationsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range fs {
+		t.Error(f)
+	}
+}
+
+func TestLiteralGroupRoleCheckFires(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Before the boundary, literal names are the only kind there is.
+	write("0037_old.up.sql", "GRANT SELECT ON x TO nexus_scheduler;\n")
+	write("0038_installation_role_prefix.up.sql", "GRANT SELECT ON installation_role_prefix TO nexus_dag_engine;\n")
+	write("0039_bad.up.sql", "-- grants to nexus_scheduler would be wrong here\n"+
+		"GRANT UPDATE (x) ON t TO nexus_scheduler;\n"+
+		"DO $$ BEGIN EXECUTE format('REVOKE ALL ON t FROM %I', 'nexus_api_gateway'); END $$;\n")
+	write("0040_good.up.sql", "DO $$ BEGIN EXECUTE format('GRANT SELECT ON t TO %I', nexus_role('scheduler')); END $$;\n"+
+		"-- the nexus_scheduler_login is a login, not a group role\n"+
+		"SELECT 'nexus_scheduler_login';\n")
+	fs, err := LiteralGroupRoles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 2 {
+		t.Fatalf("findings %v; want the GRANT and the dynamic REVOKE in 0039 only", fs)
+	}
+	for _, f := range fs {
+		if f.File != "0039_bad.up.sql" || f.Rule != "literal-group-role" || f.Severity != Blocking {
+			t.Errorf("finding %v", f)
+		}
+	}
+}

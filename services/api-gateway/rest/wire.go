@@ -5,6 +5,7 @@ package rest
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,13 +61,78 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{"error": code, "message": message})
 }
 
-// readBody reads a bounded request body.
+// bodyTooLargeError is a request body over its route's limit.
+//
+// A distinct type because the two ways a body read fails have different
+// fixes: over the limit, the client must send less (413); a read that failed
+// part way -- a reset connection, a truncated chunked encoding -- is a
+// transport problem the client may simply retry (400). The gateway used to
+// report both as "exceeds N bytes or could not be read" and answer 413 for
+// either, and the routes that decoded straight from the request answered an
+// oversized body with 400 instead.
+type bodyTooLargeError struct{ limit int64 }
+
+func (e *bodyTooLargeError) Error() string {
+	return fmt.Sprintf("request body exceeds %d bytes", e.limit)
+}
+
+// isBodyTooLarge reports whether err is a request body over its limit, from
+// readBody or from a decoder reading through http.MaxBytesReader.
+func isBodyTooLarge(err error) bool {
+	var tl *bodyTooLargeError
+	var mbe *http.MaxBytesError
+	return errors.As(err, &tl) || errors.As(err, &mbe)
+}
+
+// bodyError normalises a body read or decode failure: an over-size read
+// becomes *bodyTooLargeError whatever produced it, so every caller reports the
+// limit the same way.
+func bodyError(err error) error {
+	var mbe *http.MaxBytesError
+	if errors.As(err, &mbe) {
+		return &bodyTooLargeError{limit: mbe.Limit}
+	}
+	return err
+}
+
+// readBody reads a bounded request body. An over-size body is a
+// *bodyTooLargeError; any other failure is a read error.
 func readBody(r *http.Request, limit int64) ([]byte, error) {
 	body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, limit))
 	if err != nil {
-		return nil, fmt.Errorf("request body exceeds %d bytes or could not be read", limit)
+		if isBodyTooLarge(err) {
+			return nil, &bodyTooLargeError{limit: limit}
+		}
+		return nil, fmt.Errorf("request body could not be read: %w", err)
 	}
 	return body, nil
+}
+
+// writeBodyError answers a failed body read: 413 body_too_large for a body
+// over the limit, 400 unreadable_body for anything else. Every route answers
+// these two the same way; writeBodyErrorAs keeps the two routes whose 413
+// carried a route-specific code from before this was unified.
+func writeBodyError(w http.ResponseWriter, err error) {
+	writeBodyErrorAs(w, err, "body_too_large")
+}
+
+func writeBodyErrorAs(w http.ResponseWriter, err error, tooLargeCode string) {
+	err = bodyError(err)
+	if isBodyTooLarge(err) {
+		writeError(w, http.StatusRequestEntityTooLarge, tooLargeCode, err.Error())
+		return
+	}
+	writeError(w, http.StatusBadRequest, "unreadable_body", err.Error())
+}
+
+// rejectBody answers a body a decoder refused: 413 when it was over the limit,
+// otherwise the caller's own status, code and message for a malformed body.
+func rejectBody(w http.ResponseWriter, err error, status int, code, message string) {
+	if isBodyTooLarge(err) {
+		writeBodyError(w, err)
+		return
+	}
+	writeError(w, status, code, message)
 }
 
 // nonEmptyJSON substitutes an empty object for an empty body, so a POST with no
@@ -92,6 +158,55 @@ func wantsSSE(r *http.Request) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream")
+}
+
+// listLimit reads a list endpoint's `limit` query parameter.
+//
+// One rule for every list endpoint (CONTRACT-FINDINGS F155):
+//
+//   - absent: def;
+//   - a positive integer: that many, CAPPED at max -- a client asking for more
+//     than the page size gets the largest page, never a smaller default one
+//     (limit=600 on the run list used to answer 100 rows, fewer than limit=101);
+//   - anything else (zero, negative, not an integer): 400 invalid_limit. These
+//     used to fall back to the default silently, which hid the client bug
+//     behind a page that was merely the wrong size.
+//
+// It writes the 400 itself; the caller returns when ok is false.
+func listLimit(w http.ResponseWriter, r *http.Request, def, max int) (n int, ok bool) {
+	return boundedIntParam(w, r, "limit", def, max)
+}
+
+// boundedIntParam is listLimit for a parameter with another name
+// (recent_limit, tail).
+func boundedIntParam(w http.ResponseWriter, r *http.Request, name string, def, max int) (int, bool) {
+	v := r.URL.Query().Get(name)
+	if v == "" {
+		return def, true
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_"+name,
+			fmt.Sprintf("%s must be a positive integer (at most %d; larger values are capped)", name, max))
+		return 0, false
+	}
+	if n > max {
+		n = max
+	}
+	return n, true
+}
+
+// revisionOK enforces the one revision rule every revisioned write shares
+// (api/openapi.yaml, "Revisions"; CONTRACT-FINDINGS F155): `revision` is the
+// value the client last read, 0 meaning "I read nothing: create it only if it
+// does not exist". A negative revision names no state the server ever had.
+func revisionOK(w http.ResponseWriter, revision int64) bool {
+	if revision < 0 {
+		writeError(w, http.StatusBadRequest, "invalid_revision",
+			"revision must be the revision last read, or 0 to create only if absent")
+		return false
+	}
+	return true
 }
 
 func intParam(r *http.Request, name string, def int) int {

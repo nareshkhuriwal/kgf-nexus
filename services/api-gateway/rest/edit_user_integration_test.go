@@ -92,3 +92,68 @@ func TestIntegrationEditUser(t *testing.T) {
 	body["role"] = "admin"
 	call(path, key, body, 400) // no profile-based privilege change
 }
+
+// TestIntegrationEditUserReportsRealVerification: the response to a profile
+// edit carried email_verified: false for every account, because the handler
+// never read the column. A verified account whose display name changes stays
+// verified; one whose address changes is un-proven by the database trigger
+// (migration 0017), and the response must say so rather than guess.
+func TestIntegrationEditUserReportsRealVerification(t *testing.T) {
+	ctx := context.Background()
+	tx, err := attentionPool(t).Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	ns := fmt.Sprintf("edit-verified-%d", time.Now().UnixNano())
+	if _, err = tx.Exec(ctx, `INSERT INTO tenants(namespace,name) VALUES($1,'edit verified')`, ns); err != nil {
+		t.Fatal(err)
+	}
+	key := "nx_edit_verified_" + ns
+	if _, err = store.GatewayCreateAPIKey(ctx, tx, ns, "test", "admin", key); err != nil {
+		t.Fatal(err)
+	}
+	user, err := store.GatewayCreateUserWithoutPassword(ctx, tx, ns, "verified-"+ns+"@example.test", "Verified", "reader")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE users SET email_verified_at=now() WHERE id=$1`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	auth := authn.New(tx).WithRBAC().WithIdentity(authn.StoreIdentity{DB: tx})
+	h := New(tx, auth, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil))).WithIdentity(NewStoreIdentityAdmin(tx)).Routes()
+	put := func(email, name, prevEmail, prevName string) map[string]any {
+		t.Helper()
+		raw, _ := json.Marshal(map[string]any{"email": email, "display_name": name, "previous_email": prevEmail, "previous_display_name": prevName})
+		r := httptest.NewRequest("PUT", "/v1/namespaces/"+ns+"/users/"+user.ID, strings.NewReader(string(raw)))
+		r.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatalf("PUT: %d %s", w.Code, w.Body)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	out := put(user.Email, "Renamed", user.Email, "Verified")
+	if out["email_verified"] != true {
+		t.Errorf("display-name edit of a verified account: email_verified=%v, want true", out["email_verified"])
+	}
+	newEmail := "moved-" + ns + "@example.test"
+	out = put(newEmail, "Renamed", user.Email, "Renamed")
+	if out["email_verified"] != false {
+		t.Errorf("address change: email_verified=%v, want false (the new address is unproven)", out["email_verified"])
+	}
+	// And the response agrees with what a read returns.
+	got, err := store.GatewayGetUser(ctx, tx, ns, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.EmailVerifiedAt != nil {
+		t.Errorf("after an address change the stored account is still verified")
+	}
+}

@@ -24,6 +24,32 @@ spec:
       app.kubernetes.io/component: task-attempt
   policyTypes: ["Ingress", "Egress"]
 ---
+# The one hole: task pods may reach their agent's workload-API listener
+# (usage units, shared rate limits, checkpoints, heartbeats; F148, OPERATIONS
+# §29.10) -- TLS, per-attempt bearer token, on the agent pod's IP -- and
+# nothing else. The docker executor's equivalent is the socket mounted into a
+# --network none container.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nexus-task-to-agent-api
+  namespace: nexus-exec
+  labels:
+    app.kubernetes.io/part-of: nexus
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: nexus-agent
+      app.kubernetes.io/component: task-attempt
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nexus-agent
+      ports:
+        - {port: 9443, protocol: TCP}
+---
 # A task that declares no cpu/memory would otherwise run UNBOUNDED on a node
 # (the executor sets limits only for declared dimensions). The LimitRange gives
 # such containers a ceiling so one undeclared task cannot starve its node.

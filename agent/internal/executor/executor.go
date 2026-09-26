@@ -73,6 +73,13 @@ type TaskSpec struct {
 	// TaskAPIToken is the socket's per-attempt bearer token, exported as
 	// NEXUS_TASK_API_TOKEN wherever TaskAPISocket is exported.
 	TaskAPIToken string
+	// TaskAPIURL and TaskAPICA are the agent's network listener for a
+	// workload on another node (F148): exported as NEXUS_TASK_API (https://)
+	// and NEXUS_TASK_API_CA (the PEM CA certificate to pin). Only the
+	// kubernetes executor uses them; the token then travels by reference to
+	// the attempt's Secret.
+	TaskAPIURL string
+	TaskAPICA  []byte
 
 	Runtime *nexusv1.RuntimeSpec
 
@@ -80,6 +87,12 @@ type TaskSpec struct {
 	// deliberately distinct from the scheduler's `request`: limit >= request
 	// permits opportunistic bursting.
 	Limit *nexusv1.ResourceVector
+
+	// Request is the scheduler's `request`: what the control plane reserved
+	// on this worker. Devices are not burstable, so an executor whose devices
+	// are allocated by someone else (the kubernetes device plugin) asks for
+	// exactly the reserved ones, whatever the ceiling says. Nil when unknown.
+	Request *nexusv1.ResourceVector
 
 	// GPUDevices are the device indices this attempt holds on the worker,
 	// assigned by the worker's registry at admission. Executors expose exactly
@@ -329,9 +342,11 @@ const (
 	// EnvAttemptNumber is the attempt's 1-based number (TaskSpec.AttemptNumber).
 	EnvAttemptNumber = "NEXUS_ATTEMPT_NUMBER"
 	// EnvTaskAPI is the attempt's workload API as the workload sees it:
-	// unix://<socket path> (ADR-0032 §1). Absent when the executor cannot give
-	// the workload a path to the agent (kubernetes, F148); the SDK then keeps
-	// usage, permits and checkpoints in-process.
+	// unix://<socket path> (ADR-0032 §1), or https://<host:port> of the
+	// agent's network listener for a kubernetes pod (F148). Absent when the
+	// executor cannot give the workload a path to the agent (a kubernetes
+	// agent with no listener configured); the SDK then keeps usage, permits
+	// and checkpoints in-process.
 	EnvTaskAPI = "NEXUS_TASK_API"
 	// EnvTaskAPIToken is the bearer token every request to EnvTaskAPI must
 	// carry. Exported exactly when EnvTaskAPI is.
@@ -344,6 +359,9 @@ const (
 	// model and whole-GPU count; absent on a worker that advertises none.
 	EnvWorkerGPUKind  = "NEXUS_WORKER_GPU_KIND"
 	EnvWorkerGPUCount = "NEXUS_WORKER_GPU_COUNT"
+	// EnvTaskAPICA is the PEM CA certificate an https EnvTaskAPI must be
+	// verified against (the agent's in-memory CA). Public.
+	EnvTaskAPICA = "NEXUS_TASK_API_CA"
 )
 
 // workerEnvList renders the worker's identity and advertised GPUs.
