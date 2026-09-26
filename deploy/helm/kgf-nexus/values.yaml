@@ -278,6 +278,33 @@ agents:
       requests: { cpu: 250m, memory: 256Mi }
       limits: { memory: 4Gi }
 
+# Optional per-agent keys (ADR-0029/0030/0031), all off by default:
+#   gpuMig: "1g.10gb=MIG-...,MIG-...;3g.40gb=MIG-..."   MIG instances by profile
+#   gpuShared: "4:mps:80Gi"                             shared devices (mps|timeslice)
+#   gpuDiscovery: nvidia-smi                            read GPUs/MIG from nvidia-smi -L
+#   capacityType: spot                                  else discovered from the Node, else on-demand
+#   eviction: { sources: "kubernetes,aws", taints: "", grace: 25s }
+#   artifactCache: { bytes: 200Gi, sizeLimit: 220Gi, verify: "" }
+# The kubernetes eviction source and Node capacity-type discovery need `get` on
+# the agent's own Node (OPERATIONS §28.3).
+
+# Claim-time placement (ADR-0029 §4, ADR-0030, ADR-0031). Not to be confused
+# with `placement`, which places the chart's own pods.
+claimPlacement:
+  # pack (best fit, least waste) or spread.
+  policy: pack
+  # Pull-path delay scheduling: how long an attempt with a preference waits
+  # for a strictly better live worker before any fitting worker may take it.
+  wait: 3s
+  # Cluster quota headroom older than this gates nothing.
+  headroomTTL: 2m
+  # Retries after PREEMPTED (spot eviction) that do not spend max_attempts.
+  maxPreemptionRetries: 5
+  preemptionRetryDelay: 2s
+  # The registered cluster this release's agents run in (clusters.name);
+  # empty = no cluster labels for them.
+  clusterName: ""
+
 agentDefaults:
   heartbeatIntervalMs: 5000
   # Must stay below terminationGracePeriodSeconds, or Kubernetes kills an agent
@@ -467,6 +494,12 @@ clusterController:
   interval: 15s
   jobLabelSelector: nexus.io/attempt-id
   logLevel: info
+  # ADR-0031. Operator-declared cluster placement labels, published with every
+  # report over the observed region and provider, e.g.
+  # "nexus.io/cost-tier=1,nexus.io/data-locality=lake-eu|s3-eu-west-1".
+  clusterLabels: ""
+  # Extended resources counted as gpu_count in the published quota headroom.
+  gpuResources: ""
   # Namespaces holding the worker Deployments bound to this cluster. A
   # read-only Role is created in each (and the apply Role under apply.enabled).
   # Empty = this release's namespace, where the chart's own agents run. Never

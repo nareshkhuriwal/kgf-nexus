@@ -61,6 +61,42 @@ spec:
             {{- with .customResources }}
             - { name: NEXUS_CUSTOM_RESOURCES, value: {{ . | quote }} }
             {{- end }}
+            {{- /* Fractional GPUs, spot and caching (ADR-0029/0030/0031). */}}
+            {{- with .gpuMig }}
+            - { name: NEXUS_GPU_MIG, value: {{ . | quote }} }
+            {{- end }}
+            {{- with .gpuShared }}
+            - { name: NEXUS_GPU_SHARED, value: {{ . | quote }} }
+            {{- end }}
+            {{- with .gpuDiscovery }}
+            - { name: NEXUS_GPU_DISCOVERY, value: {{ . | quote }} }
+            {{- end }}
+            {{- with .capacityType }}
+            - { name: NEXUS_CAPACITY_TYPE, value: {{ . | quote }} }
+            {{- end }}
+            {{- with ($root.Values.claimPlacement.clusterName | default "") }}
+            - { name: NEXUS_CLUSTER_NAME, value: {{ . | quote }} }
+            {{- end }}
+            - name: NEXUS_NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            {{- with .eviction }}
+            {{- with .sources }}
+            - { name: NEXUS_EVICTION_SOURCES, value: {{ . | quote }} }
+            {{- end }}
+            {{- with .taints }}
+            - { name: NEXUS_EVICTION_TAINTS, value: {{ . | quote }} }
+            {{- end }}
+            {{- with .grace }}
+            - { name: NEXUS_EVICTION_GRACE, value: {{ . | quote }} }
+            {{- end }}
+            {{- end }}
+            {{- with .artifactCache }}
+            - { name: NEXUS_ARTIFACT_CACHE_DIR, value: /var/lib/nexus/artifacts }
+            - { name: NEXUS_ARTIFACT_CACHE_BYTES, value: {{ .bytes | quote }} }
+            {{- with .verify }}
+            - { name: NEXUS_ARTIFACT_CACHE_VERIFY, value: {{ . | quote }} }
+            {{- end }}
+            {{- end }}
             - { name: NEXUS_HEARTBEAT_INTERVAL_MS, value: {{ $root.Values.agentDefaults.heartbeatIntervalMs | int64 | toString | quote }} }
             - { name: NEXUS_DRAIN_GRACE, value: {{ $root.Values.agentDefaults.drainGrace | quote }} }
             - { name: NEXUS_WAL_DIR, value: /var/lib/nexus/wal }
@@ -90,12 +126,22 @@ spec:
             - { name: wal, mountPath: /var/lib/nexus/wal }
             - { name: work, mountPath: /var/lib/nexus/work }
             - { name: tmp, mountPath: /tmp }
+            {{- if .artifactCache }}
+            - { name: artifacts, mountPath: /var/lib/nexus/artifacts }
+            {{- end }}
             {{- include "nexus.natsVolumeMounts" $root | nindent 12 }}
             {{- include "nexus.tlsVolumeMounts" $root | nindent 12 }}
       volumes:
         - { name: wal, emptyDir: {} }
         - { name: work, emptyDir: {} }
         - { name: tmp, emptyDir: {} }
+        {{- with .artifactCache }}
+        {{- /* Sized above the cache bound so eviction happens in the cache, not
+               by kubelet evicting the pod. A hostPath or local PV keeps the cache
+               across pod restarts; an emptyDir does not (OPERATIONS §28.4). */}}
+        - name: artifacts
+          emptyDir: { sizeLimit: {{ .sizeLimit | default .bytes | quote }} }
+        {{- end }}
         {{- include "nexus.natsVolumes" (list $root "agent" (.natsSeedKey | default "")) | nindent 8 }}
         {{- include "nexus.tlsVolumes" (list $root "agent") | nindent 8 }}
 {{- include "nexus.pdb" (list $root .name .name (.replicas | default 1) .podDisruptionBudget) }}

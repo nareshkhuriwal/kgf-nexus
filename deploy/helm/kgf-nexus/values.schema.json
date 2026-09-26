@@ -221,7 +221,30 @@
           "gpuCount": { "type": "integer", "minimum": 0 },
           "diskBytes": { "type": "integer", "minimum": 1 },
           "resources": { "$ref": "#/definitions/resources" },
-          "podDisruptionBudget": { "$ref": "#/definitions/pdb" }
+          "podDisruptionBudget": { "$ref": "#/definitions/pdb" },
+          "gpuMig": { "type": "string" },
+          "gpuShared": { "type": "string" },
+          "gpuDiscovery": { "enum": ["", "nvidia-smi"] },
+          "capacityType": { "enum": ["", "on-demand", "spot"] },
+          "eviction": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "sources": { "type": "string" },
+              "taints": { "type": "string" },
+              "grace": { "$ref": "#/definitions/duration" }
+            }
+          },
+          "artifactCache": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["bytes"],
+            "properties": {
+              "bytes": { "type": "string" },
+              "sizeLimit": { "type": "string" },
+              "verify": { "enum": ["", "hit"] }
+            }
+          }
         }
       }
     },
@@ -269,6 +292,18 @@
         },
         "resources": { "$ref": "#/definitions/resources" },
         "podDisruptionBudget": { "$ref": "#/definitions/pdb" }
+      }
+    },
+    "claimPlacement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policy": { "enum": ["pack", "spread"] },
+        "wait": { "$ref": "#/definitions/duration" },
+        "headroomTTL": { "$ref": "#/definitions/duration" },
+        "maxPreemptionRetries": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "preemptionRetryDelay": { "$ref": "#/definitions/duration" },
+        "clusterName": { "type": "string" }
       }
     },
     "placement": {
@@ -341,6 +376,8 @@
         "replicas": { "type": "integer", "minimum": 1 },
         "interval": { "$ref": "#/definitions/duration" },
         "jobLabelSelector": { "type": "string" },
+        "clusterLabels": { "type": "string" },
+        "gpuResources": { "type": "string" },
         "logLevel": { "enum": ["debug", "info", "warn", "error"] },
         "workerNamespaces": { "type": "array", "items": { "$ref": "#/definitions/k8sName" }, "uniqueItems": true },
         "observeNodes": { "type": "boolean" },
