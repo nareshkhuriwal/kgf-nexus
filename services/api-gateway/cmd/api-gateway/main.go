@@ -147,7 +147,10 @@ func run() error {
 		WithFleetHealth(upstream.Fleet{WFM: wfmClient, RM: rmClient, Sched: schedClient}).
 		// Memo invalidation rides the scheduler client's dag-engine connection,
 		// the gateway's one existing route to the owner of memo_invalidations.
-		WithCacheInvalidator(schedClient)
+		WithCacheInvalidator(schedClient).
+		// Rejections and bucket counts per limiter kind (docs/OPERATIONS.md §17);
+		// limiters enabled below are instrumented as they are built.
+		WithRateLimitMetrics(rest.NewRateLimitMetrics(reg))
 
 	// Rate limiting is opt-in because a limit guessed wrong is itself an outage:
 	// the right number depends on fleet size and the console's poll interval. Off

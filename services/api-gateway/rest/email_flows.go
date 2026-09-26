@@ -184,8 +184,8 @@ func (a *API) WithEmailFlows(cfg EmailFlowConfig) *API {
 		cfg:   cfg,
 		db:    a.db,
 		log:   a.log,
-		ipLim: newRateLimiter(cfg.PerIP, a.clock),
-		adLim: newRateLimiter(cfg.PerEmail, a.clock),
+		ipLim: newKindLimiter(limiterEmailAddress, cfg.PerIP, a.clock),
+		adLim: newKindLimiter(limiterEmailRecipient, cfg.PerEmail, a.clock),
 		jobs:  make(chan func(context.Context), cfg.QueueSize),
 		stop:  make(chan struct{}),
 	}
@@ -198,6 +198,8 @@ func (a *API) WithEmailFlows(cfg EmailFlowConfig) *API {
 	}
 	ef.workers.Add(1)
 	go ef.sweep()
+	ef.ipLim.instrument(a.limitMetrics)
+	ef.adLim.instrument(a.limitMetrics)
 	a.email = ef
 	return a
 }
@@ -291,6 +293,7 @@ func (ef *emailFlows) allowIP(w http.ResponseWriter, r *http.Request) bool {
 	if v.ok {
 		return true
 	}
+	ef.ipLim.reject()
 	writeRateLimited(w, v, "Too many requests from this address. Try again in a few minutes.")
 	return false
 }
@@ -400,6 +403,7 @@ func (a *API) requestEmailLink(w http.ResponseWriter, r *http.Request, purpose s
 		return
 	}
 	if ok, _ := ef.adLim.allow(addressKey(purpose, email)); !ok {
+		ef.adLim.reject()
 		// Dropped silently, with the identical response: a distinct "slow down"
 		// here would be answered for real accounts and fake ones alike, but a
 		// silent drop also denies a flooder any feedback at all.

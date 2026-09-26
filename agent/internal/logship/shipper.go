@@ -175,13 +175,37 @@ type Stats struct {
 	TruncatedLines int64
 	TruncatedBytes int64
 	DroppedLines   int64
-	Redactions     int64
-	Compacted      bool
-	Finalized      bool
+	// DroppedBytes is the text of DroppedLines (plus a newline each).
+	DroppedBytes int64
+	// FencedBytes is raw output written after the shipper was fenced, and so
+	// refused without being read.
+	FencedBytes int64
+	Redactions  int64
+	Compacted   bool
+	Finalized   bool
 	// Fenced means the control plane rejected the attempt's lease (or never
 	// supported log shipping); nothing further was indexed.
 	Fenced bool
+	// Outcome is how Close ended; empty on a repeated Close, which did nothing.
+	Outcome FinalizeOutcome
 }
+
+// FinalizeOutcome is how one attempt's log finalization ended. A closed set:
+// it is the outcome label of nexus_agent_log_finalize_total.
+type FinalizeOutcome string
+
+const (
+	// FinalizeFinalized: the final report was accepted; the log is complete.
+	FinalizeFinalized FinalizeOutcome = "finalized"
+	// FinalizeFenced: the lease was rejected (or the control plane does not
+	// implement ReportLogs), so shipping stopped; the log is partial.
+	FinalizeFenced FinalizeOutcome = "fenced"
+	// FinalizeTimeout: the finalize budget ran out; the log is partial.
+	FinalizeTimeout FinalizeOutcome = "timeout"
+	// FinalizePartial: some chunks never reached the store and compaction could
+	// not cover them, so no final report was sent; the log has a gap.
+	FinalizePartial FinalizeOutcome = "partial"
+)
 
 type chunk struct {
 	meta *nexusv1.LogChunk
@@ -223,7 +247,9 @@ type Shipper struct {
 
 	pendingBytes       int64
 	droppedLines       int64
+	droppedBytes       int64
 	droppedSinceMarker int64
+	fencedBytes        int64
 	redactions         int64
 
 	queue       []*chunk
@@ -297,7 +323,11 @@ func (w *streamWriter) Write(p []byte) (int, error) {
 func (s *Shipper) write(stream string, p []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.fenced {
+	if s.closed {
+		return
+	}
+	if s.fenced {
+		s.fencedBytes += int64(len(p))
 		return
 	}
 	buf := append(s.partial[stream], p...)
@@ -343,6 +373,7 @@ func (s *Shipper) addLineLocked(stream string, line []byte, partial bool) {
 	// assigned, so a dropped line leaves no hole in the numbering.
 	if s.pendingBytes+int64(s.cur.Len())+int64(len(text))+64 > s.cfg.MaxPendingBytes {
 		s.droppedLines++
+		s.droppedBytes += int64(len(text)) + 1
 		s.droppedSinceMarker++
 		return
 	}
@@ -643,7 +674,7 @@ func (s *Shipper) Close(ctx context.Context) Stats {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return s.stats(false, false)
+		return s.stats(false, false, "")
 	}
 	// Anything left without a trailing newline is still output.
 	for _, stream := range []string{logformat.StreamStdout, logformat.StreamStderr, logformat.StreamCombined} {
@@ -705,12 +736,13 @@ func (s *Shipper) Close(ctx context.Context) Stats {
 	sealed := s.sealedAll
 	total := s.offset
 	s.mu.Unlock()
-	if fenced || s.upCtx.Err() != nil {
-		if s.upCtx.Err() != nil && !fenced {
-			s.cfg.Log.Warn("log finalization ran out of time; the log stays partial",
-				"attempt_id", s.cfg.AttemptID, "budget", s.cfg.FinalizeTimeout)
-		}
-		return s.stats(false, false)
+	if fenced {
+		return s.stats(false, false, FinalizeFenced)
+	}
+	if s.upCtx.Err() != nil {
+		s.cfg.Log.Warn("log finalization ran out of time; the log stays partial",
+			"attempt_id", s.cfg.AttemptID, "budget", s.cfg.FinalizeTimeout)
+		return s.stats(false, false, FinalizeTimeout)
 	}
 
 	final := &nexusv1.LogFinal{
@@ -744,14 +776,26 @@ func (s *Shipper) Close(ctx context.Context) Stats {
 		if len(s.unindexed) > 0 {
 			s.reportWithRetry(nil)
 		}
-		return s.stats(false, false)
+		return s.stats(false, false, FinalizePartial)
 	}
 	ok := s.reportWithRetry(final)
-	if !ok && s.upCtx.Err() != nil {
-		s.cfg.Log.Warn("log finalization ran out of time; the log stays partial",
-			"attempt_id", s.cfg.AttemptID, "budget", s.cfg.FinalizeTimeout)
+	outcome := FinalizeFinalized
+	if !ok {
+		s.mu.Lock()
+		fenced = s.fenced
+		s.mu.Unlock()
+		switch {
+		case fenced:
+			outcome = FinalizeFenced
+		case s.upCtx.Err() != nil:
+			outcome = FinalizeTimeout
+			s.cfg.Log.Warn("log finalization ran out of time; the log stays partial",
+				"attempt_id", s.cfg.AttemptID, "budget", s.cfg.FinalizeTimeout)
+		default:
+			outcome = FinalizePartial
+		}
 	}
-	return s.stats(compacted, ok)
+	return s.stats(compacted, ok, outcome)
 }
 
 func (s *Shipper) uploadCompacted(size int64) (string, error) {
@@ -786,7 +830,7 @@ func (s *Shipper) removeSpool() {
 	s.spool = nil
 }
 
-func (s *Shipper) stats(compacted, finalized bool) Stats {
+func (s *Shipper) stats(compacted, finalized bool, outcome FinalizeOutcome) Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return Stats{
@@ -796,10 +840,13 @@ func (s *Shipper) stats(compacted, finalized bool) Stats {
 		TruncatedLines: s.truncatedLines,
 		TruncatedBytes: s.truncatedBytes,
 		DroppedLines:   s.droppedLines,
+		DroppedBytes:   s.droppedBytes,
+		FencedBytes:    s.fencedBytes,
 		Redactions:     s.redactions,
 		Compacted:      compacted,
 		Finalized:      finalized,
 		Fenced:         s.fenced,
+		Outcome:        outcome,
 	}
 }
 

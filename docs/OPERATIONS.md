@@ -2140,6 +2140,10 @@ To check any target by hand, run `curl -s localhost:19100/metrics | grep nexus_b
   summed into `queue="_other"`.
 - The cluster-controller's `pool` label is the binding name an operator
   configured.
+- The gateway rate-limit families are labelled by bucket **kind** (`address`,
+  `auth_failure`, `auth_failure_repeat`, `credential`, `email_address`,
+  `email_recipient`), never by the client address, credential or recipient
+  the bucket is keyed on.
 
 If a caller passes labels that do not match a family's declared labels, the
 package normalizes them and logs `metrics: label set does not match` once per
@@ -2168,6 +2172,9 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_http_request_duration_seconds` | H | method, route, code | api-gateway, event-service | REST latency, 1 ms–60 s. SSE tails are observed when they end |
 | `nexus_http_response_size_bytes` | H | method, route | api-gateway, event-service | Response size |
 | `nexus_http_requests_in_flight` | G | — | api-gateway, event-service | Concurrent requests, open SSE tails included |
+| `nexus_gateway_ratelimit_rejections_total` | C | bucket (address/auth_failure/credential/email_address/email_recipient) | api-gateway | Requests refused by a limiter (§16): a 429, or the silent drop of `email_recipient`. A rise in `auth_failure` is credential stuffing; a rise in `address` or `credential` from legitimate clients means the limit is too tight |
+| `nexus_gateway_ratelimit_buckets` | G | bucket (the above plus auth_failure_repeat) | api-gateway | Live keys each limiter tracks, per replica. Only enabled limiters report. At the per-limiter cap of 100000 the least recently used key is evicted; see `_evictions_total` |
+| `nexus_gateway_ratelimit_evictions_total` | C | bucket | api-gateway | Buckets dropped at the entry cap rather than by idling. Non-zero: the cap is too small for the traffic, or the gateway is being sprayed from many addresses |
 | `grpc_server_started_total` | C | grpc_type, grpc_service, grpc_method | api-gateway (worker API), workflow-manager, dag-engine, scheduler, resource-manager | RPCs started |
 | `grpc_server_handled_total` | C | grpc_type, grpc_service, grpc_method, grpc_code | same | RPCs finished, by status. `Unauthenticated` on the gateway: bad worker keys |
 | `grpc_server_handling_seconds` | H | grpc_type, grpc_service, grpc_method | same | RPC latency, 1 ms–120 s. `PollTask` is a long poll by design |
@@ -2189,6 +2196,8 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_dag_map_expansions_total` | C | — | dag-engine | Map templates expanded |
 | `nexus_dag_fanin_refused_total` | C | — | dag-engine | Fan-ins refused for exceeding `NEXUS_DAG_MAX_FANIN_BYTES` |
 | `nexus_dag_run_state_published_total` | C | state, result | dag-engine | Run state publishes. `result="error"` on a terminal state: a run may be stranded |
+| `nexus_dag_operator_retries_total` | C | result (reset/invalid/not_retryable/not_found/conflict/error) | dag-engine | Operator retries (§18) applied to a run's graph. `invalid` and `not_retryable` are the caller's problem; `conflict` means a concurrent writer won and a retry of the request may succeed; `error` > 0 needs a look |
+| `nexus_dag_operator_retry_nodes_reset_total` | C | — | dag-engine | Nodes reset by operator retries, selected nodes and their dependents alike |
 | `nexus_rm_reservations_total` | C | result (granted/refused/not_found/error) | resource-manager | Reserve calls |
 | `nexus_rm_reserve_duration_seconds` | H | result | resource-manager | Reserve latency |
 | `nexus_rm_releases_total` | C | result (released/absent/error) | resource-manager | Releases. `absent` is expected duplicate traffic |
@@ -2220,8 +2229,14 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_agent_result_report_failures_total` | C | — | agent | Reports not delivered. The WAL retains them |
 | `nexus_agent_registration_attempts_total` | C | result (ok/retryable_error/permanent_error) | agent | Register calls. An agent that starts before the gateway retries `Unavailable`, `DeadlineExceeded`, `ResourceExhausted`, `Aborted` and `Internal` with capped exponential backoff (0.5 s to 30 s, full jitter) and stays not-ready meanwhile; a rising `retryable_error` with no `ok` means the gateway is unreachable or its auth backend is down. `permanent_error` (bad API key, wrong role, invalid request) exits the process with a message naming the fix |
 | `nexus_agent_registered` | G | — | agent | 1 while the agent holds a registered session; the `/readyz` condition |
+| `nexus_agent_log_dropped_lines_total`, `_dropped_bytes_total` | C | — | agent | Task log lines (and their bytes) dropped because shipping fell behind and the buffer was full (§19). Non-zero: the object store or the gateway is slow or unreachable from this agent |
+| `nexus_agent_log_truncated_lines_total`, `_truncated_bytes_total` | C | — | agent | Task log lines omitted by the per-attempt cap (head and tail are kept). Steady growth: a task logs more than the cap; raise it or quiet the task |
+| `nexus_agent_log_fenced_bytes_total` | C | — | agent | Task output refused after an attempt's log shipping was fenced (lease rejected, or a gateway without `ReportLogs`) |
+| `nexus_agent_log_finalize_total` | C | outcome (finalized/fenced/timeout/partial) | agent | Attempt logs finalized. Every outcome but `finalized` leaves a partial log. `timeout` or `partial` rising: object store trouble; `fenced` rising: lease loss (see `nexus_scheduler_attempts_lost_total`) |
 | `nexus_artifact_gc_last_run_objects` | G | disposition | artifact-gc | Last sweep: scanned, live_refs, reachable, too_young, orphan, deleted, delete_error |
 | `nexus_artifact_gc_last_run_orphan_bytes` | G | — | artifact-gc | Reclaimable bytes found |
+| `nexus_artifact_gc_last_run_log_objects` | G | disposition (scanned/orphan/deleted/delete_error) | artifact-gc | The task-log share of the last sweep (§19): log objects examined, collectable, collected and not removable. A subset of `_last_run_objects` |
+| `nexus_artifact_gc_last_run_log_bytes` | G | disposition (orphan/deleted) | artifact-gc | Task-log bytes collectable and actually reclaimed by the last sweep (`deleted` is 0 in a dry run) |
 | `nexus_artifact_gc_last_run_duration_seconds` | G | — | artifact-gc | Pass duration |
 | `nexus_artifact_gc_last_success_timestamp_seconds`, `_last_failure_timestamp_seconds` | G | — | artifact-gc | Batch-job liveness, via the Pushgateway |
 | `nexus_artifact_gc_dry_run` | G | — | artifact-gc | 1 when nothing was deleted |

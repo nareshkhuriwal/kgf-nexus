@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics/metricstest"
@@ -89,8 +90,50 @@ func TestAgentMetricsOnOpsListener(t *testing.T) {
 	}
 }
 
+// TestLogShippingMetrics: each attempt's log shipping adds its dropped,
+// truncated and fenced counts and one finalize outcome; a repeated Close (no
+// outcome) adds nothing.
+func TestLogShippingMetrics(t *testing.T) {
+	reg := metrics.NewRegistry()
+	m := New(reg)
+
+	m.LogShipped(logship.Stats{DroppedLines: 3, DroppedBytes: 300, TruncatedLines: 10, TruncatedBytes: 1000,
+		Outcome: logship.FinalizeFinalized})
+	m.LogShipped(logship.Stats{DroppedLines: 1, DroppedBytes: 50, FencedBytes: 4096, Fenced: true,
+		Outcome: logship.FinalizeFenced})
+	m.LogShipped(logship.Stats{Outcome: logship.FinalizeTimeout})
+	m.LogShipped(logship.Stats{DroppedLines: 99, FencedBytes: 99}) // a repeated Close: ignored
+
+	fams := metricstest.Scrape(t, metrics.OpsMux(reg), "/metrics")
+	metricstest.RequireFamilies(t, fams,
+		"nexus_agent_log_dropped_lines_total", "nexus_agent_log_dropped_bytes_total",
+		"nexus_agent_log_truncated_lines_total", "nexus_agent_log_truncated_bytes_total",
+		"nexus_agent_log_fenced_bytes_total", "nexus_agent_log_finalize_total")
+	for name, want := range map[string]float64{
+		"nexus_agent_log_dropped_lines_total":   4,
+		"nexus_agent_log_dropped_bytes_total":   350,
+		"nexus_agent_log_truncated_lines_total": 10,
+		"nexus_agent_log_truncated_bytes_total": 1000,
+		"nexus_agent_log_fenced_bytes_total":    4096,
+	} {
+		if s := metricstest.Find(fams, name, nil); s == nil || s.GetCounter().GetValue() != want {
+			t.Errorf("%s = %v, want %v", name, s, want)
+		}
+	}
+	for outcome, want := range map[string]float64{"finalized": 1, "fenced": 1, "timeout": 1} {
+		if s := metricstest.Find(fams, "nexus_agent_log_finalize_total",
+			map[string]string{"outcome": outcome}); s == nil || s.GetCounter().GetValue() != want {
+			t.Errorf("log_finalize{%s} = %v, want %v", outcome, s, want)
+		}
+	}
+	if n := len(fams["nexus_agent_log_finalize_total"].GetMetric()); n != 3 {
+		t.Errorf("log_finalize has %d series, want 3 (an empty outcome must not create one)", n)
+	}
+}
+
 func TestNilAgentMetricsIsSafe(t *testing.T) {
 	var m *Metrics
+	m.LogShipped(logship.Stats{Outcome: logship.FinalizeFinalized})
 	m.TaskStarted("x")
 	m.TaskFinished("x")
 	m.TaskReported("x", nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED, nexusv1.ErrorClass_ERROR_CLASS_OOM, time.Now(), nil)
