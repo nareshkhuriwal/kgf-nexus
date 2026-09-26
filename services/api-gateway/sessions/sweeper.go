@@ -79,7 +79,6 @@ func (sw *Sweeper) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			sw.sweepOnce(ctx)
-			sw.sweepSSO(ctx)
 		}
 	}
 }
@@ -107,17 +106,4 @@ func (sw *Sweeper) sweepOnce(ctx context.Context) int64 {
 		sw.log.Info("swept expired sessions", "deleted", deleted, "limit", sw.BatchLimit)
 	}
 	return deleted
-}
-
-// sweepSSO bounds the SSO tables (ADR-0024).
-func (sw *Sweeper) sweepSSO(ctx context.Context) {
-	// SSO login states, handoffs and SAML replay records (ADR-0024). They are
-	// already unusable once expired (every consume checks expires_at); this only
-	// bounds the tables. Replay records are kept until the assertion itself
-	// could no longer be valid, so sweeping never reopens a replay window.
-	if n, err := store.GatewayDeleteExpiredSSO(ctx, sw.db, sw.BatchLimit); err != nil {
-		sw.log.Error("could not sweep expired sso records", "error", err)
-	} else if n > 0 {
-		sw.log.Info("swept expired sso records", "deleted", n)
-	}
 }

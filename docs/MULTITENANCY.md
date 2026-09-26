@@ -58,9 +58,3 @@ The migration preserves historical cross-tenant worker-link evidence in `audit_l
 **Audit actions:** `user.email_verification_sent`, `user.email_verified`, `user.password_reset_requested` (outcome `error` when delivery failed), `user.password_reset`, and `session.login` denied with reason `email not verified`. Audit rows record token ids, never tokens.
 
 **Known limits.** A registration made with someone else's address still reserves that address's single self-service registration until an operator removes it. Nothing expires unverified registrations. The per-IP and per-address limits are in memory per replica; only the hourly issuance cap is shared. Per-IP limiting trusts `X-Real-IP` only from a private or loopback peer (the console's nginx). A client that can reach the gateway directly from a private network can forge that header, which leaves the per-address and database caps as the bound.
-
-## Single sign-on and cross-namespace owners (migration 0032)
-
-Each tenant configures its own OIDC or SAML identity providers (ADR-0024, OPERATIONS §24). A provider belongs to exactly one tenant: every account it provisions or resolves lives in that tenant's namespace, whatever the IdP asserts, and a trigger rejects any identity whose user, provider and namespace disagree. One IdP application (OIDC issuer and client ID, or SAML entity ID) can be registered by only one tenant, and client-secret references resolve only inside the tenant's own secret directory. The login page takes the tenant from a tenant-specific link (`/login?tenant=<namespace>`); there is deliberately no discovery by email domain.
-
-The first multi-namespace capability is the explicit owner grant: an administrator of namespace B may make a named user of another namespace an Owner of B. That user acts in B with administrator authority, attributed to them in B's audit trail, until B revokes the grant. There is no wildcard or platform-wide owner.

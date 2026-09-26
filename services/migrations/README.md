@@ -18,16 +18,6 @@ local equivalent. Services never migrate at startup (ADR-0011 rule 4).
 - **Additive only** (ADR-0011 rule 5). `internal/migrations` checks every
   `*.up.sql` for rolling-deploy hazards and fails `go test` on new ones.
 
-## Reserved: 0028–0031 while wave 3 merges
-
-Wave-3 branches were each handed migration numbers in advance: 0028–0031 to
-parallel branches and 0032 (`0032_sso_and_rbac`) to the SSO branch. On any
-single branch the numbers another branch owns are absent, so
-`internal/migrations/safety_test.go` lists them in `reservedVersions`, which
-tolerates them being present or absent. The integration branch removes that
-map once all of them have landed; after that a missing number fails again.
-Do not use a reserved number for anything else.
-
 ## Known gap: there is no 0019
 
 The sequence goes `0018_cluster_registry` → `0020_dynamic_expansion`. No

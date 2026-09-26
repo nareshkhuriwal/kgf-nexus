@@ -72,16 +72,6 @@ type Principal struct {
 	// narrowing" -- the role's full grant -- which is why an API key, whose Scopes
 	// is always nil, is authorized by exactly the pre-existing rule.
 	Scopes []Action
-
-	// ServiceAccountID is set for a service-account token (ADR-0024 §8).
-	ServiceAccountID string
-	// HomeNamespace is set when a session acts in Namespace through a
-	// cross-namespace owner grant: it is the account's own namespace, while
-	// Namespace is the one the request acts in (ADR-0024 §9).
-	HomeNamespace string
-	// SSOProviderID is the identity provider that minted a session, empty for
-	// a password session.
-	SSOProviderID string
 }
 
 // HasScope reports whether the credential's scopes permit an action.
