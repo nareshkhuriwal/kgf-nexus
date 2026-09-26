@@ -34,6 +34,30 @@ info:
     * `nxtok_...` - a **scoped token** from `POST /v1/namespaces/{ns}/tokens`.
     * anything else - a namespace **API key** (for example `nxs_...` from `make seed`).
 
+    A scoped token may belong to a **service account** and may carry an explicit
+    permission ceiling; its effective permissions are then the account's (or
+    its creator's) current grants intersected with that ceiling.
+
+    **KGF Cloud context (ADR-0024).** With `NEXUS_AUTH_MODE` `kgf` or `both`,
+    a request may instead carry a signed KGF context in `X-KGF-Context`
+    (scheme `kgfContext`): the KGF organization, subscription and resource
+    group map to one namespace, and the KGF role to Nexus permissions. Such a
+    request must not ALSO carry `Authorization` (400 `ambiguous_credentials`);
+    a context without a subscription and resource group is refused (403
+    `kgf_scope_required`), as is a KGF service acting for itself that is not
+    allowed to (403 `kgf_service_not_allowed`). In `kgf` mode Nexus sessions and
+    the password, registration and email routes are not served. In
+    `standalone` mode a request carrying `X-KGF-Context` is refused (400
+    `kgf_context_not_accepted`) unless the gateway is configured to verify
+    contexts for audit ATTRIBUTION only, in which case the bearer credential
+    alone authorizes. These errors can come from every authenticated
+    operation and are not repeated on each.
+
+    **Correlation.** A request may send `X-Request-ID` (1-64 of `A-Z a-z 0-9 . _ : -`);
+    it is recorded as the `request_id` of every audit row the request writes.
+    A request authenticated by a KGF context uses the context's request id
+    instead and gets it back in the `X-Request-ID` response header.
+
     Every credential is bound to ONE namespace; a `{ns}` path segment naming any
     other namespace answers 403. Authorization is two-layered: the coarse action
     of the route (`x-nexus-action`: `read`, `write` or `admin_write`) against the
@@ -58,9 +82,12 @@ info:
 
     ## Pagination
 
-    Most listings take `limit` and return the newest rows first. The run listing
-    is keyset-paginated: pass the response's `next_before` back as `before`.
-    Usage rollups page with an opaque `cursor`/`next_cursor`.
+    Most listings take `limit` and return the newest rows first. The run and
+    notification-delivery listings are keyset-paginated: pass the response's
+    `next_before` back as `before`. The user and audit listings, and usage
+    rollups, page with an opaque `cursor`/`next_cursor` (`next_cursor` is null,
+    or empty for usage, on the last page); a cursor the server did not issue is
+    400 `invalid_cursor`.
 
     ## Streaming
 
@@ -77,7 +104,17 @@ info:
     not wired they answer 404 because they are not registered at all. Routes
     whose upstream is optional (schedules, backfills, fleet health, logs, cache
     invalidation, quarantine, retry) are always registered and answer 501 when
-    the upstream is not configured.
+    the upstream is not configured; so are notifications, webhook triggers,
+    sensors and assets (501 `not_configured`).
+
+    The audit and service-account routes are registered from the identity
+    wiring too (their descriptions say so) but through their own helper, which
+    the route-coverage test does not attribute to identity, so they carry no
+    `x-nexus-conditional`.
+
+    `POST /v1/hooks/{ns}/{trigger}` is the second unauthenticated route
+    family after sign-in: a webhook sender holds no credential and proves
+    itself with an HMAC signature instead.
 
     ## Coverage
 
@@ -114,6 +151,7 @@ security:
   - apiKey: []
   - scopedToken: []
   - sessionToken: []
+  - kgfContext: []
 tags:
   - name: Specs
     description: Workflow definitions - submit, catalog, versions, delete.
@@ -144,7 +182,17 @@ tags:
   - name: Tokens
     description: Scoped machine tokens.
   - name: Audit
-    description: The namespace audit trail.
+    description: The tamper-evident namespace audit trail, its export, retention, legal hold and SIEM sinks (ADR-0025).
+  - name: Service accounts
+    description: Non-human identities for agents and CI, with role bindings and ceilinged tokens (ADR-0024).
+  - name: Notifications
+    description: Channels, routing rules and the delivery outbox for run notifications (ADR-0028).
+  - name: Triggers
+    description: Signed inbound webhooks that start runs (ADR-0028).
+  - name: Sensors
+    description: Pollers that start runs when objects land or upstream workflows succeed (ADR-0028).
+  - name: Assets
+    description: Declared data-asset lineage across workflows (ADR-0028).
   - name: Meta
     description: Machine-readable descriptions of the API and the spec grammar.
   - name: Health
@@ -672,6 +720,8 @@ paths:
                     progress_fraction: 0.44
                     progress_at: '2026-09-24T09:13:59Z'
                     progress_message_at: '2026-09-24T09:13:59Z'
+                    usage_units: {}
+                    usage_reported_at: null
                 expansions: []
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
@@ -1482,6 +1532,10 @@ paths:
       tags: [Backfills]
       operationId: pauseBackfill
       summary: Pause a backfill (the cursor is kept)
+      description: |
+        Only a RUNNING backfill can be paused. The transition is a compare-and-set on the stored state, so
+        concurrent actions serialize and the loser gets 409 with the state the
+        winner left. An unknown or malformed id is 404 `backfill_not_found`.
       x-nexus-action: write
       x-nexus-permissions: [backfills.update]
       responses:
@@ -1490,6 +1544,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/BackfillNotFound'}
+        '409': {$ref: '#/components/responses/BackfillStateConflict'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
         '501': {$ref: '#/components/responses/SchedulesUnavailable'}
@@ -1503,6 +1558,10 @@ paths:
       tags: [Backfills]
       operationId: resumeBackfill
       summary: Resume a paused backfill
+      description: |
+        Only a PAUSED backfill can be resumed. The transition is a compare-and-set on the stored state, so
+        concurrent actions serialize and the loser gets 409 with the state the
+        winner left. An unknown or malformed id is 404 `backfill_not_found`.
       x-nexus-action: write
       x-nexus-permissions: [backfills.update]
       responses:
@@ -1511,6 +1570,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/BackfillNotFound'}
+        '409': {$ref: '#/components/responses/BackfillStateConflict'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
         '501': {$ref: '#/components/responses/SchedulesUnavailable'}
@@ -1524,6 +1584,10 @@ paths:
       tags: [Backfills]
       operationId: cancelBackfill
       summary: Cancel a backfill (runs already created keep running)
+      description: |
+        Only a RUNNING or PAUSED backfill can be cancelled; CANCELLED is final. The transition is a compare-and-set on the stored state, so
+        concurrent actions serialize and the loser gets 409 with the state the
+        winner left. An unknown or malformed id is 404 `backfill_not_found`.
       x-nexus-action: write
       x-nexus-permissions: [backfills.update]
       responses:
@@ -1532,6 +1596,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/BackfillNotFound'}
+        '409': {$ref: '#/components/responses/BackfillStateConflict'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
         '501': {$ref: '#/components/responses/SchedulesUnavailable'}
@@ -2152,6 +2217,32 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/QuotasView'}
+              example:
+                namespace: default
+                revision: 5
+                quotas:
+                  locked: false
+                  max_inflight_attempts: 200
+                  max_cpu_millis: 400000
+                  max_memory_bytes: 858993459200
+                  max_gpu_count: 8
+                  max_custom: {}
+                  max_active_runs: 50
+                  max_runs_per_hour: 500
+                  storage_soft_limit_bytes: 1099511627776
+                  rate_limits:
+                    openai/gpt-4o: {requests_per_second: 10, tokens_per_minute: 450000}
+                dimensions:
+                  - {name: inflight_attempts, kind: concurrent, unit: attempts, used: 37, limit: 200, enforced: true}
+                  - {name: cpu_millis, kind: concurrent, unit: millicores, used: 74000, limit: 400000, enforced: true}
+                  - {name: memory_bytes, kind: concurrent, unit: bytes, used: 158913789952, limit: 858993459200, enforced: true}
+                  - {name: gpu_count, kind: concurrent, unit: gpus, used: 2, limit: 8, enforced: true}
+                  - {name: active_runs, kind: run, unit: runs, used: 12, limit: 50, enforced: true}
+                  - {name: runs_per_hour, kind: run, unit: runs/hour, used: 140, limit: 500, enforced: true}
+                  - {name: storage_bytes, kind: storage, unit: bytes, used: 52613349376, limit: 1099511627776, enforced: false}
+                storage:
+                  source: task_logs
+                  note: Measured from durable task-log bytes. Result-store artifacts are not metered yet, so this undercounts total storage.
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -2165,7 +2256,9 @@ paths:
         Optimistic concurrency on `revision`; 0 means unlimited for every limit.
         While a platform operator has `locked` the quotas, a namespace
         administrator may only tighten them (403 `quotas_locked` names what was
-        loosened). Unknown fields are rejected.
+        loosened). Unknown fields are rejected. A body whose `quotas` omits
+        `rate_limits` keeps the stored rate limits (so an editor that predates
+        them cannot erase them); send `rate_limits: {}` to remove them all.
       x-nexus-action: admin_write
       x-nexus-permissions: [quotas.manage]
       requestBody:
@@ -2175,7 +2268,18 @@ paths:
             schema: {$ref: '#/components/schemas/QuotasPutRequest'}
             example:
               revision: 4
-              quotas: {locked: false, max_inflight_attempts: 200, max_cpu_millis: 400000, max_memory_bytes: 858993459200, max_gpu_count: 8, max_active_runs: 50, max_runs_per_hour: 500, storage_soft_limit_bytes: 1099511627776}
+              quotas:
+                locked: false
+                max_inflight_attempts: 200
+                max_cpu_millis: 400000
+                max_memory_bytes: 858993459200
+                max_gpu_count: 8
+                max_active_runs: 50
+                max_runs_per_hour: 500
+                storage_soft_limit_bytes: 1099511627776
+                rate_limits:
+                  openai: {requests_per_second: 50, tokens_per_minute: 2000000}
+                  openai/gpt-4o: {requests_per_second: 10, tokens_per_minute: 450000, burst_tokens: 900000}
       responses:
         '200':
           description: Saved.
@@ -2503,7 +2607,7 @@ paths:
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
         '503':
-          description: '`unavailable`: the identity backend failed.'
+          description: '`unavailable` (the identity backend failed) or `audit_unavailable` (the session is issued only together with its audit row).'
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -2735,27 +2839,67 @@ paths:
       tags: [Auth]
       operationId: whoami
       summary: Describe the calling principal
-      description: The same shape for every credential kind; `effective_permissions` is what the UI should render from.
+      description: |
+        The same shape for every credential kind; `effective_permissions` is
+        what the UI should render from. A service-account token adds
+        `service_account_id`; a principal authenticated by a KGF context adds
+        `kgf` (who KGF says it is, and the readable scope its `kgf-<hash>`
+        namespace was mapped from) and gets `X-Request-ID` back.
       x-nexus-conditional: identity
       x-nexus-action: read
       x-nexus-permissions: []
       responses:
         '200':
           description: The principal.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestId'}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Whoami'}
-              example:
-                namespace: default
-                name: ops@example.com
-                role: reader
-                kind: session
-                permissions: {read: true, write: true, admin_write: false}
-                effective_permissions: [overview.view, runs.cancel, runs.create, runs.view, workflows.view]
-                roles: [Workflow Operator]
-                user_id: 1d2c3b4a-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+              examples:
+                session:
+                  summary: A console session
+                  value:
+                    namespace: default
+                    name: ops@example.com
+                    role: reader
+                    kind: session
+                    permissions: {read: true, write: true, admin_write: false}
+                    effective_permissions: [overview.view, runs.cancel, runs.create, runs.view, workflows.view]
+                    roles: [Workflow Operator]
+                    user_id: 1d2c3b4a-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                kgf:
+                  summary: A KGF Cloud context
+                  value:
+                    namespace: kgf-3f1c9a7e2b4d6f8a0c1e3b5d7f9a1c3e
+                    name: alice@contoso.example
+                    role: reader
+                    kind: kgf
+                    permissions: {read: true, write: true, admin_write: false}
+                    effective_permissions: [runs.create, runs.view, workflows.publish, workflows.view]
+                    roles: [KGF operator]
+                    kgf:
+                      organization: contoso
+                      subscription: analytics-prod
+                      resource_group: pipelines
+                      principal: alice@contoso.example
+                      role: operator
+                      request_id: req-7f3a9c2e
+                      issuer: kgf-gateway
+                      token_id: 01J8Z4QK3M6T9W2X5Y7B0C4D8E
+        '400':
+          description: '`ambiguous_credentials` or `kgf_context_not_accepted` (see Authentication).'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: ambiguous_credentials, message: 'send either an X-KGF-Context or an Authorization credential, not both'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
-        '403': {$ref: '#/components/responses/Forbidden'}
+        '403':
+          description: '`forbidden`, `kgf_scope_required` or `kgf_service_not_allowed`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: kgf_scope_required, message: 'the KGF context names no subscription and resource group; Nexus work lives in a resource group'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '503': {$ref: '#/components/responses/AuthUnavailable'}
 
@@ -2864,24 +3008,59 @@ paths:
     get:
       tags: [Users]
       operationId: listUsers
-      summary: List users
+      summary: List users (keyset-paginated, searchable)
+      description: |
+        Newest accounts first. Pass `next_cursor` back as `cursor` for the next
+        page; it is null on the last page. `q` matches a case-insensitive
+        substring of the email or display name on the server (at most 200
+        characters are used), so a search spans every page.
       x-nexus-conditional: identity
       x-nexus-action: admin_write
       x-nexus-permissions: [users.view]
       parameters:
-        - $ref: '#/components/parameters/limit100'
+        - name: limit
+          in: query
+          description: Rows per page; 0 or absent means 100, larger values are capped at 200.
+          schema: {type: integer, minimum: 0, maximum: 200, default: 100}
+        - $ref: '#/components/parameters/cursor'
+        - name: q
+          in: query
+          description: Search the email and display name.
+          schema: {type: string}
+          example: analyst
       responses:
         '200':
-          description: The users.
+          description: One page of users.
           content:
             application/json:
               schema:
                 type: object
-                required: [users]
+                required: [users, next_cursor]
                 properties:
                   users:
                     type: array
                     items: {$ref: '#/components/schemas/User'}
+                  next_cursor:
+                    type: [string, 'null']
+                    description: Pass as `cursor` for the next page; null on the last page.
+              example:
+                users:
+                  - id: 1d2c3b4a-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                    namespace: default
+                    email: analyst@example.com
+                    display_name: Data Analyst
+                    role: reader
+                    created_at: '2026-09-20T08:00:00Z'
+                    disabled_at: null
+                    disabled: false
+                    email_verified: true
+                next_cursor: MjAyNi0wOS0yMFQwODowMDowMFp8MWQyYzNiNGEtNWU2Zi00YTdiLThjOWQtMGUxZjJhM2I0YzVk
+        '400':
+          description: '`invalid_cursor`: the cursor was not issued by this server; restart from the first page.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: invalid_cursor, message: cursor is not one this server issued; restart from the first page}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -2932,7 +3111,7 @@ paths:
                   - $ref: '#/components/schemas/Error'
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
-        '503': {$ref: '#/components/responses/AuthUnavailable'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
 
   /v1/namespaces/{ns}/users/{id}:
     parameters:
@@ -3015,6 +3194,7 @@ paths:
       tags: [Users]
       operationId: enableUser
       summary: Re-enable a user
+      description: A security grant, audited in the same transaction (503 `audit_unavailable` otherwise). Disabling is a revocation and is never blocked by the audit store.
       x-nexus-conditional: identity
       x-nexus-action: admin_write
       x-nexus-permissions: [users.manage]
@@ -3029,7 +3209,7 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
-        '503': {$ref: '#/components/responses/AuthUnavailable'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
 
   /v1/namespaces/{ns}/users/{id}/password:
     parameters:
@@ -3077,7 +3257,7 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
-        '503': {$ref: '#/components/responses/AuthUnavailable'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
 
   /v1/namespaces/{ns}/users/{id}/sessions:
     parameters:
@@ -3170,8 +3350,25 @@ paths:
       operationId: createToken
       summary: Mint a scoped token (the secret is shown once)
       description: |
+        Three kinds of token (ADR-0024 §6):
+
+        * **Legacy** (`role` and `scopes`, no `permissions`): carries its
+          role's full authority, narrowed by `scopes`. Only a Nexus
+          administrator may mint one (403 `ceiling_required` otherwise).
+        * **Ceilinged** (`permissions`): at every request its authority is the
+          creator's grants intersected with `permissions`. The caller may only
+          name permissions it holds (403 `invalid_grant`); a worker token
+          cannot carry a ceiling.
+        * **Service account** (`service_account_id` and `permissions`): its
+          authority is the account's CURRENT roles intersected with
+          `permissions`, so narrowing or disabling the account takes effect
+          at once. Every permission must be held by the account (422
+          `outside_account`), and the account must be enabled.
+
         `expires_in_days` 0 (or absent) means the 90-day default; a NEGATIVE
-        value means no expiry. Scopes intersect with the role and never extend it.
+        value means no expiry, which only an administrator may ask for. Minted
+        and audited in one transaction: 503 `audit_unavailable` means no token
+        exists.
       x-nexus-conditional: identity
       x-nexus-action: admin_write
       x-nexus-permissions: [tokens.manage]
@@ -3180,7 +3377,16 @@ paths:
         content:
           application/json:
             schema: {$ref: '#/components/schemas/CreateTokenRequest'}
-            example: {name: github-actions-deploy, role: admin, scopes: [read, write], expires_in_days: 30}
+            examples:
+              legacy:
+                summary: A legacy scoped token (administrators only)
+                value: {name: github-actions-deploy, role: admin, scopes: [read, write], expires_in_days: 30}
+              ceiling:
+                summary: A token with a permission ceiling
+                value: {name: dashboards-readonly, permissions: [runs.view, workflows.view], expires_in_days: 90}
+              serviceAccount:
+                summary: A service-account token
+                value: {name: ci-deployer-2026-09, service_account_id: 7c6b5a49-3827-4165-9f4e-3d2c1b0a9f8e, permissions: [workflows.publish, workflows.view], expires_in_days: 30}
       responses:
         '201':
           description: Minted. Store `token` now; it is never shown again.
@@ -3198,6 +3404,8 @@ paths:
                 created_by: 1d2c3b4a-5e6f-4a7b-8c9d-0e1f2a3b4c5d
                 created_at: '2026-09-24T09:50:00Z'
                 revoked_at: null
+                service_account_id: null
+                permissions: null
                 live: true
                 token: nxtok_c2VjcmV0LXRva2VuLXZhbHVlLWV4YW1wbGU
                 token_shown_once: true
@@ -3207,20 +3415,48 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '413': {$ref: '#/components/responses/PayloadTooLarge'}
-        '422':
-          description: '`invalid_token_request` (with `problems`).'
+        '403':
+          description: |
+            `forbidden`; `ceiling_required` (only an administrator may mint a
+            token without `permissions`); `invalid_grant` (a permission the
+            caller does not hold, or one that cannot be delegated); or
+            `expiry_required` (only an administrator may mint a token that
+            never expires).
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/ProblemsError'}
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: ceiling_required, message: Set permissions (a ceiling within your own permissions) or mint the token for a service account}
+        '404':
+          description: '`not_found`: no such service account.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '409':
+          description: '`account_disabled`: enable the service account before minting tokens for it.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422':
+          description: '`invalid_token_request` (with `problems`: no name, no or unknown permissions or scopes, a bad role), or `outside_account` (a permission the service account does not hold).'
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/ProblemsError'
+                  - $ref: '#/components/schemas/Error'
               example:
                 error: invalid_token_request
                 message: token could not be created
                 problems: ['at least one scope is required; a token with no scopes can do nothing']
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
-        '503': {$ref: '#/components/responses/AuthUnavailable'}
+        '501':
+          description: '`not_configured`: this gateway cannot mint ceilinged tokens.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
 
   /v1/namespaces/{ns}/tokens/{id}/revoke:
     parameters:
@@ -3258,38 +3494,2213 @@ paths:
     get:
       tags: [Audit]
       operationId: listAudit
-      summary: Read the audit trail
-      x-nexus-conditional: identity
+      summary: Read the audit trail (keyset-paginated)
+      description: |
+        Newest first. Pass `next_cursor` back as `cursor` for the next page;
+        it is null on the last page. Every row written since the trail became
+        hash-chained (ADR-0025) carries its `chain_seq` and `row_hash`; use
+        `GET .../audit/export` for a verifiable copy. `request_id` finds the
+        rows of one request (a KGF support reference). Registered only when
+        identity is wired.
       x-nexus-action: admin_write
       x-nexus-permissions: [audit.view]
       parameters:
-        - name: action
+        - $ref: '#/components/parameters/auditAction'
+        - $ref: '#/components/parameters/auditActorId'
+        - $ref: '#/components/parameters/auditOutcome'
+        - $ref: '#/components/parameters/auditSince'
+        - $ref: '#/components/parameters/auditUntil'
+        - $ref: '#/components/parameters/auditRequestId'
+        - $ref: '#/components/parameters/cursor'
+        - name: limit
           in: query
-          description: Only entries with this action, e.g. `token.create`.
-          schema: {type: string}
-        - name: actor_id
-          in: query
-          schema: {type: string}
-        - name: outcome
-          in: query
-          schema: {type: string}
-        - $ref: '#/components/parameters/limit100'
+          description: Rows per page; 0, absent or more than 1000 means 100.
+          schema: {type: integer, minimum: 0, maximum: 1000, default: 100}
       responses:
         '200':
-          description: Entries, newest first.
+          description: One page of entries.
           content:
             application/json:
               schema:
                 type: object
-                required: [entries]
+                required: [entries, next_cursor]
                 properties:
                   entries:
                     type: array
                     items: {$ref: '#/components/schemas/AuditEntry'}
+                  next_cursor:
+                    type: [string, 'null']
+                    description: Pass as `cursor` for the next page; null on the last page.
+              example:
+                entries:
+                  - id: 4211
+                    namespace: default
+                    actor_id: 1d2c3b4a-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                    actor_kind: session
+                    actor_label: ops@example.com
+                    action: token.create
+                    target_kind: token
+                    target_id: 4b3a2c1d-0e9f-48a7-b6c5-d4e3f2a1b0c9
+                    outcome: success
+                    detail: {name: github-actions-deploy, role: admin, scopes: [read, write]}
+                    client_ip: 10.0.4.17
+                    occurred_at: '2026-09-24T09:50:00Z'
+                    chain_seq: 1187
+                    row_hash: 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0
+                    request_id: req-7f3a9c2e
+                    kgf: null
+                next_cursor: eyJ0IjoiMjAyNi0wOS0yNFQwOTo1MDowMFoiLCJpIjo0MjExfQ
+        '400':
+          description: '`invalid_filter` (`since`/`until` is not RFC 3339) or `invalid_cursor`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: invalid_cursor, message: cursor was not issued by this server}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+
+  /v1/namespaces/{ns}/audit/export:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Audit]
+      operationId: exportAudit
+      summary: Export the audit trail (NDJSON, CSV or KGF events)
+      description: |
+        Streams every matching row as a download (`Content-Disposition:
+        attachment`, `Cache-Control: no-store`). Takes the same filters as the
+        listing except `cursor` and `limit`: an export is never paged.
+
+        * `format=ndjson` (default) - a VERIFIABLE export: a `header` line
+          (`encoding: nexus-audit-v1`, the chain `anchor`, `complete: true`
+          when unfiltered), one `audit` line per row in chain order carrying
+          `chain_seq`, `prev_hash` and `row_hash`, then a `trailer` line with
+          the row count and the chain `head`. A missing trailer means the
+          stream was cut short, and the offline verifier reports it as
+          truncated.
+        * `format=csv` - the same rows for spreadsheets and SIEM import.
+        * `format=kgf` - KGF Cloud's audit event shape, one per line.
+
+        Registered only when identity is wired, like the listing. An error
+        after the first byte cannot change the status code; the stream simply
+        ends (without its trailer).
+      x-nexus-action: admin_write
+      x-nexus-permissions: [audit.view]
+      parameters:
+        - name: format
+          in: query
+          schema: {type: string, enum: [ndjson, csv, kgf], default: ndjson}
+        - $ref: '#/components/parameters/auditAction'
+        - $ref: '#/components/parameters/auditActorId'
+        - $ref: '#/components/parameters/auditOutcome'
+        - $ref: '#/components/parameters/auditSince'
+        - $ref: '#/components/parameters/auditUntil'
+        - $ref: '#/components/parameters/auditRequestId'
+      responses:
+        '200':
+          description: The export, streamed.
+          headers:
+            Content-Disposition:
+              description: '`attachment; filename="audit-<ns>-<UTC stamp>.ndjson"` (`.csv`, `.kgf.ndjson`).'
+              schema: {type: string}
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+                description: Newline-delimited JSON; see the operation description for the line types.
+              example: |
+                {"type":"header","v":1,"encoding":"nexus-audit-v1","namespace":"default","complete":true,"anchor":{"kind":"genesis","seq":0,"hash":"9b1c6f0e4d2a8c7b5e3f1a0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b"},"generated_at":"2026-09-26T10:00:00.000000Z"}
+                {"type":"audit","id":4211,"namespace":"default","chain_seq":1,"occurred_at":"2026-09-26T09:12:03.000000Z","actor_id":null,"actor_kind":"api_key","actor_label":"ci-deploy","action":"token.create","target_kind":"token","target_id":"4b3a2c1d-0e9f-48a7-b6c5-d4e3f2a1b0c9","outcome":"success","detail":{"name":"github-actions-deploy"},"client_ip":"10.0.4.17","prev_hash":"9b1c6f0e4d2a8c7b5e3f1a0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b","row_hash":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"}
+                {"type":"trailer","rows":1,"head":{"kind":"head","seq":1,"hash":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"}}
+            text/csv:
+              schema: {type: string, description: 'A header row, then one row per audit entry.'}
+        '400':
+          description: '`invalid_filter` (a bad `since`/`until`) or `invalid_format`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: invalid_format, message: 'format must be ndjson, csv or kgf'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+
+  /v1/namespaces/{ns}/audit/policy:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Audit]
+      operationId: getAuditPolicy
+      summary: Get the audit retention policy and legal hold
+      description: |
+        A namespace that never set one gets the default: keep forever
+        (`retention_days: null`), no legal hold, `revision` 0. Registered only
+        when identity is wired.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [audit.view]
+      responses:
+        '200':
+          description: The policy.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditPolicy'}
+              example:
+                namespace: default
+                retention_days: 400
+                legal_hold: false
+                legal_hold_reason: ''
+                legal_hold_by: ''
+                legal_hold_at: null
+                revision: 3
+                updated_by: security@example.com
+                updated_at: '2026-09-20T08:00:00Z'
+                last_purge_at: '2026-09-26T09:00:00Z'
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+    put:
+      tags: [Audit]
+      operationId: putAuditPolicy
+      summary: Set the audit retention period
+      description: |
+        Optimistic concurrency on `revision` (the value last read; 0 for a
+        namespace that never set a policy). `retention_days` null or absent
+        keeps rows forever. The purge loop removes rows older than the period
+        hourly unless the namespace is under legal hold; each purge records a
+        chain checkpoint so exports stay verifiable. A security grant: the
+        change and its audit row commit together (503 `audit_unavailable`
+        otherwise). Registered only when identity is wired.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [audit.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PutAuditPolicyRequest'}
+            example: {retention_days: 400, revision: 2}
+      responses:
+        '200':
+          description: The saved policy.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditPolicy'}
+        '400':
+          description: '`invalid_json` (unknown fields are rejected).'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/AuditPolicyConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422':
+          description: '`invalid_retention`: `retention_days` must be 1-36500, or null to keep forever.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
+
+  /v1/namespaces/{ns}/audit/legal-hold:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    post:
+      tags: [Audit]
+      operationId: setAuditLegalHold
+      summary: Place or release a legal hold on the audit trail
+      description: |
+        While a hold is set, nothing is purged, neither by the hourly loop nor
+        by `POST .../audit/purge` (409 `legal_hold`). Setting a hold needs a
+        `reason` (a matter, ticket or case reference). Optimistic concurrency
+        on `revision`. Audited in the same transaction (fail closed).
+        Registered only when identity is wired.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [audit.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LegalHoldRequest'}
+            examples:
+              set:
+                summary: Place a hold
+                value: {hold: true, reason: 'Matter 2026-114: preserve records', revision: 3}
+              release:
+                summary: Release it
+                value: {hold: false, revision: 4}
+      responses:
+        '200':
+          description: The policy after the change.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditPolicy'}
+              example:
+                namespace: default
+                retention_days: 400
+                legal_hold: true
+                legal_hold_reason: 'Matter 2026-114: preserve records'
+                legal_hold_by: security@example.com
+                legal_hold_at: '2026-09-26T10:15:00Z'
+                revision: 4
+                updated_by: security@example.com
+                updated_at: '2026-09-26T10:15:00Z'
+                last_purge_at: '2026-09-26T09:00:00Z'
+        '400':
+          description: '`invalid_json`: the body must be `{"hold": true|false, "reason": "...", "revision": N}`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/AuditPolicyConflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422':
+          description: '`reason_required`: a hold needs a reason.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
+
+  /v1/namespaces/{ns}/audit/purge:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    post:
+      tags: [Audit]
+      operationId: purgeAudit
+      summary: Apply the retention policy now
+      description: |
+        Removes the rows the retention period has expired (the loop does the
+        same hourly) and records a chain checkpoint. With no retention period
+        nothing is removed. Refused under legal hold; the refusal is itself
+        audited. Takes no body. Registered only when identity is wired.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [audit.manage]
+      responses:
+        '200':
+          description: Purged.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rows_purged]
+                properties:
+                  rows_purged: {type: integer, minimum: 0}
+              example: {rows_purged: 18231}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409':
+          description: '`legal_hold`: the namespace is under legal hold; nothing was purged.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: legal_hold, message: the namespace is under legal hold; nothing was purged}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
+
+  /v1/namespaces/{ns}/audit/sinks:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Audit]
+      operationId: listAuditSinks
+      summary: List SIEM sinks
+      description: |
+        Webhook sinks the gateway streams the chained trail to, with their
+        delivery cursor and backoff state. Signing secrets are never returned.
+        Registered only when identity is wired.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [audit.view]
+      responses:
+        '200':
+          description: The sinks.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sinks]
+                properties:
+                  sinks:
+                    type: array
+                    items: {$ref: '#/components/schemas/AuditSink'}
+              example:
+                sinks:
+                  - id: 6f5e4d3c-2b1a-4098-8765-43210fedcba9
+                    namespace: default
+                    name: splunk-hec
+                    kind: webhook
+                    format: nexus
+                    url: https://siem.example.com/nexus/audit
+                    enabled: true
+                    batch_size: 100
+                    cursor_seq: 4211
+                    consecutive_failures: 0
+                    next_attempt_at: '2026-09-26T10:00:05Z'
+                    last_attempt_at: '2026-09-26T10:00:00Z'
+                    last_success_at: '2026-09-26T10:00:00Z'
+                    last_error: ''
+                    created_by: security@example.com
+                    created_at: '2026-09-01T12:00:00Z'
+                    revision: 1
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+    post:
+      tags: [Audit]
+      operationId: createAuditSink
+      summary: Add a SIEM sink (the signing secret is shown once)
+      description: |
+        Batches of rows are POSTed to `url` as NDJSON (`format: nexus` rows in
+        the export's `audit` line shape, or `format: kgf` events) with
+        `X-Nexus-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<unix>." + body)>`
+        and a stable `X-Nexus-Delivery` id per batch for de-duplication. The
+        URL must be https (http only with NEXUS_AUDIT_SINK_ALLOW_HTTP), carry no
+        credentials, and not name an internal address. `from_start` replays
+        the whole retained chain; otherwise delivery starts at the current
+        head. Needs NEXUS_AUDIT_SINK_KEY on the gateway (503 `sinks_disabled`).
+        Registered only when identity is wired.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [audit.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateAuditSinkRequest'}
+            example: {name: splunk-hec, url: 'https://siem.example.com/nexus/audit', batch_size: 100, format: nexus, from_start: true}
+      responses:
+        '201':
+          description: Created. Store `signing_secret` now; it is never shown again.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditSinkWithSecret'}
+              example:
+                id: 6f5e4d3c-2b1a-4098-8765-43210fedcba9
+                namespace: default
+                name: splunk-hec
+                kind: webhook
+                format: nexus
+                url: https://siem.example.com/nexus/audit
+                enabled: true
+                batch_size: 100
+                cursor_seq: 0
+                consecutive_failures: 0
+                next_attempt_at: '2026-09-26T10:20:00Z'
+                last_attempt_at: null
+                last_success_at: null
+                last_error: ''
+                created_by: security@example.com
+                created_at: '2026-09-26T10:20:00Z'
+                revision: 1
+                signing_secret: whsec_c2lnbmluZy1zZWNyZXQtZXhhbXBsZS12YWx1ZQ
+                signing_secret_shown_once: true
+        '400':
+          description: '`invalid_json` (unknown fields are rejected).'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409':
+          description: '`sink_exists`: a sink with this name already exists.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422':
+          description: '`invalid_sink`, with every problem found.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InvalidSinkError'}
+              example:
+                error: invalid_sink
+                problems: ['url must be https (plain http is refused unless NEXUS_AUDIT_SINK_ALLOW_HTTP=true)', batch_size must be 1..1000]
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/SinkWriteUnavailable'}
+
+  /v1/namespaces/{ns}/audit/sinks/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/sinkId'
+    put:
+      tags: [Audit]
+      operationId: updateAuditSink
+      summary: Re-point, enable, disable or resize a sink
+      description: |
+        Only the fields given change. `revision` must equal the stored one.
+        Re-enabling or re-pointing a sink clears its backoff so delivery
+        resumes at once. Audited in the same transaction (fail closed).
+        Registered only when identity is wired.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [audit.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateAuditSinkRequest'}
+            example: {enabled: false, revision: 1}
+      responses:
+        '200':
+          description: The sink.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditSink'}
+        '400':
+          description: '`invalid_json` (unknown fields are rejected).'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: '`conflict`: the sink changed since it was read; reload and retry.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422':
+          description: '`invalid_sink`: a refused `url` or a `batch_size` outside 1-1000.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
+    delete:
+      tags: [Audit]
+      operationId: deleteAuditSink
+      summary: Remove a sink
+      description: Audited in the same transaction (fail closed). Registered only when identity is wired.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [audit.manage]
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted: {const: true}
+              example: {deleted: true}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
+
+  /v1/namespaces/{ns}/audit/sinks/{id}/rotate-secret:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/sinkId'
+    post:
+      tags: [Audit]
+      operationId: rotateAuditSinkSecret
+      summary: Issue a new signing secret for a sink (shown once)
+      description: |
+        The old secret stops signing immediately: update the receiver first
+        (or have it accept both) before rotating. Registered only when
+        identity is wired.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [audit.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [revision]
+              properties:
+                revision: {type: integer, minimum: 1}
+            example: {revision: 2}
+      responses:
+        '200':
+          description: The sink with its new `signing_secret`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditSinkWithSecret'}
+        '400':
+          description: '`invalid_json`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: '`conflict`: the sink changed since it was read.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/SinkWriteUnavailable'}
+
+  # ── service accounts (ADR-0024 §6) ───────────────────────────────────────
+  /v1/namespaces/{ns}/service-accounts:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Service accounts]
+      operationId: listServiceAccounts
+      summary: List service accounts
+      description: At most 500, by name. Registered only when identity is wired.
+      x-nexus-action: read
+      x-nexus-permissions: [service_accounts.view]
+      responses:
+        '200':
+          description: The accounts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [service_accounts]
+                properties:
+                  service_accounts:
+                    type: array
+                    items: {$ref: '#/components/schemas/ServiceAccount'}
+              example:
+                service_accounts:
+                  - id: 7c6b5a49-3827-4165-9f4e-3d2c1b0a9f8e
+                    namespace: default
+                    name: ci-deployer
+                    description: GitHub Actions deploys workflow specs
+                    disabled: false
+                    disabled_at: null
+                    created_at: '2026-09-20T08:30:00Z'
+                    revision: 2
+                    roles: [Workflow Publisher]
+                    live_tokens: 1
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+    post:
+      tags: [Service accounts]
+      operationId: createServiceAccount
+      summary: Create a service account
+      description: |
+        A non-human identity for an agent or CI system, with its own role
+        bindings. Its tokens (`POST .../tokens` with `service_account_id`)
+        resolve at every request to the account's CURRENT roles intersected
+        with the token's permission ceiling. The Administrator role cannot be
+        bound, and the caller may only bind roles whose every permission it
+        holds itself. A security grant: audited in the same transaction.
+        Registered only when identity is wired.
+      x-nexus-action: read
+      x-nexus-permissions: [service_accounts.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateServiceAccountRequest'}
+            example: {name: ci-deployer, description: GitHub Actions deploys workflow specs, roles: [Workflow Publisher]}
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ServiceAccount'}
+              example:
+                id: 7c6b5a49-3827-4165-9f4e-3d2c1b0a9f8e
+                namespace: default
+                name: ci-deployer
+                description: GitHub Actions deploys workflow specs
+                disabled: false
+                disabled_at: null
+                created_at: '2026-09-26T10:30:00Z'
+                revision: 1
+                roles: [Workflow Publisher]
+                live_tokens: 0
+        '400':
+          description: '`invalid` (not one JSON object, or an unknown field) or `unknown_role`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403':
+          description: '`forbidden`, or `invalid_grant`: a bound role holds a permission the caller does not.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: invalid_grant, message: 'Cannot delegate permission: workflows.delete'}
+        '409':
+          description: '`name_taken`, or `protected_role` (Administrator cannot be bound to a service account).'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422':
+          description: '`invalid_service_account`: a bad name or a description over 500 characters.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
+
+  /v1/namespaces/{ns}/service-accounts/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/serviceAccountId'
+    put:
+      tags: [Service accounts]
+      operationId: updateServiceAccount
+      summary: Edit a service account's description
+      description: |
+        Only the description is editable; the name is fixed. `description`
+        replaces the stored one (absent means empty). `revision` must equal the
+        stored revision. Registered only when identity is wired.
+      x-nexus-action: read
+      x-nexus-permissions: [service_accounts.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateServiceAccountRequest'}
+            example: {description: GitHub Actions deploys specs and starts smoke runs, revision: 2}
+      responses:
+        '200':
+          description: Saved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, updated]
+                properties:
+                  id: {type: string}
+                  updated: {const: true}
+              example: {id: 7c6b5a49-3827-4165-9f4e-3d2c1b0a9f8e, updated: true}
+        '400':
+          description: '`invalid`: not one JSON object, an unknown field, or a description over 500 characters.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409':
+          description: |
+            `conflict`: the account changed since it was read, OR does not exist
+            (this route does not distinguish the two).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+
+  /v1/namespaces/{ns}/service-accounts/{id}/disable:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/serviceAccountId'
+    post:
+      tags: [Service accounts]
+      operationId: disableServiceAccount
+      summary: Disable a service account (its tokens stop working at once)
+      description: |
+        Every token of the account fails authentication from its next request;
+        the token rows are untouched, so enabling the account restores them.
+        Revoke tokens to end them for good. A revocation: never blocked by the
+        audit store. The caller may only disable an account no more powerful
+        than itself. Registered only when identity is wired.
+      x-nexus-action: read
+      x-nexus-permissions: [service_accounts.manage]
+      responses:
+        '200':
+          description: Disabled.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ServiceAccountState'}
+              example: {id: 7c6b5a49-3827-4165-9f4e-3d2c1b0a9f8e, disabled: true}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/TargetAboveActor'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+
+  /v1/namespaces/{ns}/service-accounts/{id}/enable:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/serviceAccountId'
+    post:
+      tags: [Service accounts]
+      operationId: enableServiceAccount
+      summary: Re-enable a service account (restores its live tokens)
+      description: |
+        A security grant: the change and its audit row commit together (503
+        `audit_unavailable` otherwise). The caller may only enable an account
+        no more powerful than itself. Registered only when identity is wired.
+      x-nexus-action: read
+      x-nexus-permissions: [service_accounts.manage]
+      responses:
+        '200':
+          description: Enabled.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ServiceAccountState'}
+              example: {id: 7c6b5a49-3827-4165-9f4e-3d2c1b0a9f8e, disabled: false}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/TargetAboveActor'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
+
+  /v1/namespaces/{ns}/service-accounts/{id}/roles:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/serviceAccountId'
+    get:
+      tags: [Service accounts]
+      operationId: getServiceAccountRoles
+      summary: Get a service account's role bindings
+      description: Registered only when identity is wired.
+      x-nexus-action: read
+      x-nexus-permissions: [service_accounts.view]
+      responses:
+        '200':
+          description: The bindings and the revision to send back when changing them.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ServiceAccountRoles'}
+              example: {roles: [Workflow Publisher], revision: 1}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+    put:
+      tags: [Service accounts]
+      operationId: putServiceAccountRoles
+      summary: Replace a service account's role bindings
+      description: |
+        Takes effect on the account's tokens at their next request. The caller
+        must hold every permission the account holds now (`target_above_actor`
+        otherwise) and every permission of each new role (`invalid_grant`);
+        Administrator cannot be bound. `revision` must equal the stored one.
+        A security grant: audited in the same transaction. Registered only when
+        identity is wired.
+      x-nexus-action: read
+      x-nexus-permissions: [service_accounts.manage, roles.view]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PutServiceAccountRolesRequest'}
+            example: {roles: [Workflow Publisher, Workflow Operator], revision: 1}
+      responses:
+        '200':
+          description: The new bindings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [roles]
+                properties:
+                  roles:
+                    type: [array, 'null']
+                    items: {type: string}
+              example: {roles: [Workflow Publisher, Workflow Operator]}
+        '400':
+          description: '`invalid` (not one JSON object, an unknown field, or more than 20 roles) or `unknown_role`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403':
+          description: '`forbidden`, `target_above_actor` or `invalid_grant`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: target_above_actor, message: 'This service account holds workflows.delete, which you do not have'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: '`conflict` (the bindings changed since they were read) or `protected_role`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuditOrAuthUnavailable'}
+
+  # ── notifications (ADR-0028) ─────────────────────────────────────────────
+  /v1/namespaces/{ns}/notification-channels:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Notifications]
+      operationId: listNotificationChannels
+      summary: List notification channels
+      description: Every channel, by name, with the supported channel kinds. Secrets are never returned, only whether one is configured.
+      x-nexus-action: read
+      x-nexus-permissions: [notifications.view]
+      responses:
+        '200':
+          description: The channels.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [channels, kinds]
+                properties:
+                  channels:
+                    type: array
+                    items: {$ref: '#/components/schemas/NotificationChannel'}
+                  kinds:
+                    type: array
+                    items: {$ref: '#/components/schemas/ChannelKind'}
+              example:
+                channels:
+                  - id: 3d2c1b0a-9f8e-4d7c-b6a5-948372615049
+                    namespace: default
+                    name: oncall-pagerduty
+                    kind: pagerduty
+                    config: {severity: critical}
+                    secret: {configured: true, source: sealed, hint: '…a91c'}
+                    rate_limit_per_minute: 30
+                    enabled: true
+                    created_by: ops@example.com
+                    created_at: '2026-09-25T08:00:00Z'
+                    updated_at: '2026-09-25T08:00:00Z'
+                    revision: 1
+                kinds: [slack_webhook, slack_bot, teams, pagerduty, webhook, email]
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+    post:
+      tags: [Notifications]
+      operationId: createNotificationChannel
+      summary: Create a notification channel
+      description: |
+        A destination for notifications. What `config` and the secret hold
+        depends on `kind`:
+
+        | kind | secret | config |
+        | --- | --- | --- |
+        | `slack_webhook` | required: the incoming-webhook URL | none |
+        | `slack_bot` | required: the bot token (`xoxb-...`) | `channel` (required) |
+        | `teams` | required: the Workflows webhook URL | none |
+        | `pagerduty` | required: the Events API v2 routing key | `severity` (optional) |
+        | `webhook` | optional: the HMAC signing key, GENERATED when omitted | `url` (required) |
+        | `email` | none | `to`: 1-20 addresses |
+
+        A secret is given inline as `secret` (sealed with NEXUS_SECRET_KEY;
+        503 `secret_key_unconfigured` without it) or as a `secret_ref` to an
+        external secret store, never both, and never inside `config`. It cannot
+        be read back. A generated webhook signing key is returned ONCE as
+        `signing_secret`; receivers verify `X-Nexus-Signature` with it. Webhook
+        URLs must be https and public unless the gateway allows private
+        targets. Unknown fields are rejected.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [notifications.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateNotificationChannelRequest'}
+            examples:
+              pagerduty:
+                summary: PagerDuty with an inline routing key
+                value: {name: oncall-pagerduty, kind: pagerduty, config: {severity: critical}, secret: R0UT1NGK3YEXAMPLEa91c}
+              webhook:
+                summary: A signed webhook (the key is generated)
+                value: {name: ops-webhook, kind: webhook, config: {url: 'https://hooks.example.com/nexus'}, rate_limit_per_minute: 60}
+              slackRef:
+                summary: Slack, secret held in an external store
+                value: {name: data-eng-slack, kind: slack_webhook, secret_ref: 'vault:kv/data/nexus/slack#webhook_url'}
+      responses:
+        '201':
+          description: Created. `signing_secret` is present only for a webhook channel whose key was generated.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationChannelCreated'}
+              example:
+                id: 8e7d6c5b-4a39-4827-9615-0f1e2d3c4b5a
+                namespace: default
+                name: ops-webhook
+                kind: webhook
+                config: {url: 'https://hooks.example.com/nexus'}
+                secret: {configured: true, source: sealed, hint: '…3f0a'}
+                rate_limit_per_minute: 60
+                enabled: true
+                created_by: ops@example.com
+                created_at: '2026-09-26T10:40:00Z'
+                updated_at: '2026-09-26T10:40:00Z'
+                revision: 1
+                signing_secret: 4f1c2e8a9b7d6c5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c3f0a
+        '400': {$ref: '#/components/responses/ConfigBadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/ConfigConflict'}
+        '422':
+          description: '`invalid_secret` (both or an empty secret, a bad `secret_ref`), `invalid_channel` (config or secret does not fit the kind) or `invalid`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: invalid_channel, message: 'config.url is required'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+
+  /v1/namespaces/{ns}/notification-channels/{name}:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/channelName'
+    get:
+      tags: [Notifications]
+      operationId: getNotificationChannel
+      summary: Get a notification channel
+      x-nexus-action: read
+      x-nexus-permissions: [notifications.view]
+      responses:
+        '200':
+          description: The channel.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationChannel'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+    put:
+      tags: [Notifications]
+      operationId: updateNotificationChannel
+      summary: Update a notification channel
+      description: |
+        `name` and `kind` cannot change (400 `immutable`). Omitted fields keep
+        their stored values; `config`, when given, replaces the whole object.
+        Send `secret` or `secret_ref` to replace the secret (this is how a
+        generated webhook key is rotated); omit both to keep it. `revision`,
+        when non-zero, must equal the stored revision (409 otherwise); 0
+        overwrites unconditionally.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [notifications.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateNotificationChannelRequest'}
+            example: {enabled: false, revision: 1}
+      responses:
+        '200':
+          description: The channel.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationChannel'}
+        '400': {$ref: '#/components/responses/ConfigBadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/ConfigConflict'}
+        '422':
+          description: '`invalid_secret` or `invalid_channel`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+    delete:
+      tags: [Notifications]
+      operationId: deleteNotificationChannel
+      summary: Delete a notification channel
+      x-nexus-action: admin_write
+      x-nexus-permissions: [notifications.manage]
+      responses:
+        '204': {description: Deleted.}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/ConfigConflict'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+
+  /v1/namespaces/{ns}/notification-channels/{name}/test:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/channelName'
+    post:
+      tags: [Notifications]
+      operationId: testNotificationChannel
+      summary: Send a test notification through a channel
+      description: |
+        Queues a `notification.test` delivery (3 attempts) that the
+        event-service sends like any other, so a delivered test proves the
+        whole path: queue, secret, egress and receiver. Poll the returned
+        delivery for the outcome. Takes no body.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [notifications.manage]
+      responses:
+        '202':
+          description: Queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [delivery_id, state, message]
+                properties:
+                  delivery_id: {type: integer, format: int64}
+                  state: {const: pending}
+                  message: {type: string}
+              example: {delivery_id: 4812, state: pending, message: queued; the event-service sends it within seconds. Poll the delivery for the outcome.}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+
+  /v1/namespaces/{ns}/notification-rules:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Notifications]
+      operationId: listNotificationRules
+      summary: List notification rules
+      description: Every rule, by name, with the event types a rule may subscribe to.
+      x-nexus-action: read
+      x-nexus-permissions: [notifications.view]
+      responses:
+        '200':
+          description: The rules.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rules, events]
+                properties:
+                  rules:
+                    type: array
+                    items: {$ref: '#/components/schemas/NotificationRule'}
+                  events:
+                    type: array
+                    items: {$ref: '#/components/schemas/NotificationEvent'}
+              example:
+                rules:
+                  - id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                    namespace: default
+                    name: nightly-failures
+                    events: [run.failed, run.timed_out]
+                    workflows: [nightly-etl]
+                    labels: {}
+                    enabled: true
+                    channels: [oncall-pagerduty]
+                    created_by: ops@example.com
+                    created_at: '2026-09-25T08:05:00Z'
+                    updated_at: '2026-09-25T08:05:00Z'
+                    revision: 1
+                events: [run.failed, run.succeeded, run.timed_out, run.sla_exceeded, attempt.lost]
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+    post:
+      tags: [Notifications]
+      operationId: createNotificationRule
+      summary: Create a notification rule
+      description: |
+        Routes run events to channels. A rule matches an event when its type
+        is in `events`, the run's workflow is in `workflows` (empty = every
+        workflow) and the run carries every entry of `labels`. `sla_seconds`
+        is required with, and only with, `run.sla_exceeded`. Every channel
+        must exist (404 names the missing one). Unknown fields are rejected.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [notifications.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/NotificationRuleRequest'}
+            examples:
+              failures:
+                summary: Page on failures of one workflow
+                value: {name: nightly-failures, events: [run.failed, run.timed_out], workflows: [nightly-etl], channels: [oncall-pagerduty]}
+              sla:
+                summary: Warn when a run exceeds an SLA
+                value: {name: etl-sla, events: [run.sla_exceeded], workflows: [nightly-etl], sla_seconds: 3600, channels: [data-eng-slack]}
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationRule'}
+        '400': {$ref: '#/components/responses/ConfigBadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404':
+          description: '`not_found`: a named channel does not exist.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: not_found, message: 'channel "oncall-pagerduty"'}
+        '409': {$ref: '#/components/responses/ConfigConflict'}
+        '422':
+          description: '`invalid_rule`: no or unknown events, 0 or more than 20 channels, more than 100 workflows or 20 labels, or `sla_seconds` (60-2592000) without `run.sla_exceeded` or vice versa.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+
+  /v1/namespaces/{ns}/notification-rules/{name}:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/ruleName'
+    get:
+      tags: [Notifications]
+      operationId: getNotificationRule
+      summary: Get a notification rule
+      x-nexus-action: read
+      x-nexus-permissions: [notifications.view]
+      responses:
+        '200':
+          description: The rule.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationRule'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+    put:
+      tags: [Notifications]
+      operationId: updateNotificationRule
+      summary: Replace a notification rule
+      description: |
+        A full replacement: the body is validated exactly like a create, and an
+        omitted `enabled` means true. `name`, if given, must equal the path.
+        `revision`, when non-zero, must equal the stored revision.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [notifications.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/NotificationRuleRequest'}
+            example: {events: [run.failed], workflows: [nightly-etl], channels: [oncall-pagerduty, data-eng-slack], revision: 1}
+      responses:
+        '200':
+          description: The rule.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationRule'}
+        '400': {$ref: '#/components/responses/ConfigBadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/ConfigConflict'}
+        '422':
+          description: '`invalid_rule`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+    delete:
+      tags: [Notifications]
+      operationId: deleteNotificationRule
+      summary: Delete a notification rule
+      x-nexus-action: admin_write
+      x-nexus-permissions: [notifications.manage]
+      responses:
+        '204': {description: Deleted.}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+
+  /v1/namespaces/{ns}/notification-deliveries:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Notifications]
+      operationId: listNotificationDeliveries
+      summary: List notification deliveries (the outbox and dead letters)
+      description: |
+        Newest first. Keyset-paginated: when a page is full, `next_before` is
+        the last delivery's id; pass it back as `before`.
+      x-nexus-action: read
+      x-nexus-permissions: [notifications.view]
+      parameters:
+        - name: state
+          in: query
+          schema: {type: string, enum: [pending, delivered, dead]}
+        - name: channel
+          in: query
+          description: A channel name (or id); 404 when it does not exist.
+          schema: {type: string}
+        - name: run_id
+          in: query
+          schema: {type: string, format: uuid}
+        - name: before
+          in: query
+          description: The previous page's `next_before`.
+          schema: {type: integer, format: int64}
+        - name: limit
+          in: query
+          description: Rows per page; values outside 1-500 mean 100.
+          schema: {type: integer, default: 100}
+      responses:
+        '200':
+          description: One page of deliveries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deliveries]
+                properties:
+                  deliveries:
+                    type: array
+                    items: {$ref: '#/components/schemas/NotificationDelivery'}
+                  next_before: {type: integer, format: int64, description: 'Present only when the page is full.'}
+              example:
+                deliveries:
+                  - id: 4811
+                    channel: oncall-pagerduty
+                    channel_id: 3d2c1b0a-9f8e-4d7c-b6a5-948372615049
+                    channel_kind: pagerduty
+                    rule: nightly-failures
+                    rule_id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                    event_key: 'run.failed:0b6f3a52-91c4-4f0e-8a77-3c5d2e1f9a40'
+                    dedup_key: 'nexus:default:run:0b6f3a52-91c4-4f0e-8a77-3c5d2e1f9a40'
+                    event_type: run.failed
+                    action: trigger
+                    run_id: 0b6f3a52-91c4-4f0e-8a77-3c5d2e1f9a40
+                    payload: {workflow: nightly-etl, summary: 'nightly-etl run failed: load exited 1'}
+                    state: dead
+                    attempts: 8
+                    max_attempts: 8
+                    next_attempt_at: '2026-09-26T03:10:00Z'
+                    last_error: 'receiver answered 400: invalid routing key'
+                    last_status: 400
+                    created_by: event-service
+                    created_at: '2026-09-26T02:40:00Z'
+                    delivered_at: null
+                    dead_at: '2026-09-26T03:10:00Z'
+        '400':
+          description: '`invalid`: a bad `state` or a `run_id` that is not a UUID.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+
+  /v1/namespaces/{ns}/notification-deliveries/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/deliveryId'
+    get:
+      tags: [Notifications]
+      operationId: getNotificationDelivery
+      summary: Get a notification delivery
+      x-nexus-action: read
+      x-nexus-permissions: [notifications.view]
+      responses:
+        '200':
+          description: The delivery.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationDelivery'}
+        '400':
+          description: '`invalid`: the id is not an integer.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+
+  /v1/namespaces/{ns}/notification-deliveries/{id}/redrive:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/deliveryId'
+    post:
+      tags: [Notifications]
+      operationId: redriveNotificationDelivery
+      summary: Re-send a dead-lettered delivery
+      description: |
+        Queues a NEW delivery with the same payload and the same
+        receiver-facing `dedup_key` (so a receiver that did get the original
+        can de-duplicate); the dead row stays as evidence and the new one
+        records `redrive_of`. Only a `dead` delivery can be redriven. Takes no
+        body.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [notifications.manage]
+      responses:
+        '202':
+          description: Queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [delivery_id, redrive_of, state]
+                properties:
+                  delivery_id: {type: integer, format: int64}
+                  redrive_of: {type: integer, format: int64}
+                  state: {const: pending}
+              example: {delivery_id: 4820, redrive_of: 4811, state: pending}
+        '400':
+          description: '`invalid`: the id is not an integer.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: '`not_dead`: only a dead-lettered delivery can be redriven.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: not_dead, message: only a dead-lettered delivery can be redriven (this one is pending)}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+
+  # ── webhook triggers (ADR-0028) ──────────────────────────────────────────
+  /v1/namespaces/{ns}/triggers:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Triggers]
+      operationId: listTriggers
+      summary: List webhook triggers
+      x-nexus-action: read
+      x-nexus-permissions: [triggers.view]
+      responses:
+        '200':
+          description: The triggers, by name. Secrets are never returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [triggers]
+                properties:
+                  triggers:
+                    type: array
+                    items: {$ref: '#/components/schemas/WebhookTrigger'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+    post:
+      tags: [Triggers]
+      operationId: createTrigger
+      summary: Create a webhook trigger (the secret is shown once)
+      description: |
+        A signed inbound webhook that starts runs of `workflow`. The response
+        carries the hook `path` (and absolute `url` when the gateway knows its
+        public URL) and the generated signing `secret`, shown ONCE; senders
+        sign each delivery with it (see `POST /v1/hooks/{ns}/{trigger}`).
+
+        `params_mapping` maps run parameters from the delivery. Expressions are
+        evaluated against `{"payload": <request body>, "trigger": {"id", "name"}}`
+        and are a JSONPath of member and index steps only (`$.payload.ref`,
+        `$.payload.commits[0].id`), a template string with `{{ $.path }}`
+        placeholders, or a literal. `idempotency_key_path`, when set, names
+        the value that de-duplicates deliveries; otherwise each distinct signed
+        delivery is one run. A trigger is a standing authorization to create
+        runs, so creating one also needs `runs.create`. Needs NEXUS_SECRET_KEY
+        on the gateway (503 `secret_key_unconfigured`).
+      x-nexus-action: write
+      x-nexus-permissions: [triggers.create, workflows.view, runs.create]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateTriggerRequest'}
+            example:
+              name: github-push
+              workflow: build-and-test
+              params_mapping: {repo: $.payload.repository.full_name, commit: $.payload.after, note: 'push to {{ $.payload.ref }}'}
+              idempotency_key_path: $.payload.after
+              tolerance_seconds: 300
+      responses:
+        '201':
+          description: Created. Store `secret` now; it is never shown again.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WebhookTriggerWithSecret'}
+              example:
+                id: 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                namespace: default
+                name: github-push
+                workflow: build-and-test
+                params_mapping: {repo: $.payload.repository.full_name, commit: $.payload.after, note: 'push to {{ $.payload.ref }}'}
+                idempotency_key_path: $.payload.after
+                priority: 100
+                tolerance_seconds: 300
+                enabled: true
+                secret_rotated_at: '2026-09-26T11:00:00Z'
+                previous_secret_expires_at: null
+                created_by: ops@example.com
+                created_at: '2026-09-26T11:00:00Z'
+                updated_at: '2026-09-26T11:00:00Z'
+                last_fired_at: null
+                fire_count: 0
+                revision: 1
+                path: /v1/hooks/default/9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                signature_scheme: 'X-Nexus-Signature: v1=hex(HMAC-SHA256(secret, X-Nexus-Timestamp + "." + body))'
+                url: https://nexus.example.com/v1/hooks/default/9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                secret: 5e0b9d8c7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d
+        '400': {$ref: '#/components/responses/ConfigBadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/ConfigConflict'}
+        '422': {$ref: '#/components/responses/InvalidTrigger'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+
+  /v1/namespaces/{ns}/triggers/{name}:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/triggerName'
+    get:
+      tags: [Triggers]
+      operationId: getTrigger
+      summary: Get a webhook trigger
+      x-nexus-action: read
+      x-nexus-permissions: [triggers.view]
+      responses:
+        '200':
+          description: The trigger.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WebhookTrigger'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+    put:
+      tags: [Triggers]
+      operationId: updateTrigger
+      summary: Update a webhook trigger
+      description: |
+        Omitted fields keep their stored values; `params_mapping`, when given,
+        replaces the whole mapping. Pointing the trigger at a different
+        `workflow` drops a `workflow_version` pin unless one is given. The
+        secret is unchanged (rotate it separately). `name`, if given, must
+        equal the path. `revision`, when non-zero, must equal the stored
+        revision.
+      x-nexus-action: write
+      x-nexus-permissions: [triggers.update, workflows.view, runs.create]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateTriggerRequest'}
+            example: {enabled: false, revision: 3}
+      responses:
+        '200':
+          description: The trigger.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WebhookTrigger'}
+        '400': {$ref: '#/components/responses/ConfigBadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/ConfigConflict'}
+        '422': {$ref: '#/components/responses/InvalidTrigger'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+    delete:
+      tags: [Triggers]
+      operationId: deleteTrigger
+      summary: Delete a webhook trigger
+      description: Deliveries to its path answer 404 from then on. Its delivery log is removed with it.
+      x-nexus-action: write
+      x-nexus-permissions: [triggers.delete]
+      responses:
+        '204': {description: Deleted.}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+
+  /v1/namespaces/{ns}/triggers/{name}/rotate-secret:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/triggerName'
+    post:
+      tags: [Triggers]
+      operationId: rotateTriggerSecret
+      summary: Issue a new trigger secret (shown once)
+      description: |
+        The previous secret keeps verifying for `grace_seconds` (default 86400,
+        at most 604800; 0 revokes it immediately), so senders can switch over;
+        `previous_secret_expires_at` says until when. The body is optional.
+      x-nexus-action: write
+      x-nexus-permissions: [triggers.update]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                grace_seconds: {type: integer, minimum: 0, maximum: 604800, default: 86400}
+            example: {grace_seconds: 3600}
+      responses:
+        '200':
+          description: The trigger with its new `secret`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WebhookTriggerWithSecret'}
+        '400':
+          description: '`malformed_json` or `invalid` (`grace_seconds` out of range).'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+
+  /v1/namespaces/{ns}/triggers/{name}/deliveries:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/triggerName'
+    get:
+      tags: [Triggers]
+      operationId: listTriggerDeliveries
+      summary: The trigger's recent inbound deliveries
+      description: Newest first; receipts are kept for 7 days.
+      x-nexus-action: read
+      x-nexus-permissions: [triggers.view]
+      parameters:
+        - name: limit
+          in: query
+          description: Values outside 1-200 mean 50.
+          schema: {type: integer, default: 50}
+      responses:
+        '200':
+          description: The receipts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deliveries]
+                properties:
+                  deliveries:
+                    type: array
+                    items: {$ref: '#/components/schemas/WebhookReceipt'}
+              example:
+                deliveries:
+                  - received_at: '2026-09-26T11:05:00Z'
+                    outcome: accepted
+                    http_status: 202
+                    run_id: 0b6f3a52-91c4-4f0e-8a77-3c5d2e1f9a40
+                    idempotency_key: 'webhook:9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d:3f9a1c2b7e'
+                    detail: ''
+                    signature_digest: 7d1e0c9b8a7f6e5d
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+
+  /v1/hooks/{ns}/{trigger}:
+    parameters:
+      - $ref: '#/components/parameters/hookNamespace'
+      - $ref: '#/components/parameters/hookTrigger'
+    post:
+      tags: [Triggers]
+      operationId: receiveWebhook
+      summary: Deliver a signed webhook (starts or finds a run)
+      description: |
+        UNAUTHENTICATED by credential: the sender proves itself with an HMAC
+        signature over the timestamp and the exact body bytes,
+
+        `X-Nexus-Signature: v1=<hex HMAC-SHA256(secret, X-Nexus-Timestamp + "." + body)>`
+
+        where `X-Nexus-Timestamp` is Unix seconds and must be within the
+        trigger's `tolerance_seconds` of the gateway's clock. Several
+        comma-separated `v1=` values are accepted (for a sender's own key
+        rotation); during a trigger's rotation grace period either secret
+        verifies. A byte-identical resend of an accepted delivery is a replay
+        (409); a retry with a fresh timestamp is a new delivery and is
+        de-duplicated by the idempotency key instead, answering 202 with
+        `created: false` and the existing run.
+
+        An unknown or disabled trigger, and a gateway without triggers
+        enabled, all answer the same 404, so the route cannot enumerate
+        triggers. Rate limited per client address; every refusal is audited
+        (`trigger.fire`, outcome `denied`). The body (at most 1 MiB) must be
+        JSON or empty.
+      security: []
+      parameters:
+        - name: X-Nexus-Timestamp
+          in: header
+          required: true
+          description: Unix seconds at signing time.
+          schema: {type: string, pattern: '^-?[0-9]+$'}
+          example: '1790420700'
+        - name: X-Nexus-Signature
+          in: header
+          required: true
+          description: One or more comma-separated `v1=<64 hex>` signatures.
+          schema: {type: string}
+          example: v1=5d41402abc4b2a76b9719d911017c5925d41402abc4b2a76b9719d911017c592
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              description: Any JSON document; it is mapped onto run parameters by the trigger's `params_mapping`.
+            example:
+              ref: refs/heads/main
+              after: 3f9a1c2b7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b
+              repository: {full_name: example/pipelines}
+      responses:
+        '202':
+          description: Accepted. `created` is false when the idempotency key matched an existing run.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run_id, created, idempotency_key]
+                properties:
+                  run_id: {type: string, format: uuid}
+                  created: {type: boolean}
+                  idempotency_key: {type: string}
+              example: {run_id: 0b6f3a52-91c4-4f0e-8a77-3c5d2e1f9a40, created: true, idempotency_key: 'webhook:9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d:3f9a1c2b7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b'}
+        '400':
+          description: '`malformed_json`: the body is not JSON.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401':
+          description: '`signature_required`, `bad_timestamp`, `stale_timestamp` (outside the tolerance; check the sender''s clock) or `bad_signature`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: bad_signature, message: signature does not verify}
+        '404':
+          description: '`not_found`: no enabled trigger with that id in that namespace (or triggers are not enabled).'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {error: not_found, message: not found}
+        '409':
+          description: '`replayed`: this exact signed delivery was already received.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413':
+          description: '`payload_too_large`: the body exceeds 1 MiB.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '422':
+          description: |
+            `missing_idempotency_key` (nothing at `idempotency_key_path`),
+            `unmapped_params` (a mapping path did not resolve), `unknown_workflow`
+            or `invalid_params` (the workflow refused the parameters). The sender
+            may retry the same signed delivery after the trigger is fixed.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429':
+          description: '`rate_limited` (per client address) or `run_limit` (the namespace''s run quota).'
+          headers:
+            Retry-After: {$ref: '#/components/headers/RetryAfter'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503':
+          description: '`unavailable`: run creation is not configured or the workflow-manager is unreachable. Retry.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
+  # ── sensors (ADR-0028) ───────────────────────────────────────────────────
+  /v1/namespaces/{ns}/sensors:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Sensors]
+      operationId: listSensors
+      summary: List sensors
+      x-nexus-action: read
+      x-nexus-permissions: [sensors.view]
+      responses:
+        '200':
+          description: The sensors, by name, each with its runtime state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sensors]
+                properties:
+                  sensors:
+                    type: array
+                    items: {$ref: '#/components/schemas/Sensor'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+    post:
+      tags: [Sensors]
+      operationId: createSensor
+      summary: Create a sensor
+      description: |
+        A poller in the workflow-manager that starts one run of `workflow` per
+        new item it observes:
+
+        * `object_store` - new objects under `config.uri` (`s3://bucket/prefix`;
+          `gs://` and `az://` are accepted ahead of their listers) whose key,
+          relative to the prefix, matches the glob `config.pattern`.
+          `params_mapping` sees `$.object` = `{uri, bucket, key, relative_key,
+          size, etag, last_modified}`.
+        * `run_succeeded` - successful runs of `config.upstream_workflow`
+          (never the sensor's own workflow). `params_mapping` sees `$.run` =
+          `{id, workflow, params, ended_at, trigger_kind, logical_date}`.
+
+        Both also see `$.sensor` = `{id, name}`; the expression language is the
+        one webhook triggers use. On its first pass a sensor
+        records what already exists as a baseline and triggers nothing,
+        unless `backfill` is true. A sensor is a standing authorization to
+        create runs, so creating one also needs `runs.create`. Unknown fields
+        are rejected.
+      x-nexus-action: write
+      x-nexus-permissions: [sensors.create, workflows.view, runs.create]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateSensorRequest'}
+            examples:
+              objectStore:
+                summary: New CSV files in a bucket
+                value:
+                  name: landing-csv
+                  kind: object_store
+                  workflow: ingest-file
+                  config: {uri: 's3://landing/incoming/', pattern: '*.csv'}
+                  params_mapping: {object: $.object.uri}
+                  poll_interval_seconds: 60
+              upstream:
+                summary: After another workflow succeeds
+                value:
+                  name: after-etl
+                  kind: run_succeeded
+                  workflow: publish-reports
+                  config: {upstream_workflow: nightly-etl}
+                  params_mapping: {upstream_run: $.run.id}
+      responses:
+        '201':
+          description: Created. A new sensor reports `status` `waiting` until a workflow-manager replica first polls it.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Sensor'}
+              example:
+                id: 2b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091
+                namespace: default
+                name: landing-csv
+                kind: object_store
+                workflow: ingest-file
+                config: {uri: 's3://landing/incoming/', pattern: '*.csv'}
+                params_mapping: {object: $.object.uri}
+                poll_interval_seconds: 60
+                backfill: false
+                priority: 100
+                enabled: true
+                created_by: ops@example.com
+                created_at: '2026-09-26T11:10:00Z'
+                updated_at: '2026-09-26T11:10:00Z'
+                revision: 1
+                status: waiting
+        '400': {$ref: '#/components/responses/ConfigBadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/ConfigConflict'}
+        '422': {$ref: '#/components/responses/InvalidSensor'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+
+  /v1/namespaces/{ns}/sensors/{name}:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/sensorName'
+    get:
+      tags: [Sensors]
+      operationId: getSensor
+      summary: Get a sensor and its runtime state
+      x-nexus-action: read
+      x-nexus-permissions: [sensors.view]
+      responses:
+        '200':
+          description: The sensor.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Sensor'}
+              example:
+                id: 2b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091
+                namespace: default
+                name: landing-csv
+                kind: object_store
+                workflow: ingest-file
+                config: {uri: 's3://landing/incoming/', pattern: '*.csv'}
+                params_mapping: {object: $.object.uri}
+                poll_interval_seconds: 60
+                backfill: false
+                priority: 100
+                enabled: true
+                created_by: ops@example.com
+                created_at: '2026-09-26T11:10:00Z'
+                updated_at: '2026-09-26T11:10:00Z'
+                revision: 1
+                status: ok
+                state:
+                  status: ok
+                  baseline_done: true
+                  cursor: incoming/2026-09-26/batch-0042.csv
+                  watermark: '2026-09-26T11:29:12Z'
+                  next_poll_at: '2026-09-26T11:31:00Z'
+                  lease_owner: ''
+                  lease_until: null
+                  last_poll_at: '2026-09-26T11:30:00Z'
+                  last_success_at: '2026-09-26T11:30:00Z'
+                  last_error: ''
+                  consecutive_failures: 0
+                  observed_total: 57
+                  triggered_total: 12
+                  pending: 0
+                  definition_current: true
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+    put:
+      tags: [Sensors]
+      operationId: updateSensor
+      summary: Update a sensor
+      description: |
+        `name` and `kind` cannot change (400 `immutable`). Omitted fields keep
+        their stored values; `config` and `params_mapping`, when given,
+        replace the whole object. Pointing the sensor at a different
+        `workflow` drops a `workflow_version` pin unless one is given. A
+        changed definition restarts the sensor's baseline on its next poll
+        (`state.definition_current` is false until then). `revision`, when
+        non-zero, must equal the stored revision.
+      x-nexus-action: write
+      x-nexus-permissions: [sensors.update, workflows.view, runs.create]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateSensorRequest'}
+            example: {poll_interval_seconds: 300, revision: 1}
+      responses:
+        '200':
+          description: The sensor.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Sensor'}
+        '400': {$ref: '#/components/responses/ConfigBadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/ConfigConflict'}
+        '422': {$ref: '#/components/responses/InvalidSensor'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+    delete:
+      tags: [Sensors]
+      operationId: deleteSensor
+      summary: Delete a sensor
+      x-nexus-action: write
+      x-nexus-permissions: [sensors.delete]
+      responses:
+        '204': {description: Deleted.}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/ConfigWriteUnavailable'}
+
+  /v1/namespaces/{ns}/sensors/{name}/observations:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+      - $ref: '#/components/parameters/sensorName'
+    get:
+      tags: [Sensors]
+      operationId: listSensorObservations
+      summary: What a sensor has observed, and what it triggered
+      description: Newest first. Baseline observations (items that existed before the sensor started) are left out unless `include_baseline=true`.
+      x-nexus-action: read
+      x-nexus-permissions: [sensors.view]
+      parameters:
+        - name: include_baseline
+          in: query
+          schema: {type: boolean, default: false}
+        - name: limit
+          in: query
+          description: Values outside 1-500 mean 50.
+          schema: {type: integer, default: 50}
+      responses:
+        '200':
+          description: The observations.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [observations]
+                properties:
+                  observations:
+                    type: array
+                    items: {$ref: '#/components/schemas/SensorObservation'}
+              example:
+                observations:
+                  - item_key: incoming/2026-09-26/batch-0042.csv
+                    item: {uri: 's3://landing/incoming/2026-09-26/batch-0042.csv', bucket: landing, key: incoming/2026-09-26/batch-0042.csv, relative_key: 2026-09-26/batch-0042.csv, size: 184233, etag: '"9b2cf535f27731c974343645a3985328"', last_modified: '2026-09-26T11:29:12Z'}
+                    outcome: triggered
+                    run_id: 0b6f3a52-91c4-4f0e-8a77-3c5d2e1f9a40
+                    attempts: 1
+                    last_error: ''
+                    observed_at: '2026-09-26T11:30:00Z'
+                    triggered_at: '2026-09-26T11:30:01Z'
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+
+  # ── asset lineage (ADR-0028) ─────────────────────────────────────────────
+  /v1/namespaces/{ns}/assets:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Assets]
+      operationId: listAssets
+      summary: List data assets
+      description: |
+        Assets are what tasks DECLARE they produce and consume (the spec's
+        asset declarations), recorded once per run: declared lineage, not
+        observed I/O. Ordered by URI.
+      x-nexus-action: read
+      x-nexus-permissions: [assets.view]
+      parameters:
+        - name: q
+          in: query
+          description: Case-insensitive substring of the URI or name.
+          schema: {type: string}
+        - name: limit
+          in: query
+          description: Values outside 1-1000 mean 200.
+          schema: {type: integer, default: 200}
+      responses:
+        '200':
+          description: The assets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [assets]
+                properties:
+                  assets:
+                    type: array
+                    items: {$ref: '#/components/schemas/Asset'}
+              example:
+                assets:
+                  - uri: s3://warehouse/orders/daily
+                    name: orders_daily
+                    first_seen_at: '2026-09-01T02:00:00Z'
+                    last_declared_at: '2026-09-26T02:00:00Z'
+                    last_materialized_at: '2026-09-26T02:14:00Z'
+                    last_materialized_run_id: 0b6f3a52-91c4-4f0e-8a77-3c5d2e1f9a40
+                    producers: 1
+                    consumers: 2
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+
+  /v1/namespaces/{ns}/assets/detail:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Assets]
+      operationId: getAsset
+      summary: One asset - who produces it, who consumes it, when it was last built
+      description: The asset is addressed by `?uri=` because a URI contains slashes a path segment cannot carry. The 20 most recent materializations are returned.
+      x-nexus-action: read
+      x-nexus-permissions: [assets.view]
+      parameters:
+        - $ref: '#/components/parameters/assetUri'
+      responses:
+        '200':
+          description: The asset.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AssetDetail'}
+              example:
+                uri: s3://warehouse/orders/daily
+                name: orders_daily
+                first_seen_at: '2026-09-01T02:00:00Z'
+                last_declared_at: '2026-09-26T02:00:00Z'
+                last_materialized_at: '2026-09-26T02:14:00Z'
+                last_materialized_run_id: 0b6f3a52-91c4-4f0e-8a77-3c5d2e1f9a40
+                producers: 1
+                consumers: 1
+                producer_tasks:
+                  - {workflow: nightly-etl, node_id: load, last_run_id: 0b6f3a52-91c4-4f0e-8a77-3c5d2e1f9a40, last_recorded_at: '2026-09-26T02:00:00Z', runs: 26}
+                consumer_tasks:
+                  - {workflow: publish-reports, node_id: render, last_run_id: 5c4b3a29-1807-4f6e-9d5c-4b3a29180f6e, last_recorded_at: '2026-09-26T02:20:00Z', runs: 25}
+                materializations:
+                  - {run_id: 0b6f3a52-91c4-4f0e-8a77-3c5d2e1f9a40, node_id: load, workflow: nightly-etl, materialized_at: '2026-09-26T02:14:00Z', run_state: SUCCEEDED}
+                latest_materialization: {run_id: 0b6f3a52-91c4-4f0e-8a77-3c5d2e1f9a40, node_id: load, workflow: nightly-etl, materialized_at: '2026-09-26T02:14:00Z', run_state: SUCCEEDED}
+        '400':
+          description: '`missing_field`: `uri` is required.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+
+  /v1/namespaces/{ns}/assets/graph:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Assets]
+      operationId: getAssetGraph
+      summary: The declared lineage graph
+      description: |
+        Asset nodes (`asset:<uri>`) and task nodes (`task:<workflow>/<node>`),
+        with an edge task -> asset for what a task produces and asset -> task
+        for what it consumes. With `uri` it is that asset's neighbourhood to
+        `depth` asset-to-asset hops; without it, the whole namespace, from at
+        most 5000 lineage edges (`truncated` when there were more).
+      x-nexus-action: read
+      x-nexus-permissions: [assets.view]
+      parameters:
+        - name: uri
+          in: query
+          description: Focus on this asset.
+          schema: {type: string}
+        - name: depth
+          in: query
+          description: Asset-to-asset hops around `uri`; values outside 1-6 mean 2.
+          schema: {type: integer, default: 2}
+      responses:
+        '200':
+          description: The graph, nodes sorted by id.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AssetGraph'}
+              example:
+                nodes:
+                  - {id: 'asset:s3://warehouse/orders/daily', kind: asset, label: orders_daily, uri: 's3://warehouse/orders/daily'}
+                  - {id: task:nightly-etl/load, kind: task, label: nightly-etl · load, workflow: nightly-etl, node_id: load}
+                  - {id: task:publish-reports/render, kind: task, label: publish-reports · render, workflow: publish-reports, node_id: render}
+                edges:
+                  - {from: task:nightly-etl/load, to: 'asset:s3://warehouse/orders/daily'}
+                  - {from: 'asset:s3://warehouse/orders/daily', to: task:publish-reports/render}
+                truncated: false
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404':
+          description: '`not_found`: no lineage is recorded for the focus `uri`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '501': {$ref: '#/components/responses/EventsNotConfigured'}
         '503': {$ref: '#/components/responses/AuthUnavailable'}
 
   # ── probes (outside /v1) ─────────────────────────────────────────────────
@@ -3352,6 +5763,14 @@ components:
       scheme: bearer
       bearerFormat: nxsess_
       description: A console session from `POST /v1/auth/login`; RBAC roles apply.
+    kgfContext:
+      type: apiKey
+      in: header
+      name: X-KGF-Context
+      description: |
+        A signed KGF Cloud context (Ed25519, three base64url segments), only
+        with NEXUS_AUTH_MODE `kgf` or `both`. Never together with an
+        `Authorization` header. See Authentication in the description.
 
   parameters:
     ns:
@@ -3473,6 +5892,113 @@ components:
       name: limit
       in: query
       schema: {type: integer, minimum: 1}
+    cursor:
+      name: cursor
+      in: query
+      description: The previous page's `next_cursor` (opaque; omit for the first page).
+      schema: {type: string}
+    auditAction:
+      name: action
+      in: query
+      description: Only entries with this action, e.g. `token.create`.
+      schema: {type: string}
+      example: token.create
+    auditActorId:
+      name: actor_id
+      in: query
+      description: Only entries by this actor (a user id).
+      schema: {type: string}
+    auditOutcome:
+      name: outcome
+      in: query
+      description: Only entries with this outcome.
+      schema: {type: string, examples: [success, denied, error]}
+    auditSince:
+      name: since
+      in: query
+      description: Entries at or after this RFC 3339 instant.
+      schema: {type: string, format: date-time}
+      example: '2026-09-01T00:00:00Z'
+    auditUntil:
+      name: until
+      in: query
+      description: Entries strictly before this RFC 3339 instant.
+      schema: {type: string, format: date-time}
+    auditRequestId:
+      name: request_id
+      in: query
+      description: The rows of one request, by its `X-Request-ID` (how a KGF support reference is resolved).
+      schema: {type: string}
+    sinkId:
+      name: id
+      in: path
+      required: true
+      description: The audit sink id.
+      schema: {type: string}
+      example: 6f5e4d3c-2b1a-4098-8765-43210fedcba9
+    serviceAccountId:
+      name: id
+      in: path
+      required: true
+      description: The service account id.
+      schema: {type: string}
+      example: 7c6b5a49-3827-4165-9f4e-3d2c1b0a9f8e
+    channelName:
+      name: name
+      in: path
+      required: true
+      description: The notification channel's name (its id is accepted too).
+      schema: {type: string}
+      example: oncall-pagerduty
+    ruleName:
+      name: name
+      in: path
+      required: true
+      description: The notification rule's name.
+      schema: {type: string}
+      example: nightly-failures
+    deliveryId:
+      name: id
+      in: path
+      required: true
+      description: The notification delivery id (an integer).
+      schema: {type: integer, format: int64}
+      example: 4811
+    triggerName:
+      name: name
+      in: path
+      required: true
+      description: The webhook trigger's name (its id is accepted too).
+      schema: {type: string}
+      example: github-push
+    sensorName:
+      name: name
+      in: path
+      required: true
+      description: The sensor's name (its id is accepted too).
+      schema: {type: string}
+      example: landing-csv
+    assetUri:
+      name: uri
+      in: query
+      required: true
+      description: The asset's URI, exactly as declared.
+      schema: {type: string, minLength: 1}
+      example: s3://warehouse/orders/daily
+    hookNamespace:
+      name: ns
+      in: path
+      required: true
+      description: The trigger's namespace. No credential is involved, so it is not checked against one.
+      schema: {type: string, minLength: 1}
+      example: default
+    hookTrigger:
+      name: trigger
+      in: path
+      required: true
+      description: The trigger's ID (from its `path`), never its name.
+      schema: {type: string, format: uuid}
+      example: 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
 
   headers:
     RetryAfter:
@@ -3493,6 +6019,9 @@ components:
     CacheControlHour:
       description: '`public, max-age=3600`.'
       schema: {type: string}
+    RequestId:
+      description: The request's correlation id (sent when a KGF context carried one).
+      schema: {type: string, pattern: '^[A-Za-z0-9._:-]{1,64}$'}
 
   responses:
     BadRequest:
@@ -3533,10 +6062,11 @@ components:
           schema: {$ref: '#/components/schemas/Error'}
           example: {error: schedule_not_found, message: no such schedule}
     BackfillNotFound:
-      description: '`backfill_not_found`.'
+      description: '`backfill_not_found`: no backfill with that id in this namespace (a malformed id included).'
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
+          example: {error: backfill_not_found, message: no such backfill}
     PayloadTooLarge:
       description: 'The body exceeds the route''s limit (`body_too_large`, `too_large`).'
       content:
@@ -3617,6 +6147,97 @@ components:
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
+    AuditOrAuthUnavailable:
+      description: |
+        `audit_unavailable`: the change was NOT made, because its audit record
+        could not be written (security grants fail closed, ADR-0025); retry
+        shortly. Or `unavailable`: the authentication backend failed.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          examples:
+            auditUnavailable:
+              value: {error: audit_unavailable, message: the change was not made because its audit record could not be written; retry shortly}
+            authUnavailable:
+              value: {error: unavailable, message: authentication is temporarily unavailable}
+    SinkWriteUnavailable:
+      description: '`sinks_disabled` (the gateway has no NEXUS_AUDIT_SINK_KEY), `audit_unavailable` or `unavailable`.'
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {error: sinks_disabled, message: audit sinks need NEXUS_AUDIT_SINK_KEY(_FILE) on the gateway (OPERATIONS §25.2)}
+    AuditPolicyConflict:
+      description: '`conflict`: the policy changed since it was read. `current` is the stored policy to reload from.'
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AuditPolicyConflictError'}
+    TargetAboveActor:
+      description: '`forbidden`, or `target_above_actor`: the service account holds a permission the caller does not.'
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {error: target_above_actor, message: 'This service account holds workflows.delete, which you do not have'}
+    EventsNotConfigured:
+      description: '`not_configured`: notifications, triggers and sensors are not enabled on this gateway.'
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {error: not_configured, message: 'notifications, triggers and sensors are not enabled on this gateway'}
+    ConfigBadRequest:
+      description: |
+        `malformed_json` (not JSON, larger than 64 KiB, or an unknown field),
+        `invalid_name` (1-63 lower-case letters, digits, `.`, `_` or `-`,
+        starting with a letter or digit), `invalid` (a number out of range) or
+        `immutable` (a field that cannot change on update).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {error: invalid_name, message: 'name must be 1-63 characters of lower-case letters, digits, ''.'', ''_'' or ''-'', starting with a letter or digit'}
+    ConfigConflict:
+      description: '`revision_conflict` (changed since it was read; reload and retry) or `already_exists` (the name is taken in this namespace).'
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {error: revision_conflict, message: the object changed since you read it; reload and retry}
+    ConfigWriteUnavailable:
+      description: |
+        `audit_unavailable` (the change and its audit row commit together, so
+        nothing was changed), `secret_key_unconfigured` (storing a secret needs
+        NEXUS_SECRET_KEY on the gateway; a `secret_ref` works without it) or
+        `unavailable` (the authentication backend failed).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {error: secret_key_unconfigured, message: 'storing a secret needs NEXUS_SECRET_KEY on the gateway; configure it, or use a secret_ref instead'}
+    InvalidTrigger:
+      description: |
+        `invalid_trigger` (no `workflow`), `unknown_workflow` (no such
+        workflow or version in this namespace), `invalid_mapping` (a
+        `params_mapping` or `idempotency_key_path` expression is not in the
+        supported subset) or `invalid` (a database constraint).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {error: invalid_mapping, message: 'path "repository.name" must start with $'}
+    InvalidSensor:
+      description: |
+        `invalid_sensor` (no `workflow`, an unknown `kind`, or `config` that
+        does not fit the kind), `unknown_workflow`, `invalid_mapping` or
+        `invalid`.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {error: invalid_sensor, message: 'config.uri must be s3://bucket/prefix (gs:// and az:// are reserved)'}
+    BackfillStateConflict:
+      description: |
+        `backfill_state_conflict`: the backfill's current state does not allow
+        the action. Pause applies to a RUNNING backfill, resume to a PAUSED
+        one, cancel to a RUNNING or PAUSED one; COMPLETED, CANCELLED and
+        FAILED are final. `state` is the state it is in, when it could be read.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/BackfillStateConflictError'}
+          example: {error: backfill_state_conflict, message: 'resume backfill 8a7b6c5d-4e3f-4a1b-9c0d-e1f2a3b4c5d6: backfill is not in a state this transition may leave: backfill 8a7b6c5d-4e3f-4a1b-9c0d-e1f2a3b4c5d6 is CANCELLED; it can move to RUNNING only from PAUSED', state: CANCELLED}
 
   examples:
     HelloDagSpec:
@@ -3955,7 +6576,7 @@ components:
     Attempt:
       type: object
       description: '`error` and `metrics` are omitted without `tasks.results.view`.'
-      required: [id, node_id, attempt_number, state, queue, worker_id, worker_hostname, pending_reason, scheduled_at, dispatched_at, started_at, ended_at, cache_hit_of, progress_message, progress_fraction, progress_at, progress_message_at]
+      required: [id, node_id, attempt_number, state, queue, worker_id, worker_hostname, pending_reason, scheduled_at, dispatched_at, started_at, ended_at, cache_hit_of, progress_message, progress_fraction, progress_at, progress_message_at, usage_units, usage_reported_at]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         node_id: {type: string}
@@ -3976,6 +6597,15 @@ components:
         progress_fraction: {type: [number, 'null'], minimum: 0, maximum: 1}
         progress_at: {$ref: '#/components/schemas/NullableTimestamp'}
         progress_message_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        usage_units:
+          type: object
+          description: |
+            Usage the TASK reported through the workload API (ADR-0032):
+            cumulative totals keyed like `tokens:<provider>/<model>:input`.
+            `{}` when nothing was reported. Copied into the usage ledger when
+            the attempt ends.
+          additionalProperties: {type: number}
+        usage_reported_at: {$ref: '#/components/schemas/NullableTimestamp'}
 
     Expansion:
       type: object
@@ -4526,6 +7156,17 @@ components:
         max_active_runs: {type: integer, minimum: 0}
         max_runs_per_hour: {type: integer, minimum: 0}
         storage_soft_limit_bytes: {type: integer, minimum: 0, description: 'Reported against measured storage, never enforced.'}
+        rate_limits:
+          type: object
+          description: |
+            Shared token-bucket limits on calls to external providers (ADR-0032),
+            keyed by `<provider>` or `<provider>/<model>`, enforced by the permit
+            service tasks call through the workload API, never at dispatch.
+            Absent means no key is limited. While the quotas are locked, raising
+            a rate or burst, or removing a key, counts as loosening.
+          maxProperties: 64
+          propertyNames: {pattern: '^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,127}$'}
+          additionalProperties: {$ref: '#/components/schemas/RateLimit'}
 
     PlatformPlan:
       type: object
@@ -4839,8 +7480,8 @@ components:
       properties:
         namespace: {type: string}
         name: {type: string}
-        role: {type: string, enum: [admin, reader, worker]}
-        kind: {type: string, enum: [api_key, session, token]}
+        role: {type: string, enum: [admin, reader, worker], description: 'The legacy account role; a KGF principal is always `reader` (its authority is its permissions).'}
+        kind: {type: string, enum: [api_key, session, token, kgf]}
         permissions:
           type: object
           description: Coarse actions this principal may perform.
@@ -4856,6 +7497,8 @@ components:
           type: [array, 'null']
           items: {type: string}
         user_id: {type: string}
+        service_account_id: {type: string, description: 'Set for a service-account token.'}
+        kgf: {$ref: '#/components/schemas/KGFIdentity'}
         scopes:
           type: array
           items: {type: string}
@@ -4920,19 +7563,33 @@ components:
 
     CreateTokenRequest:
       type: object
-      required: [name, scopes]
+      description: A legacy token needs `scopes`; a ceilinged or service-account token needs `permissions`.
+      required: [name]
+      anyOf:
+        - required: [scopes]
+        - required: [permissions]
       properties:
         name: {type: string, minLength: 1}
-        role: {type: string, enum: [admin, reader, worker], default: reader}
+        role: {type: string, enum: [admin, reader, worker], default: reader, description: 'Legacy and ceilinged tokens; ignored for a service-account token.'}
         scopes:
           type: array
           minItems: 1
+          description: Legacy tokens. With `permissions` they only narrow the coarse scopes the ceiling implies.
           items: {type: string, enum: [read, write, admin_write, worker_rpc]}
-        expires_in_days: {type: integer, default: 0, description: '0 = 90 days; negative = never expires.'}
+        permissions:
+          type: array
+          minItems: 1
+          description: The permission ceiling, e.g. `runs.view`. Every name must be in the catalog and held by the caller.
+          items: {type: string, pattern: '^[a-z_]+(\.[a-z_]+)+$'}
+        service_account_id:
+          type: string
+          format: uuid
+          description: Mint the token for this service account (needs `permissions`).
+        expires_in_days: {type: integer, default: 0, description: '0 = 90 days; negative = never expires (administrators only).'}
 
     Token:
       type: object
-      required: [id, namespace, name, scopes, role, expires_at, last_used_at, created_by, created_at, revoked_at, live]
+      required: [id, namespace, name, scopes, role, expires_at, last_used_at, created_by, created_at, revoked_at, service_account_id, permissions, live]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         namespace: {type: string}
@@ -4946,6 +7603,11 @@ components:
         created_by: {type: [string, 'null']}
         created_at: {$ref: '#/components/schemas/Timestamp'}
         revoked_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        service_account_id: {type: [string, 'null'], description: 'The owning service account; null otherwise.'}
+        permissions:
+          type: [array, 'null']
+          description: The permission ceiling; null for a legacy token.
+          items: {type: string}
         live: {type: boolean}
 
     TokenCreated:
@@ -4959,7 +7621,7 @@ components:
 
     AuditEntry:
       type: object
-      required: [id, namespace, actor_id, actor_kind, actor_label, action, target_kind, target_id, outcome, detail, client_ip, occurred_at]
+      required: [id, namespace, actor_id, actor_kind, actor_label, action, target_kind, target_id, outcome, detail, client_ip, occurred_at, chain_seq, row_hash, request_id, kgf]
       properties:
         id: {type: integer}
         namespace: {type: string}
@@ -4971,8 +7633,12 @@ components:
         target_id: {type: string}
         outcome: {type: string}
         detail: {$ref: '#/components/schemas/AnyJSON'}
-        client_ip: {type: string}
+        client_ip: {type: string, description: 'Evidence only (it honours X-Forwarded-For); never used to authorize.'}
         occurred_at: {$ref: '#/components/schemas/Timestamp'}
+        chain_seq: {type: [integer, 'null'], minimum: 1, description: 'Position in the namespace''s hash chain; null for rows written before the chain existed.'}
+        row_hash: {type: [string, 'null'], pattern: '^[0-9a-f]{64}$', description: 'SHA-256 over the row and the previous row''s hash.'}
+        request_id: {type: string, description: 'The request''s correlation id; empty when none was given.'}
+        kgf: {$ref: '#/components/schemas/AuditKGF'}
 
     Readiness:
       type: object
@@ -4983,3 +7649,655 @@ components:
           type: object
           additionalProperties: {type: string}
         detail: {type: string}
+
+    BackfillStateConflictError:
+      type: object
+      required: [error, message]
+      properties:
+        error: {const: backfill_state_conflict}
+        message: {type: string}
+        state:
+          type: string
+          enum: [RUNNING, PAUSED, COMPLETED, CANCELLED, FAILED]
+          description: The backfill's current state; absent when it could not be re-read.
+
+    RateLimit:
+      type: object
+      additionalProperties: false
+      description: |
+        One key's shared token-bucket limit. At least one rate must be set; a
+        zero (or absent) rate leaves that dimension unlimited. Bursts default
+        to one second of requests (at least 1) and one minute of tokens, and
+        need their rate.
+      properties:
+        requests_per_second: {type: number, minimum: 0, maximum: 1000000}
+        tokens_per_minute: {type: integer, minimum: 0, maximum: 1000000000000}
+        burst_requests: {type: integer, minimum: 0, maximum: 100000000}
+        burst_tokens: {type: integer, minimum: 0, maximum: 1000000000000}
+
+    KGFIdentity:
+      type: object
+      description: |
+        Who KGF Cloud says the caller is (ADR-0024), taken only from a context
+        whose signature the gateway verified. The organization, subscription
+        and resource group are the readable form of the opaque `kgf-<hash>`
+        namespace they map to.
+      required: [organization, subscription, resource_group, principal, role, issuer, token_id]
+      properties:
+        organization: {type: string}
+        subscription: {type: string}
+        resource_group: {type: string}
+        principal: {type: string, description: 'The EFFECTIVE principal: the person a delegating service acts for, when there is one.'}
+        role: {type: string, description: 'The effective KGF role (`operator`, `viewer`, or a service''s mapped role).', examples: [operator, viewer]}
+        via: {type: string, description: 'The KGF service that presented a delegated context.'}
+        request_id: {type: string, description: 'KGF''s request id; also sent back as `X-Request-ID`.'}
+        issuer: {type: string}
+        token_id: {type: string}
+
+    AuditKGF:
+      type: [object, 'null']
+      description: KGF Cloud attribution of an audit row (a verified X-KGF-Context); null when there was none.
+      properties:
+        organization: {type: string}
+        subscription: {type: string}
+        resource_group: {type: string}
+        principal: {type: string}
+        on_behalf_of: {type: string}
+
+    AuditPolicy:
+      type: object
+      required: [namespace, retention_days, legal_hold, legal_hold_reason, legal_hold_by, legal_hold_at, revision, updated_by, updated_at, last_purge_at]
+      properties:
+        namespace: {type: string}
+        retention_days:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 36500
+          description: Rows older than this are purged; null keeps rows forever.
+        legal_hold: {type: boolean, description: 'While true nothing is purged.'}
+        legal_hold_reason: {type: string}
+        legal_hold_by: {type: string}
+        legal_hold_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        revision: {type: integer, minimum: 0, description: '0 for a namespace that never set a policy.'}
+        updated_by: {type: string}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+        last_purge_at: {$ref: '#/components/schemas/NullableTimestamp'}
+
+    PutAuditPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [revision]
+      properties:
+        retention_days:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 36500
+          description: Null or absent keeps rows forever.
+        revision: {type: integer, minimum: 0, description: 'The revision last read.'}
+
+    LegalHoldRequest:
+      type: object
+      additionalProperties: false
+      required: [hold, revision]
+      properties:
+        hold: {type: boolean}
+        reason: {type: string, description: 'Required when placing a hold: a matter, ticket or case reference.'}
+        revision: {type: integer, minimum: 0}
+
+    AuditPolicyConflictError:
+      type: object
+      required: [error, message, current]
+      properties:
+        error: {const: conflict}
+        message: {type: string}
+        current: {$ref: '#/components/schemas/AuditPolicy'}
+
+    AuditSink:
+      type: object
+      description: A SIEM sink. Its signing secret is stored encrypted and never returned after creation or rotation.
+      required: [id, namespace, name, kind, format, url, enabled, batch_size, cursor_seq, consecutive_failures, next_attempt_at, last_attempt_at, last_success_at, last_error, created_by, created_at, revision]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        namespace: {type: string}
+        name: {type: string}
+        kind: {const: webhook}
+        format: {type: string, enum: [nexus, kgf]}
+        url: {type: string}
+        enabled: {type: boolean}
+        batch_size: {type: integer, minimum: 1, maximum: 1000}
+        cursor_seq: {type: integer, minimum: 0, description: 'The chain position delivered so far.'}
+        consecutive_failures: {type: integer, minimum: 0}
+        next_attempt_at: {$ref: '#/components/schemas/Timestamp'}
+        last_attempt_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        last_success_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        last_error: {type: string}
+        created_by: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        revision: {type: integer, minimum: 1}
+
+    AuditSinkWithSecret:
+      allOf:
+        - $ref: '#/components/schemas/AuditSink'
+        - type: object
+          required: [signing_secret, signing_secret_shown_once]
+          properties:
+            signing_secret: {type: string, pattern: '^whsec_', description: 'Shown exactly once.'}
+            signing_secret_shown_once: {const: true}
+
+    CreateAuditSinkRequest:
+      type: object
+      additionalProperties: false
+      required: [name, url]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 100}
+        url: {type: string, description: 'An https URL with no credentials and no internal address.'}
+        batch_size: {type: integer, minimum: 1, maximum: 1000, default: 100}
+        enabled: {type: boolean, default: true}
+        from_start: {type: boolean, default: false, description: 'Replay the whole retained chain rather than starting at the current head.'}
+        format: {type: string, enum: [nexus, kgf], default: nexus}
+
+    UpdateAuditSinkRequest:
+      type: object
+      additionalProperties: false
+      required: [revision]
+      properties:
+        url: {type: string}
+        enabled: {type: boolean}
+        batch_size: {type: integer, minimum: 1, maximum: 1000}
+        revision: {type: integer, minimum: 1}
+
+    InvalidSinkError:
+      type: object
+      description: The one error body without a `message`; `problems` lists every reason.
+      required: [error, problems]
+      properties:
+        error: {const: invalid_sink}
+        problems:
+          type: array
+          items: {type: string}
+
+    ServiceAccount:
+      type: object
+      required: [id, namespace, name, description, disabled, disabled_at, created_at, revision, roles, live_tokens]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        namespace: {type: string}
+        name: {type: string}
+        description: {type: string}
+        disabled: {type: boolean}
+        disabled_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        revision: {type: integer}
+        roles:
+          type: [array, 'null']
+          items: {type: string}
+        live_tokens: {type: integer, minimum: 0, description: 'Unrevoked, unexpired tokens of the account.'}
+
+    CreateServiceAccountRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{1,62}$', description: '2-63 lower-case letters, digits, `.`, `_` or `-`.'}
+        description: {type: string, maxLength: 500}
+        roles:
+          type: array
+          description: RBAC role names to bind; never Administrator.
+          items: {type: string}
+
+    UpdateServiceAccountRequest:
+      type: object
+      additionalProperties: false
+      required: [revision]
+      properties:
+        description: {type: string, maxLength: 500}
+        revision: {type: integer, minimum: 1}
+
+    ServiceAccountState:
+      type: object
+      required: [id, disabled]
+      properties:
+        id: {type: string}
+        disabled: {type: boolean}
+
+    ServiceAccountRoles:
+      type: object
+      required: [roles, revision]
+      properties:
+        roles:
+          type: array
+          items: {type: string}
+        revision: {type: integer, minimum: 0}
+
+    PutServiceAccountRolesRequest:
+      type: object
+      additionalProperties: false
+      required: [roles, revision]
+      properties:
+        roles:
+          type: [array, 'null']
+          maxItems: 20
+          items: {type: string}
+        revision: {type: integer, minimum: 0}
+
+    ChannelKind:
+      type: string
+      enum: [slack_webhook, slack_bot, teams, pagerduty, webhook, email]
+
+    NotificationEvent:
+      type: string
+      enum: [run.failed, run.succeeded, run.timed_out, run.sla_exceeded, attempt.lost]
+
+    NotificationChannel:
+      type: object
+      required: [id, namespace, name, kind, config, secret, rate_limit_per_minute, enabled, created_by, created_at, updated_at, revision]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        namespace: {type: string}
+        name: {type: string}
+        kind: {$ref: '#/components/schemas/ChannelKind'}
+        config: {type: object, description: 'Kind-specific settings; never secrets.'}
+        secret:
+          type: object
+          description: Whether a secret is configured, never the secret.
+          required: [configured, source, hint]
+          properties:
+            configured: {type: boolean}
+            source: {type: string, enum: ['', sealed, ref], description: '`sealed` (stored encrypted), `ref` (an external reference) or empty.'}
+            hint: {type: string, description: 'A short, non-reversible hint to recognise the secret by.'}
+            ref: {type: string, description: 'The reference, when `source` is `ref`.'}
+        rate_limit_per_minute: {type: integer, minimum: 1, maximum: 6000}
+        enabled: {type: boolean}
+        created_by: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+        revision: {type: integer, minimum: 1}
+
+    NotificationChannelCreated:
+      allOf:
+        - $ref: '#/components/schemas/NotificationChannel'
+        - type: object
+          properties:
+            signing_secret: {type: string, description: 'A generated webhook signing key, shown exactly once.'}
+
+    CreateNotificationChannelRequest:
+      type: object
+      additionalProperties: false
+      required: [name, kind]
+      properties:
+        name: {type: string, pattern: '^[a-z0-9][a-z0-9_.-]{0,62}$'}
+        kind: {$ref: '#/components/schemas/ChannelKind'}
+        config: {type: object, description: 'Kind-specific settings (see the operation).'}
+        secret: {type: string, minLength: 1, description: 'The secret inline. Not with `secret_ref`.'}
+        secret_ref: {type: string, description: 'A reference to an external secret. Not with `secret`.'}
+        rate_limit_per_minute: {type: integer, minimum: 1, maximum: 6000, default: 30}
+        enabled: {type: boolean, default: true}
+        revision: {type: integer, description: 'Ignored on create.'}
+
+    UpdateNotificationChannelRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name: {type: string, description: 'Optional; must equal the stored name.'}
+        kind: {type: string, description: 'Optional; must equal the stored kind.'}
+        config: {type: object}
+        secret: {type: string, minLength: 1}
+        secret_ref: {type: string}
+        rate_limit_per_minute: {type: integer, minimum: 1, maximum: 6000}
+        enabled: {type: boolean}
+        revision: {type: integer, minimum: 0, description: '0 skips the concurrency check.'}
+
+    NotificationRule:
+      type: object
+      required: [id, namespace, name, events, workflows, labels, enabled, channels, created_by, created_at, updated_at, revision]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        namespace: {type: string}
+        name: {type: string}
+        events:
+          type: array
+          items: {$ref: '#/components/schemas/NotificationEvent'}
+        workflows:
+          type: [array, 'null']
+          description: Workflow names; empty matches every workflow.
+          items: {type: string}
+        labels:
+          type: [object, 'null']
+          description: Run labels that must all be present.
+          additionalProperties: {type: string}
+        sla_seconds: {type: integer, minimum: 60, maximum: 2592000, description: 'Present with `run.sla_exceeded`.'}
+        enabled: {type: boolean}
+        channels:
+          type: array
+          description: Channel names.
+          items: {type: string}
+        created_by: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+        revision: {type: integer, minimum: 1}
+
+    NotificationRuleRequest:
+      type: object
+      additionalProperties: false
+      description: '`name` is required on create; on update it is optional and must equal the path.'
+      required: [events, channels]
+      properties:
+        name: {type: string, pattern: '^[a-z0-9][a-z0-9_.-]{0,62}$'}
+        events:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/NotificationEvent'}
+        workflows:
+          type: array
+          maxItems: 100
+          items: {type: string}
+        labels:
+          type: object
+          maxProperties: 20
+          additionalProperties: {type: string}
+        sla_seconds: {type: integer, minimum: 60, maximum: 2592000}
+        channels:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: {type: string}
+        enabled: {type: boolean, default: true}
+        revision: {type: integer, minimum: 0, description: 'Update only; 0 skips the concurrency check.'}
+
+    NotificationDelivery:
+      type: object
+      required: [id, channel, channel_id, channel_kind, rule, rule_id, event_key, dedup_key, event_type, action, run_id, payload, state, attempts, max_attempts, next_attempt_at, last_error, created_by, created_at, delivered_at, dead_at]
+      properties:
+        id: {type: integer, format: int64}
+        channel: {type: string}
+        channel_id: {type: string}
+        channel_kind: {$ref: '#/components/schemas/ChannelKind'}
+        rule: {type: string, description: 'Empty for a channel test.'}
+        rule_id: {type: string}
+        event_key: {type: string, description: 'Unique per delivery.'}
+        dedup_key: {type: string, description: 'The receiver-facing idempotency key; kept by a redrive.'}
+        event_type: {type: string, examples: [run.failed, notification.test]}
+        action: {type: string, enum: [trigger, resolve, test]}
+        run_id: {type: string, description: 'Empty when the event concerns no run.'}
+        payload: {type: object}
+        state: {type: string, enum: [pending, delivered, dead]}
+        attempts: {type: integer, minimum: 0}
+        max_attempts: {type: integer, minimum: 1, maximum: 50}
+        next_attempt_at: {$ref: '#/components/schemas/Timestamp'}
+        last_error: {type: string}
+        last_status: {type: integer, description: 'The receiver''s last HTTP status, when it answered.'}
+        redrive_of: {type: integer, format: int64, description: 'The dead delivery this one re-sends.'}
+        created_by: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        delivered_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        dead_at: {$ref: '#/components/schemas/NullableTimestamp'}
+
+    ParamsMapping:
+      type: object
+      description: |
+        Run parameter name to expression: a JSONPath of member and index steps
+        only (`$.payload.ref`, `$.payload.commits[0].id`, `$['odd key']`), a
+        template string with `{{ $.path }}` placeholders, or a literal. A path
+        that does not resolve is an error, never a silently missing parameter.
+      additionalProperties: true
+
+    WebhookTrigger:
+      type: object
+      required: [id, namespace, name, workflow, params_mapping, idempotency_key_path, priority, tolerance_seconds, enabled, secret_rotated_at, previous_secret_expires_at, created_by, created_at, updated_at, last_fired_at, fire_count, revision, path, signature_scheme]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        namespace: {type: string}
+        name: {type: string}
+        workflow: {type: string}
+        workflow_version: {type: integer, minimum: 1, description: 'Present only when the trigger pins a version.'}
+        params_mapping: {$ref: '#/components/schemas/ParamsMapping'}
+        idempotency_key_path: {type: string, description: 'Empty: each distinct signed delivery is one run.'}
+        priority: {type: integer, minimum: 0, maximum: 1000}
+        tolerance_seconds: {type: integer, minimum: 30, maximum: 3600}
+        enabled: {type: boolean}
+        secret_rotated_at: {$ref: '#/components/schemas/Timestamp'}
+        previous_secret_expires_at:
+          $ref: '#/components/schemas/NullableTimestamp'
+          description: Until when the rotated-out secret still verifies; null when it no longer does.
+        created_by: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+        last_fired_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        fire_count: {type: integer, minimum: 0}
+        revision: {type: integer, minimum: 1}
+        path: {type: string, description: 'Where senders POST: `/v1/hooks/<ns>/<trigger id>`.'}
+        url: {type: string, description: 'The absolute hook URL, when the gateway is configured with its public URL.'}
+        signature_scheme: {type: string}
+
+    WebhookTriggerWithSecret:
+      allOf:
+        - $ref: '#/components/schemas/WebhookTrigger'
+        - type: object
+          required: [secret]
+          properties:
+            secret: {type: string, description: 'The signing secret, shown exactly once.'}
+
+    TriggerFields:
+      type: object
+      properties:
+        workflow: {type: string, minLength: 1, description: 'Must name an existing workflow.'}
+        workflow_version: {type: integer, minimum: 1, description: 'Pin a version; otherwise the newest runs.'}
+        params_mapping: {$ref: '#/components/schemas/ParamsMapping'}
+        idempotency_key_path: {type: string, description: 'An expression naming the value that de-duplicates deliveries.'}
+        priority: {type: integer, minimum: 0, maximum: 1000, default: 100}
+        tolerance_seconds: {type: integer, minimum: 30, maximum: 3600, default: 300, description: 'Maximum clock skew of `X-Nexus-Timestamp`.'}
+        enabled: {type: boolean, default: true}
+
+    CreateTriggerRequest:
+      allOf:
+        - $ref: '#/components/schemas/TriggerFields'
+        - type: object
+          required: [name, workflow]
+          properties:
+            name: {type: string, pattern: '^[a-z0-9][a-z0-9_.-]{0,62}$'}
+            revision: {type: integer, description: 'Ignored on create.'}
+
+    UpdateTriggerRequest:
+      allOf:
+        - $ref: '#/components/schemas/TriggerFields'
+        - type: object
+          properties:
+            name: {type: string, description: 'Optional; must equal the path.'}
+            revision: {type: integer, minimum: 0, description: '0 skips the concurrency check.'}
+
+    WebhookReceipt:
+      type: object
+      required: [received_at, outcome, http_status, run_id, idempotency_key, detail, signature_digest]
+      properties:
+        received_at: {$ref: '#/components/schemas/Timestamp'}
+        outcome: {type: string, enum: [accepted, deduplicated, rejected]}
+        http_status: {type: integer}
+        run_id: {type: string, description: 'Empty when no run was started or found.'}
+        idempotency_key: {type: string}
+        detail: {type: string, description: 'Why a delivery was rejected.'}
+        signature_digest: {type: string, pattern: '^[0-9a-f]{16}$', description: 'A prefix of the delivery''s digest, to correlate with the sender''s logs.'}
+
+    SensorKind:
+      type: string
+      enum: [object_store, run_succeeded]
+
+    SensorState:
+      type: object
+      description: The workflow-manager's runtime view of the sensor.
+      required: [status, baseline_done, cursor, watermark, next_poll_at, lease_owner, lease_until, last_poll_at, last_success_at, last_error, consecutive_failures, observed_total, triggered_total, pending, definition_current]
+      properties:
+        status: {type: string, enum: [initializing, ok, error]}
+        baseline_done: {type: boolean}
+        cursor: {type: string}
+        watermark: {$ref: '#/components/schemas/NullableTimestamp'}
+        next_poll_at: {$ref: '#/components/schemas/Timestamp'}
+        lease_owner: {type: string, description: 'The replica polling it right now, if any.'}
+        lease_until: {$ref: '#/components/schemas/NullableTimestamp'}
+        last_poll_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        last_success_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        last_error: {type: string}
+        consecutive_failures: {type: integer, minimum: 0}
+        observed_total: {type: integer, minimum: 0}
+        triggered_total: {type: integer, minimum: 0}
+        pending: {type: integer, minimum: 0, description: 'Observations waiting for their run.'}
+        definition_current: {type: boolean, description: 'False until a replica picks up the latest definition.'}
+
+    Sensor:
+      type: object
+      required: [id, namespace, name, kind, workflow, config, params_mapping, poll_interval_seconds, backfill, priority, enabled, created_by, created_at, updated_at, revision, status]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        namespace: {type: string}
+        name: {type: string}
+        kind: {$ref: '#/components/schemas/SensorKind'}
+        workflow: {type: string}
+        workflow_version: {type: integer, minimum: 1, description: 'Present only when the sensor pins a version.'}
+        config: {type: object}
+        params_mapping: {$ref: '#/components/schemas/ParamsMapping'}
+        poll_interval_seconds: {type: integer, minimum: 5, maximum: 86400}
+        backfill: {type: boolean, description: 'Trigger for what already existed at the first pass.'}
+        priority: {type: integer, minimum: 0, maximum: 1000}
+        enabled: {type: boolean}
+        created_by: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+        revision: {type: integer, minimum: 1}
+        status:
+          type: string
+          enum: [disabled, waiting, stale, initializing, ok, error]
+          description: |
+            `disabled`; `waiting` (never polled yet); `stale` (its poll is more
+            than 5 minutes overdue and no replica holds its lease, so no
+            workflow-manager is polling it); otherwise the stored `state.status`.
+        state: {$ref: '#/components/schemas/SensorState'}
+
+    SensorFields:
+      type: object
+      properties:
+        workflow: {type: string, minLength: 1}
+        workflow_version: {type: integer, minimum: 1}
+        config:
+          type: object
+          description: '`object_store`: `uri` and `pattern` (a glob). `run_succeeded`: `upstream_workflow`.'
+          properties:
+            uri: {type: string}
+            pattern: {type: string}
+            upstream_workflow: {type: string}
+          additionalProperties: false
+        params_mapping: {$ref: '#/components/schemas/ParamsMapping'}
+        poll_interval_seconds: {type: integer, minimum: 5, maximum: 86400, default: 30}
+        backfill: {type: boolean, default: false}
+        priority: {type: integer, minimum: 0, maximum: 1000, default: 100}
+        enabled: {type: boolean, default: true}
+
+    CreateSensorRequest:
+      allOf:
+        - $ref: '#/components/schemas/SensorFields'
+        - type: object
+          required: [name, kind, workflow]
+          properties:
+            name: {type: string, pattern: '^[a-z0-9][a-z0-9_.-]{0,62}$'}
+            kind: {$ref: '#/components/schemas/SensorKind'}
+            revision: {type: integer, description: 'Ignored on create.'}
+
+    UpdateSensorRequest:
+      allOf:
+        - $ref: '#/components/schemas/SensorFields'
+        - type: object
+          properties:
+            name: {type: string, description: 'Optional; must equal the path.'}
+            kind: {type: string, description: 'Optional; must equal the stored kind.'}
+            revision: {type: integer, minimum: 0, description: '0 skips the concurrency check.'}
+
+    SensorObservation:
+      type: object
+      required: [item_key, item, outcome, run_id, attempts, last_error, observed_at, triggered_at]
+      properties:
+        item_key: {type: string, description: 'The object key or upstream run id.'}
+        item: {type: object, description: 'What the mapping sees as `$.object` or `$.run`.'}
+        outcome: {type: string, enum: [pending, triggered, baseline, failed]}
+        run_id: {type: string, description: 'Empty until triggered.'}
+        attempts: {type: integer, minimum: 0}
+        last_error: {type: string}
+        observed_at: {$ref: '#/components/schemas/Timestamp'}
+        triggered_at: {$ref: '#/components/schemas/NullableTimestamp'}
+
+    Asset:
+      type: object
+      required: [uri, name, first_seen_at, last_declared_at, last_materialized_at, last_materialized_run_id, producers, consumers]
+      properties:
+        uri: {type: string}
+        name: {type: string}
+        first_seen_at: {$ref: '#/components/schemas/Timestamp'}
+        last_declared_at: {$ref: '#/components/schemas/Timestamp'}
+        last_materialized_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        last_materialized_run_id: {type: string, description: 'Empty when never materialized.'}
+        producers: {type: integer, minimum: 0, description: 'Distinct (workflow, task) pairs that declare producing it.'}
+        consumers: {type: integer, minimum: 0}
+
+    AssetTask:
+      type: object
+      required: [workflow, node_id, last_run_id, last_recorded_at, runs]
+      properties:
+        workflow: {type: string}
+        node_id: {type: string}
+        last_run_id: {type: string}
+        last_recorded_at: {$ref: '#/components/schemas/Timestamp'}
+        runs: {type: integer, minimum: 1}
+
+    AssetMaterialization:
+      type: object
+      required: [run_id, node_id, workflow, materialized_at, run_state]
+      properties:
+        run_id: {type: string}
+        node_id: {type: string}
+        workflow: {type: string}
+        materialized_at: {$ref: '#/components/schemas/Timestamp'}
+        run_state: {type: string, description: 'Empty when the run no longer exists.'}
+
+    AssetDetail:
+      allOf:
+        - $ref: '#/components/schemas/Asset'
+        - type: object
+          required: [producer_tasks, consumer_tasks, materializations, latest_materialization]
+          properties:
+            producer_tasks:
+              type: array
+              items: {$ref: '#/components/schemas/AssetTask'}
+            consumer_tasks:
+              type: array
+              items: {$ref: '#/components/schemas/AssetTask'}
+            materializations:
+              type: array
+              description: The 20 most recent, newest first.
+              items: {$ref: '#/components/schemas/AssetMaterialization'}
+            latest_materialization:
+              oneOf:
+                - $ref: '#/components/schemas/AssetMaterialization'
+                - type: 'null'
+
+    AssetGraph:
+      type: object
+      required: [nodes, edges, truncated]
+      properties:
+        nodes:
+          type: array
+          items:
+            type: object
+            required: [id, kind, label]
+            properties:
+              id: {type: string, description: '`asset:<uri>` or `task:<workflow>/<node>`.'}
+              kind: {type: string, enum: [asset, task]}
+              label: {type: string}
+              uri: {type: string, description: 'Asset nodes.'}
+              workflow: {type: string, description: 'Task nodes.'}
+              node_id: {type: string, description: 'Task nodes.'}
+        edges:
+          type: array
+          items:
+            type: object
+            required: [from, to]
+            properties:
+              from: {type: string}
+              to: {type: string}
+        truncated: {type: boolean, description: 'More than 5000 lineage edges exist; the graph is partial.'}
