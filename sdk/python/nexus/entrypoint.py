@@ -42,6 +42,7 @@ from typing import Any, Mapping, Sequence
 
 from .context import FileResultStore, InMemoryResultStore, TaskContext, derive_idempotency_key
 from .task import TaskDefinition
+from .tracing import task_span, trace_context_from_environment
 from .types import ValueSpec
 from .worker import HandlerNotFound, import_modules, resolve
 
@@ -159,6 +160,7 @@ def context_from_environment(definition: TaskDefinition[Any], env: Mapping[str, 
         start_to_close_deadline_unix_ms=int(env.get("NEXUS_DEADLINE_UNIX_MS") or 0),
         worker_id=env.get("NEXUS_WORKER_ID", ""),
         store=FileResultStore(work_dir) if work_dir else InMemoryResultStore(),
+        _trace=trace_context_from_environment(env),
     )
 
 
@@ -195,7 +197,8 @@ def run_from_environment(
     ctx = context_from_environment(definition, env)
     ctx.log.info("task starting", inputs=sorted(kwargs))
     try:
-        value = definition.fn(ctx, **kwargs)
+        with task_span(ctx):
+            value = definition.fn(ctx, **kwargs)
         written = write_outputs(definition, value, output_dir)
     except Exception as e:
         ctx.log.error("task failed", error_type=type(e).__name__, error=str(e))

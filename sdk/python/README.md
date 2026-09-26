@@ -19,6 +19,7 @@ structural rather than a promise.
 ```bash
 pip install -e sdk/python          # from the repo root
 pip install -e 'sdk/python[yaml]'  # + PyYAML, only needed to RENDER a spec
+pip install -e 'sdk/python[opentelemetry]'  # + OTel API/SDK, see Tracing
 ```
 
 No runtime dependencies. The SDK is installed into every task image, and each
@@ -226,6 +227,37 @@ window that mechanism 3 does *not* close.
 | `ctx.store.put/get` | Result store. Payloads never transit the control plane. |
 | `ctx.effect_recorded` / `record_effect` / `previous_result` | The effect journal (mechanism 3). |
 | `ctx.remaining_ms()` | Time left before `start_to_close`, per control-plane time. |
+| `ctx.traceparent` / `ctx.tracestate` / `ctx.trace_id` | The attempt's W3C trace context, or None (see Tracing). |
+| `ctx.trace_headers()` | W3C headers for an outbound call so the callee joins the trace. |
+
+## Tracing
+
+The worker agent exports the attempt's W3C trace context to every task process
+(subprocess, docker and kubernetes executors) as `TRACEPARENT`, plus
+`TRACESTATE` when non-empty -- OpenTelemetry's environment-carrier convention.
+The SDK validates `TRACEPARENT` strictly (version `00`, non-zero 32-hex trace id
+and 16-hex span id, 2-hex flags); a missing or malformed value is ignored with a
+DEBUG log on the `nexus.tracing` logger and never fails a task.
+
+Without OpenTelemetry installed you still get `ctx.traceparent`, `ctx.trace_id`
+(handy as a log correlation field) and `ctx.trace_headers()`.
+
+With the `opentelemetry` extra installed, the handler runs inside a span named
+`nexus.task <node id>` whose parent is the agent's attempt span, carrying
+`nexus.run_id`, `nexus.attempt_id` and `nexus.node_id` attributes. An exception
+is recorded on it and its status set to ERROR; the exception still propagates
+to the worker unchanged. Spans your code starts inside the handler are children
+of that span, so they land in the platform's trace.
+
+The SDK never configures a `TracerProvider` or exporter -- without one the
+OTel API is a no-op. Configure it yourself, e.g. run the handler under
+`opentelemetry-instrument` or install your own `TracerProvider` driven by the
+`OTEL_*` environment. To propagate further, put `ctx.trace_headers()` (or
+`nexus.tracing.propagation_headers()`) on outbound requests: with OTel it
+carries the currently active span, otherwise the platform's own context.
+
+`nexus.local` has no attempt span: a valid `TRACEPARENT`/`TRACESTATE` in the
+runner's environment is handed to every task instead.
 
 ## Client
 

@@ -25,6 +25,8 @@ import threading
 import time
 from typing import Any, Callable, Mapping, Protocol, TextIO
 
+from .tracing import TraceContext, propagation_headers
+
 __all__ = [
     "TaskContext",
     "ResultStore",
@@ -411,6 +413,10 @@ class TaskContext:
     _heartbeat_fn: HeartbeatFn | None = None
     _effects: dict[str, Any] = dataclasses.field(default_factory=dict)
     _effects_loaded: bool = False
+    # The platform's W3C trace context (TRACEPARENT/TRACESTATE, see
+    # nexus.tracing). Private and exposed through read-only properties: a
+    # handler reassigning it would silently detach its spans from the run.
+    _trace: TraceContext | None = None
 
     def __post_init__(self) -> None:
         if self.log is None:
@@ -423,6 +429,36 @@ class TaskContext:
                     "task_ref": self.task_ref,
                 }
             )
+
+    # ── tracing ─────────────────────────────────────────────────────────────
+    @property
+    def trace_context(self) -> TraceContext | None:
+        """The platform's validated W3C trace context, or None when absent."""
+        return self._trace
+
+    @property
+    def traceparent(self) -> str | None:
+        """The attempt's W3C ``traceparent`` (from $TRACEPARENT), or None."""
+        return self._trace.traceparent if self._trace is not None else None
+
+    @property
+    def tracestate(self) -> str | None:
+        """The attempt's W3C ``tracestate`` (from $TRACESTATE), or None."""
+        return self._trace.tracestate if self._trace is not None else None
+
+    @property
+    def trace_id(self) -> str | None:
+        """The run's 32-hex trace id, or None. Handy as a log correlation field."""
+        return self._trace.trace_id if self._trace is not None else None
+
+    def trace_headers(self) -> dict[str, str]:
+        """W3C headers to put on an outbound request so the callee joins the trace.
+
+        With OpenTelemetry installed this is the ACTIVE span's context (the
+        handler span or one you started); without it, the platform's own
+        traceparent/tracestate. Empty when there is no trace context.
+        """
+        return propagation_headers(self)
 
     # ── progress signalling ─────────────────────────────────────────────────
     def heartbeat(self, message: str | None = None) -> None:
