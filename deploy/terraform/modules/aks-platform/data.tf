@@ -123,11 +123,10 @@ resource "azurerm_monitor_diagnostic_setting" "postgres" {
 
 # ── Artifact storage (Blob) ───────────────────────────────────────────────
 #
-# PROVISIONED BUT NOT YET USED BY NEXUS. The result store speaks only the S3
-# API (minio-go), and Azure Blob has no S3 endpoint. Until the native Blob
-# backend exists (F115), Nexus artifacts go to the in-cluster MinIO on Premium
-# SSD. This account is where that backend will write, and it is created now so
-# the identity, network path and retention are settled before data arrives.
+# Where Nexus stores results and logs on AKS: the native azblob result-store
+# backend writes here through workload identity (environments/aks,
+# azure_blob_native_backend, default true). No shared key exists to leak: the
+# account refuses them.
 
 resource "azurerm_storage_account" "artifacts" {
   name                     = local.storage_name
@@ -242,8 +241,8 @@ resource "azurerm_private_endpoint" "blob" {
   }
 }
 
-# The identity the native Blob backend will use (workload identity, no keys),
-# with data access to the one container and nothing else.
+# The identity the native Blob backend uses (workload identity, no keys), with
+# data access to the one container and nothing else.
 resource "azurerm_user_assigned_identity" "nexus" {
   name                = "${var.name}-nexus-workload"
   location            = azurerm_resource_group.this.location

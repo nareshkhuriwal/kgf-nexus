@@ -70,16 +70,16 @@ output "artifact_bucket" {
 }
 
 output "artifact_hmac_credentials" {
-  description = "HMAC key pair for GCS S3 interoperability, for the kgf-nexus credentials Secret."
-  value = {
-    access_key_id     = google_storage_hmac_key.artifacts.access_id
-    secret_access_key = google_storage_hmac_key.artifacts.secret
-  }
+  description = "HMAC key pair for GCS S3 interoperability, for the kgf-nexus credentials Secret (null unless artifact_hmac_key)."
+  value = var.artifact_hmac_key ? {
+    access_key_id     = google_storage_hmac_key.artifacts[0].access_id
+    secret_access_key = google_storage_hmac_key.artifacts[0].secret
+  } : null
   sensitive = true
 }
 
 output "artifact_service_account" {
-  description = "Service account the result store acts as."
+  description = "Service account the result store acts as (the iam.gke.io/gcp-service-account annotation)."
   value       = google_service_account.artifacts.email
 }
 

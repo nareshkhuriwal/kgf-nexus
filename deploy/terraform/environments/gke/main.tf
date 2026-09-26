@@ -55,7 +55,16 @@ module "platform" {
   deletion_protection = var.deletion_protection
 
   nexus_kubernetes_namespace = var.namespace
+  nexus_service_account      = local.nexus_service_account
+  artifact_hmac_key          = !local.workload_identity
   postgres_password_version  = var.postgres_password_version
+}
+
+locals {
+  # One name on both ends: the Workload Identity binding names
+  # <project>.svc.id.goog[<ns>/<it>], and modules/kgf-nexus creates it.
+  nexus_service_account = "kgf-nexus"
+  workload_identity     = var.artifact_identity == "workload-identity"
 }
 
 # ── In-cluster platform pieces ────────────────────────────────────────────
@@ -99,8 +108,19 @@ module "nexus" {
   nats_credentials_dir = var.nats_credentials_dir
 
   postgres_password = module.platform.postgres_password
-  # GCS HMAC key pair, stored in the kgf-nexus credentials Secret.
-  object_store_credentials = module.platform.artifact_hmac_credentials
+  # The HMAC key pair only for the interoperability fallback; under Workload
+  # Identity the Secret holds no key at all.
+  object_store_credentials          = local.workload_identity ? null : module.platform.artifact_hmac_credentials
+  generate_object_store_credentials = false
+
+  # Created in both modes so switching never renames it; the annotation is
+  # what GKE's metadata server maps to the Google service account.
+  service_account = {
+    name = local.nexus_service_account
+    annotations = local.workload_identity ? tomap({
+      "iam.gke.io/gcp-service-account" = module.platform.artifact_service_account
+    }) : tomap({})
+  }
 
   chart_values = {
     postgres = {
@@ -115,15 +135,22 @@ module "nexus" {
       sslmode = "require"
     }
 
-    # GCS through its S3-compatible XML API with HMAC keys ("interoperability").
-    # minio-go special-cases storage.googleapis.com (e.g. per-object deletes,
-    # since GCS has no multi-object delete).
+    # Default: GCS natively (JSON API) through Workload Identity. Fallback
+    # (artifact_identity = "hmac"): GCS through its S3-compatible XML API with
+    # the HMAC key ("interoperability"); minio-go special-cases
+    # storage.googleapis.com there (e.g. per-object deletes, since GCS has no
+    # multi-object delete). minio.endpoint is read only by the s3 backend.
     minio = {
       enabled  = false
       endpoint = "https://storage.googleapis.com"
       bucket   = module.platform.artifact_bucket
       region   = "auto"
       useTLS   = true
+    }
+    resultStore = {
+      backend = local.workload_identity ? "gcs" : "s3"
+      s3      = { credentials = "static" }
+      gcs     = { auth = "auto" }
     }
 
     nats = {

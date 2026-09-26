@@ -82,6 +82,19 @@ must_fail "malformed image digest"              "/image/digests/migrate"       -
 must_fail "bad topology policy"                 "whenUnsatisfiable"            --set placement.topologySpread.whenUnsatisfiable=Sometimes
 must_fail "no scheduler at all"                 "schedulers"                   --set-json 'schedulers=[]'
 must_fail "peer TLS with a plaintext broker"    "enable nats.tls too"          --set tls.enabled=true --set nats.auth.mode=none
+must_fail "unknown result-store backend"        "/resultStore/backend"         --set resultStore.backend=swift
+must_fail "unknown S3 credential mode"          "/resultStore/s3/credentials"  --set resultStore.s3.credentials=imds
+must_fail "part size below S3's 5 MiB minimum"  "/resultStore/partSizeBytes"   --set resultStore.partSizeBytes=1048576
+must_fail "in-cluster MinIO with Azure Blob"    "set minio.enabled=false"      --set resultStore.backend=azblob --set resultStore.azure.account=acct123
+must_fail "in-cluster MinIO with IRSA"          "set minio.enabled=false or credentials=static" --set resultStore.s3.credentials=web-identity --set resultStore.serviceAccountName=kgf-nexus
+must_fail "azblob without a storage account"    "needs resultStore.azure.account" --set minio.enabled=false --set resultStore.backend=azblob
+must_fail "azblob shared key without a Secret"  "needs resultStore.azure.keySecret.name" --set minio.enabled=false --set resultStore.backend=azblob --set resultStore.azure.account=acct123 --set resultStore.azure.auth=shared-key
+must_fail "workload identity without an SA"     "azure.workload.identity/client-id" --set minio.enabled=false --set resultStore.backend=azblob --set resultStore.azure.account=acct123 --set resultStore.azure.auth=workload-identity
+must_fail "IRSA without an SA"                  "eks.amazonaws.com/role-arn"   --set minio.enabled=false --set resultStore.s3.credentials=web-identity
+must_fail "unauthenticated GCS against real GCS" "only for an emulator"        --set minio.enabled=false --set resultStore.backend=gcs --set resultStore.gcs.auth=none
+must_fail "tracing without a collector"         "needs tracing.endpoint"       --set tracing.enabled=true
+must_fail "tracing with a bad protocol"         "/tracing/protocol"            --set tracing.protocol=http/json
+must_fail "tracing headers Secret without key"  "needs tracing.headersSecret.key" --set tracing.enabled=true --set tracing.endpoint=http://c:4317 --set tracing.headersSecret.name=otel
 
 if [ "$fail" -ne 0 ]; then
   echo "validate: FAILED" >&2

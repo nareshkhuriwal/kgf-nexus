@@ -15,6 +15,8 @@
 #                                scheduling and the mixed CPU/GPU exit
 #                                criterion are actually exercisable
 #   ui                         → nginx, serves the console and proxies /v1
+#   jaeger                     → OPTIONAL trace collector + UI, only with
+#                                `--profile tracing` (see x-tracing-env)
 #
 # Credentials below are DEV-ONLY and deliberately obvious. They exist so
 # `docker compose up` works with no setup; they are not a secret-management
@@ -34,8 +36,36 @@ x-postgres-env: &postgres-env
   # Postgres must merge this fragment, directly or through *service-env.
   DATABASE_URL: postgres://nexus:nexus-dev-password@postgres:5432/nexus?sslmode=disable
 
+# OpenTelemetry trace export (ADR-0026), the STANDARD variables, passed
+# through from the shell so an operator's usual OTEL_* settings apply as-is.
+# OFF unless set: OTEL_TRACES_EXPORTER defaults to none, and every other value
+# defaults to empty, which the binaries and the OTel SDK treat as unset. To
+# trace the whole stack into the bundled Jaeger:
+#
+#   OTEL_TRACES_EXPORTER=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 \
+#     docker compose -f deploy/docker-compose.yml --profile tracing up
+#
+# then open http://localhost:16686. Any other collector works the same way
+# (grpc: OTEL_EXPORTER_OTLP_PROTOCOL=grpc and port 4317). OTEL_SERVICE_NAME is
+# deliberately absent: each binary names itself, and one shared value would
+# merge every service into one in the trace UI. Propagation of W3C trace
+# context between the services is always on, traced or not.
+x-tracing-env: &tracing-env
+  OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+  OTEL_EXPORTER_OTLP_INSECURE: ${OTEL_EXPORTER_OTLP_INSECURE:-}
+  OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+  # Parent-based: the process that starts a trace decides once and every hop
+  # follows, so a trace is whole or absent. 1.0 keeps every new trace -- right
+  # for a laptop; production sizes it down (the chart's default is 0.1).
+  OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}
+  OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
+  OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment.name=compose}
+  OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-}
+
 x-service-env: &service-env
-  <<: *postgres-env
+  <<: [*postgres-env, *tracing-env]
   LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
   # Both spellings: services added later read NEXUS_LOG_LEVEL (the prefixed
   # convention every other setting here follows), while the earlier ones read
@@ -85,6 +115,10 @@ x-nats-init-wait: &nats-init-wait
     condition: service_completed_successfully
 
 x-minio-env: &minio-env
+  # s3 = the MinIO below. azblob and gcs exist (internal/objstore) but need
+  # their own account/identity variables, which this laptop stack does not
+  # model; it is here so every result-store client is told the same backend.
+  NEXUS_RESULT_STORE_BACKEND: ${NEXUS_RESULT_STORE_BACKEND:-s3}
   RESULT_STORE_ENDPOINT: http://minio:9000
   NEXUS_RESULT_STORE_ENDPOINT: http://minio:9000
   NEXUS_S3_USE_TLS: "false"
@@ -328,6 +362,10 @@ services:
     depends_on: *depends-on-db
     environment:
       <<: [*service-env, *minio-env]
+      # true = an inbound REST traceparent becomes a span link, not the parent,
+      # so callers cannot pick the trace a request joins. Set it where the REST
+      # port faces callers you do not control; a laptop does not.
+      NEXUS_TRACING_PUBLIC_ENDPOINT: ${NEXUS_TRACING_PUBLIC_ENDPOINT:-false}
       HTTP_ADDR: ":8080"        # REST for humans, CLI, UI (§8.2)
       NEXUS_HTTP_ADDR: ":8080"
       NEXUS_REST_ADDR: ":8080"
@@ -567,7 +605,7 @@ services:
       api-gateway:
         condition: service_healthy
     environment:
-      <<: [*minio-env, *nats-env]
+      <<: [*minio-env, *nats-env, *tracing-env]
       # Workers hold an API token and never database credentials: a compromised
       # worker cannot corrupt runs it never touched (§3.1 invariant 2).
       NEXUS_CONTROL_PLANE: api-gateway:9091
@@ -618,7 +656,7 @@ services:
       api-gateway:
         condition: service_healthy
     environment:
-      <<: [*minio-env, *nats-env]
+      <<: [*minio-env, *nats-env, *tracing-env]
       NEXUS_CONTROL_PLANE: api-gateway:9091
       NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
       NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
@@ -674,7 +712,7 @@ services:
       api-gateway:
         condition: service_healthy
     environment:
-      <<: [*minio-env, *nats-env]
+      <<: [*minio-env, *nats-env, *tracing-env]
       NEXUS_CONTROL_PLANE: api-gateway:9091
       NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
       NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
@@ -701,6 +739,27 @@ services:
       - nats-auth-agent:/etc/nexus/nats:ro
       - chaos-effects:/var/lib/nexus/effects
       - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  # ── Tracing (optional) ────────────────────────────────────────────────────
+  # Jaeger v2 (an OpenTelemetry Collector distribution) as the OTLP receiver,
+  # span store (in memory: gone on restart) and UI. Started ONLY with
+  # `--profile tracing`, and nothing depends_on it: a stack without it is the
+  # default, and a collector that is down costs spans, never requests.
+  # Pinned by digest like every upstream image here (OPERATIONS §22).
+  jaeger:
+    image: jaegertracing/jaeger:2.10.0@sha256:8c593d8048d86334eb52dba26633b6c846b8ecbe5c22905702c932ae97baeb42
+    profiles: ["tracing"]
+    environment:
+      # Jaeger v2's bundled config binds its receivers and UI to localhost
+      # unless told otherwise, which would refuse every other container.
+      JAEGER_LISTEN_HOST: 0.0.0.0
+    ports:
+      # Loopback only: OTLP from processes on the host (the Python SDK, a
+      # locally run service) and the UI. Containers use jaeger:4317/4318.
+      - "127.0.0.1:${NEXUS_OTLP_GRPC_PORT:-4317}:4317"
+      - "127.0.0.1:${NEXUS_OTLP_HTTP_PORT:-4318}:4318"
+      - "127.0.0.1:${NEXUS_JAEGER_UI_PORT:-16686}:16686"
     restart: unless-stopped
 
   # ── UI ──────────────────────────────────────────────────────────────────

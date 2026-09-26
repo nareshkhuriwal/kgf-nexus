@@ -156,6 +156,26 @@ variable "nvidia_device_plugin_version" {
   default     = "0.20.1"
 }
 
+variable "artifact_identity" {
+  description = <<-EOT
+    How the result-store pods authenticate to S3:
+      pod-identity -- EKS Pod Identity (default): the platform's association
+                      binds the kgf-nexus ServiceAccount to the artifact role;
+                      nothing on the ServiceAccount, no key anywhere.
+      irsa         -- IRSA: the ServiceAccount is annotated with the role ARN
+                      and the webhook injects a web-identity token.
+      static       -- opt-in fallback: an IAM user key pair (usable only through
+                      this VPC's S3 endpoint) in the credentials Secret.
+  EOT
+  type        = string
+  default     = "pod-identity"
+
+  validation {
+    condition     = contains(["pod-identity", "irsa", "static"], var.artifact_identity)
+    error_message = "artifact_identity must be pod-identity, irsa or static."
+  }
+}
+
 variable "chart_values_overrides" {
   description = "Chart values deep-merged last (agents, replicas, gateway, SMTP, NATS TLS...)."
   type        = any

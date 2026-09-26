@@ -36,9 +36,10 @@ resource "random_password" "postgres" {
 }
 
 # Root credentials for the in-cluster MinIO, unless the caller supplies a key
-# pair for an external S3-compatible store (Amazon S3, GCS HMAC interop).
+# pair for an external S3-compatible store (Amazon S3, GCS HMAC interop) or
+# the store is reached with a cloud identity and needs no key at all.
 resource "random_password" "minio" {
-  count   = var.object_store_credentials == null ? 1 : 0
+  count   = var.object_store_credentials == null && var.generate_object_store_credentials ? 1 : 0
   length  = 32
   special = false
 }
@@ -73,11 +74,20 @@ locals {
   postgres_password = (
     var.postgres_password != null ? var.postgres_password : random_password.postgres[0].result
   )
-  object_store_access_key = (
-    var.object_store_credentials != null ? var.object_store_credentials.access_key_id : "nexus"
-  )
-  object_store_secret_key = (
-    var.object_store_credentials != null ? var.object_store_credentials.secret_access_key : random_password.minio[0].result
+  # The S3 key pair for the Secret: the caller's, the generated MinIO root
+  # pair, or NONE. None matters: the chart's default credential mode (auto)
+  # prefers a key pair over the pod's cloud identity, so a placeholder pair
+  # written "just in case" would shadow IRSA / Pod Identity with keys that S3
+  # rejects.
+  object_store_keys = (
+    var.object_store_credentials != null ? {
+      "minio-root-user"     = var.object_store_credentials.access_key_id
+      "minio-root-password" = var.object_store_credentials.secret_access_key
+    } :
+    var.generate_object_store_credentials ? {
+      "minio-root-user"     = "nexus"
+      "minio-root-password" = random_password.minio[0].result
+    } : {}
   )
 
   # NATS identities, from a directory deploy/nats/nexus-nats-auth.sh wrote
@@ -114,15 +124,38 @@ resource "kubernetes_secret_v1" "credentials" {
     }
   }
 
+  # The chart's key names (minio-root-*) predate external stores: they hold
+  # the S3 key pair whether the store is the in-cluster MinIO or not.
   data = merge({
     "postgres-password" = local.postgres_password
-    # The chart's key names predate external stores: they hold the S3 key pair
-    # whether the store is the in-cluster MinIO or not.
-    "minio-root-user"     = local.object_store_access_key
-    "minio-root-password" = local.object_store_secret_key
-    "worker-api-key"      = local.worker_api_key
-    "admin-api-key"       = local.admin_api_key
-  }, local.nats_seeds)
+    "worker-api-key"    = local.worker_api_key
+    "admin-api-key"     = local.admin_api_key
+  }, local.object_store_keys, local.nats_seeds)
+}
+
+# The identity the result-store pods (api-gateway, agents, artifact-gc) run
+# as, carrying the environment's cloud-identity annotation: IRSA's
+# eks.amazonaws.com/role-arn, Azure's azure.workload.identity/client-id, GKE's
+# iam.gke.io/gcp-service-account (EKS Pod Identity needs none: its association
+# names this ServiceAccount). Created here rather than by the chart because
+# the cloud side -- the federated credential, the role trust, the IAM binding
+# -- is keyed on its namespace/name, which Terraform then owns on both ends.
+#
+# No API token is mounted: Nexus never calls the Kubernetes API, and each
+# identity webhook projects its own audience-bound token independently.
+resource "kubernetes_service_account_v1" "result_store" {
+  count = var.service_account == null ? 0 : 1
+
+  metadata {
+    name        = var.service_account.name
+    namespace   = kubernetes_namespace_v1.this.metadata[0].name
+    annotations = var.service_account.annotations
+    labels = {
+      "app.kubernetes.io/part-of"    = "kgf-nexus"
+      "app.kubernetes.io/managed-by" = "terraform"
+    }
+  }
+  automount_service_account_token = false
 }
 
 resource "helm_release" "nexus" {
@@ -149,6 +182,11 @@ resource "helm_release" "nexus" {
         tag              = var.image_tag
         pullPolicy       = var.image_pull_policy
       }
+    }),
+    # Only when this module created the ServiceAccount; the reference also
+    # orders the release after it.
+    yamlencode(var.service_account == null ? {} : {
+      resultStore = { serviceAccountName = kubernetes_service_account_v1.result_store[0].metadata[0].name }
     }),
     yamlencode(local.nats_auth_values),
     yamlencode(var.chart_values),

@@ -53,10 +53,32 @@ run "plan_example" {
     condition     = kubernetes_storage_class_v1.gp3.parameters.encrypted == "true"
     error_message = "The gp3 StorageClass must encrypt volumes."
   }
+
+  assert {
+    condition     = output.object_store.identity == "pod-identity" && output.object_store.service_account == "kgf-nexus"
+    error_message = "The result store should authenticate with EKS Pod Identity as the kgf-nexus ServiceAccount by default."
+  }
+}
+
+run "irsa" {
+  command = plan
+
+  variables {
+    artifact_identity = "irsa"
+  }
+
+  assert {
+    condition     = startswith(output.object_store.credentials, "IRSA")
+    error_message = "artifact_identity = irsa should use the role through IRSA."
+  }
 }
 
 run "refuses_missing_static_credentials" {
   command = plan
+
+  variables {
+    artifact_identity = "static"
+  }
 
   override_module {
     target = module.platform
@@ -73,6 +95,7 @@ run "refuses_missing_static_credentials" {
       postgres_password                  = "MockPassword0123456789abcdefABCDEF"
       artifact_bucket                    = "bucket"
       artifact_s3_endpoint               = "https://s3.us-east-1.amazonaws.com"
+      artifact_role_arn                  = "arn:aws:iam::123456789012:role/kgf-nexus-prod-use1-nexus-artifacts"
       artifact_credentials               = null
       kms_key_arn                        = "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
     }

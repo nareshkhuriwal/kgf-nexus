@@ -48,6 +48,14 @@ minio:
   bucket: nexus-artifacts-x
   region: eu-west-1
   useTLS: true
+# The result store through EKS Pod Identity (the eks environment's default
+# artifact_identity): no key pair, and the ServiceAccount modules/kgf-nexus
+# creates. The module sets serviceAccountName; the environment the rest.
+resultStore:
+  backend: s3
+  s3:
+    credentials: pod-identity
+  serviceAccountName: kgf-nexus
 
 # chart_values_overrides (terraform.tfvars.example, plus other features' keys)
 logLevel: info

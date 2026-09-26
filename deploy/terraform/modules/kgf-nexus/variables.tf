@@ -85,6 +85,26 @@ variable "object_store_credentials" {
   sensitive = true
 }
 
+variable "generate_object_store_credentials" {
+  description = "With object_store_credentials null: true generates root credentials for the in-cluster MinIO; false writes NO S3 key pair, for a store the pods reach with a cloud identity (IRSA, EKS Pod Identity, Azure or GKE workload identity)."
+  type        = bool
+  default     = true
+}
+
+variable "service_account" {
+  description = "ServiceAccount to create for the result-store pods (api-gateway, agents, artifact-gc), with the cloud-identity annotations the environment needs; the chart's resultStore.serviceAccountName is set to it. null: none, and those pods run as the namespace's default ServiceAccount (static keys only)."
+  type = object({
+    name        = string
+    annotations = optional(map(string), {})
+  })
+  default = null
+
+  validation {
+    condition     = var.service_account == null || can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", try(var.service_account.name, "")))
+    error_message = "service_account.name must be a DNS-1123 label (lowercase letters, digits and '-')."
+  }
+}
+
 variable "helm_timeout_seconds" {
   description = "How long Helm waits for every workload and Job to become ready."
   type        = number

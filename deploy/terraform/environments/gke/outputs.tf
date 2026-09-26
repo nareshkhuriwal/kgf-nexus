@@ -26,12 +26,16 @@ output "database" {
 }
 
 output "object_store" {
-  description = "Nexus result store: GCS through the S3 interoperability API."
+  description = "Nexus result store: GCS, natively through Workload Identity or through the S3 interoperability API with an HMAC key."
   value = {
-    endpoint        = "https://storage.googleapis.com"
-    bucket          = module.platform.artifact_bucket
-    service_account = module.platform.artifact_service_account
-    credentials     = "${module.nexus.namespace}/kgf-nexus-credentials (keys minio-root-user, minio-root-password): HMAC key of the service account"
+    backend             = var.artifact_identity == "workload-identity" ? "gcs" : "s3"
+    endpoint            = var.artifact_identity == "workload-identity" ? "GCS JSON API (default endpoint)" : "https://storage.googleapis.com"
+    bucket              = module.platform.artifact_bucket
+    service_account     = module.platform.artifact_service_account
+    k8s_service_account = module.nexus.result_store_service_account
+    credentials = (var.artifact_identity == "workload-identity"
+      ? "GKE Workload Identity as ${module.platform.artifact_service_account}, no key"
+    : "${module.nexus.namespace}/kgf-nexus-credentials (keys minio-root-user, minio-root-password): HMAC key of the service account")
   }
 }
 

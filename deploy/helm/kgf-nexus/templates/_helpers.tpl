@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 {{- fail "postgres.pitr.enabled requires postgres.pitr.existingSecret (s3-key, s3-key-secret, cipher-pass), postgres.pitr.repo.s3.bucket and postgres.pitr.repo.s3.endpoint" -}}
 {{- end -}}
 {{- if not .Values.existingSecret -}}
-{{- fail "existingSecret is required: the name of a Secret holding postgres-password, minio-root-user, minio-root-password and worker-api-key (deploy/terraform creates it)" -}}
+{{- fail "existingSecret is required: the name of a Secret holding postgres-password and worker-api-key, plus minio-root-user and minio-root-password for static S3 keys (deploy/terraform creates it)" -}}
 {{- end -}}
 {{- if not .Values.image.tag -}}
 {{- fail "image.tag is required: pin an immutable tag (a git SHA), never latest" -}}
@@ -128,23 +128,160 @@ two listeners (config drift recorded in F38); all are set, as compose does.
 {{- join "," $out -}}
 {{- end -}}
 
+{{/*
+Refuse a result-store configuration that would start pods which cannot reach
+the store, naming the fix. Run from nexus.resultStoreEnv, so every template
+that renders a result-store client checks it.
+*/}}
+{{- define "nexus.resultStoreRequired" -}}
+{{- $rs := .Values.resultStore -}}
+{{- if and .Values.minio.enabled (ne $rs.backend "s3") -}}
+{{- fail (printf "minio.enabled=true runs an in-cluster MinIO, but resultStore.backend=%s would never use it: set minio.enabled=false (the %s store is external)" $rs.backend $rs.backend) -}}
+{{- end -}}
+{{- if and .Values.minio.enabled (not (has $rs.s3.credentials (list "static" "auto"))) -}}
+{{- fail (printf "minio.enabled=true needs resultStore.s3.credentials static or auto (MinIO authenticates with its root key pair); %q is a cloud-identity mode for an external S3 store -- set minio.enabled=false or credentials=static" $rs.s3.credentials) -}}
+{{- end -}}
+{{- if eq $rs.backend "azblob" -}}
+{{- if not (or $rs.azure.account $rs.azure.endpoint) -}}
+{{- fail "resultStore.backend=azblob needs resultStore.azure.account: the storage account NAME (deploy/terraform/environments/aks sets it from the provisioned account)" -}}
+{{- end -}}
+{{- if and (eq $rs.azure.auth "shared-key") (not $rs.azure.keySecret.name) -}}
+{{- fail "resultStore.azure.auth=shared-key needs resultStore.azure.keySecret.name: a Secret holding the account key (prefer auth=workload-identity; aks-platform's account has shared keys disabled)" -}}
+{{- end -}}
+{{- if and (eq $rs.azure.auth "workload-identity") (not $rs.serviceAccountName) -}}
+{{- fail "resultStore.azure.auth=workload-identity needs resultStore.serviceAccountName: an existing ServiceAccount annotated azure.workload.identity/client-id=<identity client id> (the default ServiceAccount has no federated credential)" -}}
+{{- end -}}
+{{- end -}}
+{{- if and (eq $rs.backend "s3") (eq $rs.s3.credentials "web-identity") (not $rs.serviceAccountName) -}}
+{{- fail "resultStore.s3.credentials=web-identity (IRSA) needs resultStore.serviceAccountName: an existing ServiceAccount annotated eks.amazonaws.com/role-arn=<role ARN>" -}}
+{{- end -}}
+{{- if and (eq $rs.backend "gcs") (eq $rs.gcs.auth "none") (not $rs.gcs.endpoint) -}}
+{{- fail "resultStore.gcs.auth=none is unauthenticated and only for an emulator: set resultStore.gcs.endpoint to it, or use auth=auto (Workload Identity) against real GCS" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Result-store client environment: api-gateway, the agents, artifact-gc and the
+minio-init Job. The variables are the objstore contract (internal/objstore
+config.go). The RESULT_STORE_* names without the NEXUS_ prefix are the older
+spelling some readers (and minio-init) still use; they are kept for s3 only,
+the one backend they ever described.
+*/}}
 {{- define "nexus.resultStoreEnv" -}}
+{{- include "nexus.resultStoreRequired" . -}}
+{{- $rs := .Values.resultStore -}}
+- { name: NEXUS_RESULT_STORE_BACKEND, value: {{ $rs.backend | quote }} }
+- { name: NEXUS_RESULT_STORE_BUCKET, value: {{ .Values.minio.bucket | quote }} }
+- { name: NEXUS_RESULT_STORE_REGION, value: {{ .Values.minio.region | quote }} }
+- { name: NEXUS_RESULT_STORE_PART_SIZE_BYTES, value: {{ $rs.partSizeBytes | int64 | toString | quote }} }
+- { name: RESULT_STORE_INLINE_THRESHOLD_BYTES, value: {{ .Values.minio.inlineThresholdBytes | int64 | toString | quote }} }
+{{- if eq $rs.backend "s3" }}
+{{- $secret := $rs.s3.accessKeySecret.name | default .Values.existingSecret }}
+- { name: NEXUS_S3_CREDENTIALS, value: {{ $rs.s3.credentials | quote }} }
+{{- if has $rs.s3.credentials (list "static" "auto") }}
+{{- /* auto against an external store: optional references, so a Secret
+       without a key pair lets the binary fall through to the pod's AWS
+       identity instead of failing pod start. static, or the in-cluster MinIO
+       (which cannot start without its root pair either): required, so a
+       missing key is a visible CreateContainerConfigError, never a client
+       that quietly goes looking for another identity. */}}
+{{- $optional := and (eq $rs.s3.credentials "auto") (not .Values.minio.enabled) }}
 - name: NEXUS_S3_ACCESS_KEY_ID
-  valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: minio-root-user } }
+  valueFrom: { secretKeyRef: { name: {{ $secret }}, key: {{ $rs.s3.accessKeySecret.accessKeyIdKey }}, optional: {{ $optional }} } }
 - name: RESULT_STORE_ACCESS_KEY
-  valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: minio-root-user } }
+  valueFrom: { secretKeyRef: { name: {{ $secret }}, key: {{ $rs.s3.accessKeySecret.accessKeyIdKey }}, optional: {{ $optional }} } }
 - name: NEXUS_S3_SECRET_ACCESS_KEY
-  valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: minio-root-password } }
+  valueFrom: { secretKeyRef: { name: {{ $secret }}, key: {{ $rs.s3.accessKeySecret.secretAccessKeyKey }}, optional: {{ $optional }} } }
 - name: RESULT_STORE_SECRET_KEY
-  valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: minio-root-password } }
+  valueFrom: { secretKeyRef: { name: {{ $secret }}, key: {{ $rs.s3.accessKeySecret.secretAccessKeyKey }}, optional: {{ $optional }} } }
+{{- end }}
 - { name: RESULT_STORE_ENDPOINT, value: {{ .Values.minio.endpoint | quote }} }
 - { name: NEXUS_RESULT_STORE_ENDPOINT, value: {{ .Values.minio.endpoint | quote }} }
 - { name: NEXUS_S3_USE_TLS, value: {{ .Values.minio.useTLS | toString | quote }} }
 - { name: RESULT_STORE_BUCKET, value: {{ .Values.minio.bucket | quote }} }
-- { name: NEXUS_RESULT_STORE_BUCKET, value: {{ .Values.minio.bucket | quote }} }
 - { name: RESULT_STORE_REGION, value: {{ .Values.minio.region | quote }} }
-- { name: NEXUS_RESULT_STORE_REGION, value: {{ .Values.minio.region | quote }} }
-- { name: RESULT_STORE_INLINE_THRESHOLD_BYTES, value: {{ .Values.minio.inlineThresholdBytes | int64 | toString | quote }} }
+{{- else if eq $rs.backend "azblob" }}
+{{- with $rs.azure.endpoint }}
+- { name: NEXUS_RESULT_STORE_ENDPOINT, value: {{ . | quote }} }
+{{- end }}
+- { name: NEXUS_AZURE_STORAGE_ACCOUNT, value: {{ $rs.azure.account | quote }} }
+- { name: NEXUS_AZURE_STORAGE_AUTH, value: {{ $rs.azure.auth | quote }} }
+{{- with $rs.azure.clientId }}
+- { name: NEXUS_AZURE_CLIENT_ID, value: {{ . | quote }} }
+{{- end }}
+{{- if and $rs.azure.keySecret.name (has $rs.azure.auth (list "shared-key" "auto")) }}
+- name: NEXUS_AZURE_STORAGE_KEY
+  valueFrom: { secretKeyRef: { name: {{ $rs.azure.keySecret.name }}, key: {{ $rs.azure.keySecret.key }} } }
+{{- end }}
+{{- else if eq $rs.backend "gcs" }}
+{{- with $rs.gcs.endpoint }}
+- { name: NEXUS_RESULT_STORE_ENDPOINT, value: {{ . | quote }} }
+{{- end }}
+- { name: NEXUS_GCS_AUTH, value: {{ $rs.gcs.auth | quote }} }
+{{- end }}
+{{- end -}}
+
+{{/*
+Pod-template labels for a result-store client: the user's podLabels, plus the
+label the Azure workload-identity webhook selects pods by. Rendered under
+metadata.labels, after nexus.labels (distinct keys; the selector is untouched).
+*/}}
+{{- define "nexus.resultStorePodLabels" -}}
+{{- $rs := .Values.resultStore -}}
+{{- $labels := deepCopy ($rs.podLabels | default dict) -}}
+{{- if and (eq $rs.backend "azblob") (eq $rs.azure.auth "workload-identity") -}}
+{{- $_ := set $labels "azure.workload.identity/use" "true" -}}
+{{- end -}}
+{{- range $k, $v := $labels }}
+{{ $k }}: {{ $v | quote }}
+{{- end }}
+{{- end -}}
+
+{{/* serviceAccountName for a result-store client pod, when one is set. */}}
+{{- define "nexus.resultStoreServiceAccount" -}}
+{{- with .Values.resultStore.serviceAccountName }}
+serviceAccountName: {{ . }}
+{{- end }}
+{{- end -}}
+
+{{/*
+OpenTelemetry trace export, the STANDARD OTEL_* variables, for every Nexus
+process. Nothing at all when tracing.enabled is false: the binaries then keep
+their tracer off. OTEL_SERVICE_NAME is never set -- each binary names itself.
+k8s.namespace.name and k8s.pod.name come from the downward API through two
+chart-private variables, defined BEFORE the $(VAR) reference that expands them
+(Kubernetes only expands variables declared earlier in the list), and named
+so they cannot collide with a container's own POD_NAME.
+*/}}
+{{- define "nexus.tracingEnv" -}}
+{{- $t := .Values.tracing -}}
+{{- if $t.enabled }}
+{{- if not $t.endpoint -}}
+{{- fail "tracing.enabled needs tracing.endpoint: the OTLP collector, e.g. http://otel-collector.observability:4317 (protocol grpc) or :4318 (http/protobuf)" -}}
+{{- end -}}
+{{- if and $t.headersSecret.name (not $t.headersSecret.key) -}}
+{{- fail "tracing.headersSecret.name needs tracing.headersSecret.key: the key in that Secret holding the OTEL_EXPORTER_OTLP_HEADERS value" -}}
+{{- end }}
+- { name: OTEL_TRACES_EXPORTER, value: otlp }
+- { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $t.endpoint | quote }} }
+- { name: OTEL_EXPORTER_OTLP_PROTOCOL, value: {{ $t.protocol | quote }} }
+- { name: OTEL_EXPORTER_OTLP_INSECURE, value: {{ ternary "true" "false" $t.insecure | quote }} }
+- { name: OTEL_TRACES_SAMPLER, value: {{ $t.sampler | quote }} }
+- { name: OTEL_TRACES_SAMPLER_ARG, value: {{ $t.samplerArg | quote }} }
+{{- if $t.headersSecret.name }}
+- name: OTEL_EXPORTER_OTLP_HEADERS
+  valueFrom: { secretKeyRef: { name: {{ $t.headersSecret.name }}, key: {{ $t.headersSecret.key }} } }
+{{- end }}
+- name: NEXUS_OTEL_K8S_NAMESPACE
+  valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+- name: NEXUS_OTEL_K8S_POD
+  valueFrom: { fieldRef: { fieldPath: metadata.name } }
+{{- $attrs := list }}
+{{- with $t.resourceAttributes }}{{ $attrs = append $attrs . }}{{ end }}
+{{- $attrs = append $attrs "k8s.namespace.name=$(NEXUS_OTEL_K8S_NAMESPACE)" }}
+{{- $attrs = append $attrs "k8s.pod.name=$(NEXUS_OTEL_K8S_POD)" }}
+- { name: OTEL_RESOURCE_ATTRIBUTES, value: {{ join "," $attrs | quote }} }
+{{- end }}
 {{- end -}}
 
 {{/*

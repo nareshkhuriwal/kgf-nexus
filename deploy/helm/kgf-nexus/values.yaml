@@ -37,8 +37,9 @@ logLevel: info
 
 # Credentials. REQUIRED: the name of a Secret in the release namespace with:
 #   postgres-password     password for the nexus database user (URL-safe)
-#   minio-root-user       object store access key
-#   minio-root-password   object store secret key
+#   minio-root-user       S3 access key (the in-cluster MinIO or an external
+#   minio-root-password   S3 store) and its secret. Not needed when the result
+#                         store uses a cloud identity (resultStore below)
 #   worker-api-key        API key the agents authenticate with (nxs_worker_...)
 #   admin-api-key         optional; bootstrap installs it as an admin key
 #   nats-event-service-nkey, nats-agent-nkey
@@ -146,6 +147,159 @@ minio:
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { memory: 1Gi }
+
+# ─── Result store: which backend and how it authenticates ───────────────
+# Read by EVERY result-store client: api-gateway (task logs), the agents
+# (outputs, logs) and artifact-gc. They must all agree on the backend and the
+# bucket, so this one block is rendered identically into each of them.
+#
+# The bucket (or Azure container) and region are minio.bucket / minio.region
+# above WHATEVER the backend: their names predate the other backends, and every
+# existing values file already sets them. The S3 endpoint is minio.endpoint;
+# azblob and gcs take their own endpoint below, because their default is "the
+# provider's public endpoint", never the in-cluster MinIO.
+#
+# minio.enabled (the in-cluster MinIO) is only valid with backend s3 and
+# credentials static or auto: MinIO authenticates with its root key pair, never
+# with a cloud identity. The chart refuses the other combinations rather than
+# run a MinIO that nothing talks to (set minio.enabled=false).
+resultStore:
+  # s3     -- Amazon S3, MinIO, or any S3-compatible store -- including GCS
+  #           through its XML interoperability API with an HMAC key (endpoint
+  #           https://storage.googleapis.com, credentials static).
+  # azblob -- Azure Blob Storage, native. minio.bucket is the CONTAINER.
+  # gcs    -- Google Cloud Storage, native JSON API, keyless on GKE.
+  backend: s3
+  # Multipart part / Azure block / GCS resumable chunk size, 5 MiB..512 MiB.
+  # Each in-flight upload buffers about one part in memory, so this times an
+  # agent's concurrent uploads is the memory its uploads need. 5 MiB is S3's
+  # minimum part; a multiple of 256 KiB keeps GCS from rounding it.
+  partSizeBytes: 16777216
+  s3:
+    # auto         -- the static key pair when the Secret holds one (the key
+    #                 references are optional in this mode), else the AWS
+    #                 identity visible in the pod's environment: AWS_* keys,
+    #                 IRSA, EKS Pod Identity, ECS. Never EC2 instance metadata
+    #                 (probing it hangs off EC2; use iam for that).
+    # static       -- ONLY the key pair (accessKeySecret below). A missing key
+    #                 fails pod start instead of silently falling through.
+    # web-identity -- IRSA: AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE, injected
+    #                 by the EKS pod-identity webhook from the ServiceAccount's
+    #                 eks.amazonaws.com/role-arn annotation.
+    # pod-identity -- EKS Pod Identity: AWS_CONTAINER_CREDENTIALS_FULL_URI +
+    #                 AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE, injected by the Pod
+    #                 Identity agent for a ServiceAccount with an association.
+    # iam          -- the whole chain including ECS task roles and EC2 IMDS.
+    #                 Nodes with an IMDS hop limit of 1 (the eks-platform
+    #                 default) deny IMDS to pods, on purpose.
+    # env          -- AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY that YOU inject
+    #                 into the pods; the chart renders none.
+    # anonymous    -- unsigned requests: a public bucket or a test store only.
+    # Only static and auto render key references, so for every other mode the
+    # Secret need not hold minio-root-user / minio-root-password at all.
+    credentials: auto
+    # Where the static key pair lives. Empty name = existingSecret, under the
+    # historical key names (they hold any S3 key pair, not only MinIO's). The
+    # in-cluster MinIO reads its root credentials from the same place.
+    accessKeySecret:
+      name: ""
+      accessKeyIdKey: minio-root-user
+      secretAccessKeyKey: minio-root-password
+  azure:
+    # REQUIRED for backend azblob: the storage account NAME (not a URL).
+    account: ""
+    # Empty = https://<account>.blob.core.windows.net/. Set it for a sovereign
+    # cloud (…blob.core.chinacloudapi.cn) or Azurite in a test cluster. A private
+    # endpoint needs nothing here: its private DNS zone answers the public name.
+    endpoint: ""
+    # auto              -- shared key if keySecret.name is set, else workload
+    #                      identity if the webhook injected
+    #                      AZURE_FEDERATED_TOKEN_FILE, else managed identity.
+    # workload-identity -- AKS workload identity (production). The chart adds
+    #                      the pod label azure.workload.identity/use: "true" to
+    #                      every result-store pod; the ServiceAccount they run
+    #                      as (serviceAccountName below, REQUIRED here) must
+    #                      carry azure.workload.identity/client-id.
+    # managed-identity  -- the node's (kubelet's) identity, or the user-assigned
+    #                      identity clientId selects.
+    # shared-key        -- the account key from keySecret. Accounts with shared
+    #                      keys disabled (aks-platform's) refuse it.
+    auth: auto
+    # Optional NEXUS_AZURE_CLIENT_ID: selects a user-assigned managed identity,
+    # or overrides the AZURE_CLIENT_ID the workload-identity webhook injects
+    # (normally unnecessary: the webhook takes it from the SA annotation).
+    clientId: ""
+    # The account key, for auth shared-key (REQUIRED there) or auto.
+    keySecret:
+      name: ""
+      key: azure-storage-key
+  gcs:
+    # auto -- Application Default Credentials: GKE Workload Identity through
+    #         the metadata server (the ServiceAccount annotated
+    #         iam.gke.io/gcp-service-account=<gsa>@<project>.iam.gserviceaccount.com),
+    #         or GOOGLE_APPLICATION_CREDENTIALS.
+    # none -- unauthenticated; an emulator (fake-gcs-server) only, and it
+    #         needs endpoint below.
+    auth: auto
+    # Empty = the public JSON API. Emulators only.
+    endpoint: ""
+  # The ServiceAccount the result-store pods (api-gateway, agents, artifact-gc)
+  # run as, so a cloud identity (IRSA role, EKS Pod Identity association, Azure
+  # workload identity, GKE Workload Identity) reaches ONLY the pods that use the
+  # store. It must already exist with its cloud annotation; the chart does not
+  # create it (deploy/terraform/modules/kgf-nexus does, with the annotation the
+  # environment needs). Empty = the namespace's default ServiceAccount, which is
+  # right for static keys only.
+  serviceAccountName: ""
+  # Extra labels on the result-store pods' templates, for identity webhooks
+  # that select pods by label. azure.workload.identity/use is added
+  # automatically under backend azblob + auth workload-identity.
+  podLabels: {}
+
+# ─── Distributed tracing (OpenTelemetry, off by default) ─────────────────
+# When enabled, every control-plane service and scheduler, the agents,
+# artifact-gc and the cluster controller get the STANDARD OTEL_* variables and
+# export spans over OTLP. Disabled, no OTEL_* variable is rendered and every
+# process leaves its tracer off (W3C trace-context propagation stays on either
+# way, so a partly traced deployment still produces connected traces).
+# OTEL_SERVICE_NAME is deliberately not set: each binary names itself, and one
+# value for all would merge every service into one in the trace UI.
+tracing:
+  enabled: false
+  # REQUIRED when enabled: the collector (an OpenTelemetry Collector, Jaeger,
+  # a vendor endpoint), e.g. http://otel-collector.observability:4317 (grpc)
+  # or http://otel-collector.observability:4318 (http/protobuf).
+  endpoint: ""
+  # grpc | http/protobuf. Must match the endpoint's port.
+  protocol: grpc
+  # Plaintext to the collector. True suits a collector inside the cluster (the
+  # spans never leave the pod network); set false and use https:// for one
+  # reached across a network you do not control.
+  insecure: true
+  # parentbased_traceidratio honours an incoming trace's sampling decision and
+  # keeps samplerArg of NEW traces. Also accepted: always_on, always_off,
+  # traceidratio, parentbased_always_on, parentbased_always_off.
+  sampler: parentbased_traceidratio
+  # A STRING, as the OTEL variable is: "0.1" keeps 10% of new traces. The
+  # binaries default to 1.0 when unset; 10% is a production-sized default.
+  samplerArg: "0.1"
+  # Optional OTEL_EXPORTER_OTLP_HEADERS from a Secret (never a plain value: it
+  # is usually a vendor credential), e.g. "authorization=Bearer <token>" or
+  # "x-honeycomb-team=<key>". Both name and key, or neither.
+  headersSecret:
+    name: ""
+    key: ""
+  # OTEL_RESOURCE_ATTRIBUTES, comma-separated key=value, e.g.
+  # "deployment.environment.name=prod,cloud.region=westeurope". The chart
+  # appends k8s.namespace.name and k8s.pod.name.
+  resourceAttributes: ""
+  # NEXUS_TRACING_PUBLIC_ENDPOINT on api-gateway: an inbound REST traceparent
+  # becomes a span LINK instead of the parent, so an untrusted caller cannot
+  # choose the trace ID (or the sampling decision) of what the platform does
+  # for it. Set true when the REST API is reachable by callers you do not
+  # control. Rendered whenever true, even with tracing disabled, because
+  # propagation is always on and would otherwise forward the caller's context.
+  publicEndpoint: false
 
 nats:
   # The event bus is optional (ADR-0003): disabled, the agents long-poll.

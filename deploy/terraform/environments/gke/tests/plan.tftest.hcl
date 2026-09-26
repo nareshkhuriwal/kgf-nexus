@@ -42,12 +42,25 @@ run "plan_example" {
   command = plan
 
   assert {
-    condition     = output.object_store.endpoint == "https://storage.googleapis.com"
-    error_message = "Nexus should use the GCS XML (S3 interoperability) endpoint."
+    condition     = output.object_store.backend == "gcs" && output.object_store.k8s_service_account == "kgf-nexus"
+    error_message = "Nexus should use native GCS through Workload Identity (the kgf-nexus ServiceAccount) by default."
   }
 
   assert {
     condition     = kubernetes_storage_class_v1.regional_ssd.parameters["replication-type"] == "regional-pd"
     error_message = "The StorageClass should use regional persistent disks."
+  }
+}
+
+run "hmac_fallback" {
+  command = plan
+
+  variables {
+    artifact_identity = "hmac"
+  }
+
+  assert {
+    condition     = output.object_store.backend == "s3" && output.object_store.endpoint == "https://storage.googleapis.com"
+    error_message = "The HMAC fallback should use the GCS XML (S3 interoperability) endpoint."
   }
 }

@@ -108,9 +108,19 @@ spec:
     matchLabels: {{- include "nexus.selector" (list $root .name) | nindent 6 }}
   template:
     metadata:
-      labels: {{- include "nexus.labels" (list $root .name) | nindent 8 }}
+      labels:
+        {{- include "nexus.labels" (list $root .name) | nindent 8 }}
+        {{- if .resultStore }}
+        {{- include "nexus.resultStorePodLabels" $root | nindent 8 }}
+        {{- end }}
       {{- include "nexus.metricsAnnotations" (list $root $metricsPort) | nindent 6 }}
     spec:
+      {{- if .resultStore }}
+      {{- /* The store's cloud identity (IRSA, Pod Identity, Azure/GKE workload
+             identity) binds to this ServiceAccount, so only the result-store
+             clients run as it. */}}
+      {{- include "nexus.resultStoreServiceAccount" $root | nindent 6 }}
+      {{- end }}
       {{- include "nexus.pullSecrets" $root | nindent 6 }}
       securityContext: {{- include "nexus.podSecurity" $root | nindent 8 }}
       {{- include "nexus.placement" (list $root .name) | nindent 6 }}
@@ -138,7 +148,14 @@ spec:
             {{- if $isGateway }}
             # The ops listener: /metrics and the probes, never the public port.
             - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" $metricsPort | quote }} }
+            {{- if $root.Values.tracing.publicEndpoint }}
+            # Inbound REST trace context becomes a link, never the parent: the
+            # callers are untrusted. Independent of tracing.enabled, because
+            # propagation runs even when no span is exported.
+            - { name: NEXUS_TRACING_PUBLIC_ENDPOINT, value: "true" }
             {{- end }}
+            {{- end }}
+            {{- include "nexus.tracingEnv" $root | nindent 12 }}
           ports:
             - { name: http, containerPort: 8080 }
             - { name: grpc, containerPort: {{ .grpc }} }

@@ -16,20 +16,26 @@ version choices, the security model and finding F115.
 | Registry | One ECR repository per component under `kgf-nexus/`: **immutable** tags, scan on push, KMS, untagged images expire after 14 days. The node role has pull-only access (module default). |
 | RDS | PostgreSQL 16 on db.m7g.large with gp3 autoscaling from 50 to 500 GiB, KMS encryption, **Multi-AZ on** by default. Not publicly accessible; isolated subnets; security group allows 5432 from the node security groups only. `rds.force_ssl=1`. PITR retention is 14 days (1-35). Final snapshot, deletion protection, Performance Insights (KMS), Enhanced Monitoring, and `postgresql`/`upgrade` logs to CloudWatch. The password is write-only on RDS and in Secrets Manager (`<name>/postgres`, KMS). |
 | Artifacts | S3 bucket: public access blocked, BucketOwnerEnforced, versioned, SSE-KMS with a bucket key, TLS-only bucket policy. Incomplete multipart uploads abort after 7 days, and noncurrent versions expire after 30 days. |
-| Artifact identities | An IAM policy covering this one bucket and key. (a) An **IRSA / Pod Identity role**: the target design, provisioned but unused (F115). (b) An **IAM user and access key**, used today, carrying that policy plus an explicit deny unless the request arrives through this VPC's S3 endpoint. |
+| Artifact identities | An IAM policy covering this one bucket and key. (a) An **IRSA / Pod Identity role**, used by default (`artifact_identity`). (b) An **IAM user and access key**, only with `artifact_identity = "static"`, carrying that policy plus an explicit deny unless the request arrives through this VPC's S3 endpoint. |
 | KMS | One customer-managed key for data (yearly rotation, 30-day deletion window). The key policy lets CloudWatch Logs use it for this account's log groups only. |
 | In cluster | StorageClass `nexus-gp3` (encrypted with the KMS key, Retain, WaitForFirstConsumer, **cluster default**, because recent EKS ships none), then the Nexus release. |
 
 ### The artifact store on EKS
 
 Nexus uses **Amazon S3 natively** (`minio.enabled=false`,
-`https://s3.<region>.amazonaws.com`, TLS). Its S3 client takes only static
-keys, so the credentials Secret holds the IAM user's key pair. That key is
-worthless outside the VPC because of the `aws:SourceVpce` deny. A plan-time
-guard (`terraform_data.artifact_credentials_guard`) fails if the key is
-missing. Moving to the IRSA / Pod Identity role needs a chart ServiceAccount
-and a client credential chain (F115). The role and its association already
-exist for that.
+`https://s3.<region>.amazonaws.com`, TLS) through the `s3` backend with a
+keyless credential chain (ADR-0027). `artifact_identity` selects it:
+
+- `pod-identity` (default): the EKS Pod Identity association for
+  `nexus/kgf-nexus`; pods get `AWS_CONTAINER_CREDENTIALS_FULL_URI` from the
+  Pod Identity agent and the chart sets `NEXUS_S3_CREDENTIALS=pod-identity`.
+- `irsa`: the ServiceAccount is annotated with the role ARN and the chart sets
+  `NEXUS_S3_CREDENTIALS=web-identity`.
+- `static`: the IAM user's key pair in the credentials Secret, as before. The
+  key is worthless outside the VPC because of the `aws:SourceVpce` deny, and a
+  plan-time guard fails if it is missing.
+
+Keyless mode has not been applied to a real account yet (F115).
 
 ## Prerequisites
 

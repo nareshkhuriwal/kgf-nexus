@@ -72,13 +72,23 @@ module "platform" {
   postgres    = var.postgres
 
   nexus_kubernetes_namespace = var.namespace
+  nexus_service_account      = local.nexus_service_account
   postgres_password_version  = var.postgres_password_version
+}
+
+locals {
+  # The ServiceAccount the result-store pods run as. One name on both ends:
+  # the platform's federated credential trusts system:serviceaccount:<ns>:<it>,
+  # and modules/kgf-nexus creates it with the identity's client-id annotation.
+  nexus_service_account = "kgf-nexus"
+  blob                  = var.azure_blob_native_backend
 }
 
 # ── In-cluster platform pieces ────────────────────────────────────────────
 
 # Premium SSD for every stateful volume the chart creates (NATS JetStream and,
-# on AKS today, MinIO). Retain: deleting the release never deletes the disk.
+# with azure_blob_native_backend = false, MinIO). Retain: deleting the release
+# never deletes the disk.
 resource "kubernetes_storage_class_v1" "premium_ssd" {
   metadata {
     name = "nexus-premium-ssd"
@@ -129,8 +139,20 @@ module "nexus" {
 
   nats_credentials_dir = var.nats_credentials_dir
 
-  # The managed server's password; MinIO keeps generated root credentials.
-  postgres_password = module.platform.postgres_password
+  # The managed server's password. MinIO (only without the Blob backend)
+  # keeps generated root credentials; with Blob the Secret holds no S3 key.
+  postgres_password                 = module.platform.postgres_password
+  generate_object_store_credentials = !local.blob
+
+  # Azure workload identity: the webhook exchanges this ServiceAccount's
+  # projected token for the identity named by the annotation. Created with or
+  # without Blob, so flipping the switch never renames anything.
+  service_account = {
+    name = local.nexus_service_account
+    annotations = {
+      "azure.workload.identity/client-id" = module.platform.nexus_workload_identity_client_id
+    }
+  }
 
   chart_values = {
     postgres = {
@@ -144,11 +166,24 @@ module "nexus" {
       sslmode = "require"
     }
 
-    # No S3 endpoint exists for Azure Blob: the result store is the in-cluster
-    # MinIO on Premium SSD until the native Blob backend lands (F115).
+    # The result store: the provisioned Blob container through workload
+    # identity, or (azure_blob_native_backend = false) the in-cluster MinIO on
+    # Premium SSD. The values keep one shape either way -- only leaves change
+    # -- so the two cases cannot drift apart structurally. minio.bucket is the
+    # Blob CONTAINER under backend azblob. The chart adds the pod label
+    # azure.workload.identity/use itself; the Blob account is reached over its
+    # private endpoint, whose private DNS zone answers the public name.
     minio = {
-      enabled = true
+      enabled = !local.blob
+      bucket  = local.blob ? module.platform.artifact_container : "nexus-results"
       storage = { size = var.minio_storage_size, storageClass = kubernetes_storage_class_v1.premium_ssd.metadata[0].name }
+    }
+    resultStore = {
+      backend = local.blob ? "azblob" : "s3"
+      azure = {
+        account = local.blob ? module.platform.artifact_storage_account : ""
+        auth    = local.blob ? "workload-identity" : "auto"
+      }
     }
 
     nats = {

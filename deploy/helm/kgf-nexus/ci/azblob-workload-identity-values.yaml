@@ -1,0 +1,27 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Azure Blob Storage, native, through AKS workload identity: no key anywhere.
+# The shape deploy/terraform/environments/aks renders with
+# azure_blob_native_backend = true. The ServiceAccount (annotated
+# azure.workload.identity/client-id) is created by modules/kgf-nexus, not by
+# the chart; the chart adds the azure.workload.identity/use pod label itself.
+existingSecret: nexus-credentials
+image: { tag: 0123456789ab }
+nats:
+  auth: { mode: none }
+postgres:
+  enabled: false
+  host: kgf-nexus-prod.postgres.database.azure.com
+  sslmode: require
+minio:
+  enabled: false
+  bucket: nexus-results      # the Blob CONTAINER under backend azblob
+resultStore:
+  backend: azblob
+  azure:
+    account: kgfnexusprodcinabcde
+    auth: workload-identity
+  serviceAccountName: kgf-nexus
+  podLabels:
+    nexus.khuriwalgroup.com/identity: workload

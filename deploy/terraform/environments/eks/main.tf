@@ -60,8 +60,24 @@ module "platform" {
   container_insights = var.container_insights
   postgres           = var.postgres
 
-  nexus_kubernetes_namespace = var.namespace
-  postgres_password_version  = var.postgres_password_version
+  nexus_kubernetes_namespace  = var.namespace
+  nexus_service_account       = local.nexus_service_account
+  artifact_static_credentials = var.artifact_identity == "static"
+  postgres_password_version   = var.postgres_password_version
+}
+
+locals {
+  # One name on both ends: the role trust and the Pod Identity association
+  # name system:serviceaccount:<ns>:<it>, and modules/kgf-nexus creates it.
+  nexus_service_account = "kgf-nexus"
+  # The chart's resultStore.s3.credentials for each artifact_identity: an
+  # explicit mode, never auto, so a stray key or a missing webhook is an error
+  # at startup rather than a silent fall-through to another identity.
+  s3_credentials = {
+    pod-identity = "pod-identity"
+    irsa         = "web-identity"
+    static       = "static"
+  }[var.artifact_identity]
 }
 
 # ── In-cluster platform pieces ────────────────────────────────────────────
@@ -112,14 +128,13 @@ resource "helm_release" "nvidia_device_plugin" {
 
 # ── Nexus ─────────────────────────────────────────────────────────────────
 
-# A plan-time error, not a check warning: without a key pair the kgf-nexus
-# module would fall back to generating MinIO root credentials, which S3 would
-# reject at the first upload.
+# A plan-time error, not a check warning: artifact_identity = "static" with no
+# key pair would start every result-store pod against a Secret without keys.
 resource "terraform_data" "artifact_credentials_guard" {
   lifecycle {
     precondition {
-      condition     = module.platform.artifact_credentials != null
-      error_message = "No result-store credentials: the Nexus S3 client needs a static key pair today (F115). Keep artifact_static_credentials = true in the platform module."
+      condition     = var.artifact_identity != "static" || module.platform.artifact_credentials != null
+      error_message = "artifact_identity = \"static\" needs the platform's IAM-user key pair (artifact_static_credentials), and it produced none."
     }
   }
 }
@@ -135,8 +150,20 @@ module "nexus" {
 
   nats_credentials_dir = var.nats_credentials_dir
 
-  postgres_password        = module.platform.postgres_password
-  object_store_credentials = module.platform.artifact_credentials
+  postgres_password = module.platform.postgres_password
+  # A key pair only for the static fallback. Otherwise the Secret holds none:
+  # the chart would prefer a key over the pod's identity.
+  object_store_credentials          = var.artifact_identity == "static" ? module.platform.artifact_credentials : null
+  generate_object_store_credentials = false
+
+  # Created in every mode so switching never renames it. IRSA needs the role
+  # annotation; Pod Identity's association already names this ServiceAccount.
+  service_account = {
+    name = local.nexus_service_account
+    annotations = var.artifact_identity == "irsa" ? tomap({
+      "eks.amazonaws.com/role-arn" = module.platform.artifact_role_arn
+    }) : tomap({})
+  }
 
   chart_values = {
     postgres = {
@@ -158,6 +185,10 @@ module "nexus" {
       bucket   = module.platform.artifact_bucket
       region   = module.platform.region
       useTLS   = true
+    }
+    resultStore = {
+      backend = "s3"
+      s3      = { credentials = local.s3_credentials }
     }
 
     nats = {

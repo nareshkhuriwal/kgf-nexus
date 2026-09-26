@@ -41,6 +41,32 @@ run "uses_external_credentials" {
   }
 }
 
+run "cloud_identity_writes_no_key_pair" {
+  command = plan
+
+  variables {
+    postgres_password                 = "ManagedDbPassword0123456789"
+    generate_object_store_credentials = false
+    service_account = {
+      name        = "kgf-nexus"
+      annotations = { "eks.amazonaws.com/role-arn" = "arn:aws:iam::123456789012:role/nexus-artifacts" }
+    }
+  }
+
+  assert {
+    condition     = length(random_password.minio) == 0 && !contains(keys(kubernetes_secret_v1.credentials.data), "minio-root-user")
+    error_message = "A store reached with a cloud identity must get no S3 key pair: one would shadow the identity."
+  }
+  assert {
+    condition     = kubernetes_service_account_v1.result_store[0].metadata[0].annotations["eks.amazonaws.com/role-arn"] == "arn:aws:iam::123456789012:role/nexus-artifacts"
+    error_message = "The ServiceAccount must carry the cloud-identity annotation."
+  }
+  assert {
+    condition     = !kubernetes_service_account_v1.result_store[0].automount_service_account_token
+    error_message = "The result-store ServiceAccount must not mount a Kubernetes API token."
+  }
+}
+
 run "refuses_url_unsafe_password" {
   command = plan
 

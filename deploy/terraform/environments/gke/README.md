@@ -16,18 +16,22 @@ version choices, the security model and finding F115.
 | Registry | Artifact Registry Docker repository `kgf-nexus` with **immutable tags** and cleanup of untagged images after 14 days. |
 | Cloud SQL | PostgreSQL 16, Enterprise edition, db-custom-2-7680, 50 GB PD-SSD with autoresize. **Regional HA on** by default. **No public IP**: private IP only, `ENCRYPTED_ONLY`. Backups keep 14 copies, **PITR** keeps 7 days of logs, and query insights and connection/lock/checkpoint logging are on. Deletion protection is on. The `nexus` built-in user has a write-only password. The password is also in Secret Manager. |
 | Artifacts | GCS bucket: uniform access, public access prevention enforced, versioning, 7-day soft delete, and lifecycle rules (abort multipart after 7 days, delete noncurrent after 30). |
-| Artifact identity | Service account `<name>-art` with `roles/storage.objectUser` on the bucket only. It has an **HMAC key**, used today, and a Workload Identity binding for `nexus/kgf-nexus`, prepared but unused (F115). |
+| Artifact identity | Service account `<name>-art` with `roles/storage.objectUser` on the bucket only, bound through **Workload Identity** to `nexus/kgf-nexus` (default). An **HMAC key** is created only with `artifact_identity = "hmac"`. |
 | In cluster | StorageClass `nexus-regional-ssd` (pd-ssd, **regional PD** replicated across two zones, Retain), then the Nexus release. |
 
 ### The artifact store on GKE
 
-Nexus uses **GCS through its S3 interoperability API**: `minio.enabled=false`,
-`https://storage.googleapis.com`, TLS, and the HMAC key pair stored in the
-kgf-nexus credentials Secret. minio-go special-cases Google's endpoint (for
-example, it deletes objects one at a time because GCS has no multi-object delete). Put, get, list and delete are all part of the
-interoperability API. **Large multipart uploads and the artifact GC sweep
-have not yet been run against GCS**, so qualify them before relying on them
-(F115). Rotating the HMAC key is described in the top-level README.
+By default (`artifact_identity = "workload-identity"`) Nexus uses **GCS
+natively** through its `gcs` backend (`cloud.google.com/go/storage`,
+ADR-0027): the kgf-nexus ServiceAccount carries
+`iam.gke.io/gcp-service-account`, the chart sets `NEXUS_GCS_AUTH=auto`, and
+tokens come from the GKE metadata server. No key exists in the cluster.
+
+`artifact_identity = "hmac"` is the fallback: GCS through its S3
+interoperability API with an HMAC key pair in the credentials Secret, as
+before. Both paths pass the conformance suite against fake-gcs-server; neither
+has been run against real GCS yet (F115). Rotating the HMAC key is described
+in the top-level README.
 
 ## Prerequisites
 

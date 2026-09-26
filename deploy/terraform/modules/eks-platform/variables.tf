@@ -163,15 +163,15 @@ variable "nexus_kubernetes_namespace" {
 }
 
 variable "nexus_service_account" {
-  description = "ServiceAccount the IRSA / Pod Identity role trusts. The chart does not create or use one yet (F115)."
+  description = "ServiceAccount the IRSA / Pod Identity role trusts: the one the result-store pods run as (modules/kgf-nexus creates it)."
   type        = string
   default     = "kgf-nexus"
 }
 
 variable "artifact_static_credentials" {
-  description = "Create an IAM user + access key for the result store, usable ONLY through this VPC's S3 endpoint. Required today: the Nexus S3 client takes static keys only (F115). Set false once the chart and client use the IRSA / Pod Identity role."
+  description = "Also create an IAM user + access key for the result store, usable ONLY through this VPC's S3 endpoint. Off by default: the result store authenticates with the Pod Identity / IRSA role. Opt in only where neither identity mechanism is available."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "artifact_noncurrent_version_days" {

@@ -140,24 +140,28 @@ variable "premium_disk_sku" {
 
 variable "azure_blob_native_backend" {
   description = <<-EOT
-    RESERVED for the native Azure Blob result-store backend, which does NOT
-    EXIST YET (F115). Nexus speaks only the S3 API and Azure Blob has none, so
-    on AKS the result store is the in-cluster MinIO on Premium SSD. The Blob
-    account and container are provisioned already; when the backend ships,
-    this switch will turn MinIO off and point Nexus at Blob via workload
-    identity. It cannot be enabled until then.
+    true: Nexus stores results and logs in the provisioned Blob container
+    through the native azblob backend (resultStore.backend=azblob), keyless:
+    AKS workload identity federates the kgf-nexus ServiceAccount to the
+    user-assigned identity that holds Storage Blob Data Contributor on that one
+    container. The in-cluster MinIO is not deployed and the credentials Secret
+    holds no S3 key pair.
+    false: the in-cluster MinIO on a Premium SSD PVC, as before; you then own
+    its capacity, backups and availability.
+    Switching an environment that already holds results in MinIO does NOT
+    migrate them: copy the bucket into the container first (rclone, azcopy),
+    or keep false.
   EOT
   type        = bool
-  default     = false
-
-  validation {
-    condition     = !var.azure_blob_native_backend
-    error_message = "The native Azure Blob backend is not implemented yet (F115). Nexus on AKS uses the in-cluster MinIO; leave azure_blob_native_backend = false."
-  }
+  # Default true. The Blob account is zone-redundant, versioned, soft-deleted,
+  # private-endpoint-only and audited, and needs no key; a single MinIO pod on
+  # one PVC is none of those. No AKS environment has been applied yet (F115),
+  # so there is no MinIO data this default could strand.
+  default = true
 }
 
 variable "minio_storage_size" {
-  description = "Size of the in-cluster MinIO volume (Premium SSD) holding every result and log. Plan capacity here: it is the whole artifact store on AKS."
+  description = "Size of the in-cluster MinIO volume (Premium SSD), used ONLY with azure_blob_native_backend = false. It is then the whole artifact store: plan capacity here."
   type        = string
   default     = "200Gi"
 }

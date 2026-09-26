@@ -45,10 +45,16 @@ spec:
       activeDeadlineSeconds: {{ $gc.activeDeadlineSeconds }}
       template:
         metadata:
-          labels: {{- include "nexus.labels" (list . "artifact-gc") | nindent 12 }}
+          labels:
+            {{- include "nexus.labels" (list . "artifact-gc") | nindent 12 }}
+            {{- include "nexus.resultStorePodLabels" . | nindent 12 }}
         spec:
           restartPolicy: Never
+          # No Kubernetes API token: the sweep never calls the API server. The
+          # cloud-identity webhooks (IRSA, Pod Identity, Azure workload
+          # identity) project their OWN audience-bound token, unaffected.
           automountServiceAccountToken: false
+          {{- include "nexus.resultStoreServiceAccount" . | nindent 10 }}
           {{- include "nexus.pullSecrets" . | nindent 10 }}
           securityContext: {{- include "nexus.podSecurity" . | nindent 12 }}
           {{- with .Values.placement.priorityClassName }}
@@ -81,6 +87,7 @@ spec:
                 {{- include "nexus.dbEnv" . | nindent 16 }}
                 {{- include "nexus.resultStoreEnv" . | nindent 16 }}
                 - { name: ARTIFACT_GC_LOG_LEVEL, value: {{ $gc.logLevel | quote }} }
+                {{- include "nexus.tracingEnv" . | nindent 16 }}
                 {{- with $gc.pushgatewayUrl }}
                 - { name: ARTIFACT_GC_PUSHGATEWAY_URL, value: {{ . | quote }} }
                 {{- end }}

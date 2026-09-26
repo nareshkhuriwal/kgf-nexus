@@ -26,8 +26,10 @@ spec:
     metadata:
       labels: {{- include "nexus.labels" (list $root .name) | nindent 8 }}
         nexus.khuriwalgroup.com/role: agent
+        {{- include "nexus.resultStorePodLabels" $root | nindent 8 }}
       {{- include "nexus.metricsAnnotations" (list $root (int $root.Values.metrics.agentPort)) | nindent 6 }}
     spec:
+      {{- include "nexus.resultStoreServiceAccount" $root | nindent 6 }}
       {{- include "nexus.pullSecrets" $root | nindent 6 }}
       securityContext: {{- include "nexus.podSecurity" $root | nindent 8 }}
       {{- include "nexus.placement" (list $root .name) | nindent 6 }}
@@ -71,6 +73,7 @@ spec:
             # agent's own default is loopback. No Service exposes this port.
             - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" (int $root.Values.metrics.agentPort) | quote }} }
             {{- include "nexus.tlsEnv" (list $root "client") | nindent 12 }}
+            {{- include "nexus.tracingEnv" $root | nindent 12 }}
           ports:
             - { name: metrics, containerPort: {{ int $root.Values.metrics.agentPort }} }
           # Not ready until the agent has registered with the control plane
