@@ -45,6 +45,11 @@ run "plan_example" {
   command = plan
 
   assert {
+    condition     = local.artifact_identity.name == "nexus-artifacts" && length(local.agents) == 1
+    error_message = "The result-store ServiceAccount must be the one the platform identity trusts, and the GPU agent present only with the GPU pool."
+  }
+
+  assert {
     condition     = output.object_store.endpoint == "https://s3.us-east-1.amazonaws.com"
     error_message = "Nexus should use the regional S3 endpoint."
   }
@@ -79,4 +84,30 @@ run "refuses_missing_static_credentials" {
   }
 
   expect_failures = [terraform_data.artifact_credentials_guard]
+}
+
+run "gpu_pool_hosts_a_gpu_agent" {
+  command = plan
+
+  variables {
+    gpu_node_group = merge(var.gpu_node_group, { enabled = true })
+  }
+
+  assert {
+    condition     = length(local.agents) == 2 && local.agents[1].gpuCount >= 1 && local.agents[1].nodeSelector["nexus.khuriwalgroup.com/pool"] == "gpu"
+    error_message = "With the GPU pool on, a GPU agent requesting its devices must be placed on it."
+  }
+}
+
+run "refuses_an_unpinned_ca_bundle" {
+  command = plan
+
+  override_resource {
+    target = terraform_data.postgres_ca_bundle_pin
+  }
+
+  assert {
+    condition     = sha256(local.postgres_ca_bundle) == local.ca_bundle_pins[local.postgres_ca_bundle_file]
+    error_message = "The vendored CA bundle must match its pin in ca-bundles/SHA256SUMS."
+  }
 }

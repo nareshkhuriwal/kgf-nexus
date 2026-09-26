@@ -179,7 +179,7 @@ variable "nexus_kubernetes_namespace" {
 }
 
 variable "nexus_service_account" {
-  description = "Kubernetes ServiceAccount bound to the artifact service account through Workload Identity. The chart does not create one yet (F115)."
+  description = "Kubernetes ServiceAccount bound to the artifact service account through Workload Identity. The environments pass the chart's shared result-store account (nexus-artifacts), given to api-gateway, the agents and artifact-gc."
   type        = string
   default     = "kgf-nexus"
 }

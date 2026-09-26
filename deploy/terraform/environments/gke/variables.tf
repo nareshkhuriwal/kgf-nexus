@@ -149,3 +149,44 @@ variable "postgres_password_version" {
   type        = number
   default     = 1
 }
+
+# ── Database hardening and agent pools (F115) ─────────────────────────────
+
+variable "runtime_db_roles" {
+  description = "Services connect as their own least-privilege logins, created by the chart's db-roles Job; the managed server's admin login then reaches only the migrate, bootstrap and db-roles Jobs (docs/OPERATIONS.md §20.9)."
+  type        = bool
+  default     = true
+}
+
+variable "runtime_db_password_version" {
+  description = "Bump to rotate every runtime login's password in one apply (the db-roles Job re-runs and the pods roll)."
+  type        = number
+  default     = 1
+}
+
+variable "gpu_agent" {
+  description = "The Nexus agent placed on the GPU pool when it is enabled: what it advertises (gpu_count devices of gpu_kind, and CPU/memory) and requests from the device plugin. Size it inside one GPU node (default: g2-standard-8: 8 vCPU, 32 GiB, one L4)."
+  type = object({
+    replicas       = number
+    gpu_count      = number
+    gpu_kind       = string
+    gpu_memory_gib = number
+    cpu_millis     = number
+    memory_gib     = number
+    disk_gib       = number
+  })
+  default = {
+    replicas       = 1
+    gpu_count      = 1
+    gpu_kind       = "nvidia-l4"
+    gpu_memory_gib = 24
+    cpu_millis     = 6000
+    memory_gib     = 24
+    disk_gib       = 150
+  }
+
+  validation {
+    condition     = var.gpu_agent.gpu_count >= 1 && var.gpu_agent.replicas >= 0
+    error_message = "gpu_agent.gpu_count must be at least 1 (a GPU agent requests its devices) and replicas non-negative."
+  }
+}

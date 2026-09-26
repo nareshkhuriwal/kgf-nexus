@@ -34,8 +34,18 @@ output "registry" {
 }
 
 output "postgres_host" {
-  description = "Cloud SQL private IP."
+  description = "Cloud SQL private-services-access DNS name (private zone in this VPC). Connect by this name: it is the one the server certificate carries, which sslmode=verify-full checks."
+  value       = trimsuffix(google_dns_record_set.postgres.name, ".")
+}
+
+output "postgres_private_ip" {
+  description = "Cloud SQL private IP (not in the server certificate; for diagnostics)."
   value       = google_sql_database_instance.this.private_ip_address
+}
+
+output "postgres_ca_bundle" {
+  description = "PEM of every CA the Cloud SQL instance trusts (current, upcoming, previous), from the Cloud SQL Admin API; the chart mounts it for verify-full."
+  value       = join("\n", [for c in data.google_sql_ca_certs.postgres.certs : trimspace(c.cert)])
 }
 
 output "postgres_instance_connection_name" {

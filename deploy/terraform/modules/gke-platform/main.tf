@@ -34,6 +34,7 @@ locals {
     "compute.googleapis.com",
     "container.googleapis.com",
     "sqladmin.googleapis.com",
+    "dns.googleapis.com",
     "servicenetworking.googleapis.com",
     "artifactregistry.googleapis.com",
     "secretmanager.googleapis.com",
