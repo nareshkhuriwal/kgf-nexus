@@ -32,7 +32,7 @@ func TestIntegrationClusterLabelsHeadroomAndCachedArtifacts(t *testing.T) {
 	}
 	report := ObservationReport{ClusterID: clusterID, ControllerIdentity: "c-0", EffectiveMode: "plan",
 		Labels: map[string]string{"nexus.io/region": "eu-west-1", "nexus.io/cost-tier": "2"}, LabelsReported: true,
-		Headroom: map[string]ClusterHeadroom{"tasks": {CPUMillis: 4000, MemoryBytes: -1, GPUCount: 2, Pods: 10}},
+		Headroom:         map[string]ClusterHeadroom{"tasks": {CPUMillis: 4000, MemoryBytes: -1, GPUCount: 2, Pods: 10}},
 		HeadroomReported: true}
 	if _, err := rm.ReportObservations(ctx, report); err != nil {
 		t.Fatalf("report: %v", err)
