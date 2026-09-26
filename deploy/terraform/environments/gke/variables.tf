@@ -138,6 +138,25 @@ variable "nats_credentials_dir" {
   type        = string
 }
 
+variable "artifact_identity" {
+  description = <<-EOT
+    How the result store reaches GCS:
+      workload-identity -- default: the native gcs backend (JSON API) as the
+                           artifact service account through GKE Workload
+                           Identity. No key anywhere.
+      hmac              -- opt-in fallback: the s3 backend against GCS's XML
+                           interoperability API with an HMAC key of the same
+                           service account, stored in the credentials Secret.
+  EOT
+  type        = string
+  default     = "workload-identity"
+
+  validation {
+    condition     = contains(["workload-identity", "hmac"], var.artifact_identity)
+    error_message = "artifact_identity must be workload-identity or hmac."
+  }
+}
+
 variable "chart_values_overrides" {
   description = "Chart values deep-merged last (agents, replicas, gateway, SMTP, NATS TLS...)."
   type        = any

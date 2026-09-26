@@ -145,7 +145,14 @@ spec:
             {{- if $isGateway }}
             # The ops listener: /metrics and the probes, never the public port.
             - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" $metricsPort | quote }} }
+            {{- if $root.Values.tracing.publicEndpoint }}
+            # Inbound REST trace context becomes a link, never the parent: the
+            # callers are untrusted. Independent of tracing.enabled, because
+            # propagation runs even when no span is exported.
+            - { name: NEXUS_TRACING_PUBLIC_ENDPOINT, value: "true" }
             {{- end }}
+            {{- end }}
+            {{- include "nexus.tracingEnv" $root | nindent 12 }}
           ports:
             - { name: http, containerPort: 8080 }
             - { name: grpc, containerPort: {{ .grpc }} }

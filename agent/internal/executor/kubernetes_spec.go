@@ -200,6 +200,7 @@ func k8sEnv(spec TaskSpec) []corev1.EnvVar {
 		IdempotencyKey: spec.IdempotencyKey, DeclaredOutputs: spec.DeclaredOutputs,
 		StartToCloseDeadline: spec.StartToCloseDeadline,
 		InlineThresholdBytes: spec.InlineThresholdBytes,
+		TraceEnv:             spec.TraceEnv,
 		// Runtime deliberately nil: task env is already in m, and re-adding it
 		// here would let it override the platform variables below.
 	}, k8sWorkDir) {

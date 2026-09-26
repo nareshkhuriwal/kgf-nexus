@@ -39,6 +39,12 @@
 package relay
 
 import (
+	"go.opentelemetry.io/otel/attribute"
+
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -366,6 +372,8 @@ type outboxRow struct {
 	payload    []byte
 	createdAt  time.Time
 	attempts   int32
+	// traceContext is the writer's W3C traceparent (migration 0028), or nil.
+	traceContext *string
 
 	// Joined from run_events / workflow_runs for topic = run_event.
 	evID        *int64
@@ -442,6 +450,7 @@ func (r *Relay) PublishBatch(ctx context.Context) (BatchResult, error) {
 			failed[row.id] = "unknown topic " + strconv.Quote(row.topic) + " for this relay version"
 			continue
 		}
+		publishSpan(ctx, row, msg)
 		fut, err := r.js.PublishMsgAsync(msg, jetstream.WithMsgID(bus.MsgID(row.id, row.createdAt)))
 		if err != nil {
 			failed[row.id] = err.Error()
@@ -566,7 +575,7 @@ func (r *Relay) claim(ctx context.Context, tx pgx.Tx) ([]outboxRow, error) {
 	// run row is the event_seq allocator, and locking it here would serialise the
 	// relay against every event append on that run.
 	const q = `
-SELECT o.id, o.topic, o.namespace, o.routing_key, o.payload, o.created_at, o.attempts,
+SELECT o.id, o.topic, o.namespace, o.routing_key, o.payload, o.created_at, o.attempts, o.trace_context,
        e.id, e.run_id::text, e.seq, e.node_id, e.attempt_id::text, e.kind, e.payload,
        e.actor, e.occurred_at, wr.namespace
   FROM outbox o
@@ -586,7 +595,7 @@ SELECT o.id, o.topic, o.namespace, o.routing_key, o.payload, o.created_at, o.att
 	for rows.Next() {
 		var o outboxRow
 		if err := rows.Scan(&o.id, &o.topic, &o.namespace, &o.routingKey, &o.payload, &o.createdAt,
-			&o.attempts, &o.evID, &o.evRunID, &o.evSeq, &o.evNodeID, &o.evAttemptID, &o.evKind,
+			&o.attempts, &o.traceContext, &o.evID, &o.evRunID, &o.evSeq, &o.evNodeID, &o.evAttemptID, &o.evKind,
 			&o.evPayload, &o.evActor, &o.evOccurred, &o.evNamespace); err != nil {
 			return nil, fmt.Errorf("relay: scan outbox row: %w", err)
 		}
@@ -940,4 +949,35 @@ func boolGauge(b bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+// publishSpan records one outbox row's publication as a PRODUCER span that is
+// a child of the transaction that wrote the row (its stored traceparent), and
+// injects that span into the message headers (ADR-0026). A consumer that
+// extracts the headers (tracing.ExtractNATS) therefore continues the trace of
+// the fact the message announces, across the asynchronous hop.
+//
+// The relay batch itself is not the parent: it is an implementation detail of
+// delivery, and one batch carries rows from many unrelated runs. A row written
+// without a trace (a pre-0028 writer, an untraced caller) is published with no
+// trace headers, exactly as before.
+func publishSpan(batchCtx context.Context, row outboxRow, msg *nats.Msg) {
+	if row.traceContext == nil {
+		return
+	}
+	sc := tracing.SpanContextFromTraceparent(*row.traceContext)
+	if !sc.IsValid() {
+		return
+	}
+	ctx := trace.ContextWithRemoteSpanContext(context.Background(), sc)
+	ctx, span := tracing.Start(ctx, "outbox.publish "+row.topic,
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithLinks(trace.LinkFromContext(batchCtx)),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "nats"),
+			attribute.String("messaging.destination.name", msg.Subject),
+			attribute.Int64("nexus.outbox.id", row.id),
+			attribute.Int("nexus.outbox.attempts", int(row.attempts))))
+	tracing.InjectNATS(ctx, msg)
+	span.End()
 }

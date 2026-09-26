@@ -29,7 +29,7 @@ override_module {
     key_vault_uri                     = "https://kv.vault.azure.net/"
     artifact_storage_account          = "kgfnexusprodcinabcde"
     artifact_container                = "nexus-results"
-    nexus_workload_identity_client_id = "00000000-0000-0000-0000-000000000001"
+    nexus_workload_identity_client_id = "00000000-0000-0000-0000-00000000c1d0"
   }
 }
 
@@ -57,14 +57,38 @@ run "plan_example" {
   }
 }
 
-run "refuses_blob_backend" {
+# The default: native Blob through workload identity, no MinIO, no key.
+run "blob_backend_by_default" {
+  command = plan
+
+  assert {
+    condition     = output.object_store.backend == "azblob"
+    error_message = "AKS should store results in the provisioned Blob container by default."
+  }
+
+  assert {
+    condition     = output.object_store.service_account == "nexus-artifacts" && local.artifact_identity.annotations["azure.workload.identity/client-id"] == "00000000-0000-0000-0000-00000000c1d0"
+    error_message = "The result-store pods must run as the ServiceAccount the federated credential trusts."
+  }
+
+  assert {
+    condition     = startswith(output.object_store.blob_backend_status, "enabled")
+    error_message = "blob_backend_status must say the Blob backend is enabled."
+  }
+}
+
+# The opt-out: the in-cluster MinIO, as before the Blob backend existed.
+run "minio_when_blob_disabled" {
   command = plan
 
   variables {
-    azure_blob_native_backend = true
+    azure_blob_native_backend = false
   }
 
-  expect_failures = [var.azure_blob_native_backend]
+  assert {
+    condition     = output.object_store.backend == "s3" && startswith(output.object_store.active, "in-cluster MinIO")
+    error_message = "With the Blob backend off, results go to the in-cluster MinIO."
+  }
 }
 
 run "gpu_pool_hosts_a_gpu_agent" {

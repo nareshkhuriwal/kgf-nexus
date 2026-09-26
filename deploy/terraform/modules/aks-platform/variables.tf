@@ -228,6 +228,16 @@ variable "blob_soft_delete_days" {
   default     = 30
 }
 
+variable "blob_noncurrent_version_days" {
+  description = "Days a noncurrent (overwritten or deleted) blob version is kept before the lifecycle policy removes it. Matches the S3 and GCS noncurrent expiry."
+  type        = number
+  default     = 30
+  validation {
+    condition     = var.blob_noncurrent_version_days >= 1
+    error_message = "blob_noncurrent_version_days must be at least 1."
+  }
+}
+
 # ── Key Vault ─────────────────────────────────────────────────────────────
 
 variable "key_vault_allowed_ip_ranges" {
@@ -255,9 +265,9 @@ variable "nexus_kubernetes_namespace" {
 }
 
 variable "nexus_service_account" {
-  description = "Kubernetes ServiceAccount the workload identity federates. The environments pass the chart's shared result-store account (nexus-artifacts); the native Blob backend that will use it is not merged yet (F115)."
+  description = "Kubernetes ServiceAccount the workload identity federates: the chart's shared result-store account (nexus-artifacts), which the chart creates with this identity's client-id annotation and gives to api-gateway, the agents and artifact-gc (chart serviceAccounts.apiGateway / agent / artifactGC)."
   type        = string
-  default     = "kgf-nexus"
+  default     = "nexus-artifacts"
 }
 
 variable "postgres_password_version" {

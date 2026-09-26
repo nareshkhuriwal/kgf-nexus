@@ -4,6 +4,8 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"flag"
@@ -72,7 +74,7 @@ func run() error {
 	// Every dispatch/lost log carries run_id, attempt_id and worker_id
 	// (CONTRACT.md logging convention) so an incident can be reconstructed by
 	// filtering on one run.
-	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(*logLevel)}))
+	log := slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(*logLevel)})))
 	slog.SetDefault(log)
 
 	// A per-process identity, not a per-host one. It lands in timers.claimed_by,
@@ -86,6 +88,9 @@ func run() error {
 	// Ctrl-C during startup still exits cleanly.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter; flushed last.
+	defer tracing.SetupOrExit(ctx, "scheduler", version, log)()
 
 	pool, err := store.NewPool(ctx, store.DefaultPoolConfig(*dsn))
 	if err != nil {

@@ -38,32 +38,32 @@ static credentials (`credentials.NewStaticV4` in
 
 | Cloud | Artifact store Nexus uses today | How | Status |
 |---|---|---|---|
-| AWS | **Amazon S3**, native | IAM-user key pair limited to one bucket. An explicit deny blocks every request that does not come through the VPC's S3 gateway endpoint. | Works now. The IRSA / Pod Identity role trusts the chart's `nexus-artifacts` ServiceAccount, which carries its ARN; it takes effect once the S3 client uses a credential chain (F115). |
-| GCP | **GCS through its S3 interoperability (XML) API** | HMAC key of a service account that has `roles/storage.objectUser` on one bucket. It is stored in the kgf-nexus credentials Secret. | Works with minio-go, which special-cases `storage.googleapis.com` (for example, it deletes objects one at a time because GCS has no multi-object delete). Large multipart uploads and the GC sweep have **not** been exercised against GCS (F115). |
-| Azure | **In-cluster MinIO on a Premium SSD PVC** | The chart's own MinIO (`minio.enabled=true`) on the `nexus-premium-ssd` StorageClass. | Works, but you operate it: capacity, backups (`make backup-artifacts`) and availability are yours. Azure Blob has **no S3 endpoint**. |
+| AWS | **Amazon S3**, native (`s3` backend) | **EKS Pod Identity** by default (`artifact_identity = "pod-identity"`), or IRSA (`"irsa"`): a role limited to one bucket and one KMS key, no secret in the cluster. The IAM-user key pair remains as the opt-in `"static"` fallback. | Keyless path implemented (ADR-0027); not yet applied to a real account (F115). |
+| GCP | **GCS, native** (`gcs` backend, `cloud.google.com/go/storage`) | **GKE Workload Identity** by default (`artifact_identity = "workload-identity"`): the chart's `nexus-artifacts` ServiceAccount impersonates a Google service account with object access on one bucket. The HMAC key and GCS's S3 interoperability API remain as the opt-in `"hmac"` fallback. | Keyless path implemented; conformance-tested against fake-gcs-server, not yet against real GCS (F115). |
+| Azure | **Azure Blob, native** (`azblob` backend) by default (`azure_blob_native_backend = true`) | AKS workload identity federated to the user-assigned identity with `Storage Blob Data Contributor` on the one private container. | Implemented and conformance-tested against Azurite; not yet applied to a real subscription (F115). `false` keeps the in-cluster MinIO on a Premium SSD PVC. |
+
+All three backends sit behind one result-store interface (`internal/objstore`,
+ADR-0027) and pass one conformance suite; docs/OPERATIONS.md §26 has the
+configuration, the per-cloud least-privilege scopes and the lifecycle rules.
+Switching an existing environment between backends does not migrate objects:
+copy the bucket first (rclone, azcopy, gcloud storage cp).
 
 **ServiceAccounts.** Each environment binds its object-store identity to one
-chart ServiceAccount, `nexus-artifacts`, which the chart gives to exactly the
-components that use the result store: api-gateway (task logs), the agents and
-artifact-gc (IRSA role ARN on EKS, `iam.gke.io/gcp-service-account` on GKE,
-the workload identity client id plus the `azure.workload.identity/use` pod
-label on AKS). Every other component runs under its own account with no API
-token mounted. The accounts are ready; the credentials take effect when the
-object-store client stops requiring static keys, which is a separate change.
+chart ServiceAccount, `nexus-artifacts`, which the chart creates and gives to
+exactly the components that use the result store: api-gateway (task logs), the
+agents and artifact-gc (chart `serviceAccounts.apiGateway` / `.agent` /
+`.artifactGC`). The environment sets its annotation: the IRSA role ARN on EKS
+(only with `artifact_identity = "irsa"`; Pod Identity's association names the
+account instead), `iam.gke.io/gcp-service-account` on GKE (Workload Identity),
+and the workload identity client id on AKS, where the chart also adds the
+`azure.workload.identity/use` pod label to the result-store pods. Every other
+component runs under its own account with no API token mounted
+(docs/OPERATIONS.md §20.13).
 
 **GPU pools.** When the GPU pool is enabled, the environment adds a GPU agent
 (`gpu_agent`) pinned to it with `nodeSelector`; the chart requests its
 `nvidia.com/gpu` devices and tolerates the pool's taint. A CPU agent is pinned
 to the cpu pool.
-
-Azure Blob is **not** used by Nexus today. The storage account, the private
-container, the private endpoint and a workload identity with `Storage Blob
-Data Contributor` on that container are all provisioned. They wait for a
-native Blob backend, which does not exist yet. The `azure_blob_native_backend`
-variable is reserved for that backend, and its validation refuses `true`.
-Two other routes exist, and neither is wired: an S3-to-Blob gateway such as
-s3proxy (MinIO's own gateway mode was removed in 2022), or the native backend.
-Both are tracked in F115.
 
 ## Version choices
 

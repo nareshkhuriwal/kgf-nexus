@@ -31,6 +31,8 @@ import (
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
+	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
 )
 
 // version is stamped at build time (-ldflags "-X main.version=..."). It is
@@ -113,6 +115,27 @@ func main() {
 	// set but unreadable, none where NEXUS_NATS_REQUIRE_AUTH or NEXUS_ENV=
 	// production demands them -- is fatal, like a malformed NEXUS_K8S_*: an
 	// agent quietly running without hints would hide the deployment bug.
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter. Flushed
+	// last, after the session loop has reported its final results.
+	shutdownTracing, err := tracing.Setup(ctx, tracing.Options{Service: "nexus-agent", Version: version, Log: log})
+	if err != nil {
+		log.Error("invalid OpenTelemetry configuration", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(sctx)
+	}()
+
+	// The result-store configuration the agent holds locally (ADR-0027). A
+	// malformed mode is fatal for the same reason a malformed NEXUS_K8S_* is.
+	localStore, err := objstore.ConfigFromEnv(nil)
+	if err != nil {
+		log.Error("invalid result-store configuration", "error", err)
+		os.Exit(1)
+	}
+
 	busCfg, err := bus.ConfigFromEnv("nexus-agent")
 	if err != nil {
 		log.Error("invalid NATS configuration", "error", err)
@@ -145,6 +168,8 @@ func main() {
 			SecretAccessKey: os.Getenv("NEXUS_S3_SECRET_ACCESS_KEY"),
 			SessionToken:    os.Getenv("NEXUS_S3_SESSION_TOKEN"),
 			UseTLS:          os.Getenv("NEXUS_S3_USE_TLS") == "true",
+			Local:           localStore,
+			BackendSet:      os.Getenv(objstore.EnvBackend) != "",
 		},
 		AllowUnenforceableLimits: *allowUnenforceable,
 		Bus:                      busCfg,
@@ -300,9 +325,9 @@ func newLogger(level, format string) *slog.Logger {
 	}
 	opts := &slog.HandlerOptions{Level: lv}
 	if strings.EqualFold(format, "text") {
-		return slog.New(slog.NewTextHandler(os.Stderr, opts))
+		return slog.New(tracing.LogHandler(slog.NewTextHandler(os.Stderr, opts)))
 	}
-	return slog.New(slog.NewJSONHandler(os.Stderr, opts))
+	return slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stderr, opts)))
 }
 
 // advertisedDisk resolves the scratch-disk capacity this agent advertises.

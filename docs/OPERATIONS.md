@@ -6,7 +6,7 @@
 and restore and the ordering between the two stores, the restore drills and their
 measured results, point-in-time recovery with pgBackRest and its timed drills
 (§4), what these procedures do *not* cover, the RPO/RTO each approach actually
-delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), and third-party images and toolchains: what is pinned and why (§22).
+delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), third-party images and toolchains: what is pinned and why (§22), and tracing and the result-store backends (§26).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -2224,6 +2224,9 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_agent_result_store_upload_bytes_total` | C | result | agent | Output bytes. `uploaded` counts bytes actually transferred |
 | `nexus_agent_result_store_upload_duration_seconds` | H | result | agent | Upload latency. Inline outputs are not observed |
 | `nexus_agent_result_store_upload_size_bytes` | H | — | agent | Uploaded output sizes |
+| `nexus_objstore_operations_total` | C | backend, op, outcome (ok/not_found/exists/error) | agent, api-gateway, artifact-gc | Every result-store call (§26.5). `outcome="error"` rising: the store or its credentials |
+| `nexus_objstore_operation_duration_seconds` | H | backend, op | agent, api-gateway, artifact-gc | Call latency; for `get`, time to open the object |
+| `nexus_objstore_bytes_total` | C | backend, direction (in/out) | agent, api-gateway, artifact-gc | Payload bytes through the result store |
 | `nexus_agent_sessions_total` | C | — | agent | Registrations. More than 1 per process means the control plane forced a re-registration |
 | `nexus_agent_advertised_capacity` | G | resource | agent | Capacity advertised for scheduling, which the runtime does not necessarily enforce |
 | `nexus_agent_result_report_failures_total` | C | — | agent | Reports not delivered. The WAL retains them |
@@ -2340,7 +2343,7 @@ variables as the agent, which compose (`x-minio-env`) and Helm
 
 | Setting (api-gateway) | Default | Meaning |
 |---|---|---|
-| `NEXUS_S3_ACCESS_KEY_ID`, `NEXUS_S3_SECRET_ACCESS_KEY` | unset | READ credentials for log objects. Unset: the logs route answers 501 and agents are told not to ship. |
+| `NEXUS_S3_ACCESS_KEY_ID`, `NEXUS_S3_SECRET_ACCESS_KEY` | unset | READ credentials for log objects on the `s3` backend, or any credential mode / backend in §26.3 (IRSA, Pod Identity, Azure or GCS workload identity). If the gateway cannot open the store: the logs route answers 501 and agents are told not to ship. |
 | `NEXUS_RESULT_STORE_ENDPOINT`, `_BUCKET`, `_REGION`, `NEXUS_S3_USE_TLS` | compose values | Where logs are read from; identical to where agents write. |
 | `NEXUS_LOG_SHIPPING` | `true` | `false` turns the feature off fleet-wide (501 + no shipping). |
 | `NEXUS_LOG_MAX_BYTES_PER_ATTEMPT` | 64 MiB | Per-attempt cap on shipped (encoded) bytes. Past it the head is kept, the last 2 MiB is kept, and the omission is written into the log and the index. |
@@ -2936,8 +2939,7 @@ serviceAccounts:
     name: nexus-artifacts
     annotations: { eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/<name>-nexus-artifacts }
     # GKE: { iam.gke.io/gcp-service-account: <gsa>@<project>.iam.gserviceaccount.com }
-    # AKS: { azure.workload.identity/client-id: <id> } plus
-    # podLabels: { azure.workload.identity/use: "true" }
+    # AKS: { azure.workload.identity/client-id: <id> }
   agent: *artifacts
   artifactGC: *artifacts
 ```
@@ -2945,9 +2947,21 @@ serviceAccounts:
 IRSA, EKS Pod Identity and Azure Workload Identity inject their own projected
 token and GKE uses the metadata server, so all work with the API token
 unmounted. The Terraform environments set exactly this, with the platform
-modules' trust (`nexus_service_account = "nexus-artifacts"`). **The object-store
-client does not use these credentials yet** (static keys remain configured) —
-that is a separate change (F115 part 2); the accounts are ready for it.
+modules' trust (`nexus_service_account = "nexus-artifacts"`); under EKS Pod
+Identity the association names the account and no annotation is needed.
+
+These are the accounts the result-store clients authenticate with (§26):
+`resultStore.s3.credentials` `web-identity`/`pod-identity`/`auto`,
+`resultStore.azure.auth=workload-identity` and `resultStore.gcs.auth=auto` all
+take the identity bound here. With `resultStore.backend=azblob` and
+`auth=workload-identity` the chart adds the pod label
+`azure.workload.identity/use: "true"` to exactly these three components (the
+webhook injects the federated token only into labelled pods), and it refuses
+to create their accounts without the `azure.workload.identity/client-id`
+annotation; `s3.credentials=web-identity` likewise requires
+`eks.amazonaws.com/role-arn`. With `serviceAccounts.create=false` the accounts
+are yours and are not inspected. There is no separate result-store
+ServiceAccount setting: one identity model for every pod.
 
 ### 20.14 Agent pools and GPUs
 
@@ -3269,3 +3283,162 @@ Node **24** ("Krypton"), Active LTS until 2026-10-20 and maintained until
 2028-04-30 (github.com/nodejs/Release, `schedule.json`). The exact patch
 (`24.21.0`) is pinned in all three CI definitions and in the Dockerfile, and
 they move together. Node 26 becomes LTS on 2026-10-28; move once it has.
+
+## 26. Tracing and result-store backends
+
+Two production features share this section because they share configuration
+surfaces (env, Helm values, compose) and one verification loop: OpenTelemetry
+tracing (ADR-0026) and the native S3, Azure Blob and GCS result-store backends
+(ADR-0027).
+
+### 26.1 Turning tracing on
+
+Tracing is **off** until you point it at a collector. Every service and the
+agent read only the standard OpenTelemetry variables:
+
+| Variable | Nexus default | Notes |
+|---|---|---|
+| `OTEL_TRACES_EXPORTER` | unset (off) | `otlp` or `console` turns tracing on; `none` forces it off. An unknown value fails startup. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` / `_TRACES_ENDPOINT` | unset | Setting either also turns tracing on. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | `grpc` for port 4317. `http/json` is refused. |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `_INSECURE`, `_CERTIFICATE`, `_TIMEOUT`, `_COMPRESSION` | SDK defaults | Read by the exporter itself. Keep headers (API tokens) in a Secret. |
+| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Also `parentbased_always_on/off`, `traceidratio`, `always_on/off`. |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | The chart defaults to `0.1`. |
+| `OTEL_SERVICE_NAME` | the binary's name | Do not set it fleet-wide: every service would report as one. |
+| `OTEL_RESOURCE_ATTRIBUTES` | — | e.g. `deployment.environment.name=prod`. |
+| `OTEL_BSP_*` | SDK defaults | Batch size, queue, delay. The queue drops when full; export never blocks work. |
+| `OTEL_SDK_DISABLED` | — | `true` forces tracing off. |
+| `NEXUS_TRACING_PUBLIC_ENDPOINT` (gateway) | `false` | `true`: an inbound REST `traceparent` becomes a **link**, not the parent (untrusted callers cannot force sampling or join your traces). |
+
+**Helm:** `tracing.enabled=true`, `tracing.endpoint=http://otel-collector.observability:4317`,
+`tracing.protocol=grpc`, `tracing.samplerArg="0.1"`, optional
+`tracing.headersSecret.{name,key}`, `tracing.resourceAttributes`,
+`tracing.publicEndpoint`. The chart refuses `enabled` without an endpoint.
+**Compose:** `docker compose --profile tracing up -d` starts a pinned Jaeger v2
+(UI on `127.0.0.1:16686`), then run the stack with
+`OTEL_TRACES_EXPORTER=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318`.
+
+Each process logs `OpenTelemetry tracing enabled` with exporter, sampler and
+endpoint at startup. Exporter errors (collector down) are logged at most once a
+minute per process; spans are dropped, work is not slowed.
+
+### 26.2 Reading a run's trace
+
+One run is one trace: the API request that created it, `run.create`
+(workflow-manager), `run.materialize` / `run.reconcile` (dag-engine),
+`attempt.dispatch` (scheduler, one per attempt, linked to the worker poll that
+claimed it), `attempt.execute` with `prepare_inputs`, `run`, `finalize_logs`,
+`store_outputs`, `report_result` (agent), `objstore.*` result-store calls, and
+database queries. Search your backend by `nexus.run_id` or `nexus.attempt_id`
+(span attributes), or take `trace_id` from any log line: every record logged
+with a request context, and every line of an attempt's agent log, carries
+`trace_id` and `span_id`.
+
+Task code sees the attempt's context as `TRACEPARENT` / `TRACESTATE`. The
+Python SDK (`pip install 'nexus-sdk[opentelemetry]'`) runs the handler in a
+child span and exposes `ctx.traceparent`; configure a `TracerProvider` in the
+task image (for example `opentelemetry-instrument`) to export the task's own
+spans. A run created before migration 0028, or by an untraced caller, is
+dispatched under the worker's poll trace instead.
+
+**Sizing.** At ratio 1.0 every query is a span; a 1 000-attempt fan-out is tens
+of thousands of spans in one trace, which some backends truncate. Sample in
+production (0.01–0.1) and raise the ratio for a namespace under investigation
+by sending a sampled `traceparent` with the run's creation request.
+
+**Upgrade order.** Apply `0028_trace_context` (two nullable columns, no
+rewrite) with the other migrations, then roll services. Old agents ignore
+`TaskAssignment.trace_context`. Rollback: roll the scheduler, dag-engine,
+workflow-manager and event-service back before `0028_…down.sql`.
+
+### 26.3 Choosing and configuring the result-store backend
+
+| Setting | Values | Applies to |
+|---|---|---|
+| `NEXUS_RESULT_STORE_BACKEND` | `s3` (default), `azblob`, `gcs` | gateway, agents, artifact-gc |
+| `NEXUS_RESULT_STORE_ENDPOINT` / `_BUCKET` / `_REGION` | S3 endpoint; the Azure container / GCS bucket in `_BUCKET`; endpoint optional for Azure (sovereign cloud, private DNS, Azurite) and empty for real GCS | all |
+| `NEXUS_RESULT_STORE_PART_SIZE_BYTES` | 5 MiB – 512 MiB, default 16 MiB | multipart part / Azure block / GCS chunk |
+| `NEXUS_S3_CREDENTIALS` | `auto`, `static`, `web-identity`, `pod-identity`, `iam`, `env`, `anonymous` | s3 |
+| `NEXUS_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_SESSION_TOKEN` / `_USE_TLS` | static keys, as before | s3 |
+| `NEXUS_AZURE_STORAGE_ACCOUNT` | account name | azblob |
+| `NEXUS_AZURE_STORAGE_AUTH` | `auto`, `workload-identity`, `managed-identity`, `shared-key` | azblob |
+| `NEXUS_AZURE_STORAGE_KEY`, `NEXUS_AZURE_CLIENT_ID` | shared key (from a Secret); user-assigned identity / client id override | azblob |
+| `NEXUS_GCS_AUTH` | `auto` (ADC, Workload Identity), `none` (emulators only) | gcs |
+
+**`auto` resolution.** S3: static keys if both are set; else an AWS identity
+visible in the environment (`AWS_WEB_IDENTITY_TOKEN_FILE`,
+`AWS_CONTAINER_CREDENTIALS_*`, `AWS_ACCESS_KEY_ID`); else startup reports "no
+S3 credentials". EC2 instance roles are never probed implicitly (an IMDS probe
+hangs off EC2): use `iam`. Azure: a configured key, else workload identity when
+`AZURE_FEDERATED_TOKEN_FILE` is present, else managed identity.
+
+**Per cloud** (the Terraform environments do this by default; F115). "ServiceAccount"
+means `serviceAccounts.apiGateway`, `.agent` and `.artifactGC`, the three
+result-store clients, which the environments point at one shared
+`nexus-artifacts` account (§20.13):
+
+| Cloud | Backend and identity | Chart values |
+|---|---|---|
+| EKS | `s3`, Pod Identity (`pod-identity`) or IRSA (`web-identity`) | `resultStore.s3.credentials`, ServiceAccount (IRSA: annotation `eks.amazonaws.com/role-arn`) |
+| AKS | `azblob`, `workload-identity` | `resultStore.azure.account`, `.clientId`; ServiceAccount annotation `azure.workload.identity/client-id` (the chart adds the pod label `azure.workload.identity/use: "true"`) |
+| GKE | `gcs`, Workload Identity | ServiceAccount annotation `iam.gke.io/gcp-service-account` |
+| anywhere | `s3` + static keys (Silo/MinIO, GCS HMAC interop at `https://storage.googleapis.com`) | `resultStore.s3.accessKeySecret` |
+
+The gateway advertises its backend to agents; an agent's own
+`NEXUS_RESULT_STORE_BACKEND` wins. **Upgrade agents before** moving a
+deployment to `azblob` or `gcs`: an old agent ignores the advertisement and
+speaks S3. Changing backends never migrates objects: copy the bucket first
+(`rclone sync`, `azcopy copy`, `gcloud storage cp -r`), keeping keys identical,
+then switch every component at once.
+
+The first log line to check is the gateway's `durable task logs enabled`
+(now with `backend`) or the WARN naming why the store could not be opened.
+
+### 26.4 Least privilege and lifecycle
+
+| Principal | S3 (IAM) | Azure (RBAC) | GCS (IAM) |
+|---|---|---|---|
+| agents | `s3:GetObject`, `s3:PutObject` on `<bucket>/<namespace>/*`; `s3:ListBucket` for the readiness probe | `Storage Blob Data Contributor` on the container (Azure RBAC has no prefix scope; use a container per trust boundary) | `roles/storage.objectUser` on the bucket (IAM Conditions on `resource.name.startsWith` for per-namespace scope) |
+| gateway (logs) | `s3:GetObject` on `<bucket>/*/logs/*` | `Storage Blob Data Reader` on the container | `roles/storage.objectViewer` |
+| artifact-gc | `s3:ListBucket`, `s3:GetObject`, `s3:DeleteObject` | `Storage Blob Data Contributor` | `roles/storage.objectUser` |
+
+Every backend's bucket existence check works with these object-level roles.
+
+Lifecycle rules on the bucket are housekeeping only; **reachability is decided
+by artifact-gc**, so never add an age-based expiry on current objects (it
+deletes outputs a live run still references). Provision, as the Terraform
+modules do: abort incomplete multipart uploads after 7 days (S3, GCS; Azure
+discards uncommitted blocks after 7 days by itself), expire noncurrent
+versions after 30 days (S3 rule, GCS rule, Azure management policy), soft
+delete for accidental deletes. Log retention remains `artifact-gc
+-log-retention` (§19.2).
+
+**Deduplicated outputs are refreshed.** An output identical to an existing
+object more than an hour old is re-uploaded instead of reused (F141), so the
+GC's grace period (§7.7) always covers it. Expect `uploaded` rather than
+`deduplicated` in `nexus_agent_result_store_puts_total` for such repeats.
+
+### 26.5 Metrics
+
+`nexus_objstore_operations_total{backend,op,outcome}`,
+`nexus_objstore_operation_duration_seconds{backend,op}` and
+`nexus_objstore_bytes_total{backend,direction}` are exported by the agent, the
+gateway and artifact-gc (§17.4). `outcome` is `ok`, `not_found`, `exists` or
+`error`. Alert on a rising `outcome="error"` rate per backend; `not_found` on
+`op="get"` at the gateway means log objects were removed out of band (the log
+API reports `expired`).
+
+### 26.6 Verifying
+
+```sh
+make objstore-conformance   # one suite against Silo, Azurite and fake-gcs-server; a skip fails
+make tracing-e2e            # real binaries + Jaeger: one trace from API to agent and back
+make test-stores-down
+```
+
+Both start pinned containers with `make test-stores-up`
+(`TEST_STORES_NAME`, `TEST_*_PORT` override names and loopback ports). On a
+new cloud deployment, additionally: submit the fan-out example with a > 64 MiB
+artifact (multipart), run `artifact-gc` in dry-run and `-check-refs`, read a
+task log through the console, and find the run's trace in your backend. Record
+the results here per cloud; none has been recorded yet (F115).

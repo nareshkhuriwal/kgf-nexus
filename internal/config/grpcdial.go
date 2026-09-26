@@ -4,6 +4,8 @@
 package config
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"strings"
 	"time"
 
@@ -54,6 +56,9 @@ func init() {
 // guarantees it eventually drops. Both halves are needed.
 func PeerDialOptions() []grpc.DialOption {
 	return []grpc.DialOption{
+		// Trace every internal call and inject the caller's traceparent into
+		// its metadata (ADR-0026). With tracing off this only propagates.
+		tracing.GRPCDialOption(),
 		// Spread calls across every address the name resolves to.
 		//
 		// gRPC defaults to pick_first, which connects to ONE address and stays

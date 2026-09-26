@@ -27,12 +27,22 @@ output "database" {
 }
 
 output "object_store" {
-  description = "Where Nexus artifacts live on AKS today, and the provisioned-but-unused Blob target (F115)."
+  description = "Where Nexus results and logs live, and how the pods authenticate to it."
   value = {
-    active              = "in-cluster MinIO (PVC on StorageClass nexus-premium-ssd)"
-    blob_account        = module.platform.artifact_storage_account
-    blob_container      = module.platform.artifact_container
-    blob_backend_status = var.azure_blob_native_backend ? "enabled" : "not implemented (F115)"
+    backend = var.azure_blob_native_backend ? "azblob" : "s3"
+    active = (var.azure_blob_native_backend
+      ? "Azure Blob container ${module.platform.artifact_container} in ${module.platform.artifact_storage_account} (private endpoint)"
+    : "in-cluster MinIO (PVC on StorageClass nexus-premium-ssd)")
+    blob_account   = module.platform.artifact_storage_account
+    blob_container = module.platform.artifact_container
+    # Honest about what is and is not proven: the backend exists and is
+    # selected, but no AKS environment has been applied yet (F115).
+    blob_backend_status = (var.azure_blob_native_backend
+      ? "enabled: native azblob backend, AKS workload identity (ServiceAccount ${local.artifact_service_account}); not yet exercised on a live cluster (F115)"
+    : "available, disabled (azure_blob_native_backend = false): results go to the in-cluster MinIO")
+    identity_client_id = module.platform.nexus_workload_identity_client_id
+    # The chart-created account api-gateway, the agents and artifact-gc share.
+    service_account = local.artifact_service_account
   }
 }
 

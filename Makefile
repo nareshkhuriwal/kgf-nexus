@@ -36,6 +36,7 @@ MIGRATIONS    := services/migrations
 .PHONY: sdk-typecheck
 .PHONY: check-doc-refs
 .PHONY: check-go-version
+.PHONY: objstore-conformance tracing-e2e test-stores-up test-stores-down
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test e2e e2e-up e2e-down seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
@@ -108,6 +109,66 @@ BENCH_MINIO       ?= localhost:$(BENCH_MINIO_PORT)
 # MinIO fork, pinned by digest: MinIO no longer publishes pullable images (F111).
 # Keep in step with deploy/docker-compose.yml.
 S3_IMAGE          ?= docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
+
+# The Azure Blob and GCS emulators for the result-store conformance suite
+# (ADR-0027), and the OpenTelemetry backend for the tracing end-to-end test
+# (ADR-0026). Pinned by digest like the S3 image; bump deliberately.
+AZURITE_IMAGE     ?= mcr.microsoft.com/azure-storage/azurite:3.35.0@sha256:647c63a91102a9d8e8000aab803436e1fc85fbb285e7ce830a82ee5d6661cf37
+FAKE_GCS_IMAGE    ?= docker.io/fsouza/fake-gcs-server:1.52.3@sha256:666f86b873120818b10a5e68d99401422fcf8b00c1f27fe89599c35236f48b4c
+JAEGER_IMAGE      ?= docker.io/jaegertracing/jaeger:2.10.0@sha256:8c593d8048d86334eb52dba26633b6c846b8ecbe5c22905702c932ae97baeb42
+# Disposable test stores: container prefix and loopback ports, overridable so
+# parallel checkouts do not collide.
+TEST_STORES_NAME  ?= nexus-teststores
+TEST_PG_PORT      ?= 55641
+TEST_S3_PORT      ?= 55642
+TEST_AZURITE_PORT ?= 55643
+TEST_GCS_PORT     ?= 55644
+TEST_OTLP_PORT    ?= 55645
+TEST_JAEGER_PORT  ?= 55646
+TEST_PG_PASSWORD  ?= teststores
+TEST_S3_USER      ?= teststores
+TEST_S3_SECRET    ?= teststores-secret
+# Azurite's published development account (not a secret; documented by Microsoft).
+AZURITE_KEY       := Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
+TEST_STORE_ENV = \
+  NEXUS_TEST_S3_ENDPOINT=127.0.0.1:$(TEST_S3_PORT) NEXUS_TEST_S3_ACCESS_KEY_ID=$(TEST_S3_USER) \
+  NEXUS_TEST_S3_SECRET_ACCESS_KEY=$(TEST_S3_SECRET) \
+  NEXUS_TEST_AZBLOB_ENDPOINT=http://127.0.0.1:$(TEST_AZURITE_PORT)/devstoreaccount1 \
+  NEXUS_TEST_AZBLOB_ACCOUNT=devstoreaccount1 NEXUS_TEST_AZBLOB_KEY='$(AZURITE_KEY)' \
+  NEXUS_TEST_GCS_ENDPOINT=http://127.0.0.1:$(TEST_GCS_PORT)
+
+test-stores-up: ## Start pinned Postgres, Silo, Azurite, fake-gcs-server and Jaeger for the storage and tracing suites
+	@docker inspect $(TEST_STORES_NAME)-pg >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-pg \
+	  -e POSTGRES_PASSWORD=$(TEST_PG_PASSWORD) -p 127.0.0.1:$(TEST_PG_PORT):5432 postgres:16-alpine >/dev/null
+	@docker inspect $(TEST_STORES_NAME)-s3 >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-s3 \
+	  -e MINIO_ROOT_USER=$(TEST_S3_USER) -e MINIO_ROOT_PASSWORD=$(TEST_S3_SECRET) \
+	  -p 127.0.0.1:$(TEST_S3_PORT):9000 $(S3_IMAGE) server /data >/dev/null
+	@docker inspect $(TEST_STORES_NAME)-azurite >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-azurite \
+	  -p 127.0.0.1:$(TEST_AZURITE_PORT):10000 $(AZURITE_IMAGE) \
+	  azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --skipApiVersionCheck --loose >/dev/null
+	@# -external-url makes the resumable-upload Location point back at the published port.
+	@docker inspect $(TEST_STORES_NAME)-gcs >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-gcs \
+	  -p 127.0.0.1:$(TEST_GCS_PORT):4443 $(FAKE_GCS_IMAGE) -scheme http -port 4443 \
+	  -public-host 127.0.0.1:$(TEST_GCS_PORT) -external-url http://127.0.0.1:$(TEST_GCS_PORT) -backend memory >/dev/null
+	@docker inspect $(TEST_STORES_NAME)-jaeger >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-jaeger \
+	  -p 127.0.0.1:$(TEST_OTLP_PORT):4317 -p 127.0.0.1:$(TEST_JAEGER_PORT):16686 $(JAEGER_IMAGE) >/dev/null
+	@for i in $$(seq 1 30); do docker exec $(TEST_STORES_NAME)-pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+	@sleep 2
+
+test-stores-down: ## Remove the containers test-stores-up started
+	-docker rm -f $(TEST_STORES_NAME)-pg $(TEST_STORES_NAME)-s3 $(TEST_STORES_NAME)-azurite \
+	  $(TEST_STORES_NAME)-gcs $(TEST_STORES_NAME)-jaeger
+
+objstore-conformance: test-stores-up ## Run the result-store conformance suite against Silo, Azurite and fake-gcs-server
+	@# A skipped backend looks like a pass in `go test` output (F85), so a skip fails the target.
+	@out=$$($(TEST_STORE_ENV) $(GO) test -count=1 -v -run Conformance ./internal/objstore/... 2>&1); status=$$?; \
+	  echo "$$out" | grep -E '^(--- |ok|FAIL|PASS)|skipping'; \
+	  if echo "$$out" | grep -q "skipping integration test"; then echo "a backend was SKIPPED"; exit 1; fi; exit $$status
+
+tracing-e2e: test-stores-up ## One trace from API to agent and back, read from Jaeger (ADR-0026)
+	$(TEST_STORE_ENV) NEXUS_E2E_PG_DSN='postgres://postgres:$(TEST_PG_PASSWORD)@127.0.0.1:$(TEST_PG_PORT)/postgres?sslmode=disable' \
+	  NEXUS_E2E_OTLP_GRPC=127.0.0.1:$(TEST_OTLP_PORT) NEXUS_E2E_JAEGER_QUERY=http://127.0.0.1:$(TEST_JAEGER_PORT) \
+	  $(GO) test -tags tracing_e2e -count=1 -v -timeout 10m ./tests/tracing/
 
 print-s3-image: ## Print the pinned S3 (Silo) image reference, for CI and scripts
 	@echo '$(S3_IMAGE)'

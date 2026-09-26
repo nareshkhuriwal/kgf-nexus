@@ -4,11 +4,69 @@
 package resultstore
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
+
+	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/objstore/objstoretest"
 )
+
+// TestPutRefreshesOldDeduplicatedObjects pins F141: an identical object that
+// is old enough to be a GC candidate is re-uploaded (refreshing its
+// modification time), while a recent one is reused without a transfer.
+func TestPutRefreshesOldDeduplicatedObjects(t *testing.T) {
+	mem := objstoretest.NewMemory("results")
+	var outcomes []string
+	c, err := New(Config{Store: mem, Namespace: "ns", InlineThreshold: 1,
+		OnPut: func(r string, _ int64, _ time.Duration) { outcomes = append(outcomes, r) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("a payload larger than one byte")
+	ctx := context.Background()
+	ref, err := c.Put(ctx, payload, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ref.GetBlob().GetKey()
+	if _, err := c.Put(ctx, payload, ""); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	mem.SetModified(key, old)
+	if _, err := c.Put(ctx, payload, ""); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{PutUploaded, PutDeduplicated, PutUploaded}
+	if strings.Join(outcomes, ",") != strings.Join(want, ",") {
+		t.Fatalf("outcomes = %v; want %v", outcomes, want)
+	}
+	info, err := mem.Stat(ctx, key)
+	if err != nil || !info.LastModified.After(old) {
+		t.Fatalf("old object was not refreshed: %+v %v", info, err)
+	}
+	got, err := c.Get(ctx, ref)
+	if err != nil || string(got) != string(payload) {
+		t.Fatalf("get = %q, %v", got, err)
+	}
+}
+
+// TestGetRefusesAnotherBucket: a client is bound to one bucket; a reference
+// into another is an error that names both, never a silent read elsewhere.
+func TestGetRefusesAnotherBucket(t *testing.T) {
+	c, err := New(Config{Store: objstoretest.NewMemory("results"), Namespace: "ns"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := &nexusv1.ResultRef{Kind: &nexusv1.ResultRef_Blob{Blob: &nexusv1.BlobRef{Bucket: "elsewhere", Key: "ns/x"}}}
+	if _, err := c.Get(context.Background(), ref); err == nil || !strings.Contains(err.Error(), "elsewhere") {
+		t.Fatalf("err = %v", err)
+	}
+}
 
 // TestKeyIsContentAddressedUnderTheNamespace: the key shape is <namespace>/<sha256>
 // (ADR-0008). The namespace prefix is the TENANCY boundary — scoped worker
@@ -70,17 +128,5 @@ func TestNewRequiresEndpointAndBucket(t *testing.T) {
 	}
 	if _, err := New(Config{Endpoint: "localhost:9000"}); err == nil {
 		t.Error("expected an error with no bucket")
-	}
-}
-
-func TestStripScheme(t *testing.T) {
-	for in, want := range map[string]string{
-		"http://localhost:9000":    "localhost:9000",
-		"https://s3.amazonaws.com": "s3.amazonaws.com",
-		"minio:9000":               "minio:9000",
-	} {
-		if got := stripScheme(in); got != want {
-			t.Errorf("stripScheme(%q) = %q, want %q", in, got, want)
-		}
 	}
 }

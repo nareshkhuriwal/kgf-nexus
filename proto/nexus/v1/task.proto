@@ -229,6 +229,11 @@ message TaskAssignment {
   // never authoritative (architecture §10).
   int64 lease_expires_at_unix_ms = 9;
   int64 start_to_close_deadline_unix_ms = 10;
+  // W3C trace context of the dispatch span ("traceparent" and optionally
+  // "tracestate"), so the agent's execution spans continue the run's trace
+  // (ADR-0026). Empty when the attempt was never traced. Additive: an old
+  // agent ignores it and starts its own traces.
+  map<string, string> trace_context = 11;
 }
 
 enum AttemptOutcome {

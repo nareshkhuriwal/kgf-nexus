@@ -48,8 +48,8 @@ run "plan_example" {
   }
 
   assert {
-    condition     = output.object_store.endpoint == "https://storage.googleapis.com"
-    error_message = "Nexus should use the GCS XML (S3 interoperability) endpoint."
+    condition     = output.object_store.backend == "gcs" && output.object_store.k8s_service_account == "nexus-artifacts"
+    error_message = "Nexus should use native GCS through Workload Identity (the nexus-artifacts ServiceAccount) by default."
   }
 
   assert {
@@ -68,5 +68,18 @@ run "gpu_pool_hosts_a_gpu_agent" {
   assert {
     condition     = length(local.agents) == 2 && local.agents[1].gpuCount >= 1 && local.agents[1].nodeSelector["nexus.khuriwalgroup.com/pool"] == "gpu"
     error_message = "With the GPU pool on, a GPU agent requesting its devices must be placed on it."
+  }
+}
+
+run "hmac_fallback" {
+  command = plan
+
+  variables {
+    artifact_identity = "hmac"
+  }
+
+  assert {
+    condition     = output.object_store.backend == "s3" && output.object_store.endpoint == "https://storage.googleapis.com"
+    error_message = "The HMAC fallback should use the GCS XML (S3 interoperability) endpoint."
   }
 }

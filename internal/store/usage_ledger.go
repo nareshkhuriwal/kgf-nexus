@@ -4,6 +4,8 @@
 package store
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -104,7 +106,7 @@ WITH src AS (
   RETURNING id, attempt_id, tenant_id, namespace, run_id, node_id, attempt_number, outcome,
             queue, pool, ended_at, reserved_seconds, cpu_core_seconds, memory_gib_seconds, gpu_seconds
 ), ob AS (
-  INSERT INTO outbox (topic, namespace, routing_key, payload)
+  INSERT INTO outbox (topic, namespace, routing_key, payload, trace_context)
   SELECT 'usage_recorded', namespace, run_id::text,
          jsonb_build_object(
            'ledger_id', id, 'attempt_id', attempt_id, 'tenant_id', tenant_id,
@@ -112,7 +114,8 @@ WITH src AS (
            'attempt_number', attempt_number, 'outcome', outcome, 'queue', queue,
            'pool', pool, 'ended_at', ended_at, 'reserved_seconds', reserved_seconds,
            'cpu_core_seconds', cpu_core_seconds, 'memory_gib_seconds', memory_gib_seconds,
-           'gpu_seconds', gpu_seconds)
+           'gpu_seconds', gpu_seconds),
+         $2
     FROM ins
 )
 SELECT outcome FROM ins`
@@ -126,7 +129,7 @@ func (s *SchedulerStore) recordUsage(ctx context.Context, tx pgx.Tx, attemptID u
 		return "", nil
 	}
 	var outcome string
-	err := tx.QueryRow(ctx, recordUsageSQL, attemptID).Scan(&outcome)
+	err := tx.QueryRow(ctx, recordUsageSQL, attemptID, tracing.NullableTraceparent(ctx)).Scan(&outcome)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}

@@ -79,6 +79,7 @@ spec:
             # agent's own default is loopback. No Service exposes this port.
             - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" (int $root.Values.metrics.agentPort) | quote }} }
             {{- include "nexus.tlsEnv" (list $root "client") | nindent 12 }}
+            {{- include "nexus.tracingEnv" $root | nindent 12 }}
           ports:
             - { name: metrics, containerPort: {{ int $root.Values.metrics.agentPort }} }
           # Not ready until the agent has registered with the control plane

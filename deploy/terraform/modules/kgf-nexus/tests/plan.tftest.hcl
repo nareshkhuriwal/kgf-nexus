@@ -87,6 +87,20 @@ run "refuses_non_pem_bundle" {
   expect_failures = [var.postgres_ca_bundle]
 }
 
+run "cloud_identity_writes_no_key_pair" {
+  command = plan
+
+  variables {
+    postgres_password                 = "ManagedDbPassword0123456789"
+    generate_object_store_credentials = false
+  }
+
+  assert {
+    condition     = length(random_password.minio) == 0 && !contains(keys(kubernetes_secret_v1.credentials.data), "minio-root-user")
+    error_message = "A store reached with a cloud identity must get no S3 key pair: one would shadow the identity."
+  }
+}
+
 run "refuses_url_unsafe_password" {
   command = plan
 

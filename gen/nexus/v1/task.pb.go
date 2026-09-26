@@ -934,8 +934,13 @@ type TaskAssignment struct {
 	// never authoritative (architecture §10).
 	LeaseExpiresAtUnixMs       int64 `protobuf:"varint,9,opt,name=lease_expires_at_unix_ms,json=leaseExpiresAtUnixMs,proto3" json:"lease_expires_at_unix_ms,omitempty"`
 	StartToCloseDeadlineUnixMs int64 `protobuf:"varint,10,opt,name=start_to_close_deadline_unix_ms,json=startToCloseDeadlineUnixMs,proto3" json:"start_to_close_deadline_unix_ms,omitempty"`
-	unknownFields              protoimpl.UnknownFields
-	sizeCache                  protoimpl.SizeCache
+	// W3C trace context of the dispatch span ("traceparent" and optionally
+	// "tracestate"), so the agent's execution spans continue the run's trace
+	// (ADR-0026). Empty when the attempt was never traced. Additive: an old
+	// agent ignores it and starts its own traces.
+	TraceContext  map[string]string `protobuf:"bytes,11,rep,name=trace_context,json=traceContext,proto3" json:"trace_context,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TaskAssignment) Reset() {
@@ -1038,6 +1043,13 @@ func (x *TaskAssignment) GetStartToCloseDeadlineUnixMs() int64 {
 	return 0
 }
 
+func (x *TaskAssignment) GetTraceContext() map[string]string {
+	if x != nil {
+		return x.TraceContext
+	}
+	return nil
+}
+
 var File_nexus_v1_task_proto protoreflect.FileDescriptor
 
 const file_nexus_v1_task_proto_rawDesc = "" +
@@ -1117,7 +1129,7 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"1\n" +
 	"\tSecretRef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
-	"\x03ref\x18\x02 \x01(\tR\x03ref\"\x83\x04\n" +
+	"\x03ref\x18\x02 \x01(\tR\x03ref\"\x95\x05\n" +
 	"\x0eTaskAssignment\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x01 \x01(\tR\tattemptId\x12\x15\n" +
@@ -1131,10 +1143,14 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"leaseToken\x126\n" +
 	"\x18lease_expires_at_unix_ms\x18\t \x01(\x03R\x14leaseExpiresAtUnixMs\x12C\n" +
 	"\x1fstart_to_close_deadline_unix_ms\x18\n" +
-	" \x01(\x03R\x1astartToCloseDeadlineUnixMs\x1aN\n" +
+	" \x01(\x03R\x1astartToCloseDeadlineUnixMs\x12O\n" +
+	"\rtrace_context\x18\v \x03(\v2*.nexus.v1.TaskAssignment.TraceContextEntryR\ftraceContext\x1aN\n" +
 	"\vInputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
-	"\x05value\x18\x02 \x01(\v2\x13.nexus.v1.ResultRefR\x05value:\x028\x01*\xdb\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\x13.nexus.v1.ResultRefR\x05value:\x028\x01\x1a?\n" +
+	"\x11TraceContextEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xdb\x01\n" +
 	"\vTriggerRule\x12\x1c\n" +
 	"\x18TRIGGER_RULE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18TRIGGER_RULE_ALL_SUCCESS\x10\x01\x12\x19\n" +
@@ -1173,7 +1189,7 @@ func file_nexus_v1_task_proto_rawDescGZIP() []byte {
 }
 
 var file_nexus_v1_task_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_nexus_v1_task_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_nexus_v1_task_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_nexus_v1_task_proto_goTypes = []any{
 	(TriggerRule)(0),           // 0: nexus.v1.TriggerRule
 	(AttemptState)(0),          // 1: nexus.v1.AttemptState
@@ -1193,20 +1209,21 @@ var file_nexus_v1_task_proto_goTypes = []any{
 	nil,                        // 15: nexus.v1.TaskSpec.InputParamsEntry
 	nil,                        // 16: nexus.v1.RuntimeSpec.EnvEntry
 	nil,                        // 17: nexus.v1.TaskAssignment.InputsEntry
-	(*ResourceRequest)(nil),    // 18: nexus.v1.ResourceRequest
-	(*Timeouts)(nil),           // 19: nexus.v1.Timeouts
-	(*RetryPolicy)(nil),        // 20: nexus.v1.RetryPolicy
-	(IdempotencyMode)(0),       // 21: nexus.v1.IdempotencyMode
-	(*ResultRef)(nil),          // 22: nexus.v1.ResultRef
+	nil,                        // 18: nexus.v1.TaskAssignment.TraceContextEntry
+	(*ResourceRequest)(nil),    // 19: nexus.v1.ResourceRequest
+	(*Timeouts)(nil),           // 20: nexus.v1.Timeouts
+	(*RetryPolicy)(nil),        // 21: nexus.v1.RetryPolicy
+	(IdempotencyMode)(0),       // 22: nexus.v1.IdempotencyMode
+	(*ResultRef)(nil),          // 23: nexus.v1.ResultRef
 }
 var file_nexus_v1_task_proto_depIdxs = []int32{
 	11, // 0: nexus.v1.TaskSpec.inputs:type_name -> nexus.v1.TaskSpec.InputsEntry
 	12, // 1: nexus.v1.TaskSpec.outputs:type_name -> nexus.v1.TaskSpec.OutputsEntry
-	18, // 2: nexus.v1.TaskSpec.resources:type_name -> nexus.v1.ResourceRequest
+	19, // 2: nexus.v1.TaskSpec.resources:type_name -> nexus.v1.ResourceRequest
 	13, // 3: nexus.v1.TaskSpec.node_selector:type_name -> nexus.v1.TaskSpec.NodeSelectorEntry
-	19, // 4: nexus.v1.TaskSpec.timeouts:type_name -> nexus.v1.Timeouts
-	20, // 5: nexus.v1.TaskSpec.retry:type_name -> nexus.v1.RetryPolicy
-	21, // 6: nexus.v1.TaskSpec.idempotency:type_name -> nexus.v1.IdempotencyMode
+	20, // 4: nexus.v1.TaskSpec.timeouts:type_name -> nexus.v1.Timeouts
+	21, // 5: nexus.v1.TaskSpec.retry:type_name -> nexus.v1.RetryPolicy
+	22, // 6: nexus.v1.TaskSpec.idempotency:type_name -> nexus.v1.IdempotencyMode
 	7,  // 7: nexus.v1.TaskSpec.cache:type_name -> nexus.v1.CachePolicy
 	8,  // 8: nexus.v1.TaskSpec.runtime:type_name -> nexus.v1.RuntimeSpec
 	0,  // 9: nexus.v1.TaskSpec.trigger_rule:type_name -> nexus.v1.TriggerRule
@@ -1218,14 +1235,15 @@ var file_nexus_v1_task_proto_depIdxs = []int32{
 	9,  // 15: nexus.v1.RuntimeSpec.secrets:type_name -> nexus.v1.SecretRef
 	3,  // 16: nexus.v1.TaskAssignment.spec:type_name -> nexus.v1.TaskSpec
 	17, // 17: nexus.v1.TaskAssignment.inputs:type_name -> nexus.v1.TaskAssignment.InputsEntry
-	6,  // 18: nexus.v1.TaskSpec.InputsEntry.value:type_name -> nexus.v1.ValueSpec
-	6,  // 19: nexus.v1.TaskSpec.OutputsEntry.value:type_name -> nexus.v1.ValueSpec
-	22, // 20: nexus.v1.TaskAssignment.InputsEntry.value:type_name -> nexus.v1.ResultRef
-	21, // [21:21] is the sub-list for method output_type
-	21, // [21:21] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	18, // 18: nexus.v1.TaskAssignment.trace_context:type_name -> nexus.v1.TaskAssignment.TraceContextEntry
+	6,  // 19: nexus.v1.TaskSpec.InputsEntry.value:type_name -> nexus.v1.ValueSpec
+	6,  // 20: nexus.v1.TaskSpec.OutputsEntry.value:type_name -> nexus.v1.ValueSpec
+	23, // 21: nexus.v1.TaskAssignment.InputsEntry.value:type_name -> nexus.v1.ResultRef
+	22, // [22:22] is the sub-list for method output_type
+	22, // [22:22] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_nexus_v1_task_proto_init() }
@@ -1240,7 +1258,7 @@ func file_nexus_v1_task_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nexus_v1_task_proto_rawDesc), len(file_nexus_v1_task_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   15,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -101,6 +101,12 @@ message ResultStoreConfig {
   // Results at or below this size are returned inline instead of via the blob
   // store, avoiding two round-trips for trivial outputs (ADR-0008).
   int64 inline_threshold_bytes = 4;
+  // Which API the store speaks: "s3" (also the meaning of empty, so an old
+  // gateway's answer is unchanged), "azblob" or "gcs" (ADR-0027). The agent's
+  // own NEXUS_RESULT_STORE_BACKEND wins over this. An old agent ignores it and
+  // speaks S3, which is why agents must be upgraded before a deployment moves
+  // to a native backend (OPERATIONS §26).
+  string backend = 5;
 }
 
 message HeartbeatRequest {

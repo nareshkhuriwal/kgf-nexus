@@ -43,11 +43,56 @@ still apply.
 {{- end -}}
 {{- if not (kindIs "invalid" $cfg.automountServiceAccountToken) }}{{ $automount = $cfg.automountServiceAccountToken }}{{ end -}}
 {{- $ann := merge (deepCopy ($cfg.annotations | default dict)) (deepCopy ($sas.annotations | default dict)) -}}
+{{- $labels := deepCopy ($cfg.podLabels | default dict) -}}
+{{- $rs := $root.Values.resultStore | default dict -}}
+{{- if and (has $key (include "nexus.resultStoreClients" $root | fromYamlArray)) (eq ($rs.backend | default "") "azblob") (eq ((($rs.azure | default dict).auth) | default "") "workload-identity") -}}
+{{- /* The Azure workload-identity webhook injects the federated token only
+       into pods carrying this label, so every result-store client gets it. */ -}}
+{{- $_ := set $labels "azure.workload.identity/use" "true" -}}
+{{- end -}}
 name: {{ $name | quote }}
 create: {{ $create }}
 automount: {{ $automount }}
 annotations: {{ toYaml $ann | nindent 2 }}
-podLabels: {{ toYaml ($cfg.podLabels | default dict) | nindent 2 }}
+podLabels: {{ toYaml $labels | nindent 2 }}
+{{- end -}}
+
+{{/*
+The components that are result-store clients (resultStore in values.yaml):
+the api-gateway (task logs), the agents (outputs, logs) and artifact-gc. A
+cloud identity for the store binds to their ServiceAccounts
+(serviceAccounts.apiGateway / .agent / .artifactGC), and to no other pod.
+*/}}
+{{- define "nexus.resultStoreClients" -}}
+- apiGateway
+- agent
+- artifactGC
+{{- end -}}
+
+{{/*
+Refuse a cloud-identity result-store mode whose ServiceAccounts the chart
+creates without the annotation that identity needs: the pods would start and
+then fail every upload with an authentication error. With
+serviceAccounts.create=false the accounts are the operator's and are not
+inspected. args: root, annotation key, what (for the message).
+*/}}
+{{- define "nexus.resultStoreIdentityRequired" -}}
+{{- $root := index . 0 -}}{{- $annKey := index . 1 -}}{{- $what := index . 2 -}}
+{{- range $key := include "nexus.resultStoreClients" $root | fromYamlArray -}}
+{{- if eq $key "agent" -}}
+{{- range $a := $root.Values.agents -}}
+{{- $sa := include "nexus.saFor" (list $root "agent" $a.serviceAccount) | fromYaml -}}
+{{- if and $sa.create (not (hasKey $sa.annotations $annKey)) -}}
+{{- fail (printf "%s needs the ServiceAccount of agents[%s] (%s) annotated %s: set serviceAccounts.agent.annotations (or agents[].serviceAccount), or serviceAccounts.create=false for accounts you manage (docs/OPERATIONS.md §20.13)" $what $a.name $sa.name $annKey) -}}
+{{- end -}}
+{{- end -}}
+{{- else if or (ne $key "artifactGC") $root.Values.artifactGC.enabled -}}
+{{- $sa := include "nexus.saFor" (list $root $key nil) | fromYaml -}}
+{{- if and $sa.create (not (hasKey $sa.annotations $annKey)) -}}
+{{- fail (printf "%s needs serviceAccounts.%s (%s) annotated %s, or serviceAccounts.create=false for accounts you manage (docs/OPERATIONS.md §20.13)" $what $key $sa.name $annKey) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/* Pod-spec fields for an effective ServiceAccount (nexus.saFor output). */}}

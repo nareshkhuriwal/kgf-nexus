@@ -351,10 +351,11 @@ resource "aws_iam_policy" "artifacts" {
   tags        = local.tags
 }
 
-# The target design: a role for the agents and services, bound to their
-# ServiceAccount through IRSA or EKS Pod Identity (both trusts are present).
-# NOT USED YET: the chart creates no ServiceAccount and the S3 client takes
-# static keys only (F115).
+# The result store's identity: a role for the result-store pods (api-gateway,
+# agents, artifact-gc), bound to their ServiceAccount through EKS Pod Identity
+# (the association below; environments/eks default) or IRSA (the SA's
+# eks.amazonaws.com/role-arn annotation). Both trusts are present so switching
+# is a values change. No key exists to leak.
 data "aws_iam_policy_document" "artifacts_role_trust" {
   statement {
     sid     = "PodIdentity"
@@ -395,6 +396,15 @@ resource "aws_iam_role_policy_attachment" "artifacts" {
   policy_arn = aws_iam_policy.artifacts.arn
 }
 
+# The same network fence the static key has: S3 requests on the bucket made
+# with this role are denied unless they arrive through this VPC's gateway
+# endpoint, so credentials lifted from a pod are worthless elsewhere.
+resource "aws_iam_role_policy" "artifacts_vpce_only" {
+  name   = "deny-outside-vpc-endpoint"
+  role   = aws_iam_role.artifacts.id
+  policy = data.aws_iam_policy_document.artifacts_vpce_only.json
+}
+
 resource "aws_eks_pod_identity_association" "artifacts" {
   cluster_name    = module.eks.cluster_name
   namespace       = var.nexus_kubernetes_namespace
@@ -403,11 +413,12 @@ resource "aws_eks_pod_identity_association" "artifacts" {
   tags            = local.tags
 }
 
-# What works TODAY: a key pair, because the Nexus S3 client (minio-go with
-# credentials.NewStaticV4) cannot use a role. Contained as far as a static key
-# can be: the same least-privilege policy, and an explicit deny for any request
-# that does not arrive through this VPC's S3 gateway endpoint, so a leaked key
-# is useless outside the cluster's network.
+# OPT-IN fallback (artifact_static_credentials, default false): an IAM user and
+# key pair, for a cluster where neither Pod Identity nor IRSA can be used.
+# Contained as far as a static key can be: the same least-privilege policy,
+# and an explicit deny for any request that does not arrive through this VPC's
+# S3 gateway endpoint, so a leaked key is useless outside the cluster's
+# network. It still never expires on its own; prefer the role.
 resource "aws_iam_user" "artifacts" {
   count = var.artifact_static_credentials ? 1 : 0
   name  = "${var.name}-nexus-artifacts"

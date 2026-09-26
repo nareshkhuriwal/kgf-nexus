@@ -56,7 +56,14 @@ module "platform" {
 
   nexus_kubernetes_namespace = var.namespace
   nexus_service_account      = local.artifact_service_account
+  artifact_hmac_key          = !local.workload_identity
   postgres_password_version  = var.postgres_password_version
+}
+
+locals {
+  # Native GCS through Workload Identity (the default), or the HMAC
+  # interoperability fallback.
+  workload_identity = var.artifact_identity == "workload-identity"
 }
 
 # ── In-cluster platform pieces ────────────────────────────────────────────
@@ -99,8 +106,13 @@ locals {
   artifact_identity = {
     name = local.artifact_service_account
     # GKE Workload Identity: the artifact service account grants
-    # roles/iam.workloadIdentityUser to <project>.svc.id.goog[<namespace>/nexus-artifacts].
-    annotations = { "iam.gke.io/gcp-service-account" = module.platform.artifact_service_account }
+    # roles/iam.workloadIdentityUser to <project>.svc.id.goog[<namespace>/nexus-artifacts],
+    # and this annotation is what GKE's metadata server maps to it. Only under
+    # Workload Identity; the account is created in both modes, so switching
+    # artifact_identity never renames it.
+    annotations = local.workload_identity ? tomap({
+      "iam.gke.io/gcp-service-account" = module.platform.artifact_service_account
+    }) : tomap({})
   }
 
   cpu_agent = {
@@ -156,8 +168,10 @@ module "nexus" {
   nats_credentials_dir = var.nats_credentials_dir
 
   postgres_password = module.platform.postgres_password
-  # GCS HMAC key pair, stored in the kgf-nexus credentials Secret.
-  object_store_credentials = module.platform.artifact_hmac_credentials
+  # The HMAC key pair only for the interoperability fallback; under Workload
+  # Identity the Secret holds no key at all.
+  object_store_credentials          = local.workload_identity ? null : module.platform.artifact_hmac_credentials
+  generate_object_store_credentials = false
 
   # Every CA the instance trusts, from the Cloud SQL Admin API; host is the
   # instance's DNS name, which its shared-CA certificate carries.
@@ -178,15 +192,22 @@ module "nexus" {
       sslmode = "verify-full"
     }
 
-    # GCS through its S3-compatible XML API with HMAC keys ("interoperability").
-    # minio-go special-cases storage.googleapis.com (e.g. per-object deletes,
-    # since GCS has no multi-object delete).
+    # Default: GCS natively (JSON API) through Workload Identity. Fallback
+    # (artifact_identity = "hmac"): GCS through its S3-compatible XML API with
+    # the HMAC key ("interoperability"); minio-go special-cases
+    # storage.googleapis.com there (e.g. per-object deletes, since GCS has no
+    # multi-object delete). minio.endpoint is read only by the s3 backend.
     minio = {
       enabled  = false
       endpoint = "https://storage.googleapis.com"
       bucket   = module.platform.artifact_bucket
       region   = "auto"
       useTLS   = true
+    }
+    resultStore = {
+      backend = local.workload_identity ? "gcs" : "s3"
+      s3      = { credentials = "static" }
+      gcs     = { auth = "auto" }
     }
 
     nats = {

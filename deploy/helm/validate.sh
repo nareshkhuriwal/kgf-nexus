@@ -222,7 +222,7 @@ team_agent='agents=[{"name":"agent-team","namespace":"team-ml","workerApiKeySecr
 must_fail "agent namespace without a NATS tenant" 'no entry for namespace "team-ml"' "${nkeys[@]}" \
   --set-json 'nats.auth.tenants=[{"namespace":"default","publicKeys":["UAGENTKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}]' \
   --set-json "$team_agent"
-if helm template nexus "$chart" -f "$chart/ci/minimal-values.yaml" "${nkeys[@]}" \
+if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" "${nkeys[@]}" \
     --set-json 'nats.auth.tenants=[{"namespace":"team-ml","publicKeys":["UAGENTKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}]' \
     --set-json "$team_agent" >"$tmp/team" 2>&1 &&
    grep -qF 'name: NEXUS_NAMESPACE, value: "team-ml"' "$tmp/team" &&
@@ -253,6 +253,48 @@ must_fail "bad GPU resource name"               "/agents/0/gpu/resourceName"   "
 must_fail "shared SA, conflicting identity"     "different annotations"        --set serviceAccounts.apiGateway.name=nexus-artifacts --set serviceAccounts.agent.name=nexus-artifacts --set-string 'serviceAccounts.agent.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::1:role/x'
 must_fail "SA taken from the cluster controller" "owns with its RBAC"          --set serviceAccounts.ui.name=nexus-cluster-controller
 must_fail "misspelt ServiceAccount key"         "additional properties 'annotation' not allowed" --set serviceAccounts.agent.annotation.x=y
+must_fail "unknown result-store backend"        "/resultStore/backend"         --set resultStore.backend=swift
+must_fail "unknown S3 credential mode"          "/resultStore/s3/credentials"  --set resultStore.s3.credentials=imds
+must_fail "part size below S3's 5 MiB minimum"  "/resultStore/partSizeBytes"   --set resultStore.partSizeBytes=1048576
+must_fail "in-cluster MinIO with Azure Blob"    "set minio.enabled=false"      --set resultStore.backend=azblob --set resultStore.azure.account=acct123
+must_fail "in-cluster MinIO with IRSA"          "set minio.enabled=false or credentials=static" --set resultStore.s3.credentials=web-identity
+must_fail "azblob without a storage account"    "needs resultStore.azure.account" --set minio.enabled=false --set resultStore.backend=azblob
+must_fail "azblob shared key without a Secret"  "needs resultStore.azure.keySecret.name" --set minio.enabled=false --set resultStore.backend=azblob --set resultStore.azure.account=acct123 --set resultStore.azure.auth=shared-key
+must_fail "workload identity, SA not annotated" "azure.workload.identity/client-id" --set minio.enabled=false --set resultStore.backend=azblob --set resultStore.azure.account=acct123 --set resultStore.azure.auth=workload-identity
+must_fail "IRSA, SA not annotated"              "eks.amazonaws.com/role-arn"   --set minio.enabled=false --set resultStore.s3.credentials=web-identity
+must_fail "unauthenticated GCS against real GCS" "only for an emulator"        --set minio.enabled=false --set resultStore.backend=gcs --set resultStore.gcs.auth=none
+must_fail "tracing without a collector"         "needs tracing.endpoint"       --set tracing.enabled=true
+must_fail "tracing with a bad protocol"         "/tracing/protocol"            --set tracing.protocol=http/json
+must_fail "tracing headers Secret without key"  "needs tracing.headersSecret.key" --set tracing.enabled=true --set tracing.endpoint=http://c:4317 --set tracing.headersSecret.name=otel
+# One identity model: the result-store clients' serviceAccounts, not a
+# resultStore-level account (retired before release).
+must_fail "retired resultStore.serviceAccountName" "additional properties 'serviceAccountName' not allowed" --set resultStore.serviceAccountName=kgf-nexus
+# Azure workload identity reaches exactly the three result-store clients: they
+# run as the annotated account and carry the webhook's pod label; nothing else
+# does.
+if "$helm" template nexus "$chart" -f "$chart/ci/azblob-workload-identity-values.yaml" >"$tmp/wi" 2>&1 &&
+   python3 - "$tmp/wi" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d.get("kind") in ("Deployment", "CronJob")]
+store = {"api-gateway", "agent-cpu", "artifact-gc"}
+seen = set()
+for d in docs:
+    name = d["metadata"]["name"].removeprefix("nexus-")
+    tpl = d["spec"]["jobTemplate"]["spec"]["template"] if d["kind"] == "CronJob" else d["spec"]["template"]
+    labelled = tpl["metadata"].get("labels", {}).get("azure.workload.identity/use") == "true"
+    sa = tpl["spec"].get("serviceAccountName")
+    if any(name.endswith(s) for s in store):
+        seen.add(next(s for s in store if name.endswith(s)))
+        assert labelled and sa == "nexus-artifacts", (name, labelled, sa)
+    else:
+        assert not labelled and sa != "nexus-artifacts", (name, labelled, sa)
+assert seen == store, seen
+PY
+then
+  echo "ok   rendered: azblob workload identity on exactly api-gateway, agents and artifact-gc"
+else
+  echo "FAIL: azblob workload identity did not reach exactly the result-store clients"; tail -5 "$tmp/wi"; fail=1
+fi
 
 if [ "$fail" -ne 0 ]; then
   echo "validate: FAILED" >&2

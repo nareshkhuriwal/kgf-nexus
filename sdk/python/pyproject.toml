@@ -26,10 +26,20 @@ dependencies = []
 [project.optional-dependencies]
 # YAML is needed only to RENDER a compiled spec, never to compile one.
 yaml = ["PyYAML>=6.0"]
+# Tracing (nexus.tracing): with these installed a handler runs inside a child
+# span of the platform's trace (TRACEPARENT from the worker agent). Optional:
+# without them the trace context is still exposed on TaskContext. The SDK
+# never configures an exporter -- that is the user's TracerProvider's job.
+opentelemetry = ["opentelemetry-api>=1.27", "opentelemetry-sdk>=1.27"]
 # Test tooling. Lower bounds, not pins: the SDK is a library, and CI runs the
 # suite across 3.11-3.13, so the floor is what is promised to work. pytest-cov
 # produces the Cobertura XML both CI systems publish.
-dev = ["pytest>=8.3", "pytest-cov>=6.0", "PyYAML>=6.0", "mypy>=1.13", "types-PyYAML>=6.0"]
+# The OpenTelemetry pair is here so the tracing tests run instead of skipping;
+# tests that need its ABSENCE hide it rather than relying on it being missing.
+dev = [
+  "pytest>=8.3", "pytest-cov>=6.0", "PyYAML>=6.0", "mypy>=1.13", "types-PyYAML>=6.0",
+  "opentelemetry-api>=1.27", "opentelemetry-sdk>=1.27",
+]
 
 [project.urls]
 Homepage = "https://github.com/khuriwalgroup/kgf-nexus"

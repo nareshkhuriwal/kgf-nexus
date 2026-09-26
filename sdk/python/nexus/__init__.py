@@ -64,6 +64,7 @@ from .context import (
 )
 from .scheduling import Backfill, BackfillState, OverlapPolicy, Schedule, SchedulePreview
 from .task import TaskDefinition, registry, task
+from .tracing import TraceContext
 from .types import (
     Cache,
     Cancellation,
@@ -153,6 +154,7 @@ __all__ = [
     "StructuredLogger",
     "derive_idempotency_key",
     "EffectNotRecorded",
+    "TraceContext",
     # client
     "NexusClient",
     "NexusError",

@@ -11,6 +11,8 @@
 package store
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"fmt"
 	"time"
@@ -61,6 +63,9 @@ func NewPool(ctx context.Context, cfg PoolConfig) (*pgxpool.Pool, error) {
 		pc.MinConns = cfg.MinConns
 	}
 	pc.MaxConnLifetime = cfg.MaxConnLifetime
+	// One client span per query, batch and acquire when tracing is on
+	// (ADR-0026); parameters are never recorded.
+	pc.ConnConfig.Tracer = tracing.PgxTracer()
 	pc.MaxConnIdleTime = cfg.MaxConnIdleTime
 
 	pool, err := pgxpool.NewWithConfig(ctx, pc)

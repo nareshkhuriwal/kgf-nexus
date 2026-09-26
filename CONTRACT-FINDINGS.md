@@ -3119,13 +3119,17 @@ seed a legacy `api_keys` worker row. `up` could now mint the agents' token
 through the API after registering the tenant; the bootstrap Job needs a key
 known before install (the Secret), so it keeps the SQL step.
 
-### F115. Cloud platforms: the result store is S3-only with static keys, the chart cannot use cloud identities or GPU pools, and nothing has been applied — PARTLY FIXED (parts 3, 4, 5; 1, 2 and 6 open)
+### F115. Cloud platforms: the result store is S3-only with static keys, the chart cannot use cloud identities or GPU pools, and nothing has been applied — PARTLY FIXED (parts 1–5 fixed in code; part 6, the cloud acceptance, open)
 
 **Severity:** medium (deployment blocker for Azure-native artifacts and for
 keyless and GPU operation on every cloud; not a correctness defect). Found
 while building the AKS, EKS and GKE Terraform (`deploy/terraform/modules/
 {aks,eks,gke}-platform`, `environments/{aks,eks,gke}`,
 `feat/terraform-cloud-clusters`).
+
+**Update 2026-09-26 (feat/otel-and-storage-backends, ADR-0027): parts 1 and 2
+are FIXED in code and in the Terraform defaults; their cloud acceptance
+(part 6) is still open.** The original text follows, then what changed.
 
 **1. Azure Blob has no working path.** The result store talks to storage only
 through the S3 API: minio-go in `agent/internal/resultstore`,
@@ -3136,31 +3140,35 @@ PVC, and the operator owns its capacity, backups and availability. The Blob
 account, the private container, the private endpoint and a workload identity
 with `Storage Blob Data Contributor` on that container are provisioned but
 **unused**. The `azure_blob_native_backend` variable in `environments/aks` is
-reserved and its validation refuses `true`. There are two ways forward:
-(a) a native Blob backend behind the result-store interface, using
-`azblob` with workload identity; or (b) an S3-to-Blob gateway such as s3proxy
-in front of the container, which is another component to run and secure and
-has uncertain multipart and conditional-request fidelity. (a) is the
-recommendation.
+reserved and its validation refuses `true`.
 
-**2. Only static credentials.** All three clients build
-`credentials.NewStaticV4(...)`. This means:
-- **EKS** needs an IAM user with an access key (checkov CKV_AWS_273 and
-  CKV_AWS_40, accepted and documented). It is contained as far as a key can
-  be: the policy covers one bucket and one KMS key, and an explicit deny
-  blocks any request that does not arrive through the VPC's S3 gateway
-  endpoint. The target design, an IRSA / Pod Identity role trusted for
-  `nexus/kgf-nexus` with its Pod Identity association, is provisioned and
-  unused.
-- **GKE** uses an HMAC key for GCS's S3 interoperability API. The Workload
-  Identity binding for the same service account is provisioned and unused.
+*Fixed:* option (a). All three result-store users now go through
+`internal/objstore`, which has a native `azblob` backend (official SDK v1.8.1,
+azidentity v1.14.1: workload identity, managed identity, shared key; block
+blobs uploaded as staged blocks committed by a block list). The refuse-`true`
+validation is gone and `azure_blob_native_backend` **defaults to true**: the
+chart gets `resultStore.backend=azblob`, `NEXUS_AZURE_STORAGE_AUTH=workload-identity`,
+the ServiceAccount client-id annotation and the pod label, and no in-cluster
+MinIO. The storage account keeps `shared_access_key_enabled = false`. A
+management policy now expires noncurrent blob versions after 30 days, matching
+the S3 and GCS rules. Conformance-tested against Azurite.
 
-  Fix: use minio-go's credential chain (`credentials.NewChainCredentials`
-  with `IAM`, which understands `AWS_WEB_IDENTITY_TOKEN_FILE` / IRSA and the
-  Pod Identity container-credentials endpoint; verified present in minio-go
-  v7.3.0 `pkg/credentials/iam_aws.go`) whenever no static key is configured.
-  On GKE, a keyless path needs a native GCS client (Workload Identity
-  tokens), because minio-go can sign only S3-style HMAC requests.
+**2. Only static credentials.** All three clients built
+`credentials.NewStaticV4(...)`, so EKS needed an IAM-user access key and GKE an
+HMAC key for GCS's S3 interoperability API; the IRSA / Pod Identity role and
+the Workload Identity binding were provisioned and unused.
+
+*Fixed:* the `s3` backend takes `NEXUS_S3_CREDENTIALS` =
+`auto | static | web-identity | pod-identity | iam | env | anonymous` over
+minio-go's IAM provider (IRSA web identity, EKS Pod Identity container
+credentials, ECS, IMDSv2); `auto` uses static keys when set and otherwise any
+AWS workload identity visible in the environment, and fails with a message
+naming the fix rather than sending unsigned requests. A native `gcs` backend
+(`cloud.google.com/go/storage` v1.68.0, Application Default Credentials) gives
+GKE a keyless path. Terraform defaults: **EKS** `artifact_identity =
+"pod-identity"` (`"irsa"` and the static IAM-user key are opt-in), **GKE**
+`artifact_identity = "workload-identity"` (the HMAC key is created only for
+`"hmac"`). The gateway no longer requires static keys to serve logs.
 
 **3. The chart has no ServiceAccount, nodeSelector, tolerations or GPU
 resource requests.** — **ADDRESSED** (`fix/f115-chart-db-hardening`, see
@@ -3195,8 +3203,12 @@ migration login and a lower-privileged runtime login.
 `make tf-validate` runs fmt, `init -backend=false`, validate, and
 `terraform test` with **mocked** providers. `make tf-lint` runs tflint,
 checkov and trivy. No cloud API has accepted these plans, and no Nexus
-workload has run on AKS, EKS or GKE. In particular, large multipart uploads
-and the GC sweep have not been run against GCS interop. Acceptance: one
+workload has run on AKS, EKS or GKE. The storage backends pass one
+conformance suite (multipart, atomic visibility of failed uploads, ranged
+reads, lazy listing, create-if-absent, not-found classification) against Silo,
+Azurite and fake-gcs-server (`make objstore-conformance`), but emulators are
+not the clouds: throttling, IAM propagation, Azure's 50 000-block limit and
+real Workload Identity token exchange are unexercised. Acceptance: one
 apply per cloud in a scratch account, then the fan-out/fan-in example with a
 >64 MiB artifact (multipart), the artifact GC sweep, and a PITR restore of
 the managed database, with results recorded in docs/OPERATIONS.md.
@@ -3239,10 +3251,24 @@ the managed database, with results recorded in docs/OPERATIONS.md.
   GPUs must say so. The environments add a GPU agent on the GPU pool.
   OPERATIONS §20.13-20.14.
 
-Still open: parts 1 and 2 (native Blob/GCS and credential-chain clients: a
-separate change, which the accounts above are ready for) and part 6 (no cloud
-apply; in particular the Cloud SQL shared-CA bundle and PSA DNS name, and GPU
-execution on real hardware, are unverified).
+**Integration (wave 3).** Parts 1-2 and 3-5 were built on separate branches
+with two ServiceAccount models: `resultStore.serviceAccountName` plus
+`resultStore.podLabels` and a Terraform-created `kgf-nexus` account, against
+the chart's per-component `serviceAccounts`. One model remains, the chart's:
+the result-store clients run as `serviceAccounts.apiGateway` / `.agent` /
+`.artifactGC`, which the environments point at one chart-created
+`nexus-artifacts` account that the platform identities trust.
+`resultStore.serviceAccountName` / `.podLabels` and the kgf-nexus module's
+`service_account` variable are gone (never released). The chart adds the
+`azure.workload.identity/use` pod label to those three components under
+`azblob` + `workload-identity`, and refuses to create their accounts without
+the annotation that `workload-identity` or `s3.credentials=web-identity`
+needs. On EKS the role ARN annotation is set only for `artifact_identity =
+"irsa"`; Pod Identity's association names the account.
+
+Still open: part 6 (no cloud apply; in particular the Cloud SQL shared-CA
+bundle and PSA DNS name, real workload-identity token exchange for the native
+backends, and GPU execution on real hardware, are unverified).
 
 ### F116. The SDK derived a different idempotency key from the control plane — FIXED
 
@@ -3821,3 +3847,70 @@ likely misconfigurations.
 error>` whenever the reason changes and every minute otherwise (libpq's
 messages name the host and the failure, never the password). Checked with the
 migrate image against an unresolvable host and in the verify-full install.
+
+### F140. The architecture promised traces and trace ids on every log line; nothing produced either — FIXED
+
+**Severity:** medium (operability; no correctness impact). ARCHITECTURE §9
+promised "structured JSON logs with `trace_id` ... on every line" and
+"OpenTelemetry traces spanning submit → dispatch → execute → report". No
+service created a span, no hop propagated a `traceparent`, no log line had a
+trace id, and the go.mod carried OpenTelemetry only as an unused transitive
+dependency. Diagnosing a slow run meant joining six services' logs by
+timestamp.
+
+Three boundaries made a naive fix insufficient: the transactional outbox (a
+fact commits in one service, the relay publishes later), the attempt row (the
+dag-engine inserts it inside one request, a worker poll claims it in another)
+and the task process (no shared memory with the agent). Tracing only the
+synchronous hops would have produced one trace per request and no trace per
+run.
+
+**Fix (ADR-0026, OPERATIONS §26):** `internal/tracing` configures the pinned
+OpenTelemetry SDK from the standard `OTEL_*` variables in every service and
+the agent (off by default, parent-based ratio sampling, a malformed setting
+fails startup). W3C context crosses REST (route-template server spans), every
+gRPC hop (otelgrpc via the shared server and dial options), Postgres (otelpgx
+on every pool), the outbox (`outbox.trace_context`, migration 0028; the relay
+publishes each row as a child of its writer and injects NATS headers), the
+attempt row (`task_attempts.trace_context`; the scheduler's
+`attempt.dispatch` is a child of it and links the poll), the assignment
+(`TaskAssignment.trace_context`, additive) and the task process
+(`TRACEPARENT`/`TRACESTATE`; the Python SDK's `opentelemetry` extra continues
+it). slog records logged with a context carry `trace_id`/`span_id`, and every
+line of an attempt's agent log does.
+
+**Verified:** unit tests with the in-memory exporter (propagation over gRPC
+metadata, NATS headers, HTTP route naming and the public-endpoint link mode,
+dispatch parenting, log enrichment); `make tracing-e2e` runs the real
+binaries against Postgres, Silo and a pinned Jaeger v2 and asserts one trace
+holding the gateway, workflow-manager, dag-engine, scheduler and agent spans
+of a two-node run, result-store puts and database spans, with each task given
+a TRACEPARENT in that trace.
+
+**Remaining:** NATS consumers only wake loops and do not continue the trace
+(the attempt row carries it instead); very large fan-outs make very large
+traces, so production should sample (§26.2).
+
+### F141. A deduplicated output could be collected between the put and the report that references it — FIXED
+
+**Severity:** high (silent loss of a successful task's output), narrow window.
+Found while defining the result-store contract (ADR-0027).
+
+`resultstore.Client.Put` skipped the upload when an object with the same
+content address already existed. The artifact GC deletes unreferenced objects
+whose last-modified time is older than its grace period (24 h). An orphan with
+the same bytes as a new output -- a pruned run's output, or any identical
+payload written more than a day ago and no longer referenced -- is exactly
+such an object. Put reused it without touching it; if the GC's pass listed it
+before the new attempt's report committed `output_ref`, the object was
+deleted and the run recorded SUCCEEDED with a reference to nothing. The
+list-then-query ordering does not help: the object is old, so the grace
+period, which is what covers in-flight writes, did not apply.
+
+**Fix:** a deduplicated put reuses the existing object only if it was modified
+within the last hour (`resultstore.DedupeRefreshAge`); an older one is
+re-uploaded, refreshing its modification time and putting it back inside
+every grace period with 23 hours of margin. The common savings (a retry, or a
+fan-out producing identical outputs moments apart) are kept.
+`TestPutRefreshesOldDeduplicatedObjects` pins it. Operators see these repeats
+as `uploaded`, not `deduplicated`, in `nexus_agent_result_store_puts_total`.

@@ -4,6 +4,8 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
+
 	"context"
 	"fmt"
 	"log/slog"
@@ -36,7 +38,9 @@ import (
 // time() - nexus_artifact_gc_last_success_timestamp_seconds is the alert that
 // the scheduled sweep stopped running.
 type gcMetrics struct {
-	reg *metrics.Registry
+	// objstore counts the pass's list, stat and delete calls by backend.
+	objstore *objstore.Metrics
+	reg      *metrics.Registry
 
 	objects     *metrics.GaugeVec
 	orphanBytes *metrics.Gauge
@@ -56,7 +60,8 @@ type gcMetrics struct {
 func newGCMetrics() *gcMetrics {
 	reg := metrics.NewServiceRegistry("artifact-gc", version)
 	return &gcMetrics{
-		reg: reg,
+		reg:      reg,
+		objstore: objstore.NewMetrics(reg),
 		objects: reg.NewGauge("nexus_artifact_gc_last_run_objects",
 			"Objects in the last sweep, by disposition: scanned (listed), live_refs, reachable, too_young (inside the grace period), orphan (collectable), deleted, delete_error.",
 			"disposition"),

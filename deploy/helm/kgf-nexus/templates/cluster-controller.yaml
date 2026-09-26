@@ -221,6 +221,7 @@ spec:
             - name: POD_NAMESPACE
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
             {{- include "nexus.tlsEnv" (list . "client") | nindent 12 }}
+            {{- include "nexus.tracingEnv" . | nindent 12 }}
           ports:
             - { name: http, containerPort: 8090 }
           livenessProbe:

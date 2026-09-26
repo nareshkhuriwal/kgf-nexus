@@ -113,6 +113,12 @@ variable "runtime_db_password_version" {
   }
 }
 
+variable "generate_object_store_credentials" {
+  description = "With object_store_credentials null: true generates root credentials for the in-cluster MinIO; false writes NO S3 key pair, for a store the pods reach with a cloud identity (IRSA, EKS Pod Identity, Azure or GKE workload identity). The identity itself is bound to the chart's ServiceAccounts (chart_values.serviceAccounts.apiGateway / agent / artifactGC), which the environments annotate."
+  type        = bool
+  default     = true
+}
+
 variable "helm_timeout_seconds" {
   description = "How long Helm waits for every workload and Job to become ready."
   type        = number

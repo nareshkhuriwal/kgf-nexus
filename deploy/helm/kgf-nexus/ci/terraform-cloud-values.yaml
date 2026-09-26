@@ -49,23 +49,20 @@ postgres:
     enabled: true
     existingSecret: kgf-nexus-db-logins
     passwordRevision: 1
-# environments/eks chart_values: the result-store identity and agent pools
+# environments/eks chart_values: the result-store identity and agent pools.
+# EKS Pod Identity (the default artifact_identity): the association names
+# nexus-artifacts, so the account carries no annotation. Under
+# artifact_identity = "irsa" it carries the role ARN (ci/s3-irsa-values.yaml).
 serviceAccounts:
   apiGateway:
     name: nexus-artifacts
-    annotations:
-      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/x-nexus-artifacts
-      eks.amazonaws.com/sts-regional-endpoints: "true"
+    annotations: {}
   agent:
     name: nexus-artifacts
-    annotations:
-      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/x-nexus-artifacts
-      eks.amazonaws.com/sts-regional-endpoints: "true"
+    annotations: {}
   artifactGC:
     name: nexus-artifacts
-    annotations:
-      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/x-nexus-artifacts
-      eks.amazonaws.com/sts-regional-endpoints: "true"
+    annotations: {}
 agents:
   - name: agent-cpu
     replicas: 1
@@ -97,6 +94,13 @@ minio:
   bucket: nexus-artifacts-x
   region: eu-west-1
   useTLS: true
+# The result store through EKS Pod Identity (the eks environment's default
+# artifact_identity): no key pair; the identity reaches the nexus-artifacts
+# ServiceAccount above.
+resultStore:
+  backend: s3
+  s3:
+    credentials: pod-identity
 
 # chart_values_overrides (terraform.tfvars.example, plus other features' keys)
 logLevel: info

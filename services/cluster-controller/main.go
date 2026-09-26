@@ -16,6 +16,8 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"flag"
@@ -66,6 +68,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter; flushed last.
+	defer tracing.SetupOrExit(ctx, "cluster-controller", version, log)()
 
 	err := run(ctx, log, runConfig{
 		cluster: *clusterName, rmAddr: *rmAddr, httpAddr: *httpAddr, identity: *identity, leaseNS: *leaseNS,
@@ -223,7 +228,7 @@ func newLogger(level string) *slog.Logger {
 	default:
 		lv = slog.LevelInfo
 	}
-	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lv}))
+	return slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lv})))
 }
 
 func hostname() string {

@@ -4,6 +4,12 @@
 package grpcapi
 
 import (
+	"go.opentelemetry.io/otel/trace"
+
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,6 +47,11 @@ func (s *RunServer) CreateRun(ctx context.Context, req *nexusv1.CreateRunRequest
 		params[k] = v
 	}
 
+	ctx, span := tracing.Start(ctx, "run.create", trace.WithAttributes(
+		tracing.AttrNamespace.String(req.GetNamespace()),
+		attribute.String("nexus.spec_id", req.GetSpecId()),
+		attribute.String("nexus.trigger_kind", req.GetTriggerKind())))
+	defer span.End()
 	res, err := s.runs.Create(ctx, runs.CreateRequest{
 		Namespace: req.GetNamespace(),
 		// The proto carries only spec_id. A caller that has a NAME resolves it
@@ -54,8 +65,10 @@ func (s *RunServer) CreateRun(ctx context.Context, req *nexusv1.CreateRunRequest
 		Priority:       req.GetPriority(),
 	})
 	if err != nil {
+		tracing.End(span, err)
 		return nil, runError("create run", err)
 	}
+	span.SetAttributes(tracing.AttrRunID.String(res.Run.ID), attribute.Bool("nexus.deduplicated", !res.Created))
 	return &nexusv1.CreateRunResponse{
 		RunId: res.Run.ID,
 		// Deduplicated, not "failed": an idempotent replay returning the original

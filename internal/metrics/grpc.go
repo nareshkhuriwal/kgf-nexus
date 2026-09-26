@@ -4,6 +4,8 @@
 package metrics
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"strings"
 	"time"
@@ -58,6 +60,12 @@ func NewGRPCServerMetrics(reg *Registry) *GRPCServerMetrics {
 // has; put them FIRST so an RPC rejected by authentication is still counted.
 func (m *GRPCServerMetrics) ServerOptions() []grpc.ServerOption {
 	return []grpc.ServerOption{
+		// The OpenTelemetry stats handler rides with the metrics interceptors
+		// because every Nexus gRPC server installs these: one call site, and
+		// no server can be instrumented for one signal and not the other.
+		// It continues the caller's trace from the request metadata
+		// (ADR-0026); with tracing off it only propagates.
+		tracing.GRPCServerOption(),
 		grpc.ChainUnaryInterceptor(m.UnaryInterceptor()),
 		grpc.ChainStreamInterceptor(m.StreamInterceptor()),
 	}

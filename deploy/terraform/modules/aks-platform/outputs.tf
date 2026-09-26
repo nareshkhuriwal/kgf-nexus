@@ -75,12 +75,12 @@ output "key_vault_uri" {
 }
 
 output "artifact_storage_account" {
-  description = "Storage account for artifacts (for the future native Blob backend; unused by Nexus today, F115)."
+  description = "Storage account holding Nexus results and logs (native azblob backend)."
   value       = azurerm_storage_account.artifacts.name
 }
 
 output "artifact_container" {
-  description = "Blob container for artifacts (unused by Nexus today, F115)."
+  description = "Blob container for Nexus results and logs (the chart's minio.bucket under backend azblob)."
   value       = azurerm_storage_container.artifacts.name
 }
 

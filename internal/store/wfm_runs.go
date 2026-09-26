@@ -4,6 +4,8 @@
 package store
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"fmt"
@@ -208,14 +210,15 @@ func WFMTransitionRun(ctx context.Context, q GWQuerier, runID string, from []str
 		   AND state::text = ANY($2)
 		RETURNING id, namespace, state, state_version
 		), ob AS (
-		  INSERT INTO outbox (topic, namespace, routing_key, payload)
+		  INSERT INTO outbox (topic, namespace, routing_key, payload, trace_context)
 		  SELECT 'run_state', namespace, id::text,
 		         jsonb_build_object('run_id', id, 'namespace', namespace,
-		                            'state', state::text, 'state_version', state_version)
+		                            'state', state::text, 'state_version', state_version),
+		         $4
 		    FROM upd
 		)
 		SELECT id::text FROM upd`,
-		runID, from, to,
+		runID, from, to, tracing.NullableTraceparent(ctx),
 	).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunRow{}, ErrRunStateConflict

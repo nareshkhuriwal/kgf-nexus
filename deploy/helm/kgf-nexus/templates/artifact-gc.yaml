@@ -87,6 +87,7 @@ spec:
                 {{- include "nexus.dbEnv" (list . "artifactGC") | nindent 16 }}
                 {{- include "nexus.resultStoreEnv" . | nindent 16 }}
                 - { name: ARTIFACT_GC_LOG_LEVEL, value: {{ $gc.logLevel | quote }} }
+                {{- include "nexus.tracingEnv" . | nindent 16 }}
                 {{- with $gc.pushgatewayUrl }}
                 - { name: ARTIFACT_GC_PUSHGATEWAY_URL, value: {{ . | quote }} }
                 {{- end }}

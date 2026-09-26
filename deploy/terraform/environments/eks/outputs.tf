@@ -27,13 +27,18 @@ output "database" {
 }
 
 output "object_store" {
-  description = "Nexus result store: Amazon S3 through the VPC gateway endpoint."
+  description = "Nexus result store: Amazon S3 through the VPC gateway endpoint, and how the pods authenticate."
   value = {
-    endpoint          = module.platform.artifact_s3_endpoint
-    bucket            = module.platform.artifact_bucket
-    credentials       = "${module.nexus.namespace}/kgf-nexus-credentials (keys minio-root-user, minio-root-password): IAM user usable only via the VPC endpoint"
-    target_role_arn   = module.platform.artifact_role_arn
-    target_role_state = "provisioned, unused until the chart/client support IRSA or Pod Identity (F115)"
+    endpoint        = module.platform.artifact_s3_endpoint
+    bucket          = module.platform.artifact_bucket
+    identity        = var.artifact_identity
+    service_account = local.artifact_service_account
+    role_arn        = module.platform.artifact_role_arn
+    credentials = {
+      pod-identity = "EKS Pod Identity: role ${module.platform.artifact_role_arn}, no key"
+      irsa         = "IRSA: role ${module.platform.artifact_role_arn} (ServiceAccount annotation), no key"
+      static       = "${module.nexus.namespace}/kgf-nexus-credentials (keys minio-root-user, minio-root-password): IAM user usable only via the VPC endpoint"
+    }[var.artifact_identity]
   }
 }
 

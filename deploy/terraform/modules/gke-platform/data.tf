@@ -241,19 +241,29 @@ resource "google_storage_bucket_iam_member" "artifacts" {
   member = google_service_account.artifacts.member
 }
 
-# What works TODAY: an HMAC key for the service account, because the Nexus S3
-# client (minio-go, static credentials) talks to GCS's XML API in S3
+# OPT-IN fallback (artifact_hmac_key, default false): an HMAC key for the
+# service account, for the s3 backend against GCS's XML API in S3
 # interoperability mode. The environment root writes it into the kgf-nexus
 # credentials Secret. Rotate by creating a second key, rolling the Secret,
-# then setting the old key INACTIVE and deleting it.
+# then setting the old key INACTIVE and deleting it. Unlike the default below
+# it is a long-lived secret; prefer Workload Identity.
 resource "google_storage_hmac_key" "artifacts" {
+  count                 = var.artifact_hmac_key ? 1 : 0
   project               = var.project_id
   service_account_email = google_service_account.artifacts.email
 }
 
-# The target design, prepared now: the same service account through Workload
-# Identity (no key at all). Unused until the chart grows a ServiceAccount and
-# the client a GCS or token-based path (F115).
+# Existing state (created before the count) keeps its key instead of being
+# destroyed and recreated under a new address.
+moved {
+  from = google_storage_hmac_key.artifacts
+  to   = google_storage_hmac_key.artifacts[0]
+}
+
+# The default: the native gcs backend acts as this service account through
+# GKE Workload Identity -- the nexus-artifacts ServiceAccount, annotated
+# iam.gke.io/gcp-service-account, gets short-lived tokens from the metadata
+# server. No key exists anywhere.
 resource "google_service_account_iam_member" "artifacts_workload_identity" {
   service_account_id = google_service_account.artifacts.name
   role               = "roles/iam.workloadIdentityUser"

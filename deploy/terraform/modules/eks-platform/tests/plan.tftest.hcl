@@ -88,8 +88,12 @@ run "secure_defaults" {
     error_message = "ECR tags must be immutable."
   }
   assert {
-    condition     = length(aws_iam_access_key.artifacts) == 1
-    error_message = "Static artifact credentials are needed today (F115)."
+    condition     = length(aws_iam_access_key.artifacts) == 0
+    error_message = "No static artifact key by default: the result store uses the Pod Identity / IRSA role."
+  }
+  assert {
+    condition     = aws_eks_pod_identity_association.artifacts.service_account == "nexus-artifacts"
+    error_message = "The Pod Identity association must name the result-store ServiceAccount."
   }
 }
 

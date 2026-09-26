@@ -83,7 +83,7 @@ output "artifact_s3_endpoint" {
 }
 
 output "artifact_role_arn" {
-  description = "IRSA / Pod Identity role for the result store (target design; unused until F115 is closed)."
+  description = "IRSA / Pod Identity role the result store authenticates as."
   value       = aws_iam_role.artifacts.arn
 }
 

@@ -5,6 +5,8 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"log/slog"
@@ -26,7 +28,7 @@ import (
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	log := slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	dsn := config.DSN()
 	addr := env("HTTP_ADDR", ":8085")
@@ -34,7 +36,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := pgxpool.New(ctx, dsn)
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter; flushed last.
+	defer tracing.SetupOrExit(ctx, "event-service", version, log)()
+
+	pcfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		log.Error("parse database url", "error", err)
+		os.Exit(1)
+	}
+	pcfg.ConnConfig.Tracer = tracing.PgxTracer() // ADR-0026; parameters never recorded
+	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
 	if err != nil {
 		log.Error("could not create connection pool", "error", err)
 		os.Exit(1)

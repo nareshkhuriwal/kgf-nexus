@@ -40,6 +40,7 @@ from .context import (
     resolve_inline_threshold,
 )
 from .task import TaskDefinition, registry
+from .tracing import task_span, trace_context_from_environment
 
 __all__ = ["execute_assignment", "run_handler", "main", "HandlerNotFound"]
 
@@ -93,7 +94,12 @@ def resolve(task_ref: str) -> TaskDefinition[Any]:
     return definition
 
 
-def build_context(assignment: Mapping[str, Any], *, store: ResultStore | None = None) -> TaskContext:
+def build_context(
+    assignment: Mapping[str, Any],
+    *,
+    store: ResultStore | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> TaskContext:
     """Build a TaskContext from a TaskAssignment (proto/nexus/v1/task.proto).
 
     The idempotency key comes FROM THE ASSIGNMENT -- the control plane derived it
@@ -101,6 +107,9 @@ def build_context(assignment: Mapping[str, Any], *, store: ResultStore | None = 
     silently differs between control plane and worker would break dedup in the one
     situation it exists for, and a loud mismatch is far cheaper than a duplicate
     charge.
+
+    The trace context comes from $TRACEPARENT/$TRACESTATE (``environ`` defaults
+    to ``os.environ``), which the agent exports to every workload.
     """
     run_id = str(assignment.get("run_id") or "")
     node_id = str(assignment.get("node_id") or "")
@@ -163,6 +172,7 @@ def build_context(assignment: Mapping[str, Any], *, store: ResultStore | None = 
         start_to_close_deadline_unix_ms=int(assignment.get("start_to_close_deadline_unix_ms") or 0),
         store=store,
         inputs=dict(assignment.get("inputs") or {}),
+        _trace=trace_context_from_environment(environ),
     )
 
 
@@ -216,8 +226,12 @@ def run_handler(
     Retrying inside the worker would hide failures from the control plane's retry
     policy, its backoff, and its `retry_on` classification, and would make
     `attempt_number` a lie.
+
+    The call runs inside a child span of the platform's trace when there is a
+    trace context and OpenTelemetry is installed (nexus.tracing.task_span).
     """
-    return definition.fn(ctx, **kwargs)
+    with task_span(ctx):
+        return definition.fn(ctx, **kwargs)
 
 
 def execute_assignment(
