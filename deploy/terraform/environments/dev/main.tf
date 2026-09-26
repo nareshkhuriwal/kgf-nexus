@@ -95,13 +95,18 @@ module "nexus" {
   # into the gitignored .dev-nats/). The broker requires them.
   nats_credentials_dir = var.nats_credentials_dir
 
+  # The workstation's own Postgres, not an in-cluster one.
+  postgres_password = var.postgres_password
+
   chart_values = {
     logLevel = "info"
 
+    # The host machine's PostgreSQL (deploy/scripts/dev-host-postgres.sh).
+    postgres = merge({ enabled = false }, var.postgres)
+
     # Laptop-sized volumes; the defaults are sized for a shared cluster.
-    postgres = { storage = { size = "5Gi" } }
-    minio    = { storage = { size = "5Gi" } }
-    nats     = { storage = { size = "1Gi" } }
+    minio = { storage = { size = "5Gi" } }
+    nats  = { storage = { size = "1Gi" } }
 
     # Mail goes to Mailpit, so verification and password-reset emails can be
     # read at http://localhost:<ports.mailpit>.
