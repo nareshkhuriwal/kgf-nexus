@@ -209,8 +209,17 @@ SELECT id FROM a`,
 	// only by whatever else happened to make the run terminal. Same transaction as
 	// the INSERT so the budget cannot drift from the attempts that actually exist,
 	// and ON CONFLICT above means a duplicated timer delivery charges it once.
+	//
+	// A retry after an announced eviction is charged to the SEPARATE
+	// preemption budget instead (ADR-0030 §3): the timer payload says which,
+	// because the decision was made -- against the right budget -- in the
+	// transaction that recorded the PREEMPTED outcome.
+	budgetCol := "attempts_used"
+	if charge, _ := timer.Payload["charge"].(string); charge == chargePreemption && !s.placementMissing {
+		budgetCol = "preemptions_used"
+	}
 	if _, err := tx.Exec(ctx, `
-UPDATE task_nodes SET attempts_used = attempts_used + 1
+UPDATE task_nodes SET `+budgetCol+` = `+budgetCol+` + 1
  WHERE run_id = $1 AND node_id = $2`, runID, nodeID); err != nil {
 		return nil, fmt.Errorf("charge retry budget for %s/%s: %w", runID, nodeID, err)
 	}

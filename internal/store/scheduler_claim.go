@@ -74,6 +74,26 @@ type ClaimConfig struct {
 	// no lock. Off (NEXUS_QUOTAS=false) is the rollback step before reverting
 	// migration 0027: the claim then reads neither the view nor the usage.
 	Quotas bool
+
+	// PlacementPolicy is pack (best fit, the default) or spread, for the
+	// worker choice on the push path, the deferral score on the pull path and
+	// the shared GPU device inside a worker (ADR-0029 §4).
+	PlacementPolicy domain.PlacementPolicy
+	// PlacementWait bounds pull-path delay scheduling: a candidate with
+	// something to prefer is left for a strictly better live worker for at
+	// most this long after it became due. Zero disables deferral.
+	PlacementWait time.Duration
+	// Cost prices a worker for the placement score; nil ignores cost
+	// (ADR-0030 §6).
+	Cost domain.CostModel
+	// HeadroomTTL is how old a cluster's published quota headroom may be and
+	// still gate dispatch (ADR-0031 §3).
+	HeadroomTTL time.Duration
+	// MaxPreemptions is the platform cap on preemption retries for a task
+	// that declares none (ADR-0030 §3).
+	MaxPreemptions int32
+	// PreemptionRetryDelay is the backoff before retrying a PREEMPTED attempt.
+	PreemptionRetryDelay time.Duration
 }
 
 // DefaultClaimConfig returns the ADR-0010 recommended lease settings.
@@ -96,6 +116,12 @@ func DefaultClaimConfig(queue string) ClaimConfig {
 		ClaimWindow:            64,
 		ClaimWindowPages:       4,
 		Quotas:                 true,
+		PlacementPolicy:        domain.PolicyPack,
+		PlacementWait:          3 * time.Second,
+		Cost:                   domain.TierCostModel{},
+		HeadroomTTL:            2 * time.Minute,
+		MaxPreemptions:         domain.DefaultMaxPreemptions,
+		PreemptionRetryDelay:   2 * time.Second,
 	}
 }
 
@@ -121,6 +147,9 @@ type SchedulerStore struct {
 	// terminal transition. Set once at startup, never flipped afterwards.
 	quotasMissing   bool
 	meteringMissing bool
+	// placementMissing is set by DetectPlacementSchema when migration 0035 is
+	// not applied yet; the claim then reads no placement facts.
+	placementMissing bool
 }
 
 // NewSchedulerStore constructs the store. instanceID should be stable for the
@@ -554,47 +583,84 @@ func (s *SchedulerStore) selectWorker(
 
 	// DRAINING workers are excluded: they accept no new work, which is what
 	// makes a rolling deploy not cost hours of in-flight compute (§5.5).
-	const q = `
-SELECT id, hostname, capacity, committed
-  FROM workers
- WHERE state = 'ACTIVE'
-   AND $1 = ANY(queues)
-   AND last_heartbeat_at > $2
-   AND labels @> $3::jsonb
-   AND ($4 = '' OR $4 = ANY(executors))
-   AND tenant_id = (SELECT tenant_id FROM task_attempts WHERE id=$5)
- ORDER BY id
- FOR UPDATE SKIP LOCKED`
+	//
+	// The placement facts ride on the same rows (ADR-0031): effective labels
+	// for eligibility, cached artifacts and locality for the score.
+	q := `
+SELECT w.id, w.hostname, w.capacity, w.committed, ` + s.placementCols() + `
+  FROM workers w
+ WHERE w.state = 'ACTIVE'
+   AND $1 = ANY(w.queues)
+   AND w.last_heartbeat_at > $2
+   AND w.labels @> $3::jsonb
+   AND ($4 = '' OR $4 = ANY(w.executors))
+   AND w.tenant_id = (SELECT tenant_id FROM task_attempts WHERE id=$5)
+ ORDER BY w.id
+ FOR UPDATE OF w SKIP LOCKED`
+
+	if err := s.resolveSameHost(ctx, tx, cand); err != nil {
+		return nil, nil, err
+	}
 
 	rows, err := tx.Query(ctx, q,
 		s.cfg.Queue, now.Add(-s.cfg.LivenessWindow), selJSON, cand.Spec.Executor, cand.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("select candidate workers: %w", err)
 	}
-	defer rows.Close()
+
+	type scanned struct {
+		w     WorkerCandidate
+		facts workerFacts
+	}
+	var locked []scanned
+	for rows.Next() {
+		var sc scanned
+		var capJSON, comJSON, labelsJSON, clLabels, headroom []byte
+		var cached []string
+		var at *time.Time
+		if err := rows.Scan(&sc.w.ID, &sc.w.Hostname, &capJSON, &comJSON,
+			&labelsJSON, &cached, &clLabels, &headroom, &at); err != nil {
+			rows.Close()
+			return nil, nil, fmt.Errorf("scan worker row: %w", err)
+		}
+		if sc.w.Capacity, err = decodeVector(capJSON); err != nil {
+			rows.Close()
+			return nil, nil, fmt.Errorf("decode capacity for worker %s: %w", sc.w.ID, err)
+		}
+		if sc.w.Committed, err = decodeVector(comJSON); err != nil {
+			rows.Close()
+			return nil, nil, fmt.Errorf("decode committed for worker %s: %w", sc.w.ID, err)
+		}
+		sc.facts = scanFacts(labelsJSON, cached, clLabels, headroom, at)
+		locked = append(locked, sc)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate worker rows: %w", err)
+	}
 
 	var (
 		best      *WorkerCandidate
 		bestShort []domain.Shortfall
 	)
-	for rows.Next() {
-		var w WorkerCandidate
-		var capJSON, comJSON []byte
-		if err := rows.Scan(&w.ID, &w.Hostname, &capJSON, &comJSON); err != nil {
-			return nil, nil, fmt.Errorf("scan worker row: %w", err)
+	cfg := s.scoreConfig()
+	for i := range locked {
+		w, facts := locked[i].w, locked[i].facts
+		if ok, why := domain.Eligible(facts.Labels, cand.Spec.Placement); !ok {
+			if bestShort == nil {
+				bestShort = []domain.Shortfall{{Dim: "placement", Detail: why}}
+			}
+			continue
 		}
-		capacity, err := decodeVector(capJSON)
-		if err != nil {
-			return nil, nil, fmt.Errorf("decode capacity for worker %s: %w", w.ID, err)
+		if reason, err := s.headroomBlocks(ctx, tx, now, w.ID, &facts, cand); err != nil {
+			return nil, nil, err
+		} else if reason != "" {
+			if bestShort == nil {
+				bestShort = []domain.Shortfall{{Dim: "cluster_quota", Detail: reason}}
+			}
+			continue
 		}
-		committed, err := decodeVector(comJSON)
-		if err != nil {
-			return nil, nil, fmt.Errorf("decode committed for worker %s: %w", w.ID, err)
-		}
-		w.Capacity, w.Committed = capacity, committed
-
-		fits, short := domain.Fits(capacity, committed, cand.ResourceRequest)
-		if !fits {
+		if short := s.placeOn(&w, cand.ResourceRequest); short != nil {
 			// Keep the shortfall from the CLOSEST worker (fewest blocking
 			// dimensions) so pending_reason names the bottleneck an operator can
 			// actually fix, not an arbitrary worker's unrelated limits.
@@ -603,14 +669,16 @@ SELECT id, hostname, capacity, committed
 			}
 			continue
 		}
-		w.Score = domain.BestFitScore(capacity, committed, cand.ResourceRequest)
-		if best == nil || w.Score < best.Score {
+		// HIGHER is better (domain.PlacementScore): packing per the policy plus
+		// the soft preferences. Ties keep the lowest worker id, as before.
+		w.Score = domain.PlacementScore(domain.WorkerView{
+			Hostname: w.Hostname, Labels: facts.Labels, Capacity: w.Capacity,
+			Committed: w.Committed, Cached: facts.Cached,
+		}, cand.ResourceRequest, cand.Spec.Placement, cfg)
+		if best == nil || w.Score > best.Score {
 			cp := w
 			best = &cp
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("iterate worker rows: %w", err)
 	}
 
 	if best == nil {
@@ -778,7 +846,16 @@ func (s *SchedulerStore) commitDispatch(
 	// Atomicity here is worth more than ownership purity. Nowhere else does the
 	// scheduler write these tables; every other capacity operation calls the
 	// resource manager's API.
-	reqJSON, err := encodeVector(cand.ResourceRequest)
+	//
+	// The reservation is the PLACED vector (ADR-0029): the request plus the
+	// shared GPU device chosen for it. Every release path subtracts the
+	// reservation row, so recording the device here is what makes release
+	// return capacity to the device it was taken from.
+	reserved := worker.Placed
+	if reserved == nil {
+		reserved = cand.ResourceRequest
+	}
+	reqJSON, err := encodeVector(reserved)
 	if err != nil {
 		return nil, false, err
 	}
@@ -789,7 +866,7 @@ func (s *SchedulerStore) commitDispatch(
 		return nil, false, fmt.Errorf("insert reservation: %w", err)
 	}
 
-	newCommitted, err := encodeVector(domain.AddVec(worker.Committed, cand.ResourceRequest))
+	newCommitted, err := encodeVector(domain.AddVec(worker.Committed, reserved))
 	if err != nil {
 		return nil, false, err
 	}
@@ -846,7 +923,11 @@ UPDATE task_attempts
 			"lease_id":         leaseID.String(),
 			"lease_expires_at": expiresAt.UTC().Format(time.RFC3339Nano),
 			"attempt_number":   cand.AttemptNumber,
-			"best_fit_score":   worker.Score,
+			// Keeps its historical meaning (lower is tighter); the combined
+			// ADR-0029 score, higher is better, is placement_score.
+			"best_fit_score":    domain.BestFitScore(worker.Capacity, worker.Committed, reserved),
+			"placement_score":   worker.Score,
+			"shared_gpu_device": sharedDeviceOf(reserved),
 		}); err != nil {
 		return nil, false, err
 	}
@@ -903,4 +984,10 @@ func newLeaseToken() (string, error) {
 		return "", fmt.Errorf("generate lease token: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// sharedDeviceOf names the shared GPU device a reservation holds, "" for none.
+func sharedDeviceOf(v *nexusv1.ResourceVector) string {
+	d, _ := domain.SharedDevice(v)
+	return d
 }

@@ -197,10 +197,11 @@ func (s *SchedulerStore) ApplyResult(
 	// into a no-op exactly as skipping did, and a peer applying the same result
 	// is seen as terminal. The wait cannot deadlock on this statement because it
 	// is the transaction's first lock. See lockAttemptForTransition.
-	const lockQ = `
+	lockQ := `
 SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
        a.resource_request, a.scheduled_at, a.priority, a.queue,
-       n.spec_json, n.attempts_used, n.max_attempts, r.deadline_at, n.retry_floor
+       n.spec_json, n.attempts_used, n.max_attempts, r.deadline_at, n.retry_floor,
+       ` + s.preemptionsUsedCol() + `
   FROM task_attempts a
   JOIN task_nodes    n ON n.run_id = a.run_id AND n.node_id = a.node_id
   JOIN workflow_runs r ON r.id = a.run_id
@@ -214,12 +215,13 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
 		reqJSON, specJSON        []byte
 		attemptsUsed, maxAttempt int32
 		runDeadline              *time.Time
+		preemptionsUsed          int32
 	)
 	err = s.lockAttemptForTransition(ctx, tx, func() error {
 		return tx.QueryRow(ctx, lockQ, attemptID).Scan(
 			&cand.ID, &cand.RunID, &cand.NodeID, &cand.AttemptNumber, &workerID,
 			&reqJSON, &cand.ScheduledAt, &cand.Priority, &cand.Queue,
-			&specJSON, &attemptsUsed, &maxAttempt, &runDeadline, &cand.RetryFloor)
+			&specJSON, &attemptsUsed, &maxAttempt, &runDeadline, &cand.RetryFloor, &preemptionsUsed)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Already terminal: a duplicate report (the expected consequence of
@@ -341,6 +343,7 @@ UPDATE task_attempts
 	// crash cannot leave an attempt failed with no retry scheduled and no record
 	// that one was owed.
 	if state != string(domain.AttemptSucceeded) {
+		cand.preemptionsUsed = preemptionsUsed
 		decision, _, rerr := s.evaluateAndScheduleRetryWithClass(
 			ctx, tx, now, &cand, errClass, attemptsUsed, maxAttempt, runDeadline)
 		if rerr != nil {
@@ -376,8 +379,21 @@ func (s *SchedulerStore) evaluateAndScheduleRetryWithClass(
 		stcExceeded = true
 	}
 
-	decision := domain.ShouldRetry(class, att.Spec.IdempotencyModeProto(),
-		attemptsUsed, maxAttempts, stcExceeded, policy)
+	var decision domain.RetryDecision
+	preempted := false
+	if class == nexusv1.ErrorClass_ERROR_CLASS_PREEMPTED {
+		// ADR-0030 §3: an eviction the agent announced spends the preemption
+		// budget, not max_attempts, until that budget is gone.
+		maxP := s.cfg.MaxPreemptions
+		if p := att.Spec.Placement; p != nil && p.MaxPreemptions > 0 {
+			maxP = p.MaxPreemptions
+		}
+		decision, preempted = domain.ShouldRetryPreempted(att.Spec.IdempotencyModeProto(),
+			attemptsUsed, maxAttempts, att.preemptionsUsed, maxP, stcExceeded, policy)
+	} else {
+		decision = domain.ShouldRetry(class, att.Spec.IdempotencyModeProto(),
+			attemptsUsed, maxAttempts, stcExceeded, policy)
+	}
 
 	if decision.Warn {
 		if err := appendEvent(ctx, tx, att.RunID, att.NodeID, &att.ID,
@@ -404,12 +420,19 @@ func (s *SchedulerStore) evaluateAndScheduleRetryWithClass(
 	}
 
 	delay := domain.Backoff(policy, att.AttemptNumber-att.RetryFloor)
-	fireAt := now.Add(delay)
-	if err := insertTimer(ctx, tx, domain.TimerRetryBackoff, att.ID, fireAt, map[string]any{
+	payload := map[string]any{
 		"run_id": att.RunID.String(), "node_id": att.NodeID,
 		"next_attempt_number": att.AttemptNumber + 1,
 		"reason":              decision.Reason,
-	}); err != nil {
+	}
+	if preempted {
+		// The node is gone, not the task broken: a short fixed delay, and the
+		// retry timer charges preemptions_used instead of attempts_used.
+		delay = s.cfg.PreemptionRetryDelay
+		payload["charge"] = chargePreemption
+	}
+	fireAt := now.Add(delay)
+	if err := insertTimer(ctx, tx, domain.TimerRetryBackoff, att.ID, fireAt, payload); err != nil {
 		return decision, time.Time{}, err
 	}
 	if err := appendEvent(ctx, tx, att.RunID, att.NodeID, &att.ID,

@@ -36,6 +36,7 @@ type Metrics struct {
 	loopErrors    *metrics.CounterVec
 	quotaBlocked  *metrics.CounterVec
 	usageWrites   *metrics.CounterVec
+	deferred      *metrics.Counter
 
 	pending     *metrics.GaugeVec
 	oldestAge   *metrics.GaugeVec
@@ -88,6 +89,9 @@ func NewMetrics(reg *metrics.Registry, queue string) *Metrics {
 		usageWrites: reg.NewCounter("nexus_scheduler_usage_ledger_writes_total",
 			"Usage-ledger rows written, one per dispatched attempt that ended, by outcome (ADR-0021).",
 			"queue", "outcome"),
+		deferred: reg.NewCounter("nexus_scheduler_placement_deferrals_total",
+			"Pull-path candidates left PENDING for a strictly better live worker (bounded delay scheduling, ADR-0029). Counted per examination.",
+			"queue").With(metrics.Labels{"queue": queue}),
 		pending: reg.NewGauge("nexus_scheduler_pending_attempts",
 			"PENDING attempts per queue, fleet-wide (every replica reports every queue: aggregate with max by (queue)).",
 			"queue"),
@@ -120,6 +124,14 @@ func (m *Metrics) QuotaBlocked(dimension string) {
 		dimension = "custom"
 	}
 	m.quotaBlocked.With(metrics.Labels{"queue": m.queue, "dimension": dimension}).Inc()
+}
+
+// PlacementDeferred implements store.PlacementObserver.
+func (m *Metrics) PlacementDeferred() {
+	if m == nil {
+		return
+	}
+	m.deferred.Inc()
 }
 
 // UsageRecorded implements store.QuotaObserver.

@@ -4,8 +4,12 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
+
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 )
@@ -102,5 +106,45 @@ func TestNullString(t *testing.T) {
 	}
 	if got := nullString("node"); got == nil || *got != "node" {
 		t.Error("non-empty string must pass through")
+	}
+}
+
+// Fractional GPU fields survive both writers' dialects (ADR-0029): this
+// package's snake_case numbers and the resource manager's protojson, which
+// quotes int64s.
+func TestVectorFractionalGPURoundTrip(t *testing.T) {
+	v := &nexusv1.ResourceVector{
+		CpuMillis: 1000, Mig: map[string]int64{"1g.10gb": 2}, GpuShareMilli: 250,
+		GpuShareMemoryBytes: 10 << 30,
+		GpuShares:           map[string]*nexusv1.GPUShare{"3": {Milli: 250, MemoryBytes: 10 << 30}},
+	}
+	b, err := encodeVector(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeVector(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !proto.Equal(got, v) {
+		t.Fatalf("snake round trip:\n got %v\nwant %v", got, v)
+	}
+	pj, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = decodeVector(pj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !proto.Equal(got, v) {
+		t.Fatalf("protojson read:\n got %v\nwant %v", got, v)
+	}
+	// A plain vector encodes exactly as before: no new keys.
+	plain, _ := encodeVector(&nexusv1.ResourceVector{CpuMillis: 1})
+	for _, k := range []string{"mig", "gpu_share", "gpu_shares"} {
+		if bytes.Contains(plain, []byte(`"`+k)) {
+			t.Fatalf("plain vector grew key %q: %s", k, plain)
+		}
 	}
 }

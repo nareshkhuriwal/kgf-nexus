@@ -243,6 +243,20 @@ func (s *SchedulerStore) notifyQuotaBlocked(dims []string) {
 	}
 }
 
+// PlacementObserver is an optional extension of the observer for placement
+// events (ADR-0029 §4). Checked by type assertion so existing observers keep
+// compiling.
+type PlacementObserver interface {
+	// PlacementDeferred is one pull-path candidate left for a better worker.
+	PlacementDeferred()
+}
+
+func (s *SchedulerStore) notifyDeferred() {
+	if o, ok := s.observer.(PlacementObserver); ok {
+		o.PlacementDeferred()
+	}
+}
+
 func (s *SchedulerStore) notifyUsage(outcome string) {
 	if s.observer != nil && outcome != "" {
 		s.observer.UsageRecorded(outcome)
