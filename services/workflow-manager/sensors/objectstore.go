@@ -139,8 +139,15 @@ func S3ConfigFromEnv(getenv func(string) string) (S3Config, bool) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
+	// The result store's settings describe an S3 endpoint only when it IS s3:
+	// on azblob or gcs, NEXUS_RESULT_STORE_ENDPOINT is an Azure service URL or
+	// a GCS emulator, and those stores have their own listers.
+	own := resultStoreIs(getenv, objstore.BackendS3)
 	pick := func(keys ...string) string {
-		for _, k := range keys {
+		for i, k := range keys {
+			if i > 0 && !own {
+				break
+			}
 			if v := strings.TrimSpace(getenv(k)); v != "" {
 				return v
 			}

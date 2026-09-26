@@ -3999,7 +3999,9 @@ constraint.
 | `NEXUS_CONSOLE_URL` | event-service | unset | Links each notification to `<console>/runs/<id>`. |
 | `NEXUS_SMTP_*` | event-service | mail disabled | Email channels. The settings are the same as the gateway's (§10). With no host, email deliveries fail permanently and say why. |
 | `NEXUS_NOTIFY_EVAL_BATCH`, `_EVAL_INTERVAL`, `_DISPATCH_BATCH`, `_DISPATCH_INTERVAL`, `_CONCURRENCY`, `_SLA_INTERVAL`, `_BASE_BACKOFF`, `_MAX_BACKOFF`, `_RETENTION` | event-service | 200, 1s, 50, 1s, 8, 30s, 30s, 1h, 720h | Notifier tuning. |
-| `NEXUS_SENSOR_S3_ENDPOINT`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_SESSION_TOKEN`, `_CREDENTIALS`, `_USE_TLS` | workflow-manager | the result store's `NEXUS_RESULT_STORE_*` / `NEXUS_S3_*` | The store that `s3://` sensors list. `_CREDENTIALS` takes the result store's modes (`auto`, `static`, `web-identity`, `pod-identity`, `iam`, `env`, `anonymous`; §26.3), so a sensor watching the platform's own bucket uses the same keyless identity; the Helm chart gives the workflow-manager the result-store ServiceAccount for that (§20.13). |
+| `NEXUS_SENSOR_S3_ENDPOINT`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_SESSION_TOKEN`, `_CREDENTIALS`, `_USE_TLS` | workflow-manager | the result store's `NEXUS_RESULT_STORE_*` / `NEXUS_S3_*` | The store that `s3://` sensors list. The result-store fallback applies only when the result store is `s3`: an Azure or GCS store's endpoint is never handed to the S3 client. `_CREDENTIALS` takes the result store's modes (`auto`, `static`, `web-identity`, `pod-identity`, `iam`, `env`, `anonymous`; §26.3), so a sensor watching the platform's own bucket uses the same keyless identity; the Helm chart gives the workflow-manager the result-store ServiceAccount for that (§20.13). |
+| `NEXUS_SENSOR_AZURE_STORAGE_ACCOUNT`, `_AUTH`, `_KEY`, `NEXUS_SENSOR_AZURE_CLIENT_ID`, `NEXUS_SENSOR_AZBLOB_ENDPOINT` | workflow-manager | the result store's `NEXUS_AZURE_*` and endpoint, **only when** `NEXUS_RESULT_STORE_BACKEND=azblob` | The storage account `azblob://` / `az://` sensors list. `_AUTH` takes the result store's modes (`auto`, `workload-identity`, `managed-identity`, `shared-key`). A malformed mode stops the service at startup. |
+| `NEXUS_SENSOR_GCS_AUTH`, `NEXUS_SENSOR_GCS_ENDPOINT`, `NEXUS_SENSOR_GCS_ENABLED` | workflow-manager | the result store's `NEXUS_GCS_AUTH` and endpoint, **only when** `NEXUS_RESULT_STORE_BACKEND=gcs` | `gcs://` / `gs://` sensors. `auto` is Application Default Credentials (GKE Workload Identity); `none` is for an emulator and requires `_ENDPOINT`. ADC needs no setting, so on another result-store backend opt in with `NEXUS_SENSOR_GCS_ENABLED=true`. |
 | `NEXUS_SENSOR_INTERVAL` | workflow-manager | 2s | How often a replica looks for due sensors. Each sensor's own `poll_interval_seconds` decides how often it is actually polled. |
 
 In Helm, set `events.secretKey.existingSecret` (and `key`, and `previousKey`
@@ -4181,10 +4183,20 @@ nexusctl sensor observations landing    # what it saw and which run it started
   - `stale`: no replica has polled it for 5 min. Check that the workflow-manager
     is running.
   - `disabled`
-- **Object stores.** `s3://` is served now. `gs://` and `az://` definitions are
-  accepted and report "no object-store lister is configured" until native
-  listers are registered. The lister interface (`sensors.ObjectLister`) is two
-  behaviours: list after a key, and page.
+- **Object stores.** `s3://bucket/prefix`, `azblob://container/prefix` (alias
+  `az://`) and `gcs://bucket/prefix` (alias `gs://`) are served, each by the
+  result store's own backend (`internal/objstore`), so they authenticate the
+  way the store does (§26.3). In an Azure URI the host is the CONTAINER; the
+  storage account comes from configuration (§27.1), never from the URI, so a
+  sensor definition cannot aim the platform's identity at another account. A
+  scheme with no configured store reports "no object-store lister is
+  configured". GCS and S3 resume a listing server-side (StartOffset,
+  StartAfter); Azure's XML listing has no start key, so an Azure sensor re-reads
+  the keys under its prefix up to its cursor on each poll: keep Azure prefixes
+  narrow (a dated directory rather than a whole container). Proven by
+  `services/workflow-manager/sensors/native_integration_test.go` against
+  Azurite and fake-gcs-server, and the `ListAfter` case of the objstore
+  conformance suite on all three backends.
 
 ### 27.7 Asset lineage
 
