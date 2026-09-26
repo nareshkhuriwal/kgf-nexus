@@ -223,6 +223,20 @@ smtp:
   # Where emailed links point: the console's public URL.
   publicUrl: ""
 
+# Notifications, webhook triggers and sensors (ADR-0028, OPERATIONS §27).
+events:
+  secretKey:
+    # A Secret holding a 32-byte key (base64 or hex): openssl rand -base64 32.
+    # Empty = no key: inline channel secrets and webhook triggers are refused;
+    # channel secret references (env:/file:) still work.
+    existingSecret: ""
+    key: secret-key
+    # During a key rotation, the key of the retired value in the same Secret.
+    previousKey: ""
+  # Lets channels reach private and loopback addresses (on-premises receivers).
+  # Off by default so a channel cannot be pointed at internal services.
+  allowPrivateTargets: false
+
 migrate:
   resources:
     requests: { cpu: 50m, memory: 64Mi }

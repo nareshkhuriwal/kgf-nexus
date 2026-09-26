@@ -100,6 +100,17 @@ x-minio-env: &minio-env
   # round-trips to the blob store (ADR-0008; §12 proposes 64 KiB).
   RESULT_STORE_INLINE_THRESHOLD_BYTES: "65536"
 
+# Notifications, webhook triggers and sensors (ADR-0028, docs/OPERATIONS.md §27).
+# NEXUS_SECRET_KEY seals channel and trigger secrets at rest; the gateway seals,
+# the event-service opens, so both must hold the SAME key. The default below is a
+# DEVELOPMENT key, public in this file: any real deployment sets its own
+# (openssl rand -base64 32) or leaves it unset and uses secret references.
+x-events-env: &events-env
+  NEXUS_SECRET_KEY: ${NEXUS_SECRET_KEY:-ZGV2LW9ubHktbmV4dXMtc2VjcmV0LWtleS0zMmJ5dGU=}
+  # Local receivers (a webhook on the host, Mailpit) are private addresses; a
+  # real deployment keeps this false so a channel cannot reach internal services.
+  NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS: ${NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS:-true}
+
 x-go-build: &go-build
   context: ..
   dockerfile: deploy/Dockerfile.service
@@ -327,7 +338,7 @@ services:
         SERVICE_PATH: services/api-gateway/cmd/api-gateway
     depends_on: *depends-on-db
     environment:
-      <<: [*service-env, *minio-env]
+      <<: [*service-env, *minio-env, *events-env]
       HTTP_ADDR: ":8080"        # REST for humans, CLI, UI (§8.2)
       NEXUS_HTTP_ADDR: ":8080"
       NEXUS_REST_ADDR: ":8080"
@@ -374,7 +385,9 @@ services:
         SERVICE_PATH: services/workflow-manager/cmd/workflow-manager
     depends_on: *depends-on-db
     environment:
-      <<: *service-env
+      # minio-env: object-store sensors (ADR-0028) list the result store unless
+      # NEXUS_SENSOR_S3_* names another endpoint.
+      <<: [*service-env, *minio-env]
       HTTP_ADDR: ":8080"
       NEXUS_HTTP_ADDR: ":8080"
       NEXUS_REST_ADDR: ":8080"
@@ -530,7 +543,7 @@ services:
     volumes:
       - nats-auth-event-service:/etc/nexus/nats:ro
     environment:
-      <<: [*service-env, *nats-env]
+      <<: [*service-env, *nats-env, *events-env]
       HTTP_ADDR: ":8080"
       NEXUS_HTTP_ADDR: ":8080"
       NEXUS_REST_ADDR: ":8080"
@@ -540,6 +553,15 @@ services:
       NEXUS_GRPC_ADDR: ":9090"
       NEXUS_WFM_GRPC_ADDR: ":9090"
       RM_GRPC_ADDR: ":9090"
+      # Notification email goes through the same SMTP settings as the gateway's
+      # account mail (Mailpit locally), and links point at the console.
+      NEXUS_SMTP_HOST: ${NEXUS_SMTP_HOST:-mailpit}
+      NEXUS_SMTP_PORT: ${NEXUS_SMTP_PORT:-1025}
+      NEXUS_SMTP_TLS: ${NEXUS_SMTP_TLS:-none}
+      NEXUS_SMTP_USERNAME: ${NEXUS_SMTP_USERNAME:-}
+      NEXUS_SMTP_PASSWORD: ${NEXUS_SMTP_PASSWORD:-}
+      NEXUS_SMTP_FROM: ${NEXUS_SMTP_FROM:-KGF Nexus <no-reply@nexus.localhost>}
+      NEXUS_CONSOLE_URL: ${NEXUS_PUBLIC_URL:-http://localhost:3000}
       # Outbox relay tuning (services/event-service/relay). Defaults shown.
       NEXUS_OUTBOX_RETENTION: 1h
       NEXUS_OUTBOX_MAX_AGE: 24h

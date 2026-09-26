@@ -153,6 +153,22 @@
       }
     },
     "mailpit": { "type": "object", "properties": { "enabled": { "type": "boolean" } } },
+    "events": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "secretKey": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 },
+            "previousKey": { "type": "string" }
+          }
+        },
+        "allowPrivateTargets": { "type": "boolean" }
+      }
+    },
     "smtp": {
       "type": "object",
       "additionalProperties": true,
