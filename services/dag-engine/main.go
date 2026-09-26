@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -96,6 +97,11 @@ func run() error {
 	}
 
 	engine := NewEngine(st, runStates, nil, log)
+	qcfg, concurrency, passTimeout, err := reconcileQueueConfigFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	engine.SetReconcileLimits(concurrency, passTimeout)
 
 	// Metrics, served on the health listener (docs/OPERATIONS.md).
 	reg := metrics.NewServiceRegistry("dag-engine", version)
@@ -158,6 +164,25 @@ func run() error {
 			return
 		}
 		httpErr <- nil
+	}()
+
+	// The durable half of run advancement (F160): consume the reconcile
+	// requests the database queued with each terminal attempt and run state
+	// change, so a lost ReconcileRun call delays a run instead of stranding it.
+	// Started before serving, so requests left by a previous replica -- or
+	// queued by migration 0039 for runs stranded before it -- are picked up at
+	// boot.
+	host, _ := os.Hostname()
+	qcfg.Owner = fmt.Sprintf("dag-engine/%s/%d", host, os.Getpid())
+	queueCtx, stopQueue := context.WithCancel(context.Background())
+	queueDone := make(chan struct{})
+	go func() {
+		defer close(queueDone)
+		NewReconcileQueue(engine, st, qcfg, log).Run(queueCtx)
+	}()
+	defer func() {
+		stopQueue()
+		<-queueDone
 	}()
 
 	grpcErr := make(chan error, 1)
@@ -243,6 +268,53 @@ func withMetrics(h http.Handler, reg *metrics.Registry) http.Handler {
 	reg.Routes(mux)
 	mux.Handle("/", h)
 	return mux
+}
+
+// reconcileQueueConfigFromEnv reads the reconcile tuning (F160). Every value
+// must be a positive integer when set; a typo stops the service at startup
+// rather than silently running with a default nobody chose.
+//
+//	NEXUS_DAG_RECONCILE_CONCURRENCY      runs reconciled at once (default 8)
+//	NEXUS_DAG_RECONCILE_TIMEOUT_SEC      bound on one reconcile pass (default 120)
+//	NEXUS_DAG_RECONCILE_QUEUE_POLL_MS    idle poll of the durable queue (default 1000)
+//	NEXUS_DAG_RECONCILE_QUEUE_BATCH      requests claimed per batch (default 500)
+//	NEXUS_DAG_RECONCILE_QUEUE_LEASE_SEC  claim lease (default 30)
+func reconcileQueueConfigFromEnv(getenv func(string) string) (ReconcileQueueConfig, int, time.Duration, error) {
+	read := func(key string, def int) (int, error) {
+		raw := strings.TrimSpace(getenv(key))
+		if raw == "" {
+			return def, nil
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("%s=%q: want a positive integer", key, raw)
+		}
+		return n, nil
+	}
+	var (
+		cfg  ReconcileQueueConfig
+		vals [5]int
+	)
+	for i, v := range []struct {
+		key string
+		def int
+	}{
+		{"NEXUS_DAG_RECONCILE_CONCURRENCY", defaultReconcileConcurrency},
+		{"NEXUS_DAG_RECONCILE_TIMEOUT_SEC", int(defaultReconcileTimeout / time.Second)},
+		{"NEXUS_DAG_RECONCILE_QUEUE_POLL_MS", 1000},
+		{"NEXUS_DAG_RECONCILE_QUEUE_BATCH", 500},
+		{"NEXUS_DAG_RECONCILE_QUEUE_LEASE_SEC", 30},
+	} {
+		n, err := read(v.key, v.def)
+		if err != nil {
+			return cfg, 0, 0, err
+		}
+		vals[i] = n
+	}
+	cfg.PollInterval = time.Duration(vals[2]) * time.Millisecond
+	cfg.BatchSize = vals[3]
+	cfg.Lease = time.Duration(vals[4]) * time.Second
+	return cfg, vals[0], time.Duration(vals[1]) * time.Second, nil
 }
 
 func envOr(key, def string) string {

@@ -144,9 +144,18 @@ postgres:
   # Empty keeps each service's own default (16 for most). Set these when the
   # database is shared and its max_connections is small, e.g. a workstation's
   # own Postgres: every replica of every service holds up to maxConns.
+  #
+  # perService overrides them for one connection key (the keys of
+  # connections above: apiGateway, dagEngine, scheduler, ...). The dag-engine
+  # is the usual candidate: it reconciles up to NEXUS_DAG_RECONCILE_CONCURRENCY
+  # runs at once and consumes the durable reconcile queue (CONTRACT-FINDINGS
+  # F160), so a cap sized for a quiet service starves it under a fan-out.
+  #   perService:
+  #     dagEngine: { maxConns: 10, minConns: 1 }
   pool:
     maxConns: ""
     minConns: ""
+    perService: {}
   maxConnections: 200
   sharedBuffers: 256MB
   storage:

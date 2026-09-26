@@ -174,13 +174,20 @@ func (s *GRPCServer) MaterializeRun(ctx context.Context, req *MaterializeRunRequ
 }
 
 // ReconcileRun recomputes a run after an attempt reached a terminal state.
+//
+// It is the FAST path of run advancement, not the durable one (F160): the
+// request it answers is already queued in run_reconcile_requests, written with
+// the fact that needed it, so a call that times out or never arrives delays
+// the run by one consumer poll instead of stranding it. Concurrent calls for
+// one run are coalesced (reconcileFlights); the answer always comes from a
+// pass that began after the call arrived.
 func (s *GRPCServer) ReconcileRun(ctx context.Context, req *ReconcileRunRequest) (*ReconcileRunResponse, error) {
 	if req.GetRunID() == "" {
 		return nil, status.Error(codes.InvalidArgument, "run_id is required")
 	}
 	ctx, span := tracing.Start(ctx, "run.reconcile", trace.WithAttributes(tracing.AttrRunID.String(req.RunID)))
 	defer span.End()
-	res, err := s.engine.Reconcile(ctx, req.RunID)
+	res, err := s.engine.ReconcileDurably(ctx, req.RunID)
 	if err != nil {
 		tracing.End(span, err)
 		return nil, toStatus(err)
@@ -302,6 +309,12 @@ func toStatus(err error) error {
 	switch {
 	case err == nil:
 		return nil
+	case errorsIs(err, context.DeadlineExceeded):
+		// A coalesced caller that stopped waiting; the pass it waited for
+		// carries on, and the durable queue covers the run either way.
+		return status.Error(codes.DeadlineExceeded, err.Error())
+	case errorsIs(err, context.Canceled):
+		return status.Error(codes.Canceled, err.Error())
 	case errorsIs(err, store.ErrDAGEngineRunNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errorsIs(err, ErrNotMaterialized):

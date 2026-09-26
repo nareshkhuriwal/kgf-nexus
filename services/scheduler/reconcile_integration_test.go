@@ -628,6 +628,33 @@ func TestPauseDoesNotCancelInFlightWork(t *testing.T) {
 	}
 }
 
+// TestTimedOutRunStopsInFlightWorkThroughTheHeartbeat (F160). A run deadline
+// kills the run's work: the workflow-manager marks the run TIMED_OUT and then
+// asks the scheduler to cancel the attempts. That second call was best-effort
+// with no retry -- when it failed, the run was TIMED_OUT and its attempts ran
+// on, holding their reservations, because the heartbeat only derived
+// cancellations from CANCELLING and CANCELLED runs. The run state is the
+// durable fact; deriving the kill from it makes a lost call harmless.
+func TestTimedOutRunStopsInFlightWorkThroughTheHeartbeat(t *testing.T) {
+	t.Parallel()
+	pool := newTestPool(t)
+	f := newFixture(t, pool)
+	ctx := context.Background()
+
+	workerID := f.addWorker(vec{CPUMillis: 4000, MemoryBytes: 8 << 30}, nil, nil)
+	attemptID := f.occupy(workerID, "overran", vec{CPUMillis: 1000, MemoryBytes: 1 << 30})
+
+	f.setRunState("TIMED_OUT")
+	ids, err := f.newStore(nil).PendingCancellations(ctx, workerID)
+	if err != nil {
+		t.Fatalf("pending cancellations (TIMED_OUT): %v", err)
+	}
+	if len(ids) != 1 || ids[0] != attemptID {
+		t.Errorf("a TIMED_OUT run reported %v, want [%s]; a lost cancel call would leave "+
+			"its work running past the deadline with nothing left to stop it", ids, attemptID)
+	}
+}
+
 // TestCancelledAttemptIsReportedRegardlessOfRunState covers the other source in
 // the union: the attempt itself was moved terminal (an operator cancelled one
 // node), so the work on the worker is orphaned even though the run continues.

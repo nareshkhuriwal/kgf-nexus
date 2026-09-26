@@ -116,6 +116,7 @@ func run() error {
 	// timers package because only this file knows how to reach the run service,
 	// which is the same reason the timer handlers are injected.
 	rec.OnStalledRun(runSvc.ReconcileStalled)
+	rec.OnUnmaterializedRun(runSvc.EnsureMaterialized)
 	rec.OnCancellingRun(runSvc.ReconcileCancelling)
 
 	// ── gRPC API ──────────────────────────────────────────────────────────
