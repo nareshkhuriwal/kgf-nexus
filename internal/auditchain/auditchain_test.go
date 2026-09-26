@@ -23,12 +23,14 @@ func TestCanonicalV1IsPinned(t *testing.T) {
 		TargetKind: "token", TargetID: "t-1", Outcome: "success",
 		Detail:   json.RawMessage(`{"scopes": ["read"], "b": 1.50, "a": {"z": null, "&": "<>"}}`),
 		ClientIP: "10.0.0.1", PrevHash: strings.Repeat("a", 64),
+		KGF:       KGF{Organization: "org-1", Subscription: "sub-1", Principal: "svc:portal", OnBehalfOf: "user:ana"},
+		RequestID: "req_42",
 	}
 	c, err := Canonical(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `["nexus-audit-v1","team-a",7,"2026-09-25T10:11:12.345678Z","0f3c0b7e-1111-4222-8333-944445555666","user","Ana <ana@x>","token.create","token","t-1","success",{"a":{"&":"<>","z":null},"b":1.50,"scopes":["read"]},"10.0.0.1","` + strings.Repeat("a", 64) + `"]`
+	want := `["nexus-audit-v1","team-a",7,"2026-09-25T10:11:12.345678Z","0f3c0b7e-1111-4222-8333-944445555666","user","Ana <ana@x>","token.create","token","t-1","success",{"a":{"&":"<>","z":null},"b":1.50,"scopes":["read"]},"10.0.0.1","org-1","sub-1","","svc:portal","user:ana","req_42","` + strings.Repeat("a", 64) + `"]`
 	if string(c) != want {
 		t.Fatalf("canonical_v1 changed:\n got %s\nwant %s", c, want)
 	}
@@ -52,6 +54,9 @@ func TestCanonicalV1IsPinned(t *testing.T) {
 		"tkind": func(x *Row) { x.TargetKind = "user" }, "tid": func(x *Row) { x.TargetID = "t-2" },
 		"outcome": func(x *Row) { x.Outcome = "denied" }, "detail": func(x *Row) { x.Detail = json.RawMessage(`{}`) },
 		"ip": func(x *Row) { x.ClientIP = "10.0.0.2" }, "prev": func(x *Row) { x.PrevHash = strings.Repeat("b", 64) },
+		"kgf org": func(x *Row) { x.KGF.Organization = "org-2" }, "kgf sub": func(x *Row) { x.KGF.Subscription = "" },
+		"kgf rg": func(x *Row) { x.KGF.ResourceGroup = "rg" }, "kgf principal": func(x *Row) { x.KGF.Principal = "user:bob" },
+		"kgf obo": func(x *Row) { x.KGF.OnBehalfOf = "" }, "request": func(x *Row) { x.RequestID = "req_43" },
 	} {
 		m := r
 		mut(&m)

@@ -19,6 +19,7 @@ type AuditSink struct {
 	Namespace           string     `json:"namespace"`
 	Name                string     `json:"name"`
 	Kind                string     `json:"kind"`
+	Format              string     `json:"format"`
 	URL                 string     `json:"url"`
 	Enabled             bool       `json:"enabled"`
 	BatchSize           int        `json:"batch_size"`
@@ -37,13 +38,13 @@ type AuditSink struct {
 	KeyID            string `json:"-"`
 }
 
-const sinkColumns = `id::text, namespace, name, kind, url, enabled, batch_size, cursor_seq,
+const sinkColumns = `id::text, namespace, name, kind, format, url, enabled, batch_size, cursor_seq,
 	consecutive_failures, next_attempt_at, last_attempt_at, last_success_at, last_error,
 	created_by, created_at, revision, secret_ciphertext, secret_nonce, key_id`
 
 func scanSink(row pgx.Row) (AuditSink, error) {
 	var s AuditSink
-	err := row.Scan(&s.ID, &s.Namespace, &s.Name, &s.Kind, &s.URL, &s.Enabled, &s.BatchSize, &s.CursorSeq,
+	err := row.Scan(&s.ID, &s.Namespace, &s.Name, &s.Kind, &s.Format, &s.URL, &s.Enabled, &s.BatchSize, &s.CursorSeq,
 		&s.ConsecutiveFailures, &s.NextAttemptAt, &s.LastAttemptAt, &s.LastSuccessAt, &s.LastError,
 		&s.CreatedBy, &s.CreatedAt, &s.Revision, &s.SecretCiphertext, &s.SecretNonce, &s.KeyID)
 	return s, err
@@ -65,12 +66,12 @@ func GatewayCreateAuditSink(ctx context.Context, db GWDB, s AuditSink, fromStart
 		_ = tx.QueryRow(ctx, `SELECT last_seq FROM audit_chain_heads WHERE namespace = $1`, s.Namespace).Scan(&cursor)
 	}
 	out, err := scanSink(tx.QueryRow(ctx, `
-		INSERT INTO audit_sinks (namespace, name, kind, url, enabled, batch_size, cursor_seq,
+		INSERT INTO audit_sinks (namespace, name, kind, format, url, enabled, batch_size, cursor_seq,
 		                         secret_ciphertext, secret_nonce, key_id, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		VALUES ($1, $2, $3, COALESCE(NULLIF($12, ''), 'nexus'), $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING `+sinkColumns,
 		s.Namespace, s.Name, s.Kind, s.URL, s.Enabled, s.BatchSize, cursor,
-		s.SecretCiphertext, s.SecretNonce, s.KeyID, s.CreatedBy))
+		s.SecretCiphertext, s.SecretNonce, s.KeyID, s.CreatedBy, s.Format))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return AuditSink{}, ErrConflict

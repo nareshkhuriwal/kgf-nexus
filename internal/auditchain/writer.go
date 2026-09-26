@@ -51,9 +51,30 @@ func (n *NDJSONWriter) Close(head *Checkpoint) error {
 	return n.w.Flush()
 }
 
+// KGFWriter streams KGF-shaped audit events (ToKGF), one JSON object per
+// line, with no header or trailer: the shape a KGF-side collector ingests.
+type KGFWriter struct {
+	w   *bufio.Writer
+	enc *json.Encoder
+}
+
+// NewKGFWriter wraps w.
+func NewKGFWriter(w io.Writer) *KGFWriter {
+	bw := bufio.NewWriterSize(w, 64<<10)
+	enc := json.NewEncoder(bw)
+	enc.SetEscapeHTML(false)
+	return &KGFWriter{w: bw, enc: enc}
+}
+
+func (k *KGFWriter) Write(r Record) error { return k.enc.Encode(ToKGF(r)) }
+
+// Flush pushes buffered lines.
+func (k *KGFWriter) Flush() error { return k.w.Flush() }
+
 // CSVColumns is the CSV export's header row.
 var CSVColumns = []string{"id", "namespace", "chain_seq", "occurred_at", "actor_id", "actor_kind", "actor_label",
-	"action", "target_kind", "target_id", "outcome", "detail", "client_ip", "prev_hash", "row_hash"}
+	"action", "target_kind", "target_id", "outcome", "detail", "client_ip", "prev_hash", "row_hash",
+	"request_id", "kgf_organization", "kgf_subscription", "kgf_resource_group", "kgf_principal", "kgf_on_behalf_of"}
 
 // CSVWriter streams RFC 4180 CSV. CSV is for spreadsheets and SIEM imports,
 // not verification: it has no header or trailer lines, and cells are
@@ -99,7 +120,12 @@ func (c *CSVWriter) Write(r Record) error {
 	}
 	row := []string{strconv.FormatInt(r.ID, 10), r.Namespace, seq, r.OccurredAt, opt(r.ActorID), r.ActorKind,
 		r.ActorLabel, r.Action, r.TargetKind, r.TargetID, r.Outcome, strings.TrimSpace(string(r.Detail)),
-		r.ClientIP, opt(r.PrevHash), opt(r.RowHash)}
+		r.ClientIP, opt(r.PrevHash), opt(r.RowHash), r.RequestID}
+	k := KGF{}
+	if r.KGF != nil {
+		k = *r.KGF
+	}
+	row = append(row, k.Organization, k.Subscription, k.ResourceGroup, k.Principal, k.OnBehalfOf)
 	for i := range row {
 		row[i] = SafeCell(row[i])
 	}

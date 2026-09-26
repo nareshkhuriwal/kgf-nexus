@@ -32,6 +32,7 @@ import (
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/mail"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
@@ -181,6 +182,15 @@ func run() error {
 		return err
 	}
 	api = api.WithAuditExport(auditKeys, sinkPolicy)
+	// KGF Cloud attribution (ADR-0025): Nexus runs as a KGF service, and
+	// KGF's gateway signs an X-KGF-Context for every request it forwards.
+	// With KGF's public keys configured, audit rows record the verified KGF
+	// organization, scope, principal and request id.
+	kgfVerifier, err := kgfctx.FromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	api = api.WithKGFContext(kgfVerifier)
 	rest.RegisterAuditMetrics(reg)
 	deliverer := &auditexport.Deliverer{DB: db, Keys: auditKeys, Policy: sinkPolicy, Log: log}
 	deliverer.RegisterMetrics(reg)

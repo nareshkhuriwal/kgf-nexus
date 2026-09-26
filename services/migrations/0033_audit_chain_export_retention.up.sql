@@ -30,6 +30,22 @@ ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS chain_seq BIGINT;
 ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS prev_hash TEXT;
 ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS row_hash  TEXT;
 
+-- ─── KGF Cloud attribution ────────────────────────────────────────────────
+-- Nexus runs as a service of KGF Cloud. When a request carries a VERIFIED
+-- KGF context (the X-KGF-Context token KGF's gateway signs), the row records
+-- the KGF organization, subscription, resource group, principal and the
+-- person a KGF service acted for, so KGF's audit pipeline can attribute the
+-- action without trusting Nexus's own principal names. request_id is the
+-- correlation id (KGF's, from the verified context, else the caller's
+-- X-Request-ID). Empty strings, not NULL: every value is hashed, and one
+-- representation of "absent" keeps canonical_v1 unambiguous.
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS kgf_organization   TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS kgf_subscription   TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS kgf_resource_group TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS kgf_principal      TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS kgf_on_behalf_of   TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS request_id         TEXT NOT NULL DEFAULT '';
+
 -- One position per namespace; the export streams in this order.
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS audit_log_chain_idx
     ON audit_log (namespace, chain_seq) WHERE chain_seq IS NOT NULL;
@@ -96,6 +112,9 @@ CREATE TABLE IF NOT EXISTS audit_sinks (
     tenant_id            UUID REFERENCES tenants(id),
     name                 TEXT NOT NULL,
     kind                 TEXT NOT NULL CHECK (kind IN ('webhook')),
+    -- 'nexus': the Nexus export record; 'kgf': KGF Cloud's audit event shape
+    -- (OPERATIONS §25.2), for a KGF-side collector.
+    format               TEXT NOT NULL DEFAULT 'nexus' CHECK (format IN ('nexus', 'kgf')),
     url                  TEXT NOT NULL,
     enabled              BOOLEAN NOT NULL DEFAULT true,
     secret_ciphertext    BYTEA NOT NULL,

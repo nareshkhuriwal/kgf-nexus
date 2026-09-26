@@ -7,6 +7,9 @@ package rest
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -18,6 +21,7 @@ import (
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/auditchain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/auditexport"
@@ -152,6 +156,69 @@ func TestIntegrationAuditAPI(t *testing.T) {
 	res, _ = auditchain.Verify(bytes.NewReader(call("GET", base+"/audit/export", "", key, 200).Body.Bytes()))
 	if !res.OK(false) {
 		t.Fatalf("final verification: %v", res.Problems)
+	}
+
+	// KGF Cloud attribution: a verified X-KGF-Context lands in the chained
+	// row and in the KGF-shaped export; a forged one contributes nothing.
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	kv, err := kgfctx.FromEnv(func(k string) string {
+		return map[string]string{kgfctx.EnvPublicKeys: base64.RawURLEncoding.EncodeToString(pub), kgfctx.EnvUserIssuers: "gateway"}[k]
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hk := New(pool, auth, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil))).
+		WithIdentity(NewStoreIdentityAdmin(pool)).WithAuditExport(keys, auditexport.URLPolicy{}).WithKGFContext(kv).Routes()
+	kgfToken := func(key ed25519.PrivateKey) string {
+		hdr, _ := json.Marshal(map[string]string{"alg": "EdDSA", "typ": "JWT", "kid": kgfctx.KeyID(pub)})
+		// What KGF's gateway forwards for a signed-in operator.
+		cl, _ := json.Marshal(map[string]any{"org": "org-kgf", "sub": "sub-9", "rg": "rg-data", "principal": "user:ana",
+			"role": "operator", "request_id": "req_kgf_1", "iss": "gateway", "aud": "nexus",
+			"iat": time.Now().Unix(), "exp": time.Now().Add(time.Minute).Unix()})
+		s := base64.RawURLEncoding.EncodeToString(hdr) + "." + base64.RawURLEncoding.EncodeToString(cl)
+		return s + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, []byte(s)))
+	}
+	send := func(token string, name string) {
+		r := httptest.NewRequest("POST", base+"/tokens", strings.NewReader(`{"name":"`+name+`","role":"reader","scopes":["read"]}`))
+		r.Header.Set("Authorization", "Bearer "+key)
+		r.Header.Set(kgfctx.Header, token)
+		r.Header.Set(kgfctx.RequestIDHeader, "req_caller_supplied")
+		rw := httptest.NewRecorder()
+		hk.ServeHTTP(rw, r)
+		if rw.Code != 201 {
+			t.Fatalf("token via KGF: %d %s", rw.Code, rw.Body)
+		}
+	}
+	send(kgfToken(priv), "via-kgf")
+	_, forged, _ := ed25519.GenerateKey(rand.Reader)
+	send(kgfToken(forged), "forged-kgf")
+	var events []auditchain.KGFEvent
+	for _, line := range strings.Split(strings.TrimSpace(call("GET", base+"/audit/export?format=kgf&action=token.create", "", key, 200).Body.String()), "\n") {
+		var ev auditchain.KGFEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("kgf line %q: %v", line, err)
+		}
+		events = append(events, ev)
+	}
+	var viaKGF, viaForged *auditchain.KGFEvent
+	for i := range events {
+		switch d := string(events[i].Nexus.Detail); {
+		case strings.Contains(d, `"via-kgf"`):
+			viaKGF = &events[i]
+		case strings.Contains(d, `"forged-kgf"`):
+			viaForged = &events[i]
+		}
+	}
+	if viaKGF == nil || viaKGF.OrganizationID != "org-kgf" || viaKGF.Principal != "user:ana" ||
+		viaKGF.RequestID != "req_kgf_1" || !viaKGF.Attributed || viaKGF.Chain == nil ||
+		!strings.HasPrefix(viaKGF.ResourceID, "/organizations/org-kgf/subscriptions/sub-9/resourceGroups/rg-data/providers/KGF.Nexus/") {
+		t.Fatalf("verified KGF attribution = %+v", viaKGF)
+	}
+	if viaForged == nil || viaForged.OrganizationID != "" || viaForged.Attributed || viaForged.RequestID != "req_caller_supplied" {
+		t.Fatalf("a forged KGF context was attributed: %+v", viaForged)
+	}
+	if res, _ := auditchain.Verify(bytes.NewReader(call("GET", base+"/audit/export", "", key, 200).Body.Bytes())); !res.OK(false) {
+		t.Fatalf("chain with KGF attribution: %v", res.Problems)
 	}
 
 	// An Auditor reads and exports, but cannot reconfigure.

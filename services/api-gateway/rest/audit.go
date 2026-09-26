@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/auditchain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/auditexport"
@@ -294,8 +295,8 @@ func (a *API) exportAudit(w http.ResponseWriter, r *http.Request, _ authn.Princi
 	if format == "" {
 		format = "ndjson"
 	}
-	if format != "ndjson" && format != "csv" {
-		writeError(w, http.StatusBadRequest, "invalid_format", "format must be ndjson or csv")
+	if format != "ndjson" && format != "csv" && format != "kgf" {
+		writeError(w, http.StatusBadRequest, "invalid_format", "format must be ndjson, csv or kgf")
 		return
 	}
 	filters := map[string]string{}
@@ -310,11 +311,19 @@ func (a *API) exportAudit(w http.ResponseWriter, r *http.Request, _ authn.Princi
 	var head *auditchain.Checkpoint
 	var nd *auditchain.NDJSONWriter
 	var cw *auditchain.CSVWriter
+	var kw *auditchain.KGFWriter
 	n := 0
 	err = store.GatewayExportAudit(r.Context(), a.db, ns, f, func(m store.AuditExportMeta) error {
 		started = true
 		head = m.Head
 		w.Header().Set("Cache-Control", "no-store")
+		if format == "kgf" {
+			// KGF Cloud's audit event shape, one per line (OPERATIONS §25.2).
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.Header().Set("Content-Disposition", `attachment; filename="audit-`+ns+`-`+stamp+`.kgf.ndjson"`)
+			kw = auditchain.NewKGFWriter(w)
+			return nil
+		}
 		if format == "csv" {
 			w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 			w.Header().Set("Content-Disposition", `attachment; filename="audit-`+ns+`-`+stamp+`.csv"`)
@@ -333,16 +342,22 @@ func (a *API) exportAudit(w http.ResponseWriter, r *http.Request, _ authn.Princi
 		return nd.WriteHeader(h)
 	}, func(row store.AuditRow) error {
 		var err error
-		if cw != nil {
+		switch {
+		case kw != nil:
+			err = kw.Write(row.Record())
+		case cw != nil:
 			err = cw.Write(row.Record())
-		} else {
+		default:
 			err = nd.Write(row.Record())
 		}
 		n++
 		if err == nil && n%1000 == 0 {
-			if cw != nil {
+			switch {
+			case kw != nil:
+				err = kw.Flush()
+			case cw != nil:
 				err = cw.Flush()
-			} else {
+			default:
 				err = nd.Flush()
 			}
 			if flusher != nil {
@@ -362,11 +377,14 @@ func (a *API) exportAudit(w http.ResponseWriter, r *http.Request, _ authn.Princi
 		a.log.ErrorContext(r.Context(), "audit export aborted mid-stream", "namespace", ns, "rows", n, "error", err)
 		return
 	}
-	if cw != nil {
+	switch {
+	case kw != nil:
+		_ = kw.Flush()
+	case cw != nil:
 		_ = cw.Flush()
-		return
+	default:
+		_ = nd.Close(head)
 	}
-	_ = nd.Close(head)
 }
 
 // ── retention and legal hold ─────────────────────────────────────────────
@@ -521,6 +539,7 @@ func (a *API) createAuditSink(w http.ResponseWriter, r *http.Request, p authn.Pr
 		BatchSize int    `json:"batch_size"`
 		Enabled   *bool  `json:"enabled"`
 		FromStart bool   `json:"from_start"`
+		Format    string `json:"format"`
 	}
 	if err := decodeRBACBody(w, r, &b); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
@@ -540,6 +559,12 @@ func (a *API) createAuditSink(w http.ResponseWriter, r *http.Request, p authn.Pr
 	if b.BatchSize < 1 || b.BatchSize > 1000 {
 		problems = append(problems, "batch_size must be 1..1000")
 	}
+	if b.Format == "" {
+		b.Format = "nexus"
+	}
+	if b.Format != "nexus" && b.Format != "kgf" {
+		problems = append(problems, "format must be nexus or kgf")
+	}
 	if len(problems) > 0 {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "invalid_sink", "problems": problems})
 		return
@@ -556,7 +581,7 @@ func (a *API) createAuditSink(w http.ResponseWriter, r *http.Request, p authn.Pr
 	}
 	enabled := b.Enabled == nil || *b.Enabled
 	s, err := store.GatewayCreateAuditSink(r.Context(), a.db, store.AuditSink{
-		Namespace: ns, Name: b.Name, Kind: "webhook", URL: b.URL, Enabled: enabled, BatchSize: b.BatchSize,
+		Namespace: ns, Name: b.Name, Kind: "webhook", Format: b.Format, URL: b.URL, Enabled: enabled, BatchSize: b.BatchSize,
 		SecretCiphertext: ct, SecretNonce: nonce, KeyID: a.auditKeys.KeyID(), CreatedBy: p.Name,
 	}, b.FromStart, principalEntry(r, p, "audit.sink.create", "audit_sink", "", store.AuditSuccess,
 		map[string]any{"name": b.Name, "url": b.URL, "from_start": b.FromStart}))
@@ -670,6 +695,36 @@ func (a *API) deleteAuditSink(w http.ResponseWriter, r *http.Request, p authn.Pr
 	default:
 		writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 	}
+}
+
+// WithKGFContext enables KGF Cloud attribution of audit rows: a request whose
+// X-KGF-Context verifies against v has its KGF organization, scope and
+// principal recorded. Attribution only -- never authorization.
+func (a *API) WithKGFContext(v *kgfctx.Verifier) *API {
+	a.kgf = v
+	return a
+}
+
+// attachKGF puts the verified KGF context (if any) and the request's
+// correlation id into r's context, where every audit writer reads them.
+// An unverifiable token contributes nothing, and its request_id is not used.
+func (a *API) attachKGF(r *http.Request) *http.Request {
+	ctx := r.Context()
+	reqID := kgfctx.SanitizeRequestID(r.Header.Get(kgfctx.RequestIDHeader))
+	if tok := r.Header.Get(kgfctx.Header); tok != "" && a.kgf != nil {
+		if c, err := a.kgf.Verify(tok, time.Now()); err == nil {
+			ctx = kgfctx.With(ctx, c)
+			if id := kgfctx.SanitizeRequestID(c.RequestID); id != "" {
+				reqID = id
+			}
+		} else {
+			a.log.WarnContext(ctx, "X-KGF-Context did not verify; the audit row will carry no KGF attribution")
+		}
+	}
+	if reqID != "" {
+		ctx = kgfctx.WithRequestID(ctx, reqID)
+	}
+	return r.WithContext(ctx)
 }
 
 // WithAuditExport configures sink secrets and the sink URL policy.

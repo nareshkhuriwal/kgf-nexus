@@ -53,8 +53,26 @@ type Row struct {
 	// canonicalised before hashing).
 	Detail   json.RawMessage
 	ClientIP string
-	PrevHash string
+	// KGF Cloud attribution (verified X-KGF-Context), empty when absent.
+	KGF KGF
+	// RequestID is the correlation id: KGF's when a verified context
+	// carried one, else the caller's X-Request-ID.
+	RequestID string
+	PrevHash  string
 }
+
+// KGF is the KGF Cloud scope and principal of a request, taken only from a
+// context token whose signature the gateway verified.
+type KGF struct {
+	Organization  string `json:"organization,omitempty"`
+	Subscription  string `json:"subscription,omitempty"`
+	ResourceGroup string `json:"resource_group,omitempty"`
+	Principal     string `json:"principal,omitempty"`
+	OnBehalfOf    string `json:"on_behalf_of,omitempty"`
+}
+
+// IsZero reports whether no KGF attribution is present.
+func (k KGF) IsZero() bool { return k == KGF{} }
 
 // CanonicalJSON re-encodes JSON text deterministically: numbers verbatim (as
 // PostgreSQL normalised them), object keys sorted, no insignificant
@@ -89,7 +107,8 @@ func marshal(v any) ([]byte, error) {
 //
 //	["nexus-audit-v1", namespace, seq, occurred_at, actor_id|null, actor_kind,
 //	 actor_label, action, target_kind, target_id, outcome, <detail>, client_ip,
-//	 prev_hash]
+//	 kgf_organization, kgf_subscription, kgf_resource_group, kgf_principal,
+//	 kgf_on_behalf_of, request_id, prev_hash]
 //
 // with occurred_at in TimeLayout, detail as CanonicalJSON, strings encoded by
 // encoding/json with HTML escaping off.
@@ -105,7 +124,9 @@ func Canonical(r Row) ([]byte, error) {
 	return marshal([]any{
 		Version, r.Namespace, r.Seq, r.OccurredAt.UTC().Format(TimeLayout), actor,
 		r.ActorKind, r.ActorLabel, r.Action, r.TargetKind, r.TargetID, r.Outcome,
-		json.RawMessage(detail), r.ClientIP, r.PrevHash,
+		json.RawMessage(detail), r.ClientIP,
+		r.KGF.Organization, r.KGF.Subscription, r.KGF.ResourceGroup, r.KGF.Principal, r.KGF.OnBehalfOf,
+		r.RequestID, r.PrevHash,
 	})
 }
 
@@ -164,6 +185,8 @@ type Record struct {
 	Outcome    string          `json:"outcome"`
 	Detail     json.RawMessage `json:"detail"`
 	ClientIP   string          `json:"client_ip"`
+	KGF        *KGF            `json:"kgf,omitempty"`
+	RequestID  string          `json:"request_id,omitempty"`
 	PrevHash   *string         `json:"prev_hash"`
 	RowHash    *string         `json:"row_hash"`
 }
@@ -187,7 +210,10 @@ func (rec Record) RowOf() (Row, error) {
 	r := Row{
 		Namespace: rec.Namespace, OccurredAt: t, ActorID: rec.ActorID, ActorKind: rec.ActorKind,
 		ActorLabel: rec.ActorLabel, Action: rec.Action, TargetKind: rec.TargetKind, TargetID: rec.TargetID,
-		Outcome: rec.Outcome, Detail: rec.Detail, ClientIP: rec.ClientIP,
+		Outcome: rec.Outcome, Detail: rec.Detail, ClientIP: rec.ClientIP, RequestID: rec.RequestID,
+	}
+	if rec.KGF != nil {
+		r.KGF = *rec.KGF
 	}
 	if rec.Seq != nil {
 		r.Seq = *rec.Seq

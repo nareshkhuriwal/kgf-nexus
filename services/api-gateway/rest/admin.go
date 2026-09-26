@@ -99,6 +99,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	if a.rateLimited(w, r) || a.authAttemptBlocked(w, r) {
 		return
 	}
+	r = a.attachKGF(r)
 	body, err := readBody(r, maxLoginBytes)
 	if err != nil {
 		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())

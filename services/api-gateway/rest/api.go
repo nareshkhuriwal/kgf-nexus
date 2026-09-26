@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/auditexport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
@@ -138,6 +139,9 @@ type API struct {
 	// audit.go and ADR-0025.
 	auditKeys  *auditexport.Keyring
 	sinkPolicy auditexport.URLPolicy
+	// kgf verifies KGF Cloud's X-KGF-Context for audit ATTRIBUTION only;
+	// nil records none. See audit.go.
+	kgf *kgfctx.Verifier
 }
 
 // New builds the REST API.
@@ -469,7 +473,7 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 				}
 			}
 		}
-		h(w, r.WithContext(authn.WithPrincipal(r.Context(), p)), p)
+		h(w, a.attachKGF(r.WithContext(authn.WithPrincipal(r.Context(), p))), p)
 	})
 }
 

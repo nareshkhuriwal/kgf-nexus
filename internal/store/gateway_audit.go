@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/auditchain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 )
 
 // ── audit log (ADR-0025 §2, migration 0033) ──────────────────────────────
@@ -31,6 +32,12 @@ type AuditEntry struct {
 	Outcome    string
 	Detail     map[string]any
 	ClientIP   string
+	// KGF is the KGF Cloud attribution of a request whose X-KGF-Context the
+	// gateway verified; zero when there was none (migration 0033).
+	KGF auditchain.KGF
+	// RequestID correlates the row with the request (KGF's request id from a
+	// verified context, else the caller's X-Request-ID).
+	RequestID string
 }
 
 // AuditRow is a stored audit event.
@@ -47,6 +54,8 @@ type AuditRow struct {
 	Detail     []byte
 	ClientIP   string
 	OccurredAt time.Time
+	KGF        auditchain.KGF
+	RequestID  string
 	// Chain position (nil for rows written before migration 0033, or by an
 	// older gateway replica during a rolling upgrade).
 	Seq      *int64
@@ -64,8 +73,16 @@ func (a AuditRow) Record() auditchain.Record {
 		ID: a.ID, Namespace: a.Namespace, Seq: a.Seq, OccurredAt: a.OccurredAt.UTC().Format(auditchain.TimeLayout),
 		ActorID: a.ActorID, ActorKind: a.ActorKind, ActorLabel: a.ActorLabel, Action: a.Action,
 		TargetKind: a.TargetKind, TargetID: a.TargetID, Outcome: a.Outcome, Detail: json.RawMessage(detail),
-		ClientIP: a.ClientIP, PrevHash: a.PrevHash, RowHash: a.RowHash,
+		ClientIP: a.ClientIP, PrevHash: a.PrevHash, RowHash: a.RowHash, RequestID: a.RequestID,
+		KGF: kgfPtr(a.KGF),
 	}
+}
+
+func kgfPtr(k auditchain.KGF) *auditchain.KGF {
+	if k.IsZero() {
+		return nil
+	}
+	return &k
 }
 
 // Audit outcomes. A DENIED attempt is recorded as loudly as a successful one: an
@@ -135,6 +152,18 @@ func appendChained(ctx context.Context, q GWQuerier, e AuditEntry) error {
 		lower := strings.ToLower(*e.ActorID)
 		e.ActorID = &lower
 	}
+	// KGF attribution travels in the request context (set by the gateway's
+	// guard only after the X-KGF-Context signature verified), so every audit
+	// writer -- helper or in-transaction store function -- records it.
+	if e.KGF.IsZero() {
+		if k, ok := kgfctx.From(ctx); ok {
+			e.KGF = auditchain.KGF{Organization: k.Organization, Subscription: k.Subscription,
+				ResourceGroup: k.ResourceGroup, Principal: k.Principal, OnBehalfOf: k.OnBehalfOf}
+		}
+	}
+	if e.RequestID == "" {
+		e.RequestID = kgfctx.RequestIDFrom(ctx)
+	}
 
 	// PostgreSQL's normal form of the detail (numbers, duplicate keys), so the
 	// hash is over exactly what an export will later carry.
@@ -166,7 +195,7 @@ func appendChained(ctx context.Context, q GWQuerier, e AuditEntry) error {
 		Namespace: e.Namespace, Seq: seq, OccurredAt: occurred, ActorID: e.ActorID,
 		ActorKind: e.ActorKind, ActorLabel: e.ActorLabel, Action: e.Action, TargetKind: e.TargetKind,
 		TargetID: e.TargetID, Outcome: e.Outcome, Detail: json.RawMessage(normalised),
-		ClientIP: e.ClientIP, PrevHash: lastHash,
+		ClientIP: e.ClientIP, KGF: e.KGF, RequestID: e.RequestID, PrevHash: lastHash,
 	})
 	if err != nil {
 		return fmt.Errorf("append audit %s: hash: %w", e.Action, err)
@@ -174,10 +203,12 @@ func appendChained(ctx context.Context, q GWQuerier, e AuditEntry) error {
 	if _, err := q.Exec(ctx, `
 		INSERT INTO audit_log
 		    (namespace, actor_id, actor_kind, actor_label, action, target_kind, target_id,
-		     outcome, detail, client_ip, occurred_at, chain_seq, prev_hash, row_hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14)`,
+		     outcome, detail, client_ip, occurred_at, chain_seq, prev_hash, row_hash,
+		     kgf_organization, kgf_subscription, kgf_resource_group, kgf_principal, kgf_on_behalf_of, request_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
 		e.Namespace, e.ActorID, e.ActorKind, e.ActorLabel, e.Action, e.TargetKind, e.TargetID,
-		e.Outcome, normalised, e.ClientIP, occurred, seq, lastHash, hash); err != nil {
+		e.Outcome, normalised, e.ClientIP, occurred, seq, lastHash, hash,
+		e.KGF.Organization, e.KGF.Subscription, e.KGF.ResourceGroup, e.KGF.Principal, e.KGF.OnBehalfOf, e.RequestID); err != nil {
 		return fmt.Errorf("append audit %s: %w", e.Action, err)
 	}
 	if _, err := q.Exec(ctx, `
@@ -232,14 +263,17 @@ func decodeAuditCursor(s string) (*auditCursor, error) {
 
 const auditColumns = `id, namespace, actor_id::text, actor_kind, actor_label, action,
 		       target_kind, target_id, outcome, detail::text, client_ip, occurred_at,
-		       chain_seq, prev_hash, row_hash`
+		       chain_seq, prev_hash, row_hash, kgf_organization, kgf_subscription,
+		       kgf_resource_group, kgf_principal, kgf_on_behalf_of, request_id`
 
 func scanAudit(rows pgx.Rows) (AuditRow, error) {
 	var a AuditRow
 	var detail string
 	err := rows.Scan(&a.ID, &a.Namespace, &a.ActorID, &a.ActorKind, &a.ActorLabel,
 		&a.Action, &a.TargetKind, &a.TargetID, &a.Outcome, &detail,
-		&a.ClientIP, &a.OccurredAt, &a.Seq, &a.PrevHash, &a.RowHash)
+		&a.ClientIP, &a.OccurredAt, &a.Seq, &a.PrevHash, &a.RowHash,
+		&a.KGF.Organization, &a.KGF.Subscription, &a.KGF.ResourceGroup, &a.KGF.Principal,
+		&a.KGF.OnBehalfOf, &a.RequestID)
 	a.Detail = []byte(detail)
 	return a, err
 }

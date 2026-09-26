@@ -309,8 +309,14 @@ func (d *Deliverer) send(ctx context.Context, s store.AuditSink, rows []store.Au
 	enc.SetEscapeHTML(false)
 	for _, r := range rows {
 		rec := r.Record()
-		rec.Type = "audit"
-		if err := enc.Encode(rec); err != nil {
+		var v any = rec
+		if s.Format == "kgf" {
+			v = auditchain.ToKGF(rec) // KGF Cloud's audit event shape
+		} else {
+			rec.Type = "audit"
+			v = rec
+		}
+		if err := enc.Encode(v); err != nil {
 			return err
 		}
 	}
@@ -325,6 +331,7 @@ func (d *Deliverer) send(ctx context.Context, s store.AuditSink, rows []store.Au
 	req.Header.Set("X-Nexus-Namespace", s.Namespace)
 	req.Header.Set("X-Nexus-Sink", s.ID)
 	req.Header.Set("X-Nexus-Encoding", auditchain.Version)
+	req.Header.Set("X-Nexus-Format", s.Format)
 	// Stable per batch, so a receiver can de-duplicate a redelivery.
 	req.Header.Set("X-Nexus-Delivery", fmt.Sprintf("%s:%d-%d", s.ID, first, last))
 	client := d.HTTP

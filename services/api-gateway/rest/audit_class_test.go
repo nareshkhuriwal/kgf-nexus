@@ -17,7 +17,8 @@ import (
 // struct literals, the helper calls, and the variables the email flows and
 // enable/disable handlers pick an action from.
 var auditActionPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`Action:\s*"([a-z_.]+)"`),
+	// The last character must be a letter: "nexus." + x is a prefix, not an action.
+	regexp.MustCompile(`Action:\s*"([a-z_.]*[a-z_])"`),
 	regexp.MustCompile(`auditPrincipal\(r,\s*p,\s*"([a-z_.]+)"`),
 	regexp.MustCompile(`principalEntry\(r,\s*p,\s*"([a-z_.]+)"`),
 	regexp.MustCompile(`rbacAudit\(r,\s*tx,\s*p,\s*"([a-z_.]+)"`),
