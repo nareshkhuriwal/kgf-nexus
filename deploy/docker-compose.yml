@@ -571,7 +571,7 @@ services:
       # Workers hold an API token and never database credentials: a compromised
       # worker cannot corrupt runs it never touched (§3.1 invariant 2).
       NEXUS_CONTROL_PLANE: api-gateway:9091
-      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
+      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?is unset. First run on a fresh checkout - use `make quickstart` (nexusctl up). Own keys - export NEXUS_WORKER_API_KEY=$$(make -s worker-key), then make up and make seed}
       NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
       NEXUS_QUEUES: default
       NEXUS_LABELS: "zone=local,accelerator=none"
@@ -620,7 +620,7 @@ services:
     environment:
       <<: [*minio-env, *nats-env]
       NEXUS_CONTROL_PLANE: api-gateway:9091
-      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
+      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?is unset. First run on a fresh checkout - use `make quickstart` (nexusctl up). Own keys - export NEXUS_WORKER_API_KEY=$$(make -s worker-key), then make up and make seed}
       NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
       # Subscribes to BOTH queues so gpu work has somewhere to go while the
       # cpu-only agent still handles the default queue.
@@ -676,7 +676,7 @@ services:
     environment:
       <<: [*minio-env, *nats-env]
       NEXUS_CONTROL_PLANE: api-gateway:9091
-      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
+      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?is unset. First run on a fresh checkout - use `make quickstart` (nexusctl up). Own keys - export NEXUS_WORKER_API_KEY=$$(make -s worker-key), then make up and make seed}
       NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
       NEXUS_QUEUES: default,gpu
       NEXUS_LABELS: "zone=local,accelerator=nvidia"

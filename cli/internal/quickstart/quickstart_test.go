@@ -41,8 +41,10 @@ func TestUpFirstRunSeedsThroughTheAPIAndPrintsSecretsOnce(t *testing.T) {
 	if !res.Seeded || res.AlreadyUp {
 		t.Fatalf("result = %+v, want a fresh seed", res)
 	}
-	if e.api.registers != 1 || e.api.tokenCreate != 1 {
-		t.Fatalf("registers=%d tokens=%d, want 1 and 1", e.api.registers, e.api.tokenCreate)
+	// Two tokens through the API: the admin key and the agents' worker token.
+	if e.api.registers != 1 || e.api.tokenCreate != 2 || e.api.workerTokens != 1 {
+		t.Fatalf("registers=%d tokens=%d worker tokens=%d, want 1, 2 and 1",
+			e.api.registers, e.api.tokenCreate, e.api.workerTokens)
 	}
 	if e.api.loggedOut != 1 {
 		t.Errorf("the seeding session was not logged out")
@@ -72,7 +74,7 @@ func TestUpFirstRunSeedsThroughTheAPIAndPrintsSecretsOnce(t *testing.T) {
 	// key (never the sentinel, never the user's stale shell value) and the
 	// tenant's namespace.
 	for svc, k := range e.docker.agentKeys {
-		if k == workerKeySentinel || k == "from-the-users-shell" || !strings.HasPrefix(k, "nxs_worker_") {
+		if k == workerKeySentinel || k == "from-the-users-shell" || !strings.HasPrefix(k, "nxtok_worker") {
 			t.Errorf("%s started with key %q", svc, k)
 		}
 		if e.docker.agentNS[svc] != res.Namespace {
@@ -82,9 +84,10 @@ func TestUpFirstRunSeedsThroughTheAPIAndPrintsSecretsOnce(t *testing.T) {
 	if e.docker.hups != 1 {
 		t.Errorf("broker reloads = %d, want 1", e.docker.hups)
 	}
-	// The SQL never splices values in.
-	if len(e.docker.psqlStdin) != 1 || strings.Contains(e.docker.psqlStdin[0], res.Namespace) {
-		t.Errorf("psql script = %q", e.docker.psqlStdin)
+	// No database writes: every credential came from the API (F114 fixed).
+	if len(e.docker.psqlStdin) != 0 || e.docker.callCount("exec") != 0 {
+		t.Errorf("up wrote to the database directly: exec calls=%d, psql=%q",
+			e.docker.callCount("exec"), e.docker.psqlStdin)
 	}
 
 	// State: 0600, holds the worker key, never the password or the admin key.
@@ -107,7 +110,10 @@ func TestUpFirstRunSeedsThroughTheAPIAndPrintsSecretsOnce(t *testing.T) {
 	}
 	sum := sha256.Sum256([]byte(st.WorkerKey))
 	if e.api.workerHash[hex.EncodeToString(sum[:])] != st.Namespace {
-		t.Errorf("stored worker key does not match the installed hash")
+		t.Errorf("stored worker key is not the worker token the API minted")
+	}
+	if st.WorkerTokenID == "" || st.WorkerKeyExpiresAt == nil {
+		t.Errorf("state lacks the worker token's id/expiry: %+v", st)
 	}
 
 	// Config: new file, 0600, context is current and carries the admin key.
@@ -149,7 +155,7 @@ func TestUpSecondRunIsANoOpAndPrintsNoSecret(t *testing.T) {
 	if !res.AlreadyUp || res.Seeded {
 		t.Fatalf("result = %+v, want AlreadyUp", res)
 	}
-	if e.api.registers != 1 || e.api.tokenCreate != 1 {
+	if e.api.registers != 1 || e.api.tokenCreate != 2 {
 		t.Errorf("second run created credentials: registers=%d tokens=%d", e.api.registers, e.api.tokenCreate)
 	}
 	if e.docker.callCount("up") != ups {
@@ -503,4 +509,40 @@ func TestStateStoreRejectsUnsafeProjectNames(t *testing.T) {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+func TestUpFailsClearlyWhenTheWorkerTokenCannotBeMinted(t *testing.T) {
+	e := newTestEnv(t)
+	e.api.workerTokenFail = true
+	_, err := Up(context.Background(), e.opts())
+	var qe *Error
+	if !errors.As(err, &qe) || qe.Kind != KindSeedFailed || !strings.Contains(qe.Message, "worker token") {
+		t.Fatalf("err = %v, want a seed failure naming the worker token", err)
+	}
+	if e.api.loggedOut != 1 {
+		t.Errorf("the seeding session was left live after the failure")
+	}
+	if len(e.docker.agentKeys) != 0 {
+		t.Errorf("agents were started without a worker token: %v", e.docker.agentKeys)
+	}
+}
+
+func TestUpWarnsWhenTheWorkerTokenHasExpired(t *testing.T) {
+	e := newTestEnv(t)
+	o := e.opts()
+	mustUp(t, e, o)
+	st, err := o.Store.Load("nexus")
+	if err != nil || st == nil {
+		t.Fatalf("state: %v", err)
+	}
+	past := time.Now().Add(-time.Hour)
+	st.WorkerKeyExpiresAt = &past
+	if err := o.Store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	e.log.Reset()
+	mustUp(t, e, e.opts())
+	if !strings.Contains(e.log.String(), "worker token "+st.WorkerTokenID+" expired") {
+		t.Errorf("no expiry warning:\n%s", e.log.String())
+	}
 }

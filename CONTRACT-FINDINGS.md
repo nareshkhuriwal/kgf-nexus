@@ -3417,3 +3417,53 @@ is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
 `ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
 report the output. Test it in `agent/internal/worker` for both inline and blob
 outputs, and in the NATS/e2e path with a non-SDK executor.
+
+### F130. `make up` failed on a fresh checkout, and both CI examples jobs with it — FIXED
+
+**Severity:** medium for onboarding and CI. The documented first command did
+not work, and the examples-and-chaos gate could not have passed. No production
+impact.
+
+`deploy/docker-compose.yml` interpolates `${NEXUS_WORKER_API_KEY:?...}` into
+every agent, and Compose refuses to parse the whole file while the variable is
+unset. On a fresh checkout nothing sets it, so `make up` (and `make down`,
+`make logs`, `make ps`, which parse the same file) died with a bare
+interpolation error. Its message said "run `make seed` first", but `make seed`
+needs the stack up. deploy/README.md still documented a `dev-worker-key`
+default that no longer existed. The GitHub `examples` job and the Azure
+`EndToEnd` stage both started with `make up` and no key. They then inserted an
+admin key into `default` with no tenant row, which F121's trigger refuses. The
+GitHub job also shared the id `e2e` with the browser job, so YAML silently kept
+only the later of the two.
+
+`nexusctl up` also still inserted its worker key into `api_keys` through
+`docker compose exec` into Postgres, after F114 made API-minted worker tokens
+usable. That key was not audited, had no expiry, and was invisible in the
+console.
+
+**Fix.**
+- `make quickstart` (`go run ./cli/cmd/nexusctl up`) is the documented first-run
+  entry point (README, deploy/README.md §1, cli/README.md).
+- `make up` checks for the key before Compose runs, and exits 2 with both
+  options: `make quickstart`, or `export NEXUS_WORKER_API_KEY=$(make -s
+  worker-key)`, then `make up && make seed`. The Compose message says the same.
+- `make down`, `make logs` and `make ps` pass a placeholder, so they work
+  without the key.
+- `make seed` falls back to the stack's own psql when the host has none.
+- `nexusctl up` mints the worker token through `POST /v1/namespaces/{ns}/tokens`
+  (role `worker`, scope `worker_rpc`) with the same session as the admin key.
+  It writes nothing to the database, records the token's id and expiry, and
+  warns on `up` when the token has expired or expires within a week.
+- The SQL bootstrap remains only in the Helm chart's bootstrap Job, where no
+  API caller exists yet (docs/OPERATIONS.md §20.10).
+- CI generates both keys first, then runs `make up` and `make seed`. The
+  examples job is renamed `examples`.
+
+**Verified.** Unit tests: `nexusctl up` mints two tokens and runs no `exec`;
+a failed worker-token mint is a seed failure, the session is still logged out
+and no agent starts; the expiry warning fires. A fresh `git clone` of the branch
+into a temp directory, running `make up` (refused with the message above), then
+`make quickstart` under compose project `nexus-w3b-fresh` on ports 55781-55788:
+the stack came up, both credentials were minted through the API, and the agents
+registered with the API-minted worker token. The CI jobs themselves run only in
+real CI.
