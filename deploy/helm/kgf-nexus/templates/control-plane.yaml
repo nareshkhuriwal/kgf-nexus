@@ -30,7 +30,7 @@ so the two deployments cannot drift in behaviour.
       (dict "name" "EVENT_SSE_KEEPALIVE_MS" "value" "15000")))
 -}}
 {{- range .Values.schedulers }}
-{{- $svcs = append $svcs (dict "name" .name "key" "" "image" "scheduler" "grpc" 9090 "replicas" (.replicas | default 1) "scheduler" . "tls" true "extra" (list
+{{- $svcs = append $svcs (dict "name" .name "key" "" "sa" "scheduler" "image" "scheduler" "grpc" 9090 "replicas" (.replicas | default 1) "scheduler" . "tls" true "extra" (list
       (dict "name" "NEXUS_QUEUE" "value" .queue)
       (dict "name" "SCHEDULER_BIN_PACKING" "value" "best_fit")
       (dict "name" "SCHEDULER_LOOKAHEAD" "value" "32")
@@ -39,6 +39,8 @@ so the two deployments cannot drift in behaviour.
       (dict "name" "LEASE_TTL_MS" "value" "30000"))) }}
 {{- end }}
 {{- range $svcs }}
+{{- $saKey := .sa | default .key }}
+{{- $sa := include "nexus.saFor" (list $root $saKey nil) | fromYaml }}
 {{- $over := dict }}
 {{- if .key }}{{ $over = index $root.Values.services .key | default dict }}{{ end }}
 {{- if .scheduler }}{{ $over = .scheduler }}{{ end }}
@@ -110,20 +112,23 @@ spec:
     matchLabels: {{- include "nexus.selector" (list $root .name) | nindent 6 }}
   template:
     metadata:
-      labels: {{- include "nexus.labels" (list $root .name) | nindent 8 }}
-      {{- include "nexus.metricsAnnotations" (list $root $metricsPort) | nindent 6 }}
+      labels:
+        {{- include "nexus.labels" (list $root .name) | nindent 8 }}
+        {{- include "nexus.saPodLabels" $sa | indent 8 }}
+      {{- include "nexus.metricsAnnotations" (list $root $metricsPort true) | nindent 6 }}
     spec:
+      {{- include "nexus.podIdentity" $sa | nindent 6 }}
       {{- include "nexus.pullSecrets" $root | nindent 6 }}
       securityContext: {{- include "nexus.podSecurity" $root | nindent 8 }}
       {{- include "nexus.placement" (list $root .name) | nindent 6 }}
       initContainers:
-        {{- include "nexus.waitForSchema" $root | nindent 8 }}
+        {{- include "nexus.waitForSchema" (list $root $saKey) | nindent 8 }}
       containers:
         - name: {{ .name }}
           image: {{ include "nexus.image" (list $root .image) }}
           imagePullPolicy: {{ $root.Values.image.pullPolicy }}
           env:
-            {{- include "nexus.serviceEnv" $root | nindent 12 }}
+            {{- include "nexus.serviceEnv" (list $root $saKey) | nindent 12 }}
             {{- include "nexus.listenEnv" (list .grpc) | nindent 12 }}
             {{- if .resultStore }}
             {{- include "nexus.resultStoreEnv" $root | nindent 12 }}
@@ -165,6 +170,7 @@ spec:
             readOnlyRootFilesystem: true
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            {{- include "nexus.dbVolumeMounts" $root | nindent 12 }}
             {{- if .nats }}
             {{- include "nexus.natsVolumeMounts" $root | nindent 12 }}
             {{- end }}
@@ -173,6 +179,7 @@ spec:
             {{- end }}
       volumes:
         - { name: tmp, emptyDir: {} }
+        {{- include "nexus.dbVolumes" $root | nindent 8 }}
         {{- if .nats }}
         {{- include "nexus.natsVolumes" (list $root "event-service" "") | nindent 8 }}
         {{- end }}

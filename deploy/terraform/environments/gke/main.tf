@@ -55,6 +55,7 @@ module "platform" {
   deletion_protection = var.deletion_protection
 
   nexus_kubernetes_namespace = var.namespace
+  nexus_service_account      = local.artifact_service_account
   postgres_password_version  = var.postgres_password_version
 }
 
@@ -85,6 +86,62 @@ resource "kubernetes_storage_class_v1" "regional_ssd" {
 # its admission controller adds the nvidia.com/gpu toleration to pods that
 # request GPUs; nothing to install here.
 
+# ── Result-store identity, database CA, agent pools ──────────────────────
+
+locals {
+  gib = 1073741824
+
+  # The ONE ServiceAccount the platform's object-store identity trusts
+  # (module.platform nexus_service_account). The chart gives it to exactly
+  # the components that touch the result store: api-gateway (task logs), the
+  # agents and artifact-gc. Every other component keeps its own account.
+  artifact_service_account = "nexus-artifacts"
+  artifact_identity = {
+    name = local.artifact_service_account
+    # GKE Workload Identity: the artifact service account grants
+    # roles/iam.workloadIdentityUser to <project>.svc.id.goog[<namespace>/nexus-artifacts].
+    annotations = { "iam.gke.io/gcp-service-account" = module.platform.artifact_service_account }
+  }
+
+  cpu_agent = {
+    name         = "agent-cpu"
+    replicas     = 1
+    queues       = "default"
+    labels       = "zone=cluster,accelerator=none"
+    executors    = "subprocess"
+    cpuMillis    = 2000
+    memoryBytes  = 4 * local.gib
+    gpuCount     = 0
+    diskBytes    = 10 * local.gib
+    nodeSelector = { "nexus.khuriwalgroup.com/pool" = "cpu" }
+    resources    = { requests = { cpu = "250m", memory = "256Mi" }, limits = { memory = "4Gi" } }
+  }
+
+  # On the tainted GPU pool: the chart requests gpuCount nvidia.com/gpu from
+  # the device plugin (advertised == allocated) and tolerates the
+  # nvidia.com/gpu NoSchedule taint; the nodeSelector keeps it off CPU nodes.
+  gpu_agent = {
+    name           = "agent-gpu"
+    replicas       = var.gpu_agent.replicas
+    queues         = "gpu"
+    labels         = "zone=cluster,accelerator=nvidia"
+    executors      = "subprocess"
+    cpuMillis      = var.gpu_agent.cpu_millis
+    memoryBytes    = var.gpu_agent.memory_gib * local.gib
+    gpuCount       = var.gpu_agent.gpu_count
+    gpuKind        = var.gpu_agent.gpu_kind
+    gpuMemoryBytes = var.gpu_agent.gpu_memory_gib * local.gib
+    diskBytes      = var.gpu_agent.disk_gib * local.gib
+    nodeSelector   = { "nexus.khuriwalgroup.com/pool" = "gpu" }
+    resources = {
+      requests = { cpu = "500m", memory = "1Gi" }
+      limits   = { memory = "26Gi" }
+    }
+  }
+
+  agents = concat([local.cpu_agent], slice([local.gpu_agent], 0, var.gpu_pool.enabled ? 1 : 0))
+}
+
 # ── Nexus ─────────────────────────────────────────────────────────────────
 
 module "nexus" {
@@ -102,6 +159,12 @@ module "nexus" {
   # GCS HMAC key pair, stored in the kgf-nexus credentials Secret.
   object_store_credentials = module.platform.artifact_hmac_credentials
 
+  # Every CA the instance trusts, from the Cloud SQL Admin API; host is the
+  # instance's DNS name, which its shared-CA certificate carries.
+  postgres_ca_bundle          = module.platform.postgres_ca_bundle
+  runtime_db_roles            = var.runtime_db_roles
+  runtime_db_password_version = var.runtime_db_password_version
+
   chart_values = {
     postgres = {
       enabled  = false
@@ -109,10 +172,10 @@ module "nexus" {
       port     = 5432
       user     = module.platform.postgres_user
       database = module.platform.postgres_database
-      # ssl_mode ENCRYPTED_ONLY on the instance. Encrypted, server identity
-      # not verified: the chart cannot mount the instance CA for verify-full
-      # yet (F115). Traffic never leaves the VPC.
-      sslmode = "require"
+      # verify-full against the managed server's CA (the kgf-nexus module
+      # mounts postgres_ca_bundle and sets it); the services connect as
+      # their own runtime logins, not the admin (runtime_db_roles).
+      sslmode = "verify-full"
     }
 
     # GCS through its S3-compatible XML API with HMAC keys ("interoperability").
@@ -129,6 +192,14 @@ module "nexus" {
     nats = {
       storage = { storageClass = kubernetes_storage_class_v1.regional_ssd.metadata[0].name }
     }
+
+    serviceAccounts = {
+      apiGateway = local.artifact_identity
+      agent      = local.artifact_identity
+      artifactGC = local.artifact_identity
+    }
+
+    agents = local.agents
   }
 
   chart_values_overrides = var.chart_values_overrides

@@ -8,7 +8,25 @@
 # it shares with the services does not compile yet — which matters during Phase
 # 1 bring-up, where the services are still being written.
 
+ARG GO_VERSION=1.25
+
+# nexus-db-roles (services/db-roles): creates the per-service LOGIN roles as
+# the chart's db-roles Job. Go, not psql, because it hashes each password into
+# a SCRAM verifier client-side, which psql can only do interactively
+# (\password); the plaintext then never reaches the server or its logs.
+FROM golang:${GO_VERSION}-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY services/db-roles ./services/db-roles
+COPY internal ./internal
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w" -o /out/nexus-db-roles ./services/db-roles
+
 FROM postgres:16-alpine
+
+COPY --from=build --chmod=0755 /out/nexus-db-roles /usr/local/bin/nexus-db-roles
 
 COPY deploy/migrate.sh /usr/local/bin/migrate.sh
 RUN chmod +x /usr/local/bin/migrate.sh

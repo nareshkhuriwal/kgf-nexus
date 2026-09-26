@@ -69,7 +69,7 @@ apply. Deletion protection is deliberate.
 |---|---|
 | `kubeconfig_command` | `az aks get-credentials ... && kubelogin convert-kubeconfig -l azurecli` |
 | `registry` | ACR login server |
-| `database` | Host, port, database, user, `sslmode=require`, the **Key Vault secret ID** of the password, and the Kubernetes Secret key. The password itself is never printed. |
+| `database` | Host, port, database, user, `sslmode=verify-full` (pinned CA bundle in `kgf-nexus-postgres-ca`), the runtime logins Secret, the **Key Vault secret ID** of the password, and the Kubernetes Secret key. The password itself is never printed. |
 | `object_store` | What stores artifacts today (MinIO) and the unused Blob target |
 | `key_vault_uri`, `namespace`, `console_access` | As named |
 | `admin_api_key` | Sensitive: `terraform output -raw admin_api_key` |

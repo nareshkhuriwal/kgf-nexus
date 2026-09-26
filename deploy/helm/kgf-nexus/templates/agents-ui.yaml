@@ -7,6 +7,9 @@ Worker agents and the console.
 {{- include "nexus.valuesComplete" . }}
 {{- $root := . -}}
 {{- range .Values.agents }}
+{{- $sa := include "nexus.saFor" (list $root "agent" .serviceAccount (.executors | default "subprocess")) | fromYaml }}
+{{- $resources := include "nexus.agentResources" (list $root .) | fromYaml }}
+{{- $placement := include "nexus.agentPlacement" (list $root .) | fromYaml }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -26,11 +29,13 @@ spec:
     metadata:
       labels: {{- include "nexus.labels" (list $root .name) | nindent 8 }}
         nexus.khuriwalgroup.com/role: agent
+        {{- include "nexus.saPodLabels" $sa | indent 8 }}
       {{- include "nexus.metricsAnnotations" (list $root (int $root.Values.metrics.agentPort)) | nindent 6 }}
     spec:
+      {{- include "nexus.podIdentity" $sa | nindent 6 }}
       {{- include "nexus.pullSecrets" $root | nindent 6 }}
       securityContext: {{- include "nexus.podSecurity" $root | nindent 8 }}
-      {{- include "nexus.placement" (list $root .name) | nindent 6 }}
+      {{- include "nexus.placement" (list $root .name $placement) | nindent 6 }}
       terminationGracePeriodSeconds: {{ $root.Values.agentDefaults.terminationGracePeriodSeconds }}
       containers:
         - name: agent
@@ -84,7 +89,7 @@ spec:
             httpGet: { path: /readyz, port: metrics }
             periodSeconds: 5
             failureThreshold: 3
-          resources: {{- toYaml .resources | nindent 12 }}
+          resources: {{- toYaml $resources | nindent 12 }}
           securityContext: {{- include "nexus.containerSecurity" $root | nindent 12 }}
           volumeMounts:
             # The WAL outlives a container restart (emptyDir survives those),
@@ -104,6 +109,7 @@ spec:
 {{- include "nexus.pdb" (list $root .name .name (.replicas | default 1) .podDisruptionBudget) }}
 {{- end }}
 {{- if .Values.ui.enabled }}
+{{- $sa := include "nexus.saFor" (list . "ui" nil) | fromYaml }}
 {{- $resolver := .Values.dns.resolver }}
 {{- if not $resolver }}
 {{- $kubeDNS := lookup "v1" "Service" "kube-system" "kube-dns" }}
@@ -132,8 +138,11 @@ spec:
     matchLabels: {{- include "nexus.selector" (list . "ui") | nindent 6 }}
   template:
     metadata:
-      labels: {{- include "nexus.labels" (list . "ui") | nindent 8 }}
+      labels:
+        {{- include "nexus.labels" (list . "ui") | nindent 8 }}
+        {{- include "nexus.saPodLabels" $sa | indent 8 }}
     spec:
+      {{- include "nexus.podIdentity" $sa | nindent 6 }}
       {{- include "nexus.pullSecrets" . | nindent 6 }}
       {{- include "nexus.placement" (list . "ui") | nindent 6 }}
       containers:

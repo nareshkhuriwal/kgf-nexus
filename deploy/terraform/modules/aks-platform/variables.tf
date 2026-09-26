@@ -255,7 +255,7 @@ variable "nexus_kubernetes_namespace" {
 }
 
 variable "nexus_service_account" {
-  description = "Kubernetes ServiceAccount the workload identity federates. The chart does not create one yet (F115), so nothing uses it today."
+  description = "Kubernetes ServiceAccount the workload identity federates. The environments pass the chart's shared result-store account (nexus-artifacts); the native Blob backend that will use it is not merged yet (F115)."
   type        = string
   default     = "kgf-nexus"
 }

@@ -16,7 +16,7 @@ version choices, the security model and finding F115.
 | Registry | Artifact Registry Docker repository `kgf-nexus` with **immutable tags** and cleanup of untagged images after 14 days. |
 | Cloud SQL | PostgreSQL 16, Enterprise edition, db-custom-2-7680, 50 GB PD-SSD with autoresize. **Regional HA on** by default. **No public IP**: private IP only, `ENCRYPTED_ONLY`. Backups keep 14 copies, **PITR** keeps 7 days of logs, and query insights and connection/lock/checkpoint logging are on. Deletion protection is on. The `nexus` built-in user has a write-only password. The password is also in Secret Manager. |
 | Artifacts | GCS bucket: uniform access, public access prevention enforced, versioning, 7-day soft delete, and lifecycle rules (abort multipart after 7 days, delete noncurrent after 30). |
-| Artifact identity | Service account `<name>-art` with `roles/storage.objectUser` on the bucket only. It has an **HMAC key**, used today, and a Workload Identity binding for `nexus/kgf-nexus`, prepared but unused (F115). |
+| Artifact identity | Service account `<name>-art` with `roles/storage.objectUser` on the bucket only. It has an **HMAC key**, used today, and a Workload Identity binding for `<namespace>/nexus-artifacts`, the chart ServiceAccount of api-gateway, the agents and artifact-gc, annotated with it; used once the client has a keyless path (F115). |
 | In cluster | StorageClass `nexus-regional-ssd` (pd-ssd, **regional PD** replicated across two zones, Retain), then the Nexus release. |
 
 ### The artifact store on GKE
@@ -64,7 +64,7 @@ To destroy, set `deletion_protection = false` and apply. The bucket does not
 |---|---|
 | `kubeconfig_command` | `gcloud container clusters get-credentials ... --region ...` (adds `--dns-endpoint` for a private control plane) |
 | `registry` | `<region>-docker.pkg.dev/<project>/` (images under `kgf-nexus/`) |
-| `database` | Private IP, port, database, user, `sslmode=require`, the instance connection name, the **Secret Manager secret** holding the password, and the Kubernetes Secret key. The password itself is never printed. |
+| `database` | Instance DNS name (private zone; the name its shared-CA certificate carries), port, database, user, `sslmode=verify-full` (pinned CA bundle in `kgf-nexus-postgres-ca`), the runtime logins Secret, the instance connection name, the **Secret Manager secret** holding the password, and the Kubernetes Secret key. The password itself is never printed. |
 | `object_store` | Endpoint, bucket, service account, and where the HMAC key lives |
 | `namespace`, `console_access` | As named |
 | `admin_api_key` | Sensitive: `terraform output -raw admin_api_key` |

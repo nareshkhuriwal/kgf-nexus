@@ -18,7 +18,9 @@ output "database" {
     port            = 5432
     database        = module.platform.postgres_database
     user            = module.platform.postgres_user
-    sslmode         = "require"
+    sslmode         = "verify-full"
+    ca_bundle       = "${module.nexus.namespace}/kgf-nexus-postgres-ca (key ca.crt)"
+    runtime_logins  = var.runtime_db_roles ? "${module.nexus.namespace}/kgf-nexus-db-logins (postgres-password-<component>); the admin login is used only by the migrate, bootstrap and db-roles Jobs" : "off: every service connects as the admin login"
     password_secret = module.platform.postgres_password_secret_id
     k8s_secret      = "${module.nexus.namespace}/kgf-nexus-credentials (key postgres-password)"
   }

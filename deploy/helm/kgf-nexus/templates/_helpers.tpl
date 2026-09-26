@@ -4,6 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 */}}
 
 {{- define "nexus.required" -}}
+{{- include "nexus.dbRequired" . -}}
 {{- if and .Values.postgres.pitr.enabled (not .Values.postgres.enabled) -}}
 {{- fail "postgres.pitr.enabled needs the in-cluster postgres (postgres.enabled=true). A managed database (Azure Flexible Server, RDS, Cloud SQL) must use the provider's automated backups and point-in-time restore instead -- see docs/OPERATIONS.md §4." -}}
 {{- end -}}
@@ -69,25 +70,10 @@ imagePullSecrets:
 {{- end }}
 {{- end -}}
 
-{{/*
-The database URL is assembled in the pod from the Secret, never rendered into
-a manifest: $(NEXUS_DB_PASSWORD) is Kubernetes' own env expansion, so the
-password exists only in the Secret and the container's environment.
-The password must be URL-safe (deploy/terraform generates alphanumerics).
-Required: the services have no built-in DSN and exit at startup without this
-(internal/config.DSN, docs/OPERATIONS.md §8).
-*/}}
-{{- define "nexus.dbEnv" -}}
-- name: NEXUS_DB_PASSWORD
-  valueFrom:
-    secretKeyRef: { name: {{ .Values.existingSecret }}, key: postgres-password }
-- name: DATABASE_URL
-  value: "postgres://{{ .Values.postgres.user }}:$(NEXUS_DB_PASSWORD)@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.database }}?sslmode={{ .Values.postgres.sslmode }}"
-{{- end -}}
-
 {{/* Peer addresses and logging, shared by every control-plane service. */}}
 {{- define "nexus.serviceEnv" -}}
-{{ include "nexus.dbEnv" . }}
+{{- $key := index . 1 -}}{{- with index . 0 -}}
+{{ include "nexus.dbEnv" (list . $key) }}
 - { name: LOG_LEVEL, value: {{ .Values.logLevel | quote }} }
 - { name: NEXUS_LOG_LEVEL, value: {{ .Values.logLevel | quote }} }
 - { name: LOG_FORMAT, value: json }
@@ -103,6 +89,7 @@ Required: the services have no built-in DSN and exit at startup without this
 - { name: EVENT_SERVICE_ADDR, value: "event-service:9090" }
 - { name: NEXUS_EVENT_SERVICE_ADDR, value: "event-service:9090" }
 - { name: API_GATEWAY_ADDR, value: "api-gateway:9091" }
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -279,6 +266,7 @@ migration shipped in the migrate image of the SAME tag is recorded -- which is
 exactly "the migration job for this release has finished".
 */}}
 {{- define "nexus.waitForSchema" -}}
+{{- $key := index . 1 -}}{{- with index . 0 -}}
 - name: wait-for-schema
   image: {{ include "nexus.image" (list . "migrate") }}
   imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -288,17 +276,33 @@ exactly "the migration job for this release has finished".
       set -eu
       latest=$(ls /migrations/*.up.sql | sort | tail -n 1 | xargs basename | sed 's/\.up\.sql$//')
       echo "waiting for migration $latest"
-      until [ "$(psql "$DATABASE_URL" -tAc "SELECT 1 FROM schema_migrations WHERE version = '$latest'" 2>/dev/null)" = "1" ]; do
+      # Say WHY it is still waiting: a wrong CA bundle, a host name the
+      # certificate lacks or a runtime login not created yet otherwise shows
+      # only as a pod stuck in Init (F133). libpq never prints the password.
+      last=""; n=0
+      while :; do
+        out=$(psql "$DATABASE_URL" -tAc "SELECT 1 FROM schema_migrations WHERE version = '$latest'" 2>&1 | head -n 1) || true
+        [ "$out" = "1" ] && break
+        [ -n "$out" ] || out="migration $latest not recorded yet"
+        if [ "$out" != "$last" ] || [ $((n % 30)) -eq 0 ]; then
+          echo "wait-for-schema: not ready: $out"
+          last=$out
+        fi
+        n=$((n + 1))
         sleep 2
       done
       echo "schema at $latest"
   env:
-{{ include "nexus.dbEnv" . | indent 4 }}
+{{ include "nexus.dbEnv" (list . $key) | indent 4 }}
+  {{- with include "nexus.dbVolumeMounts" . }}
+  volumeMounts: {{- . | indent 4 }}
+  {{- end }}
   securityContext:
 {{ include "nexus.containerSecurity" . | indent 4 }}
   resources:
     requests: { cpu: 10m, memory: 16Mi }
     limits: { memory: 64Mi }
+{{- end -}}
 {{- end -}}
 
 {{/* Non-root, no privilege escalation, no capabilities: the Nexus images run as uid 10001. */}}
@@ -347,11 +351,16 @@ when metrics.podAnnotations is true. Argument: (list $root port).
 */}}
 {{- define "nexus.metricsAnnotations" -}}
 {{- $root := index . 0 -}}{{- $port := index . 1 -}}
-{{- if $root.Values.metrics.podAnnotations }}
+{{- $db := and (gt (len .) 2) (index . 2) -}}
+{{- $dbAnn := ternary (include "nexus.dbRevisionAnnotation" $root) "" $db -}}
+{{- if or $root.Values.metrics.podAnnotations $dbAnn }}
 annotations:
+  {{- if $root.Values.metrics.podAnnotations }}
   prometheus.io/scrape: "true"
   prometheus.io/port: {{ $port | quote }}
   prometheus.io/path: /metrics
+  {{- end }}
+  {{- with $dbAnn }}{{ . | indent 2 }}{{ end }}
 {{- end }}
 {{- end -}}
 

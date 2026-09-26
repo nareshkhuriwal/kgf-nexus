@@ -163,7 +163,7 @@ variable "nexus_kubernetes_namespace" {
 }
 
 variable "nexus_service_account" {
-  description = "ServiceAccount the IRSA / Pod Identity role trusts. The chart does not create or use one yet (F115)."
+  description = "ServiceAccount the IRSA / Pod Identity role trusts. The environments pass the chart's shared result-store account (nexus-artifacts), annotated with this role for IRSA."
   type        = string
   default     = "kgf-nexus"
 }
