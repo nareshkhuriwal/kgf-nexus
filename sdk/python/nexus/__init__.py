@@ -65,6 +65,7 @@ from .context import (
 from .scheduling import Backfill, BackfillState, OverlapPolicy, Schedule, SchedulePreview
 from .task import TaskDefinition, registry, task
 from .types import (
+    Asset,
     Cache,
     Cancellation,
     Concurrency,
@@ -133,6 +134,7 @@ __all__ = [
     "Param",
     "registry",
     # declaration types
+    "Asset",
     "Resources",
     "Gpu",
     "Timeouts",
