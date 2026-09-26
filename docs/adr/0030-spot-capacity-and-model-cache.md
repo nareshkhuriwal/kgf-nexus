@@ -100,7 +100,13 @@ often.
 
 ### 3. A separate budget for preemption
 
-A `PREEMPTED` failure does **not** consume `attempts_used`. It consumes
+A `PREEMPTED` failure does **not** consume `attempts_used`. The scheduler
+also moves the reporting worker ACTIVE -> DRAINING in the transaction that
+records it (the report is the worker saying its node is going), because its own
+`drain_reason` arrives only with its next heartbeat and a long poll it had
+already parked would otherwise be handed the retry. The DAG engine treats a
+node whose failed attempt has a pending `retry_backoff` timer as not
+exhausted, since a preemption retry runs past `max_attempts` by design. It consumes
 `task_nodes.preemptions_used` (migration 0035), capped by
 `placement.max_preemptions` (0 = the platform default,
 `NEXUS_MAX_PREEMPTION_RETRIES`, default 5). Under the cap the retry is

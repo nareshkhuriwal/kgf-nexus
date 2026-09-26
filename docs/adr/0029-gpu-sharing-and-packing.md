@@ -215,7 +215,15 @@ in OPERATIONS §28.9.
   worker's reservations continuously; no sample exceeds any device's capacity,
   every reservation's device exists, and a namespace quota set in the same run
   is never exceeded.
-- Benchmarks before and after at the ADR-0018 cells: OPERATIONS §28.6.
+- Simulated end to end (`tests/gpusim`, compose): `examples/gpu_sharing`
+  packs up to 3 slices on one 40 GiB device (peak 38 GiB) with zero audit
+  violations across MIG and shared jobs, and the ledger drains to zero.
+- Mutation check (F89): pinning every slice to one device (a pooled model)
+  makes the race test report per-device over-allocation within seconds.
+- Benchmarks before and after at the ADR-0018 cells, alternated binaries, three
+  rounds: OPERATIONS §28.6. Pull-path single-replica p50 is unchanged within
+  0.3 ms at 1k/10k/100k backlogs; no regression is distinguishable from the
+  (contended) machine's noise.
 
 ## Consequences
 

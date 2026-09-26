@@ -3051,7 +3051,10 @@ replaces the default taint list; `NEXUS_EVICTION_POLL` (5 s),
 On a notice the agent stops polling, reports `drain_reason` (the gateway marks
 it DRAINING), and sends every running task SIGTERM with the notice's time
 minus 5 s. A task that exits non-zero is reported `PREEMPTED` and retried
-against `task_nodes.preemptions_used`; exit 0 is a success. **Checkpointing
+against `task_nodes.preemptions_used`; exit 0 is a success. The scheduler moves
+a worker that reports `PREEMPTED` to DRAINING in the same transaction, so the
+retry can never be handed back to it (not even by a long poll it had already
+parked). **Checkpointing
 tasks should exit non-zero (143) after writing their checkpoint.** A spot
 worker with no eviction source logs a warning: its reclaimed tasks become LOST
 and spend the ordinary budget.
@@ -3121,7 +3124,65 @@ ADR-0018 cells on the same machine and database, alternating binaries, is
 recorded in the table below (laptop numbers: Apple M4 Pro, Postgres 16 in
 Docker Desktop, 64 workers).
 
-BENCH_TABLE_PLACEHOLDER
+**Read these as laptop numbers taken under contention.** Apple M4 Pro,
+Postgres 16.15 in Docker Desktop (`shared_buffers=512MB`), 64 workers,
+3,000 claims per cell (backlog/2 at 1k). Other sessions' benchmark and
+cluster containers ran on the same machine throughout (`docker stats` showed a
+second Postgres benchmark at ~100 % CPU), so single cells swing by 2-3x
+between runs of the SAME binary. Before = `integrate/wave-2`, after = this
+branch; binaries alternated on one migrated database (0035 applied, which the
+old binary ignores). Three rounds; round 3 ran on the quietest machine and is
+shown. Full tables: rounds 1-3 reproduce with `NEXUS_BENCH_*` as in
+`tests/bench/dispatch_test.go`.
+
+| path | backlog | replicas | before claims/s | after claims/s | before p50 / p99 | after p50 / p99 |
+|---|---:|---:|---:|---:|---:|---:|
+| pull | 1,000 | 1 | 172 | 172 | 5.0 / 14.0 ms | 5.3 / 12.9 ms |
+| pull | 1,000 | 4 | 501 | 507 | 7.0 / 18.3 ms | 6.6 / 22.5 ms |
+| pull | 1,000 | 16 | 871 | 846 | 15.7 / 72.8 ms | 15.6 / 83.9 ms |
+| pull | 10,000 | 1 | 130 | 140 | 6.1 / 28.2 ms | 6.1 / 21.2 ms |
+| pull | 10,000 | 4 | 383 | 515 | 8.6 / 37.9 ms | 6.9 / 17.6 ms |
+| pull | 10,000 | 16 | 999 | 754 | 13.8 / 54.4 ms | 16.4 / 125.5 ms |
+| pull | 100,000 | 1 | 131 | 136 | 6.1 / 24.1 ms | 6.1 / 24.1 ms |
+| pull | 100,000 | 4 | 435 | 262 | 7.5 / 35.6 ms | 11.6 / 63.1 ms |
+| pull | 100,000 | 16 | 785 | 815 | 16.0 / 112.4 ms | 16.5 / 69.6 ms |
+| push | 1,000 | 1 | 74 | 32 | 12.1 / 29.8 ms | 18.7 / 158.5 ms |
+| push | 1,000 | 4 | 67 | 128 | 43.4 / 197.6 ms | 22.7 / 79.6 ms |
+| push | 1,000 | 16 | 47 | 145 | 169.6 / 534.3 ms | 48.8 / 141.9 ms |
+| push | 10,000 | 1 | 21 | 30 | 46.2 / 91.0 ms | 31.4 / 61.1 ms |
+| push | 10,000 | 4 | 30 | 73 | 99.8 / 467.9 ms | 37.5 / 166.6 ms |
+| push | 10,000 | 16 | 12 | 47 | 849 ms / 4.30 s | 161 ms / 934 ms |
+| push | 100,000 | 1 | 3 | 3 | 358 / 828 ms | 332 / 603 ms |
+| push | 100,000 | 4 | 7 | 7 | 398 ms / 2.19 s | 400 ms / 1.53 s |
+| push | 100,000 | 16 | 7 | 4 | 1.63 / 7.52 s | 3.05 / 11.84 s |
+
+GPU work on the new path (`NEXUS_BENCH_GPU=true`: every attempt a shared-GPU
+slice on workers with 8 shared devices each; after only, round 3):
+
+| path | backlog | replicas | claims/s | p50 / p99 |
+|---|---:|---:|---:|---:|
+| pull | 1,000 | 1 | 159 | 5.3 / 17.5 ms |
+| pull | 10,000 | 1 | 159 | 5.4 / 16.4 ms |
+| pull | 100,000 | 1 | 158 | 5.6 / 15.3 ms |
+| pull | 100,000 | 16 | 745 | 17.2 / 69.3 ms |
+| push | 1,000 | 1 | 116 | 8.0 / 14.4 ms |
+| push | 10,000 | 1 | 27 | 32.9 / 68.6 ms |
+
+**Reading.** On the pull path (the default deployment) single-replica p50 is
+unchanged within 0.3 ms at every backlog, and across three rounds the
+before/after differences change sign from round to round: no regression is
+distinguishable from the machine's noise. Non-GPU claims do strictly more work
+only in reading the cluster columns (one guarded LATERAL lookup that is skipped
+for a worker without `nexus.io/cluster`) and decoding a slightly wider worker
+row; everything else is behind `resource_request ? ...` / `spec_json ?
+'placement'` guards or `WantsScoring`, which a plain CPU task never passes.
+Fractional-GPU claims cost the same as non-GPU ones on the pull path. The push
+path is unwindowed (ADR-0018) and, under contention, its cells swing both ways
+(round 1 after was worse at 16 replicas, round 3 after is better in 7 of 9
+cells); the one structural addition there, per-worker cluster lookups, was
+collapsed into the guarded LATERAL join after round 1. Re-measure on
+production-class hardware with no co-tenant load before relying on any single
+cell.
 
 ### 28.7 Rollout and rollback
 
