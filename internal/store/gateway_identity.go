@@ -75,6 +75,10 @@ type ScopedTokenRow struct {
 	CreatedBy  *string
 	CreatedAt  time.Time
 	RevokedAt  *time.Time
+	// ServiceAccountID and Permissions are migration 0032's additions; nil for
+	// a pre-0032 token.
+	ServiceAccountID *string
+	Permissions      []string
 }
 
 // ── credential generation ────────────────────────────────────────────────
@@ -579,6 +583,12 @@ type ResolvedToken struct {
 	Name      string
 	Role      string
 	Scopes    []string
+	// ServiceAccountID is set when the token belongs to a service account
+	// (migration 0032). Its grants then come from the account's role bindings.
+	ServiceAccountID string
+	// Permissions is the token's explicit ceiling, nil when it has none. A
+	// non-nil empty slice is a ceiling of nothing.
+	Permissions []string
 }
 
 // GatewayCreateScopedToken mints a scoped token, returning the plaintext once.
@@ -587,6 +597,32 @@ type ResolvedToken struct {
 // authorizer intersects it with the role. Failing closed matters here: a token
 // created with a typo'd scope must be useless rather than accidentally broad.
 func GatewayCreateScopedToken(ctx context.Context, q GWQuerier, namespace, name, role string, scopes []string, expiresAt *time.Time, createdBy *string) (plaintext string, row ScopedTokenRow, err error) {
+	return GatewayCreateScopedTokenWith(ctx, q, TokenSpec{Namespace: namespace, Name: name, Role: role, Scopes: scopes, ExpiresAt: expiresAt, CreatedBy: createdBy})
+}
+
+// TokenSpec describes a scoped token to mint.
+type TokenSpec struct {
+	Namespace        string
+	Name             string
+	Role             string
+	Scopes           []string
+	ExpiresAt        *time.Time
+	CreatedBy        *string
+	ServiceAccountID *string
+	// Permissions is the explicit ceiling; nil stores SQL NULL (no ceiling).
+	Permissions []string
+}
+
+// GatewayCreateScopedTokenWith mints a token, optionally owned by a service
+// account and carrying a permission ceiling (migration 0032).
+func GatewayCreateScopedTokenWith(ctx context.Context, q GWQuerier, spec TokenSpec) (plaintext string, row ScopedTokenRow, err error) {
+	namespace, name, role, scopes, expiresAt, createdBy := spec.Namespace, spec.Name, spec.Role, spec.Scopes, spec.ExpiresAt, spec.CreatedBy
+	var perms []byte
+	if spec.Permissions != nil {
+		if perms, err = json.Marshal(spec.Permissions); err != nil {
+			return "", ScopedTokenRow{}, fmt.Errorf("encode permissions: %w", err)
+		}
+	}
 	plaintext, err = GenerateSecret("nxtok")
 	if err != nil {
 		return "", ScopedTokenRow{}, err
@@ -599,20 +635,25 @@ func GatewayCreateScopedToken(ctx context.Context, q GWQuerier, namespace, name,
 		return "", ScopedTokenRow{}, fmt.Errorf("encode scopes: %w", err)
 	}
 
-	var rawScopes []byte
+	var rawScopes, rawPerms []byte
 	err = q.QueryRow(ctx, `
-		INSERT INTO scoped_tokens (namespace, name, token_hash, scopes, role, expires_at, created_by)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
+		INSERT INTO scoped_tokens (namespace, name, token_hash, scopes, role, expires_at, created_by, service_account_id, permissions)
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9::jsonb)
 		RETURNING id::text, namespace, name, scopes, role, expires_at, last_used_at,
-		          created_by::text, created_at, revoked_at`,
-		namespace, name, HashAPIKey(plaintext), encoded, role, expiresAt, createdBy,
+		          created_by::text, created_at, revoked_at, service_account_id::text, permissions`,
+		namespace, name, HashAPIKey(plaintext), encoded, role, expiresAt, createdBy, spec.ServiceAccountID, perms,
 	).Scan(&row.ID, &row.Namespace, &row.Name, &rawScopes, &row.Role, &row.ExpiresAt,
-		&row.LastUsedAt, &row.CreatedBy, &row.CreatedAt, &row.RevokedAt)
+		&row.LastUsedAt, &row.CreatedBy, &row.CreatedAt, &row.RevokedAt, &row.ServiceAccountID, &rawPerms)
 	if err != nil {
 		return "", ScopedTokenRow{}, fmt.Errorf("create scoped token: %w", err)
 	}
 	if err := json.Unmarshal(rawScopes, &row.Scopes); err != nil {
 		return "", ScopedTokenRow{}, fmt.Errorf("decode scopes: %w", err)
+	}
+	if rawPerms != nil {
+		if err := json.Unmarshal(rawPerms, &row.Permissions); err != nil {
+			return "", ScopedTokenRow{}, fmt.Errorf("decode permissions: %w", err)
+		}
 	}
 	return plaintext, row, nil
 }
@@ -624,15 +665,29 @@ func GatewayCreateScopedToken(ctx context.Context, q GWQuerier, namespace, name,
 // no expiry, which is what `OR expires_at > now()` expresses.
 func GatewayResolveScopedToken(ctx context.Context, q GWQuerier, presented string) (ResolvedToken, error) {
 	var rt ResolvedToken
-	var rawScopes []byte
+	var rawScopes, rawPerms []byte
+	var saID *string
+	// A service-account token is live only while its account is enabled: the
+	// join is the revocation, so disabling the account needs no token sweep.
 	err := q.QueryRow(ctx, `
-		SELECT id::text, namespace, name, role, scopes
-		  FROM scoped_tokens
-		 WHERE token_hash = $1
-		   AND revoked_at IS NULL
-		   AND (expires_at IS NULL OR expires_at > now())`,
+		SELECT t.id::text, t.namespace, t.name, t.role, t.scopes, t.service_account_id::text, t.permissions
+		  FROM scoped_tokens t
+		  LEFT JOIN service_accounts sa ON sa.id = t.service_account_id
+		 WHERE t.token_hash = $1
+		   AND t.revoked_at IS NULL
+		   AND (t.expires_at IS NULL OR t.expires_at > now())
+		   AND (t.service_account_id IS NULL OR (sa.id IS NOT NULL AND sa.disabled_at IS NULL))`,
 		HashAPIKey(presented),
-	).Scan(&rt.TokenID, &rt.Namespace, &rt.Name, &rt.Role, &rawScopes)
+	).Scan(&rt.TokenID, &rt.Namespace, &rt.Name, &rt.Role, &rawScopes, &saID, &rawPerms)
+	if saID != nil {
+		rt.ServiceAccountID = *saID
+	}
+	if err == nil && rawPerms != nil {
+		rt.Permissions = []string{}
+		if err = json.Unmarshal(rawPerms, &rt.Permissions); err != nil {
+			return ResolvedToken{}, fmt.Errorf("decode permissions for token %s: %w", rt.TokenID, err)
+		}
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ResolvedToken{}, ErrIdentityUnknown
 	}
@@ -669,7 +724,7 @@ func GatewayListScopedTokens(ctx context.Context, q GWQuerier, namespace string,
 	}
 	rows, err := q.Query(ctx, `
 		SELECT id::text, namespace, name, scopes, role, expires_at, last_used_at,
-		       created_by::text, created_at, revoked_at
+		       created_by::text, created_at, revoked_at, service_account_id::text, permissions
 		  FROM scoped_tokens
 		 WHERE namespace = $1
 		 ORDER BY created_at DESC
@@ -682,10 +737,15 @@ func GatewayListScopedTokens(ctx context.Context, q GWQuerier, namespace string,
 	out := make([]ScopedTokenRow, 0, 16)
 	for rows.Next() {
 		var t ScopedTokenRow
-		var rawScopes []byte
+		var rawScopes, rawPerms []byte
 		if err := rows.Scan(&t.ID, &t.Namespace, &t.Name, &rawScopes, &t.Role, &t.ExpiresAt,
-			&t.LastUsedAt, &t.CreatedBy, &t.CreatedAt, &t.RevokedAt); err != nil {
+			&t.LastUsedAt, &t.CreatedBy, &t.CreatedAt, &t.RevokedAt, &t.ServiceAccountID, &rawPerms); err != nil {
 			return nil, fmt.Errorf("scan scoped token: %w", err)
+		}
+		if rawPerms != nil {
+			if err := json.Unmarshal(rawPerms, &t.Permissions); err != nil {
+				return nil, fmt.Errorf("decode permissions for token %s: %w", t.ID, err)
+			}
 		}
 		if err := json.Unmarshal(rawScopes, &t.Scopes); err != nil {
 			return nil, fmt.Errorf("decode scopes for token %s: %w", t.ID, err)
@@ -727,6 +787,10 @@ type AuditEntry struct {
 	Outcome    string
 	Detail     map[string]any
 	ClientIP   string
+	// RequestID is the KGF request id when the actor came through KGF Cloud
+	// (migration 0032, ADR-0024 §5), so a KGF support reference resolves to
+	// these rows. Empty otherwise.
+	RequestID string
 }
 
 // AuditRow is a stored audit event.
@@ -743,6 +807,7 @@ type AuditRow struct {
 	Detail     []byte
 	ClientIP   string
 	OccurredAt time.Time
+	RequestID  string
 }
 
 // Audit outcomes. A DENIED attempt is recorded as loudly as a successful one: an
@@ -781,10 +846,10 @@ func GatewayAppendAudit(ctx context.Context, q GWQuerier, e AuditEntry) error {
 	_, err = q.Exec(ctx, `
 		INSERT INTO audit_log
 		    (namespace, actor_id, actor_kind, actor_label, action,
-		     target_kind, target_id, outcome, detail, client_ip)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
+		     target_kind, target_id, outcome, detail, client_ip, request_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)`,
 		e.Namespace, e.ActorID, e.ActorKind, e.ActorLabel, e.Action,
-		e.TargetKind, e.TargetID, e.Outcome, detail, e.ClientIP)
+		e.TargetKind, e.TargetID, e.Outcome, detail, e.ClientIP, e.RequestID)
 	if err != nil {
 		return fmt.Errorf("append audit %s: %w", e.Action, err)
 	}
@@ -796,7 +861,9 @@ type AuditFilter struct {
 	Action  string
 	ActorID string
 	Outcome string
-	Limit   int
+	// RequestID narrows to one KGF request (ADR-0024 §5).
+	RequestID string
+	Limit     int
 }
 
 // GatewayListAudit reads the audit trail for a namespace, most recent first.
@@ -812,15 +879,16 @@ func GatewayListAudit(ctx context.Context, q GWQuerier, namespace string, f Audi
 	}
 	rows, err := q.Query(ctx, `
 		SELECT id, namespace, actor_id::text, actor_kind, actor_label, action,
-		       target_kind, target_id, outcome, detail, client_ip, occurred_at
+		       target_kind, target_id, outcome, detail, client_ip, occurred_at, request_id
 		  FROM audit_log
 		 WHERE namespace = $1
+		   AND ($6 = '' OR request_id = $6)
 		   AND ($2 = '' OR action = $2)
 		   AND ($3 = '' OR actor_id::text = $3)
 		   AND ($4 = '' OR outcome = $4)
 		 ORDER BY occurred_at DESC, id DESC
 		 LIMIT $5`,
-		namespace, f.Action, f.ActorID, f.Outcome, limit)
+		namespace, f.Action, f.ActorID, f.Outcome, limit, f.RequestID)
 	if err != nil {
 		return nil, fmt.Errorf("list audit: %w", err)
 	}
@@ -831,7 +899,7 @@ func GatewayListAudit(ctx context.Context, q GWQuerier, namespace string, f Audi
 		var a AuditRow
 		if err := rows.Scan(&a.ID, &a.Namespace, &a.ActorID, &a.ActorKind, &a.ActorLabel,
 			&a.Action, &a.TargetKind, &a.TargetID, &a.Outcome, &a.Detail,
-			&a.ClientIP, &a.OccurredAt); err != nil {
+			&a.ClientIP, &a.OccurredAt, &a.RequestID); err != nil {
 			return nil, fmt.Errorf("scan audit row: %w", err)
 		}
 		out = append(out, a)

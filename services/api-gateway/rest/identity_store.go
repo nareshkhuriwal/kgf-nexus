@@ -85,6 +85,16 @@ func (s StoreIdentityAdmin) AppendAudit(ctx context.Context, e store.AuditEntry)
 	return store.GatewayAppendAudit(ctx, s.DB, e)
 }
 
+// ListUsersPage is the keyset-paginated listing (ADR-0024 §6).
+func (s StoreIdentityAdmin) ListUsersPage(ctx context.Context, namespace string, limit int, cursor, search string) (store.UsersPage, error) {
+	return store.GatewayListUsersPage(ctx, s.DB, namespace, limit, cursor, search)
+}
+
+// CreateScopedTokenWith mints a service-account or ceilinged token (ADR-0024 §6).
+func (s StoreIdentityAdmin) CreateScopedTokenWith(ctx context.Context, spec store.TokenSpec) (string, store.ScopedTokenRow, error) {
+	return store.GatewayCreateScopedTokenWith(ctx, s.DB, spec)
+}
+
 func (s StoreIdentityAdmin) ListAudit(ctx context.Context, namespace string, f store.AuditFilter) ([]store.AuditRow, error) {
 	return store.GatewayListAudit(ctx, s.DB, namespace, f)
 }

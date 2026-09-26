@@ -169,7 +169,10 @@ func TestVerifyRejects(t *testing.T) {
 		{"unknown key", tokOther, now, ErrUnknownKey},
 		{"known kid, other key", tokSameKid, now, ErrInvalid},
 		{"expired", good, now.Add(61 * time.Second), ErrExpired},
-		{"issued in the future", forged(func(c *Claims) { c.IssuedAt = now.Add(2 * time.Minute).Unix(); c.Expires = now.Add(3 * time.Minute).Unix() }), now, ErrExpired},
+		{"issued in the future", forged(func(c *Claims) {
+			c.IssuedAt = now.Add(2 * time.Minute).Unix()
+			c.Expires = now.Add(3 * time.Minute).Unix()
+		}), now, ErrExpired},
 		{"lifetime beyond MaxTTL", forged(func(c *Claims) { c.Expires = now.Add(time.Hour).Unix() }), now, ErrInvalid},
 		{"wrong audience", forged(func(c *Claims) { c.Audience = "kgf-compute" }), now, ErrWrongAudience},
 		{"wildcard audience", forged(func(c *Claims) { c.Audience = AnyAudience }), now, ErrWrongAudience},
@@ -196,7 +199,12 @@ func TestVerifyRejects(t *testing.T) {
 		t.Fatalf("AcceptAnyAudience: %v", err)
 	}
 	// A pure service context from a non-user issuer is fine: it asserts no person.
-	svcTok := forged(func(c *Claims) { c.Issuer = "kgf-billing"; c.Principal = "svc:kgf-billing"; c.Role = RoleService; c.TokenID = "svc" })
+	svcTok := forged(func(c *Claims) {
+		c.Issuer = "kgf-billing"
+		c.Principal = "svc:kgf-billing"
+		c.Role = RoleService
+		c.TokenID = "svc"
+	})
 	if _, err := verifierFor(k).Verify(svcTok, now); err != nil {
 		t.Fatalf("service context: %v", err)
 	}

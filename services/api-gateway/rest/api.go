@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/spec"
 	"google.golang.org/grpc/codes"
@@ -125,6 +126,11 @@ type API struct {
 
 	// cache is nil unless WithCacheInvalidator was called; its route answers 501.
 	cache CacheInvalidator
+
+	// authMode and kgf select and perform KGF context authentication
+	// (ADR-0024); the zero value is standalone. See kgf.go.
+	authMode AuthMode
+	kgf      *authn.KGFAuthenticator
 
 	// assignments reads an attempt's assignment for replay; nil means the
 	// store-backed reader. inlineThreshold is the configured ADR-0016 boundary
@@ -338,12 +344,16 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 	}
 
 	// THE ONE UNGUARDED ROUTE. Rate-limited and fully audited inside the handler.
-	mux.HandleFunc("POST /v1/auth/login", a.login)
-	mux.HandleFunc("POST /v1/auth/register", a.registerCustomer)
+	// In KGF mode people sign in through KGF Cloud (ADR-0024 §1): Nexus's own
+	// password, registration and email routes are not served at all.
+	if a.passwordRoutesEnabled() {
+		mux.HandleFunc("POST /v1/auth/login", a.login)
+		mux.HandleFunc("POST /v1/auth/register", a.registerCustomer)
+	}
 	// Email verification and password recovery: unguarded for the same reason as
 	// login (the caller has no credential), rate limited per IP and per address
 	// inside the handlers. Registered only when the flows are wired.
-	if a.email != nil {
+	if a.email != nil && a.passwordRoutesEnabled() {
 		mux.HandleFunc("POST /v1/auth/email/verification", a.requestVerificationEmail)
 		mux.HandleFunc("POST /v1/auth/email/verify", a.verifyEmail)
 		mux.HandleFunc("POST /v1/auth/password/forgot", a.forgotPassword)
@@ -381,6 +391,9 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 	// The audit trail records who changed what. Admin-only: it names accounts and
 	// the actions taken against them.
 	mux.Handle("GET /v1/namespaces/{ns}/audit", a.guard(authn.ActionAdminWrite, a.listAudit))
+
+	// Service accounts for agents and CI (ADR-0024 §6).
+	a.registerServiceAccountRoutes(mux)
 }
 
 // guard authenticates, authorizes for the path's namespace, and then dispatches.
@@ -411,10 +424,15 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 		// unchanged api_keys lookup. Every credential kind therefore passes through
 		// this one enforcement point, which is what keeps "who may do what"
 		// answerable by reading this function.
-		p, err := a.auth.AuthenticateCredential(r.Context(), presented)
+		p, err, handled := a.authenticateRequest(w, r, presented)
+		if handled {
+			return
+		}
 		if errors.Is(err, authn.ErrUnauthenticated) {
 			if presented != "" {
 				a.recordAuthFailure(r, presented)
+			} else if ctxToken := r.Header.Get(kgfctx.Header); ctxToken != "" {
+				a.recordAuthFailure(r, "kgf\x00"+ctxToken)
 			}
 			// No detail about WHY. Distinguishing "no such key" from "revoked"
 			// would make this endpoint an oracle for probing valid keys.
@@ -452,10 +470,14 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 				return
 			}
 		}
-		// Identity mutation and delegation remain restricted to unbound administrators.
+		// Identity mutation remains restricted to unbound administrators for
+		// Nexus credentials (ADR-0012). A KGF principal is the exception for the
+		// Nexus-internal machine identities (roles, service accounts, tokens):
+		// in KGF mode there is no Nexus administrator, and the KGF role already
+		// decided (ADR-0024 §4). users.manage is never granted to one.
 		if p.Grants != nil {
 			for _, permission := range required {
-				if permission == "users.manage" || permission == "tokens.manage" || permission == "roles.manage" {
+				if authn.Reserved(permission) && (p.KGF == nil || permission == "users.manage") {
 					writeError(w, 403, "forbidden", "Delegation requires a namespace administrator")
 					return
 				}
