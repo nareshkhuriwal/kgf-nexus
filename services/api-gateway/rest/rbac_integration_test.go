@@ -38,7 +38,9 @@ func TestIntegrationRBACAssignmentsAndRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		for _, sql := range []string{`DELETE FROM audit_log WHERE namespace=$1`, `DELETE FROM rbac_user_access WHERE namespace=$1`, `DELETE FROM rbac_roles WHERE namespace=$1`, `DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE namespace=$1)`, `DELETE FROM users WHERE namespace=$1`, `DELETE FROM api_keys WHERE namespace=$1`} {
+		// audit_log rows stay: since 0033 they are removed only by audit_purge(),
+		// and the namespace is unique to this test.
+		for _, sql := range []string{`DELETE FROM rbac_user_access WHERE namespace=$1`, `DELETE FROM rbac_roles WHERE namespace=$1`, `DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE namespace=$1)`, `DELETE FROM users WHERE namespace=$1`, `DELETE FROM api_keys WHERE namespace=$1`} {
 			if _, e := pool.Exec(ctx, sql, ns); e != nil {
 				t.Errorf("cleanup: %v", e)
 			}

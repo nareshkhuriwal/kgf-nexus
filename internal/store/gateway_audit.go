@@ -76,6 +76,10 @@ const (
 	AuditError   = "error"
 )
 
+// auditNow is the audit clock; a variable only so integration tests can write
+// back-dated rows to exercise retention.
+var auditNow = time.Now
+
 type beginner interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
@@ -156,7 +160,7 @@ func appendChained(ctx context.Context, q GWQuerier, e AuditEntry) error {
 		return fmt.Errorf("append audit %s: lock chain head: %w", e.Action, err)
 	}
 
-	occurred := time.Now().UTC().Truncate(time.Microsecond)
+	occurred := auditNow().UTC().Truncate(time.Microsecond)
 	seq := lastSeq + 1
 	hash, err := auditchain.Hash(auditchain.Row{
 		Namespace: e.Namespace, Seq: seq, OccurredAt: occurred, ActorID: e.ActorID,
