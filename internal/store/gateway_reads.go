@@ -11,10 +11,20 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // ErrNotFound is the gateway's generic miss for read projections, mapped to 404.
 var ErrNotFound = errors.New("not found")
+
+// IsMalformedID reports whether err is Postgres refusing to cast a value to a
+// column's type (22P02 invalid_text_representation) -- in practice a path id
+// that is not a UUID. No row can have such an id, so callers answer it as not
+// found; before this it reached clients as a 500 "internal".
+func IsMalformedID(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "22P02"
+}
 
 // ErrInvalidRequest means an owning service rejected the request DOCUMENT rather
 // than failing to process it: the HTTP and the JSON were fine, the content is

@@ -126,7 +126,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	if spec.Namespace != req.Namespace {
 		// Namespaces are the tenancy boundary; a run must never execute a spec
 		// belonging to another tenant even if its UUID is known.
-		return CreateResult{}, fmt.Errorf("spec %s belongs to namespace %s, not %s", spec.ID, spec.Namespace, req.Namespace)
+		// ErrNotFound, so the caller gets the 404 an unknown id gets (it was a
+		// 500), and without naming the other tenant's namespace.
+		return CreateResult{}, fmt.Errorf("%w: spec %s is not in namespace %s", store.ErrNotFound, spec.ID, req.Namespace)
 	}
 
 	policy, err := parsePolicy(spec.SpecJSON)

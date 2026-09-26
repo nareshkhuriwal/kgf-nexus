@@ -660,7 +660,7 @@ func (a *API) backfillAction(action string) func(http.ResponseWriter, *http.Requ
 }
 
 func (a *API) failBackfill(w http.ResponseWriter, r *http.Request, op string, err error) {
-	if errors.Is(err, store.ErrBackfillNotFound) || status.Code(err) == codes.NotFound {
+	if errors.Is(err, store.ErrBackfillNotFound) || status.Code(err) == codes.NotFound || store.IsMalformedID(err) {
 		writeError(w, http.StatusNotFound, "backfill_not_found", "no such backfill")
 		return
 	}
