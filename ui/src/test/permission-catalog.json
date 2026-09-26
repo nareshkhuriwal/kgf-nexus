@@ -1,0 +1,24 @@
+{
+  "_generated": "from ModuleActions in services/api-gateway/authn/rbac.go; regenerate with: go test ./services/api-gateway/authn -run TestUIPermissionCatalog -update-catalog",
+  "modules": {
+    "assets": ["view"],
+    "audit": ["view","manage"],
+    "backfills": ["view","create","update"],
+    "infrastructure": ["view","configure"],
+    "notifications": ["view","manage"],
+    "overview": ["view"],
+    "quotas": ["view","manage"],
+    "roles": ["view","manage"],
+    "runs": ["view","create","cancel","pause","resume","retry","delete"],
+    "schedules": ["view","create","update","delete"],
+    "sensors": ["view","create","update","delete"],
+    "service_accounts": ["view","manage"],
+    "tasks": ["view","logs.view","results.view"],
+    "tokens": ["view","manage"],
+    "triggers": ["view","create","update","delete"],
+    "usage": ["view"],
+    "users": ["view","manage"],
+    "workers": ["view","drain","quarantine"],
+    "workflows": ["view","publish","delete","cache.invalidate"]
+  }
+}

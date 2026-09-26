@@ -19,6 +19,7 @@ import type { ReactNode } from 'react';
 import { PermissionContext } from '../components/Permissions';
 import { NAV_GROUPS } from '../components/navItems';
 import { permissionForPath } from '../components/Permissions';
+import catalog from './permission-catalog.json';
 
 /**
  * Every `<module>.view` the navigation can ask for, derived from the nav
@@ -37,41 +38,23 @@ export const ALL_VIEW_PERMISSIONS: readonly string[] = Object.freeze(
 );
 
 /**
- * The exact permission catalog, mirroring ModuleActions in
- * services/api-gateway/authn/rbac.go -- which is what Administrator holds.
+ * The exact permission catalog -- ModuleActions in
+ * services/api-gateway/authn/rbac.go, which is what Administrator holds.
  *
- * Spelled out rather than derived from the nav, because the nav only yields
- * `<module>.view` and the console gates ACTIONS too: a bulk cancel bar asks for
- * runs.cancel, a delete row action for runs.delete. A fixture with view
- * permissions alone renders every list and no control on it, which fails a
- * bulk-action test with "unable to find button" -- the same misleading shape as
- * having no provider at all.
+ * Read from permission-catalog.json, which the gateway's own test
+ * (TestUIPermissionCatalogMatchesModuleActions) keeps byte-identical to
+ * ModuleActions: add a permission on the server without regenerating it and
+ * the Go suite fails. A hand-typed copy here drifted (F157): it lacked
+ * workers.quarantine, audit.manage and workflows.cache.invalidate, so the
+ * "Administrator" fixture could not render the quarantine controls at all.
  *
- * If a module or action is added on the server, add it here. A test fixture
- * that silently lacks a permission the product has is how a control stops being
- * covered without anything going red.
+ * Not derived from the nav, because the nav only yields `<module>.view` and the
+ * console gates ACTIONS too: a bulk cancel bar asks for runs.cancel, a delete
+ * row action for runs.delete. A fixture with view permissions alone renders
+ * every list and no control on it, which fails a bulk-action test with "unable
+ * to find button" -- the same misleading shape as having no provider at all.
  */
-const MODULE_ACTIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  overview: ['view'],
-  workflows: ['view', 'publish', 'delete'],
-  runs: ['view', 'create', 'cancel', 'pause', 'resume', 'retry', 'delete'],
-  tasks: ['view', 'logs.view', 'results.view'],
-  schedules: ['view', 'create', 'update', 'delete'],
-  backfills: ['view', 'create', 'update'],
-  workers: ['view', 'drain'],
-  infrastructure: ['view', 'configure'],
-  users: ['view', 'manage'],
-  tokens: ['view', 'manage'],
-  audit: ['view'],
-  roles: ['view', 'manage'],
-  service_accounts: ['view', 'manage'],
-  quotas: ['view', 'manage'],
-  usage: ['view'],
-  notifications: ['view', 'manage'],
-  triggers: ['view', 'create', 'update', 'delete'],
-  sensors: ['view', 'create', 'update', 'delete'],
-  assets: ['view'],
-});
+export const MODULE_ACTIONS: Readonly<Record<string, readonly string[]>> = Object.freeze(catalog.modules);
 
 /** Everything: what the Administrator role resolves to. The default for tests. */
 export const ADMIN_PERMISSIONS: readonly string[] = Object.freeze(
