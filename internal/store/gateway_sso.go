@@ -536,6 +536,16 @@ func GatewaySSOLogin(ctx context.Context, db GWDB, p SSOProviderRow, id SSOAsser
 			if !p.LinkByVerifiedEmail || !id.EmailVerified {
 				return res, ErrSSOAccountUnlinked
 			}
+			// An account already linked to ANOTHER subject of this provider is
+			// never re-linked by email: that would let a second IdP account
+			// with the same (reassigned, recycled) address take it over.
+			var linked bool
+			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_identities WHERE provider_id=$1 AND user_id=$2)`, p.ID, existing).Scan(&linked); err != nil {
+				return res, err
+			}
+			if linked {
+				return res, ErrSSOAccountUnlinked
+			}
 			userID = existing
 			res.Linked = true
 		case errors.Is(err, pgx.ErrNoRows):
