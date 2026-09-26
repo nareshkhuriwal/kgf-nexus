@@ -95,6 +95,11 @@ func (o *OIDC) provider(ctx context.Context, p store.SSOProviderRow) (cachedProv
 		return cachedProvider{}, fmt.Errorf("oidc discovery metadata: %w", err)
 	}
 	c = cachedProvider{p: prov, fetched: o.cfg.now(), meta: meta}
+	if p.ID == "" || strings.HasPrefix(p.ID, "probe-") {
+		// An administrator's "does this issuer work" check: never cached, so
+		// repeated saves cannot grow the cache.
+		return c, nil
+	}
 	o.mu.Lock()
 	for k := range o.providers {
 		if strings.HasPrefix(k, p.ID+"@") {
