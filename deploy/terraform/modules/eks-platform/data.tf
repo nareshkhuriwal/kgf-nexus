@@ -221,7 +221,10 @@ resource "aws_secretsmanager_secret_version" "postgres" {
     dbname   = aws_db_instance.postgres.db_name
     username = aws_db_instance.postgres.username
     password = random_password.postgres.result
-    sslmode  = "require"
+    # Clients verify the server: sslmode=verify-full with the RDS CA bundle
+    # (deploy/terraform/ca-bundles). Write-only: reaches Secrets Manager on
+    # the next postgres_password_version bump.
+    sslmode = "verify-full"
   })
   secret_string_wo_version = var.postgres_password_version
 }
