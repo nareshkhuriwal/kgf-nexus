@@ -233,6 +233,20 @@ else
   echo "FAIL: the kubernetes pool agent did not render as expected"; tail -5 "$tmp/k8s"; fail=1
 fi
 
+# Per-installation group roles and PUBLIC CONNECT (F153): the prefix reaches
+# the migrate Job and db-roles, and the logins join the prefixed roles.
+must_fail "group role prefix is the shared name" "/postgres/groupRolePrefix"   --set postgres.groupRolePrefix=nexus
+must_fail "group role prefix malformed"          "/postgres/groupRolePrefix"   --set postgres.groupRolePrefix=Acme-1
+if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set postgres.groupRolePrefix=acme \
+    --set postgres.runtimeRoles.enabled=true --set postgres.runtimeRoles.revokePublicConnect=true >"$tmp/prefix" 2>&1 &&
+   [ "$(grep -cF 'name: NEXUS_DB_ROLE_PREFIX, value: "acme"' "$tmp/prefix")" = 2 ] &&
+   grep -qF 'name: NEXUS_DB_REVOKE_PUBLIC_CONNECT, value: "true"' "$tmp/prefix" &&
+   grep -qF 'acme_scheduler' "$tmp/prefix" && ! grep -qF '\"nexus_scheduler\"' "$tmp/prefix"; then
+  echo "ok   rendered: group role prefix acme on migrate and db-roles, PUBLIC CONNECT revoked"
+else
+  echo "FAIL: the group role prefix did not render as expected"; tail -5 "$tmp/prefix"; fail=1
+fi
+
 # An agent serving another tenant (agents[].namespace) needs that tenant's NATS
 # identity: refused without it, rendered with the tenant's key and worker key.
 nkeys=(--set nats.auth.mode=nkey

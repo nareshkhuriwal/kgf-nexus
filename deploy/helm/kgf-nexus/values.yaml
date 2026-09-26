@@ -128,6 +128,18 @@ postgres:
     # Per-login concurrent session cap (-1 = none). Size above the pool's
     # max_conns x replicas, or scale-out fails at connect.
     connectionLimit: -1
+    # On a server shared by several Nexus installations (F153, OPERATIONS
+    # §20.12): the db-roles Job revokes PUBLIC's CONNECT on this database after
+    # granting CONNECT to every login above, so another installation's logins
+    # cannot connect here at all. Any other role that must connect (backups,
+    # monitoring) then needs its own GRANT CONNECT.
+    revokePublicConnect: false
+  # Per-installation service group roles (migration 0038, F153): with "acme",
+  # the migrate Job creates acme_api_gateway ... acme_event_service and moves
+  # every grant this database gave the shared nexus_* roles onto them, so no
+  # other installation's logins inherit it. Empty = the shared nexus_* roles
+  # (every existing installation). Unique per server; fixed once applied.
+  groupRolePrefix: ""
   # Per-service connection pool caps (NEXUS_DB_MAX_CONNS / NEXUS_DB_MIN_CONNS).
   # Empty keeps each service's own default (16 for most). Set these when the
   # database is shared and its max_connections is small, e.g. a workstation's

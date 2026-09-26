@@ -77,4 +77,24 @@ for file in "$MIGRATIONS_DIR"/*.up.sql; do
   applied=$((applied + 1))
 done
 
+# Per-installation group-role names (0038, F153). Runs after EVERY migrate,
+# not only when 0038 is new: it also moves whatever a later migration granted
+# to the shared nexus_* names. NEXUS_DB_ROLE_PREFIX unset keeps whatever this
+# database already uses (the shared names on every existing installation).
+role_prefix="${NEXUS_DB_ROLE_PREFIX:-}"
+if [ -n "$role_prefix" ] && ! printf '%s' "$role_prefix" | grep -Eq '^[a-z][a-z0-9_]{0,39}$'; then
+  echo "migrate: NEXUS_DB_ROLE_PREFIX=$role_prefix must match ^[a-z][a-z0-9_]{0,39}\$" >&2
+  exit 1
+fi
+has_prefix_fn=$(psql "$DATABASE_URL" -tAc \
+  "SELECT 1 FROM pg_proc WHERE proname = 'nexus_ensure_role_prefix'")
+if [ "$has_prefix_fn" = "1" ]; then
+  in_force=$(printf "SELECT nexus_ensure_role_prefix(:'prefix');\n" |
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -tA --single-transaction -v prefix="$role_prefix")
+  echo "migrate: service group roles are ${in_force}_*"
+elif [ -n "$role_prefix" ] && [ "$role_prefix" != nexus ]; then
+  echo "migrate: NEXUS_DB_ROLE_PREFIX needs migration 0038, which is not in $MIGRATIONS_DIR" >&2
+  exit 1
+fi
+
 echo "migrate: done ($applied newly applied)"

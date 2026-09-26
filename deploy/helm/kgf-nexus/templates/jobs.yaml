@@ -37,6 +37,10 @@ spec:
           env:
             {{- include "nexus.dbEnv" (list . "migrate") | nindent 12 }}
             - { name: MIGRATIONS_DIR, value: /migrations }
+            {{- with .Values.postgres.groupRolePrefix }}
+            # Per-installation group roles (0038, F153): fixed once applied.
+            - { name: NEXUS_DB_ROLE_PREFIX, value: {{ . | quote }} }
+            {{- end }}
           resources: {{- toYaml .Values.migrate.resources | nindent 12 }}
           securityContext: {{- include "nexus.containerSecurity" . | nindent 12 }}
           {{- with include "nexus.dbVolumeMounts" . }}
@@ -155,6 +159,13 @@ spec:
             {{- include "nexus.dbEnv" (list . "migrate") | nindent 12 }}
             - name: NEXUS_DB_ROLES
               value: {{ include "nexus.dbRolesSpec" . | quote }}
+            {{- with .Values.postgres.groupRolePrefix }}
+            - { name: NEXUS_DB_ROLE_PREFIX, value: {{ . | quote }} }
+            {{- end }}
+            {{- if $rr.revokePublicConnect }}
+            # Only this installation's logins and the owner connect (F153).
+            - { name: NEXUS_DB_REVOKE_PUBLIC_CONNECT, value: "true" }
+            {{- end }}
             {{- range $key := (include "nexus.dbRuntimeKeys" . | fromJsonArray) }}
             - name: {{ printf "NEXUS_PW_%s" (snakecase $key | upper) }}
               valueFrom: { secretKeyRef: { name: {{ $rrSecret }}, key: {{ (index $.Values.postgres.connections $key).passwordKey }} } }

@@ -186,8 +186,15 @@
             "existingSecret": { "type": "string" },
             "scope": { "enum": ["union", "service"] },
             "passwordRevision": { "type": "integer", "minimum": 1 },
-            "connectionLimit": { "type": "integer", "minimum": -1 }
+            "connectionLimit": { "type": "integer", "minimum": -1 },
+            "revokePublicConnect": { "type": "boolean", "description": "REVOKE CONNECT ON DATABASE FROM PUBLIC in the db-roles Job (F153)." }
           }
+        },
+        "groupRolePrefix": {
+          "type": "string",
+          "pattern": "^$|^[a-z][a-z0-9_]{0,39}$",
+          "not": { "const": "nexus" },
+          "description": "Per-installation service group roles <prefix>_scheduler ... (migration 0038, F153). Empty = the shared nexus_* roles. Fixed once applied."
         },
         "maxConnections": { "type": "integer", "minimum": 10 },
         "pool": {
