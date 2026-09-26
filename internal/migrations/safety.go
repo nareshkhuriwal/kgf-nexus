@@ -77,7 +77,23 @@ type rule struct {
 	// "matches X but not Y" -- so the exclusion lives in code rather than in an
 	// unreadable pattern.
 	extra func(stmt string) bool
-	why   string
+	// exempt waives a match using what the rest of the SAME migration does: a
+	// statement on a table the migration created, or an object dropped and
+	// re-created under the same name (the idempotent re-apply idiom). Nil means
+	// no exemption.
+	exempt func(stmt string, fc fileContext) bool
+	why    string
+}
+
+// fileContext is what one migration file creates, collected before any rule
+// runs because a CREATE may precede or follow the statement it excuses.
+type fileContext struct {
+	// fresh holds tables this migration creates: empty, so a lock or scan on
+	// them stalls nothing, and no older replica can depend on their shape.
+	fresh map[string]bool
+	// created holds "kind:name" (and "trigger:name@table") of indexes,
+	// triggers, functions, procedures, views and types this migration creates.
+	created map[string]bool
 }
 
 // rules are ordered most-severe first so a statement matching several is reported
@@ -97,16 +113,61 @@ var rules = []rule{
 		why:      "an old replica still reads this table and will fail mid-deploy",
 	},
 	{
+		name:     "truncate",
+		severity: Blocking,
+		re:       regexp.MustCompile(`(?i)\bTRUNCATE\b`),
+		why: "deletes every row, with no WHERE and no undo short of a restore, under an " +
+			"ACCESS EXCLUSIVE lock; a migration must not destroy data an old replica still serves",
+	},
+	{
+		name:     "drop-object",
+		severity: Blocking,
+		re:       regexp.MustCompile(`(?i)\bDROP\s+(?:TYPE|DOMAIN|FUNCTION|PROCEDURE|VIEW|MATERIALIZED\s+VIEW|SEQUENCE|SCHEMA)\b`),
+		exempt:   droppedObjectIsRecreated,
+		why: "an old replica, a column default or a trigger still uses this object and " +
+			"fails once it is gone; drop it a release after the last user",
+	},
+	{
+		name:     "drop-trigger",
+		severity: Blocking,
+		re:       regexp.MustCompile(`(?i)\bDROP\s+TRIGGER\b`),
+		exempt:   droppedTriggerIsRecreated,
+		why: "triggers carry invariants old replicas rely on -- the 0014 tenant_assignment " +
+			"triggers are what let a replica that predates tenant_id keep writing; " +
+			"re-create it in the same migration or remove it a release later",
+	},
+	{
+		name:     "drop-constraint",
+		severity: Blocking,
+		re:       regexp.MustCompile(`(?i)\bDROP\s+CONSTRAINT\b`),
+		exempt:   alterTargetIsFresh,
+		why: "an old replica's ON CONFLICT (or ON CONSTRAINT) may name this unique or " +
+			"primary key and fails without it, and its correctness may rest on a CHECK or " +
+			"FOREIGN KEY; drop it a release after the last reader",
+	},
+	{
+		name:     "drop-index",
+		severity: Blocking,
+		re:       regexp.MustCompile(`(?i)\bDROP\s+INDEX\b`),
+		exempt:   droppedIndexIsRecreated,
+		why: "a unique index can be what an old replica's ON CONFLICT relies on, a query " +
+			"plan may depend on any index, and without CONCURRENTLY the drop holds " +
+			"ACCESS EXCLUSIVE on the table; drop it a release after the last user",
+	},
+	{
 		name:     "rename",
 		severity: Blocking,
-		re:       regexp.MustCompile(`(?i)\bALTER\s+TABLE\b[\s\S]*?\bRENAME\b`),
+		// Tables, columns and constraints, and every other named object an old
+		// replica can reference: an index (ON CONFLICT ON CONSTRAINT), an enum
+		// value (RENAME VALUE), a type, a sequence, a function or a view.
+		re: regexp.MustCompile(`(?i)\bALTER\s+(?:TABLE|INDEX|TYPE|DOMAIN|SEQUENCE|VIEW|MATERIALIZED\s+VIEW|FUNCTION|PROCEDURE|SCHEMA)\b[\s\S]*?\bRENAME\b`),
 		why: "a rename is a drop and an add at once, so neither the old nor the new " +
 			"replica can see the name the other uses; add the new name, migrate readers, remove the old",
 	},
 	{
 		name:     "alter-column-type",
 		severity: Blocking,
-		re:       regexp.MustCompile(`(?i)\bALTER\s+(?:TABLE|COLUMN)\b[\s\S]*?\b(?:SET\s+DATA\s+)?TYPE\b`),
+		re:       regexp.MustCompile(`(?i)\bALTER\s+TABLE\b[\s\S]*?\bALTER\s+(?:COLUMN\s+)?(?:"[^"]+"|\w+)\s+(?:SET\s+DATA\s+)?TYPE\b`),
 		why: "changing a column's type rewrites the table under an ACCESS EXCLUSIVE lock " +
 			"and can change what an old replica reads back; add a new column instead",
 	},
@@ -129,6 +190,14 @@ var rules = []rule{
 			"NOT NULL a release later",
 	},
 	{
+		name:     "drop-default",
+		severity: Blocking,
+		re:       regexp.MustCompile(`(?i)\bALTER\b[\s\S]*?\bDROP\s+DEFAULT\b`),
+		why: "an old replica that INSERTs without this column relied on the default; on a " +
+			"NOT NULL column every such INSERT now fails, and on a nullable one it silently " +
+			"stores NULL instead",
+	},
+	{
 		name:     "unbounded-update",
 		severity: Review,
 		re:       regexp.MustCompile(`(?i)^\s*UPDATE\s+\w+`),
@@ -136,6 +205,28 @@ var rules = []rule{
 		why: "a backfill with no WHERE bound takes row locks across the whole table " +
 			"inside the migration's transaction; on a large table that is a stall, " +
 			"and it is invisible on an empty dev database (this is migration 0002's real cost)",
+	},
+	{
+		name:     "unbounded-delete",
+		severity: Review,
+		re:       regexp.MustCompile(`(?i)^\s*DELETE\s+FROM\b`),
+		extra:    func(stmt string) bool { return !boundedUpdate(stmt) },
+		exempt:   func(stmt string, fc fileContext) bool { return targetIsFresh(deleteTargetRe, stmt, fc) },
+		why: "a DELETE with no top-level WHERE removes every row and locks them all inside " +
+			"the migration's transaction; bound it, or say why the whole table goes",
+	},
+	{
+		name:     "validating-constraint",
+		severity: Review,
+		re:       regexp.MustCompile(`(?i)\bADD\s+(?:CONSTRAINT\s+(?:"[^"]+"|\w+)\s+)?(?:FOREIGN\s+KEY|CHECK|UNIQUE|PRIMARY\s+KEY|EXCLUDE)\b`),
+		// NOT VALID defers the scan (VALIDATE CONSTRAINT later takes only SHARE
+		// UPDATE EXCLUSIVE); USING INDEX adopts an index built CONCURRENTLY.
+		extra:  func(stmt string) bool { return !notValidOrUsingIndex.MatchString(stmt) },
+		exempt: alterTargetIsFresh,
+		why: "adding a constraint validates every existing row under a lock that blocks " +
+			"writes (a UNIQUE or PRIMARY KEY also builds its index there), and an old " +
+			"replica's writes that violate it start failing; add CHECK/FOREIGN KEY NOT " +
+			"VALID and VALIDATE later, or UNIQUE ... USING INDEX over a CONCURRENTLY-built index",
 	},
 	{
 		name:     "create-index-blocking",
@@ -157,13 +248,99 @@ var (
 	// leaves the outer UPDATE touching every row. Counting that as bounded would
 	// have exempted the exact statement this package was written to catch.
 	hasWhere = regexp.MustCompile(`(?i)\bWHERE\b`)
+
+	notValidOrUsingIndex = regexp.MustCompile(`(?i)\bNOT\s+VALID\b|\bUSING\s+INDEX\b`)
 )
 
 var (
 	createTableRe  = regexp.MustCompile(`(?is)\bCREATE\s+TABLE\b(?:\s+IF\s+NOT\s+EXISTS)?\s+"?(\w+)"?`)
 	createIndexRe  = regexp.MustCompile(`(?is)\bCREATE\s+(?:UNIQUE\s+)?INDEX\b[\s\S]*?\bON\s+"?(\w+)"?`)
 	updateTargetRe = regexp.MustCompile(`(?is)^\s*UPDATE\s+(?:ONLY\s+)?"?(\w+)"?`)
+	deleteTargetRe = regexp.MustCompile(`(?is)^\s*DELETE\s+FROM\s+(?:ONLY\s+)?"?(\w+)"?`)
+	alterTargetRe  = regexp.MustCompile(`(?is)\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?"?(\w+)"?`)
+
+	createdIndexRe   = regexp.MustCompile(`(?is)\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)"?`)
+	createdTriggerRe = regexp.MustCompile(`(?is)\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\s+"?(\w+)"?[\s\S]*?\bON\s+(?:ONLY\s+)?"?(\w+)"?`)
+	createdObjectRe  = regexp.MustCompile(`(?is)\bCREATE\s+(?:OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE|VIEW|TYPE|DOMAIN)\s+(?:\w+\.)?"?(\w+)"?`)
+	droppedIndexRe   = regexp.MustCompile(`(?is)\bDROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?"?(\w+)"?`)
+	droppedTriggerRe = regexp.MustCompile(`(?is)\bDROP\s+TRIGGER\s+(?:IF\s+EXISTS\s+)?"?(\w+)"?\s+ON\s+(?:ONLY\s+)?"?(\w+)"?`)
+	droppedObjectRe  = regexp.MustCompile(`(?is)\bDROP\s+(FUNCTION|PROCEDURE|VIEW|TYPE|DOMAIN)\s+(?:IF\s+EXISTS\s+)?(?:\w+\.)?"?(\w+)"?`)
 )
+
+// newFileContext collects what a migration creates.
+func newFileContext(stmts []statement) fileContext {
+	fc := fileContext{fresh: tablesCreatedIn(stmts), created: map[string]bool{}}
+	for _, st := range stmts {
+		for _, m := range createdIndexRe.FindAllStringSubmatch(st.text, -1) {
+			fc.created["index:"+strings.ToLower(m[1])] = true
+		}
+		for _, m := range createdTriggerRe.FindAllStringSubmatch(st.text, -1) {
+			fc.created["trigger:"+strings.ToLower(m[1])+"@"+strings.ToLower(m[2])] = true
+		}
+		for _, m := range createdObjectRe.FindAllStringSubmatch(st.text, -1) {
+			fc.created[strings.ToLower(m[1])+":"+strings.ToLower(m[2])] = true
+		}
+	}
+	return fc
+}
+
+// targetIsFresh reports whether re's first capture names a table this
+// migration created.
+func targetIsFresh(re *regexp.Regexp, stmt string, fc fileContext) bool {
+	m := re.FindStringSubmatch(stmt)
+	return m != nil && fc.fresh[strings.ToLower(m[1])]
+}
+
+func alterTargetIsFresh(stmt string, fc fileContext) bool {
+	return targetIsFresh(alterTargetRe, stmt, fc)
+}
+
+// droppedIndexIsRecreated: every index the statement drops is created again,
+// under the same name, by this migration -- the "drop a leftover INVALID copy,
+// then CREATE INDEX CONCURRENTLY" idiom of 0022 and 0027. A name built at run
+// time (format('DROP INDEX %I', ...)) cannot be read and is not exempt.
+func droppedIndexIsRecreated(stmt string, fc fileContext) bool {
+	ms := droppedIndexRe.FindAllStringSubmatch(stmt, -1)
+	if len(ms) == 0 {
+		return false
+	}
+	for _, m := range ms {
+		if !fc.created["index:"+strings.ToLower(m[1])] {
+			return false
+		}
+	}
+	return true
+}
+
+// droppedTriggerIsRecreated: DROP TRIGGER IF EXISTS x ON t followed by CREATE
+// TRIGGER x ... ON t, the idempotent re-apply idiom of every tenant trigger.
+func droppedTriggerIsRecreated(stmt string, fc fileContext) bool {
+	ms := droppedTriggerRe.FindAllStringSubmatch(stmt, -1)
+	if len(ms) == 0 {
+		return false
+	}
+	for _, m := range ms {
+		if !fc.created["trigger:"+strings.ToLower(m[1])+"@"+strings.ToLower(m[2])] {
+			return false
+		}
+	}
+	return true
+}
+
+// droppedObjectIsRecreated: a function, procedure, view, type or domain
+// dropped and created again under the same name (a signature change).
+func droppedObjectIsRecreated(stmt string, fc fileContext) bool {
+	ms := droppedObjectRe.FindAllStringSubmatch(stmt, -1)
+	if len(ms) == 0 {
+		return false
+	}
+	for _, m := range ms {
+		if !fc.created[strings.ToLower(m[1])+":"+strings.ToLower(m[2])] {
+			return false
+		}
+	}
+	return true
+}
 
 // tablesCreatedIn lists the tables a migration creates itself.
 func tablesCreatedIn(stmts []statement) map[string]bool {
@@ -278,7 +455,8 @@ func Analyse(dir string) ([]Finding, error) {
 		// Tables created by THIS migration are empty, so an index on one cannot
 		// stall anything. Collected up front because a CREATE INDEX may precede or
 		// follow the CREATE TABLE it belongs to.
-		fresh := tablesCreatedIn(stmts)
+		fc := newFileContext(stmts)
+		fresh := fc.fresh
 		for _, st := range stmts {
 			for _, r := range rules {
 				if !r.re.MatchString(st.text) {
@@ -291,6 +469,9 @@ func Analyse(dir string) ([]Finding, error) {
 					continue
 				}
 				if r.name == "unbounded-update" && updateTargetIsFresh(st.text, fresh) {
+					continue
+				}
+				if r.exempt != nil && r.exempt(st.text, fc) {
 					continue
 				}
 				{

@@ -345,19 +345,31 @@ Only the header comment and the operator stand between them.
 
 `internal/migrations` (run by `go test ./...` in the CI `build` job) scans every
 `*.up.sql` and fails on shapes that break old replicas: `DROP COLUMN`,
-`DROP TABLE`, `RENAME`, `ALTER … TYPE`, `SET NOT NULL`,
-`ADD COLUMN … NOT NULL` with no default, top-level `UPDATE` with no `WHERE`, and
-`CREATE INDEX` without `CONCURRENTLY`. It also checks versions are unique, gaps
-are only the known one (0019), and names are well formed (OPERATIONS.md §6.2).
+`DROP TABLE`, `TRUNCATE`, `DROP CONSTRAINT`, `DROP INDEX`, `DROP TRIGGER`,
+`DROP` of a type, domain, function, procedure, view, sequence or schema,
+`RENAME` of any of those objects (including an enum's `RENAME VALUE`),
+`ALTER … [SET DATA] TYPE`, `SET NOT NULL`, `DROP DEFAULT`,
+`ADD COLUMN … NOT NULL` with no default, `ADD CONSTRAINT` (FOREIGN KEY, CHECK,
+UNIQUE, PRIMARY KEY, EXCLUDE) that validates existing rows -- that is,
+without `NOT VALID` or `USING INDEX` --, top-level `UPDATE` or `DELETE` with
+no `WHERE`, and `CREATE INDEX` without `CONCURRENTLY`. Statements on a table
+the same migration creates are exempt, as are a trigger, index, function,
+view or type dropped and re-created under the same name in the same
+migration (the idempotent re-apply idiom). DDL built at run time inside a
+`DO` block is matched where its text is literal (`EXECUTE 'DROP INDEX x'`)
+and cannot be where it is computed (`format(...)`). It also checks versions
+are unique, gaps are only the known one (0019), and names are well formed
+(OPERATIONS.md §6.2). Accepted findings in applied migrations are listed,
+with reasons, in `internal/migrations/safety_test.go`.
 
 It is **syntactic**. It does not know what the old code runs, so it cannot
 catch any of the following:
 
-- `DROP CONSTRAINT` / `DROP INDEX` removing a unique index that an old
-  `INSERT … ON CONFLICT (cols)` depends on. §7.4 shows this passing the gate
-  and failing the old code.
-- A new `CHECK`, `FOREIGN KEY` or trigger that rejects rows an old writer
-  still produces.
+- Whether a dropped constraint or index is one an old `INSERT … ON CONFLICT
+  (cols)` depends on: every drop is flagged, and the reviewer decides. §7.4
+  shows such a drop failing the old code.
+- Whether a new `CHECK`, `FOREIGN KEY` or trigger rejects rows an old writer
+  still produces (the gate flags the constraint, not the writer).
 - A changed function or trigger body, a changed default, or a changed view.
 - Semantic changes: a column whose meaning changed without its shape changing.
 
