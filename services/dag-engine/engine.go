@@ -747,7 +747,13 @@ func deriveNodeStates(
 		// the node's retry_floor, because an operator retry grants the budget
 		// afresh and the attempts below the floor belong to the superseded tries
 		// (CONTRACT-FINDINGS F100). LoadAttempts has already dropped those.
-		exhausted := last.AttemptNumber-n.RetryFloor >= maxAttempts
+		//
+		// A retry the scheduler has already scheduled overrides the count: a
+		// preemption retry (ADR-0030 §3) runs past max_attempts by design, and
+		// judging the node by its attempt count alone declared it FAILED -- and
+		// the run with it -- in the seconds before the retry attempt existed.
+		// Found by the simulated spot e2e (tests/gpusim).
+		exhausted := last.AttemptNumber-n.RetryFloor >= maxAttempts && !last.RetryPending
 		out[n.NodeID] = dag.AttemptStateToNode(string(last.State), exhausted)
 	}
 	return out

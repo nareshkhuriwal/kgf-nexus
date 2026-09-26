@@ -35,7 +35,8 @@ func normalizeSpecEnums(raw []byte) []byte {
 	if !bytes.Contains(raw, []byte(`"retry"`)) &&
 		!bytes.Contains(raw, []byte(`"idempotency"`)) &&
 		!bytes.Contains(raw, []byte(`"trigger_rule"`)) &&
-		!bytes.Contains(raw, []byte(`"strategy"`)) {
+		!bytes.Contains(raw, []byte(`"strategy"`)) &&
+		!bytes.Contains(raw, []byte(`"capacity"`)) {
 		return raw
 	}
 	var doc any
@@ -63,6 +64,17 @@ var enumPrefixes = map[string]map[string]string{
 	"strategy":     backoffStrategyNames,
 	"idempotency":  idempotencyModeNames,
 	"trigger_rule": triggerRuleNames,
+	// PlacementSpec.capacity (ADR-0030). Without it protojson's DiscardUnknown
+	// silently turned "spot_preferred" and "on_demand_only" into the zero value
+	// SPOT_ALLOWED: the spec was accepted, and the constraint vanished at run
+	// materialization -- found by the simulated spot e2e (tests/gpusim).
+	"capacity": capacityPreferenceNames,
+}
+
+var capacityPreferenceNames = map[string]string{
+	"spot_allowed":   "CAPACITY_PREFERENCE_SPOT_ALLOWED",
+	"spot_preferred": "CAPACITY_PREFERENCE_SPOT_PREFERRED",
+	"on_demand_only": "CAPACITY_PREFERENCE_ON_DEMAND_ONLY",
 }
 
 var errorClassNames = map[string]string{
@@ -73,6 +85,7 @@ var errorClassNames = map[string]string{
 	"permission_denied": "ERROR_CLASS_PERMISSION_DENIED",
 	"application":       "ERROR_CLASS_APPLICATION", "oom": "ERROR_CLASS_OOM",
 	"not_found": "ERROR_CLASS_NOT_FOUND", "infrastructure": "ERROR_CLASS_INFRASTRUCTURE",
+	"preempted": "ERROR_CLASS_PREEMPTED",
 }
 
 var backoffStrategyNames = map[string]string{

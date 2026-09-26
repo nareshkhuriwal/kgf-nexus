@@ -532,7 +532,13 @@ func TestClusterHeadroomGatesKubernetesDispatch(t *testing.T) {
 func TestPreemptionUsesItsOwnRetryBudget(t *testing.T) {
 	pool := newTestPool(t)
 	f := newFixture(t, pool)
-	w := f.addWorker(vec{CPUMillis: 8000, MemoryBytes: 1 << 34}, nil, nil)
+	// One worker per preemption: a preempted worker is drained in the same
+	// transaction, so each retry must land somewhere else.
+	var workers []uuid.UUID
+	for i := 0; i < 3; i++ {
+		workers = append(workers, f.addWorker(vec{CPUMillis: 8000, MemoryBytes: 1 << 34}, nil, nil))
+	}
+	next := 0
 	st := f.newStore(func(c *store.ClaimConfig) { c.PreemptionRetryDelay = 0 })
 	f.addAttempt("p", 100, vec{CPUMillis: 100}, nodeSpec{TaskRef: "t", Version: 1, MaxAttempts: 1, Idempotency: "required",
 		Placement: map[string]any{"max_preemptions": 2}}, time.Now().UTC().Add(-time.Minute))
@@ -545,6 +551,8 @@ func TestPreemptionUsesItsOwnRetryBudget(t *testing.T) {
 		return
 	}
 	preemptOnce := func() store.AppliedResult {
+		w := workers[next]
+		next++
 		got, err := st.ClaimForWorker(ctx, time.Now().UTC(), store.WorkerClaimRequest{WorkerID: w, MaxTasks: 1})
 		if err != nil || len(got) != 1 {
 			t.Fatalf("dispatch: %v %v", got, err)
@@ -554,6 +562,15 @@ func TestPreemptionUsesItsOwnRetryBudget(t *testing.T) {
 			Error: &nexusv1.TaskError{Class: nexusv1.ErrorClass_ERROR_CLASS_PREEMPTED, Message: "spot interruption"}})
 		if err != nil {
 			t.Fatal(err)
+		}
+		// The reporting worker's node is going away: it is drained in the same
+		// transaction, so neither a parked long poll nor the push loop can hand
+		// it the retry.
+		if s := f.workerState(w); s != "DRAINING" {
+			t.Fatalf("preempted worker is %s, want DRAINING", s)
+		}
+		if again, _ := st.ClaimForWorker(ctx, time.Now().UTC(), store.WorkerClaimRequest{WorkerID: w, MaxTasks: 1}); len(again) != 0 {
+			t.Fatal("the drained, preempted worker was handed work")
 		}
 		if res.Retry {
 			fired, err := st.ClaimDueTimers(ctx, time.Now().UTC().Add(time.Minute), []string{domain.TimerRetryBackoff}, 10)

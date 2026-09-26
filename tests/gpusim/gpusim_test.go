@@ -35,6 +35,8 @@ import (
 var (
 	root    = filepath.Join("..", "..")
 	project = envOr("E2E_PROJECT", "nexus-w3j")
+	// workerKey is the stack's worker API key, read by stackEnv.
+	workerKey string
 )
 
 func envOr(k, def string) string {
@@ -60,6 +62,7 @@ func stackEnv(t *testing.T) map[string]string {
 	if out["E2E_PROJECT"] != project {
 		t.Skipf("stack env is for project %q, not %q", out["E2E_PROJECT"], project)
 	}
+	workerKey = out["E2E_WORKER_API_KEY"]
 	return out
 }
 
@@ -69,6 +72,9 @@ func compose(t *testing.T, args ...string) string {
 		"-f", "deploy/e2e/docker-compose.e2e.yml", "-f", "deploy/e2e/docker-compose.gpu-sim.yml"}
 	cmd := exec.Command("docker", append(full, args...)...)
 	cmd.Dir = root
+	// The compose file interpolates the worker key for every command, even
+	// read-only ones, so hand it the stack's key.
+	cmd.Env = append(os.Environ(), "NEXUS_WORKER_API_KEY="+workerKey)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker compose %v: %v\n%s", args, err, out)

@@ -91,7 +91,7 @@ _AUDIT = (
     "    if (mode[a] ~ /^shared/) {\n"
     "      used = 0; conc = 0;\n"
     "      for (b = 1; b <= j; b++) if (mode[b] ~ /^shared/ && host[b] == host[a] && dev[b] == dev[a] && s[b] <= s[a] && e[b] > s[a]) { used += mem[b]; conc++ }\n"
-    "      if (used > cap) { bad++; why = why sprintf(\"device %s on %s held %d bytes at once (capacity %d); \", dev[a], host[a], used, cap) }\n"
+    "      if (used > cap) { bad++; why = why sprintf(\"device %s on %s held %.0f bytes at once (capacity %.0f);\", dev[a], host[a], used, cap) }\n"
     "      if (conc > packed) packed = conc; if (used > peak) peak = used\n"
     "    } else if (mode[a] == \"mig\") {\n"
     "      inuse = 0;\n"
@@ -102,7 +102,7 @@ _AUDIT = (
     "    } else { bad++; why = why sprintf(\"%s ran with GPU mode %s; \", node[a], mode[a]) }\n"
     "  }\n"
     "  if (packed < 2) { bad++; why = why \"no two slices ever shared a device: nothing was packed; \" }\n"
-    '  printf "{\\"jobs\\":%d,\\"violations\\":%d,\\"max_slices_on_one_device\\":%d,\\"peak_device_vram_bytes\\":%d", j, bad, packed, peak;\n'
+    '  printf "{\\"jobs\\":%d,\\"violations\\":%d,\\"max_slices_on_one_device\\":%d,\\"peak_device_vram_bytes\\":%.0f", j, bad, packed, peak;\n'
     '  if (bad) { printf ",\\"problems\\":\\"%s\\"}\\n", why; print "GPU SHARING AUDIT FAILED: " why > "/dev/stderr"; exit 1 }\n'
     '  printf "}\\n" }\' > "$NEXUS_OUTPUT_DIR/audit" && cat "$NEXUS_OUTPUT_DIR/audit"'
 )

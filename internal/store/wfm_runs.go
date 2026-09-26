@@ -363,11 +363,28 @@ func WFMListStalledRuns(ctx context.Context, q GWQuerier, minAge time.Duration, 
 		   -- live attempts, and concluding THAT run terminal would kill it before
 		   -- it ever started.
 		   AND EXISTS (SELECT 1 FROM task_nodes n WHERE n.run_id = r.id)
+		   --
+		   -- A node whose STORED state is not terminal also counts as settled
+		   -- when it has attempts, none of them live (checked above) and no
+		   -- retry scheduled: node state is only rewritten by a reconcile, and
+		   -- an attempt that ended by LEASE EXPIRY with its budget spent
+		   -- triggers none -- the gateway reconciles after worker reports only.
+		   -- Such a run sat RUNNING forever, invisible to this sweep because
+		   -- its node still read RUNNING (found by tests/gpusim). A node in
+		   -- retry backoff has a retry_backoff timer and is left alone; a node
+		   -- with no attempt at all (waiting on upstreams, or a map template)
+		   -- is judged by its stored state as before.
 		   AND NOT EXISTS (
 		         SELECT 1 FROM task_nodes n
 		          WHERE n.run_id = r.id
 		            AND n.state NOT IN
-		                ('SUCCEEDED','FAILED','SKIPPED','UPSTREAM_FAILED','CANCELLED'))
+		                ('SUCCEEDED','FAILED','SKIPPED','UPSTREAM_FAILED','CANCELLED')
+		            AND NOT (
+		                  EXISTS (SELECT 1 FROM task_attempts a
+		                           WHERE a.run_id = n.run_id AND a.node_id = n.node_id)
+		              AND NOT EXISTS (SELECT 1 FROM task_attempts a
+		                                JOIN timers t ON t.subject_id = a.id AND t.kind = 'retry_backoff'
+		                               WHERE a.run_id = n.run_id AND a.node_id = n.node_id)))
 		   -- Age from the last thing that HAPPENED, which is the most recent
 		   -- attempt ending. workflow_runs has no updated_at, and created_at is
 		   -- the wrong clock: a long healthy run would look stale the whole time

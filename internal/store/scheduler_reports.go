@@ -352,6 +352,22 @@ UPDATE task_attempts
 		out.Retry = decision.Retry
 	}
 
+	// A PREEMPTED report is the worker saying its node is being reclaimed
+	// (ADR-0030 §2). Stop dispatching to it in THIS transaction: its eviction
+	// drain_reason reaches the gateway only on its next heartbeat, and in that
+	// gap a long poll it had already parked -- or the push loop -- handed the
+	// preemption retry straight back to the dying worker, which refused it and
+	// let it go LOST (found by tests/gpusim). The scheduler already owns this
+	// column for the DEAD transition (0005); ACTIVE -> DRAINING is the only
+	// move made here, and a worker in any other state is left alone.
+	if errClass == nexusv1.ErrorClass_ERROR_CLASS_PREEMPTED && workerID != nil {
+		if _, err := tx.Exec(ctx,
+			`UPDATE workers SET state = 'DRAINING' WHERE id = $1 AND state = 'ACTIVE'`, *workerID,
+		); err != nil {
+			return AppliedResult{}, fmt.Errorf("drain preempted worker %s: %w", *workerID, err)
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return AppliedResult{}, fmt.Errorf("commit apply-result tx: %w", err)
 	}
