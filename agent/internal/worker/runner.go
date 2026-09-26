@@ -4,6 +4,14 @@
 package worker
 
 import (
+	otelcodes "go.opentelemetry.io/otel/codes"
+
+	"go.opentelemetry.io/otel/trace"
+
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"fmt"
@@ -208,8 +216,24 @@ func (r *Runner) Executors() []string {
 // including a panic in task-adjacent code.
 func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 	attemptID := a.GetAttemptId()
-	log := r.log.With("attempt_id", attemptID, "run_id", a.GetRunId(),
-		"node_id", a.GetNodeId(), "attempt_number", a.GetAttemptNumber())
+
+	// Continue the run's trace from the dispatch span the scheduler recorded
+	// (ADR-0026). The attempt's whole life on this worker -- inputs, workload,
+	// logs, outputs, report -- is one span with phase children, and the log
+	// lines of this attempt carry its trace_id.
+	ctx, span := tracing.Start(tracing.Extract(ctx, a.GetTraceContext()), "attempt.execute",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			tracing.AttrRunID.String(a.GetRunId()),
+			tracing.AttrNodeID.String(a.GetNodeId()),
+			tracing.AttrAttemptID.String(attemptID),
+			tracing.AttrAttemptNumber.Int(int(a.GetAttemptNumber())),
+			tracing.AttrWorkerID.String(r.WorkerID),
+			tracing.AttrExecutor.String(a.GetSpec().GetRuntime().GetExecutor())))
+	defer span.End()
+
+	log := tracing.WithTrace(ctx, r.log.With("attempt_id", attemptID, "run_id", a.GetRunId(),
+		"node_id", a.GetNodeId(), "attempt_number", a.GetAttemptNumber()))
 
 	// A per-attempt cancellable context, so a CANCEL_ATTEMPT directive or a lease
 	// revocation can tear down THIS attempt without touching its siblings.
@@ -308,8 +332,12 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 	token := a.GetLeaseToken()
 	r.reporter.ReportStarted(taskCtx, attemptID, token)
 
-	spec, err := r.buildExecutorSpec(taskCtx, a)
+	inCtx, inSpan := tracing.Start(taskCtx, "attempt.prepare_inputs",
+		trace.WithAttributes(attribute.Int("nexus.inputs", len(a.GetInputs()))))
+	spec, err := r.buildExecutorSpec(inCtx, a)
+	tracing.End(inSpan, err)
 	if err != nil {
+		span.SetStatus(otelcodes.Error, "inputs could not be prepared")
 		c := executor.ClassifyError(err)
 		log.Error("could not prepare the task specification", "error", err, "class", c.Class.String())
 		r.reportFailure(taskCtx, a, c, executor.Outcome{})
@@ -320,9 +348,19 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 	if ship != nil {
 		spec.LogSink = ship
 	}
-	outcome, prepErr := r.execute(taskCtx, exec, rt, spec, log)
-	r.finishLogs(ctx, ship, log)
+	runCtx, runSpan := tracing.Start(taskCtx, "attempt.run",
+		trace.WithAttributes(tracing.AttrExecutor.String(exec.Kind())))
+	// The workload's own spans (TRACEPARENT) are children of attempt.run.
+	spec.TraceEnv = tracing.TaskEnv(runCtx)
+	outcome, prepErr := r.execute(runCtx, exec, rt, spec, log)
+	runSpan.SetAttributes(attribute.Int("nexus.exit_code", int(outcome.ExitCode)))
+	tracing.End(runSpan, prepErr)
+
+	logCtx, logSpan := tracing.Start(ctx, "attempt.finalize_logs")
+	r.finishLogs(logCtx, ship, log)
+	logSpan.End()
 	if prepErr != nil {
+		span.SetStatus(otelcodes.Error, "execution failed")
 		c := executor.ClassifyError(prepErr)
 		log.Error("execution failed before or during the workload", "error", prepErr, "class", c.Class.String())
 		r.reportFailure(taskCtx, a, c, outcome)
@@ -606,6 +644,8 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 	// prevent, and reporting now is cheaper than replaying at next boot.
 	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 	defer cancel()
+	reportCtx, span := tracing.Start(reportCtx, "attempt.report_result")
+	defer span.End()
 
 	token := r.currentToken(a)
 	req := &nexusv1.ReportResultRequest{
@@ -624,7 +664,10 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 	switch {
 	case o.Succeeded():
 		req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED
-		refs, err := r.storeOutputs(reportCtx, a, o, log)
+		outCtx, outSpan := tracing.Start(reportCtx, "attempt.store_outputs")
+		refs, err := r.storeOutputs(outCtx, a, o, log)
+		outSpan.SetAttributes(attribute.Int("nexus.outputs", len(refs)))
+		tracing.End(outSpan, err)
 		if err != nil {
 			// We cannot persist an output, so we cannot honestly claim success: a
 			// downstream task would read a reference to nothing. INFRASTRUCTURE +
@@ -647,8 +690,15 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 		AttemptID: a.GetAttemptId(), LeaseToken: token,
 		RunID: a.GetRunId(), NodeID: a.GetNodeId(),
 	}
+	span.SetAttributes(tracing.AttrOutcome.String(req.GetOutcome().String()))
+	if req.GetOutcome() != nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED {
+		span.SetStatus(otelcodes.Error, req.GetError().GetType())
+	}
 	err := r.reporter.ReportResult(reportCtx, req, entry)
 	r.observeReport(a.GetAttemptId(), req, err)
+	if err != nil {
+		span.RecordError(err)
+	}
 	if err != nil {
 		log.Error("failed to report the attempt result", "error", err)
 	}

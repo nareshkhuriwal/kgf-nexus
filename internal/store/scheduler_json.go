@@ -4,6 +4,8 @@
 package store
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"encoding/json"
 	"fmt"
@@ -252,8 +254,8 @@ WITH ev AS (
   VALUES ($1, $2, $3, $4, $5, $6, $7)
   RETURNING id
 )
-INSERT INTO outbox (topic, ref_id) SELECT 'run_event', id FROM ev`,
-		runID, seq, nullString(nodeID), attemptID, kind, body, actor,
+INSERT INTO outbox (topic, ref_id, trace_context) SELECT 'run_event', id, $8 FROM ev`,
+		runID, seq, nullString(nodeID), attemptID, kind, body, actor, tracing.NullableTraceparent(ctx),
 	); err != nil {
 		return fmt.Errorf("append run_event %s: %w", kind, err)
 	}

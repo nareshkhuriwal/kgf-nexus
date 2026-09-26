@@ -43,6 +43,14 @@ type TaskSpec struct {
 	RunID     string
 	NodeID    string
 
+	// TraceEnv is the attempt's W3C trace context as process environment
+	// (TRACEPARENT, and TRACESTATE when set), following the OpenTelemetry
+	// environment-carrier convention (ADR-0026). Every executor passes it to
+	// the workload with the platform variables, so an instrumented task (the
+	// Python SDK with its opentelemetry extra, or any program honouring the
+	// convention) continues the attempt's trace. Empty when untraced.
+	TraceEnv map[string]string
+
 	// IdempotencyKey is handed to the workload as NEXUS_IDEMPOTENCY_KEY. It is
 	// stable across retries by construction, which is the mechanism that lets
 	// a handler deduplicate its own side effects.
@@ -278,3 +286,17 @@ const (
 	// of a compiled-in 64 KiB. Exported only when the agent knows the value.
 	EnvInlineThreshold = "NEXUS_INLINE_THRESHOLD_BYTES"
 )
+
+// traceEnvList renders TraceEnv as KEY=VALUE pairs in a fixed order. Only the
+// two convention keys are passed, whatever the map holds: the trace context
+// arrives from the control plane, and nothing else from it belongs in a task's
+// environment.
+func traceEnvList(spec TaskSpec) []string {
+	var out []string
+	for _, k := range []string{"TRACEPARENT", "TRACESTATE"} {
+		if v := spec.TraceEnv[k]; v != "" {
+			out = append(out, k+"="+v)
+		}
+	}
+	return out
+}

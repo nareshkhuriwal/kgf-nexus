@@ -59,6 +59,10 @@ type WorkerAssignment struct {
 	// InputRefsJSON is task_attempts.input_refs verbatim: the attempt's resolved
 	// inputs as the DAG engine wrote them.
 	InputRefsJSON []byte
+	// TraceContext is task_attempts.trace_context (migration 0028): the W3C
+	// traceparent of whatever made the attempt ready, or "" when untraced.
+	// The scheduler parents its dispatch span on it (ADR-0026).
+	TraceContext string
 
 	// claimedRequest is the resource request that was just committed, used only
 	// to decrement the local capacity budget within one multi-task poll. Not
@@ -294,7 +298,7 @@ func (s *SchedulerStore) claimOneForWorker(
 			continue
 		}
 
-		idemKey, specJSON, inputRefs, err := s.assignmentDetails(ctx, tx, cand)
+		idemKey, specJSON, inputRefs, traceCtx, err := s.assignmentDetails(ctx, tx, cand)
 		if err != nil {
 			return nil, err
 		}
@@ -327,6 +331,7 @@ func (s *SchedulerStore) claimOneForWorker(
 			LeaseExpiresAt: dispatch.ExpiresAt,
 			SpecJSON:       specJSON,
 			InputRefsJSON:  inputRefs,
+			TraceContext:   traceCtx,
 			claimedRequest: cand.ResourceRequest,
 		}
 		// The start_to_close deadline is an absolute instant derived from
@@ -728,16 +733,20 @@ func (s *SchedulerStore) finishWorkerCandidate(
 // value every at-least-once guarantee depends on.
 func (s *SchedulerStore) assignmentDetails(
 	ctx context.Context, tx pgx.Tx, cand *Candidate,
-) (idempotencyKey string, specJSON, inputRefs []byte, err error) {
+) (idempotencyKey string, specJSON, inputRefs []byte, traceCtx string, err error) {
+	var tc *string
 	err = tx.QueryRow(ctx, `
-SELECT a.idempotency_key, n.spec_json::text, a.input_refs::text
+SELECT a.idempotency_key, n.spec_json::text, a.input_refs::text, a.trace_context
   FROM task_attempts a
   JOIN task_nodes n ON n.run_id = a.run_id AND n.node_id = a.node_id
- WHERE a.id = $1`, cand.ID).Scan(&idempotencyKey, &specJSON, &inputRefs)
+ WHERE a.id = $1`, cand.ID).Scan(&idempotencyKey, &specJSON, &inputRefs, &tc)
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("load assignment details for attempt %s: %w", cand.ID, err)
+		return "", nil, nil, "", fmt.Errorf("load assignment details for attempt %s: %w", cand.ID, err)
 	}
-	return idempotencyKey, specJSON, inputRefs, nil
+	if tc != nil {
+		traceCtx = *tc
+	}
+	return idempotencyKey, specJSON, inputRefs, traceCtx, nil
 }
 
 // PendingCancellations lists the attempts this worker holds that the control

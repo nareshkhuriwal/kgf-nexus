@@ -136,17 +136,18 @@ func (s *SchedulerStore) CreatePendingRetry(
 		cacheKey      *string
 		inputRefs     []byte
 		prevWorker    *uuid.UUID
+		prevTrace     *string
 		specJSON      []byte
 	)
 	if err := tx.QueryRow(ctx, `
 SELECT a.run_id, a.node_id, a.attempt_number, a.state, a.queue, a.priority,
        a.resource_request, a.idempotency_key, a.cache_key, a.input_refs,
-       a.worker_id, n.spec_json
+       a.worker_id, n.spec_json, a.trace_context
   FROM task_attempts a
   JOIN task_nodes n ON n.run_id = a.run_id AND n.node_id = a.node_id
  WHERE a.id = $1`, prevID,
 	).Scan(&runID, &nodeID, &attemptNumber, &state, &queue, &priority,
-		&reqJSON, &idemKey, &cacheKey, &inputRefs, &prevWorker, &specJSON); err != nil {
+		&reqJSON, &idemKey, &cacheKey, &inputRefs, &prevWorker, &specJSON, &prevTrace); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// The attempt is gone (run deleted). Consume the timer rather than
 			// leaving it to be retried forever.
@@ -183,14 +184,14 @@ SELECT a.run_id, a.node_id, a.attempt_number, a.state, a.queue, a.priority,
 WITH a AS (
 INSERT INTO task_attempts (
         run_id, node_id, attempt_number, state, queue, priority,
-        resource_request, idempotency_key, cache_key, input_refs, scheduled_at)
-VALUES ($1,$2,$3,'PENDING',$4,$5,$6,$7,$8,$9,$10)
+        resource_request, idempotency_key, cache_key, input_refs, scheduled_at, trace_context)
+VALUES ($1,$2,$3,'PENDING',$4,$5,$6,$7,$8,$9,$10,$11)
 ON CONFLICT (run_id, node_id, attempt_number) DO NOTHING
-RETURNING id, run_id, queue, scheduled_at
+RETURNING id, run_id, queue, scheduled_at, trace_context
 ),`+outboxTaskReadyCTE+`
 SELECT id FROM a`,
 		runID, nodeID, nextNumber, queue, priority,
-		reqJSON, idemKey, cacheKey, inputRefs, now,
+		reqJSON, idemKey, cacheKey, inputRefs, now, retryTrace(ctx, prevTrace),
 	).Scan(&newID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, s.finishTimer(ctx, tx, timer.ID)

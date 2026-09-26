@@ -4,6 +4,8 @@
 package store
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -272,11 +274,11 @@ func (s *DAGEngineStore) ApplyReconcile(
 		WITH a AS (
 		INSERT INTO task_attempts
 		  (run_id, node_id, attempt_number, state, queue, priority,
-		   resource_request, idempotency_key, cache_key, input_refs)
+		   resource_request, idempotency_key, cache_key, input_refs, trace_context)
 		VALUES ($1::uuid, $2, $3,
-		        'PENDING'::attempt_state, $4, $5, $6, $7, $8, $9)
+		        'PENDING'::attempt_state, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (run_id, node_id, attempt_number) DO NOTHING
-		RETURNING id, run_id, queue, scheduled_at, attempt_number
+		RETURNING id, run_id, queue, scheduled_at, attempt_number, trace_context
 		),` + outboxTaskReadyCTE + `
 		SELECT id::text, attempt_number FROM a`
 
@@ -299,6 +301,10 @@ func (s *DAGEngineStore) ApplyReconcile(
 		UPDATE task_nodes SET attempts_used = attempts_used + 1
 		 WHERE run_id = $1::uuid AND node_id = $2`
 
+	// The attempt remembers the trace that made its node ready (migration
+	// 0028): the scheduler parents the dispatch span on it, so the claim, the
+	// execution and the result join the run's trace instead of the poll's.
+	traceCtx := tracing.NullableTraceparent(ctx)
 	for _, a := range attempts {
 		if !wonDispatch[a.NodeID] {
 			// Another reconciler won this node's READY CAS and is creating the
@@ -337,7 +343,7 @@ func (s *DAGEngineStore) ApplyReconcile(
 				nullableJSON(a.MemoOutputRef), *a.MemoHitOf).Scan(&id, &num)
 		} else {
 			qerr = tx.QueryRow(ctx, insAttempt, runID, a.NodeID, next, queue, a.Priority,
-				resJSON, a.IdempotencyKey, a.CacheKey, inputs).Scan(&id, &num)
+				resJSON, a.IdempotencyKey, a.CacheKey, inputs, traceCtx).Scan(&id, &num)
 		}
 		if errors.Is(qerr, pgx.ErrNoRows) {
 			// The ON CONFLICT fired: this attempt number already exists, so a
