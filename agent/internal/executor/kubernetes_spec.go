@@ -21,6 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 )
 
@@ -277,17 +278,40 @@ func (e *KubernetesExecutor) buildJob(spec TaskSpec, workerID string) (*batchv1.
 	// emptyDirs so the root filesystem can be read-only: a task that needs to
 	// write anywhere else is told so by EROFS immediately, instead of silently
 	// filling the node's image layer.
+	//
+	// One per-attempt Secret carries both the staged inputs and the resolved
+	// task secrets (ADR-0025), under disjoint keys: input keys are sanitised
+	// names ([A-Za-z0-9_-]), secret keys carry a "nexus-secret-env." or
+	// "nexus-secret-file." prefix, which contains a dot and so can never
+	// collide. Each volume projects only its own keys.
 	var inputsSource corev1.VolumeSource
 	var secret *corev1.Secret
+	data := map[string][]byte{}
+	var inputItems []corev1.KeyToPath
 	if len(spec.Inputs) > 0 {
-		data, err := k8sInputData(spec.Inputs)
+		in, err := k8sInputData(spec.Inputs)
 		if err != nil {
 			return nil, nil, err
 		}
+		for k, v := range in {
+			data[k] = v
+			inputItems = append(inputItems, corev1.KeyToPath{Key: k, Path: k})
+		}
+		sort.Slice(inputItems, func(i, j int) bool { return inputItems[i].Key < inputItems[j].Key })
+	}
+	secretEnvVars, secretItems, err := k8sSecretData(spec.Secrets, k8sSecretName(name), data)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(data) > 0 {
 		mode := int32(0o440)
-		inputsSource = corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-			SecretName: k8sSecretName(name), DefaultMode: &mode,
-		}}
+		if len(inputItems) > 0 {
+			inputsSource = corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: k8sSecretName(name), DefaultMode: &mode, Items: inputItems,
+			}}
+		} else {
+			inputsSource = corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}
+		}
 		secret = &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: k8sSecretName(name), Namespace: cfg.Namespace,
@@ -321,6 +345,18 @@ func (e *KubernetesExecutor) buildJob(spec TaskSpec, workerID string) (*batchv1.
 		{Name: "inputs", MountPath: k8sWorkDir + "/" + InputDirName, ReadOnly: true},
 		{Name: "tmp", MountPath: "/tmp"},
 	}
+	taskEnv := k8sEnv(spec)
+	if len(secretItems) > 0 {
+		mode := int32(0o440)
+		volumes = append(volumes, corev1.Volume{Name: "nexus-secrets", VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: k8sSecretName(name), DefaultMode: &mode, Items: secretItems},
+		}})
+		taskMounts = append(taskMounts, corev1.VolumeMount{Name: "nexus-secrets", MountPath: ContainerSecretsDir, ReadOnly: true})
+		taskEnv = append(taskEnv, corev1.EnvVar{Name: secrets.EnvSecretsDir, Value: ContainerSecretsDir})
+	}
+	// Env-injected secrets by REFERENCE: a literal value in the pod spec is
+	// readable by anyone who can get pods, and lands in etcd backups.
+	taskEnv = append(taskEnv, secretEnvVars...)
 	// The collector mounts the two volumes SIDE BY SIDE, not nested as the
 	// task does: a read-only volume cannot host the mountpoint of another, and
 	// the collector starts before the task has created /nexus/outputs.
@@ -341,7 +377,7 @@ func (e *KubernetesExecutor) buildJob(spec TaskSpec, workerID string) (*batchv1.
 		Command:         append([]string(nil), spec.Runtime.GetCommand()...),
 		Args:            append([]string(nil), spec.Runtime.GetArgs()...),
 		WorkingDir:      workingDir,
-		Env:             k8sEnv(spec),
+		Env:             taskEnv,
 		Resources:       res,
 		VolumeMounts:    taskMounts,
 		ImagePullPolicy: pullPolicy,
@@ -482,6 +518,45 @@ func (e *KubernetesExecutor) buildJob(spec TaskSpec, workerID string) (*batchv1.
 		}}
 	}
 	return job, secret, nil
+}
+
+// k8sSecretData adds the resolved secrets to the attempt Secret's data and
+// returns the env vars (by secretKeyRef) and the file projections for them.
+// The Secret's total size (inputs + secrets) is bounded by the same cap as
+// inputs alone, below the API server's 1 MiB object limit.
+func k8sSecretData(ss []secrets.Secret, secretName string, data map[string][]byte) ([]corev1.EnvVar, []corev1.KeyToPath, error) {
+	if len(ss) == 0 {
+		return nil, nil, nil
+	}
+	total := 0
+	for _, v := range data {
+		total += len(v)
+	}
+	var env []corev1.EnvVar
+	var items []corev1.KeyToPath
+	for _, s := range ss {
+		total += len(s.Value)
+		switch s.Inject {
+		case secrets.InjectFile:
+			key := "nexus-secret-file." + s.Name
+			data[key] = s.Value
+			items = append(items, corev1.KeyToPath{Key: key, Path: s.Name})
+		default:
+			key := "nexus-secret-env." + s.Name
+			data[key] = s.Value
+			env = append(env, corev1.EnvVar{Name: s.Name, ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+					Key:                  key,
+				},
+			}})
+		}
+	}
+	if total > k8sMaxInputBytes {
+		return nil, nil, fmt.Errorf("%w: staged inputs and secrets total %d bytes, over the %d-byte cap of the "+
+			"per-attempt Secret", ErrValidation, total, k8sMaxInputBytes)
+	}
+	return env, items, nil
 }
 
 // k8sInputData renders staged inputs as Secret data keyed by sanitised name —

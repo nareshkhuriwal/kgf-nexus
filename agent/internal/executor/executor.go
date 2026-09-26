@@ -17,6 +17,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 )
 
@@ -109,6 +110,11 @@ type TaskSpec struct {
 	// tagged by stream; for the others the runner follows Logs() into it. Nil
 	// leaves every executor's capture exactly as it was before log shipping.
 	LogSink LogSink
+
+	// Secrets are the attempt's RESOLVED secret values (ADR-0025), delivered
+	// by each executor as declared (env or file). They are never logged:
+	// secrets.Secret formats as [REDACTED]. Nil when the task declares none.
+	Secrets []secrets.Secret
 }
 
 // Prepared is an executor's staged, not-yet-running workload: a materialised

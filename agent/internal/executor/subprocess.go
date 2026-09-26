@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 )
 
@@ -56,6 +57,18 @@ type SubprocessExecutor struct {
 	// safer than silently running unconstrained, and the resulting
 	// INFRASTRUCTURE error tells the operator to use docker.
 	AllowUnenforceableLimits bool
+
+	// InheritDeny are extra variables (path.Match globs) removed from the
+	// environment a task inherits from the agent, on top of the agent's own
+	// credentials, which are always removed (F138). The agent sets it to the
+	// tenant's env:// allow-list: a variable a task may only obtain by
+	// declaring it must not also arrive by inheritance.
+	//
+	// The subprocess executor runs the task as the agent's own user, so a
+	// hostile task can still read the agent's memory or /proc/<agent>/environ
+	// on hosts without PR_SET_DUMPABLE protection. This is one more reason
+	// the executor is development-grade.
+	InheritDeny []string
 }
 
 // subprocState is the per-attempt private state hung off Prepared/Handle.
@@ -150,11 +163,22 @@ func (e *SubprocessExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepar
 		return Prepared{}, err
 	}
 
+	env := buildEnvScrubbed(spec, e.InheritDeny, workDir, filepath.Join(workDir, InputDirName),
+		OutputFilePath(spec, workDir), filepath.Join(workDir, OutputDirName))
+	secretFiles, err := stageSecretFiles(workDir, spec.Secrets)
+	if err != nil {
+		_ = removeSecrets(workDir)
+		os.RemoveAll(workDir)
+		return Prepared{}, err
+	}
+	if secretFiles != "" {
+		env = append(env, secrets.EnvSecretsDir+"="+secretFiles)
+	}
+
 	st := &subprocState{
-		argv:      argv,
-		outputDir: workDir,
-		env: buildEnv(spec, workDir, filepath.Join(workDir, InputDirName),
-			OutputFilePath(spec, workDir), filepath.Join(workDir, OutputDirName)),
+		argv:            argv,
+		outputDir:       workDir,
+		env:             env,
 		workDir:         workDir,
 		declaredOutputs: spec.DeclaredOutputs,
 		stdoutOutput:    spec.StdoutOutput,
@@ -506,6 +530,11 @@ func (e *SubprocessExecutor) Cleanup(ctx context.Context, h Handle) error {
 	}
 	if h.WorkDir == "" {
 		return nil
+	}
+	// Secrets first: of everything an attempt leaves on disk, they are the
+	// thing that must not outlive it.
+	if err := removeSecrets(h.WorkDir); err != nil {
+		return err
 	}
 	// RemoveAll on an absent path is already a no-op, which is what makes
 	// repeated Cleanup calls safe.

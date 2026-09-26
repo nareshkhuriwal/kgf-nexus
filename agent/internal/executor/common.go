@@ -100,10 +100,23 @@ func stageInputs(workDir string, inputs map[string]*nexusv1.ResultRef) error {
 // the platform variables LAST, so a task cannot override NEXUS_* and lie to
 // itself about its own idempotency key.
 func buildEnv(spec TaskSpec, workDir, inputDir, outputFile, outputDir string) []string {
-	env := os.Environ()
+	return buildEnvScrubbed(spec, nil, workDir, inputDir, outputFile, outputDir)
+}
+
+// buildEnvScrubbed is buildEnv with extra inherited variables to drop. The
+// agent's own credentials are ALWAYS dropped from the inherited environment
+// (F138); deny adds the env:// allow-list, so a variable a task may receive
+// only by declaring it does not also arrive by inheritance.
+//
+// Order: inherited, task env, env-injected secrets, platform variables. A
+// secret never shares a name with a task env entry (the runner rejects that)
+// and cannot shadow a NEXUS_ variable (secrets.Validate rejects that).
+func buildEnvScrubbed(spec TaskSpec, deny []string, workDir, inputDir, outputFile, outputDir string) []string {
+	env := scrubInheritedEnv(os.Environ(), deny)
 	for k, v := range spec.Runtime.GetEnv() {
 		env = append(env, k+"="+v)
 	}
+	env = append(env, secretEnv(spec.Secrets)...)
 	env = append(env,
 		EnvAttemptID+"="+spec.AttemptID,
 		EnvRunID+"="+spec.RunID,

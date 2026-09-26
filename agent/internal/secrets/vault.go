@@ -37,7 +37,7 @@ type VaultConfig struct {
 	// and non-empty: Vault's own policy is the primary control, and this is a
 	// second, agent-side one, so a too-broad Vault role cannot be used to read
 	// another team's paths through a spec.
-	AllowPaths []string `yaml:"allow_paths"`
+	AllowPaths []string  `yaml:"allow_paths"`
 	Auth       VaultAuth `yaml:"auth"`
 	TLS        TLSConfig `yaml:"tls"`
 	// Timeout bounds each HTTP request. Default 10s.

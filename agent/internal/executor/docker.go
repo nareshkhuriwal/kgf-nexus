@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 )
 
@@ -72,6 +73,13 @@ type dockerState struct {
 	stdoutOutput    string
 
 	containerID string
+
+	// envFile is the 0600 --env-file carrying env-injected secrets, removed
+	// as soon as `docker run` has read it; secretFiles is the host directory
+	// bind-mounted read-only at ContainerSecretsDir. Both live in
+	// <workdir>.secrets, outside the work directory the task can write.
+	envFile     string
+	secretFiles string
 
 	// logSink and the follower that feeds it (ADR-0020). `docker logs` keeps
 	// stdout and stderr distinguishable on the wire, so they arrive tagged.
@@ -200,6 +208,17 @@ func (e *DockerExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepared, 
 		return Prepared{}, err
 	}
 
+	envFile, err := writeEnvFile(workDir, spec.Secrets)
+	var secretFiles string
+	if err == nil {
+		secretFiles, err = stageSecretFiles(workDir, spec.Secrets)
+	}
+	if err != nil {
+		_ = removeSecrets(workDir)
+		os.RemoveAll(workDir)
+		return Prepared{}, err
+	}
+
 	const containerWD = "/nexus"
 	st := &dockerState{
 		image:           image,
@@ -214,6 +233,8 @@ func (e *DockerExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepared, 
 		declaredOutputs: spec.DeclaredOutputs,
 		stdoutOutput:    spec.StdoutOutput,
 		logSink:         spec.LogSink,
+		envFile:         envFile,
+		secretFiles:     secretFiles,
 		// Deterministic name derived from the attempt id: it makes an orphan
 		// findable after an agent restart (`docker ps --filter name=nexus-`),
 		// which is what turns "no orphaned workload" into something we can
@@ -275,10 +296,25 @@ func (e *DockerExecutor) Start(ctx context.Context, p Prepared) (Handle, error) 
 	for _, kv := range st.env {
 		args = append(args, "--env", kv)
 	}
+	if st.envFile != "" {
+		// Read by the docker CLI; the values never reach its argv.
+		args = append(args, "--env-file", st.envFile)
+	}
+	if st.secretFiles != "" {
+		args = append(args,
+			"--volume", st.secretFiles+":"+ContainerSecretsDir+":ro",
+			"--env", secrets.EnvSecretsDir+"="+ContainerSecretsDir)
+	}
 	args = append(args, st.image)
 	args = append(args, st.argv...)
 
 	out, err := e.output(ctx, 2*time.Minute, args...)
+	if st.envFile != "" {
+		// The container's config now holds the values (visible to docker
+		// inspect, i.e. to host root); the file on disk is no longer needed.
+		_ = os.Remove(st.envFile)
+		st.envFile = ""
+	}
 	if err != nil {
 		// A leftover container from a previous identically-named attempt would
 		// otherwise wedge every retry. Remove and retry once.
@@ -549,6 +585,9 @@ func (e *DockerExecutor) Cleanup(ctx context.Context, h Handle) error {
 		}
 	}
 	if h.WorkDir != "" {
+		if err := removeSecrets(h.WorkDir); err != nil {
+			errs = append(errs, err)
+		}
 		if err := os.RemoveAll(h.WorkDir); err != nil {
 			errs = append(errs, fmt.Errorf("cleanup workdir %s: %w", h.WorkDir, err))
 		}

@@ -32,8 +32,8 @@ type AKVConfig struct {
 	// DNSSuffix defaults to vault.azure.net (public cloud).
 	DNSSuffix string `yaml:"dns_suffix"`
 	// Cloud is "public" (default), "usgov" or "china": the Entra authority.
-	Cloud   string  `yaml:"cloud"`
-	Auth    AKVAuth `yaml:"auth"`
+	Cloud   string        `yaml:"cloud"`
+	Auth    AKVAuth       `yaml:"auth"`
 	Timeout time.Duration `yaml:"timeout"`
 }
 
