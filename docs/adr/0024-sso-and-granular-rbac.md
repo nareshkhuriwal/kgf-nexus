@@ -103,7 +103,7 @@ Button               --navigate--> /v1/auth/sso/{id}/start?return_to=/runs
   gateway: state (32 B), nonce (32 B), PKCE verifier (S256), binding cookie (32 B)
            stores sso_login_states{sha256(state), provider, nonce, verifier,
                                    saml_request_id, return_to, sha256(binding), expires +10 min}
-           Set-Cookie nexus_sso_bind (HttpOnly, SameSite=Lax, Secure on https, Path=/v1/auth/sso)
+           Set-Cookie __Host-nexus_sso (HttpOnly, SameSite=Lax, Secure, Path=/; plain nexus_sso on http localhost)
   302 -> IdP authorize (response_type=code, code_challenge, state, nonce)
         or SAML AuthnRequest (HTTP-Redirect binding, ID recorded)
 IdP  --302/POST--> /v1/auth/sso/oidc/{id}/callback   or   /v1/auth/sso/saml/{id}/acs

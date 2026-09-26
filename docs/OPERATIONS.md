@@ -3033,8 +3033,8 @@ metadata is pasted, never fetched.
 
 **Reverse proxy.** `/v1/auth/sso/*` must reach the gateway on the SAME origin
 as the console (the shipped `deploy/nginx.conf` does), because the browser
-binding cookie (`__Secure-nexus_sso`, or `nexus_sso` on http localhost) is
-scoped to `/v1/auth/sso` and is sent with the console's exchange call.
+binding cookie (`__Host-nexus_sso`, or `nexus_sso` on http localhost) is
+sent with the console's exchange call; the `__Host-` prefix means no other (sub)domain can plant it.
 `/sso/complete` is a console route (SPA fallback).
 
 ### 24.2 The flow, and what to look for when it fails
@@ -3168,7 +3168,11 @@ Map IdP group values (names, or GUIDs for Entra) to Nexus roles under the
 provider's *Group mapping*. At **every** SSO login the user's IdP-sourced roles
 are replaced by the roles their current groups map to (`user.roles.idp_sync`
 audit rows list added and removed roles); administrator-assigned roles are
-kept separately and are unaffected. With *Revoke sessions on role loss*, a
+kept separately and are unaffected. A provider with no mappings never touches
+roles. A linked account that still used the legacy (unbound) reader
+permissions becomes explicitly bound the first time a provider with mappings
+signs it in, so from then on it holds exactly its mapped and assigned roles.
+With *Revoke sessions on role loss*, a
 login that removes a role also ends the user's other sessions.
 
 **Revocation bound.** Removing a user from a group at the IdP takes effect at

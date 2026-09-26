@@ -99,7 +99,11 @@ func sha256Hex(s string) string {
 
 func (a *API) ssoCookieName() string {
 	if a.sso.cfg.SecureCookies() {
-		return "__Secure-nexus_sso"
+		// __Host-: Secure, no Domain, Path=/. A sibling or parent domain
+		// cannot plant one (cookie tossing), which is what would otherwise let
+		// an attacker pre-set a victim's binding to a value they know and bind
+		// their own handoff to it.
+		return "__Host-nexus_sso"
 	}
 	return "nexus_sso"
 }
@@ -118,8 +122,12 @@ func (a *API) bindingCookie(r *http.Request) string {
 }
 
 func (a *API) setBindingCookie(w http.ResponseWriter, value string, maxAge int) {
+	path := "/v1/auth/sso"
+	if a.sso.cfg.SecureCookies() {
+		path = "/" // required by the __Host- prefix
+	}
 	http.SetCookie(w, &http.Cookie{
-		Name: a.ssoCookieName(), Value: value, Path: "/v1/auth/sso", MaxAge: maxAge,
+		Name: a.ssoCookieName(), Value: value, Path: path, MaxAge: maxAge,
 		HttpOnly: true, Secure: a.sso.cfg.SecureCookies(), SameSite: http.SameSiteLaxMode,
 	})
 }
