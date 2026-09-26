@@ -1,0 +1,54 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# OPT-IN: run the stack on the compose file's own postgres container instead
+# of the host's PostgreSQL (the default, deploy/docker-compose.yml header).
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.bundled-postgres.yml up -d
+#   NEXUS_BUNDLED_POSTGRES=1 make up
+#   NEXUS_BUNDLED_POSTGRES=1 nexusctl up        (or nexusctl up --bundled-postgres)
+#
+# For a machine without PostgreSQL, CI runners (which have no host server),
+# and the point-in-time-recovery overlay and drills, which must control the
+# server's data directory, archive_command and restarts. Credentials are DEV
+# ONLY, as in the base file.
+
+x-bundled-db: &bundled-db
+  DATABASE_URL: postgres://nexus:nexus-dev-password@postgres:5432/nexus?sslmode=disable
+
+x-after-postgres: &after-postgres
+  postgres:
+    condition: service_healthy
+
+services:
+  postgres:
+    profiles: !reset []
+
+  migrate:
+    depends_on: *after-postgres
+    environment:
+      <<: *bundled-db
+      # The container's initdb creates the database; waiting covers its start.
+      NEXUS_MIGRATE_CREATE_DATABASE: "false"
+      NEXUS_MIGRATE_WAIT_SECONDS: "60"
+  api-gateway:
+    depends_on: *after-postgres
+    environment: *bundled-db
+  workflow-manager:
+    depends_on: *after-postgres
+    environment: *bundled-db
+  dag-engine:
+    depends_on: *after-postgres
+    environment: *bundled-db
+  scheduler:
+    depends_on: *after-postgres
+    environment: *bundled-db
+  scheduler-gpu:
+    depends_on: *after-postgres
+    environment: *bundled-db
+  resource-manager:
+    depends_on: *after-postgres
+    environment: *bundled-db
+  event-service:
+    depends_on: *after-postgres
+    environment: *bundled-db

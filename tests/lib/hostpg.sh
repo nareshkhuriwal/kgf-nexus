@@ -95,7 +95,8 @@ hostpg_check() {
             current_setting('max_connections')::int - (SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend'),
             current_setting('server_version')" 2>&1) \
     || hostpg_die "cannot reach PostgreSQL at $(hostpg_redact "$HOSTPG_SERVER"): $info
-  Start the host server (e.g. 'brew services start postgresql@18') or set NEXUS_TEST_PG_SERVER."
+  Start it (macOS: 'brew services start postgresql@18'; Linux: 'sudo systemctl start postgresql') or set NEXUS_TEST_PG_SERVER.
+  To run a compose stack on its bundled Postgres container instead, opt in: NEXUS_BUNDLED_POSTGRES=1 (make up, nexusctl up) or E2E_BUNDLED_POSTGRES=1 (e2e-stack.sh)."
   local can free version
   read -r can free version <<<"$info"
   [ "$can" = t ] || hostpg_die "the role in NEXUS_TEST_PG_SERVER cannot CREATE DATABASE"

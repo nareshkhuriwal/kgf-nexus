@@ -8,17 +8,19 @@ SHELL := /bin/bash
 
 # The development stack runs on the HOST's PostgreSQL (the project rule:
 # Postgres comes from the host, never a container), in its own database
-# $(NEXUS_DEV_DB), created on first `make up` and dropped by `make down`,
-# through deploy/docker-compose.host-db.yml. NEXUS_BUNDLED_POSTGRES=1 opts in
-# to the compose file's own postgres container instead: for a machine with no
-# PostgreSQL, the PITR overlay (which must control its server), and CI runners.
+# $(NEXUS_DEV_DB), created on first `make up` and dropped by `make down`; the
+# compose file's default. NEXUS_BUNDLED_POSTGRES=1 opts in to its postgres
+# container instead (deploy/docker-compose.bundled-postgres.yml): for a
+# machine with no PostgreSQL and CI runners. The PITR overlay always uses it.
 NEXUS_BUNDLED_POSTGRES ?=
+export NEXUS_BUNDLED_POSTGRES
 NEXUS_DEV_DB  ?= nexus_dev_compose
 COMPOSE_BASE  ?= docker compose -f deploy/docker-compose.yml
+COMPOSE_BUNDLED ?= $(COMPOSE_BASE) -f deploy/docker-compose.bundled-postgres.yml
 ifeq ($(NEXUS_BUNDLED_POSTGRES),1)
-COMPOSE       ?= $(COMPOSE_BASE)
+COMPOSE       ?= $(COMPOSE_BUNDLED)
 else
-COMPOSE       ?= $(COMPOSE_BASE) -f deploy/docker-compose.host-db.yml
+COMPOSE       ?= $(COMPOSE_BASE)
 # What the stack's containers connect to; compose needs it to parse the file
 # even for down/logs/ps. Computed once (string work only, no database access).
 ifeq ($(origin NEXUS_HOST_DATABASE_URL),undefined)
@@ -659,9 +661,9 @@ restore-drill: ## Prove a restore recovers artifacts byte-identically; RTO=1 tim
 # The documented exception to "Postgres comes from the host": continuous WAL
 # archiving and an in-place restore need a server whose data directory,
 # archive_command and restarts the stack controls, so the PITR overlay always
-# runs on the bundled container (never the host-database overlay), as do the
+# runs on the bundled container (never the host's server), as do the
 # backup/restore drills built on it.
-COMPOSE_PITR ?= $(COMPOSE_BASE) -f deploy/docker-compose.pitr.yml
+COMPOSE_PITR ?= $(COMPOSE_BUNDLED) -f deploy/docker-compose.pitr.yml
 BACKUP_TYPE  ?= full
 PITR_REPORT  ?= ./pitr-drill-report.json
 

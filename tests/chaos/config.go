@@ -138,6 +138,6 @@ func selectExamples(all []example, getenv func(string) string) ([]example, error
 }
 
 // chaosDatabaseURL is the stack's database as the host reaches it, for a stack
-// with no postgres container (the host-database overlay). Empty means query
+// with no postgres container (the default: the host's PostgreSQL). Empty means query
 // the stack's own postgres service.
 func chaosDatabaseURL() string { return os.Getenv("NEXUS_CHAOS_DATABASE_URL") }

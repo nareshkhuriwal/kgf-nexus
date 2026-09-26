@@ -86,7 +86,8 @@ if [[ "$BUNDLED_PG" != 1 ]]; then
   _c="${NEXUS_HOST_DATABASE_URL#*://}"; _c="${_c#*@}"
   export NEXUS_E2E_DB="${NEXUS_E2E_DB:-${_c%%\?*}}"
   export NEXUS_E2E_OWNER_URL="${NEXUS_E2E_OWNER_URL:-$NEXUS_HOST_DATABASE_URL}"
-  files+=(-f deploy/docker-compose.host-db.yml)
+else
+  files+=(-f deploy/docker-compose.bundled-postgres.yml)
 fi
 if [[ -n "${E2E_MINIO_IMAGE:-}" ]]; then
   files+=(-f deploy/e2e/docker-compose.minio-local.yml)

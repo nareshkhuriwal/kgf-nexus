@@ -53,26 +53,35 @@ The compose file lives in deploy/ but the build context is the repo root,
 because the Go module and the shared internal/ + gen/ packages live there.
 `make down`, `make logs` and `make ps` work with or without the key set.
 
-**The database comes from the host.** `make up` runs the stack on the
-workstation's own PostgreSQL (the project rule: Postgres comes from the host,
-never a container): it creates the database `nexus_dev_compose`
-(`NEXUS_DEV_DB`) on the server `NEXUS_TEST_PG_SERVER` names (default
-`postgres://127.0.0.1:5432/postgres`, the current OS user, as a Homebrew server
-trusts it), and layers `deploy/docker-compose.host-db.yml`, which switches the
-bundled `postgres` service off and points the migration job and every service
-at `NEXUS_HOST_DATABASE_URL` (the same database as containers reach it,
-`host.docker.internal`). `make down` drops that database with the volumes. On a
-server shared with other workloads set `NEXUS_DB_MAX_CONNS` (for example 2) to
-cap every service's pool. The same overlay serves `deploy/e2e/e2e-stack.sh`
-and the chaos suite.
+**The database comes from the host.** Every way of starting the stack runs
+it on the machine's own PostgreSQL (the project rule: Postgres comes from the
+host, never a container); the compose file's `postgres` service is off unless
+explicitly enabled:
 
-`NEXUS_BUNDLED_POSTGRES=1 make up` opts in to the compose file's own
-`postgres` container instead: for a machine with no PostgreSQL, and CI runners.
-Running `docker compose -f deploy/docker-compose.yml up` directly, and the
-first-run `make quickstart` (`nexusctl up`), also use the bundled container, so
-a first run needs nothing installed. The PITR overlay (`make up-pitr`) always
-does: continuous WAL archiving and an in-place restore need a server whose data
-directory, `archive_command` and restarts the stack controls.
+| Start | Database |
+|---|---|
+| `docker compose -f deploy/docker-compose.yml up` | `NEXUS_HOST_DATABASE_URL`, default `postgres://$USER@host.docker.internal:5432/nexus_compose`; the migration job creates it if missing |
+| `make up` | `nexus_dev_compose` (`NEXUS_DEV_DB`) on `NEXUS_TEST_PG_SERVER` (default `postgres://127.0.0.1:5432/postgres`), created first; `make down` drops it |
+| `make quickstart` / `nexusctl up` | `nexusctl_<project>` on `NEXUS_HOST_PG_ADMIN_URL` (same default); `nexusctl down --volumes` drops it |
+| `deploy/e2e/e2e-stack.sh` | the project's own database (`E2E_DB`), dropped by `down` |
+
+If the server cannot be reached, each fails fast and says how to start it
+(`brew services start postgresql@18`, `sudo systemctl start postgresql`) or
+how to opt out. Containers reach the host at `host.docker.internal` (Docker
+Desktop; on Linux the compose file maps it to the host gateway, and the server
+must listen there and allow the Docker bridge in `pg_hba.conf`). On a server
+shared with other workloads set `NEXUS_DB_MAX_CONNS` (for example 2) to cap
+every service's pool.
+
+**The bundled container is an explicit opt-in**, through
+`deploy/docker-compose.bundled-postgres.yml`: `NEXUS_BUNDLED_POSTGRES=1 make up`,
+`nexusctl up --bundled-postgres`, `E2E_BUNDLED_POSTGRES=1` for the e2e stack,
+or `docker compose -f deploy/docker-compose.yml -f
+deploy/docker-compose.bundled-postgres.yml up`. Use it on a machine without
+PostgreSQL. CI runners, which have no host server, use it. The PITR overlay
+(`make up-pitr`) and the drills built on it always do, as does the DB TLS drill:
+they need a server whose data directory, `archive_command`, certificates and
+restarts the stack controls.
 
 Then:
 

@@ -15,9 +15,12 @@ on a clean database, on an Apple-silicon laptop with Docker Desktop, on
 ## Before you start
 
 - Docker with the Compose v2 plugin (2.24 or later). Docker Desktop is fine.
+- PostgreSQL running on this machine: the stack keeps its data there, never in
+  a container (macOS: `brew install postgresql@18 && brew services start
+  postgresql@18`). See [the database](#the-database) for the opt-out.
 - Go 1.25 or later, to build `nexusctl`.
 - Python 3.11 or later, for the SDK and the project's tests.
-- About 4 GB of free memory, and ports 3000, 8090, 9091, 55433, 9010/9011,
+- About 4 GB of free memory, and ports 3000, 8090, 9091, 9010/9011,
   8025, 4222 and 19100–19122 free (see [other ports](#other-ports)).
 
 ```bash
@@ -25,6 +28,28 @@ git clone https://github.com/nareshkhuriwal/kgf-nexus.git && cd kgf-nexus
 go build -o ./nexusctl ./cli/cmd/nexusctl
 export PATH="$PWD:$PATH"
 ```
+
+## The database
+
+The stack's database is on **your machine's own PostgreSQL**, never a
+container: `up` creates the database `nexusctl_<project>` (`nexusctl_nexus` by
+default) on the server `NEXUS_HOST_PG_ADMIN_URL` names (default
+`postgres://127.0.0.1:5432/postgres` as your OS user, which a Homebrew server
+trusts) and points every service at it through `host.docker.internal`.
+`nexusctl down --volumes` drops it. If the server is not reachable, `up` stops
+before building anything and says so:
+
+```console
+$ nexusctl up
+error: cannot use the host's PostgreSQL at postgres://127.0.0.1:5432/postgres?sslmode=disable for the stack's database: failed to connect to ... connection refused
+  The stack runs on the host machine's PostgreSQL by default. Start it (macOS: `brew services start postgresql@18`; Linux: `sudo systemctl start postgresql`), or point NEXUS_HOST_PG_ADMIN_URL at a server where your role may CREATE DATABASE. To use the bundled Postgres container instead, opt in: `nexusctl up --bundled-postgres` (or NEXUS_BUNDLED_POSTGRES=1).
+```
+
+`--bundled-postgres` (or `NEXUS_BUNDLED_POSTGRES=1`) runs the compose file's
+own Postgres container instead, through
+`deploy/docker-compose.bundled-postgres.yml`, for a machine without
+PostgreSQL. The choice is remembered for the stack. On Linux the host server
+must also listen on the Docker bridge and allow it in `pg_hba.conf`.
 
 ## 1. Start the stack
 

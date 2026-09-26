@@ -4835,8 +4835,9 @@ noise.
    databases on the server `NEXUS_TEST_PG_SERVER` names, the workstation's by
    default (`tests/lib/hostpg.sh`: databases tagged by COMMENT so only a
    tool's own is ever dropped, a free-slot check, retries on "too many
-   clients"); the stacks use `deploy/docker-compose.host-db.yml`, which
-   switches the bundled postgres off. `NEXUS_BUNDLED_POSTGRES=1` /
+   clients"); the compose file itself now defaults to the host's server
+   (item 8), and the bundled postgres is the opt-in
+   `deploy/docker-compose.bundled-postgres.yml`. `NEXUS_BUNDLED_POSTGRES=1` /
    `E2E_BUNDLED_POSTGRES=1` opt back in (CI runners, which have no host
    server, do; the nats and compat CI jobs get a service container as their
    server). Documented exceptions, which need a server they control: the PITR
@@ -4873,11 +4874,29 @@ noise.
    instead of Kubernetes pod-name hostnames; `ml_capacity_test` runs its
    Python steps in the docker executor from a digest-pinned
    `python:3.13-alpine`, which also restricts them to Docker-capable workers.
+8. **Every start path defaults to the host's PostgreSQL** (follow-up to item
+   5, per the standing rule). `deploy/docker-compose.yml` itself now points
+   every service at `NEXUS_HOST_DATABASE_URL` (default
+   `postgres://$USER@host.docker.internal:5432/nexus_compose`, `host-gateway`
+   mapped for Linux); its `postgres` service sits behind a profile that only
+   the opt-in `deploy/docker-compose.bundled-postgres.yml` enables. The
+   migration job creates a missing database and, when the server cannot be
+   reached, fails within `NEXUS_MIGRATE_WAIT_SECONDS` (15 s) with how to start
+   it or opt in, so no service starts. `make up` checks the server first;
+   `nexusctl up` creates `nexusctl_<project>` on `NEXUS_HOST_PG_ADMIN_URL`
+   before building anything, records it (a dropped database makes the record
+   stale, like a recreated volume), shows it in `status` and drops it on
+   `down --volumes`; an unreachable server is a `host_database` error naming
+   `brew services start postgresql@18` and `--bundled-postgres` /
+   `NEXUS_BUNDLED_POSTGRES=1`. The bundled container remains only as that
+   opt-in, for CI runners, and for the PITR and DB TLS drills. The earlier
+   `deploy/docker-compose.host-db.yml` is folded into the base file.
 
 **Chaos suite on the host database** (compose project `nexus-w4b-chaos`,
 database `nexus_w4b_chaos` on host PostgreSQL 18.3, every service pool capped
 at 2, no postgres container, `NEXUS_COMPOSE_FILE` naming the base file, the
-e2e port overlay and the host-database overlay):
+e2e port overlay and, at the time, a host-database overlay since folded into
+the base file):
 
 - First full run (`make chaos` equivalent, 33 min): the example sweep ran 15
   examples (the two AI examples skip without the AI overlay). 12 SUCCEEDED,

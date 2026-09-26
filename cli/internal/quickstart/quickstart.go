@@ -156,8 +156,17 @@ type Options struct {
 	ConfigPath  string
 	ContextName string
 
-	// Volumes, for Down, also deletes the project's data volumes.
+	// Volumes, for Down, also deletes the project's data volumes and its
+	// database on the host's PostgreSQL.
 	Volumes bool
+
+	// BundledPostgres runs the stack on the compose file's own postgres
+	// container (deploy/docker-compose.bundled-postgres.yml) instead of the
+	// host's PostgreSQL. Also NEXUS_BUNDLED_POSTGRES=1 in Environ.
+	BundledPostgres bool
+	// HostDB manages the stack's database on the host's PostgreSQL. Nil uses
+	// PgHostDB on NEXUS_HOST_PG_ADMIN_URL (default 127.0.0.1:5432).
+	HostDB HostDB
 
 	Environ    []string
 	Runner     Runner
@@ -196,6 +205,9 @@ func (o *Options) defaults() {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	if o.HostDB == nil {
+		o.HostDB = PgHostDB{AdminURL: hostAdminURL(o.Environ)}
+	}
 	if o.Log == nil {
 		o.Log = io.Discard
 	}
@@ -224,6 +236,21 @@ type session struct {
 	agents  []string      // services that need the worker key
 	// forceRecreate is set for the first `up` of a retry; see Up.
 	forceRecreate bool
+	// bundled: the stack runs on the bundled postgres container. Otherwise
+	// hostDB is the database nexusctl manages on the host's PostgreSQL ("" when
+	// the caller named one with NEXUS_HOST_DATABASE_URL) and hostDBURL how the
+	// containers reach it.
+	bundled   bool
+	hostDB    string
+	hostDBURL string
+}
+
+// hostAdminURL is the host server nexusctl creates stack databases on.
+func hostAdminURL(environ []string) string {
+	if v := envValue(environ, "NEXUS_HOST_PG_ADMIN_URL"); v != "" {
+		return v
+	}
+	return defaultHostAdminURL
 }
 
 // resolve locates the compose file, the project and any existing state.
@@ -286,6 +313,31 @@ func resolve(ctx context.Context, o Options) (*session, error) {
 			}
 		}
 	}
+	// The database: the host's PostgreSQL unless the bundled container was
+	// asked for, now or when the stack was created (its overlay is recorded).
+	bundled := o.BundledPostgres || envValue(o.Environ, "NEXUS_BUNDLED_POSTGRES") == "1"
+	hasOverlay := false
+	for _, f := range overrides {
+		if filepath.Base(f) == bundledOverlay {
+			bundled, hasOverlay = true, true
+		}
+	}
+	if bundled && !hasOverlay {
+		p := filepath.Join(filepath.Dir(file), bundledOverlay)
+		if _, err := os.Stat(p); err != nil {
+			return nil, &Error{Kind: KindComposeFile, Message: "the bundled-postgres overlay " + p + " was not found", Err: err}
+		}
+		overrides = append(overrides, p)
+	}
+	s.bundled = bundled
+	if !bundled && envValue(o.Environ, hostDBURLEnv) == "" {
+		s.hostDB = hostDBName(project)
+		u, err := containerDBURL(hostAdminURL(o.Environ), s.hostDB, o.Environ)
+		if err != nil {
+			return nil, &Error{Kind: KindHostDatabase, Message: "NEXUS_HOST_PG_ADMIN_URL is not usable", Err: err}
+		}
+		s.hostDBURL = u
+	}
 	s.file, s.files, s.project, s.state = file, append([]string{file}, overrides...), project, st
 
 	pc, err := s.configWith(ctx, s.files, project)
@@ -317,6 +369,9 @@ func (s *session) baseEnv() []string {
 	for k := range s.portEnv {
 		managed[k] = true
 	}
+	if s.hostDBURL != "" {
+		managed[hostDBURLEnv] = true
+	}
 	env := make([]string, 0, len(s.o.Environ)+len(s.portEnv)+1)
 	for _, kv := range s.o.Environ {
 		k, _, _ := strings.Cut(kv, "=")
@@ -334,6 +389,9 @@ func (s *session) baseEnv() []string {
 	}
 	if gid, ok := dockerSocketGID(env); ok {
 		env = append(env, dockerSocketGIDEnv+"="+gid)
+	}
+	if s.hostDBURL != "" {
+		env = append(env, hostDBURLEnv+"="+s.hostDBURL)
 	}
 	return env
 }
@@ -417,6 +475,14 @@ func Up(ctx context.Context, o Options) (*Result, error) {
 	}
 	if err := s.discardIfStale(ctx); err != nil {
 		return nil, err
+	}
+	// Fail fast, before any image is built, when the host's PostgreSQL is not
+	// there: the stack cannot start without it.
+	if s.hostDB != "" {
+		if err := s.o.HostDB.Ensure(ctx, s.hostDB); err != nil {
+			return nil, hostDBError(s.o.HostDB, err)
+		}
+		s.logf("Database %s on the host's PostgreSQL (%s).", s.hostDB, s.o.HostDB.Server())
 	}
 
 	c, err := s.compose()
@@ -506,6 +572,17 @@ func Up(ctx context.Context, o Options) (*Result, error) {
 // discardIfStale drops a state record whose database is gone, so `up` seeds the
 // new database instead of trusting credentials that no longer exist.
 func (s *session) discardIfStale(ctx context.Context) error {
+	if s.state != nil && s.state.HostDatabase != "" {
+		exists, err := s.o.HostDB.Exists(ctx, s.state.HostDatabase)
+		if err != nil {
+			return hostDBError(s.o.HostDB, err)
+		}
+		if exists {
+			return nil
+		}
+		s.logf("The database %s on the host's PostgreSQL was dropped since this stack was seeded; its local record is stale and will be replaced.", s.state.HostDatabase)
+		return s.discardState()
+	}
 	if s.state == nil || s.state.DataVolume == "" {
 		return nil
 	}
@@ -521,6 +598,11 @@ func (s *session) discardIfStale(ctx context.Context) error {
 		why = "was recreated"
 	}
 	s.logf("The database volume %s %s since this stack was seeded; its local record is stale and will be replaced.", s.state.DataVolume, why)
+	return s.discardState()
+}
+
+// discardState removes the local record and the context it wrote.
+func (s *session) discardState() error {
 	if s.state.Context != "" && s.state.ConfigPath != "" {
 		if _, err := config.RemoveContext(s.state.ConfigPath, s.state.Context); err != nil {
 			s.logf("warning: could not remove stale context %q from %s: %v", s.state.Context, s.state.ConfigPath, err)
@@ -896,7 +978,11 @@ func (s *session) seedAndStartAgents(ctx context.Context, c *Compose) (*Result, 
 		WorkerTokenID: workerTok.ID, WorkerKeyExpiresAt: workerTok.ExpiresAt,
 		ConsoleURL: consoleURL, APIURL: apiURL,
 	}
-	st.DataVolume, st.DataVolumeCreatedAt = s.dataVolume(ctx)
+	if s.hostDB != "" {
+		st.HostDatabase = s.hostDB
+	} else {
+		st.DataVolume, st.DataVolumeCreatedAt = s.dataVolume(ctx)
+	}
 
 	res := &Result{Project: s.project, Seeded: true, ConsoleURL: consoleURL, APIURL: apiURL,
 		TenantID: reg.Tenant.ID, Namespace: ns}

@@ -49,6 +49,12 @@ func Down(ctx context.Context, o Options) error {
 			fmt.Fprintf(o.Out, "Removed nexusctl context %q from %s (its key no longer exists).\n", s.state.Context, s.state.ConfigPath)
 		}
 	}
+	if db := s.managedDB(); db != "" {
+		if err := s.o.HostDB.Drop(ctx, db); err != nil {
+			return hostDBError(s.o.HostDB, err)
+		}
+		fmt.Fprintf(o.Out, "Dropped database %s on the host's PostgreSQL.\n", db)
+	}
 	if err := o.Store.Delete(s.project); err != nil {
 		return err
 	}
@@ -66,18 +72,21 @@ type ServiceStatus struct {
 
 // StatusReport is what `nexusctl status` shows.
 type StatusReport struct {
-	Project     string          `json:"project"`
-	ComposeFile string          `json:"compose_file"`
-	Running     bool            `json:"running"`
-	Healthy     bool            `json:"healthy"`
-	Seeded      bool            `json:"seeded"`
-	TenantID    string          `json:"tenant_id,omitempty"`
-	Namespace   string          `json:"namespace,omitempty"`
-	Context     string          `json:"context,omitempty"`
-	ConsoleURL  string          `json:"console_url,omitempty"`
-	APIURL      string          `json:"api_url,omitempty"`
-	Services    []ServiceStatus `json:"services"`
-	Problems    []string        `json:"problems,omitempty"`
+	Project     string `json:"project"`
+	ComposeFile string `json:"compose_file"`
+	Running     bool   `json:"running"`
+	Healthy     bool   `json:"healthy"`
+	Seeded      bool   `json:"seeded"`
+	TenantID    string `json:"tenant_id,omitempty"`
+	Namespace   string `json:"namespace,omitempty"`
+	Context     string `json:"context,omitempty"`
+	ConsoleURL  string `json:"console_url,omitempty"`
+	APIURL      string `json:"api_url,omitempty"`
+	// Database is where the stack's data lives: host:<name> on the host's
+	// PostgreSQL, or "bundled container".
+	Database string          `json:"database"`
+	Services []ServiceStatus `json:"services"`
+	Problems []string        `json:"problems,omitempty"`
 }
 
 // Status reports per-service state and health, and the URLs if running.
@@ -99,6 +108,14 @@ func Status(ctx context.Context, o Options) (*StatusReport, error) {
 		return nil, err
 	}
 	rep := &StatusReport{Project: s.project, ComposeFile: s.file, Seeded: s.state != nil, Services: []ServiceStatus{}}
+	switch {
+	case s.bundled:
+		rep.Database = "bundled container"
+	case s.managedDB() != "":
+		rep.Database = "host:" + s.managedDB()
+	default:
+		rep.Database = "host (" + hostDBURLEnv + ")"
+	}
 	if s.state != nil {
 		rep.TenantID, rep.Namespace, rep.Context = s.state.TenantID, s.state.Namespace, s.state.Context
 	}
@@ -130,4 +147,12 @@ func Status(ctx context.Context, o Options) (*StatusReport, error) {
 		rep.Healthy = len(rep.Problems) == 0
 	}
 	return rep, nil
+}
+
+// managedDB is the host database this stack's record or configuration names.
+func (s *session) managedDB() string {
+	if s.state != nil && s.state.HostDatabase != "" {
+		return s.state.HostDatabase
+	}
+	return s.hostDB
 }

@@ -29,8 +29,8 @@ func TestComposeFileArgs(t *testing.T) {
 		{"one file", map[string]string{"NEXUS_COMPOSE_FILE": "deploy/x.yml"}, []string{"-f", "deploy/x.yml"}},
 		{
 			"overlays, comma-separated, in order",
-			map[string]string{"NEXUS_COMPOSE_FILE": "deploy/docker-compose.yml, deploy/e2e/docker-compose.e2e.yml,deploy/docker-compose.host-db.yml"},
-			[]string{"-f", "deploy/docker-compose.yml", "-f", "deploy/e2e/docker-compose.e2e.yml", "-f", "deploy/docker-compose.host-db.yml"},
+			map[string]string{"NEXUS_COMPOSE_FILE": "deploy/docker-compose.yml, deploy/e2e/docker-compose.e2e.yml,deploy/docker-compose.tls.yml"},
+			[]string{"-f", "deploy/docker-compose.yml", "-f", "deploy/e2e/docker-compose.e2e.yml", "-f", "deploy/docker-compose.tls.yml"},
 		},
 		{"empty entries are ignored", map[string]string{"NEXUS_COMPOSE_FILE": "a.yml,,b.yml,"}, []string{"-f", "a.yml", "-f", "b.yml"}},
 		// Compose reads COMPOSE_FILE itself (with its own separator); passing -f

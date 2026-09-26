@@ -18,13 +18,61 @@ set -eu
 : "${DATABASE_URL:?DATABASE_URL must be set}"
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-/migrations}"
 
-echo "migrate: waiting for postgres to accept connections"
-for i in $(seq 1 60); do
-  if psql "$DATABASE_URL" -c 'SELECT 1' >/dev/null 2>&1; then
-    break
+WAIT="${NEXUS_MIGRATE_WAIT_SECONDS:-60}"
+case "$WAIT" in ''|*[!0-9]*) WAIT=60 ;; esac
+
+# The same URL with its database replaced by the maintenance database, for
+# creating a missing one.
+maintenance_url() {
+  base=${DATABASE_URL%%\?*}
+  query=""
+  [ "$base" != "$DATABASE_URL" ] && query="?${DATABASE_URL#*\?}"
+  echo "${base%/*}/postgres${query}"
+}
+db_name() {
+  base=${DATABASE_URL%%\?*}
+  echo "${base##*/}"
+}
+# Where the server is, without credentials, for messages.
+server_of() {
+  echo "$DATABASE_URL" | sed -E 's#^[a-z]+://([^@/]*@)?([^/?]*).*#\2#'
+}
+
+echo "migrate: waiting for postgres at $(server_of) to accept connections"
+i=0
+created=0
+while :; do
+  i=$((i + 1))
+  err=$(psql "$DATABASE_URL" -c 'SELECT 1' 2>&1 >/dev/null) && break
+  # A reachable server without the database: create it once, when allowed
+  # (the stack's own database on the host's PostgreSQL).
+  if [ "$created" = 0 ] && [ "${NEXUS_MIGRATE_CREATE_DATABASE:-false}" = true ] &&
+     printf '%s' "$err" | grep -q 'does not exist'; then
+    db=$(db_name)
+    case "$db" in
+      ''|*[!a-z0-9_]*) echo "migrate: database name '$db' must match [a-z0-9_]+ to be created here" >&2; exit 1 ;;
+    esac
+    echo "migrate: creating database $db"
+    psql "$(maintenance_url)" -v ON_ERROR_STOP=1 -qc "CREATE DATABASE $db" || {
+      echo "migrate: could not create database $db; create it yourself, or grant this role CREATEDB" >&2
+      exit 1
+    }
+    created=1
+    continue
   fi
-  if [ "$i" = 60 ]; then
-    echo "migrate: postgres did not become reachable in 60s" >&2
+  if [ "$i" -ge "$WAIT" ]; then
+    echo "migrate: PostgreSQL at $(server_of) did not accept connections in ${WAIT}s:" >&2
+    printf '  %s\n' "$err" | head -3 >&2
+    cat >&2 <<'HINT'
+migrate: The stack uses the HOST machine's PostgreSQL by default. Start it, e.g.
+           macOS (Homebrew):  brew services start postgresql@18
+           Linux:             sudo systemctl start postgresql
+         (on Linux it must also listen on the Docker bridge and allow it in
+         pg_hba.conf), or point NEXUS_HOST_DATABASE_URL at a reachable server.
+         To use the bundled Postgres container instead, opt in explicitly:
+           NEXUS_BUNDLED_POSTGRES=1 make up      NEXUS_BUNDLED_POSTGRES=1 nexusctl up
+           docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.bundled-postgres.yml up
+HINT
     exit 1
   fi
   sleep 1

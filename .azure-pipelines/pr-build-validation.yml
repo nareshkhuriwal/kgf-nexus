@@ -842,14 +842,14 @@ stages:
           # The examples need workers. Without this wait the suite fails with a
           # scheduling timeout that says nothing about the actual cause.
           for _ in $(seq 1 60); do
-            n=$(docker compose -f deploy/docker-compose.yml exec -T postgres \
+            n=$(docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.bundled-postgres.yml exec -T postgres \
                   psql -U nexus -d nexus -tAc \
                   "SELECT count(*) FROM workers WHERE state='ACTIVE'" | tr -d ' \r')
             [ "${n:-0}" -ge 3 ] && { echo "✅ $n workers registered"; exit 0; }
             sleep 5
           done
           echo "workers never registered; the examples cannot run" >&2
-          docker compose -f deploy/docker-compose.yml logs --tail=50 agent-cpu >&2
+          docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.bundled-postgres.yml logs --tail=50 agent-cpu >&2
           exit 1
         displayName: 'Wait for the Fleet to Register'
         env:
@@ -871,12 +871,13 @@ stages:
           # nothing at all.
           NEXUS_ENDPOINT: http://localhost:$(NEXUS_API_PORT)
           NEXUS_API_KEY: $(NEXUS_API_KEY)
+          NEXUS_COMPOSE_FILE: deploy/docker-compose.yml,deploy/docker-compose.bundled-postgres.yml
 
       # Logs are worth far more than the exit code when this fails: the whole
       # point of the suite is that the interesting evidence lives in the
       # services, not in the test output.
       - script: |
-          docker compose -f deploy/docker-compose.yml logs --tail=200
+          docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.bundled-postgres.yml logs --tail=200
         displayName: 'Dump Service Logs on Failure'
         condition: failed()
         env:

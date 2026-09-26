@@ -65,9 +65,20 @@ func withDocker(t *testing.T, d *scriptedDocker) string {
 	}
 	prev := quickstartHost
 	quickstartHost = func() (quickstart.Runner, []string, string) { return d, []string{"PATH=/usr/bin"}, root }
-	t.Cleanup(func() { quickstartHost = prev })
+	prevDB := quickstartHostDB
+	quickstartHostDB = memHostDB{}
+	t.Cleanup(func() { quickstartHost, quickstartHostDB = prev, prevDB })
 	return root
 }
+
+// memHostDB is a host PostgreSQL that is always there and holds nothing, so
+// no test creates a real database.
+type memHostDB struct{}
+
+func (memHostDB) Ensure(context.Context, string) error         { return nil }
+func (memHostDB) Exists(context.Context, string) (bool, error) { return true, nil }
+func (memHostDB) Drop(context.Context, string) error           { return nil }
+func (memHostDB) Server() string                               { return "postgres://127.0.0.1:5432/postgres" }
 
 func TestUpFlagValidation(t *testing.T) {
 	h := newHarness(t)
