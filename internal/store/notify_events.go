@@ -436,13 +436,13 @@ type ClaimedDelivery struct {
 	MaxAttempts int32
 	CreatedAt   time.Time
 
-	ChannelName       string
-	ChannelKind       string
-	ChannelConfig     map[string]any
-	ChannelEnabled    bool
-	SecretCiphertext  []byte
-	SecretRef         string
-	RateLimitPerMin   int32
+	ChannelName      string
+	ChannelKind      string
+	ChannelConfig    map[string]any
+	ChannelEnabled   bool
+	SecretCiphertext []byte
+	SecretRef        string
+	RateLimitPerMin  int32
 }
 
 // NotifyClaimDeliveries leases up to limit due deliveries for owner.

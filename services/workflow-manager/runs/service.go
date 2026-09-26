@@ -84,6 +84,9 @@ type CreateRequest struct {
 	// millisecond later cannot change what this run executes (ADR-0004).
 	SpecID   string
 	SpecName string
+	// SpecVersion pins a version of SpecName instead of the latest (schedules,
+	// webhook triggers and sensors that opted out of tracking edits; F143).
+	SpecVersion *int32
 
 	IdempotencyKey string
 	TriggerKind    string
@@ -115,6 +118,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	switch {
 	case req.SpecID != "":
 		spec, err = store.WFMGetSpecByID(ctx, s.db, req.SpecID)
+	case req.SpecName != "" && req.SpecVersion != nil:
+		spec, err = store.WFMGetSpecVersion(ctx, s.db, req.Namespace, req.SpecName, *req.SpecVersion)
 	case req.SpecName != "":
 		spec, err = store.WFMGetLatestSpec(ctx, s.db, req.Namespace, req.SpecName)
 	default:

@@ -36,7 +36,10 @@ func (a *RunsAdapter) Create(ctx context.Context, req CreateRunRequest) (string,
 		// SpecName, not SpecID: a schedule tracks the current definition of its
 		// workflow, and runs.Create pins the version it resolves so the run stays
 		// reproducible (ADR-0004).
-		SpecName:       req.SpecName,
+		SpecName: req.SpecName,
+		// A pinned version is honoured (F143): before, the adapter dropped it
+		// and every tick ran the latest definition.
+		SpecVersion:    req.SpecVersion,
 		IdempotencyKey: req.IdempotencyKey,
 		TriggerKind:    req.TriggerKind,
 		TriggerDetail:  req.TriggerDetail,
