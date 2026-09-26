@@ -45,6 +45,8 @@ with the code, treat the document as the bug.
 | [RBAC-DESIGN.md](RBAC-DESIGN.md) / [RBAC-IMPLEMENTATION.md](RBAC-IMPLEMENTATION.md) | The target authorization model, and what is implemented today |
 | [CLUSTER-SCALING.md](CLUSTER-SCALING.md) | The cluster registry and controller |
 | [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) | Dependency licences |
+| [AIRGAP.md](AIRGAP.md) | Building, carrying and loading the air-gapped installation bundle |
+| [SOC2-READINESS.md](SOC2-READINESS.md) | Nexus service controls and evidence for KGF Cloud's SOC 2 program (not an attestation) |
 
 ## The design in brief
 
