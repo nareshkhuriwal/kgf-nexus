@@ -184,8 +184,10 @@ their **state** is workflow-manager-owned:
   `baseline` and no run — and only new arrivals trigger.
 - **Pluggable object stores.** The sensor depends on a two-method `ObjectLister`
   interface, and a registry maps a URI scheme to an implementation. S3-compatible (minio-go,
-  the result-store client library) ships now; native Azure/GCS listers register under
-  their schemes without touching the sensor.
+  the result-store client library) shipped first; native Azure Blob (`azblob://`, `az://`)
+  and GCS (`gcs://`, `gs://`) listers are the result store's own `internal/objstore`
+  backends behind the same interface, resuming through `objstore.ListAfter`
+  (OPERATIONS §27.6).
 
 ### 6. Lineage is declared in the spec and recorded per run
 

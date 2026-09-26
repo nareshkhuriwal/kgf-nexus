@@ -545,6 +545,58 @@ func summarise(s string) string {
 	return s
 }
 
+// GroupRolePrefixVersion is the migration (0038) after which an installation
+// may use its own group-role names (F153).
+const GroupRolePrefixVersion = 38
+
+// literalGroupRole matches a service group role named literally; a login
+// (nexus_scheduler_login) is not a match.
+var literalGroupRole = regexp.MustCompile(
+	`\bnexus_(?:api_gateway|workflow_manager|dag_engine|scheduler|resource_manager|event_service)\b`)
+
+var migrationVersion = regexp.MustCompile(`^([0-9]{4})_`)
+
+// LiteralGroupRoles reports statements in migrations numbered above
+// GroupRolePrefixVersion that name a service group role literally. Such a
+// grant lands on the shared nexus_* role, which a prefixed installation's
+// logins are not members of (and migrate.sh's sync only moves grants: a
+// literal REVOKE would silently miss the prefixed role). They must resolve the
+// name with nexus_role('<service>').
+func LiteralGroupRoles(dir string) ([]Finding, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "*.up.sql"))
+	if err != nil {
+		return nil, fmt.Errorf("list migrations in %s: %w", dir, err)
+	}
+	sort.Strings(files)
+	var out []Finding
+	for _, path := range files {
+		name := filepath.Base(path)
+		m := migrationVersion.FindStringSubmatch(name)
+		if m == nil {
+			continue
+		}
+		var v int
+		if _, err := fmt.Sscanf(m[1], "%d", &v); err != nil || v <= GroupRolePrefixVersion {
+			continue
+		}
+		body, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil, fmt.Errorf("read %s: %w", path, rerr)
+		}
+		for _, st := range split(string(body)) {
+			if literalGroupRole.MatchString(st.text) {
+				out = append(out, Finding{
+					File: name, Line: st.line, Severity: Blocking, Rule: "literal-group-role",
+					Stmt: summarise(st.text),
+					Why: "names a service group role literally; since 0038 an installation may rename them " +
+						"(NEXUS_DB_ROLE_PREFIX), so resolve it with nexus_role('<service>') inside EXECUTE format(...)",
+				})
+			}
+		}
+	}
+	return out, nil
+}
+
 // Blocking filters to the findings that would break a rolling deploy.
 func BlockingOnly(fs []Finding) []Finding {
 	var out []Finding

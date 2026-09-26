@@ -295,7 +295,10 @@ platform credential. The context methods below use it when it is there, and
 nothing in a handler needs to know. Endpoints: `GET /v1/info`,
 `POST /v1/usage`, `POST /v1/progress`, `POST /v1/permits`,
 `POST /v1/permits/settle`, `PUT`/`GET /v1/checkpoint`, `POST /v1/error`
-(ADR-0032 §1 has the table and the status codes).
+(ADR-0032 §1 has the table and the status codes). A kubernetes pod reaches its
+agent over TLS instead: `NEXUS_TASK_API=https://<agent>:<port>`, verified
+against the PEM CA in `NEXUS_TASK_API_CA`; the client never uses plain
+`http://` and never skips verification (ADR-0032 addendum).
 
 | Member | Purpose |
 |---|---|
@@ -393,8 +396,9 @@ repository calls a real provider; every test and example uses the mock below.
 
 ### Without a workload API
 
-The local runner, unit tests and the kubernetes executor (F149) have no
-workload API. The same calls then work in-process:
+The local runner, unit tests and a kubernetes agent with no workload-API
+listener configured have no workload API. The same calls then work
+in-process:
 
 - **usage** accumulates on the context and is logged (`"msg": "usage"`) when
   the task ends;

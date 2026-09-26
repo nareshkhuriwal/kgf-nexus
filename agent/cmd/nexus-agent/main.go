@@ -244,6 +244,27 @@ func main() {
 		cfg.Kubernetes = ke
 		log.Info("kubernetes executor configured", "namespace", kcfg.Namespace,
 			"owner", ke.Config.Owner, "helper_image", ke.Config.HelperImage)
+
+		// The workload API for pods on other nodes (F148; ADR-0032 addendum).
+		// Opt-in, because task pods must be able to reach the advertised
+		// address (and a NetworkPolicy must allow exactly that).
+		if kcfg.TaskAPIAdvertise != "" {
+			n, nerr := taskapi.StartNetwork(taskapi.NetworkConfig{
+				Listen: kcfg.TaskAPIListen, Advertise: kcfg.TaskAPIAdvertise,
+				ExtraNames: kcfg.TaskAPIExtraNames, Log: log,
+			})
+			if nerr != nil {
+				// Configured but unusable is a deployment bug: every kubernetes
+				// task would silently lose its usage record and shared limits.
+				log.Error("could not start the workload API network listener", "error", nerr)
+				os.Exit(1)
+			}
+			defer n.Close()
+			cfg.TaskAPINetwork = n
+		} else {
+			log.Warn("kubernetes tasks get no workload API: usage units, shared rate limits and checkpoints " +
+				"stay in-process (set NEXUS_K8S_TASK_API_ADVERTISE, OPERATIONS §29.10)")
+		}
 	}
 
 	// A drain that gives up before the uninterruptible ceiling would kill, at

@@ -127,6 +127,39 @@ type Store interface {
 	CreateBucket(ctx context.Context) error
 }
 
+// AfterLister is implemented by backends that can begin a listing past a key
+// on the server (S3 StartAfter, GCS StartOffset), so resuming a listing from
+// a cursor costs one page, not a walk over everything before it. Callers use
+// ListAfter, which falls back to skipping client-side for the others.
+type AfterLister interface {
+	// ListAfter is List restricted to keys that sort strictly after
+	// startAfter. startAfter is never empty and never sorts before prefix.
+	ListAfter(ctx context.Context, prefix, startAfter string, fn func(ObjectInfo) error) error
+}
+
+// ListAfter calls fn for every object under prefix whose key sorts strictly
+// after startAfter, in lexical order, with List's ErrStop semantics. An empty
+// startAfter, or one that sorts before the prefix, lists the whole prefix.
+//
+// Azure Blob has no server-side start key in its XML listing (StartFrom exists
+// only for the Arrow response format), so there the skip is client-side and a
+// resumed listing reads every key under the prefix up to the cursor: keep
+// such prefixes narrow.
+func ListAfter(ctx context.Context, s Store, prefix, startAfter string, fn func(ObjectInfo) error) error {
+	if startAfter == "" || startAfter < prefix {
+		return s.List(ctx, prefix, fn)
+	}
+	if al, ok := s.(AfterLister); ok {
+		return al.ListAfter(ctx, prefix, startAfter, fn)
+	}
+	return s.List(ctx, prefix, func(o ObjectInfo) error {
+		if o.Key <= startAfter {
+			return nil
+		}
+		return fn(o)
+	})
+}
+
 // ValidateKey rejects keys every backend would treat differently or badly.
 // Every backend's Put enforces it, so a caller bug fails the same way
 // everywhere instead of writing a "//"-containing key on S3 that Azure would

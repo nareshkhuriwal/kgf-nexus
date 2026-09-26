@@ -6,6 +6,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -92,6 +94,18 @@ type KubernetesConfig struct {
 	// refuses shared-GPU tasks rather than running them with no GPU.
 	SharedGPUResourceName string
 
+	// TaskAPIAdvertise is host:port at which task pods reach this agent's
+	// workload-API TLS listener (F148): the agent pod's IP from the downward
+	// API, a Service name, or host.docker.internal for an agent outside a
+	// local cluster. Setting it ENABLES the listener; empty leaves kubernetes
+	// attempts without a workload API (the SDK's in-process fallback).
+	TaskAPIAdvertise string
+	// TaskAPIListen is the address the listener binds. Default ":<port of
+	// TaskAPIAdvertise>".
+	TaskAPIListen string
+	// TaskAPIExtraNames are further DNS names or IPs for its certificate.
+	TaskAPIExtraNames []string
+
 	// TTLAfterFinished lets the Job controller delete a finished Job the agent
 	// never cleaned up (agent crashed). It is ALSO the window in which a
 	// restarted agent can still harvest a finished attempt's result.
@@ -155,7 +169,25 @@ func LoadKubernetesConfigFromEnv(getenv func(string) string) (cfg KubernetesConf
 		cfg.MIGResourcePrefix = "nvidia.com/mig-"
 	}
 	cfg.SharedGPUResourceName = getenv("NEXUS_K8S_GPU_SHARED_RESOURCE")
+	if err := validateGPUResourceNames(cfg); err != nil {
+		return cfg, true, err
+	}
 	cfg.ImagePullSecrets = splitList(getenv("NEXUS_K8S_IMAGE_PULL_SECRETS"))
+	cfg.TaskAPIAdvertise = strings.TrimSpace(getenv("NEXUS_K8S_TASK_API_ADVERTISE"))
+	cfg.TaskAPIListen = strings.TrimSpace(getenv("NEXUS_K8S_TASK_API_LISTEN"))
+	cfg.TaskAPIExtraNames = splitList(getenv("NEXUS_K8S_TASK_API_EXTRA_NAMES"))
+	if cfg.TaskAPIAdvertise != "" {
+		_, port, perr := net.SplitHostPort(cfg.TaskAPIAdvertise)
+		if perr != nil || strings.Contains(cfg.TaskAPIAdvertise, "://") {
+			return cfg, true, fmt.Errorf("NEXUS_K8S_TASK_API_ADVERTISE=%q: want host:port as task pods dial it", cfg.TaskAPIAdvertise)
+		}
+		if cfg.TaskAPIListen == "" {
+			cfg.TaskAPIListen = ":" + port
+		}
+	} else if cfg.TaskAPIListen != "" {
+		return cfg, true, fmt.Errorf("NEXUS_K8S_TASK_API_LISTEN is set without NEXUS_K8S_TASK_API_ADVERTISE: " +
+			"task pods need the address to dial, and the certificate must name it")
+	}
 
 	switch p := corev1.PullPolicy(getenv("NEXUS_K8S_IMAGE_PULL_POLICY")); p {
 	case "", corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
@@ -195,6 +227,44 @@ func LoadKubernetesConfigFromEnv(getenv func(string) string) (cfg KubernetesConf
 	}
 	cfg.applyDefaults()
 	return cfg, true, nil
+}
+
+// validateGPUResourceNames refuses device-plugin resource names the API
+// server would reject or no plugin could ever advertise. A bad name is not a
+// failed task, it is a pod Pending forever ("Insufficient <name>") until its
+// start timeout, on every GPU attempt; failing at boot names the setting.
+func validateGPUResourceNames(cfg KubernetesConfig) error {
+	check := func(env, name string) error {
+		if name == "" {
+			return nil
+		}
+		// Extended resources are domain-qualified ("vendor.com/thing").
+		if !strings.Contains(name, "/") {
+			return fmt.Errorf("%s=%q: an extended resource name is domain-qualified, e.g. nvidia.com/gpu", env, name)
+		}
+		if errs := validation.IsQualifiedName(name); len(errs) > 0 {
+			return fmt.Errorf("%s=%q: %s", env, name, strings.Join(errs, "; "))
+		}
+		return nil
+	}
+	if err := check("NEXUS_K8S_GPU_RESOURCE", cfg.GPUResourceName); err != nil {
+		return err
+	}
+	if err := check("NEXUS_K8S_GPU_SHARED_RESOURCE", cfg.SharedGPUResourceName); err != nil {
+		return err
+	}
+	// The prefix is joined to a profile ("1g.10gb"), so it must end where the
+	// device plugin's names separate the two: nvidia.com/mig-1g.10gb.
+	p := cfg.MIGResourcePrefix
+	if p != "" && !strings.ContainsAny(p[len(p)-1:], "-/._") {
+		return fmt.Errorf("NEXUS_K8S_MIG_RESOURCE_PREFIX=%q must end in '-', '/', '.' or '_' (the NVIDIA device plugin's mixed strategy uses nvidia.com/mig-)", p)
+	}
+	if p != "" {
+		if err := check("NEXUS_K8S_MIG_RESOURCE_PREFIX", p+"1g.10gb"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func splitList(s string) []string {

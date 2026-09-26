@@ -157,7 +157,17 @@ func (s *gcsStore) Get(ctx context.Context, key string, offset, length int64) (i
 }
 
 func (s *gcsStore) List(ctx context.Context, prefix string, fn func(ObjectInfo) error) error {
-	q := &storage.Query{Prefix: prefix}
+	return s.list(ctx, prefix, "", fn)
+}
+
+// ListAfter implements AfterLister with the JSON API's startOffset, which is
+// INCLUSIVE: the cursor object itself is skipped here.
+func (s *gcsStore) ListAfter(ctx context.Context, prefix, startAfter string, fn func(ObjectInfo) error) error {
+	return s.list(ctx, prefix, startAfter, fn)
+}
+
+func (s *gcsStore) list(ctx context.Context, prefix, startAfter string, fn func(ObjectInfo) error) error {
+	q := &storage.Query{Prefix: prefix, StartOffset: startAfter}
 	// Only the fields the sweep reads: a listing of millions of objects should
 	// not carry ACLs and metadata it discards.
 	if err := q.SetAttrSelection([]string{"Name", "Size", "Updated", "ContentType"}); err != nil {
@@ -172,7 +182,7 @@ func (s *gcsStore) List(ctx context.Context, prefix string, fn func(ObjectInfo) 
 		if err != nil {
 			return fmt.Errorf("objstore: gcs list %s/%s: %w", s.bucket, prefix, err)
 		}
-		if strings.HasSuffix(a.Name, "/") {
+		if strings.HasSuffix(a.Name, "/") || (startAfter != "" && a.Name <= startAfter) {
 			continue
 		}
 		if err := fn(ObjectInfo{Key: a.Name, Size: a.Size, LastModified: a.Updated, ContentType: a.ContentType}); err != nil {

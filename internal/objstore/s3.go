@@ -239,6 +239,29 @@ func (s *s3Store) List(ctx context.Context, prefix string, fn func(ObjectInfo) e
 	return ctx.Err()
 }
 
+// ListAfter implements AfterLister with ListObjectsV2 StartAfter.
+func (s *s3Store) ListAfter(ctx context.Context, prefix, startAfter string, fn func(ObjectInfo) error) error {
+	listCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	opts := minio.ListObjectsOptions{Prefix: prefix, Recursive: true, StartAfter: startAfter}
+	for obj := range s.mc.ListObjects(listCtx, s.bucket, opts) {
+		if obj.Err != nil {
+			return fmt.Errorf("objstore: s3 list %s/%s after %s: %w", s.bucket, prefix, startAfter, obj.Err)
+		}
+		if strings.HasSuffix(obj.Key, "/") || obj.Key <= startAfter {
+			continue
+		}
+		if err := fn(ObjectInfo{Key: obj.Key, Size: obj.Size, LastModified: obj.LastModified,
+			ContentType: obj.ContentType}); err != nil {
+			if errors.Is(err, ErrStop) {
+				return nil
+			}
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
 func (s *s3Store) Delete(ctx context.Context, key string) error {
 	if key == "" {
 		return errors.New("objstore: refusing to delete an empty key")

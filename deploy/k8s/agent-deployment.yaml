@@ -114,6 +114,18 @@ spec:
               value: busybox:1.37.0
             - name: NEXUS_K8S_TTL_AFTER_FINISHED
               value: 10m
+            # The workload API for task pods (F148, OPERATIONS §29.10): TLS on
+            # this pod's IP, per-attempt tokens through each attempt's Secret.
+            # executor-policies.yaml lets task pods reach exactly this port.
+            - name: NEXUS_POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+            - name: NEXUS_K8S_TASK_API_ADVERTISE
+              value: "$(NEXUS_POD_IP):9443"
+            # Device-plugin resources task pods request (ADR-0029 §2):
+            # - name: NEXUS_K8S_MIG_RESOURCE_PREFIX
+            #   value: nvidia.com/mig-
+            # - name: NEXUS_K8S_GPU_SHARED_RESOURCE
+            #   value: nvidia.com/gpu.shared
             # Uncomment for a GPU pool:
             # - name: NEXUS_K8S_GPU_RESOURCE
             #   value: nvidia.com/gpu
@@ -125,6 +137,7 @@ spec:
             #   value: "nvidia.com/gpu:NoSchedule"
           ports:
             - {name: metrics, containerPort: 8089}
+            - {name: task-api, containerPort: 9443}
           # 503 until the agent has registered with the control plane (it
           # retries with backoff while the gateway starts); see OPERATIONS.
           readinessProbe:

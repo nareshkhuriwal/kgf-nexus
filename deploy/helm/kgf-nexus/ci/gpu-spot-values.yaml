@@ -40,6 +40,27 @@ agents:
     capacityType: spot
     eviction: { sources: "kubernetes,aws", grace: 25s }
     artifactCache: { bytes: 200Gi, sizeLimit: 220Gi, verify: hit }
+  # A kubernetes-executor agent fronting a MIG + MPS task pool: task pods
+  # request nvidia.com/mig-<profile> and nvidia.com/gpu.shared per attempt,
+  # the agent pod requests no GPU, and task pods reach its workload API.
+  - name: agent-k8s-gpu-pool
+    queues: gpu
+    executors: kubernetes
+    labels: "accelerator=nvidia-a100,substrate=kubernetes"
+    cpuMillis: 64000
+    memoryBytes: 274877906944
+    diskBytes: 429496729600
+    gpuMig: "1g.10gb=14;3g.40gb=4"
+    gpuShared: "0:mps:40Gi"
+    # Its own identity: it mounts an API token (it creates Jobs); the other
+    # agents do not.
+    serviceAccount: { name: nexus-agent-k8s }
+    kubernetes:
+      namespace: nexus-tasks
+      serviceAccount: nexus-task
+      sharedGpuResourceName: nvidia.com/gpu.shared
+      gpuKindLabel: nvidia.com/gpu.product
+      taskApi: { port: 9443 }
 clusterController:
   clusterLabels: "nexus.io/cost-tier=1,nexus.io/data-locality=lake-eu"
   gpuResources: "nvidia.com/gpu,nvidia.com/gpu.shared"
