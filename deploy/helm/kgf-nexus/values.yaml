@@ -284,6 +284,23 @@ agentDefaults:
   # mid-drain and strands its attempts until their leases expire.
   drainGrace: 60s
   terminationGracePeriodSeconds: 90
+  # Worker-side secret resolution (ADR-0025, OPERATIONS §25.1). configSecret
+  # names a Secret whose key `secrets.yaml` is the per-tenant provider file
+  # (only this release's nexusNamespace block is loaded). Empty: no providers,
+  # and a task that declares a secret fails PERMISSION_DENIED.
+  secrets:
+    configSecret: ""
+    # Extra Secret volumes for file:// refs, e.g. a KGF Cloud CSI-projected
+    # Key Vault secret: [{ name: kv, secretName: nexus-kv, mountPath: /var/run/secrets/nexus }]
+    # (list mountPath under file.allow_dirs in secrets.yaml).
+    fileSecrets: []
+    # Azure workload identity for akv:// (the KGF stamp's workload identity
+    # client id); adds the azure.workload.identity/use label and annotation.
+    workloadIdentityClientId: ""
+    serviceAccountName: ""
+    # Host-side secret files (docker/subprocess executors) live on a
+    # memory-backed emptyDir, never on the work volume's disk.
+    tmpfsSizeLimit: 64Mi
 
 # Prometheus scraping (docs/OPERATIONS.md, "Metrics"). Every Nexus pod serves
 # /metrics on a port that no external Service exposes: the gateway on its
@@ -311,6 +328,23 @@ metrics:
   # serviceMonitor.enabled unless set explicitly.
   podMonitor:
     enabled: null
+
+# Audit export (ADR-0025, OPERATIONS §25.2).
+auditExport:
+  # Secret holding key `audit-sink-key` (openssl rand -base64 32): seals SIEM
+  # sink signing secrets. Empty: sinks are refused (503); export, retention
+  # and legal hold still work.
+  sinkKeySecret: ""
+  # Internal CIDRs a sink may deliver to (an on-premises SIEM). Loopback,
+  # link-local and private ranges are refused otherwise.
+  sinkAllowCIDRs: ""
+  # KGF Cloud attribution: KGF's context-signing public keys (base64url,
+  # comma-separated) so audit rows record the verified KGF organization,
+  # scope, principal and request id. Attribution only, never authorization.
+  kgfContext:
+    publicKeys: ""
+    audience: nexus
+    userIssuers: gateway
 
 # Host-based routing via the Gateway API (templates/gateway.yaml). Off by
 # default: it needs a Gateway API implementation installed in the cluster.

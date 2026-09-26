@@ -138,6 +138,22 @@ spec:
             {{- if $isGateway }}
             # The ops listener: /metrics and the probes, never the public port.
             - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" $metricsPort | quote }} }
+            {{- with $root.Values.auditExport }}
+            {{- if .sinkKeySecret }}
+            # Seals audit sink signing secrets (ADR-0025).
+            - name: NEXUS_AUDIT_SINK_KEY
+              valueFrom: { secretKeyRef: { name: {{ .sinkKeySecret | quote }}, key: audit-sink-key } }
+            {{- end }}
+            {{- if .sinkAllowCIDRs }}
+            - { name: NEXUS_AUDIT_SINK_ALLOW_CIDRS, value: {{ .sinkAllowCIDRs | quote }} }
+            {{- end }}
+            {{- if .kgfContext.publicKeys }}
+            # KGF Cloud attribution of audit rows (verification only).
+            - { name: NEXUS_KGF_CONTEXT_PUBLIC_KEYS, value: {{ .kgfContext.publicKeys | quote }} }
+            - { name: NEXUS_KGF_CONTEXT_AUDIENCE, value: {{ .kgfContext.audience | default "nexus" | quote }} }
+            - { name: NEXUS_KGF_CONTEXT_USER_ISSUERS, value: {{ .kgfContext.userIssuers | default "gateway" | quote }} }
+            {{- end }}
+            {{- end }}
             {{- end }}
           ports:
             - { name: http, containerPort: 8080 }
