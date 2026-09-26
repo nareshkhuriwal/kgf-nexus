@@ -226,14 +226,19 @@ func TestFailureNotifiesMatchingRulesOnceWithSignedWebhook(t *testing.T) {
 	if got := hook.count(); got != 2 {
 		t.Fatalf("receiver got %d requests, want 2 (etl failure once, other success once)", got)
 	}
+	// Deliveries are sent concurrently, so find the failure by type.
 	hook.mu.Lock()
-	first, h := hook.bodies[0], hook.hdrs[0]
+	var first map[string]any
+	var h http.Header
+	for i, b := range hook.bodies {
+		if b["type"] == notify.EventRunFailed {
+			first, h = b, hook.hdrs[i]
+		}
+	}
 	hook.mu.Unlock()
 	if first["type"] != notify.EventRunFailed || first["run_id"] != r1 || first["link"] != "https://nexus.example/runs/"+r1 {
 		t.Fatalf("first body %v", first)
 	}
-	raw, _ := json.Marshal(first)
-	_ = raw
 	if h.Get("X-Nexus-Signature") == "" || h.Get("Idempotency-Key") == "" {
 		t.Fatalf("headers %v", h)
 	}
