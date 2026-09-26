@@ -422,7 +422,7 @@ enforce:
 }
 
 func (e *SubprocessExecutor) buildOutcome(st *subprocState, waitErr error, timedOut bool, startedAt time.Time) Outcome {
-	o := Outcome{WallMs: time.Since(startedAt).Milliseconds(), TimedOut: timedOut}
+	o := Outcome{WallMs: elapsedMs(time.Since(startedAt)), TimedOut: timedOut}
 
 	if ps := st.cmd.ProcessState; ps != nil {
 		o.ExitCode = ps.ExitCode()

@@ -98,6 +98,62 @@ func TestSubprocessSinkSeparatesStreamsAndKeepsTheLocalLog(t *testing.T) {
 	}
 }
 
+// slowSink is a sink whose writes take a while: a busy log shipper, a slow disk
+// under the local spool, or simply a host so loaded that the draining goroutine
+// is descheduled between the sink and the stdout buffer.
+type slowSink struct {
+	captureSink
+	delay time.Duration
+}
+
+func (s *slowSink) Writer(stream string) io.Writer {
+	w := s.captureSink.Writer(stream)
+	return writerFunc(func(p []byte) (int, error) {
+		time.Sleep(s.delay)
+		return w.Write(p)
+	})
+}
+
+// TestSubprocessStdoutOutputWaitsForTheDrain is the deterministic form of what
+// made TestSubprocessSinkSeparatesStreamsAndKeepsTheLocalLog fail about one run
+// in ten under load: with a log sink, a declared stdout output reaches its
+// buffer only through the pipe drain, AFTER the sink write for the same bytes.
+// Wait used to build the outcome as soon as the process was reaped and drain
+// afterwards, so a drain still inside the sink write left the output empty,
+// and the attempt reported SUCCEEDED with no result. A slow sink makes that
+// window certain rather than a scheduling accident.
+func TestSubprocessStdoutOutputWaitsForTheDrain(t *testing.T) {
+	e := &SubprocessExecutor{Root: t.TempDir(), AllowUnenforceableLimits: true}
+	sink := &slowSink{delay: 300 * time.Millisecond}
+	spec := TaskSpec{
+		AttemptID:       "att-slow-sink",
+		DeclaredOutputs: []string{"res"},
+		StdoutOutput:    "res",
+		Runtime:         &nexusv1.RuntimeSpec{Command: []string{"/bin/sh", "-c", `printf '{"v":1}'`}},
+		LogSink:         sink,
+	}
+	ctx := context.Background()
+	p, err := e.Prepare(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := e.Start(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Cleanup(context.Background(), h) })
+	o, err := e.Wait(ctx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(o.Outputs["res"].Bytes); got != `{"v":1}` {
+		t.Fatalf("stdout output = %q, want the task's whole stdout: the outcome was built before the drain finished", got)
+	}
+	if got := sink.get(LogStreamStdout); got != `{"v":1}` {
+		t.Fatalf("stdout sink = %q", got)
+	}
+}
+
 // TestSubprocessSinkDoesNotWaitForeverOnAGrandchild: a background process that
 // inherits stdout and outlives the task must not hold Wait (and so the result
 // report) open; the drain is bounded.

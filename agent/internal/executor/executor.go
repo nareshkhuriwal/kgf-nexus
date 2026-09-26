@@ -204,7 +204,9 @@ type Outcome struct {
 
 	PeakMemoryBytes int64
 	CPUSeconds      float64
-	WallMs          int64
+	// WallMs is rounded UP to whole milliseconds (elapsedMs), so a workload
+	// that ran reports at least 1: 0 reads as "not measured".
+	WallMs int64
 
 	// Output is the workload's result under the SINGLE-output convention
 	// (output.json in WorkDir). Raw bytes: the executor does not interpret it.
@@ -352,3 +354,14 @@ const ContainerTaskAPIDir = "/run/nexus-task"
 
 // TaskAPIScheme prefixes the socket path in EnvTaskAPI.
 const TaskAPIScheme = "unix://"
+
+// elapsedMs is a wall-clock duration in whole milliseconds, rounded up. A task
+// that exits within a millisecond of starting (a trivial shell command on a
+// fast Linux host) truncated to 0, which consumers and the conformance suite
+// read as "not measured".
+func elapsedMs(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	return int64((d + time.Millisecond - 1) / time.Millisecond)
+}

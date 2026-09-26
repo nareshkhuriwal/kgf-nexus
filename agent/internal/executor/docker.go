@@ -422,8 +422,44 @@ type dockerInspect struct {
 	} `json:"State"`
 }
 
+// oomSettleWindow bounds how long a SIGKILLed, memory-limited container's
+// outcome waits for the daemon to record an OOM kill.
+//
+// containerd publishes a task's exit and its OOM event separately, and the
+// daemon records OOMKilled only when it processes the OOM event. When the exit
+// is handled first -- more likely the busier the host -- `docker wait` has
+// already returned and a single inspect reads OOMKilled=false for a container
+// the kernel OOM-killed; the flag turns true a moment later. The attempt was
+// then classified as a plain SIGKILL (APPLICATION, not retried on a bigger
+// worker) instead of OOM. Only a 137 exit under a memory limit, not a deadline
+// kill, can be a late OOM, so nothing else pays for the wait.
+const oomSettleWindow = 3 * time.Second
+
+// awaitOOMFlag re-inspects until the daemon reports OOMKilled or the settle
+// window ends.
+func (e *DockerExecutor) awaitOOMFlag(ctx context.Context, st *dockerState) bool {
+	deadline := time.Now().Add(oomSettleWindow)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+		raw, err := e.output(ctx, 30*time.Second, "inspect", "--format", "{{json .State.OOMKilled}}", st.containerID)
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(raw) == "true" {
+			e.logger().Info("container OOM kill recorded after its exit",
+				"container", shortID(st.containerID))
+			return true
+		}
+	}
+	return false
+}
+
 func (e *DockerExecutor) inspectOutcome(st *dockerState, timedOut bool) Outcome {
-	o := Outcome{TimedOut: timedOut, WallMs: time.Since(st.startedA).Milliseconds()}
+	o := Outcome{TimedOut: timedOut, WallMs: elapsedMs(time.Since(st.startedA))}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -442,6 +478,9 @@ func (e *DockerExecutor) inspectOutcome(st *dockerState, timedOut bool) Outcome 
 		return o
 	}
 	insp := arr[0]
+	if insp.State.ExitCode == 137 && !insp.State.OOMKilled && !timedOut && st.limit.GetMemoryBytes() > 0 {
+		insp.State.OOMKilled = e.awaitOOMFlag(ctx, st)
+	}
 	o.ExitCode = insp.State.ExitCode
 	o.OOMKilled = insp.State.OOMKilled
 
@@ -456,7 +495,7 @@ func (e *DockerExecutor) inspectOutcome(st *dockerState, timedOut bool) Outcome 
 	}
 	if ts, err := time.Parse(time.RFC3339Nano, insp.State.StartedAt); err == nil {
 		if te, err := time.Parse(time.RFC3339Nano, insp.State.FinishedAt); err == nil && te.After(ts) {
-			o.WallMs = te.Sub(ts).Milliseconds()
+			o.WallMs = elapsedMs(te.Sub(ts))
 		}
 	}
 	if st.limit.GetMemoryBytes() > 0 && o.OOMKilled {
