@@ -591,8 +591,15 @@ func (c *SchedulerClient) RecordProgress(ctx context.Context, attemptID, leaseTo
 // It runs AFTER the terminal transition has committed, and its failure does not
 // fail the RPC. The attempt's outcome is already durable; refusing the worker's
 // report because the engine was briefly unavailable would make the worker retry a
-// report that already landed, and the engine's own reconcile is idempotent and
-// re-runnable, so a missed call costs latency rather than correctness.
+// report that already landed.
+//
+// This call is the FAST path only (CONTRACT-FINDINGS F160). It used to be the
+// only path: a timed-out or lost call left the run with nothing that would ever
+// reconcile it, and a 500-way fan-out on the dev cluster stranded exactly so,
+// with 446 calls lost to DeadlineExceeded. The terminal attempt write now
+// enqueues a durable reconcile request in the same transaction (migration
+// 0039), which the dag-engine consumes; a failed call here costs one consumer
+// poll of latency, not the run.
 func (c *SchedulerClient) ApplyResult(ctx context.Context, req *nexusv1.ReportResultRequest) error {
 	if c.grpc == nil {
 		return fmt.Errorf("apply result: %w (scheduler owns task_attempts)", ErrUpstreamNotConfigured)
@@ -610,7 +617,9 @@ func (c *SchedulerClient) ApplyResult(ctx context.Context, req *nexusv1.ReportRe
 		return nil
 	}
 	if err := c.dag.reconcileRun(ctx, applied.RunID, applied.NodeID); err != nil {
-		c.log.ErrorContext(ctx, "attempt result committed but the run reconcile failed; the run will not advance until a later reconcile",
+		// WARN, not ERROR: nothing is lost. The durable request the report
+		// transaction queued will be consumed by the dag-engine.
+		c.log.WarnContext(ctx, "attempt result committed but the fast-path run reconcile failed; the dag-engine's durable reconcile queue will advance the run",
 			"run_id", applied.RunID, "node_id", applied.NodeID,
 			"attempt_id", req.GetAttemptId(), "err", err)
 	}

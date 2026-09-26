@@ -325,12 +325,24 @@ func (s *SpecServer) SetRunState(ctx context.Context, req *SetRunStateRequest) (
 		return nil, status.Errorf(codes.InvalidArgument,
 			"run state %q is not a transition this endpoint accepts", req.State)
 	}
-	if err != nil {
-		// An illegal transition is the state machine working. Reported as
-		// not-applied so a repeated at-least-once report is not an error storm.
+	if errors.Is(err, store.ErrRunStateConflict) || errors.Is(err, store.ErrNotFound) {
+		// An illegal transition is the state machine working, and a run that
+		// no longer exists has nothing to transition. Reported as not-applied
+		// so a repeated at-least-once report is not an error storm.
 		s.log.DebugContext(ctx, "run state transition refused",
 			"run_id", req.RunID, "requested", req.State, "err", err)
 		return &SetRunStateResponse{Applied: false}, nil
+	}
+	if err != nil {
+		// A FAULT is not a refusal, and must not be reported as one (F160).
+		// Answering applied=false here told the engine its conclusion had been
+		// adjudicated and could be dropped; a terminal publish lost to a
+		// database blip then left the run RUNNING with every node terminal.
+		// Unavailable makes the engine keep its durable reconcile request and
+		// publish again.
+		s.log.WarnContext(ctx, "run state transition failed; the engine will retry it",
+			"run_id", req.RunID, "requested", req.State, "err", err)
+		return nil, status.Errorf(codes.Unavailable, "set run %s state to %s: %v", req.RunID, req.State, err)
 	}
 	return &SetRunStateResponse{State: row.State, Applied: true}, nil
 }

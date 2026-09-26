@@ -33,6 +33,12 @@ local equivalent. Services never migrate at startup (ADR-0011 rule 4).
 | 0037 | `0037_strict_service_grants` | F132: the grants per-service logins need (scheduler timer lease and worker reaping, gateway lease renewal, `SELECT (id, namespace)` on `tenants`); grants only |
 | 0038 | `0038_installation_role_prefix` | F153: opt-in per-installation service group roles (`NEXUS_DB_ROLE_PREFIX`): `installation_role_prefix`, `nexus_role()`, and the move of every grant off the shared `nexus_*` roles that `deploy/migrate.sh` runs after each migrate. No prefix: nothing changes |
 
+## After wave 3
+
+| Version | Migration | Design |
+|---|---|---|
+| 0039 | `0039_run_reconcile_queue` | F160: the durable run-reconcile queue (`run_reconcile_requests`), its triggers on `task_attempts` (terminal) and `workflow_runs` (state changes that need the engine), and a one-time request for every live materialized run, which repairs runs stranded before the upgrade. Owned by the dag-engine; see the ADR-0011 addendum |
+
 **Granting after 0038.** An installation may have renamed its group roles, so
 a migration numbered above 0038 must not name `nexus_<service>` literally:
 resolve it with `nexus_role('<service>')` inside `EXECUTE format('GRANT ...

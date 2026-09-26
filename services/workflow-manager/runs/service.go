@@ -189,6 +189,17 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 		// A deduplicated creation must do NOTHING else: materializing the DAG or
 		// arming timers a second time would double every downstream effect of a
 		// retry that was supposed to be free.
+		//
+		// With one exception (F160): the first creation committed the run and
+		// then lost its materialize call, so the run the caller is retrying for
+		// has no graph and will never start. Materializing it is not a second
+		// effect -- it is the first one, finally applied -- and MaterializeRun
+		// is idempotent, so a race with the sweep doing the same is harmless.
+		if run.State == string(domain.RunPending) {
+			if err := s.materializeIfMissing(ctx, run.ID, spec.ID, spec.SpecJSON); err != nil {
+				return CreateResult{}, err
+			}
+		}
 		s.log.InfoContext(ctx, "run creation deduplicated by idempotency key",
 			"run_id", run.ID, "idempotency_key", req.IdempotencyKey)
 		return CreateResult{Run: run, Created: false}, nil
@@ -219,6 +230,43 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 
 	log.InfoContext(ctx, "run created", "spec_name", spec.Name, "spec_version", spec.Version)
 	return CreateResult{Run: run, Created: true}, nil
+}
+
+// materializeIfMissing materializes a run that has no nodes yet.
+func (s *Service) materializeIfMissing(ctx context.Context, runID, specID string, specJSON []byte) error {
+	counts, err := store.WFMCountRunNodesByState(ctx, s.db, runID)
+	if err != nil {
+		return fmt.Errorf("check dag of run %s: %w", runID, err)
+	}
+	if len(counts) > 0 {
+		return nil
+	}
+	s.log.WarnContext(ctx, "run was created but never materialized; materializing it now",
+		"run_id", runID)
+	if err := s.dag.MaterializeRun(ctx, runID, specID, specJSON); err != nil {
+		return fmt.Errorf("materialize dag for run %s: %w", runID, err)
+	}
+	return nil
+}
+
+// EnsureMaterialized materializes a PENDING run whose creation committed but
+// whose materialize call was lost (F160). Called by the stalled-run sweep for
+// runs WFMListUnmaterializedRuns reports. A run that is no longer PENDING, or
+// already has its graph, is left alone. The run deadline, if any, is armed by
+// the reconciler's missing-deadline sweep, as for any run.
+func (s *Service) EnsureMaterialized(ctx context.Context, runID string) error {
+	run, err := store.WFMGetRun(ctx, s.db, runID)
+	if err != nil {
+		return err
+	}
+	if run.State != string(domain.RunPending) {
+		return nil
+	}
+	spec, err := store.WFMGetSpecByID(ctx, s.db, run.SpecID)
+	if err != nil {
+		return fmt.Errorf("read spec of run %s: %w", runID, err)
+	}
+	return s.materializeIfMissing(ctx, runID, spec.ID, spec.SpecJSON)
 }
 
 // Start moves a PENDING run to RUNNING once the DAG engine has its frontier.
@@ -260,10 +308,13 @@ func (s *Service) Resume(ctx context.Context, runID string) (store.RunRow, error
 
 	// Logged and swallowed rather than returned: the resume itself is committed and
 	// durable, so failing the operator's call would misreport a state change that
-	// already happened. A missed reconcile costs latency, not correctness — the next
-	// terminal attempt triggers one anyway.
+	// already happened. This call is the fast path: the PAUSED -> RUNNING write
+	// enqueued a durable reconcile request in its own transaction (migration
+	// 0039, F160), so a lost call is picked up by the dag-engine's queue. Before
+	// that, "the next terminal attempt triggers one" was the only recovery, and a
+	// run paused with nothing in flight had no next attempt.
 	if _, _, _, rerr := s.dag.ReconcileRun(ctx, runID, ""); rerr != nil {
-		s.log.ErrorContext(ctx, "run resumed but the frontier could not be recomputed; nodes that became ready during the pause may not dispatch until the next attempt reports",
+		s.log.WarnContext(ctx, "run resumed but the fast-path frontier recompute failed; the dag-engine's durable reconcile queue will dispatch it",
 			"run_id", runID, "error", rerr)
 	}
 	return run, nil
@@ -306,8 +357,10 @@ func (s *Service) Cancel(ctx context.Context, runID string) (store.RunRow, error
 	//
 	// Swallowed like Resume's: the cancel is committed and durable, and failing
 	// the operator's call would misreport a state change that already happened.
+	// The -> CANCELLING write queued a durable reconcile request (F160), so the
+	// dag-engine settles the nodes even if this call is lost.
 	if _, _, _, rerr := s.dag.ReconcileRun(ctx, runID, ""); rerr != nil {
-		s.log.ErrorContext(ctx, "run cancelled but its withheld nodes could not be settled; the graph will show PENDING nodes on a terminal run",
+		s.log.WarnContext(ctx, "run cancelled but the fast-path node settlement failed; the dag-engine's durable reconcile queue will settle them",
 			"run_id", runID, "error", rerr)
 	}
 
@@ -551,10 +604,11 @@ func (s *Service) Retry(ctx context.Context, req RetryRequest) (RetryResult, err
 	}
 
 	// Committed. From here nothing fails the operator's call: the retry is
-	// durable, and a missed reconcile is caught by the next report or the
-	// stalled-run sweep, which reconciles any RUNNING run with nothing in flight.
+	// durable, and the FAILED -> RUNNING write queued a durable reconcile request
+	// in this transaction (F160), which the dag-engine consumes if this call is
+	// lost. The stalled-run sweep remains the backstop behind it.
 	if _, _, _, err := s.dag.ReconcileRun(ctx, runID, ""); err != nil {
-		log.ErrorContext(ctx, "run retried but its frontier could not be recomputed; the stalled-run sweep will dispatch it",
+		log.WarnContext(ctx, "run retried but the fast-path frontier recompute failed; the dag-engine's durable reconcile queue will dispatch it",
 			"error", err)
 	}
 
@@ -606,8 +660,12 @@ func (s *Service) OnRunDeadline(ctx context.Context, runID string) error {
 	}
 
 	// Timing out means the work must actually stop; unlike pause, this is a kill.
+	// This call is the fast path: the worker heartbeat also derives CANCEL_ATTEMPT
+	// from the run's durable TIMED_OUT state (F160), so a lost call no longer
+	// leaves the work running past its deadline.
 	if err := s.sched.CancelRunAttempts(ctx, runID); err != nil {
-		s.log.ErrorContext(ctx, "failed to stop attempts of a timed-out run", "run_id", runID, "error", err)
+		s.log.WarnContext(ctx, "failed to cancel the attempts of a timed-out run; the worker heartbeat will stop them",
+			"run_id", runID, "error", err)
 	}
 	s.log.WarnContext(ctx, "run exceeded run_timeout_ms", "run_id", runID, "state", run.State)
 	return nil

@@ -247,6 +247,21 @@ else
   echo "FAIL: the group role prefix did not render as expected"; tail -5 "$tmp/prefix"; fail=1
 fi
 
+# Per-service pool caps (F160): postgres.pool.perService.<connection key>
+# overrides the shared cap for that service only; a key that names no
+# connection is refused rather than silently ignored.
+must_fail "per-service pool for an unknown service" "invalid propertyName 'dagengine'" --set postgres.pool.perService.dagengine.maxConns=8
+if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set postgres.pool.maxConns=3 \
+    --set postgres.pool.perService.dagEngine.maxConns=8 >"$tmp/pool" 2>&1 &&
+   grep -A12 -E 'image: .*/dag-engine:' "$tmp/pool" | grep -qF 'name: NEXUS_DB_MAX_CONNS, value: "8"' &&
+   grep -A12 -E 'image: .*/scheduler:' "$tmp/pool" | grep -qF 'name: NEXUS_DB_MAX_CONNS, value: "3"' &&
+   grep -A12 -E 'image: .*/api-gateway:' "$tmp/pool" | grep -qF 'name: NEXUS_DB_MAX_CONNS, value: "3"' &&
+   [ "$(grep -cF 'name: NEXUS_DB_MAX_CONNS, value: "8"' "$tmp/pool")" -le 2 ]; then
+  echo "ok   rendered: dag-engine pool 8 over a shared cap of 3, every other service keeps 3"
+else
+  echo "FAIL: postgres.pool.perService did not render as expected"; tail -5 "$tmp/pool"; fail=1
+fi
+
 # An agent serving another tenant (agents[].namespace) needs that tenant's NATS
 # identity: refused without it, rendered with the tenant's key and worker key.
 nkeys=(--set nats.auth.mode=nkey

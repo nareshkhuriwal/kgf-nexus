@@ -65,10 +65,25 @@ type Engine struct {
 
 	// metrics is optional; nil records nothing.
 	metrics *Metrics
+
+	// flights coalesces reconciles per run (F160). Every reconcile that
+	// answers a caller or consumes the durable queue goes through it.
+	flights *reconcileFlights
 }
 
 // SetMetrics attaches the service instruments. Called once, before serving.
-func (e *Engine) SetMetrics(m *Metrics) { e.metrics = m }
+func (e *Engine) SetMetrics(m *Metrics) {
+	e.metrics = m
+	e.flights.metrics = m
+}
+
+// SetReconcileLimits bounds coalesced reconciles: how many runs reconcile at
+// once and how long one pass may take. Zero keeps the default. Called once,
+// before serving.
+func (e *Engine) SetReconcileLimits(concurrency int, timeout time.Duration) {
+	e.flights = newReconcileFlights(e.reconcileAndAcknowledge, concurrency, timeout)
+	e.flights.metrics = e.metrics
+}
 
 // NewEngine wires the engine. runs and ev may be nil, in which case the engine
 // runs "headless": it still maintains task_nodes/task_edges and creates attempts,
@@ -78,13 +93,15 @@ func NewEngine(st *store.DAGEngineStore, runs RunStateWriter, ev EventWriter, lo
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Engine{
+	e := &Engine{
 		store:      st,
 		runs:       runs,
 		ev:         ev,
 		log:        log,
 		validation: dag.DefaultValidationOptions(),
 	}
+	e.flights = newReconcileFlights(e.reconcileAndAcknowledge, 0, 0)
+	return e
 }
 
 // SetValidationOptions overrides submit-time validation policy.
@@ -209,6 +226,12 @@ type ReconcileResult struct {
 	CASMisses       []string
 	// Expanded lists the map templates this reconcile expanded (§5.4).
 	Expanded []string
+	// PublishErr is set when the engine reached a run-level conclusion
+	// (RUNNING, PAUSED or terminal) and could not publish it to the
+	// workflow-manager. The node work is committed either way; this says the
+	// announcement is still owed, so the durable request that asked for this
+	// reconcile must not be acknowledged (F160).
+	PublishErr error
 }
 
 // Reconcile recomputes the run from ground truth and applies the result.
@@ -254,6 +277,9 @@ func (e *Engine) reconcile(ctx context.Context, runID string) (*ReconcileResult,
 			total.CASMisses = append(total.CASMisses, res.CASMisses...)
 			total.Expanded = append(total.Expanded, res.Expanded...)
 			total.RunState, total.RunTerminal, total.Halted = res.RunState, res.RunTerminal, res.Halted
+			if res.PublishErr != nil {
+				total.PublishErr = res.PublishErr
+			}
 		}
 		if !again {
 			break
@@ -283,7 +309,7 @@ func (e *Engine) reconcilePass(ctx context.Context, runID string) (res *Reconcil
 		return nil, false, fmt.Errorf("reconcile run %s: %w", runID, err)
 	}
 	if len(nodes) == 0 {
-		return nil, false, fmt.Errorf("reconcile run %s: no nodes materialized", runID)
+		return nil, false, fmt.Errorf("reconcile run %s: %w", runID, ErrNotMaterialized)
 	}
 	edges, err := e.store.LoadEdges(ctx, runID)
 	if err != nil {
@@ -478,8 +504,10 @@ func (e *Engine) reconcilePass(ctx context.Context, runID string) (res *Reconcil
 	if run.State == domain.RunPending && (len(applied.AttemptsCreated) > 0 || len(expanded) > 0) {
 		if err := e.publishRunState(ctx, runID, domain.RunRunning); err != nil {
 			// Visibility, not correctness: the attempts are already durable and
-			// dispatchable, and the next reconcile republishes.
+			// dispatchable. Recorded so the durable request behind this
+			// reconcile stays queued and the next pass republishes.
 			log.Error("could not publish RUNNING run state", "error", err)
+			res.PublishErr = err
 		}
 	}
 
@@ -512,8 +540,12 @@ func (e *Engine) reconcilePass(ctx context.Context, runID string) (res *Reconcil
 			err := e.publishRunState(pubCtx, runID, domain.RunState(decision.RunState))
 			cancel()
 			if err != nil {
-				log.Error("could not publish terminal run state; the run will stay non-terminal because nothing will reconcile it again",
+				// Since F160 this is no longer the end of the run: the durable
+				// request that asked for this reconcile is kept (PublishErr), so
+				// the queue consumer reconciles again and republishes.
+				log.Error("could not publish terminal run state; keeping the run's reconcile request queued so it is published again",
 					"error", err, "state", string(decision.RunState))
+				res.PublishErr = err
 			}
 		}
 
@@ -533,6 +565,7 @@ func (e *Engine) reconcilePass(ctx context.Context, runID string) (res *Reconcil
 				"previous_state", string(run.State))
 			if err := e.publishRunState(ctx, runID, domain.RunPaused); err != nil {
 				log.Error("could not publish PAUSED run state", "error", err)
+				res.PublishErr = err
 			}
 		}
 	}

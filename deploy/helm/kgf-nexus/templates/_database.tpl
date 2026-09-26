@@ -140,10 +140,12 @@ exit at startup without it (internal/config.DSN). args: root, key.
     secretKeyRef: { name: {{ $c.secret }}, key: {{ $c.passwordKey }} }
 - name: DATABASE_URL
   value: {{ $c.url | quote }}
-{{- with ((index . 0).Values.postgres.pool).maxConns }}
+{{- $pool := (index . 0).Values.postgres.pool | default dict -}}
+{{- $own := index ($pool.perService | default dict) (index . 1) | default dict -}}
+{{- with ($own.maxConns | default $pool.maxConns) }}
 - { name: NEXUS_DB_MAX_CONNS, value: {{ . | quote }} }
 {{- end }}
-{{- with ((index . 0).Values.postgres.pool).minConns }}
+{{- with ($own.minConns | default $pool.minConns) }}
 - { name: NEXUS_DB_MIN_CONNS, value: {{ . | quote }} }
 {{- end }}
 {{- end -}}
