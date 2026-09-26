@@ -26,6 +26,18 @@ type AKVConfig struct {
 	// Required: without it a spec could point this tenant's identity at any
 	// vault the identity happens to be able to read.
 	AllowVaults []string `yaml:"allow_vaults"`
+	// DefaultVault is the vault an akv:///<secret> ref (no vault name) reads.
+	// On KGF Cloud it is the platform stamp's Key Vault
+	// (kgf-platform-kv-<env>, the chart's global.keyVaultName), so specs do
+	// not hard-code an environment. It must also be in AllowVaults.
+	DefaultVault string `yaml:"default_vault"`
+	// AllowSecretPrefixes, when set, restricts the secret NAMES this tenant
+	// may read. A KGF platform vault is shared by every service and tenant,
+	// and Key Vault RBAC is granted per vault (or per secret), so the
+	// agent-side prefix is what keeps tenant A's specs from naming tenant B's
+	// secrets: KGF's convention is service-prefixed kebab-case
+	// ("nexus-<tenant>-db-password", cf. "nexus-context-signing-key").
+	AllowSecretPrefixes []string `yaml:"allow_secret_prefixes"`
 	// VaultURLs optionally maps a vault name to its URL (private endpoints,
 	// sovereign clouds). Otherwise https://<name>.<DNSSuffix>/ is used.
 	VaultURLs map[string]string `yaml:"vault_urls"`
@@ -86,6 +98,14 @@ func NewAKVProvider(cfg AKVConfig) (*AKVProvider, error) {
 	for _, v := range cfg.AllowVaults {
 		if !akvVaultName.MatchString(v) {
 			return nil, fmt.Errorf("akv: %q is not a valid Key Vault name", v)
+		}
+	}
+	if cfg.DefaultVault != "" && !containsFold(cfg.AllowVaults, cfg.DefaultVault) {
+		return nil, fmt.Errorf("akv: default_vault %q must also be listed in allow_vaults", cfg.DefaultVault)
+	}
+	for _, p := range cfg.AllowSecretPrefixes {
+		if p == "" || !akvSecretName.MatchString(p) {
+			return nil, fmt.Errorf("akv: allow_secret_prefixes entry %q is not a valid secret-name prefix", p)
 		}
 	}
 	for name, u := range cfg.VaultURLs {
@@ -178,9 +198,17 @@ func (p *AKVProvider) Resolve(ctx context.Context, ref Ref) ([]byte, error) {
 	if ref.Field != "" || len(ref.Query) > 0 {
 		return nil, Invalid("akv refs are akv://<vault>/<secret>[/<version>] with no query or field")
 	}
-	parts := strings.Split(strings.Trim(ref.Target, "/"), "/")
+	// akv:///<secret>[/<version>] (empty vault) reads the default vault.
+	target := ref.Target
+	if strings.HasPrefix(target, "/") {
+		if p.cfg.DefaultVault == "" {
+			return nil, Invalid("akv:///<secret> needs a default_vault in this tenant's configuration")
+		}
+		target = p.cfg.DefaultVault + target
+	}
+	parts := strings.Split(strings.Trim(target, "/"), "/")
 	if len(parts) < 2 || len(parts) > 3 {
-		return nil, Invalid("akv refs are akv://<vault>/<secret>[/<version>]")
+		return nil, Invalid("akv refs are akv://<vault>/<secret>[/<version>] or akv:///<secret>[/<version>]")
 	}
 	vault, name := parts[0], parts[1]
 	version := ""
@@ -192,6 +220,9 @@ func (p *AKVProvider) Resolve(ctx context.Context, ref Ref) ([]byte, error) {
 	}
 	if !containsFold(p.cfg.AllowVaults, vault) {
 		return nil, Denied("key vault %q is not in this tenant's allow-list", vault)
+	}
+	if len(p.cfg.AllowSecretPrefixes) > 0 && !hasPrefixFold(p.cfg.AllowSecretPrefixes, name) {
+		return nil, Denied("secret %q does not carry one of this tenant's allowed name prefixes", name)
 	}
 	g, err := p.getter(vault)
 	if err != nil {
@@ -231,6 +262,16 @@ func (p *AKVProvider) getter(vault string) (AKVGetter, error) {
 	}
 	p.getters[key] = g
 	return g, nil
+}
+
+// hasPrefixFold matches Key Vault names, which are case-insensitive.
+func hasPrefixFold(prefixes []string, s string) bool {
+	for _, p := range prefixes {
+		if len(s) >= len(p) && strings.EqualFold(s[:len(p)], p) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsFold(list []string, s string) bool {

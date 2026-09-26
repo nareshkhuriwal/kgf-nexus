@@ -270,6 +270,40 @@ func TestAKVProviderWithAFakeVault(t *testing.T) {
 	}
 }
 
+// TestAKVFollowsTheKGFPlatformVaultConvention: one shared platform vault
+// (kgf-platform-kv-<env>) named by default_vault, and per-tenant secret-name
+// prefixes as the isolation inside it.
+func TestAKVFollowsTheKGFPlatformVaultConvention(t *testing.T) {
+	fake := &fakeAKV{secrets: map[string]string{"nexus-team-a-db-password@": "pw-a", "nexus-team-b-db-password@": "pw-b"}}
+	p := newAKVProviderWith(AKVConfig{AllowVaults: []string{"kgf-platform-kv-dev"}, DefaultVault: "kgf-platform-kv-dev",
+		AllowSecretPrefixes: []string{"nexus-team-a-"}}, func(u string) (AKVGetter, error) { return fake, nil })
+	get := func(raw string) ([]byte, error) {
+		r, err := ParseRef(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p.Resolve(context.Background(), r)
+	}
+	if v, err := get("akv:///nexus-team-a-db-password"); err != nil || string(v) != "pw-a" {
+		t.Fatalf("default vault: %q %v", v, err)
+	}
+	if v, err := get("akv://kgf-platform-kv-dev/NEXUS-TEAM-A-db-password"); err == nil && string(v) == "pw-b" {
+		t.Fatal("case folding crossed tenants")
+	}
+	if _, err := get("akv:///nexus-team-b-db-password"); err == nil || classOf(t, err) != nexusv1.ErrorClass_ERROR_CLASS_PERMISSION_DENIED {
+		t.Errorf("another tenant's prefix: %v", err)
+	}
+	noDefault := newAKVProviderWith(AKVConfig{AllowVaults: []string{"kgf-platform-kv-dev"}}, func(string) (AKVGetter, error) { return fake, nil })
+	r, _ := ParseRef("akv:///nexus-team-a-db-password")
+	if _, err := noDefault.Resolve(context.Background(), r); err == nil || classOf(t, err) != nexusv1.ErrorClass_ERROR_CLASS_VALIDATION {
+		t.Errorf("no default vault: %v", err)
+	}
+	if _, err := NewAKVProvider(AKVConfig{AllowVaults: []string{"a-vault"}, DefaultVault: "other-vault",
+		Auth: AKVAuth{Method: "managed_identity"}}); err == nil {
+		t.Error("a default vault outside allow_vaults was accepted")
+	}
+}
+
 func TestAKVConfigValidation(t *testing.T) {
 	if _, err := NewAKVProvider(AKVConfig{AllowVaults: []string{"ok-vault"}, Auth: AKVAuth{Method: "client_secret"}}); err == nil {
 		t.Error("client_secret without tenant/client/file accepted")
