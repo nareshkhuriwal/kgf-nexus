@@ -78,3 +78,24 @@ variable "ports" {
     mailpit = 8125
   }
 }
+
+# The HOST machine's PostgreSQL (make k8s-dev-up runs
+# deploy/scripts/dev-host-postgres.sh to create the role and database). Pods
+# reach the workstation at host.docker.internal; no Postgres runs in-cluster.
+variable "postgres" {
+  description = "External (host) PostgreSQL the dev platform uses instead of an in-cluster StatefulSet."
+  type = object({
+    host     = optional(string, "host.docker.internal")
+    port     = optional(number, 5432)
+    user     = optional(string, "nexus_dev")
+    database = optional(string, "nexus_dev")
+    sslmode  = optional(string, "disable")
+  })
+  default = {}
+}
+
+variable "postgres_password" {
+  description = "Password of var.postgres.user, from .dev-postgres/password (TF_VAR_postgres_password)."
+  type        = string
+  sensitive   = true
+}

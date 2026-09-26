@@ -83,6 +83,12 @@ Required: the services have no built-in DSN and exit at startup without this
     secretKeyRef: { name: {{ .Values.existingSecret }}, key: postgres-password }
 - name: DATABASE_URL
   value: "postgres://{{ .Values.postgres.user }}:$(NEXUS_DB_PASSWORD)@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.database }}?sslmode={{ .Values.postgres.sslmode }}"
+{{- with (.Values.postgres.pool).maxConns }}
+- { name: NEXUS_DB_MAX_CONNS, value: {{ . | quote }} }
+{{- end }}
+{{- with (.Values.postgres.pool).minConns }}
+- { name: NEXUS_DB_MIN_CONNS, value: {{ . | quote }} }
+{{- end }}
 {{- end -}}
 
 {{/* Peer addresses and logging, shared by every control-plane service. */}}
