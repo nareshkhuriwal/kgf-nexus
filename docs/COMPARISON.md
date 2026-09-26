@@ -31,7 +31,7 @@ Statements about Nexus cite this repository. They describe `main` at
 | Kubernetes required | No: subprocess, Docker or Kubernetes executors (ADR-0007) | No [A4] | No [P4] | **Yes** [G3] | **Yes** [F4] |
 | State store | PostgreSQL only, which is also the dispatch queue (ADR-0002) | PostgreSQL or MySQL [A5] | SQLite or PostgreSQL; HA needs PostgreSQL + Redis [P5] | etcd (CRD status); PostgreSQL/MySQL for offload and archive [G4] | PostgreSQL + object store [F5] |
 | Worker connectivity | Agents pull over outbound gRPC and hold no DB credentials (ADR-0005, ARCHITECTURE §3.1) | Airflow 3 workers talk to the API server, not the DB; Edge workers need only HTTPS [A4] | Pull work pools (worker on your infra), push (serverless) or managed [P4] | Controller creates pods in-cluster [G3] | Executor reconciles task pods in-cluster [F4] |
-| Managed offering | none | Astronomer, MWAA, Cloud Composer and others [A12] | Prefect Cloud [P12] | Akuity, Pipekit [G12] | Union.ai [F12] |
+| Managed offering | none (planned as a KGF Cloud service, design only) | Astronomer, MWAA, Cloud Composer and others [A12] | Prefect Cloud [P12] | Akuity, Pipekit [G12] | Union.ai [F12] |
 
 ## 2. Execution semantics
 
@@ -72,7 +72,8 @@ This is not a complete list. It covers what an evaluator should weigh first.
   Rollouts [G14]. Flyte has connectors [F4]. Nexus has an executor interface
   and no integration library.
 - **Managed services.** All four can be bought as a hosted product today. Nexus
-  Cloud is a design document ([CLOUD-ARCHITECTURE.md](CLOUD-ARCHITECTURE.md)).
+  is planned as the `KGF.Nexus` service of KGF Cloud. That is a design, not a
+  running service ([KGF-INTEGRATION.md](KGF-INTEGRATION.md)).
 - **Authoring ergonomics.** Prefect and Flyte 2 run plain Python with runtime
   control flow. Nexus deliberately compiles to a static spec plus dynamic
   expansion. That is safer for the control plane, and less flexible for authors.

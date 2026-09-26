@@ -4,7 +4,8 @@
 [ARCHITECTURE.md §11](ARCHITECTURE.md#11-phased-plan) (the phased plan), the
 [ADRs](adr/README.md) and the open items in
 [CONTRACT-FINDINGS.md](../CONTRACT-FINDINGS.md). It is a statement of
-direction, not a commitment to dates. **Nexus is not production-ready.** It has
+direction, not a commitment to dates. Nexus is delivered as the `KGF.Nexus`
+service of KGF Cloud ([ADR-0033](adr/0033-nexus-as-kgf-nexus-service.md)). **Nexus is not production-ready.** It has
 not passed its production acceptance gates ([docs/README.md](README.md#current-state)).
 "Shipped" below means *merged to `main` with tests*, not *proven in production*.
 
@@ -123,12 +124,32 @@ production brief. Order is indicative.
 - Multi-region control plane.
 - Optional durable-execution authoring mode.
 
-**Nexus Cloud (design only)**
-- Hosted, cell-based control plane with customer-run workers, per-tenant CAs,
-  locked plan quotas and billing from the usage ledger:
-  [ADR-0033](adr/0033-nexus-cloud-hosted-control-plane.md) and
-  [CLOUD-ARCHITECTURE.md](CLOUD-ARCHITECTURE.md). Its §14 lists the gaps and
-  its §15 the owner's open decisions, including which features are enterprise.
+**Shipping as a KGF Cloud service (design only)**
+
+Nexus ships as the `KGF.Nexus` service of KGF Cloud, not as a separate
+hosted product ([ADR-0033](adr/0033-nexus-as-kgf-nexus-service.md),
+[KGF-INTEGRATION.md](KGF-INTEGRATION.md)). The merge plan is in
+KGF-INTEGRATION.md §13 and is carried out service by service:
+
+1. `X-KGF-Context` authentication in the Nexus gateway. Another branch is
+   implementing it; it is not merged.
+2. The subscription-to-namespace scope mapping.
+3. Database posture: per-service runtime logins, then a row-level security
+   decision.
+4. The engine deployed in the KGF platform cluster.
+5. The KGF provider front replacing the simulated `kgf-cloud:services/nexus`.
+6. Quotas set in KGF.
+7. Usage exported to kgf-billing.
+8. Audit exported to KGF.
+9. The portal extension.
+10. Acceptance.
+11. Removal of the features KGF owns.
+
+Items 6–8 need contracts that KGF Cloud does not have yet.
+
+Consequence for the branches above: SSO/RBAC, cost management and audit
+sinks duplicate KGF identity, billing and audit export. Whether they merge
+at all is an open owner decision (KGF-INTEGRATION.md OPEN-10).
 
 **Operational gaps already documented**
 - A shared, not per-replica, rate limiter (OPERATIONS §16.6).
