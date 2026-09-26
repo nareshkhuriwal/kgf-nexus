@@ -66,6 +66,7 @@ from .scheduling import Backfill, BackfillState, OverlapPolicy, Schedule, Schedu
 from .task import TaskDefinition, registry, task
 from .tracing import TraceContext
 from .types import (
+    Asset,
     Cache,
     Cancellation,
     Concurrency,
@@ -135,6 +136,7 @@ __all__ = [
     "Param",
     "registry",
     # declaration types
+    "Asset",
     "Resources",
     "Gpu",
     "Timeouts",

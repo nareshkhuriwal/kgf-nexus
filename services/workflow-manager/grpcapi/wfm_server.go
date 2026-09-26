@@ -267,6 +267,8 @@ type specService interface {
 	DeleteSchedule(context.Context, *DeleteScheduleRequest) (*DeleteScheduleResponse, error)
 	StartBackfill(context.Context, *StartBackfillRequest) (*BackfillResponse, error)
 	BackfillAction(context.Context, *BackfillActionRequest) (*BackfillResponse, error)
+	// CreateTriggeredRun: webhook-trigger runs (ADR-0028).
+	CreateTriggeredRun(context.Context, *CreateTriggeredRunRequest) (*CreateTriggeredRunResponse, error)
 }
 
 // SpecServer implements the spec half plus the run-state callback.
@@ -400,6 +402,7 @@ var SpecServiceDesc = grpc.ServiceDesc{
 		{MethodName: "DeleteSchedule", Handler: deleteScheduleHandler},
 		{MethodName: "StartBackfill", Handler: startBackfillHandler},
 		{MethodName: "BackfillAction", Handler: backfillActionHandler},
+		{MethodName: "CreateTriggeredRun", Handler: createTriggeredRunHandler},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "services/workflow-manager/grpcapi/wfm_server.go",

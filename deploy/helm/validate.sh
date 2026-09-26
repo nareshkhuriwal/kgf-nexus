@@ -279,7 +279,7 @@ if "$helm" template nexus "$chart" -f "$chart/ci/azblob-workload-identity-values
    python3 - "$tmp/wi" <<'PY'
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d.get("kind") in ("Deployment", "CronJob")]
-store = {"api-gateway", "agent-cpu", "artifact-gc"}
+store = {"api-gateway", "workflow-manager", "agent-cpu", "artifact-gc"}
 seen = set()
 for d in docs:
     name = d["metadata"]["name"].removeprefix("nexus-")
@@ -294,7 +294,7 @@ for d in docs:
 assert seen == store, seen
 PY
 then
-  echo "ok   rendered: azblob workload identity on exactly api-gateway, agents and artifact-gc"
+  echo "ok   rendered: azblob workload identity on exactly api-gateway, workflow-manager, agents and artifact-gc"
 else
   echo "FAIL: azblob workload identity did not reach exactly the result-store clients"; tail -5 "$tmp/wi"; fail=1
 fi

@@ -28,5 +28,6 @@ serviceAccounts:
     name: nexus-artifacts
     annotations: { azure.workload.identity/client-id: 00000000-0000-0000-0000-00000000c1d0 }
     podLabels: { nexus.khuriwalgroup.com/identity: workload }
+  workflowManager: *artifacts
   agent: *artifacts
   artifactGC: *artifacts

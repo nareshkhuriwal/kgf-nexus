@@ -68,12 +68,15 @@ configuredPodLabels: {{ toYaml ($cfg.podLabels | default dict) | nindent 2 }}
 
 {{/*
 The components that are result-store clients (resultStore in values.yaml):
-the api-gateway (task logs), the agents (outputs, logs) and artifact-gc. A
-cloud identity for the store binds to their ServiceAccounts
-(serviceAccounts.apiGateway / .agent / .artifactGC), and to no other pod.
+the api-gateway (task logs), the workflow-manager (object-store sensors
+watching the platform's store, ADR-0028), the agents (outputs, logs) and
+artifact-gc. A cloud identity for the store binds to their ServiceAccounts
+(serviceAccounts.apiGateway / .workflowManager / .agent / .artifactGC), and to
+no other pod.
 */}}
 {{- define "nexus.resultStoreClients" -}}
 - apiGateway
+- workflowManager
 - agent
 - artifactGC
 {{- end -}}

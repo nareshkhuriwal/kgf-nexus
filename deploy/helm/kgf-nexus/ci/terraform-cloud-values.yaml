@@ -57,6 +57,9 @@ serviceAccounts:
   apiGateway:
     name: nexus-artifacts
     annotations: {}
+  workflowManager:
+    name: nexus-artifacts
+    annotations: {}
   agent:
     name: nexus-artifacts
     annotations: {}

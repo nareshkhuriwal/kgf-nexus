@@ -164,6 +164,10 @@ func groups() []*group {
 		workerGroup(),
 		cacheGroup(),
 		auditGroup(),
+		triggerGroup(),
+		sensorGroup(),
+		notifyGroup(),
+		assetGroup(),
 	}
 }
 

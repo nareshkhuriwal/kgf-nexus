@@ -111,6 +111,24 @@ func WFMGetLatestSpec(ctx context.Context, q GWQuerier, namespace, name string) 
 	return s, nil
 }
 
+// WFMGetSpecVersion resolves (namespace, name, version) to one pinned spec.
+func WFMGetSpecVersion(ctx context.Context, q GWQuerier, namespace, name string, version int32) (SpecRow, error) {
+	var s SpecRow
+	err := q.QueryRow(ctx, `
+		SELECT id::text, namespace, name, version, spec_hash, spec_json::text, created_by, created_at
+		  FROM workflow_specs
+		 WHERE namespace = $1 AND name = $2 AND version = $3`,
+		namespace, name, version,
+	).Scan(&s.ID, &s.Namespace, &s.Name, &s.Version, &s.SpecHash, &s.SpecJSON, &s.CreatedBy, &s.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SpecRow{}, ErrNotFound
+	}
+	if err != nil {
+		return SpecRow{}, fmt.Errorf("get spec version: %w", err)
+	}
+	return s, nil
+}
+
 // ── deletion ──────────────────────────────────────────────────────────────
 
 // ErrSpecReferenced means a spec version could not be deleted because something

@@ -163,7 +163,7 @@ variable "nexus_kubernetes_namespace" {
 }
 
 variable "nexus_service_account" {
-  description = "ServiceAccount the IRSA / Pod Identity role trusts: the chart's shared result-store account (nexus-artifacts), which the chart creates (annotated with this role for IRSA) and gives to api-gateway, the agents and artifact-gc."
+  description = "ServiceAccount the IRSA / Pod Identity role trusts: the chart's shared result-store account (nexus-artifacts), which the chart creates (annotated with this role for IRSA) and gives to api-gateway, workflow-manager, the agents and artifact-gc."
   type        = string
   default     = "nexus-artifacts"
 }

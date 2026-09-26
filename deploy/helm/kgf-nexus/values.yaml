@@ -214,8 +214,9 @@ minio:
     limits: { memory: 1Gi }
 
 # ─── Result store: which backend and how it authenticates ───────────────
-# Read by EVERY result-store client: api-gateway (task logs), the agents
-# (outputs, logs) and artifact-gc. They must all agree on the backend and the
+# Read by EVERY result-store client: api-gateway (task logs), the
+# workflow-manager (object-store sensors), the agents (outputs, logs) and
+# artifact-gc. They must all agree on the backend and the
 # bucket, so this one block is rendered identically into each of them.
 #
 # The bucket (or Azure container) and region are minio.bucket / minio.region
@@ -283,7 +284,7 @@ resultStore:
     # workload-identity -- AKS workload identity (production). The chart adds
     #                      the pod label azure.workload.identity/use: "true" to
     #                      every result-store pod; the ServiceAccounts they run
-    #                      as (serviceAccounts.apiGateway / .agent / .artifactGC
+    #                      as (serviceAccounts.apiGateway / .workflowManager / .agent / .artifactGC
     #                      below) must carry azure.workload.identity/client-id,
     #                      and the chart refuses to create them without it.
     # managed-identity  -- the node's (kubelet's) identity, or the user-assigned
@@ -309,8 +310,9 @@ resultStore:
     auth: auto
     # Empty = the public JSON API. Emulators only.
     endpoint: ""
-  # Cloud identity: the result-store pods (api-gateway, agents, artifact-gc)
-  # run as serviceAccounts.apiGateway / .agent / .artifactGC (below), so a
+  # Cloud identity: the result-store pods (api-gateway, workflow-manager,
+  # agents, artifact-gc) run as serviceAccounts.apiGateway / .workflowManager /
+  # .agent / .artifactGC (below), so a
   # cloud identity (IRSA role, EKS Pod Identity association, Azure workload
   # identity, GKE Workload Identity) is bound to those accounts' annotations
   # and reaches ONLY the pods that use the store (docs/OPERATIONS.md §20.13).
@@ -438,11 +440,6 @@ smtp:
   # Where emailed links point: the console's public URL.
   publicUrl: ""
 
-# Nexus inside KGF Cloud (ADR-0024, OPERATIONS §24). authMode "standalone"
-# keeps Nexus's own sign-in and changes nothing. "kgf" accepts people only
-# through the X-KGF-Context kgf-gateway signs; "both" accepts either. In kgf
-# or both mode set contextKeysUrl (kgf-gateway's /.well-known/kgf-context.json)
-# or contextPublicKeys (comma-separated base64url Ed25519 keys), not both.
 # ─── KGF Cloud (ADR-0024, docs/OPERATIONS.md §24) ────────────────────────
 # One kgfctx verifier for the gateway-signed X-KGF-Context:
 #   authMode standalone -- Nexus credentials authenticate. With keys below,
@@ -463,6 +460,20 @@ kgf:
   userIssuers: kgf-gateway
   # KGF services allowed to call Nexus for themselves: "svc:kgf-billing=viewer".
   servicePrincipals: ""
+
+# Notifications, webhook triggers and sensors (ADR-0028, OPERATIONS §27).
+events:
+  secretKey:
+    # A Secret holding a 32-byte key (base64 or hex): openssl rand -base64 32.
+    # Empty = no key: inline channel secrets and webhook triggers are refused;
+    # channel secret references (env:/file:) still work.
+    existingSecret: ""
+    key: secret-key
+    # During a key rotation, the key of the retired value in the same Secret.
+    previousKey: ""
+  # Lets channels reach private and loopback addresses (on-premises receivers).
+  # Off by default so a channel cannot be pointed at internal services.
+  allowPrivateTargets: false
 
 migrate:
   resources:
@@ -660,7 +671,8 @@ ui:
 #   GKE               annotations: { iam.gke.io/gcp-service-account: <gsa>@<project>.iam.gserviceaccount.com }
 #   AKS               annotations: { azure.workload.identity/client-id: <client-id> }
 #                     podLabels:   { azure.workload.identity/use: "true" }
-# Only the result-store users (apiGateway for logs, agent, artifactGC) need one.
+# Only the result-store users (apiGateway for logs, workflowManager for
+# object-store sensors, agent, artifactGC) need one.
 # The API token is NOT mounted unless a component sets
 # automountServiceAccountToken: true; none of them calls the Kubernetes API
 # (an agent whose executors include "kubernetes" defaults to true). IRSA,

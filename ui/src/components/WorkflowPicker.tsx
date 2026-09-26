@@ -70,9 +70,15 @@ export interface WorkflowPickerProps {
   onChange: (specName: string) => void;
   /** Wired to the same id the label points at, so the field stays labelled. */
   id?: string;
+  /**
+   * The field's visible label and accessible name. Defaults to "workflow"; a
+   * form with two workflow fields (a sensor's upstream and the one it starts)
+   * names each, so neither is announced as just "workflow".
+   */
+  label?: string;
 }
 
-export function WorkflowPicker({ namespace, value, onChange, id }: WorkflowPickerProps) {
+export function WorkflowPicker({ namespace, value, onChange, id, label = 'workflow' }: WorkflowPickerProps) {
   // The empty search fetches the catalog once and caches it for 30s. No
   // debounce is needed because nothing here is typed into the query: unlike
   // WorkflowsPage, the term never changes.
@@ -128,7 +134,7 @@ export function WorkflowPicker({ namespace, value, onChange, id }: WorkflowPicke
   return (
     <div className="form-field">
       <span className="form-label" id={`${hintId}-label`}>
-        workflow
+        {label}
       </span>
 
       {typing ? (
@@ -138,7 +144,7 @@ export function WorkflowPicker({ namespace, value, onChange, id }: WorkflowPicke
           onChange={(e) => onChange(e.target.value)}
           placeholder="example-etl"
           className="mono"
-          aria-label="workflow"
+          aria-label={label}
           aria-describedby={hintId}
           required
         />
@@ -147,7 +153,7 @@ export function WorkflowPicker({ namespace, value, onChange, id }: WorkflowPicke
           id={id}
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          aria-label="workflow"
+          aria-label={label}
           aria-describedby={hintId}
           required
         >

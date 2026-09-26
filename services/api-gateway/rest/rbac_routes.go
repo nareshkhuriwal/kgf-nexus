@@ -101,4 +101,37 @@ var routePermissions = map[string][]string{
 	// input values), so it needs the result-view grant as well as run and
 	// task visibility. Its own block keeps the table above aligned as is.
 	assignmentRoute: {"runs.view", "tasks.view", "tasks.results.view"},
+	// ADR-0028: notifications, webhook triggers, sensors and asset lineage.
+	// A trigger or sensor is a standing authorization to create runs, so every
+	// mutation of one also needs runs.create (and workflows.view to name one).
+	"GET /v1/namespaces/{ns}/notification-channels":                 {"notifications.view"},
+	"POST /v1/namespaces/{ns}/notification-channels":                {"notifications.manage"},
+	"GET /v1/namespaces/{ns}/notification-channels/{name}":          {"notifications.view"},
+	"PUT /v1/namespaces/{ns}/notification-channels/{name}":          {"notifications.manage"},
+	"DELETE /v1/namespaces/{ns}/notification-channels/{name}":       {"notifications.manage"},
+	"POST /v1/namespaces/{ns}/notification-channels/{name}/test":    {"notifications.manage"},
+	"GET /v1/namespaces/{ns}/notification-rules":                    {"notifications.view"},
+	"POST /v1/namespaces/{ns}/notification-rules":                   {"notifications.manage"},
+	"GET /v1/namespaces/{ns}/notification-rules/{name}":             {"notifications.view"},
+	"PUT /v1/namespaces/{ns}/notification-rules/{name}":             {"notifications.manage"},
+	"DELETE /v1/namespaces/{ns}/notification-rules/{name}":          {"notifications.manage"},
+	"GET /v1/namespaces/{ns}/notification-deliveries":               {"notifications.view"},
+	"GET /v1/namespaces/{ns}/notification-deliveries/{id}":          {"notifications.view"},
+	"POST /v1/namespaces/{ns}/notification-deliveries/{id}/redrive": {"notifications.manage"},
+	"GET /v1/namespaces/{ns}/triggers":                              {"triggers.view"},
+	"POST /v1/namespaces/{ns}/triggers":                             {"triggers.create", "workflows.view", "runs.create"},
+	"GET /v1/namespaces/{ns}/triggers/{name}":                       {"triggers.view"},
+	"PUT /v1/namespaces/{ns}/triggers/{name}":                       {"triggers.update", "workflows.view", "runs.create"},
+	"DELETE /v1/namespaces/{ns}/triggers/{name}":                    {"triggers.delete"},
+	"POST /v1/namespaces/{ns}/triggers/{name}/rotate-secret":        {"triggers.update"},
+	"GET /v1/namespaces/{ns}/triggers/{name}/deliveries":            {"triggers.view"},
+	"GET /v1/namespaces/{ns}/sensors":                               {"sensors.view"},
+	"POST /v1/namespaces/{ns}/sensors":                              {"sensors.create", "workflows.view", "runs.create"},
+	"GET /v1/namespaces/{ns}/sensors/{name}":                        {"sensors.view"},
+	"PUT /v1/namespaces/{ns}/sensors/{name}":                        {"sensors.update", "workflows.view", "runs.create"},
+	"DELETE /v1/namespaces/{ns}/sensors/{name}":                     {"sensors.delete"},
+	"GET /v1/namespaces/{ns}/sensors/{name}/observations":           {"sensors.view"},
+	"GET /v1/namespaces/{ns}/assets":                                {"assets.view"},
+	"GET /v1/namespaces/{ns}/assets/detail":                         {"assets.view"},
+	"GET /v1/namespaces/{ns}/assets/graph":                          {"assets.view"},
 }

@@ -30,5 +30,6 @@ serviceAccounts:
   apiGateway: &artifacts
     name: nexus-artifacts
     annotations: { eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/kgf-nexus-prod-use1-nexus-artifacts" }
+  workflowManager: *artifacts
   agent: *artifacts
   artifactGC: *artifacts

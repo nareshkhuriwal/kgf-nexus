@@ -67,6 +67,10 @@ const MODULE_ACTIONS: Readonly<Record<string, readonly string[]>> = Object.freez
   service_accounts: ['view', 'manage'],
   quotas: ['view', 'manage'],
   usage: ['view'],
+  notifications: ['view', 'manage'],
+  triggers: ['view', 'create', 'update', 'delete'],
+  sensors: ['view', 'create', 'update', 'delete'],
+  assets: ['view'],
 });
 
 /** Everything: what the Administrator role resolves to. The default for tests. */

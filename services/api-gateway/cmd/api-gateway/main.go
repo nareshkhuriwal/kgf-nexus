@@ -40,6 +40,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/mail"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
+	"github.com/khuriwalgroup/kgf-nexus/internal/secretbox"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/auditexport"
@@ -144,6 +145,17 @@ func run() error {
 	// read back.
 	logStreamer, logShipping := logBackend(ctx, cfg, db, reg, log)
 
+	// Notifications, webhook triggers, sensors and lineage (ADR-0028). A
+	// malformed secret key is fatal; an absent one is not -- the gateway then
+	// refuses to store inline secrets (503) instead of storing them in clear.
+	secretBox, err := secretbox.FromEnv(os.Getenv)
+	if err != nil {
+		return fmt.Errorf("NEXUS_SECRET_KEY: %w", err)
+	}
+	if secretBox == nil {
+		log.Warn("NEXUS_SECRET_KEY is not set: webhook triggers and inline channel secrets cannot be created")
+	}
+
 	// ── REST listener ─────────────────────────────────────────────────────
 	api := rest.New(db, auth, wfmClient, rmClient, logStreamer, log).
 		// The same client serves both: schedule writes go through workflow-manager
@@ -163,7 +175,13 @@ func run() error {
 		WithCacheInvalidator(schedClient).
 		// Rejections and bucket counts per limiter kind (docs/OPERATIONS.md §17);
 		// limiters enabled below are instrumented as they are built.
-		WithRateLimitMetrics(rest.NewRateLimitMetrics(reg))
+		WithRateLimitMetrics(rest.NewRateLimitMetrics(reg)).
+		WithEvents(rest.EventsConfig{
+			Secrets:             secretBox,
+			TriggeredRuns:       wfmClient,
+			AllowPrivateTargets: os.Getenv("NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS") == "true",
+			PublicURL:           os.Getenv("NEXUS_PUBLIC_URL"),
+		})
 
 	// Rate limiting is opt-in because a limit guessed wrong is itself an outage:
 	// the right number depends on fleet size and the console's poll interval. Off

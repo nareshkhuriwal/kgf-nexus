@@ -622,6 +622,9 @@
         },
         "cancellation": {
           "$ref": "#/$defs/CancellationPolicy"
+        },
+        "assets": {
+          "$ref": "#/$defs/TaskAssets"
         }
       },
       "allOf": [
@@ -671,6 +674,47 @@
           }
         }
       ]
+    },
+    "TaskAssets": {
+      "description": "ADR-0028. Declared data lineage: the assets this task reads (consumes) and writes (produces). Recorded per run; a producing node's success is recorded as a materialization. Declared, not observed: Nexus records what the task says it touches.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "produces": {
+          "$ref": "#/$defs/AssetList"
+        },
+        "consumes": {
+          "$ref": "#/$defs/AssetList"
+        }
+      }
+    },
+    "AssetList": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/AssetRef"
+      }
+    },
+    "AssetRef": {
+      "type": "object",
+      "required": [
+        "uri"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "uri": {
+          "description": "A URI naming the asset, e.g. s3://bucket/path, postgres://db/schema.table, bq://project.dataset.table.",
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 1024,
+          "pattern": "^[a-zA-Z][a-zA-Z0-9+.-]*://\\S+$"
+        },
+        "name": {
+          "description": "A human-readable name shown in the console.",
+          "type": "string",
+          "maxLength": 200
+        }
+      }
     },
     "Edge": {
       "type": "object",

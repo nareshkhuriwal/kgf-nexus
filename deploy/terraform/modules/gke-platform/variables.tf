@@ -179,7 +179,7 @@ variable "nexus_kubernetes_namespace" {
 }
 
 variable "nexus_service_account" {
-  description = "Kubernetes ServiceAccount bound to the artifact service account through Workload Identity: the chart's shared result-store account (nexus-artifacts), which the chart creates with the iam.gke.io annotation and gives to api-gateway, the agents and artifact-gc."
+  description = "Kubernetes ServiceAccount bound to the artifact service account through Workload Identity: the chart's shared result-store account (nexus-artifacts), which the chart creates with the iam.gke.io annotation and gives to api-gateway, workflow-manager, the agents and artifact-gc."
   type        = string
   default     = "nexus-artifacts"
 }

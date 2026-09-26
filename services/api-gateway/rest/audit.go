@@ -103,6 +103,25 @@ var auditActionClasses = map[string]AuditClass{
 	"platform.cluster.update":   AuditGrant,
 	"platform.cluster.delete":   AuditGrant,
 	"quota.update":              AuditGrant,
+	// webhook triggers (ADR-0028): a trigger's secret is a credential that
+	// creates runs, so minting, re-pointing or rotating it is a grant.
+	"trigger.create":        AuditGrant,
+	"trigger.update":        AuditGrant,
+	"trigger.secret.rotate": AuditGrant,
+	"trigger.delete":        AuditRevoke,
+	"trigger.fire":          AuditOps,
+	// notifications and sensors (ADR-0028): configuration, no access changes
+	"notification.channel.create":   AuditOps,
+	"notification.channel.update":   AuditOps,
+	"notification.channel.delete":   AuditOps,
+	"notification.channel.test":     AuditOps,
+	"notification.rule.create":      AuditOps,
+	"notification.rule.update":      AuditOps,
+	"notification.rule.delete":      AuditOps,
+	"notification.delivery.redrive": AuditOps,
+	"sensor.create":                 AuditOps,
+	"sensor.update":                 AuditOps,
+	"sensor.delete":                 AuditOps,
 	// operations
 	"run.delete":        AuditOps,
 	"run.retry":         AuditOps,

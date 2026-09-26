@@ -1431,6 +1431,7 @@ Asset/lineage layer over the task core (the Dagster idea, added without rewritin
 | 4 | 64 KiB stays the default (measured: inline beats a MinIO round trip up to between 64 and 256 KiB; every shipped result is < 1 KiB), configurable within [1 B, 1 MiB], applied consistently. | [ADR-0016](adr/0016-inline-result-threshold.md) |
 | 5 | Weighted fair share across namespaces (in-flight ÷ weight) ahead of priority + aging within a namespace, inside the unchanged claim. Implemented (migration 0022) and tested for starvation-freedom, weights, aging and no double dispatch. | [ADR-0017](adr/0017-weighted-fair-share-across-namespaces.md) |
 | 6 | The assumption above does **not** hold for the current claim: its cost is linear in the queue's PENDING backlog (laptop: ~1.1k/s at 1k backlog with 16 replicas; ~40–200/s at 10k; single digits to ~20/s at 100k). Fix the scan in SQL first; build a dedicated dispatch path only if claim p99 > 250 ms, backlog > 50k, or demand > 70 % of measured capacity persists afterwards. | [ADR-0018](adr/0018-postgres-dispatch-ceiling.md) |
+| [ADR-0028](adr/0028-event-triggers-notifications-sensors-lineage.md) | Notifications, webhook triggers, sensors and declared asset lineage (Phase 3/4) |
 
 ---
 

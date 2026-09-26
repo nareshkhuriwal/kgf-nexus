@@ -201,7 +201,7 @@
     "resultStore": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Result-store backend and credentials for api-gateway, the agents and artifact-gc. Cross-field rules (azure.account for azblob, a key Secret for shared-key, minio.enabled only with s3 static/auto) are template guards.",
+      "description": "Result-store backend and credentials for api-gateway, the workflow-manager (sensors), the agents and artifact-gc. Cross-field rules (azure.account for azblob, a key Secret for shared-key, minio.enabled only with s3 static/auto) are template guards.",
       "properties": {
         "backend": { "enum": ["s3", "azblob", "gcs"] },
         "partSizeBytes": {
@@ -301,6 +301,22 @@
       }
     },
     "mailpit": { "type": "object", "properties": { "enabled": { "type": "boolean" } } },
+    "events": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "secretKey": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 },
+            "previousKey": { "type": "string" }
+          }
+        },
+        "allowPrivateTargets": { "type": "boolean" }
+      }
+    },
     "smtp": {
       "type": "object",
       "additionalProperties": true,

@@ -17,8 +17,13 @@ import (
 // instead of being noticed in review, which is the failure mode migration 0005
 // exists to end: the ADR claimed grants enforced ownership while none existed.
 var ownedTables = map[string][]string{
-	"nexus_api_gateway":      {"api_keys", "attempt_log_chunks", "attempt_logs", "idempotency_keys"},
-	"nexus_workflow_manager": {"timers", "workflow_runs", "workflow_specs"},
+	"nexus_api_gateway": {"api_keys", "attempt_log_chunks", "attempt_logs", "idempotency_keys",
+		// ADR-0028: notification, trigger and sensor configuration.
+		"notification_channels", "notification_rule_channels", "notification_rules", "sensors",
+		"webhook_receipts", "webhook_triggers"},
+	// sensor_state and sensor_observations (ADR-0028): the sensor loop's lease,
+	// cursor and at-most-once observation claims.
+	"nexus_workflow_manager": {"sensor_observations", "sensor_state", "timers", "workflow_runs", "workflow_specs"},
 	"nexus_dag_engine":       {"task_edges", "task_nodes"},
 	// attempt_progress (0024) is the latest ReportProgress of each attempt: part
 	// of the attempt's lifecycle, so the scheduler's, kept out of task_attempts
@@ -91,6 +96,9 @@ func TestNonOwnersCannotWriteOthersTables(t *testing.T) {
 		// The DAG engine creates a node's first attempt while materializing the
 		// frontier; every transition after that belongs to the scheduler.
 		"nexus_dag_engine/task_attempts/INSERT": true,
+		// ADR-0028: a channel test and a dead-letter redrive are NEW delivery
+		// rows the gateway inserts; it can never lease, mark or delete one.
+		"nexus_api_gateway/notification_deliveries/INSERT": true,
 	}
 
 	owner := map[string]string{}

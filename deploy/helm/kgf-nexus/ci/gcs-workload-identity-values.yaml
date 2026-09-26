@@ -26,5 +26,6 @@ serviceAccounts:
   apiGateway: &artifacts
     name: nexus-artifacts
     annotations: { iam.gke.io/gcp-service-account: kgf-nexus-prod-art@example-project.iam.gserviceaccount.com }
+  workflowManager: *artifacts
   agent: *artifacts
   artifactGC: *artifacts

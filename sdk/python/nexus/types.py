@@ -19,11 +19,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import Any, Iterable, Literal, Mapping, Sequence
+import re
+from typing import Any, Iterable, Literal, Mapping, Sequence, Union
 
 from .units import parse_bytes, parse_cpu_millis, parse_duration_ms
 
 __all__ = [
+    "Asset",
+    "AssetLike",
     "Gpu",
     "Resources",
     "Timeouts",
@@ -422,6 +425,74 @@ class Cache:
         if not isinstance(value, Mapping):
             raise SpecError(f"cache must be a Cache, a bool or a mapping, got {type(value).__name__}")
         return Cache(**value)
+
+
+_ASSET_URI = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://\S+$")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Asset:
+    """A data asset a task reads or writes, for declared lineage (ADR-0028).
+
+    ``uri`` names the asset (``s3://bucket/path``, ``postgres://db/schema.table``);
+    ``name`` is an optional label for the console. Declared, not observed: Nexus
+    records what the task says it touches.
+    """
+
+    uri: str
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.uri, str) or len(self.uri) > 1024 or not _ASSET_URI.match(self.uri):
+            raise SpecError(
+                f"asset uri {self.uri!r} must be scheme://..., at most 1024 characters, no whitespace"
+            )
+        if len(self.name) > 200:
+            raise SpecError(f"asset name for {self.uri!r} is longer than 200 characters")
+
+    def to_wire(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"uri": self.uri}
+        if self.name:
+            out["name"] = self.name
+        return out
+
+    @staticmethod
+    def coerce(value: object) -> "Asset":
+        if isinstance(value, Asset):
+            return value
+        if isinstance(value, str):
+            return Asset(uri=value)
+        if isinstance(value, Mapping):
+            unknown = set(value) - {"uri", "name"}
+            if unknown:
+                raise SpecError(f"asset has unknown field(s) {', '.join(sorted(map(str, unknown)))}")
+            return Asset(uri=str(value.get("uri", "")), name=str(value.get("name") or ""))
+        raise SpecError(
+            f"an asset must be an Asset, a URI string or a mapping, got {type(value).__name__}"
+        )
+
+
+AssetLike = Union[Asset, str, Mapping[str, str]]
+
+
+def coerce_assets(field: str, raw: object) -> tuple[Asset, ...]:
+    """Coerce a produces= / consumes= argument; duplicates are rejected."""
+    if raw is None:
+        return ()
+    items: Sequence[object]
+    if isinstance(raw, (str, Asset, Mapping)):
+        items = [raw]
+    elif isinstance(raw, (list, tuple)):
+        items = raw
+    else:
+        raise SpecError(f"{field} must be a list of assets, got {type(raw).__name__}")
+    out = tuple(Asset.coerce(v) for v in items)
+    uris = [a.uri for a in out]
+    if len(set(uris)) != len(uris):
+        raise SpecError(f"{field} lists the same asset twice")
+    if len(out) > 100:
+        raise SpecError(f"{field} lists more than 100 assets")
+    return out
 
 
 # The schema's absolute maximum for a declared bound (ADR-0015). Checked here too

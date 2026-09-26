@@ -9,7 +9,7 @@ so the two deployments cannot drift in behaviour.
 {{- $root := . -}}
 {{- include "nexus.valuesComplete" . -}}
 {{- $svcs := list
-  (dict "name" "api-gateway" "key" "apiGateway" "image" "api-gateway" "grpc" 9091 "resultStore" true "hpa" true "tls" true "extra" (list
+  (dict "name" "api-gateway" "key" "apiGateway" "image" "api-gateway" "grpc" 9091 "resultStore" true "events" true "hpa" true "tls" true "extra" (list
       (dict "name" "AUTH_MODE" "value" "api_key")
       (dict "name" "NEXUS_SMTP_HOST" "value" (.Values.smtp.host | toString))
       (dict "name" "NEXUS_SMTP_PORT" "value" (.Values.smtp.port | toString))
@@ -24,13 +24,18 @@ so the two deployments cannot drift in behaviour.
       (dict "name" "NEXUS_KGF_AUDIENCE" "value" (.Values.kgf.audience | toString))
       (dict "name" "NEXUS_KGF_USER_ISSUERS" "value" (.Values.kgf.userIssuers | toString))
       (dict "name" "NEXUS_KGF_SERVICE_PRINCIPALS" "value" (.Values.kgf.servicePrincipals | toString))))
-  (dict "name" "workflow-manager" "key" "workflowManager" "image" "workflow-manager" "grpc" 9090 "hpa" true "tls" true "extra" (list
+  (dict "name" "workflow-manager" "key" "workflowManager" "image" "workflow-manager" "grpc" 9090 "resultStore" true "hpa" true "tls" true "extra" (list
       (dict "name" "TIMER_POLL_INTERVAL_MS" "value" "1000")))
   (dict "name" "dag-engine" "key" "dagEngine" "image" "dag-engine" "grpc" 9090 "hpa" true "tls" true "extra" (list))
   (dict "name" "resource-manager" "key" "resourceManager" "image" "resource-manager" "grpc" 9090 "tls" true "extra" (list
       (dict "name" "WORKER_LIVENESS_TIMEOUT_MS" "value" "15000")
       (dict "name" "RECONCILE_INTERVAL_MS" "value" "10000")))
-  (dict "name" "event-service" "key" "eventService" "image" "event-service" "grpc" 9090 "nats" true "hpa" true "extra" (list
+  (dict "name" "event-service" "key" "eventService" "image" "event-service" "grpc" 9090 "nats" true "events" true "hpa" true "extra" (list
+      (dict "name" "NEXUS_SMTP_HOST" "value" (.Values.smtp.host | toString))
+      (dict "name" "NEXUS_SMTP_PORT" "value" (.Values.smtp.port | toString))
+      (dict "name" "NEXUS_SMTP_TLS" "value" (.Values.smtp.tls | toString))
+      (dict "name" "NEXUS_SMTP_FROM" "value" (.Values.smtp.from | toString))
+      (dict "name" "NEXUS_CONSOLE_URL" "value" (.Values.smtp.publicUrl | toString))
       (dict "name" "NEXUS_OUTBOX_RETENTION" "value" "1h")
       (dict "name" "NEXUS_OUTBOX_MAX_AGE" "value" "24h")
       (dict "name" "EVENT_SSE_KEEPALIVE_MS" "value" "15000")))
@@ -144,6 +149,9 @@ spec:
             {{- end }}
             {{- range .extra }}
             - { name: {{ .name }}, value: {{ .value | quote }} }
+            {{- end }}
+            {{- if .events }}
+            {{- include "nexus.eventsEnv" $root | nindent 12 }}
             {{- end }}
             {{- if .tls }}
             {{- include "nexus.tlsEnv" (list $root "server") | nindent 12 }}

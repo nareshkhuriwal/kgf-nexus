@@ -265,7 +265,7 @@ variable "nexus_kubernetes_namespace" {
 }
 
 variable "nexus_service_account" {
-  description = "Kubernetes ServiceAccount the workload identity federates: the chart's shared result-store account (nexus-artifacts), which the chart creates with this identity's client-id annotation and gives to api-gateway, the agents and artifact-gc (chart serviceAccounts.apiGateway / agent / artifactGC)."
+  description = "Kubernetes ServiceAccount the workload identity federates: the chart's shared result-store account (nexus-artifacts), which the chart creates with this identity's client-id annotation and gives to api-gateway, workflow-manager, the agents and artifact-gc (chart serviceAccounts.apiGateway / agent / artifactGC)."
   type        = string
   default     = "nexus-artifacts"
 }

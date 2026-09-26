@@ -166,10 +166,15 @@ role's action set covers the action. **Unmapped permissions are denied.**
 | `infrastructure.view` / `.configure` | `KGF.Nexus/infrastructure/read` / `write` |
 | `quotas.view` / `quotas.manage` | `KGF.Nexus/quotas/read` / `write` |
 | `usage.view` | `KGF.Nexus/usage/read` |
+| `notifications.view` / `.manage` | `KGF.Nexus/notifications/read` / `write` |
+| `triggers.view`, `triggers.create` / `.update`, `triggers.delete` | `KGF.Nexus/triggers/read`, `write`, `delete` |
+| `sensors.view`, `sensors.create` / `.update`, `sensors.delete` | `KGF.Nexus/sensors/read`, `write`, `delete` |
+| `assets.view` | `KGF.Nexus/assets/read` |
 | `audit.view` | `KGF.Nexus/auditEvents/read` |
 | `roles.view` / `roles.manage` | `KGF.Nexus/roles/read` / `write` |
 | `service_accounts.view` / `.manage`, `tokens.view` / `.manage` | `KGF.Nexus/serviceAccounts/read` / `write` |
 | `users.view`, `users.manage` | **none** — KGF owns people |
+| `audit.manage` | **none** — retention, legal hold, purge and sinks (ADR-0025) stay with the platform owner's Nexus machine credential, not a Contributor wildcard |
 
 The mapping names actions beyond the ones the manifest declares today
 (`pipelines/*`); kgf-cloud should declare them (OPERATIONS §24.6 lists them).

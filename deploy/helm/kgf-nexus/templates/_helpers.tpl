@@ -526,3 +526,25 @@ deploy/docker-compose.pitr.yml.
 {{ toYaml . }}
 {{- end }}
 {{- end -}}
+
+{{- /*
+Notifications, webhook triggers and sensors (ADR-0028). The gateway seals
+channel and trigger secrets and the event-service opens them, so both read
+the SAME key from one Secret. No key configured is a supported state: inline
+secrets are then refused and only secret references work.
+*/ -}}
+{{- define "nexus.eventsEnv" -}}
+{{- $e := .Values.events | default dict -}}
+{{- $k := $e.secretKey | default dict -}}
+{{- if $k.existingSecret }}
+- name: NEXUS_SECRET_KEY
+  valueFrom:
+    secretKeyRef: { name: {{ $k.existingSecret | quote }}, key: {{ $k.key | default "secret-key" | quote }} }
+{{- end }}
+{{- if $k.previousKey }}
+- name: NEXUS_SECRET_KEY_PREVIOUS
+  valueFrom:
+    secretKeyRef: { name: {{ $k.existingSecret | quote }}, key: {{ $k.previousKey | quote }} }
+{{- end }}
+- { name: NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS, value: {{ $e.allowPrivateTargets | default false | toString | quote }} }
+{{- end -}}

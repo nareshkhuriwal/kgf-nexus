@@ -41,7 +41,8 @@ output "object_store" {
       ? "enabled: native azblob backend, AKS workload identity (ServiceAccount ${local.artifact_service_account}); not yet exercised on a live cluster (F115)"
     : "available, disabled (azure_blob_native_backend = false): results go to the in-cluster MinIO")
     identity_client_id = module.platform.nexus_workload_identity_client_id
-    # The chart-created account api-gateway, the agents and artifact-gc share.
+    # The chart-created account api-gateway, workflow-manager, the agents and
+    # artifact-gc share.
     service_account = local.artifact_service_account
   }
 }

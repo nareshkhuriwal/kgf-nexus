@@ -51,8 +51,8 @@ copy the bucket first (rclone, azcopy, gcloud storage cp).
 **ServiceAccounts.** Each environment binds its object-store identity to one
 chart ServiceAccount, `nexus-artifacts`, which the chart creates and gives to
 exactly the components that use the result store: api-gateway (task logs), the
-agents and artifact-gc (chart `serviceAccounts.apiGateway` / `.agent` /
-`.artifactGC`). The environment sets its annotation: the IRSA role ARN on EKS
+workflow-manager (object-store sensors), the agents and artifact-gc (chart
+`serviceAccounts.apiGateway` / `.workflowManager` / `.agent` / `.artifactGC`). The environment sets its annotation: the IRSA role ARN on EKS
 (only with `artifact_identity = "irsa"`; Pod Identity's association names the
 account instead), `iam.gke.io/gcp-service-account` on GKE (Workload Identity),
 and the workload identity client id on AKS, where the chart also adds the

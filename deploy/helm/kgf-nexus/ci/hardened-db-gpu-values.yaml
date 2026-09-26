@@ -36,6 +36,10 @@ serviceAccounts:
     name: nexus-artifacts
     annotations: { eks.amazonaws.com/role-arn: "arn:aws:iam::111122223333:role/nexus-artifacts" }
     podLabels: { azure.workload.identity/use: "true" }
+  workflowManager:
+    name: nexus-artifacts
+    annotations: { eks.amazonaws.com/role-arn: "arn:aws:iam::111122223333:role/nexus-artifacts" }
+    podLabels: { azure.workload.identity/use: "true" }
   agent:
     name: nexus-artifacts
     annotations: { eks.amazonaws.com/role-arn: "arn:aws:iam::111122223333:role/nexus-artifacts" }

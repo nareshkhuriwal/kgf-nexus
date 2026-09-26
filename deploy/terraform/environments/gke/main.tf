@@ -215,9 +215,10 @@ module "nexus" {
     }
 
     serviceAccounts = {
-      apiGateway = local.artifact_identity
-      agent      = local.artifact_identity
-      artifactGC = local.artifact_identity
+      apiGateway      = local.artifact_identity
+      workflowManager = local.artifact_identity
+      agent           = local.artifact_identity
+      artifactGC      = local.artifact_identity
     }
 
     agents = local.agents

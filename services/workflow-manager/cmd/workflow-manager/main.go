@@ -37,6 +37,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/grpcapi"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/runs"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/schedules"
+	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/sensors"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/timers"
 )
 
@@ -181,7 +182,7 @@ func run() error {
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 	go func() {
 		log.Info("gRPC listener started", "addr", cfg.GRPCAddr)
 		if err := grpcSrv.Serve(grpcLis); err != nil {
@@ -216,6 +217,30 @@ func run() error {
 		defer close(schedDone)
 		if err := schedSvc.Run(ctx); err != nil {
 			errCh <- fmt.Errorf("schedule fire loop: %w", err)
+		}
+	}()
+
+	// The sensor loop (ADR-0028), for the same reasons as the fire loop: each
+	// sensor is leased with SKIP LOCKED and every observation is a unique row,
+	// so any number of replicas may run it without a leader.
+	listers := sensors.NewRegistry()
+	if s3cfg, ok := sensors.S3ConfigFromEnv(os.Getenv); ok {
+		listers.Register("s3", func(context.Context) (sensors.ObjectLister, error) { return sensors.NewS3Lister(s3cfg) })
+	} else {
+		log.Info("no S3 endpoint configured for sensors (NEXUS_SENSOR_S3_ENDPOINT); object-store sensors will report an error")
+	}
+	sensorCfg := sensors.DefaultConfig()
+	if v := os.Getenv("NEXUS_SENSOR_INTERVAL"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			sensorCfg.Interval = d
+		}
+	}
+	sensorSvc := sensors.New(db, sensors.NewRunsAdapter(runSvc), listers, sensorCfg, log)
+	sensorDone := make(chan struct{})
+	go func() {
+		defer close(sensorDone)
+		if err := sensorSvc.Run(ctx); err != nil {
+			errCh <- fmt.Errorf("sensor loop: %w", err)
 		}
 	}()
 

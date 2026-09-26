@@ -20,6 +20,11 @@ import {
 } from '@tanstack/react-query';
 import { ApiError, api, type AttentionFilter, type RunListFilter, type RunPage } from './client';
 import type {
+  ChannelRequest,
+  DeliveryFilter,
+  RuleRequest,
+  SensorRequest,
+  TriggerRequest,
   Attempt,
   Backfill,
   CreateRunRequest,
@@ -61,6 +66,21 @@ export const qk = {
   // No namespace segment: /v1/health/fleet is one control plane, so every
   // namespace shares the cache entry rather than refetching on a switch.
   fleetHealth: () => ['fleet-health'] as const,
+  channels: (ns: string) => ['notification-channels', ns] as const,
+  rules: (ns: string) => ['notification-rules', ns] as const,
+  deliveries: (ns: string, f: DeliveryFilter) =>
+    ['notification-deliveries', ns, f.state ?? '', f.channel ?? '', f.run_id ?? '', f.before ?? '', f.limit ?? 0] as const,
+  delivery: (ns: string, id: string) => ['notification-delivery', ns, id] as const,
+  triggers: (ns: string) => ['triggers', ns] as const,
+  trigger: (ns: string, name: string) => ['trigger', ns, name] as const,
+  triggerDeliveries: (ns: string, name: string) => ['trigger-deliveries', ns, name] as const,
+  sensors: (ns: string) => ['sensors', ns] as const,
+  sensor: (ns: string, name: string) => ['sensor', ns, name] as const,
+  sensorObservations: (ns: string, name: string, baseline: boolean) =>
+    ['sensor-observations', ns, name, baseline] as const,
+  assets: (ns: string, q: string) => ['assets', ns, q] as const,
+  asset: (ns: string, uri: string) => ['asset', ns, uri] as const,
+  assetGraph: (ns: string, uri: string, depth: number) => ['asset-graph', ns, uri, depth] as const,
 };
 
 export function shouldRetry(failureCount: number, error: unknown): boolean {
@@ -656,5 +676,303 @@ export function useFleetHealth() {
     queryFn: () => api.getFleetHealth(),
     refetchInterval: FLEET_POLL_MS,
     ...base,
+  });
+}
+
+// ── events: notifications, triggers, sensors, assets (ADR-0028) ─────────────
+
+/**
+ * 501 `not_configured`: the gateway was started without the events feature.
+ *
+ * Distinguished from a 404 on purpose. ApiError.isNotImplemented folds the two
+ * together, which is right for "the endpoint is not built yet", but here a 404
+ * is a real answer (unknown asset, deleted trigger) and must not be rendered as
+ * "this server does not have the feature".
+ */
+export function isNotConfigured(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 501;
+}
+
+/** A 403: the credential lacks the permission. Rendered as Forbidden, not an error. */
+export function isForbidden(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 403;
+}
+
+/** Configuration lists change only when someone edits them; 15s is plenty. */
+const EVENTS_CONFIG_POLL_MS = 15_000;
+/** Delivery and observation lists are activity logs; they move faster. */
+const EVENTS_ACTIVITY_POLL_MS = 5_000;
+
+/** No retry for a 501: the feature is off, and asking again will not turn it on. */
+const eventsBase = {
+  ...base,
+  retry: (failureCount: number, error: unknown) =>
+    !isNotConfigured(error) && shouldRetry(failureCount, error),
+} satisfies Partial<UseQueryOptions>;
+
+export function useChannels(namespace: string, enabled = true) {
+  return useQuery({
+    queryKey: qk.channels(namespace),
+    queryFn: () => api.listChannels(namespace),
+    refetchInterval: EVENTS_CONFIG_POLL_MS,
+    enabled,
+    ...eventsBase,
+  });
+}
+
+export function useRules(namespace: string, enabled = true) {
+  return useQuery({
+    queryKey: qk.rules(namespace),
+    queryFn: () => api.listRules(namespace),
+    refetchInterval: EVENTS_CONFIG_POLL_MS,
+    enabled,
+    ...eventsBase,
+  });
+}
+
+export function useDeliveries(namespace: string, filter: DeliveryFilter, enabled = true) {
+  return useQuery({
+    queryKey: qk.deliveries(namespace, filter),
+    queryFn: () => api.listDeliveries(namespace, filter),
+    placeholderData: keepPreviousData,
+    refetchInterval: EVENTS_ACTIVITY_POLL_MS,
+    enabled,
+    ...eventsBase,
+  });
+}
+
+/**
+ * One delivery, polled while it is still pending: this is how a "Send test"
+ * button learns whether the message actually left. Polling stops as soon as the
+ * delivery reaches delivered or dead, since neither state changes again.
+ */
+export function useDelivery(namespace: string, id: string) {
+  return useQuery({
+    queryKey: qk.delivery(namespace, id),
+    queryFn: () => api.getDelivery(namespace, id),
+    enabled: id !== '',
+    refetchInterval: (q) => (q.state.data && q.state.data.state !== 'pending' ? false : 1500),
+    ...eventsBase,
+  });
+}
+
+function invalidateNotifications(qc: ReturnType<typeof useQueryClient>, namespace: string) {
+  void qc.invalidateQueries({ queryKey: qk.channels(namespace) });
+  void qc.invalidateQueries({ queryKey: qk.rules(namespace) });
+  void qc.invalidateQueries({ queryKey: ['notification-deliveries', namespace] });
+}
+
+export function useSaveChannel(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, body }: { name?: string; body: ChannelRequest }) =>
+      name ? api.updateChannel(namespace, name, body) : api.createChannel(namespace, body),
+    onSuccess: () => invalidateNotifications(qc, namespace),
+  });
+}
+
+export function useDeleteChannel(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api.deleteChannel(namespace, name),
+    onSuccess: () => invalidateNotifications(qc, namespace),
+  });
+}
+
+export function useTestChannel(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api.testChannel(namespace, name),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['notification-deliveries', namespace] }),
+  });
+}
+
+export function useSaveRule(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, body }: { name?: string; body: RuleRequest }) =>
+      name ? api.updateRule(namespace, name, body) : api.createRule(namespace, body),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.rules(namespace) }),
+  });
+}
+
+export function useDeleteRule(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api.deleteRule(namespace, name),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.rules(namespace) }),
+  });
+}
+
+export function useRedriveDelivery(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string | number) => api.redriveDelivery(namespace, id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['notification-deliveries', namespace] }),
+  });
+}
+
+export function useTriggers(namespace: string) {
+  return useQuery({
+    queryKey: qk.triggers(namespace),
+    queryFn: () => api.listTriggers(namespace),
+    refetchInterval: EVENTS_CONFIG_POLL_MS,
+    ...eventsBase,
+  });
+}
+
+export function useTrigger(namespace: string, name: string) {
+  return useQuery({
+    queryKey: qk.trigger(namespace, name),
+    queryFn: () => api.getTrigger(namespace, name),
+    enabled: name !== '',
+    refetchInterval: EVENTS_CONFIG_POLL_MS,
+    ...eventsBase,
+  });
+}
+
+export function useTriggerDeliveries(namespace: string, name: string, enabled = true) {
+  return useQuery({
+    queryKey: qk.triggerDeliveries(namespace, name),
+    queryFn: () => api.listTriggerDeliveries(namespace, name),
+    enabled: enabled && name !== '',
+    refetchInterval: EVENTS_ACTIVITY_POLL_MS,
+    ...eventsBase,
+  });
+}
+
+function invalidateTrigger(qc: ReturnType<typeof useQueryClient>, namespace: string, name: string) {
+  void qc.invalidateQueries({ queryKey: qk.triggers(namespace) });
+  void qc.invalidateQueries({ queryKey: qk.trigger(namespace, name) });
+}
+
+export function useCreateTrigger(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: TriggerRequest) => api.createTrigger(namespace, body),
+    onSuccess: (t) => invalidateTrigger(qc, namespace, t.name),
+  });
+}
+
+export function useUpdateTrigger(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, body }: { name: string; body: TriggerRequest }) =>
+      api.updateTrigger(namespace, name, body),
+    onSuccess: (t) => invalidateTrigger(qc, namespace, t.name),
+  });
+}
+
+export function useDeleteTrigger(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api.deleteTrigger(namespace, name),
+    onSuccess: (_v, name) => {
+      void qc.invalidateQueries({ queryKey: qk.triggers(namespace) });
+      qc.removeQueries({ queryKey: qk.trigger(namespace, name) });
+    },
+  });
+}
+
+export function useRotateTriggerSecret(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, graceSeconds }: { name: string; graceSeconds: number }) =>
+      api.rotateTriggerSecret(namespace, name, graceSeconds),
+    onSuccess: (t) => invalidateTrigger(qc, namespace, t.name),
+  });
+}
+
+export function useSensors(namespace: string) {
+  return useQuery({
+    queryKey: qk.sensors(namespace),
+    queryFn: () => api.listSensors(namespace),
+    // Status is live (lease, next poll, last error), so faster than config.
+    refetchInterval: EVENTS_ACTIVITY_POLL_MS * 2,
+    ...eventsBase,
+  });
+}
+
+export function useSensor(namespace: string, name: string) {
+  return useQuery({
+    queryKey: qk.sensor(namespace, name),
+    queryFn: () => api.getSensor(namespace, name),
+    enabled: name !== '',
+    refetchInterval: EVENTS_ACTIVITY_POLL_MS * 2,
+    ...eventsBase,
+  });
+}
+
+export function useSensorObservations(namespace: string, name: string, includeBaseline: boolean) {
+  return useQuery({
+    queryKey: qk.sensorObservations(namespace, name, includeBaseline),
+    queryFn: () => api.listSensorObservations(namespace, name, { includeBaseline }),
+    enabled: name !== '',
+    placeholderData: keepPreviousData,
+    refetchInterval: EVENTS_ACTIVITY_POLL_MS * 2,
+    ...eventsBase,
+  });
+}
+
+function invalidateSensor(qc: ReturnType<typeof useQueryClient>, namespace: string, name: string) {
+  void qc.invalidateQueries({ queryKey: qk.sensors(namespace) });
+  void qc.invalidateQueries({ queryKey: qk.sensor(namespace, name) });
+}
+
+export function useCreateSensor(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SensorRequest) => api.createSensor(namespace, body),
+    onSuccess: (s) => invalidateSensor(qc, namespace, s.name),
+  });
+}
+
+export function useUpdateSensor(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, body }: { name: string; body: SensorRequest }) =>
+      api.updateSensor(namespace, name, body),
+    onSuccess: (s) => invalidateSensor(qc, namespace, s.name),
+  });
+}
+
+export function useDeleteSensor(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api.deleteSensor(namespace, name),
+    onSuccess: (_v, name) => {
+      void qc.invalidateQueries({ queryKey: qk.sensors(namespace) });
+      qc.removeQueries({ queryKey: qk.sensor(namespace, name) });
+    },
+  });
+}
+
+export function useAssets(namespace: string, q: string) {
+  return useQuery({
+    queryKey: qk.assets(namespace, q),
+    queryFn: () => api.listAssets(namespace, { q }),
+    placeholderData: keepPreviousData,
+    refetchInterval: EVENTS_CONFIG_POLL_MS * 2,
+    ...eventsBase,
+  });
+}
+
+export function useAsset(namespace: string, uri: string) {
+  return useQuery({
+    queryKey: qk.asset(namespace, uri),
+    queryFn: () => api.getAsset(namespace, uri),
+    enabled: uri !== '',
+    refetchInterval: EVENTS_CONFIG_POLL_MS * 2,
+    ...eventsBase,
+  });
+}
+
+export function useAssetGraph(namespace: string, uri: string, depth: number, enabled = true) {
+  return useQuery({
+    queryKey: qk.assetGraph(namespace, uri, depth),
+    queryFn: () => api.getAssetGraph(namespace, { uri: uri || undefined, depth: uri ? depth : undefined }),
+    enabled,
+    placeholderData: keepPreviousData,
+    ...eventsBase,
   });
 }

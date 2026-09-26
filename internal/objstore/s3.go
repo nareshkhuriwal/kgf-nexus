@@ -107,6 +107,16 @@ func s3Credentials(c Config) (*credentials.Credentials, error) {
 	return nil, fmt.Errorf("objstore: unknown %s %q", EnvS3Creds, mode)
 }
 
+// S3Credentials builds S3 credentials for a mode (NEXUS_S3_CREDENTIALS values:
+// auto, static, web-identity, pod-identity, iam, env, anonymous) exactly as
+// the result store does, for other S3 clients in the platform -- the
+// workflow-manager's object-store sensors -- so they take the same keyless
+// identities instead of requiring a static key pair.
+func S3Credentials(mode, accessKeyID, secretAccessKey, sessionToken string) (*credentials.Credentials, error) {
+	return s3Credentials(Config{Backend: BackendS3, S3: S3Config{Credentials: mode,
+		AccessKeyID: accessKeyID, SecretAccessKey: secretAccessKey, SessionToken: sessionToken}})
+}
+
 // awsWorkloadIdentityVisible reports whether the environment names an AWS
 // identity auto mode may use without probing the network.
 func awsWorkloadIdentityVisible() bool {

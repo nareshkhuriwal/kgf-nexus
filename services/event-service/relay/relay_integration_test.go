@@ -649,9 +649,14 @@ func TestNATSAttemptCreationReachesAWorkerSubscription(t *testing.T) {
 func TestNATSPruneBoundsTheTable(t *testing.T) {
 	pool := testPG(t)
 	w := newWorld(t, pool)
-	ids := w.appendEvents(3)
-	// ids[0]: published long ago. ids[1]: unpublished and ancient. ids[2]: fresh.
-	if _, err := pool.Exec(w.ctx, `UPDATE outbox SET published_at = now() - interval '2 hours' WHERE id = $1`, ids[0]); err != nil {
+	ids := w.appendEvents(4)
+	// ids[0]: published and notified long ago. ids[1]: unpublished and ancient.
+	// ids[2]: fresh. ids[3]: published long ago but NOT yet evaluated by the
+	// notifier (ADR-0028), so retention must keep it.
+	if _, err := pool.Exec(w.ctx, `UPDATE outbox SET published_at = now() - interval '2 hours', notified_at = now() WHERE id = $1`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(w.ctx, `UPDATE outbox SET published_at = now() - interval '2 hours' WHERE id = $1`, ids[3]); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(w.ctx, `UPDATE outbox SET created_at = now() - interval '2 days' WHERE id = $1`, ids[1]); err != nil {
@@ -662,8 +667,8 @@ func TestNATSPruneBoundsTheTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	left := w.outboxIDs()
-	if len(left) != 1 || left[0] != ids[2] {
-		t.Errorf("rows left after prune = %v, want only the fresh row %d", left, ids[2])
+	if len(left) != 2 || left[0] != ids[2] || left[1] != ids[3] {
+		t.Errorf("rows left after prune = %v, want the fresh row %d and the un-notified row %d", left, ids[2], ids[3])
 	}
 	if m.Pruned.With(metrics.Labels{"reason": "expired"}).Value() < 1 ||
 		m.Pruned.With(metrics.Labels{"reason": "published"}).Value() < 1 {

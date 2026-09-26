@@ -810,3 +810,283 @@ export interface FleetHealth {
  * again" will make a different decision than the one this actually performs.
  */
 export type RunAction = 'pause' | 'resume' | 'cancel' | 'retry';
+
+// ── events: notifications, webhook triggers, sensors, assets (ADR-0028) ─────
+
+export type ChannelKind = 'slack_webhook' | 'slack_bot' | 'teams' | 'pagerduty' | 'webhook' | 'email';
+
+export interface ChannelSecretInfo {
+  configured: boolean;
+  /** `sealed` is stored encrypted by the gateway; `ref` names env:/file: on the server. */
+  source: 'sealed' | 'ref' | '';
+  hint?: string;
+  ref?: string;
+}
+
+export interface NotificationChannel {
+  id: string;
+  name: string;
+  kind: ChannelKind;
+  config: Record<string, unknown>;
+  secret: ChannelSecretInfo;
+  rate_limit_per_minute: number;
+  enabled: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  revision: number;
+}
+
+/** Returned by POST only: a generated webhook signing secret is shown once. */
+export interface CreatedChannel extends NotificationChannel {
+  signing_secret?: string;
+}
+
+export interface ChannelRequest {
+  name?: string;
+  kind?: ChannelKind;
+  config?: Record<string, unknown>;
+  secret?: string;
+  secret_ref?: string;
+  rate_limit_per_minute?: number;
+  enabled?: boolean;
+  revision?: number;
+}
+
+export interface ChannelList {
+  channels: NotificationChannel[];
+  kinds: string[];
+}
+
+export interface NotificationRule {
+  id: string;
+  name: string;
+  events: string[];
+  workflows: string[];
+  labels: Record<string, string>;
+  sla_seconds?: number | null;
+  enabled: boolean;
+  channels: string[];
+  created_by: string;
+  created_at?: string;
+  updated_at?: string;
+  revision: number;
+}
+
+export interface RuleRequest {
+  name?: string;
+  events: string[];
+  workflows: string[];
+  labels: Record<string, string>;
+  sla_seconds?: number;
+  channels: string[];
+  enabled: boolean;
+  revision?: number;
+}
+
+export interface RuleList {
+  rules: NotificationRule[];
+  events: string[];
+}
+
+export type DeliveryState = 'pending' | 'delivered' | 'dead';
+
+export interface NotificationDelivery {
+  /** A bigint on the server: serialised as a JSON number. */
+  id: number | string;
+  channel: string;
+  channel_kind: string;
+  rule: string;
+  event_type: string;
+  action: string;
+  run_id: string | null;
+  payload: unknown;
+  state: DeliveryState;
+  attempts: number;
+  max_attempts: number;
+  next_attempt_at: string | null;
+  last_error: string | null;
+  last_status?: number | null;
+  dedup_key: string;
+  created_at: string;
+  delivered_at: string | null;
+  dead_at: string | null;
+  redrive_of?: number | string | null;
+}
+
+export interface DeliveryFilter {
+  state?: DeliveryState | '';
+  channel?: string;
+  run_id?: string;
+  limit?: number;
+  before?: string;
+}
+
+export interface DeliveryPage {
+  deliveries: NotificationDelivery[];
+  nextBefore?: string;
+}
+
+export interface WebhookTrigger {
+  id: string;
+  name: string;
+  workflow: string;
+  workflow_version?: number | null;
+  params_mapping: Record<string, unknown>;
+  idempotency_key_path: string;
+  priority: number;
+  tolerance_seconds: number;
+  enabled: boolean;
+  secret_rotated_at: string | null;
+  previous_secret_expires_at: string | null;
+  created_by: string;
+  created_at: string;
+  last_fired_at: string | null;
+  fire_count: number;
+  revision: number;
+  path: string;
+  url?: string;
+  signature_scheme: string;
+}
+
+/** Create and rotate return the plaintext secret exactly once. */
+export interface TriggerWithSecret extends WebhookTrigger {
+  secret?: string;
+}
+
+export interface TriggerRequest {
+  name?: string;
+  workflow?: string;
+  workflow_version?: number;
+  params_mapping?: Record<string, unknown>;
+  idempotency_key_path?: string;
+  priority?: number;
+  tolerance_seconds?: number;
+  enabled?: boolean;
+  revision?: number;
+}
+
+export interface TriggerDelivery {
+  received_at: string;
+  /** accepted | deduplicated | rejected */
+  outcome: string;
+  http_status: number;
+  run_id: string | null;
+  idempotency_key: string | null;
+  detail: string | null;
+  signature_digest: string;
+}
+
+export type SensorKind = 'object_store' | 'run_succeeded';
+
+export interface SensorState {
+  status: string;
+  baseline_done: boolean;
+  cursor: string | null;
+  watermark: string | null;
+  next_poll_at: string | null;
+  lease_owner: string | null;
+  lease_until: string | null;
+  last_poll_at: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  consecutive_failures: number;
+  observed_total: number;
+  triggered_total: number;
+  pending: number;
+  definition_current: boolean;
+}
+
+export interface Sensor {
+  id: string;
+  name: string;
+  kind: SensorKind;
+  workflow: string;
+  workflow_version?: number | null;
+  config: Record<string, unknown>;
+  params_mapping: Record<string, unknown>;
+  poll_interval_seconds: number;
+  backfill: boolean;
+  priority: number;
+  enabled: boolean;
+  /** disabled | waiting | initializing | ok | error | stale */
+  status: string;
+  state?: SensorState | null;
+  created_by: string;
+  created_at?: string;
+  updated_at?: string;
+  revision: number;
+}
+
+export interface SensorRequest {
+  name?: string;
+  kind?: SensorKind;
+  workflow?: string;
+  config?: Record<string, unknown>;
+  params_mapping?: Record<string, unknown>;
+  poll_interval_seconds?: number;
+  backfill?: boolean;
+  enabled?: boolean;
+  revision?: number;
+}
+
+export interface SensorObservation {
+  item_key: string;
+  item: unknown;
+  /** pending | triggered | baseline | failed */
+  outcome: string;
+  run_id: string | null;
+  attempts: number;
+  last_error: string | null;
+  observed_at: string;
+  triggered_at: string | null;
+}
+
+export interface Asset {
+  uri: string;
+  name: string;
+  first_seen_at: string;
+  last_declared_at: string;
+  last_materialized_at: string | null;
+  last_materialized_run_id: string | null;
+  producers: number;
+  consumers: number;
+}
+
+export interface AssetTask {
+  workflow: string;
+  node_id: string;
+  last_run_id: string | null;
+  last_recorded_at: string | null;
+  runs: number;
+}
+
+export interface AssetMaterialization {
+  run_id: string;
+  node_id: string;
+  workflow: string;
+  materialized_at: string;
+  run_state: string;
+}
+
+export interface AssetDetail extends Asset {
+  producer_tasks: AssetTask[];
+  consumer_tasks: AssetTask[];
+  materializations: AssetMaterialization[];
+  latest_materialization: AssetMaterialization | null;
+}
+
+export interface AssetGraphNode {
+  id: string;
+  kind: 'asset' | 'task';
+  label: string;
+  uri?: string;
+  workflow?: string;
+  node_id?: string;
+}
+
+export interface AssetGraph {
+  nodes: AssetGraphNode[];
+  edges: { from: string; to: string }[];
+  truncated: boolean;
+}
