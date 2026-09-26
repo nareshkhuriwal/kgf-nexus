@@ -526,7 +526,11 @@ func TestIntegrationSSOCrossTenantMisuse(t *testing.T) {
 	}
 	// IdP A asserts B's administrator, verified.
 	base := idpA.Claims
-	idpA.Claims = func(n string) map[string]any { c := base(n); c["email"], c["sub"] = "carol@b.test", "carol-at-a"; return c }
+	idpA.Claims = func(n string) map[string]any {
+		c := base(n)
+		c["email"], c["sub"] = "carol@b.test", "carol-at-a"
+		return c
+	}
 	b := e.browser()
 	res := b.loginOIDC(pidA)
 	if res.User.Namespace != nsA || res.User.ID == carol.ID {

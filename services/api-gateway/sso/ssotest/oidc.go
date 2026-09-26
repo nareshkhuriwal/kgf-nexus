@@ -84,14 +84,14 @@ func (p *OIDCProvider) Close() { p.Server.Close() }
 
 func (p *OIDCProvider) discovery(w http.ResponseWriter, _ *http.Request) {
 	d := map[string]any{
-		"issuer":                                p.Issuer(),
-		"authorization_endpoint":                p.Issuer() + "/authorize",
-		"token_endpoint":                        p.Issuer() + "/token",
-		"jwks_uri":                              p.Issuer() + "/jwks",
-		"response_types_supported":              []string{"code"},
-		"subject_types_supported":               []string{"public"},
-		"id_token_signing_alg_values_supported": []string{"RS256"},
-		"code_challenge_methods_supported":      []string{"S256"},
+		"issuer":                                         p.Issuer(),
+		"authorization_endpoint":                         p.Issuer() + "/authorize",
+		"token_endpoint":                                 p.Issuer() + "/token",
+		"jwks_uri":                                       p.Issuer() + "/jwks",
+		"response_types_supported":                       []string{"code"},
+		"subject_types_supported":                        []string{"public"},
+		"id_token_signing_alg_values_supported":          []string{"RS256"},
+		"code_challenge_methods_supported":               []string{"S256"},
 		"authorization_response_iss_parameter_supported": p.SendIss,
 	}
 	if p.EndSession {

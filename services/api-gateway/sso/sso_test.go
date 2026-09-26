@@ -241,7 +241,11 @@ func TestOIDCRejectsBadTokens(t *testing.T) {
 		}, "azp"},
 		{"iat far in the past", func(f *oidcFixture) {
 			base := f.idp.Claims
-			f.idp.Claims = func(n string) map[string]any { c := base(n); c["iat"] = time.Now().Add(-2 * time.Hour).Unix(); return c }
+			f.idp.Claims = func(n string) map[string]any {
+				c := base(n)
+				c["iat"] = time.Now().Add(-2 * time.Hour).Unix()
+				return c
+			}
 		}, "too old"},
 		{"iat in the future", func(f *oidcFixture) {
 			base := f.idp.Claims
