@@ -28,6 +28,35 @@ func (c *Client) put(ctx context.Context, path string, payload any) (any, error)
 	return c.do(ctx, http.MethodPut, c.urlFor(path, nil), body, nil)
 }
 
+// putRevisioned PUTs a partial update of an object with a revision.
+//
+// The gateway's revision rule (api/openapi.yaml, "Revisions") has no
+// unconditional overwrite: an update names the revision it read, and a
+// missing revision means 0, which is a 409 for an object that exists. A body
+// without "revision" therefore gets the object's CURRENT revision, read just
+// before the write, so a concurrent change in between is a 409 the user sees
+// rather than a silent overwrite. A body that names one is sent unchanged.
+func (c *Client) putRevisioned(ctx context.Context, path string, body map[string]any) (any, error) {
+	if _, ok := body["revision"]; !ok {
+		cur, err := c.get(ctx, path, nil)
+		if err != nil {
+			return nil, err
+		}
+		obj, _ := cur.(map[string]any)
+		rev, ok := obj["revision"].(float64)
+		if !ok {
+			return nil, fmt.Errorf("GET %s returned no revision to update against", path)
+		}
+		withRev := make(map[string]any, len(body)+1)
+		for k, v := range body {
+			withRev[k] = v
+		}
+		withRev["revision"] = int64(rev)
+		body = withRev
+	}
+	return c.put(ctx, path, body)
+}
+
 func encode(payload any) ([]byte, error) {
 	if payload == nil {
 		return []byte("{}"), nil
@@ -55,7 +84,7 @@ func (c *Client) CreateChannel(ctx context.Context, body map[string]any) (any, e
 	return c.post(ctx, "/notification-channels", body)
 }
 func (c *Client) UpdateChannel(ctx context.Context, name string, body map[string]any) (any, error) {
-	return c.put(ctx, "/notification-channels/"+esc(name), body)
+	return c.putRevisioned(ctx, "/notification-channels/"+esc(name), body)
 }
 func (c *Client) DeleteChannel(ctx context.Context, name string) (any, error) {
 	return c.del(ctx, "/notification-channels/"+esc(name))
@@ -73,7 +102,7 @@ func (c *Client) CreateRule(ctx context.Context, body map[string]any) (any, erro
 	return c.post(ctx, "/notification-rules", body)
 }
 func (c *Client) UpdateRule(ctx context.Context, name string, body map[string]any) (any, error) {
-	return c.put(ctx, "/notification-rules/"+esc(name), body)
+	return c.putRevisioned(ctx, "/notification-rules/"+esc(name), body)
 }
 func (c *Client) DeleteRule(ctx context.Context, name string) (any, error) {
 	return c.del(ctx, "/notification-rules/"+esc(name))
@@ -109,7 +138,7 @@ func (c *Client) CreateTrigger(ctx context.Context, body map[string]any) (any, e
 	return c.post(ctx, "/triggers", body)
 }
 func (c *Client) UpdateTrigger(ctx context.Context, name string, body map[string]any) (any, error) {
-	return c.put(ctx, "/triggers/"+esc(name), body)
+	return c.putRevisioned(ctx, "/triggers/"+esc(name), body)
 }
 func (c *Client) DeleteTrigger(ctx context.Context, name string) (any, error) {
 	return c.del(ctx, "/triggers/"+esc(name))
@@ -141,7 +170,7 @@ func (c *Client) CreateSensor(ctx context.Context, body map[string]any) (any, er
 	return c.post(ctx, "/sensors", body)
 }
 func (c *Client) UpdateSensor(ctx context.Context, name string, body map[string]any) (any, error) {
-	return c.put(ctx, "/sensors/"+esc(name), body)
+	return c.putRevisioned(ctx, "/sensors/"+esc(name), body)
 }
 func (c *Client) DeleteSensor(ctx context.Context, name string) (any, error) {
 	return c.del(ctx, "/sensors/"+esc(name))

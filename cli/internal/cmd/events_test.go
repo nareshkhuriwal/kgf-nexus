@@ -34,14 +34,19 @@ func TestTriggerCreateSendsMappingAndPrintsTheSecretOnce(t *testing.T) {
 	}
 }
 
+// TestTriggerUpdateSendsOnlyGivenFlags: the given flags, plus the revision
+// read just before -- the gateway has no unconditional overwrite.
 func TestTriggerUpdateSendsOnlyGivenFlags(t *testing.T) {
 	h := newHarness(t)
-	h.routes(map[string]route{"PUT " + ns + "/triggers/gh": {body: `{"name":"gh"}`}})
+	h.routes(map[string]route{
+		"GET " + ns + "/triggers/gh": {body: `{"name":"gh","revision":4}`},
+		"PUT " + ns + "/triggers/gh": {body: `{"name":"gh"}`},
+	})
 	if code, _, errb := h.run("trigger", "update", "gh", "--disable"); code != 0 {
 		t.Fatalf("%d %s", code, errb)
 	}
 	b := bodyOf(t, h.last())
-	if len(b) != 1 || b["enabled"] != false {
+	if len(b) != 2 || b["enabled"] != false || b["revision"] != 4.0 {
 		t.Fatalf("update body %v", b)
 	}
 }
@@ -93,11 +98,15 @@ func TestSensorCreateObjectStore(t *testing.T) {
 
 func TestSensorEnableDisable(t *testing.T) {
 	h := newHarness(t)
-	h.routes(map[string]route{"PUT " + ns + "/sensors/land": {body: `{"name":"land","enabled":false}`}})
+	h.routes(map[string]route{
+		"GET " + ns + "/sensors/land": {body: `{"name":"land","revision":2}`},
+		"PUT " + ns + "/sensors/land": {body: `{"name":"land","enabled":false}`},
+	})
 	if code, _, _ := h.run("sensor", "disable", "land"); code != 0 || bodyOf(t, h.last())["enabled"] != false {
 		t.Fatal("disable")
 	}
-	if code, _, _ := h.run("sensor", "enable", "land"); code != 0 || bodyOf(t, h.last())["enabled"] != true {
+	if code, _, _ := h.run("sensor", "enable", "land"); code != 0 || bodyOf(t, h.last())["enabled"] != true ||
+		bodyOf(t, h.last())["revision"] != 2.0 {
 		t.Fatal("enable")
 	}
 }
