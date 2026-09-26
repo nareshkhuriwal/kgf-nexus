@@ -231,6 +231,15 @@ export interface Attempt {
   progress_at?: string | null;
   /** Control-plane time the progress message last changed. */
   progress_message_at?: string | null;
+  /**
+   * Cumulative usage units the task reported (ADR-0032 §2), keyed
+   * `<kind>:<subject>[:<qualifier>]`, e.g. `tokens:openai/gpt-4o-mini:input`.
+   * `{}` when the task reported nothing; absent from gateways that predate the
+   * field. lib/usage.ts parses and groups the keys.
+   */
+  usage_units?: Record<string, number>;
+  /** Control-plane time of the latest usage report; null when none was sent. */
+  usage_reported_at?: string | null;
 }
 
 export interface RunEvent {

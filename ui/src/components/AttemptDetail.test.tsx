@@ -192,3 +192,53 @@ describe('selection', () => {
     expect(onSelect).toHaveBeenCalledWith('a1');
   });
 });
+
+describe('usage units (ADR-0032 §2)', () => {
+  it('renders tokens by model and other units verbatim', () => {
+    render(
+      <AttemptList
+        attempts={[
+          attempt({
+            usage_units: {
+              'tokens:openai/gpt-4o-mini:input': 1200,
+              'tokens:openai/gpt-4o-mini:output': 340,
+              'requests:openai/gpt-4o-mini': 3,
+              'gpu_seconds:a100': 42,
+            },
+            usage_reported_at: '2026-09-12T10:01:00Z',
+          }),
+        ]}
+      />,
+    );
+    const usage = screen.getByTestId('attempt-usage');
+    const models = within(usage).getByRole('table', { name: /tokens by model/i });
+    expect(within(models).getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
+      'Model',
+      'Input',
+      'Output',
+      'Cached',
+      'Requests',
+    ]);
+    const row = within(models).getByRole('row', { name: /openai\/gpt-4o-mini/ });
+    // Cached was not reported, so it is a dash, not a zero.
+    expect(within(row).getAllByRole('cell').map((c) => c.textContent)).toEqual(['1,200', '340', '—', '3']);
+    const other = within(usage).getByRole('table', { name: /other units/i });
+    expect(within(other).getByText('gpu_seconds:a100')).toBeInTheDocument();
+    expect(within(usage).getByText(/last reported/)).toBeInTheDocument();
+    // The scroll regions are reachable by keyboard.
+    for (const region of within(usage).getAllByRole('region')) expect(region).toHaveAttribute('tabindex', '0');
+  });
+
+  it('says no usage was reported for an empty map, never a table of zeros', () => {
+    render(<AttemptList attempts={[attempt({ usage_units: {}, usage_reported_at: null })]} />);
+    const usage = screen.getByTestId('attempt-usage');
+    expect(usage).toHaveTextContent(/No usage reported/);
+    expect(within(usage).queryByRole('table')).not.toBeInTheDocument();
+    expect(within(usage).queryByText(/last reported/)).not.toBeInTheDocument();
+  });
+
+  it('leaves the section out when the gateway does not serve usage', () => {
+    render(<AttemptList attempts={[attempt()]} />);
+    expect(screen.queryByTestId('attempt-usage')).not.toBeInTheDocument();
+  });
+});
