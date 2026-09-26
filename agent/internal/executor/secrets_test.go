@@ -91,6 +91,26 @@ func TestSubprocessInjectsSecretsAndScrubsAgentCredentials(t *testing.T) {
 	}
 }
 
+func TestSecretsRootKeepsSecretsOffTheWorkVolume(t *testing.T) {
+	root := t.TempDir()
+	SecretsRoot = root
+	defer func() { SecretsRoot = "" }()
+	work := filepath.Join(t.TempDir(), "attempt-1")
+	dir, err := stageSecretFiles(work, testSecrets())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(dir, root+"/") {
+		t.Fatalf("secret files staged at %s, not under SecretsRoot %s", dir, root)
+	}
+	if err := removeSecrets(work); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Errorf("SecretsRoot not cleaned: %v", entries)
+	}
+}
+
 func TestSubprocessPrepareFailureRemovesSecrets(t *testing.T) {
 	root := t.TempDir()
 	e := &SubprocessExecutor{Root: root, AllowUnenforceableLimits: true}

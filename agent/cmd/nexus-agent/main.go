@@ -131,8 +131,16 @@ func main() {
 		log.Error("invalid secrets configuration", "error", err)
 		os.Exit(1)
 	}
+	if root := os.Getenv("NEXUS_SECRETS_DIR_ROOT"); root != "" {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			log.Error("NEXUS_SECRETS_DIR_ROOT is not usable", "path", root, "error", err)
+			os.Exit(1)
+		}
+		executor.SecretsRoot = root
+	}
 	if secretResolver != nil {
-		log.Info("secret providers configured", "namespace", *namespace, "schemes", secretResolver.Schemes())
+		log.Info("secret providers configured", "namespace", *namespace, "schemes", secretResolver.Schemes(),
+			"secrets_dir_root", executor.SecretsRoot)
 		// A core dump or a same-UID ptrace of this process would expose every
 		// resolved value; refuse both where the OS allows.
 		if herr := secrets.HardenProcess(); herr != nil {

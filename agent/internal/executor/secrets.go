@@ -29,8 +29,20 @@ import (
 // ContainerSecretsDir is where container executors mount file secrets.
 const ContainerSecretsDir = "/run/nexus/secrets"
 
+// SecretsRoot, when set, holds every attempt's host-side secret material
+// instead of a sibling of its work directory: point it at a tmpfs
+// (NEXUS_SECRETS_DIR_ROOT; the Helm chart mounts a memory-backed emptyDir)
+// so resolved values never reach a disk. Set once by the agent at start-up,
+// before any attempt runs; read-only afterwards.
+var SecretsRoot string
+
 // secretsDir is the per-attempt secret directory for a work directory.
-func secretsDir(workDir string) string { return workDir + ".secrets" }
+func secretsDir(workDir string) string {
+	if SecretsRoot != "" {
+		return filepath.Join(SecretsRoot, filepath.Base(workDir)+".secrets")
+	}
+	return workDir + ".secrets"
+}
 
 // hasFileSecrets reports whether any secret is file-injected.
 func hasFileSecrets(ss []secrets.Secret) bool {
