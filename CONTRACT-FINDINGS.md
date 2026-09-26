@@ -3077,7 +3077,7 @@ seed a legacy `api_keys` worker row. `up` could now mint the agents' token
 through the API after registering the tenant; the bootstrap Job needs a key
 known before install (the Secret), so it keeps the SQL step.
 
-### F115. Cloud platforms: the result store is S3-only with static keys, the chart cannot use cloud identities or GPU pools, and nothing has been applied — OPEN
+### F115. Cloud platforms: the result store is S3-only with static keys, the chart cannot use cloud identities or GPU pools, and nothing has been applied — PARTLY FIXED (parts 3, 4, 5; 1, 2 and 6 open)
 
 **Severity:** medium (deployment blocker for Azure-native artifacts and for
 keyless and GPU operation on every cloud; not a correctness defect). Found
@@ -3121,7 +3121,8 @@ recommendation.
   tokens), because minio-go can sign only S3-style HMAC requests.
 
 **3. The chart has no ServiceAccount, nodeSelector, tolerations or GPU
-resource requests.** Without a ServiceAccount, (2) cannot be adopted even
+resource requests.** — **ADDRESSED** (`fix/f115-chart-db-hardening`, see
+the resolution below). Without a ServiceAccount, (2) cannot be adopted even
 after the client change. Without tolerations and `nvidia.com/gpu` limits, the
 tainted GPU pools that all three modules can create (`gpu_pool` /
 `gpu_node_group`, `nvidia.com/gpu=present:NoSchedule`) **cannot host a Nexus
@@ -3132,14 +3133,17 @@ agents request none. Fix: per-agent `serviceAccountName`, `nodeSelector`,
 chart-level ServiceAccount with annotations. GPU execution then still needs
 qualification on real hardware (production brief).
 
-**4. `sslmode=require`, not `verify-full`.** All three managed databases
+**4. `sslmode=require`, not `verify-full`.** — **ADDRESSED** (resolution
+below). All three managed databases
 enforce TLS, but the chart cannot mount a CA bundle (Azure DigiCert/Microsoft
 roots, the RDS global bundle, the Cloud SQL instance CA), so the server's
 identity is not verified. Traffic never leaves the private network, which
 limits the risk. Fix: a `postgres.caSecret` value, mounted in each pod, with
 `sslrootcert=` added to `DATABASE_URL`.
 
-**5. The database user is the managed server's admin user.** Migrations
+**5. The database user is the managed server's admin user.** —
+**ADDRESSED**, with the strict per-service scope left to F132 (resolution
+below). Migrations
 create per-service NOLOGIN roles and so need CREATEROLE, which the admin
 login has: `azure_pg_admin`, `rds_superuser` or `cloudsqlsuperuser`. The
 services then run as that same login. Fix: a bootstrap step creates a
@@ -3152,8 +3156,51 @@ checkov and trivy. No cloud API has accepted these plans, and no Nexus
 workload has run on AKS, EKS or GKE. In particular, large multipart uploads
 and the GC sweep have not been run against GCS interop. Acceptance: one
 apply per cloud in a scratch account, then the fan-out/fan-in example with a
->64 MiB artifact (multipart), the artifact GC sweep, and a PITR restore of
+the >64 MiB artifact (multipart), the artifact GC sweep, and a PITR restore of
 the managed database, with results recorded in docs/OPERATIONS.md.
+
+**Resolution of parts 3-5 (`fix/f115-chart-db-hardening`).**
+
+- *Part 4, verify-full.* `postgres.caBundle` (Secret or ConfigMap) is mounted at
+  `/etc/nexus/postgres-ca/ca.crt` in every pod that connects and passed as
+  `sslrootcert`; `postgres.params` / `postgres.connections.<c>.params` carry
+  further libpq parameters globally and per connection. The chart refuses
+  verify modes without a bundle and identity keys in `params`. pgx is pinned to
+  treat the bundle as the only roots, check the host and never fall back
+  (`internal/config/dsn_tls_test.go`). Terraform: the RDS global bundle and the
+  Azure roots (DigiCert Global Root G2, Microsoft RSA Root CA 2017) are vendored
+  in `deploy/terraform/ca-bundles` with SHA-256-pinned sources and root
+  fingerprints (`refresh.sh`), and the environments refuse a bundle that no
+  longer matches `SHA256SUMS`; Cloud SQL moves to the shared CA hierarchy
+  (`GOOGLE_MANAGED_CAS_CA`, whose certificates carry the instance DNS name),
+  with a private Cloud DNS zone for that name and every trusted CA from
+  `google_sql_ca_certs`. `deploy/scripts/db-tls-drill.sh` (18/18) and a live
+  install prove the positive path and the refusals (wrong CA, wrong host, IP,
+  plaintext). Rotation: OPERATIONS §20.10.
+- *Part 5, admin login.* `nexus-db-roles` (in the migrate image) creates one
+  LOGIN role per service, never SUPERUSER/CREATEROLE/CREATEDB/REPLICATION/
+  BYPASSRLS, with the password set from a client-side SCRAM verifier; the chart
+  runs it as the db-roles Job (owner login, inside the cluster, where a managed
+  server's private endpoint is reachable), and Terraform generates the
+  passwords (`runtime_db_roles`, on by default). The admin password now reaches
+  only the migrate, bootstrap and db-roles Jobs, and no service can run DDL,
+  TRUNCATE or rewrite `run_events`. Logins default to the union of the six
+  group roles because the strict per-service mapping breaks the scheduler
+  (F132). OPERATIONS §20.11.
+- *Part 3, identity and GPU pools.* Every component has its own ServiceAccount
+  with no API token mounted; annotations and pod labels per component; one
+  shared `nexus-artifacts` account for api-gateway, agents and artifact-gc,
+  which each platform module's identity now trusts (IRSA role ARN, GKE service
+  account, Azure client id + workload-identity label). Agents take per-entry
+  `nodeSelector`/`tolerations`/`affinity`; `gpuCount > 0` requests that many
+  `nvidia.com/gpu` (configurable) and tolerates the pool taint, and simulated
+  GPUs must say so. The environments add a GPU agent on the GPU pool.
+  OPERATIONS §20.12-20.13.
+
+Still open: parts 1 and 2 (native Blob/GCS and credential-chain clients: a
+separate change, which the accounts above are ready for) and part 6 (no cloud
+apply; in particular the Cloud SQL shared-CA bundle and PSA DNS name, and GPU
+execution on real hardware, are unverified).
 
 ### F116. The SDK derived a different idempotency key from the control plane — FIXED
 
@@ -3417,3 +3464,54 @@ is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
 `ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
 report the output. Test it in `agent/internal/worker` for both inline and blob
 outputs, and in the NATS/e2e path with a non-SDK executor.
+
+### F132. The per-service database roles do not cover what the scheduler writes — OPEN
+
+**Severity:** medium (blocks the strict form of ADR-0011's enforced ownership;
+no runtime impact with the default `runtimeRoles.scope: union`).
+
+Migration 0005 made ADR-0011's write matrix a set of NOLOGIN group roles, and
+`internal/store/service_roles_integration_test.go` checks the grants against
+the matrix. Nothing ever ran a service AS its role: every deployment connected
+as the owner. The first install with one group role per login (F115 part 5,
+`postgres.runtimeRoles.scope: service`, namespace `nexus-w3c-helm`) left the
+scheduler unready, with two loops denied on every tick:
+
+- `ClaimDueTimers` (`internal/store/scheduler_timers.go`): `UPDATE timers SET
+  claimed_by, claimed_at ... FOR UPDATE SKIP LOCKED`, and the release path
+  `UPDATE timers SET claimed_by = NULL`. `nexus_scheduler` has only INSERT and
+  DELETE on `timers` (0005: "deadline timers"); the timer *runner* that later
+  moved into the scheduler also claims them. Denied 495 times in ten minutes.
+- `ReapDeadWorkers` (`internal/store/scheduler_liveness.go`): `DELETE FROM
+  workers` for long-DEAD workers with no leases or reservations.
+  `nexus_scheduler` has only `UPDATE (committed, state)` on `workers`.
+
+`hello_dag` still SUCCEEDED under the strict scope, and no other service logged
+a denial on that path, so the gap is the scheduler's background loops. Other
+paths (schedules, backfills, retries, cancellation, deletion, quotas, the
+cluster registry) were not exercised under the strict scope.
+
+**Proposed fix.** An additive migration granting `nexus_scheduler` `UPDATE
+(claimed_by, claimed_at) ON timers` and `DELETE ON workers`, each recorded as a
+documented exception in 0005's style and in `service_roles_integration_test.go`
+(the `allowed` map and a column-scope assertion), or moving dead-worker reaping
+to resource-manager, which owns `workers`. Then run the e2e and integration
+suites with every service on its own login (`scope: service`) to find the
+remaining paths, and make `service` the chart default.
+
+### F133. wait-for-schema hid why a pod was stuck in Init — FIXED
+
+**Severity:** low (operability).
+
+The chart's `wait-for-schema` init container ran `psql ... 2>/dev/null` in a
+loop until the newest migration was recorded. Any connection failure -- a CA
+bundle that does not match the server, a host name the certificate lacks, a
+runtime login the db-roles Job has not created, a wrong password -- was
+indistinguishable from "migrations still running": the pod sat in `Init:0/1`
+with an empty log. With verify-full and runtime logins (F115) those are the
+likely misconfigurations.
+
+**Fix.** The loop logs `wait-for-schema: not ready: <first line of psql's
+error>` whenever the reason changes and every minute otherwise (libpq's
+messages name the host and the failure, never the password). Checked with the
+migrate image against an unresolvable host and in the verify-full install.
