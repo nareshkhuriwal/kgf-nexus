@@ -74,6 +74,26 @@ type Scheduler interface {
 	PendingCancellations(ctx context.Context, workerID string) ([]string, error)
 }
 
+// HeartbeatFactsRecorder is the optional ResourceManager extension that carries
+// the agent's placement facts (ADR-0030 §4). Optional so existing test fakes
+// keep compiling; the production client implements it.
+type HeartbeatFactsRecorder interface {
+	RecordHeartbeatFacts(ctx context.Context, workerID string, cached []string, reported bool) error
+}
+
+// AgentDrainer is the optional ResourceManager extension that marks a worker
+// DRAINING at the agent's own request (ADR-0030 §2).
+type AgentDrainer interface {
+	DrainWorkerForReason(ctx context.Context, workerID, reason string) error
+}
+
+func truncateReason(s string) string {
+	if len(s) > 128 {
+		return s[:128]
+	}
+	return s
+}
+
 // Config tunes the worker protocol's timing.
 type Config struct {
 	// HeartbeatInterval is what the server TELLS workers to use. Server-controlled
@@ -245,8 +265,26 @@ func (s *Server) Heartbeat(ctx context.Context, req *nexusv1.HeartbeatRequest) (
 		}, nil
 	}
 
-	if err := s.rm.RecordHeartbeat(ctx, workerID, req.GetFreeCapacity(), req.GetCpuUtilization(), req.GetMemoryUtilization()); err != nil {
+	if hf, ok := s.rm.(HeartbeatFactsRecorder); ok && req.GetCachedArtifactsReported() {
+		if err := hf.RecordHeartbeatFacts(ctx, workerID, req.GetCachedArtifacts(), true); err != nil {
+			return nil, status.Errorf(codes.Internal, "record heartbeat: %v", err)
+		}
+	} else if err := s.rm.RecordHeartbeat(ctx, workerID, req.GetFreeCapacity(), req.GetCpuUtilization(), req.GetMemoryUtilization()); err != nil {
 		return nil, status.Errorf(codes.Internal, "record heartbeat: %v", err)
+	}
+
+	// The agent stopped taking work on its own (an eviction notice). Pull
+	// dispatch already stopped with its polling; DRAINING stops the push path
+	// too. Best effort: the next beat repeats it.
+	if reason := req.GetDrainReason(); reason != "" && state == string(domain.WorkerActive) {
+		if d, ok := s.rm.(AgentDrainer); ok {
+			if err := d.DrainWorkerForReason(ctx, workerID, truncateReason(reason)); err != nil {
+				s.log.WarnContext(ctx, "could not mark a self-draining worker DRAINING", "worker_id", workerID, "error", err)
+			} else {
+				s.log.InfoContext(ctx, "worker is draining itself", "worker_id", workerID, "reason", reason)
+				state = "DRAINING"
+			}
+		}
 	}
 
 	directives, err := s.reconcileAndBuildDirectives(ctx, workerID, state, req.GetRunningAttemptIds())
