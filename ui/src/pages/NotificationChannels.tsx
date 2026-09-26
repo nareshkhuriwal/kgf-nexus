@@ -60,6 +60,11 @@ const SECRET_LABEL: Record<ChannelKind, string | null> = {
 
 const PD_SEVERITIES = ['critical', 'error', 'warning', 'info'] as const;
 
+/** A channel of a kind that cannot deliver without a secret, and has none. */
+function needsSecretToEnable(c: NotificationChannel): boolean {
+  return SECRET_LABEL[c.kind] != null && !c.secret?.configured;
+}
+
 function kindLabel(kind: string): string {
   return CHANNEL_KINDS.find((k) => k.kind === kind)?.label ?? kind;
 }
@@ -158,8 +163,10 @@ export function ChannelsTab({ namespace }: { namespace: string }) {
               type="button"
               className="icon-action"
               aria-label={c.enabled ? `Disable channel ${c.name}` : `Enable channel ${c.name}`}
-              title={c.enabled ? 'Disable' : 'Enable'}
-              disabled={save.isPending && save.variables?.name === c.name}
+              title={
+                c.enabled ? 'Disable' : needsSecretToEnable(c) ? 'Needs a secret: edit the channel and give one before enabling it' : 'Enable'
+              }
+              disabled={(save.isPending && save.variables?.name === c.name) || (!c.enabled && needsSecretToEnable(c))}
               onClick={() => {
                 setActionError(null);
                 save.mutate(
@@ -171,6 +178,17 @@ export function ChannelsTab({ namespace }: { namespace: string }) {
               <ActionIcon name={c.enabled ? 'disable' : 'enable'} />
             </button>
           </Permit>
+          {SECRET_LABEL[c.kind] != null && c.secret?.configured && (
+            <RowAction
+              permission="notifications.manage"
+              label={`Clear secret of channel ${c.name}`}
+              icon="clear-secret"
+              confirm={`Remove the stored ${SECRET_LABEL[c.kind]} from ${c.name}? It cannot be recovered. The channel is disabled until a new secret is saved, so rules that name it skip it meanwhile.`}
+              onAction={() =>
+                save.mutateAsync({ name: c.name, body: { clear_secret: true, enabled: false, revision: c.revision } })
+              }
+            />
+          )}
           <RowAction
             permission="notifications.manage"
             label={`Delete channel ${c.name}`}
@@ -396,7 +414,9 @@ export function ChannelForm({
     .map((s) => s.trim())
     .filter(Boolean);
   const refValid = secretRef.trim() === '' || /^(env:[A-Za-z_][A-Za-z0-9_]*|file:\/.+)$/.test(secretRef.trim());
-  const needsSecret = secretLabel !== null && !editing;
+  // A new channel needs its secret; so does an edit that enables a channel whose
+  // secret was cleared (the server refuses it otherwise).
+  const needsSecret = secretLabel !== null && (!editing || (!channel?.secret?.configured && enabled));
   const secretMissing =
     needsSecret && (secretMode === 'sealed' ? secret.trim() === '' : secretRef.trim() === '');
   const rateNum = rate.trim() === '' ? undefined : Number(rate);

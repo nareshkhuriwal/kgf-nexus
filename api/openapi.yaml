@@ -4498,7 +4498,9 @@ paths:
         `name` and `kind` cannot change (400 `immutable`). Omitted fields keep
         their stored values; `config`, when given, replaces the whole object.
         Send `secret` or `secret_ref` to replace the secret (this is how a
-        generated webhook key is rotated); omit both to keep it. `revision`,
+        generated webhook key is rotated); omit both to keep it; send
+        `clear_secret: true` to remove it, which also disables the channel.
+        `revision`,
         when non-zero, must equal the stored revision (409 otherwise); 0
         overwrites unconditionally.
       x-nexus-action: admin_write
@@ -7944,6 +7946,14 @@ components:
         config: {type: object}
         secret: {type: string, minLength: 1}
         secret_ref: {type: string}
+        clear_secret:
+          type: boolean
+          description: >-
+            Remove the stored secret (sealed value or reference). Not with
+            `secret` or `secret_ref`. The channel is disabled in the same write
+            and cannot be enabled again until a secret is supplied. Refused
+            (422 `invalid_secret`) for `webhook`, whose signing key can only be
+            replaced, and for kinds that take no secret.
         rate_limit_per_minute: {type: integer, minimum: 1, maximum: 6000}
         enabled: {type: boolean}
         revision: {type: integer, minimum: 0, description: '0 skips the concurrency check.'}

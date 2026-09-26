@@ -857,6 +857,8 @@ export interface ChannelRequest {
   config?: Record<string, unknown>;
   secret?: string;
   secret_ref?: string;
+  /** Removes the stored secret; the channel is disabled until a new one is saved. */
+  clear_secret?: boolean;
   rate_limit_per_minute?: number;
   enabled?: boolean;
   revision?: number;

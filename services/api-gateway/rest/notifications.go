@@ -41,14 +41,17 @@ func channelPayload(c store.NotificationChannel) map[string]any {
 }
 
 type channelRequest struct {
-	Name               string         `json:"name"`
-	Kind               string         `json:"kind"`
-	Config             map[string]any `json:"config"`
-	Secret             *string        `json:"secret"`
-	SecretRef          *string        `json:"secret_ref"`
-	RateLimitPerMinute *json.Number   `json:"rate_limit_per_minute"`
-	Enabled            *bool          `json:"enabled"`
-	Revision           int64          `json:"revision"`
+	Name      string         `json:"name"`
+	Kind      string         `json:"kind"`
+	Config    map[string]any `json:"config"`
+	Secret    *string        `json:"secret"`
+	SecretRef *string        `json:"secret_ref"`
+	// ClearSecret removes the stored secret (sealed or reference) on an
+	// update. See prepareSecret for which kinds allow it.
+	ClearSecret        bool         `json:"clear_secret"`
+	RateLimitPerMinute *json.Number `json:"rate_limit_per_minute"`
+	Enabled            *bool        `json:"enabled"`
+	Revision           int64        `json:"revision"`
 }
 
 func randomSecret() string {
@@ -93,6 +96,24 @@ func (a *API) prepareSecret(req channelRequest, kind, ns, id string, existing bo
 	var inline []byte
 	if req.Secret != nil && req.SecretRef != nil {
 		return sec, nil, "", false, errors.New("give secret or secret_ref, not both")
+	}
+	if req.ClearSecret {
+		if req.Secret != nil || req.SecretRef != nil {
+			return sec, nil, "", false, errors.New("give clear_secret or a new secret, not both")
+		}
+		if !existing {
+			return sec, nil, "", false, errors.New("clear_secret applies to a channel that has a secret")
+		}
+		switch r, _ := notify.SecretFor(kind); r {
+		case notify.SecretGenerated:
+			// Every webhook delivery is signed; removing the key would make them
+			// unverifiable. Replacing it is how a leaked key is retired.
+			return sec, nil, "", false, fmt.Errorf("a %s channel's signing key cannot be removed, only replaced: send a new \"secret\"", kind)
+		case notify.SecretNone:
+			return sec, nil, "", false, fmt.Errorf("a %s channel takes no secret", kind)
+		}
+		// Keep=false with nothing set clears the ciphertext, reference and hint.
+		return store.ChannelSecretUpdate{}, nil, "", false, nil
 	}
 	generated := ""
 	switch {
@@ -219,13 +240,27 @@ func (a *API) updateChannel(w http.ResponseWriter, r *http.Request, p authn.Prin
 	if cfg == nil {
 		cfg = cur.Config
 	}
-	if err := notify.ValidateChannel(cur.Kind, cfg, inline, has, a.events.AllowPrivateTargets); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "invalid_channel", err.Error())
-		return
-	}
 	enabled := cur.Enabled
 	if req.Enabled != nil {
 		enabled = *req.Enabled
+	}
+	// A cleared channel cannot deliver, so the clear disables it in the same
+	// write; turning it back on needs a secret, which validation below enforces
+	// (a disabled channel of a secret-requiring kind may sit without one).
+	if req.ClearSecret {
+		if req.Enabled != nil && *req.Enabled {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_secret", "a channel cannot be enabled while its secret is being cleared")
+			return
+		}
+		enabled = false
+	}
+	validateHas := has
+	if r, _ := notify.SecretFor(cur.Kind); r == notify.SecretRequired && !has && !enabled {
+		validateHas = true
+	}
+	if err := notify.ValidateChannel(cur.Kind, cfg, inline, validateHas, a.events.AllowPrivateTargets); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_channel", err.Error())
+		return
 	}
 	var out store.NotificationChannel
 	err = a.withTx(r.Context(), func(tx pgx.Tx) error {
@@ -237,7 +272,8 @@ func (a *API) updateChannel(w http.ResponseWriter, r *http.Request, p authn.Prin
 			return err
 		}
 		return auditTx(r, tx, p, "notification.channel.update", "notification_channel", out.ID,
-			map[string]any{"name": out.Name, "secret_replaced": !sec.Keep, "enabled": out.Enabled})
+			map[string]any{"name": out.Name, "secret_replaced": !sec.Keep && !req.ClearSecret,
+				"secret_cleared": req.ClearSecret, "enabled": out.Enabled})
 	})
 	if err != nil {
 		a.failConfig(w, r, "update channel", err)

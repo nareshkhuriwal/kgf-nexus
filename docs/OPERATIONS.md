@@ -4051,6 +4051,16 @@ resolved by the **event-service** in its own environment. Refs that name platfor
 credentials (`NEXUS_SECRET_KEY*`, `DATABASE_URL`, `PG*`, `NEXUS_NATS*`, and the
 S3 secrets) are refused.
 
+An update with `"clear_secret": true` removes a stored secret (sealed value or
+reference) without deleting the channel, for example after a credential leaks
+and before its replacement exists. The channel is disabled in the same write,
+because it cannot deliver without one, and enabling it again is refused until a
+secret is supplied (`{"enabled": true, "secret": ...}`). It is audited as
+`notification.channel.update` with `secret_cleared: true`. A `webhook`
+channel's signing key cannot be removed, only replaced by sending a new
+`secret`, so every delivery stays signed. The console offers the same action
+("Clear secret") on the channel row, behind a confirmation.
+
 A rule matches events in its namespace:
 
 - **Events:** `run.failed`, `run.succeeded`, `run.timed_out`, `run.sla_exceeded`

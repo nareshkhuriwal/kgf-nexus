@@ -194,6 +194,59 @@ func TestIntegrationNotificationChannelsNeverExposeSecrets(t *testing.T) {
 	}
 }
 
+// clear_secret removes a stored credential without deleting the channel. A kind
+// that cannot deliver without one is disabled in the same write and cannot be
+// re-enabled until a secret is supplied; a webhook's signing key can be
+// replaced but never removed, so every delivery stays signed.
+func TestIntegrationChannelClearSecret(t *testing.T) {
+	e := newEventsHarness(t, true)
+	base := "/v1/namespaces/" + e.nsA + "/notification-channels"
+	e.call("POST", base, `{"name":"slack","kind":"slack_webhook","secret":"https://hooks.slack.com/services/T0/B0/SUPERSECRET"}`, e.adminA, 201)
+	e.call("POST", base, `{"name":"pd","kind":"pagerduty","secret_ref":"env:PD_ROUTING_KEY"}`, e.adminA, 201)
+	e.call("POST", base, `{"name":"hook","kind":"webhook","config":{"url":"https://hooks.example/nexus"}}`, e.adminA, 201)
+	e.call("POST", base, `{"name":"mail","kind":"email","config":{"to":["x@example.com"]}}`, e.adminA, 201)
+
+	e.call("PUT", base+"/slack", `{"clear_secret":true}`, e.readerA, 403)
+	e.call("PUT", base+"/slack", `{"clear_secret":true,"secret":"https://hooks.slack.com/x"}`, e.adminA, 422)
+	e.call("PUT", base+"/slack", `{"clear_secret":true,"enabled":true}`, e.adminA, 422)
+	e.call("POST", base, `{"name":"new","kind":"slack_webhook","clear_secret":true}`, e.adminA, 422)
+
+	for _, name := range []string{"slack", "pd"} {
+		got := e.call("PUT", base+"/"+name, `{"clear_secret":true}`, e.adminA, 200)
+		sec := got["secret"].(map[string]any)
+		if sec["configured"] != false || sec["source"] != "" || sec["hint"] != "" || got["enabled"] != false {
+			t.Fatalf("%s after clear: %v", name, got)
+		}
+		var ct []byte
+		var ref *string
+		if err := e.tx.QueryRow(e.ctx, `SELECT secret_ciphertext, secret_ref FROM notification_channels WHERE namespace = $1 AND name = $2`,
+			e.nsA, name).Scan(&ct, &ref); err != nil {
+			t.Fatal(err)
+		}
+		if ct != nil || ref != nil {
+			t.Fatalf("%s: the stored secret survived the clear (ciphertext %d bytes, ref %v)", name, len(ct), ref)
+		}
+		// No secret, so it cannot be turned back on until one is supplied.
+		e.call("PUT", base+"/"+name, `{"enabled":true}`, e.adminA, 422)
+	}
+	again := e.call("PUT", base+"/slack", `{"enabled":true,"secret":"https://hooks.slack.com/services/T0/B0/NEW"}`, e.adminA, 200)
+	if again["enabled"] != true || again["secret"].(map[string]any)["configured"] != true {
+		t.Fatalf("re-armed: %v", again)
+	}
+
+	e.call("PUT", base+"/hook", `{"clear_secret":true}`, e.adminA, 422)
+	e.call("PUT", base+"/mail", `{"clear_secret":true}`, e.adminA, 422)
+
+	var cleared int
+	if err := e.tx.QueryRow(e.ctx, `SELECT count(*) FROM audit_log WHERE namespace = $1 AND action = 'notification.channel.update'
+   AND outcome = 'success' AND detail->>'secret_cleared' = 'true'`, e.nsA).Scan(&cleared); err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 2 {
+		t.Fatalf("audited clears: %d, want 2", cleared)
+	}
+}
+
 func TestIntegrationInlineSecretsNeedAKey(t *testing.T) {
 	e := newEventsHarness(t, false)
 	base := "/v1/namespaces/" + e.nsA + "/notification-channels"

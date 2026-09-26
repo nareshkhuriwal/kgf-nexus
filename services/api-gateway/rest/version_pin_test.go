@@ -17,10 +17,10 @@ func TestVersionPinDistinguishesAbsentNullAndNumber(t *testing.T) {
 		want            *int32
 		wantErr         bool
 	}{
-		{body: `{}`, cur: &three, want: &three},                             // absent keeps the pin
-		{body: `{}`, cur: &three, workflowChanged: true, want: nil},         // a new workflow drops it
-		{body: `{"workflow_version":null}`, cur: &three, want: nil},        // explicit null unpins
-		{body: `{"workflow_version":7}`, cur: &three, want: ptr32(7)},      // a number pins
+		{body: `{}`, cur: &three, want: &three},                       // absent keeps the pin
+		{body: `{}`, cur: &three, workflowChanged: true, want: nil},   // a new workflow drops it
+		{body: `{"workflow_version":null}`, cur: &three, want: nil},   // explicit null unpins
+		{body: `{"workflow_version":7}`, cur: &three, want: ptr32(7)}, // a number pins
 		{body: `{"workflow_version":7}`, workflowChanged: true, want: ptr32(7)},
 		{body: `{"workflow_version":0}`, wantErr: true},
 		{body: `{"workflow_version":1.5}`, wantErr: true},
