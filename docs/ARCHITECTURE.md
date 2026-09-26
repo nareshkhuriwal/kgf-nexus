@@ -1434,8 +1434,7 @@ Asset/lineage layer over the task core (the Dagster idea, added without rewritin
 | 3 | Yes, bounded: `cancellation.uninterruptible` sends no SIGTERM, waits min(declared ≤ 1 h, agent ceiling default 10 m), then SIGKILL. Does not extend `start_to_close`. Implemented and tested. | [ADR-0015](adr/0015-bounded-uninterruptible-tasks.md) |
 | 4 | 64 KiB stays the default (measured: inline beats a MinIO round trip up to between 64 and 256 KiB; every shipped result is < 1 KiB), configurable within [1 B, 1 MiB], applied consistently. | [ADR-0016](adr/0016-inline-result-threshold.md) |
 | 5 | Weighted fair share across namespaces (in-flight ÷ weight) ahead of priority + aging within a namespace, inside the unchanged claim. Implemented (migration 0022) and tested for starvation-freedom, weights, aging and no double dispatch. | [ADR-0017](adr/0017-weighted-fair-share-across-namespaces.md) |
-| 6 | The assumption above does **not** hold for the current claim: its cost is linear in the queue's PENDING backlog (laptop: ~1.1k/s at 1k backlog with 16 replicas; ~40–200/s at 10k; single digits to ~20/s at 100k). Fix the scan in SQL first; build a dedicated dispatch path only if claim p99 > 250 ms, backlog > 50k, or demand > 70 % of measured capacity persists afterwards. | [ADR-0018](adr/0018-postgres-dispatch-ceiling.md) |
-| [ADR-0028](adr/0028-event-triggers-notifications-sensors-lineage.md) | Notifications, webhook triggers, sensors and declared asset lineage (Phase 3/4) |
+| 6 | The assumption above does **not** hold for the current claim: its cost is linear in the queue's PENDING backlog (laptop: ~1.1k/s at 1k backlog with 16 replicas; ~40–200/s at 10k; single digits to ~20/s at 100k). Fix the scan in SQL first; build a dedicated dispatch path only if claim p99 > 250 ms, backlog > 50k, or demand > 70 % of measured capacity persists afterwards. Stage 1 (the windowed pull claim) has since shipped. The pull path no longer slows with backlog; see [BENCHMARKS.md](BENCHMARKS.md) for the current laptop curves. | [ADR-0018](adr/0018-postgres-dispatch-ceiling.md) |
 
 ---
 
@@ -1460,3 +1459,10 @@ Asset/lineage layer over the task core (the Dagster idea, added without rewritin
 | [ADR-0016](adr/0016-inline-result-threshold.md) | Inline-vs-blob result threshold (§12 Q4) |
 | [ADR-0017](adr/0017-weighted-fair-share-across-namespaces.md) | Weighted fair share across namespaces (§12 Q5) |
 | [ADR-0018](adr/0018-postgres-dispatch-ceiling.md) | Postgres dispatch ceiling, trigger and migration path (§12 Q6) |
+| [ADR-0024](adr/0024-nexus-inside-kgf-cloud.md) | Nexus inside KGF Cloud: X-KGF-Context authentication, one namespace per KGF resource group |
+| [ADR-0025](adr/0025-secret-resolution-audit-export-airgap.md) | Worker-side secret resolution, tamper-evident audit export, air-gapped install |
+| [ADR-0026](adr/0026-opentelemetry-tracing.md) | OpenTelemetry tracing across services, the outbox and task processes |
+| [ADR-0027](adr/0027-result-store-backends.md) | Result-store backends: S3 (credential chain), Azure Blob, GCS |
+| [ADR-0028](adr/0028-event-triggers-notifications-sensors-lineage.md) | Notifications, webhook triggers, sensors and declared asset lineage (Phase 3/4) |
+| [ADR-0032](adr/0032-ai-workloads-usage-rate-limits-checkpoints.md) | AI workloads: the workload API, usage units, shared rate limits, checkpoints |
+| [ADR-0033](adr/0033-nexus-as-kgf-nexus-service.md) | Nexus as the KGF.Nexus service of KGF Cloud |

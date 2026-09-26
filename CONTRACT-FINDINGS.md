@@ -4246,6 +4246,95 @@ task_nodes TO nexus_scheduler`, column-scoped like every other cross-owner
 grant. `TestSchedulerRoleCanChargeTheRetryBudget` runs the statement as
 `nexus_scheduler` and also asserts the grant did not widen to other columns.
 
+### F150. The benchmark re-run: stale dispatch figures in the docs, a benchmarked push path the scheduler never runs, and host noise the harness does not record — PARTLY FIXED
+
+**Severity:** low (documentation and measurement hygiene; no correctness
+defect). Found while re-running `make bench-dispatch`, `make bench-inline` and
+the ADR-0021 quota cells for [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
+(2026-09-26; raw output in `docs/benchmarks/raw/`).
+
+**1. The documents quoted pre-Stage-1 dispatch numbers and named metrics as
+missing that exist. FIXED here.**
+- OPERATIONS §20.5 still said claim cost was "linear in a queue's PENDING
+  backlog".
+- ARCHITECTURE §12's resolution of question 6 gave only the pre-Stage-1
+  figures (~40–200/s at 10k).
+- ADR-0018 and OPERATIONS §20.5 told operators to watch
+  `nexus_claim_seconds` / `nexus_pending_attempts` "once they exist". They
+  exist as `nexus_scheduler_claim_duration_seconds` and
+  `nexus_scheduler_pending_attempts` (OPERATIONS §17.4,
+  `services/scheduler/metrics.go`).
+
+All three now point at the shipped metric names and at BENCHMARKS.md. The
+re-run confirms Stage 1: with the pull claim at 1 replica, p50 is 5.7 ms at
+both 10k and 100k backlog, against 27 ms and 262 ms before.
+
+**2. `bench-dispatch` spends most of its time on a path production does not run.
+OPEN.**
+- The shipped scheduler always starts with a nil notifier, so its push loop is
+  off (`services/scheduler/main.go`, `NewSchedulerWithLogger`; F81). Workers
+  are served only by `ClaimForWorker`.
+- The push claim (`store.Claim`) is still the unwindowed, fair-share-ordered
+  scan: about 0.4 s p50 at a 100k backlog. Its cells hit the 90 s cap, so they
+  take most of the benchmark's wall clock.
+- An A/B against the pre-quota build (`b7bd493`) found no ADR-0021 regression.
+  The builds are within noise of each other.
+
+Proposed: make the push path opt-in in the harness
+(`NEXUS_BENCH_MODES=pull` by default). Then either window `Claim` the way
+0023 windowed the pull claim, or delete the push loop if no deployment will
+enable a notifier. Record the choice in ADR-0018.
+
+**3. Laptop noise is large and the harness does not record it. OPEN.**
+- Identical code moved single cells by 2–5× between runs while other stacks
+  shared the host (load average 9–38, 16–48 containers).
+- Which 16-replica pull cell collapsed changed between runs:
+  - run 1: 10k/16 at 153/s with p99 1.03 s;
+  - run 2: 100k/16 at 143/s with p99 597 ms.
+
+  In each run the other cell was healthy.
+- At 16 replicas this 10-vCPU Docker VM is oversubscribed, and p99 can exceed
+  ADR-0018's 250 ms trigger.
+- The harness prints the PostgreSQL version and `GOMAXPROCS` only.
+
+Proposed: print host load, CPU count, the Docker VM limits and the per-cell
+database CPU in the table header, and run each cell at least twice. The
+per-cell count in ADR-0018's method (2,000 dispatches) also differs from the
+harness default (3,000). Say which one a published table used.
+
+**4. The chaos suite could not be pointed at an isolated compose project
+without a rendered file.** `tests/chaos` passes one `-f` file
+(`NEXUS_COMPOSE_FILE`), so an isolated project with the e2e port override
+(needed so `--scale scheduler=3` does not publish the default metrics ports)
+had to be run from a `docker compose config` render of both files.
+BENCHMARKS.md §4 records how it was run. Proposed: accept a
+comma-separated list in `NEXUS_COMPOSE_FILE`, or `COMPOSE_FILE` itself. OPEN.
+
+**5. Two committed examples fail on the compose stack for reasons that are not
+scheduler faults. OPEN.**
+Found by the example sweep in the same run
+(`docs/benchmarks/raw/chaos-2026-09-26.txt`).
+
+- `gpu_scheduling`'s audit decides which GPU model a worker has from its
+  hostname pattern (`agent-gpu-a10`, `agent-gpu-`; `examples/gpu_scheduling/dag.py`
+  `_CAPACITY`). Under compose `HOSTNAME` is the container ID, so every correctly
+  placed job was reported as misplaced and the audit FAILED. The database showed
+  the A100 jobs on the nvidia-a100 worker and the A10 jobs on the nvidia-a10
+  worker. The example only works where agents are Kubernetes pods named after
+  their Deployment. Proposed: have each job report the worker's advertised
+  `gpu_kind` (or the agent's `NEXUS_WORKER_LABELS`) instead of a hostname.
+- `ml_capacity_test` runs `python3` in the subprocess executor. The compose
+  agents are Alpine images without Python (`deploy/Dockerfile.service`), so
+  `generate_data` FAILED with `ERROR_CLASS_NOT_FOUND`. Proposed: rewrite those steps as
+  shell tasks, as the passing subprocess examples are written, or run them in
+  the Docker executor with a Python image and skip the example where no
+  Docker-capable agent is registered.
+
+Separately, the sweep's 120 s per-example budget is too short on a loaded host
+when examples run back to back on three workers. Six examples that were still
+RUNNING at 120 s had SUCCEEDED when checked after the suite. That is a test
+budget question, not a platform defect.
+
 ### F151. Subprocess tasks inherited the agent's entire environment, including its worker credential and result-store keys — FIXED
 
 **Severity:** high (verified on a live stack: a probe task printed `NEXUS_API_KEY` and `NEXUS_S3_*` / `RESULT_STORE_*`).

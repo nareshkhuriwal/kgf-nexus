@@ -2579,12 +2579,14 @@ up in place (TLS §5.0). REST, probes and `/metrics` stay HTTP.
   Gateway rate limits are per replica (§16.6): N replicas admit up to N× a
   client's rate.
 - **resource-manager** has no HPA and the chart refuses one.
-- **Schedulers:** not autoscaled by default. ADR-0018 measured claim cost as
-  linear in a queue's PENDING backlog and bound by **Postgres** CPU, not the
-  scheduler's: 1→16 replicas gives ~6× at a 1k backlog, ~5× at 10k, and mostly
-  adds latency at 100k. CPU on the scheduler pod is therefore the wrong signal.
-  Size `schedulers[].replicas` (2–4 per busy queue) and watch
-  `nexus_claim_seconds` / `nexus_pending_attempts` once they exist.
+- **Schedulers:** not autoscaled by default. Claim cost is bound by
+  **Postgres** CPU, not the scheduler's (ADR-0018). Since the windowed pull
+  claim (§15), it no longer grows with the backlog, but extra replicas stop
+  helping once the database is saturated. The laptop curves are in
+  [BENCHMARKS.md](BENCHMARKS.md). CPU on the scheduler pod is therefore the
+  wrong signal. Size `schedulers[].replicas` (2–4 per busy queue) and watch
+  `nexus_scheduler_claim_duration_seconds` (p99 against ADR-0018's 250 ms
+  trigger) and `nexus_scheduler_pending_attempts` (§17.4).
   `schedulers[].autoscaling` exists for an operator who has measured their own
   curve; the cluster controller reports scheduler HPAs either way.
 - **Workers** are scaled by the cluster controller (apply mode) or by hand.
