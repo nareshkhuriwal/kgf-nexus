@@ -138,6 +138,8 @@ spec:
             {{- if $isGateway }}
             # The ops listener: /metrics and the probes, never the public port.
             - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" $metricsPort | quote }} }
+            # Tenant SSO client secrets, one directory per tenant (ADR-0024).
+            - { name: NEXUS_SSO_SECRET_DIR, value: /var/run/secrets/nexus-sso }
             {{- end }}
           ports:
             - { name: http, containerPort: 8080 }
@@ -169,6 +171,11 @@ spec:
             {{- if .tls }}
             {{- include "nexus.tlsVolumeMounts" $root | nindent 12 }}
             {{- end }}
+            {{- if $isGateway }}
+            {{- range $i, $s := $root.Values.sso.tenantSecrets }}
+            - { name: sso-{{ $i }}, mountPath: {{ printf "/var/run/secrets/nexus-sso/%s" $s.namespace | quote }}, readOnly: true }
+            {{- end }}
+            {{- end }}
       volumes:
         - { name: tmp, emptyDir: {} }
         {{- if .nats }}
@@ -176,6 +183,12 @@ spec:
         {{- end }}
         {{- if .tls }}
         {{- include "nexus.tlsVolumes" (list $root (include "nexus.tlsLeafFor" (list $root .name))) | nindent 8 }}
+        {{- end }}
+        {{- if $isGateway }}
+        {{- range $i, $s := $root.Values.sso.tenantSecrets }}
+        - name: sso-{{ $i }}
+          secret: { secretName: {{ $s.secretName | quote }}, defaultMode: 0400 }
+        {{- end }}
         {{- end }}
 {{- include "nexus.pdb" (list $root .name .name $floor $over.podDisruptionBudget) }}
 {{- if $hpa.enabled }}

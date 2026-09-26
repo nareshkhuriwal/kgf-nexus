@@ -6,7 +6,7 @@
 and restore and the ordering between the two stores, the restore drills and their
 measured results, point-in-time recovery with pgBackRest and its timed drills
 (§4), what these procedures do *not* cover, the RPO/RTO each approach actually
-delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), and third-party images and toolchains: what is pinned and why (§22).
+delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), third-party images and toolchains: what is pinned and why (§22), and single sign-on with OIDC and SAML, service accounts and delegated identity administration (§24).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -2969,3 +2969,303 @@ Node **24** ("Krypton"), Active LTS until 2026-10-20 and maintained until
 2028-04-30 (github.com/nodejs/Release, `schedule.json`). The exact patch
 (`24.21.0`) is pinned in all three CI definitions and in the Dockerfile, and
 they move together. Node 26 becomes LTS on 2026-10-28; move once it has.
+
+---
+
+## 24. Single sign-on (OIDC and SAML), service accounts and delegated identity administration
+
+**Design:** [ADR-0024](adr/0024-sso-and-granular-rbac.md). **Migration:** `0032_sso_and_rbac`.
+**Verified:** the Go unit suite (`services/api-gateway/sso`), the PostgreSQL
+integration suite (`services/api-gateway/rest`, `TestIntegrationSSO*`,
+`TestIntegrationDelegated*`, `TestIntegrationServiceAccounts*`,
+`TestIntegrationCrossNamespaceOwners`, `TestIntegrationUsersCursorPagination`)
+and the Keycloak end-to-end suite (`tests/sso/run-keycloak-e2e.sh`, Keycloak
+26.7.4 as both OIDC provider and SAML IdP). Entra ID, Okta and Google were
+**not** exercised against live tenants; the settings below follow each
+vendor's documented OIDC/SAML behaviour and are what to verify first when
+connecting one.
+
+### 24.1 What an operator must configure
+
+SSO is per tenant: each tenant administrator adds identity providers in the
+console (**Govern → Single sign-on**) or through
+`POST /v1/namespaces/{ns}/sso/providers`. The installation supplies only this:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `NEXUS_PUBLIC_URL` | — (required) | The console's external origin, e.g. `https://nexus.example.com`. Redirect URIs, the SAML ACS and entity IDs are built from it. Unset: every SSO route answers `503 sso_unavailable` and the login page shows no SSO buttons. Must be `https` outside `localhost`. |
+| `NEXUS_SSO_SECRET_DIR` | `/var/run/secrets/nexus-sso` | Directory of per-tenant client secrets: `<dir>/<namespace>/<name>`, referenced as `file:<name>`. |
+| `NEXUS_SSO_ALLOW_ENV_SECRETS` | `false` | Allow `env:NEXUS_SSO_SECRET_<NAME>` references. Single-tenant installations only: every tenant could name every variable of that shape. |
+| `NEXUS_SSO_CLOCK_SKEW_SEC` | `120` | Leeway on ID-token `exp`/`iat`. SAML uses crewjam's fixed 180 s. |
+| `NEXUS_SSO_ALLOW_INSECURE_ISSUERS` | `false` | Permit `http://` issuers. Development and the e2e suite only. |
+| `NEXUS_SSO_ALLOW_PRIVATE_ISSUERS` | `false` | Permit issuers on loopback/private/link-local addresses. Development only: with it on, a tenant administrator can make the gateway fetch internal URLs. |
+
+The gateway logs `single sign-on configured` at startup, or a WARN naming any
+development relaxation that is on.
+
+**Client secrets are never stored in the database.** Provision each one as a
+file, e.g. for Kubernetes:
+
+```bash
+kubectl -n nexus create secret generic nexus-sso-acme \
+  --from-literal=okta="$OKTA_CLIENT_SECRET"
+```
+
+With the Helm chart, list it under `sso.tenantSecrets` (`- {namespace:
+<tenant namespace>, secretName: nexus-sso-acme}`); the chart mounts it
+read-only at `/var/run/secrets/nexus-sso/<tenant namespace>/` on the
+api-gateway and sets `NEXUS_SSO_SECRET_DIR`. `NEXUS_PUBLIC_URL` comes from
+`smtp.publicUrl`. With Compose, mount a directory at the same path.
+
+and enter `file:okta` as the provider's client secret reference. The provider
+list shows `client_secret_resolves: true|false`; enabling an OIDC provider is
+refused until the reference resolves and the issuer's discovery document is
+reachable.
+
+**Network.** The gateway must reach each OIDC issuer (discovery, JWKS, token
+endpoint) over HTTPS. It never follows redirects from an IdP, never uses an
+HTTP proxy for these calls, and refuses loopback, private (RFC 1918, ULA),
+link-local, CGNAT and unspecified addresses at connect time. An IdP that is
+only reachable on a private network (on-premises ADFS, an internal Keycloak)
+needs `NEXUS_SSO_ALLOW_PRIVATE_ISSUERS=true`, which is acceptable only when
+every tenant administrator is trusted. SAML makes no outbound call: IdP
+metadata is pasted, never fetched.
+
+**Reverse proxy.** `/v1/auth/sso/*` must reach the gateway on the SAME origin
+as the console (the shipped `deploy/nginx.conf` does), because the browser
+binding cookie (`__Secure-nexus_sso`, or `nexus_sso` on http localhost) is
+scoped to `/v1/auth/sso` and is sent with the console's exchange call.
+`/sso/complete` is a console route (SPA fallback).
+
+### 24.2 The flow, and what to look for when it fails
+
+1. The login page (`/login?tenant=<namespace>`) lists the tenant's enabled
+   providers (`GET /v1/auth/sso/tenants/{ns}/providers`).
+2. `GET /v1/auth/sso/{id}/start` stores a single-use login state (10 minutes),
+   sets the binding cookie and redirects to the IdP: OIDC code flow with PKCE
+   S256, `state` and `nonce`; or a SAML AuthnRequest (HTTP-Redirect) whose ID is
+   recorded.
+3. The IdP returns to `/v1/auth/sso/oidc/{id}/callback` or posts to
+   `/v1/auth/sso/saml/{id}/acs`. The gateway consumes the state, verifies the ID
+   token or assertion, links or provisions the user, syncs group roles, and
+   redirects to `/sso/complete#handoff=…` (60 s, single use, bound to the
+   browser).
+4. The console posts the handoff to `/v1/auth/sso/exchange` and receives an
+   ordinary session (12 h), exactly like a password login.
+
+Failures return to `/login?sso_error=<code>`. The reason is in the audit log
+(`session.sso_login`, outcome `denied`, `detail.reason` and `detail.error`):
+
+| Code | Usual cause |
+| --- | --- |
+| `provider_unavailable` | Provider disabled or deleted, discovery failing, secret reference not resolving |
+| `state_invalid` | Login took over 10 minutes, the back button replayed a callback, an IdP-initiated SAML post (refused by design) |
+| `browser_mismatch` | Callback opened in a different browser or profile, or cookies blocked for the console origin |
+| `idp_error` | The IdP returned `error=` (user cancelled, client misconfigured) |
+| `token_invalid` | ID token rejected: signature, `iss`, `aud`, `exp`, `nonce`, `azp`, `iat`, RFC 9207 `iss`; or code exchange refused (wrong secret, redirect URI not registered) |
+| `assertion_invalid` | SAML rejected: unsigned assertion, wrong certificate, audience/recipient/destination, `InResponseTo`, expiry, transient NameID, replay |
+| `domain_not_allowed` | Email domain not in the provider's allowed domains |
+| `account_not_linked` | An account with that email exists and was not linked (see 24.4) |
+| `no_account` | No account and just-in-time provisioning is off |
+| `account_disabled` | The Nexus account is disabled |
+| `email_missing` | The IdP sent no email claim/attribute (add the `email` scope or attribute) |
+
+### 24.3 Provider examples
+
+Values in angle brackets come from the provider page after saving it once
+(the redirect URI and SAML URLs contain the provider id). Save disabled, copy
+the URLs to the IdP, then enable.
+
+**Keycloak (OIDC).** Client: *OpenID Connect*, *Client authentication* on,
+*Standard flow* only, *Valid redirect URIs* `<redirect_uri>`, *Valid post
+logout redirect URIs* `https://nexus.example.com/login?signed_out=1`,
+*Advanced → PKCE method* `S256`. Add a *Group Membership* mapper named
+`groups` (full path off, in the ID token). Nexus: issuer
+`https://keycloak.example.com/realms/<realm>`, client ID, `file:` secret
+reference, scopes `email profile`, groups claim `groups`.
+
+**Keycloak (SAML).** Client ID = `<sp_entity_id>`; *Valid redirect URIs*
+`<acs_url>`; *Sign assertions* on (signing the document too is fine); *Client
+signature required* off (Nexus does not sign AuthnRequests); *Force POST
+binding* on; *Name ID format* `persistent` with *Force name ID format* on;
+*Front channel logout* with *Logout Service Redirect Binding URL* `<slo_url>`.
+Mappers: *User Property* `email` → attribute `email`; *Group list* → attribute
+`groups` (full path off). Nexus: paste
+`https://keycloak.example.com/realms/<realm>/protocol/saml/descriptor`.
+
+**Microsoft Entra ID (OIDC).** App registration → *Web* platform → redirect URI
+`<redirect_uri>`, front-channel logout URL optional. *Certificates & secrets* →
+new client secret into the secret file. Issuer
+`https://login.microsoftonline.com/<tenant-id>/v2.0` (single-tenant; the
+`common`/`organizations` endpoints are not supported, their issuer is not
+fixed). Scopes `email profile`. Groups: *Token configuration → Add groups
+claim* (security groups, ID token). Entra sends group **object IDs**, so map
+the GUIDs; a user in more than 200 groups gets an overage claim instead of
+`groups`, which Nexus does not resolve: use *Groups assigned to the
+application* to stay under the limit. Entra's `email` claim is not verified
+by default (`email_verified` is not sent), so email linking will not happen
+for Entra; enable JIT or link accounts by removing and re-provisioning.
+
+**Microsoft Entra ID (SAML).** Enterprise application → *Single sign-on →
+SAML*: Identifier `<sp_entity_id>`, Reply URL `<acs_url>`, Logout URL
+`<slo_url>`; *Name identifier* `user.objectid` with format *Persistent*;
+claims `email` = `user.mail`, group claim with name `groups`. *Signing
+option*: *Sign SAML assertion* (or *response and assertion*). Download
+*Federation Metadata XML* and paste it.
+
+**Okta (OIDC).** App integration → *OIDC → Web Application*, grant type
+*Authorization Code* only, sign-in redirect `<redirect_uri>`, sign-out redirect
+`https://nexus.example.com/login?signed_out=1`, *Require PKCE* on. Issuer
+`https://<org>.okta.com` (org authorization server) or
+`https://<org>.okta.com/oauth2/default` (custom). Groups: on the custom
+authorization server add a `groups` claim to the ID token with a filter;
+on the org server use the app's *Groups claim filter*. Okta sends
+`email_verified`.
+
+**Okta (SAML).** SAML 2.0 app: Single sign-on URL `<acs_url>` (*Use this for
+Recipient and Destination*), Audience URI `<sp_entity_id>`, Name ID format
+*Persistent*, attribute statements `email` → `user.email`, group attribute
+statement `groups` (filter). *Assertion Signature* **Signed**. Paste the
+*Identity Provider metadata*.
+
+**Google Workspace (OIDC).** Google Cloud console → OAuth client *Web
+application*, authorized redirect URI `<redirect_uri>`. Issuer
+`https://accounts.google.com`, scopes `email profile`. **Always** set allowed
+domains to the Workspace domain(s): the Google issuer is shared by every
+Google account in the world. Google sends `email_verified`, so email linking
+works; Google does not send groups in ID tokens, so use explicit role
+assignment or Google Workspace SAML. Google does not offer RP-initiated
+logout; signing out ends the Nexus session only.
+
+**Google Workspace (SAML).** Admin console → *Apps → Web and mobile apps →
+Add custom SAML app*: ACS URL `<acs_url>`, Entity ID `<sp_entity_id>`, Name ID
+format *PERSISTENT* (Name ID *Basic Information > Primary email* is acceptable
+if emails never change), attribute `email`, group membership → `groups`.
+Paste the IdP metadata.
+
+### 24.4 Provisioning and account linking
+
+- **Just-in-time provisioning** (off by default) creates a password-less
+  account in the provider's tenant, with an explicit empty role binding: no
+  mapped group means **no** module access, never the legacy reader
+  permissions.
+- **Linking** an existing account happens only when *Link by verified email*
+  is on **and** the IdP asserts `email_verified=true` (SAML: an attribute named
+  `email_verified` with value `true`) **and** the domain is allowed. An account
+  already linked to another subject of that provider is never re-linked. Each
+  link is audited as `user.sso_linked`.
+- Every identity is keyed on (provider, subject). Unlink one in the user's
+  details (`DELETE /v1/namespaces/{ns}/users/{id}/identities/{identity}`).
+- A provider only ever creates or resolves users in **its own** tenant; an IdP
+  asserting an email of another tenant produces, at most, an account in the
+  provider's tenant (and not even that unless the domain is allowed).
+- Administrator accounts may sign in by SSO (if linked); their authority stays
+  the protected system role and IdP groups never change it.
+
+### 24.5 Group mapping and revocation
+
+Map IdP group values (names, or GUIDs for Entra) to Nexus roles under the
+provider's *Group mapping*. At **every** SSO login the user's IdP-sourced roles
+are replaced by the roles their current groups map to (`user.roles.idp_sync`
+audit rows list added and removed roles); administrator-assigned roles are
+kept separately and are unaffected. With *Revoke sessions on role loss*, a
+login that removes a role also ends the user's other sessions.
+
+**Revocation bound.** Removing a user from a group at the IdP takes effect at
+their next Nexus SSO login. An existing session keeps its roles until it
+expires (12 h) unless the account is disabled in Nexus or its sessions are
+revoked (**Users → Sign out everywhere**). For immediate offboarding, disable
+the user in Nexus as well as at the IdP. SCIM and OIDC back-channel logout are
+not implemented. Mapping to *Administrator* is refused; a role in use by a
+mapping cannot be deleted.
+
+### 24.6 Logout
+
+`POST /v1/auth/logout` revokes the Nexus session first and, for an SSO session,
+returns `end_session_url`: the OIDC `end_session_endpoint` with `client_id`
+and `post_logout_redirect_uri` (register the latter at the IdP), or a SAML
+`LogoutRequest` to the IdP's HTTP-Redirect SLO endpoint. The console navigates
+there. Local logout never depends on the IdP.
+
+### 24.7 Delegated identity administration
+
+Identity permissions are per action: `users.create/update/enable/disable/
+sessions.revoke/password.reset/roles.assign`, `roles.create/update/delete`,
+`tokens.create/revoke`, `service_accounts.*`, `sso.view/configure/
+mappings.update`, `owners.view/grant`, `clusters.view/configure`. They can be
+placed in custom roles, with three guards:
+
+- a role, binding, mapping or token ceiling can only contain grants the actor
+  holds (`403 invalid_grant`);
+- a non-Administrator can only act on accounts no more powerful than itself,
+  and never on an Administrator (`403 target_above_actor`, audited as denied);
+- `owners.grant` and creating Administrator accounts need an Administrator
+  (or Owner) **session**; admin API keys cannot grant ownership.
+
+Migration 0032 adds `clusters.view` / `clusters.configure` to every custom role
+that held `infrastructure.view` / `infrastructure.configure`, so the split
+narrows nobody.
+
+### 24.8 Service accounts and token ceilings
+
+**Govern → Service accounts** creates a non-human identity with role
+bindings. Its tokens (`POST /v1/namespaces/{ns}/tokens` with
+`service_account_id` and `permissions`) carry a ceiling: effective grants are
+the account's **current** roles ∩ the ceiling, re-read on every request.
+Disabling the account makes all its tokens fail authentication immediately;
+enabling restores them; revoke tokens to end them permanently. Legacy tokens
+may also carry `permissions`; a delegate (non-Administrator) must set one.
+Grant-bearing tokens never authenticate the worker protocol.
+
+### 24.9 Cross-namespace owners
+
+An Administrator of namespace B grants Owner of B to a person from another
+namespace by user ID **and** email (**Users → Owners**, or
+`POST /v1/namespaces/{B}/owners`). That person's session then has
+Administrator authority in B only (recorded as role `Owner`, attributed to the
+real user in B's audit log); `GET /v1/auth/memberships` lists the namespaces
+they can act in. Revoke with `DELETE /v1/namespaces/{B}/owners/{user_id}`;
+effective on the next request.
+
+### 24.10 Upgrade, rollback and mixed versions
+
+Apply `0032_sso_and_rbac` before deploying the new gateway and console, and
+deploy them together (the console uses the new permission names). During a
+rolling upgrade an **old** gateway replica:
+
+- ignores service-account links and ceilings. A service-account token is
+  stored with an empty scope list, so an old replica grants it nothing; a
+  ceilinged legacy token is stored with only the coarse scopes its ceiling
+  implies, so an old replica grants at most that. Do not mint ceilinged
+  admin-role tokens until every replica runs the new gateway;
+- does not know the SSO routes (404) and does not sweep SSO tables;
+- treats IdP-synced roles as absent, so an SSO user's module access on an old
+  replica is only their administrator-assigned roles.
+
+Rollback: roll the gateway and console back first, then (only if required)
+apply `0032_sso_and_rbac.down.sql` after exporting `sso_providers`,
+`sso_group_mappings`, `user_identities`, `service_accounts` and
+`namespace_owner_grants`. SSO-provisioned users remain, without passwords.
+
+### 24.11 Testing SSO locally
+
+```bash
+tests/sso/run-keycloak-e2e.sh          # Keycloak 26.7.4 + Postgres, OIDC and SAML
+KEEP=1 tests/sso/run-keycloak-e2e.sh   # leave nexus-w3e-keycloak running on :55812
+```
+
+The suite starts `nexus-w3e-keycloak` (55812) and `nexus-w3e-sso-pg` (55814),
+serves the gateway on `localhost:55813`, and fails if it skips.
+
+### 24.12 Known limits
+
+- Group changes apply at the next login (24.5); no SCIM, no back-channel logout.
+- SAML: no encrypted assertions, AuthnRequests are unsigned, IdP-initiated SSO
+  is refused, metadata is pasted (rotate the IdP certificate by pasting new
+  metadata; include both certificates during a rollover).
+- Entra ID group overage and multi-tenant (`common`) issuers are not
+  supported; Google sends no groups over OIDC.
+- Discovery is cached per replica for an hour (JWKS rotation is picked up
+  immediately on an unknown `kid`).
+- Tenant discovery by email domain is intentionally absent; share
+  `https://nexus.example.com/login?tenant=<namespace>` with users.

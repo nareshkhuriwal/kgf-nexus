@@ -223,6 +223,16 @@ smtp:
   # Where emailed links point: the console's public URL.
   publicUrl: ""
 
+# Tenant single sign-on (ADR-0024, OPERATIONS §24). SSO needs smtp.publicUrl
+# (NEXUS_PUBLIC_URL): redirect URIs and SAML endpoints are built from it.
+# Client secrets are never stored in the database: each tenant's secrets are
+# a Kubernetes Secret mounted at /var/run/secrets/nexus-sso/<namespace>/, and a
+# provider references a key as file:<key>.
+sso:
+  tenantSecrets: []
+  # - namespace: 3f1c...-tenant-uuid
+  #   secretName: nexus-sso-acme
+
 migrate:
   resources:
     requests: { cpu: 50m, memory: 64Mi }

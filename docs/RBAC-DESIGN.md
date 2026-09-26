@@ -1,6 +1,6 @@
 # Nexus RBAC and module access specification
 
-Status: target implementation contract, September 13, 2026. Namespace-scoped human module RBAC is implemented. See [RBAC-IMPLEMENTATION.md](RBAC-IMPLEMENTATION.md) for shipped behavior, validation, compatibility, and remaining gaps. The full catalog below is not yet implemented.
+Status: target implementation contract, September 13, 2026. Namespace-scoped human module RBAC is implemented; since ADR-0024 (September 26, 2026) so are granular identity permissions with delegation, service accounts with token ceilings, per-namespace owners, IdP group mapping and separate cluster permissions. See [RBAC-IMPLEMENTATION.md](RBAC-IMPLEMENTATION.md) for shipped behavior, validation, compatibility, and remaining gaps. The full catalog below is not yet implemented.
 
 ## Scope
 

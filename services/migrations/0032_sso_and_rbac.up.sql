@@ -14,7 +14,7 @@
 -- A service-account token is written with an EMPTY scope list, so an old
 -- replica that cannot interpret it grants it nothing; a ceilinged legacy token
 -- is written with only the coarse scopes its ceiling implies, so an old replica
--- grants at most that coarse approximation (ADR-0024 §8, OPERATIONS §24.9). It
+-- grants at most that coarse approximation (ADR-0024 §8, OPERATIONS §24.10). It
 -- keeps writing sessions without an SSO provider. The one data change is bounded: custom
 -- roles that hold the infrastructure grants gain the new cluster grants, so
 -- splitting cluster permissions out of infrastructure takes nobody's access
