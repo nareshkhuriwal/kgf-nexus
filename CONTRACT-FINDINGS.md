@@ -3462,11 +3462,15 @@ console.
 **Verified.** Unit tests: `nexusctl up` mints two tokens and runs no `exec`;
 a failed worker-token mint is a seed failure, the session is still logged out
 and no agent starts; the expiry warning fires. A fresh `git clone` of the branch
-into a temp directory, running `make up` (refused with the message above), then
-`make quickstart` under compose project `nexus-w3b-fresh` on ports 55781-55788:
-the stack came up, both credentials were minted through the API, and the agents
-registered with the API-minted worker token. The CI jobs themselves run only in
-real CI.
+into a temp directory, with no NEXUS_WORKER_API_KEY in the environment. There,
+`make up` was refused (exit 2) with the message above. `make quickstart` then
+ran under compose project `nexus-w3b-fresh` on ports 55782-55789, with an
+override dropping the fixed 191xx metrics ports. The stack became healthy, the
+tenant was registered, and `3 worker(s) registered`. In its database,
+`api_keys` had 0 rows. `scoped_tokens` held `nexusctl-up-admin` (admin) and
+`nexusctl-up-worker` (worker, `["worker_rpc"]`), both with an expiry, and 3
+workers were ACTIVE. `nexusctl down --volumes` then removed it. The CI jobs
+themselves run only in real CI.
 
 ### F131. CI's chart and proto gates were missing, floating or blind to Helm 4 — FIXED
 
