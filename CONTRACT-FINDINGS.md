@@ -4516,9 +4516,20 @@ Checked against two databases migrated on one server (`nexus_integ3` and
   db-roles run.
 - **0005's rollback** revokes the shared roles' grants in its own database and
   drops them only when nothing else holds them (the drop is guarded).
-- `TestServiceRolesExist` counted `nexus\_%` roles, which on a shared server
-  also matches other installations' `nexus_*_login` roles; it now counts the
-  six group roles by name.
+- `TestServiceRolesExist` and `TestIntegration_NewTableGrants` counted
+  `nexus\_%` roles, which on a shared server also matches other
+  installations' `nexus_*_login` roles (the first failed, the second skipped
+  silently); both now count the six group roles by name.
+
+**Running the suites on a shared server.** The full integration suite at
+`-p 1` with default parallelism opened up to 16 connections and, with the
+server near `max_connections`, eight concurrency tests failed at connect
+("too many clients"); with `NEXUS_DB_MAX_CONNS=3` and `-parallel 2` the peak
+was 18 and they passed. `TestNATSRolledBackFactIsNeverPublished` needs a
+database with no unpublished outbox backlog (the relay publishes five batches
+and expects its row among them); in the full suite's shared database it saw
+3,433 other rows and failed, and it passes on its own database, which is why
+`tests/nats/run-integration.sh` uses one.
 
 **Fix.** `nexus-db-roles` now grants CONNECT on its own database to every
 login it manages (read-only logins already had it), so an operator can
