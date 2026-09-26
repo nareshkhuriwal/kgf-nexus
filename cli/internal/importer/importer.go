@@ -244,8 +244,11 @@ func specYAML(s *Spec) []byte {
 	want, _ := json.Marshal(s)
 	wantDoc, err := clispec.Parse(want, "spec")
 	for _, quoteAll := range []bool{false, true} {
+		// Built from the JSON (valid YAML, struct field order kept), not with
+		// Node.Encode, which round-trips through yaml.v3's own emitter and
+		// fails on the very strings this guards against.
 		var n yaml.Node
-		if err := n.Encode(s); err != nil {
+		if err := yaml.Unmarshal(want, &n); err != nil {
 			break
 		}
 		styleStrings(&n, quoteAll)
@@ -264,7 +267,10 @@ func specYAML(s *Spec) []byte {
 }
 
 func styleStrings(n *yaml.Node, quoteAll bool) {
-	if n.Kind == yaml.ScalarNode && n.Tag == "!!str" && strings.Contains(n.Value, "\n") {
+	switch {
+	case n.Kind == yaml.MappingNode || n.Kind == yaml.SequenceNode:
+		n.Style = 0 // block, not JSON's flow style
+	case n.Kind == yaml.ScalarNode && n.Tag == "!!str" && strings.Contains(n.Value, "\n"):
 		risky := strings.HasPrefix(n.Value, "\n") || strings.HasPrefix(n.Value, " ") ||
 			strings.Contains(n.Value, " \n") || strings.Contains(n.Value, "\t")
 		if quoteAll || risky {
@@ -272,6 +278,8 @@ func styleStrings(n *yaml.Node, quoteAll bool) {
 		} else {
 			n.Style = yaml.LiteralStyle
 		}
+	case n.Kind == yaml.ScalarNode:
+		n.Style = 0 // the emitter quotes only where YAML needs it
 	}
 	for _, c := range n.Content {
 		styleStrings(c, quoteAll)

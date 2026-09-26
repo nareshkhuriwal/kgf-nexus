@@ -195,6 +195,9 @@ func TestGolden(t *testing.T) {
 					specs.WriteString("---\n")
 				}
 				specs.Write(w.YAML)
+				if !bytes.Contains(w.YAML, []byte("\napi_version: nexus.dev/v1\n")) {
+					t.Errorf("%s: not rendered as block YAML (the round-trip fallback fired)", w.Name)
+				}
 				checkPlatform(t, schema, w)
 			}
 			golden(t, "testdata/golden/"+c.name()+".spec.yaml", specs.Bytes())

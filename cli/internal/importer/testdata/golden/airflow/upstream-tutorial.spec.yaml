@@ -2,4 +2,59 @@
 # 10 translated, 1 approximated, 3 unsupported. Read the import report before submitting.
 # PARTIAL: tasks with task_ref nexus-import/unsupported stand in for constructs that were
 # not converted, and FAIL when run. Replace them before relying on this workflow.
-{"api_version":"nexus.dev/v1","namespace":"team-a","name":"tutorial","description":"This is a documentation placed anywhere","labels":{"imported-from":"airflow","source-id":"tutorial","tags":"example"},"tasks":[{"id":"print_date","task_ref":"airflow/tutorial/print_date","retry":{"max_attempts":2,"strategy":"fixed","initial_ms":300000,"jitter":"none"},"runtime":{"executor":"subprocess","command":["bash","-c"],"args":["date"]}},{"id":"sleep","task_ref":"airflow/tutorial/sleep","retry":{"max_attempts":4,"strategy":"fixed","initial_ms":300000,"jitter":"none"},"runtime":{"executor":"subprocess","command":["bash","-c"],"args":["sleep 5"]}},{"id":"templated","task_ref":"airflow/tutorial/templated","retry":{"max_attempts":2,"strategy":"fixed","initial_ms":300000,"jitter":"none"},"runtime":{"executor":"subprocess","command":["bash","-c"],"args":["\n{% for i in range(5) %}\n    echo \"{{ ds }}\"\n    echo \"{{ macros.ds_add(ds, 7)}}\"\n{% endfor %}\n"]}}],"edges":[{"from_node_id":"print_date","to_node_id":"sleep"},{"from_node_id":"print_date","to_node_id":"templated"}]}
+api_version: nexus.dev/v1
+namespace: team-a
+name: tutorial
+description: This is a documentation placed anywhere
+labels:
+  imported-from: airflow
+  source-id: tutorial
+  tags: example
+tasks:
+  - id: print_date
+    task_ref: airflow/tutorial/print_date
+    retry:
+      max_attempts: 2
+      strategy: fixed
+      initial_ms: 300000
+      jitter: none
+    runtime:
+      executor: subprocess
+      command:
+        - bash
+        - -c
+      args:
+        - date
+  - id: sleep
+    task_ref: airflow/tutorial/sleep
+    retry:
+      max_attempts: 4
+      strategy: fixed
+      initial_ms: 300000
+      jitter: none
+    runtime:
+      executor: subprocess
+      command:
+        - bash
+        - -c
+      args:
+        - sleep 5
+  - id: templated
+    task_ref: airflow/tutorial/templated
+    retry:
+      max_attempts: 2
+      strategy: fixed
+      initial_ms: 300000
+      jitter: none
+    runtime:
+      executor: subprocess
+      command:
+        - bash
+        - -c
+      args:
+        - "\n{% for i in range(5) %}\n    echo \"{{ ds }}\"\n    echo \"{{ macros.ds_add(ds, 7)}}\"\n{% endfor %}\n"
+edges:
+  - from_node_id: print_date
+    to_node_id: sleep
+  - from_node_id: print_date
+    to_node_id: templated
