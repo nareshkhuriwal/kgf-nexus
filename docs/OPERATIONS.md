@@ -2909,9 +2909,27 @@ needs nothing extra. The owner password is then mounted only by the three Jobs.
   DML the platform grants, still with no DDL, no ownership, no TRUNCATE, no role
   management, and `run_events` still append-only. Verified live (§20.15).
 - `service`: each login joins only its own group role, ADR-0011's write matrix
-  enforced at the database. **Not production-ready**: the scheduler's timer
-  claim (`UPDATE timers`) and dead-worker reaping (`DELETE FROM workers`) are not
-  granted to `nexus_scheduler` (F132). Use it to find such paths.
+  enforced at the database. Migration 0037 grants the cross-owner writes the
+  strict run found (the scheduler's timer lease and dead-worker reaping, the
+  gateway's batched lease renewal, tenant lookups; F132), and the e2e stack
+  runs this way with `deploy/e2e/docker-compose.service-logins.yml`. Still
+  opt-in: the default stays `union` until production installs have run it.
+
+**A server shared with other databases (F153).** Roles are cluster-wide, not
+per database: the six `nexus_*` group roles are shared by every Nexus database
+on the server (each migration only adds grants inside its own database), and a
+login made for one Nexus database inherits its group's grants in all of them,
+connecting through PUBLIC's default CONNECT. On a shared server:
+
+- give each installation its own login names (the chart's
+  `postgres.connections.<c>.user`), or one install's db-roles Job resets the
+  other's passwords and `nexus_*` memberships;
+- revoke PUBLIC's CONNECT on each Nexus database, as its owner:
+  `REVOKE CONNECT ON DATABASE nexus FROM PUBLIC;` The db-roles Job grants
+  CONNECT on its own database to each login it manages, so that installation's
+  services keep working and no other installation's logins get in;
+- never roll 0005 back on a shared server: its rollback drops the group roles
+  when no database still grants them anything.
 
 **Rotation.** Put new passwords in the Secret (Terraform:
 `runtime_db_password_version += 1`), bump `postgres.runtimeRoles.passwordRevision`
@@ -3601,12 +3619,19 @@ Linux, `PR_SET_DUMPABLE=0`.
 **Subprocess executor (F138, F151).** A subprocess task's environment is
 built from an allow-list, never inherited wholesale: `PATH`, `HOME`, `LANG`,
 `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `USER`, `LOGNAME`, `NEXUS_TASK_MODULES`,
-`NEXUS_RESULT_DIR`, then `runtime.env`, env-injected secrets and the platform
-`NEXUS_*` variables. Pass anything else explicitly with
+`NEXUS_RESULT_DIR`, then `runtime.env`, env-injected secrets and the
+platform task contract: the `NEXUS_*` variables (attempt, run, node,
+idempotency key, directories, outputs, deadline, attempt number,
+`NEXUS_INLINE_THRESHOLD_BYTES`), the attempt's `TRACEPARENT`/`TRACESTATE`
+(ADR-0026) and its workload API `NEXUS_TASK_API`/`NEXUS_TASK_API_TOKEN`
+(ADR-0032), all set explicitly per attempt. Pass anything else explicitly with
 `NEXUS_SUBPROCESS_ENV_PASSTHROUGH=GLOB[,GLOB...]` (default empty; Helm
 `agentDefaults.secrets.subprocessEnvPassthrough`). The agent's own credentials
-(`NEXUS_API_KEY`, `NEXUS_S3_*`, `NEXUS_RESULT_STORE_*`, `RESULT_STORE_*`, NATS,
-Vault, Azure, AWS, GCP) never pass, whatever the pattern says. Docker and
+(`NEXUS_API_KEY`, `NEXUS_S3_*`, `NEXUS_RESULT_STORE_*`, `RESULT_STORE_*`,
+`NEXUS_AZURE_*`, `NEXUS_GCS_*`, NATS, Vault, Azure, AWS -- including the IRSA
+and Pod Identity token files -- GCP, the mTLS client key, OTLP exporter
+headers, and any inherited `NEXUS_TASK_API*`) never pass, whatever the pattern
+says. Docker and
 Kubernetes tasks start from an empty environment. The subprocess executor
 still runs tasks as the agent's user: development-grade, as ADR-0007 says.
 
@@ -3974,7 +3999,7 @@ constraint.
 | `NEXUS_CONSOLE_URL` | event-service | unset | Links each notification to `<console>/runs/<id>`. |
 | `NEXUS_SMTP_*` | event-service | mail disabled | Email channels. The settings are the same as the gateway's (§10). With no host, email deliveries fail permanently and say why. |
 | `NEXUS_NOTIFY_EVAL_BATCH`, `_EVAL_INTERVAL`, `_DISPATCH_BATCH`, `_DISPATCH_INTERVAL`, `_CONCURRENCY`, `_SLA_INTERVAL`, `_BASE_BACKOFF`, `_MAX_BACKOFF`, `_RETENTION` | event-service | 200, 1s, 50, 1s, 8, 30s, 30s, 1h, 720h | Notifier tuning. |
-| `NEXUS_SENSOR_S3_ENDPOINT`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_USE_TLS` | workflow-manager | the result store's `NEXUS_RESULT_STORE_*` / `NEXUS_S3_*` | The store that `s3://` sensors list. |
+| `NEXUS_SENSOR_S3_ENDPOINT`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_SESSION_TOKEN`, `_CREDENTIALS`, `_USE_TLS` | workflow-manager | the result store's `NEXUS_RESULT_STORE_*` / `NEXUS_S3_*` | The store that `s3://` sensors list. `_CREDENTIALS` takes the result store's modes (`auto`, `static`, `web-identity`, `pod-identity`, `iam`, `env`, `anonymous`; §26.3), so a sensor watching the platform's own bucket uses the same keyless identity; the Helm chart gives the workflow-manager the result-store ServiceAccount for that (§20.13). |
 | `NEXUS_SENSOR_INTERVAL` | workflow-manager | 2s | How often a replica looks for due sensors. Each sensor's own `poll_interval_seconds` decides how often it is actually polled. |
 
 In Helm, set `events.secretKey.existingSecret` (and `key`, and `previousKey`
@@ -4474,7 +4499,8 @@ until run on the named hardware:
 
 Design: [ADR-0032](adr/0032-ai-workloads-usage-rate-limits-checkpoints.md).
 Migration 0036. Findings F148 (Python heartbeats never reached the control
-plane; the workload API) and F149 (retries under role separation).
+plane; the workload API) and F149 (retries under role separation; the same gap as F147, whose grant
+lives in 0035; F132, 0037).
 
 ### 29.1 What a task can do
 

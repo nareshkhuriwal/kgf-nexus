@@ -62,3 +62,20 @@ blocked task's effective priority grows with its age
 (`priority + age_seconds × aging_rate`). Once it is high enough, the scheduler
 stops back-filling and reserves capacity as it frees. The walk-through is in
 [architecture §7.3](../design/architecture.md#73-resource-contention).
+
+## Fractional GPUs, spot capacity and placement
+
+A task can ask for a **fraction of a GPU**: a MIG instance by profile, or a
+share of a device the worker runs under MPS or time-slicing. The control
+plane subtracts the share from that device's own ledger in the claim and
+tells the agent which device it placed the task on, so two tasks can never be
+packed past a device's memory. **Spot** workers carry a capacity-type label;
+a task may prefer, allow or refuse spot capacity, and an agent that receives
+an eviction notice signals the workload to checkpoint and reports the attempt
+`PREEMPTED`, which is retried against a separate preemption budget instead of
+`max_attempts`. Placement constraints and preferences (required labels, cost
+tier, data locality, cached model artifacts) are evaluated in the same claim,
+across clusters. Designs: [ADR-0029](../design/adr/0029-gpu-sharing-and-packing.md),
+[ADR-0030](../design/adr/0030-spot-capacity-and-model-cache.md),
+[ADR-0031](../design/adr/0031-multi-cluster-placement.md); operations:
+[runbook §28](../operations/runbook.md#28-fractional-gpus-spot-capacity-model-caches-and-multi-cluster-placement).

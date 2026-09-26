@@ -40,9 +40,13 @@ templates log this way.
 
 ## Secrets in logs
 
-The agent has a redaction hook that replaces known secret values before a
-line is buffered. It has **no input yet**, because workers do not resolve
-secret references (see [security](security-tenancy.md#secrets)). A task that
-prints a credential ships it verbatim, so do not print credentials.
+The agent resolves a task's declared secrets itself (see
+[security](security-tenancy.md#secrets)), so it knows their values: every
+shipped log line, the agent's own copy of the log, progress notes and error
+messages pass a redactor that replaces each resolved value with
+`[REDACTED:<name>]` before the line is buffered. It matches exact values
+line by line, and a value shorter than 3 bytes cannot be redacted (the agent
+names such a secret in a warning). A credential the task obtained some other
+way is not known to the redactor, so do not print credentials.
 
 Retention and sizing are in [runbook §19](../operations/runbook.md#19-durable-task-logs-retention-and-sizing).

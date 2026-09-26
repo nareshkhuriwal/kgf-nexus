@@ -30,6 +30,7 @@ local equivalent. Services never migrate at startup (ADR-0011 rule 4).
 | 0034 | `0034_events_triggers_notifications` | ADR-0028: notifications, webhook triggers, sensors, asset lineage |
 | 0035 | `0035_gpu_spot_multicluster` | ADR-0029/0030/0031: the preemption budget, cached artifacts, cluster labels and headroom; the scheduler's `UPDATE (attempts_used, preemptions_used)` on `task_nodes` (F147) |
 | 0036 | `0036_workload_api` | ADR-0032: attempt usage, rate-limit buckets, checkpoints, `free_retries`; the scheduler's `UPDATE (free_retries)` |
+| 0037 | `0037_strict_service_grants` | F132: the grants per-service logins need (scheduler timer lease and worker reaping, gateway lease renewal, `SELECT (id, namespace)` on `tenants`); grants only |
 
 **One column, one owner.** 0032 and 0033 both touched `audit_log`; the
 integration left one set of columns: `request_id` (and its index) is 0032's,
@@ -37,7 +38,7 @@ the chain columns and the `kgf_*` attribution columns are 0033's, and each
 file's rollback drops only its own. 0035 and 0036 both granted the scheduler
 `UPDATE (attempts_used)` on `task_nodes`; it is granted once, by 0035.
 
-**Rollback order.** Roll back in reverse version order (`0036`,
+**Rollback order.** Roll back in reverse version order (`0037`, `0036`,
 `0035`, `0034`, `0033`, `0032`, `0028`), each after the services that read it
 are back on a release that does not. `make migrate-down` does exactly that.
 

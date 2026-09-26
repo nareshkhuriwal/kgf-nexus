@@ -115,6 +115,8 @@ nav:
       - Results and artifacts: concepts/results-artifacts.md
       - Logs: concepts/logs.md
       - Security and tenancy: concepts/security-tenancy.md
+      - Events, triggers and sensors: concepts/events-triggers.md
+      - Nexus in KGF Cloud: concepts/kgf-cloud.md
   - Recipes:
       - recipes/index.md
       - ETL: recipes/etl.md
@@ -123,6 +125,7 @@ nav:
       - File fan-out: recipes/file-fanout.md
       - Schedules and backfills: recipes/schedules-backfills.md
       - Secrets: recipes/secrets.md
+      - AI workloads: recipes/ai-workloads.md
       - GPU jobs: recipes/gpu-jobs.md
       - Kubernetes executor: recipes/kubernetes-executor.md
       - Local development and replay: recipes/local-development.md
@@ -142,6 +145,8 @@ nav:
           - EKS: operations/terraform/eks.md
           - GKE: operations/terraform/gke.md
       - Azure provisioning: operations/azure-provisioning.md
+      - Tracing and storage backends: operations/tracing-storage.md
+      - Air-gapped installation: operations/airgap.md
   - Reference:
       - reference/index.md
       - REST API: reference/api/index.md
@@ -150,6 +155,11 @@ nav:
       - Workflow spec: reference/workflow-spec.md
   - Design:
       - Architecture: design/architecture.md
+      - KGF Cloud integration: design/kgf-integration.md
+      - Benchmarks: design/benchmarks.md
+      - Comparison: design/comparison.md
+      - Roadmap: design/roadmap.md
+      - SOC 2 readiness: design/soc2-readiness.md
       - Decision records: design/adr/index.md
       - Multi-tenancy: design/multitenancy.md
       - RBAC design: design/rbac-design.md

@@ -39,9 +39,14 @@ func TestServiceRolesExist(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
 
+	// Roles are CLUSTER-wide: on a server shared with other Nexus databases, or
+	// holding nexus-db-roles logins (nexus_*_login), a LIKE pattern counts those
+	// too (F153). Count exactly the six NOLOGIN group roles 0005 creates.
 	var n int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*)::int FROM pg_roles WHERE rolname LIKE 'nexus\_%'`).Scan(&n); err != nil {
+		`SELECT count(*)::int FROM pg_roles WHERE rolname = ANY($1) AND NOT rolcanlogin`,
+		[]string{"nexus_api_gateway", "nexus_workflow_manager", "nexus_dag_engine",
+			"nexus_scheduler", "nexus_resource_manager", "nexus_event_service"}).Scan(&n); err != nil {
 		t.Fatalf("count roles: %v", err)
 	}
 	if n != 6 {
@@ -93,6 +98,9 @@ func TestNonOwnersCannotWriteOthersTables(t *testing.T) {
 		"nexus_scheduler/timers/INSERT":       true,
 		"nexus_scheduler/timers/DELETE":       true,
 		"nexus_scheduler/run_events/INSERT":   true,
+		// 0037 (F132): the scheduler's liveness loop reaps workers that have
+		// been DEAD past retention with nothing attached to them.
+		"nexus_scheduler/workers/DELETE": true,
 		// The DAG engine creates a node's first attempt while materializing the
 		// frontier; every transition after that belongs to the scheduler.
 		"nexus_dag_engine/task_attempts/INSERT": true,
@@ -196,5 +204,31 @@ func TestCrossOwnerWritesAreColumnScoped(t *testing.T) {
 	sort.Strings(got)
 	if len(got) != len(granted) {
 		t.Errorf("scheduler's UPDATE columns on workers = %v, want exactly committed and state", got)
+	}
+
+	// 0037 (F132): the scheduler leases due timers, which the workflow-manager
+	// owns, through two columns only; it may never rewrite when or what fires.
+	timerCols := map[string]bool{"claimed_by": true, "claimed_at": true}
+	trows, err := pool.Query(ctx, `
+		SELECT column_name FROM information_schema.column_privileges
+		 WHERE grantee = 'nexus_scheduler' AND table_name = 'timers'
+		   AND privilege_type = 'UPDATE'`)
+	if err != nil {
+		t.Fatalf("read timer column privileges: %v", err)
+	}
+	defer trows.Close()
+	n := 0
+	for trows.Next() {
+		var col string
+		if err := trows.Scan(&col); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		n++
+		if !timerCols[col] {
+			t.Errorf("nexus_scheduler may UPDATE timers.%s; only the lease columns claimed_by and claimed_at are granted", col)
+		}
+	}
+	if n != len(timerCols) {
+		t.Errorf("scheduler's UPDATE columns on timers: %d, want exactly claimed_by and claimed_at", n)
 	}
 }

@@ -435,6 +435,17 @@ Fleet and diagnostics:
   events              Stream run events (--follow, via SSE)
   cache invalidate    Stop reusing memoized results
 
+Events, triggers and lineage (ADR-0028):
+  trigger list|get|create|update|delete|rotate-secret|deliveries|fire
+  sensor list|get|create|update|delete|enable|disable|observations
+  notify channels|channel-get|channel-create|channel-delete|channel-test|
+         rules|rule-create|rule-delete|deliveries|redrive
+  asset list|get|graph
+
+Audit (ADR-0025):
+  audit export        Download the audit trail (NDJSON, CSV or KGF events)
+  audit verify        Verify the hash chain, via the API or offline
+
 Other:
   config view         Show the resolved configuration (never prints key material)
   completion          Shell completion script (bash, zsh, fish)

@@ -15,9 +15,11 @@ section that explains it in full.
 | [Resources and GPUs](resources.md) | CPU, memory, disk, GPU count, kind and memory, and custom countable resources. They are requested per task and reserved atomically at dispatch. |
 | [Queues and fair share](queues-fair-share.md) | Workers pull from queues. Priority and aging order work within a namespace, and weighted fair share orders work across namespaces. |
 | [Quotas](quotas.md) | Per-namespace limits on concurrent attempts, resources and run volume, with a usage ledger. |
-| [Results and artifacts](results-artifacts.md) | Small results are stored inline in Postgres. Large ones go to an S3-compatible store and never pass through the control plane. |
+| [Results and artifacts](results-artifacts.md) | Small results are stored inline in Postgres. Large ones go to the result store (S3, Azure Blob or GCS) and never pass through the control plane. |
 | [Logs](logs.md) | Durable, per-attempt logs that are searchable, can be followed live, and are bounded. |
-| [Security and tenancy](security-tenancy.md) | Tenants, namespaces, roles, scoped tokens, worker credentials and secret references. |
+| [Security and tenancy](security-tenancy.md) | Tenants, namespaces, roles, scoped and service-account tokens, worker credentials, worker-resolved secrets and the audit trail. |
+| [Events, triggers, sensors and lineage](events-triggers.md) | Notifications on run outcomes, signed webhook triggers, sensors on data arrival or upstream success, and declared asset lineage. |
+| [Nexus in KGF Cloud](kgf-cloud.md) | Nexus as the `KGF.Nexus` service: KGF context authentication, one namespace per resource group, and what stays in Nexus versus KGF. |
 
 ## The shape of the system
 

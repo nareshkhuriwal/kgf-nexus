@@ -280,13 +280,24 @@ func applyOne(ctx context.Context, tx pgx.Tx, l Login, verifier string) (Result,
 		res.Revoked = append(res.Revoked, g)
 	}
 
+	// CONNECT on THIS database, granted explicitly to every login rather than
+	// inherited from PUBLIC. Logins and the nexus_* group roles are
+	// cluster-wide, so on a server holding several Nexus databases a login made
+	// for one inherits its group's grants in all of them; the defence is
+	// `REVOKE CONNECT ON DATABASE <other> FROM PUBLIC` on each (F153,
+	// OPERATIONS §20.12), which this grant keeps from locking out this
+	// database's own logins.
+	var db string
+	if err := tx.QueryRow(ctx, `SELECT current_database()`).Scan(&db); err != nil {
+		return res, err
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`GRANT CONNECT ON DATABASE %s TO %s`,
+		pgx.Identifier{db}.Sanitize(), ident)); err != nil {
+		return res, fmt.Errorf("grant connect: %w", err)
+	}
+
 	if l.ReadOnly {
-		var db string
-		if err := tx.QueryRow(ctx, `SELECT current_database()`).Scan(&db); err != nil {
-			return res, err
-		}
 		for _, stmt := range []string{
-			`GRANT CONNECT ON DATABASE %[2]s TO %[1]s`,
 			`GRANT USAGE ON SCHEMA public TO %[1]s`,
 			`GRANT SELECT ON ALL TABLES IN SCHEMA public TO %[1]s`,
 			// Tables the owner creates in later migrations become readable too,

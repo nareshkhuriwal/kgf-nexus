@@ -8,8 +8,12 @@ Task outputs never pass through the control plane
   `NEXUS_INLINE_THRESHOLD_BYTES` on the gateway
   ([ADR-0016](../design/adr/0016-inline-result-threshold.md)). Workers are told
   the value, as `$NEXUS_INLINE_THRESHOLD_BYTES`.
-- **Larger values are blobs** in an S3-compatible store. The local stack uses
-  Silo, a community MinIO fork ([runbook §22.1](../operations/runbook.md#221-the-s3-store-why-silo-and-not-minio)).
+- **Larger values are blobs** in the result store: Amazon S3 or any
+  S3-compatible store (with static keys or a credential chain: IRSA, EKS Pod
+  Identity, ...), Azure Blob Storage or Google Cloud Storage, natively, behind
+  one interface held to one conformance suite ([Tracing and storage
+  backends](../operations/tracing-storage.md)). The local stack uses Silo, a
+  community MinIO fork ([runbook §22.1](../operations/runbook.md#221-the-s3-store-why-silo-and-not-minio)).
   Workers upload and download them **directly**, with credentials scoped to
   their namespace prefix. A blob is content-addressed
   (`<namespace>/<sha256>`) and immutable: a retry writes a new object and never

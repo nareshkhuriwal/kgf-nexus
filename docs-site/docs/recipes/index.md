@@ -12,6 +12,7 @@ and a task image, or an example under `examples/`.
 | [File fan-out](file-fanout.md) | `nexusctl init file-fanout`, `examples/fan_out_map` |
 | [Schedules and backfills](schedules-backfills.md) | any registered workflow |
 | [Secrets](secrets.md) | read before putting a credential anywhere near a spec |
+| [AI workloads](ai-workloads.md) | `examples/llm_batch_inference`, `examples/llm_eval` |
 | [GPU jobs](gpu-jobs.md) | `examples/gpu_scheduling`, `examples/image_processing_gpu` |
 | [Kubernetes executor](kubernetes-executor.md) | `examples/kubernetes_executor` |
 | [Local development and replay](local-development.md) | `run --local`, `replay` |

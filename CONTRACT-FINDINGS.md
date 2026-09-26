@@ -3798,7 +3798,7 @@ every pipeline file parses with duplicate keys rejected. The CI jobs
 themselves, and the Azure `Build.Reason`/`fetchDepth` handling, run only in
 real CI.
 
-### F132. The per-service database roles do not cover what the scheduler writes — OPEN
+### F132. The per-service database roles do not cover what the scheduler writes — FIXED
 
 **Severity:** medium (blocks the strict form of ADR-0011's enforced ownership;
 no runtime impact with the default `runtimeRoles.scope: union`).
@@ -3831,6 +3831,45 @@ documented exception in 0005's style and in `service_roles_integration_test.go`
 to resource-manager, which owns `workers`. Then run the e2e and integration
 suites with every service on its own login (`scope: service`) to find the
 remaining paths, and make `service` the chart default.
+
+**Fix (wave 3, migration 0037).** `deploy/e2e/docker-compose.service-logins.yml`
+runs the e2e stack the way `scope: service` runs the chart: after the
+migrations, `nexus-db-roles` creates one LOGIN per service, a member of that
+service's 0005 group role only, and every service connects as it. Running it
+found three more denials beyond the two above, and 0037 grants all of them,
+column-scoped wherever the statement allows:
+
+- `nexus_scheduler`: `UPDATE (claimed_by, claimed_at) ON timers` (the timer
+  lease; never `fire_at`, `kind` or `payload`) and `DELETE ON workers` (the
+  dead-worker reaper).
+- `nexus_api_gateway`: `UPDATE (expires_at, renewed_at) ON leases`. The
+  batched lease renewal (`GatewayRenewLeases`, ADR-0010) was denied on every
+  `ExtendLease`, so any attempt longer than one lease TTL would have been
+  reclaimed as LOST.
+- every service but the gateway: `SELECT (id, namespace) ON tenants`. The
+  dag-engine's memo lookup resolves a tenant id from the namespace; it was
+  denied, and the engine then ran without memoization (silently slower, no
+  error surfaced). Never the contact or registration e-mail columns.
+
+The retry-budget columns are 0035's (`attempts_used`, `preemptions_used`, F147)
+and 0036's (`free_retries`); F149 was the same gap as F147.
+`service_roles_integration_test.go` records the new cross-owner exceptions
+(the `allowed` map and a column-scope assertion on `timers`).
+
+**Verified** on a strict stack (every service on its own login, host
+PostgreSQL 18.3): the Playwright e2e suite (3/3), then schedules
+(create/update/enable/disable/delete), a backfill (pause/resume/cancel), runs
+(create/pause/resume/cancel/retry), quotas with rate limits, tokens and service
+accounts, audit list/export/policy/legal hold/verify, a notification channel
+test and rule, a webhook trigger that created a run which SUCCEEDED, a
+`run_succeeded` sensor that created its downstream run, cache invalidation and
+worker quarantine/release. No service logged a permission error afterwards.
+The Go integration suites connect as the owner by design; the grant matrix is
+held by the role tests.
+
+**Still open.** The chart default stays `runtimeRoles.scope: union`; making
+`service` the default is a follow-up, as are paths not exercised above (the
+multicluster registry, KGF-mode audit export, and the kubernetes executor).
 
 ### F133. wait-for-schema hid why a pod was stuck in Init — FIXED
 
@@ -4235,6 +4274,11 @@ task_nodes TO nexus_scheduler`, column-scoped like 0005's `event_seq` grant.
 `TestIntegrationSchedulerRoleChargesRetryBudgets` runs as the scheduler role;
 with the grant revoked it fails with exactly the error above.
 
+**Integration (wave 3).** F149 (the AI workload pack) found the same gap and
+granted the same column again in 0036. The grant now exists once, here in
+0035; 0036 grants only `free_retries`. F132 is the general form of this gap,
+and 0037 holds the rest of it.
+
 ### F148. A running task had no channel to the control plane; Python heartbeats were silent no-ops — FIXED (kubernetes: OPEN)
 
 **Severity:** high (a task declaring `timeouts.heartbeat` could not keep itself
@@ -4279,10 +4323,13 @@ transaction rolls back and the retry timer is released to fire again, forever:
 no retry is ever created. Development stacks that connect every service as the
 database owner never saw it.
 
-**Fix.** Migration 0036 grants `UPDATE (attempts_used, free_retries) ON
-task_nodes TO nexus_scheduler`, column-scoped like every other cross-owner
-grant. `TestSchedulerRoleCanChargeTheRetryBudget` runs the statement as
-`nexus_scheduler` and also asserts the grant did not widen to other columns.
+**Fix.** The same gap as F147 (found in parallel on the GPU branch). After
+integration each grant exists once: migration 0035 grants
+`UPDATE (attempts_used, preemptions_used)` (F147) and 0036 only
+`UPDATE (free_retries) ON task_nodes TO nexus_scheduler`, column-scoped like
+every other cross-owner grant. `TestSchedulerRoleCanChargeTheRetryBudget` runs
+the statement as `nexus_scheduler` and also asserts the grant did not widen to
+other columns. See F132 for the rest of the per-service matrix.
 
 ### F150. The benchmark re-run: stale dispatch figures in the docs, a benchmarked push path the scheduler never runs, and host noise the harness does not record — PARTLY FIXED
 
@@ -4437,3 +4484,61 @@ state (with F145's refusal events and the pending-retry probe, a node with a
 retry on its way is never taken for exhausted). Held by
 `TestIntegrationListStalledRuns` (an unreconciled run with its budget spent is
 reported stalled; a run with a retry scheduled is not).
+
+### F153. Database roles are cluster-wide: Nexus databases sharing a server share their group roles, and a login made for one can write another — PARTLY FIXED
+
+**Severity:** medium on a server shared by several Nexus installations (a
+login for one installation connects to another's database with its group
+role's write grants); none on a dedicated server. Found while moving the
+wave-3 integration onto a shared host PostgreSQL 18.3.
+
+Checked against two databases migrated on one server (`nexus_integ3` and
+`nexus_integ3_strict`):
+
+- **Grants are per database and idempotent.** Every migration's GRANT is
+  scoped to its own database's tables and guarded on the role existing;
+  migrating the second database left the first database's grants
+  identical (a hash of `information_schema.role_table_grants` and
+  `column_privileges`, 582 rows, before and after). Every migration through
+  0037 applies cleanly on PostgreSQL 18.3.
+- **Group roles are shared.** 0005 creates the six `nexus_*` NOLOGIN roles
+  once per *server* (`IF NOT EXISTS`); every later database reuses them. Two
+  migrations running concurrently against different databases can both see
+  the role missing, and one then fails with `duplicate_object`; re-running it
+  succeeds, since the check is repeated. PostgreSQL has no cross-database
+  lock a migration could take (advisory locks are per database), so this is
+  documented, not locked.
+- **Logins cross databases.** A login created by `nexus-db-roles` for one
+  database (`nexus_integ3s_scheduler_login`, member of `nexus_scheduler`)
+  connected to the *other* database through PUBLIC's default CONNECT and held
+  `UPDATE` on its `task_attempts`. Two installations using the chart's default
+  login names also reset each other's passwords and memberships on every
+  db-roles run.
+- **0005's rollback** revokes the shared roles' grants in its own database and
+  drops them only when nothing else holds them (the drop is guarded).
+- `TestServiceRolesExist` counted `nexus\_%` roles, which on a shared server
+  also matches other installations' `nexus_*_login` roles; it now counts the
+  six group roles by name.
+
+**Fix.** `nexus-db-roles` now grants CONNECT on its own database to every
+login it manages (read-only logins already had it), so an operator can
+`REVOKE CONNECT ON DATABASE <db> FROM PUBLIC` on each Nexus database without
+locking out that installation's own services;
+`TestApplyCreatesLeastPrivilegeLogins` asserts the explicit grant. The e2e
+per-service-login overlay takes a login prefix (`NEXUS_E2E_LOGIN_PREFIX`).
+OPERATIONS §20.12 documents the shared-server rules (distinct login names per
+installation, revoke PUBLIC CONNECT, never roll back 0005).
+
+**Still open.** Per-installation group role names (a prefix on the six
+`nexus_*` roles) would isolate installations without relying on CONNECT, but
+the names are fixed in migrations 0005 onwards and in the chart; that is a
+design change for a later release. Not fixed either: the chart does not revoke
+PUBLIC's CONNECT itself (the db-roles Job could, behind a value).
+
+**PostgreSQL 18.** Nothing in the schema or grants failed on 18.3. The host
+server uses `trust` authentication for local connections, so
+`TestApplyRotatesAndConverges` cannot prove an old password stops working
+there; it now detects a server that accepts any password and logs instead of
+failing. PostgreSQL 15 and later no longer grant CREATE on schema `public` to
+PUBLIC, so the migrate login must own the database or hold CREATE on `public`
+(a non-owner migrate login fails with "permission denied for schema public").

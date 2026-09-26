@@ -114,6 +114,19 @@ func TestApplyCreatesLeastPrivilegeLogins(t *testing.T) {
 			t.Errorf("%s: %s on %s = %v, want %v", c.Config().User, priv, table, ok, want)
 		}
 	}
+	// CONNECT is granted on this database explicitly, not inherited from
+	// PUBLIC, so revoking PUBLIC's CONNECT on a shared server (F153) leaves the
+	// service's own logins working.
+	var connect bool
+	if err := owner.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_database d, aclexplode(d.datacl) a
+		 WHERE d.datname = current_database() AND a.grantee = $1::regrole AND a.privilege_type = 'CONNECT')`,
+		sched).Scan(&connect); err != nil {
+		t.Fatal(err)
+	}
+	if !connect {
+		t.Errorf("%s holds CONNECT on the database only through PUBLIC", sched)
+	}
+
 	check(s, "task_attempts", "UPDATE", true)
 	check(s, "api_keys", "SELECT", true)
 	check(s, "api_keys", "INSERT", false)
@@ -170,7 +183,12 @@ func TestApplyRotatesAndConverges(t *testing.T) {
 	if res[0].Created || fmt.Sprint(res[0].Granted) != "[nexus_workflow_manager]" || fmt.Sprint(res[0].Revoked) != "[nexus_dag_engine]" {
 		t.Fatalf("second run %+v", res[0])
 	}
-	if c, err := connectAs(t, name, first); err == nil {
+	// A server on `trust` authentication (a developer's host PostgreSQL)
+	// accepts any password, so a rejected old password proves nothing there.
+	if c, err := connectAs(t, name, "not-the-password-"+name); err == nil {
+		c.Close(ctx)
+		t.Log("server does not check passwords (trust authentication); rotation of the verifier not asserted")
+	} else if c, err := connectAs(t, name, first); err == nil {
 		c.Close(ctx)
 		t.Fatal("old password still authenticates after rotation")
 	}

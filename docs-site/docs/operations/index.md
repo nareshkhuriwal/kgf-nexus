@@ -10,6 +10,8 @@ rendered here unchanged, so there is one copy of each:
 | [TLS](tls.md) | `docs/TLS.md` | inter-service TLS/mTLS and how to roll it out |
 | [Terraform](terraform/index.md) | `deploy/terraform/` | AKS, EKS and GKE environments |
 | [Azure provisioning](azure-provisioning.md) | `deploy/AZURE-PROVISIONING.md` | Azure specifics |
+| [Tracing and storage backends](tracing-storage.md) | ADR-0026, ADR-0027 | OpenTelemetry tracing; the S3, Azure Blob and GCS result stores |
+| [Air-gapped installation](airgap.md) | `docs/AIRGAP.md` | a digest-pinned bundle and mirroring it into a private registry |
 
 ## Find the runbook section for a task
 
@@ -31,14 +33,22 @@ rendered here unchanged, so there is one copy of each:
 | size log retention | [§19](runbook.md#19-durable-task-logs-retention-and-sizing) |
 | set namespace quotas, export usage | [§21](runbook.md#21-namespace-quotas-and-usage-metering) |
 | bump a pinned third-party image | [§22](runbook.md#22-third-party-images-and-toolchains-what-is-pinned-and-why) |
+| know where cost management went | [§23](runbook.md#23-cost-management-moved-to-kgf-billing) |
+| run Nexus inside KGF Cloud | [§24](runbook.md#24-running-nexus-inside-kgf-cloud-context-authentication-tenancy-mapping-and-service-accounts) |
+| resolve task secrets, export the audit trail, install air-gapped | [§25](runbook.md#25-task-secrets-the-audit-trail-and-air-gapped-installation) |
+| turn on tracing, choose a result-store backend | [§26](runbook.md#26-tracing-and-result-store-backends) |
+| configure notifications, triggers and sensors | [§27](runbook.md#27-notifications-webhook-triggers-sensors-and-asset-lineage) |
+| run fractional GPUs, spot capacity, multi-cluster placement | [§28](runbook.md#28-fractional-gpus-spot-capacity-model-caches-and-multi-cluster-placement) |
+| meter AI usage, share provider rate limits, checkpoint | [§29](runbook.md#29-ai-workloads-usage-units-shared-rate-limits-and-checkpoints) |
 
 ## What is measured and what is not
 
 Backup, restore and PITR drills have been run, and their results are recorded
 in the runbook (§3.2, §4.6) and in `docs/drills/`. They are **laptop
 measurements**, not production RPO/RTO commitments. Dispatch-throughput
-figures are in [ADR-0018](../design/adr/0018-postgres-dispatch-ceiling.md), with
-the same caveat. The runbook's [§5](runbook.md#5-what-is-not-covered) lists
+figures are in [ADR-0018](../design/adr/0018-postgres-dispatch-ceiling.md) and
+the current laptop curves in [Benchmarks](../design/benchmarks.md), with the
+same caveat. The runbook's [§5](runbook.md#5-what-is-not-covered) lists
 what backups do not cover.
 
 ## Development versus production
