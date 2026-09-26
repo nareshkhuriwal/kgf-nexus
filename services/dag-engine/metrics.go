@@ -24,6 +24,8 @@ type Metrics struct {
 	expansions  *metrics.Counter
 	fanInRefuse *metrics.Counter
 	runStates   *metrics.CounterVec
+	retries     *metrics.CounterVec
+	retryResets *metrics.Counter
 }
 
 // NewMetrics registers the dag-engine families on reg.
@@ -51,6 +53,11 @@ func NewMetrics(reg *metrics.Registry) *Metrics {
 		runStates: reg.NewCounter("nexus_dag_run_state_published_total",
 			"Run state changes the engine published to the workflow-manager, by state and result.",
 			"state", "result"),
+		retries: reg.NewCounter("nexus_dag_operator_retries_total",
+			"Operator retries (ResetNodes) applied to a run's graph, by result: reset, invalid (unknown node ids), not_retryable (run or nodes not in a retryable state), not_found, conflict (a concurrent writer won) or error.",
+			"result"),
+		retryResets: reg.NewCounter("nexus_dag_operator_retry_nodes_reset_total",
+			"Nodes reset to PENDING (or an expanded template to RUNNING) by operator retries, selected nodes and their dependents alike.").Counter(),
 	}
 }
 
@@ -103,4 +110,14 @@ func (m *Metrics) observeRunState(state string, err error) {
 		result = "error"
 	}
 	m.runStates.With(metrics.Labels{"state": state, "result": result}).Inc()
+}
+
+// observeOperatorRetry records one ResetNodes call: its result and how many
+// nodes it reset.
+func (m *Metrics) observeOperatorRetry(result string, nodesReset int) {
+	if m == nil {
+		return
+	}
+	m.retries.With(metrics.Labels{"result": result}).Inc()
+	m.retryResets.Add(float64(nodesReset))
 }

@@ -41,7 +41,10 @@ spec:
 # worker and API key in a namespace without one), and the worker/admin API keys
 # from the Secret, stored as SHA-256 hashes exactly as `make seed` does. Only
 # hashes reach the database and nothing is echoed, so the keys never appear in
-# a log.
+# a log. This is the one credential path that bypasses the API, on purpose:
+# the agents need a key before anyone can authenticate a POST /tokens on a
+# fresh install. Later credentials, including rotated worker tokens (F114),
+# come from the API (docs/OPERATIONS.md §20.10).
 apiVersion: batch/v1
 kind: Job
 metadata:

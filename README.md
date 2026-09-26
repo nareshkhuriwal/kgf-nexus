@@ -7,6 +7,20 @@ the execution plane is a fleet of lightweight agents that register, heartbeat,
 pull leased work, run it, and report results. Postgres is the source of truth,
 including the dispatch queue.
 
+## Quick start
+
+Needs Docker (Compose v2) and Go. From a fresh checkout:
+
+```bash
+make quickstart    # = go run ./cli/cmd/nexusctl up
+```
+
+It starts the local stack, registers a tenant, mints an admin key and the
+agents' worker token through the API, and prints the console URL and
+credentials once. `go run ./cli/cmd/nexusctl down --volumes` removes the stack
+and its local record again. `make up` is the path
+for driving Compose with your own keys (deploy/README.md).
+
 ## Documentation
 
 | Document | What it covers |

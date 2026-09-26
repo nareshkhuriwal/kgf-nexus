@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 )
@@ -49,6 +50,13 @@ type Metrics struct {
 
 	registrations *metrics.CounterVec
 	registered    *metrics.Gauge
+
+	logDroppedLines   *metrics.Counter
+	logDroppedBytes   *metrics.Counter
+	logTruncatedLines *metrics.Counter
+	logTruncatedBytes *metrics.Counter
+	logFencedBytes    *metrics.Counter
+	logFinalize       *metrics.CounterVec
 }
 
 // New registers the agent families on reg.
@@ -100,6 +108,20 @@ func New(reg *metrics.Registry) *Metrics {
 			"result"),
 		registered: reg.NewGauge("nexus_agent_registered",
 			"1 while the agent holds a registered session (the /readyz condition), else 0.").Gauge(),
+
+		logDroppedLines: reg.NewCounter("nexus_agent_log_dropped_lines_total",
+			"Task log lines dropped because shipping fell behind and the in-memory buffer was full (the log carries a marker in their place).").Counter(),
+		logDroppedBytes: reg.NewCounter("nexus_agent_log_dropped_bytes_total",
+			"Bytes of the task log lines counted by nexus_agent_log_dropped_lines_total.").Counter(),
+		logTruncatedLines: reg.NewCounter("nexus_agent_log_truncated_lines_total",
+			"Task log lines omitted by the per-attempt log cap (the head and tail are kept).").Counter(),
+		logTruncatedBytes: reg.NewCounter("nexus_agent_log_truncated_bytes_total",
+			"Bytes of the task log lines counted by nexus_agent_log_truncated_lines_total.").Counter(),
+		logFencedBytes: reg.NewCounter("nexus_agent_log_fenced_bytes_total",
+			"Task output bytes refused because the attempt's log shipping was fenced (its lease was rejected, or the control plane does not implement ReportLogs).").Counter(),
+		logFinalize: reg.NewCounter("nexus_agent_log_finalize_total",
+			"Attempt logs finalized, by outcome: finalized (complete), fenced, timeout (finalize budget ran out) or partial (chunks never reached the store). Every outcome but finalized leaves a partial log.",
+			"outcome"),
 	}
 }
 
@@ -212,4 +234,19 @@ func (m *Metrics) SessionStarted(capacity *nexusv1.ResourceVector) {
 // enumLabel turns "ATTEMPT_OUTCOME_TIMED_OUT" into "timed_out".
 func enumLabel(s, prefix string) string {
 	return strings.ToLower(strings.TrimPrefix(s, prefix))
+}
+
+// LogShipped records one attempt's log shipping, from the shipper's Close. A
+// Stats with no Outcome (a repeated Close, which did nothing) is ignored, so an
+// attempt is never counted twice.
+func (m *Metrics) LogShipped(st logship.Stats) {
+	if m == nil || st.Outcome == "" {
+		return
+	}
+	m.logDroppedLines.Add(float64(st.DroppedLines))
+	m.logDroppedBytes.Add(float64(st.DroppedBytes))
+	m.logTruncatedLines.Add(float64(st.TruncatedLines))
+	m.logTruncatedBytes.Add(float64(st.TruncatedBytes))
+	m.logFencedBytes.Add(float64(st.FencedBytes))
+	m.logFinalize.With(metrics.Labels{"outcome": string(st.Outcome)}).Inc()
 }

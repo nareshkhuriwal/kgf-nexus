@@ -210,16 +210,25 @@ exist yet), waits until every service is healthy and the gateway answers
 3. `POST /v1/auth/login`, then `POST /v1/namespaces/{ns}/tokens` mints an admin
    API key (role `admin`, scopes `read`/`write`/`admin_write`, 90-day expiry);
    the session is logged out.
-4. The agents need a worker credential. The API can issue one
-   (`POST /v1/namespaces/{ns}/tokens` with role `worker` and scope
-   `worker_rpc`, accepted by the worker protocol since F114 was fixed), but
-   `up` still does exactly what `make seed` does: it
-   generates a worker key locally and inserts only its SHA-256 hash into
-   `api_keys` (role `worker`, the new tenant's namespace) through
-   `docker compose exec` into the stack's Postgres — no host `psql` needed. It
+4. With the same session, `POST /v1/namespaces/{ns}/tokens` also mints the
+   agents' **worker token** (role `worker`, scope `worker_rpc`, the default
+   90-day expiry), which the worker protocol accepts since F114 was fixed. Like
+   the admin key, it is audited, listed and revocable in the console. `up`
    then points the agents and the NATS identity job at the tenant's namespace
    with a generated override file, reloads the broker, starts the agents, and
    waits until they register.
+
+`up` writes nothing to the database directly. (Before F114 it inserted a
+locally generated key's hash into `api_keys`, the only credential the worker
+protocol then accepted.) A direct database bootstrap remains only where a
+credential is needed before any API can be asked: the Helm chart's bootstrap
+job (docs/OPERATIONS.md §20). `make seed` is the manual equivalent for a stack
+you started with `make up` and your own `NEXUS_WORKER_API_KEY`.
+
+When the worker token has expired, or expires within a week, `up` says so
+before starting anything; an expired token otherwise looks like agents that
+never register. Recover with `nexusctl down --volumes && nexusctl up`, or mint
+a new worker token and restart the agents with it.
 
 It then prints the console URL, the tenant ID, the sign-in email and password,
 and the admin API key **once**. The password is stored nowhere. The admin key is

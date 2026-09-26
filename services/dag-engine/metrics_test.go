@@ -6,12 +6,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/internal/dag"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics/metricstest"
@@ -66,6 +68,56 @@ func TestMetricsServedOnHealthListener(t *testing.T) {
 	if code := get(h, "/readyz"); code != 503 {
 		t.Errorf("/readyz = %d with the database down, want 503", code)
 	}
+}
+
+// TestOperatorRetryMetrics: every ResetNodes outcome lands in one bounded
+// result label, classified the way toStatus maps it for the caller, and the
+// nodes a successful retry reset are counted.
+func TestOperatorRetryMetrics(t *testing.T) {
+	reg := metrics.NewRegistry()
+	m := NewMetrics(reg)
+
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{nil, "reset"},
+		{fmt.Errorf("reset nodes of run r: %w", &dag.RetryError{Unknown: []string{"nope"}}), "invalid"},
+		{fmt.Errorf("reset nodes of run r: %w", &dag.RetryError{Refused: []dag.NodeRefusal{{NodeID: "a"}}}), "not_retryable"},
+		{fmt.Errorf("reset nodes of run r: %w", ErrRunNotRetryable), "not_retryable"},
+		{fmt.Errorf("reset nodes of run r: %w", ErrNotMaterialized), "not_retryable"},
+		{fmt.Errorf("reset nodes: %w", store.ErrDAGEngineRunNotFound), "not_found"},
+		{fmt.Errorf("reset nodes of run r: %w", store.ErrNodeRetryConflict), "conflict"},
+		{errors.New("connection refused"), "error"},
+	}
+	for _, c := range cases {
+		if got := retryResult(c.err); got != c.want {
+			t.Errorf("retryResult(%v) = %q, want %q", c.err, got, c.want)
+		}
+	}
+
+	m.observeOperatorRetry(retryResult(nil), 3)
+	m.observeOperatorRetry(retryResult(nil), 2)
+	m.observeOperatorRetry(retryResult(ErrRunNotRetryable), 0)
+
+	fams := metricstest.Scrape(t, metrics.OpsMux(reg), "/metrics")
+	metricstest.RequireFamilies(t, fams, "nexus_dag_operator_retries_total",
+		"nexus_dag_operator_retry_nodes_reset_total")
+	if s := metricstest.Find(fams, "nexus_dag_operator_retries_total",
+		map[string]string{"result": "reset"}); s == nil || s.GetCounter().GetValue() != 2 {
+		t.Errorf("operator_retries{reset} = %v, want 2", s)
+	}
+	if s := metricstest.Find(fams, "nexus_dag_operator_retries_total",
+		map[string]string{"result": "not_retryable"}); s == nil || s.GetCounter().GetValue() != 1 {
+		t.Errorf("operator_retries{not_retryable} = %v, want 1", s)
+	}
+	if s := metricstest.Find(fams, "nexus_dag_operator_retry_nodes_reset_total", nil); s == nil || s.GetCounter().GetValue() != 5 {
+		t.Errorf("operator_retry_nodes_reset = %v, want 5", s)
+	}
+
+	// Not wired: records nothing and does not panic.
+	var nilM *Metrics
+	nilM.observeOperatorRetry("reset", 1)
 }
 
 func get(h http.Handler, path string) int {

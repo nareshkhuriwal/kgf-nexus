@@ -107,8 +107,17 @@ type Stats struct {
 	DeleteErrors int   // orphans that could not be removed
 	OrphanBytes  int64 // reclaimable bytes across Orphans
 	LogObjects   int   // listed objects under a <namespace>/logs/ prefix
-	DryRun       bool
-	Duration     time.Duration
+	// The task-log (ADR-0020) share of Orphans, Deleted, DeleteErrors and
+	// OrphanBytes, so log retention can be watched apart from output GC:
+	// logs are collected by age (LogRetention), outputs by reachability, and a
+	// change in one must not hide inside the totals of the other.
+	LogOrphans      int
+	LogOrphanBytes  int64
+	LogDeleted      int
+	LogDeletedBytes int64
+	LogDeleteErrors int
+	DryRun          bool
+	Duration        time.Duration
 	// OrphanKeys lists the collectable keys, capped, so a dry run is auditable
 	// rather than just a count.
 	OrphanKeys []string
@@ -334,6 +343,10 @@ func (s *Sweeper) Once(ctx context.Context) (Stats, error) {
 		}
 		st.Orphans++
 		st.OrphanBytes += c.SizeBytes
+		if IsLogKey(c.Key) {
+			st.LogOrphans++
+			st.LogOrphanBytes += c.SizeBytes
+		}
 		orphans = append(orphans, c)
 		if len(st.OrphanKeys) < maxLoggedOrphanKeys {
 			st.OrphanKeys = append(st.OrphanKeys, c.Key)
@@ -358,12 +371,19 @@ func (s *Sweeper) Once(ctx context.Context) (Stats, error) {
 		}
 		if err := s.store.DeleteObject(ctx, c.Key); err != nil {
 			st.DeleteErrors++
+			if IsLogKey(c.Key) {
+				st.LogDeleteErrors++
+			}
 			// Logged, not fatal: one unremovable object must not strand the rest.
 			s.log.Error("artifact GC: could not delete an orphan",
 				"key", c.Key, "error", err)
 			continue
 		}
 		st.Deleted++
+		if IsLogKey(c.Key) {
+			st.LogDeleted++
+			st.LogDeletedBytes += c.SizeBytes
+		}
 		s.log.Info("artifact GC deleted an orphan object",
 			"key", c.Key, "size_bytes", c.SizeBytes, "last_modified", c.LastModified)
 	}
@@ -388,6 +408,9 @@ func (s *Sweeper) logStats(msg string, st Stats) {
 		"prefix", s.cfg.Prefix,
 		"log_retention", s.cfg.LogRetention,
 		"log_objects_examined", st.LogObjects,
+		"log_orphans", st.LogOrphans,
+		"log_deleted", st.LogDeleted,
+		"log_deleted_bytes", st.LogDeletedBytes,
 		"ref_sources", RefSources(),
 		"duration", st.Duration,
 	)

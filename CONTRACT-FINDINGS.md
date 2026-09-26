@@ -3417,3 +3417,116 @@ is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
 `ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
 report the output. Test it in `agent/internal/worker` for both inline and blob
 outputs, and in the NATS/e2e path with a non-SDK executor.
+
+### F130. `make up` failed on a fresh checkout, and both CI examples jobs with it — FIXED
+
+**Severity:** medium for onboarding and CI. The documented first command did
+not work, and the examples-and-chaos gate could not have passed. No production
+impact.
+
+`deploy/docker-compose.yml` interpolates `${NEXUS_WORKER_API_KEY:?...}` into
+every agent, and Compose refuses to parse the whole file while the variable is
+unset. On a fresh checkout nothing sets it, so `make up` (and `make down`,
+`make logs`, `make ps`, which parse the same file) died with a bare
+interpolation error. Its message said "run `make seed` first", but `make seed`
+needs the stack up. deploy/README.md still documented a `dev-worker-key`
+default that no longer existed. The GitHub `examples` job and the Azure
+`EndToEnd` stage both started with `make up` and no key. They then inserted an
+admin key into `default` with no tenant row, which F121's trigger refuses. The
+GitHub job also shared the id `e2e` with the browser job, so YAML silently kept
+only the later of the two.
+
+`nexusctl up` also still inserted its worker key into `api_keys` through
+`docker compose exec` into Postgres, after F114 made API-minted worker tokens
+usable. That key was not audited, had no expiry, and was invisible in the
+console.
+
+**Fix.**
+- `make quickstart` (`go run ./cli/cmd/nexusctl up`) is the documented first-run
+  entry point (README, deploy/README.md §1, cli/README.md).
+- `make up` checks for the key before Compose runs, and exits 2 with both
+  options: `make quickstart`, or `export NEXUS_WORKER_API_KEY=$(make -s
+  worker-key)`, then `make up && make seed`. The Compose message says the same.
+- `make down`, `make logs` and `make ps` pass a placeholder, so they work
+  without the key.
+- `make seed` falls back to the stack's own psql when the host has none.
+- `nexusctl up` mints the worker token through `POST /v1/namespaces/{ns}/tokens`
+  (role `worker`, scope `worker_rpc`) with the same session as the admin key.
+  It writes nothing to the database, records the token's id and expiry, and
+  warns on `up` when the token has expired or expires within a week.
+- The SQL bootstrap remains only in the Helm chart's bootstrap Job, where no
+  API caller exists yet (docs/OPERATIONS.md §20.10).
+- CI generates both keys first, then runs `make up` and `make seed`. The
+  examples job is renamed `examples`.
+
+**Verified.** Unit tests: `nexusctl up` mints two tokens and runs no `exec`;
+a failed worker-token mint is a seed failure, the session is still logged out
+and no agent starts; the expiry warning fires. A fresh `git clone` of the branch
+into a temp directory, with no NEXUS_WORKER_API_KEY in the environment. There,
+`make up` was refused (exit 2) with the message above. `make quickstart` then
+ran under compose project `nexus-w3b-fresh` on ports 55782-55789, with an
+override dropping the fixed 191xx metrics ports. The stack became healthy, the
+tenant was registered, and `3 worker(s) registered`. In its database,
+`api_keys` had 0 rows. `scoped_tokens` held `nexusctl-up-admin` (admin) and
+`nexusctl-up-worker` (worker, `["worker_rpc"]`), both with an expiry, and 3
+workers were ACTIVE. `nexusctl down --volumes` then removed it. The CI jobs
+themselves run only in real CI.
+
+### F131. CI's chart and proto gates were missing, floating or blind to Helm 4 — FIXED
+
+**Severity:** medium. A chart the product's own guards reject, or a
+wire-breaking proto change, could merge with green CI.
+
+- `deploy/helm/validate.sh` (lint, kubeconform, the refused-values cases) ran in
+  neither GitHub CI nor the Azure PR pipeline. CI ran a bare `helm lint` with
+  whatever helm the runner image carried, and kubeconform was never installed.
+  The script read CRD schemas from the datreeio catalog's `main` branch, which
+  can change without a commit here.
+- Under Helm 4, `helm lint` logs a template `fail` at INFO and exits 0, so a
+  lint gate passes values the chart refuses at install. Lint also ignores
+  `key: null` overrides, so on `ci/external-deps-values.yaml` it logs nine
+  false PDB refusals that the real render does not have. `helm --wait` also
+  returned while a pod was crash-looping (§20.8).
+- Nothing checked proto changes. A renumbered field or a changed type compiles
+  on both sides and breaks only old agents during a rolling upgrade.
+- `.github/workflows/ci.yml` had two jobs with id `e2e` (see F130). Without
+  actionlint, nothing noticed.
+
+**Fix.**
+- `deploy/scripts/pinned-tool.sh` installs helm v4.3.0, kubeconform v0.8.0 and
+  buf v1.73.0 into `.tools/`. It refuses any download whose SHA-256 differs
+  from the committed pin (taken from each project's release checksum file),
+  and re-verifies cached binaries.
+- `validate.sh` uses those tools. It checks against Kubernetes and CRD schemas
+  pinned by source commit and per-file SHA-256 in `deploy/helm/schemas.lock`,
+  read from a local cache only. A warm cache needs no network, and
+  `SCHEMA_OFFLINE=1` makes a cold cache an error.
+- `validate.sh` asserts the `helm template` render (the same coalescing and
+  guards as install), not lint's exit code. A probe proves the gate fails on
+  values whose guard lint swallows.
+- `proto/buf.yaml`: STANDARD lint, with the two rules the existing API
+  deliberately departs from (shared `Ack` / `RunActionResponse` /
+  `ReleaseResponse`) excepted per file rather than reformatted. `proto/check.sh`
+  runs `buf breaking` (FILE rules) against the previous main, using the same
+  resolution as compat-smoke.
+- New targets: `make tools`, `helm-validate`, `proto-lint`, `proto-breaking`,
+  `proto-check` and `actionlint` (digest-pinned image).
+- CI: GitHub jobs `helm` (now validate.sh), `proto` and `workflow-lint`; Azure
+  stages `Helm` and `Proto`, both required by the quality gate.
+- Operator guidance for lint and `--wait`: docs/OPERATIONS.md §20.10.
+- Two gates that already failed on integrate/wave-2 were fixed along the way.
+  `make check-doc-refs` flagged its own docstring's example anchor.
+  `make license-check` (Azure UnitTest) flagged the `nexusctl init` scaffolds
+  under cli/internal/templates/files/. Those are user-project content, now
+  exempt with the reason stated in the Makefile.
+
+**Verified locally.** validate.sh passes: 4 values files rendered and
+schema-valid (47/73/38/47 objects), the probe refused, 16 bad values refused.
+It also passes with `SCHEMA_OFFLINE=1`, and fails with a clear message on a
+cold cache. A tampered pin is refused (`CHECKSUM MISMATCH`, nothing
+installed). `buf lint` and `buf breaking` pass against origin/main 82b9ec8. A
+deliberate break (`memory_bytes` int64 -> string, `disk_bytes` renumbered 6 ->
+16) failed with both changes named, and was reverted. actionlint is clean, and
+every pipeline file parses with duplicate keys rejected. The CI jobs
+themselves, and the Azure `Build.Reason`/`fetchDepth` handling, run only in
+real CI.

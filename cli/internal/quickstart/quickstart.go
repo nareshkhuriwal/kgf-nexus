@@ -29,26 +29,31 @@
 // platform operator, and enrolling one is deliberately a manual database step
 // (migration 0013: "No automatic elevation").
 //
-// # The one step that is not an API call
+//  4. With the same session, POST /v1/namespaces/{ns}/tokens mints the agents'
+//     WORKER credential too: role worker, scope worker_rpc, the default
+//     expiry. The worker gRPC listener authenticates these scoped tokens (F114,
+//     workergrpc/interceptor.go uses AuthenticateCredential and requires the
+//     worker_rpc capability), so the agents need nothing the API cannot issue.
 //
-// The agents need a WORKER credential, and the API cannot issue one that works:
-// a scoped token with role worker is accepted by POST /tokens, but the worker
-// gRPC interceptor authenticates only legacy api_keys
-// (services/api-gateway/workergrpc/interceptor.go calls Authenticate, not
-// AuthenticateCredential), so an agent holding one is refused. The only working
-// path is the one `make seed` documents: generate a key locally and insert its
-// SHA-256 hash into api_keys with role worker. This package does exactly that,
-// through `docker compose exec` into the stack's own Postgres container (no host
-// psql needed), for the new tenant's namespace only. The plaintext never leaves
-// this process except into the agents' environment and the 0600 state record.
+// # No database writes
+//
+// Every credential `up` creates is minted by the gateway, audited, revocable
+// from the console and expires, like any other token. `up` used to generate the
+// worker key locally and INSERT its hash into api_keys through `docker compose
+// exec` into Postgres, because before F114 the worker protocol accepted only
+// legacy api_keys. That bypassed the audit log and produced a key with no
+// expiry that the console could not list; it is gone. A direct database
+// bootstrap remains only where a credential is needed before any API exists
+// to ask: the Helm chart's bootstrap job (docs/OPERATIONS.md §20).
+//
+// The worker token's plaintext never leaves this process except into the
+// agents' environment and the 0600 state record.
 package quickstart
 
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -395,6 +400,8 @@ func Up(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	s.warnWorkerTokenExpiry()
 
 	// Already up and seeded: say so, print no secret, change nothing -- unless
 	// --build asked for new images.
@@ -829,15 +836,25 @@ func (s *session) seedAndStartAgents(ctx context.Context, c *Compose) (*Result, 
 	if err != nil {
 		return nil, s.seedErr("admin API key (POST /v1/namespaces/{ns}/tokens)", err, true)
 	}
-	// The session was only a means to mint the key; leaving it live would be one
-	// more bearer credential nobody holds.
-	if err := api.Logout(ctx, session); err != nil {
-		s.logf("warning: could not end the seeding session: %v", err)
+	// The agents' credential, through the same API: a scoped worker token that
+	// the worker protocol accepts (F114). Worker role and worker_rpc only, so it
+	// is refused by every REST route and cannot administer anything.
+	workerTok, err := api.CreateToken(ctx, session, ns, TokenRequest{
+		Name:   "nexusctl-up-worker",
+		Role:   "worker",
+		Scopes: []string{"worker_rpc"},
+	})
+	if err == nil && (workerTok.Secret == "" || workerTok.Role != "worker") {
+		err = fmt.Errorf("the gateway returned role %q and %d-byte secret for a worker token", workerTok.Role, len(workerTok.Secret))
 	}
-
-	workerKey, workerName, err := s.installWorkerKey(ctx, c, ns)
+	// The session was only a means to mint the keys; leaving it live would be
+	// one more bearer credential nobody holds. Ended even if the worker token
+	// failed.
+	if lerr := api.Logout(ctx, session); lerr != nil {
+		s.logf("warning: could not end the seeding session: %v", lerr)
+	}
 	if err != nil {
-		return nil, s.seedErr("worker key", err, true)
+		return nil, s.seedErr("worker token (POST /v1/namespaces/{ns}/tokens, role worker)", err, true)
 	}
 
 	st := &State{
@@ -845,7 +862,8 @@ func (s *session) seedAndStartAgents(ctx context.Context, c *Compose) (*Result, 
 		CreatedAt: s.o.Now().UTC(),
 		TenantID:  reg.Tenant.ID, Namespace: ns, TenantName: reg.Tenant.Name,
 		AdminEmail: s.o.AdminEmail, AdminUserID: reg.AdministratorID, AdminTokenID: adminKey.ID,
-		WorkerKeyName: workerName, WorkerKey: workerKey,
+		WorkerKeyName: workerTok.Name, WorkerKey: workerTok.Secret,
+		WorkerTokenID: workerTok.ID, WorkerKeyExpiresAt: workerTok.ExpiresAt,
 		ConsoleURL: consoleURL, APIURL: apiURL,
 	}
 	st.DataVolume, st.DataVolumeCreatedAt = s.dataVolume(ctx)
@@ -922,41 +940,25 @@ func (s *session) awaitVerification(ctx context.Context, mb Mailbox, since time.
 	}
 }
 
-// installWorkerKey creates the agents' credential. See the package comment for
-// why this one step goes to the database rather than the API.
-func (s *session) installWorkerKey(ctx context.Context, c *Compose, ns string) (key, name string, err error) {
-	dsn := s.probe.Services[gatewayService].Env("DATABASE_URL")
-	u, err := url.Parse(dsn)
-	if err != nil || u.User == nil || u.Hostname() == "" {
-		return "", "", fmt.Errorf("the gateway's DATABASE_URL is missing or not a postgres URL")
+// warnWorkerTokenExpiry says, before anything starts, when the agents' token
+// has expired or will within a week: an expired worker token looks like agents
+// that silently never register. The gateway enforces the expiry; this only
+// makes it visible.
+func (s *session) warnWorkerTokenExpiry() {
+	if s.state == nil || s.state.WorkerKeyExpiresAt == nil {
+		return
 	}
-	dbService := u.Hostname()
-	if _, ok := s.probe.Services[dbService]; !ok {
-		return "", "", fmt.Errorf("the gateway's database host %q is not a service in this compose project", dbService)
+	left := s.state.WorkerKeyExpiresAt.Sub(s.o.Now())
+	switch {
+	case left <= 0:
+		s.logf("warning: the agents' worker token %s expired on %s; the agents will be refused. "+
+			"Start over with `nexusctl down --volumes && nexusctl up`, or mint a new worker token "+
+			"(role worker, scope worker_rpc) and restart the agents with it.",
+			s.state.WorkerTokenID, s.state.WorkerKeyExpiresAt.Format(time.DateOnly))
+	case left < 7*24*time.Hour:
+		s.logf("warning: the agents' worker token %s expires on %s.",
+			s.state.WorkerTokenID, s.state.WorkerKeyExpiresAt.Format(time.DateOnly))
 	}
-	dbName := strings.TrimPrefix(u.Path, "/")
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return "", "", err
-	}
-	// The same shape `make seed` generates.
-	key = "nxs_worker_" + hex.EncodeToString(secret)
-	sum := sha256.Sum256([]byte(key))
-	name = "nexusctl-up-worker-" + s.o.Now().UTC().Format("20060102150405")
-	// psql variables with :'var' quoting, so no value is ever spliced into SQL.
-	script := "INSERT INTO api_keys (namespace, name, key_hash, role) VALUES (:'ns', :'name', :'hash', 'worker');\n"
-	res, err := c.Exec(ctx, strings.NewReader(script), dbService,
-		"psql", "-X", "-q", "-v", "ON_ERROR_STOP=1",
-		"-U", u.User.Username(), "-d", dbName,
-		"-v", "ns="+ns, "-v", "name="+name, "-v", "hash="+hex.EncodeToString(sum[:]),
-		"-f", "-")
-	if err != nil {
-		return "", "", err
-	}
-	if res.ExitCode != 0 {
-		return "", "", fmt.Errorf("inserting the worker key failed: %s", tail(string(res.Stderr), 5))
-	}
-	return key, name, nil
 }
 
 func (s *session) dataVolume(ctx context.Context) (name, created string) {

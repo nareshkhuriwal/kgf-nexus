@@ -45,6 +45,32 @@ func TestSweepMetricsServed(t *testing.T) {
 	}
 }
 
+// TestLogCollectionMetrics: the task-log share of a deleting pass is exposed as
+// objects and bytes by disposition.
+func TestLogCollectionMetrics(t *testing.T) {
+	gm := newGCMetrics()
+	gm.sweep(artifactgc.Stats{Listed: 50, LogObjects: 20, Orphans: 12, LogOrphans: 10,
+		LogOrphanBytes: 1 << 20, Deleted: 11, LogDeleted: 9, LogDeletedBytes: 900 << 10,
+		DeleteErrors: 1, LogDeleteErrors: 1})
+	gm.finish(nil)
+
+	fams := metricstest.Scrape(t, metrics.OpsMux(gm.reg), "/metrics")
+	metricstest.RequireFamilies(t, fams, "nexus_artifact_gc_last_run_log_objects",
+		"nexus_artifact_gc_last_run_log_bytes")
+	for d, want := range map[string]float64{"scanned": 20, "orphan": 10, "deleted": 9, "delete_error": 1} {
+		if s := metricstest.Find(fams, "nexus_artifact_gc_last_run_log_objects",
+			map[string]string{"disposition": d}); s == nil || s.GetGauge().GetValue() != want {
+			t.Errorf("log_objects{%s} = %v, want %v", d, s, want)
+		}
+	}
+	for d, want := range map[string]float64{"orphan": 1 << 20, "deleted": 900 << 10} {
+		if s := metricstest.Find(fams, "nexus_artifact_gc_last_run_log_bytes",
+			map[string]string{"disposition": d}); s == nil || s.GetGauge().GetValue() != want {
+			t.Errorf("log_bytes{%s} = %v, want %v", d, s, want)
+		}
+	}
+}
+
 // TestPushSendsOnlyTheJobsFamilies: the Pushgateway receives the job's
 // nexus_* numbers, and none of the go_/process_ series of a process that is
 // about to exit.

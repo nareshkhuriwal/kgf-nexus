@@ -163,23 +163,56 @@ migrate-down: ## Roll back all *.down.sql migrations, newest first (DESTRUCTIVE)
 	echo "migrate-down: done"
 
 # ── Compose ───────────────────────────────────────────────────────────────
-up: ## Bring up the full stack (postgres, minio, migrations, 6 services, 2 agents, ui)
+# deploy/docker-compose.yml requires NEXUS_WORKER_API_KEY (the agents'
+# credential), and Compose refuses to parse the file while it is unset. On a
+# fresh checkout nothing has set it, so `make up` used to die inside Compose
+# with a bare interpolation error. The first-run entry point is `make
+# quickstart` (nexusctl up), which mints both credentials through the API;
+# `make up` is the drive-it-yourself path, and now says so before Compose runs.
+up: ## Bring up the full stack with your own keys (first run on a fresh checkout: `make quickstart`)
+	@if [ -z "$${NEXUS_WORKER_API_KEY:-}" ]; then \
+	  echo "make up: NEXUS_WORKER_API_KEY is not set, and the agents cannot start without it." >&2; \
+	  echo "" >&2; \
+	  echo "  First run on this checkout? Use the quick start: it brings the stack up," >&2; \
+	  echo "  registers a tenant and mints the admin and worker tokens through the API" >&2; \
+	  echo "  (cli/README.md, 'Local quick start'):" >&2; \
+	  echo "      make quickstart" >&2; \
+	  echo "" >&2; \
+	  echo "  Or drive Compose yourself with a key you generate, then install it:" >&2; \
+	  echo '      export NEXUS_WORKER_API_KEY=$$(make -s worker-key)' >&2; \
+	  echo "      make up && make seed" >&2; \
+	  exit 2; \
+	fi
 	$(COMPOSE) up --build -d
 	@echo
 	@echo "UI      http://localhost:$${NEXUS_UI_PORT:-3000}"
 	@echo "API     http://localhost:$${NEXUS_API_PORT:-8090}/v1/namespaces/$(NAMESPACE)/runs"
 	@echo "MinIO   http://localhost:$${NEXUS_MINIO_CONSOLE_PORT:-9001}"
 	@echo
-	@echo "Next:   make seed   # create a dev API key"
+	@echo "Next:   make seed   # installs this worker key for the agents, and an admin key"
 
+# The first-run path. QUICKSTART_ARGS passes flags through, e.g.
+#   make quickstart QUICKSTART_ARGS="-p nexus-mine --api-port 18090"
+QUICKSTART_ARGS ?=
+.PHONY: quickstart worker-key
+quickstart: ## First run: start the stack, register a tenant, mint admin + worker tokens via the API (nexusctl up)
+	$(GO) run ./cli/cmd/nexusctl up $(QUICKSTART_ARGS)
+
+worker-key: ## Print a fresh random worker key (export as NEXUS_WORKER_API_KEY before `make up`, then `make seed`)
+	@if command -v openssl >/dev/null 2>&1; then printf 'nxs_worker_%s\n' "$$(openssl rand -hex 32)"; \
+	else printf 'nxs_worker_%s\n' "$$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"; fi
+
+# These only address existing containers, but Compose still parses the whole
+# file, so they pass a placeholder when the key is unset. It reaches no
+# container: nothing is created by down, logs or ps.
 down: ## Stop the stack and remove volumes (DESTROYS local run history)
-	$(COMPOSE) down -v
+	NEXUS_WORKER_API_KEY="$${NEXUS_WORKER_API_KEY:-unused-by-down}" $(COMPOSE) down -v
 
 logs: ## Tail logs for all services
-	$(COMPOSE) logs -f --tail=100
+	@NEXUS_WORKER_API_KEY="$${NEXUS_WORKER_API_KEY:-unused-by-logs}" $(COMPOSE) logs -f --tail=100
 
 ps: ## Show container status
-	$(COMPOSE) ps
+	@NEXUS_WORKER_API_KEY="$${NEXUS_WORKER_API_KEY:-unused-by-ps}" $(COMPOSE) ps
 
 # ── Kubernetes dev environment (deploy/terraform/environments/dev) ────────
 # The whole platform on Docker Desktop's Kubernetes, via the kgf-nexus Helm
@@ -337,8 +370,11 @@ sdk-test: $(SDK_VENV)/.installed sdk-typecheck ## Type-check, then run the Pytho
 # belong to a registered tenant" (F121). Idempotent, and the same statement the
 # Helm bootstrap job and deploy/pitr-seed.sh already run.
 seed: ## Generate and install API keys (prints each plaintext exactly once)
-	@command -v psql >/dev/null || { echo "psql not found; run: $(COMPOSE) exec postgres psql -U nexus -d nexus"; exit 1; }
 	@set -euo pipefail; \
+	if ! command -v psql >/dev/null 2>&1; then \
+	  echo "seed: no psql on PATH; using the compose stack's own postgres container" >&2; \
+	  psql() { shift; NEXUS_WORKER_API_KEY="$${NEXUS_WORKER_API_KEY:-unused}" $(COMPOSE) exec -T postgres psql -U nexus -d nexus "$$@"; }; \
+	fi; \
 	gen() { \
 	  if command -v openssl >/dev/null 2>&1; then \
 	    printf 'nxs_%s_%s' "$$1" "$$(openssl rand -hex 32)"; \
@@ -501,10 +537,13 @@ license-report: ## List the license of every module compiled into the binaries
 
 # Fails when a first-party source file is missing its SPDX identifier. Generated
 # code is exempt: it is rewritten by protoc and would lose the header anyway.
+# So are the `nexusctl init` scaffolds (cli/internal/templates/files/): they are
+# copied into the user's own project, where our header would mislabel their code.
 license-check: ## Assert every first-party source file carries an SPDX identifier
 	@missing=0; \
 	for f in $$(git ls-files '*.go' '*.ts' '*.tsx' '*.py' '*.sh' '*.sql' '*.proto' \
-	            | grep -v '/gen/' | grep -v '^gen/'); do \
+	            | grep -v '/gen/' | grep -v '^gen/' \
+	            | grep -v '^cli/internal/templates/files/'); do \
 	  if ! head -5 "$$f" | grep -q 'SPDX-License-Identifier'; then \
 	    echo "missing SPDX header: $$f"; missing=1; \
 	  fi; \
@@ -514,7 +553,32 @@ license-check: ## Assert every first-party source file carries an SPDX identifie
 # The previous release's database integration suite against THIS tree's schema,
 # reached by the real upgrade path (previous migrations, then these). ADR-0011
 # rule 5 says old replicas survive the new schema; this is the test that says
-# so. Disposable Postgres on 127.0.0.1:55688. docs/COMPATIBILITY.md §7.
+# so. Disposable Postgres on 127.0.0.1:55688, container nexus-compat-pg-55688;
+# NEXUS_COMPAT_PG_PORT and NEXUS_COMPAT_NAME_PREFIX move both. docs/COMPATIBILITY.md §7.
 .PHONY: compat-smoke
 compat-smoke: ## Run the previous release's DB integration suite against this tree's migrated schema
 	tests/compat/previous-release-smoke.sh
+
+# ── Pinned tools, chart and proto checks ──────────────────────────────────
+# Every tool is one exact release, downloaded into .tools/ and refused unless
+# its SHA-256 matches the pin in deploy/scripts/pinned-tool.sh.
+.PHONY: tools helm-validate proto-lint proto-breaking proto-check actionlint
+tools: ## Install the pinned, checksum-verified helm, kubeconform and buf into .tools/
+	@for t in helm kubeconform buf; do deploy/scripts/pinned-tool.sh $$t; done
+
+helm-validate: ## Lint, render and schema-check the Helm chart offline-capable (deploy/helm/validate.sh)
+	deploy/helm/validate.sh
+
+proto-lint: ## buf lint over proto/ (exceptions in proto/buf.yaml)
+	proto/check.sh lint
+
+proto-breaking: ## buf breaking against the previous main (BUF_AGAINST=<rev> overrides)
+	proto/check.sh breaking
+
+proto-check: ## buf lint and buf breaking
+	proto/check.sh all
+
+# actionlint in its digest-pinned image, over .github/workflows (needs Docker).
+ACTIONLINT_IMAGE ?= rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+actionlint: ## Lint the GitHub workflows with the pinned actionlint image
+	docker run --rm -v "$(CURDIR):/repo:ro" -w /repo $(ACTIONLINT_IMAGE) -color

@@ -57,6 +57,12 @@ type State struct {
 
 	WorkerKeyName string `json:"worker_key_name"`
 	WorkerKey     string `json:"worker_key"`
+	// WorkerTokenID and WorkerKeyExpiresAt describe the scoped worker token the
+	// API minted (revocable in the console under that ID). Empty for records
+	// written before `up` minted it through the API, whose key is a legacy
+	// api_keys row with no expiry.
+	WorkerTokenID      string     `json:"worker_token_id,omitempty"`
+	WorkerKeyExpiresAt *time.Time `json:"worker_key_expires_at,omitempty"`
 
 	// Context is the nexusctl config context written for this stack, and
 	// ConfigPath the file it was written to; both empty when none was written.

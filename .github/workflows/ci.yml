@@ -177,21 +177,72 @@ jobs:
       - uses: actions/checkout@v4
       - run: make check-doc-refs
 
-  # The Helm chart: lint, then prove every Nexus image the chart renders takes
-  # its digest from image.digests -- the key the release pipeline sets from its
-  # digest map (templates/deploy-aks.yml). The release re-runs the same check
-  # against the real map and environment values before `helm upgrade` (F112).
-  helm:
-    name: helm lint and image-digest check
+  # The wire contract. buf lint (rules and the project's documented exceptions
+  # in proto/buf.yaml), then buf breaking against the previous main: the main
+  # tip on a PR, main~1 on a push to main (proto/check.sh). A rolling upgrade
+  # runs old agents against new services, so a renumbered field or a changed
+  # type must not merge. buf is pinned and checksum-verified; the history is
+  # needed to extract the previous tree, hence fetch-depth: 0.
+  proto:
+    name: proto lint and breaking-change check
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: helm lint
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@v4
+        with:
+          path: .tools
+          key: pinned-tools-${{ runner.os }}-${{ hashFiles('deploy/scripts/pinned-tool.sh') }}
+      - name: buf lint
+        run: make proto-lint
+      - name: buf breaking against the previous main
+        run: make proto-breaking
+
+  # This file and any other workflow, with the pinned actionlint image (it
+  # bundles shellcheck for the run: scripts). A duplicated job id, for one,
+  # silently drops the first job: YAML keeps the last key.
+  workflow-lint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: make actionlint
+
+  # The Helm chart, with the helm and kubeconform pinned and checksum-verified
+  # in deploy/scripts/pinned-tool.sh (not the runner image's helm): lint and
+  # render every ci/ values file, schema-check the output against the
+  # Kubernetes and CRD schemas pinned in deploy/helm/schemas.lock, and prove
+  # every bad value is refused (docs/OPERATIONS.md §20.10). Then prove every
+  # Nexus image the chart renders takes its digest from image.digests -- the
+  # key the release pipeline sets from its digest map (templates/deploy-aks.yml).
+  # The release re-runs the same check against the real map and environment
+  # values before `helm upgrade` (F112).
+  helm:
+    name: helm validate and image-digest check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      KUBECONFORM_SCHEMA_CACHE: ${{ github.workspace }}/.cache/kubeconform-schemas
+    steps:
+      - uses: actions/checkout@v4
+      # Both caches are content-verified on use (tool stamps, schema hashes),
+      # so a poisoned cache fails the job rather than passing it.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .tools
+            .cache/kubeconform-schemas
+          key: helm-validate-${{ runner.os }}-${{ hashFiles('deploy/scripts/pinned-tool.sh', 'deploy/helm/schemas.lock') }}
+      - name: Install pinned helm and kubeconform (sha256-verified)
         run: |
-          helm version
-          helm lint deploy/helm/kgf-nexus \
-            --set existingSecret=ci --set image.tag=ci --set nats.auth.mode=none
+          set -euo pipefail
+          dirname "$(deploy/scripts/pinned-tool.sh helm)" >> "$GITHUB_PATH"
+          deploy/scripts/pinned-tool.sh kubeconform
+      - name: deploy/helm/validate.sh
+        run: make helm-validate
       - name: Every rendered Nexus image resolves to its digest
         run: |
           python3 deploy/scripts/helm-image-digests.py self-test \
@@ -361,7 +412,11 @@ jobs:
   # It brings up the real compose stack and runs every committed example to
   # SUCCEEDED, then kills a worker mid-task and races three scheduler replicas.
   # Together those are Phase 1 exit criteria 1, 2 and 3.
-  e2e:
+  #
+  # Its id was `e2e`, the same as the browser job above; YAML keeps the last
+  # duplicate key, so one of the two never ran. actionlint (workflow-lint)
+  # now refuses a duplicate.
+  examples:
     name: examples and chaos suite
     runs-on: ubuntu-latest
     needs: build
@@ -374,24 +429,29 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      # deploy/docker-compose.yml requires NEXUS_WORKER_API_KEY, so the keys
+      # exist before the stack does. Masked, and exported to every later step
+      # (including the `docker compose` calls, which parse the file too).
+      - name: Generate this run's API keys
+        run: |
+          set -euo pipefail
+          WKEY=$(make -s worker-key)
+          AKEY="nxs_admin_$(openssl rand -hex 32)"
+          echo "::add-mask::$WKEY"
+          echo "::add-mask::$AKEY"
+          {
+            echo "NEXUS_WORKER_API_KEY=$WKEY"
+            echo "NEXUS_DEV_API_KEY=$AKEY"
+            echo "NEXUS_API_KEY=$AKEY"
+          } >> "$GITHUB_ENV"
+
       - name: Bring up the stack
         run: make up
 
-      - name: Seed an API key
-        id: seed
-        run: |
-          set -euo pipefail
-          KEY="nxs_admin_$(openssl rand -hex 32)"
-          HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
-          docker compose -f deploy/docker-compose.yml exec -T postgres \
-            psql -U nexus -d nexus -v ON_ERROR_STOP=1 -q -c \
-            "INSERT INTO api_keys (namespace, name, key_hash, role)
-             VALUES ('default','ci-admin','$HASH','admin')
-             ON CONFLICT (key_hash) DO NOTHING"
-          # Masked so a re-run of the log cannot leak it, even though it is
-          # scoped to a throwaway stack.
-          echo "::add-mask::$KEY"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+      # The default tenant, then both key hashes: the same target a developer
+      # runs (it falls back to the stack's own psql when the runner has none).
+      - name: Install the keys (make seed)
+        run: make seed
 
       - name: Wait for the fleet to register
         run: |
@@ -412,7 +472,6 @@ jobs:
         run: make chaos
         env:
           NEXUS_ENDPOINT: http://localhost:8090
-          NEXUS_API_KEY: ${{ steps.seed.outputs.key }}
 
       # Logs are worth far more than the exit code when this fails: the whole
       # point of the suite is that the interesting evidence lives in the

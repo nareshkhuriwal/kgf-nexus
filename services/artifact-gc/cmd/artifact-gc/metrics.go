@@ -45,6 +45,12 @@ type gcMetrics struct {
 	lastFailure *metrics.Gauge
 	dryRun      *metrics.Gauge
 	dangling    *metrics.GaugeVec
+	// The task-log (ADR-0020) share of the sweep. Gauges for the same reason
+	// as the rest: each pass is a fresh process whose values the Pushgateway
+	// replaces whole, so "collected by the last run" is the honest shape; a
+	// counter here would reset every run and read as a crash to rate().
+	logObjects *metrics.GaugeVec
+	logBytes   *metrics.GaugeVec
 }
 
 func newGCMetrics() *gcMetrics {
@@ -67,6 +73,12 @@ func newGCMetrics() *gcMetrics {
 		dangling: reg.NewGauge("nexus_artifact_gc_last_check_refs",
 			"The last -check-refs pass, by kind: rows_scanned, keys_checked, missing_keys (objects gone), dangling_rows. Nonzero missing_keys is a data-loss fault.",
 			"kind"),
+		logObjects: reg.NewGauge("nexus_artifact_gc_last_run_log_objects",
+			"Task-log objects (<namespace>/logs/) in the last sweep, by disposition: scanned, orphan (past -log-retention or its attempt gone), deleted (collected), delete_error. A subset of nexus_artifact_gc_last_run_objects.",
+			"disposition"),
+		logBytes: reg.NewGauge("nexus_artifact_gc_last_run_log_bytes",
+			"Task-log bytes in the last sweep, by disposition: orphan (collectable) and deleted (actually reclaimed; 0 in a dry run).",
+			"disposition"),
 	}
 }
 
@@ -81,6 +93,14 @@ func (m *gcMetrics) sweep(st artifactgc.Stats) {
 	} {
 		m.objects.With(metrics.Labels{"disposition": k}).Set(float64(v))
 	}
+	for k, v := range map[string]int{
+		"scanned": st.LogObjects, "orphan": st.LogOrphans, "deleted": st.LogDeleted,
+		"delete_error": st.LogDeleteErrors,
+	} {
+		m.logObjects.With(metrics.Labels{"disposition": k}).Set(float64(v))
+	}
+	m.logBytes.With(metrics.Labels{"disposition": "orphan"}).Set(float64(st.LogOrphanBytes))
+	m.logBytes.With(metrics.Labels{"disposition": "deleted"}).Set(float64(st.LogDeletedBytes))
 	m.orphanBytes.Set(float64(st.OrphanBytes))
 	m.duration.Set(st.Duration.Seconds())
 	if st.DryRun {

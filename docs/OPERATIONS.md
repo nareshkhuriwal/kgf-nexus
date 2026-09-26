@@ -2140,6 +2140,10 @@ To check any target by hand, run `curl -s localhost:19100/metrics | grep nexus_b
   summed into `queue="_other"`.
 - The cluster-controller's `pool` label is the binding name an operator
   configured.
+- The gateway rate-limit families are labelled by bucket **kind** (`address`,
+  `auth_failure`, `auth_failure_repeat`, `credential`, `email_address`,
+  `email_recipient`), never by the client address, credential or recipient
+  the bucket is keyed on.
 
 If a caller passes labels that do not match a family's declared labels, the
 package normalizes them and logs `metrics: label set does not match` once per
@@ -2168,6 +2172,9 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_http_request_duration_seconds` | H | method, route, code | api-gateway, event-service | REST latency, 1 ms–60 s. SSE tails are observed when they end |
 | `nexus_http_response_size_bytes` | H | method, route | api-gateway, event-service | Response size |
 | `nexus_http_requests_in_flight` | G | — | api-gateway, event-service | Concurrent requests, open SSE tails included |
+| `nexus_gateway_ratelimit_rejections_total` | C | bucket (address/auth_failure/credential/email_address/email_recipient) | api-gateway | Requests refused by a limiter (§16): a 429, or the silent drop of `email_recipient`. A rise in `auth_failure` is credential stuffing; a rise in `address` or `credential` from legitimate clients means the limit is too tight |
+| `nexus_gateway_ratelimit_buckets` | G | bucket (the above plus auth_failure_repeat) | api-gateway | Live keys each limiter tracks, per replica. Only enabled limiters report. At the per-limiter cap of 100000 the least recently used key is evicted; see `_evictions_total` |
+| `nexus_gateway_ratelimit_evictions_total` | C | bucket | api-gateway | Buckets dropped at the entry cap rather than by idling. Non-zero: the cap is too small for the traffic, or the gateway is being sprayed from many addresses |
 | `grpc_server_started_total` | C | grpc_type, grpc_service, grpc_method | api-gateway (worker API), workflow-manager, dag-engine, scheduler, resource-manager | RPCs started |
 | `grpc_server_handled_total` | C | grpc_type, grpc_service, grpc_method, grpc_code | same | RPCs finished, by status. `Unauthenticated` on the gateway: bad worker keys |
 | `grpc_server_handling_seconds` | H | grpc_type, grpc_service, grpc_method | same | RPC latency, 1 ms–120 s. `PollTask` is a long poll by design |
@@ -2189,6 +2196,8 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_dag_map_expansions_total` | C | — | dag-engine | Map templates expanded |
 | `nexus_dag_fanin_refused_total` | C | — | dag-engine | Fan-ins refused for exceeding `NEXUS_DAG_MAX_FANIN_BYTES` |
 | `nexus_dag_run_state_published_total` | C | state, result | dag-engine | Run state publishes. `result="error"` on a terminal state: a run may be stranded |
+| `nexus_dag_operator_retries_total` | C | result (reset/invalid/not_retryable/not_found/conflict/error) | dag-engine | Operator retries (§18) applied to a run's graph. `invalid` and `not_retryable` are the caller's problem; `conflict` means a concurrent writer won and a retry of the request may succeed; `error` > 0 needs a look |
+| `nexus_dag_operator_retry_nodes_reset_total` | C | — | dag-engine | Nodes reset by operator retries, selected nodes and their dependents alike |
 | `nexus_rm_reservations_total` | C | result (granted/refused/not_found/error) | resource-manager | Reserve calls |
 | `nexus_rm_reserve_duration_seconds` | H | result | resource-manager | Reserve latency |
 | `nexus_rm_releases_total` | C | result (released/absent/error) | resource-manager | Releases. `absent` is expected duplicate traffic |
@@ -2220,8 +2229,14 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_agent_result_report_failures_total` | C | — | agent | Reports not delivered. The WAL retains them |
 | `nexus_agent_registration_attempts_total` | C | result (ok/retryable_error/permanent_error) | agent | Register calls. An agent that starts before the gateway retries `Unavailable`, `DeadlineExceeded`, `ResourceExhausted`, `Aborted` and `Internal` with capped exponential backoff (0.5 s to 30 s, full jitter) and stays not-ready meanwhile; a rising `retryable_error` with no `ok` means the gateway is unreachable or its auth backend is down. `permanent_error` (bad API key, wrong role, invalid request) exits the process with a message naming the fix |
 | `nexus_agent_registered` | G | — | agent | 1 while the agent holds a registered session; the `/readyz` condition |
+| `nexus_agent_log_dropped_lines_total`, `_dropped_bytes_total` | C | — | agent | Task log lines (and their bytes) dropped because shipping fell behind and the buffer was full (§19). Non-zero: the object store or the gateway is slow or unreachable from this agent |
+| `nexus_agent_log_truncated_lines_total`, `_truncated_bytes_total` | C | — | agent | Task log lines omitted by the per-attempt cap (head and tail are kept). Steady growth: a task logs more than the cap; raise it or quiet the task |
+| `nexus_agent_log_fenced_bytes_total` | C | — | agent | Task output refused after an attempt's log shipping was fenced (lease rejected, or a gateway without `ReportLogs`) |
+| `nexus_agent_log_finalize_total` | C | outcome (finalized/fenced/timeout/partial) | agent | Attempt logs finalized. Every outcome but `finalized` leaves a partial log. `timeout` or `partial` rising: object store trouble; `fenced` rising: lease loss (see `nexus_scheduler_attempts_lost_total`) |
 | `nexus_artifact_gc_last_run_objects` | G | disposition | artifact-gc | Last sweep: scanned, live_refs, reachable, too_young, orphan, deleted, delete_error |
 | `nexus_artifact_gc_last_run_orphan_bytes` | G | — | artifact-gc | Reclaimable bytes found |
+| `nexus_artifact_gc_last_run_log_objects` | G | disposition (scanned/orphan/deleted/delete_error) | artifact-gc | The task-log share of the last sweep (§19): log objects examined, collectable, collected and not removable. A subset of `_last_run_objects` |
+| `nexus_artifact_gc_last_run_log_bytes` | G | disposition (orphan/deleted) | artifact-gc | Task-log bytes collectable and actually reclaimed by the last sweep (`deleted` is 0 in a dry run) |
 | `nexus_artifact_gc_last_run_duration_seconds` | G | — | artifact-gc | Pass duration |
 | `nexus_artifact_gc_last_success_timestamp_seconds`, `_last_failure_timestamp_seconds` | G | — | artifact-gc | Batch-job liveness, via the Pushgateway |
 | `nexus_artifact_gc_dry_run` | G | — | artifact-gc | 1 when nothing was deleted |
@@ -2698,7 +2713,80 @@ external gRPC Service.
       expand/contract, `make compat-smoke` passed for the release, upgrade with
       `-f` values, then wait on pod readiness.
 - [ ] `deploy/helm/validate.sh` passes on your values file (copy it into
-      `ci/` or run `helm lint --strict -f`).
+      `ci/`). Running `helm lint --strict -f` by hand is **not** enough on
+      Helm 4 (§20.10); `helm template -f` must exit 0.
+- [ ] After every install or upgrade, readiness and restart counts were
+      checked as in §20.10, not only Helm's `--wait`.
+
+### 20.10 Helm 4: what lint and `--wait` do not tell you
+
+Two Helm 4 behaviours make its own exit codes weaker gates than they look.
+`deploy/helm/validate.sh` (CI: GitHub job `helm`, Azure stage `Helm`) is built
+around both. Helm and kubeconform are pinned and checksum-verified
+(`deploy/scripts/pinned-tool.sh`), and so are the Kubernetes and CRD schemas
+(`deploy/helm/schemas.lock`).
+
+**`helm lint` does not fail on the chart's guards.** Every guard in the chart
+(`existingSecret is required`, `confirmDelete=true`, the PDB and HPA checks, …)
+is a template `fail`. Helm 4's lint logs such a `fail` at INFO
+(`level=INFO msg="funcMap fail" message=...`) and still reports
+`0 chart(s) failed`, exit 0. Helm 3 printed it as an `[ERROR]`. A lint-only gate
+therefore passes values the chart would refuse at install time. Lint also does
+not apply `key: null` overrides from `-f` files the way install and template
+do. With `ci/external-deps-values.yaml` (which nulls
+`podDisruptionBudget.maxUnavailable`), lint "fails" the PDB guard on every
+service although the real render is fine. So:
+
+- The gate is `helm template` with the same values and `--kube-version`. It
+  coalesces values exactly as `helm install` does, and exits 1 with
+  `execution error at (...): <message>` when a guard fires. `validate.sh`
+  asserts that exit status and prints the error. It then checks the output with
+  kubeconform. It still runs `helm lint --strict` for lint's own findings, and
+  prints lint's `funcMap fail` lines as a note when the render passed.
+- `validate.sh` proves the gate itself with a probe:
+  `artifactGC.mode=delete` without `confirmDelete` must fail the render step,
+  although `helm lint` exits 0 on it.
+- By hand: `helm template nexus deploy/helm/kgf-nexus -f my-values.yaml
+  --kube-version <your cluster's> >/dev/null && echo OK`. Treat lint's exit code
+  as advisory.
+
+**`helm install/upgrade --wait` can return while a pod is crash-looping.** Seen
+in §20.8: the release reported `deployed` with an agent in `CrashLoopBackOff`.
+`--wait` considers a Deployment ready once enough replicas were Ready at some
+point, and a container that passes its probes briefly and then restarts
+satisfies it. After every install or upgrade:
+
+```sh
+for d in $(kubectl -n nexus get deploy -o name); do
+  kubectl -n nexus rollout status "$d" --timeout=5m || exit 1
+done
+kubectl -n nexus wait --for=condition=Ready pod \
+  -l 'app.kubernetes.io/component notin (migrate,bootstrap,minio-init,artifact-gc)' --timeout=5m
+# Then, a minute later: nothing restarting.
+kubectl -n nexus get pods -o custom-columns='POD:.metadata.name,RESTARTS:.status.containerStatuses[*].restartCount,STATE:.status.containerStatuses[*].state.waiting.reason' \
+  | awk 'NR==1 || $2 ~ /[1-9]/ || $3 ~ /CrashLoop|Error/'
+```
+
+A non-empty list after the header means the upgrade is not done. Read
+`kubectl -n nexus logs <pod> --previous` before retrying or rolling back
+(§6.3). An agent restarting once or twice on a cold install is the known
+first-registration race noted in §20.8. More restarts than that, or any
+restarting control-plane pod, is a failed rollout.
+
+**Why the chart's bootstrap Job writes to the database.** The `bootstrap` Job
+inserts the tenant row and the hashes of `worker-api-key` (and
+`admin-api-key`, if set) from `existingSecret` directly into Postgres. This is
+the one place a credential is created by SQL rather than by the API, because
+nothing can call the API yet. The agents need a worker credential when they
+first start, a fresh install has no user or token to authenticate a
+`POST /tokens`, and self-registration (what `nexusctl up` uses locally) needs
+e-mail verification, which a production install cannot automate. The Job uses
+the chart's database credentials, is idempotent, and stores only SHA-256 hashes.
+Once the release is up, mint further credentials, including rotated worker
+tokens (role `worker`, scope `worker_rpc`, F114), through the console or
+`POST /v1/namespaces/{ns}/tokens`, and revoke the bootstrap keys. Locally,
+`nexusctl up` mints both of its credentials through the API and writes nothing
+to the database (cli/README.md, "Local quick start").
 
 ---
 

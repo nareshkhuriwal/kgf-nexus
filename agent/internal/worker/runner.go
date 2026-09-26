@@ -124,7 +124,9 @@ func (r *Runner) finishLogs(ctx context.Context, ship *logship.Shipper, log *slo
 	st := ship.Close(context.WithoutCancel(ctx))
 	log.Info("attempt log shipped", "lines", st.Lines, "bytes", st.Bytes, "chunks", st.Chunks,
 		"finalized", st.Finalized, "compacted", st.Compacted, "truncated_lines", st.TruncatedLines,
-		"dropped_lines", st.DroppedLines, "redactions", st.Redactions, "fenced", st.Fenced)
+		"dropped_lines", st.DroppedLines, "redactions", st.Redactions, "fenced", st.Fenced,
+		"outcome", st.Outcome)
+	r.Metrics.LogShipped(st)
 }
 
 // DefaultUninterruptibleCeiling bounds a deferred cancellation when the agent is

@@ -546,3 +546,55 @@ type stubQuerier struct{}
 func (stubQuerier) Query(context.Context, string, ...any) (pgx.Rows, error) {
 	return nil, errors.New("stub querier: no database")
 }
+
+// TestLogObjectsAreCountedApartFromOutputs: the task-log share of a pass is
+// reported separately, so log retention can be watched without it hiding in
+// the output totals (the nexus_artifact_gc_last_run_log_* gauges).
+func TestLogObjectsAreCountedApartFromOutputs(t *testing.T) {
+	fs := &fakeStore{
+		objects: []Candidate{
+			{Key: "default/logs/att-1/00000000.ndjson", LastModified: old(), SizeBytes: 1000},
+			{Key: "default/logs/att-1/log.ndjson", LastModified: old(), SizeBytes: 2000},
+			{Key: "default/logs/att-2/00000000.ndjson", LastModified: old(), SizeBytes: 400},
+			{Key: "default/logs/att-3/00000000.ndjson", LastModified: old(), SizeBytes: 50}, // live
+			{Key: "default/logs/att-4/00000000.ndjson", LastModified: fresh(), SizeBytes: 60},
+			{Key: "default/orphan-output", LastModified: old(), SizeBytes: 7},
+		},
+		deleteErr: map[string]error{"default/logs/att-2/00000000.ndjson": errors.New("access denied")},
+	}
+	sw := sweeperWithRefs(t, fs, Config{DryRun: false, GracePeriod: time.Hour},
+		refSet("default/logs/att-3/00000000.ndjson"), nil)
+
+	st, err := sw.Once(context.Background())
+	if err != nil {
+		t.Fatalf("Once: %v", err)
+	}
+	if st.LogObjects != 5 || st.LogOrphans != 3 || st.LogOrphanBytes != 3400 {
+		t.Errorf("log objects/orphans/orphan bytes = %d/%d/%d, want 5/3/3400",
+			st.LogObjects, st.LogOrphans, st.LogOrphanBytes)
+	}
+	if st.LogDeleted != 2 || st.LogDeletedBytes != 3000 || st.LogDeleteErrors != 1 {
+		t.Errorf("log deleted/deleted bytes/delete errors = %d/%d/%d, want 2/3000/1",
+			st.LogDeleted, st.LogDeletedBytes, st.LogDeleteErrors)
+	}
+	// The totals still include the log share.
+	if st.Orphans != 4 || st.Deleted != 3 || st.DeleteErrors != 1 {
+		t.Errorf("orphans/deleted/delete errors = %d/%d/%d, want 4/3/1", st.Orphans, st.Deleted, st.DeleteErrors)
+	}
+}
+
+// TestDryRunCollectsNoLogBytes: a dry run reports collectable logs and deletes
+// none of them.
+func TestDryRunCollectsNoLogBytes(t *testing.T) {
+	fs := &fakeStore{objects: []Candidate{
+		{Key: "default/logs/att-1/log.ndjson", LastModified: old(), SizeBytes: 900},
+	}}
+	sw := sweeperWithRefs(t, fs, Config{DryRun: true, GracePeriod: time.Hour}, refSet(), nil)
+	st, err := sw.Once(context.Background())
+	if err != nil {
+		t.Fatalf("Once: %v", err)
+	}
+	if st.LogOrphans != 1 || st.LogOrphanBytes != 900 || st.LogDeleted != 0 || st.LogDeletedBytes != 0 {
+		t.Errorf("dry run log stats = %+v", st)
+	}
+}

@@ -105,6 +105,8 @@ type API struct {
 	// is nil when disabled, which is the zero-config default and what keeps dev
 	// and the existing tests unchanged. See ratelimit.go.
 	limits gatewayLimiters
+	// limitMetrics instruments every limiter; nil records nothing.
+	limitMetrics *RateLimitMetrics
 	// schedules is nil when no schedule upstream is configured, in which case the
 	// schedule routes answer 501 rather than the gateway refusing to start. That
 	// keeps a gateway usable against a workflow-manager that predates schedules,
@@ -155,6 +157,7 @@ func (a *API) WithRateLimit(cfg RateLimitConfig) *API {
 // WithRateLimits enables the three gateway limiters with explicit settings.
 func (a *API) WithRateLimits(cfg GatewayRateLimits) *API {
 	a.limits = newGatewayLimiters(cfg, a.clock)
+	a.limits.instrument(a.limitMetrics)
 	return a
 }
 
