@@ -163,6 +163,10 @@ func groups() []*group {
 		backfillGroup(),
 		workerGroup(),
 		cacheGroup(),
+		triggerGroup(),
+		sensorGroup(),
+		notifyGroup(),
+		assetGroup(),
 	}
 }
 
