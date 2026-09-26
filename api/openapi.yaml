@@ -4998,6 +4998,7 @@ paths:
                 path: /v1/hooks/default/9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
                 signature_scheme: 'X-Nexus-Signature: v1=hex(HMAC-SHA256(secret, X-Nexus-Timestamp + "." + body))'
                 url: https://nexus.example.com/v1/hooks/default/9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                url_source: config
                 secret: 5e0b9d8c7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d
         '400': {$ref: '#/components/responses/ConfigBadRequest'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
@@ -8043,7 +8044,7 @@ components:
 
     WebhookTrigger:
       type: object
-      required: [id, namespace, name, workflow, params_mapping, idempotency_key_path, priority, tolerance_seconds, enabled, secret_rotated_at, previous_secret_expires_at, created_by, created_at, updated_at, last_fired_at, fire_count, revision, path, signature_scheme]
+      required: [id, namespace, name, workflow, params_mapping, idempotency_key_path, priority, tolerance_seconds, enabled, secret_rotated_at, previous_secret_expires_at, created_by, created_at, updated_at, last_fired_at, fire_count, revision, path, url_source, signature_scheme]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         namespace: {type: string}
@@ -8066,7 +8067,14 @@ components:
         fire_count: {type: integer, minimum: 0}
         revision: {type: integer, minimum: 1}
         path: {type: string, description: 'Where senders POST: `/v1/hooks/<ns>/<trigger id>`.'}
-        url: {type: string, description: 'The absolute hook URL, when the gateway is configured with its public URL.'}
+        url: {type: string, format: uri, description: 'The absolute hook URL. Present whenever the gateway knows its public address (see url_source); omitted, never guessed, when it does not.'}
+        url_source:
+          type: string
+          enum: [forwarded, config, unknown]
+          description: >-
+            Where `url` came from: `forwarded` headers of a proxy listed in
+            NEXUS_TRUSTED_PROXIES, the configured NEXUS_PUBLIC_URL, or
+            `unknown` (no url; a client must not build one from its own origin).
         signature_scheme: {type: string}
 
     WebhookTriggerWithSecret:

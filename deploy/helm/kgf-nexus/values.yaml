@@ -481,6 +481,11 @@ events:
   # Lets channels reach private and loopback addresses (on-premises receivers).
   # Off by default so a channel cannot be pointed at internal services.
   allowPrivateTargets: false
+  # CIDRs of the proxies in front of the gateway whose Forwarded /
+  # X-Forwarded-Host / X-Forwarded-Proto headers decide a webhook trigger's
+  # public URL, ahead of smtp.publicUrl (docs/OPERATIONS.md §27.1). Name only
+  # proxies that overwrite those headers; empty trusts none.
+  trustedProxies: []
 
 migrate:
   resources:

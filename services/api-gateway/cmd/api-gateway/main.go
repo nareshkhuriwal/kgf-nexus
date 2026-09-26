@@ -155,6 +155,25 @@ func run() error {
 	if secretBox == nil {
 		log.Warn("NEXUS_SECRET_KEY is not set: webhook triggers and inline channel secrets cannot be created")
 	}
+	// A trigger's hook URL is given to a third party, so a wrong base is worse
+	// than none: a malformed value stops startup (F156).
+	trustedProxies, err := rest.ParseTrustedProxies(os.Getenv("NEXUS_TRUSTED_PROXIES"))
+	if err != nil {
+		return err
+	}
+	eventsCfg := rest.EventsConfig{
+		Secrets:             secretBox,
+		TriggeredRuns:       wfmClient,
+		AllowPrivateTargets: os.Getenv("NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS") == "true",
+		PublicURL:           os.Getenv("NEXUS_PUBLIC_URL"),
+		TrustedProxies:      trustedProxies,
+	}
+	if err := eventsCfg.Validate(); err != nil {
+		return err
+	}
+	if eventsCfg.PublicURL == "" && len(trustedProxies) == 0 {
+		log.Warn("neither NEXUS_PUBLIC_URL nor NEXUS_TRUSTED_PROXIES is set: webhook trigger URLs are reported as unknown and the console shows only their path")
+	}
 
 	// ── REST listener ─────────────────────────────────────────────────────
 	api := rest.New(db, auth, wfmClient, rmClient, logStreamer, log).
@@ -176,12 +195,7 @@ func run() error {
 		// Rejections and bucket counts per limiter kind (docs/OPERATIONS.md §17);
 		// limiters enabled below are instrumented as they are built.
 		WithRateLimitMetrics(rest.NewRateLimitMetrics(reg)).
-		WithEvents(rest.EventsConfig{
-			Secrets:             secretBox,
-			TriggeredRuns:       wfmClient,
-			AllowPrivateTargets: os.Getenv("NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS") == "true",
-			PublicURL:           os.Getenv("NEXUS_PUBLIC_URL"),
-		})
+		WithEvents(eventsCfg)
 
 	// Rate limiting is opt-in because a limit guessed wrong is itself an outage:
 	// the right number depends on fleet size and the console's poll interval. Off

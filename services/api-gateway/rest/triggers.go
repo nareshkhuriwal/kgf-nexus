@@ -45,7 +45,10 @@ func (a *API) hookPath(ns, id string) string {
 	return "/v1/hooks/" + ns + "/" + id
 }
 
-func (a *API) triggerPayload(t store.WebhookTrigger) map[string]any {
+// triggerPayload renders a trigger. r decides the public hook URL (F156): url
+// is present whenever the gateway knows its public address, and url_source
+// always says where it came from ("forwarded", "config" or "unknown").
+func (a *API) triggerPayload(r *http.Request, t store.WebhookTrigger) map[string]any {
 	out := map[string]any{
 		"id": t.ID, "namespace": t.Namespace, "name": t.Name, "workflow": t.SpecName,
 		"params_mapping": t.ParamsMapping, "idempotency_key_path": t.IdempotencyKeyPath,
@@ -56,8 +59,13 @@ func (a *API) triggerPayload(t store.WebhookTrigger) map[string]any {
 		"path":             a.hookPath(t.Namespace, t.ID),
 		"signature_scheme": "X-Nexus-Signature: v1=hex(HMAC-SHA256(secret, X-Nexus-Timestamp + \".\" + body))",
 	}
-	if a.events != nil && a.events.PublicURL != "" {
-		out["url"] = strings.TrimRight(a.events.PublicURL, "/") + a.hookPath(t.Namespace, t.ID)
+	out["url_source"] = urlSourceUnknown
+	if a.events != nil {
+		origin, source := a.events.hookOrigin(r)
+		out["url_source"] = source
+		if origin != "" {
+			out["url"] = origin + a.hookPath(t.Namespace, t.ID)
+		}
 	}
 	if t.SpecVersion != nil {
 		out["workflow_version"] = *t.SpecVersion
@@ -144,7 +152,7 @@ func (a *API) listTriggers(w http.ResponseWriter, r *http.Request, _ authn.Princ
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, t := range rows {
-		out = append(out, a.triggerPayload(t))
+		out = append(out, a.triggerPayload(r, t))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"triggers": out})
 }
@@ -158,7 +166,7 @@ func (a *API) getTrigger(w http.ResponseWriter, r *http.Request, _ authn.Princip
 		a.failConfig(w, r, "get trigger", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, a.triggerPayload(t))
+	writeJSON(w, http.StatusOK, a.triggerPayload(r, t))
 }
 
 func (a *API) createTrigger(w http.ResponseWriter, r *http.Request, p authn.Principal) {
@@ -202,7 +210,7 @@ func (a *API) createTrigger(w http.ResponseWriter, r *http.Request, p authn.Prin
 		a.failConfig(w, r, "create trigger", err)
 		return
 	}
-	body := a.triggerPayload(out)
+	body := a.triggerPayload(r, out)
 	// Shown ONCE. It cannot be read back; rotate it to get a new one.
 	body["secret"] = secret
 	writeJSON(w, http.StatusCreated, body)
@@ -251,7 +259,7 @@ func (a *API) updateTrigger(w http.ResponseWriter, r *http.Request, p authn.Prin
 		a.failConfig(w, r, "update trigger", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, a.triggerPayload(out))
+	writeJSON(w, http.StatusOK, a.triggerPayload(r, out))
 }
 
 func (a *API) deleteTrigger(w http.ResponseWriter, r *http.Request, p authn.Principal) {
@@ -343,7 +351,7 @@ func (a *API) rotateTriggerSecret(w http.ResponseWriter, r *http.Request, p auth
 		a.failConfig(w, r, "rotate trigger secret", err)
 		return
 	}
-	resp := a.triggerPayload(out)
+	resp := a.triggerPayload(r, out)
 	resp["secret"] = secret
 	writeJSON(w, http.StatusOK, resp)
 }

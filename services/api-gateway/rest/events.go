@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"strings"
 
@@ -52,6 +53,9 @@ type EventsConfig struct {
 	AllowPrivateTargets bool
 	// PublicURL, when set, turns a trigger's hook path into an absolute URL.
 	PublicURL string
+	// TrustedProxies are the peers whose Forwarded / X-Forwarded-* headers
+	// decide the hook URL, ahead of PublicURL (public_url.go). Empty: none.
+	TrustedProxies []netip.Prefix
 }
 
 // WithEvents enables the notification, trigger, sensor and asset routes.

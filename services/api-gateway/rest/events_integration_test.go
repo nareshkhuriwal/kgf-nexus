@@ -249,8 +249,8 @@ func TestIntegrationWebhookTriggerSignatureReplayAndIdempotency(t *testing.T) {
 	  "params_mapping":{"repo":"$.payload.repository.name","ref":"refs: {{ $.payload.ref }}","env":"prod"}}`, e.adminA, 201)
 	secret := tr["secret"].(string)
 	path := tr["path"].(string)
-	if tr["url"] != "https://nexus.example"+path {
-		t.Fatalf("url %v", tr["url"])
+	if tr["url"] != "https://nexus.example"+path || tr["url_source"] != "config" {
+		t.Fatalf("url %v (%v)", tr["url"], tr["url_source"])
 	}
 	got := e.call("GET", ns+"/triggers/gh", "", e.readerA, 200)
 	if _, leaked := got["secret"]; leaked {

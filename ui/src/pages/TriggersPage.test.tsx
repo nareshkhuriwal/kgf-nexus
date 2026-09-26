@@ -227,3 +227,57 @@ describe('the trigger detail page', () => {
     expect(screen.getByRole('link', { name: /Back to triggers/ })).toBeInTheDocument();
   });
 });
+
+describe('the webhook URL (F156)', () => {
+  function api(t: WebhookTrigger) {
+    return stubApi((c) => {
+      if (c.method === 'GET' && c.path === `${NS}/triggers/github-push`) return [200, t];
+      if (c.path === `${NS}/triggers/github-push/deliveries`) return [200, { deliveries: [] }];
+      return workflows(c);
+    });
+  }
+
+  it('shows the URL the gateway returned, and where it came from', async () => {
+    api(trigger({ url: 'https://hooks.corp.example/v1/hooks/default/tr-1', url_source: 'forwarded' }));
+    detail();
+    expect(await screen.findByText('https://hooks.corp.example/v1/hooks/default/tr-1')).toBeInTheDocument();
+    expect(screen.getByText(/from the trusted proxy/)).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('never builds the URL from the page origin when the gateway does not know it', async () => {
+    api(trigger({ url: undefined, url_source: 'unknown' }));
+    detail();
+    const warning = await screen.findByRole('alert');
+    expect(warning).toHaveTextContent(/public address is unknown/i);
+    expect(warning).toHaveTextContent(/NEXUS_PUBLIC_URL/);
+    expect(screen.getByText('/v1/hooks/default/tr-1')).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(`${window.location.origin}/v1/hooks`);
+  });
+
+  it('treats a response from an older gateway, with neither url nor url_source, as unknown', async () => {
+    api(trigger());
+    detail();
+    expect(await screen.findByRole('alert')).toHaveTextContent(/public address is unknown/i);
+  });
+
+  it('warns alongside a freshly issued secret, and the example says what to fill in', async () => {
+    stubApi((c) => {
+      if (c.method === 'POST' && c.path === `${NS}/triggers`) return [201, { ...trigger({ name: 'deploy-hook', url_source: 'unknown' }), secret: 'nxwh_once' }];
+      if (c.path === `${NS}/triggers`) return [200, { triggers: [] }];
+      return workflows(c);
+    });
+    list();
+    fireEvent.click(await screen.findByRole('button', { name: 'New trigger' }));
+    const form = screen.getByRole('button', { name: 'Create trigger' }).closest('form')!;
+    fireEvent.change(within(form).getByRole('textbox', { name: /^name/ }), { target: { value: 'deploy-hook' } });
+    const picker = await within(form).findByRole('option', { name: /example-etl/ });
+    fireEvent.change(picker.closest('select')!, { target: { value: 'example-etl' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Create trigger' }));
+
+    expect(await screen.findByLabelText('One-time secret')).toHaveValue('nxwh_once');
+    expect(screen.getByLabelText('Webhook URL')).toHaveValue('/v1/hooks/default/tr-1');
+    expect(screen.getByText(/public address is unknown/i).closest('[role="alert"]')).not.toBeNull();
+    expect(screen.getByLabelText('Signing example').textContent).toContain("'<public address>/v1/hooks/default/tr-1'");
+  });
+});

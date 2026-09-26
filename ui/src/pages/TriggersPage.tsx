@@ -13,7 +13,6 @@
 
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { API_BASE } from '../api/client';
 import { errorMessage, useCreateTrigger, useDeleteTrigger, useTriggers, useUpdateTrigger } from '../api/hooks';
 import type { TriggerRequest, TriggerWithSecret, WebhookTrigger } from '../api/types';
 import { DataTable, type Column } from '../components/DataTable';
@@ -34,12 +33,54 @@ import {
 } from '../components/EventsShared';
 import { fmtAge, fmtTs } from '../lib/format';
 
-/** The address a sender posts to. `url` when the gateway knows its public base. */
-export function triggerUrl(t: Pick<WebhookTrigger, 'url' | 'path'>): { value: string; absolute: boolean } {
-  if (t.url) return { value: t.url, absolute: true };
-  if (/^https?:\/\//.test(t.path)) return { value: t.path, absolute: true };
-  const origin = API_BASE || (typeof window !== 'undefined' ? window.location.origin : '');
-  return origin ? { value: `${origin}${t.path}`, absolute: true } : { value: t.path, absolute: false };
+export interface TriggerUrl {
+  /** The absolute URL, or the bare path when the public address is unknown. */
+  value: string;
+  known: boolean;
+  source: 'forwarded' | 'config' | 'unknown';
+}
+
+/**
+ * The address a sender posts to, exactly as the gateway reported it (F156).
+ *
+ * The console never builds it from its own page origin: behind a proxy the
+ * console and the hook endpoint can be served under different names, and a
+ * guessed URL handed to a third party next to a fresh secret fails silently.
+ * When the gateway does not know its public address the path is shown with a
+ * warning instead.
+ */
+export function triggerUrl(t: Pick<WebhookTrigger, 'url' | 'url_source' | 'path'>): TriggerUrl {
+  if (t.url) return { value: t.url, known: true, source: t.url_source === 'forwarded' ? 'forwarded' : 'config' };
+  return { value: t.path, known: false, source: 'unknown' };
+}
+
+const URL_SOURCE_TEXT: Record<TriggerUrl['source'], string> = {
+  forwarded: 'Reported by the gateway from the trusted proxy in front of it.',
+  config: "Reported by the gateway from its configured public address (NEXUS_PUBLIC_URL).",
+  unknown: '',
+};
+
+export function TriggerUrlSource({ url }: { url: TriggerUrl }) {
+  return url.known ? <span className="form-hint">{URL_SOURCE_TEXT[url.source]}</span> : <UnknownUrlWarning />;
+}
+
+/** Shown wherever a hook URL would be, when the gateway cannot say what it is. */
+export function UnknownUrlWarning() {
+  return (
+    <div className="notice warn" role="alert">
+      <span className="notice-glyph" aria-hidden="true">
+        !
+      </span>
+      <div>
+        <div className="notice-title">The gateway&apos;s public address is unknown</div>
+        <div className="notice-detail">
+          Only the path is shown. Senders must post to it on the address the gateway is reachable at from outside, which
+          this console cannot know. Set <code>NEXUS_PUBLIC_URL</code> on the gateway, or list the proxy in front of it in{' '}
+          <code>NEXUS_TRUSTED_PROXIES</code>, and the full URL appears here.
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function signingExample(url: string): string {
@@ -59,17 +100,17 @@ export function signingExample(url: string): string {
 /** URL, scheme and example, shown with a freshly issued secret. */
 export function TriggerSecretDetails({ trigger }: { trigger: WebhookTrigger }) {
   const url = triggerUrl(trigger);
-  const example = signingExample(url.value);
+  const example = signingExample(url.known ? url.value : `<public address>${url.value}`);
   return (
     <>
       <label className="form-field">
         <span className="form-label">webhook URL</span>
         <div className="row" style={{ gap: 'var(--space-3)', flexWrap: 'wrap' }}>
           <input readOnly value={url.value} className="mono" aria-label="Webhook URL" style={{ flex: '1 1 260px', minWidth: 0 }} />
-          <CopyButton text={url.value} label="Copy URL" />
+          <CopyButton text={url.value} label={url.known ? 'Copy URL' : 'Copy path'} />
         </div>
-        {!url.absolute && <span className="form-hint">Relative to the API gateway&apos;s public address.</span>}
       </label>
+      <TriggerUrlSource url={url} />
       <div className="form-field">
         <span className="form-label">signing</span>
         <span className="form-hint">

@@ -954,7 +954,13 @@ export interface WebhookTrigger {
   fire_count: number;
   revision: number;
   path: string;
+  /** The absolute hook URL, decided by the gateway; absent when it is unknown. */
   url?: string;
+  /**
+   * Where `url` came from: a trusted proxy's forwarded headers, the gateway's
+   * NEXUS_PUBLIC_URL, or unknown. Absent from gateways older than F156.
+   */
+  url_source?: 'forwarded' | 'config' | 'unknown';
   signature_scheme: string;
 }
 
