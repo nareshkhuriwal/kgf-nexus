@@ -64,6 +64,7 @@ const MODULE_ACTIONS: Readonly<Record<string, readonly string[]>> = Object.freez
   tokens: ['view', 'manage'],
   audit: ['view'],
   roles: ['view', 'manage'],
+  service_accounts: ['view', 'manage'],
   quotas: ['view', 'manage'],
   usage: ['view'],
 });

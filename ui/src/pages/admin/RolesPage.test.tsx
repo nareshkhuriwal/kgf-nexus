@@ -7,10 +7,10 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { PermissionContext } from '../../components/Permissions';
 import { RolesPage } from './RolesPage';
 import { authApi, authRequest, type User } from '../../api/auth';
-vi.mock('../../api/auth', () => ({authApi:{listUsers:vi.fn()},authRequest:vi.fn()}));
+vi.mock('../../api/auth', () => ({authApi:{listUsersPage:vi.fn()},authRequest:vi.fn()}));
 afterEach(() => {cleanup();vi.resetAllMocks();});
 function setup(users: User[], catalog: unknown = {roles:[],catalog:{}}) {
- vi.mocked(authApi.listUsers).mockResolvedValue(users);
+ vi.mocked(authApi.listUsersPage).mockResolvedValue({users,next_cursor:null});
  vi.mocked(authRequest).mockImplementation(async path => path.endsWith('/roles') && path.includes('/users/') ? {roles:[],legacy:false,revision:1} : catalog as never);
  const client=new QueryClient({defaultOptions:{queries:{retry:false},mutations:{retry:false}}});
  render(<MemoryRouter><PermissionContext.Provider value={['roles.view','roles.manage','users.view','users.manage']}><QueryClientProvider client={client}><RolesPage namespace="default"/></QueryClientProvider></PermissionContext.Provider></MemoryRouter>);
@@ -32,6 +32,23 @@ it('keeps reader accounts selectable for role assignment', async () => {
  fireEvent.change(screen.getByLabelText('User account'),{target:{value:'reader'}});
  expect(await screen.findByRole('button',{name:'Save assignments'})).toBeTruthy();
  expect(screen.queryByText(/Only administrator accounts exist/)).toBeNull();
+});
+it('searches accounts on the server and pages with the cursor instead of a fixed cap', async () => {
+ vi.mocked(authApi.listUsersPage).mockImplementation(async (_ns, opts) => {
+  if (opts?.cursor === 'c2') return {users:[account('older')],next_cursor:null};
+  if (opts?.q === 'rea') return {users:[account('reader')],next_cursor:null};
+  return {users:[account('newest')],next_cursor:'c2'};
+ });
+ vi.mocked(authRequest).mockResolvedValue({roles:[],catalog:{}} as never);
+ const client=new QueryClient({defaultOptions:{queries:{retry:false}}});
+ render(<MemoryRouter><PermissionContext.Provider value={['roles.view','roles.manage','users.view']}><QueryClientProvider client={client}><RolesPage namespace="default"/></QueryClientProvider></PermissionContext.Provider></MemoryRouter>);
+ await screen.findByRole('option',{name:'newest@example.test'});
+ expect(screen.queryByText(/up to 500/)).toBeNull();
+ fireEvent.click(screen.getByRole('button',{name:'Load more accounts'}));
+ await screen.findByRole('option',{name:'older@example.test'});
+ fireEvent.change(screen.getByLabelText('Find account'),{target:{value:'rea'}});
+ await screen.findByRole('option',{name:'reader@example.test'});
+ expect(vi.mocked(authApi.listUsersPage).mock.calls.some(([, o]) => o?.q === 'rea')).toBe(true);
 });
 it('explains an empty user list', async () => {
  setup([]);

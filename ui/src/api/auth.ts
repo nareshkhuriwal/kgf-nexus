@@ -194,6 +194,12 @@ export interface User {
   disabled: boolean;
 }
 
+/** One page of the users listing. */
+export interface UsersPage {
+  users: User[];
+  next_cursor: string | null;
+}
+
 export interface ScopedToken {
   id: string;
   namespace: string;
@@ -206,6 +212,10 @@ export interface ScopedToken {
   created_at: string;
   revoked_at: string | null;
   live: boolean;
+  /** The service account this token belongs to (ADR-0024 §6), if any. */
+  service_account_id?: string | null;
+  /** The token's permission ceiling; null when it has none. */
+  permissions?: string[] | null;
   /** Present ONLY in the create response, and never again. */
   token?: string;
 }
@@ -310,6 +320,26 @@ export const authApi = {
   async listUsers(namespace: string, limit?: number): Promise<User[]> {
     const q = limit !== undefined ? `?limit=${limit}` : '';
     return list<User>(await authRequest<unknown>(`${ns(namespace)}/users${q}`), 'users');
+  },
+
+  /**
+   * One keyset page of users (ADR-0024 §6): newest first, at most 200, with
+   * `q` matched against email and display name ON THE SERVER. `next_cursor`
+   * is null on the last page; pass it back to get the next one.
+   */
+  async listUsersPage(
+    namespace: string,
+    opts: { limit?: number; cursor?: string | null; q?: string } = {},
+  ): Promise<UsersPage> {
+    const params = new URLSearchParams();
+    if (opts.limit) params.set('limit', String(opts.limit));
+    if (opts.cursor) params.set('cursor', opts.cursor);
+    if (opts.q) params.set('q', opts.q);
+    const qs = params.toString();
+    const res = await authRequest<{ users?: User[]; next_cursor?: string | null }>(
+      `${ns(namespace)}/users${qs ? `?${qs}` : ''}`,
+    );
+    return { users: Array.isArray(res?.users) ? res.users : [], next_cursor: res?.next_cursor ?? null };
   },
 
   createUser(
