@@ -4197,6 +4197,44 @@ scheduler's event, the node is `FAILED`, the downstream node is
 `UPSTREAM_FAILED` and the run is `FAILED`. All of `services/dag-engine`'s
 integration tests pass.
 
+### F146. `prefer_same_worker_as` was parsed and never read — FIXED
+
+**Severity:** low (a documented soft preference that did nothing).
+
+`TaskSpec.prefer_same_worker_as` ("soft data-locality hint: prefer the worker
+that ran this node", task.proto field 9) has been accepted by the schema,
+decoded by the gateway, emitted by the SDK and stored in every node spec since
+Phase 0. No scheduler code read it: `TaskSpecView` did not even have the field,
+so a task that declared it was placed exactly as one that did not, and nothing
+told the author.
+
+**Fix (ADR-0030 §5):** the claim resolves the named node's most recent
+SUCCEEDED attempt in the same run to its worker's **hostname** (worker ids are
+per session, ADR-0010 point 7; the data lives on the host) and adds it to the
+placement score. It is a soft preference like every other one: the push path
+picks the matching worker among those that fit, and the pull path defers the
+attempt to it for at most `NEXUS_PLACEMENT_WAIT`. Test:
+`TestPreferSameWorkerAsIsRead` (a worker on another host polls first and is
+refused; the preferred host gets the task).
+
+### F147. The scheduler's database role could not charge the retry budget it owns — FIXED
+
+**Severity:** medium under per-service database roles (every automatic retry
+failed); none with the single superuser role compose and the chart use today.
+
+`CreatePendingRetry` (scheduler_timers.go) creates a retry attempt and, in the
+same transaction, increments `task_nodes.attempts_used`. Migration 0005 granted
+UPDATE on that column only to `nexus_dag_engine`, so a scheduler connected as
+`nexus_scheduler` -- the ADR-0011 least-privilege deployment 0005 exists for --
+failed every retry-backoff timer with `permission denied for table
+task_nodes (SQLSTATE 42501)`: no retry was ever created, and the timer was
+retried forever. Nothing tested the scheduler role against that statement.
+
+**Fix (migration 0035):** `GRANT UPDATE (attempts_used, preemptions_used) ON
+task_nodes TO nexus_scheduler`, column-scoped like 0005's `event_seq` grant.
+`TestIntegrationSchedulerRoleChargesRetryBudgets` runs as the scheduler role;
+with the grant revoked it fails with exactly the error above.
+
 ### F148. A running task had no channel to the control plane; Python heartbeats were silent no-ops — FIXED (kubernetes: OPEN)
 
 **Severity:** high (a task declaring `timeouts.heartbeat` could not keep itself
@@ -4376,3 +4414,26 @@ kubernetes env builders, and the rendered Job's containers) and
 start from the developer's environment plus the `NEXUS_*` task contract, so a
 task can use the tools and credentials the developer already has; they
 resolve no `SecretRef`s. Documented in OPERATIONS §25.1 rather than changed.
+
+### F152. A run whose last attempt was lost with no retry budget stayed RUNNING forever — FIXED
+
+**Severity:** medium (a run never reached a terminal state, so its
+schedule's overlap policy, its notifications and its operator all waited on a
+run that could not finish). Pre-existing; found by the simulated spot/GPU e2e
+(`tests/gpusim`) on `feat/gpu-and-multicluster-scheduling`.
+
+When a node's last attempt ended through lease expiry (LOST) with its retry
+budget already spent, the scheduler wrote the terminal attempt and scheduled
+nothing, and nothing reconciled the node afterwards: no result report arrived
+to trigger the DAG engine, so the node still read RUNNING. The stalled-run
+sweep (`WFMListStalledRuns`, `internal/store/wfm_runs.go`) looked only for
+runs whose nodes were all terminal, so it skipped this run, which then stayed
+RUNNING forever.
+
+**Fix.** The stalled-run sweep also treats a node whose attempts have all
+ended with no retry scheduled (no pending `retry_backoff` timer) as settled,
+so the run is handed back to the DAG engine, which derives the node's final
+state (with F145's refusal events and the pending-retry probe, a node with a
+retry on its way is never taken for exhausted). Held by
+`TestIntegrationListStalledRuns` (an unreconciled run with its budget spent is
+reported stalled; a run with a retry scheduled is not).

@@ -71,7 +71,7 @@ func (x RecordScalingRequest_IdleUpdate) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RecordScalingRequest_IdleUpdate.Descriptor instead.
 func (RecordScalingRequest_IdleUpdate) EnumDescriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{14, 0}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{15, 0}
 }
 
 type GetAssignmentRequest struct {
@@ -603,8 +603,17 @@ type ReportObservationsRequest struct {
 	CompleteKinds []string          `protobuf:"bytes,8,rep,name=complete_kinds,json=completeKinds,proto3" json:"complete_kinds,omitempty"`
 	Objects       []*ObservedObject `protobuf:"bytes,9,rep,name=objects,proto3" json:"objects,omitempty"`
 	LastError     string            `protobuf:"bytes,10,opt,name=last_error,json=lastError,proto3" json:"last_error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// ADR-0031: the cluster's placement labels (operator-declared plus observed
+	// region/provider), stored in cluster_status.labels. Replaced only when
+	// labels_reported is set, so an older controller leaves them alone.
+	Labels         map[string]string `protobuf:"bytes,11,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	LabelsReported bool              `protobuf:"varint,12,opt,name=labels_reported,json=labelsReported,proto3" json:"labels_reported,omitempty"`
+	// ADR-0031 §3: remaining ResourceQuota room per task namespace, observed
+	// now. Replaced only when headroom_reported is set.
+	Headroom         []*NamespaceHeadroom `protobuf:"bytes,13,rep,name=headroom,proto3" json:"headroom,omitempty"`
+	HeadroomReported bool                 `protobuf:"varint,14,opt,name=headroom_reported,json=headroomReported,proto3" json:"headroom_reported,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ReportObservationsRequest) Reset() {
@@ -707,6 +716,122 @@ func (x *ReportObservationsRequest) GetLastError() string {
 	return ""
 }
 
+func (x *ReportObservationsRequest) GetLabels() map[string]string {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+func (x *ReportObservationsRequest) GetLabelsReported() bool {
+	if x != nil {
+		return x.LabelsReported
+	}
+	return false
+}
+
+func (x *ReportObservationsRequest) GetHeadroom() []*NamespaceHeadroom {
+	if x != nil {
+		return x.Headroom
+	}
+	return nil
+}
+
+func (x *ReportObservationsRequest) GetHeadroomReported() bool {
+	if x != nil {
+		return x.HeadroomReported
+	}
+	return false
+}
+
+// NamespaceHeadroom is min(hard - used) over a namespace's ResourceQuotas, per
+// resource. A resource no quota constrains is absent (unbounded), not zero.
+type NamespaceHeadroom struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Namespace string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	// -1 = unbounded.
+	CpuMillis   int64 `protobuf:"varint,2,opt,name=cpu_millis,json=cpuMillis,proto3" json:"cpu_millis,omitempty"`
+	MemoryBytes int64 `protobuf:"varint,3,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
+	GpuCount    int64 `protobuf:"varint,4,opt,name=gpu_count,json=gpuCount,proto3" json:"gpu_count,omitempty"`
+	Pods        int64 `protobuf:"varint,5,opt,name=pods,proto3" json:"pods,omitempty"`
+	// Extended resources other than the GPU, e.g. nvidia.com/mig-1g.10gb.
+	Extended      map[string]int64 `protobuf:"bytes,6,rep,name=extended,proto3" json:"extended,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NamespaceHeadroom) Reset() {
+	*x = NamespaceHeadroom{}
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NamespaceHeadroom) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NamespaceHeadroom) ProtoMessage() {}
+
+func (x *NamespaceHeadroom) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NamespaceHeadroom.ProtoReflect.Descriptor instead.
+func (*NamespaceHeadroom) Descriptor() ([]byte, []int) {
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *NamespaceHeadroom) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *NamespaceHeadroom) GetCpuMillis() int64 {
+	if x != nil {
+		return x.CpuMillis
+	}
+	return 0
+}
+
+func (x *NamespaceHeadroom) GetMemoryBytes() int64 {
+	if x != nil {
+		return x.MemoryBytes
+	}
+	return 0
+}
+
+func (x *NamespaceHeadroom) GetGpuCount() int64 {
+	if x != nil {
+		return x.GpuCount
+	}
+	return 0
+}
+
+func (x *NamespaceHeadroom) GetPods() int64 {
+	if x != nil {
+		return x.Pods
+	}
+	return 0
+}
+
+func (x *NamespaceHeadroom) GetExtended() map[string]int64 {
+	if x != nil {
+		return x.Extended
+	}
+	return nil
+}
+
 type ReportObservationsResponse struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	DesiredRevision int64                  `protobuf:"varint,1,opt,name=desired_revision,json=desiredRevision,proto3" json:"desired_revision,omitempty"`
@@ -716,7 +841,7 @@ type ReportObservationsResponse struct {
 
 func (x *ReportObservationsResponse) Reset() {
 	*x = ReportObservationsResponse{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[5]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -728,7 +853,7 @@ func (x *ReportObservationsResponse) String() string {
 func (*ReportObservationsResponse) ProtoMessage() {}
 
 func (x *ReportObservationsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[5]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -741,7 +866,7 @@ func (x *ReportObservationsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportObservationsResponse.ProtoReflect.Descriptor instead.
 func (*ReportObservationsResponse) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{5}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ReportObservationsResponse) GetDesiredRevision() int64 {
@@ -763,7 +888,7 @@ type GetPoolStateRequest struct {
 
 func (x *GetPoolStateRequest) Reset() {
 	*x = GetPoolStateRequest{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[6]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -775,7 +900,7 @@ func (x *GetPoolStateRequest) String() string {
 func (*GetPoolStateRequest) ProtoMessage() {}
 
 func (x *GetPoolStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[6]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -788,7 +913,7 @@ func (x *GetPoolStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPoolStateRequest.ProtoReflect.Descriptor instead.
 func (*GetPoolStateRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{6}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetPoolStateRequest) GetClusterId() string {
@@ -834,7 +959,7 @@ type Demand struct {
 
 func (x *Demand) Reset() {
 	*x = Demand{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[7]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -846,7 +971,7 @@ func (x *Demand) String() string {
 func (*Demand) ProtoMessage() {}
 
 func (x *Demand) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[7]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -859,7 +984,7 @@ func (x *Demand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Demand.ProtoReflect.Descriptor instead.
 func (*Demand) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{7}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Demand) GetPendingTasks() int32 {
@@ -930,7 +1055,7 @@ type PodWorkers struct {
 
 func (x *PodWorkers) Reset() {
 	*x = PodWorkers{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[8]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -942,7 +1067,7 @@ func (x *PodWorkers) String() string {
 func (*PodWorkers) ProtoMessage() {}
 
 func (x *PodWorkers) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[8]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -955,7 +1080,7 @@ func (x *PodWorkers) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PodWorkers.ProtoReflect.Descriptor instead.
 func (*PodWorkers) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{8}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *PodWorkers) GetHostname() string {
@@ -1017,7 +1142,7 @@ type PoolState struct {
 
 func (x *PoolState) Reset() {
 	*x = PoolState{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[9]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1029,7 +1154,7 @@ func (x *PoolState) String() string {
 func (*PoolState) ProtoMessage() {}
 
 func (x *PoolState) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[9]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1042,7 +1167,7 @@ func (x *PoolState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PoolState.ProtoReflect.Descriptor instead.
 func (*PoolState) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{9}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *PoolState) GetDemand() *Demand {
@@ -1077,7 +1202,7 @@ type DrainPodRequest struct {
 
 func (x *DrainPodRequest) Reset() {
 	*x = DrainPodRequest{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[10]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1089,7 +1214,7 @@ func (x *DrainPodRequest) String() string {
 func (*DrainPodRequest) ProtoMessage() {}
 
 func (x *DrainPodRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[10]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1102,7 +1227,7 @@ func (x *DrainPodRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainPodRequest.ProtoReflect.Descriptor instead.
 func (*DrainPodRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{10}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *DrainPodRequest) GetClusterId() string {
@@ -1171,7 +1296,7 @@ type DrainPodResponse struct {
 
 func (x *DrainPodResponse) Reset() {
 	*x = DrainPodResponse{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[11]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1183,7 +1308,7 @@ func (x *DrainPodResponse) String() string {
 func (*DrainPodResponse) ProtoMessage() {}
 
 func (x *DrainPodResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[11]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1196,7 +1321,7 @@ func (x *DrainPodResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainPodResponse.ProtoReflect.Descriptor instead.
 func (*DrainPodResponse) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{11}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DrainPodResponse) GetDrained() int32 {
@@ -1224,7 +1349,7 @@ type CheckPodRemovableRequest struct {
 
 func (x *CheckPodRemovableRequest) Reset() {
 	*x = CheckPodRemovableRequest{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[12]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1236,7 +1361,7 @@ func (x *CheckPodRemovableRequest) String() string {
 func (*CheckPodRemovableRequest) ProtoMessage() {}
 
 func (x *CheckPodRemovableRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[12]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1249,7 +1374,7 @@ func (x *CheckPodRemovableRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckPodRemovableRequest.ProtoReflect.Descriptor instead.
 func (*CheckPodRemovableRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{12}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *CheckPodRemovableRequest) GetClusterId() string {
@@ -1284,7 +1409,7 @@ type CheckPodRemovableResponse struct {
 
 func (x *CheckPodRemovableResponse) Reset() {
 	*x = CheckPodRemovableResponse{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[13]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1296,7 +1421,7 @@ func (x *CheckPodRemovableResponse) String() string {
 func (*CheckPodRemovableResponse) ProtoMessage() {}
 
 func (x *CheckPodRemovableResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[13]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1309,7 +1434,7 @@ func (x *CheckPodRemovableResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckPodRemovableResponse.ProtoReflect.Descriptor instead.
 func (*CheckPodRemovableResponse) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{13}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CheckPodRemovableResponse) GetRemovable() bool {
@@ -1359,7 +1484,7 @@ type RecordScalingRequest struct {
 
 func (x *RecordScalingRequest) Reset() {
 	*x = RecordScalingRequest{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[14]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1371,7 +1496,7 @@ func (x *RecordScalingRequest) String() string {
 func (*RecordScalingRequest) ProtoMessage() {}
 
 func (x *RecordScalingRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[14]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1384,7 +1509,7 @@ func (x *RecordScalingRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordScalingRequest.ProtoReflect.Descriptor instead.
 func (*RecordScalingRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{14}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *RecordScalingRequest) GetClusterId() string {
@@ -1507,7 +1632,7 @@ type RecordScalingResponse struct {
 
 func (x *RecordScalingResponse) Reset() {
 	*x = RecordScalingResponse{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[15]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1519,7 +1644,7 @@ func (x *RecordScalingResponse) String() string {
 func (*RecordScalingResponse) ProtoMessage() {}
 
 func (x *RecordScalingResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[15]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1532,7 +1657,7 @@ func (x *RecordScalingResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordScalingResponse.ProtoReflect.Descriptor instead.
 func (*RecordScalingResponse) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{15}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{16}
 }
 
 type ReportReconcileErrorRequest struct {
@@ -1547,7 +1672,7 @@ type ReportReconcileErrorRequest struct {
 
 func (x *ReportReconcileErrorRequest) Reset() {
 	*x = ReportReconcileErrorRequest{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[16]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1559,7 +1684,7 @@ func (x *ReportReconcileErrorRequest) String() string {
 func (*ReportReconcileErrorRequest) ProtoMessage() {}
 
 func (x *ReportReconcileErrorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[16]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1572,7 +1697,7 @@ func (x *ReportReconcileErrorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportReconcileErrorRequest.ProtoReflect.Descriptor instead.
 func (*ReportReconcileErrorRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{16}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ReportReconcileErrorRequest) GetClusterId() string {
@@ -1611,7 +1736,7 @@ type ReportReconcileErrorResponse struct {
 
 func (x *ReportReconcileErrorResponse) Reset() {
 	*x = ReportReconcileErrorResponse{}
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[17]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1623,7 +1748,7 @@ func (x *ReportReconcileErrorResponse) String() string {
 func (*ReportReconcileErrorResponse) ProtoMessage() {}
 
 func (x *ReportReconcileErrorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[17]
+	mi := &file_nexus_rm_v1_cluster_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1636,7 +1761,7 @@ func (x *ReportReconcileErrorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportReconcileErrorResponse.ProtoReflect.Descriptor instead.
 func (*ReportReconcileErrorResponse) Descriptor() ([]byte, []int) {
-	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{17}
+	return file_nexus_rm_v1_cluster_proto_rawDescGZIP(), []int{18}
 }
 
 var File_nexus_rm_v1_cluster_proto protoreflect.FileDescriptor
@@ -1700,7 +1825,7 @@ const file_nexus_rm_v1_cluster_proto_rawDesc = "" +
 	"\x10resource_version\x18\n" +
 	" \x01(\tR\x0fresourceVersion\x12!\n" +
 	"\fsummary_json\x18\v \x01(\tR\vsummaryJson\x12+\n" +
-	"\x12created_at_unix_ms\x18\f \x01(\x03R\x0fcreatedAtUnixMs\"\xd1\x03\n" +
+	"\x12created_at_unix_ms\x18\f \x01(\x03R\x0fcreatedAtUnixMs\"\xea\x05\n" +
 	"\x19ReportObservationsRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\tR\tclusterId\x12/\n" +
@@ -1714,7 +1839,25 @@ const file_nexus_rm_v1_cluster_proto_rawDesc = "" +
 	"\aobjects\x18\t \x03(\v2\x1b.nexus.rm.v1.ObservedObjectR\aobjects\x12\x1d\n" +
 	"\n" +
 	"last_error\x18\n" +
-	" \x01(\tR\tlastError\"G\n" +
+	" \x01(\tR\tlastError\x12J\n" +
+	"\x06labels\x18\v \x03(\v22.nexus.rm.v1.ReportObservationsRequest.LabelsEntryR\x06labels\x12'\n" +
+	"\x0flabels_reported\x18\f \x01(\bR\x0elabelsReported\x12:\n" +
+	"\bheadroom\x18\r \x03(\v2\x1e.nexus.rm.v1.NamespaceHeadroomR\bheadroom\x12+\n" +
+	"\x11headroom_reported\x18\x0e \x01(\bR\x10headroomReported\x1a9\n" +
+	"\vLabelsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xab\x02\n" +
+	"\x11NamespaceHeadroom\x12\x1c\n" +
+	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x1d\n" +
+	"\n" +
+	"cpu_millis\x18\x02 \x01(\x03R\tcpuMillis\x12!\n" +
+	"\fmemory_bytes\x18\x03 \x01(\x03R\vmemoryBytes\x12\x1b\n" +
+	"\tgpu_count\x18\x04 \x01(\x03R\bgpuCount\x12\x12\n" +
+	"\x04pods\x18\x05 \x01(\x03R\x04pods\x12H\n" +
+	"\bextended\x18\x06 \x03(\v2,.nexus.rm.v1.NamespaceHeadroom.ExtendedEntryR\bextended\x1a;\n" +
+	"\rExtendedEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"G\n" +
 	"\x1aReportObservationsResponse\x12)\n" +
 	"\x10desired_revision\x18\x01 \x01(\x03R\x0fdesiredRevision\"\x84\x01\n" +
 	"\x13GetPoolStateRequest\x12\x1d\n" +
@@ -1825,7 +1968,7 @@ func file_nexus_rm_v1_cluster_proto_rawDescGZIP() []byte {
 }
 
 var file_nexus_rm_v1_cluster_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_nexus_rm_v1_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_nexus_rm_v1_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_nexus_rm_v1_cluster_proto_goTypes = []any{
 	(RecordScalingRequest_IdleUpdate)(0), // 0: nexus.rm.v1.RecordScalingRequest.IdleUpdate
 	(*GetAssignmentRequest)(nil),         // 1: nexus.rm.v1.GetAssignmentRequest
@@ -1833,46 +1976,52 @@ var file_nexus_rm_v1_cluster_proto_goTypes = []any{
 	(*PoolBinding)(nil),                  // 3: nexus.rm.v1.PoolBinding
 	(*ObservedObject)(nil),               // 4: nexus.rm.v1.ObservedObject
 	(*ReportObservationsRequest)(nil),    // 5: nexus.rm.v1.ReportObservationsRequest
-	(*ReportObservationsResponse)(nil),   // 6: nexus.rm.v1.ReportObservationsResponse
-	(*GetPoolStateRequest)(nil),          // 7: nexus.rm.v1.GetPoolStateRequest
-	(*Demand)(nil),                       // 8: nexus.rm.v1.Demand
-	(*PodWorkers)(nil),                   // 9: nexus.rm.v1.PodWorkers
-	(*PoolState)(nil),                    // 10: nexus.rm.v1.PoolState
-	(*DrainPodRequest)(nil),              // 11: nexus.rm.v1.DrainPodRequest
-	(*DrainPodResponse)(nil),             // 12: nexus.rm.v1.DrainPodResponse
-	(*CheckPodRemovableRequest)(nil),     // 13: nexus.rm.v1.CheckPodRemovableRequest
-	(*CheckPodRemovableResponse)(nil),    // 14: nexus.rm.v1.CheckPodRemovableResponse
-	(*RecordScalingRequest)(nil),         // 15: nexus.rm.v1.RecordScalingRequest
-	(*RecordScalingResponse)(nil),        // 16: nexus.rm.v1.RecordScalingResponse
-	(*ReportReconcileErrorRequest)(nil),  // 17: nexus.rm.v1.ReportReconcileErrorRequest
-	(*ReportReconcileErrorResponse)(nil), // 18: nexus.rm.v1.ReportReconcileErrorResponse
+	(*NamespaceHeadroom)(nil),            // 6: nexus.rm.v1.NamespaceHeadroom
+	(*ReportObservationsResponse)(nil),   // 7: nexus.rm.v1.ReportObservationsResponse
+	(*GetPoolStateRequest)(nil),          // 8: nexus.rm.v1.GetPoolStateRequest
+	(*Demand)(nil),                       // 9: nexus.rm.v1.Demand
+	(*PodWorkers)(nil),                   // 10: nexus.rm.v1.PodWorkers
+	(*PoolState)(nil),                    // 11: nexus.rm.v1.PoolState
+	(*DrainPodRequest)(nil),              // 12: nexus.rm.v1.DrainPodRequest
+	(*DrainPodResponse)(nil),             // 13: nexus.rm.v1.DrainPodResponse
+	(*CheckPodRemovableRequest)(nil),     // 14: nexus.rm.v1.CheckPodRemovableRequest
+	(*CheckPodRemovableResponse)(nil),    // 15: nexus.rm.v1.CheckPodRemovableResponse
+	(*RecordScalingRequest)(nil),         // 16: nexus.rm.v1.RecordScalingRequest
+	(*RecordScalingResponse)(nil),        // 17: nexus.rm.v1.RecordScalingResponse
+	(*ReportReconcileErrorRequest)(nil),  // 18: nexus.rm.v1.ReportReconcileErrorRequest
+	(*ReportReconcileErrorResponse)(nil), // 19: nexus.rm.v1.ReportReconcileErrorResponse
+	nil,                                  // 20: nexus.rm.v1.ReportObservationsRequest.LabelsEntry
+	nil,                                  // 21: nexus.rm.v1.NamespaceHeadroom.ExtendedEntry
 }
 var file_nexus_rm_v1_cluster_proto_depIdxs = []int32{
 	3,  // 0: nexus.rm.v1.ClusterAssignment.bindings:type_name -> nexus.rm.v1.PoolBinding
 	4,  // 1: nexus.rm.v1.ReportObservationsRequest.objects:type_name -> nexus.rm.v1.ObservedObject
-	8,  // 2: nexus.rm.v1.PoolState.demand:type_name -> nexus.rm.v1.Demand
-	9,  // 3: nexus.rm.v1.PoolState.pods:type_name -> nexus.rm.v1.PodWorkers
-	9,  // 4: nexus.rm.v1.CheckPodRemovableResponse.workers:type_name -> nexus.rm.v1.PodWorkers
-	0,  // 5: nexus.rm.v1.RecordScalingRequest.idle_update:type_name -> nexus.rm.v1.RecordScalingRequest.IdleUpdate
-	1,  // 6: nexus.rm.v1.ClusterControllerService.GetAssignment:input_type -> nexus.rm.v1.GetAssignmentRequest
-	5,  // 7: nexus.rm.v1.ClusterControllerService.ReportObservations:input_type -> nexus.rm.v1.ReportObservationsRequest
-	7,  // 8: nexus.rm.v1.ClusterControllerService.GetPoolState:input_type -> nexus.rm.v1.GetPoolStateRequest
-	11, // 9: nexus.rm.v1.ClusterControllerService.DrainPod:input_type -> nexus.rm.v1.DrainPodRequest
-	13, // 10: nexus.rm.v1.ClusterControllerService.CheckPodRemovable:input_type -> nexus.rm.v1.CheckPodRemovableRequest
-	15, // 11: nexus.rm.v1.ClusterControllerService.RecordScaling:input_type -> nexus.rm.v1.RecordScalingRequest
-	17, // 12: nexus.rm.v1.ClusterControllerService.ReportReconcileError:input_type -> nexus.rm.v1.ReportReconcileErrorRequest
-	2,  // 13: nexus.rm.v1.ClusterControllerService.GetAssignment:output_type -> nexus.rm.v1.ClusterAssignment
-	6,  // 14: nexus.rm.v1.ClusterControllerService.ReportObservations:output_type -> nexus.rm.v1.ReportObservationsResponse
-	10, // 15: nexus.rm.v1.ClusterControllerService.GetPoolState:output_type -> nexus.rm.v1.PoolState
-	12, // 16: nexus.rm.v1.ClusterControllerService.DrainPod:output_type -> nexus.rm.v1.DrainPodResponse
-	14, // 17: nexus.rm.v1.ClusterControllerService.CheckPodRemovable:output_type -> nexus.rm.v1.CheckPodRemovableResponse
-	16, // 18: nexus.rm.v1.ClusterControllerService.RecordScaling:output_type -> nexus.rm.v1.RecordScalingResponse
-	18, // 19: nexus.rm.v1.ClusterControllerService.ReportReconcileError:output_type -> nexus.rm.v1.ReportReconcileErrorResponse
-	13, // [13:20] is the sub-list for method output_type
-	6,  // [6:13] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	20, // 2: nexus.rm.v1.ReportObservationsRequest.labels:type_name -> nexus.rm.v1.ReportObservationsRequest.LabelsEntry
+	6,  // 3: nexus.rm.v1.ReportObservationsRequest.headroom:type_name -> nexus.rm.v1.NamespaceHeadroom
+	21, // 4: nexus.rm.v1.NamespaceHeadroom.extended:type_name -> nexus.rm.v1.NamespaceHeadroom.ExtendedEntry
+	9,  // 5: nexus.rm.v1.PoolState.demand:type_name -> nexus.rm.v1.Demand
+	10, // 6: nexus.rm.v1.PoolState.pods:type_name -> nexus.rm.v1.PodWorkers
+	10, // 7: nexus.rm.v1.CheckPodRemovableResponse.workers:type_name -> nexus.rm.v1.PodWorkers
+	0,  // 8: nexus.rm.v1.RecordScalingRequest.idle_update:type_name -> nexus.rm.v1.RecordScalingRequest.IdleUpdate
+	1,  // 9: nexus.rm.v1.ClusterControllerService.GetAssignment:input_type -> nexus.rm.v1.GetAssignmentRequest
+	5,  // 10: nexus.rm.v1.ClusterControllerService.ReportObservations:input_type -> nexus.rm.v1.ReportObservationsRequest
+	8,  // 11: nexus.rm.v1.ClusterControllerService.GetPoolState:input_type -> nexus.rm.v1.GetPoolStateRequest
+	12, // 12: nexus.rm.v1.ClusterControllerService.DrainPod:input_type -> nexus.rm.v1.DrainPodRequest
+	14, // 13: nexus.rm.v1.ClusterControllerService.CheckPodRemovable:input_type -> nexus.rm.v1.CheckPodRemovableRequest
+	16, // 14: nexus.rm.v1.ClusterControllerService.RecordScaling:input_type -> nexus.rm.v1.RecordScalingRequest
+	18, // 15: nexus.rm.v1.ClusterControllerService.ReportReconcileError:input_type -> nexus.rm.v1.ReportReconcileErrorRequest
+	2,  // 16: nexus.rm.v1.ClusterControllerService.GetAssignment:output_type -> nexus.rm.v1.ClusterAssignment
+	7,  // 17: nexus.rm.v1.ClusterControllerService.ReportObservations:output_type -> nexus.rm.v1.ReportObservationsResponse
+	11, // 18: nexus.rm.v1.ClusterControllerService.GetPoolState:output_type -> nexus.rm.v1.PoolState
+	13, // 19: nexus.rm.v1.ClusterControllerService.DrainPod:output_type -> nexus.rm.v1.DrainPodResponse
+	15, // 20: nexus.rm.v1.ClusterControllerService.CheckPodRemovable:output_type -> nexus.rm.v1.CheckPodRemovableResponse
+	17, // 21: nexus.rm.v1.ClusterControllerService.RecordScaling:output_type -> nexus.rm.v1.RecordScalingResponse
+	19, // 22: nexus.rm.v1.ClusterControllerService.ReportReconcileError:output_type -> nexus.rm.v1.ReportReconcileErrorResponse
+	16, // [16:23] is the sub-list for method output_type
+	9,  // [9:16] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_nexus_rm_v1_cluster_proto_init() }
@@ -1886,7 +2035,7 @@ func file_nexus_rm_v1_cluster_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nexus_rm_v1_cluster_proto_rawDesc), len(file_nexus_rm_v1_cluster_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   18,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

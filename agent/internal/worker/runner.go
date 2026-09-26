@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/artifactcache"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
@@ -118,6 +119,9 @@ type Runner struct {
 	// CheckpointStore overrides the result store for checkpoint objects. Nil
 	// uses the result store; tests set it to an in-memory store.
 	CheckpointStore taskapi.ObjectStore
+	// Cache is the node-local artifact cache (ADR-0030 §4). Nil disables it:
+	// artifacts are then the task's own business, as before.
+	Cache *artifactcache.Cache
 }
 
 // newShipper starts the attempt's log shipper, or returns nil when shipping is
@@ -220,6 +224,9 @@ type runningTask struct {
 	// workload that then dies of our signal did not fail for the reason it
 	// may have declared through the workload API.
 	cancelRequested atomic.Bool
+	// preempted is set by Preempt: the node is being reclaimed, and a
+	// non-successful outcome is reported as PREEMPTED (ADR-0030 §2).
+	preempted atomic.Bool
 }
 
 // NewRunner builds a runner over the executors this worker advertises.
@@ -384,6 +391,18 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 	defer secrets.Wipe(resolved)
 	rt.redactor = r.buildRedactor(a, resolved, log)
 
+	// Cached artifacts are pinned for the whole attempt, so LRU eviction can
+	// never pull a model out from under a running task (ADR-0030 §4).
+	artifacts, releaseArtifacts, aerr := r.acquireArtifacts(taskCtx, a, kind, log)
+	defer releaseArtifacts()
+	if aerr != nil {
+		span.SetStatus(otelcodes.Error, "a declared artifact could not be provided")
+		c := classifyArtifactError(aerr)
+		log.Error("could not provide a declared artifact", "error", aerr, "class", c.Class.String())
+		r.reportFailure(taskCtx, a, c, executor.Outcome{})
+		return
+	}
+
 	inCtx, inSpan := tracing.Start(taskCtx, "attempt.prepare_inputs",
 		trace.WithAttributes(attribute.Int("nexus.inputs", len(a.GetInputs()))))
 	spec, err := r.buildExecutorSpec(inCtx, a)
@@ -400,6 +419,8 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 		onPhase := spec.OnPhase
 		spec.OnPhase = func(phase, detail string) { onPhase(phase, redactString(rt.redactor, detail)) }
 	}
+
+	spec.Artifacts = artifacts
 
 	// The workload API exists before Prepare, because the executor bakes the
 	// socket into the workload's environment and mounts, and is torn down on
@@ -619,6 +640,7 @@ func (r *Runner) buildExecutorSpec(ctx context.Context, a *nexusv1.TaskAssignmen
 		// The devices the registry named at admission, so concurrent GPU
 		// attempts on this worker never share one.
 		GPUDevices:           r.registry.GPUDevices(a.GetAttemptId()),
+		GPU:                  r.registry.GPUAssignment(a.GetAttemptId()),
 		Inputs:               inputs,
 		DeclaredOutputs:      declaredOutputNames(spec),
 		StdoutOutput:         spec.GetRuntime().GetStdoutOutput(),
@@ -775,6 +797,11 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 		}
 	}
 
+	// An announced eviction overrides whatever the workload declared: the
+	// node going away is why the attempt ended (ADR-0030 §2).
+	if req.Outcome != nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED && r.preempted(a.GetAttemptId()) {
+		asPreempted(req)
+	}
 	if req.Error != nil {
 		// A kubernetes failure message can carry the pod's log tail
 		// (FallbackToLogsOnError); it must not carry a secret into the
@@ -937,6 +964,9 @@ func (r *Runner) reportFailure(ctx context.Context, a *nexusv1.TaskAssignment,
 	}
 	if c.Class == nexusv1.ErrorClass_ERROR_CLASS_TIMEOUT {
 		req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_TIMED_OUT
+	}
+	if r.preempted(a.GetAttemptId()) {
+		asPreempted(req)
 	}
 	entry := wal.Entry{AttemptID: a.GetAttemptId(), LeaseToken: token,
 		RunID: a.GetRunId(), NodeID: a.GetNodeId()}

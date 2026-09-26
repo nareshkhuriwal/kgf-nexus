@@ -17,6 +17,10 @@ const (
 	ReasonRetryTransient = "retry_error_class_retryable"
 	ReasonRetryLost      = "retry_indeterminate_idempotent"
 	ReasonRetryLostBest  = "retry_indeterminate_best_effort"
+	// ReasonRetryPreempted is a retry after an eviction the agent announced
+	// (ADR-0030 §3). It is charged to task_nodes.preemptions_used, not to
+	// attempts_used.
+	ReasonRetryPreempted = "retry_preempted"
 
 	ReasonNoRetryAttemptsExhausted = "attempts_exhausted"
 	ReasonNoRetryScheduleToClose   = "schedule_to_close_exceeded"
@@ -63,6 +67,9 @@ var defaultRetryOn = map[nexusv1.ErrorClass]bool{
 	// Reached only once the uncharged RATE_LIMITED retries are spent
 	// (RateLimitedDecision); retryable like any throttle.
 	nexusv1.ErrorClass_ERROR_CLASS_RATE_LIMITED: true,
+	// Past its own budget a preemption is an infrastructure fault: retryable,
+	// but now spending max_attempts (ADR-0030 §3).
+	nexusv1.ErrorClass_ERROR_CLASS_PREEMPTED: true,
 }
 
 // alwaysTerminal classes cannot be fixed by running the same code on the same
@@ -258,4 +265,40 @@ func RateLimitedDelay(retryAfterMs int64, p *nexusv1.RetryPolicy, attemptNumber 
 		d = MinRateLimitedDelay
 	}
 	return d
+}
+
+// DefaultMaxPreemptions is the platform cap on preemption retries when neither
+// the task (placement.max_preemptions) nor the scheduler configuration sets one.
+const DefaultMaxPreemptions int32 = 5
+
+// ShouldRetryPreempted is the decision for an attempt the agent reported
+// PREEMPTED (ADR-0030 §3). While the node's preemptions_used is under the cap
+// the retry is granted against the SEPARATE preemption budget, and
+// chargePreemption tells the caller to charge that budget rather than
+// attempts_used. Past the cap -- or when the author vetoed the class, or the
+// schedule_to_close SLA is gone -- it defers to ShouldRetry, so the attempt then
+// spends the ordinary budget like any retryable infrastructure fault.
+func ShouldRetryPreempted(
+	idem nexusv1.IdempotencyMode,
+	attemptsUsed, maxAttempts int32,
+	preemptionsUsed, maxPreemptions int32,
+	scheduleToCloseExceeded bool,
+	policy *nexusv1.RetryPolicy,
+) (d RetryDecision, chargePreemption bool) {
+	class := nexusv1.ErrorClass_ERROR_CLASS_PREEMPTED
+	for _, c := range policy.GetNoRetryOn() {
+		if c == class {
+			return RetryDecision{Reason: ReasonNoRetryDenied}, false
+		}
+	}
+	if scheduleToCloseExceeded {
+		return RetryDecision{Reason: ReasonNoRetryScheduleToClose}, false
+	}
+	if maxPreemptions <= 0 {
+		maxPreemptions = DefaultMaxPreemptions
+	}
+	if preemptionsUsed < maxPreemptions {
+		return RetryDecision{Retry: true, Reason: ReasonRetryPreempted}, true
+	}
+	return ShouldRetry(class, idem, attemptsUsed, maxAttempts, false, policy), false
 }

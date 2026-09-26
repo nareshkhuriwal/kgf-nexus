@@ -192,6 +192,9 @@ func toTaskAssignment(a *store.WorkerAssignment) *nexusv1.TaskAssignment {
 	if !a.StartToCloseDeadline.IsZero() {
 		out.StartToCloseDeadlineUnixMs = a.StartToCloseDeadline.UnixMilli()
 	}
+	// The reservation as committed, so the agent uses the shared GPU device
+	// the ledger charged (ADR-0029 §2).
+	out.Reserved = a.Reserved
 
 	if len(a.SpecJSON) > 0 {
 		spec := &nexusv1.TaskSpec{}

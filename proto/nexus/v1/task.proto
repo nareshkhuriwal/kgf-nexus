@@ -81,6 +81,58 @@ message TaskSpec {
   // their 21, 22, ... in a merge. Additive: an old agent ignores it and keeps
   // the plain SIGTERM -> grace -> SIGKILL contract.
   CancellationPolicy cancellation = 50;
+
+  // ADR-0030/0031: where this task may and would prefer to run. Field 60 for
+  // the same reason as 50. Absent means "anywhere the node_selector allows",
+  // which is what every spec written before it means.
+  PlacementSpec placement = 60;
+}
+
+// CapacityPreference is a task's stance on preemptible (spot) capacity. The
+// zero value is SPOT_ALLOWED so every existing spec keeps its meaning.
+enum CapacityPreference {
+  // The zero value is meaningful on purpose (every spec written before
+  // placement existed means "spot allowed"), so it is not an _UNSPECIFIED.
+  // buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+  CAPACITY_PREFERENCE_SPOT_ALLOWED = 0;
+  // Runs on either; spot workers score higher.
+  CAPACITY_PREFERENCE_SPOT_PREFERRED = 1;
+  // Never dispatched to a worker labelled nexus.io/capacity-type=spot.
+  CAPACITY_PREFERENCE_ON_DEMAND_ONLY = 2;
+}
+
+// PlacementSpec holds hard constraints (eligibility) and soft preferences
+// (score) evaluated at claim time (ADR-0029 §4, ADR-0031). Worker labels are
+// overlaid with the labels of the worker's cluster (nexus.io/cluster).
+message PlacementSpec {
+  CapacityPreference capacity = 1;
+  // Hard: the worker's effective labels must contain every pair.
+  map<string, string> required_labels = 2;
+  // Hard: effective nexus.io/cost-tier must be <= this. 0 = no limit.
+  int32 max_cost_tier = 3;
+  // Soft: prefer workers whose nexus.io/data-locality tags intersect these.
+  repeated string preferred_data_locality = 4;
+  // Soft: prefer workers carrying these labels.
+  map<string, string> preferred_labels = 5;
+  // Artifacts the agent should serve from its node-local cache (ADR-0030 §4).
+  // Placement prefers workers that already hold them.
+  repeated CacheArtifact artifacts = 6;
+  // Cap on retries after PREEMPTED failures, which do not spend max_attempts.
+  // 0 = the platform default (NEXUS_MAX_PREEMPTION_RETRIES).
+  int32 max_preemptions = 7;
+}
+
+// CacheArtifact is one cacheable input: a model, a tokenizer, a dataset shard.
+message CacheArtifact {
+  // Exposed to the workload as NEXUS_ARTIFACT_<NAME> (upper-cased, [A-Z0-9_]).
+  string name = 1;
+  // Content address, "sha256:<64 hex>". Verified on download. Empty keys the
+  // entry by URI, which cannot be integrity-checked.
+  string key = 2;
+  // Where to fetch it on a miss: https://, http://, file://.
+  string uri = 3;
+  // Declared size, used for cache-affinity scoring and eviction planning.
+  int64 size_bytes = 4;
 }
 
 // MapSpec declares a fan-out over a runtime collection (§5.4).
@@ -240,6 +292,12 @@ message TaskAssignment {
   // (ADR-0026). Empty when the attempt was never traced. Additive: an old
   // agent ignores it and starts its own traces.
   map<string, string> trace_context = 11;
+  // The reservation as committed (ADR-0029): the resource request plus the
+  // shared GPU device the control plane placed it on (gpu_shares). The agent
+  // uses the SAME device or refuses the assignment, so the control plane's
+  // per-device ledger and the real usage never diverge. Absent from an older
+  // scheduler; the agent then falls back to the request.
+  ResourceVector reserved = 60;
 }
 
 enum AttemptOutcome {

@@ -83,6 +83,14 @@ type KubernetesConfig struct {
 	// GPUKindLabel is the node label carrying the GPU model (e.g.
 	// nvidia.com/gpu.product); when set, gpu_kind becomes a nodeSelector.
 	GPUKindLabel string
+	// MIGResourcePrefix prefixes a MIG profile to form the device plugin's
+	// extended resource (mixed strategy): "nvidia.com/mig-" + "1g.10gb"
+	// (ADR-0029 §2). Default nvidia.com/mig-.
+	MIGResourcePrefix string
+	// SharedGPUResourceName is the device plugin's replicated resource for a
+	// shared (MPS or time-sliced) GPU, e.g. nvidia.com/gpu.shared. Empty
+	// refuses shared-GPU tasks rather than running them with no GPU.
+	SharedGPUResourceName string
 
 	// TTLAfterFinished lets the Job controller delete a finished Job the agent
 	// never cleaned up (agent crashed). It is ALSO the window in which a
@@ -142,6 +150,11 @@ func LoadKubernetesConfigFromEnv(getenv func(string) string) (cfg KubernetesConf
 	cfg.HelperImage = getenv("NEXUS_K8S_HELPER_IMAGE")
 	cfg.GPUResourceName = getenv("NEXUS_K8S_GPU_RESOURCE")
 	cfg.GPUKindLabel = getenv("NEXUS_K8S_GPU_KIND_LABEL")
+	cfg.MIGResourcePrefix = getenv("NEXUS_K8S_MIG_RESOURCE_PREFIX")
+	if cfg.MIGResourcePrefix == "" {
+		cfg.MIGResourcePrefix = "nvidia.com/mig-"
+	}
+	cfg.SharedGPUResourceName = getenv("NEXUS_K8S_GPU_SHARED_RESOURCE")
 	cfg.ImagePullSecrets = splitList(getenv("NEXUS_K8S_IMAGE_PULL_SECRETS"))
 
 	switch p := corev1.PullPolicy(getenv("NEXUS_K8S_IMAGE_PULL_POLICY")); p {

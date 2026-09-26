@@ -100,6 +100,12 @@ type DEAttemptRow struct {
 	// still left in the budget. The retry budget alone cannot tell "between
 	// tries" from "given up" in that case (CONTRACT-FINDINGS F145).
 	RetryRefused bool
+	// RetryPending is true when this terminal, unsuccessful attempt has a
+	// retry_backoff timer: the scheduler already decided, in the transaction
+	// that ended the attempt, that another attempt follows. The engine must not
+	// call the node exhausted meanwhile. The attempt count alone cannot say so
+	// for a preemption retry, which does not spend max_attempts (ADR-0030 §3).
+	RetryPending bool
 }
 
 // LoadRun reads the run row. It does NOT lock: the engine's own writes are
@@ -240,7 +246,13 @@ func (s *DAGEngineStore) LoadAttempts(ctx context.Context, runID string) ([]DEAt
 	                  CASE WHEN n.parent_node_id IS NULL THEN a.output_ref END, a.error,
 	                  EXISTS (SELECT 1 FROM run_events e
 	                           WHERE e.run_id = a.run_id AND e.attempt_id = a.id
-	                             AND e.kind IN ('RetryExhausted', 'IndeterminateOutcome'))
+	                             AND e.kind IN ('RetryExhausted', 'IndeterminateOutcome')),
+	                  -- Only an unsuccessful terminal attempt can have a retry
+	                  -- pending; idx_timers_subject serves the probe.
+	                  CASE WHEN a.state IN ('FAILED','LOST','TIMED_OUT')
+	                       THEN EXISTS (SELECT 1 FROM timers t
+	                                     WHERE t.subject_id = a.id AND t.kind = 'retry_backoff')
+	                       ELSE false END
 	             FROM task_attempts a
 	             JOIN task_nodes n ON n.run_id = a.run_id AND n.node_id = a.node_id
 	            WHERE a.run_id = $1::uuid
@@ -257,7 +269,7 @@ func (s *DAGEngineStore) LoadAttempts(ctx context.Context, runID string) ([]DEAt
 		var a DEAttemptRow
 		var state string
 		if err := rows.Scan(&a.ID, &a.RunID, &a.NodeID, &a.AttemptNumber, &state,
-			&a.OutputRef, &a.ErrorJSON, &a.RetryRefused); err != nil {
+			&a.OutputRef, &a.ErrorJSON, &a.RetryRefused, &a.RetryPending); err != nil {
 			return nil, fmt.Errorf("scan attempt row: %w", err)
 		}
 		a.State = domain.AttemptState(state)

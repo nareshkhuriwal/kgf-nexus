@@ -18,6 +18,7 @@
 #                    base compose file uses; see docker-compose.minio-local.yml
 #   E2E_NAMESPACE    namespace the keys are minted in (default default)
 #   E2E_READY_TIMEOUT_S  seconds to wait for the stack (default 600)
+#   E2E_EXTRA_COMPOSE    optional overlay file(s), space-separated, applied last
 #
 # Port layout, from E2E_PORT_BASE (B):
 #   B+0 console (nginx)   B+1 REST gateway   B+2 Postgres   B+3 MinIO S3
@@ -62,6 +63,11 @@ fi
 if [[ "${E2E_AI:-}" == 1 ]]; then
   files+=(-f deploy/e2e/docker-compose.ai.yml)
 fi
+# Optional overlays, space-separated, applied last (e.g. the simulated-GPU and
+# spot overlay deploy/e2e/docker-compose.gpu-sim.yml, ADR-0029/0030).
+for extra in ${E2E_EXTRA_COMPOSE:-}; do
+  files+=(-f "$extra")
+done
 compose() { docker compose -p "$PROJECT" "${files[@]}" "$@"; }
 
 log() { printf '[e2e-stack] %s\n' "$*" >&2; }

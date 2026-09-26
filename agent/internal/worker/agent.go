@@ -14,7 +14,10 @@ import (
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/artifactcache"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/eviction"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/gpu"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/heartbeat"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/lease"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
@@ -109,6 +112,24 @@ type Config struct {
 	// (ADR-0032 §1). Empty means taskapi.DefaultRoot. Keep it short: a Unix
 	// socket path is limited to 104 bytes on Darwin and 108 on Linux.
 	TaskAPIRoot string
+
+	// GPU is the fractional-GPU inventory (ADR-0029); Capacity must already
+	// include it. The zero value means whole GPUs only.
+	GPU gpu.Inventory
+	// MPSPipeDir is the MPS server's pipe directory, mounted into containers
+	// on MPS-shared devices. Empty means /tmp/nvidia-mps.
+	MPSPipeDir string
+	// Eviction are the node eviction notice sources (ADR-0030 §2). Empty
+	// disables eviction handling: a reclaimed node then produces LOST
+	// attempts, as before.
+	Eviction []eviction.Source
+	// EvictionGrace is the checkpoint window for a notice without a
+	// deadline; EvictionMaxGrace caps any window. Zero means the defaults.
+	EvictionGrace    time.Duration
+	EvictionMaxGrace time.Duration
+	// Cache is the node-local artifact cache (ADR-0030 §4). Built once by the
+	// caller, like Metrics, so it survives REREGISTER. Nil disables it.
+	Cache *artifactcache.Cache
 }
 
 // ResultStoreCredentials are the parts of result-store access the agent holds
@@ -184,6 +205,11 @@ type Agent struct {
 	drainOnce sync.Once
 	draining  atomic.Bool
 	stopAll   context.CancelFunc
+
+	// evicting is set by the first eviction notice; drainReason is what the
+	// heartbeat tells the control plane (ADR-0030 §2).
+	evicting    atomic.Bool
+	drainReason atomic.Value
 }
 
 // New builds an agent. The executors it supports are constructed here and
@@ -210,7 +236,7 @@ func New(cfg Config, client Client, log *slog.Logger) (*Agent, error) {
 	}
 	return &Agent{
 		cfg: cfg, client: client, log: log, wal: w,
-		registry:   NewRegistry(cfg.Capacity),
+		registry:   newAgentRegistry(cfg),
 		reregister: make(chan struct{}, 1),
 	}, nil
 }
@@ -316,6 +342,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}()
 
+	// Spot/preemptible eviction notices, if any source is configured.
+	a.watchEvictions(runCtx)
+
 	var runErr error
 	select {
 	case <-ctx.Done():
@@ -409,7 +438,17 @@ func (a *Agent) register(ctx context.Context) error {
 	a.hb.Observe = a.cfg.Metrics.Heartbeat
 	a.cfg.Metrics.SessionStarted(a.cfg.Capacity)
 	a.puller = NewPuller(a.workerID, a.cfg.Queues, a.client, a.registry, a.keeper, a.runner, a.log)
+	a.runner.Cache = a.cfg.Cache
+	a.hb.Extra = a.heartbeatExtra
 	return nil
+}
+
+// newAgentRegistry builds the registry over the advertised capacity and the
+// fractional-GPU inventory.
+func newAgentRegistry(cfg Config) *Registry {
+	r := NewRegistryWithGPUs(cfg.Capacity, cfg.GPU)
+	r.MPSPipeDir = cfg.MPSPipeDir
+	return r
 }
 
 // buildExecutors constructs the substrates this worker supports.

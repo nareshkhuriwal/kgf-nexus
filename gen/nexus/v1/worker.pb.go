@@ -527,8 +527,18 @@ type HeartbeatRequest struct {
 	FreeCapacity      *ResourceVector `protobuf:"bytes,3,opt,name=free_capacity,json=freeCapacity,proto3" json:"free_capacity,omitempty"`
 	CpuUtilization    float64         `protobuf:"fixed64,4,opt,name=cpu_utilization,json=cpuUtilization,proto3" json:"cpu_utilization,omitempty"`
 	MemoryUtilization float64         `protobuf:"fixed64,5,opt,name=memory_utilization,json=memoryUtilization,proto3" json:"memory_utilization,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Non-empty when the agent has stopped taking work on its own, e.g.
+	// "eviction:aws" after a spot interruption notice (ADR-0030). The gateway
+	// moves an ACTIVE worker to DRAINING so the push path stops too.
+	DrainReason string `protobuf:"bytes,60,opt,name=drain_reason,json=drainReason,proto3" json:"drain_reason,omitempty"`
+	// Artifact keys in the agent's node-local cache, most recently used first,
+	// at most 256 (ADR-0030 §4). Only meaningful when cached_artifacts_reported
+	// is set, which distinguishes "an empty cache" from "an agent that predates
+	// the field".
+	CachedArtifacts         []string `protobuf:"bytes,61,rep,name=cached_artifacts,json=cachedArtifacts,proto3" json:"cached_artifacts,omitempty"`
+	CachedArtifactsReported bool     `protobuf:"varint,62,opt,name=cached_artifacts_reported,json=cachedArtifactsReported,proto3" json:"cached_artifacts_reported,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *HeartbeatRequest) Reset() {
@@ -594,6 +604,27 @@ func (x *HeartbeatRequest) GetMemoryUtilization() float64 {
 		return x.MemoryUtilization
 	}
 	return 0
+}
+
+func (x *HeartbeatRequest) GetDrainReason() string {
+	if x != nil {
+		return x.DrainReason
+	}
+	return ""
+}
+
+func (x *HeartbeatRequest) GetCachedArtifacts() []string {
+	if x != nil {
+		return x.CachedArtifacts
+	}
+	return nil
+}
+
+func (x *HeartbeatRequest) GetCachedArtifactsReported() bool {
+	if x != nil {
+		return x.CachedArtifactsReported
+	}
+	return false
 }
 
 type HeartbeatResponse struct {
@@ -2168,13 +2199,16 @@ const file_nexus_v1_worker_proto_rawDesc = "" +
 	"\x06bucket\x18\x02 \x01(\tR\x06bucket\x12\x16\n" +
 	"\x06region\x18\x03 \x01(\tR\x06region\x124\n" +
 	"\x16inline_threshold_bytes\x18\x04 \x01(\x03R\x14inlineThresholdBytes\x12\x18\n" +
-	"\abackend\x18\x05 \x01(\tR\abackend\"\xf6\x01\n" +
+	"\abackend\x18\x05 \x01(\tR\abackend\"\x80\x03\n" +
 	"\x10HeartbeatRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12.\n" +
 	"\x13running_attempt_ids\x18\x02 \x03(\tR\x11runningAttemptIds\x12=\n" +
 	"\rfree_capacity\x18\x03 \x01(\v2\x18.nexus.v1.ResourceVectorR\ffreeCapacity\x12'\n" +
 	"\x0fcpu_utilization\x18\x04 \x01(\x01R\x0ecpuUtilization\x12-\n" +
-	"\x12memory_utilization\x18\x05 \x01(\x01R\x11memoryUtilization\"t\n" +
+	"\x12memory_utilization\x18\x05 \x01(\x01R\x11memoryUtilization\x12!\n" +
+	"\fdrain_reason\x18< \x01(\tR\vdrainReason\x12)\n" +
+	"\x10cached_artifacts\x18= \x03(\tR\x0fcachedArtifacts\x12:\n" +
+	"\x19cached_artifacts_reported\x18> \x01(\bR\x17cachedArtifactsReported\"t\n" +
 	"\x11HeartbeatResponse\x123\n" +
 	"\n" +
 	"directives\x18\x01 \x03(\v2\x13.nexus.v1.DirectiveR\n" +

@@ -217,7 +217,33 @@ type ObservationReport struct {
 	CompleteKinds       []string
 	Objects             []ObservedObject
 	LastError           string
+
+	// ADR-0031: placement labels and ResourceQuota headroom per task
+	// namespace. Each replaces the stored value only when reported, so an
+	// older controller that sends neither leaves them alone.
+	Labels           map[string]string
+	LabelsReported   bool
+	Headroom         map[string]ClusterHeadroom
+	HeadroomReported bool
 }
+
+// ClusterHeadroom is one namespace's remaining ResourceQuota room; -1 means
+// unbounded. The JSON shape is what the claim reads (headroomVec).
+type ClusterHeadroom struct {
+	CPUMillis   int64            `json:"cpu_millis"`
+	MemoryBytes int64            `json:"memory_bytes"`
+	GPUCount    int64            `json:"gpu_count"`
+	Pods        int64            `json:"pods"`
+	Extended    map[string]int64 `json:"extended,omitempty"`
+}
+
+// Bounds on a report's placement facts: they are read by every claim on the
+// cluster's workers, so their size is a dispatch cost.
+const (
+	maxClusterLabels      = 64
+	maxClusterLabelLen    = 256
+	maxHeadroomNamespaces = 64
+)
 
 var observationKinds = map[string]bool{
 	"SchedulerDeployment": true, "WorkerDeployment": true, "Deployment": true,
@@ -257,6 +283,18 @@ func (s *RMStore) ReportObservations(ctx context.Context, r ObservationReport) (
 		}
 	}
 
+	if len(r.Labels) > maxClusterLabels {
+		return 0, fmt.Errorf("%w: %d cluster labels; the bound is %d", ErrInvalidClusterReport, len(r.Labels), maxClusterLabels)
+	}
+	for k, v := range r.Labels {
+		if k == "" || len(k) > maxClusterLabelLen || len(v) > maxClusterLabelLen {
+			return 0, fmt.Errorf("%w: cluster label %q is empty or longer than %d", ErrInvalidClusterReport, k, maxClusterLabelLen)
+		}
+	}
+	if len(r.Headroom) > maxHeadroomNamespaces {
+		return 0, fmt.Errorf("%w: headroom for %d namespaces; the bound is %d", ErrInvalidClusterReport, len(r.Headroom), maxHeadroomNamespaces)
+	}
+
 	var desired int64
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `SELECT desired_revision FROM clusters WHERE id = $1`, r.ClusterID).Scan(&desired); err != nil {
@@ -284,6 +322,36 @@ func (s *RMStore) ReportObservations(ctx context.Context, r ObservationReport) (
 			r.ClusterID, r.ObservedRevision, r.ObservedClusterUID, r.KubernetesVersion,
 			r.ControllerIdentity, r.EffectiveMode, r.EffectiveModeReason, r.LastError); err != nil {
 			return fmt.Errorf("store: upsert cluster status: %w", err)
+		}
+		if r.LabelsReported {
+			labels := r.Labels
+			if labels == nil {
+				labels = map[string]string{}
+			}
+			b, err := json.Marshal(labels)
+			if err != nil {
+				return fmt.Errorf("store: encode cluster labels: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `UPDATE cluster_status SET labels = $2 WHERE cluster_id = $1`, r.ClusterID, b); err != nil {
+				return fmt.Errorf("store: record cluster labels: %w", err)
+			}
+		}
+		if r.HeadroomReported {
+			h := r.Headroom
+			if h == nil {
+				h = map[string]ClusterHeadroom{}
+			}
+			b, err := json.Marshal(h)
+			if err != nil {
+				return fmt.Errorf("store: encode cluster headroom: %w", err)
+			}
+			// Observed "now" by the database clock, the one the claim compares
+			// against (invariant 7: control-plane time).
+			if _, err := tx.Exec(ctx,
+				`UPDATE cluster_status SET headroom = $2, headroom_observed_at = now() WHERE cluster_id = $1`,
+				r.ClusterID, b); err != nil {
+				return fmt.Errorf("store: record cluster headroom: %w", err)
+			}
 		}
 		for kind := range complete {
 			if _, err := tx.Exec(ctx, `DELETE FROM cluster_observations WHERE cluster_id = $1 AND kind = $2`, r.ClusterID, kind); err != nil {

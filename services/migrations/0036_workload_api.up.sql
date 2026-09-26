@@ -136,11 +136,11 @@ BEGIN
     END LOOP;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_scheduler') THEN
         GRANT INSERT, UPDATE, DELETE ON attempt_usage, rate_limit_buckets, task_checkpoints TO nexus_scheduler;
-        -- The scheduler creates retry attempts (scheduler_timers.go) and charges
-        -- the budget in the same transaction, but 0005 granted attempts_used to
-        -- the DAG engine only: under role separation every scheduled retry failed
-        -- with permission denied (CONTRACT-FINDINGS F149). Column-scoped, like
-        -- every other cross-owner grant.
-        GRANT UPDATE (attempts_used, free_retries) ON task_nodes TO nexus_scheduler;
+        -- The scheduler records a free RATE_LIMITED retry in the terminal
+        -- transaction (ADR-0032 §3). Column-scoped, like every other
+        -- cross-owner grant. UPDATE (attempts_used), which the retry timer
+        -- needs to charge the ordinary budget, is 0035's (F147; F149 is the
+        -- same gap), granted once there rather than twice.
+        GRANT UPDATE (free_retries) ON task_nodes TO nexus_scheduler;
     END IF;
 END $$;

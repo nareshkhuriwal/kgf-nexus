@@ -47,7 +47,12 @@ so the two deployments cannot drift in behaviour.
       (dict "name" "SCHEDULER_LOOKAHEAD" "value" "32")
       (dict "name" "SCHEDULER_AGING_MS" "value" "30000")
       (dict "name" "SCHEDULER_POLL_INTERVAL_MS" "value" "500")
-      (dict "name" "LEASE_TTL_MS" "value" "30000"))) }}
+      (dict "name" "LEASE_TTL_MS" "value" "30000")
+      (dict "name" "NEXUS_PLACEMENT_POLICY" "value" ($root.Values.claimPlacement.policy | default "pack"))
+      (dict "name" "NEXUS_PLACEMENT_WAIT" "value" ($root.Values.claimPlacement.wait | default "3s"))
+      (dict "name" "NEXUS_CLUSTER_HEADROOM_TTL" "value" ($root.Values.claimPlacement.headroomTTL | default "2m"))
+      (dict "name" "NEXUS_MAX_PREEMPTION_RETRIES" "value" ($root.Values.claimPlacement.maxPreemptionRetries | default 5 | int64 | toString))
+      (dict "name" "NEXUS_PREEMPTION_RETRY_DELAY" "value" ($root.Values.claimPlacement.preemptionRetryDelay | default "2s")))) }}
 {{- end }}
 {{- range $svcs }}
 {{- $saKey := .sa | default .key }}

@@ -29,6 +29,7 @@ from .types import (
     AssetLike,
     Cache,
     Cancellation,
+    Placement,
     Concurrency,
     IdempotencyMode,
     Resources,
@@ -120,6 +121,7 @@ class _Declaration:
     runtime: Runtime | None
     node_selector: Mapping[str, str] | None
     prefer_same_worker_as: str | None
+    placement: Placement | None
     concurrency: Concurrency | None
     priority: int
     trigger_rule: str
@@ -325,6 +327,11 @@ class TaskDefinition(Generic[R]):
             spec["node_selector"] = {str(k): str(v) for k, v in sorted(d.node_selector.items())}
         if d.prefer_same_worker_as:
             spec["prefer_same_worker_as"] = d.prefer_same_worker_as
+        if d.placement is not None:
+            # Omitted when empty, so a task without placement hashes as before.
+            placement = d.placement.to_wire()
+            if placement:
+                spec["placement"] = placement
         if d.concurrency is not None:
             spec["concurrency_key"] = d.concurrency.key
             spec["concurrency_limit"] = d.concurrency.limit
@@ -360,6 +367,7 @@ def _as_author_kwargs(d: _Declaration) -> dict[str, Any]:
         "runtime": d.runtime,
         "node_selector": d.node_selector,
         "prefer_same_worker_as": d.prefer_same_worker_as,
+        "placement": d.placement,
         "concurrency": d.concurrency,
         "priority": d.priority,
         "trigger_rule": d.trigger_rule,
@@ -437,6 +445,10 @@ def _build_declaration(fn: Callable[..., Any], kw: Mapping[str, Any]) -> _Declar
     if runtime is not None:
         runtime.to_wire()
 
+    placement = Placement.coerce(kw.get("placement"))
+    if placement is not None:
+        placement.to_wire()
+
     raw_resources = kw.get("resources")
     resources: Resources | None
     if isinstance(raw_resources, Mapping):
@@ -483,6 +495,7 @@ def _build_declaration(fn: Callable[..., Any], kw: Mapping[str, Any]) -> _Declar
         "runtime",
         "node_selector",
         "prefer_same_worker_as",
+        "placement",
         "concurrency",
         "priority",
         "trigger_rule",
@@ -509,6 +522,7 @@ def _build_declaration(fn: Callable[..., Any], kw: Mapping[str, Any]) -> _Declar
         runtime=runtime,
         node_selector=dict(kw["node_selector"]) if kw.get("node_selector") else None,
         prefer_same_worker_as=kw.get("prefer_same_worker_as"),
+        placement=placement,
         concurrency=concurrency,
         priority=int(kw.get("priority") or 0),
         trigger_rule=trigger_rule,
@@ -540,6 +554,7 @@ def task(
     runtime: Runtime | Mapping[str, Any] | None = None,
     node_selector: Mapping[str, str] | None = None,
     prefer_same_worker_as: str | None = None,
+    placement: Placement | Mapping[str, Any] | None = None,
     concurrency: Concurrency | Mapping[str, Any] | None = None,
     priority: int = 0,
     trigger_rule: TriggerRule = "all_success",
@@ -566,6 +581,7 @@ def task(
     runtime: Runtime | Mapping[str, Any] | None = None,
     node_selector: Mapping[str, str] | None = None,
     prefer_same_worker_as: str | None = None,
+    placement: Placement | Mapping[str, Any] | None = None,
     concurrency: Concurrency | Mapping[str, Any] | None = None,
     priority: int = 0,
     trigger_rule: TriggerRule = "all_success",
@@ -629,6 +645,7 @@ def task(
                 "runtime": runtime,
                 "node_selector": node_selector,
                 "prefer_same_worker_as": prefer_same_worker_as,
+                "placement": placement,
                 "concurrency": concurrency,
                 "priority": priority,
                 "trigger_rule": trigger_rule,

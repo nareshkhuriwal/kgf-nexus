@@ -7,7 +7,8 @@
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_scheduler') THEN
-        REVOKE UPDATE (attempts_used, free_retries) ON task_nodes FROM nexus_scheduler;
+        -- attempts_used stays: 0035 granted it, and 0035's rollback revokes it.
+        REVOKE UPDATE (free_retries) ON task_nodes FROM nexus_scheduler;
     END IF;
 END $$;
 ALTER TABLE task_nodes DROP COLUMN IF EXISTS free_retries;

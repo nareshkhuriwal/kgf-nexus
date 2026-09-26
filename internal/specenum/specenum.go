@@ -38,6 +38,9 @@ func Normalize(doc any) {
 		}
 		normalizeField(t, "idempotency", IdempotencyAliases)
 		normalizeField(t, "trigger_rule", TriggerRuleAliases)
+		if p, ok := t["placement"].(map[string]any); ok {
+			normalizeField(p, "capacity", CapacityAliases)
+		}
 
 		r, ok := t["retry"].(map[string]any)
 		if !ok {
@@ -86,6 +89,8 @@ var (
 		"all_success", "all_done", "one_success", "one_failed", "none_failed", "all_skipped")
 	BackoffAliases    = aliasTable("BACKOFF_STRATEGY_", "fixed", "linear", "exponential")
 	ErrorClassAliases = errorClassTable()
+	// CapacityAliases are PlacementSpec.capacity (ADR-0030).
+	CapacityAliases = aliasTable("CAPACITY_PREFERENCE_", "spot_allowed", "spot_preferred", "on_demand_only")
 )
 
 func aliasTable(prefix string, shortForms ...string) map[string]string {
@@ -105,7 +110,7 @@ func aliasTable(prefix string, shortForms ...string) map[string]string {
 func errorClassTable() map[string]string {
 	out := aliasTable("ERROR_CLASS_",
 		"transient", "timeout", "worker_lost", "validation", "permission_denied",
-		"application", "oom", "not_found", "infrastructure", "rate_limited")
+		"application", "oom", "not_found", "infrastructure", "rate_limited", "preempted")
 	out["validation_error"] = "validation"
 	return out
 }

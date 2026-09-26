@@ -34,6 +34,8 @@ func TestDeriveNodeStates(t *testing.T) {
 		{NodeID: "b", MaxAttempts: 1, State: domain.NodePending},
 		{NodeID: "c", MaxAttempts: 3, State: domain.NodeSkipped},
 		{NodeID: "d", MaxAttempts: 3, State: domain.NodePending},
+		// e has had one uncharged RATE_LIMITED retry (ADR-0032 §3).
+		{NodeID: "e", MaxAttempts: 2, State: domain.NodePending, FreeRetries: 1},
 	}
 	edges := []store.DEEdgeRow{}
 	g := graphFromRows(nodes, edges, &nexusv1.WorkflowSpec{})
@@ -102,6 +104,26 @@ func TestDeriveNodeStates(t *testing.T) {
 			want: map[string]dag.NodeState{"b": dag.NodeFailed},
 		},
 		{
+			// ADR-0030 §3: a PREEMPTED failure is retried against its own budget,
+			// past max_attempts. The scheduler records that decision as a
+			// retry_backoff timer in the same transaction; until the retry attempt
+			// exists, that timer is the only evidence, and the node must not be
+			// declared FAILED (which would fail the run under it).
+			name: "max_attempts=1 but a retry is pending (preemption): still RUNNING",
+			attempts: []store.DEAttemptRow{
+				{NodeID: "b", AttemptNumber: 1, State: domain.AttemptFailed, RetryPending: true},
+			},
+			want: map[string]dag.NodeState{"b": dag.NodeRunning},
+		},
+		{
+			name: "the preemption retry past max_attempts, when it succeeds, succeeds the node",
+			attempts: []store.DEAttemptRow{
+				{NodeID: "b", AttemptNumber: 1, State: domain.AttemptFailed},
+				{NodeID: "b", AttemptNumber: 2, State: domain.AttemptSucceeded},
+			},
+			want: map[string]dag.NodeState{"b": dag.NodeSucceeded},
+		},
+		{
 			// TIMED_OUT and LOST are ATTEMPT states with no node-state counterpart.
 			// Exhausted, they must read as a FAILED node so §5.2's disqualifying set
 			// is expressible in the node vocabulary the schema actually has.
@@ -117,6 +139,35 @@ func TestDeriveNodeStates(t *testing.T) {
 				{NodeID: "b", AttemptNumber: 1, State: domain.AttemptLost},
 			},
 			want: map[string]dag.NodeState{"b": dag.NodeFailed},
+		},
+		{
+			// Retry accounting together (ADR-0032 §3 and ADR-0030 §3): e's
+			// attempt 1 was a free RATE_LIMITED retry, so attempt 2 has used
+			// one charged attempt of two and the node is between tries.
+			name: "a free rate-limited retry is not charged: attempt 2 of max 2 still has budget",
+			attempts: []store.DEAttemptRow{
+				{NodeID: "e", AttemptNumber: 1, State: domain.AttemptFailed},
+				{NodeID: "e", AttemptNumber: 2, State: domain.AttemptFailed},
+			},
+			want: map[string]dag.NodeState{"e": dag.NodeRunning},
+		},
+		{
+			name: "free retry, a preemption past the count, then a pending retry: still RUNNING",
+			attempts: []store.DEAttemptRow{
+				{NodeID: "e", AttemptNumber: 1, State: domain.AttemptFailed},
+				{NodeID: "e", AttemptNumber: 2, State: domain.AttemptFailed},
+				{NodeID: "e", AttemptNumber: 3, State: domain.AttemptFailed, RetryPending: true},
+			},
+			want: map[string]dag.NodeState{"e": dag.NodeRunning},
+		},
+		{
+			name: "free retry and preemption spent, the scheduler refused the last retry: FAILED",
+			attempts: []store.DEAttemptRow{
+				{NodeID: "e", AttemptNumber: 1, State: domain.AttemptFailed},
+				{NodeID: "e", AttemptNumber: 2, State: domain.AttemptFailed},
+				{NodeID: "e", AttemptNumber: 4, State: domain.AttemptFailed, RetryRefused: true},
+			},
+			want: map[string]dag.NodeState{"e": dag.NodeFailed},
 		},
 		{
 			name: "the LATEST attempt wins over earlier ones",

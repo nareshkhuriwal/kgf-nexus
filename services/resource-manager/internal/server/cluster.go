@@ -141,6 +141,18 @@ func (s *ClusterServer) ReportObservations(ctx context.Context, req *rmv1.Report
 		ObservedRevision: req.GetObservedRevision(), EffectiveMode: req.GetEffectiveMode(),
 		EffectiveModeReason: req.GetEffectiveModeReason(), CompleteKinds: req.GetCompleteKinds(),
 		LastError: truncate(req.GetLastError(), 4096),
+
+		Labels: req.GetLabels(), LabelsReported: req.GetLabelsReported(),
+		HeadroomReported: req.GetHeadroomReported(),
+	}
+	if req.GetHeadroomReported() {
+		r.Headroom = map[string]store.ClusterHeadroom{}
+		for _, h := range req.GetHeadroom() {
+			r.Headroom[h.GetNamespace()] = store.ClusterHeadroom{
+				CPUMillis: h.GetCpuMillis(), MemoryBytes: h.GetMemoryBytes(), GPUCount: h.GetGpuCount(),
+				Pods: h.GetPods(), Extended: h.GetExtended(),
+			}
+		}
 	}
 	for _, o := range req.GetObjects() {
 		obj := store.ObservedObject{

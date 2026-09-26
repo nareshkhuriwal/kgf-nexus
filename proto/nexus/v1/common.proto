@@ -22,6 +22,38 @@ message ResourceVector {
   int64 disk_bytes = 6;
   // Arbitrary countable constraints, e.g. {"license_token": 1}.
   map<string, int64> custom = 7;
+
+  // ── Fractional GPUs (ADR-0029) ──────────────────────────────────────────
+  // Field numbers from 60, like TaskSpec.cancellation's 50: parallel branches
+  // extend this message too, and a distinctive range cannot collide in a merge.
+  // Every field is additive: an old reader ignores them and sees a vector with
+  // no fractional GPU at all, which is what it could schedule anyway.
+
+  // MIG instances by profile, e.g. {"1g.10gb": 1}. On a request: instances
+  // needed per profile. On capacity / committed: the worker's instances of each
+  // profile / how many are reserved. Pooled per profile, because every instance
+  // of a profile is interchangeable; the agent names the instance (its UUID).
+  map<string, int64> mig = 60;
+  // Shared-GPU (MPS or time-slicing) request: a fraction of ONE shared device
+  // in thousandths (250 = a quarter). 0 with gpu_share_memory_bytes > 0 means
+  // "pack by memory only". On committed: the sum over reservations
+  // (informational; gpu_shares is the ledger).
+  int32 gpu_share_milli = 61;
+  // Shared-GPU request: VRAM needed on that ONE device. A QUANTITY subtracted
+  // from the device, unlike gpu_memory_bytes, which is a floor on a whole
+  // device and never subtracted.
+  int64 gpu_share_memory_bytes = 62;
+  // Shared devices by device key (the device index as a string). On capacity:
+  // each shared device's full size (milli = 1000). On committed: what is
+  // reserved on each. On a reservation: exactly the one device the request was
+  // placed on, which is what makes release exact. Never set on a request.
+  map<string, GPUShare> gpu_shares = 63;
+}
+
+// GPUShare is one shared device's compute (thousandths) and memory.
+message GPUShare {
+  int64 milli = 1;
+  int64 memory_bytes = 2;
 }
 
 // ResourceRequest separates scheduling cost from enforcement ceiling.
@@ -101,6 +133,12 @@ enum ErrorClass {
   // charging the retry budget, up to a platform cap, after
   // TaskError.retry_after_ms (ADR-0032).
   ERROR_CLASS_RATE_LIMITED = 10;
+  // The worker's node is being reclaimed (spot/preemptible eviction, ADR-0030):
+  // the agent sent the checkpoint signal and the workload ended because of it.
+  // Retried against a SEPARATE budget (task_nodes.preemptions_used), so an
+  // eviction does not spend the task's max_attempts. Only the agent reports it;
+  // a node that vanished without notice is still WORKER_LOST.
+  ERROR_CLASS_PREEMPTED = 11;
 }
 
 // IdempotencyMode drives how indeterminate (LOST) outcomes are handled.

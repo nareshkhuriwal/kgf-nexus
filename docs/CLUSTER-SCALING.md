@@ -148,6 +148,27 @@ a controller in the wrong mode or pointed at the wrong cluster cannot drain.
 5. To apply: enter the kube-system UID the controller reports, confirm apply,
    and install `deploy/k8s/cluster-controller/apply`. See docs/OPERATIONS.md §12.
 
+## Placement facts for multi-cluster dispatch (ADR-0031)
+
+Besides observing and scaling, the controller publishes two facts the
+scheduler's claim reads (OPERATIONS §28.5):
+
+- **Cluster labels**: `NEXUS_CLUSTER_LABELS` (operator-declared, e.g. cost tier
+  and data locality) over the observed `nexus.io/region` (most common
+  `topology.kubernetes.io/region` of the Nodes) and `nexus.io/provider` (the
+  Nodes' `spec.providerID` scheme). Published only from a complete Node list.
+- **Quota headroom**: per bound namespace, `min(hard - used)` over its
+  ResourceQuotas for CPU, memory, GPUs (`NEXUS_CLUSTER_GPU_RESOURCES`), pods and
+  other extended resources; `-1` where unconstrained. A namespace whose quota
+  usage is not computed yet is omitted, and nothing is published if any list
+  failed, so a partial view never replaces a complete one.
+
+Both are stored in `cluster_status` (migration 0035) and resolved by the claim
+through the worker's `nexus.io/cluster` label within its own tenant. They are
+read-only observations: the controller's RBAC is unchanged (the bound
+namespaces' Role already lists ResourceQuotas; `observeNodes` already lists
+Nodes).
+
 ## What is verified, and what is not
 
 Verified: unit tests with the client-go fake clientset (scale-out, cooldown,

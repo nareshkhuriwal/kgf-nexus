@@ -14,6 +14,7 @@ import (
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 )
 
 // DefaultGraceAfterTerm is the fallback SIGTERM→SIGKILL window. Ten seconds is
@@ -189,9 +190,14 @@ func buildEnvScrubbed(spec TaskSpec, passthrough, deny []string, workDir, inputD
 	// A GPU request without device isolation is pinned by convention only; a
 	// workload can override this, which is precisely the fidelity gap that
 	// makes subprocess development-grade.
-	if ids := gpuDeviceList(spec); ids != "" {
+	if spec.GPU.Any() {
+		env = append(env, "CUDA_VISIBLE_DEVICES="+hostGPUList(spec))
+	} else if ids := gpuDeviceList(spec); ids != "" {
 		env = append(env, "CUDA_VISIBLE_DEVICES="+ids)
 	}
+	// A host process addresses the shared device by its host index.
+	env = append(env, gpuSliceEnv(spec, spec.GPU.SharedDevice)...)
+	env = append(env, artifactEnv(spec, false)...)
 	return env
 }
 
@@ -262,7 +268,7 @@ func checkSubprocessLimitFidelity(limit *nexusv1.ResourceVector) error {
 			"use the docker executor or set AllowUnenforceableLimits for development",
 			ErrLimitUnenforceable, runtimeName())
 	}
-	if limit.GetGpuCount() > 0 && f.GPU == "none" {
+	if domain.UsesGPU(limit) && f.GPU == "none" {
 		return fmt.Errorf("%w: subprocess executor cannot isolate GPUs on %s",
 			ErrLimitUnenforceable, runtimeName())
 	}

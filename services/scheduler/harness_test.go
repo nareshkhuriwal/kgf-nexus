@@ -121,6 +121,17 @@ type vec struct {
 	GPUMemoryBytes int64            `json:"gpu_memory_bytes"`
 	DiskBytes      int64            `json:"disk_bytes"`
 	Custom         map[string]int64 `json:"custom"`
+	// Fractional GPUs (ADR-0029), omitted when zero exactly as the store
+	// writes them.
+	Mig                 map[string]int64      `json:"mig,omitempty"`
+	GPUShareMilli       int32                 `json:"gpu_share_milli,omitempty"`
+	GPUShareMemoryBytes int64                 `json:"gpu_share_memory_bytes,omitempty"`
+	GPUShares           map[string]shareEntry `json:"gpu_shares,omitempty"`
+}
+
+type shareEntry struct {
+	Milli       int64 `json:"milli"`
+	MemoryBytes int64 `json:"memory_bytes"`
 }
 
 func mustJSON(t *testing.T, v any) []byte {
@@ -170,6 +181,10 @@ type nodeSpec struct {
 	ConcurrencyKey    string            `json:"concurrency_key,omitempty"`
 	ConcurrencyLimit  int32             `json:"concurrency_limit,omitempty"`
 	Retry             map[string]any    `json:"retry,omitempty"`
+	// ADR-0030/0031, in the protojson-with-proto-names shape the DAG engine
+	// writes.
+	Placement          map[string]any `json:"placement,omitempty"`
+	PreferSameWorkerAs string         `json:"prefer_same_worker_as,omitempty"`
 }
 
 // addAttempt creates a node and its first PENDING attempt.

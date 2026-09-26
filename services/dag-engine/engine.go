@@ -749,13 +749,21 @@ func deriveNodeStates(
 		// (CONTRACT-FINDINGS F100). LoadAttempts has already dropped those. Free
 		// RATE_LIMITED retries are not charged either (ADR-0032 §3).
 		//
-		// Exhausted too when the scheduler refused to retry the last attempt
-		// (a non-retryable error class, an indeterminate outcome with
-		// idempotency none, a blown schedule_to_close) while budget remained.
-		// No further attempt will ever be created, so treating the node as
-		// "between tries" left it RUNNING forever and the run never ended
-		// (CONTRACT-FINDINGS F145).
-		exhausted := last.AttemptNumber-n.RetryFloor-n.FreeRetries >= maxAttempts || last.RetryRefused
+		// Two facts the scheduler recorded in the transaction that ended the
+		// attempt override the count:
+		//   - a retry it REFUSED (a RetryExhausted or IndeterminateOutcome
+		//     event: a non-retryable class, an indeterminate outcome with
+		//     idempotency none, a blown schedule_to_close) makes the node
+		//     exhausted even with budget left -- no further attempt will ever
+		//     be created, and treating it as "between tries" left it RUNNING
+		//     forever (CONTRACT-FINDINGS F145);
+		//   - a retry it SCHEDULED (a pending retry_backoff timer) keeps the
+		//     node alive past the count: a preemption retry (ADR-0030 §3) runs
+		//     past max_attempts by design, and judging by the count alone
+		//     declared the node FAILED in the seconds before the retry attempt
+		//     existed (found by the simulated spot e2e, tests/gpusim).
+		charged := last.AttemptNumber - n.RetryFloor - n.FreeRetries
+		exhausted := last.RetryRefused || (charged >= maxAttempts && !last.RetryPending)
 		out[n.NodeID] = dag.AttemptStateToNode(string(last.State), exhausted)
 	}
 	return out

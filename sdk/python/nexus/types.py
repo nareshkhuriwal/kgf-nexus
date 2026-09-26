@@ -65,6 +65,7 @@ ErrorClass = Literal[
     "not_found",
     "infrastructure",
     "rate_limited",
+    "preempted",
 ]
 
 _ERROR_CLASS_NAMES: dict[str, str] = {
@@ -84,6 +85,10 @@ _ERROR_CLASS_NAMES: dict[str, str] = {
     # A provider 429/503 the task's own retries did not absorb (ADR-0032 §3).
     # Retried without charging the retry budget, up to a cap.
     "rate_limited": "ERROR_CLASS_RATE_LIMITED",
+    # A spot/preemptible eviction the agent announced (ADR-0030): retried
+    # against its own budget, so listing it in no_retry_on is the only reason
+    # to name it.
+    "preempted": "ERROR_CLASS_PREEMPTED",
 }
 
 BackoffStrategy = Literal["fixed", "linear", "exponential"]
@@ -158,10 +163,23 @@ class Gpu:
     count: int = 1
     kind: str | None = None
     memory: str | int | None = None
+    # Fractional GPUs (ADR-0029). `mig` asks for MIG instances by profile, e.g.
+    # {"1g.10gb": 1}; `share` is a fraction of ONE shared (MPS or time-sliced)
+    # device and `share_memory` the VRAM needed on it. Both are subtracted per
+    # device by the scheduler, so several small jobs pack onto one GPU. Use
+    # count=0 with either: a fractional request takes no whole device.
+    mig: Mapping[str, int] | None = None
+    share: float | None = None
+    share_memory: str | int | None = None
 
     def __post_init__(self) -> None:
         if self.count < 0:
             raise SpecError(f"gpu.count must be non-negative, got {self.count}")
+        if self.share is not None and not (0 < self.share <= 1):
+            raise SpecError(f"gpu.share must be in (0, 1], got {self.share}")
+        for profile, n in (self.mig or {}).items():
+            if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+                raise SpecError(f"gpu.mig[{profile!r}] must be a non-negative instance count, got {n!r}")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -206,6 +224,12 @@ class Resources:
                 request["gpu_kind"] = gpu.kind
             if gpu.memory is not None:
                 request["gpu_memory_bytes"] = parse_bytes(gpu.memory)
+            if gpu.mig:
+                request["mig"] = {str(k): v for k, v in sorted(gpu.mig.items()) if v}
+            if gpu.share is not None:
+                request["gpu_share_milli"] = max(1, round(gpu.share * 1000))
+            if gpu.share_memory is not None:
+                request["gpu_share_memory_bytes"] = parse_bytes(gpu.share_memory)
         if self.custom:
             custom: dict[str, int] = {}
             for k, v in self.custom.items():
@@ -228,6 +252,9 @@ class Resources:
         # limit mirrors the request rather than being independently settable.
         if gpu is not None and gpu.count:
             limit["gpu_count"] = gpu.count
+        for key in ("mig", "gpu_share_milli", "gpu_share_memory_bytes"):
+            if key in request:
+                limit[key] = request[key]
 
         for dim, req_key in (("cpu", "cpu_millis"), ("memory", "memory_bytes"), ("disk", "disk_bytes")):
             if req_key in limit and req_key in request and limit[req_key] < request[req_key]:
@@ -781,3 +808,99 @@ def coerce_trigger_rule(value: str) -> str:
 
 def coerce_idempotency(value: str) -> str:
     return _enum(_IDEMPOTENCY_NAMES, value, "idempotency")
+
+
+# ── Placement (ADR-0030, ADR-0031) ────────────────────────────────────────────
+
+CapacityPreference = Literal["spot_allowed", "spot_preferred", "on_demand_only"]
+_CAPACITY_NAMES: dict[str, str] = {
+    "spot_allowed": "CAPACITY_PREFERENCE_SPOT_ALLOWED",
+    "spot_preferred": "CAPACITY_PREFERENCE_SPOT_PREFERRED",
+    "on_demand_only": "CAPACITY_PREFERENCE_ON_DEMAND_ONLY",
+}
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Artifact:
+    """A model or dataset the worker serves from its node-local cache.
+
+    The workload finds it at ``$NEXUS_ARTIFACT_<NAME>``. ``key`` is the content
+    address ``sha256:<hex>``; the agent verifies the download against it and
+    refuses a mismatch. Workers already holding the artifact are preferred.
+    """
+
+    name: str
+    uri: str
+    key: str | None = None
+    size: str | int | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        if not self.name:
+            raise SpecError("artifact.name is required")
+        if not self.uri.startswith(("https://", "http://", "file://")):
+            raise SpecError(f"artifact {self.name!r}: uri must be https://, http:// or file://")
+        out: dict[str, Any] = {"name": self.name, "uri": self.uri}
+        if self.key:
+            k = self.key
+            if not (k.startswith("sha256:") and len(k) == 71 and all(c in "0123456789abcdef" for c in k[7:])):
+                raise SpecError(f"artifact {self.name!r}: key must be sha256:<64 lowercase hex>")
+            out["key"] = k
+        if self.size is not None:
+            out["size_bytes"] = parse_bytes(self.size)
+        return out
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Placement:
+    """Where a task may and would prefer to run.
+
+    Hard: ``capacity="on_demand_only"``, ``required_labels`` (matched against
+    the worker's labels overlaid with its cluster's, e.g.
+    ``{"nexus.io/region": "eu-west-1"}``) and ``max_cost_tier``. Soft (a better
+    worker is preferred for a few seconds): ``capacity="spot_preferred"``,
+    ``preferred_data_locality``, ``preferred_labels`` and cached ``artifacts``.
+    ``max_preemptions`` caps retries after spot evictions, which do not spend
+    the retry budget.
+    """
+
+    capacity: CapacityPreference | None = None
+    required_labels: Mapping[str, str] | None = None
+    max_cost_tier: int | None = None
+    preferred_data_locality: Sequence[str] | None = None
+    preferred_labels: Mapping[str, str] | None = None
+    artifacts: Sequence[Artifact] | None = None
+    max_preemptions: int | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.capacity is not None and self.capacity != "spot_allowed":
+            out["capacity"] = _enum(_CAPACITY_NAMES, self.capacity, "placement.capacity")
+        if self.required_labels:
+            out["required_labels"] = {str(k): str(v) for k, v in sorted(self.required_labels.items())}
+        if self.max_cost_tier:
+            if self.max_cost_tier < 0 or self.max_cost_tier > 100:
+                raise SpecError(f"placement.max_cost_tier must be in [0, 100], got {self.max_cost_tier}")
+            out["max_cost_tier"] = self.max_cost_tier
+        if self.preferred_data_locality:
+            out["preferred_data_locality"] = [str(x) for x in self.preferred_data_locality]
+        if self.preferred_labels:
+            out["preferred_labels"] = {str(k): str(v) for k, v in sorted(self.preferred_labels.items())}
+        if self.artifacts:
+            out["artifacts"] = [a.to_wire() for a in self.artifacts]
+        if self.max_preemptions:
+            if self.max_preemptions < 0 or self.max_preemptions > 100:
+                raise SpecError(f"placement.max_preemptions must be in [0, 100], got {self.max_preemptions}")
+            out["max_preemptions"] = self.max_preemptions
+        return out
+
+    @staticmethod
+    def coerce(value: "Placement | Mapping[str, Any] | None") -> "Placement | None":
+        if value is None or isinstance(value, Placement):
+            return value
+        if isinstance(value, Mapping):
+            kw = dict(value)
+            arts = kw.get("artifacts")
+            if arts is not None:
+                kw["artifacts"] = [a if isinstance(a, Artifact) else Artifact(**a) for a in arts]
+            return Placement(**kw)
+        raise SpecError(f"placement must be a Placement or a mapping, got {type(value).__name__}")

@@ -1,0 +1,45 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Renders the ADR-0029/0030/0031 agent and scheduler options: a MIG agent, an
+# MPS-shared spot agent with eviction handling and an artifact cache, a
+# published cluster name and claim placement settings. Self-contained, like
+# every ci/ values file deploy/helm/validate.sh renders on its own.
+existingSecret: nexus-secrets
+image:
+  tag: "0.0.0-ci"
+nats:
+  auth: { mode: none }
+claimPlacement:
+  policy: pack
+  wait: 3s
+  headroomTTL: 2m
+  maxPreemptionRetries: 5
+  preemptionRetryDelay: 2s
+  clusterName: gpu-eu-west-1
+agents:
+  - name: agent-cpu
+    queues: default
+    cpuMillis: 2000
+    memoryBytes: 4294967296
+    diskBytes: 10737418240
+  - name: agent-a100-mig
+    queues: gpu
+    labels: "accelerator=nvidia-a100"
+    cpuMillis: 32000
+    memoryBytes: 137438953472
+    diskBytes: 214748364800
+    gpuDiscovery: nvidia-smi
+  - name: agent-h100-spot
+    queues: gpu
+    labels: "accelerator=nvidia-h100"
+    cpuMillis: 32000
+    memoryBytes: 137438953472
+    diskBytes: 214748364800
+    gpuShared: "0:mps:80Gi,1:mps:80Gi"
+    capacityType: spot
+    eviction: { sources: "kubernetes,aws", grace: 25s }
+    artifactCache: { bytes: 200Gi, sizeLimit: 220Gi, verify: hit }
+clusterController:
+  clusterLabels: "nexus.io/cost-tier=1,nexus.io/data-locality=lake-eu"
+  gpuResources: "nvidia.com/gpu,nvidia.com/gpu.shared"

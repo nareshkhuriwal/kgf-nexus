@@ -67,6 +67,8 @@ type Metrics struct {
 	workloadAPI   *metrics.CounterVec
 	usageFlushes  *metrics.CounterVec
 	checkpointOps *metrics.CounterVec
+
+	placement placementMetrics
 }
 
 // ObjectStore returns the result-store client instruments, or nil (record
@@ -80,7 +82,7 @@ func (m *Metrics) ObjectStore() *objstore.Metrics {
 
 // New registers the agent families on reg.
 func New(reg *metrics.Registry) *Metrics {
-	return &Metrics{
+	m := &Metrics{
 		objstore: objstore.NewMetrics(reg),
 		running: reg.NewGauge("nexus_agent_tasks_running",
 			"Attempts currently executing on this agent, by executor.", "executor"),
@@ -153,6 +155,8 @@ func New(reg *metrics.Registry) *Metrics {
 			"Checkpoint saves requested by workloads, by result: saved, stale (fenced: stale lease or an older checkpoint), too_large or error.",
 			"result"),
 	}
+	m.placement = newPlacementMetrics(reg)
+	return m
 }
 
 // Workload API label values. Closed sets: anything else is folded into

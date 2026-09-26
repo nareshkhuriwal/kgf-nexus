@@ -961,7 +961,32 @@ func TestIntegrationListStalledRuns(t *testing.T) {
 			"nothing else will ever look at it again (run %s)", stalled.runID)
 	}
 
+	// A node whose last attempt ended by lease expiry with its budget spent:
+	// nothing reconciled it, so its STORED state still reads RUNNING. It is as
+	// stuck as the case above and must be swept too (found by tests/gpusim).
+	unreconciled := newFixture(t, ctx, pool)
+	unreconciled.attempt("expired", 1)
+	settleRun(t, ctx, pool, unreconciled.runID, "RUNNING", "RUNNING", "FAILED", time.Hour)
+	found, err = WFMListStalledRuns(ctx, pool, time.Minute, 100)
+	if err != nil {
+		t.Fatalf("list stalled runs: %v", err)
+	}
+	if !contains(found, unreconciled.runID) {
+		t.Errorf("a run whose node still reads RUNNING with every attempt ended and no retry scheduled "+
+			"was not reported stalled; it would stay RUNNING forever (run %s)", unreconciled.runID)
+	}
+
 	// ── Everything below must NOT be swept. ──────────────────────────────
+
+	// Between retries: the attempt failed, the node reads RUNNING, and a
+	// retry_backoff timer says the next attempt is coming.
+	backoff := newFixture(t, ctx, pool)
+	backoff.attempt("retrying", 1)
+	settleRun(t, ctx, pool, backoff.runID, "RUNNING", "RUNNING", "FAILED", time.Hour)
+	mustExec(t, ctx, pool, `INSERT INTO timers (kind, subject_id, fire_at, payload)
+		SELECT 'retry_backoff', id, now() + interval '1 minute', '{}' FROM task_attempts WHERE run_id = $1`,
+		backoff.runID)
+	assertNotStalled(t, ctx, pool, backoff.runID, "a run with a retry scheduled")
 
 	// Still working. The obvious case, and the one that would be catastrophic
 	// to get wrong: concluding a running node's run would kill live work.

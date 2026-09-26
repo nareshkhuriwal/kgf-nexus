@@ -44,6 +44,9 @@ type Candidate struct {
 	// RATE_LIMITED retries not charged to its budget (ADR-0032 §3). Loaded,
 	// like RetryFloor, only where a retry decision is made.
 	FreeRetries int32
+	// preemptionsUsed is task_nodes.preemptions_used, loaded where a retry
+	// decision is made (ADR-0030 §3).
+	preemptionsUsed int32
 	// Spec is the node's task spec, the source of timeouts, retry policy,
 	// node_selector, executor and concurrency settings. Read from
 	// task_nodes.spec_json, which the scheduler reads but never writes.
@@ -77,6 +80,14 @@ type TaskSpecView struct {
 	// unparseable policy on one node cannot stop the scheduler from dispatching
 	// every other node.
 	RetryJSON json.RawMessage `json:"retry"`
+
+	// PreferSameWorkerAs names a node whose worker this task should prefer
+	// (TaskSpec.prefer_same_worker_as). Parsed since Phase 0, read only since
+	// ADR-0030 §5 (F146).
+	PreferSameWorkerAs string `json:"prefer_same_worker_as"`
+	// Placement is the decoded PlacementSpec (ADR-0030/0031), nil when absent.
+	// Filled by UnmarshalJSON from either dialect; never marshalled.
+	Placement *domain.Placement `json:"-"`
 }
 
 // IdempotencyMode maps the spec's string form onto the wire enum.
@@ -187,6 +198,8 @@ func errorClassFromString(s string) nexusv1.ErrorClass {
 		return nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE
 	case "rate_limited", "ERROR_CLASS_RATE_LIMITED":
 		return nexusv1.ErrorClass_ERROR_CLASS_RATE_LIMITED
+	case "preempted", "ERROR_CLASS_PREEMPTED":
+		return nexusv1.ErrorClass_ERROR_CLASS_PREEMPTED
 	default:
 		return nexusv1.ErrorClass_ERROR_CLASS_UNSPECIFIED
 	}
@@ -199,6 +212,10 @@ type WorkerCandidate struct {
 	Capacity  *nexusv1.ResourceVector
 	Committed *nexusv1.ResourceVector
 	Score     float64
+	// Placed is what the claim reserves on this worker: the request plus the
+	// shared GPU device chosen for it (domain.Place, ADR-0029). Nil means the
+	// request itself.
+	Placed *nexusv1.ResourceVector
 }
 
 // DispatchResult describes a committed dispatch.
@@ -337,6 +354,16 @@ func (s *TaskSpecView) UnmarshalJSON(b []byte) error {
 	// protojson + UseProtoNames: snake_case keys, 64-bit integers as strings.
 	// Applied before the camelCase pass because both are protojson dialects and
 	// only one producer writes each; neither emits both.
+	s.Placement = decodePlacement(b)
+	if s.PreferSameWorkerAs == "" {
+		var cc struct {
+			P string `json:"preferSameWorkerAs"`
+		}
+		if json.Unmarshal(b, &cc) == nil {
+			s.PreferSameWorkerAs = cc.P
+		}
+	}
+
 	var sn struct {
 		TaskRef      string            `json:"task_ref"`
 		Version      *json.Number      `json:"version"`
@@ -477,4 +504,90 @@ func numInt64(n *json.Number) (int64, bool) {
 		return 0, false
 	}
 	return v, true
+}
+
+// decodePlacement reads TaskSpec.placement from spec_json in either key
+// spelling (protojson with proto names, which the DAG engine writes, or
+// camelCase) and either enum spelling. A malformed block yields nil -- no
+// constraint -- rather than an error: ADR-0011 rule 5, and the gateway has
+// already validated what it stored.
+func decodePlacement(b []byte) *domain.Placement {
+	var doc struct {
+		Placement map[string]json.RawMessage `json:"placement"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil || len(doc.Placement) == 0 {
+		return nil
+	}
+	pick := func(keys ...string) json.RawMessage {
+		for _, k := range keys {
+			if v, ok := doc.Placement[k]; ok && len(v) > 0 && string(v) != "null" {
+				return v
+			}
+		}
+		return nil
+	}
+	p := &domain.Placement{}
+	if raw := pick("capacity"); raw != nil {
+		p.Capacity = capacityPreference(raw)
+	}
+	if raw := pick("required_labels", "requiredLabels"); raw != nil {
+		_ = json.Unmarshal(raw, &p.RequiredLabels)
+	}
+	if raw := pick("preferred_labels", "preferredLabels"); raw != nil {
+		_ = json.Unmarshal(raw, &p.PreferredLabels)
+	}
+	if raw := pick("preferred_data_locality", "preferredDataLocality"); raw != nil {
+		_ = json.Unmarshal(raw, &p.PreferredDataLocality)
+	}
+	if raw := pick("max_cost_tier", "maxCostTier"); raw != nil {
+		var n json.Number
+		if json.Unmarshal(raw, &n) == nil {
+			v, _ := n.Int64()
+			p.MaxCostTier = int(v)
+		}
+	}
+	if raw := pick("max_preemptions", "maxPreemptions"); raw != nil {
+		var n json.Number
+		if json.Unmarshal(raw, &n) == nil {
+			v, _ := n.Int64()
+			p.MaxPreemptions = int32(v)
+		}
+	}
+	if raw := pick("artifacts"); raw != nil {
+		var arts []struct {
+			Key       string       `json:"key"`
+			SizeBytes *json.Number `json:"size_bytes"`
+			SizeCamel *json.Number `json:"sizeBytes"`
+		}
+		if json.Unmarshal(raw, &arts) == nil {
+			for _, a := range arts {
+				size, ok := numInt64(a.SizeBytes)
+				if !ok {
+					size, _ = numInt64(a.SizeCamel)
+				}
+				p.Artifacts = append(p.Artifacts, domain.ArtifactRef{Key: a.Key, SizeBytes: size})
+			}
+		}
+	}
+	return p
+}
+
+// capacityPreference accepts the proto enum name, the short authoring form and
+// the number.
+func capacityPreference(raw json.RawMessage) nexusv1.CapacityPreference {
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		switch str {
+		case "CAPACITY_PREFERENCE_SPOT_PREFERRED", "spot_preferred":
+			return nexusv1.CapacityPreference_CAPACITY_PREFERENCE_SPOT_PREFERRED
+		case "CAPACITY_PREFERENCE_ON_DEMAND_ONLY", "on_demand_only":
+			return nexusv1.CapacityPreference_CAPACITY_PREFERENCE_ON_DEMAND_ONLY
+		}
+		return nexusv1.CapacityPreference_CAPACITY_PREFERENCE_SPOT_ALLOWED
+	}
+	var n int32
+	if json.Unmarshal(raw, &n) == nil {
+		return nexusv1.CapacityPreference(n)
+	}
+	return nexusv1.CapacityPreference_CAPACITY_PREFERENCE_SPOT_ALLOWED
 }

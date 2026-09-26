@@ -13,7 +13,7 @@ and ignores this chart's defaults, so sections added since then are simply
 absent. Fail with the fix rather than a nil-pointer error deep in a template.
 */}}
 {{- define "nexus.valuesComplete" -}}
-{{- range $section := list "placement" "podDisruptionBudget" "autoscaling" "tls" "clusterController" "artifactGC" "serviceAccounts" "resultStore" "tracing" "agentPolicy" "kgf" -}}
+{{- range $section := list "placement" "podDisruptionBudget" "autoscaling" "tls" "clusterController" "artifactGC" "serviceAccounts" "resultStore" "tracing" "agentPolicy" "kgf" "claimPlacement" -}}
 {{- if not (hasKey $.Values $section) -}}
 {{- fail (printf "values section %q is missing: this looks like `helm upgrade --reuse-values` from an older chart version, which drops the new version's defaults. Upgrade with --reset-then-reuse-values (keeps your previous overrides) or with -f <your values file> (docs/OPERATIONS.md §20.2)" $section) -}}
 {{- end -}}

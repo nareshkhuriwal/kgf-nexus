@@ -205,6 +205,31 @@
             "type": "integer",
             "minimum": 0
           }
+        },
+        "mig": {
+          "description": "MIG instances needed per profile, e.g. {\"1g.10gb\": 1} (ADR-0029). Each instance of a profile is interchangeable; the worker names the instance.",
+          "type": "object",
+          "maxProperties": 8,
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^([0-9]+c\\.)?[0-9]+g\\.[0-9]+gb(\\+me)?$"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 56
+          }
+        },
+        "gpu_share_milli": {
+          "description": "Fraction of ONE shared (MPS or time-sliced) GPU, in thousandths: 250 = a quarter (ADR-0029). Compute is only enforced on MPS devices.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "gpu_share_memory_bytes": {
+          "description": "VRAM needed on that ONE shared GPU, subtracted from the device's pool so several VRAM-declared jobs can pack onto it (ADR-0029). Enforced only on MPS devices; on time-sliced devices it is an honour system.",
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -254,6 +279,7 @@
         "not_found",
         "infrastructure",
         "rate_limited",
+        "preempted",
         "ERROR_CLASS_TRANSIENT",
         "ERROR_CLASS_TIMEOUT",
         "ERROR_CLASS_WORKER_LOST",
@@ -263,7 +289,8 @@
         "ERROR_CLASS_OOM",
         "ERROR_CLASS_NOT_FOUND",
         "ERROR_CLASS_INFRASTRUCTURE",
-        "ERROR_CLASS_RATE_LIMITED"
+        "ERROR_CLASS_RATE_LIMITED",
+        "ERROR_CLASS_PREEMPTED"
       ]
     },
     "RetryPolicy": {
@@ -627,6 +654,9 @@
         },
         "assets": {
           "$ref": "#/$defs/TaskAssets"
+        },
+        "placement": {
+          "$ref": "#/$defs/Placement"
         }
       },
       "allOf": [
@@ -778,6 +808,93 @@
           "uninterruptible": {
             "const": true
           }
+        }
+      }
+    },
+    "Placement": {
+      "description": "Where the task may and would prefer to run (ADR-0030, ADR-0031). Hard constraints are claim-time eligibility; preferences are a soft score (a better worker is preferred for at most the scheduler's placement wait). Worker labels are overlaid with their cluster's.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "capacity": {
+          "description": "Spot/preemptible stance. spot_allowed (default) runs anywhere; spot_preferred scores spot workers higher; on_demand_only is never dispatched to a worker labelled nexus.io/capacity-type=spot.",
+          "enum": [
+            "spot_allowed",
+            "spot_preferred",
+            "on_demand_only",
+            "CAPACITY_PREFERENCE_SPOT_ALLOWED",
+            "CAPACITY_PREFERENCE_SPOT_PREFERRED",
+            "CAPACITY_PREFERENCE_ON_DEMAND_ONLY"
+          ],
+          "default": "spot_allowed"
+        },
+        "required_labels": {
+          "description": "HARD: the worker's effective labels (its own plus its cluster's, e.g. nexus.io/region) must contain every pair.",
+          "$ref": "#/$defs/stringMap"
+        },
+        "max_cost_tier": {
+          "description": "HARD: the worker's nexus.io/cost-tier must not exceed this. 0 = no limit.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "preferred_data_locality": {
+          "description": "SOFT: prefer workers whose nexus.io/data-locality tags include one of these.",
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "preferred_labels": {
+          "description": "SOFT: prefer workers carrying these labels.",
+          "$ref": "#/$defs/stringMap"
+        },
+        "artifacts": {
+          "description": "Models/datasets the worker serves from its node-local cache (ADR-0030 section 4); workers already holding them are preferred.",
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/CacheArtifact"
+          }
+        },
+        "max_preemptions": {
+          "description": "Cap on retries after PREEMPTED (spot eviction) failures, which do not spend retry.max_attempts. 0 = the platform default.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "CacheArtifact": {
+      "type": "object",
+      "required": [
+        "name",
+        "uri"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Exposed to the workload as NEXUS_ARTIFACT_<NAME>.",
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$"
+        },
+        "key": {
+          "description": "Content address sha256:<64 lowercase hex>, verified on download. Omit to key by URI (no integrity check).",
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "uri": {
+          "description": "Where to fetch on a cache miss.",
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^(https?|file)://"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     }

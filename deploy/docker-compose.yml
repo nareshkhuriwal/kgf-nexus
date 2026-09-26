@@ -730,6 +730,16 @@ services:
       NEXUS_GPU_COUNT: "2"
       NEXUS_GPU_KIND: ${NEXUS_GPU_KIND:-nvidia-a100}
       NEXUS_GPU_MEMORY_BYTES: "42949672960"
+      # Fractional GPUs (ADR-0029), simulated like the whole ones: one A100
+      # partitioned into MIG instances (synthetic UUIDs; the agent labels the
+      # worker simulated=true) and two shared devices, one time-sliced and one
+      # under MPS. Indices 2 and 3 because 0 and 1 are the whole GPUs above:
+      # a device is in exactly one mode. examples/gpu_sharing runs on these.
+      NEXUS_GPU_MIG: "1g.10gb=3;3g.40gb=1"
+      NEXUS_GPU_SHARED: "2:timeslice:40Gi,3:mps:40Gi"
+      # Node-local model/dataset cache (ADR-0030 §4).
+      NEXUS_ARTIFACT_CACHE_DIR: /var/lib/nexus/artifacts
+      NEXUS_ARTIFACT_CACHE_BYTES: 2Gi
       NEXUS_DISK_BYTES: "53687091200"
       NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
       NEXUS_METRICS_ADDR: ":8089"

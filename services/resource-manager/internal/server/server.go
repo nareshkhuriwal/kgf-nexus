@@ -135,6 +135,14 @@ func (s *Server) HeartbeatWorker(ctx context.Context, req *rmv1.HeartbeatWorkerR
 		return nil, status.Errorf(codes.Internal, "touch heartbeat: %v", err)
 	}
 
+	if req.GetCachedArtifactsReported() {
+		// Placement input only (ADR-0030 §4): a failure here must not fail
+		// the heartbeat, which is liveness.
+		if err := s.store.RecordCachedArtifacts(ctx, workerID, req.GetCachedArtifacts()); err != nil {
+			log.Warn("could not record cached artifacts; cache affinity uses the previous set", "error", err)
+		}
+	}
+
 	grace := time.Duration(req.GetReconcileGraceMs()) * time.Millisecond
 	if grace <= 0 {
 		grace = s.ReconcileGrace

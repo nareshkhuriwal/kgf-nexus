@@ -22,6 +22,7 @@ import (
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // DockerExecutor runs each attempt as a container. This is the PRODUCTION-grade
@@ -68,6 +69,8 @@ type dockerState struct {
 	taskAPIDir string
 	limit      *nexusv1.ResourceVector
 	gpuDevices []int
+	gpu        GPUAssignment
+	artifacts  map[string]string
 	deadline   time.Time
 	grace      time.Duration
 	name       string
@@ -234,6 +237,8 @@ func (e *DockerExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepared, 
 		taskAPIDir:      taskAPIDirOf(spec),
 		limit:           spec.Limit,
 		gpuDevices:      spec.GPUDevices,
+		gpu:             spec.GPU,
+		artifacts:       spec.Artifacts,
 		deadline:        spec.StartToCloseDeadline,
 		grace:           orDefaultGrace(spec.GraceAfterTerm),
 		declaredOutputs: spec.DeclaredOutputs,
@@ -693,6 +698,9 @@ func dockerEnv(spec TaskSpec, containerWD string) []string {
 			EnvTaskAPIToken+"="+spec.TaskAPIToken,
 		)
 	}
+	// Inside a container given exactly one shared device, that device is 0.
+	env = append(env, gpuSliceEnv(spec, "0")...)
+	env = append(env, artifactEnv(spec, true)...)
 	return env
 }
 
@@ -714,7 +722,20 @@ func dockerRunArgs(st *dockerState, attemptID, network string) []string {
 		// it per attempt and removes it when the attempt ends.
 		args = append(args, "--volume", st.taskAPIDir+":"+ContainerTaskAPIDir)
 	}
-	args = append(args, dockerLimitArgs(st.limit, st.gpuDevices)...)
+	if st.gpu.Any() {
+		// Fractional GPUs (ADR-0029): the assigned MIG instances / shared
+		// device (plus any whole devices) are exposed by name; the limit's
+		// --gpus count must not be emitted as well, or docker sees two device
+		// requests.
+		lim := proto.Clone(st.limit).(*nexusv1.ResourceVector)
+		lim.GpuCount = 0
+		args = append(args, dockerLimitArgs(lim, nil)...)
+		args = append(args, dockerGPUArgs(TaskSpec{Limit: st.limit, GPUDevices: st.gpuDevices, GPU: st.gpu})...)
+	} else {
+		args = append(args, dockerLimitArgs(st.limit, st.gpuDevices)...)
+	}
+	// Node-local cached artifacts, read-only (ADR-0030 §4).
+	args = append(args, dockerArtifactArgs(st.artifacts)...)
 	for _, kv := range st.env {
 		args = append(args, "--env", kv)
 	}
