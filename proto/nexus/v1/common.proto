@@ -96,6 +96,11 @@ enum ErrorClass {
   ERROR_CLASS_NOT_FOUND = 8;
   // Infrastructure fault (result store down, executor failure). Retryable.
   ERROR_CLASS_INFRASTRUCTURE = 9;
+  // Retryable: an external provider throttled the task (HTTP 429, or 503 with
+  // Retry-After) past what the task's own retries absorbed. Retried WITHOUT
+  // charging the retry budget, up to a platform cap, after
+  // TaskError.retry_after_ms (ADR-0032).
+  ERROR_CLASS_RATE_LIMITED = 10;
 }
 
 // IdempotencyMode drives how indeterminate (LOST) outcomes are handled.
@@ -122,6 +127,10 @@ message TaskError {
   // Reference into the result store for a full stack trace / diagnostic blob,
   // rather than inlining unbounded text into the metadata store.
   string detail_ref = 5;
+  // How long the provider asked the caller to wait (its Retry-After), for
+  // ERROR_CLASS_RATE_LIMITED. 0 = not stated; the retry policy's backoff is
+  // used instead. The scheduler clamps it (ADR-0032).
+  int64 retry_after_ms = 6;
 }
 
 // ResultRef discriminates inline from blob storage. Small results are inlined

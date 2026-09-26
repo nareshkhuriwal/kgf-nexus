@@ -44,6 +44,26 @@ service WorkerService {
   // this RPC answers UNIMPLEMENTED; agents only call it when RegisterResponse
   // advertised log_shipping.enabled.
   rpc ReportLogs(ReportLogsRequest) returns (Ack);
+
+  // ── The workload API (ADR-0032) ─────────────────────────────────────────
+  // The agent serves each attempt a local socket and forwards what the task
+  // asks for through these RPCs, adding the lease token: the workload never
+  // holds a credential. Every one is fenced like the RPCs above. A gateway
+  // that predates them answers UNIMPLEMENTED; agents call them only when
+  // RegisterResponse.workload_api advertised the capability.
+
+  // Cumulative usage-unit totals for the attempt (tokens, requests, ...).
+  // Merged per key with max, so a duplicate or reordered report is harmless.
+  rpc ReportUsage(ReportUsageRequest) returns (Ack);
+  // Token-bucket permits against the namespace's shared rate limits, or (with
+  // settle) a correction of tokens already taken. Never waits server-side.
+  rpc AcquirePermits(AcquirePermitsRequest) returns (AcquirePermitsResponse);
+  // Registers a checkpoint object the agent has ALREADY written to the result
+  // store. Accepted only while the lease is live and only if newer than the
+  // stored checkpoint for the attempt's idempotency key.
+  rpc SaveCheckpoint(SaveCheckpointRequest) returns (Ack);
+  // The latest checkpoint for the attempt's idempotency key, if any.
+  rpc GetCheckpoint(GetCheckpointRequest) returns (GetCheckpointResponse);
 }
 
 message RegisterRequest {
@@ -70,6 +90,19 @@ message RegisterResponse {
   // Absent (or enabled=false) from a gateway that cannot index logs; the agent
   // then ships nothing rather than uploading objects nobody can read (ADR-0020).
   LogShippingConfig log_shipping = 6;
+  // Absent from a gateway that predates the workload API (ADR-0032): the agent
+  // then offers the workload none of it.
+  WorkloadApiConfig workload_api = 7;
+}
+
+// WorkloadApiConfig says which workload-API capabilities this control plane
+// serves (ADR-0032).
+message WorkloadApiConfig {
+  bool usage_reporting = 1;
+  bool rate_limits = 2;
+  bool checkpoints = 3;
+  // Largest checkpoint the agent may register. 0 = agent default (64 MiB).
+  int64 max_checkpoint_bytes = 4;
 }
 
 // LogShippingConfig is the control plane's log policy for this session. The
@@ -257,4 +290,70 @@ message LogFinal {
   // unreachable for long enough that the bounded buffer filled).
   int64 dropped_lines = 7;
   int64 chunk_count = 8;
+}
+
+// ReportUsageRequest carries the attempt's CUMULATIVE usage units. Keys follow
+// ADR-0032's convention (tokens:<provider>/<model>:input, requests:<provider>/
+// <model>, ...); values are non-negative totals, never deltas.
+message ReportUsageRequest {
+  string attempt_id = 1;
+  string lease_token = 2;
+  map<string, int64> units = 3;
+}
+
+message AcquirePermitsRequest {
+  string attempt_id = 1;
+  string lease_token = 2;
+  // Rate-limit keys (<provider> or <provider>/<model>). All or none are
+  // granted. Unconfigured keys are unlimited.
+  repeated string keys = 3;
+  // Requests to take from each key's request bucket.
+  int64 requests = 4;
+  // Tokens to take from each key's token bucket. With settle, a signed
+  // correction (actual - estimated) applied without a check.
+  int64 tokens = 5;
+  bool settle = 6;
+}
+
+message AcquirePermitsResponse {
+  // False with reason "stale_lease_token" when the caller does not own the
+  // attempt; nothing was taken.
+  bool accepted = 1;
+  string reason = 2;
+  bool granted = 3;
+  // When not granted: how long until the request could be granted, computed
+  // from the control plane's clock.
+  int64 retry_after_ms = 4;
+  // Requested keys with no configured limit.
+  repeated string unlimited_keys = 5;
+}
+
+message SaveCheckpointRequest {
+  string attempt_id = 1;
+  string lease_token = 2;
+  // Per-attempt, strictly increasing.
+  int64 seq = 3;
+  // Must be <namespace>/checkpoints/<idempotency_key>/<attempt_id>/...
+  string key = 4;
+  string sha256 = 5;
+  int64 size_bytes = 6;
+}
+
+message GetCheckpointRequest {
+  string attempt_id = 1;
+  string lease_token = 2;
+}
+
+message GetCheckpointResponse {
+  bool accepted = 1;
+  string reason = 2;
+  bool found = 3;
+  string key = 4;
+  string sha256 = 5;
+  int64 size_bytes = 6;
+  int64 seq = 7;
+  // The attempt that saved it (an earlier attempt, on a retry).
+  int32 attempt_number = 8;
+  int64 saved_at_unix_ms = 9;
+  string bucket = 10;
 }

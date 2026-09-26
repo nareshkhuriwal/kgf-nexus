@@ -100,21 +100,27 @@ const (
 	ErrorClass_ERROR_CLASS_NOT_FOUND ErrorClass = 8
 	// Infrastructure fault (result store down, executor failure). Retryable.
 	ErrorClass_ERROR_CLASS_INFRASTRUCTURE ErrorClass = 9
+	// Retryable: an external provider throttled the task (HTTP 429, or 503 with
+	// Retry-After) past what the task's own retries absorbed. Retried WITHOUT
+	// charging the retry budget, up to a platform cap, after
+	// TaskError.retry_after_ms (ADR-0032).
+	ErrorClass_ERROR_CLASS_RATE_LIMITED ErrorClass = 10
 )
 
 // Enum value maps for ErrorClass.
 var (
 	ErrorClass_name = map[int32]string{
-		0: "ERROR_CLASS_UNSPECIFIED",
-		1: "ERROR_CLASS_TRANSIENT",
-		2: "ERROR_CLASS_TIMEOUT",
-		3: "ERROR_CLASS_WORKER_LOST",
-		4: "ERROR_CLASS_VALIDATION",
-		5: "ERROR_CLASS_PERMISSION_DENIED",
-		6: "ERROR_CLASS_APPLICATION",
-		7: "ERROR_CLASS_OOM",
-		8: "ERROR_CLASS_NOT_FOUND",
-		9: "ERROR_CLASS_INFRASTRUCTURE",
+		0:  "ERROR_CLASS_UNSPECIFIED",
+		1:  "ERROR_CLASS_TRANSIENT",
+		2:  "ERROR_CLASS_TIMEOUT",
+		3:  "ERROR_CLASS_WORKER_LOST",
+		4:  "ERROR_CLASS_VALIDATION",
+		5:  "ERROR_CLASS_PERMISSION_DENIED",
+		6:  "ERROR_CLASS_APPLICATION",
+		7:  "ERROR_CLASS_OOM",
+		8:  "ERROR_CLASS_NOT_FOUND",
+		9:  "ERROR_CLASS_INFRASTRUCTURE",
+		10: "ERROR_CLASS_RATE_LIMITED",
 	}
 	ErrorClass_value = map[string]int32{
 		"ERROR_CLASS_UNSPECIFIED":       0,
@@ -127,6 +133,7 @@ var (
 		"ERROR_CLASS_OOM":               7,
 		"ERROR_CLASS_NOT_FOUND":         8,
 		"ERROR_CLASS_INFRASTRUCTURE":    9,
+		"ERROR_CLASS_RATE_LIMITED":      10,
 	}
 )
 
@@ -572,7 +579,11 @@ type TaskError struct {
 	Retryable bool `protobuf:"varint,4,opt,name=retryable,proto3" json:"retryable,omitempty"`
 	// Reference into the result store for a full stack trace / diagnostic blob,
 	// rather than inlining unbounded text into the metadata store.
-	DetailRef     string `protobuf:"bytes,5,opt,name=detail_ref,json=detailRef,proto3" json:"detail_ref,omitempty"`
+	DetailRef string `protobuf:"bytes,5,opt,name=detail_ref,json=detailRef,proto3" json:"detail_ref,omitempty"`
+	// How long the provider asked the caller to wait (its Retry-After), for
+	// ERROR_CLASS_RATE_LIMITED. 0 = not stated; the retry policy's backoff is
+	// used instead. The scheduler clamps it (ADR-0032).
+	RetryAfterMs  int64 `protobuf:"varint,6,opt,name=retry_after_ms,json=retryAfterMs,proto3" json:"retry_after_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -640,6 +651,13 @@ func (x *TaskError) GetDetailRef() string {
 		return x.DetailRef
 	}
 	return ""
+}
+
+func (x *TaskError) GetRetryAfterMs() int64 {
+	if x != nil {
+		return x.RetryAfterMs
+	}
+	return 0
 }
 
 // ResultRef discriminates inline from blob storage. Small results are inlined
@@ -918,14 +936,15 @@ const file_nexus_v1_common_proto_rawDesc = "" +
 	"\x06jitter\x18\x06 \x01(\tR\x06jitter\x12/\n" +
 	"\bretry_on\x18\a \x03(\x0e2\x14.nexus.v1.ErrorClassR\aretryOn\x124\n" +
 	"\vno_retry_on\x18\b \x03(\x0e2\x14.nexus.v1.ErrorClassR\tnoRetryOn\x129\n" +
-	"\x19retry_on_different_worker\x18\t \x01(\bR\x16retryOnDifferentWorker\"\xa2\x01\n" +
+	"\x19retry_on_different_worker\x18\t \x01(\bR\x16retryOnDifferentWorker\"\xc8\x01\n" +
 	"\tTaskError\x12*\n" +
 	"\x05class\x18\x01 \x01(\x0e2\x14.nexus.v1.ErrorClassR\x05class\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x18\n" +
 	"\amessage\x18\x03 \x01(\tR\amessage\x12\x1c\n" +
 	"\tretryable\x18\x04 \x01(\bR\tretryable\x12\x1d\n" +
 	"\n" +
-	"detail_ref\x18\x05 \x01(\tR\tdetailRef\"\x98\x01\n" +
+	"detail_ref\x18\x05 \x01(\tR\tdetailRef\x12$\n" +
+	"\x0eretry_after_ms\x18\x06 \x01(\x03R\fretryAfterMs\"\x98\x01\n" +
 	"\tResultRef\x12\x18\n" +
 	"\x06inline\x18\x01 \x01(\fH\x00R\x06inline\x12'\n" +
 	"\x04blob\x18\x02 \x01(\v2\x11.nexus.v1.BlobRefH\x00R\x04blob\x12!\n" +
@@ -949,7 +968,7 @@ const file_nexus_v1_common_proto_rawDesc = "" +
 	"\x1cBACKOFF_STRATEGY_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16BACKOFF_STRATEGY_FIXED\x10\x01\x12\x1b\n" +
 	"\x17BACKOFF_STRATEGY_LINEAR\x10\x02\x12 \n" +
-	"\x1cBACKOFF_STRATEGY_EXPONENTIAL\x10\x03*\xa6\x02\n" +
+	"\x1cBACKOFF_STRATEGY_EXPONENTIAL\x10\x03*\xc4\x02\n" +
 	"\n" +
 	"ErrorClass\x12\x1b\n" +
 	"\x17ERROR_CLASS_UNSPECIFIED\x10\x00\x12\x19\n" +
@@ -961,7 +980,9 @@ const file_nexus_v1_common_proto_rawDesc = "" +
 	"\x17ERROR_CLASS_APPLICATION\x10\x06\x12\x13\n" +
 	"\x0fERROR_CLASS_OOM\x10\a\x12\x19\n" +
 	"\x15ERROR_CLASS_NOT_FOUND\x10\b\x12\x1e\n" +
-	"\x1aERROR_CLASS_INFRASTRUCTURE\x10\t*\x8f\x01\n" +
+	"\x1aERROR_CLASS_INFRASTRUCTURE\x10\t\x12\x1c\n" +
+	"\x18ERROR_CLASS_RATE_LIMITED\x10\n" +
+	"*\x8f\x01\n" +
 	"\x0fIdempotencyMode\x12 \n" +
 	"\x1cIDEMPOTENCY_MODE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19IDEMPOTENCY_MODE_REQUIRED\x10\x01\x12 \n" +
