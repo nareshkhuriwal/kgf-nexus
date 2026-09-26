@@ -35,6 +35,7 @@ MIGRATIONS    := services/migrations
 .PHONY: sdk-test
 .PHONY: sdk-typecheck
 .PHONY: check-doc-refs
+.PHONY: check-go-version
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test e2e e2e-up e2e-down seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
@@ -118,6 +119,9 @@ verify-s3-image: ## Verify the pinned S3 image's GitHub build provenance (needs 
 
 check-doc-refs: ## Fail if any "OPERATIONS §N" reference in the repo names a section that does not exist
 	python3 deploy/scripts/check-operations-refs.py
+
+check-go-version: ## Fail unless go.mod, CONTRACT.md, CI and the service image name the same Go version
+	$(GO) test -count=1 ./tests/repo
 
 bench-pg: ## Start a disposable, migrated Postgres + MinIO for the benchmarks
 	@docker inspect $(BENCH_NAME)-pg >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-pg \
