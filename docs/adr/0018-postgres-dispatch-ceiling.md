@@ -197,6 +197,10 @@ What this does not change: a worker that can run nothing near the top of its
 queue still pays one full scan per poll (the fallback); the push path
 (`Claim`) is not windowed; and the two trigger metrics
 (`nexus_claim_seconds`, `nexus_pending_attempts`) still do not exist.
+*(Update 2026-09-26: both have since shipped, as
+`nexus_scheduler_claim_duration_seconds` by queue and path, and
+`nexus_scheduler_pending_attempts` by queue; see OPERATIONS §17.4. The
+benchmark was re-run on 2026-09-26: [BENCHMARKS.md](../BENCHMARKS.md), F150.)*
 
 ## Consequences
 

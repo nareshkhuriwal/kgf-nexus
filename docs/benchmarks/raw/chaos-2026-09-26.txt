@@ -1,0 +1,139 @@
+start 2026-09-26T07:34:09Z load=7.96 13.79 17.01
+=== RUN   TestEveryCommittedExampleActuallyRuns
+    examples_test.go:53: found 14 committed examples
+=== RUN   TestEveryCommittedExampleActuallyRuns/batch_inference
+    examples_test.go:99: batch_inference    11/11 nodes SUCCEEDED
+=== RUN   TestEveryCommittedExampleActuallyRuns/chaos_effect
+    examples_test.go:99: chaos_effect        3/3 nodes SUCCEEDED
+=== RUN   TestEveryCommittedExampleActuallyRuns/credit_risk_ml
+    examples_test.go:82: example credit_risk_ml reached RUNNING, want SUCCEEDED (run 3dead106-c65b-4410-8b78-9e84febdb471)
+    examples_test.go:84:   cv_trial[11] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[13] [RUNNING]
+    examples_test.go:84:   cv_trial[16] [RUNNING]
+    examples_test.go:84:   cv_trial[17] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[18] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[20] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[22] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[24] [RUNNING]
+    examples_test.go:84:   cv_trial[25] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[28] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[29] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[30] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[31] [RUNNING]
+    examples_test.go:84:   cv_trial[32] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[33] [RUNNING]
+    examples_test.go:84:   cv_trial[34] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[35] [RUNNING]
+    examples_test.go:84:   cv_trial[36] [RUNNING]
+    examples_test.go:84:   cv_trial[37] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[38] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[39] [RUNNING]
+    examples_test.go:84:   cv_trial[3] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[40] [RUNNING]
+    examples_test.go:84:   cv_trial[41] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[42] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[43] [RUNNING]
+    examples_test.go:84:   cv_trial[44] [RUNNING]
+    examples_test.go:84:   cv_trial[45] [RUNNING]
+    examples_test.go:84:   cv_trial[46] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[47] [RUNNING]
+    examples_test.go:84:   cv_trial[48] [RUNNING]
+    examples_test.go:84:   cv_trial[49] [RUNNING]
+    examples_test.go:84:   cv_trial[5] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[6] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[7] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+    examples_test.go:84:   cv_trial[9] [PENDING] waiting_for_resources: cpu (need 1000, free 0)
+=== RUN   TestEveryCommittedExampleActuallyRuns/csv_sales_pipeline
+    examples_test.go:82: example csv_sales_pipeline reached RUNNING, want SUCCEEDED (run 3a00b56f-70d5-42cf-8d02-9f644ca98b91)
+    examples_test.go:84:   generate_00 [PENDING]
+    examples_test.go:84:   generate_01 [PENDING]
+    examples_test.go:84:   generate_02 [PENDING]
+    examples_test.go:84:   generate_03 [PENDING]
+    examples_test.go:84:   generate_04 [PENDING]
+    examples_test.go:84:   generate_05 [PENDING]
+    examples_test.go:84:   generate_06 [PENDING]
+    examples_test.go:84:   generate_07 [PENDING]
+    examples_test.go:84:   generate_08 [PENDING]
+    examples_test.go:84:   generate_09 [PENDING]
+    examples_test.go:84:   generate_10 [PENDING]
+    examples_test.go:84:   generate_11 [PENDING]
+    examples_test.go:84:   generate_12 [PENDING]
+    examples_test.go:84:   generate_13 [PENDING]
+    examples_test.go:84:   generate_14 [PENDING]
+    examples_test.go:84:   generate_15 [PENDING]
+=== RUN   TestEveryCommittedExampleActuallyRuns/dispatch_storm
+    examples_test.go:82: example dispatch_storm reached RUNNING, want SUCCEEDED (run e486c514-d79b-42ec-b54c-9a958860f032)
+    examples_test.go:84:   fan_out [PENDING] waiting_for_resources: cpu (need 500, free 0)
+=== RUN   TestEveryCommittedExampleActuallyRuns/fan_out_map
+    examples_test.go:82: example fan_out_map reached RUNNING, want SUCCEEDED (run 018804ce-1d66-4176-a0e6-d153f6404818)
+    examples_test.go:84:   summarize [PENDING]
+=== RUN   TestEveryCommittedExampleActuallyRuns/fanout_scale
+    examples_test.go:99: fanout_scale       503/503 nodes SUCCEEDED
+=== RUN   TestEveryCommittedExampleActuallyRuns/gpu_scheduling
+    examples_test.go:82: example gpu_scheduling reached RUNNING, want SUCCEEDED (run 0b8e605f-9c4f-4b58-80b1-c85ab7182717)
+    examples_test.go:84:   audit [FAILED] {"type": "TaskFailed", "class": "ERROR_CLASS_APPLICATION", "message": "exit code 1"}
+=== RUN   TestEveryCommittedExampleActuallyRuns/hello_dag
+    examples_test.go:99: hello_dag           3/3 nodes SUCCEEDED
+=== RUN   TestEveryCommittedExampleActuallyRuns/idempotent_effect
+    examples_test.go:99: idempotent_effect   4/4 nodes SUCCEEDED
+=== RUN   TestEveryCommittedExampleActuallyRuns/image_processing_gpu
+    examples_test.go:82: example image_processing_gpu reached RUNNING, want SUCCEEDED (run 43391b76-2f31-4483-a39b-efe47286b3e0)
+    examples_test.go:84:   detect_06 [RUNNING]
+    examples_test.go:84:   enhance_00 [PENDING] waiting_for_resources: gpu_kind (need "nvidia-a10", worker has "nvidia-a100")
+    examples_test.go:84:   enhance_01 [PENDING] waiting_for_resources: gpu (need 1, free 0)
+    examples_test.go:84:   enhance_02 [PENDING] waiting_for_resources: gpu_kind (need "nvidia-a10", worker has "nvidia-a100")
+    examples_test.go:84:   enhance_04 [PENDING] waiting_for_resources: gpu_kind (need "nvidia-a10", worker has "nvidia-a100")
+    examples_test.go:84:   enhance_05 [PENDING] waiting_for_resources: gpu_kind (need "nvidia-a10", worker has "nvidia-a100")
+    examples_test.go:84:   enhance_07 [PENDING] waiting_for_resources: gpu_kind (need "nvidia-a10", worker has "nvidia-a100")
+=== RUN   TestEveryCommittedExampleActuallyRuns/ml_capacity_test
+    examples_test.go:82: example ml_capacity_test reached RUNNING, want SUCCEEDED (run 7a79b351-0c4a-4d52-9f0d-10282ff1fbd0)
+    examples_test.go:84:   generate_data [FAILED] {"type": "NotFound", "class": "ERROR_CLASS_NOT_FOUND", "message": "prepare: executor: image or handler not found: \"python3\": exec: \"python3\": executable file not found in $PATH"}
+=== RUN   TestEveryCommittedExampleActuallyRuns/ml_training_pipeline
+    examples_test.go:99: ml_training_pipeline 28/28 nodes SUCCEEDED
+=== RUN   TestEveryCommittedExampleActuallyRuns/ten_node_mixed
+    examples_test.go:82: example ten_node_mixed reached RUNNING, want SUCCEEDED (run d16ab97b-2bdd-4ccb-804d-4fac5ec23ace)
+    examples_test.go:84:   train_small [PENDING] waiting_for_resources: gpu_kind (need "nvidia-a10", worker has "nvidia-a100")
+--- FAIL: TestEveryCommittedExampleActuallyRuns (1071.74s)
+    --- PASS: TestEveryCommittedExampleActuallyRuns/batch_inference (2.52s)
+    --- PASS: TestEveryCommittedExampleActuallyRuns/chaos_effect (25.58s)
+    --- FAIL: TestEveryCommittedExampleActuallyRuns/credit_risk_ml (120.47s)
+    --- FAIL: TestEveryCommittedExampleActuallyRuns/csv_sales_pipeline (122.58s)
+    --- FAIL: TestEveryCommittedExampleActuallyRuns/dispatch_storm (122.56s)
+    --- FAIL: TestEveryCommittedExampleActuallyRuns/fan_out_map (122.39s)
+    --- PASS: TestEveryCommittedExampleActuallyRuns/fanout_scale (41.52s)
+    --- FAIL: TestEveryCommittedExampleActuallyRuns/gpu_scheduling (121.46s)
+    --- PASS: TestEveryCommittedExampleActuallyRuns/hello_dag (2.54s)
+    --- PASS: TestEveryCommittedExampleActuallyRuns/idempotent_effect (2.53s)
+    --- FAIL: TestEveryCommittedExampleActuallyRuns/image_processing_gpu (122.64s)
+    --- FAIL: TestEveryCommittedExampleActuallyRuns/ml_capacity_test (121.46s)
+    --- PASS: TestEveryCommittedExampleActuallyRuns/ml_training_pipeline (22.84s)
+    --- FAIL: TestEveryCommittedExampleActuallyRuns/ten_node_mixed (120.51s)
+FAIL
+FAIL	github.com/khuriwalgroup/kgf-nexus/tests/chaos	1072.356s
+FAIL
+examples exit=1
+=== RUN   TestKillingAWorkerMidTaskYieldsExactlyOneLogicalEffect
+    chaos_test.go:92: run cc1e8153-5ac6-4707-b4c5-54830e61fadd created
+    chaos_test.go:100: node slow is RUNNING on worker 583da339-3546-4c45-93a3-7ba581842733 (container f00936a85ad2)
+    chaos_test.go:108: SIGKILLed f00936a85ad2 mid-task
+    chaos_test.go:161: node seed    effects=1 executions=1
+    chaos_test.go:161: node slow    effects=1 executions=2
+    chaos_test.go:161: node settle  effects=1 executions=1
+--- PASS: TestKillingAWorkerMidTaskYieldsExactlyOneLogicalEffect (61.54s)
+=== RUN   TestKillingAWorkerLeavesNoCapacityLeaked
+--- PASS: TestKillingAWorkerLeavesNoCapacityLeaked (0.40s)
+=== RUN   TestSchedulerReplicasNeverDoubleDispatchUnderLoad
+    chaos_test.go:567: only 1 scheduler replica running; scaling to 3
+    chaos_test.go:580: 3 scheduler replicas are running
+    chaos_test.go:592: created 8 concurrent dispatch storms
+    chaos_test.go:634: sampled the ledger 21 times under load; peak concurrent leases 6
+    chaos_test.go:654: peak overlapping dispatches: 18
+    chaos_test.go:700: replica nexus-w3l-chaos-scheduler-1 claimed 291 attempts
+    chaos_test.go:700: replica nexus-w3l-chaos-scheduler-2 claimed 73 attempts
+    chaos_test.go:700: replica nexus-w3l-chaos-scheduler-3 claimed 67 attempts
+    chaos_test.go:700: replica nexus-w3l-chaos-scheduler-gpu-1 claimed 25 attempts
+--- PASS: TestSchedulerReplicasNeverDoubleDispatchUnderLoad (17.57s)
+PASS
+ok  	github.com/khuriwalgroup/kgf-nexus/tests/chaos	80.792s
+chaos exit=0
+end 2026-09-26T07:53:24Z load=8.54 10.25 12.52

@@ -20,6 +20,26 @@ including the dispatch queue.
 | [ui/README.md](ui/README.md) | The web UI |
 | [examples/](examples/README.md) | Runnable example workflows |
 
+## Evaluating Nexus
+
+These four pages are for anyone deciding whether Nexus fits. They are kept
+separate from the rest of the documentation above.
+
+- [docs/BENCHMARKS.md](docs/BENCHMARKS.md): measured dispatch throughput and
+  latency, inline-vs-blob results, chaos and restore drills. The method and
+  hardware are recorded, and every figure is a laptop figure, not a production
+  capacity figure.
+- [docs/COMPARISON.md](docs/COMPARISON.md): Nexus next to Airflow, Prefect,
+  Argo Workflows and Flyte, with sources. It says where each is stronger.
+- [docs/ROADMAP.md](docs/ROADMAP.md): what has shipped, what is in progress,
+  and what is planned.
+- [docs/KGF-INTEGRATION.md](docs/KGF-INTEGRATION.md): how Nexus ships as the
+  `KGF.Nexus` service of KGF Cloud. This is a design; it has not been built
+  ([ADR-0033](docs/adr/0033-nexus-as-kgf-nexus-service.md)).
+
+Nexus has not passed its production acceptance gates and is not described as
+production-ready.
+
 ## License
 
 Copyright 2026 Khuriwal Group
