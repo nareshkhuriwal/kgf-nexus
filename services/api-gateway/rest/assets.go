@@ -24,7 +24,10 @@ func (a *API) listAssets(w http.ResponseWriter, r *http.Request, _ authn.Princip
 	if !a.eventsEnabled(w) {
 		return
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	limit, ok := listLimit(w, r, store.DefaultAssetPage, store.MaxAssetPage)
+	if !ok {
+		return
+	}
 	rows, err := store.AssetList(r.Context(), a.db, r.PathValue("ns"), r.URL.Query().Get("q"), limit)
 	if err != nil {
 		a.failConfig(w, r, "list assets", err)

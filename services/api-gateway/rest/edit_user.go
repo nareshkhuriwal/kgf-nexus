@@ -23,8 +23,8 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request, p authn.Princip
 		PreviousEmail       *string `json:"previous_email"`
 		PreviousDisplayName *string `json:"previous_display_name"`
 	}
-	if decodeRBACBody(w, r, &b) != nil {
-		writeError(w, 400, "invalid", "Invalid user details")
+	if err := decodeRBACBody(w, r, &b); err != nil {
+		rejectBody(w, err, http.StatusBadRequest, "invalid", "Invalid user details")
 		return
 	}
 	b.Email = strings.ToLower(strings.TrimSpace(b.Email))
@@ -42,6 +42,11 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request, p authn.Princip
 	defer tx.Rollback(r.Context())
 	var current store.UserRow
 	err = tx.QueryRow(r.Context(), `SELECT id::text,namespace,email,display_name,role,created_at,disabled_at FROM users WHERE namespace=$1 AND id::text=$2 FOR UPDATE`, p.Namespace, r.PathValue("id")).Scan(&current.ID, &current.Namespace, &current.Email, &current.DisplayName, &current.Role, &current.CreatedAt, &current.DisabledAt)
+	// email_verified_at is read back from the UPDATE below rather than here:
+	// the database un-proves an address when it changes (migration 0017's
+	// trigger), so only the row as written says whether the account is still
+	// verified. The response used to leave it nil -- email_verified: false for
+	// every account.
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "not_found", "User not found")
 		return
@@ -54,7 +59,8 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request, p authn.Princip
 		writeError(w, 409, "conflict", "This user changed. Close the editor, refresh the list, and reopen it before saving.")
 		return
 	}
-	_, err = tx.Exec(r.Context(), `UPDATE users SET email=$3,display_name=$4 WHERE namespace=$1 AND id::text=$2`, p.Namespace, current.ID, b.Email, b.DisplayName)
+	err = tx.QueryRow(r.Context(), `UPDATE users SET email=$3,display_name=$4 WHERE namespace=$1 AND id::text=$2 RETURNING email_verified_at`,
+		p.Namespace, current.ID, b.Email, b.DisplayName).Scan(&current.EmailVerifiedAt)
 	if err != nil {
 		var pgerr *pgconn.PgError
 		if errors.As(err, &pgerr) && pgerr.Code == "23505" {
@@ -64,15 +70,17 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request, p authn.Princip
 		a.fail(w, r, "edit user", err)
 		return
 	}
-	var actorID *string
-	if p.UserID != "" {
-		actorID = &p.UserID
-	}
-	if err = store.GatewayAppendAudit(r.Context(), tx, store.AuditEntry{Namespace: p.Namespace, ActorID: actorID, ActorKind: string(p.Kind), ActorLabel: p.Name, Action: "user.update", TargetKind: "user", TargetID: current.ID, Outcome: store.AuditSuccess, ClientIP: clientIP(r), Detail: map[string]any{"email": b.Email, "display_name": b.DisplayName}}); err == nil {
+	// user.update is a security grant (it can re-point where recovery mail
+	// goes), so a failed audit write rolls the edit back and answers 503
+	// audit_unavailable like every other fail-closed action (F139), not 500.
+	if err = auditTx(r, tx, p, "user.update", "user", current.ID,
+		map[string]any{"email": b.Email, "display_name": b.DisplayName}); err == nil {
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
-		a.fail(w, r, "edit user", err)
+		if !a.auditUnavailable(w, r, err) {
+			a.fail(w, r, "edit user", err)
+		}
 		return
 	}
 	current.Email = b.Email

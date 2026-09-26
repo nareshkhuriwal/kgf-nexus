@@ -387,7 +387,12 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 	}
 	mux.Handle("GET /v1/account/tenant", a.guard(authn.ActionRead, a.currentTenant))
 	mux.Handle("GET /v1/platform/tenants", a.guard(authn.ActionRead, a.listTenants))
-	mux.Handle("POST /v1/platform/tenants", a.guard(authn.ActionRead, a.createTenant))
+	// Creating a tenant is a platform-operator WRITE (F154). It carries no
+	// fine-grained permission -- the catalog is per namespace and this is not
+	// -- so the coarse action is the guard's whole decision, and it must not be
+	// `read`: that let every read-only credential through the guard and left
+	// the handler's operator check as the only line of defence.
+	mux.Handle("POST /v1/platform/tenants", a.guard(authn.ActionAdminWrite, a.createTenant))
 
 	// Logout and whoami need only a valid credential of any kind, so they are
 	// guarded on read: every authenticated principal may ask who it is and end its
@@ -526,7 +531,9 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 func (a *API) submitSpec(w http.ResponseWriter, r *http.Request, p authn.Principal) {
 	body, err := readBody(r, maxSpecBytes)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "spec_too_large", err.Error())
+		// 413 spec_too_large only for a body over the limit; a read that failed
+		// part way is 400 unreadable_body, not a size the client must reduce.
+		writeBodyErrorAs(w, err, "spec_too_large")
 		return
 	}
 
@@ -638,8 +645,12 @@ func (a *API) fleetHealth(w http.ResponseWriter, r *http.Request, _ authn.Princi
 // ADR-0011 lets the gateway read any table, and a catalog listing is a projection
 // like the run list.
 func (a *API) listCatalog(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	limit, ok := listLimit(w, r, store.DefaultCatalogPage, store.MaxCatalogPage)
+	if !ok {
+		return
+	}
 	rows, err := store.GatewayListCatalog(r.Context(), a.db, r.PathValue("ns"),
-		strings.TrimSpace(r.URL.Query().Get("search")), intParam(r, "limit", 100))
+		strings.TrimSpace(r.URL.Query().Get("search")), limit)
 	if err != nil {
 		a.fail(w, r, "list catalog", err)
 		return
@@ -783,7 +794,11 @@ func (a *API) deleteSpec(w http.ResponseWriter, r *http.Request, p authn.Princip
 }
 
 func (a *API) listSpecVersions(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
-	rows, err := store.GatewayListSpecVersions(r.Context(), a.db, r.PathValue("ns"), r.PathValue("name"), intParam(r, "limit", 50))
+	limit, ok := listLimit(w, r, store.DefaultVersionPage, store.MaxVersionPage)
+	if !ok {
+		return
+	}
+	rows, err := store.GatewayListSpecVersions(r.Context(), a.db, r.PathValue("ns"), r.PathValue("name"), limit)
 	if err != nil {
 		a.fail(w, r, "list spec versions", err)
 		return
@@ -844,7 +859,7 @@ func (a *API) createRun(w http.ResponseWriter, r *http.Request, p authn.Principa
 
 	body, err := readBody(r, maxRunBytes)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 
@@ -978,9 +993,15 @@ func (a *API) createRun(w http.ResponseWriter, r *http.Request, p authn.Principa
 }
 
 func (a *API) listRuns(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	// Capped at 500, not reset: limit=600 used to answer the 100-row default,
+	// fewer rows than limit=101 (F155).
+	limit, ok := listLimit(w, r, store.DefaultRunPage, store.MaxRunPage)
+	if !ok {
+		return
+	}
 	f := store.RunFilter{
 		SpecName: r.URL.Query().Get("spec"),
-		Limit:    intParam(r, "limit", 100),
+		Limit:    limit,
 	}
 	if s := r.URL.Query().Get("state"); s != "" {
 		f.States = strings.Split(s, ",")
@@ -994,9 +1015,6 @@ func (a *API) listRuns(w http.ResponseWriter, r *http.Request, _ authn.Principal
 		f.Before = &t
 	}
 
-	if f.Limit <= 0 || f.Limit > 500 {
-		f.Limit = 100
-	}
 	f.Lookahead = true
 	rows, err := store.GatewayListRuns(r.Context(), a.db, r.PathValue("ns"), f)
 	if err != nil {
@@ -1174,6 +1192,10 @@ func (a *API) lifecycle(w http.ResponseWriter, r *http.Request, op string, fn fu
 // would drop or repeat events written in the same millisecond.
 func (a *API) getRunEvents(w http.ResponseWriter, r *http.Request, p authn.Principal) {
 	ns, id := r.PathValue("ns"), r.PathValue("id")
+	limit, ok := listLimit(w, r, store.DefaultEventPage, store.MaxEventPage)
+	if !ok {
+		return
+	}
 	// Namespace-scoped existence check first: without it, event history would be
 	// readable across tenants by guessing a run UUID.
 	if _, err := store.GatewayGetRun(r.Context(), a.db, ns, id); err != nil {
@@ -1195,7 +1217,7 @@ func (a *API) getRunEvents(w http.ResponseWriter, r *http.Request, p authn.Princ
 		return
 	}
 
-	events, err := store.GatewayListRunEvents(r.Context(), a.db, id, after, intParam(r, "limit", 500))
+	events, err := store.GatewayListRunEvents(r.Context(), a.db, id, after, limit)
 	if err != nil {
 		a.fail(w, r, "list run events", err)
 		return
@@ -1325,6 +1347,10 @@ func (a *API) listWorkers(w http.ResponseWriter, r *http.Request, _ authn.Princi
 // fleet.
 func (a *API) getWorker(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
 	ns, id := r.PathValue("ns"), r.PathValue("id")
+	recentLimit, ok := boundedIntParam(w, r, "recent_limit", store.DefaultWorkerTail, store.MaxWorkerTail)
+	if !ok {
+		return
+	}
 	// Namespace-scoped resolve FIRST, so a worker UUID from another tenant is a
 	// 404 before any attempt of theirs is read.
 	wk, err := store.GatewayGetWorker(r.Context(), a.db, ns, id)
@@ -1337,7 +1363,7 @@ func (a *API) getWorker(w http.ResponseWriter, r *http.Request, _ authn.Principa
 		a.fail(w, r, "list worker running attempts", err)
 		return
 	}
-	recent, err := store.GatewayWorkerRecentAttempts(r.Context(), a.db, id, intParam(r, "recent_limit", workerRecentLimit))
+	recent, err := store.GatewayWorkerRecentAttempts(r.Context(), a.db, id, recentLimit)
 	if err != nil {
 		a.fail(w, r, "list worker recent attempts", err)
 		return
@@ -1357,11 +1383,6 @@ func (a *API) getWorker(w http.ResponseWriter, r *http.Request, _ authn.Principa
 	payload["recent_attempts"] = recentOut
 	writeJSON(w, http.StatusOK, payload)
 }
-
-// workerRecentLimit bounds the historical tail. 25 fills a screen without
-// turning a detail page into a history export; the store clamps anything larger
-// because there is no index on worker_id for terminal attempt states.
-const workerRecentLimit = 25
 
 // drainWorker asks the worker to stop taking new work and finish what it has.
 //

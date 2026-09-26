@@ -184,8 +184,11 @@ func TestIntegrationNotificationChannelsNeverExposeSecrets(t *testing.T) {
 	e.call("POST", base, `{"name":"x","kind":"webhook","config":{"url":"https://h.example"}}`, e.readerA, 403)
 	e.call("GET", "/v1/namespaces/"+e.nsB+"/notification-channels", "", e.adminA, 403)
 	e.call("POST", base, `{"name":"ops-hook","kind":"webhook","config":{"url":"https://h.example"}}`, e.adminA, 409)
-	// Update keeps the secret unless replaced.
-	upd := e.call("PUT", base+"/slack", `{"enabled":false,"rate_limit_per_minute":5}`, e.adminA, 200)
+	// Update keeps the secret unless replaced. The revision rule (F155): an
+	// update names the revision it read; omitting it (0, "create only if
+	// absent") on a channel that exists is a conflict, not an overwrite.
+	e.call("PUT", base+"/slack", `{"enabled":false,"rate_limit_per_minute":5}`, e.adminA, 409)
+	upd := e.call("PUT", base+"/slack", `{"enabled":false,"rate_limit_per_minute":5,"revision":1}`, e.adminA, 200)
 	if upd["enabled"] != false || upd["secret"].(map[string]any)["configured"] != true {
 		t.Fatalf("update %v", upd)
 	}
@@ -215,7 +218,10 @@ func TestIntegrationRulesTestSendAndRedrive(t *testing.T) {
 		t.Fatalf("rule %v", rule)
 	}
 	e.call("PUT", ns+"/notification-rules/r", `{"events":["run.failed"],"channels":["hook"],"revision":999}`, e.adminA, 409)
-	e.call("PUT", ns+"/notification-rules/r", `{"events":["run.failed"],"channels":["hook"]}`, e.adminA, 200)
+	e.call("PUT", ns+"/notification-rules/r", `{"events":["run.failed"],"channels":["hook"]}`, e.adminA, 409)
+	e.call("PUT", ns+"/notification-rules/r", `{"events":["run.failed"],"channels":["hook"],"revision":-1}`, e.adminA, 400)
+	e.call("PUT", ns+"/notification-rules/r", `{"events":["run.failed"],"channels":["hook"],"revision":1}`, e.adminA, 200)
+	e.call("PUT", ns+"/notification-rules/gone", `{"events":["run.failed"],"channels":["hook"],"revision":1}`, e.adminA, 404)
 
 	test := e.call("POST", ns+"/notification-channels/hook/test", "", e.adminA, 202)
 	id := int64(test["delivery_id"].(float64))
@@ -329,7 +335,9 @@ func TestIntegrationWebhookTriggerSignatureReplayAndIdempotency(t *testing.T) {
 		t.Fatalf("revoked secret still verifies: %d", w.Code)
 	}
 	// Disabled triggers are indistinguishable from unknown ones.
-	e.call("PUT", ns+"/triggers/gh", `{"enabled":false}`, e.adminA, 200)
+	e.call("PUT", ns+"/triggers/gh", `{"enabled":false}`, e.adminA, 409) // no revision: not an overwrite
+	rev := e.call("GET", ns+"/triggers/gh", "", e.readerA, 200)["revision"].(float64)
+	e.call("PUT", ns+"/triggers/gh", fmt.Sprintf(`{"enabled":false,"revision":%d}`, int64(rev)), e.adminA, 200)
 	if w := e.hook(path, body, secret, now.Add(9*time.Second)); w.Code != 404 {
 		t.Fatalf("disabled: %d", w.Code)
 	}
@@ -355,7 +363,9 @@ func TestIntegrationSensorsAPI(t *testing.T) {
 		t.Fatalf("sensor %v", s)
 	}
 	e.call("PUT", ns+"/sensors/arrivals", `{"kind":"run_succeeded"}`, e.adminA, 400)
-	e.call("PUT", ns+"/sensors/arrivals", `{"enabled":false}`, e.adminA, 200)
+	e.call("PUT", ns+"/sensors/arrivals", `{"enabled":false}`, e.adminA, 409)
+	e.call("PUT", ns+"/sensors/arrivals", `{"enabled":false,"revision":-2}`, e.adminA, 400)
+	e.call("PUT", ns+"/sensors/arrivals", `{"enabled":false,"revision":1}`, e.adminA, 200)
 	list := e.call("GET", ns+"/sensors", "", e.readerA, 200)
 	if len(list["sensors"].([]any)) != 1 || list["sensors"].([]any)[0].(map[string]any)["status"] != "disabled" {
 		t.Fatalf("list %v", list)

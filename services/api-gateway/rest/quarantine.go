@@ -65,7 +65,7 @@ func (a *API) quarantineWorker(w http.ResponseWriter, r *http.Request, p authn.P
 	ns, id := r.PathValue("ns"), r.PathValue("id")
 	body, err := readBody(r, 16<<10)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req quarantineRequest
@@ -117,7 +117,7 @@ func (a *API) releaseWorker(w http.ResponseWriter, r *http.Request, p authn.Prin
 	ns, id := r.PathValue("ns"), r.PathValue("id")
 	body, err := readBody(r, 16<<10)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req quarantineRequest
@@ -185,7 +185,7 @@ func (a *API) invalidateCache(w http.ResponseWriter, r *http.Request, p authn.Pr
 	}
 	body, err := readBody(r, 16<<10)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req invalidateRequest

@@ -13,12 +13,11 @@ import (
 	"strings"
 )
 
+// platformOperator answers 403 unless p is a platform operator: an unbound
+// administrator's SESSION (never a key or token, never a role-bound or KGF
+// principal) whose account is listed in platform_operators.
 func (a *API) platformOperator(w http.ResponseWriter, r *http.Request, p authn.Principal) bool {
-	if p.Kind != authn.KindSession || p.Role != authn.RoleAdmin || p.Grants != nil {
-		writeError(w, 403, "forbidden", "Platform operator session required")
-		return false
-	}
-	ok, err := store.GatewayPlatformOperator(r.Context(), a.db, p.UserID)
+	ok, err := a.isPlatformOperator(r, p)
 	if err != nil {
 		a.fail(w, r, "check platform operator", err)
 		return false
@@ -73,7 +72,7 @@ func (a *API) onboardTenant(w http.ResponseWriter, r *http.Request, p authn.Prin
 	}
 	body, err := readBody(r, 16<<10)
 	if err != nil {
-		writeError(w, 413, "too_large", "Request too large")
+		writeBodyError(w, err)
 		return
 	}
 	if json.Unmarshal(body, &req) != nil {
@@ -133,9 +132,14 @@ func (a *API) onboardTenant(w http.ResponseWriter, r *http.Request, p authn.Prin
 		p.Name = req.Email
 	}
 	for _, ns := range auditNamespaces {
-		err = store.GatewayAppendAudit(r.Context(), tx, store.AuditEntry{Namespace: ns, ActorKind: string(p.Kind), ActorLabel: p.Name, Action: "tenant.create", TargetKind: "tenant", TargetID: t.ID, Outcome: "OK", Detail: map[string]any{"tenant_id": t.ID, "administrator_id": u.ID}})
+		// Outcome "success" like every other row (it was the literal "OK", which
+		// no outcome filter or export matched), with the caller's address.
+		err = store.GatewayAppendAudit(r.Context(), tx, store.AuditEntry{Namespace: ns, ActorKind: string(p.Kind), ActorLabel: p.Name, Action: "tenant.create", TargetKind: "tenant", TargetID: t.ID, Outcome: store.AuditSuccess, ClientIP: clientIP(r), Detail: map[string]any{"tenant_id": t.ID, "administrator_id": u.ID}})
 		if err != nil {
-			a.fail(w, r, "audit onboarding", err)
+			// tenant.create is a security grant: the onboarding rolls back with
+			// its audit row, and the caller is told to retry (F139).
+			countAuditFailure(ClassOf("tenant.create"), true)
+			a.auditUnavailable(w, r, auditWriteError{err})
 			return
 		}
 	}
@@ -152,6 +156,11 @@ func (a *API) onboardTenant(w http.ResponseWriter, r *http.Request, p authn.Prin
 
 func (a *API) currentTenant(w http.ResponseWriter, r *http.Request, p authn.Principal) {
 	t, err := store.GatewayTenant(r.Context(), a.db, p.Namespace)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "tenant_not_found",
+			"namespace "+p.Namespace+" is not registered to a tenant")
+		return
+	}
 	if err != nil {
 		a.fail(w, r, "load tenant", err)
 		return
