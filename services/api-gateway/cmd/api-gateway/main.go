@@ -36,6 +36,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/auditexport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
@@ -167,6 +168,25 @@ func run() error {
 	}
 	api = api.WithEmailFlows(emailCfg)
 
+	// Audit export (ADR-0025): sink secrets are sealed under
+	// NEXUS_AUDIT_SINK_KEY(_FILE); without it sinks are refused (503) but
+	// listing, export, retention and legal hold all work. A malformed key or
+	// destination policy is fatal, like any other security configuration.
+	auditKeys, err := auditexport.KeyringFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	sinkPolicy, err := auditexport.PolicyFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	api = api.WithAuditExport(auditKeys, sinkPolicy)
+	rest.RegisterAuditMetrics(reg)
+	deliverer := &auditexport.Deliverer{DB: db, Keys: auditKeys, Policy: sinkPolicy, Log: log}
+	deliverer.RegisterMetrics(reg)
+	purger := &auditexport.Purger{DB: db, Log: log}
+	purger.RegisterMetrics(reg)
+
 	hc := health.New(map[string]health.Check{
 		// Readiness depends on the database because a gateway that cannot reach
 		// Postgres can authenticate nothing and serve nothing useful.
@@ -262,7 +282,17 @@ func run() error {
 	sweeper.Interval = cfg.SessionSweepInterval
 	sweeper.BatchLimit = cfg.SessionSweepLimit
 
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 6)
+	go func() {
+		if err := deliverer.Run(ctx); err != nil {
+			errCh <- fmt.Errorf("audit sink deliverer: %w", err)
+		}
+	}()
+	go func() {
+		if err := purger.Run(ctx); err != nil {
+			errCh <- fmt.Errorf("audit retention purger: %w", err)
+		}
+	}()
 	go func() {
 		if err := opsSrv.Serve(); err != nil {
 			errCh <- fmt.Errorf("metrics listener: %w", err)

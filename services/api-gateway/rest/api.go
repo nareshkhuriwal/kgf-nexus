@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/auditexport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/spec"
@@ -131,6 +132,12 @@ type API struct {
 	// reported alongside it. See assignment.go.
 	assignments     AssignmentReader
 	inlineThreshold int64
+
+	// auditKeys seals audit sink signing secrets; nil disables sink creation
+	// (503 sinks_disabled). sinkPolicy bounds where sinks may point. See
+	// audit.go and ADR-0025.
+	auditKeys  *auditexport.Keyring
+	sinkPolicy auditexport.URLPolicy
 }
 
 // New builds the REST API.
@@ -379,8 +386,9 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/namespaces/{ns}/tokens/{id}/revoke", a.guard(authn.ActionAdminWrite, a.revokeToken))
 
 	// The audit trail records who changed what. Admin-only: it names accounts and
-	// the actions taken against them.
-	mux.Handle("GET /v1/namespaces/{ns}/audit", a.guard(authn.ActionAdminWrite, a.listAudit))
+	// the actions taken against them. Paging, export, retention, legal hold and
+	// SIEM sinks (ADR-0025): audit.go.
+	a.registerAuditRoutes(mux)
 }
 
 // guard authenticates, authorizes for the path's namespace, and then dispatches.

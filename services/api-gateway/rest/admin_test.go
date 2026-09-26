@@ -214,7 +214,46 @@ func (f *fakeIdentityAdmin) AppendAudit(_ context.Context, e store.AuditEntry) e
 	return nil
 }
 
-func (f *fakeIdentityAdmin) ListAudit(_ context.Context, ns string, filter store.AuditFilter) ([]store.AuditRow, error) {
+// WithinTx gives the fake real rollback semantics: everything fn changed is
+// restored when it fails, exactly as the Postgres transaction would.
+func (f *fakeIdentityAdmin) WithinTx(_ context.Context, fn func(IdentityAdmin) error) error {
+	snap := f.snapshot()
+	if err := fn(f); err != nil {
+		f.restore(snap)
+		return err
+	}
+	return nil
+}
+
+type fakeIdentitySnapshot struct {
+	users    map[string]store.UserRow
+	byEmail  map[string]string
+	password map[string]string
+	sessions map[string]store.SessionRow
+	tokens   map[string]store.ScopedTokenRow
+	audit    []store.AuditEntry
+	nextID   int
+}
+
+func cloneMap[K comparable, V any](m map[K]V) map[K]V {
+	out := make(map[K]V, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func (f *fakeIdentityAdmin) snapshot() fakeIdentitySnapshot {
+	return fakeIdentitySnapshot{cloneMap(f.users), cloneMap(f.byEmail), cloneMap(f.password),
+		cloneMap(f.sessions), cloneMap(f.tokens), append([]store.AuditEntry(nil), f.audit...), f.nextID}
+}
+
+func (f *fakeIdentityAdmin) restore(s fakeIdentitySnapshot) {
+	f.users, f.byEmail, f.password, f.sessions, f.tokens, f.audit, f.nextID =
+		s.users, s.byEmail, s.password, s.sessions, s.tokens, s.audit, s.nextID
+}
+
+func (f *fakeIdentityAdmin) ListAudit(_ context.Context, ns string, filter store.AuditFilter) ([]store.AuditRow, string, error) {
 	var out []store.AuditRow
 	for i, e := range f.audit {
 		if e.Namespace != ns {
@@ -232,7 +271,7 @@ func (f *fakeIdentityAdmin) ListAudit(_ context.Context, ns string, filter store
 			Detail: []byte("{}"), OccurredAt: time.Now(),
 		})
 	}
-	return out, nil
+	return out, "", nil
 }
 
 // auditedActions returns the actions recorded so far, for readable assertions.
@@ -850,14 +889,54 @@ func TestAuditListIsFilterable(t *testing.T) {
 // TestAuditFailureDoesNotFailTheOperation documents a deliberate trade: refusing
 // an administrative action because its audit row could not be written would block
 // administration during exactly the incident when it is needed.
-func TestAuditFailureDoesNotFailTheOperation(t *testing.T) {
+//
+// ADR-0025 (F139) replaced that trade for SECURITY actions: a grant is now
+// refused, and rolled back, when its audit row cannot be written; a
+// revocation still goes through.
+func TestFailedAuditBlocksAndRollsBackSecurityGrants(t *testing.T) {
 	h, _, ids := newAdminAPI(t)
 	ids.failAudit = true
 
 	rec := doJSON(t, h, "POST", "/v1/namespaces/team-ml/users", adminKey,
-		`{"email":"resilient@example.com","password":"a-long-enough-password"}`)
+		`{"email":"unaudited@example.com","password":"a-long-enough-password"}`)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "audit_unavailable") {
+		t.Fatalf("user.create with the audit store down: status %d body=%s, want 503 audit_unavailable", rec.Code, rec.Body)
+	}
+	if _, exists := ids.byEmail["team-ml\x00unaudited@example.com"]; exists {
+		t.Error("the user was created although its audit row was not written")
+	}
+
+	before := len(ids.tokens)
+	rec = doJSON(t, h, "POST", "/v1/namespaces/team-ml/tokens", adminKey,
+		`{"name":"ci","role":"reader","scopes":["read"]}`)
+	if rec.Code != http.StatusServiceUnavailable || len(ids.tokens) != before {
+		t.Errorf("token.create: status %d, tokens %d -> %d; want 503 and no token minted", rec.Code, before, len(ids.tokens))
+	}
+
+	sessions := len(ids.sessions)
+	rec = doJSON(t, h, "POST", "/v1/auth/login", "",
+		`{"namespace":"team-ml","email":"admin@example.com","password":"correct-password-1234"}`)
+	if rec.Code != http.StatusServiceUnavailable || len(ids.sessions) != sessions {
+		t.Errorf("login: status %d, sessions %d -> %d; want 503 and no session", rec.Code, sessions, len(ids.sessions))
+	}
+}
+
+func TestFailedAuditNeverBlocksARevocation(t *testing.T) {
+	h, _, ids := newAdminAPI(t)
+	rec := doJSON(t, h, "POST", "/v1/namespaces/team-ml/tokens", adminKey,
+		`{"name":"ci","role":"reader","scopes":["read"]}`)
 	if rec.Code != http.StatusCreated {
-		t.Errorf("a failed audit write blocked user creation: status %d. body=%s", rec.Code, rec.Body)
+		t.Fatalf("create token: %d %s", rec.Code, rec.Body)
+	}
+	var tok struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &tok)
+	ids.failAudit = true
+	rec = doJSON(t, h, "POST", "/v1/namespaces/team-ml/tokens/"+tok.ID+"/revoke", adminKey, `{}`)
+	if rec.Code != http.StatusOK || ids.tokens[tok.ID].RevokedAt == nil {
+		t.Errorf("revoke with the audit store down: status %d revoked=%v; a revocation must go through",
+			rec.Code, ids.tokens[tok.ID].RevokedAt != nil)
 	}
 }
 
