@@ -1,0 +1,50 @@
+# AI-workload overlay (ADR-0032, OPERATIONS §29.8): layered on the e2e stack
+#
+#   docker compose -p <project> -f deploy/docker-compose.yml \
+#     -f deploy/e2e/docker-compose.e2e.yml -f deploy/e2e/docker-compose.ai.yml up -d --build
+#
+# (deploy/e2e/e2e-stack.sh does this when E2E_AI=1.) It changes three things:
+#
+#   * agent-cpu runs deploy/e2e/Dockerfile.agent-ai: the same agent binary plus
+#     Python 3 and the SDK, with examples/ mounted read-only at
+#     /opt/nexus/examples, where examples/llm_* compiled specs point;
+#   * a mock-llm sidecar, the SDK's OpenAI/Anthropic-compatible fake
+#     (nexus.testing.mock_llm), reachable from tasks as http://mock-llm:8089.
+#     It injects a 429 every 7th call so the stack exercises Retry-After and
+#     the shared permits. NO real provider is called and no key exists;
+#   * the GPU agents are not started: they have no Python and would claim
+#     (and fail) default-queue work.
+
+services:
+  mock-llm:
+    image: python:3.12-alpine
+    command: ["python", "-m", "nexus.testing.mock_llm", "--host", "0.0.0.0", "--port", "8089",
+              "--rate-limit-every", "7", "--retry-after", "0.2"]
+    environment:
+      PYTHONPATH: /opt/nexus/sdk
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ../sdk/python/nexus:/opt/nexus/sdk/nexus:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8089/healthz', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  agent-cpu:
+    build:
+      context: ..
+      dockerfile: deploy/e2e/Dockerfile.agent-ai
+    depends_on:
+      mock-llm:
+        condition: service_healthy
+    environment:
+      NEXUS_EXECUTORS: subprocess
+    volumes:
+      - ../examples:/opt/nexus/examples:ro
+
+  agent-gpu:
+    profiles: ["gpu-agents"]
+  agent-gpu-a10:
+    profiles: ["gpu-agents"]

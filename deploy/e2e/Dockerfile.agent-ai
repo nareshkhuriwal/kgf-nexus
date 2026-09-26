@@ -1,0 +1,40 @@
+# The worker agent with Python 3 and the Nexus SDK, for the AI-workload overlay
+# (docker-compose.ai.yml, ADR-0032, OPERATIONS §29).
+#
+# The stock agent image is alpine with no interpreter: its example workloads are
+# sh + awk. The AI examples run `python3 -m nexus.entrypoint` as subprocess
+# tasks, so this image adds CPython and the SDK (zero runtime dependencies) and
+# nothing else. The agent binary is built exactly as Dockerfile.service builds
+# it. Development/test only: production task images carry their own
+# interpreter and run under the docker or kubernetes executor.
+#
+#   docker build -f deploy/e2e/Dockerfile.agent-ai .
+
+ARG GO_VERSION=1.25
+
+FROM golang:${GO_VERSION}-alpine AS build
+RUN apk add --no-cache git ca-certificates
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w -X main.version=dev-ai" \
+      -o /out/service ./agent/cmd/nexus-agent
+
+FROM python:3.12-alpine AS runtime
+RUN apk add --no-cache ca-certificates tzdata \
+ && adduser -D -u 10001 nexus
+COPY --from=build --chmod=0755 /out/service /usr/local/bin/nexus-service
+# The SDK is copied (not mounted) so the image is self-contained; the examples
+# are mounted by the overlay at /opt/nexus/examples, which is where their
+# compiled specs point.
+COPY sdk/python/nexus /opt/nexus/sdk/nexus
+ENV PYTHONPATH=/opt/nexus/sdk \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+RUN mkdir -p /var/lib/nexus/wal /var/lib/nexus-agent/wal /var/lib/nexus/effects /tmp/nexus-task \
+ && chown -R 10001:10001 /var/lib/nexus /var/lib/nexus-agent /tmp/nexus-task
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/nexus-service"]

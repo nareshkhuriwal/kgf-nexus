@@ -53,7 +53,7 @@ ON CONFLICT (idempotency_key) DO UPDATE SET seq = EXCLUDED.seq, object_key = EXC
 
 		runLive, live := seedLogAttempt(t, tx, ns)
 		superseded := point(runLive, live, 1)
-		livePtr := point(runLive, live, 2) // the pointer moved past seq 1
+		livePtr := point(runLive, live, 2)               // the pointer moved past seq 1
 		fenced := strings.TrimSuffix(livePtr, "2") + "3" // uploaded, registration refused
 
 		runDone, done := seedLogAttempt(t, tx, ns)

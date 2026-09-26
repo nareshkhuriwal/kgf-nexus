@@ -347,6 +347,80 @@ JOIN tenants t ON t.id = b.tenant_id WHERE t.namespace = $1 AND b.key = 'mock/bi
 	}
 }
 
+// TestPermitSQLMatchesTheDomainModel holds store.permitSQL to the reference
+// arithmetic in domain.BucketLimit (Refill, then Take or Settle): each case
+// pins a bucket's levels and its age in the database, takes permits once, and
+// compares the stored result with the model, allowing only the refill of the
+// few milliseconds the call itself takes.
+func TestPermitSQLMatchesTheDomainModel(t *testing.T) {
+	f := newFixture(t, newTestPool(t))
+	p := newProgressAttempt(t, f, "model", 0)
+	ctx := context.Background()
+	lim := domain.BucketLimit{RequestsPerSecond: 4, TokensPerMinute: 1200, BurstRequests: 6, BurstTokens: 900}
+	f.setRateLimits(map[string]any{"model/k": map[string]any{
+		"requests_per_second": lim.RequestsPerSecond, "tokens_per_minute": lim.TokensPerMinute,
+		"burst_requests": lim.BurstRequests, "burst_tokens": lim.BurstTokens}})
+	p.permits(t, p.srv, []string{"model/k"}, 1, 1, false) // create the bucket
+
+	type tc struct {
+		req, tok   float64 // stored levels
+		age        float64 // seconds since refreshed_at
+		requests   int64
+		tokens     int64
+		settle     bool
+		wantGrant  bool
+		wantWaitGT float64 // when denied: wait at least this (seconds)
+	}
+	cases := []tc{
+		{req: 6, tok: 900, age: 0, requests: 1, tokens: 100, wantGrant: true},
+		{req: 0.5, tok: 900, age: 0, requests: 1, tokens: 100, wantGrant: false, wantWaitGT: 0.1},
+		{req: 0, tok: 0, age: 0.5, requests: 1, tokens: 5, wantGrant: true},                      // refilled 2 req, 10 tok
+		{req: 6, tok: 100, age: 1, requests: 1, tokens: 500, wantGrant: false, wantWaitGT: 18.9}, // 120 of 500 tokens
+		{req: 6, tok: 900, age: 0, requests: 1, tokens: 5000, wantGrant: true},                   // oversized from a full bucket
+		{req: 6, tok: 899, age: 0, requests: 1, tokens: 5000, wantGrant: false},                  // not quite full
+		{req: 6, tok: -400, age: 0, requests: 0, tokens: -700, settle: true, wantGrant: true},    // refund
+		{req: 6, tok: 100, age: 0, requests: 0, tokens: 2000, settle: true, wantGrant: true},     // debt, clamped
+		{req: -6, tok: -900, age: 100, requests: 6, tokens: 900, wantGrant: true},                // refill caps at the burst
+	}
+	for i, c := range cases {
+		if _, err := f.pool.Exec(ctx, `
+UPDATE rate_limit_buckets b SET request_level = $2, token_level = $3,
+       refreshed_at = clock_timestamp() - make_interval(secs => $4)
+  FROM tenants t WHERE t.id = b.tenant_id AND t.namespace = $1 AND b.key = 'model/k'`,
+			f.ns, c.req, c.tok, c.age); err != nil {
+			t.Fatal(err)
+		}
+		resp := p.permits(t, p.srv, []string{"model/k"}, c.requests, c.tokens, c.settle)
+		var got domain.BucketState
+		if err := f.pool.QueryRow(ctx, `SELECT request_level, token_level FROM rate_limit_buckets b
+JOIN tenants t ON t.id = b.tenant_id WHERE t.namespace = $1 AND b.key = 'model/k'`, f.ns).Scan(&got.Requests, &got.Tokens); err != nil {
+			t.Fatal(err)
+		}
+		model := lim.Refill(domain.BucketState{Requests: c.req, Tokens: c.tok}, c.age)
+		wantGranted := true
+		var wait float64
+		if c.settle {
+			model = lim.Settle(model, c.tokens)
+		} else {
+			var next domain.BucketState
+			next, wantGranted, wait = lim.Take(model, c.requests, c.tokens)
+			model = next
+		}
+		if resp.Granted != wantGranted || resp.Granted != c.wantGrant {
+			t.Errorf("case %d: granted sql=%v model=%v want=%v", i, resp.Granted, wantGranted, c.wantGrant)
+			continue
+		}
+		if !resp.Granted && (float64(resp.RetryAfterMs)/1000 < c.wantWaitGT || math.Abs(float64(resp.RetryAfterMs)/1000-wait) > 0.1) {
+			t.Errorf("case %d: wait sql=%dms model=%.3fs", i, resp.RetryAfterMs, wait)
+		}
+		// The call itself takes a few ms of refill; allow 100 ms of it.
+		slackR, slackT := lim.RequestsPerSecond*0.1, float64(lim.TokensPerMinute)/60*0.1
+		if math.Abs(got.Requests-model.Requests) > slackR || math.Abs(got.Tokens-model.Tokens) > slackT {
+			t.Errorf("case %d: stored %+v, model %+v", i, got, model)
+		}
+	}
+}
+
 // TestPermitsHoldAcrossReplicas is the fleet-wide claim: four scheduler
 // replicas (separate connection pools, as separate processes have), 8 callers
 // each, hammering one key. The permits granted over the window can never exceed

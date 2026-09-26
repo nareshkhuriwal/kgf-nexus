@@ -265,6 +265,10 @@ type PermitRequest struct {
 	Tokens    int64
 	// Settle applies Tokens as a signed correction without a check.
 	Settle bool
+
+	// Filled by AcquirePermits from the namespace's policy.
+	limited   []limitedKey
+	unlimited []string
 }
 
 // PermitOutcome says what AcquirePermits did.
@@ -315,10 +319,97 @@ func normalizePermitRequest(r *PermitRequest) error {
 	return nil
 }
 
+// permitSQL takes (or settles) permits from every requested bucket, all or
+// none, in ONE statement. It is the arithmetic of domain.BucketLimit
+// (Refill, Take, Settle) written in SQL, and the integration test
+// TestPermitSQLMatchesTheDomainModel holds the two together.
+//
+// Why one statement. The bucket row is the only contended object of the
+// permit service, so its throughput is bounded by how long a caller holds
+// that row lock. Read-lock, compute in Go, write back and commit held it for
+// three client round trips; measured on one hot key with 128 concurrent
+// callers that collapsed to ~120 permits/s with a 3.7 s p99 (OPERATIONS
+// §29.6). Here the lock is taken, the levels refilled from the database clock,
+// the decision made and the rows written without leaving the server, and the
+// caller runs it in autocommit, so the COMMIT follows in the same round trip.
+//
+// Locking: `cur` locks the requested buckets FOR UPDATE in key order (the
+// LockRows node sits above the ORDER BY), so two multi-key callers can never
+// deadlock. If a row was waited on, EvalPlanQual re-evaluates the row --
+// clock_timestamp() included -- against the version that committed, so the
+// refill is measured from that version's refreshed_at. The UPDATE's
+// refreshed_at is the same clock value, so elapsed time is counted exactly
+// once: tokens are never created, only (at worst) refilled a moment late.
+//
+// Parameters: $1 tenant, $2 keys, $3 requests/s, $4 tokens/min, $5 request
+// burst, $6 token burst (per key, same order), $7 requests, $8 tokens,
+// $9 settle. Returns (granted, wait seconds, buckets locked).
+const permitSQL = `
+WITH cfg AS (
+  SELECT * FROM unnest($2::text[], $3::float8[], $4::float8[], $5::float8[], $6::float8[])
+           AS c(key, rps, tpm, breq, btok)
+), cur AS (
+  SELECT b.key, c.rps, c.tpm / 60.0 AS tps, c.breq, c.btok, clock_timestamp() AS now,
+         CASE WHEN c.rps > 0
+              THEN LEAST(c.breq, b.request_level
+                   + c.rps * GREATEST(0, EXTRACT(EPOCH FROM clock_timestamp() - b.refreshed_at))::float8)
+              ELSE b.request_level END AS rl,
+         CASE WHEN c.tpm > 0
+              THEN LEAST(c.btok, b.token_level
+                   + c.tpm / 60.0 * GREATEST(0, EXTRACT(EPOCH FROM clock_timestamp() - b.refreshed_at))::float8)
+              ELSE b.token_level END AS tl
+    FROM rate_limit_buckets b
+    JOIN cfg c ON c.key = b.key
+   WHERE b.tenant_id = $1
+   ORDER BY b.key
+     FOR UPDATE OF b
+), judged AS (
+  SELECT cur.*,
+         -- A cost above the whole burst is granted only from a full bucket.
+         CASE WHEN rps > 0 AND $7::bigint > 0 AND rl < LEAST($7::bigint, breq)
+              THEN (LEAST($7::bigint, breq) - rl) / rps ELSE 0 END AS wait_r,
+         CASE WHEN tps > 0 AND $8::bigint > 0 AND tl < LEAST($8::bigint, btok)
+              THEN (LEAST($8::bigint, btok) - tl) / tps ELSE 0 END AS wait_t
+    FROM cur
+), decision AS (
+  SELECT $9::boolean OR COALESCE(bool_and(wait_r = 0 AND wait_t = 0), true) AS granted,
+         COALESCE(max(GREATEST(wait_r, wait_t)), 0) AS wait,
+         count(*) AS n
+    FROM judged
+), upd AS (
+  UPDATE rate_limit_buckets b
+     SET request_level = CASE
+           WHEN d.granted AND NOT $9::boolean AND j.rps > 0 AND $7::bigint > 0
+             THEN GREATEST(-j.breq, j.rl - $7::bigint)
+           ELSE j.rl END,
+         token_level = CASE
+           WHEN $9::boolean AND j.tps > 0
+             THEN GREATEST(-j.btok, LEAST(j.btok, j.tl - $8::bigint))
+           WHEN d.granted AND j.tps > 0 AND $8::bigint > 0
+             THEN GREATEST(-j.btok, j.tl - $8::bigint)
+           ELSE j.tl END,
+         refreshed_at     = GREATEST(b.refreshed_at, j.now),
+         granted_requests = b.granted_requests + CASE WHEN d.granted AND NOT $9::boolean THEN $7::bigint ELSE 0 END,
+         granted_tokens   = b.granted_tokens   + CASE WHEN d.granted AND NOT $9::boolean THEN $8::bigint ELSE 0 END,
+         denied           = b.denied + CASE WHEN d.granted THEN 0 ELSE 1 END
+    FROM judged j, decision d
+   WHERE b.tenant_id = $1 AND b.key = j.key
+     -- All or none: if a bucket does not exist yet, nothing is written and
+     -- the caller creates it and runs the statement again.
+     AND d.n = cardinality($2::text[])
+  RETURNING 1
+)
+SELECT d.granted, d.wait, d.n, (SELECT count(*) FROM upd) FROM decision d`
+
 // AcquirePermits takes (or settles) permits from the namespace's token buckets
-// for every requested key, all or none, in one transaction (ADR-0032 §3). It
-// never waits for capacity: a denial returns how long to wait, computed from
-// the database clock.
+// for every requested key, all or none (ADR-0032 §3). It never waits for
+// capacity: a denial returns how long to wait, computed from the database
+// clock.
+//
+// Three statements, no explicit transaction: the fence and the limit lookup
+// are plain reads (a permit taken by an attempt whose lease ends a moment
+// later is merely spent), and permitSQL is atomic on its own. A first use of a
+// key creates its bucket full and retries once.
 func (s *SchedulerStore) AcquirePermits(ctx context.Context, req PermitRequest) (PermitOutcome, error) {
 	if s.workloadMissing {
 		return PermitOutcome{}, ErrWorkloadUnavailable
@@ -326,13 +417,23 @@ func (s *SchedulerStore) AcquirePermits(ctx context.Context, req PermitRequest) 
 	if err := normalizePermitRequest(&req); err != nil {
 		return PermitOutcome{}, err
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return PermitOutcome{}, fmt.Errorf("begin permit tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return PermitOutcome{}, fmt.Errorf("acquire connection for permits: %w", err)
+	}
+	defer conn.Release()
+	// The fence as a read-only transaction-less query: pgx.Tx is only the
+	// shape fenceWorkload takes, so give it a short read transaction.
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return PermitOutcome{}, fmt.Errorf("begin permit fence: %w", err)
+	}
 	w, err := s.fenceWorkload(ctx, tx, req.AttemptID, req.Token, false)
+	if err == nil && w != nil {
+		err = s.loadPermitLimits(ctx, tx, w.TenantID, &req)
+	}
+	_ = tx.Rollback(ctx)
 	if err != nil {
 		return PermitOutcome{}, err
 	}
@@ -340,14 +441,74 @@ func (s *SchedulerStore) AcquirePermits(ctx context.Context, req PermitRequest) 
 		return PermitOutcome{StaleLease: true}, nil
 	}
 
-	limits := map[string]domain.BucketLimit{}
-	rows, err := tx.Query(ctx, `
+	out := PermitOutcome{Granted: true, Unlimited: req.unlimited, Limited: len(req.limited)}
+	if len(req.limited) == 0 {
+		return out, nil
+	}
+	keys := make([]string, len(req.limited))
+	rps := make([]float64, len(req.limited))
+	tpm := make([]float64, len(req.limited))
+	breq := make([]float64, len(req.limited))
+	btok := make([]float64, len(req.limited))
+	for i, lk := range req.limited {
+		keys[i], rps[i], tpm[i] = lk.key, lk.limit.RequestsPerSecond, float64(lk.limit.TokensPerMinute)
+		breq[i], btok[i] = lk.limit.RequestBurst(), lk.limit.TokenBurst()
+	}
+
+	for try := 0; try < 2; try++ {
+		var (
+			granted bool
+			wait    float64
+			locked  int
+			updated int
+		)
+		if err := conn.QueryRow(ctx, permitSQL, w.TenantID, keys, rps, tpm, breq, btok,
+			req.Requests, req.Tokens, req.Settle).Scan(&granted, &wait, &locked, &updated); err != nil {
+			return PermitOutcome{}, fmt.Errorf("take permits: %w", err)
+		}
+		if locked == len(keys) {
+			out.Granted = granted
+			if !granted {
+				// Round up: waking a millisecond early only buys another denial.
+				out.RetryAfter = time.Duration(math.Ceil(wait*1000)) * time.Millisecond
+				if out.RetryAfter < time.Millisecond {
+					out.RetryAfter = time.Millisecond
+				}
+			}
+			return out, nil
+		}
+		if updated != 0 {
+			// Unreachable: permitSQL writes nothing unless it locked every
+			// requested bucket. Kept as a tripwire for an edit that breaks it.
+			return PermitOutcome{}, fmt.Errorf("take permits: %d of %d buckets written on a partial lock", updated, len(keys))
+		}
+		// First use of a key (or a bucket deleted by hand): create the missing
+		// buckets full, then take once more.
+		if _, err := conn.Exec(ctx, `
+INSERT INTO rate_limit_buckets (tenant_id, key, request_level, token_level, refreshed_at)
+SELECT $1, k, r, t, clock_timestamp() FROM unnest($2::text[], $3::float8[], $4::float8[]) AS u(k, r, t)
+ON CONFLICT (tenant_id, key) DO NOTHING`, w.TenantID, keys, breq, btok); err != nil {
+			return PermitOutcome{}, fmt.Errorf("create rate-limit buckets: %w", err)
+		}
+	}
+	return PermitOutcome{}, fmt.Errorf("take permits: buckets for %v could not be created", keys)
+}
+
+type limitedKey struct {
+	key   string
+	limit domain.BucketLimit
+}
+
+// loadPermitLimits splits req.Keys (sorted) into configured and unlimited keys.
+func (s *SchedulerStore) loadPermitLimits(ctx context.Context, q pgx.Tx, tenant uuid.UUID, req *PermitRequest) error {
+	rows, err := q.Query(ctx, `
 SELECT key, requests_per_second, tokens_per_minute, burst_requests, burst_tokens
   FROM namespace_rate_limits
- WHERE tenant_id = $1 AND key = ANY($2)`, w.TenantID, req.Keys)
+ WHERE tenant_id = $1 AND key = ANY($2)`, tenant, req.Keys)
 	if err != nil {
-		return PermitOutcome{}, fmt.Errorf("read rate limits: %w", err)
+		return fmt.Errorf("read rate limits: %w", err)
 	}
+	limits := map[string]domain.BucketLimit{}
 	for rows.Next() {
 		var (
 			k string
@@ -355,7 +516,7 @@ SELECT key, requests_per_second, tokens_per_minute, burst_requests, burst_tokens
 		)
 		if err := rows.Scan(&k, &l.RequestsPerSecond, &l.TokensPerMinute, &l.BurstRequests, &l.BurstTokens); err != nil {
 			rows.Close()
-			return PermitOutcome{}, fmt.Errorf("scan rate limit: %w", err)
+			return fmt.Errorf("scan rate limit: %w", err)
 		}
 		if l.Limited() {
 			limits[k] = l
@@ -363,99 +524,16 @@ SELECT key, requests_per_second, tokens_per_minute, burst_requests, burst_tokens
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return PermitOutcome{}, fmt.Errorf("read rate limits: %w", err)
+		return fmt.Errorf("read rate limits: %w", err)
 	}
-
-	out := PermitOutcome{Granted: true}
-	type locked struct {
-		key   string
-		limit domain.BucketLimit
-		state domain.BucketState
-	}
-	var held []locked
-	var now time.Time
-	for _, k := range req.Keys { // sorted
-		l, ok := limits[k]
-		if !ok {
-			out.Unlimited = append(out.Unlimited, k)
-			continue
-		}
-		full := l.FullBucket()
-		// The no-op DO UPDATE locks the row and returns its current levels in
-		// one statement, creating it full on first use. clock_timestamp() in
-		// RETURNING is evaluated after the lock is held, so the refill is
-		// measured to the moment this transaction owns the bucket.
-		var (
-			st        domain.BucketState
-			refreshed time.Time
-		)
-		if err := tx.QueryRow(ctx, `
-INSERT INTO rate_limit_buckets (tenant_id, key, request_level, token_level, refreshed_at)
-VALUES ($1, $2, $3, $4, clock_timestamp())
-ON CONFLICT (tenant_id, key) DO UPDATE SET key = EXCLUDED.key
-RETURNING request_level, token_level, refreshed_at, clock_timestamp()`,
-			w.TenantID, k, full.Requests, full.Tokens).Scan(&st.Requests, &st.Tokens, &refreshed, &now); err != nil {
-			return PermitOutcome{}, fmt.Errorf("lock rate-limit bucket %q: %w", k, err)
-		}
-		st = l.Refill(st, now.Sub(refreshed).Seconds())
-		held = append(held, locked{k, l, st})
-	}
-	out.Limited = len(held)
-	if len(held) == 0 {
-		// Nothing is limited; no row was touched.
-		return out, tx.Commit(ctx)
-	}
-
-	var wait float64
-	next := make([]domain.BucketState, len(held))
-	for i, h := range held {
-		if req.Settle {
-			next[i] = h.limit.Settle(h.state, req.Tokens)
-			continue
-		}
-		n, ok, wt := h.limit.Take(h.state, req.Requests, req.Tokens)
-		next[i] = n
-		if !ok {
-			out.Granted = false
-			wait = math.Max(wait, wt)
+	for _, k := range req.Keys {
+		if l, ok := limits[k]; ok {
+			req.limited = append(req.limited, limitedKey{k, l})
+		} else {
+			req.unlimited = append(req.unlimited, k)
 		}
 	}
-	for i, h := range held {
-		if !out.Granted {
-			// Store the refilled levels (so the next reader's elapsed time is
-			// short) and count the denial; take nothing.
-			next[i] = h.state
-		}
-		grantedReq, grantedTok := int64(0), int64(0)
-		if out.Granted && !req.Settle {
-			grantedReq, grantedTok = req.Requests, req.Tokens
-		}
-		denied := 0
-		if !out.Granted {
-			denied = 1
-		}
-		if _, err := tx.Exec(ctx, `
-UPDATE rate_limit_buckets
-   SET request_level = $3, token_level = $4, refreshed_at = GREATEST(refreshed_at, $5),
-       granted_requests = granted_requests + $6, granted_tokens = granted_tokens + $7,
-       denied = denied + $8
- WHERE tenant_id = $1 AND key = $2`,
-			w.TenantID, h.key, next[i].Requests, next[i].Tokens, now,
-			grantedReq, grantedTok, denied); err != nil {
-			return PermitOutcome{}, fmt.Errorf("update rate-limit bucket %q: %w", h.key, err)
-		}
-	}
-	if !out.Granted {
-		// Round up: waking a millisecond early only buys another denial.
-		out.RetryAfter = time.Duration(math.Ceil(wait*1000)) * time.Millisecond
-		if out.RetryAfter < time.Millisecond {
-			out.RetryAfter = time.Millisecond
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return PermitOutcome{}, fmt.Errorf("commit permit tx: %w", err)
-	}
-	return out, nil
+	return nil
 }
 
 // ── Checkpoints ──────────────────────────────────────────────────────────────

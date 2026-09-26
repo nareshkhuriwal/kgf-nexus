@@ -133,6 +133,11 @@ bench-dispatch: ## Claims/sec and p50/p99 claim latency vs replicas and backlog 
 	NEXUS_BENCH_DSN='$(BENCH_DSN)' $(GO) test -tags bench -count=1 -v -timeout 120m \
 	  -run TestDispatchCeiling ./tests/bench/
 
+bench-ratelimit: ## Permit throughput/latency, saturation correctness, and claims with permit traffic (ADR-0032; needs BENCH_DSN)
+	@test -n "$(BENCH_DSN)" || { echo "BENCH_DSN is unset; run 'make bench-pg' and export what it prints"; exit 1; }
+	NEXUS_BENCH_DSN='$(BENCH_DSN)' $(GO) test -tags bench -count=1 -v -timeout 60m \
+	  -run TestRateLimiterCeiling ./tests/bench/
+
 bench-inline: ## Postgres-inline vs MinIO round trip by payload size (needs BENCH_DSN)
 	@test -n "$(BENCH_DSN)" || { echo "BENCH_DSN is unset; run 'make bench-pg' and export what it prints"; exit 1; }
 	NEXUS_BENCH_DSN='$(BENCH_DSN)' NEXUS_BENCH_MINIO='$(BENCH_MINIO)' $(GO) test -tags bench -count=1 -v \
