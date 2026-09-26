@@ -31,7 +31,9 @@ WHAT IS NOT (the parity limits, stated rather than papered over):
     GPU placement does not exist (CUDA_VISIBLE_DEVICES is not set);
   * executors: ``subprocess`` tasks and Python handlers only. ``docker`` and
     ``kubernetes`` tasks are refused unless ``host_executor=True``, which runs
-    their command on the host -- a different environment from their image;
+    their command on the host -- a different environment from their image --
+    in the directory the run was started from, with that directory on
+    PYTHONPATH (standing in for the image's working directory);
   * memoization is within ONE run (no cross-run cache, no invalidations);
   * no pause, resume, operator retry, schedules or events API;
   * results live in a FileResultStore under the run directory, not in an
@@ -323,6 +325,12 @@ class _Runner:
         self.max_fanout_ceiling = max_fanout_ceiling
         self.inline_threshold = clamp_inline_threshold(inline_threshold)
         self.host_executor = host_executor
+        #: Where the run was started. A docker/kubernetes task run with
+        #: host_executor stands in for its image, whose working directory holds
+        #: the project, so it runs HERE (not in the attempt directory) with this
+        #: directory importable -- otherwise `python -m nexus.entrypoint
+        #: --module dag` and relative paths like data/orders.csv cannot resolve.
+        self.launch_dir = os.getcwd()
         #: Replay pins the control plane's key instead of deriving one.
         self.fixed_idempotency_key: str | None = None
         self.rng = random.Random(seed)
@@ -614,14 +622,23 @@ class _Runner:
             with open(os.path.join(a.work_dir, "inputs", _safe(name)), "wb") as f:
                 f.write(self.store.get_bytes(ref))
         argv = [str(x) for x in (rt.get("command") or [])] + [str(x) for x in (rt.get("args") or [])]
-        cwd = str(rt.get("working_dir") or a.work_dir)
+        env = self._base_env(a, spec)
+        if str(rt.get("executor") or "subprocess") == "subprocess":
+            cwd = str(rt.get("working_dir") or a.work_dir)
+        else:
+            # host_executor standing in for an image (see launch_dir). An image
+            # working_dir names a path inside the image, which means nothing here.
+            cwd = self.launch_dir
+            env["PYTHONPATH"] = os.pathsep.join(
+                [self.launch_dir] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+            )
         stdout_path = os.path.join(a.work_dir, "stdout.log")
         stderr_path = os.path.join(a.work_dir, "stderr.log")
         started = time.monotonic()
         with open(stdout_path, "wb") as so, open(stderr_path, "wb") as se:
             try:
                 proc = subprocess.Popen(
-                    argv, cwd=cwd, env=self._base_env(a, spec), stdout=so, stderr=se,
+                    argv, cwd=cwd, env=env, stdout=so, stderr=se,
                     stdin=subprocess.DEVNULL, start_new_session=True,
                 )
             except FileNotFoundError as e:

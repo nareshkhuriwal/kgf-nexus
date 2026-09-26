@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Task image for __WORKFLOW_NAME__.
 #
 # Every task in dag.py runs this image with
@@ -12,16 +11,21 @@
 # The Nexus SDK comes from the named build context "nexus-sdk", never from a
 # package index by name: "nexus-sdk" on PyPI is an unrelated project (see
 # requirements.txt). Without --build-context the build fails at the COPY below
-# instead of silently installing the wrong package.
+# instead of silently installing the wrong package. Named build contexts need
+# BuildKit (the default builder since Docker Engine 23).
 #
 # Push the image somewhere your workers can pull from, and set IMAGE in dag.py
 # to that reference. Pin by digest in production so a re-tag cannot change
 # what runs.
 FROM python:3.12-slim
 
+# PYTHONPATH, because executors do not run the task in WORKDIR: the docker
+# executor sets the working directory to the attempt's /nexus mount, so
+# `--module dag` must be importable from anywhere (F144).
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app
 
 WORKDIR /app
 COPY --from=nexus-sdk . /tmp/nexus-sdk

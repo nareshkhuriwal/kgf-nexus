@@ -349,8 +349,8 @@ the last seq you saw and nothing is missed in the gap.`,
 			for _, ev := range output.Items(result, "events") {
 				t.Rows = append(t.Rows, []string{
 					output.Str(ev, "seq"),
-					output.Str(ev, "at"),
-					output.Str(ev, "type"),
+					eventTime(ev),
+					firstStr(ev, "kind", "type"),
 					firstStr(ev, "node_id", "node"),
 					eventDetail(ev),
 				})
@@ -363,8 +363,8 @@ the last seq you saw and nothing is missed in the gap.`,
 func formatEventLine(ev map[string]any) string {
 	return fmt.Sprintf("%-6s %-22s %-26s %-18s %s",
 		output.Str(ev, "seq"),
-		output.Str(ev, "at"),
-		output.Str(ev, "type"),
+		eventTime(ev),
+		firstStr(ev, "kind", "type"),
 		firstStr(ev, "node_id", "node"),
 		eventDetail(ev))
 }
@@ -383,7 +383,7 @@ func eventDetail(ev map[string]any) string {
 	if s := output.Str(ev, "state"); s != "-" {
 		return s
 	}
-	return "-"
+	return eventPayloadDetail(ev)
 }
 
 func configCmd() *command {
