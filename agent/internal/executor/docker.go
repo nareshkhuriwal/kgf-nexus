@@ -56,6 +56,12 @@ type DockerExecutor struct {
 	// bridge is the quiet path by which a task reaches the control plane's own
 	// network.
 	NetworkMode string
+
+	// oomSettle overrides oomSettleWindow; zero uses it. For tests.
+	oomSettle time.Duration
+	// cli, when set, replaces running the docker CLI (output). For tests
+	// that must observe the context a call receives.
+	cli func(ctx context.Context, args ...string) (string, error)
 }
 
 type dockerState struct {
@@ -441,7 +447,11 @@ func (e *DockerExecutor) awaitOOMFlag(ctx context.Context, st *dockerState) bool
 	// One deadline for the whole wait, in-flight inspects included: on a
 	// loaded host a single docker CLI call can take seconds, and a per-call
 	// timeout would let the settle run far past the window.
-	ctx, cancel := context.WithTimeout(ctx, oomSettleWindow)
+	window := e.oomSettle
+	if window <= 0 {
+		window = oomSettleWindow
+	}
+	ctx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
 	for {
 		select {
@@ -449,7 +459,7 @@ func (e *DockerExecutor) awaitOOMFlag(ctx context.Context, st *dockerState) bool
 			return false
 		case <-time.After(100 * time.Millisecond):
 		}
-		raw, err := e.output(ctx, oomSettleWindow, "inspect", "--format", "{{json .State.OOMKilled}}", st.containerID)
+		raw, err := e.output(ctx, window, "inspect", "--format", "{{json .State.OOMKilled}}", st.containerID)
 		if err != nil {
 			continue
 		}
@@ -809,13 +819,24 @@ func (e *DockerExecutor) run(ctx context.Context, timeout time.Duration, args ..
 	return err
 }
 
+// cliWaitDelay bounds how long a docker CLI call may outlive its context.
+// CommandContext kills only the process it started; a descendant still holding
+// the output pipe kept Run (which waits for the pipe to close) blocked long
+// after the deadline -- how a 3 s OOM settle took 13 s on a loaded host.
+// After this delay the pipes are closed and Run returns.
+const cliWaitDelay = 500 * time.Millisecond
+
 func (e *DockerExecutor) output(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if e.cli != nil {
+		return e.cli(ctx, args...)
+	}
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, e.bin(), args...)
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
+	cmd.WaitDelay = cliWaitDelay
 	err := cmd.Run()
 	return buf.String(), err
 }
