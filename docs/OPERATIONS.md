@@ -6,7 +6,7 @@
 and restore and the ordering between the two stores, the restore drills and their
 measured results, point-in-time recovery with pgBackRest and its timed drills
 (§4), what these procedures do *not* cover, the RPO/RTO each approach actually
-delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), and third-party images and toolchains: what is pinned and why (§22).
+delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), third-party images and toolchains: what is pinned and why (§22), and notifications, webhook triggers, sensors and asset lineage (§27).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -2969,3 +2969,262 @@ Node **24** ("Krypton"), Active LTS until 2026-10-20 and maintained until
 2028-04-30 (github.com/nodejs/Release, `schedule.json`). The exact patch
 (`24.21.0`) is pinned in all three CI definitions and in the Dockerfile, and
 they move together. Node 26 becomes LTS on 2026-10-28; move once it has.
+
+---
+
+## 27. Notifications, webhook triggers, sensors and asset lineage
+
+ADR-0028 describes the design. This section covers running it. Migration 0034 adds the
+tables. Services never migrate themselves, so apply it with the migrate job before
+you deploy code that uses it (§6). No NATS subject or permission changes: the
+notifier reads the outbox from Postgres, so everything here works with the bus
+disabled.
+
+| Piece | Runs in | Tables it writes |
+|---|---|---|
+| Channel/rule/trigger/sensor configuration, hook receiver | api-gateway | `notification_channels`, `notification_rules`, `notification_rule_channels`, `webhook_triggers`, `webhook_receipts`, `sensors` (+ INSERT on `notification_deliveries` for test and redrive) |
+| Notifier (evaluate, SLA sweep, dispatch) and lineage recorder | event-service | `notification_deliveries`, `notification_channel_windows`, `notification_incidents`, `assets`, `asset_lineage_edges`, `asset_materializations`, `outbox.notified_at` |
+| Sensor loop | workflow-manager | `sensor_state`, `sensor_observations` (+ runs, through the run service) |
+
+Every loop is safe with any number of replicas and needs no leader: claims use
+`FOR UPDATE SKIP LOCKED` or a lease, and every output is keyed by a unique
+constraint.
+
+### 27.1 Configuration
+
+| Variable | Service | Default | Meaning |
+|---|---|---|---|
+| `NEXUS_SECRET_KEY` / `_FILE` | gateway, event-service | unset | 32-byte key (base64 or hex) sealing channel and trigger secrets (AES-256-GCM). **Both services need the same value.** Unset: inline channel secrets and webhook triggers are refused (503 `secret_key_unconfigured`); `secret_ref` channels still work. A malformed value stops the service at startup. |
+| `NEXUS_SECRET_KEY_PREVIOUS` / `_FILE` | gateway, event-service | unset | A retired key that still opens old ciphertexts during a rotation (§27.2). |
+| `NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS` | gateway, event-service | `false` | Allows `http://` and private, loopback and link-local destinations. Keep it false in shared deployments: otherwise a channel can be aimed at internal services and at the cloud metadata endpoint. Compose sets it true for local receivers. |
+| `NEXUS_PUBLIC_URL` | gateway | unset | Turns a trigger's hook path into the absolute `url` shown to operators. |
+| `NEXUS_CONSOLE_URL` | event-service | unset | Links each notification to `<console>/runs/<id>`. |
+| `NEXUS_SMTP_*` | event-service | mail disabled | Email channels. The settings are the same as the gateway's (§10). With no host, email deliveries fail permanently and say why. |
+| `NEXUS_NOTIFY_EVAL_BATCH`, `_EVAL_INTERVAL`, `_DISPATCH_BATCH`, `_DISPATCH_INTERVAL`, `_CONCURRENCY`, `_SLA_INTERVAL`, `_BASE_BACKOFF`, `_MAX_BACKOFF`, `_RETENTION` | event-service | 200, 1s, 50, 1s, 8, 30s, 30s, 1h, 720h | Notifier tuning. |
+| `NEXUS_SENSOR_S3_ENDPOINT`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_USE_TLS` | workflow-manager | the result store's `NEXUS_RESULT_STORE_*` / `NEXUS_S3_*` | The store that `s3://` sensors list. |
+| `NEXUS_SENSOR_INTERVAL` | workflow-manager | 2s | How often a replica looks for due sensors. Each sensor's own `poll_interval_seconds` decides how often it is actually polled. |
+
+In Helm, set `events.secretKey.existingSecret` (and `key`, and `previousKey`
+during a rotation) to a Secret you create. Set `events.allowPrivateTargets` only
+for on-premises receivers.
+
+```sh
+kubectl -n nexus create secret generic nexus-events --from-literal=secret-key="$(openssl rand -base64 32)"
+helm upgrade nexus deploy/helm/kgf-nexus --reuse-values --set events.secretKey.existingSecret=nexus-events
+```
+
+Compose ships a **public development key** so a local stack works out of the
+box. Never deploy it.
+
+### 27.2 Rotating the secret key
+
+Every ciphertext records which key sealed it.
+
+1. Put the new key in `NEXUS_SECRET_KEY` and the old key in
+   `NEXUS_SECRET_KEY_PREVIOUS`, on the gateway **and** the event-service. Roll
+   both.
+2. Re-seal: rotate every webhook trigger (`nexusctl trigger rotate-secret <name>`
+   re-seals the grace-period copy under the new key), and re-save every channel
+   with an inline secret (`PUT` with `secret`).
+3. Remove `NEXUS_SECRET_KEY_PREVIOUS`.
+
+If a key is lost, its ciphertexts cannot be opened. Deliveries on those
+channels go to the dead letters with "the channel secret could not be opened",
+and the hooks answer 401. Recover by re-entering channel secrets and rotating
+trigger secrets.
+
+### 27.3 Channels and rules
+
+| Kind | Secret (inline `secret` or `secret_ref: env:NAME \| file:/path`) | `config` |
+|---|---|---|
+| `slack_webhook` | incoming-webhook URL | — |
+| `slack_bot` | bot token (`chat:write`) | `channel` (id) |
+| `teams` | Workflows (Power Automate) webhook URL; sends an Adaptive Card 1.4 | — |
+| `pagerduty` | Events API v2 routing key | `severity`: critical \| error \| warning \| info |
+| `webhook` | HMAC signing key; generated and **shown once** when omitted | `url` |
+| `email` | — | `to`: 1–20 addresses |
+
+Reads never return a secret. They show only `{configured, source, hint}`, where the
+hint is a URL's host or the last four characters of the secret. A `secret_ref` is
+resolved by the **event-service** in its own environment. Refs that name platform
+credentials (`NEXUS_SECRET_KEY*`, `DATABASE_URL`, `PG*`, `NEXUS_NATS*`, and the
+S3 secrets) are refused.
+
+A rule matches events in its namespace:
+
+- **Events:** `run.failed`, `run.succeeded`, `run.timed_out`, `run.sla_exceeded`
+  (needs `sla_seconds`: a run still active this long after creation) and
+  `attempt.lost`.
+- **Filters:** an optional list of workflow names and labels (every `k=v` must
+  appear in the workflow's spec `labels`).
+- **Targets:** one or more channels.
+- **Rules never page about history.** A rule matches only facts at or after its
+  creation.
+- **Budget and quota events are not available** (F142). Nothing durable records
+  them yet.
+
+```sh
+nexusctl notify channel-create oncall --kind pagerduty --secret-env PD_ROUTING_KEY --severity critical
+nexusctl notify channel-create ops-hook --kind webhook --url https://hooks.example.com/nexus   # prints the signing secret once
+nexusctl notify rule-create etl-failures --event run.failed --event run.timed_out \
+    --event run.sla_exceeded --sla 2h --workflow nightly-etl --label team=data --channel oncall
+nexusctl notify channel-test oncall      # queued and sent like a real one; waits for the outcome
+```
+
+### 27.4 Delivery semantics
+
+- **One delivery per event per channel.** The key is `UNIQUE(channel, event_key)`.
+  The event key is the fact's identity, such as `run_state:<run>:<state_version>`
+  or `run_event:<id>`. Two rules that match one event on one channel send once.
+- **At-least-once to the receiver.** A dispatcher leases a delivery for 60 s, sends
+  it outside any transaction, and records the outcome only while it still holds
+  the lease. A crash mid-send means the delivery is sent again, so every send
+  carries a stable dedup key:
+  - webhooks: `Idempotency-Key` and `X-Nexus-Delivery`
+  - PagerDuty: `dedup_key`
+
+  Slack, Teams and SMTP cannot deduplicate, so a crash inside that window can
+  send one duplicate message.
+- **Retries.** Backoff is exponential with jitter: 30 s, doubling, capped at 1 h,
+  and never shorter than a receiver's `Retry-After`. A delivery gets at most 8
+  attempts (about 4 h). 408, 425, 429, 5xx and network errors are retried. Any
+  other 4xx is permanent, as are a refused private address, a redirect (never
+  followed), a disabled channel, and a secret that cannot be opened. A permanent
+  failure goes straight to the **dead letters** (`state=dead`).
+- **Redrive.** `nexusctl notify redrive <id>` (or the console) inserts a **new**
+  delivery that keeps the original dedup key. The dead row stays as evidence.
+- **Rate limit.** Each channel has a fixed one-minute window,
+  `rate_limit_per_minute` (default 30). The limit is exact across replicas. An
+  over-limit delivery waits for the next window and spends no attempt.
+- **PagerDuty.** A trigger opens an incident per (rule, channel, workflow). Repeat
+  failures reuse its dedup key, so they group into one incident. The next
+  `run.succeeded` of that workflow sends a `resolve` with the same key. A success
+  with nothing open sends nothing, and a channel test resolves itself.
+- **Retention.** Delivered and dead rows are pruned after `NEXUS_NOTIFY_RETENTION`
+  (30 days). Outbox rows are kept until the notifier has evaluated them, up to
+  the relay's `NEXUS_OUTBOX_MAX_AGE` (24 h). A notifier that is down for longer
+  than that loses notifications for the oldest facts.
+
+Receivers of the generic webhook verify
+`X-Nexus-Signature: v1=hex(HMAC-SHA256(key, X-Nexus-Timestamp + "." + body))`,
+reject stale timestamps, and deduplicate on `Idempotency-Key`.
+
+### 27.5 Inbound webhook triggers
+
+```sh
+nexusctl trigger create github-push --workflow build \
+    --map repo='$.payload.repository.name' --map ref='$.payload.ref' \
+    --idempotency-key-path '$.payload.after'           # prints url and secret ONCE
+export NEXUS_TRIGGER_SECRET=...                           # the printed secret
+nexusctl trigger fire github-push --data '{"after":"abc","ref":"main","repository":{"name":"svc"}}'
+```
+
+A sender POSTs JSON to `/v1/hooks/<ns>/<trigger-id>` with:
+
+```
+X-Nexus-Timestamp: <unix seconds>
+X-Nexus-Signature: v1=<hex HMAC-SHA256(secret, timestamp + "." + raw body)>
+```
+
+For example: `sig=$(printf '%s.%s' "$ts" "$body" | openssl dgst -sha256 -hmac "$secret" | cut -d' ' -f2)`.
+
+| Answer | Meaning |
+|---|---|
+| 202 `{run_id, created}` | Run created (`created: true`), or an existing run for the same idempotency key. |
+| 401 | Missing or bad signature, or a timestamp outside `tolerance_seconds` (default 300). |
+| 404 | Unknown **or disabled** trigger. They are indistinguishable, so the route cannot enumerate triggers. |
+| 409 `replayed` | This exact signed delivery was already accepted. |
+| 422 | Not JSON, no value at the idempotency key path, a params path missing from the payload, the workflow gone, or a required param missing. |
+| 429 | The workflow's `max_active_runs` or the namespace run quota. The delivery is recorded as rejected, so **retrying the identical request is accepted** once there is room. |
+
+Params come from `params_mapping`. Each value is a JSONPath into
+`{"payload": body, "trigger": {id, name}}`, a template (`"{{ $.payload.ref }}"`),
+or a literal. Runs record `trigger_kind: webhook` and
+`trigger_detail: {trigger_id, trigger_name, delivery}`.
+
+The audit log records every create, update, delete and rotation (with the actor)
+and every delivery as `trigger.fire`, including refusals (`outcome=denied`).
+`nexusctl trigger deliveries <name>` shows the last 7 days.
+
+Rotation: `nexusctl trigger rotate-secret <name> --grace 24h` returns the new
+secret. The old one keeps verifying until the grace period ends, and `--grace 0`
+revokes it immediately.
+
+Put the hook route behind the gateway's per-address rate limit (§16). It is the
+one route an unauthenticated sender can reach besides login.
+
+### 27.6 Sensors
+
+```sh
+nexusctl sensor create landing --workflow ingest --uri s3://raw/landing/ --pattern '**/*.parquet' \
+    --map path='$.object.uri' --map size='$.object.size' --poll 1m
+nexusctl sensor create after-etl --workflow report --upstream nightly-etl --map date='$.run.params.date'
+nexusctl sensor list                    # status, triggered, pending, last error
+nexusctl sensor observations landing    # what it saw and which run it started
+```
+
+- **Exactly one run per object or upstream run.** An observation is claimed by a
+  unique row. Its run is created under `sensor:<id>:<hash>`, and a crash between
+  the two is retried under the same key.
+- **Baseline vs backfill.** By default the first full sweep records what already
+  exists as `baseline` and triggers nothing. `--backfill` triggers for everything.
+  Changing a sensor's definition restarts its sweep. Without backfill, it
+  re-baselines.
+- **Durable cursor.** Listing resumes after the last key (S3 `StartAfter`), 1000
+  keys per pass, and wraps at the end of the prefix. An object whose key sorts
+  behind the cursor is found on the next sweep. `sensor_observations` grows with
+  the number of distinct keys and is removed only when the sensor is deleted.
+  Prefer prefixes that are pruned upstream.
+- **Status:**
+  - `waiting`: no replica has picked it up yet
+  - `initializing`: first sweep in progress
+  - `ok`
+  - `error`: see `last_error`; polling backs off to at most 15 min
+  - `stale`: no replica has polled it for 5 min. Check that the workflow-manager
+    is running.
+  - `disabled`
+- **Object stores.** `s3://` is served now. `gs://` and `az://` definitions are
+  accepted and report "no object-store lister is configured" until native
+  listers are registered. The lister interface (`sensors.ObjectLister`) is two
+  behaviours: list after a key, and page.
+
+### 27.7 Asset lineage
+
+Tasks declare `assets: {produces: [{uri, name}], consumes: [...]}` in the spec,
+or `@task(produces=..., consumes=...)` in the SDK. The notifier records each
+run's edges the first time it sees the run. When a producing node succeeds it
+records a **materialization**. A memoized (cache-hit) node does not count as one.
+Query lineage with `nexusctl asset list | get <uri> | graph --uri <uri>`, the
+console's Assets page, or `GET /v1/namespaces/<ns>/assets/{,detail,graph}`.
+Lineage is **declared**: it states what a task said it touches, not what it did.
+
+### 27.8 Monitoring
+
+| Metric | Alert when |
+|---|---|
+| `nexus_notify_pending_deliveries` | Growing for 15 min: receivers are down or rate limits are too low. |
+| `nexus_notify_oldest_due_delivery_seconds` | > 600: deliveries are due and not being sent. Is the event-service running, and does it have DB connections? |
+| `nexus_notify_dead_letters_total{kind}` | Any increase. Inspect `nexusctl notify deliveries --state dead`. |
+| `nexus_notify_send_attempts_total{kind,outcome}` | Rising `retry` ratio. |
+| `nexus_notify_eval_errors_total` | Any increase: a fact could not be evaluated; see the event-service log. |
+| `nexus_notify_rate_limited_total` | Sustained: raise the channel's `rate_limit_per_minute` or narrow its rules. |
+| `nexus_outbox_backlog_rows` (existing) | Also counts rows waiting for the notifier when NATS is disabled. |
+
+### 27.9 Upgrade and rollback
+
+Upgrade:
+
+- 0034 is additive: new tables, plus one nullable `outbox` column added with
+  `CREATE INDEX CONCURRENTLY` (`migrate: no-transaction`, safe to re-run).
+- A mixed fleet is safe. Old writers leave `notified_at` NULL, which means "not
+  yet evaluated". An old relay may prune a published row an hour after
+  publishing, which in practice is long after a new notifier evaluated it.
+- Deploy order: migrate, then the event-service, workflow-manager and gateway
+  (any order among the three).
+
+Rollback:
+
+- Roll back the code, then apply `0034_*.down.sql` only if you mean to discard
+  all of it: configuration, delivery history, trigger secrets, sensor state and
+  lineage.
+- Export first: `pg_dump -t 'notification_*' -t 'webhook_*' -t 'sensor*' -t 'asset*'`.

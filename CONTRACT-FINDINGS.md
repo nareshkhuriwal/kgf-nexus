@@ -3417,3 +3417,43 @@ is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
 `ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
 report the output. Test it in `agent/internal/worker` for both inline and blob
 outputs, and in the NATS/e2e path with a non-SDK executor.
+
+### F142. No durable budget or quota fact exists to notify on — OPEN
+
+**Severity:** low (a requested notification trigger cannot be offered honestly).
+
+ADR-0028's rules were asked to fire "on a budget or quota event if the subjects
+exist". They do not. A namespace run-quota refusal (ADR-0021) is a synchronous
+429 at run creation. The workflow-manager returns `ResourceExhausted` and
+writes nothing durable. A claim-time quota is a pending *reason* recomputed on
+every claim, not an event. No outbox topic or `run_events` kind records either,
+and `nexus.usage.recorded` announces consumption, not a limit being reached.
+There is also no budget concept anywhere in the tree. A rule that subscribed to
+"quota exceeded" would therefore never fire. The gateway refuses such an event
+type, and the message names this finding, instead of accepting a rule that can
+never match.
+
+**Proposed fix.** When quotas gain a durable transition, add an outbox topic
+and a `notify.EventType` for it. A transition means a namespace crossing into
+and out of "at limit", recorded once per crossing: for example, a
+`quota_state` row with a CAS on `at_limit`, written by the scheduler with an
+outbox row in the same statement. The notifier will then evaluate the new topic
+like `run_state`, with a dedup key per crossing.
+
+### F143. Schedules silently ignored a pinned `spec_version` — FIXED
+
+**Severity:** medium (a documented control had no effect).
+
+`schedules.spec_version` is documented as "pin a version to opt out of tracking
+edits", and `nexusctl schedule create --spec-version` and the gateway accept
+and store it. But `schedules.RunsAdapter.Create` never passed it on, and
+`runs.CreateRequest` had no field for it. So every tick ran the **latest**
+version of the workflow, however it was pinned. A reviewed definition could
+change under a production schedule without anyone editing the schedule.
+
+**Fix (this branch).** `runs.CreateRequest.SpecVersion` resolves (namespace,
+name, version) through `store.WFMGetSpecVersion`, and a missing version is
+`NotFound`. The schedule adapter passes the schedule's pin. Webhook triggers
+and sensors use the same field. Existing schedules with a pin now run the
+pinned version. Operators who relied, unknowingly, on "latest" should check
+`GET /v1/namespaces/<ns>/schedules` for a `spec_version`.
