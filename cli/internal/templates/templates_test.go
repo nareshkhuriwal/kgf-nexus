@@ -251,7 +251,7 @@ func TestRenderSubstitutesEveryToken(t *testing.T) {
 			}
 		}
 		for _, want := range []string{"README.md", "dag.py", "requirements.txt", "tests/test_tasks.py",
-			"conftest.py", "Dockerfile", ".gitignore"} {
+			"conftest.py", "Dockerfile", ".gitignore", ".dockerignore"} {
 			if !paths[want] {
 				t.Errorf("%s is missing %s", tm.Name, want)
 			}

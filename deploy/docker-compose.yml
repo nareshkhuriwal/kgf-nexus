@@ -666,6 +666,7 @@ services:
       # a task but not how it ended, and report INDETERMINATE rather than
       # guessing (§6.3).
       NEXUS_WAL_DIR: /var/lib/nexus/wal
+      NEXUS_WORK_DIR: ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     ports:
       # /metrics (agent), loopback only.
@@ -679,6 +680,19 @@ services:
       # socket is effectively root on the host — acceptable on a laptop, never
       # in production, where the k8s executor (ADR-0007) is the answer.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Attempt work directories, at the SAME path on the host and in the
+      # agent: the docker executor bind-mounts them into task containers by
+      # path, and the daemon resolves that path on the host (F144).
+      - ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}:${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
+    # The agent runs as uid 10001, so it can use that socket only through the
+    # socket's group. Docker Desktop's VM-side socket is root:root 0660, hence
+    # the default 0; on a Linux host the socket is usually root:docker, and
+    # `nexusctl up` sets NEXUS_DOCKER_SOCKET_GID from it (for plain compose:
+    # NEXUS_DOCKER_SOCKET_GID=$(stat -c %g /var/run/docker.sock)). Without it
+    # the agent logs "docker daemon unreachable", advertises no docker
+    # executor, and every docker task waits unplaced (F144).
+    group_add:
+      - "${NEXUS_DOCKER_SOCKET_GID:-0}"
     restart: unless-stopped
 
   agent-gpu:
@@ -720,6 +734,7 @@ services:
       NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
       NEXUS_METRICS_ADDR: ":8089"
       NEXUS_WAL_DIR: /var/lib/nexus/wal
+      NEXUS_WORK_DIR: ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     ports:
       # /metrics (agent), loopback only.
@@ -730,6 +745,12 @@ services:
       - nats-auth-agent:/etc/nexus/nats:ro
       - chaos-effects:/var/lib/nexus/effects
       - /var/run/docker.sock:/var/run/docker.sock
+      # Attempt work directories, at the SAME path on the host and in the
+      # agent: the docker executor bind-mounts them into task containers by
+      # path, and the daemon resolves that path on the host (F144).
+      - ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}:${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
+    group_add:
+      - "${NEXUS_DOCKER_SOCKET_GID:-0}"  # see agent-cpu (F144)
     restart: unless-stopped
 
   # A SECOND gpu agent, advertising nvidia-a10 rather than a100.
@@ -772,6 +793,7 @@ services:
       NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
       NEXUS_METRICS_ADDR: ":8089"
       NEXUS_WAL_DIR: /var/lib/nexus/wal
+      NEXUS_WORK_DIR: ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
       NEXUS_LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     ports:
@@ -783,6 +805,12 @@ services:
       - nats-auth-agent:/etc/nexus/nats:ro
       - chaos-effects:/var/lib/nexus/effects
       - /var/run/docker.sock:/var/run/docker.sock
+      # Attempt work directories, at the SAME path on the host and in the
+      # agent: the docker executor bind-mounts them into task containers by
+      # path, and the daemon resolves that path on the host (F144).
+      - ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}:${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
+    group_add:
+      - "${NEXUS_DOCKER_SOCKET_GID:-0}"  # see agent-cpu (F144)
     restart: unless-stopped
 
   # ── Tracing (optional) ────────────────────────────────────────────────────

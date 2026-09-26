@@ -1286,6 +1286,10 @@ message HeartbeatResponse {
 
 ### 8.2 Public REST API (sketch)
 
+The complete, tested contract is [`api/openapi.yaml`](../api/openapi.yaml)
+(OpenAPI 3.1, also served at `GET /v1/openapi.yaml`); the sketch below is the
+original outline.
+
 ```
 POST   /v1/namespaces/{ns}/specs                 submit/validate spec
 GET    /v1/namespaces/{ns}/specs/{name}/versions

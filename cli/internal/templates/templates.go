@@ -107,7 +107,7 @@ const commonDir = "files/_common"
 // renames maps embedded names to their on-disk names. Dotfiles are stored
 // without the dot so they are visible in the repository and not mistaken for
 // this repository's own configuration.
-var renames = map[string]string{"gitignore": ".gitignore"}
+var renames = map[string]string{"gitignore": ".gitignore", "dockerignore": ".dockerignore"}
 
 // Render produces the files of a template with vars substituted, sorted by path.
 func Render(name string, v Vars) ([]File, error) {

@@ -1,0 +1,13 @@
+# Kept out of the task image: local environments, tests and caches.
+.venv/
+venv/
+.git/
+tests/
+conftest.py
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.nexus-local/
+Dockerfile
+.dockerignore
+*.db

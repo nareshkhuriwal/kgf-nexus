@@ -1,0 +1,159 @@
+# KGF Nexus documentation site. Build with `make docs` (strict, then the link
+# check). Tooling is pinned in requirements.txt; see docs-site/README.md for why
+# MkDocs Material.
+site_name: KGF Nexus
+site_description: Documentation for KGF Nexus, a distributed workflow orchestrator.
+repo_url: https://github.com/nareshkhuriwal/kgf-nexus
+repo_name: kgf-nexus
+edit_uri: edit/main/docs-site/docs/
+copyright: Copyright 2026 Khuriwal Group. Apache-2.0.
+
+docs_dir: docs
+site_dir: site
+strict: true
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+  not_found: warn
+
+theme:
+  name: material
+  # No web fonts: the site must render offline and make no third-party requests.
+  font: false
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.action.edit
+    - search.highlight
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+
+extra:
+  # Branch that "repo:" links and generated-page edit links point at.
+  repo_branch: main
+
+hooks:
+  - hooks/repo_docs.py
+  - hooks/cli_reference.py
+  - hooks/openapi_reference.py
+  - hooks/schema_reference.py
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          # Static analysis only (griffe): the SDK is never imported to build docs.
+          paths: [../sdk/python]
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            show_signature_annotations: true
+            separate_signature: false
+            members_order: source
+            filters: ["!^_"]
+            merge_init_into_class: true
+            show_if_no_docstring: false
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      # GitHub-compatible heading ids, so anchors written for the repository
+      # documents (rendered here unchanged) resolve on the site too.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Concepts:
+      - concepts/index.md
+      - Workflows and specs: concepts/workflows.md
+      - Tasks: concepts/tasks.md
+      - DAG semantics: concepts/dag-semantics.md
+      - Fan-out and fan-in: concepts/fan-out-fan-in.md
+      - Retries and idempotency: concepts/retries-idempotency.md
+      - Leases and at-least-once: concepts/leases.md
+      - Resources and GPUs: concepts/resources.md
+      - Queues and fair share: concepts/queues-fair-share.md
+      - Quotas: concepts/quotas.md
+      - Results and artifacts: concepts/results-artifacts.md
+      - Logs: concepts/logs.md
+      - Security and tenancy: concepts/security-tenancy.md
+  - Recipes:
+      - recipes/index.md
+      - ETL: recipes/etl.md
+      - ML training: recipes/ml-training.md
+      - Batch inference: recipes/batch-inference.md
+      - File fan-out: recipes/file-fanout.md
+      - Schedules and backfills: recipes/schedules-backfills.md
+      - Secrets: recipes/secrets.md
+      - GPU jobs: recipes/gpu-jobs.md
+      - Kubernetes executor: recipes/kubernetes-executor.md
+      - Local development and replay: recipes/local-development.md
+  - Migrating:
+      - migrate/index.md
+      - From Airflow: migrate/airflow.md
+      - From Prefect: migrate/prefect.md
+      - From Argo Workflows: migrate/argo.md
+  - Operations:
+      - operations/index.md
+      - Runbook (OPERATIONS.md): operations/runbook.md
+      - Deploying: operations/deploy.md
+      - TLS: operations/tls.md
+      - Terraform:
+          - operations/terraform/index.md
+          - AKS: operations/terraform/aks.md
+          - EKS: operations/terraform/eks.md
+          - GKE: operations/terraform/gke.md
+      - Azure provisioning: operations/azure-provisioning.md
+  - Reference:
+      - reference/index.md
+      - REST API: reference/api/index.md
+      - CLI (nexusctl): reference/cli.md
+      - Python SDK: reference/sdk.md
+      - Workflow spec: reference/workflow-spec.md
+  - Design:
+      - Architecture: design/architecture.md
+      - Decision records: design/adr/index.md
+      - Multi-tenancy: design/multitenancy.md
+      - RBAC design: design/rbac-design.md
+      - RBAC implementation: design/rbac-implementation.md
+      - Cluster scaling: design/cluster-scaling.md
+      - Compatibility: design/compatibility.md
+      - Third-party licences: design/third-party-licenses.md

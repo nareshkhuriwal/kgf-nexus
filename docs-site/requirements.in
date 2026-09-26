@@ -1,0 +1,8 @@
+# Direct dependencies of the documentation site. Lock with:
+#   uv pip compile docs-site/requirements.in --generate-hashes --python-version 3.11 -o docs-site/requirements.txt
+# and install ONLY from the lock (make docs does): pip install --require-hashes -r docs-site/requirements.txt
+mkdocs==1.6.1
+mkdocs-material==9.7.7
+mkdocstrings==1.0.6
+mkdocstrings-python==2.0.9
+PyYAML>=6.0

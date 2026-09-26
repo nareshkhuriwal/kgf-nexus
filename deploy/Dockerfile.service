@@ -52,6 +52,17 @@ FROM alpine:3.21 AS runtime
 RUN apk add --no-cache ca-certificates tzdata \
  && adduser -D -u 10001 nexus
 
+# The worker agent's docker executor drives the Docker CLI (agent/internal/
+# executor/docker.go) and advertises the executor only when `docker info`
+# succeeds. Without the CLI the compose agents silently ran subprocess-only,
+# and every task with runtime.executor=docker -- including every nexusctl init
+# template -- waited unplaced forever (F144). bash is there for subprocess
+# tasks that need it: Airflow BashOperator commands converted by
+# `nexusctl import airflow` run as `bash -c`, and busybox sh is not bash.
+# Only the agent image gets either.
+ARG SERVICE
+RUN if [ "$SERVICE" = "agent" ]; then apk add --no-cache docker-cli bash; fi
+
 # --chmod is required: a plain COPY carries the build stage's mode bits, and the
 # binary is then not executable by the unprivileged runtime user, which fails at
 # container start with a bare "permission denied" that says nothing about why.

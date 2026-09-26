@@ -1,0 +1,71 @@
+# Hand-written test input for `nexusctl import argo` (original to this repository).
+# Fully translatable, and run for real by TestConvertedPipelinesRunLocally:
+# steps with a parallel group, a script whose stdout feeds withParam, a
+# mapped container, a fan-in, and an output parameter read from a file.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: runnable-map-reduce-
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: prefix
+        value: word
+  templates:
+    - name: main
+      steps:
+        - - name: generate
+            template: gen-words
+          - name: stamp
+            template: write-stamp
+        - - name: shout
+            template: upper
+            arguments:
+              parameters:
+                - name: word
+                  value: "{{item}}"
+            withParam: "{{steps.generate.outputs.result}}"
+        - - name: collect
+            template: join
+            arguments:
+              parameters:
+                - name: words
+                  value: "{{steps.shout.outputs.result}}"
+                - name: stamp
+                  value: "{{steps.stamp.outputs.parameters.stamp}}"
+    - name: gen-words
+      script:
+        image: alpine:3.23
+        command: [sh]
+        source: |
+          printf '["alpha","beta","gamma"]'
+    - name: write-stamp
+      container:
+        image: alpine:3.23
+        command: [sh, -c]
+        args: ["printf ok > /tmp/nexus-import-stamp.txt"]
+      outputs:
+        parameters:
+          - name: stamp
+            valueFrom:
+              path: /tmp/nexus-import-stamp.txt
+    - name: upper
+      inputs:
+        parameters:
+          - name: word
+      container:
+        image: alpine:3.23
+        command: [sh, -c]
+        args: ["printf '\"%s-%s\"' {{workflow.parameters.prefix}} $(echo {{inputs.parameters.word}} | tr a-z A-Z)"]
+      retryStrategy:
+        limit: 2
+    - name: join
+      inputs:
+        parameters:
+          - name: words
+          - name: stamp
+      container:
+        image: alpine:3.23
+        command: [sh, -c]
+        args: ["echo \"{{inputs.parameters.words}}\" | grep -q word-ALPHA && test \"{{inputs.parameters.stamp}}\" = ok"]

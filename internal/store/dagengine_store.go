@@ -94,6 +94,12 @@ type DEAttemptRow struct {
 	State         domain.AttemptState
 	OutputRef     []byte // raw JSONB; the engine forwards it without interpreting
 	ErrorJSON     []byte
+	// RetryRefused is true when the scheduler evaluated this attempt's failure
+	// and decided not to retry it (a RetryExhausted or IndeterminateOutcome
+	// event names it), for example a non-retryable error class with attempts
+	// still left in the budget. The retry budget alone cannot tell "between
+	// tries" from "given up" in that case (CONTRACT-FINDINGS F145).
+	RetryRefused bool
 }
 
 // LoadRun reads the run row. It does NOT lock: the engine's own writes are
@@ -225,8 +231,16 @@ func (s *DAGEngineStore) LoadAttempts(ctx context.Context, runID string) ([]DEAt
 	// max_fanout children with up to the inline threshold each -- hundreds of MiB
 	// read on every reconcile -- and nothing but fan-in assembly needs them, which
 	// streams them with a size bound instead (StreamChildOutputs).
+	// The refusal is read from run_events, which the scheduler appends in the
+	// SAME transaction as the terminal attempt write (scheduler_reports.go,
+	// scheduler_reconcile.go), so an attempt can never be observed terminal
+	// with its refusal still missing. idx_events_run_seq narrows the probe to
+	// this run's events.
 	const q = `SELECT a.id::text, a.run_id::text, a.node_id, a.attempt_number, a.state::text,
-	                  CASE WHEN n.parent_node_id IS NULL THEN a.output_ref END, a.error
+	                  CASE WHEN n.parent_node_id IS NULL THEN a.output_ref END, a.error,
+	                  EXISTS (SELECT 1 FROM run_events e
+	                           WHERE e.run_id = a.run_id AND e.attempt_id = a.id
+	                             AND e.kind IN ('RetryExhausted', 'IndeterminateOutcome'))
 	             FROM task_attempts a
 	             JOIN task_nodes n ON n.run_id = a.run_id AND n.node_id = a.node_id
 	            WHERE a.run_id = $1::uuid
@@ -243,7 +257,7 @@ func (s *DAGEngineStore) LoadAttempts(ctx context.Context, runID string) ([]DEAt
 		var a DEAttemptRow
 		var state string
 		if err := rows.Scan(&a.ID, &a.RunID, &a.NodeID, &a.AttemptNumber, &state,
-			&a.OutputRef, &a.ErrorJSON); err != nil {
+			&a.OutputRef, &a.ErrorJSON, &a.RetryRefused); err != nil {
 			return nil, fmt.Errorf("scan attempt row: %w", err)
 		}
 		a.State = domain.AttemptState(state)

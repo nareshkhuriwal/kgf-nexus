@@ -63,6 +63,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -331,7 +332,33 @@ func (s *session) baseEnv() []string {
 	for _, k := range keys {
 		env = append(env, k+"="+s.portEnv[k])
 	}
+	if gid, ok := dockerSocketGID(env); ok {
+		env = append(env, dockerSocketGIDEnv+"="+gid)
+	}
 	return env
+}
+
+// dockerSocketGIDEnv is the group the compose agents join so that their
+// non-root user (uid 10001) can use the bind-mounted Docker socket, which the
+// docker executor needs (F144). The compose default, 0, is right for Docker
+// Desktop, whose VM-side socket is root:root 0660.
+const dockerSocketGIDEnv = "NEXUS_DOCKER_SOCKET_GID"
+
+// dockerSocketGID returns the host socket's group on Linux, where the socket
+// that is mounted is the host's own (usually root:docker with a
+// distribution-specific gid). It returns false when the caller already set
+// the variable, on other systems (Docker Desktop mounts the VM's socket, not
+// the host path), or when the socket cannot be inspected.
+func dockerSocketGID(env []string) (string, bool) {
+	for _, kv := range env {
+		if strings.HasPrefix(kv, dockerSocketGIDEnv+"=") {
+			return "", false
+		}
+	}
+	if runtime.GOOS != "linux" {
+		return "", false
+	}
+	return socketGroup("/var/run/docker.sock")
 }
 
 func (s *session) configWith(ctx context.Context, files []string, project string) (ProjectConfig, error) {
@@ -507,6 +534,9 @@ func (s *session) discardIfStale(ctx context.Context) error {
 }
 
 func (s *session) up(ctx context.Context, c *Compose, services []string) error {
+	if err := ensureAgentWorkDir(c.Env); err != nil {
+		return &Error{Kind: KindComposeFailed, Message: "could not prepare the agents' shared work directory", Err: err}
+	}
 	args := []string{"up", "--detach", "--remove-orphans"}
 	if s.forceRecreate {
 		args = append(args, "--force-recreate")

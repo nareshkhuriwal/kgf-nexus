@@ -1,10 +1,14 @@
-# Runtime dependencies of the task image. The handlers use only the standard
-# library, so the SDK is the only requirement.
+# Third-party runtime dependencies of the task image. The handlers use only the
+# standard library, so there are none yet; add yours here.
 #
-# nexus-sdk is the Nexus Python SDK (sdk/python in the Nexus repository). If it
-# is not published to your package index, install it from a checkout instead:
-#   pip install -e /path/to/kgf-nexus/sdk/python
-nexus-sdk>=0.1.0
+# The Nexus SDK is deliberately NOT listed. Its distribution name, nexus-sdk,
+# belongs on PyPI to an unrelated project (Blue Brain Nexus), so
+# `pip install nexus-sdk` from a public index installs the wrong package and
+# every task then fails with "No module named nexus". Install the SDK from a
+# Nexus checkout instead:
+#   locally:        pip install -e /path/to/kgf-nexus/sdk/python
+#   in the image:   docker build --build-context nexus-sdk=/path/to/kgf-nexus/sdk/python ...
+# or from your own index, pinned to the version you tested.
 
 # For the tests in tests/ (not needed in the task image).
 # pytest>=8.3

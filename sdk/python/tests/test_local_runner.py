@@ -383,6 +383,28 @@ def test_preflight_refuses_what_it_cannot_run(tmp_path):
     assert res.state == "SUCCEEDED"
 
 
+def test_host_executor_runs_a_container_task_from_the_launch_directory(tmp_path, monkeypatch):
+    # A docker task stands in for its image, whose working directory holds the
+    # project: `python -m nexus.entrypoint --module dag` and relative data paths
+    # must resolve from where the run was started, as `nexusctl init` projects
+    # rely on (CONTRACT-FINDINGS F144).
+    project = tmp_path / "proj"
+    (project / "data").mkdir(parents=True)
+    (project / "data" / "in.txt").write_text("hello\n")
+    (project / "helper_mod.py").write_text("WORD = 'imported'\n")
+    monkeypatch.chdir(project)
+    script = ("import helper_mod, os; "
+              "open(os.path.join(os.environ['NEXUS_OUTPUT_DIR'], 'result'), 'w')"
+              ".write(helper_mod.WORD + ':' + open('data/in.txt').read().strip())")
+    spec = {"api_version": "nexus.dev/v1", "name": "x", "tasks": [
+        {"id": "d", "task_ref": "x.d", "outputs": {"result": {"type": "string"}},
+         "runtime": {"executor": "docker", "image": "i", "working_dir": "/app",
+                     "command": [sys.executable, "-c", script]}}]}
+    res = _run(spec, run_dir=str(tmp_path / "run"), host_executor=True)
+    assert res.state == "SUCCEEDED", res.summary()
+    assert res.output("d") == "imported:hello"
+
+
 def test_an_unsatisfiable_input_is_refused_before_anything_runs(tmp_path):
     spec = {"api_version": "nexus.dev/v1", "name": "x", "tasks": [
         {"id": "a", "task_ref": "x.a", "inputs": {"n": {"type": "json", "required": True}},

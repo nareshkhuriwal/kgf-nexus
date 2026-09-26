@@ -128,15 +128,19 @@ Examples:
 			for _, f := range written {
 				fmt.Fprintf(env.IO.Out, "  %s\n", f)
 			}
+			// The SDK is installed from a checkout, never by name from a public
+			// index: "nexus-sdk" on PyPI is an unrelated project (F144).
+			sdk := sdkCheckout(dir)
 			fmt.Fprintf(env.IO.Out, `
 Next:
   cd %s
-  python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt pytest
+  python -m venv .venv && . .venv/bin/activate
+  pip install -e %s -r requirements.txt pytest
   pytest                                    # test the task functions locally
   nexusctl workflow compile dag.py --show   # the exact spec the server will see
-  docker build -t %s .                      # the task image (IMAGE in dag.py)
+  docker build --build-context nexus-sdk=%s -t %s .   # the task image (IMAGE in dag.py)
   nexusctl workflow submit dag.py
-`, dir, name+":0.1.0")
+`, dir, sdk, sdk, name+":0.1.0")
 			return nil
 		},
 	}
@@ -211,4 +215,35 @@ func checkTarget(dir string, force bool) error {
 			"files into it (other files are left alone)", dir)
 	}
 	return nil
+}
+
+// sdkPlaceholder is printed when no Nexus checkout can be found.
+const sdkPlaceholder = "/path/to/kgf-nexus/sdk/python"
+
+// sdkCheckout returns the Python SDK directory of the Nexus checkout that
+// contains dir or the working directory, or a placeholder. The SDK is always
+// installed from a checkout (or the user's own index), never by name from
+// PyPI, where "nexus-sdk" is an unrelated project (F144).
+func sdkCheckout(dir string) string {
+	starts := []string{dir}
+	if wd, err := os.Getwd(); err == nil {
+		starts = append(starts, wd)
+	}
+	for _, s := range starts {
+		abs, err := filepath.Abs(s)
+		if err != nil {
+			continue
+		}
+		for d := abs; ; d = filepath.Dir(d) {
+			candidate := filepath.Join(d, "sdk", "python")
+			if b, err := os.ReadFile(filepath.Join(candidate, "pyproject.toml")); err == nil &&
+				strings.Contains(string(b), `name = "nexus-sdk"`) {
+				return candidate
+			}
+			if filepath.Dir(d) == d {
+				break
+			}
+		}
+	}
+	return sdkPlaceholder
 }

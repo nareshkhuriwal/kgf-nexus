@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	nexusapi "github.com/khuriwalgroup/kgf-nexus/api"
 	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/auditexport"
@@ -335,6 +336,11 @@ func (a *API) Routes() http.Handler {
 	// The schema the gateway actually enforces, served so authors and the SDK can
 	// validate locally against the same grammar rather than a documented copy of it.
 	mux.HandleFunc("GET /v1/schemas/workflow-spec-v1.json", a.serveSchema)
+	// The OpenAPI description of this very route set, unauthenticated like the
+	// schema above and for the same reason: a client generator or an API explorer
+	// must be able to read the contract before it holds a credential.
+	// openapi_test.go keeps the document and Routes() in lockstep.
+	mux.HandleFunc("GET /v1/openapi.yaml", serveOpenAPI)
 
 	mux.Handle("GET /v1/namespaces/{ns}/platform/config", a.guard(authn.ActionAdminWrite, a.platformGet))
 	mux.Handle("PUT /v1/namespaces/{ns}/platform/config", a.guard(authn.ActionAdminWrite, a.platformPut))
@@ -803,6 +809,19 @@ func (a *API) serveSchema(w http.ResponseWriter, r *http.Request) {
 	// hard; a client re-fetching it on every validation is pure waste.
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	_, _ = w.Write(b)
+}
+
+// openAPIDocument is read once: the embedded bytes are immutable for the life
+// of the binary, so copying them per request would be pure waste.
+var openAPIDocument = nexusapi.OpenAPIYAML()
+
+// serveOpenAPI serves api/openapi.yaml byte-for-byte as compiled in.
+func serveOpenAPI(w http.ResponseWriter, _ *http.Request) {
+	// application/yaml is the registered media type (RFC 9512).
+	w.Header().Set("Content-Type", "application/yaml")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("Content-Length", strconv.Itoa(len(openAPIDocument)))
+	_, _ = w.Write(openAPIDocument)
 }
 
 // ── runs ──────────────────────────────────────────────────────────────────

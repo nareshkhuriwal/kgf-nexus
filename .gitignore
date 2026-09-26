@@ -71,3 +71,6 @@ deploy/.env
 
 # Air-gap bundles (make airgap-bundle)
 /dist/
+
+# Documentation site build output (make docs)
+/docs-site/site/

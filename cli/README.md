@@ -56,6 +56,10 @@ down [--volumes]                     Stop it; --volumes also DELETES its data
 init <template> [dir] [--name N] [--gpu] [--force]   New project from a template
 init --list                                          List templates
 
+import airflow|prefect|argo <file|dir>   Convert pipelines into specs + a report
+           [--out F | --out-dir D] [--report R.md|R.json] [--allow-partial]
+           [--python PY] [--max-fanout N]
+
 workflow submit <file> [--dry-run] [--watch]   Submit a spec (JSON, YAML, or .py)
 workflow compile <file> [--show]     Print exactly the spec the server will see
 workflow versions <name>             List registered spec versions
@@ -122,7 +126,7 @@ stderr, so `-o json` output stays parseable.
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | Any other failure: a server fault (5xx), a failed `run create --wait`, an invalid spec or cron expression, a local file error |
+| 1 | Any other failure: a server fault (5xx), a failed `run create --wait`, an invalid spec or cron expression, a local file error, `import` found unsupported constructs (without `--allow-partial`) |
 | 2 | Usage: unknown command or flag, wrong operands, invalid flag value. Nothing was sent |
 | 3 | Not confirmed: a destructive command was declined, or had no terminal and no `--yes` |
 | 4 | Not found (HTTP 404): no such run, schedule, backfill, worker or workflow in the namespace |
@@ -158,6 +162,54 @@ directory name (made schema-valid) and the namespace to the resolved
 `--namespace`. `init` writes only into an empty or new directory unless
 `--force`, and even then touches only the template's own files. Templates are
 embedded in the binary, so it works offline.
+
+## `import`: migrate from Airflow, Prefect or Argo
+
+```bash
+nexusctl import airflow dags/ --out-dir nexus/ --report import-report.md
+nexusctl import prefect flows/ --out-dir nexus/          # also reads prefect.yaml
+nexusctl import argo workflows/etl.yaml --out etl.yaml
+nexusctl import argo workflows/ --allow-partial -o json > import.json
+```
+
+Converts every DAG, flow or Argo `Workflow`/`WorkflowTemplate`/`CronWorkflow`
+found into a WorkflowSpec, and writes a report that classifies each construct
+as **translated**, **approximated** (converted; the report says how behaviour
+differs) or **unsupported**, with its `file:line` and the Nexus construct it
+became. The per-source migration guides in the docs site list the mappings.
+
+- **Static only.** Airflow and Prefect files are parsed with Python's `ast` by
+  an analyzer embedded in nexusctl, run with your interpreter (`--python`,
+  default `python3`, 3.8+, nothing installed). It never imports or executes
+  the file. Anything it cannot resolve without running code -- a loop that
+  creates tasks, `Variable.get()`, a value computed at run time -- is reported
+  as unsupported with its line, not guessed. Argo YAML is read in Go.
+- **Nothing lossy is written by accident.** If any construct is unsupported,
+  no spec is written and the exit code is 1. `--allow-partial` writes the specs
+  anyway, with each unsupported construct as a placeholder task that **fails**
+  when run (`task_ref: nexus-import/unsupported`) and a `# PARTIAL` header, and
+  exits 0. The report is written in every case.
+- **Validated before writing.** Each generated spec is checked against the
+  schema and the gateway's semantic rules; a failure is a converter bug,
+  reported as such, and nothing is written (exit 1).
+- **Outputs.** `--out FILE` for an input holding one workflow; `--out-dir DIR`
+  writes `<name>.yaml` per workflow (a spec file holds one document, so several
+  workflows cannot share `--out`: exit 2). With neither, the specs go to stdout
+  separated by `---`. `--report R.md` writes Markdown, `R.json` JSON; `-o json`
+  prints the JSON report (with written specs inline) instead of the stderr
+  summary.
+- **Schedules are companions.** A Nexus schedule is its own API object, never
+  part of a spec, so the report prints the `nexusctl schedule create` command
+  (cron, timezone, overlap) and, for Airflow `catchup=True`, a
+  `nexusctl backfill start` command.
+- **Maps.** A mapped task whose source sets no bound gets `max_fanout`
+  `--max-fanout` (default 1024, Airflow's `max_map_length`); a map over a
+  literal list gets a generated `<task>__items` task that emits the list.
+
+Python tasks (TaskFlow, `PythonOperator`, Prefect `@task`) become
+`python3 -m nexus.entrypoint --module <file> <file>.<function>`: re-decorate the
+function with `@nexus.task(task_ref=...)` as the report says. Execution is
+at-least-once; review each task for idempotency before relying on retries.
 
 ## `workflow submit --watch`
 
