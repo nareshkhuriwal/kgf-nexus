@@ -1,0 +1,235 @@
+api_version: nexus.dev/v1
+description: LLM calls over sharded prompts with shared rate limits; a shard crashes
+  once and resumes from its checkpoint; the verdict checks every answer, every token
+  and zero re-asked prompts.
+edges:
+- from_node_id: answer_shard
+  output_to_input:
+    summaries: summary
+  to_node_id: verify
+- from_node_id: plan
+  output_to_input: {}
+  to_node_id: answer_shard
+- from_node_id: plan
+  output_to_input:
+    shards: result
+  to_node_id: verify
+name: llm-batch-inference
+namespace: default
+params:
+  base_url:
+    default_json: '"http://mock-llm:8089"'
+    type: string
+  checkpoint_every:
+    default_json: '5'
+    type: int
+  crash_after:
+    default_json: '10'
+    type: int
+  crash_shard:
+    default_json: '1'
+    type: int
+  max_tokens:
+    default_json: '16'
+    type: int
+  model:
+    default_json: '"mock-large"'
+    type: string
+  records:
+    default_json: '120'
+    type: int
+  shard_size:
+    default_json: '30'
+    type: int
+run_timeout_ms: 1800000
+tasks:
+- id: answer_shard
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    base_url: base_url
+    checkpoint_every: checkpoint_every
+    crash_after: crash_after
+    crash_shard: crash_shard
+    max_tokens: max_tokens
+    model: model
+  inputs:
+    base_url:
+      required: true
+      type: json
+    checkpoint_every:
+      required: true
+      type: json
+    crash_after:
+      required: true
+      type: json
+    crash_shard:
+      required: true
+      type: json
+    max_tokens:
+      required: true
+      type: json
+    model:
+      required: true
+      type: json
+    shard:
+      required: true
+      type: json
+  map:
+    item_input: shard
+    max_fanout: 32
+    over_node_id: plan
+    over_output: result
+  outputs:
+    summary:
+      max_bytes: 16384
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 100
+      memory_bytes: 134217728
+  retry:
+    initial_ms: 1000
+    jitter: full
+    max_attempts: 3
+    max_ms: 10000
+    multiplier: 2.0
+    retry_on:
+    - ERROR_CLASS_INFRASTRUCTURE
+    - ERROR_CLASS_RATE_LIMITED
+    - ERROR_CLASS_TRANSIENT
+    - ERROR_CLASS_WORKER_LOST
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - llm_batch.answer_shard
+    command:
+    - python3
+    - -m
+    - nexus.entrypoint
+    - --module
+    - /opt/nexus/examples/llm_batch_inference/dag.py
+    executor: subprocess
+  task_ref: llm_batch.answer_shard
+  timeouts:
+    heartbeat_ms: 120000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 600000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: plan
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    checkpoint_every: checkpoint_every
+    crash_after: crash_after
+    crash_shard: crash_shard
+    records: records
+    shard_size: shard_size
+  inputs:
+    checkpoint_every:
+      required: true
+      type: json
+    crash_after:
+      required: true
+      type: json
+    crash_shard:
+      required: true
+      type: json
+    records:
+      required: true
+      type: json
+    shard_size:
+      required: true
+      type: json
+  outputs:
+    result:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 100
+      memory_bytes: 134217728
+  retry:
+    initial_ms: 1000
+    jitter: full
+    max_attempts: 2
+    max_ms: 600000
+    multiplier: 2.0
+    retry_on:
+    - ERROR_CLASS_INFRASTRUCTURE
+    - ERROR_CLASS_TRANSIENT
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - llm_batch.plan
+    command:
+    - python3
+    - -m
+    - nexus.entrypoint
+    - --module
+    - /opt/nexus/examples/llm_batch_inference/dag.py
+    executor: subprocess
+  task_ref: llm_batch.plan
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: verify
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    crash_shard: crash_shard
+    records: records
+  inputs:
+    crash_shard:
+      required: true
+      type: json
+    records:
+      required: true
+      type: json
+    shards:
+      required: true
+      type: json
+    summaries:
+      required: true
+      type: json
+  outputs:
+    verdict:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 100
+      memory_bytes: 134217728
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 1
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - llm_batch.verify
+    command:
+    - python3
+    - -m
+    - nexus.entrypoint
+    - --module
+    - /opt/nexus/examples/llm_batch_inference/dag.py
+    executor: subprocess
+  task_ref: llm_batch.verify
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_DONE
+  version: 1
+

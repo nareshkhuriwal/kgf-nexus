@@ -39,6 +39,9 @@ var catalog = []Template{
 	{Name: "ml-training", Summary: "Hyperparameter grid via .map, train, evaluate, select the best, quality gate."},
 	{Name: "batch-inference", Summary: "Shard a dataset, .map inference with per-shard checkpoints, aggregate.", GPUOption: true},
 	{Name: "file-fanout", Summary: "List objects under a prefix, process each, fan in a manifest with max_bytes."},
+	{Name: "llm-batch-inference", Summary: "Shard prompts, .map LLM calls under shared rate limits, resume mid-shard from checkpoints, total tokens."},
+	{Name: "llm-eval", Summary: "Answer a reference set, grade (exact, regex, LLM-as-judge), metrics, fail the run below min_accuracy."},
+	{Name: "fine-tune", Summary: "Validate data, submit a fine-tuning job idempotently, poll, gate on held-out accuracy vs base, register.", GPUOption: true},
 }
 
 // List returns the templates in display order.

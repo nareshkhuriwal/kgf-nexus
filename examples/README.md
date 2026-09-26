@@ -32,12 +32,41 @@ SUITE="gpu" make k8s-dev-test    # one workload
 ```
 
 For a Python starting point with the same shapes, `nexusctl init --list` shows
-project templates (ETL, ML training, batch inference, file fan-out) that
-generate a runnable `dag.py`, tests and a task image.
+project templates (ETL, ML training, batch inference, file fan-out, LLM batch
+inference, LLM eval, fine-tuning) that generate a runnable `dag.py`, tests and
+a task image.
 
 On a laptop the GPUs are **simulated** (the dev agents advertise capacity and
 are labelled `simulated=true`): `gpu_scheduling` tests the scheduler's GPU
 accounting, queueing and device assignment, not CUDA.
+
+### AI workloads (opt-in)
+
+Two Python workflows that call a model through `nexus.llm.LLMClient` (shared
+rate-limit permits, in-task 429 retries, token usage units, checkpoints; see
+ADR-0032) against the SDK's deterministic **mock** model server. Nothing calls
+a real provider and no API key is involved.
+
+| Example | What it does | What it proves |
+|---|---|---|
+| [`llm_batch_inference/`](llm_batch_inference/) | 120 prompts in 4 shards; shard 1 crashes on purpose right after a checkpoint | The retry resumes mid-shard (`resumed_from > 0`) and asks no prompt twice; every record answered exactly once and correctly; token totals agree with the per-answer counts and the mock's rule |
+| [`llm_eval/`](llm_eval/) | 50 reference items; exact, regex and LLM-as-judge graders; accuracy per grader and category | The quality gate passes `mock-large` and fails the run for `mock-small` (`--param model=mock-small`) |
+
+Each has a `check_local.py` that runs it with the local runner against an
+in-process mock, no stack needed:
+
+```bash
+./.venv/bin/python examples/llm_batch_inference/check_local.py
+./.venv/bin/python examples/llm_eval/check_local.py
+```
+
+On a stack they need the AI overlay (an agent with Python 3 and the SDK,
+`examples/` at `/opt/nexus/examples`, and the mock reachable as
+`http://mock-llm:8089`), so they are not in the default suite:
+
+```bash
+SUITE=ai examples/run-suite.sh
+```
 
 ### Long-running workloads
 
