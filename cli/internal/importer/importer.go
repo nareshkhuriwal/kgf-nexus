@@ -231,11 +231,51 @@ func renderYAML(w *Workflow, source string) []byte {
 		b.WriteString("# PARTIAL: tasks with task_ref nexus-import/unsupported stand in for constructs that were\n")
 		b.WriteString("# not converted, and FAIL when run. Replace them before relying on this workflow.\n")
 	}
-	enc := yaml.NewEncoder(&b)
-	enc.SetIndent(2)
-	_ = enc.Encode(w.Spec)
-	_ = enc.Close()
+	b.Write(specYAML(w.Spec))
 	return b.Bytes()
+}
+
+// specYAML renders a spec as YAML that parses back to the SAME document.
+// yaml.v3's literal block style is readable for scripts but drops a leading
+// newline (and mangles some whitespace-only lines), which would silently
+// change a command. Every rendering is therefore checked by parsing it back;
+// a string that does not survive is double-quoted instead.
+func specYAML(s *Spec) []byte {
+	want, _ := json.Marshal(s)
+	wantDoc, err := clispec.Parse(want, "spec")
+	for _, quoteAll := range []bool{false, true} {
+		var n yaml.Node
+		if err := n.Encode(s); err != nil {
+			break
+		}
+		styleStrings(&n, quoteAll)
+		var b bytes.Buffer
+		enc := yaml.NewEncoder(&b)
+		enc.SetIndent(2)
+		_ = enc.Encode(&n)
+		_ = enc.Close()
+		got, perr := clispec.Parse(b.Bytes(), "spec")
+		if err != nil || (perr == nil && got.Hash == wantDoc.Hash) {
+			return b.Bytes()
+		}
+	}
+	// Unreachable in practice: JSON is valid YAML and always round-trips.
+	return want
+}
+
+func styleStrings(n *yaml.Node, quoteAll bool) {
+	if n.Kind == yaml.ScalarNode && n.Tag == "!!str" && strings.Contains(n.Value, "\n") {
+		risky := strings.HasPrefix(n.Value, "\n") || strings.HasPrefix(n.Value, " ") ||
+			strings.Contains(n.Value, " \n") || strings.Contains(n.Value, "\t")
+		if quoteAll || risky {
+			n.Style = yaml.DoubleQuotedStyle
+		} else {
+			n.Style = yaml.LiteralStyle
+		}
+	}
+	for _, c := range n.Content {
+		styleStrings(c, quoteAll)
+	}
 }
 
 // collect lists the files to analyse, plus side files (prefect.yaml).
