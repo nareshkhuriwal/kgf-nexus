@@ -50,11 +50,20 @@ still apply.
        into pods carrying this label, so every result-store client gets it. */ -}}
 {{- $_ := set $labels "azure.workload.identity/use" "true" -}}
 {{- end -}}
+{{- if and (eq $key "agent") ((($root.Values.agentDefaults | default dict).secrets | default dict).workloadIdentityClientId) -}}
+{{- /* akv:// secrets through Azure workload identity (ADR-0025): the agents
+       need the webhook's projected token as well. */ -}}
+{{- $_ := set $labels "azure.workload.identity/use" "true" -}}
+{{- end -}}
 name: {{ $name | quote }}
 create: {{ $create }}
 automount: {{ $automount }}
 annotations: {{ toYaml $ann | nindent 2 }}
 podLabels: {{ toYaml $labels | nindent 2 }}
+{{- /* What the values configure, before the chart's automatic identity
+       labels: two components may share an account while only one of them
+       needs a webhook label, so sharing is judged on this. */}}
+configuredPodLabels: {{ toYaml ($cfg.podLabels | default dict) | nindent 2 }}
 {{- end -}}
 
 {{/*

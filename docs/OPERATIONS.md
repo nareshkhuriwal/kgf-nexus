@@ -6,7 +6,7 @@
 and restore and the ordering between the two stores, the restore drills and their
 measured results, point-in-time recovery with pgBackRest and its timed drills
 (§4), what these procedures do *not* cover, the RPO/RTO each approach actually
-delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), third-party images and toolchains: what is pinned and why (§22), cost management, which moved to KGF billing (§23), running Nexus inside KGF Cloud: context authentication, tenancy mapping and service accounts (§24), and tracing and the result-store backends (§26).
+delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), third-party images and toolchains: what is pinned and why (§22), cost management, which moved to KGF billing (§23), running Nexus inside KGF Cloud: context authentication, tenancy mapping and service accounts (§24), task secrets, the audit trail and air-gapped installation (§25), and tracing and the result-store backends (§26).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -3331,7 +3331,8 @@ Requests that would confuse identity are refused, never guessed at:
 | Request | Answer |
 | --- | --- |
 | `X-KGF-Context` **and** `Authorization` (kgf, both) | `400 ambiguous_credentials` |
-| `X-KGF-Context` in `standalone` | `400 kgf_context_not_accepted` |
+| `X-KGF-Context` in `standalone` without KGF keys | `400 kgf_context_not_accepted` |
+| `X-KGF-Context` with a Nexus credential in `standalone` **with** KGF keys | accepted: the credential authenticates and authorizes; the context, if it verifies, only attributes the audit row (§25.2) |
 | Nexus session (`nxsess_…`) in `kgf` | `401` |
 | Context with no subscription or resource group | `403 kgf_scope_required` |
 | Pure KGF service context not listed in `NEXUS_KGF_SERVICE_PRINCIPALS` | `403 kgf_service_not_allowed` |
@@ -3343,7 +3344,7 @@ Requests that would confuse identity are refused, never guessed at:
 | --- | --- | --- |
 | `NEXUS_AUTH_MODE` | `standalone` | `standalone`, `kgf` or `both`. Anything else stops startup. |
 | `NEXUS_KGF_CONTEXT_KEYS_URL` | — | kgf-gateway's key document, e.g. `http://kgf-gateway.kgf-platform.svc:18080/.well-known/kgf-context.json`. |
-| `NEXUS_KGF_CONTEXT_PUBLIC_KEYS` | — | Alternatively, static base64url Ed25519 public keys, comma separated (the value of the gateway's `key` field). Exactly one of the two is required in `kgf`/`both`. |
+| `NEXUS_KGF_CONTEXT_PUBLIC_KEYS` | — | Alternatively, static base64url Ed25519 public keys, comma separated (the value of the gateway's `key` field). Exactly one of the two is required in `kgf`/`both`; in `standalone` either one turns on audit attribution only (§25.2). |
 | `NEXUS_KGF_CONTEXT_KEYS_REFRESH_SEC` | `300` | Periodic refresh of the key document. |
 | `NEXUS_KGF_AUDIENCE` | `kgf-nexus` | The audience kgf-gateway mints for Nexus: `kgf-` + the manifest `id`. Must match the name Nexus is registered under. |
 | `NEXUS_KGF_USER_ISSUERS` | `kgf-gateway` | Issuers allowed to carry a human principal. Add a KGF facade service here only if it delegates (`obo`) to Nexus. |
@@ -3420,6 +3421,7 @@ Nexus permission is held when its KGF action is in that set:
 | `operator` | every permission in the table in ADR-0024 §4: pipelines, runs (create, control, delete), schedules, backfills, workers (drain, quarantine), infrastructure, quotas, usage, audit, roles, service accounts, tokens |
 | `viewer` | every `…/read` action: workflows, runs, task metadata, **logs and results**, schedules, backfills, workers, infrastructure, quotas, usage, audit, roles, service accounts |
 | either | **never** `users.view` or `users.manage`: KGF owns people |
+| either | **never** `audit.manage` (retention, legal hold, purge, SIEM sinks; §25.2): changing what evidence is kept must not ride on a Contributor wildcard. It stays with the platform owner's Nexus machine credential (an admin API key, or a service account an administrator bound) |
 
 A viewer reading task logs and results follows KGF's Reader ("view every
 resource"); Nexus's own Viewer preset is narrower. Permissions not in the
@@ -3447,7 +3449,11 @@ KGF.Nexus/{roles,serviceAccounts}/{read,write}
 
 ### 24.7 Audit and support references
 
-Every audit row written for a KGF principal has `actor_kind = 'kgf'`,
+Every audit row written for a KGF principal also carries the chained KGF
+columns of §25.2 (`kgf_organization`, `kgf_subscription`,
+`kgf_resource_group`, `kgf_principal`, `kgf_on_behalf_of`), taken from the
+context that authenticated it; `request_id` is one column, added by 0032 and
+shared with §25.2. It has `actor_kind = 'kgf'`,
 `actor_label` = the KGF principal (the person, for a delegated context),
 `request_id` = the KGF request id, and `detail.kgf` = organization,
 subscription, resource group, role, issuer, token id and, for a delegated
@@ -3503,6 +3509,271 @@ if required) apply the down migration after exporting `kgf_scopes` and
   check, not re-derived here, until contexts carry assignments.
 - The per-replica provisioning cache means the first request for a new scope
   on each replica runs one small transaction.
+
+---
+
+## 25. Task secrets, the audit trail, and air-gapped installation
+
+ADR-0025. Nexus runs as a service of KGF Cloud; §25.1 and §25.3 are Nexus's
+own mechanisms, §25.2 feeds KGF Cloud's audit and compliance program
+(docs/SOC2-READINESS.md). Migration 0033 is required for §25.2.
+
+### 25.1 Worker-side secret resolution
+
+A task declares references, never values:
+
+```yaml
+runtime:
+  secrets:
+    - { name: DB_PASSWORD, ref: "vault://kv/team-a/db#password" }        # env (default)
+    - { name: tls.key,     ref: "akv:///nexus-team-a-tls-key", inject: file }
+```
+
+`inject: env` sets the variable `name`; `inject: file` writes
+`$NEXUS_SECRETS_DIR/<name>` (0400) and keeps the value out of the
+environment. **Prefer `file`**: environment variables are visible to
+same-host root (`docker inspect`, `/proc/<pid>/environ`). The agent resolves
+every declared secret **before** the workload is prepared; a task gets all of
+them or does not start.
+
+**Configuration** (`NEXUS_SECRETS_CONFIG`, mode 0600/0640, never group- or
+world-writable; unknown keys are rejected so a typo cannot disable a control).
+Keyed by namespace: the agent loads **only its own `--namespace` block** and
+never constructs another tenant's providers.
+
+```yaml
+version: 1
+tenants:
+  team-a:
+    timeout: 30s
+    env:   { allow: ["TEAM_A_*"] }                 # env://NAME; "*" is refused
+    file:  { allow_dirs: ["/var/run/secrets/nexus"], max_bytes: 65536 }
+    vault:
+      address: https://vault.internal:8200
+      namespace: team-a                            # Vault Enterprise namespace, optional
+      mounts: ["kv"]                               # KV v2 mounts; longest prefix wins
+      allow_paths: ["kv/team-a"]                   # required; agent-side second fence
+      auth: { method: kubernetes, role: nexus-team-a }   # or approle / token (files only)
+      tls:  { ca_file: /etc/nexus/vault-ca.pem }
+    akv:
+      default_vault: kgf-platform-kv-prod          # KGF stamp Key Vault (global.keyVaultName)
+      allow_vaults: ["kgf-platform-kv-prod"]
+      allow_secret_prefixes: ["nexus-team-a-"]     # isolation inside the shared vault
+      auth: { method: workload_identity }          # KGF stamp workload identity
+```
+
+| Scheme | Ref | Notes |
+|---|---|---|
+| `env://` | `env://NAME` | Agent environment, allow-listed. The agent's own credentials (`NEXUS_API_KEY`, `NEXUS_S3_*`, NATS, `VAULT_TOKEN`, `AZURE_CLIENT_SECRET`, ...) are never resolvable. |
+| `file://` | `file:///abs/path` | Must stay inside `allow_dirs` after symlink resolution; 1 MiB cap. On KGF Cloud, mount the CSI-projected Key Vault secret (`agentDefaults.secrets.fileSecrets`) and allow its directory. |
+| `vault://` | `vault://<mount>/<path>[?version=N][#field]` | KV v2. No field: the secret's data map as JSON. Auth `kubernetes` (projected SA token), `approle` (role id + secret-id file), `token` (token file, re-read on every login so Vault Agent can rotate it). Plain `http` and `insecure_skip_verify` only for loopback. A 403 triggers one re-login. |
+| `akv://` | `akv://<vault>/<secret>[/<version>]`, or `akv:///<secret>` for `default_vault` | Official Azure SDK. `workload_identity` (KGF's convention: the stamp's federated identity; chart `agentDefaults.secrets.workloadIdentityClientId`), `managed_identity`, `client_secret` / `client_certificate` (files). Secret names follow KGF's service-prefixed kebab-case (`nexus-<tenant>-<name>`); `allow_secret_prefixes` enforces it. |
+
+`aws-sm://` and `gcp-sm://` are not implemented.
+
+**Failure classes** (`TaskError.type = SecretResolutionFailed`): malformed ref,
+reserved `NEXUS_*` name, clash with `runtime.env`, missing field ->
+`VALIDATION`; scheme not configured for the tenant, not allow-listed, 401/403
+-> `PERMISSION_DENIED`; absent secret/version -> `NOT_FOUND`; unreachable,
+timeout, 429, 5xx, sealed Vault -> `TRANSIENT` (retryable). None is retried by
+the agent itself; the control plane's retry policy decides.
+
+**Where values go, and do not.** Executors: subprocess (env + files),
+docker (`--env-file` 0600, removed right after `docker run`; files bind-mounted
+read-only at `/run/nexus/secrets`), kubernetes (the per-attempt Secret, by
+`secretKeyRef` and a projected volume; never a literal in the pod spec).
+Host-side files live under `NEXUS_SECRETS_DIR_ROOT` (the chart mounts a
+memory-backed emptyDir there) and are removed by Cleanup on every path.
+Values never enter the WAL, the result store (unless the task writes them into
+its own output), reports, events or agent log lines; shipped task logs, the
+agent-log copy, progress notes and error messages pass the ADR-0020 redactor
+(per line, exact match, values under 3 bytes are not redactable and are named
+in a WARN). With providers configured the agent sets `RLIMIT_CORE=0` and, on
+Linux, `PR_SET_DUMPABLE=0`.
+
+**Subprocess executor (F138, F151).** A subprocess task's environment is
+built from an allow-list, never inherited wholesale: `PATH`, `HOME`, `LANG`,
+`LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `USER`, `LOGNAME`, `NEXUS_TASK_MODULES`,
+`NEXUS_RESULT_DIR`, then `runtime.env`, env-injected secrets and the platform
+`NEXUS_*` variables. Pass anything else explicitly with
+`NEXUS_SUBPROCESS_ENV_PASSTHROUGH=GLOB[,GLOB...]` (default empty; Helm
+`agentDefaults.secrets.subprocessEnvPassthrough`). The agent's own credentials
+(`NEXUS_API_KEY`, `NEXUS_S3_*`, `NEXUS_RESULT_STORE_*`, `RESULT_STORE_*`, NATS,
+Vault, Azure, AWS, GCP) never pass, whatever the pattern says. Docker and
+Kubernetes tasks start from an empty environment. The subprocess executor
+still runs tasks as the agent's user: development-grade, as ADR-0007 says.
+
+**Local runs and replay** (`nexus.local`, `nexusctl run --local`,
+`nexusctl replay`) run on the developer's own machine: tasks inherit the
+developer's full environment plus the `NEXUS_*` contract (so a local task can
+use the developer's tools and credentials), and `SecretRef`s are **not**
+resolved; export the values a task needs, under the names it declares.
+Nothing from a local run leaves the machine.
+
+**Tests.** `make test-vault` (a digest-pinned Vault 1.21.4 dev container:
+token and AppRole login, KV v2 fields and versions, policy denial, revoked
+token, sealed server). Azure Key Vault is covered by a fake behind the
+`AKVGetter` interface; **manual test against a real vault**:
+
+1. `az keyvault secret set --vault-name <vault> --name nexus-team-a-probe --value "$(openssl rand -hex 16)"`;
+   grant the agent's identity *Key Vault Secrets User* on the secret or vault.
+2. Configure the tenant's `akv:` block (workload identity on AKS; for a laptop
+   use `client_secret` with a secret file).
+3. Submit a task with `{ name: PROBE, ref: "akv:///nexus-team-a-probe", inject: file }`
+   that runs `sha256sum "$NEXUS_SECRETS_DIR/PROBE"`; compare with the local
+   `sha256sum` of the value. Then `echo "$(cat $NEXUS_SECRETS_DIR/PROBE)"` and
+   confirm the attempt log shows `[REDACTED:PROBE]`.
+4. Negative: a name without the tenant prefix -> `PERMISSION_DENIED`; a missing
+   name -> `NOT_FOUND`; revoke the role -> `PERMISSION_DENIED`.
+
+### 25.2 The audit trail: pagination, export, KGF Cloud, sinks, retention, hash chain
+
+**Routes** (Administrator; the Auditor role has `audit.view`, only
+Administrator has `audit.manage`):
+
+| Route | Permission | |
+|---|---|---|
+| `GET /v1/namespaces/{ns}/audit?limit=&cursor=&since=&until=&action=&outcome=&actor_id=` | audit.view | newest first; `next_cursor` is an opaque keyset cursor (stable while rows arrive), `null` on the last page |
+| `GET .../audit/export?format=ndjson\|csv\|kgf&since=&until=&action=&outcome=&actor_id=` | audit.view | streamed from one REPEATABLE READ snapshot, no row cap |
+| `GET/PUT .../audit/policy` `{retention_days|null, revision}` | view / manage | |
+| `POST .../audit/legal-hold` `{hold, reason, revision}` | audit.manage | a reason is required to set a hold |
+| `POST .../audit/purge` | audit.manage | apply retention now (the gateway also runs it hourly) |
+| `GET/POST .../audit/sinks`, `PUT/DELETE .../audit/sinks/{id}`, `POST .../audit/sinks/{id}/rotate-secret` | view / manage | |
+
+**Formats.** `ndjson` is the verifiable export: a header (`encoding`,
+`complete` = unfiltered, `anchor` = the genesis or latest purge checkpoint,
+`chain_started_at`), one `audit` record per row in chain order with `chain_seq`,
+`prev_hash`, `row_hash`, and a trailer with the row count and the chain head.
+`csv` is RFC 4180 with a quote prefixed to any cell starting `= + - @`, tab or
+CR (the same neutralisation KGF's export applies). `kgf` is KGF Cloud's audit
+event shape, one per line.
+
+**KGF Cloud.** KGF has no audit ingestion API today (its `audit_events` are
+written by its own services and exported per project), so Nexus provides the
+KGF-shaped export and a KGF-format sink for a KGF-side collector. Mapping:
+
+| KGF field | From |
+|---|---|
+| `organization_id` | verified KGF context `org`; empty when the request carried none (the collector maps by `nexus.namespace`) |
+| `id` | `nexus:<namespace>:<chain_seq>` (stable, so redelivery de-duplicates on KGF's `(organization_id, id)` key) |
+| `action` | `nexus.` + Nexus action (KGF's dotted lower-case style), e.g. `nexus.token.create` |
+| `resource_id` | `/organizations/{org}/subscriptions/{sub}/resourceGroups/{rg}/providers/KGF.Nexus/namespaces/{ns}/{target_kind}/{target_id}` (KGF authz scope form) when the KGF scope is known, else `nexus://namespaces/{ns}/...` |
+| `subscription_id`, `resource_group` | verified context `sub`, `rg` |
+| `created_at` | `occurred_at`, RFC 3339 UTC |
+| `principal`, `on_behalf_of` | verified context `principal`, `obo`; else `nexus:<actor_kind>:<label>` |
+| `request_id` | verified context `request_id`, else the caller's `X-Request-ID` (sanitised, correlation only) |
+| `outcome`, `source` (`kgf-nexus`), `kgf_attributed` | |
+| `nexus{}` | namespace, audit id, Nexus action, actor, target, client IP, detail |
+| `chain{}` | encoding, seq, prev_hash, row_hash: tamper evidence survives the hand-over |
+
+Attribution uses the ONE KGF context verifier of §24 (`internal/kgfctx`):
+the same keys (`NEXUS_KGF_CONTEXT_PUBLIC_KEYS` or `NEXUS_KGF_CONTEXT_KEYS_URL`),
+audience (`NEXUS_KGF_AUDIENCE`, default `kgf-nexus`), user issuers
+(`NEXUS_KGF_USER_ISSUERS`, default `kgf-gateway`), replay guard and
+tenantctx-identical checks. Chart: the `kgf` block. Where the attribution comes
+from depends on `NEXUS_AUTH_MODE`:
+
+| Mode | Attribution |
+|---|---|
+| `kgf`, `both`, request authenticated by `X-KGF-Context` | the context that authenticated it; the actor is recorded as `actor_kind = 'kgf'` (§24.7) |
+| `standalone` with keys configured | an `X-KGF-Context` sent **with** a Nexus credential, if it verifies: **attribution only**, the Nexus credential alone authorizes. An unverifiable or replayed token contributes nothing and is logged at WARN |
+| `standalone` without keys | none; a request carrying `X-KGF-Context` is refused (`400 kgf_context_not_accepted`, §24.2) rather than silently ignored |
+| any mode, machine credential without a context | none; `request_id` is the caller's sanitised `X-Request-ID` |
+
+**Sinks.** A webhook sink receives NDJSON batches (`format: nexus` records or
+`format: kgf` events), `POST`ed with `Content-Type: application/x-ndjson` and
+`X-Nexus-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>." + body)>`,
+`X-Nexus-Delivery: <sink>:<first>-<last>` (stable per batch: de-duplicate on
+it), `X-Nexus-Namespace`, `X-Nexus-Format`. Verify: recompute the HMAC over the
+exact body bytes with the secret, compare in constant time, and reject a `t`
+older than your tolerance (300 s). Any 2xx acknowledges the batch and advances
+the sink's cursor; anything else is retried with capped exponential backoff
+(5 s doubling to 10 min, full jitter): **at least once**. Only one gateway
+replica delivers a given sink at a time (advisory lock). The signing secret is
+generated by Nexus, returned **once** at creation or rotation, and stored
+AES-256-GCM-sealed (bound to the namespace) under `NEXUS_AUDIT_SINK_KEY` or
+`NEXUS_AUDIT_SINK_KEY_FILE` (32 random bytes, base64: `openssl rand -base64 32`;
+chart `auditExport.sinkKeySecret`, key `audit-sink-key`). Without the key,
+sink creation answers 503 `sinks_disabled`. Rotating the gateway key makes
+existing sinks fail with "rotate the sink's secret": rotate each sink.
+Destinations are `https` only and may not resolve to loopback, link-local
+(169.254.169.254), private or unspecified addresses unless listed in
+`NEXUS_AUDIT_SINK_ALLOW_CIDRS` (checked at configuration AND at dial time, no
+proxies, no redirects). `NEXUS_AUDIT_SINK_ALLOW_HTTP=true` is for development.
+
+**Retention and legal hold.** `retention_days` null (default) keeps everything.
+Rows leave `audit_log` only through `audit_purge()` (SECURITY DEFINER; the
+gateway role stays INSERT-only), which: does nothing without a policy; refuses
+under legal hold; removes only a **prefix** of the chain, and never a row an
+enabled sink has not acknowledged; writes a `purge` checkpoint (seq and hash of
+the last removed row) in the same transaction. Triggers make `audit_log`
+UPDATE-proof and DELETE-proof for every role outside `audit_purge()`.
+
+**Hash chain.** Per namespace. `row_hash = hex(sha256(canonical_v1))`, where
+canonical_v1 is the compact JSON array
+
+```
+["nexus-audit-v1", namespace, chain_seq, occurred_at, actor_id|null, actor_kind,
+ actor_label, action, target_kind, target_id, outcome, detail, client_ip,
+ kgf_organization, kgf_subscription, kgf_resource_group, kgf_principal,
+ kgf_on_behalf_of, request_id, prev_hash]
+```
+
+with `occurred_at` as `YYYY-MM-DDTHH:MM:SS.ffffffZ` (UTC, microseconds),
+`actor_id` lower-case, `detail` re-encoded from PostgreSQL's jsonb form with
+numbers verbatim, object keys sorted, no whitespace and no HTML escaping, and
+strings as Go's `encoding/json` writes them. `prev_hash` of seq 1 is
+`hex(sha256("nexus-audit-v1:genesis:" + namespace))`. The append locks the
+namespace's `audit_chain_heads` row in the change's transaction, so replicas
+cannot fork the chain. Rows written before 0033 carry no chain position and are
+reported as pre-chain; a row without a position written after the chain
+started (an older gateway replica mid-upgrade, or direct SQL) is reported as
+**unchained** and fails verification unless `--allow-unchained`.
+
+**Verify.** `nexusctl audit verify` (via the API) or
+`nexusctl audit verify --file export.ndjson` (offline, no credentials): exit
+0 intact, **8** broken, printing the first broken sequence (altered row, gap,
+reordered row, broken link, truncated tail). Evidence procedure: export
+(`nexusctl audit export --file audit-<date>.ndjson`), verify, store the file and
+the reported head **outside** the database (or keep a SIEM sink). The chain
+proves retained rows were not altered relative to each other; a superuser who
+rewrites the whole tail is caught only by comparing with a copy held elsewhere.
+
+**Fail-closed decision (F139).** Security grants (login, user create / enable /
+update / password reset / email verified, roles, tokens minted, tenant
+creation, platform/cluster/quota configuration, every audit-configuration
+change) commit **with** their audit row or not at all: `503 audit_unavailable`.
+Revocations (logout, token revoke, user disable, sessions revoked, role delete)
+are never blocked; a failed write logs `AUDIT RECORD LOST` at ERROR.
+Operational actions (retries, deletes of runs/specs/schedules, quarantine,
+cache invalidation, email-link sends) log and continue. The table is
+`auditActionClasses` in `services/api-gateway/rest/audit.go`; a test fails the
+build if any action string is unclassified. Alert on
+`increase(nexus_audit_write_failures_total[5m]) > 0` (labels `class`,
+`blocked`), `nexus_audit_sink_delivery_failures_total` rising, and on a sink
+whose `last_success_at` is older than your RPO.
+
+**Migration 0033** is additive and `no-transaction` (a concurrent index):
+re-runnable after a partial apply. Apply it before rolling out the new gateway;
+old replicas keep writing unchained rows until replaced. Rollback
+(`0033_*.down.sql`) drops the chain columns, checkpoints, policies and sinks:
+**export first**, or the tamper evidence for retained rows is lost.
+
+### 25.3 Air-gapped installation
+
+`make airgap-bundle` (on a connected host; `AIRGAP_VERSION=`, `PLATFORMS=`)
+writes `dist/nexus-airgap-<version>.tar.gz` and its `.sha256`: every image the
+chart and compose reference, resolved and saved **by digest** (skopeo when
+installed, else `docker save`), the packaged chart, `nexusctl` and
+`nexus-agent` binaries, the SDK wheel, `schemas/`, `manifest.json` and
+`SHA256SUMS` (cosign-signed when cosign is installed; the manifest says
+`"signed": false` otherwise). Inside the gap, `load.sh --registry
+<host>[/path]` verifies checksums (and the signature), pushes every image,
+records the digest the **registry** reports, and writes `values-airgap.yaml`
+pinning every chart image to `<registry>/...@sha256`, then proves it with
+`helm template`. `make airgap-test` repeats this against a throwaway local
+registry. Full procedure, what is not included, and the digest caveats:
+docs/AIRGAP.md.
 
 ---
 

@@ -25,10 +25,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/testdb"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
-	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/kgfctx"
 )
 
 type kgfEnv struct {
@@ -149,6 +149,15 @@ func TestIntegrationKGFContextAuthAndAudit(t *testing.T) {
 	err = e.pool.QueryRow(context.Background(), `SELECT actor_kind, actor_label, detail::text FROM audit_log WHERE namespace=$1 AND request_id='req-sa'`, ns).Scan(&kind, &label, &detail)
 	if err != nil || kind != "kgf" || label != "user:alice@acme.test" || !strings.Contains(detail, `"organization": "`+e.prefix+`acme"`) || !strings.Contains(detail, `"role": "operator"`) {
 		t.Fatalf("audit attribution: %v %s %s %s", err, kind, label, detail)
+	}
+	// In KGF mode the chained KGF columns (migration 0033) come from the
+	// context that AUTHENTICATED the request, verified once by kgfctx.
+	var org, sub, rg, principal string
+	var seq *int64
+	err = e.pool.QueryRow(context.Background(), `SELECT kgf_organization, kgf_subscription, kgf_resource_group,
+		kgf_principal, chain_seq FROM audit_log WHERE namespace=$1 AND request_id='req-sa'`, ns).Scan(&org, &sub, &rg, &principal, &seq)
+	if err != nil || org != e.prefix+"acme" || sub != "sub-1" || rg != "rg-data" || principal != "user:alice@acme.test" || seq == nil {
+		t.Fatalf("KGF columns from the authenticated context: %v %q %q %q %q %v", err, org, sub, rg, principal, seq)
 	}
 	list := e.do("GET", base+"/audit?request_id=req-role", "", op("r7"), "", 200)
 	var entries struct {

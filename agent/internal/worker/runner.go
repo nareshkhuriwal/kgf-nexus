@@ -4,14 +4,7 @@
 package worker
 
 import (
-	otelcodes "go.opentelemetry.io/otel/codes"
-
-	"go.opentelemetry.io/otel/trace"
-
-	"go.opentelemetry.io/otel/attribute"
-
-	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
-
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -21,13 +14,19 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
 )
 
 // LegacyOutputName is the output name given to a result produced under the
@@ -90,10 +89,13 @@ type Runner struct {
 	// LogFinalizeTimeout overrides the shipper's finalize budget; zero uses
 	// logship.DefaultFinalizeTimeout.
 	LogFinalizeTimeout time.Duration
-	// SecretValues resolves the attempt's secret VALUES for log redaction. Nil
-	// today: nothing in the platform resolves SecretRefs on the worker yet, and
-	// the resolver that does must be wired here (ADR-0020).
+	// SecretValues adds values to redact beyond the attempt's own resolved
+	// secrets, which are always redacted (ADR-0025). Optional.
 	SecretValues func(a *nexusv1.TaskAssignment) map[string]string
+	// Secrets resolves the attempt's SecretRefs with this tenant's providers
+	// (ADR-0025). Nil means no providers: a task that declares a secret fails
+	// PERMISSION_DENIED instead of running without it. Set before first Run.
+	Secrets *secrets.Resolver
 	// Namespace prefixes the attempt's log objects; the agent's namespace.
 	Namespace string
 }
@@ -101,13 +103,9 @@ type Runner struct {
 // newShipper starts the attempt's log shipper, or returns nil when shipping is
 // off (old gateway, no result store, no indexer) -- the attempt then runs
 // exactly as it did before ADR-0020.
-func (r *Runner) newShipper(a *nexusv1.TaskAssignment, log *slog.Logger) *logship.Shipper {
+func (r *Runner) newShipper(a *nexusv1.TaskAssignment, redactor *logship.Redactor, log *slog.Logger) *logship.Shipper {
 	if r.LogShipping == nil || !r.LogShipping.GetEnabled() || r.LogIndexer == nil || r.store == nil || r.Namespace == "" {
 		return nil
-	}
-	var secrets map[string]string
-	if r.SecretValues != nil {
-		secrets = r.SecretValues(a)
 	}
 	return logship.New(logship.Config{
 		Namespace:       r.Namespace,
@@ -117,7 +115,7 @@ func (r *Runner) newShipper(a *nexusv1.TaskAssignment, log *slog.Logger) *logshi
 		FlushInterval:   time.Duration(r.LogShipping.GetFlushIntervalMs()) * time.Millisecond,
 		FinalizeTimeout: r.LogFinalizeTimeout,
 		SpoolDir:        r.LogSpoolDir,
-		Redactor:        logship.NewRedactor(secrets),
+		Redactor:        redactor,
 		Token:           func() string { return r.currentToken(a) },
 		Log:             log,
 	}, r.store, r.LogIndexer)
@@ -185,6 +183,12 @@ type runningTask struct {
 	// context cancellation.
 	handle   *executor.Handle
 	handleMu sync.Mutex
+
+	// redactor replaces the attempt's secret values in everything that leaves
+	// the runner as text: shipped logs, the agent-log copy, progress notes
+	// and the reported error message. Set once, before the workload starts;
+	// nil redacts nothing.
+	redactor *logship.Redactor
 
 	// kind and started feed the task metrics. Written by the attempt's own
 	// goroutine before any report, and read by that goroutine only.
@@ -334,6 +338,26 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 	token := a.GetLeaseToken()
 	r.reporter.ReportStarted(taskCtx, attemptID, token)
 
+	// ── Secrets: resolved BEFORE anything is prepared (ADR-0025) ─────────────
+	// A task either gets every secret it declared or never starts. Values live
+	// in this goroutine's memory and the executor's injection only; they are
+	// wiped when the attempt ends.
+	secCtx, secSpan := tracing.Start(taskCtx, "attempt.resolve_secrets",
+		trace.WithAttributes(attribute.Int("nexus.secrets", len(a.GetSpec().GetRuntime().GetSecrets()))))
+	resolved, serr := r.resolveSecrets(secCtx, a)
+	// The error text names the reference and the provider, never a value.
+	tracing.End(secSpan, serr)
+	if serr != nil {
+		span.SetStatus(otelcodes.Error, "secrets could not be resolved")
+		c := secretFailure(serr)
+		log.Error("could not resolve the task's secrets; the workload was not started",
+			"error", c.Message, "class", c.Class.String(), "retryable", c.Retryable)
+		r.reportFailure(taskCtx, a, c, executor.Outcome{})
+		return
+	}
+	defer secrets.Wipe(resolved)
+	rt.redactor = r.buildRedactor(a, resolved, log)
+
 	inCtx, inSpan := tracing.Start(taskCtx, "attempt.prepare_inputs",
 		trace.WithAttributes(attribute.Int("nexus.inputs", len(a.GetInputs()))))
 	spec, err := r.buildExecutorSpec(inCtx, a)
@@ -345,8 +369,13 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 		r.reportFailure(taskCtx, a, c, executor.Outcome{})
 		return
 	}
+	spec.Secrets = resolved
+	if rt.redactor != nil && spec.OnPhase != nil {
+		onPhase := spec.OnPhase
+		spec.OnPhase = func(phase, detail string) { onPhase(phase, redactString(rt.redactor, detail)) }
+	}
 
-	ship := r.newShipper(a, log)
+	ship := r.newShipper(a, rt.redactor, log)
 	if ship != nil {
 		spec.LogSink = ship
 	}
@@ -364,7 +393,9 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 	if prepErr != nil {
 		span.SetStatus(otelcodes.Error, "execution failed")
 		c := executor.ClassifyError(prepErr)
-		log.Error("execution failed before or during the workload", "error", prepErr, "class", c.Class.String())
+		c.Message = redactString(rt.redactor, c.Message)
+		log.Error("execution failed before or during the workload",
+			"error", redactString(rt.redactor, prepErr.Error()), "class", c.Class.String())
 		r.reportFailure(taskCtx, a, c, outcome)
 		return
 	}
@@ -416,7 +447,7 @@ func (r *Runner) execute(ctx context.Context, exec executor.Executor, rt *runnin
 	if spec.LogSink != nil {
 		followDone = r.followIntoSink(ctx, exec, handle, spec.LogSink, log)
 	} else {
-		r.streamLogs(ctx, exec, handle, log)
+		r.streamLogs(ctx, exec, handle, rt.redactor, log)
 	}
 
 	outcome, err := exec.Wait(ctx, handle)
@@ -465,7 +496,13 @@ func (r *Runner) followIntoSink(ctx context.Context, exec executor.Executor, h e
 // must not be able to block the runner or exhaust the agent's memory. The log
 // stream is a diagnostic, not a result — losing the tail of a pathological log is
 // strictly better than losing the task.
-func (r *Runner) streamLogs(ctx context.Context, exec executor.Executor, h executor.Handle, log *slog.Logger) {
+//
+// Read by LINE, not by fixed-size chunk, so the redactor -- which matches per
+// line (ADR-0020) -- sees every secret whole rather than split across two
+// reads. A line longer than the scanner's cap ends the copy: this is a
+// diagnostic, and a truncated one is better than an unredacted one.
+func (r *Runner) streamLogs(ctx context.Context, exec executor.Executor, h executor.Handle,
+	redactor *logship.Redactor, log *slog.Logger) {
 	rc, err := exec.Logs(ctx, h)
 	if err != nil {
 		log.Warn("could not open the workload log stream", "error", err)
@@ -474,19 +511,14 @@ func (r *Runner) streamLogs(ctx context.Context, exec executor.Executor, h execu
 	go func() {
 		defer rc.Close()
 		const maxLogBytes = 16 << 20 // 16 MiB per attempt
-		lr := io.LimitReader(rc, maxLogBytes)
-		buf := make([]byte, 32<<10)
-		for {
-			n, err := lr.Read(buf)
-			if n > 0 {
-				log.Info("task log", "output", string(buf[:n]))
-			}
-			if err != nil {
-				if !errors.Is(err, io.EOF) && ctx.Err() == nil {
-					log.Debug("log stream ended", "error", err)
-				}
-				return
-			}
+		sc := bufio.NewScanner(io.LimitReader(rc, maxLogBytes))
+		sc.Buffer(make([]byte, 32<<10), 256<<10)
+		for sc.Scan() {
+			line, _ := redactor.Apply(sc.Text())
+			log.Info("task log", "output", line)
+		}
+		if err := sc.Err(); err != nil && !errors.Is(err, io.EOF) && ctx.Err() == nil {
+			log.Debug("log stream ended", "error", err)
 		}
 	}()
 }
@@ -695,6 +727,12 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 		req.Error = executor.ClassifiedFromOutcome(o, "").ToProto()
 	}
 
+	if req.Error != nil {
+		// A kubernetes failure message can carry the pod's log tail
+		// (FallbackToLogsOnError); it must not carry a secret into the
+		// control plane's attempt history.
+		req.Error.Message = r.redactAttempt(a.GetAttemptId(), req.Error.GetMessage())
+	}
 	entry := wal.Entry{
 		AttemptID: a.GetAttemptId(), LeaseToken: token,
 		RunID: a.GetRunId(), NodeID: a.GetNodeId(),
@@ -837,6 +875,7 @@ func (r *Runner) reportFailure(ctx context.Context, a *nexusv1.TaskAssignment,
 	defer cancel()
 
 	token := r.currentToken(a)
+	c.Message = r.redactAttempt(a.GetAttemptId(), c.Message)
 	req := &nexusv1.ReportResultRequest{
 		AttemptId:     a.GetAttemptId(),
 		LeaseToken:    token,

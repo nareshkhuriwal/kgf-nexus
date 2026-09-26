@@ -67,7 +67,7 @@ sent while it believed it was acting as a KGF principal.
 
 ### 2. Verifying the context
 
-`services/api-gateway/kgfctx` mirrors `pkg/tenantctx` field for field and check
+`internal/kgfctx` mirrors `pkg/tenantctx` field for field and check
 for check (Nexus cannot import kgf-cloud's module; a conformance test verifies
 a token minted by kgf-cloud's own code):
 

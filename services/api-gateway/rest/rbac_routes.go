@@ -74,6 +74,19 @@ var routePermissions = map[string][]string{
 	"POST /v1/namespaces/{ns}/tokens":                     {"tokens.manage"},
 	"POST /v1/namespaces/{ns}/tokens/{id}/revoke":         {"tokens.manage"},
 	"GET /v1/namespaces/{ns}/audit":                       {"audit.view"},
+	// ADR-0025. Export is a read of the same trail. Everything that changes
+	// what is kept, where it is sent, or removes rows is audit.manage, which
+	// only the Administrator role holds by default.
+	"GET /v1/namespaces/{ns}/audit/export":                    {"audit.view"},
+	"GET /v1/namespaces/{ns}/audit/policy":                    {"audit.view"},
+	"PUT /v1/namespaces/{ns}/audit/policy":                    {"audit.manage"},
+	"POST /v1/namespaces/{ns}/audit/legal-hold":               {"audit.manage"},
+	"POST /v1/namespaces/{ns}/audit/purge":                    {"audit.manage"},
+	"GET /v1/namespaces/{ns}/audit/sinks":                     {"audit.view"},
+	"POST /v1/namespaces/{ns}/audit/sinks":                    {"audit.manage"},
+	"PUT /v1/namespaces/{ns}/audit/sinks/{id}":                {"audit.manage"},
+	"POST /v1/namespaces/{ns}/audit/sinks/{id}/rotate-secret": {"audit.manage"},
+	"DELETE /v1/namespaces/{ns}/audit/sinks/{id}":             {"audit.manage"},
 
 	// Service accounts for agents and CI (ADR-0024 §6).
 	"GET /v1/namespaces/{ns}/service-accounts":               {"service_accounts.view"},

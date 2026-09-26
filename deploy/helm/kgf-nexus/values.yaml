@@ -443,11 +443,23 @@ smtp:
 # through the X-KGF-Context kgf-gateway signs; "both" accepts either. In kgf
 # or both mode set contextKeysUrl (kgf-gateway's /.well-known/kgf-context.json)
 # or contextPublicKeys (comma-separated base64url Ed25519 keys), not both.
+# ─── KGF Cloud (ADR-0024, docs/OPERATIONS.md §24) ────────────────────────
+# One kgfctx verifier for the gateway-signed X-KGF-Context:
+#   authMode standalone -- Nexus credentials authenticate. With keys below,
+#                          a context that verifies alongside a Nexus credential
+#                          ATTRIBUTES the audit row (organization, scope,
+#                          principal, request id) and never authorizes; without
+#                          keys an X-KGF-Context is refused (400).
+#   authMode kgf|both   -- the context authenticates people (keys REQUIRED);
+#                          audit rows are attributed to that context.
 kgf:
   authMode: standalone
+  # Exactly one key source when set: KGF's /.well-known/kgf-context.json, or
+  # static base64url Ed25519 public keys (comma-separated).
   contextKeysUrl: ""
   contextPublicKeys: ""
   audience: kgf-nexus
+  # Issuers entitled to assert a human principal (comma-separated).
   userIssuers: kgf-gateway
   # KGF services allowed to call Nexus for themselves: "svc:kgf-billing=viewer".
   servicePrincipals: ""
@@ -553,6 +565,28 @@ agentDefaults:
   # mid-drain and strands its attempts until their leases expire.
   drainGrace: 60s
   terminationGracePeriodSeconds: 90
+  # Worker-side secret resolution (ADR-0025, OPERATIONS §25.1). configSecret
+  # names a Secret whose key `secrets.yaml` is the per-tenant provider file
+  # (only this release's nexusNamespace block is loaded). Empty: no providers,
+  # and a task that declares a secret fails PERMISSION_DENIED.
+  secrets:
+    configSecret: ""
+    # Extra Secret volumes for file:// refs, e.g. a KGF Cloud CSI-projected
+    # Key Vault secret: [{ name: kv, secretName: nexus-kv, mountPath: /var/run/secrets/nexus }]
+    # (list mountPath under file.allow_dirs in secrets.yaml).
+    fileSecrets: []
+    # Azure workload identity for akv:// (the KGF stamp's workload identity
+    # client id): sets AZURE_CLIENT_ID and the azure.workload.identity/use pod
+    # label on the agents. The federated credential must trust the agents'
+    # ServiceAccount (serviceAccounts.agent, or agents[].serviceAccount).
+    workloadIdentityClientId: ""
+    # Extra agent-environment variables subprocess tasks may inherit (globs,
+    # comma-separated), beyond PATH/HOME/LANG/TZ/TMPDIR and the task contract
+    # (F151). The agent's own credentials never pass. Default: none.
+    subprocessEnvPassthrough: ""
+    # Host-side secret files (docker/subprocess executors) live on a
+    # memory-backed emptyDir, never on the work volume's disk.
+    tmpfsSizeLimit: 64Mi
 
 # Prometheus scraping (docs/OPERATIONS.md, "Metrics"). Every Nexus pod serves
 # /metrics on a port that no external Service exposes: the gateway on its
@@ -580,6 +614,18 @@ metrics:
   # serviceMonitor.enabled unless set explicitly.
   podMonitor:
     enabled: null
+
+# Audit export (ADR-0025, OPERATIONS §25.2).
+auditExport:
+  # Secret holding key `audit-sink-key` (openssl rand -base64 32): seals SIEM
+  # sink signing secrets. Empty: sinks are refused (503); export, retention
+  # and legal hold still work.
+  sinkKeySecret: ""
+  # Internal CIDRs a sink may deliver to (an on-premises SIEM). Loopback,
+  # link-local and private ranges are refused otherwise.
+  sinkAllowCIDRs: ""
+  # KGF Cloud attribution of audit rows uses the kgf block's keys (one
+  # verifier for authentication and attribution): see kgf above.
 
 # Host-based routing via the Gateway API (templates/gateway.yaml). Off by
 # default: it needs a Gateway API implementation installed in the cluster.

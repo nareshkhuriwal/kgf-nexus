@@ -5,3 +5,7 @@
 **/node_modules
 ui/dist
 gpt_architecture.zip
+# Air-gap bundles and their staging (make airgap-bundle): gigabytes of saved
+# images that must never become part of an image build context.
+dist
+.claude

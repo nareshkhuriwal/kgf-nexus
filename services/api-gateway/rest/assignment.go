@@ -172,8 +172,15 @@ func scrubSecrets(spec map[string]any) []map[string]string {
 		name, _ := m["name"].(string)
 		ref, _ := m["ref"].(string)
 		entry := map[string]string{"name": name, "ref": ref}
+		c := map[string]any{"name": name, "ref": ref}
+		// inject is wiring (env or file), not a value: safe to carry, and a
+		// replay without it would deliver a file secret as an env var.
+		if inj, _ := m["inject"].(string); inj == "env" || inj == "file" {
+			entry["inject"] = inj
+			c["inject"] = inj
+		}
 		out = append(out, entry)
-		clean = append(clean, map[string]any{"name": name, "ref": ref})
+		clean = append(clean, c)
 	}
 	if raw != nil {
 		rt["secrets"] = clean

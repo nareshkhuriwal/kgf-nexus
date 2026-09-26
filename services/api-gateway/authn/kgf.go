@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
-	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/kgfctx"
 )
 
 // KindKGF is a caller authenticated by a KGF context.
@@ -64,7 +64,13 @@ var (
 // KGFActions maps every Nexus permission that a KGF principal can hold to the
 // KGF.Nexus action that grants it (ADR-0024 §4). A permission absent from
 // this map is never granted to a KGF principal: deny by default. users.* is
-// deliberately absent because KGF owns people.
+// deliberately absent because KGF owns people. audit.manage (retention, legal
+// hold, purge and SIEM sinks, ADR-0025) is deliberately absent too: a flat
+// KGF operator role is Contributor, and "may shorten retention and purge the
+// evidence of its own actions" must not ride on a wildcard. It stays with the
+// platform owner's Nexus machine credential (an admin API key, or a service
+// account an administrator bound), and KGF's own audit pipeline receives the
+// trail through a kgf-format sink that credential configures.
 var KGFActions = map[string]string{
 	"overview.view":              "KGF.Nexus/pipelines/read",
 	"workflows.view":             "KGF.Nexus/pipelines/read",

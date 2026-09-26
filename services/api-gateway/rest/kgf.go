@@ -9,8 +9,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
-	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/kgfctx"
 )
 
 // AuthMode selects what the REST listener accepts (ADR-0024 §1).
@@ -76,6 +76,13 @@ func (a *API) authenticateRequest(w http.ResponseWriter, r *http.Request, presen
 		if a.mode() == AuthKGF && strings.HasPrefix(presented, "nxsess_") {
 			return authn.Principal{}, authn.ErrUnauthenticated, false
 		}
+		p, err := a.auth.AuthenticateCredential(r.Context(), presented)
+		return p, err, false
+	}
+	if !a.kgfEnabled() && a.kgfAttribution != nil {
+		// Standalone with KGF's keys configured (ADR-0025 §2): the context is
+		// ATTRIBUTION only. The Nexus credential alone authenticates and
+		// authorizes; attachKGF records the context if it verifies.
 		p, err := a.auth.AuthenticateCredential(r.Context(), presented)
 		return p, err, false
 	}

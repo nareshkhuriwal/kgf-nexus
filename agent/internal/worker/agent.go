@@ -19,6 +19,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/lease"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
@@ -65,6 +66,16 @@ type Config struct {
 	// be deferred for a task that declared itself uninterruptible (ADR-0015).
 	// Zero means worker.DefaultUninterruptibleCeiling.
 	MaxUninterruptible time.Duration
+
+	// Secrets resolves task SecretRefs with THIS namespace's providers only
+	// (ADR-0025; secrets.LoadForNamespace). Nil: no providers, and a task
+	// that declares a secret fails PERMISSION_DENIED.
+	Secrets *secrets.Resolver
+
+	// SubprocessEnvPassthrough are extra agent-process variables (globs)
+	// subprocess tasks may inherit beyond the minimal base set
+	// (NEXUS_SUBPROCESS_ENV_PASSTHROUGH; F151). Default empty.
+	SubprocessEnvPassthrough []string
 
 	// AllowUnenforceableLimits relaxes the subprocess executor's refusal to run
 	// tasks whose limits it cannot honour. Development only.
@@ -377,6 +388,7 @@ func (a *Agent) register(ctx context.Context) error {
 	a.runner.WorkerID = a.workerID
 	a.runner.Metrics = a.cfg.Metrics
 	a.runner.UninterruptibleCeiling = a.cfg.MaxUninterruptible
+	a.runner.Secrets = a.cfg.Secrets
 	// The control plane's threshold, clamped, also governs the no-store path:
 	// a worker without an object store must refuse exactly what a worker with
 	// one would have sent to it (ADR-0016).
@@ -404,6 +416,10 @@ func (a *Agent) buildExecutors() map[string]executor.Executor {
 		"subprocess": &executor.SubprocessExecutor{
 			Root: a.cfg.WorkDir, Log: a.log,
 			AllowUnenforceableLimits: a.cfg.AllowUnenforceableLimits,
+			// Variables a task may only receive by declaring them (env://)
+			// must not also arrive by inheritance (F138).
+			InheritDeny:    a.cfg.Secrets.EnvAllowPatterns(),
+			EnvPassthrough: a.cfg.SubprocessEnvPassthrough,
 		},
 	}
 	probe, cancel := context.WithTimeout(context.Background(), 10*time.Second)

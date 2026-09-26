@@ -3902,6 +3902,67 @@ manifest; make `Verify` refuse `*` when `Audience` is set (or drop
 `AnyAudience`); consider a shared replay store for providers with
 side-effecting routes. Nothing in this repository changes kgf-cloud.
 
+### F138. The subprocess executor handed every task the agent's own credentials — FIXED
+
+**Severity:** high (a task could impersonate its worker and read the result store directly).
+
+`executor.buildEnv` started the workload environment from `os.Environ()`, so a
+subprocess task inherited everything the agent was started with:
+`NEXUS_API_KEY` (the worker credential that registers with the control plane),
+`NEXUS_S3_ACCESS_KEY_ID` / `NEXUS_S3_SECRET_ACCESS_KEY` (result-store keys
+scoped to the namespace, not to the attempt), NATS credentials, and any
+provider credential an operator put there. A task could therefore register a
+fake worker, claim other tasks' attempts in its namespace, or read and
+overwrite other attempts' results. The docker and kubernetes executors were
+unaffected: they start from an empty environment. ADR-0025's `env://`
+provider made the gap sharper, because a variable a task may only receive by
+declaring it would also have arrived by inheritance.
+
+**Fix (ADR-0025):** the inherited environment is scrubbed of the agent's
+credential variables (`secrets.IsAgentCredentialEnv`: `NEXUS_API_KEY`,
+`NEXUS_S3_*`, `NEXUS_NATS_PASSWORD*`, `NEXUS_NATS_CREDS`, the NKey seed and TLS
+key files, `NEXUS_SECRETS_CONFIG`, `VAULT_TOKEN`, `VAULT_SECRET_ID`,
+`AZURE_CLIENT_SECRET`, the Azure certificate and federated-token paths, AWS and
+GCP credentials) and of every name on the tenant's `env://` allow-list
+(`SubprocessExecutor.InheritDeny`); those can never be resolved through
+`env://` either. F151 then replaced the deny-list with an explicit allow-list
+(the subprocess environment is now built, not filtered). With secret providers configured the agent also sets
+`RLIMIT_CORE=0` and, on Linux, `PR_SET_DUMPABLE=0`, so a same-UID task cannot
+read the agent's memory through `/proc`. The subprocess executor still runs
+tasks as the agent's user and remains development-grade (ADR-0007). Test:
+`TestSubprocessInjectsSecretsAndScrubsAgentCredentials`.
+
+### F139. Audit writes failed open: a credential could be minted with no audit record — FIXED
+
+**Severity:** high (an audit trail that can silently miss the events it exists for).
+
+`API.auditAttempt` wrote the audit row after the change and, on failure, only
+logged: "refusing an operation because its audit record could not be written
+would mean a database hiccup blocks administration". The consequence was that
+a session could be issued, a user created or enabled, a password reset, or a
+scoped token minted, and the audit table would never know. Nor could an
+auditor tell: the trail had no ordering or integrity evidence, a 1000-row
+listing cap, no export, no retention policy and no legal hold.
+
+**Fix (ADR-0025, migration 0033):** every audited action is classed in
+`auditActionClasses` (`services/api-gateway/rest/audit.go`), and a test fails
+the build when an action string in the code is unclassified. **Security
+grants** now commit with their audit row in one transaction
+(`IdentityAdmin.WithinTx`, `auditedTx`) or not at all (`503
+audit_unavailable`); the password reset also became atomic with its session
+revocation, removing the old `partial_reset` state. **Revocations** are never
+blocked (a revocation refused because the log is down keeps a credential
+alive) and a failed write is logged as `AUDIT RECORD LOST`. **Operational**
+actions log and count. Every failure increments
+`nexus_audit_write_failures_total{class,blocked}`. The trail itself became a
+per-namespace hash chain with keyset pagination, NDJSON/CSV/KGF export,
+signed SIEM sinks, retention with legal hold, and `nexusctl audit verify`
+(OPERATIONS §25.2). Tests: `TestFailedAuditBlocksAndRollsBackSecurityGrants`,
+`TestFailedAuditNeverBlocksARevocation`, `TestEveryAuditedActionIsClassified`,
+and the Postgres suites `TestAuditChainIsUnforkedUnderConcurrentReplicas`,
+`TestAuditTamperingIsDetected`, `TestAuditLogIsAppendOnlyForEveryRole`,
+`TestIntegrationAuditAPI`.
+
 ### F140. The architecture promised traces and trace ids on every log line; nothing produced either — FIXED
 
 **Severity:** medium (operability; no correctness impact). ARCHITECTURE §9
@@ -3968,3 +4029,45 @@ every grace period with 23 hours of margin. The common savings (a retry, or a
 fan-out producing identical outputs moments apart) are kept.
 `TestPutRefreshesOldDeduplicatedObjects` pins it. Operators see these repeats
 as `uploaded`, not `deduplicated`, in `nexus_agent_result_store_puts_total`.
+
+### F151. Subprocess tasks inherited the agent's entire environment, including its worker credential and result-store keys — FIXED
+
+**Severity:** high (verified on a live stack: a probe task printed `NEXUS_API_KEY` and `NEXUS_S3_*` / `RESULT_STORE_*`).
+
+`executor.buildEnv` started every subprocess task's environment from
+`os.Environ()`. On the compose stack the agent carries its worker API key,
+the result-store endpoint, bucket and access keys (both the `NEXUS_S3_*` and
+`RESULT_STORE_*` spellings), NATS credential paths and everything else it was
+started with, so any subprocess task could register as a worker, claim other
+attempts in the namespace, or read and overwrite other attempts' results.
+Docker and Kubernetes tasks were not affected: both build the workload
+environment from scratch. F138's deny-list (drop known credential names)
+narrowed this but still passed every variable nobody had thought to list.
+
+**Fix:** the subprocess environment is now an explicit allow-list
+(`buildEnvScrubbed`, `subprocessBaseEnv`): `PATH` (a default when the agent
+has none), `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `USER`,
+`LOGNAME`, the SDK task contract settings `NEXUS_TASK_MODULES` and
+`NEXUS_RESULT_DIR`, then the declared `runtime.env`, the env-injected
+secrets (ADR-0025), and the platform variables the executor sets
+(`NEXUS_ATTEMPT_ID`, `NEXUS_RUN_ID`, `NEXUS_NODE_ID`, `NEXUS_IDEMPOTENCY_KEY`,
+`NEXUS_WORK_DIR`, `NEXUS_INPUT_DIR`, `NEXUS_OUTPUT_FILE`, `NEXUS_OUTPUT_DIR`,
+`NEXUS_OUTPUT_NAMES`, `NEXUS_DEADLINE_UNIX_MS`, `NEXUS_INLINE_THRESHOLD_BYTES`,
+`NEXUS_SECRETS_DIR`, `CUDA_VISIBLE_DEVICES`). Nothing else. Operators may pass
+more with `NEXUS_SUBPROCESS_ENV_PASSTHROUGH` (comma-separated globs; Helm
+`agentDefaults.secrets.subprocessEnvPassthrough`; default empty); the agent's
+own credentials (`secrets.IsAgentCredentialEnv`, now including
+`NEXUS_RESULT_STORE_*` and `RESULT_STORE_*`) never pass even when a pattern
+matches them, and names on the tenant's `env://` allow-list pass only by
+declaration. TRACEPARENT is not propagated today (no tracing context exists
+on the agent). Regression tests, written first:
+`TestSubprocessTaskEnvironmentIsMinimalAndExplicit` (a task dumps `env`),
+`TestContainerTaskEnvironmentsNeverCarryAgentCredentials` (docker and
+kubernetes env builders, and the rendered Job's containers) and
+`TestDockerContainerEnvironmentHasNoAgentCredentials` (a real container).
+
+**Local runner and replay** (`nexus.local`, `nexusctl run --local`,
+`nexusctl replay`): these run on the developer's own machine and deliberately
+start from the developer's environment plus the `NEXUS_*` task contract, so a
+task can use the tools and credentials the developer already has; they
+resolve no `SecretRef`s. Documented in OPERATIONS §25.1 rather than changed.

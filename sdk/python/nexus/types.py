@@ -31,6 +31,7 @@ __all__ = [
     "Cache",
     "Runtime",
     "SecretRef",
+    "SecretInject",
     "Concurrency",
     "ValueSpec",
     "ValueSpecLike",
@@ -45,6 +46,9 @@ __all__ = [
 # Authors write the short, obvious word; we map it to the contract's canonical
 # enum name. Accepting the canonical name too means a spec that was decompiled
 # from the wire form recompiles unchanged.
+
+#: How a resolved secret reaches the workload (ADR-0025).
+SecretInject = Literal["env", "file"]
 
 ErrorClass = Literal[
     "transient",
@@ -485,6 +489,12 @@ class SecretRef:
 
     name: str
     ref: str
+    #: How the worker delivers the value (ADR-0025): ``"env"`` sets the
+    #: environment variable ``name``; ``"file"`` writes
+    #: ``$NEXUS_SECRETS_DIR/<name>`` and keeps it out of the environment, which
+    #: is the safer choice. The default is emitted as nothing, so specs written
+    #: before this field keep their content address.
+    inject: SecretInject = "env"
 
     def to_wire(self) -> dict[str, str]:
         if not self.name or not self.ref:
@@ -495,7 +505,14 @@ class SecretRef:
                 "(e.g. 'vault://kv/ml/s3'); a literal secret value must never be "
                 "written into a spec"
             )
-        return {"name": self.name, "ref": self.ref}
+        if self.inject not in ("env", "file"):
+            raise SpecError(
+                f"secret {self.name!r} inject must be 'env' or 'file', got {self.inject!r}"
+            )
+        out = {"name": self.name, "ref": self.ref}
+        if self.inject == "file":
+            out["inject"] = "file"
+        return out
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

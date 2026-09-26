@@ -37,13 +37,14 @@ import (
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/mail"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/auditexport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
-	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/rest"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/sessions"
@@ -181,11 +182,37 @@ func run() error {
 		return err
 	}
 	api = api.WithEmailFlows(emailCfg)
-	mode, kgfAuth, kgfReady, err := kgfConfig(ctx, db, log)
+	mode, kgfAuth, kgfAttrib, kgfReady, err := kgfConfig(ctx, db, log)
 	if err != nil {
 		return err
 	}
 	api = api.WithKGF(mode, kgfAuth)
+
+	// Audit export (ADR-0025): sink secrets are sealed under
+	// NEXUS_AUDIT_SINK_KEY(_FILE); without it sinks are refused (503) but
+	// listing, export, retention and legal hold all work. A malformed key or
+	// destination policy is fatal, like any other security configuration.
+	auditKeys, err := auditexport.KeyringFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	sinkPolicy, err := auditexport.PolicyFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	api = api.WithAuditExport(auditKeys, sinkPolicy)
+	// KGF Cloud attribution in standalone mode (ADR-0025 with ADR-0024): with
+	// KGF's context keys configured, a request that authenticates with a Nexus
+	// credential and carries a verifying X-KGF-Context has its KGF
+	// organization, scope, principal and request id recorded -- attribution
+	// only. In kgf/both mode the context authenticates, and attribution comes
+	// from that principal (kgfAttrib is nil there).
+	api = api.WithKGFContext(kgfAttrib)
+	rest.RegisterAuditMetrics(reg)
+	deliverer := &auditexport.Deliverer{DB: db, Keys: auditKeys, Policy: sinkPolicy, Log: log}
+	deliverer.RegisterMetrics(reg)
+	purger := &auditexport.Purger{DB: db, Log: log}
+	purger.RegisterMetrics(reg)
 
 	checks := map[string]health.Check{
 		// Readiness depends on the database because a gateway that cannot reach
@@ -303,7 +330,17 @@ func run() error {
 	sweeper.Interval = cfg.SessionSweepInterval
 	sweeper.BatchLimit = cfg.SessionSweepLimit
 
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 6)
+	go func() {
+		if err := deliverer.Run(ctx); err != nil {
+			errCh <- fmt.Errorf("audit sink deliverer: %w", err)
+		}
+	}()
+	go func() {
+		if err := purger.Run(ctx); err != nil {
+			errCh <- fmt.Errorf("audit retention purger: %w", err)
+		}
+	}()
 	go func() {
 		if err := opsSrv.Serve(); err != nil {
 			errCh <- fmt.Errorf("metrics listener: %w", err)
@@ -668,29 +705,31 @@ func emailFlowConfig(log *slog.Logger) (rest.EmailFlowConfig, error) {
 }
 
 // kgfConfig reads KGF Cloud context authentication (ADR-0024,
-// docs/OPERATIONS.md §24). NEXUS_AUTH_MODE=standalone (the default) returns a
-// nil authenticator and changes nothing. In kgf or both mode a key source is
-// mandatory: a gateway that could verify no context would refuse every KGF
-// request, so a misconfiguration stops startup instead.
-func kgfConfig(ctx context.Context, db store.GWDB, log *slog.Logger) (rest.AuthMode, *authn.KGFAuthenticator, health.Check, error) {
+// docs/OPERATIONS.md §24) and attribution (ADR-0025, §25). One kgfctx
+// verifier -- keys, audience, user issuers, replay guard -- serves both.
+//
+//   - NEXUS_AUTH_MODE=kgf or both: a key source is mandatory (a gateway that
+//     could verify no context would refuse every KGF request, so a
+//     misconfiguration stops startup) and the context AUTHENTICATES; the
+//     returned authenticator wraps the verifier.
+//   - standalone (the default): Nexus credentials authenticate. With a key
+//     source configured, the verifier is returned for audit ATTRIBUTION only;
+//     without one, nil, and an X-KGF-Context is refused rather than ignored.
+func kgfConfig(ctx context.Context, db store.GWDB, log *slog.Logger) (rest.AuthMode, *authn.KGFAuthenticator, *kgfctx.Verifier, health.Check, error) {
 	mode, err := rest.ParseAuthMode(os.Getenv("NEXUS_AUTH_MODE"))
 	if err != nil {
-		return "", nil, nil, err
-	}
-	if mode == rest.AuthStandalone {
-		log.Info("authentication mode: standalone (Nexus credentials only)")
-		return mode, nil, nil, nil
+		return "", nil, nil, nil, err
 	}
 	var keys kgfctx.KeySource
 	var ready health.Check
 	static, url := env("NEXUS_KGF_CONTEXT_PUBLIC_KEYS", ""), env("NEXUS_KGF_CONTEXT_KEYS_URL", "")
 	switch {
 	case static != "" && url != "":
-		return "", nil, nil, errors.New("set NEXUS_KGF_CONTEXT_PUBLIC_KEYS or NEXUS_KGF_CONTEXT_KEYS_URL, not both")
+		return "", nil, nil, nil, errors.New("set NEXUS_KGF_CONTEXT_PUBLIC_KEYS or NEXUS_KGF_CONTEXT_KEYS_URL, not both")
 	case static != "":
 		sk, err := kgfctx.ParseStaticKeys(static)
 		if err != nil || len(sk) == 0 {
-			return "", nil, nil, fmt.Errorf("NEXUS_KGF_CONTEXT_PUBLIC_KEYS: %v", err)
+			return "", nil, nil, nil, fmt.Errorf("NEXUS_KGF_CONTEXT_PUBLIC_KEYS: %v", err)
 		}
 		keys = sk
 	case url != "":
@@ -698,15 +737,15 @@ func kgfConfig(ctx context.Context, db store.GWDB, log *slog.Logger) (rest.AuthM
 		rk.Refresh = time.Duration(envInt("NEXUS_KGF_CONTEXT_KEYS_REFRESH_SEC", 300)) * time.Second
 		keys, ready = rk, rk.Ready
 		if err := rk.Ready(ctx); err != nil {
-			// Not fatal: KGF's gateway may start after Nexus. /readyz reports it.
-			log.Warn("KGF context keys are not available yet; KGF requests are refused until they are", "url", url, "error", err)
+			// Not fatal: KGF's gateway may start after Nexus. /readyz reports it
+			// in kgf/both mode.
+			log.Warn("KGF context keys are not available yet; KGF contexts are refused until they are", "url", url, "error", err)
 		}
+	case mode == rest.AuthStandalone:
+		log.Info("authentication mode: standalone (Nexus credentials only; no KGF attribution keys configured)")
+		return mode, nil, nil, nil, nil
 	default:
-		return "", nil, nil, errors.New("NEXUS_AUTH_MODE=" + string(mode) + " needs NEXUS_KGF_CONTEXT_KEYS_URL or NEXUS_KGF_CONTEXT_PUBLIC_KEYS")
-	}
-	services, err := authn.ParseServicePrincipals(env("NEXUS_KGF_SERVICE_PRINCIPALS", ""))
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("NEXUS_KGF_SERVICE_PRINCIPALS: %w", err)
+		return "", nil, nil, nil, errors.New("NEXUS_AUTH_MODE=" + string(mode) + " needs NEXUS_KGF_CONTEXT_KEYS_URL or NEXUS_KGF_CONTEXT_PUBLIC_KEYS")
 	}
 	var issuers []string
 	for _, i := range strings.Split(env("NEXUS_KGF_USER_ISSUERS", "kgf-gateway"), ",") {
@@ -714,21 +753,31 @@ func kgfConfig(ctx context.Context, db store.GWDB, log *slog.Logger) (rest.AuthM
 			issuers = append(issuers, i)
 		}
 	}
+	verifier := kgfctx.Verifier{
+		Keys: keys, Audience: env("NEXUS_KGF_AUDIENCE", "kgf-nexus"),
+		AcceptAnyAudience: envBool("NEXUS_KGF_ACCEPT_ANY_AUDIENCE", false),
+		UserIssuers:       issuers, Seen: kgfctx.NewMemoryReplayGuard(),
+	}
+	if verifier.AcceptAnyAudience {
+		log.Warn("NEXUS_KGF_ACCEPT_ANY_AUDIENCE=true: contexts minted for every KGF service are accepted here")
+	}
+	if mode == rest.AuthStandalone {
+		log.Info("authentication mode: standalone; X-KGF-Context is verified for audit attribution only",
+			"audience", verifier.Audience, "user_issuers", issuers, "keys_url", url, "static_keys", static != "")
+		return mode, nil, &verifier, nil, nil
+	}
+	services, err := authn.ParseServicePrincipals(env("NEXUS_KGF_SERVICE_PRINCIPALS", ""))
+	if err != nil {
+		return "", nil, nil, nil, fmt.Errorf("NEXUS_KGF_SERVICE_PRINCIPALS: %w", err)
+	}
 	k := &authn.KGFAuthenticator{
-		Verifier: kgfctx.Verifier{
-			Keys: keys, Audience: env("NEXUS_KGF_AUDIENCE", "kgf-nexus"),
-			AcceptAnyAudience: envBool("NEXUS_KGF_ACCEPT_ANY_AUDIENCE", false),
-			UserIssuers:       issuers, Seen: kgfctx.NewMemoryReplayGuard(),
-		},
+		Verifier:          verifier,
 		Provisioner:       authn.StoreProvisioner{DB: db},
 		ServicePrincipals: services,
 	}
 	log.Info("authentication mode: KGF context", "mode", string(mode), "audience", k.Verifier.Audience,
 		"user_issuers", issuers, "keys_url", url, "static_keys", static != "", "service_principals", len(services))
-	if k.Verifier.AcceptAnyAudience {
-		log.Warn("NEXUS_KGF_ACCEPT_ANY_AUDIENCE=true: contexts minted for every KGF service are accepted here")
-	}
-	return mode, k, ready, nil
+	return mode, k, nil, ready, nil
 }
 
 // envBool reads a boolean, keeping the default on an unparseable value for the

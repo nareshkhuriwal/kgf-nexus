@@ -18,7 +18,7 @@ const AdministratorRole = "Administrator"
 var ModuleActions = map[string][]string{
 	"overview": {"view"}, "workflows": {"view", "publish", "delete", "cache.invalidate"}, "runs": {"view", "create", "cancel", "pause", "resume", "retry", "delete"},
 	"tasks": {"view", "logs.view", "results.view"}, "schedules": {"view", "create", "update", "delete"}, "backfills": {"view", "create", "update"},
-	"workers": {"view", "drain", "quarantine"}, "infrastructure": {"view", "configure"}, "users": {"view", "manage"}, "tokens": {"view", "manage"}, "audit": {"view"}, "roles": {"view", "manage"},
+	"workers": {"view", "drain", "quarantine"}, "infrastructure": {"view", "configure"}, "users": {"view", "manage"}, "tokens": {"view", "manage"}, "audit": {"view", "manage"}, "roles": {"view", "manage"},
 	// ADR-0024 §6: non-human identities for agents and CI.
 	"service_accounts": {"view", "manage"},
 	// ADR-0021. quotas.view is broad (it explains a quota_exceeded pending

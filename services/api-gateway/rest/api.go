@@ -21,9 +21,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/auditexport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
-	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/spec"
 	"google.golang.org/grpc/codes"
@@ -139,6 +140,18 @@ type API struct {
 	// reported alongside it. See assignment.go.
 	assignments     AssignmentReader
 	inlineThreshold int64
+
+	// auditKeys seals audit sink signing secrets; nil disables sink creation
+	// (503 sinks_disabled). sinkPolicy bounds where sinks may point. See
+	// audit.go and ADR-0025.
+	auditKeys  *auditexport.Keyring
+	sinkPolicy auditexport.URLPolicy
+	// kgfAttribution verifies KGF Cloud's X-KGF-Context for audit
+	// ATTRIBUTION ONLY in standalone mode, where a Nexus credential
+	// authenticates and authorizes; nil when KGF's keys are not configured.
+	// In kgf/both mode the context authenticates instead (kgf above) and
+	// attribution comes from that principal. See audit.go attachKGF.
+	kgfAttribution *kgfctx.Verifier
 }
 
 // New builds the REST API.
@@ -392,8 +405,9 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/namespaces/{ns}/tokens/{id}/revoke", a.guard(authn.ActionAdminWrite, a.revokeToken))
 
 	// The audit trail records who changed what. Admin-only: it names accounts and
-	// the actions taken against them.
-	mux.Handle("GET /v1/namespaces/{ns}/audit", a.guard(authn.ActionAdminWrite, a.listAudit))
+	// the actions taken against them. Paging, export, retention, legal hold and
+	// SIEM sinks (ADR-0025): audit.go.
+	a.registerAuditRoutes(mux)
 
 	// Service accounts for agents and CI (ADR-0024 §6).
 	a.registerServiceAccountRoutes(mux)
@@ -486,7 +500,7 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 				}
 			}
 		}
-		h(w, r.WithContext(authn.WithPrincipal(r.Context(), p)), p)
+		h(w, a.attachKGF(r.WithContext(authn.WithPrincipal(r.Context(), p)), p), p)
 	})
 }
 

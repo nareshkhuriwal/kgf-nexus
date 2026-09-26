@@ -27,9 +27,19 @@
 ALTER TABLE outbox        ADD COLUMN IF NOT EXISTS trace_context TEXT;
 ALTER TABLE task_attempts ADD COLUMN IF NOT EXISTS trace_context TEXT;
 
-ALTER TABLE outbox DROP CONSTRAINT IF EXISTS outbox_trace_context_len;
-ALTER TABLE outbox ADD CONSTRAINT outbox_trace_context_len
-    CHECK (trace_context IS NULL OR length(trace_context) <= 128) NOT VALID;
-ALTER TABLE task_attempts DROP CONSTRAINT IF EXISTS task_attempts_trace_context_len;
-ALTER TABLE task_attempts ADD CONSTRAINT task_attempts_trace_context_len
-    CHECK (trace_context IS NULL OR length(trace_context) <= 128) NOT VALID;
+-- Added only when absent (a re-run is a no-op), never dropped and re-added:
+-- the migration safety gate forbids dropping a constraint in an upgrade, and
+-- nothing but this migration ever defines these two.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'outbox_trace_context_len'
+                    AND conrelid = 'outbox'::regclass) THEN
+        ALTER TABLE outbox ADD CONSTRAINT outbox_trace_context_len
+            CHECK (trace_context IS NULL OR length(trace_context) <= 128) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'task_attempts_trace_context_len'
+                    AND conrelid = 'task_attempts'::regclass) THEN
+        ALTER TABLE task_attempts ADD CONSTRAINT task_attempts_trace_context_len
+            CHECK (trace_context IS NULL OR length(trace_context) <= 128) NOT VALID;
+    END IF;
+END $$;

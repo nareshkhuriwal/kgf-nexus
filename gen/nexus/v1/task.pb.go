@@ -862,9 +862,15 @@ func (x *RuntimeSpec) GetStdoutOutput() string {
 }
 
 type SecretRef struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Ref           string                 `protobuf:"bytes,2,opt,name=ref,proto3" json:"ref,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The variable name (inject "env") or file name under $NEXUS_SECRETS_DIR
+	// (inject "file") the resolved value is delivered as.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Provider URI: env://, file://, vault://, akv:// (ADR-0025). Never a value.
+	Ref string `protobuf:"bytes,2,opt,name=ref,proto3" json:"ref,omitempty"`
+	// How the value reaches the workload: "env" (the default when empty) or
+	// "file". Additive (ADR-0025); an agent that predates it injects nothing.
+	Inject        string `protobuf:"bytes,3,opt,name=inject,proto3" json:"inject,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -909,6 +915,13 @@ func (x *SecretRef) GetName() string {
 func (x *SecretRef) GetRef() string {
 	if x != nil {
 		return x.Ref
+	}
+	return ""
+}
+
+func (x *SecretRef) GetInject() string {
+	if x != nil {
+		return x.Inject
 	}
 	return ""
 }
@@ -1126,10 +1139,11 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"\rstdout_output\x18\b \x01(\tR\fstdoutOutput\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"1\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"I\n" +
 	"\tSecretRef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
-	"\x03ref\x18\x02 \x01(\tR\x03ref\"\x95\x05\n" +
+	"\x03ref\x18\x02 \x01(\tR\x03ref\x12\x16\n" +
+	"\x06inject\x18\x03 \x01(\tR\x06inject\"\x95\x05\n" +
 	"\x0eTaskAssignment\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x01 \x01(\tR\tattemptId\x12\x15\n" +

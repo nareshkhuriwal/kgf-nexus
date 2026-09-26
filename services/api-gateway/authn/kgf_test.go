@@ -12,14 +12,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
-	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/kgfctx"
 )
 
 // Every catalog permission is either mapped to a KGF.Nexus action or on this
 // list of permissions a KGF principal must never hold. A new permission
 // therefore fails this test until someone decides which it is.
-var kgfUnmapped = map[string]bool{"users.view": true, "users.manage": true}
+var kgfUnmapped = map[string]bool{"users.view": true, "users.manage": true,
+	// Retention, legal hold, purge and sinks stay with the platform owner
+	// (ADR-0025 with ADR-0024 §4): not a KGF Contributor wildcard.
+	"audit.manage": true}
 
 func TestKGFActionTableCoversTheCatalog(t *testing.T) {
 	for _, perm := range Catalog() {
@@ -59,6 +62,9 @@ func TestKGFRoleMapping(t *testing.T) {
 	for _, g := range []map[string]bool{op, viewer} {
 		if g["users.view"] || g["users.manage"] {
 			t.Fatal("a KGF role granted Nexus user administration; KGF owns people")
+		}
+		if g["audit.manage"] {
+			t.Fatal("a KGF role may change audit retention, legal hold or sinks")
 		}
 	}
 	if len(KGFGrants(kgfctx.RoleService)) != 0 || len(KGFGrants("admin")) != 0 {

@@ -140,7 +140,9 @@ func (a *API) createServiceAccount(w http.ResponseWriter, r *http.Request, p aut
 		return
 	}
 	if err = auditTx(r, tx, p, "service_account.create", "service_account", id, map[string]any{"name": b.Name, "roles": b.Roles}); err != nil {
-		a.fail(w, r, "create service account", err)
+		if !a.auditUnavailable(w, r, err) {
+			a.fail(w, r, "create service account", err)
+		}
 		return
 	}
 	s, err := scanServiceAccount(tx.QueryRow(r.Context(), serviceAccountSelect+` WHERE s.id=$1`, id))
@@ -207,7 +209,31 @@ func (a *API) setServiceAccountDisabled(disabled bool) func(http.ResponseWriter,
 			at = &now
 			action = "service_account.disable"
 		}
-		tag, err := a.db.Exec(r.Context(), `UPDATE service_accounts SET disabled_at=$3, revision=revision+1 WHERE namespace=$1 AND id::text=$2`, p.Namespace, id, at)
+		if disabled {
+			// A revocation: it takes effect even if its audit row cannot be
+			// written (that failure is logged and counted, F139).
+			tag, err := a.db.Exec(r.Context(), `UPDATE service_accounts SET disabled_at=$3, revision=revision+1 WHERE namespace=$1 AND id::text=$2`, p.Namespace, id, at)
+			if err != nil {
+				a.fail(w, r, "service account", err)
+				return
+			}
+			if tag.RowsAffected() == 0 {
+				writeError(w, http.StatusNotFound, "not_found", "Service account not found")
+				return
+			}
+			a.auditPrincipal(r, p, action, "service_account", id, store.AuditSuccess, nil)
+			writeJSON(w, http.StatusOK, map[string]any{"id": id, "disabled": disabled})
+			return
+		}
+		// Enabling restores every token of the account: a security grant, so
+		// the change and its audit row commit together or not at all.
+		tx, err := a.db.Begin(r.Context())
+		if err != nil {
+			a.fail(w, r, "service account", err)
+			return
+		}
+		defer tx.Rollback(r.Context())
+		tag, err := tx.Exec(r.Context(), `UPDATE service_accounts SET disabled_at=$3, revision=revision+1 WHERE namespace=$1 AND id::text=$2`, p.Namespace, id, at)
 		if err != nil {
 			a.fail(w, r, "service account", err)
 			return
@@ -216,7 +242,15 @@ func (a *API) setServiceAccountDisabled(disabled bool) func(http.ResponseWriter,
 			writeError(w, http.StatusNotFound, "not_found", "Service account not found")
 			return
 		}
-		a.auditPrincipal(r, p, action, "service_account", id, store.AuditSuccess, nil)
+		if err = auditTx(r, tx, p, action, "service_account", id, nil); err == nil {
+			err = tx.Commit(r.Context())
+		}
+		if err != nil {
+			if !a.auditUnavailable(w, r, err) {
+				a.fail(w, r, "service account", err)
+			}
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"id": id, "disabled": disabled})
 	}
 }
@@ -287,7 +321,9 @@ func (a *API) serviceAccountRoles(w http.ResponseWriter, r *http.Request, p auth
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
-		a.fail(w, r, "assign roles", err)
+		if !a.auditUnavailable(w, r, err) {
+			a.fail(w, r, "assign roles", err)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"roles": b.Roles})
@@ -440,15 +476,28 @@ func (a *API) createCeilingToken(w http.ResponseWriter, r *http.Request, p authn
 	if p.UserID != "" {
 		spec.CreatedBy = &p.UserID
 	}
-	secret, row, err := minter.CreateScopedTokenWith(r.Context(), spec)
+	// Minted and audited in one transaction (fail closed, F139), like every
+	// other token.
+	var secret string
+	var row store.ScopedTokenRow
+	err := a.auditedTx(r, func(id IdentityAdmin) (store.AuditEntry, error) {
+		m, ok := id.(tokenMinter)
+		if !ok {
+			m = minter
+		}
+		var err error
+		secret, row, err = m.CreateScopedTokenWith(r.Context(), spec)
+		return principalEntry(r, p, "token.create", "token", row.ID, store.AuditSuccess, map[string]any{
+			"name": row.Name, "role": row.Role, "scopes": row.Scopes, "permissions": row.Permissions,
+			"service_account_id": row.ServiceAccountID, "expires_at": row.ExpiresAt,
+		}), err
+	})
 	if err != nil {
-		a.fail(w, r, "create token", err)
+		if !a.auditUnavailable(w, r, err) {
+			a.fail(w, r, "create token", err)
+		}
 		return
 	}
-	a.auditPrincipal(r, p, "token.create", "token", row.ID, store.AuditSuccess, map[string]any{
-		"name": row.Name, "role": row.Role, "scopes": row.Scopes, "permissions": row.Permissions,
-		"service_account_id": row.ServiceAccountID, "expires_at": row.ExpiresAt,
-	})
 	payload := tokenPayload(row)
 	payload["token"] = secret
 	payload["token_shown_once"] = true
@@ -506,21 +555,17 @@ func isUnique(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "SQLSTATE 23505")
 }
 
-// auditTx writes an audit row inside a transaction.
+// auditTx writes an audit row inside the change's own transaction, so the
+// change and its record commit together or not at all (fail closed, F139).
+// A failed write is an auditWriteError: the caller answers 503
+// audit_unavailable (auditUnavailable) and the transaction rolls back.
 func auditTx(r *http.Request, tx pgx.Tx, p authn.Principal, action, targetKind, target string, detail map[string]any) error {
-	var actorID *string
-	if p.UserID != "" {
-		actorID = &p.UserID
+	e := principalEntry(r, p, action, targetKind, target, store.AuditSuccess, detail)
+	if err := store.GatewayAppendAudit(r.Context(), tx, e); err != nil {
+		countAuditFailure(ClassOf(action), true)
+		return auditWriteError{err}
 	}
-	kind := string(p.Kind)
-	if kind == "" {
-		kind = string(authn.KindAPIKey)
-	}
-	e := store.AuditEntry{Namespace: p.Namespace, ActorID: actorID, ActorKind: kind,
-		ActorLabel: p.Name, Action: action, TargetKind: targetKind, TargetID: target, Outcome: store.AuditSuccess,
-		Detail: detail, ClientIP: clientIP(r)}
-	attributeKGF(p, &e)
-	return store.GatewayAppendAudit(r.Context(), tx, e)
+	return nil
 }
 
 // isAdministrator reports whether a principal holds the Administrator system

@@ -418,7 +418,38 @@
         "gpuResourceName": { "type": "string", "pattern": "^[a-z0-9.-]+/[a-z0-9._-]+$" },
         "heartbeatIntervalMs": { "type": "integer", "minimum": 100 },
         "drainGrace": { "$ref": "#/definitions/duration" },
-        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 }
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 },
+        "secrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "configSecret": { "type": "string" },
+            "fileSecrets": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "secretName", "mountPath"],
+                "properties": {
+                  "name": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" },
+                  "secretName": { "type": "string", "minLength": 1 },
+                  "mountPath": { "type": "string", "pattern": "^/" }
+                }
+              }
+            },
+            "workloadIdentityClientId": { "type": "string" },
+            "subprocessEnvPassthrough": { "type": "string" },
+            "tmpfsSizeLimit": { "$ref": "#/definitions/quantityOrNumber" }
+          }
+        }
+      }
+    },
+    "auditExport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sinkKeySecret": { "type": "string" },
+        "sinkAllowCIDRs": { "type": "string" }
       }
     },
     "metrics": {

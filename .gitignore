@@ -68,3 +68,6 @@ deploy/.env
 
 # Pinned, checksum-verified tools (deploy/scripts/pinned-tool.sh)
 /.tools/
+
+# Air-gap bundles (make airgap-bundle)
+/dist/

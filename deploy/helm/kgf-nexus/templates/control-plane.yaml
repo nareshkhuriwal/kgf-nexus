@@ -157,6 +157,16 @@ spec:
             # propagation runs even when no span is exported.
             - { name: NEXUS_TRACING_PUBLIC_ENDPOINT, value: "true" }
             {{- end }}
+            {{- with $root.Values.auditExport }}
+            {{- if .sinkKeySecret }}
+            # Seals audit sink signing secrets (ADR-0025).
+            - name: NEXUS_AUDIT_SINK_KEY
+              valueFrom: { secretKeyRef: { name: {{ .sinkKeySecret | quote }}, key: audit-sink-key } }
+            {{- end }}
+            {{- if .sinkAllowCIDRs }}
+            - { name: NEXUS_AUDIT_SINK_ALLOW_CIDRS, value: {{ .sinkAllowCIDRs | quote }} }
+            {{- end }}
+            {{- end }}
             {{- end }}
             {{- include "nexus.tracingEnv" $root | nindent 12 }}
           ports:

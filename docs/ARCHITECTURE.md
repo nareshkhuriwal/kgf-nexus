@@ -704,7 +704,7 @@ runtime:
   command: ["python", "-m", "train"]
   env:
     LOG_LEVEL: info
-  secrets:                     # injected by worker from its provider;
+  secrets:                     # resolved by the worker agent (ADR-0025);
     - name: S3_CREDENTIALS     # never stored in the metadata store
       ref: vault://kv/ml/s3
 
@@ -1301,6 +1301,10 @@ GET    /v1/namespaces/{ns}/workers               fleet view
 GET    /v1/namespaces/{ns}/workers/{id}          detail + the tasks running on it
 POST   /v1/namespaces/{ns}/workers/{id}/drain
 GET    /v1/namespaces/{ns}/capacity              advertised vs committed
+GET    /v1/namespaces/{ns}/audit                 keyset-paged audit trail (?cursor=, since, until)
+GET    /v1/namespaces/{ns}/audit/export          ndjson (verifiable) | csv | kgf (ADR-0025)
+GET|PUT /v1/namespaces/{ns}/audit/policy         retention; POST .../audit/legal-hold, .../audit/purge
+*      /v1/namespaces/{ns}/audit/sinks[/{id}]    signed SIEM webhook sinks (+ /rotate-secret)
 ```
 
 ### 8.3 SDK sketch

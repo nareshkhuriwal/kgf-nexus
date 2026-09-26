@@ -27,6 +27,7 @@ import (
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/worker"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
@@ -145,6 +146,45 @@ func main() {
 		log.Warn("NEXUS_NATS_REQUIRE_AUTH=false overrides NEXUS_ENV: dispatch hints may be received without credentials")
 	}
 
+	// Secret providers (ADR-0025): only THIS namespace's block of the file is
+	// loaded; another tenant's credentials never enter this process. A file
+	// that does not parse or validate is fatal, like a malformed NEXUS_K8S_*.
+	secretResolver, err := secrets.LoadForNamespace(os.Getenv(secrets.EnvConfigPath), *namespace)
+	if err != nil {
+		log.Error("invalid secrets configuration", "error", err)
+		os.Exit(1)
+	}
+	if root := os.Getenv("NEXUS_SECRETS_DIR_ROOT"); root != "" {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			log.Error("NEXUS_SECRETS_DIR_ROOT is not usable", "path", root, "error", err)
+			os.Exit(1)
+		}
+		executor.SecretsRoot = root
+	}
+	if secretResolver != nil {
+		log.Info("secret providers configured", "namespace", *namespace, "schemes", secretResolver.Schemes(),
+			"secrets_dir_root", executor.SecretsRoot)
+		// A core dump or a same-UID ptrace of this process would expose every
+		// resolved value; refuse both where the OS allows.
+		if herr := secrets.HardenProcess(); herr != nil {
+			log.Warn("could not harden the agent process against core dumps", "error", herr)
+		}
+	} else {
+		log.Info("no secret providers configured for this namespace; tasks that declare secrets will fail PERMISSION_DENIED",
+			"namespace", *namespace, "config", os.Getenv(secrets.EnvConfigPath))
+	}
+
+	// Subprocess tasks inherit a minimal environment (F151); an operator may
+	// pass more by name. The agent's own credentials never pass.
+	var passthrough []string
+	for _, p := range splitCSV(os.Getenv("NEXUS_SUBPROCESS_ENV_PASSTHROUGH")) {
+		if secrets.IsAgentCredentialEnv(p) {
+			log.Warn("NEXUS_SUBPROCESS_ENV_PASSTHROUGH names an agent credential; it is ignored", "pattern", p)
+			continue
+		}
+		passthrough = append(passthrough, p)
+	}
+
 	cfg := worker.Config{
 		Namespace: *namespace,
 		Queues:    splitCSV(*queues),
@@ -174,6 +214,8 @@ func main() {
 		AllowUnenforceableLimits: *allowUnenforceable,
 		Bus:                      busCfg,
 		MaxUninterruptible:       *maxUninterruptible,
+		Secrets:                  secretResolver,
+		SubprocessEnvPassthrough: passthrough,
 	}
 
 	// The kubernetes executor is opt-in: it exists only when NEXUS_K8S_NAMESPACE

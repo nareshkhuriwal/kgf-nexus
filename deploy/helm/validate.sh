@@ -269,6 +269,9 @@ must_fail "tracing headers Secret without key"  "needs tracing.headersSecret.key
 # One identity model: the result-store clients' serviceAccounts, not a
 # resultStore-level account (retired before release).
 must_fail "retired resultStore.serviceAccountName" "additional properties 'serviceAccountName' not allowed" --set resultStore.serviceAccountName=kgf-nexus
+must_fail "retired agent secrets SA"            "additional properties 'serviceAccountName' not allowed" --set agentDefaults.secrets.serviceAccountName=nexus-agent
+# One KGF verifier: attribution keys live in the kgf block, not auditExport.
+must_fail "retired auditExport.kgfContext"      "additional properties 'kgfContext' not allowed" --set auditExport.kgfContext.publicKeys=x
 # Azure workload identity reaches exactly the three result-store clients: they
 # run as the annotated account and carry the webhook's pod label; nothing else
 # does.

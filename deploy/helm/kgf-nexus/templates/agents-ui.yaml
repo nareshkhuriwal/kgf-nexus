@@ -78,6 +78,19 @@ spec:
             # All interfaces inside the pod so Prometheus can reach it; the
             # agent's own default is loopback. No Service exposes this port.
             - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" (int $root.Values.metrics.agentPort) | quote }} }
+            # Resolved secret files never touch the work volume's disk (ADR-0025).
+            - { name: NEXUS_SECRETS_DIR_ROOT, value: /var/lib/nexus/secrets }
+            {{- with $root.Values.agentDefaults.secrets }}
+            {{- if .configSecret }}
+            - { name: NEXUS_SECRETS_CONFIG, value: /etc/nexus/secrets/secrets.yaml }
+            {{- end }}
+            {{- if .workloadIdentityClientId }}
+            - { name: AZURE_CLIENT_ID, value: {{ .workloadIdentityClientId | quote }} }
+            {{- end }}
+            {{- if .subprocessEnvPassthrough }}
+            - { name: NEXUS_SUBPROCESS_ENV_PASSTHROUGH, value: {{ .subprocessEnvPassthrough | quote }} }
+            {{- end }}
+            {{- end }}
             {{- include "nexus.tlsEnv" (list $root "client") | nindent 12 }}
             {{- include "nexus.tracingEnv" $root | nindent 12 }}
           ports:
@@ -99,12 +112,31 @@ spec:
             - { name: wal, mountPath: /var/lib/nexus/wal }
             - { name: work, mountPath: /var/lib/nexus/work }
             - { name: tmp, mountPath: /tmp }
+            - { name: secrets-tmpfs, mountPath: /var/lib/nexus/secrets }
+            {{- if $root.Values.agentDefaults.secrets.configSecret }}
+            - { name: secrets-config, mountPath: /etc/nexus/secrets, readOnly: true }
+            {{- end }}
+            {{- range $root.Values.agentDefaults.secrets.fileSecrets }}
+            - { name: {{ printf "fs-%s" .name }}, mountPath: {{ .mountPath | quote }}, readOnly: true }
+            {{- end }}
             {{- include "nexus.natsVolumeMounts" $root | nindent 12 }}
             {{- include "nexus.tlsVolumeMounts" $root | nindent 12 }}
       volumes:
         - { name: wal, emptyDir: {} }
         - { name: work, emptyDir: {} }
         - { name: tmp, emptyDir: {} }
+        - name: secrets-tmpfs
+          emptyDir: { medium: Memory, sizeLimit: {{ $root.Values.agentDefaults.secrets.tmpfsSizeLimit | default "64Mi" }} }
+        {{- with $root.Values.agentDefaults.secrets.configSecret }}
+        # 0440 and read-only: the file names credentials paths, never values,
+        # but it decides which backends this agent may reach.
+        - name: secrets-config
+          secret: { secretName: {{ . | quote }}, defaultMode: 0440, items: [{ key: secrets.yaml, path: secrets.yaml }] }
+        {{- end }}
+        {{- range $root.Values.agentDefaults.secrets.fileSecrets }}
+        - name: {{ printf "fs-%s" .name }}
+          secret: { secretName: {{ .secretName | quote }}, defaultMode: 0440 }
+        {{- end }}
         {{- include "nexus.natsVolumes" (list $root "agent" (.natsSeedKey | default "")) | nindent 8 }}
         {{- include "nexus.tlsVolumes" (list $root "agent") | nindent 8 }}
 {{- include "nexus.pdb" (list $root .name .name (.replicas | default 1) .podDisruptionBudget) }}
