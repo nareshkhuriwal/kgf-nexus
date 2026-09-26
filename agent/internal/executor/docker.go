@@ -438,14 +438,18 @@ const oomSettleWindow = 3 * time.Second
 // awaitOOMFlag re-inspects until the daemon reports OOMKilled or the settle
 // window ends.
 func (e *DockerExecutor) awaitOOMFlag(ctx context.Context, st *dockerState) bool {
-	deadline := time.Now().Add(oomSettleWindow)
-	for time.Now().Before(deadline) {
+	// One deadline for the whole wait, in-flight inspects included: on a
+	// loaded host a single docker CLI call can take seconds, and a per-call
+	// timeout would let the settle run far past the window.
+	ctx, cancel := context.WithTimeout(ctx, oomSettleWindow)
+	defer cancel()
+	for {
 		select {
 		case <-ctx.Done():
 			return false
 		case <-time.After(100 * time.Millisecond):
 		}
-		raw, err := e.output(ctx, 30*time.Second, "inspect", "--format", "{{json .State.OOMKilled}}", st.containerID)
+		raw, err := e.output(ctx, oomSettleWindow, "inspect", "--format", "{{json .State.OOMKilled}}", st.containerID)
 		if err != nil {
 			continue
 		}
@@ -455,7 +459,6 @@ func (e *DockerExecutor) awaitOOMFlag(ctx context.Context, st *dockerState) bool
 			return true
 		}
 	}
-	return false
 }
 
 func (e *DockerExecutor) inspectOutcome(st *dockerState, timedOut bool) Outcome {

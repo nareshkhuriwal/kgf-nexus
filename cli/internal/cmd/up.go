@@ -344,6 +344,9 @@ func printStatusHeader(env *Environment, rep *quickstart.StatusReport) {
 	if rep.APIURL != "" {
 		fmt.Fprintf(w, "API       %s\n", rep.APIURL)
 	}
+	if rep.Database != "" {
+		fmt.Fprintf(w, "Database  %s\n", rep.Database)
+	}
 	if rep.Seeded {
 		fmt.Fprintf(w, "Tenant    %s", rep.TenantID)
 		if rep.Context != "" {
