@@ -3156,7 +3156,7 @@ checkov and trivy. No cloud API has accepted these plans, and no Nexus
 workload has run on AKS, EKS or GKE. In particular, large multipart uploads
 and the GC sweep have not been run against GCS interop. Acceptance: one
 apply per cloud in a scratch account, then the fan-out/fan-in example with a
-the >64 MiB artifact (multipart), the artifact GC sweep, and a PITR restore of
+>64 MiB artifact (multipart), the artifact GC sweep, and a PITR restore of
 the managed database, with results recorded in docs/OPERATIONS.md.
 
 **Resolution of parts 3-5 (`fix/f115-chart-db-hardening`).**
