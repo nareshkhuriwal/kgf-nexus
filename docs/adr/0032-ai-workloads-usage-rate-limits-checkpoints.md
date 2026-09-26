@@ -137,10 +137,10 @@ can never lower or double a total. Validation (grammar, bounds, key count) is
 applied by the scheduler, and a report that fails it is refused whole.
 
 **Fencing and the terminal race.** `RecordUsage` runs in one transaction that
-first takes `FOR KEY SHARE` on the attempt row (bounded by a 2 s
+first takes `FOR NO KEY UPDATE` on the attempt row (bounded by a 2 s
 `lock_timeout`), then re-reads the lease and the attempt state *after* the lock,
 and only then upserts `attempt_usage`. Every terminal path locks the attempt
-`FOR UPDATE` first, which conflicts with `FOR KEY SHARE`, and reads
+`FOR UPDATE` first, which conflicts with `FOR NO KEY UPDATE`, and reads
 `attempt_usage` only later in its transaction. So either the usage report
 commits first and the terminal transaction sees it, or the report waits, then
 sees a terminal state (or no lease) and is refused as stale. No unit is ever
@@ -149,6 +149,15 @@ timers, the run row or the lease row, so it cannot form a cycle with any
 terminal path (the deadlock `RecordProgress` hit was a timer/lease ordering).
 The lease-expiry reclaim skips locked attempt rows; a usage report can delay a
 reclaim by one sweep, never block it.
+
+`FOR KEY SHARE` was the first choice and was measured to be wrong: share
+lockers do not conflict with each other, so PostgreSQL lets a new one join the
+row's multixact without queueing behind a waiting `FOR UPDATE`. Four
+overlapping reporters starved `ApplyResult` indefinitely in
+`TestUsageNeverEscapesTheLedger`, and `lock_timeout` never fired because each
+single wait was short. `FOR NO KEY UPDATE` conflicts with itself, so every
+locker queues on the tuple lock in FIFO order behind the terminal transition.
+It still does not conflict with the `FOR KEY SHARE` of a foreign-key check.
 
 **The ledger.** `recordUsageSQL` now writes
 `custom = <reserved custom resources> || <attempt_usage.units>` and adds
@@ -261,7 +270,7 @@ immutable: each retry is a new attempt row.
 
 The scheduler stores **one pointer per idempotency key** in `task_checkpoints`
 (migration 0036). Registration is fenced three ways, in one transaction with
-the attempt row held `FOR KEY SHARE` as for usage: the lease must be live, the
+the attempt row held `FOR NO KEY UPDATE` as for usage: the lease must be live, the
 attempt in flight, and the new pointer must be **newer** than the stored one —
 a higher attempt number, or the same attempt and a higher `seq`. The key must
 be exactly under the attempt's own prefix. A stale attempt (reclaimed lease,

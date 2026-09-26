@@ -90,15 +90,26 @@ type workloadAttempt struct {
 // fenceWorkload loads the attempt, requires it in flight with a live lease
 // matching token, and returns nil (stale) otherwise.
 //
-// With lock, the attempt row is taken FOR KEY SHARE, bounded by the attempt
-// lock timeout, and the state and lease are read AFTER the lock. That is what
-// orders this write against the attempt's terminal transition, which locks the
-// row FOR UPDATE first (ADR-0032 §2): either this commits first and the
-// terminal transaction sees it, or this waits and then finds the attempt ended.
-// The statement is the transaction's first lock, so the wait cannot close a
-// deadlock cycle. Without lock it is a plain read, for writes whose racing a
-// terminal transition is harmless (a permit taken by an attempt that is ending
-// is merely spent).
+// With lock, the attempt row is taken FOR NO KEY UPDATE, bounded by the
+// attempt lock timeout, and the state and lease are read AFTER the lock. That
+// is what orders this write against the attempt's terminal transition, which
+// locks the row FOR UPDATE first (ADR-0032 §2): either this commits first and
+// the terminal transaction sees it, or this waits and then finds the attempt
+// ended. The statement is the transaction's first lock, so the wait cannot
+// close a deadlock cycle.
+//
+// NOT FOR KEY SHARE, which was tried: share lockers do not conflict with each
+// other, so PostgreSQL lets a new one join the row's multixact without queueing
+// behind a waiting FOR UPDATE. Overlapping reports then keep the multixact
+// alive indefinitely and the terminal transition starves -- lock_timeout never
+// fires because each individual wait is short. FOR NO KEY UPDATE conflicts
+// with itself, so every locker takes the heavyweight tuple lock and waits in
+// FIFO order behind the terminal transition. It still does not conflict with
+// the FOR KEY SHARE a foreign-key check takes, and it creates no row version.
+//
+// Without lock it is a plain read, for writes whose racing a terminal
+// transition is harmless (a permit taken by an attempt that is ending is
+// merely spent).
 func (s *SchedulerStore) fenceWorkload(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, token string, lock bool) (*workloadAttempt, error) {
 	q := `
 SELECT a.run_id, a.node_id, a.tenant_id, r.namespace, a.attempt_number,
@@ -109,7 +120,7 @@ SELECT a.run_id, a.node_id, a.tenant_id, r.namespace, a.attempt_number,
  WHERE a.id = $1
    AND a.state IN ('DISPATCHED','RUNNING')`
 	if lock {
-		q += "\n FOR KEY SHARE OF a"
+		q += "\n FOR NO KEY UPDATE OF a"
 	}
 	var (
 		w       workloadAttempt

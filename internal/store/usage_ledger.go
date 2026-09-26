@@ -124,7 +124,7 @@ SELECT outcome FROM ins`
 // recorded in the same transaction as the terminal transition. Usage keys all
 // contain ':' and no custom resource name can, so `||` never overwrites a
 // reserved resource. Every terminal caller locked the attempt row FOR UPDATE
-// before this statement, and RecordUsage holds FOR KEY SHARE on it while it
+// before this statement, and RecordUsage holds FOR NO KEY UPDATE on it while it
 // writes, so the units read here are final: a report either committed before
 // the transition or is refused as stale after it.
 var recordUsageWithUnitsSQL = strings.NewReplacer(

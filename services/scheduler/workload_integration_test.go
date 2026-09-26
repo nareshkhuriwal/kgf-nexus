@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -188,11 +189,17 @@ func TestUsageNeverEscapesTheLedger(t *testing.T) {
 					stop    atomic.Bool
 					counter atomic.Int64
 				)
+				// Stop the reporters on EVERY exit path, t.Fatal included:
+				// otherwise they outlive the subtest and hammer the database.
+				defer func() { stop.Store(true); wg.Wait() }()
 				for w := 0; w < 4; w++ {
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
 						for !stop.Load() {
+							// Paced a little: an agent flushes every few seconds,
+							// and an unpaced loop measures the disk, not the lock.
+							time.Sleep(time.Millisecond)
 							n := counter.Add(1)
 							resp, err := p.srv.RecordUsage(ctx, &RecordUsageRequest{
 								AttemptID: p.id.String(), LeaseToken: p.token,
@@ -209,21 +216,27 @@ func TestUsageNeverEscapesTheLedger(t *testing.T) {
 					}()
 				}
 				time.Sleep(time.Duration(5+round*3) * time.Millisecond)
-				switch path {
-				case "result":
-					if _, err := p.st.ApplyResult(ctx, time.Now().UTC(), &nexusv1.ReportResultRequest{
-						AttemptId: p.id.String(), LeaseToken: p.token,
-						Outcome: nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED,
-					}); err != nil {
-						t.Fatal(err)
+				// ErrAttemptBusy is the documented "resend" answer (F104): the
+				// agent resends a result, and the reconcilers run again, so the
+				// test does the same until the attempt is terminal.
+				for i := 0; f.attemptState(p.id) == "RUNNING"; i++ {
+					if i == 50 {
+						t.Fatalf("%s never ended the attempt", path)
 					}
-				case "expire":
-					f.expireLease(p.id)
-					if _, err := p.st.ReconcileExpiredLeases(ctx, time.Now().UTC(), 10); err != nil {
-						t.Fatal(err)
+					var err error
+					switch path {
+					case "result":
+						_, err = p.st.ApplyResult(ctx, time.Now().UTC(), &nexusv1.ReportResultRequest{
+							AttemptId: p.id.String(), LeaseToken: p.token,
+							Outcome: nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED,
+						})
+					case "expire":
+						f.expireLease(p.id)
+						_, err = p.st.ReconcileExpiredLeases(ctx, time.Now().UTC(), 10)
+					case "cancel":
+						_, err = p.st.CancelRunAttempts(ctx, f.runID, time.Now().UTC())
 					}
-				case "cancel":
-					if _, err := p.st.CancelRunAttempts(ctx, f.runID, time.Now().UTC()); err != nil {
+					if err != nil && !errors.Is(err, store.ErrAttemptBusy) {
 						t.Fatal(err)
 					}
 				}
@@ -492,6 +505,11 @@ func TestRateLimitedRetriesAreFreeUpToTheCap(t *testing.T) {
 	// happen.
 	id := f.addAttempt("throttled", 100, vec{CPUMillis: 100}, nodeSpec{TaskRef: "t", Version: 1, MaxAttempts: 1}, time.Now().UTC())
 	if _, err := pool.Exec(ctx, `UPDATE task_attempts SET state='RUNNING', worker_id=$2, dispatched_at=now(), started_at=now() WHERE id=$1`, id, w); err != nil {
+		t.Fatal(err)
+	}
+	// The DAG engine charges the first attempt when it creates it
+	// (dagengine_writes.go); the fixture does not, so do it here.
+	if _, err := pool.Exec(ctx, `UPDATE task_nodes SET attempts_used = 1 WHERE run_id=$1 AND node_id='throttled'`, f.runID); err != nil {
 		t.Fatal(err)
 	}
 	st := f.newStore(func(c *store.ClaimConfig) { c.RateLimitedFreeRetries = 2 })

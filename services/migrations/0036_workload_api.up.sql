@@ -23,7 +23,7 @@
 -- A SIDE TABLE, for 0024's reason: no report path may UPDATE task_attempts,
 -- whose row every terminal transition locks. Deliberately NOT a foreign key to
 -- task_attempts: the FK check's FOR KEY SHARE would be taken on every insert.
--- (The usage report does take FOR KEY SHARE on the attempt, on purpose and
+-- (The usage report does take FOR NO KEY UPDATE on the attempt, on purpose and
 -- bounded, to serialize against the terminal transition; see ADR-0032 §2.)
 CREATE TABLE IF NOT EXISTS attempt_usage (
     attempt_id   UUID PRIMARY KEY,
