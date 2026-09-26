@@ -3417,3 +3417,50 @@ is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
 `ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
 report the output. Test it in `agent/internal/worker` for both inline and blob
 outputs, and in the NATS/e2e path with a non-SDK executor.
+
+### F136. Nexus could not accept KGF Cloud's identity, so a KGF user needed a second Nexus account — FIXED
+
+**Severity:** high (integration blocker: Nexus is a service of KGF Cloud).
+
+KGF Cloud's kgf-identity owns people and kgf-gateway authenticates every
+request and forwards it with a signed `X-KGF-Context`
+(`kgf-cloud/pkg/tenantctx`). Nexus authenticated only its own passwords,
+sessions and API keys, knew nothing of KGF organizations, subscriptions or
+resource groups, and recorded audit rows that could not be joined to KGF's by
+request id. Every KGF user of Nexus would have needed a separate Nexus
+account, onboarding and offboarding.
+
+**Fix (ADR-0024, migration 0032, OPERATIONS §24).** `NEXUS_AUTH_MODE=kgf|both`
+verifies the context exactly as tenantctx does (conformance vector minted by
+kgf-cloud's own signer), maps each KGF organization/subscription/resource
+group to one Nexus tenant namespace provisioned on first use, grants the
+Nexus permissions whose `KGF.Nexus/*` action the KGF role covers (deny by
+default; never user administration), refuses a request carrying both a
+context and a Nexus credential, and attributes audit rows to the KGF
+principal and request id. `standalone` stays the default. A first draft that
+built OIDC/SAML sign-in inside Nexus was withdrawn and reverted (`e3dc95c`):
+sign-in is KGF's.
+
+### F137. kgf-cloud declares too few KGF.Nexus actions, and tenantctx accepts a wildcard audience — OPEN (kgf-cloud)
+
+**Severity:** medium.
+
+1. `kgf-cloud/services/nexus/manifest.json` declares only
+   `KGF.Nexus/pipelines/{read,list,write,delete,run}`. Nexus's permission
+   mapping needs run control, logs and results, schedules, backfills, workers,
+   infrastructure, quotas, usage, audit, roles and service accounts
+   (OPERATIONS §24.6). The built-in Contributor and Reader cover them by
+   wildcard, so the flat roles work today, but a KGF custom role cannot name
+   them, and kgf-gateway's coarse check derives `…/write` for every POST.
+2. `tenantctx.Verifier.Verify` accepts the audience `*` even when the
+   verifier declares its own audience, although its comment says such a
+   deployment refuses it. A wildcard-audience token is replayable against every
+   provider. Nexus refuses it unless `NEXUS_KGF_ACCEPT_ANY_AUDIENCE=true`.
+3. tenantctx's replay guard is per process, so a context replayed against
+   another replica within its minute is accepted there. Nexus mirrors this and
+   documents it (OPERATIONS §24.10).
+
+**Proposed (in kgf-cloud):** declare the actions in 24.6 in the Nexus
+manifest; make `Verify` refuse `*` when `Audience` is set (or drop
+`AnyAudience`); consider a shared replay store for providers with
+side-effecting routes. Nothing in this repository changes kgf-cloud.

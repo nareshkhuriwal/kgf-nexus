@@ -355,6 +355,11 @@ services:
       # Links in emails point at the console, which is where the verify and
       # reset pages live -- not at this gateway.
       NEXUS_PUBLIC_URL: ${NEXUS_PUBLIC_URL:-http://localhost:3000}
+      # KGF Cloud context authentication (ADR-0024, OPERATIONS §24). Standalone
+      # unless set; kgf/both need the gateway's key document or static keys.
+      NEXUS_AUTH_MODE: ${NEXUS_AUTH_MODE:-standalone}
+      NEXUS_KGF_CONTEXT_KEYS_URL: ${NEXUS_KGF_CONTEXT_KEYS_URL:-}
+      NEXUS_KGF_CONTEXT_PUBLIC_KEYS: ${NEXUS_KGF_CONTEXT_PUBLIC_KEYS:-}
       # The operations listener: /metrics, /healthz, /readyz. NOT the REST port,
       # which is the public ingress (docs/OPERATIONS.md, "Metrics").
       NEXUS_METRICS_ADDR: ":8088"

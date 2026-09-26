@@ -6,7 +6,7 @@
 and restore and the ordering between the two stores, the restore drills and their
 measured results, point-in-time recovery with pgBackRest and its timed drills
 (§4), what these procedures do *not* cover, the RPO/RTO each approach actually
-delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), and third-party images and toolchains: what is pinned and why (§22).
+delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), third-party images and toolchains: what is pinned and why (§22), and running Nexus inside KGF Cloud: context authentication, tenancy mapping and service accounts (§24).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -2969,3 +2969,211 @@ Node **24** ("Krypton"), Active LTS until 2026-10-20 and maintained until
 2028-04-30 (github.com/nodejs/Release, `schedule.json`). The exact patch
 (`24.21.0`) is pinned in all three CI definitions and in the Dockerfile, and
 they move together. Node 26 becomes LTS on 2026-10-28; move once it has.
+
+---
+
+## 24. Running Nexus inside KGF Cloud: context authentication, tenancy mapping and service accounts
+
+**Design:** [ADR-0024](adr/0024-nexus-inside-kgf-cloud.md). **Migration:**
+`0032_kgf_context_and_service_accounts`. **Verified:** `kgfctx` unit tests
+(including a conformance vector minted by kgf-cloud's own `pkg/tenantctx`
+signer and re-minted byte for byte), `authn` unit tests of the action mapping,
+and the PostgreSQL integration suite (`TestIntegrationKGF*`,
+`TestIntegrationServiceAccountsAndTokenCeilings`,
+`TestIntegrationUsersCursorPagination`). **Not verified:** a live kgf-gateway
+forwarding to Nexus; the tests mint contexts in the gateway's format but do
+not run kgf-cloud's processes.
+
+In KGF Cloud, kgf-identity owns people and kgf-gateway authenticates every
+request, then forwards it to the provider with a freshly signed Ed25519
+`X-KGF-Context` (`kgf-cloud/docs/platform-services.md`). In KGF mode Nexus
+trusts that context instead of its own passwords and sessions.
+
+### 24.1 Modes
+
+| `NEXUS_AUTH_MODE` | People | Machine credentials | `/v1/auth/login`, `/register`, email flows |
+| --- | --- | --- | --- |
+| `standalone` (default) | Nexus sessions | API keys, scoped and service-account tokens | served |
+| `kgf` | KGF context only; Nexus sessions refused | yes | **not served** (404) |
+| `both` | KGF context or Nexus session | yes | served |
+
+The worker gRPC listener is the same in every mode. Use `both` only while
+migrating a standalone installation into KGF; `kgf` is the target.
+
+Requests that would confuse identity are refused, never guessed at:
+
+| Request | Answer |
+| --- | --- |
+| `X-KGF-Context` **and** `Authorization` (kgf, both) | `400 ambiguous_credentials` |
+| `X-KGF-Context` in `standalone` | `400 kgf_context_not_accepted` |
+| Nexus session (`nxsess_…`) in `kgf` | `401` |
+| Context with no subscription or resource group | `403 kgf_scope_required` |
+| Pure KGF service context not listed in `NEXUS_KGF_SERVICE_PRINCIPALS` | `403 kgf_service_not_allowed` |
+| Any verification failure (signature, key, expiry, audience, issuer, replay) | one opaque `401`; the reason is logged at INFO (`kgf context refused`) |
+
+### 24.2 Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `NEXUS_AUTH_MODE` | `standalone` | `standalone`, `kgf` or `both`. Anything else stops startup. |
+| `NEXUS_KGF_CONTEXT_KEYS_URL` | — | kgf-gateway's key document, e.g. `http://kgf-gateway.kgf-platform.svc:18080/.well-known/kgf-context.json`. |
+| `NEXUS_KGF_CONTEXT_PUBLIC_KEYS` | — | Alternatively, static base64url Ed25519 public keys, comma separated (the value of the gateway's `key` field). Exactly one of the two is required in `kgf`/`both`. |
+| `NEXUS_KGF_CONTEXT_KEYS_REFRESH_SEC` | `300` | Periodic refresh of the key document. |
+| `NEXUS_KGF_AUDIENCE` | `kgf-nexus` | The audience kgf-gateway mints for Nexus: `kgf-` + the manifest `id`. Must match the name Nexus is registered under. |
+| `NEXUS_KGF_USER_ISSUERS` | `kgf-gateway` | Issuers allowed to carry a human principal. Add a KGF facade service here only if it delegates (`obo`) to Nexus. |
+| `NEXUS_KGF_SERVICE_PRINCIPALS` | — | KGF services that may call Nexus for themselves, with the role they act as: `svc:kgf-billing=viewer,svc:kgf-orchestrator=operator`. Unlisted services are refused. |
+| `NEXUS_KGF_ACCEPT_ANY_AUDIENCE` | `false` | Accept tenantctx's wildcard audience `*`. Only for KGF's single-process local profile. |
+
+Helm: the `kgf:` values block (`authMode`, `contextKeysUrl`,
+`contextPublicKeys`, `audience`, `userIssuers`, `servicePrincipals`) sets
+these on the api-gateway; the schema rejects an unknown mode. Compose passes
+`NEXUS_AUTH_MODE`, `NEXUS_KGF_CONTEXT_KEYS_URL` and
+`NEXUS_KGF_CONTEXT_PUBLIC_KEYS` through.
+
+**Startup and readiness.** The gateway logs `authentication mode: KGF
+context` with the audience, issuers and key source. With a key URL it tries a
+first fetch; if kgf-gateway is not up yet it logs a WARN and starts, and
+`/readyz` fails (`kgf_context_keys`) until a key is held, so the load balancer
+does not send it traffic it would refuse.
+
+**Registering Nexus in KGF.** kgf-gateway routes `KGF.Nexus` to the manifest's
+`internalURL`. Today `kgf-cloud/services/nexus` (the simulation provider) owns
+that registration. Pointing KGF at this gateway is a kgf-cloud change: the
+manifest endpoint (or a facade that delegates with
+`tenantctx.Signer.DelegateFrom` to audience `kgf-nexus`) and the actions in
+24.6. Nothing in this repository changes kgf-cloud.
+
+### 24.3 Key rotation
+
+kgf-gateway publishes `{"keys":[{"kid","alg":"EdDSA","key"}]}` with
+`kid = "kgf-" + hex(sha256(key)[:6])`. Nexus:
+
+- refetches immediately when it sees an unknown `kid` (at most once per 30 s),
+  so a new gateway key is trusted on its first token;
+- keeps a key that left the document for 5 minutes (the maximum context
+  lifetime), so tokens minted just before the rotation still verify;
+- ignores a published key whose `kid` is not its derived id;
+- keeps its keys through a failed refresh.
+
+To rotate: deploy the gateway with the new key; nothing is needed on Nexus.
+With static keys, add the new key to `NEXUS_KGF_CONTEXT_PUBLIC_KEYS` first,
+roll the gateway, then remove the old one after 5 minutes.
+
+### 24.4 Tenancy mapping
+
+Each KGF (organization, subscription, resource group) is one Nexus tenant
+namespace, created on the first request that names it:
+
+```
+namespace = "kgf-" + hex(sha256("kgf-nexus/v1" \0 org \0 sub \0 rg))[:32]      (lower-cased)
+```
+
+`whoami` reports it together with the KGF identity. Read the mapping, or find
+a namespace's KGF scope, with:
+
+```sql
+SELECT namespace, organization, subscription, resource_group, created_at
+  FROM kgf_scopes WHERE organization = 'org-acme' ORDER BY created_at;
+```
+
+Every request's path namespace must equal the caller's mapped namespace
+(`/v1/namespaces/<ns>/…`); another is `403`. Two organizations with equal
+subscription and group names get different namespaces. A tenant with the
+derived name that was not created by this mapping is refused
+(`namespace_conflict` in the log), never adopted. Deleting a KGF resource
+group does not delete its Nexus tenant; its data follows Nexus's retention.
+
+### 24.5 Authorization
+
+The context's role (the delegated person's, for an `obo` context) becomes
+KGF's built-in action set (operator = Contributor, viewer = Reader), and a
+Nexus permission is held when its KGF action is in that set:
+
+| KGF role | Holds |
+| --- | --- |
+| `operator` | every permission in the table in ADR-0024 §4: pipelines, runs (create, control, delete), schedules, backfills, workers (drain, quarantine), infrastructure, quotas, usage, audit, roles, service accounts, tokens |
+| `viewer` | every `…/read` action: workflows, runs, task metadata, **logs and results**, schedules, backfills, workers, infrastructure, quotas, usage, audit, roles, service accounts |
+| either | **never** `users.view` or `users.manage`: KGF owns people |
+
+A viewer reading task logs and results follows KGF's Reader ("view every
+resource"); Nexus's own Viewer preset is narrower. Permissions not in the
+table are denied.
+
+### 24.6 KGF.Nexus actions to declare in kgf-cloud
+
+The manifest declares `KGF.Nexus/pipelines/{read,list,write,delete,run}`.
+Nexus also evaluates these, which kgf-cloud should add to
+`services/nexus/manifest.json` so custom KGF roles can name them:
+
+```
+KGF.Nexus/pipelines/cache/action
+KGF.Nexus/pipelines/runs/{read,delete}
+KGF.Nexus/pipelines/runs/{logs,results}/read
+KGF.Nexus/pipelines/runs/{cancel,pause,resume,retry}/action
+KGF.Nexus/schedules/{read,write,delete}
+KGF.Nexus/schedules/backfills/{read,write}
+KGF.Nexus/workers/read
+KGF.Nexus/workers/{drain,quarantine}/action
+KGF.Nexus/{infrastructure,quotas}/{read,write}
+KGF.Nexus/{usage,auditEvents}/read
+KGF.Nexus/{roles,serviceAccounts}/{read,write}
+```
+
+### 24.7 Audit and support references
+
+Every audit row written for a KGF principal has `actor_kind = 'kgf'`,
+`actor_label` = the KGF principal (the person, for a delegated context),
+`request_id` = the KGF request id, and `detail.kgf` = organization,
+subscription, resource group, role, issuer, token id and, for a delegated
+context, `via` (the acting service). Responses carry `X-Request-ID` with the
+same value. To resolve a KGF support reference:
+
+```bash
+curl -H "X-KGF-Context: …" "$NEXUS/v1/namespaces/$NS/audit?request_id=<id>"
+```
+
+```sql
+SELECT occurred_at, action, outcome, actor_label, detail->'kgf'
+  FROM audit_log WHERE request_id = '<id>';   -- indexed
+```
+
+### 24.8 Service accounts for agents and CI
+
+Machine credentials stay Nexus's: **service accounts** hold role bindings, and
+their tokens carry a permission ceiling (`POST …/tokens` with
+`service_account_id` and `permissions`). Effective grants are the account's
+current roles ∩ the ceiling, re-read on every request; disabling the account
+refuses its tokens at once. In KGF mode an **operator** manages service
+accounts, custom roles and tokens for its resource group; a binding or ceiling
+can hold only permissions the operator holds, never an identity-administration
+grant (`users.manage`, `roles.manage`, `tokens.manage`,
+`service_accounts.manage`), and an unceilinged token can be minted only by a
+Nexus administrator. Grant-bearing tokens never speak the worker protocol.
+
+`GET /v1/namespaces/{ns}/users?limit=&cursor=&q=` is keyset-paginated (at most
+200 per page, server-side search); in KGF mode it is denied (KGF owns people).
+
+### 24.9 Mixed versions, upgrade and rollback
+
+Apply `0032_kgf_context_and_service_accounts` (no-transaction: it builds the
+`audit_log.request_id` index `CONCURRENTLY`; re-run it if interrupted), then
+deploy the gateway. During a rolling upgrade an old replica ignores the new
+columns: a service-account token is stored with an empty scope list, so an old
+replica grants it nothing; a ceilinged token is stored with only the coarse
+scopes its ceiling implies. An old replica does not understand
+`X-KGF-Context`: switch `NEXUS_AUTH_MODE` to `kgf` only once every replica
+runs the new gateway.
+
+Rollback: set `NEXUS_AUTH_MODE=standalone`, roll the gateway back, then (only
+if required) apply the down migration after exporting `kgf_scopes` and
+`service_accounts`. KGF-provisioned tenants remain as ordinary tenants.
+
+### 24.10 Known limits
+
+- The replay guard is per replica (as in kgf-cloud's tenantctx); the audience
+  check and the one-minute lifetime bound the window.
+- Authorization follows the flat role in the context. A KGF custom role
+  narrower than Contributor or Reader is enforced by kgf-gateway's coarse
+  check, not re-derived here, until contexts carry assignments.
+- The per-replica provisioning cache means the first request for a new scope
+  on each replica runs one small transaction.

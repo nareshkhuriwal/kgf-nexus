@@ -16,7 +16,7 @@
 -- audit_log and scoped_tokens. An old gateway replica never reads them. A
 -- service-account token is written with an EMPTY scope list, so an old replica
 -- that cannot interpret it grants it nothing; a ceilinged legacy token is
--- written with only the coarse scopes its ceiling implies (OPERATIONS §24.8).
+-- written with only the coarse scopes its ceiling implies (OPERATIONS §24.9).
 --
 -- OWNERSHIP: api-gateway, like every identity table (0007).
 

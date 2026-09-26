@@ -223,6 +223,20 @@ smtp:
   # Where emailed links point: the console's public URL.
   publicUrl: ""
 
+# Nexus inside KGF Cloud (ADR-0024, OPERATIONS §24). authMode "standalone"
+# keeps Nexus's own sign-in and changes nothing. "kgf" accepts people only
+# through the X-KGF-Context kgf-gateway signs; "both" accepts either. In kgf
+# or both mode set contextKeysUrl (kgf-gateway's /.well-known/kgf-context.json)
+# or contextPublicKeys (comma-separated base64url Ed25519 keys), not both.
+kgf:
+  authMode: standalone
+  contextKeysUrl: ""
+  contextPublicKeys: ""
+  audience: kgf-nexus
+  userIssuers: kgf-gateway
+  # KGF services allowed to call Nexus for themselves: "svc:kgf-billing=viewer".
+  servicePrincipals: ""
+
 migrate:
   resources:
     requests: { cpu: 50m, memory: 64Mi }
