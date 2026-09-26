@@ -205,7 +205,7 @@ func k8sEnv(spec TaskSpec) []corev1.EnvVar {
 		// on another node and has no path to this agent's socket, so exporting
 		// NEXUS_TASK_API would send the SDK to a socket that does not exist.
 		// Without it the SDK keeps usage, permits and checkpoints in-process
-		// (ADR-0032 §1 and §6; F149, open).
+		// (ADR-0032 §1 and §6; F148, open).
 		// Runtime deliberately nil: task env is already in m, and re-adding it
 		// here would let it override the platform variables below.
 	}, k8sWorkDir) {

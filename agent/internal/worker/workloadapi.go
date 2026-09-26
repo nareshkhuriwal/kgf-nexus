@@ -71,7 +71,7 @@ func declaredTaskError(o executor.Outcome, f attemptFacts) (*nexusv1.TaskError, 
 
 // startTaskAPI serves the attempt's workload API, or returns nil when the
 // attempt gets none: the executor cannot reach a local socket (kubernetes,
-// F149), the root is unusable, or the socket could not be created.
+// F148), the root is unusable, or the socket could not be created.
 //
 // A failure here degrades rather than fails the attempt. The SDK keeps usage,
 // permits and checkpoints in-process without a socket, so the task still runs

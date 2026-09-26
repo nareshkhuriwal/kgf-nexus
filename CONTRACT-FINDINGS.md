@@ -3417,3 +3417,52 @@ is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
 `ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
 report the output. Test it in `agent/internal/worker` for both inline and blob
 outputs, and in the NATS/e2e path with a non-SDK executor.
+
+### F148. A running task had no channel to the control plane; Python heartbeats were silent no-ops — FIXED (kubernetes: OPEN)
+
+**Severity:** high (a task declaring `timeouts.heartbeat` could not keep itself
+alive; no usage, rate-limit or checkpoint feature could exist).
+
+`TaskContext.heartbeat()` and `progress()` call `_heartbeat_fn`, which neither
+`nexus.entrypoint` nor `nexus.worker` ever set. Under a real agent both were
+no-ops, so a long Python task with a heartbeat timeout was timed out while
+working, and the progress message the console shows never came from Python
+tasks. More generally the only workload-to-agent path was the output
+directory, read after exit: a task could not report what it consumed, ask for
+a shared rate-limit permit, or save partial state.
+
+**Fix (ADR-0032, migration 0036).** The agent serves each attempt an HTTP API
+on a per-attempt Unix socket with a bearer token (`NEXUS_TASK_API`,
+`NEXUS_TASK_API_TOKEN`) and forwards to four new lease-fenced worker RPCs
+(ReportUsage, AcquirePermits, SaveCheckpoint, GetCheckpoint) plus the existing
+ReportProgress. The SDK's heartbeat/progress, usage, permits and
+checkpoint/resume use it. Proven by the agent's `taskapi` tests, the SDK's
+`test_workload_api.py` against a fake socket server, and on a stack with the
+AI overlay: `examples/llm_batch_inference` crashed a shard after 10 of 30
+prompts, and the retry resumed from the checkpoint and asked only the other
+20 (OPERATIONS §29.8).
+
+**Still open.** The kubernetes executor's pods run on other nodes and get no
+socket: tasks there fall back in-process (usage only logged, permits not
+shared, checkpoints in `ctx.store`). Closing it needs a network-reachable,
+per-attempt authenticated endpoint on the agent (or a sidecar), with the same
+fencing.
+
+### F149. The scheduler could not charge the retry budget under role separation — FIXED
+
+**Severity:** high (every automatic retry failed on a deployment that uses
+the per-service database roles).
+
+`CreatePendingRetry` (scheduler_timers.go) inserts the retry attempt and, in
+the same transaction, runs `UPDATE task_nodes SET attempts_used = attempts_used
++ 1`. Migration 0005 granted `UPDATE (attempts_used)` on `task_nodes` to the
+DAG engine only; the scheduler role has no UPDATE on the table. With the
+service roles in force the statement fails with permission denied, the
+transaction rolls back and the retry timer is released to fire again, forever:
+no retry is ever created. Development stacks that connect every service as the
+database owner never saw it.
+
+**Fix.** Migration 0036 grants `UPDATE (attempts_used, free_retries) ON
+task_nodes TO nexus_scheduler`, column-scoped like every other cross-owner
+grant. `TestSchedulerRoleCanChargeTheRetryBudget` runs the statement as
+`nexus_scheduler` and also asserts the grant did not widen to other columns.

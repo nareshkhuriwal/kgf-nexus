@@ -83,7 +83,7 @@ lingering grandchild process cannot act on a finished attempt.
   that declared no network still reaches its own agent and nothing else.
 - **kubernetes**: pods run on other nodes and have no path to the agent. The
   variables are not exported, and the SDK degrades as described in §6
-  (F149, open).
+  (F148, still open for kubernetes).
 
 Endpoints (all JSON; errors are `{"error": "<code>", "message": "..."}`):
 
@@ -120,7 +120,13 @@ Grammar: `kind` is `[a-z][a-z0-9_]{0,31}`; `subject` is
 `[A-Za-z0-9][A-Za-z0-9._/@+-]{0,127}`; `qualifier` is `[a-z][a-z0-9_]{0,31}`;
 the whole key is at most 200 bytes. `provider` is lower-case by convention
 (`openai`, `anthropic`, `azure-openai`, `bedrock`, `mock`), and `model` is the
-provider's model id verbatim. Values are **non-negative integers** (int64,
+provider's model id verbatim, except that neither may contain `:` (the price
+book treats every `custom` key with a `:` as a usage unit, and the grammar
+needs the colon as its separator): the SDK maps any character outside the
+subject grammar to `_`, so a fine-tuned id `ft:gpt-4o-mini:org:x` is reported
+as `openai/ft_gpt-4o-mini_org_x`, and the scheduler refuses a key that does not
+parse. Usage keys cannot be quota-limited yet (`max_custom` names refuse `:`);
+that is a follow-up. Values are **non-negative integers** (int64,
 ≤ 10^15 per key per attempt); a fractional quantity uses a smaller unit. At
 most **64 keys per attempt**. Because every usage key contains `:` and no
 custom resource name can, the two share the ledger's `custom` object without
@@ -234,9 +240,11 @@ exact over time, not merely an upper bound.
 ADR-0021 serializes a *read of an aggregate* that has no row of its own. A
 bucket is one row; `SELECT … FOR UPDATE` on it is the same serialization,
 scoped to one key, released by the same COMMIT, and it stores the state.
-Throughput per key is bounded by one short transaction at a time; it is
-measured in `tests/bench` (OPERATIONS §29.6) and is far above any provider
-limit this protects. Different keys never contend.
+Throughput per key is bounded by one short statement at a time, so the whole
+take -- lock, refill, all-or-none decision, write -- is one autocommit SQL
+statement (`permitSQL`) that never holds the row across a client round trip.
+It is measured in `tests/bench` (OPERATIONS §29.6) and is far above any
+provider limit this protects. Different keys never contend.
 
 **The retry class.** `ERROR_CLASS_RATE_LIMITED` (common.proto, additive, spec
 spelling `rate_limited`) is for a provider 429 or 503 that in-task retries did
@@ -337,17 +345,38 @@ the ordering the sweep's safety argument requires.
 
 ## Evidence
 
-- `internal/store/workload_integration_test.go` (Postgres 16): usage max-merge,
-  validation, stale-lease refusal; a usage burst racing `ApplyResult`, lease
-  expiry and cancel — the ledger's units always equal the attempt's stored
-  units; checkpoint fencing (stale attempt, older seq, foreign prefix, retry
-  resumes); rate-limit fairness across replicas (granted ≤ burst + rate × T);
-  free RATE_LIMITED retries and the cap.
-- `tests/bench/ratelimit_test.go`: permits/s and p50/p99 for one hot key and
-  for spread keys at 1–16 replicas, and claim latency with and without
-  concurrent permit traffic (OPERATIONS §29.6).
-- Agent tests for the socket API; SDK tests (including mypy --strict); the
-  template tests; the two examples run end to end against the mock.
+- `services/scheduler/workload_integration_test.go` (Postgres 16.15, `-race`):
+  usage max-merge, validation, stale-lease refusal and the copy into the
+  ledger and the outbox; `TestUsageNeverEscapesTheLedger` races four reporters
+  against `ApplyResult`, lease expiry and cancel, 24 rounds, and the ledger's
+  units always equal the attempt's; checkpoint fencing (stale token, zombie
+  after LOST, older seq, foreign prefix, a retry resuming and superseding);
+  `TestPermitSQLMatchesTheDomainModel` holds the permit statement to
+  `domain.BucketLimit`; four replicas × 8 callers on a 50 req/s key granted
+  107–110 permits in 2 s against a ceiling of 112; free RATE_LIMITED retries,
+  the provider's Retry-After as the delay, and the cap; the F149 grant.
+- **The lock mode was found by that race test.** The first version fenced
+  with `FOR KEY SHARE`; overlapping reporters starved `ApplyResult` for
+  minutes (see §2). With `FOR NO KEY UPDATE` the same test passes in ~2 s.
+- `tests/bench/ratelimit_test.go` (`make bench-ratelimit`, OPERATIONS §29.6):
+  one hot key, 8 callers, 817 permits/s (p99 36 ms); 16 spread keys × 4
+  replicas, 1,624/s; one hot key with 128 callers, 373/s (p99 1.65 s). The
+  first implementation, which held the row lock across three client round
+  trips, managed 506 and 118/s on the same cells. Under a saturated 100 req/s
+  limit the ceiling held at every replica count. Pull claims beside ~300
+  permits/s on one key measured 75–161 claims/s against 175–184 alone (two
+  noisy runs on a shared laptop): the claim transaction is unchanged, but the
+  permit service shares database CPU.
+- `internal/artifactgc/checkpoints_integration_test.go` against Silo: a
+  deleting pass keeps only the pointer of an unfinished node.
+- On a full stack (`deploy/e2e`, AI overlay, 14 containers):
+  `llm-batch-inference` crashed shard 1 after 10 of 30 prompts; the retry
+  resumed and asked only 20, and the ledger holds 10 and 20 requests on the
+  two attempts. With `rate_limits` of 5 req/s on `mock`, the eval and a second
+  batch run succeeded through 693 denials. `llm-eval` with `mock-small`
+  failed at its quality gate (0.68 < 0.9).
+- Agent tests for the socket API; SDK tests (391+, mypy --strict); the seven
+  templates' compile/validate/pytest test; the examples' local self-checks.
 
 ## Consequences
 
@@ -363,7 +392,7 @@ limits are enforced only for calls made through the permit API: a task that
 calls a provider directly is unmetered and unthrottled. Usage units are
 self-reported by the workload and are exactly as trustworthy as the task code
 (fine for cost attribution inside a tenant, not a substitute for the
-provider's invoice). The kubernetes executor has no workload API yet (F149).
+provider's invoice). The kubernetes executor has no workload API yet (F148, open).
 A checkpoint is at-least-once state, not a transaction with the task's external
 effects: the effect journal and idempotency keys still apply.
 

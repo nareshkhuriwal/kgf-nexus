@@ -44,7 +44,7 @@ func TestTaskAPIIsExportedPerSubstrate(t *testing.T) {
 	for _, e := range k8sEnv(spec) {
 		switch e.Name {
 		case EnvTaskAPI, EnvTaskAPIToken:
-			t.Errorf("kubernetes must not export %s: the pod cannot reach the agent's socket (F149)", e.Name)
+			t.Errorf("kubernetes must not export %s: the pod cannot reach the agent's socket (F148)", e.Name)
 		case EnvAttemptNumber:
 			sawNumber = e.Value == "3"
 		}

@@ -58,7 +58,7 @@ type TaskSpec struct {
 	// executor exports it as-is; the docker executor bind-mounts its directory
 	// at ContainerTaskAPIDir and exports the container path; the kubernetes
 	// executor exports nothing, because a pod on another node cannot reach a
-	// socket on this host (F149).
+	// socket on this host (F148).
 	TaskAPISocket string
 	// TaskAPIToken is the socket's per-attempt bearer token, exported as
 	// NEXUS_TASK_API_TOKEN wherever TaskAPISocket is exported.
@@ -297,7 +297,7 @@ const (
 	EnvAttemptNumber = "NEXUS_ATTEMPT_NUMBER"
 	// EnvTaskAPI is the attempt's workload API as the workload sees it:
 	// unix://<socket path> (ADR-0032 §1). Absent when the executor cannot give
-	// the workload a path to the agent (kubernetes, F149); the SDK then keeps
+	// the workload a path to the agent (kubernetes, F148); the SDK then keeps
 	// usage, permits and checkpoints in-process.
 	EnvTaskAPI = "NEXUS_TASK_API"
 	// EnvTaskAPIToken is the bearer token every request to EnvTaskAPI must
