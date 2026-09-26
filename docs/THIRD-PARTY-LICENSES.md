@@ -92,6 +92,19 @@ redistribution with attribution in any case. No action is required.
 `MIT-0` (`@csstools/color-helpers`) is MIT without the attribution clause --
 strictly more permissive than MIT.
 
+## Test data (not distributed in any binary)
+
+`cli/internal/importer/testdata/upstream/` holds unmodified copies of example
+pipelines used to test `nexusctl import`. They are read by tests only, never
+compiled, embedded or shipped. Each directory's README gives the upstream URL,
+tag, commit and per-file sha256.
+
+| Project | Tag | Files | License |
+| --- | --- | --- | --- |
+| Apache Airflow (github.com/apache/airflow) | 3.3.2 | 8 example DAGs | Apache-2.0 (its NOTICE is reproduced in the directory README) |
+| Argo Workflows (github.com/argoproj/argo-workflows) | v4.1.4 | 18 examples | Apache-2.0 |
+| Prefect (github.com/PrefectHQ/prefect) | 3.8.6 | 4 examples | Apache-2.0 |
+
 ## Assessment
 
 No license conflicts were identified. KGF Nexus may be distributed under the
