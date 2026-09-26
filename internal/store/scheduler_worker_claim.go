@@ -875,6 +875,14 @@ SELECT a.idempotency_key, n.spec_json::text, a.input_refs::text, a.trace_context
 // starts; the in-flight ones finish on their own and MaybeFinalizePause advances
 // PAUSING -> PAUSED when the last of them reports. "Drain" here means "stop
 // feeding it", not "stop it" — and cancel remains the operation that stops work.
+//
+// TIMED_OUT is included (CONTRACT-FINDINGS F160): a run deadline kills the
+// run's work exactly as cancel does. The workflow-manager marks the run
+// TIMED_OUT and then asks for the attempts to be cancelled, and that second
+// call was best-effort with no retry -- when it was lost, the run was over and
+// its attempts ran on, holding their reservations, with no channel left to
+// stop them. Deriving the directive from the run's durable state makes the
+// lost call harmless, as it already was for CANCELLING.
 func (s *SchedulerStore) PendingCancellations(
 	ctx context.Context, workerID uuid.UUID,
 ) ([]uuid.UUID, error) {
@@ -885,7 +893,7 @@ SELECT a.id
  WHERE a.worker_id = $1
    AND (a.state = 'CANCELLED'
         OR (a.state IN ('DISPATCHED','RUNNING')
-            AND r.state IN ('CANCELLING','CANCELLED')))
+            AND r.state IN ('CANCELLING','CANCELLED','TIMED_OUT')))
  ORDER BY a.dispatched_at NULLS LAST`
 	rows, err := s.pool.Query(ctx, q, workerID)
 	if err != nil {

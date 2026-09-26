@@ -124,3 +124,55 @@ Attractive for decoupling. Rejected for the *dispatch* path, which needs a
 synchronous, transactional decision — "can this task run here, and claim it if
 so" cannot be eventually consistent without risking double-dispatch. The event
 bus remains the right mechanism for fan-out and notification (ADR-0003).
+
+## Addendum (2026-09-26): durable run advancement (CONTRACT-FINDINGS F160)
+
+**The gap.** "Every inter-service call needs a timeout and a retry budget"
+(Consequences, above) was honoured for the call itself and not for its
+*obligation*. Advancing a run is the dag-engine's job, and it was asked to do
+it only by synchronous RPCs made after the fact had committed in another
+service -- the gateway after a terminal attempt report, the workflow-manager
+after resume, cancel and retry. Each call was logged and swallowed on
+failure, and nothing asked again. On the dev cluster a 500-way fan-out lost
+446 of them to `DeadlineExceeded` against a 3-connection engine pool and stayed
+RUNNING forever with every attempt SUCCEEDED; an engine restart or a network
+error does the same to any run.
+
+**Decision.** The obligation is recorded by the database in the transaction
+that creates it, and the owner consumes it:
+
+- `run_reconcile_requests` (migration 0039) is **owned by the dag-engine**,
+  which alone claims, releases and deletes rows.
+- Rows are written by **triggers** -- on `task_attempts` reaching (or being
+  inserted in) a terminal state, and on `workflow_runs` state changes that
+  need the engine (into RUNNING from anything but PENDING, into PAUSING, into
+  CANCELLING). The trigger functions are `SECURITY DEFINER`, so no writer holds
+  a grant on the queue.
+- This is the **second deliberate case of a write inside another service's
+  transaction** (rule 2 above names the dispatch claim as the first; the
+  outbox of 0016 is the same shape for the event-service). The justification
+  is rule 2's own: the request must commit atomically with the fact, or it is
+  exactly the best-effort follow-up it replaces. It is narrower than the
+  dispatch exception -- an append of a row nobody but the owner reads for
+  work -- and a trigger rather than an INSERT at each call site, because the
+  call sites are many (reports, lease expiry, deadline timers, cancellation,
+  operator actions) and the next one would be missed.
+- The dag-engine consumes with `FOR UPDATE SKIP LOCKED` and a lease, so
+  replicas share the backlog with no leader and a crashed replica's claims
+  return on expiry. A request is deleted only after a reconcile that began
+  after it committed has succeeded, including publishing any run-level
+  conclusion.
+- The synchronous RPCs remain as the **latency path**. Reconciles of one run
+  are coalesced (single-flight with one shared follow-up pass), so a burst of
+  N reports costs at most two passes instead of N.
+- The workflow-manager's stalled-run sweep stays as the **backstop**, now
+  keyed on "nothing in flight and no retry scheduled" rather than on node
+  state, and catches runs stranded before the queue existed.
+
+**Consequences.** Run advancement no longer depends on any single call
+arriving. The costs: one row insert per terminal attempt (no shared row lock;
+rows are append-only), a 1 s default poll on the owner, and one more table
+and trigger pair that a rolling upgrade must respect -- an old dag-engine
+ignores the queue (rows accumulate until the new one consumes them), and an
+old scheduler's terminal writes are enqueued by the trigger whatever its
+version.

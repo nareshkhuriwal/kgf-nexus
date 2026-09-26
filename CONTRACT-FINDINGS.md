@@ -4989,3 +4989,178 @@ an agent GPU request; malformed resource names are refused by the schema.
 `simulated=true` by the agent (it cannot see the devices); on such an agent
 the label means "allocated by the device plugin". The chart was verified by
 rendering, not by installing a GPU pool.
+
+### F160. Run advancement hung on a best-effort RPC: a lost reconcile call stranded the run forever — FIXED
+
+**Severity:** high (a run never ends, and nothing notices). Found on the dev
+cluster: a 500-way fan-out (run `bb11ac87-…`) stayed RUNNING with all 501
+attempts SUCCEEDED, 26 children and the map template reading RUNNING and the
+fan-in `verify` PENDING with no attempt. The api-gateway had logged "attempt
+result committed but the run reconcile failed; the run will not advance until
+a later reconcile" 446 times, every one `DeadlineExceeded`.
+
+**Root cause.** A run advances only when the dag-engine reconciles it -- turns
+finished attempts into node states, starts the next nodes, publishes the
+run's conclusion. The only thing that asked it to was a synchronous RPC made
+*after* the fact had committed in another service: the gateway's
+`ReconcileRun` after each terminal report, and the workflow-manager's after
+resume, cancel and retry. Each failure was logged and swallowed, and no later
+reconcile ever came: there is no next report for a node whose attempt already
+reported. Three things compounded on the dev cluster:
+
+1. **No durability.** The obligation to reconcile lived only in an in-flight
+   RPC. A timeout, an engine restart or a network error lost it.
+2. **No coalescing.** Each of the ~500 reports sent its own reconcile of the
+   same run, each loading every node and attempt of that run, at once, through
+   a dag-engine pool capped at 3 connections (`NEXUS_DB_MAX_CONNS=3`). They
+   queued on the pool and the gateway's call deadline expired on 446 of them.
+3. **The backstop was blind to it.** The workflow-manager's stalled-run sweep
+   (`WFMListStalledRuns`, F152) required every node to look settled and judged
+   a node with no attempt by its stored state. A fan-in waiting on upstreams
+   that have in fact finished has no attempt and reads PENDING, and a map
+   template reads RUNNING, so a run stranded mid-graph never matched. Node
+   state is a projection written by the very reconcile that did not happen.
+
+**Fix -- durable request, coalesced consumption, blind spot closed.**
+
+- **The obligation is written by the database, atomically with the fact**
+  (migration 0039). `run_reconcile_requests` is an append-only queue owned by
+  the dag-engine. Triggers insert a row when a `task_attempts` row reaches (or
+  is inserted in) a terminal state -- whoever writes it: the report path, lease
+  expiry (F152's case), deadline timers, cancellation -- and when a
+  `workflow_runs` state change needs the engine (into RUNNING from anything but
+  PENDING, into PAUSING, into CANCELLING). `SECURITY DEFINER`, so no writer
+  holds a grant on the queue and a missing grant cannot fail a report. The
+  ADR-0011 addendum records this as the second deliberate write inside another
+  service's transaction, for rule 2's own reason: the request must commit with
+  the fact, or it is the best-effort follow-up it replaces.
+- **The dag-engine consumes it** (`services/dag-engine/reconcile_queue.go`):
+  claims with `FOR UPDATE SKIP LOCKED` under a lease, so replicas share the
+  backlog with no leader and a crashed replica's claims return on expiry;
+  reconciles each claimed run once; deletes the rows only after a reconcile
+  that *began after they committed* has succeeded, including publishing any
+  run-level conclusion. A failing run is backed off (1 s to 1 min) and never
+  dropped. Deletion is by id over a snapshot taken before the reconcile reads
+  anything, so a request that commits mid-reconcile survives for the next pass
+  (a high-water mark over ids would lose it: ids are assigned at INSERT and
+  become visible at COMMIT).
+- **The RPCs stay, as the latency path.** `ReconcileRun` now goes through the
+  same pass, which consumes the requests it covered, so the happy path does no
+  second reconcile.
+- **Coalescing** (`services/dag-engine/coalesce.go`). Reconciles of one run are
+  single-flighted with one shared follow-up: a caller is never answered by a
+  pass that began before it asked (that pass may have read the attempts before
+  the caller's fact committed), and every caller arriving during a pass shares
+  the next one. Passes run detached from the callers' contexts with their own
+  timeout, so an impatient caller cannot abort a pass others wait on, and a
+  semaphore (`NEXUS_DAG_RECONCILE_CONCURRENCY`) bounds concurrent runs so a
+  burst waits on goroutines rather than on the pool. The burst test's 502
+  completions of one run cost 6-17 passes instead of 502.
+- **A publish failure keeps the request.** A reconcile that reaches RUNNING,
+  PAUSED or a terminal state and cannot publish it now reports `PublishErr`;
+  the request stays queued and the conclusion is published again. Before, a
+  failed terminal publish logged "the run will stay non-terminal because
+  nothing will reconcile it again" -- true, and now false.
+- **SetRunState stopped reporting faults as refusals.** The workflow-manager
+  answered `applied=false` for *any* error, so a terminal publish lost to its
+  own database fault looked to the engine like an adjudicated refusal. Only
+  `ErrRunStateConflict` and `ErrNotFound` are refusals now; anything else is
+  `Unavailable`, and the engine retries.
+- **The stalled-run sweep's blind spot is closed.** A run is stalled when it is
+  materialized, non-terminal, has nothing live and no retry timer, and has been
+  quiet past the race guard -- whatever its node states say. It is the
+  backstop behind the queue and the repair for runs stranded before it.
+- **Runs stranded before the upgrade** are repaired twice over: migration 0039
+  queues one request for every live materialized run, and the widened sweep
+  finds any it missed.
+
+**The other post-commit follow-ups, checked for the same failure mode.**
+
+- *Gateway reconcile after a report; workflow-manager reconcile after resume,
+  cancel, retry* -- durable via the triggers above; their log lines are WARN
+  now and say which mechanism will finish the job.
+- *Run creation's materialize call* -- same class, fixed. `runs.Create` commits
+  the run and then asks the engine to materialize it; a lost call left a
+  PENDING run with no graph that nothing would start, holding a
+  `max_active_runs` slot. Worse, the schedule and sensor loops retry creation
+  under the same idempotency key, and the deduplicated branch did nothing, so
+  every retry returned the dead run. The deduplicated branch now materializes
+  a PENDING run that has no nodes (materialize is idempotent), and the stalled
+  sweep materializes PENDING graph-less runs past the race guard
+  (`WFMListUnmaterializedRuns`, `runs.EnsureMaterialized`).
+- *Cancel fan-out* -- already durable: the run is CANCELLING, the F109 cancel
+  sweep re-issues it every 5 s, and the heartbeat derives CANCEL_ATTEMPT from
+  the run state. The node settlement after cancel is now queued too.
+- *Run deadline* -- same class, fixed. `OnRunDeadline` marks the run TIMED_OUT
+  and then cancels its attempts; that call had no retry, and the heartbeat
+  derived CANCEL_ATTEMPT only from CANCELLING/CANCELLED runs, so a lost call
+  left a timed-out run's work running past its deadline holding reservations.
+  `PendingCancellations` now includes TIMED_OUT.
+- *Schedule ticks, backfills, sensors* -- durable already: leased state rows,
+  deterministic idempotency keys, and a pending observation retried until its
+  run exists; with the materialize fix above, a retried creation now also
+  starts the run.
+- *Event outbox* -- durable by construction (0016): the row commits with the
+  fact and the relay retries until published.
+- *Permit settlement* -- not a post-commit follow-up: a single synchronous call
+  whose failure is returned to the task, and `permitSQL` is atomic. A lost
+  settlement mis-charges a token bucket that refills; it strands nothing.
+- *Engine run events* -- remain best-effort by design (EventWriter): the audit
+  gap is visible and the current-state tables stay correct.
+
+**Pool size.** The chart gained `postgres.pool.perService.<connection key>`,
+overriding the shared caps for one service; `validate.sh` renders it and
+refuses an unknown key. The dev environment sets the dag-engine to 10 against
+a shared 3. Coalescing removes most of the pressure; the headroom covers the
+reconcile concurrency and the queue consumer. OPERATIONS §30 documents the
+tuning, metrics (`nexus_dag_reconcile_queue_depth`,
+`_oldest_seconds`, `_runs_total`, `nexus_dag_reconcile_coalesced_total`) and
+the upgrade.
+
+**Tests.** Written first, each failing before its fix:
+
+- `TestIntegrationListStalledRuns` gains the stranded fan-out shape (failed on
+  the old query) and a PAUSED negative case.
+- `internal/store/dagengine_reconcile_queue_integration_test.go`: every
+  terminal kind enqueues exactly once, a rolled-back write leaves nothing, a
+  duplicate terminal write is not a new fact, a memo hit born SUCCEEDED
+  enqueues, the run-state transitions that need the engine enqueue and the
+  others do not, the scheduler's role enqueues through the trigger without a
+  grant, concurrent claims are disjoint, leases hide and expire, release backs
+  off and records the cause, and acknowledgement by id spares a later request.
+- `services/dag-engine/durable_reconcile_integration_test.go`, against a real
+  engine and Postgres, with a fleet playing the scheduler, workers and
+  gateway: a control proving the fault injector strands the run with no
+  consumer; two of three post-report RPCs lost plus a failed terminal publish,
+  run SUCCEEDED; an engine replica killed mid-run holding leases, a fresh one
+  takes them after expiry and finishes; 502 completions of one run reported at
+  once against a 3-connection pool, no stranded node and 6-17 passes
+  (reverting the coalescer: 504 passes, the test fails); and a run stranded
+  with no queued request, repaired by the stalled-run sweep. All five pass with
+  `-count=10`.
+- `services/dag-engine/coalesce_test.go`: 501 calls during a pass run two
+  passes, the follow-up starts after the burst, runs are independent and the
+  concurrency bound holds, a caller's deadline does not cancel the pass, a
+  wedged pass hits its own timeout; the env parsing and backoff are pinned.
+- `TestSetRunStateSeparatesRefusalsFromFaults`,
+  `TestTimedOutRunStopsInFlightWorkThroughTheHeartbeat`,
+  `TestIntegrationALostMaterializeIsRepairedByTheIdempotentRetry` and
+  `TestIntegrationUnmaterializedRunsAreSweptAndMaterialized`.
+
+**Reproduced on the real run.** The stranded run was copied read-only from
+`nexus_dev` (spec, run, 503 nodes, 502 edges, the expansion, 501 attempts)
+into a database migrated to 0038, and the fixed binaries started against it.
+Upgrade path (0039's backfill request): the queue consumer reconciled it and
+`verify` had an attempt 4 s after start; once that attempt SUCCEEDED the run
+was SUCCEEDED with 503 nodes SUCCEEDED and an empty queue. Sweep path (queue
+emptied after migrating, as if stranded after the upgrade with its request
+lost): the workflow-manager's sweep found it at its first pass and the same
+outcome followed.
+
+**Remaining.** Coalescing is per replica: two dag-engine replicas can still
+reconcile one run at the same time, which is safe (every write is
+compare-and-set) and merely redundant. A reconcile of a TIMED_OUT run still
+computes a frontier the scheduler will never dispatch (pre-existing, not made
+worse: the same reconcile ran from the report RPC before). The dev cluster's
+stuck run itself was not touched; it is repaired when the fixed release and
+0039 are deployed there.

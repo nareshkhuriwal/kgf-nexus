@@ -104,9 +104,19 @@ module "nexus" {
     logLevel = "info"
 
     # The host machine's PostgreSQL (deploy/scripts/dev-host-postgres.sh).
-    # The host Postgres is shared with other projects (max_connections is
-    # typically 100), so each service keeps a small pool.
-    postgres = merge({ enabled = false, pool = { maxConns = 3, minConns = 1 } }, var.postgres)
+    # The host Postgres is shared with other projects, so each service keeps a
+    # small pool. The dag-engine gets more: it reconciles several runs at once
+    # and consumes the durable reconcile queue, and at 3 connections a 500-way
+    # fan-out timed its reconciles out (CONTRACT-FINDINGS F160). Coalescing
+    # removes most of that pressure; the headroom covers the rest.
+    postgres = merge({
+      enabled = false
+      pool = {
+        maxConns   = 3
+        minConns   = 1
+        perService = { dagEngine = { maxConns = 10, minConns = 1 } }
+      }
+    }, var.postgres)
 
     # Laptop-sized volumes; the defaults are sized for a shared cluster.
     minio = { storage = { size = "5Gi" } }

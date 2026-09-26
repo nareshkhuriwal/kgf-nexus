@@ -2233,6 +2233,10 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_dag_run_state_published_total` | C | state, result | dag-engine | Run state publishes. `result="error"` on a terminal state: a run may be stranded |
 | `nexus_dag_operator_retries_total` | C | result (reset/invalid/not_retryable/not_found/conflict/error) | dag-engine | Operator retries (§18) applied to a run's graph. `invalid` and `not_retryable` are the caller's problem; `conflict` means a concurrent writer won and a retry of the request may succeed; `error` > 0 needs a look |
 | `nexus_dag_operator_retry_nodes_reset_total` | C | — | dag-engine | Nodes reset by operator retries, selected nodes and their dependents alike |
+| `nexus_dag_reconcile_queue_depth` | G | — | dag-engine | Durable run-reconcile requests queued (§30). Near zero when healthy |
+| `nexus_dag_reconcile_queue_oldest_seconds` | G | — | dag-engine | Age of the oldest queued request (§30). Alert above a few minutes: some run is not advancing |
+| `nexus_dag_reconcile_queue_runs_total` | C | result (ok/dropped/retry) | dag-engine | Runs the queue consumer processed (§30). `retry` rising: reconciles or run-state publishes are failing |
+| `nexus_dag_reconcile_coalesced_total` | C | — | dag-engine | Reconcile requests answered by a pass already queued for the same run instead of a pass of their own (§30) |
 | `nexus_rm_reservations_total` | C | result (granted/refused/not_found/error) | resource-manager | Reserve calls |
 | `nexus_rm_reserve_duration_seconds` | H | result | resource-manager | Reserve latency |
 | `nexus_rm_releases_total` | C | result (released/absent/error) | resource-manager | Releases. `absent` is expected duplicate traffic |
@@ -4860,3 +4864,76 @@ was retried; the retry resumed from the checkpoint; `attempt_usage`, the usage
 ledger, `task_checkpoints`, the checkpoint objects, `rate_limit_buckets` and the
 heartbeats all held the expected values; a token after its attempt ended, and
 each tenant's token on the other tenant's agent, were refused.
+
+---
+
+## 30. Run advancement: the durable reconcile queue
+
+A run advances only when the dag-engine reconciles it: turns finished attempts
+into node states, starts the next nodes and publishes the run's conclusion.
+Since CONTRACT-FINDINGS F160 the obligation to reconcile is a row in
+`run_reconcile_requests`, written by a database trigger in the same
+transaction as the fact that needs it (a terminal attempt; a resume, cancel,
+pause or operator retry). The synchronous `ReconcileRun` calls from the
+gateway and the workflow-manager are the fast path; the dag-engine's queue
+consumer is the durable one. A lost call, a timeout or an engine restart
+delays a run by about one poll; it no longer strands it.
+
+### 30.1 Tuning (dag-engine)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NEXUS_DAG_RECONCILE_CONCURRENCY` | 8 | Runs reconciled at once. Each reconcile holds about one connection at a time, so keep the pool (`NEXUS_DB_MAX_CONNS`) at or above this plus 2 |
+| `NEXUS_DAG_RECONCILE_TIMEOUT_SEC` | 120 | Bound on one reconcile pass. Passes run detached from the caller, so a caller's deadline never aborts one |
+| `NEXUS_DAG_RECONCILE_QUEUE_POLL_MS` | 1000 | Idle poll of the queue: the extra latency of a run whose fast-path call was lost |
+| `NEXUS_DAG_RECONCILE_QUEUE_BATCH` | 500 | Requests claimed per batch. A 500-way burst of one run is one run to reconcile |
+| `NEXUS_DAG_RECONCILE_QUEUE_LEASE_SEC` | 30 | Claim lease. A crashed replica's claims return after it; a pass that outlives it only causes a redundant, harmless reconcile elsewhere |
+
+Every value must be a positive integer; anything else stops the service at
+startup. Reconciles of one run are coalesced: however many reports arrive
+together, at most one pass runs and one more is queued behind it.
+
+**Pool size.** The dag-engine is the service most likely to need a bigger
+pool than the rest. With the Helm chart, `postgres.pool.perService.dagEngine`
+overrides the shared `postgres.pool` caps for it alone (§20); the dev
+environment sets 10 against a shared 3.
+
+### 30.2 Monitoring and alerts
+
+- `nexus_dag_reconcile_queue_oldest_seconds` above ~300 s: a run is waiting
+  on a reconcile that keeps failing, or no dag-engine is consuming. The engine
+  logs `run reconcile requests are waiting` at WARN with the count and age.
+- `nexus_dag_reconcile_queue_runs_total{result="retry"}` rising: reconciles
+  or run-state publishes fail. The log line `reconcile from the durable queue
+  failed; will retry` names the run and the error; requests back off
+  exponentially (1 s to 1 min) and are never dropped.
+- `nexus_stalled_runs_recovered_total` (workflow-manager) should stay flat.
+  The stalled-run sweep is now the backstop behind the queue; a nonzero rate
+  after the upgrade means a path that needs a reconcile is not enqueuing one.
+
+To see what is queued:
+
+```sql
+SELECT run_id, count(*), min(created_at), max(attempts), max(last_error)
+  FROM run_reconcile_requests GROUP BY run_id ORDER BY min(created_at) LIMIT 20;
+```
+
+To ask for one run to be looked at again, insert a request; the next poll
+takes it:
+
+```sql
+INSERT INTO run_reconcile_requests (run_id, reason) VALUES ('<run-id>', 'operator');
+```
+
+### 30.3 Upgrading
+
+Apply migration 0039 before rolling the services (§6.3). It queues one
+request for every live, materialized run, so the first new dag-engine to start
+reconciles each of them once -- this is what repairs runs that were stranded
+before the upgrade, such as a fan-out whose fan-in never started. Expect a
+short burst of reconciles at startup, proportional to the number of live runs.
+
+Order does not matter for correctness: an old dag-engine ignores the queue
+(rows wait for the new one), and the trigger enqueues whatever version of the
+scheduler wrote the terminal attempt. To roll back, roll the dag-engine back
+first, then 0039 (§6.4).

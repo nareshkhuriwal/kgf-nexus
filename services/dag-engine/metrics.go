@@ -26,6 +26,12 @@ type Metrics struct {
 	runStates   *metrics.CounterVec
 	retries     *metrics.CounterVec
 	retryResets *metrics.Counter
+
+	// The durable reconcile queue and coalescing (F160).
+	queueDepth     *metrics.Gauge
+	queueOldest    *metrics.Gauge
+	queueProcessed *metrics.CounterVec
+	coalesced      *metrics.Counter
 }
 
 // NewMetrics registers the dag-engine families on reg.
@@ -58,7 +64,38 @@ func NewMetrics(reg *metrics.Registry) *Metrics {
 			"result"),
 		retryResets: reg.NewCounter("nexus_dag_operator_retry_nodes_reset_total",
 			"Nodes reset to PENDING (or an expanded template to RUNNING) by operator retries, selected nodes and their dependents alike.").Counter(),
+		queueDepth: reg.NewGauge("nexus_dag_reconcile_queue_depth",
+			"Durable run-reconcile requests queued (run_reconcile_requests), sampled by the consumer. Near zero when healthy; a rising value means reconciles are failing or nothing is consuming.").Gauge(),
+		queueOldest: reg.NewGauge("nexus_dag_reconcile_queue_oldest_seconds",
+			"Age of the oldest queued run-reconcile request. The alarm for a run that is not advancing.").Gauge(),
+		queueProcessed: reg.NewCounter("nexus_dag_reconcile_queue_runs_total",
+			"Runs the reconcile-queue consumer processed, by result: ok (reconciled, requests consumed), dropped (run deleted or never materialized) or retry (reconcile or publish failed; requests backed off).",
+			"result"),
+		coalesced: reg.NewCounter("nexus_dag_reconcile_coalesced_total",
+			"Reconcile requests answered by a pass another request had already queued for the same run, instead of a pass of their own.").Counter(),
 	}
+}
+
+func (m *Metrics) observeQueue(depth int64, oldest time.Duration) {
+	if m == nil {
+		return
+	}
+	m.queueDepth.Set(float64(depth))
+	m.queueOldest.Set(oldest.Seconds())
+}
+
+func (m *Metrics) observeQueueRun(result string) {
+	if m == nil {
+		return
+	}
+	m.queueProcessed.With(metrics.Labels{"result": result}).Inc()
+}
+
+func (m *Metrics) observeCoalesced() {
+	if m == nil {
+		return
+	}
+	m.coalesced.Inc()
 }
 
 func (m *Metrics) observeOp(op string, start time.Time, err error) {

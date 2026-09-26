@@ -80,12 +80,22 @@ json() { python3 -c "import sys,json; d=json.load(sys.stdin); print(eval(sys.arg
 # database. That is a dev-only diagnostic, not how a client should read
 # results; elsewhere the run state above is the verdict.
 verdict() { # run node
-  local ns=${NEXUS_SUITE_K8S_NAMESPACE:-nexus-dev} pw out
-  pw=$(kubectl -n "$ns" get secret kgf-nexus-credentials -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d 2>/dev/null) || true
-  [ -n "$pw" ] || { echo "   (verdict output not retrievable: the API does not expose task outputs yet)"; return; }
-  out=$(kubectl -n "$ns" exec postgres-0 -- env PGPASSWORD="$pw" psql -U nexus -d nexus -tA -c \
-    "SELECT o.value->>'inline' FROM task_attempts a, jsonb_each(a.output_ref) o
-      WHERE a.run_id = '$1' AND a.node_id = '$2' AND a.state = 'SUCCEEDED' LIMIT 1" 2>/dev/null | base64 -d 2>/dev/null) || true
+  local ns=${NEXUS_SUITE_K8S_NAMESPACE:-nexus-dev} pw out dsn=${NEXUS_SUITE_DATABASE_URL:-}
+  local q="SELECT o.value->>'inline' FROM task_attempts a, jsonb_each(a.output_ref) o
+      WHERE a.run_id = '$1' AND a.node_id = '$2' AND a.state = 'SUCCEEDED' LIMIT 1"
+  # The dev environment runs on the host machine's Postgres
+  # (deploy/scripts/dev-host-postgres.sh), so read it there directly.
+  if [ -z "$dsn" ] && [ -s .dev-postgres/password ]; then
+    dsn="postgres://${NEXUS_DEV_PG_USER:-nexus_dev}:$(cat .dev-postgres/password)@127.0.0.1:${NEXUS_DEV_PG_PORT:-5432}/${NEXUS_DEV_PG_DATABASE:-nexus_dev}?sslmode=disable"
+  fi
+  if [ -n "$dsn" ]; then
+    out=$(psql "$dsn" -tA -c "$q" 2>/dev/null | base64 -d 2>/dev/null) || true
+  else
+    # An older dev environment with an in-cluster Postgres.
+    pw=$(kubectl -n "$ns" get secret kgf-nexus-credentials -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    [ -n "$pw" ] || { echo "   (verdict output not retrievable: set NEXUS_SUITE_DATABASE_URL)"; return; }
+    out=$(kubectl -n "$ns" exec postgres-0 -- env PGPASSWORD="$pw" psql -U nexus -d nexus -tA -c "$q" 2>/dev/null | base64 -d 2>/dev/null) || true
+  fi
   [ -n "$out" ] || { echo "   (no verdict output recorded for $2)"; return; }
   echo "   verdict ($2):"
   printf '%s' "$out" | python3 -m json.tool 2>/dev/null | sed 's/^/     /' || echo "     $out"

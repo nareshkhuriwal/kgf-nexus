@@ -324,28 +324,50 @@ func WFMListRunsNeedingDeadline(ctx context.Context, q GWQuerier, limit int) ([]
 }
 
 // WFMListStalledRuns finds runs that have stopped progressing and will never be
-// looked at again: every node is terminal, nothing is in flight, and yet the RUN
-// is still non-terminal.
+// looked at again: materialized, still non-terminal, nothing in flight and no
+// retry on its way.
 //
-// Such a run is unreachable from every direction. A reconcile happens only when
-// an attempt reports or an operator intervenes, and a run with no live attempts
-// will never produce either -- so the conclusion the engine already computed is
-// simply never applied. Observed in the wild as a run sitting at PAUSING for
-// seven hours with all three of its nodes terminal, and as the F67 case where a
-// terminal publish was cancelled after the node work had committed.
+// Such a run is unreachable from every direction. A reconcile happens when an
+// attempt goes terminal or an operator intervenes, and a run with no live
+// attempt and no retry pending will never produce either -- so whatever the
+// engine would conclude, or start next, is simply never computed. Observed as
+// a run sitting at PAUSING for seven hours with all three of its nodes
+// terminal, as the F67 case where a terminal publish was cancelled after the
+// node work had committed, as F152 (a LOST attempt with no budget left) and as
+// F160: a 500-way fan-out whose attempts all SUCCEEDED while the reconciles
+// after them were lost, leaving 26 children RUNNING, the map template RUNNING
+// and the fan-in PENDING with no attempt at all.
 //
-// This is the BACKSTOP, not the fix. Each individual cause is worth fixing at its
-// own call site and several have been (F62, F67, b97d1ac). What this adds is the
-// guarantee those point fixes cannot give on their own: whatever the reason a run
-// stops being reconciled, something eventually notices. A nonzero result is
-// therefore a SIGNAL that an upstream path is broken, not routine housekeeping --
-// callers should say so loudly rather than repairing quietly.
+// WHY NO NODE-STATE TEST. The query used to require every node to look
+// settled, judging a node with no attempts by its stored state. That is the
+// check F160 slipped through: a fan-in waiting on upstreams that have in fact
+// all finished has no attempt and reads PENDING, and a map template (which has
+// no attempt of its own) reads RUNNING, so a run stranded mid-graph never
+// matched. Node state is a projection the engine writes during a reconcile --
+// the very thing that did not happen -- so it cannot be the test for "a
+// reconcile is owed". What can: nothing live and nothing scheduled. A run in
+// that condition either has a conclusion to publish or a frontier to start,
+// and either way only a reconcile moves it. Asking for one on a run that turns
+// out to be fine costs one idempotent reconcile.
+//
+// This is the BACKSTOP, not the fix. Since F160 every terminal attempt and
+// every run state change that needs the engine enqueues a durable request
+// (migration 0039) that the dag-engine consumes, so this sweep should stay
+// quiet. What it adds is the guarantee no point fix can give on its own:
+// whatever the reason a run stops being reconciled, something eventually
+// notices -- including runs stranded before the queue existed. A nonzero
+// result is therefore a SIGNAL that an upstream path is broken, not routine
+// housekeeping; callers say so loudly rather than repairing quietly.
 //
 // minAge exists so this never races a healthy run. A run mid-transition can
-// legitimately show every node terminal for the moment between the last attempt
-// reporting and the engine publishing the outcome; sweeping that would replace a
-// correct conclusion with a guessed one. Anything still in this state after a
-// grace period is genuinely stuck.
+// legitimately look idle for the moment between its last attempt ending and
+// the engine creating the next ones; sweeping that would only duplicate the
+// reconcile already on its way. Anything still in this state after a grace
+// period is genuinely stuck.
+//
+// COST. One pass over the active runs (idx_runs_active) with per-run probes on
+// idx_attempts_run, once per StalledRunInterval and bounded by limit -- a read
+// on the minute scale, off the dispatch path ADR-0018 measures.
 func WFMListStalledRuns(ctx context.Context, q GWQuerier, minAge time.Duration, limit int) ([]string, error) {
 	if limit <= 0 {
 		limit = 100
@@ -361,33 +383,17 @@ func WFMListStalledRuns(ctx context.Context, q GWQuerier, minAge time.Duration, 
 		         SELECT 1 FROM task_attempts a
 		          WHERE a.run_id = r.id
 		            AND a.state IN ('PENDING','DISPATCHED','RUNNING'))
-		   -- The DAG is materialized and every node has settled. The nodes check
-		   -- must not be skipped: a run whose graph does not exist yet also has no
-		   -- live attempts, and concluding THAT run terminal would kill it before
-		   -- it ever started.
+		   -- The DAG is materialized. Must not be skipped: a run whose graph does
+		   -- not exist yet also has no live attempts, and reconciling THAT is an
+		   -- error, not a repair.
 		   AND EXISTS (SELECT 1 FROM task_nodes n WHERE n.run_id = r.id)
-		   --
-		   -- A node whose STORED state is not terminal also counts as settled
-		   -- when it has attempts, none of them live (checked above) and no
-		   -- retry scheduled: node state is only rewritten by a reconcile, and
-		   -- an attempt that ended by LEASE EXPIRY with its budget spent
-		   -- triggers none -- the gateway reconciles after worker reports only.
-		   -- Such a run sat RUNNING forever, invisible to this sweep because
-		   -- its node still read RUNNING (found by tests/gpusim). A node in
-		   -- retry backoff has a retry_backoff timer and is left alone; a node
-		   -- with no attempt at all (waiting on upstreams, or a map template)
-		   -- is judged by its stored state as before.
+		   -- No retry on its way: a node in retry backoff has a retry_backoff
+		   -- timer on its failed attempt, and the timer, not a reconcile, is
+		   -- what moves it next.
 		   AND NOT EXISTS (
-		         SELECT 1 FROM task_nodes n
-		          WHERE n.run_id = r.id
-		            AND n.state NOT IN
-		                ('SUCCEEDED','FAILED','SKIPPED','UPSTREAM_FAILED','CANCELLED')
-		            AND NOT (
-		                  EXISTS (SELECT 1 FROM task_attempts a
-		                           WHERE a.run_id = n.run_id AND a.node_id = n.node_id)
-		              AND NOT EXISTS (SELECT 1 FROM task_attempts a
-		                                JOIN timers t ON t.subject_id = a.id AND t.kind = 'retry_backoff'
-		                               WHERE a.run_id = n.run_id AND a.node_id = n.node_id)))
+		         SELECT 1 FROM task_attempts a
+		           JOIN timers t ON t.subject_id = a.id AND t.kind = 'retry_backoff'
+		          WHERE a.run_id = r.id)
 		   -- Age from the last thing that HAPPENED, which is the most recent
 		   -- attempt ending. workflow_runs has no updated_at, and created_at is
 		   -- the wrong clock: a long healthy run would look stale the whole time
@@ -411,6 +417,42 @@ func WFMListStalledRuns(ctx context.Context, q GWQuerier, minAge time.Duration, 
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("scan stalled run id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// WFMListUnmaterializedRuns lists PENDING runs whose DAG was never
+// materialized, older than minAge (CONTRACT-FINDINGS F160).
+//
+// Run creation commits the run row and THEN asks the dag-engine to
+// materialize it. When that call is lost the run is PENDING with no nodes:
+// nothing will ever start it, and it holds a max_active_runs slot. minAge is
+// the race guard against a create that is merely mid-materialize. Bounded by
+// idx_runs_active (PENDING is in its predicate) and one probe of the task_nodes
+// primary key per candidate.
+func WFMListUnmaterializedRuns(ctx context.Context, q GWQuerier, minAge time.Duration, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := q.Query(ctx, `
+		SELECT r.id::text
+		  FROM workflow_runs r
+		 WHERE r.state = 'PENDING'
+		   AND NOT EXISTS (SELECT 1 FROM task_nodes n WHERE n.run_id = r.id)
+		   AND r.created_at < now() - $1::interval
+		 ORDER BY r.created_at
+		 LIMIT $2`, minAge.String(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list unmaterialized runs: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan unmaterialized run id: %w", err)
 		}
 		out = append(out, id)
 	}

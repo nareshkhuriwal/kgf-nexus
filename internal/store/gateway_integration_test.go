@@ -976,7 +976,43 @@ func TestIntegrationListStalledRuns(t *testing.T) {
 			"was not reported stalled; it would stay RUNNING forever (run %s)", unreconciled.runID)
 	}
 
+	// The dev-cluster fan-out (F160): every attempt SUCCEEDED, but the reconciles
+	// that should have followed were lost, so the children still read RUNNING,
+	// the map template (which has no attempt of its own) reads RUNNING and the
+	// fan-in node, which never got an attempt, reads PENDING. Nothing is in
+	// flight and nothing will ever report again, yet the old query skipped the
+	// run: it judged the template and the fan-in by their stored state.
+	stranded := newFixture(t, ctx, pool)
+	stranded.attempt("square[0]", 1)
+	stranded.attempt("square[1]", 1)
+	mustExec(t, ctx, pool, `
+		INSERT INTO task_nodes (run_id, node_id, task_ref, spec_json, state)
+		VALUES ($1, 'square', 'scale.square', '{}'::jsonb, 'RUNNING'),
+		       ($1, 'verify', 'scale.verify', '{}'::jsonb, 'PENDING')`, stranded.runID)
+	mustExec(t, ctx, pool, `UPDATE task_nodes SET state = 'RUNNING'
+		 WHERE run_id = $1 AND node_id LIKE 'square[%'`, stranded.runID)
+	mustExec(t, ctx, pool, `UPDATE task_attempts SET state = 'SUCCEEDED', ended_at = now() - interval '1 hour'
+		 WHERE run_id = $1`, stranded.runID)
+	mustExec(t, ctx, pool, `UPDATE workflow_runs SET state = 'RUNNING',
+		        created_at = now() - interval '1 hour', started_at = now() - interval '1 hour'
+		  WHERE id = $1`, stranded.runID)
+	found, err = WFMListStalledRuns(ctx, pool, time.Minute, 100)
+	if err != nil {
+		t.Fatalf("list stalled runs: %v", err)
+	}
+	if !contains(found, stranded.runID) {
+		t.Errorf("a fan-out whose attempts all SUCCEEDED but whose fan-in never got an attempt "+
+			"was not reported stalled; it stays RUNNING forever (run %s)", stranded.runID)
+	}
+
 	// ── Everything below must NOT be swept. ──────────────────────────────
+
+	// Paused: nothing in flight and a PENDING node, but an operator is holding
+	// it. Resume reconciles it; the sweep must not.
+	paused := newFixture(t, ctx, pool)
+	paused.attempt("held", 1)
+	settleRun(t, ctx, pool, paused.runID, "PAUSED", "PENDING", "SUCCEEDED", time.Hour)
+	assertNotStalled(t, ctx, pool, paused.runID, "a PAUSED run")
 
 	// Between retries: the attempt failed, the node reads RUNNING, and a
 	// retry_backoff timer says the next attempt is coming.

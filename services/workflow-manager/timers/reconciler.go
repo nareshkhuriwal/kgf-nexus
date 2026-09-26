@@ -179,6 +179,8 @@ type Reconciler struct {
 	// reconcileCancelling re-issues a CANCELLING run's attempt cancellation.
 	// Injected for the same reason as reconcileRun.
 	reconcileCancelling func(ctx context.Context, runID string) error
+	// materializeRun finishes a run whose materialize call was lost (F160).
+	materializeRun func(ctx context.Context, runID string) error
 }
 
 // New builds a reconciler.
@@ -234,6 +236,14 @@ func (r *Reconciler) OnStalledRun(fn func(ctx context.Context, runID string) err
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reconcileRun = fn
+}
+
+// OnUnmaterializedRun registers the action for a PENDING run whose DAG was
+// never materialized (F160). Unset, the stalled-run sweep still reports them.
+func (r *Reconciler) OnUnmaterializedRun(fn func(ctx context.Context, runID string) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.materializeRun = fn
 }
 
 // OnCancellingRun registers the cancel sweep's action (F109). Unset, the sweep
@@ -304,6 +314,7 @@ func (r *Reconciler) Run(ctx context.Context) error {
 			r.sweepStaleClaims(ctx)
 		case <-stalled.C:
 			r.sweepStalledRuns(ctx)
+			r.sweepUnmaterializedRuns(ctx)
 		case <-cancelling.C:
 			r.SweepCancellingRuns(ctx)
 		case <-ticker.C:
@@ -421,8 +432,12 @@ func (r *Reconciler) sweepStaleClaims(ctx context.Context) {
 //
 // This is a BACKSTOP for a class of bug, not a feature. A run reaches this state
 // when its conclusion was computed and then lost, or never computed because
-// nothing triggered a reconcile: every node terminal, no attempt in flight, and
-// no future event that would cause anyone to look. Three separate causes have
+// nothing triggered a reconcile: no attempt in flight, no retry scheduled, and
+// no future event that would cause anyone to look -- whether every node is
+// terminal or a fan-in is still waiting on upstreams that have in fact all
+// finished (F160). Since F160 the durable reconcile queue (migration 0039)
+// covers every such trigger, so this should find nothing but runs stranded
+// before that upgrade. Three separate causes have
 // been fixed at their own call sites (F62 cancel, F67 terminal publish, the pause
 // gap in b97d1ac) and each fix was correct -- but they share a shape, and the
 // shape says the next one will not be found until an operator notices a run that
@@ -450,8 +465,9 @@ func (r *Reconciler) sweepStalledRuns(ctx context.Context) {
 		// WARN even when the repair succeeds. The run should never have been
 		// here, and a silent fix would hide the upstream defect that put it here
 		// -- which is the bug actually worth finding.
-		r.log.WarnContext(ctx, "run stalled with every node terminal and nothing in flight; "+
-			"its conclusion was never applied, which means a publish or reconcile path failed upstream",
+		r.log.WarnContext(ctx, "run stalled with nothing in flight and no retry scheduled; "+
+			"no reconcile followed its last change, which means a publish or reconcile path failed upstream "+
+			"(the dag-engine's durable reconcile queue, F160, should have caught it)",
 			"run_id", runID, "stalled_for_at_least", r.cfg.StalledRunAge)
 		if m := r.cfg.Metrics; m != nil && m.StalledRuns != nil {
 			m.StalledRuns.Inc()
@@ -466,6 +482,40 @@ func (r *Reconciler) sweepStalledRuns(ctx context.Context) {
 			// Logged and skipped, never fatal: one unrecoverable run must not
 			// stop the others being recovered, and the next sweep retries it.
 			r.log.ErrorContext(ctx, "could not reconcile a stalled run; will retry next sweep",
+				"run_id", runID, "error", err)
+		}
+	}
+}
+
+// sweepUnmaterializedRuns finds PENDING runs whose creation committed but whose
+// materialize call was lost, and materializes them (F160). The same backstop
+// shape as sweepStalledRuns, one step earlier in a run's life: nothing else
+// would ever start such a run, and it holds a max_active_runs slot. WARN and
+// the stalled-run counter, for the same reason: finding one means a create path
+// lost a call.
+func (r *Reconciler) sweepUnmaterializedRuns(ctx context.Context) {
+	runs, err := store.WFMListUnmaterializedRuns(ctx, r.db, r.cfg.StalledRunAge, r.cfg.BatchSize)
+	if err != nil {
+		r.log.ErrorContext(ctx, "failed to sweep unmaterialized runs", "error", err)
+		return
+	}
+	if len(runs) == 0 {
+		return
+	}
+	r.mu.RLock()
+	fn := r.materializeRun
+	r.mu.RUnlock()
+	for _, runID := range runs {
+		r.log.WarnContext(ctx, "run is PENDING with no graph; its creation committed but the materialize call was lost",
+			"run_id", runID, "stalled_for_at_least", r.cfg.StalledRunAge)
+		if m := r.cfg.Metrics; m != nil && m.StalledRuns != nil {
+			m.StalledRuns.Inc()
+		}
+		if fn == nil {
+			continue
+		}
+		if err := fn(ctx, runID); err != nil {
+			r.log.ErrorContext(ctx, "could not materialize a run; will retry next sweep",
 				"run_id", runID, "error", err)
 		}
 	}
