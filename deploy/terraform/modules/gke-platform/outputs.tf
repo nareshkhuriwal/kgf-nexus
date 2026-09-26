@@ -34,8 +34,18 @@ output "registry" {
 }
 
 output "postgres_host" {
-  description = "Cloud SQL private IP."
+  description = "Cloud SQL private-services-access DNS name (private zone in this VPC). Connect by this name: it is the one the server certificate carries, which sslmode=verify-full checks."
+  value       = trimsuffix(google_dns_record_set.postgres.name, ".")
+}
+
+output "postgres_private_ip" {
+  description = "Cloud SQL private IP (not in the server certificate; for diagnostics)."
   value       = google_sql_database_instance.this.private_ip_address
+}
+
+output "postgres_ca_bundle" {
+  description = "PEM of every CA the Cloud SQL instance trusts (current, upcoming, previous), from the Cloud SQL Admin API; the chart mounts it for verify-full."
+  value       = join("\n", [for c in data.google_sql_ca_certs.postgres.certs : trimspace(c.cert)])
 }
 
 output "postgres_instance_connection_name" {
@@ -70,16 +80,16 @@ output "artifact_bucket" {
 }
 
 output "artifact_hmac_credentials" {
-  description = "HMAC key pair for GCS S3 interoperability, for the kgf-nexus credentials Secret."
-  value = {
-    access_key_id     = google_storage_hmac_key.artifacts.access_id
-    secret_access_key = google_storage_hmac_key.artifacts.secret
-  }
+  description = "HMAC key pair for GCS S3 interoperability, for the kgf-nexus credentials Secret (null unless artifact_hmac_key)."
+  value = var.artifact_hmac_key ? {
+    access_key_id     = google_storage_hmac_key.artifacts[0].access_id
+    secret_access_key = google_storage_hmac_key.artifacts[0].secret
+  } : null
   sensitive = true
 }
 
 output "artifact_service_account" {
-  description = "Service account the result store acts as."
+  description = "Service account the result store acts as (the iam.gke.io/gcp-service-account annotation)."
   value       = google_service_account.artifacts.email
 }
 

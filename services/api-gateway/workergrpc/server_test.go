@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 )
@@ -396,6 +397,40 @@ func TestUnappliedResultIsNeverAcknowledged(t *testing.T) {
 	}
 }
 
+// TestResultFencedByAReclaimIsStale is F104's residual: when the lease
+// reconciler won the attempt row, the scheduler reports the ignored result as
+// stale and the worker is told stale_lease_token, not Accepted. The duplicate
+// of a result that did land stays Accepted.
+func TestResultFencedByAReclaimIsStale(t *testing.T) {
+	ctx := workerCtx()
+	cases := []struct {
+		name   string
+		err    error
+		accept bool
+		reason string
+	}{
+		{"reclaimed", fmt.Errorf("apply result for attempt a1: %w", store.ErrStaleLeaseToken), false, store.ReasonStaleLeaseToken},
+		{"duplicate", nil, true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newLeaseDB()
+			db.tokens["a1"] = "tok-current"
+			s := testServer(db, &fakeRM{exists: true, state: "ACTIVE"}, &fakeSched{resultErr: tc.err})
+			ack, err := s.ReportResult(ctx, &nexusv1.ReportResultRequest{
+				AttemptId: "a1", LeaseToken: "tok-current",
+				Outcome: nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED,
+			})
+			if err != nil {
+				t.Fatalf("ReportResult: %v", err)
+			}
+			if ack.GetAccepted() != tc.accept || ack.GetReason() != tc.reason {
+				t.Fatalf("ack = %+v, want accepted=%v reason=%q", ack, tc.accept, tc.reason)
+			}
+		})
+	}
+}
+
 // TestReportProgressForwardsMessageFractionAndToken is F96: the executor's
 // status line and fraction must reach the scheduler, which stores them, and the
 // lease token must travel with them so the scheduler can fence inside its own
@@ -563,6 +598,51 @@ func TestRegisterRejectsIncompleteRegistration(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if _, err := s.Register(ctx, c.req); status.Code(err) != codes.InvalidArgument {
 				t.Errorf("err = %v, want InvalidArgument", err)
+			}
+		})
+	}
+}
+
+// TestRegisterEnforcesTheAgentPolicy: an agent older than the configured
+// minimum, or missing a required capability, is refused with
+// FAILED_PRECONDITION -- which the agent's backoff treats as permanent -- and
+// no worker row is created. A compliant agent registers.
+func TestRegisterEnforcesTheAgentPolicy(t *testing.T) {
+	ctx := workerCtx()
+	req := func(version string, caps ...string) *nexusv1.RegisterRequest {
+		return &nexusv1.RegisterRequest{
+			Namespace: "team-ml", Hostname: "h", Queues: []string{"default"},
+			Capacity: &nexusv1.ResourceVector{CpuMillis: 1000}, AgentVersion: version, Capabilities: caps,
+		}
+	}
+	cases := []struct {
+		name string
+		req  *nexusv1.RegisterRequest
+		ok   bool
+	}{
+		{"compliant", req("1.5.0", domain.CapOutputMaxBytes, domain.CapLogShipping), true},
+		{"too old", req("1.3.2", domain.CapOutputMaxBytes), false},
+		{"dev build", req("dev", domain.CapOutputMaxBytes), false},
+		{"missing capability", req("1.5.0", domain.CapLogShipping), false},
+		{"pre-capability agent", req("1.5.0"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rm := &fakeRM{exists: true, state: "ACTIVE"}
+			s := testServer(newLeaseDB(), rm, &fakeSched{})
+			s.cfg.AgentPolicy = domain.AgentPolicy{MinVersion: "1.4.0", RequiredCapabilities: []string{domain.CapOutputMaxBytes}}
+			_, err := s.Register(ctx, c.req)
+			if c.ok {
+				if err != nil {
+					t.Fatalf("compliant agent refused: %v", err)
+				}
+				return
+			}
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("err = %v, want FailedPrecondition", err)
+			}
+			if rm.registered != 0 {
+				t.Errorf("a refused agent still created %d worker row(s)", rm.registered)
 			}
 		})
 	}

@@ -24,6 +24,62 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// CapacityPreference is a task's stance on preemptible (spot) capacity. The
+// zero value is SPOT_ALLOWED so every existing spec keeps its meaning.
+type CapacityPreference int32
+
+const (
+	// The zero value is meaningful on purpose (every spec written before
+	// placement existed means "spot allowed"), so it is not an _UNSPECIFIED.
+	// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+	CapacityPreference_CAPACITY_PREFERENCE_SPOT_ALLOWED CapacityPreference = 0
+	// Runs on either; spot workers score higher.
+	CapacityPreference_CAPACITY_PREFERENCE_SPOT_PREFERRED CapacityPreference = 1
+	// Never dispatched to a worker labelled nexus.io/capacity-type=spot.
+	CapacityPreference_CAPACITY_PREFERENCE_ON_DEMAND_ONLY CapacityPreference = 2
+)
+
+// Enum value maps for CapacityPreference.
+var (
+	CapacityPreference_name = map[int32]string{
+		0: "CAPACITY_PREFERENCE_SPOT_ALLOWED",
+		1: "CAPACITY_PREFERENCE_SPOT_PREFERRED",
+		2: "CAPACITY_PREFERENCE_ON_DEMAND_ONLY",
+	}
+	CapacityPreference_value = map[string]int32{
+		"CAPACITY_PREFERENCE_SPOT_ALLOWED":   0,
+		"CAPACITY_PREFERENCE_SPOT_PREFERRED": 1,
+		"CAPACITY_PREFERENCE_ON_DEMAND_ONLY": 2,
+	}
+)
+
+func (x CapacityPreference) Enum() *CapacityPreference {
+	p := new(CapacityPreference)
+	*p = x
+	return p
+}
+
+func (x CapacityPreference) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CapacityPreference) Descriptor() protoreflect.EnumDescriptor {
+	return file_nexus_v1_task_proto_enumTypes[0].Descriptor()
+}
+
+func (CapacityPreference) Type() protoreflect.EnumType {
+	return &file_nexus_v1_task_proto_enumTypes[0]
+}
+
+func (x CapacityPreference) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CapacityPreference.Descriptor instead.
+func (CapacityPreference) EnumDescriptor() ([]byte, []int) {
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{0}
+}
+
 // Airflow's trigger-rule taxonomy is well designed and worth adopting directly.
 type TriggerRule int32
 
@@ -70,11 +126,11 @@ func (x TriggerRule) String() string {
 }
 
 func (TriggerRule) Descriptor() protoreflect.EnumDescriptor {
-	return file_nexus_v1_task_proto_enumTypes[0].Descriptor()
+	return file_nexus_v1_task_proto_enumTypes[1].Descriptor()
 }
 
 func (TriggerRule) Type() protoreflect.EnumType {
-	return &file_nexus_v1_task_proto_enumTypes[0]
+	return &file_nexus_v1_task_proto_enumTypes[1]
 }
 
 func (x TriggerRule) Number() protoreflect.EnumNumber {
@@ -83,7 +139,7 @@ func (x TriggerRule) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TriggerRule.Descriptor instead.
 func (TriggerRule) EnumDescriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{0}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{1}
 }
 
 type AttemptState int32
@@ -141,11 +197,11 @@ func (x AttemptState) String() string {
 }
 
 func (AttemptState) Descriptor() protoreflect.EnumDescriptor {
-	return file_nexus_v1_task_proto_enumTypes[1].Descriptor()
+	return file_nexus_v1_task_proto_enumTypes[2].Descriptor()
 }
 
 func (AttemptState) Type() protoreflect.EnumType {
-	return &file_nexus_v1_task_proto_enumTypes[1]
+	return &file_nexus_v1_task_proto_enumTypes[2]
 }
 
 func (x AttemptState) Number() protoreflect.EnumNumber {
@@ -154,7 +210,7 @@ func (x AttemptState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AttemptState.Descriptor instead.
 func (AttemptState) EnumDescriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{1}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{2}
 }
 
 type AttemptOutcome int32
@@ -199,11 +255,11 @@ func (x AttemptOutcome) String() string {
 }
 
 func (AttemptOutcome) Descriptor() protoreflect.EnumDescriptor {
-	return file_nexus_v1_task_proto_enumTypes[2].Descriptor()
+	return file_nexus_v1_task_proto_enumTypes[3].Descriptor()
 }
 
 func (AttemptOutcome) Type() protoreflect.EnumType {
-	return &file_nexus_v1_task_proto_enumTypes[2]
+	return &file_nexus_v1_task_proto_enumTypes[3]
 }
 
 func (x AttemptOutcome) Number() protoreflect.EnumNumber {
@@ -212,7 +268,7 @@ func (x AttemptOutcome) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AttemptOutcome.Descriptor instead.
 func (AttemptOutcome) EnumDescriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{2}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{3}
 }
 
 // TaskSpec is the contract between the workflow author and the platform.
@@ -276,7 +332,11 @@ type TaskSpec struct {
 	// extend TaskSpec too, and a high, distinctive number cannot collide with
 	// their 21, 22, ... in a merge. Additive: an old agent ignores it and keeps
 	// the plain SIGTERM -> grace -> SIGKILL contract.
-	Cancellation  *CancellationPolicy `protobuf:"bytes,50,opt,name=cancellation,proto3" json:"cancellation,omitempty"`
+	Cancellation *CancellationPolicy `protobuf:"bytes,50,opt,name=cancellation,proto3" json:"cancellation,omitempty"`
+	// ADR-0030/0031: where this task may and would prefer to run. Field 60 for
+	// the same reason as 50. Absent means "anywhere the node_selector allows",
+	// which is what every spec written before it means.
+	Placement     *PlacementSpec `protobuf:"bytes,60,opt,name=placement,proto3" json:"placement,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -465,6 +525,190 @@ func (x *TaskSpec) GetCancellation() *CancellationPolicy {
 	return nil
 }
 
+func (x *TaskSpec) GetPlacement() *PlacementSpec {
+	if x != nil {
+		return x.Placement
+	}
+	return nil
+}
+
+// PlacementSpec holds hard constraints (eligibility) and soft preferences
+// (score) evaluated at claim time (ADR-0029 §4, ADR-0031). Worker labels are
+// overlaid with the labels of the worker's cluster (nexus.io/cluster).
+type PlacementSpec struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Capacity CapacityPreference     `protobuf:"varint,1,opt,name=capacity,proto3,enum=nexus.v1.CapacityPreference" json:"capacity,omitempty"`
+	// Hard: the worker's effective labels must contain every pair.
+	RequiredLabels map[string]string `protobuf:"bytes,2,rep,name=required_labels,json=requiredLabels,proto3" json:"required_labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Hard: effective nexus.io/cost-tier must be <= this. 0 = no limit.
+	MaxCostTier int32 `protobuf:"varint,3,opt,name=max_cost_tier,json=maxCostTier,proto3" json:"max_cost_tier,omitempty"`
+	// Soft: prefer workers whose nexus.io/data-locality tags intersect these.
+	PreferredDataLocality []string `protobuf:"bytes,4,rep,name=preferred_data_locality,json=preferredDataLocality,proto3" json:"preferred_data_locality,omitempty"`
+	// Soft: prefer workers carrying these labels.
+	PreferredLabels map[string]string `protobuf:"bytes,5,rep,name=preferred_labels,json=preferredLabels,proto3" json:"preferred_labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Artifacts the agent should serve from its node-local cache (ADR-0030 §4).
+	// Placement prefers workers that already hold them.
+	Artifacts []*CacheArtifact `protobuf:"bytes,6,rep,name=artifacts,proto3" json:"artifacts,omitempty"`
+	// Cap on retries after PREEMPTED failures, which do not spend max_attempts.
+	// 0 = the platform default (NEXUS_MAX_PREEMPTION_RETRIES).
+	MaxPreemptions int32 `protobuf:"varint,7,opt,name=max_preemptions,json=maxPreemptions,proto3" json:"max_preemptions,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *PlacementSpec) Reset() {
+	*x = PlacementSpec{}
+	mi := &file_nexus_v1_task_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlacementSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlacementSpec) ProtoMessage() {}
+
+func (x *PlacementSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_task_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlacementSpec.ProtoReflect.Descriptor instead.
+func (*PlacementSpec) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *PlacementSpec) GetCapacity() CapacityPreference {
+	if x != nil {
+		return x.Capacity
+	}
+	return CapacityPreference_CAPACITY_PREFERENCE_SPOT_ALLOWED
+}
+
+func (x *PlacementSpec) GetRequiredLabels() map[string]string {
+	if x != nil {
+		return x.RequiredLabels
+	}
+	return nil
+}
+
+func (x *PlacementSpec) GetMaxCostTier() int32 {
+	if x != nil {
+		return x.MaxCostTier
+	}
+	return 0
+}
+
+func (x *PlacementSpec) GetPreferredDataLocality() []string {
+	if x != nil {
+		return x.PreferredDataLocality
+	}
+	return nil
+}
+
+func (x *PlacementSpec) GetPreferredLabels() map[string]string {
+	if x != nil {
+		return x.PreferredLabels
+	}
+	return nil
+}
+
+func (x *PlacementSpec) GetArtifacts() []*CacheArtifact {
+	if x != nil {
+		return x.Artifacts
+	}
+	return nil
+}
+
+func (x *PlacementSpec) GetMaxPreemptions() int32 {
+	if x != nil {
+		return x.MaxPreemptions
+	}
+	return 0
+}
+
+// CacheArtifact is one cacheable input: a model, a tokenizer, a dataset shard.
+type CacheArtifact struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Exposed to the workload as NEXUS_ARTIFACT_<NAME> (upper-cased, [A-Z0-9_]).
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Content address, "sha256:<64 hex>". Verified on download. Empty keys the
+	// entry by URI, which cannot be integrity-checked.
+	Key string `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	// Where to fetch it on a miss: https://, http://, file://.
+	Uri string `protobuf:"bytes,3,opt,name=uri,proto3" json:"uri,omitempty"`
+	// Declared size, used for cache-affinity scoring and eviction planning.
+	SizeBytes     int64 `protobuf:"varint,4,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CacheArtifact) Reset() {
+	*x = CacheArtifact{}
+	mi := &file_nexus_v1_task_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CacheArtifact) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CacheArtifact) ProtoMessage() {}
+
+func (x *CacheArtifact) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_task_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CacheArtifact.ProtoReflect.Descriptor instead.
+func (*CacheArtifact) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *CacheArtifact) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *CacheArtifact) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *CacheArtifact) GetUri() string {
+	if x != nil {
+		return x.Uri
+	}
+	return ""
+}
+
+func (x *CacheArtifact) GetSizeBytes() int64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
+}
+
 // MapSpec declares a fan-out over a runtime collection (§5.4).
 //
 // Every field is mandatory. max_fanout in particular has no default: an
@@ -492,7 +736,7 @@ type MapSpec struct {
 
 func (x *MapSpec) Reset() {
 	*x = MapSpec{}
-	mi := &file_nexus_v1_task_proto_msgTypes[1]
+	mi := &file_nexus_v1_task_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -504,7 +748,7 @@ func (x *MapSpec) String() string {
 func (*MapSpec) ProtoMessage() {}
 
 func (x *MapSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_task_proto_msgTypes[1]
+	mi := &file_nexus_v1_task_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -517,7 +761,7 @@ func (x *MapSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MapSpec.ProtoReflect.Descriptor instead.
 func (*MapSpec) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{1}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *MapSpec) GetOverNodeId() string {
@@ -573,7 +817,7 @@ type CancellationPolicy struct {
 
 func (x *CancellationPolicy) Reset() {
 	*x = CancellationPolicy{}
-	mi := &file_nexus_v1_task_proto_msgTypes[2]
+	mi := &file_nexus_v1_task_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -585,7 +829,7 @@ func (x *CancellationPolicy) String() string {
 func (*CancellationPolicy) ProtoMessage() {}
 
 func (x *CancellationPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_task_proto_msgTypes[2]
+	mi := &file_nexus_v1_task_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -598,7 +842,7 @@ func (x *CancellationPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancellationPolicy.ProtoReflect.Descriptor instead.
 func (*CancellationPolicy) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{2}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CancellationPolicy) GetUninterruptible() bool {
@@ -632,7 +876,7 @@ type ValueSpec struct {
 
 func (x *ValueSpec) Reset() {
 	*x = ValueSpec{}
-	mi := &file_nexus_v1_task_proto_msgTypes[3]
+	mi := &file_nexus_v1_task_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -644,7 +888,7 @@ func (x *ValueSpec) String() string {
 func (*ValueSpec) ProtoMessage() {}
 
 func (x *ValueSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_task_proto_msgTypes[3]
+	mi := &file_nexus_v1_task_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -657,7 +901,7 @@ func (x *ValueSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValueSpec.ProtoReflect.Descriptor instead.
 func (*ValueSpec) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{3}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ValueSpec) GetType() string {
@@ -699,7 +943,7 @@ type CachePolicy struct {
 
 func (x *CachePolicy) Reset() {
 	*x = CachePolicy{}
-	mi := &file_nexus_v1_task_proto_msgTypes[4]
+	mi := &file_nexus_v1_task_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -711,7 +955,7 @@ func (x *CachePolicy) String() string {
 func (*CachePolicy) ProtoMessage() {}
 
 func (x *CachePolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_task_proto_msgTypes[4]
+	mi := &file_nexus_v1_task_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -724,7 +968,7 @@ func (x *CachePolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CachePolicy.ProtoReflect.Descriptor instead.
 func (*CachePolicy) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{4}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CachePolicy) GetEnabled() bool {
@@ -777,7 +1021,7 @@ type RuntimeSpec struct {
 
 func (x *RuntimeSpec) Reset() {
 	*x = RuntimeSpec{}
-	mi := &file_nexus_v1_task_proto_msgTypes[5]
+	mi := &file_nexus_v1_task_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -789,7 +1033,7 @@ func (x *RuntimeSpec) String() string {
 func (*RuntimeSpec) ProtoMessage() {}
 
 func (x *RuntimeSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_task_proto_msgTypes[5]
+	mi := &file_nexus_v1_task_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -802,7 +1046,7 @@ func (x *RuntimeSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuntimeSpec.ProtoReflect.Descriptor instead.
 func (*RuntimeSpec) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{5}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RuntimeSpec) GetExecutor() string {
@@ -862,16 +1106,22 @@ func (x *RuntimeSpec) GetStdoutOutput() string {
 }
 
 type SecretRef struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Ref           string                 `protobuf:"bytes,2,opt,name=ref,proto3" json:"ref,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The variable name (inject "env") or file name under $NEXUS_SECRETS_DIR
+	// (inject "file") the resolved value is delivered as.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Provider URI: env://, file://, vault://, akv:// (ADR-0025). Never a value.
+	Ref string `protobuf:"bytes,2,opt,name=ref,proto3" json:"ref,omitempty"`
+	// How the value reaches the workload: "env" (the default when empty) or
+	// "file". Additive (ADR-0025); an agent that predates it injects nothing.
+	Inject        string `protobuf:"bytes,3,opt,name=inject,proto3" json:"inject,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SecretRef) Reset() {
 	*x = SecretRef{}
-	mi := &file_nexus_v1_task_proto_msgTypes[6]
+	mi := &file_nexus_v1_task_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -883,7 +1133,7 @@ func (x *SecretRef) String() string {
 func (*SecretRef) ProtoMessage() {}
 
 func (x *SecretRef) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_task_proto_msgTypes[6]
+	mi := &file_nexus_v1_task_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -896,7 +1146,7 @@ func (x *SecretRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretRef.ProtoReflect.Descriptor instead.
 func (*SecretRef) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{6}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *SecretRef) GetName() string {
@@ -909,6 +1159,13 @@ func (x *SecretRef) GetName() string {
 func (x *SecretRef) GetRef() string {
 	if x != nil {
 		return x.Ref
+	}
+	return ""
+}
+
+func (x *SecretRef) GetInject() string {
+	if x != nil {
+		return x.Inject
 	}
 	return ""
 }
@@ -934,13 +1191,24 @@ type TaskAssignment struct {
 	// never authoritative (architecture §10).
 	LeaseExpiresAtUnixMs       int64 `protobuf:"varint,9,opt,name=lease_expires_at_unix_ms,json=leaseExpiresAtUnixMs,proto3" json:"lease_expires_at_unix_ms,omitempty"`
 	StartToCloseDeadlineUnixMs int64 `protobuf:"varint,10,opt,name=start_to_close_deadline_unix_ms,json=startToCloseDeadlineUnixMs,proto3" json:"start_to_close_deadline_unix_ms,omitempty"`
-	unknownFields              protoimpl.UnknownFields
-	sizeCache                  protoimpl.SizeCache
+	// W3C trace context of the dispatch span ("traceparent" and optionally
+	// "tracestate"), so the agent's execution spans continue the run's trace
+	// (ADR-0026). Empty when the attempt was never traced. Additive: an old
+	// agent ignores it and starts its own traces.
+	TraceContext map[string]string `protobuf:"bytes,11,rep,name=trace_context,json=traceContext,proto3" json:"trace_context,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// The reservation as committed (ADR-0029): the resource request plus the
+	// shared GPU device the control plane placed it on (gpu_shares). The agent
+	// uses the SAME device or refuses the assignment, so the control plane's
+	// per-device ledger and the real usage never diverge. Absent from an older
+	// scheduler; the agent then falls back to the request.
+	Reserved      *ResourceVector `protobuf:"bytes,60,opt,name=reserved,proto3" json:"reserved,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TaskAssignment) Reset() {
 	*x = TaskAssignment{}
-	mi := &file_nexus_v1_task_proto_msgTypes[7]
+	mi := &file_nexus_v1_task_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -952,7 +1220,7 @@ func (x *TaskAssignment) String() string {
 func (*TaskAssignment) ProtoMessage() {}
 
 func (x *TaskAssignment) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_task_proto_msgTypes[7]
+	mi := &file_nexus_v1_task_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -965,7 +1233,7 @@ func (x *TaskAssignment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskAssignment.ProtoReflect.Descriptor instead.
 func (*TaskAssignment) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_task_proto_rawDescGZIP(), []int{7}
+	return file_nexus_v1_task_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *TaskAssignment) GetAttemptId() string {
@@ -1038,11 +1306,25 @@ func (x *TaskAssignment) GetStartToCloseDeadlineUnixMs() int64 {
 	return 0
 }
 
+func (x *TaskAssignment) GetTraceContext() map[string]string {
+	if x != nil {
+		return x.TraceContext
+	}
+	return nil
+}
+
+func (x *TaskAssignment) GetReserved() *ResourceVector {
+	if x != nil {
+		return x.Reserved
+	}
+	return nil
+}
+
 var File_nexus_v1_task_proto protoreflect.FileDescriptor
 
 const file_nexus_v1_task_proto_rawDesc = "" +
 	"\n" +
-	"\x13nexus/v1/task.proto\x12\bnexus.v1\x1a\x15nexus/v1/common.proto\"\x94\v\n" +
+	"\x13nexus/v1/task.proto\x12\bnexus.v1\x1a\x15nexus/v1/common.proto\"\xcb\v\n" +
 	"\bTaskSpec\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x19\n" +
 	"\btask_ref\x18\x02 \x01(\tR\ataskRef\x12\x18\n" +
@@ -1066,7 +1348,8 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"\finput_params\x18\x14 \x03(\v2#.nexus.v1.TaskSpec.InputParamsEntryR\vinputParams\x12\x1a\n" +
 	"\bpriority\x18\x12 \x01(\x05R\bpriority\x12#\n" +
 	"\x03map\x18\x15 \x01(\v2\x11.nexus.v1.MapSpecR\x03map\x12@\n" +
-	"\fcancellation\x182 \x01(\v2\x1c.nexus.v1.CancellationPolicyR\fcancellation\x1aN\n" +
+	"\fcancellation\x182 \x01(\v2\x1c.nexus.v1.CancellationPolicyR\fcancellation\x125\n" +
+	"\tplacement\x18< \x01(\v2\x17.nexus.v1.PlacementSpecR\tplacement\x1aN\n" +
 	"\vInputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
 	"\x05value\x18\x02 \x01(\v2\x13.nexus.v1.ValueSpecR\x05value:\x028\x01\x1aO\n" +
@@ -1081,7 +1364,27 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a>\n" +
 	"\x10InputParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8a\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xbb\x04\n" +
+	"\rPlacementSpec\x128\n" +
+	"\bcapacity\x18\x01 \x01(\x0e2\x1c.nexus.v1.CapacityPreferenceR\bcapacity\x12T\n" +
+	"\x0frequired_labels\x18\x02 \x03(\v2+.nexus.v1.PlacementSpec.RequiredLabelsEntryR\x0erequiredLabels\x12\"\n" +
+	"\rmax_cost_tier\x18\x03 \x01(\x05R\vmaxCostTier\x126\n" +
+	"\x17preferred_data_locality\x18\x04 \x03(\tR\x15preferredDataLocality\x12W\n" +
+	"\x10preferred_labels\x18\x05 \x03(\v2,.nexus.v1.PlacementSpec.PreferredLabelsEntryR\x0fpreferredLabels\x125\n" +
+	"\tartifacts\x18\x06 \x03(\v2\x17.nexus.v1.CacheArtifactR\tartifacts\x12'\n" +
+	"\x0fmax_preemptions\x18\a \x01(\x05R\x0emaxPreemptions\x1aA\n" +
+	"\x13RequiredLabelsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aB\n" +
+	"\x14PreferredLabelsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"f\n" +
+	"\rCacheArtifact\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\x12\x10\n" +
+	"\x03uri\x18\x03 \x01(\tR\x03uri\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\x04 \x01(\x03R\tsizeBytes\"\x8a\x01\n" +
 	"\aMapSpec\x12 \n" +
 	"\fover_node_id\x18\x01 \x01(\tR\n" +
 	"overNodeId\x12\x1f\n" +
@@ -1114,10 +1417,11 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"\rstdout_output\x18\b \x01(\tR\fstdoutOutput\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"1\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"I\n" +
 	"\tSecretRef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
-	"\x03ref\x18\x02 \x01(\tR\x03ref\"\x83\x04\n" +
+	"\x03ref\x18\x02 \x01(\tR\x03ref\x12\x16\n" +
+	"\x06inject\x18\x03 \x01(\tR\x06inject\"\xcb\x05\n" +
 	"\x0eTaskAssignment\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x01 \x01(\tR\tattemptId\x12\x15\n" +
@@ -1131,10 +1435,19 @@ const file_nexus_v1_task_proto_rawDesc = "" +
 	"leaseToken\x126\n" +
 	"\x18lease_expires_at_unix_ms\x18\t \x01(\x03R\x14leaseExpiresAtUnixMs\x12C\n" +
 	"\x1fstart_to_close_deadline_unix_ms\x18\n" +
-	" \x01(\x03R\x1astartToCloseDeadlineUnixMs\x1aN\n" +
+	" \x01(\x03R\x1astartToCloseDeadlineUnixMs\x12O\n" +
+	"\rtrace_context\x18\v \x03(\v2*.nexus.v1.TaskAssignment.TraceContextEntryR\ftraceContext\x124\n" +
+	"\breserved\x18< \x01(\v2\x18.nexus.v1.ResourceVectorR\breserved\x1aN\n" +
 	"\vInputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
-	"\x05value\x18\x02 \x01(\v2\x13.nexus.v1.ResultRefR\x05value:\x028\x01*\xdb\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\x13.nexus.v1.ResultRefR\x05value:\x028\x01\x1a?\n" +
+	"\x11TraceContextEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\x8a\x01\n" +
+	"\x12CapacityPreference\x12$\n" +
+	" CAPACITY_PREFERENCE_SPOT_ALLOWED\x10\x00\x12&\n" +
+	"\"CAPACITY_PREFERENCE_SPOT_PREFERRED\x10\x01\x12&\n" +
+	"\"CAPACITY_PREFERENCE_ON_DEMAND_ONLY\x10\x02*\xdb\x01\n" +
 	"\vTriggerRule\x12\x1c\n" +
 	"\x18TRIGGER_RULE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18TRIGGER_RULE_ALL_SUCCESS\x10\x01\x12\x19\n" +
@@ -1172,60 +1485,74 @@ func file_nexus_v1_task_proto_rawDescGZIP() []byte {
 	return file_nexus_v1_task_proto_rawDescData
 }
 
-var file_nexus_v1_task_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_nexus_v1_task_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_nexus_v1_task_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_nexus_v1_task_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_nexus_v1_task_proto_goTypes = []any{
-	(TriggerRule)(0),           // 0: nexus.v1.TriggerRule
-	(AttemptState)(0),          // 1: nexus.v1.AttemptState
-	(AttemptOutcome)(0),        // 2: nexus.v1.AttemptOutcome
-	(*TaskSpec)(nil),           // 3: nexus.v1.TaskSpec
-	(*MapSpec)(nil),            // 4: nexus.v1.MapSpec
-	(*CancellationPolicy)(nil), // 5: nexus.v1.CancellationPolicy
-	(*ValueSpec)(nil),          // 6: nexus.v1.ValueSpec
-	(*CachePolicy)(nil),        // 7: nexus.v1.CachePolicy
-	(*RuntimeSpec)(nil),        // 8: nexus.v1.RuntimeSpec
-	(*SecretRef)(nil),          // 9: nexus.v1.SecretRef
-	(*TaskAssignment)(nil),     // 10: nexus.v1.TaskAssignment
-	nil,                        // 11: nexus.v1.TaskSpec.InputsEntry
-	nil,                        // 12: nexus.v1.TaskSpec.OutputsEntry
-	nil,                        // 13: nexus.v1.TaskSpec.NodeSelectorEntry
-	nil,                        // 14: nexus.v1.TaskSpec.InputLiteralsEntry
-	nil,                        // 15: nexus.v1.TaskSpec.InputParamsEntry
-	nil,                        // 16: nexus.v1.RuntimeSpec.EnvEntry
-	nil,                        // 17: nexus.v1.TaskAssignment.InputsEntry
-	(*ResourceRequest)(nil),    // 18: nexus.v1.ResourceRequest
-	(*Timeouts)(nil),           // 19: nexus.v1.Timeouts
-	(*RetryPolicy)(nil),        // 20: nexus.v1.RetryPolicy
-	(IdempotencyMode)(0),       // 21: nexus.v1.IdempotencyMode
-	(*ResultRef)(nil),          // 22: nexus.v1.ResultRef
+	(CapacityPreference)(0),    // 0: nexus.v1.CapacityPreference
+	(TriggerRule)(0),           // 1: nexus.v1.TriggerRule
+	(AttemptState)(0),          // 2: nexus.v1.AttemptState
+	(AttemptOutcome)(0),        // 3: nexus.v1.AttemptOutcome
+	(*TaskSpec)(nil),           // 4: nexus.v1.TaskSpec
+	(*PlacementSpec)(nil),      // 5: nexus.v1.PlacementSpec
+	(*CacheArtifact)(nil),      // 6: nexus.v1.CacheArtifact
+	(*MapSpec)(nil),            // 7: nexus.v1.MapSpec
+	(*CancellationPolicy)(nil), // 8: nexus.v1.CancellationPolicy
+	(*ValueSpec)(nil),          // 9: nexus.v1.ValueSpec
+	(*CachePolicy)(nil),        // 10: nexus.v1.CachePolicy
+	(*RuntimeSpec)(nil),        // 11: nexus.v1.RuntimeSpec
+	(*SecretRef)(nil),          // 12: nexus.v1.SecretRef
+	(*TaskAssignment)(nil),     // 13: nexus.v1.TaskAssignment
+	nil,                        // 14: nexus.v1.TaskSpec.InputsEntry
+	nil,                        // 15: nexus.v1.TaskSpec.OutputsEntry
+	nil,                        // 16: nexus.v1.TaskSpec.NodeSelectorEntry
+	nil,                        // 17: nexus.v1.TaskSpec.InputLiteralsEntry
+	nil,                        // 18: nexus.v1.TaskSpec.InputParamsEntry
+	nil,                        // 19: nexus.v1.PlacementSpec.RequiredLabelsEntry
+	nil,                        // 20: nexus.v1.PlacementSpec.PreferredLabelsEntry
+	nil,                        // 21: nexus.v1.RuntimeSpec.EnvEntry
+	nil,                        // 22: nexus.v1.TaskAssignment.InputsEntry
+	nil,                        // 23: nexus.v1.TaskAssignment.TraceContextEntry
+	(*ResourceRequest)(nil),    // 24: nexus.v1.ResourceRequest
+	(*Timeouts)(nil),           // 25: nexus.v1.Timeouts
+	(*RetryPolicy)(nil),        // 26: nexus.v1.RetryPolicy
+	(IdempotencyMode)(0),       // 27: nexus.v1.IdempotencyMode
+	(*ResourceVector)(nil),     // 28: nexus.v1.ResourceVector
+	(*ResultRef)(nil),          // 29: nexus.v1.ResultRef
 }
 var file_nexus_v1_task_proto_depIdxs = []int32{
-	11, // 0: nexus.v1.TaskSpec.inputs:type_name -> nexus.v1.TaskSpec.InputsEntry
-	12, // 1: nexus.v1.TaskSpec.outputs:type_name -> nexus.v1.TaskSpec.OutputsEntry
-	18, // 2: nexus.v1.TaskSpec.resources:type_name -> nexus.v1.ResourceRequest
-	13, // 3: nexus.v1.TaskSpec.node_selector:type_name -> nexus.v1.TaskSpec.NodeSelectorEntry
-	19, // 4: nexus.v1.TaskSpec.timeouts:type_name -> nexus.v1.Timeouts
-	20, // 5: nexus.v1.TaskSpec.retry:type_name -> nexus.v1.RetryPolicy
-	21, // 6: nexus.v1.TaskSpec.idempotency:type_name -> nexus.v1.IdempotencyMode
-	7,  // 7: nexus.v1.TaskSpec.cache:type_name -> nexus.v1.CachePolicy
-	8,  // 8: nexus.v1.TaskSpec.runtime:type_name -> nexus.v1.RuntimeSpec
-	0,  // 9: nexus.v1.TaskSpec.trigger_rule:type_name -> nexus.v1.TriggerRule
-	14, // 10: nexus.v1.TaskSpec.input_literals:type_name -> nexus.v1.TaskSpec.InputLiteralsEntry
-	15, // 11: nexus.v1.TaskSpec.input_params:type_name -> nexus.v1.TaskSpec.InputParamsEntry
-	4,  // 12: nexus.v1.TaskSpec.map:type_name -> nexus.v1.MapSpec
-	5,  // 13: nexus.v1.TaskSpec.cancellation:type_name -> nexus.v1.CancellationPolicy
-	16, // 14: nexus.v1.RuntimeSpec.env:type_name -> nexus.v1.RuntimeSpec.EnvEntry
-	9,  // 15: nexus.v1.RuntimeSpec.secrets:type_name -> nexus.v1.SecretRef
-	3,  // 16: nexus.v1.TaskAssignment.spec:type_name -> nexus.v1.TaskSpec
-	17, // 17: nexus.v1.TaskAssignment.inputs:type_name -> nexus.v1.TaskAssignment.InputsEntry
-	6,  // 18: nexus.v1.TaskSpec.InputsEntry.value:type_name -> nexus.v1.ValueSpec
-	6,  // 19: nexus.v1.TaskSpec.OutputsEntry.value:type_name -> nexus.v1.ValueSpec
-	22, // 20: nexus.v1.TaskAssignment.InputsEntry.value:type_name -> nexus.v1.ResultRef
-	21, // [21:21] is the sub-list for method output_type
-	21, // [21:21] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	14, // 0: nexus.v1.TaskSpec.inputs:type_name -> nexus.v1.TaskSpec.InputsEntry
+	15, // 1: nexus.v1.TaskSpec.outputs:type_name -> nexus.v1.TaskSpec.OutputsEntry
+	24, // 2: nexus.v1.TaskSpec.resources:type_name -> nexus.v1.ResourceRequest
+	16, // 3: nexus.v1.TaskSpec.node_selector:type_name -> nexus.v1.TaskSpec.NodeSelectorEntry
+	25, // 4: nexus.v1.TaskSpec.timeouts:type_name -> nexus.v1.Timeouts
+	26, // 5: nexus.v1.TaskSpec.retry:type_name -> nexus.v1.RetryPolicy
+	27, // 6: nexus.v1.TaskSpec.idempotency:type_name -> nexus.v1.IdempotencyMode
+	10, // 7: nexus.v1.TaskSpec.cache:type_name -> nexus.v1.CachePolicy
+	11, // 8: nexus.v1.TaskSpec.runtime:type_name -> nexus.v1.RuntimeSpec
+	1,  // 9: nexus.v1.TaskSpec.trigger_rule:type_name -> nexus.v1.TriggerRule
+	17, // 10: nexus.v1.TaskSpec.input_literals:type_name -> nexus.v1.TaskSpec.InputLiteralsEntry
+	18, // 11: nexus.v1.TaskSpec.input_params:type_name -> nexus.v1.TaskSpec.InputParamsEntry
+	7,  // 12: nexus.v1.TaskSpec.map:type_name -> nexus.v1.MapSpec
+	8,  // 13: nexus.v1.TaskSpec.cancellation:type_name -> nexus.v1.CancellationPolicy
+	5,  // 14: nexus.v1.TaskSpec.placement:type_name -> nexus.v1.PlacementSpec
+	0,  // 15: nexus.v1.PlacementSpec.capacity:type_name -> nexus.v1.CapacityPreference
+	19, // 16: nexus.v1.PlacementSpec.required_labels:type_name -> nexus.v1.PlacementSpec.RequiredLabelsEntry
+	20, // 17: nexus.v1.PlacementSpec.preferred_labels:type_name -> nexus.v1.PlacementSpec.PreferredLabelsEntry
+	6,  // 18: nexus.v1.PlacementSpec.artifacts:type_name -> nexus.v1.CacheArtifact
+	21, // 19: nexus.v1.RuntimeSpec.env:type_name -> nexus.v1.RuntimeSpec.EnvEntry
+	12, // 20: nexus.v1.RuntimeSpec.secrets:type_name -> nexus.v1.SecretRef
+	4,  // 21: nexus.v1.TaskAssignment.spec:type_name -> nexus.v1.TaskSpec
+	22, // 22: nexus.v1.TaskAssignment.inputs:type_name -> nexus.v1.TaskAssignment.InputsEntry
+	23, // 23: nexus.v1.TaskAssignment.trace_context:type_name -> nexus.v1.TaskAssignment.TraceContextEntry
+	28, // 24: nexus.v1.TaskAssignment.reserved:type_name -> nexus.v1.ResourceVector
+	9,  // 25: nexus.v1.TaskSpec.InputsEntry.value:type_name -> nexus.v1.ValueSpec
+	9,  // 26: nexus.v1.TaskSpec.OutputsEntry.value:type_name -> nexus.v1.ValueSpec
+	29, // 27: nexus.v1.TaskAssignment.InputsEntry.value:type_name -> nexus.v1.ResultRef
+	28, // [28:28] is the sub-list for method output_type
+	28, // [28:28] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_nexus_v1_task_proto_init() }
@@ -1239,8 +1566,8 @@ func file_nexus_v1_task_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nexus_v1_task_proto_rawDesc), len(file_nexus_v1_task_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   15,
+			NumEnums:      4,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

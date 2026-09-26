@@ -27,6 +27,10 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"flag"
 	"fmt"
@@ -121,7 +125,19 @@ func main() {
 		log.Warn("-i-understand-this-deletes-data was given without -delete; staying in dry run")
 	}
 
-	if *endpoint == "" {
+	// The backend, credential modes and cloud accounts come from the same
+	// NEXUS_RESULT_STORE_* / NEXUS_S3_* / NEXUS_AZURE_* / NEXUS_GCS_*
+	// variables every other result-store user reads (ADR-0027); the flags
+	// above keep overriding location and static keys as they always have.
+	storeCfg, err := objstore.ConfigFromEnv(nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "artifact-gc: %v\n", err)
+		os.Exit(2)
+	}
+	storeCfg.Endpoint, storeCfg.Bucket, storeCfg.Region, storeCfg.UseTLS = *endpoint, *bucket, *region, *useTLS
+	storeCfg.S3.AccessKeyID, storeCfg.S3.SecretAccessKey = *access, *secret
+
+	if storeCfg.Backend == objstore.BackendS3 && *endpoint == "" {
 		fmt.Fprintln(os.Stderr,
 			"artifact-gc: no result-store endpoint. Set RESULT_STORE_ENDPOINT or pass -endpoint\n"+
 				"artifact-gc: (the compose stack publishes MinIO on http://localhost:9010).")
@@ -130,6 +146,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter; flushed last.
+	defer tracing.SetupOrExit(ctx, "artifact-gc", version, log)()
 
 	gm := newGCMetrics()
 	stopMetrics, err := gm.serve(*metricsAddr, log)
@@ -141,10 +160,7 @@ func main() {
 		dsn: *dsn, prefix: *prefix, grace: *grace, maxObjects: *maxObjects, dryRun: dryRun,
 		logRetention: *logRetention,
 		checkRefs:    *checkRefs, maxRefs: *maxRefs,
-		minio: artifactgc.MinIOConfig{
-			Endpoint: *endpoint, Bucket: *bucket, Region: *region,
-			AccessKeyID: *access, SecretAccessKey: *secret, UseTLS: *useTLS,
-		},
+		store:   storeCfg,
 		metrics: gm,
 	})
 	gm.finish(runErr)
@@ -166,7 +182,7 @@ type runConfig struct {
 	logRetention time.Duration
 	checkRefs    bool
 	maxRefs      int
-	minio        artifactgc.MinIOConfig
+	store        objstore.Config
 	metrics      *gcMetrics
 }
 
@@ -180,10 +196,15 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	}
 	defer pool.Close()
 
-	objects, err := artifactgc.NewMinIOStore(ctx, cfg.minio)
+	raw, err := objstore.Open(ctx, cfg.store)
+	if err != nil {
+		return fmt.Errorf("open the result store: %w", err)
+	}
+	objects, err := artifactgc.NewObjectStore(ctx, objstore.Instrument(raw, cfg.metrics.objstore))
 	if err != nil {
 		return err
 	}
+	log.Info("result store", "backend", objects.Backend(), "bucket", objects.Bucket())
 
 	if cfg.checkRefs {
 		return checkDangling(ctx, pool, objects, log, cfg)
@@ -203,7 +224,7 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	}
 	log.Info("artifact GC starting",
 		"mode", mode,
-		"endpoint", cfg.minio.Endpoint,
+		"backend", objects.Backend(), "endpoint", cfg.store.Endpoint,
 		"bucket", objects.Bucket(),
 		"prefix", cfg.prefix,
 		"grace_period", sw.Config().GracePeriod,
@@ -220,7 +241,7 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	// A human-readable summary on stdout as well as the structured log: this is a
 	// command an operator reads, not a service whose logs get shipped.
 	fmt.Printf("\nartifact-gc summary (%s)\n", mode)
-	fmt.Printf("  objects examined      %d  (%d task-log objects)\n", st.Listed, st.LogObjects)
+	fmt.Printf("  objects examined      %d  (%d task-log, %d checkpoint objects)\n", st.Listed, st.LogObjects, st.CheckpointObjects)
 	fmt.Printf("  live references       %d  (from %v)\n", st.LiveRefs, artifactgc.RefSources())
 	fmt.Printf("  reachable (kept)      %d\n", st.Reachable)
 	fmt.Printf("  too young (kept)      %d  (grace %s)\n", st.TooYoung, sw.Config().GracePeriod)
@@ -248,7 +269,7 @@ func newLogger(level string) *slog.Logger {
 	default:
 		l = slog.LevelInfo
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l}))
+	return slog.New(tracing.LogHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l})))
 }
 
 func envOr(key, def string) string {
@@ -306,7 +327,7 @@ func checkDangling(
 	log *slog.Logger, cfg runConfig,
 ) error {
 	log.Info("checking for dangling references (READ-ONLY; nothing will be modified)",
-		"endpoint", cfg.minio.Endpoint, "bucket", objects.Bucket(),
+		"backend", objects.Backend(), "endpoint", cfg.store.Endpoint, "bucket", objects.Bucket(),
 		"max_refs", cfg.maxRefs, "reference_sources", artifactgc.RefSources())
 
 	rep, err := artifactgc.CheckDanglingRefs(ctx, pool, objects, log, cfg.maxRefs)

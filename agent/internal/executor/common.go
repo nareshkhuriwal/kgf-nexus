@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 )
 
 // DefaultGraceAfterTerm is the fallback SIGTERM→SIGKILL window. Ten seconds is
@@ -100,10 +102,61 @@ func stageInputs(workDir string, inputs map[string]*nexusv1.ResultRef) error {
 // the platform variables LAST, so a task cannot override NEXUS_* and lie to
 // itself about its own idempotency key.
 func buildEnv(spec TaskSpec, workDir, inputDir, outputFile, outputDir string) []string {
-	env := os.Environ()
+	return buildEnvScrubbed(spec, nil, nil, workDir, inputDir, outputFile, outputDir)
+}
+
+// subprocessBaseEnv are the only agent-process variables a subprocess task
+// inherits by default (F151): what a process needs to run at all (PATH, a
+// home, a locale, a timezone, a temp dir, who it is) and the two SDK task
+// contract settings an operator configures on the agent host
+// (NEXUS_TASK_MODULES, NEXUS_RESULT_DIR). Everything else the agent was
+// started with -- its worker credential, result-store and NATS
+// configuration, cloud credentials, unrelated settings -- stays with the
+// agent. The platform variables (NEXUS_ATTEMPT_ID, NEXUS_IDEMPOTENCY_KEY,
+// NEXUS_INPUT_DIR, NEXUS_OUTPUT_*, NEXUS_DEADLINE_UNIX_MS,
+// NEXUS_INLINE_THRESHOLD_BYTES, NEXUS_SECRETS_DIR ...) are set explicitly.
+var subprocessBaseEnv = []string{
+	"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "USER", "LOGNAME",
+	"NEXUS_TASK_MODULES", "NEXUS_RESULT_DIR",
+}
+
+// defaultPath is used when the agent itself has no PATH.
+const defaultPath = "/usr/local/bin:/usr/bin:/bin"
+
+// buildEnvScrubbed builds a subprocess task's environment from an explicit
+// allow-list, never from the agent's whole environment (F151):
+//
+//	subprocessBaseEnv + passthrough (operator globs) - agent credentials - deny
+//	+ task env + env-injected secrets + platform variables
+//
+// The agent's own credentials (secrets.IsAgentCredentialEnv) never pass, even
+// when an operator's passthrough glob matches them; deny (the env://
+// allow-list) keeps a variable a task may only receive by DECLARING it from
+// also arriving by inheritance. A secret never shares a name with a task env
+// entry (the runner rejects that) and cannot shadow a NEXUS_ variable.
+func buildEnvScrubbed(spec TaskSpec, passthrough, deny []string, workDir, inputDir, outputFile, outputDir string) []string {
+	var env []string
+	havePath := false
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if !contains(subprocessBaseEnv, name) && !secrets.MatchAny(passthrough, name) {
+			continue
+		}
+		if secrets.IsAgentCredentialEnv(name) || secrets.MatchAny(deny, name) {
+			continue
+		}
+		if name == "PATH" {
+			havePath = true
+		}
+		env = append(env, kv)
+	}
+	if !havePath {
+		env = append(env, "PATH="+defaultPath)
+	}
 	for k, v := range spec.Runtime.GetEnv() {
 		env = append(env, k+"="+v)
 	}
+	env = append(env, secretEnv(spec.Secrets)...)
 	env = append(env,
 		EnvAttemptID+"="+spec.AttemptID,
 		EnvRunID+"="+spec.RunID,
@@ -115,6 +168,7 @@ func buildEnv(spec TaskSpec, workDir, inputDir, outputFile, outputDir string) []
 		EnvOutputDir+"="+outputDir,
 		EnvOutputNames+"="+strings.Join(spec.DeclaredOutputs, " "),
 	)
+	env = append(env, traceEnvList(spec)...)
 	if !spec.StartToCloseDeadline.IsZero() {
 		env = append(env, EnvDeadlineUnixMs+"="+
 			strconv.FormatInt(spec.StartToCloseDeadline.UnixMilli(), 10))
@@ -122,13 +176,38 @@ func buildEnv(spec TaskSpec, workDir, inputDir, outputFile, outputDir string) []
 	if spec.InlineThresholdBytes > 0 {
 		env = append(env, EnvInlineThreshold+"="+strconv.FormatInt(spec.InlineThresholdBytes, 10))
 	}
+	if spec.AttemptNumber > 0 {
+		env = append(env, EnvAttemptNumber+"="+strconv.FormatInt(int64(spec.AttemptNumber), 10))
+	}
+	// The subprocess shares the agent's filesystem, so the host path IS the
+	// workload's path (ADR-0032 §1).
+	if spec.TaskAPISocket != "" {
+		env = append(env,
+			EnvTaskAPI+"="+TaskAPIScheme+spec.TaskAPISocket,
+			EnvTaskAPIToken+"="+spec.TaskAPIToken,
+		)
+	}
 	// A GPU request without device isolation is pinned by convention only; a
 	// workload can override this, which is precisely the fidelity gap that
 	// makes subprocess development-grade.
-	if ids := gpuDeviceList(spec); ids != "" {
+	if spec.GPU.Any() {
+		env = append(env, "CUDA_VISIBLE_DEVICES="+hostGPUList(spec))
+	} else if ids := gpuDeviceList(spec); ids != "" {
 		env = append(env, "CUDA_VISIBLE_DEVICES="+ids)
 	}
+	// A host process addresses the shared device by its host index.
+	env = append(env, gpuSliceEnv(spec, spec.GPU.SharedDevice)...)
+	env = append(env, artifactEnv(spec, false)...)
 	return env
+}
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // gpuDeviceList is the comma-separated device indices an attempt may use: the
@@ -189,7 +268,7 @@ func checkSubprocessLimitFidelity(limit *nexusv1.ResourceVector) error {
 			"use the docker executor or set AllowUnenforceableLimits for development",
 			ErrLimitUnenforceable, runtimeName())
 	}
-	if limit.GetGpuCount() > 0 && f.GPU == "none" {
+	if domain.UsesGPU(limit) && f.GPU == "none" {
 		return fmt.Errorf("%w: subprocess executor cannot isolate GPUs on %s",
 			ErrLimitUnenforceable, runtimeName())
 	}

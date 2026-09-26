@@ -18,6 +18,7 @@ artifactGC.confirmDelete=true. Run once by hand:
 {{- fail "artifactGC.mode=delete permanently removes result-store objects and also needs artifactGC.confirmDelete=true. Run in report mode first and read the summary (docs/OPERATIONS.md §7.7)." }}
 {{- end }}
 {{- $delete := and (eq $gc.mode "delete") $gc.confirmDelete }}
+{{- $sa := include "nexus.saFor" (list . "artifactGC" nil) | fromYaml }}
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -45,10 +46,15 @@ spec:
       activeDeadlineSeconds: {{ $gc.activeDeadlineSeconds }}
       template:
         metadata:
-          labels: {{- include "nexus.labels" (list . "artifact-gc") | nindent 12 }}
+          labels:
+            {{- include "nexus.labels" (list . "artifact-gc") | nindent 12 }}
+            {{- include "nexus.saPodLabels" $sa | indent 12 }}
+          {{- with include "nexus.dbRevisionAnnotation" . }}
+          annotations: {{- . | indent 12 }}
+          {{- end }}
         spec:
           restartPolicy: Never
-          automountServiceAccountToken: false
+          {{- include "nexus.podIdentity" $sa | nindent 10 }}
           {{- include "nexus.pullSecrets" . | nindent 10 }}
           securityContext: {{- include "nexus.podSecurity" . | nindent 12 }}
           {{- with .Values.placement.priorityClassName }}
@@ -78,9 +84,10 @@ spec:
                 - -i-understand-this-deletes-data
                 {{- end }}
               env:
-                {{- include "nexus.dbEnv" . | nindent 16 }}
+                {{- include "nexus.dbEnv" (list . "artifactGC") | nindent 16 }}
                 {{- include "nexus.resultStoreEnv" . | nindent 16 }}
                 - { name: ARTIFACT_GC_LOG_LEVEL, value: {{ $gc.logLevel | quote }} }
+                {{- include "nexus.tracingEnv" . | nindent 16 }}
                 {{- with $gc.pushgatewayUrl }}
                 - { name: ARTIFACT_GC_PUSHGATEWAY_URL, value: {{ . | quote }} }
                 {{- end }}
@@ -88,4 +95,10 @@ spec:
               securityContext:
                 {{- include "nexus.containerSecurity" . | nindent 16 }}
                 readOnlyRootFilesystem: true
+              {{- with include "nexus.dbVolumeMounts" . }}
+              volumeMounts: {{- . | indent 16 }}
+              {{- end }}
+          {{- with include "nexus.dbVolumes" . }}
+          volumes: {{- . | indent 12 }}
+          {{- end }}
 {{- end }}

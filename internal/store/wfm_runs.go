@@ -4,6 +4,8 @@
 package store
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"fmt"
@@ -208,14 +210,15 @@ func WFMTransitionRun(ctx context.Context, q GWQuerier, runID string, from []str
 		   AND state::text = ANY($2)
 		RETURNING id, namespace, state, state_version
 		), ob AS (
-		  INSERT INTO outbox (topic, namespace, routing_key, payload)
+		  INSERT INTO outbox (topic, namespace, routing_key, payload, trace_context)
 		  SELECT 'run_state', namespace, id::text,
 		         jsonb_build_object('run_id', id, 'namespace', namespace,
-		                            'state', state::text, 'state_version', state_version)
+		                            'state', state::text, 'state_version', state_version),
+		         $4
 		    FROM upd
 		)
 		SELECT id::text FROM upd`,
-		runID, from, to,
+		runID, from, to, tracing.NullableTraceparent(ctx),
 	).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunRow{}, ErrRunStateConflict
@@ -363,11 +366,28 @@ func WFMListStalledRuns(ctx context.Context, q GWQuerier, minAge time.Duration, 
 		   -- live attempts, and concluding THAT run terminal would kill it before
 		   -- it ever started.
 		   AND EXISTS (SELECT 1 FROM task_nodes n WHERE n.run_id = r.id)
+		   --
+		   -- A node whose STORED state is not terminal also counts as settled
+		   -- when it has attempts, none of them live (checked above) and no
+		   -- retry scheduled: node state is only rewritten by a reconcile, and
+		   -- an attempt that ended by LEASE EXPIRY with its budget spent
+		   -- triggers none -- the gateway reconciles after worker reports only.
+		   -- Such a run sat RUNNING forever, invisible to this sweep because
+		   -- its node still read RUNNING (found by tests/gpusim). A node in
+		   -- retry backoff has a retry_backoff timer and is left alone; a node
+		   -- with no attempt at all (waiting on upstreams, or a map template)
+		   -- is judged by its stored state as before.
 		   AND NOT EXISTS (
 		         SELECT 1 FROM task_nodes n
 		          WHERE n.run_id = r.id
 		            AND n.state NOT IN
-		                ('SUCCEEDED','FAILED','SKIPPED','UPSTREAM_FAILED','CANCELLED'))
+		                ('SUCCEEDED','FAILED','SKIPPED','UPSTREAM_FAILED','CANCELLED')
+		            AND NOT (
+		                  EXISTS (SELECT 1 FROM task_attempts a
+		                           WHERE a.run_id = n.run_id AND a.node_id = n.node_id)
+		              AND NOT EXISTS (SELECT 1 FROM task_attempts a
+		                                JOIN timers t ON t.subject_id = a.id AND t.kind = 'retry_backoff'
+		                               WHERE a.run_id = n.run_id AND a.node_id = n.node_id)))
 		   -- Age from the last thing that HAPPENED, which is the most recent
 		   -- attempt ending. workflow_runs has no updated_at, and created_at is
 		   -- the wrong clock: a long healthy run would look stale the whole time
@@ -391,6 +411,42 @@ func WFMListStalledRuns(ctx context.Context, q GWQuerier, minAge time.Duration, 
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("scan stalled run id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// WFMListCancellingRuns lists runs that are CANCELLING, oldest first, for the
+// cancel reconciler (CONTRACT-FINDINGS F109).
+//
+// A run stays CANCELLING until its in-flight attempts are terminal. When the
+// cancel's attempt fan-out failed (scheduler unreachable, an attempt busy past
+// the lock timeout), nothing else re-issues it: the heartbeat still stops the
+// work, but the attempt then ends through its late result, usually FAILED,
+// instead of CANCELLED. Listing every CANCELLING run -- including one whose
+// attempts are already terminal but whose finalize was lost -- lets one sweep
+// both re-issue and finalize. It only reads; limit bounds a pass.
+func WFMListCancellingRuns(ctx context.Context, q GWQuerier, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := q.Query(ctx, `
+		SELECT r.id::text
+		  FROM workflow_runs r
+		 WHERE r.state = 'CANCELLING'
+		 ORDER BY r.created_at
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list cancelling runs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan cancelling run id: %w", err)
 		}
 		out = append(out, id)
 	}

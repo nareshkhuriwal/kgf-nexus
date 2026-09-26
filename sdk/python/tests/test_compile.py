@@ -549,6 +549,24 @@ def test_secret_values_cannot_be_written_into_a_spec() -> None:
             return 1
 
 
+def test_secret_inject_is_emitted_only_when_not_the_default() -> None:
+    from nexus import SecretRef
+
+    # The default must serialise exactly as before the field existed, or every
+    # stored spec with a secret would change its content address.
+    assert SecretRef("DB", "vault://kv/db#password").to_wire() == {
+        "name": "DB",
+        "ref": "vault://kv/db#password",
+    }
+    assert SecretRef("tls.key", "file:///run/k/tls.key", inject="file").to_wire() == {
+        "name": "tls.key",
+        "ref": "file:///run/k/tls.key",
+        "inject": "file",
+    }
+    with pytest.raises(SpecError, match="inject must be"):
+        SecretRef("X", "env://X", inject="stdin").to_wire()  # type: ignore[arg-type]
+
+
 def test_docker_runtime_requires_an_image() -> None:
     from nexus import Runtime
 

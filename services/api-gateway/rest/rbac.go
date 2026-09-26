@@ -101,7 +101,7 @@ func (a *API) putRole(w http.ResponseWriter, r *http.Request, p authn.Principal)
 		allowed[g] = true
 	}
 	for _, g := range b.Permissions {
-		if !allowed[g] || !p.Allows(g) || g == "users.manage" || g == "tokens.manage" || g == "roles.manage" {
+		if !allowed[g] || !p.Allows(g) || authn.Reserved(g) {
 			writeError(w, 403, "invalid_grant", "Cannot delegate permission: "+g)
 			return
 		}
@@ -327,7 +327,9 @@ func rbacAudit(r *http.Request, tx pgx.Tx, p authn.Principal, action, target str
 	if p.UserID != "" {
 		actorID = &p.UserID
 	}
-	return store.GatewayAppendAudit(r.Context(), tx, store.AuditEntry{Namespace: p.Namespace, ActorID: actorID, Detail: detail, ActorKind: string(p.Kind), ActorLabel: p.Name, Action: action, TargetKind: "rbac", TargetID: target, Outcome: "success", ClientIP: clientIP(r)})
+	e := store.AuditEntry{Namespace: p.Namespace, ActorID: actorID, Detail: detail, ActorKind: string(p.Kind), ActorLabel: p.Name, Action: action, TargetKind: "rbac", TargetID: target, Outcome: "success", ClientIP: clientIP(r)}
+	attributeKGF(p, &e)
+	return store.GatewayAppendAudit(r.Context(), tx, e)
 }
 
 func permittedEventPayload(e store.EventRow, p authn.Principal) map[string]any {

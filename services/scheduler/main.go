@@ -4,6 +4,8 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"flag"
@@ -13,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -21,6 +24,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
@@ -65,6 +69,10 @@ func run() error {
 		backlogInterval = flag.Duration("backlog-sample-interval",
 			envDuration("NEXUS_BACKLOG_SAMPLE_INTERVAL", 15*time.Second),
 			"how often the PENDING backlog gauges are refreshed (0 = never)")
+		// ADR-0032 §3: provider throttles retried without charging the budget.
+		freeRetries = flag.Int("rate-limited-free-retries",
+			envInt("NEXUS_RATE_LIMITED_FREE_RETRIES", 0),
+			"RATE_LIMITED retries per node not charged to its retry budget (0 = default 10, negative = none)")
 	)
 	flag.Parse()
 
@@ -72,7 +80,7 @@ func run() error {
 	// Every dispatch/lost log carries run_id, attempt_id and worker_id
 	// (CONTRACT.md logging convention) so an incident can be reconstructed by
 	// filtering on one run.
-	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(*logLevel)}))
+	log := slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(*logLevel)})))
 	slog.SetDefault(log)
 
 	// A per-process identity, not a per-host one. It lands in timers.claimed_by,
@@ -86,6 +94,9 @@ func run() error {
 	// Ctrl-C during startup still exits cleanly.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter; flushed last.
+	defer tracing.SetupOrExit(ctx, "scheduler", version, log)()
 
 	pool, err := store.NewPool(ctx, store.DefaultPoolConfig(*dsn))
 	if err != nil {
@@ -101,6 +112,20 @@ func run() error {
 	claimCfg.Quotas = *quotas
 	claimCfg.ClaimWindow = *claimWindow
 	claimCfg.ClaimWindowPages = *claimWindowPages
+	claimCfg.RateLimitedFreeRetries = int32(*freeRetries)
+	// Placement (ADR-0029/0030/0031). Environment only: these are fleet
+	// policy, set once per deployment, and the Helm chart renders them.
+	claimCfg.PlacementPolicy = domain.ParsePlacementPolicy(envOr("NEXUS_PLACEMENT_POLICY", "pack"))
+	claimCfg.PlacementWait = envDuration("NEXUS_PLACEMENT_WAIT", claimCfg.PlacementWait)
+	claimCfg.HeadroomTTL = envDuration("NEXUS_CLUSTER_HEADROOM_TTL", claimCfg.HeadroomTTL)
+	claimCfg.PreemptionRetryDelay = envDuration("NEXUS_PREEMPTION_RETRY_DELAY", claimCfg.PreemptionRetryDelay)
+	if v := envOr("NEXUS_MAX_PREEMPTION_RETRIES", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 1000 {
+			return fmt.Errorf("NEXUS_MAX_PREEMPTION_RETRIES=%q: want an integer in [0, 1000]", v)
+		}
+		claimCfg.MaxPreemptions = int32(n)
+	}
 
 	st := store.NewSchedulerStore(pool, claimCfg, instanceID)
 	// Decided once, here, before the store serves a claim. An unindexed or
@@ -131,6 +156,24 @@ func run() error {
 		log.Warn("namespace quotas are not enforced: namespace_quota_limits is missing",
 			"why", "migration 0027 is not applied; apply it and restart")
 	}
+	ws, err := st.DetectWorkloadSchema(ctx)
+	if err != nil {
+		return err
+	}
+	if !ws.Present {
+		log.Warn("the workload API is off: usage units, rate-limit permits and checkpoints are unavailable",
+			"why", "migration 0036 is not applied; apply it and restart (ADR-0032)")
+	}
+	placementSchema, err := st.DetectPlacementSchema(ctx)
+	if err != nil {
+		return err
+	}
+	if !placementSchema {
+		log.Warn("placement facts are off: migration 0035 is not applied",
+			"why", "cluster labels, cluster quota headroom, cache affinity and the preemption budget need it; apply it and restart")
+	}
+	log.Info("placement configured", "policy", claimCfg.PlacementPolicy, "wait", claimCfg.PlacementWait,
+		"headroom_ttl", claimCfg.HeadroomTTL, "max_preemptions", claimCfg.MaxPreemptions)
 	sched := NewSchedulerWithLogger(st, log)
 
 	// Metrics, served on the health listener (no extra port; docs/OPERATIONS.md).
@@ -185,7 +228,7 @@ func run() error {
 	grpcOpts := append(grpcMetrics.ServerOptions(), config.PeerServerOptions()...)
 	grpcSrv := grpc.NewServer(append(grpcOpts, sopts...)...)
 	Register(grpcSrv, NewGRPCServer(st, log).WithMetrics(schedMetrics))
-	RegisterReports(grpcSrv, NewReportServer(st, log))
+	RegisterReports(grpcSrv, NewReportServer(st, log).WithMetrics(schedMetrics))
 
 	grpcErr := make(chan error, 1)
 	go func() {
@@ -319,6 +362,16 @@ func envDuration(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return def
+}
+
+// envInt reads an integer, falling back on absence or a malformed value.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
 		}
 	}
 	return def

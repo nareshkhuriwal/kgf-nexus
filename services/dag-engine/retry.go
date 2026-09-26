@@ -49,6 +49,16 @@ type ResetResult struct {
 // workflow-manager's uncommitted transition leaves visible, and it keeps any
 // other caller from resetting nodes under a live run.
 func (e *Engine) ResetNodes(ctx context.Context, runID string, selected []string, actor string) (*ResetResult, error) {
+	res, err := e.resetNodes(ctx, runID, selected, actor)
+	reset := 0
+	if res != nil {
+		reset = len(res.Reset)
+	}
+	e.metrics.observeOperatorRetry(retryResult(err), reset)
+	return res, err
+}
+
+func (e *Engine) resetNodes(ctx context.Context, runID string, selected []string, actor string) (*ResetResult, error) {
 	log := e.log.With("run_id", runID)
 
 	run, err := e.store.LoadRun(ctx, runID)
@@ -143,4 +153,39 @@ func isRetryRefusal(err error) (refused, badRequest bool) {
 		return false, false
 	}
 	return true, len(re.Unknown) > 0
+}
+
+// Operator-retry results, the closed label set of nexus_dag_operator_retries_total.
+const (
+	retryResultReset         = "reset"
+	retryResultInvalid       = "invalid"
+	retryResultNotRetryable  = "not_retryable"
+	retryResultNotFound      = "not_found"
+	retryResultConflict      = "conflict"
+	retryResultInternalError = "error"
+)
+
+// retryResult classifies a ResetNodes outcome the same way toStatus maps it to
+// a gRPC code, so the metric and the caller's view of the retry agree:
+// invalid (unknown node ids: the request was malformed), not_retryable (the
+// run or the selected nodes are not in a retryable state), not_found,
+// conflict (a concurrent writer won; asking again may succeed) and error.
+func retryResult(err error) string {
+	switch {
+	case err == nil:
+		return retryResultReset
+	case errors.Is(err, store.ErrDAGEngineRunNotFound):
+		return retryResultNotFound
+	case errors.Is(err, ErrNotMaterialized), errors.Is(err, ErrRunNotRetryable):
+		return retryResultNotRetryable
+	case errors.Is(err, store.ErrNodeRetryConflict):
+		return retryResultConflict
+	}
+	if refused, badRequest := isRetryRefusal(err); refused {
+		if badRequest {
+			return retryResultInvalid
+		}
+		return retryResultNotRetryable
+	}
+	return retryResultInternalError
 }

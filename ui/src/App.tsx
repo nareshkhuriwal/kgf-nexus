@@ -60,6 +60,7 @@ import { InfrastructurePage } from './pages/admin/InfrastructurePage';
 import { QuotasPage } from './pages/admin/QuotasPage';
 import { UsersPage } from './pages/admin/UsersPage';
 import { TokensPage } from './pages/admin/TokensPage';
+import { ServiceAccountsPage } from './pages/admin/ServiceAccountsPage';
 import { AuditPage } from './pages/admin/AuditPage';
 import { OverviewPage } from './pages/OverviewPage';
 import { SettingsPage } from './pages/SettingsPage';
@@ -72,6 +73,12 @@ import { WorkerDetailPage } from './pages/WorkerDetailPage';
 import { SchedulesPage } from './pages/SchedulesPage';
 import { ScheduleDetailPage } from './pages/ScheduleDetailPage';
 import { BackfillDetailPage } from './pages/BackfillDetailPage';
+import { TriggersPage } from './pages/TriggersPage';
+import { TriggerDetailPage } from './pages/TriggerDetailPage';
+import { SensorsPage } from './pages/SensorsPage';
+import { SensorDetailPage } from './pages/SensorDetailPage';
+import { NotificationsPage } from './pages/NotificationsPage';
+import { AssetsPage } from './pages/AssetsPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { CommandPalette } from './components/CommandPalette';
 import { ProfileMenu } from './components/ProfileMenu';
@@ -515,6 +522,12 @@ export function App() {
           path="/backfills/:backfillId"
           element={<BackfillDetailPage namespace={namespace} />}
         />
+        <Route path="/triggers" element={<TriggersPage key={namespace} namespace={namespace} />} />
+        <Route path="/triggers/:name" element={<TriggerDetailPage namespace={namespace} />} />
+        <Route path="/sensors" element={<SensorsPage key={namespace} namespace={namespace} />} />
+        <Route path="/sensors/:name" element={<SensorDetailPage namespace={namespace} />} />
+        <Route path="/notifications" element={<NotificationsPage namespace={namespace} />} />
+        <Route path="/assets" element={<AssetsPage namespace={namespace} />} />
         <Route path="/workers" element={<WorkersPage namespace={namespace} />} />
         <Route path="/workers/:workerId" element={<WorkerDetailPage namespace={namespace} />} />
         {/* Inside the chrome, and deliberately not in navItems.ts: settings is
@@ -542,6 +555,7 @@ export function App() {
           path="/admin/tokens"
           element={<TokensPage namespace={namespace} canAdmin={grants.includes("tokens.view")} />}
         />
+        <Route path="/admin/service-accounts" element={<ServiceAccountsPage key={namespace} namespace={namespace} />} />
         <Route
           path="/admin/audit"
           element={<AuditPage namespace={namespace} canAdmin={grants.includes("audit.view")} />}

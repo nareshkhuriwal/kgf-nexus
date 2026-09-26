@@ -214,6 +214,15 @@ spec:
             - { name: NEXUS_CONTROLLER_ALLOW_APPLY, value: {{ ternary "true" "false" $cc.apply.enabled | quote }} }
             - { name: NEXUS_CONTROLLER_INTERVAL, value: {{ $cc.interval | quote }} }
             - { name: NEXUS_JOB_LABEL_SELECTOR, value: {{ $cc.jobLabelSelector | quote }} }
+            {{- /* ADR-0031: placement labels and ResourceQuota headroom. Task
+                   namespaces default to the bound worker namespaces, which the
+                   read-only Role below already covers. */}}
+            {{- with $cc.clusterLabels }}
+            - { name: NEXUS_CLUSTER_LABELS, value: {{ . | quote }} }
+            {{- end }}
+            {{- with $cc.gpuResources }}
+            - { name: NEXUS_CLUSTER_GPU_RESOURCES, value: {{ . | quote }} }
+            {{- end }}
             - { name: CONTROLLER_HTTP_ADDR, value: ":8090" }
             - { name: CONTROLLER_LOG_LEVEL, value: {{ $cc.logLevel | quote }} }
             - name: POD_NAME
@@ -221,6 +230,7 @@ spec:
             - name: POD_NAMESPACE
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
             {{- include "nexus.tlsEnv" (list . "client") | nindent 12 }}
+            {{- include "nexus.tracingEnv" . | nindent 12 }}
           ports:
             - { name: http, containerPort: 8090 }
           livenessProbe:

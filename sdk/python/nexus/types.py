@@ -19,11 +19,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import Any, Iterable, Literal, Mapping, Sequence
+import re
+from typing import Any, Iterable, Literal, Mapping, Sequence, Union
 
 from .units import parse_bytes, parse_cpu_millis, parse_duration_ms
 
 __all__ = [
+    "Asset",
+    "AssetLike",
     "Gpu",
     "Resources",
     "Timeouts",
@@ -31,6 +34,7 @@ __all__ = [
     "Cache",
     "Runtime",
     "SecretRef",
+    "SecretInject",
     "Concurrency",
     "ValueSpec",
     "ValueSpecLike",
@@ -46,6 +50,9 @@ __all__ = [
 # enum name. Accepting the canonical name too means a spec that was decompiled
 # from the wire form recompiles unchanged.
 
+#: How a resolved secret reaches the workload (ADR-0025).
+SecretInject = Literal["env", "file"]
+
 ErrorClass = Literal[
     "transient",
     "timeout",
@@ -57,6 +64,8 @@ ErrorClass = Literal[
     "oom",
     "not_found",
     "infrastructure",
+    "rate_limited",
+    "preempted",
 ]
 
 _ERROR_CLASS_NAMES: dict[str, str] = {
@@ -73,6 +82,13 @@ _ERROR_CLASS_NAMES: dict[str, str] = {
     "oom": "ERROR_CLASS_OOM",
     "not_found": "ERROR_CLASS_NOT_FOUND",
     "infrastructure": "ERROR_CLASS_INFRASTRUCTURE",
+    # A provider 429/503 the task's own retries did not absorb (ADR-0032 §3).
+    # Retried without charging the retry budget, up to a cap.
+    "rate_limited": "ERROR_CLASS_RATE_LIMITED",
+    # A spot/preemptible eviction the agent announced (ADR-0030): retried
+    # against its own budget, so listing it in no_retry_on is the only reason
+    # to name it.
+    "preempted": "ERROR_CLASS_PREEMPTED",
 }
 
 BackoffStrategy = Literal["fixed", "linear", "exponential"]
@@ -147,10 +163,23 @@ class Gpu:
     count: int = 1
     kind: str | None = None
     memory: str | int | None = None
+    # Fractional GPUs (ADR-0029). `mig` asks for MIG instances by profile, e.g.
+    # {"1g.10gb": 1}; `share` is a fraction of ONE shared (MPS or time-sliced)
+    # device and `share_memory` the VRAM needed on it. Both are subtracted per
+    # device by the scheduler, so several small jobs pack onto one GPU. Use
+    # count=0 with either: a fractional request takes no whole device.
+    mig: Mapping[str, int] | None = None
+    share: float | None = None
+    share_memory: str | int | None = None
 
     def __post_init__(self) -> None:
         if self.count < 0:
             raise SpecError(f"gpu.count must be non-negative, got {self.count}")
+        if self.share is not None and not (0 < self.share <= 1):
+            raise SpecError(f"gpu.share must be in (0, 1], got {self.share}")
+        for profile, n in (self.mig or {}).items():
+            if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+                raise SpecError(f"gpu.mig[{profile!r}] must be a non-negative instance count, got {n!r}")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -195,6 +224,12 @@ class Resources:
                 request["gpu_kind"] = gpu.kind
             if gpu.memory is not None:
                 request["gpu_memory_bytes"] = parse_bytes(gpu.memory)
+            if gpu.mig:
+                request["mig"] = {str(k): v for k, v in sorted(gpu.mig.items()) if v}
+            if gpu.share is not None:
+                request["gpu_share_milli"] = max(1, round(gpu.share * 1000))
+            if gpu.share_memory is not None:
+                request["gpu_share_memory_bytes"] = parse_bytes(gpu.share_memory)
         if self.custom:
             custom: dict[str, int] = {}
             for k, v in self.custom.items():
@@ -217,6 +252,9 @@ class Resources:
         # limit mirrors the request rather than being independently settable.
         if gpu is not None and gpu.count:
             limit["gpu_count"] = gpu.count
+        for key in ("mig", "gpu_share_milli", "gpu_share_memory_bytes"):
+            if key in request:
+                limit[key] = request[key]
 
         for dim, req_key in (("cpu", "cpu_millis"), ("memory", "memory_bytes"), ("disk", "disk_bytes")):
             if req_key in limit and req_key in request and limit[req_key] < request[req_key]:
@@ -420,6 +458,74 @@ class Cache:
         return Cache(**value)
 
 
+_ASSET_URI = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://\S+$")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Asset:
+    """A data asset a task reads or writes, for declared lineage (ADR-0028).
+
+    ``uri`` names the asset (``s3://bucket/path``, ``postgres://db/schema.table``);
+    ``name`` is an optional label for the console. Declared, not observed: Nexus
+    records what the task says it touches.
+    """
+
+    uri: str
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.uri, str) or len(self.uri) > 1024 or not _ASSET_URI.match(self.uri):
+            raise SpecError(
+                f"asset uri {self.uri!r} must be scheme://..., at most 1024 characters, no whitespace"
+            )
+        if len(self.name) > 200:
+            raise SpecError(f"asset name for {self.uri!r} is longer than 200 characters")
+
+    def to_wire(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"uri": self.uri}
+        if self.name:
+            out["name"] = self.name
+        return out
+
+    @staticmethod
+    def coerce(value: object) -> "Asset":
+        if isinstance(value, Asset):
+            return value
+        if isinstance(value, str):
+            return Asset(uri=value)
+        if isinstance(value, Mapping):
+            unknown = set(value) - {"uri", "name"}
+            if unknown:
+                raise SpecError(f"asset has unknown field(s) {', '.join(sorted(map(str, unknown)))}")
+            return Asset(uri=str(value.get("uri", "")), name=str(value.get("name") or ""))
+        raise SpecError(
+            f"an asset must be an Asset, a URI string or a mapping, got {type(value).__name__}"
+        )
+
+
+AssetLike = Union[Asset, str, Mapping[str, str]]
+
+
+def coerce_assets(field: str, raw: object) -> tuple[Asset, ...]:
+    """Coerce a produces= / consumes= argument; duplicates are rejected."""
+    if raw is None:
+        return ()
+    items: Sequence[object]
+    if isinstance(raw, (str, Asset, Mapping)):
+        items = [raw]
+    elif isinstance(raw, (list, tuple)):
+        items = raw
+    else:
+        raise SpecError(f"{field} must be a list of assets, got {type(raw).__name__}")
+    out = tuple(Asset.coerce(v) for v in items)
+    uris = [a.uri for a in out]
+    if len(set(uris)) != len(uris):
+        raise SpecError(f"{field} lists the same asset twice")
+    if len(out) > 100:
+        raise SpecError(f"{field} lists more than 100 assets")
+    return out
+
+
 # The schema's absolute maximum for a declared bound (ADR-0015). Checked here too
 # so an over-long bound fails at the decorator rather than at submit.
 MAX_UNINTERRUPTIBLE_MS = 3_600_000
@@ -485,6 +591,12 @@ class SecretRef:
 
     name: str
     ref: str
+    #: How the worker delivers the value (ADR-0025): ``"env"`` sets the
+    #: environment variable ``name``; ``"file"`` writes
+    #: ``$NEXUS_SECRETS_DIR/<name>`` and keeps it out of the environment, which
+    #: is the safer choice. The default is emitted as nothing, so specs written
+    #: before this field keep their content address.
+    inject: SecretInject = "env"
 
     def to_wire(self) -> dict[str, str]:
         if not self.name or not self.ref:
@@ -495,7 +607,14 @@ class SecretRef:
                 "(e.g. 'vault://kv/ml/s3'); a literal secret value must never be "
                 "written into a spec"
             )
-        return {"name": self.name, "ref": self.ref}
+        if self.inject not in ("env", "file"):
+            raise SpecError(
+                f"secret {self.name!r} inject must be 'env' or 'file', got {self.inject!r}"
+            )
+        out = {"name": self.name, "ref": self.ref}
+        if self.inject == "file":
+            out["inject"] = "file"
+        return out
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -689,3 +808,99 @@ def coerce_trigger_rule(value: str) -> str:
 
 def coerce_idempotency(value: str) -> str:
     return _enum(_IDEMPOTENCY_NAMES, value, "idempotency")
+
+
+# ── Placement (ADR-0030, ADR-0031) ────────────────────────────────────────────
+
+CapacityPreference = Literal["spot_allowed", "spot_preferred", "on_demand_only"]
+_CAPACITY_NAMES: dict[str, str] = {
+    "spot_allowed": "CAPACITY_PREFERENCE_SPOT_ALLOWED",
+    "spot_preferred": "CAPACITY_PREFERENCE_SPOT_PREFERRED",
+    "on_demand_only": "CAPACITY_PREFERENCE_ON_DEMAND_ONLY",
+}
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Artifact:
+    """A model or dataset the worker serves from its node-local cache.
+
+    The workload finds it at ``$NEXUS_ARTIFACT_<NAME>``. ``key`` is the content
+    address ``sha256:<hex>``; the agent verifies the download against it and
+    refuses a mismatch. Workers already holding the artifact are preferred.
+    """
+
+    name: str
+    uri: str
+    key: str | None = None
+    size: str | int | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        if not self.name:
+            raise SpecError("artifact.name is required")
+        if not self.uri.startswith(("https://", "http://", "file://")):
+            raise SpecError(f"artifact {self.name!r}: uri must be https://, http:// or file://")
+        out: dict[str, Any] = {"name": self.name, "uri": self.uri}
+        if self.key:
+            k = self.key
+            if not (k.startswith("sha256:") and len(k) == 71 and all(c in "0123456789abcdef" for c in k[7:])):
+                raise SpecError(f"artifact {self.name!r}: key must be sha256:<64 lowercase hex>")
+            out["key"] = k
+        if self.size is not None:
+            out["size_bytes"] = parse_bytes(self.size)
+        return out
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Placement:
+    """Where a task may and would prefer to run.
+
+    Hard: ``capacity="on_demand_only"``, ``required_labels`` (matched against
+    the worker's labels overlaid with its cluster's, e.g.
+    ``{"nexus.io/region": "eu-west-1"}``) and ``max_cost_tier``. Soft (a better
+    worker is preferred for a few seconds): ``capacity="spot_preferred"``,
+    ``preferred_data_locality``, ``preferred_labels`` and cached ``artifacts``.
+    ``max_preemptions`` caps retries after spot evictions, which do not spend
+    the retry budget.
+    """
+
+    capacity: CapacityPreference | None = None
+    required_labels: Mapping[str, str] | None = None
+    max_cost_tier: int | None = None
+    preferred_data_locality: Sequence[str] | None = None
+    preferred_labels: Mapping[str, str] | None = None
+    artifacts: Sequence[Artifact] | None = None
+    max_preemptions: int | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.capacity is not None and self.capacity != "spot_allowed":
+            out["capacity"] = _enum(_CAPACITY_NAMES, self.capacity, "placement.capacity")
+        if self.required_labels:
+            out["required_labels"] = {str(k): str(v) for k, v in sorted(self.required_labels.items())}
+        if self.max_cost_tier:
+            if self.max_cost_tier < 0 or self.max_cost_tier > 100:
+                raise SpecError(f"placement.max_cost_tier must be in [0, 100], got {self.max_cost_tier}")
+            out["max_cost_tier"] = self.max_cost_tier
+        if self.preferred_data_locality:
+            out["preferred_data_locality"] = [str(x) for x in self.preferred_data_locality]
+        if self.preferred_labels:
+            out["preferred_labels"] = {str(k): str(v) for k, v in sorted(self.preferred_labels.items())}
+        if self.artifacts:
+            out["artifacts"] = [a.to_wire() for a in self.artifacts]
+        if self.max_preemptions:
+            if self.max_preemptions < 0 or self.max_preemptions > 100:
+                raise SpecError(f"placement.max_preemptions must be in [0, 100], got {self.max_preemptions}")
+            out["max_preemptions"] = self.max_preemptions
+        return out
+
+    @staticmethod
+    def coerce(value: "Placement | Mapping[str, Any] | None") -> "Placement | None":
+        if value is None or isinstance(value, Placement):
+            return value
+        if isinstance(value, Mapping):
+            kw = dict(value)
+            arts = kw.get("artifacts")
+            if arts is not None:
+                kw["artifacts"] = [a if isinstance(a, Artifact) else Artifact(**a) for a in arts]
+            return Placement(**kw)
+        raise SpecError(f"placement must be a Placement or a mapping, got {type(value).__name__}")

@@ -325,11 +325,12 @@ Exit codes: 0 cancelled; 3 not confirmed; 4 no such backfill; 5 already ended.`,
 			if err != nil {
 				return err
 			}
-			// Check the transition HERE. The server does not (CONTRACT-FINDINGS
-			// F118): its state update has no from-state guard, so "resume" on a
-			// CANCELLED or COMPLETED backfill would silently revive it and start
-			// generating runs again. A read-then-act check is racy, but it stops
-			// the common operator mistake until the server enforces it.
+			// Check the transition here as well as on the server. The server's
+			// compare-and-set is what decides (F119: 409 backfill_state_conflict);
+			// this read-then-act check only spares a confirmation prompt for an
+			// action that cannot apply, and protects against an older server
+			// whose state update had no from-state guard and would revive a
+			// CANCELLED or COMPLETED backfill.
 			current, err := c.GetBackfill(ctx, id)
 			if err != nil {
 				return err

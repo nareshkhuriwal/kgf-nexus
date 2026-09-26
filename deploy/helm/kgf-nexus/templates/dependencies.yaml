@@ -184,11 +184,14 @@ spec:
         - name: minio
           image: {{ .Values.minio.image }}
           args: ["server", "/data", "--console-address", ":9001"]
+          {{- /* The key pair the clients present (resultStore.s3.accessKeySecret):
+                 one source, so MinIO and its clients cannot disagree. */}}
+          {{- $keys := .Values.resultStore.s3.accessKeySecret }}
           env:
             - name: MINIO_ROOT_USER
-              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: minio-root-user } }
+              valueFrom: { secretKeyRef: { name: {{ $keys.name | default .Values.existingSecret }}, key: {{ $keys.accessKeyIdKey }} } }
             - name: MINIO_ROOT_PASSWORD
-              valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: minio-root-password } }
+              valueFrom: { secretKeyRef: { name: {{ $keys.name | default .Values.existingSecret }}, key: {{ $keys.secretAccessKeyKey }} } }
           ports:
             - { name: s3, containerPort: 9000 }
             - { name: console, containerPort: 9001 }

@@ -149,3 +149,46 @@ func (g *GRPCClient) ExtendLease(ctx context.Context, req *nexusv1.ExtendLeaseRe
 	}
 	return resp, nil
 }
+
+// ── The workload API (ADR-0032) ──────────────────────────────────────────────
+// Forwarded on behalf of a task through its attempt's socket (agent/internal/
+// taskapi). The workload never sees these credentials; the agent adds the
+// session metadata here and the lease token in the request.
+
+// ReportUsage sends an attempt's cumulative usage-unit totals.
+func (g *GRPCClient) ReportUsage(ctx context.Context, req *nexusv1.ReportUsageRequest) (*nexusv1.Ack, error) {
+	resp, err := g.c.ReportUsage(g.auth(ctx), req)
+	if err != nil {
+		return nil, fmt.Errorf("ReportUsage: %w", err)
+	}
+	return resp, nil
+}
+
+// AcquirePermits takes (or, with settle, corrects) shared rate-limit permits.
+func (g *GRPCClient) AcquirePermits(ctx context.Context, req *nexusv1.AcquirePermitsRequest) (*nexusv1.AcquirePermitsResponse, error) {
+	resp, err := g.c.AcquirePermits(g.auth(ctx), req)
+	if err != nil {
+		return nil, fmt.Errorf("AcquirePermits: %w", err)
+	}
+	return resp, nil
+}
+
+// SaveCheckpoint registers a checkpoint object already written to the result
+// store.
+func (g *GRPCClient) SaveCheckpoint(ctx context.Context, req *nexusv1.SaveCheckpointRequest) (*nexusv1.Ack, error) {
+	resp, err := g.c.SaveCheckpoint(g.auth(ctx), req)
+	if err != nil {
+		return nil, fmt.Errorf("SaveCheckpoint: %w", err)
+	}
+	return resp, nil
+}
+
+// GetCheckpoint returns the latest checkpoint for the attempt's idempotency
+// key.
+func (g *GRPCClient) GetCheckpoint(ctx context.Context, req *nexusv1.GetCheckpointRequest) (*nexusv1.GetCheckpointResponse, error) {
+	resp, err := g.c.GetCheckpoint(g.auth(ctx), req)
+	if err != nil {
+		return nil, fmt.Errorf("GetCheckpoint: %w", err)
+	}
+	return resp, nil
+}

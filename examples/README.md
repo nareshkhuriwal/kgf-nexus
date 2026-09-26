@@ -19,6 +19,7 @@ check fails. They are plain `sh` + `awk`, so they run on the stock agent image.
 | [`csv_sales_pipeline/`](csv_sales_pipeline/) | 16 regions × (generate CSV → validate → aggregate) → report; 320k rows by default | A 49-node DAG; MB-sized files through the result store (MinIO); every row either aggregated or rejected, or the run fails |
 | [`ml_training_pipeline/`](ml_training_pipeline/) | Synthetic regression data, a 24-trial hyperparameter search (real gradient descent), best-model selection, an R² quality gate | Runtime fan-out with shared blob inputs, memoization (a re-run reuses every trial), a gate that can fail the run |
 | [`gpu_scheduling/`](gpu_scheduling/) | 8 GPU jobs (1×A100, 2×A100, A10) contending for 2 A100s + 1 A10 | Queueing under GPU contention; an audit fails the run on oversubscription, a wrong GPU model, or two concurrent jobs sharing a device |
+| [`gpu_sharing/`](gpu_sharing/) | 13 jobs on MIG instances and VRAM-declared slices of two shared GPUs (ADR-0029) | Per-device VRAM packing and MIG instance assignment; an audit fails the run on any per-device over-allocation, an instance handed to two overlapping jobs, or no packing at all |
 | [`fanout_scale/`](fanout_scale/) | Fan out to N tiny tasks (500 by default) and sum them | Dispatch throughput with hundreds queued; the sum must equal the closed form exactly |
 | [`batch_inference/`](batch_inference/) | Shard 2,000 records into 8 shards, score each with a fixed logistic model (CPU), verify | A memoized map (per-shard checkpoints) with `max_fanout` and a `max_bytes`-bounded fan-in; every shard reported once, every record scored once, and the sharded positives equal one unsharded pass |
 
@@ -32,12 +33,41 @@ SUITE="gpu" make k8s-dev-test    # one workload
 ```
 
 For a Python starting point with the same shapes, `nexusctl init --list` shows
-project templates (ETL, ML training, batch inference, file fan-out) that
-generate a runnable `dag.py`, tests and a task image.
+project templates (ETL, ML training, batch inference, file fan-out, LLM batch
+inference, LLM eval, fine-tuning) that generate a runnable `dag.py`, tests and
+a task image.
 
 On a laptop the GPUs are **simulated** (the dev agents advertise capacity and
 are labelled `simulated=true`): `gpu_scheduling` tests the scheduler's GPU
 accounting, queueing and device assignment, not CUDA.
+
+### AI workloads (opt-in)
+
+Two Python workflows that call a model through `nexus.llm.LLMClient` (shared
+rate-limit permits, in-task 429 retries, token usage units, checkpoints; see
+ADR-0032) against the SDK's deterministic **mock** model server. Nothing calls
+a real provider and no API key is involved.
+
+| Example | What it does | What it proves |
+|---|---|---|
+| [`llm_batch_inference/`](llm_batch_inference/) | 120 prompts in 4 shards; shard 1 crashes on purpose right after a checkpoint | The retry resumes mid-shard (`resumed_from > 0`) and asks no prompt twice; every record answered exactly once and correctly; token totals agree with the per-answer counts and the mock's rule |
+| [`llm_eval/`](llm_eval/) | 50 reference items; exact, regex and LLM-as-judge graders; accuracy per grader and category | The quality gate passes `mock-large` and fails the run for `mock-small` (`--param model=mock-small`) |
+
+Each has a `check_local.py` that runs it with the local runner against an
+in-process mock, no stack needed:
+
+```bash
+./.venv/bin/python examples/llm_batch_inference/check_local.py
+./.venv/bin/python examples/llm_eval/check_local.py
+```
+
+On a stack they need the AI overlay (an agent with Python 3 and the SDK,
+`examples/` at `/opt/nexus/examples`, and the mock reachable as
+`http://mock-llm:8089`), so they are not in the default suite:
+
+```bash
+SUITE=ai examples/run-suite.sh
+```
 
 ### Long-running workloads
 

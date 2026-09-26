@@ -91,6 +91,11 @@ type ApplyResultResponse struct {
 	// duplicates routine.
 	Applied bool `json:"applied"`
 	Retry   bool `json:"retry"`
+	// StaleLease is set, with Applied false, when the lease reconciler or the
+	// liveness sweep reclaimed the attempt first (F104): the gateway answers
+	// the worker stale_lease_token instead of Accepted. Additive; an older
+	// gateway ignores it and keeps answering Accepted.
+	StaleLease bool `json:"stale_lease,omitempty"`
 }
 
 // CancelRunAttemptsRequest stops every in-flight attempt of a run.
@@ -111,6 +116,7 @@ type attemptReportService interface {
 	RecordProgress(context.Context, *RecordProgressRequest) (*RecordProgressResponse, error)
 	ApplyResult(context.Context, *ApplyResultRequest) (*ApplyResultResponse, error)
 	CancelRunAttempts(context.Context, *CancelRunAttemptsRequest) (*CancelRunAttemptsResponse, error)
+	workloadService
 }
 
 // ReportServer implements the attempt-report half.
@@ -120,9 +126,16 @@ type attemptReportService interface {
 // re-checking ownership. The one exception is CancelRunAttempts, which is called
 // by workflow-manager rather than by a worker and carries no lease at all.
 type ReportServer struct {
-	store *store.SchedulerStore
-	log   *slog.Logger
-	now   func() time.Time
+	store   *store.SchedulerStore
+	log     *slog.Logger
+	now     func() time.Time
+	metrics *Metrics
+}
+
+// WithMetrics installs the workload-API instruments. Nil records nothing.
+func (r *ReportServer) WithMetrics(m *Metrics) *ReportServer {
+	r.metrics = m
+	return r
 }
 
 // NewReportServer builds the adapter.
@@ -203,8 +216,8 @@ func (r *ReportServer) ApplyResult(ctx context.Context, req *ApplyResultRequest)
 		// A duplicate or late report. Logged at debug because it is expected
 		// under at-least-once delivery and would otherwise be constant noise.
 		r.log.DebugContext(ctx, "attempt result ignored as already terminal",
-			"attempt_id", inner.GetAttemptId())
-		return &ApplyResultResponse{Applied: false}, nil
+			"attempt_id", inner.GetAttemptId(), "stale_lease", applied.Stale)
+		return &ApplyResultResponse{Applied: false, StaleLease: applied.Stale}, nil
 	}
 
 	r.log.InfoContext(ctx, "attempt result applied",
@@ -242,6 +255,10 @@ var AttemptReportServiceDesc = grpc.ServiceDesc{
 		{MethodName: "RecordProgress", Handler: recordProgressHandler},
 		{MethodName: "ApplyResult", Handler: applyResultHandler},
 		{MethodName: "CancelRunAttempts", Handler: cancelRunAttemptsHandler},
+		// The workload API (ADR-0032), workload_grpc.go.
+		{MethodName: "RecordUsage", Handler: recordUsageHandler},
+		{MethodName: "AcquirePermits", Handler: acquirePermitsHandler},
+		{MethodName: "SaveCheckpoint", Handler: saveCheckpointHandler},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "services/scheduler/reports_grpc.go",

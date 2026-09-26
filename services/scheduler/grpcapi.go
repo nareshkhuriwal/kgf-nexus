@@ -4,6 +4,14 @@
 package main
 
 import (
+	otelcodes "go.opentelemetry.io/otel/codes"
+
+	"go.opentelemetry.io/otel/trace"
+
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -84,6 +92,11 @@ func (g *GRPCServer) ClaimForWorker(
 
 	now := g.timeNow()
 	claimStart := time.Now()
+	ctx, claimSpan := tracing.Start(ctx, "scheduler.claim", trace.WithAttributes(
+		tracing.AttrWorkerID.String(workerID.String()),
+		attribute.StringSlice("nexus.queues", req.GetQueues()),
+		attribute.Int("nexus.max_tasks", int(req.GetMaxTasks()))))
+	defer claimSpan.End()
 	assignments, err := g.store.ClaimForWorker(ctx, now, store.WorkerClaimRequest{
 		WorkerID:     workerID,
 		Queues:       req.GetQueues(),
@@ -98,6 +111,11 @@ func (g *GRPCServer) ClaimForWorker(
 		outcome = "dispatched"
 	}
 	g.metrics.observeClaim("poll", outcome, time.Since(claimStart), len(assignments))
+	claimSpan.SetAttributes(tracing.AttrOutcome.String(outcome), tracing.AttrCount.Int(len(assignments)))
+	if err != nil {
+		claimSpan.RecordError(err)
+		claimSpan.SetStatus(otelcodes.Error, "claim failed")
+	}
 	if err != nil {
 		// Assignments committed before the error are still returned: each is a
 		// real lease on a real attempt, and discarding them here would strand
@@ -111,7 +129,9 @@ func (g *GRPCServer) ClaimForWorker(
 
 	resp := &nexusv1.ClaimForWorkerResponse{}
 	for i := range assignments {
-		resp.Assignments = append(resp.Assignments, toTaskAssignment(&assignments[i]))
+		ta := toTaskAssignment(&assignments[i])
+		ta.TraceContext = dispatchSpan(ctx, claimStart, &assignments[i])
+		resp.Assignments = append(resp.Assignments, ta)
 	}
 	for _, a := range assignments {
 		g.log.InfoContext(ctx, "attempt claimed by polling worker",
@@ -172,6 +192,9 @@ func toTaskAssignment(a *store.WorkerAssignment) *nexusv1.TaskAssignment {
 	if !a.StartToCloseDeadline.IsZero() {
 		out.StartToCloseDeadlineUnixMs = a.StartToCloseDeadline.UnixMilli()
 	}
+	// The reservation as committed, so the agent uses the shared GPU device
+	// the ledger charged (ADR-0029 §2).
+	out.Reserved = a.Reserved
 
 	if len(a.SpecJSON) > 0 {
 		spec := &nexusv1.TaskSpec{}
@@ -200,4 +223,34 @@ func toTaskAssignment(a *store.WorkerAssignment) *nexusv1.TaskAssignment {
 		}
 	}
 	return out
+}
+
+// dispatchSpan records one attempt's dispatch and returns the trace context
+// the agent continues from (TaskAssignment.trace_context, ADR-0026).
+//
+// The span's PARENT is the trace stored on the attempt row -- the reconcile
+// that made the node ready, and through it the API request that created the
+// run -- so the dispatch, the execution and the result sit in the run's trace.
+// The worker's poll, which is what actually triggered the claim, is attached
+// as a LINK: it is a cause, but a poll trace per idle second is not where an
+// operator looks for a run. An attempt with no stored trace (created before
+// migration 0028, or by an untraced caller) is dispatched under the poll.
+func dispatchSpan(claimCtx context.Context, start time.Time, a *store.WorkerAssignment) map[string]string {
+	parent := claimCtx
+	opts := []trace.SpanStartOption{
+		trace.WithTimestamp(start),
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			tracing.AttrRunID.String(a.RunID.String()),
+			tracing.AttrNodeID.String(a.NodeID),
+			tracing.AttrAttemptID.String(a.AttemptID.String()),
+			tracing.AttrAttemptNumber.Int(int(a.AttemptNumber))),
+	}
+	if sc := tracing.SpanContextFromTraceparent(a.TraceContext); sc.IsValid() {
+		parent = trace.ContextWithRemoteSpanContext(context.Background(), sc)
+		opts = append(opts, trace.WithLinks(trace.LinkFromContext(claimCtx)))
+	}
+	ctx, span := tracing.Start(parent, "attempt.dispatch", opts...)
+	span.End()
+	return tracing.Inject(ctx)
 }

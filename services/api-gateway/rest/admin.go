@@ -49,7 +49,31 @@ type IdentityAdmin interface {
 	RevokeScopedToken(ctx context.Context, namespace, tokenID string) error
 
 	AppendAudit(ctx context.Context, e store.AuditEntry) error
-	ListAudit(ctx context.Context, namespace string, f store.AuditFilter) ([]store.AuditRow, error)
+	ListAudit(ctx context.Context, namespace string, f store.AuditFilter) ([]store.AuditRow, string, error)
+
+	// WithinTx runs fn against an IdentityAdmin bound to ONE transaction and
+	// commits only if fn returns nil. It is how a security-sensitive change and
+	// its audit row commit together or not at all (ADR-0025, audit.go).
+	WithinTx(ctx context.Context, fn func(IdentityAdmin) error) error
+}
+
+// attributeKGF records the KGF identity on an audit entry written for a KGF
+// principal (ADR-0024 §5): actor kind "kgf", the effective KGF principal as
+// the label, the KGF request id in its own column, and the scope, role, token
+// id and any delegating service under detail.kgf.
+func attributeKGF(p authn.Principal, e *store.AuditEntry) {
+	if p.KGF == nil {
+		return
+	}
+	e.ActorKind = string(authn.KindKGF)
+	e.ActorLabel = p.KGF.Principal
+	e.RequestID = p.KGF.RequestID
+	d := map[string]any{}
+	for k, v := range e.Detail {
+		d[k] = v
+	}
+	d["kgf"] = p.KGF.AuditDetail()
+	e.Detail = d
 }
 
 // WithIdentity enables the identity and admin routes.
@@ -94,6 +118,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	if a.rateLimited(w, r) || a.authAttemptBlocked(w, r) {
 		return
 	}
+	r = a.attachKGF(r, authn.Principal{})
 	body, err := readBody(r, maxLoginBytes)
 	if err != nil {
 		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
@@ -146,19 +171,27 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, session, err := a.identity.CreateSession(r.Context(), user.ID,
-		authn.SessionTTL, r.UserAgent(), clientIP(r))
+	// The session and its audit row commit together (security-sensitive, fail
+	// closed): a session nobody can see in the audit trail is never issued.
+	var token string
+	var session store.SessionRow
+	err = a.auditedTx(r, func(id IdentityAdmin) (store.AuditEntry, error) {
+		var err error
+		token, session, err = id.CreateSession(r.Context(), user.ID, authn.SessionTTL, r.UserAgent(), clientIP(r))
+		return store.AuditEntry{
+			Namespace: user.Namespace, ActorID: &user.ID, ActorKind: "user", ActorLabel: user.Email,
+			Action: "session.login", TargetKind: "session", TargetID: session.ID,
+			Outcome: store.AuditSuccess,
+		}, err
+	})
 	if err != nil {
+		if a.auditUnavailable(w, r, err) {
+			return
+		}
 		a.log.ErrorContext(r.Context(), "could not create session", "user_id", user.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not start a session")
 		return
 	}
-
-	a.auditAttempt(r, store.AuditEntry{
-		Namespace: user.Namespace, ActorID: &user.ID, ActorKind: "user", ActorLabel: user.Email,
-		Action: "session.login", TargetKind: "session", TargetID: session.ID,
-		Outcome: store.AuditSuccess,
-	})
 
 	// The token is returned exactly ONCE, in this body, and is never recoverable.
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -236,6 +269,14 @@ func (a *API) whoami(w http.ResponseWriter, r *http.Request, p authn.Principal) 
 	if p.UserID != "" {
 		out["user_id"] = p.UserID
 	}
+	if p.ServiceAccountID != "" {
+		out["service_account_id"] = p.ServiceAccountID
+	}
+	if p.KGF != nil {
+		// Who KGF says this is, and the scope the namespace was mapped from
+		// (ADR-0024 §3): the readable form of an opaque kgf-<hash> namespace.
+		out["kgf"] = p.KGF
+	}
 	if p.Scopes != nil {
 		scopes := make([]string, 0, len(p.Scopes))
 		for _, s := range p.Scopes {
@@ -248,7 +289,39 @@ func (a *API) whoami(w http.ResponseWriter, r *http.Request, p authn.Principal) 
 
 // ── users ────────────────────────────────────────────────────────────────
 
+// usersPager is the keyset-paginated listing (ADR-0024 §6). Optional on the
+// interface so test doubles that predate it keep compiling; the store adapter
+// implements it.
+type usersPager interface {
+	ListUsersPage(ctx context.Context, namespace string, limit int, cursor, search string) (store.UsersPage, error)
+}
+
+// listUsers serves one page of accounts: ?limit (max 200), ?cursor from the
+// previous page's next_cursor, and ?q to match email or display name on the
+// server. next_cursor is null on the last page.
 func (a *API) listUsers(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
+	if pager, ok := a.identity.(usersPager); ok {
+		q := r.URL.Query()
+		page, err := pager.ListUsersPage(r.Context(), r.PathValue("ns"), intParam(r, "limit", 100), q.Get("cursor"), q.Get("q"))
+		if errors.Is(err, store.ErrBadCursor) {
+			writeError(w, http.StatusBadRequest, "invalid_cursor", "cursor is not one this server issued; restart from the first page")
+			return
+		}
+		if err != nil {
+			a.fail(w, r, "list users", err)
+			return
+		}
+		out := make([]map[string]any, 0, len(page.Users))
+		for _, u := range page.Users {
+			out = append(out, userPayload(u))
+		}
+		var next any
+		if page.NextCursor != "" {
+			next = page.NextCursor
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"users": out, "next_cursor": next})
+		return
+	}
 	rows, err := a.identity.ListUsers(r.Context(), r.PathValue("ns"), intParam(r, "limit", 100))
 	if err != nil {
 		a.fail(w, r, "list users", err)
@@ -305,8 +378,17 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request, p authn.Princip
 		a.createUserWithRole(w, r, p, req.Email, req.DisplayName, req.RoleName, req.Password)
 		return
 	}
-	user, err := a.identity.CreateUser(r.Context(), ns, req.Email, req.DisplayName, req.Role, req.Password)
+	var user store.UserRow
+	err = a.auditedTx(r, func(id IdentityAdmin) (store.AuditEntry, error) {
+		var err error
+		user, err = id.CreateUser(r.Context(), ns, req.Email, req.DisplayName, req.Role, req.Password)
+		return principalEntry(r, p, "user.create", "user", user.ID, store.AuditSuccess,
+			map[string]any{"email": user.Email, "role": user.Role}), err
+	})
 	if err != nil {
+		if a.auditUnavailable(w, r, err) {
+			return
+		}
 		if errors.Is(err, store.ErrEmailTaken) {
 			a.auditPrincipal(r, p, "user.create", "user", req.Email, store.AuditDenied,
 				map[string]any{"reason": "email already registered"})
@@ -320,8 +402,6 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request, p authn.Princip
 		return
 	}
 
-	a.auditPrincipal(r, p, "user.create", "user", user.ID, store.AuditSuccess,
-		map[string]any{"email": user.Email, "role": user.Role})
 	writeJSON(w, http.StatusCreated, userPayload(user))
 }
 
@@ -369,7 +449,25 @@ func (a *API) setUserDisabled(w http.ResponseWriter, r *http.Request, p authn.Pr
 		return
 	}
 
-	user, err := a.identity.SetUserDisabled(r.Context(), ns, id, disabled)
+	// Enabling GRANTS access: it commits with its audit row or not at all.
+	// Disabling REVOKES access: it is never blocked by the audit store (a
+	// revocation refused because a log is down is the wrong way to fail), and
+	// a failed audit write is reported loudly instead (audit.go).
+	var user store.UserRow
+	var err error
+	if disabled {
+		user, err = a.identity.SetUserDisabled(r.Context(), ns, id, true)
+	} else {
+		err = a.auditedTx(r, func(idm IdentityAdmin) (store.AuditEntry, error) {
+			var err error
+			user, err = idm.SetUserDisabled(r.Context(), ns, id, false)
+			return principalEntry(r, p, "user.enable", "user", user.ID, store.AuditSuccess,
+				map[string]any{"email": user.Email}), err
+		})
+	}
+	if a.auditUnavailable(w, r, err) {
+		return
+	}
 	if errors.Is(err, store.ErrLastAdministrator) {
 		writeError(w, 409, "last_administrator", err.Error())
 		return
@@ -378,12 +476,10 @@ func (a *API) setUserDisabled(w http.ResponseWriter, r *http.Request, p authn.Pr
 		a.fail(w, r, "set user disabled", err)
 		return
 	}
-	action := "user.enable"
 	if disabled {
-		action = "user.disable"
+		a.auditPrincipal(r, p, "user.disable", "user", user.ID, store.AuditSuccess,
+			map[string]any{"email": user.Email})
 	}
-	a.auditPrincipal(r, p, action, "user", user.ID, store.AuditSuccess,
-		map[string]any{"email": user.Email})
 	writeJSON(w, http.StatusOK, userPayload(user))
 }
 
@@ -422,24 +518,26 @@ func (a *API) resetUserPassword(w http.ResponseWriter, r *http.Request, p authn.
 		a.fail(w, r, "get user", err)
 		return
 	}
-	if err := a.identity.SetUserPassword(r.Context(), user.ID, req.Password); err != nil {
+	// The new password, the revocation of every session and the audit row
+	// commit together: there is no longer a "password changed but sessions
+	// still live" partial state, and no unaudited credential change.
+	var revoked int64
+	err = a.auditedTx(r, func(id IdentityAdmin) (store.AuditEntry, error) {
+		if err := id.SetUserPassword(r.Context(), user.ID, req.Password); err != nil {
+			return store.AuditEntry{}, err
+		}
+		var err error
+		revoked, err = id.RevokeUserSessions(r.Context(), user.ID)
+		return principalEntry(r, p, "user.password_reset", "user", user.ID, store.AuditSuccess,
+			map[string]any{"email": user.Email, "sessions_revoked": revoked}), err
+	})
+	if err != nil {
+		if a.auditUnavailable(w, r, err) {
+			return
+		}
 		a.fail(w, r, "set password", err)
 		return
 	}
-	revoked, err := a.identity.RevokeUserSessions(r.Context(), user.ID)
-	if err != nil {
-		// The password IS changed at this point. Reporting success would hide live
-		// sessions that still hold the old credential, so this is an error the
-		// operator must see and act on.
-		a.log.ErrorContext(r.Context(), "password reset but sessions not revoked",
-			"user_id", user.ID, "error", err)
-		writeError(w, http.StatusInternalServerError, "partial_reset",
-			"the password was changed but existing sessions could not be revoked; revoke them explicitly")
-		return
-	}
-
-	a.auditPrincipal(r, p, "user.password_reset", "user", user.ID, store.AuditSuccess,
-		map[string]any{"email": user.Email, "sessions_revoked": revoked})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user_id": user.ID, "sessions_revoked": revoked,
 	})
@@ -533,6 +631,10 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request, p authn.Princi
 		Role          string   `json:"role"`
 		Scopes        []string `json:"scopes"`
 		ExpiresInDays int      `json:"expires_in_days"`
+		// ADR-0024 §6: a token may belong to a service account and may carry
+		// an explicit permission ceiling. Pointer so "absent" and "[]" differ.
+		ServiceAccountID string    `json:"service_account_id"`
+		Permissions      *[]string `json:"permissions"`
 	}
 	if err := json.Unmarshal(nonEmptyJSON(body), &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", "request body is not valid JSON")
@@ -540,6 +642,18 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request, p authn.Princi
 	}
 	req.Name = strings.TrimSpace(req.Name)
 	req.Role = orDefault(strings.TrimSpace(req.Role), string(authn.RoleReader))
+	if req.ServiceAccountID != "" || req.Permissions != nil {
+		a.createCeilingToken(w, r, p, ns, req.Name, req.Role, req.Scopes, req.ExpiresInDays, req.ServiceAccountID, req.Permissions)
+		return
+	}
+	// An unceilinged token carries its role's full legacy authority, so only a
+	// Nexus administrator may mint one. A KGF principal must name a ceiling
+	// within its own grants, or use a service account (ADR-0024 §6).
+	if !isAdministrator(p) {
+		writeError(w, http.StatusForbidden, "ceiling_required",
+			"Set permissions (a ceiling within your own permissions) or mint the token for a service account")
+		return
+	}
 
 	problems := validateNewToken(req.Name, req.Role, req.Scopes)
 	if len(problems) > 0 {
@@ -570,15 +684,24 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request, p authn.Princi
 		createdBy = &p.UserID
 	}
 
-	secret, row, err := a.identity.CreateScopedToken(r.Context(), ns, req.Name, req.Role, req.Scopes, expiresAt, createdBy)
+	// Minted and audited in one transaction: a credential that exists without
+	// an audit record is exactly what fail-closed auditing forbids. The row
+	// records WHAT was granted, never the secret itself.
+	var secret string
+	var row store.ScopedTokenRow
+	err = a.auditedTx(r, func(id IdentityAdmin) (store.AuditEntry, error) {
+		var err error
+		secret, row, err = id.CreateScopedToken(r.Context(), ns, req.Name, req.Role, req.Scopes, expiresAt, createdBy)
+		return principalEntry(r, p, "token.create", "token", row.ID, store.AuditSuccess,
+			map[string]any{"name": row.Name, "role": row.Role, "scopes": row.Scopes, "expires_at": row.ExpiresAt}), err
+	})
 	if err != nil {
+		if a.auditUnavailable(w, r, err) {
+			return
+		}
 		a.fail(w, r, "create token", err)
 		return
 	}
-
-	// The audit row records WHAT was granted but never the secret itself.
-	a.auditPrincipal(r, p, "token.create", "token", row.ID, store.AuditSuccess,
-		map[string]any{"name": row.Name, "role": row.Role, "scopes": row.Scopes, "expires_at": row.ExpiresAt})
 
 	payload := tokenPayload(row)
 	// Shown once and never recoverable. The field name says so, because a client
@@ -637,74 +760,11 @@ func tokenPayload(t store.ScopedTokenRow) map[string]any {
 		"scopes": t.Scopes, "role": t.Role,
 		"expires_at": t.ExpiresAt, "last_used_at": t.LastUsedAt,
 		"created_by": t.CreatedBy, "created_at": t.CreatedAt, "revoked_at": t.RevokedAt,
+		// ADR-0024 §6. permissions is null when the token has no ceiling.
+		"service_account_id": t.ServiceAccountID, "permissions": t.Permissions,
 		// Derived server-side: "can this credential be used right now" has one
 		// answer, and it is the one the authenticator's query computes.
 		"live": t.RevokedAt == nil && (t.ExpiresAt == nil || t.ExpiresAt.After(time.Now())),
-	}
-}
-
-// ── audit ────────────────────────────────────────────────────────────────
-
-func (a *API) listAudit(w http.ResponseWriter, r *http.Request, _ authn.Principal) {
-	rows, err := a.identity.ListAudit(r.Context(), r.PathValue("ns"), store.AuditFilter{
-		Action:  r.URL.Query().Get("action"),
-		ActorID: r.URL.Query().Get("actor_id"),
-		Outcome: r.URL.Query().Get("outcome"),
-		Limit:   intParam(r, "limit", 100),
-	})
-	if err != nil {
-		a.fail(w, r, "list audit", err)
-		return
-	}
-	out := make([]map[string]any, 0, len(rows))
-	for _, e := range rows {
-		out = append(out, map[string]any{
-			"id": e.ID, "namespace": e.Namespace,
-			"actor_id": e.ActorID, "actor_kind": e.ActorKind, "actor_label": e.ActorLabel,
-			"action": e.Action, "target_kind": e.TargetKind, "target_id": e.TargetID,
-			"outcome": e.Outcome, "detail": rawJSON(e.Detail),
-			"client_ip": e.ClientIP, "occurred_at": e.OccurredAt,
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"entries": out})
-}
-
-// ── audit helpers ────────────────────────────────────────────────────────
-
-// auditPrincipal records an action taken by an authenticated caller.
-//
-// A failure to write the audit row is LOGGED, not returned. That is a deliberate
-// trade and worth stating: refusing an operation because its audit record could
-// not be written would mean a database hiccup blocks administration during
-// exactly the incident when an operator needs it. The log line is the fallback
-// record. The alternative -- failing closed -- is defensible for a compliance
-// system, and if this platform ever needs that, this is the single place to change.
-func (a *API) auditPrincipal(r *http.Request, p authn.Principal, action, targetKind, targetID, outcome string, detail map[string]any) {
-	kind := string(p.Kind)
-	if kind == "" {
-		kind = string(authn.KindAPIKey)
-	}
-	e := store.AuditEntry{
-		Namespace: p.Namespace, ActorKind: kind, ActorLabel: p.Name,
-		Action: action, TargetKind: targetKind, TargetID: targetID,
-		Outcome: outcome, Detail: detail, ClientIP: clientIP(r),
-	}
-	if p.UserID != "" {
-		e.ActorID = &p.UserID
-	}
-	a.auditAttempt(r, e)
-}
-
-func (a *API) auditAttempt(r *http.Request, e store.AuditEntry) {
-	if a.identity == nil {
-		return
-	}
-	if e.ClientIP == "" {
-		e.ClientIP = clientIP(r)
-	}
-	if err := a.identity.AppendAudit(r.Context(), e); err != nil {
-		a.log.ErrorContext(r.Context(), "could not write audit record",
-			"action", e.Action, "outcome", e.Outcome, "error", err)
 	}
 }
 

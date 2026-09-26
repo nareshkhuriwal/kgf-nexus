@@ -1,0 +1,31 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Google Cloud Storage, native JSON API, through GKE Workload Identity: no HMAC
+# key. The shape deploy/terraform/environments/gke renders by default. The
+# result-store clients share the chart-created nexus-artifacts ServiceAccount,
+# annotated iam.gke.io/gcp-service-account; the Secret holds no S3 key pair.
+existingSecret: nexus-credentials
+image: { tag: 0123456789ab }
+nats:
+  auth: { mode: none }
+postgres:
+  enabled: false
+  host: 10.100.0.3
+  sslmode: require
+minio:
+  enabled: false
+  bucket: kgf-nexus-prod-usc1-results-abc123
+  region: us-central1
+resultStore:
+  backend: gcs
+  partSizeBytes: 8388608
+  gcs:
+    auth: auto
+serviceAccounts:
+  apiGateway: &artifacts
+    name: nexus-artifacts
+    annotations: { iam.gke.io/gcp-service-account: kgf-nexus-prod-art@example-project.iam.gserviceaccount.com }
+  workflowManager: *artifacts
+  agent: *artifacts
+  artifactGC: *artifacts

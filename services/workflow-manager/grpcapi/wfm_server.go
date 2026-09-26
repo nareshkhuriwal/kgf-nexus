@@ -4,6 +4,12 @@
 package grpcapi
 
 import (
+	"go.opentelemetry.io/otel/trace"
+
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,6 +47,11 @@ func (s *RunServer) CreateRun(ctx context.Context, req *nexusv1.CreateRunRequest
 		params[k] = v
 	}
 
+	ctx, span := tracing.Start(ctx, "run.create", trace.WithAttributes(
+		tracing.AttrNamespace.String(req.GetNamespace()),
+		attribute.String("nexus.spec_id", req.GetSpecId()),
+		attribute.String("nexus.trigger_kind", req.GetTriggerKind())))
+	defer span.End()
 	res, err := s.runs.Create(ctx, runs.CreateRequest{
 		Namespace: req.GetNamespace(),
 		// The proto carries only spec_id. A caller that has a NAME resolves it
@@ -54,8 +65,10 @@ func (s *RunServer) CreateRun(ctx context.Context, req *nexusv1.CreateRunRequest
 		Priority:       req.GetPriority(),
 	})
 	if err != nil {
+		tracing.End(span, err)
 		return nil, runError("create run", err)
 	}
+	span.SetAttributes(tracing.AttrRunID.String(res.Run.ID), attribute.Bool("nexus.deduplicated", !res.Created))
 	return &nexusv1.CreateRunResponse{
 		RunId: res.Run.ID,
 		// Deduplicated, not "failed": an idempotent replay returning the original
@@ -122,7 +135,7 @@ func runStateProto(s string) nexusv1.RunState {
 // the right HTTP status instead of a blanket 500.
 func runError(op string, err error) error {
 	switch {
-	case errors.Is(err, store.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound), store.IsMalformedID(err):
 		return status.Errorf(codes.NotFound, "%s: %v", op, err)
 	case errors.Is(err, store.ErrRunQuotaExceeded):
 		// Before ErrMaxActiveRuns, which shares the code: the gateway tells the
@@ -254,6 +267,8 @@ type specService interface {
 	DeleteSchedule(context.Context, *DeleteScheduleRequest) (*DeleteScheduleResponse, error)
 	StartBackfill(context.Context, *StartBackfillRequest) (*BackfillResponse, error)
 	BackfillAction(context.Context, *BackfillActionRequest) (*BackfillResponse, error)
+	// CreateTriggeredRun: webhook-trigger runs (ADR-0028).
+	CreateTriggeredRun(context.Context, *CreateTriggeredRunRequest) (*CreateTriggeredRunResponse, error)
 }
 
 // SpecServer implements the spec half plus the run-state callback.
@@ -358,7 +373,7 @@ func (s *SpecServer) GetSpec(ctx context.Context, req *GetSpecRequest) (*GetSpec
 		return nil, status.Error(codes.InvalidArgument, "either spec_id or spec_name is required")
 	}
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
+		if errors.Is(err, store.ErrNotFound) || store.IsMalformedID(err) {
 			return nil, status.Errorf(codes.NotFound, "get spec: %v", err)
 		}
 		return nil, status.Errorf(codes.Internal, "get spec: %v", err)
@@ -387,6 +402,7 @@ var SpecServiceDesc = grpc.ServiceDesc{
 		{MethodName: "DeleteSchedule", Handler: deleteScheduleHandler},
 		{MethodName: "StartBackfill", Handler: startBackfillHandler},
 		{MethodName: "BackfillAction", Handler: backfillActionHandler},
+		{MethodName: "CreateTriggeredRun", Handler: createTriggeredRunHandler},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "services/workflow-manager/grpcapi/wfm_server.go",

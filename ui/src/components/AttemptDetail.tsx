@@ -25,8 +25,10 @@ import {
 } from '../lib/format';
 import { executorStatus, isExecutorWaiting, isInFlight, progressFraction } from '../lib/progress';
 import { normalizeState } from '../lib/states';
+import { hasUsage, summarizeUsage } from '../lib/usage';
 import { StateBadge } from './StateBadge';
 import { Empty } from './Status';
+import { UsageTables } from './UsageUnits';
 
 export function AttemptList({
   attempts,
@@ -169,6 +171,8 @@ function AttemptCard({
           <MetricsBlock metrics={attempt.metrics} />
         </div>
 
+        <UsageBlock attempt={attempt} />
+
         {attempt.error && (
           <div style={{ gridColumn: '1 / -1' }}>
             <div className="attempt-section-title">Error</div>
@@ -276,6 +280,40 @@ function ResourceBlock({ resources }: { resources: ResourceRequest | null | unde
       <dt>limit</dt>
       <dd>{resources.limit ? fmtResources(resources.limit) : EMPTY}</dd>
     </dl>
+  );
+}
+
+/**
+ * Usage units the task reported (ADR-0032 §2). Sits beside the resource
+ * request because the two answer the same question from opposite ends: what
+ * the attempt asked the cluster for, and what it spent at a provider.
+ *
+ * A gateway that predates the field omits `usage_units` entirely; that is not
+ * the same as "the task reported nothing", so the section is left out rather
+ * than claiming the latter. An empty map is the honest "No usage reported" —
+ * never a table of zeros, which would assert a measurement nobody made.
+ */
+function UsageBlock({ attempt }: { attempt: Attempt }) {
+  if (attempt.usage_units === undefined) return null;
+  const summary = summarizeUsage(attempt.usage_units);
+  const label = `attempt #${attempt.attempt_number} usage`;
+  return (
+    <div style={{ gridColumn: '1 / -1' }} data-testid="attempt-usage">
+      <div className="attempt-section-title">Usage units</div>
+      {hasUsage(summary) ? (
+        <UsageTables summary={summary} label={label} />
+      ) : (
+        <div className="muted">
+          No usage reported{' '}
+          <span className="faint">(the task sends usage units through the SDK while it runs)</span>
+        </div>
+      )}
+      {attempt.usage_reported_at && (
+        <div className="faint usage-meta">
+          last reported <span title={fmtTs(attempt.usage_reported_at)}>{fmtAge(attempt.usage_reported_at)}</span>
+        </div>
+      )}
+    </div>
   );
 }
 

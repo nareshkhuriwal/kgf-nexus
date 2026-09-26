@@ -22,6 +22,7 @@ only this process, inside the container, does.
 from __future__ import annotations
 
 import argparse
+import enum
 import importlib
 import importlib.util
 import json
@@ -39,9 +40,35 @@ from .context import (
     derive_idempotency_key,
     resolve_inline_threshold,
 )
+from ._taskapi import TaskAPIClient, TaskAPIError, from_environment
+from .ratelimit import RateLimited
 from .task import TaskDefinition, registry
+from .tracing import task_span, trace_context_from_environment
 
-__all__ = ["execute_assignment", "run_handler", "main", "HandlerNotFound"]
+__all__ = [
+    "execute_assignment",
+    "run_handler",
+    "main",
+    "HandlerNotFound",
+    "declare_error",
+    "FROM_ENVIRONMENT",
+]
+
+
+class _Source(enum.Enum):
+    FROM_ENVIRONMENT = "from_environment"
+
+
+#: The default for ``task_api=``: use the workload API the agent exported in
+#: ``NEXUS_TASK_API``, if any. Pass ``None`` to force the in-process fallback.
+FROM_ENVIRONMENT = _Source.FROM_ENVIRONMENT
+
+# The classes a workload may declare through POST /v1/error. The agent never
+# lets a workload claim worker_lost, oom, timeout or infrastructure: those are
+# the agent's own observations (ADR-0032 §3).
+_DECLARABLE_CLASSES = frozenset(
+    {"rate_limited", "transient", "validation", "permission_denied", "application", "not_found"}
+)
 
 
 class HandlerNotFound(LookupError):
@@ -93,7 +120,13 @@ def resolve(task_ref: str) -> TaskDefinition[Any]:
     return definition
 
 
-def build_context(assignment: Mapping[str, Any], *, store: ResultStore | None = None) -> TaskContext:
+def build_context(
+    assignment: Mapping[str, Any],
+    *,
+    store: ResultStore | None = None,
+    environ: Mapping[str, str] | None = None,
+    task_api: TaskAPIClient | None | _Source = FROM_ENVIRONMENT,
+) -> TaskContext:
     """Build a TaskContext from a TaskAssignment (proto/nexus/v1/task.proto).
 
     The idempotency key comes FROM THE ASSIGNMENT -- the control plane derived it
@@ -101,6 +134,13 @@ def build_context(assignment: Mapping[str, Any], *, store: ResultStore | None = 
     silently differs between control plane and worker would break dedup in the one
     situation it exists for, and a loud mismatch is far cheaper than a duplicate
     charge.
+
+    The trace context comes from $TRACEPARENT/$TRACESTATE (``environ`` defaults
+    to ``os.environ``), which the agent exports to every workload.
+
+    ``task_api`` is the attempt's workload API (ADR-0032): by default the one
+    the agent exported in ``NEXUS_TASK_API`` (read from ``environ``); ``None``
+    forces the in-process fallbacks (what the local runner does).
     """
     run_id = str(assignment.get("run_id") or "")
     node_id = str(assignment.get("node_id") or "")
@@ -163,6 +203,8 @@ def build_context(assignment: Mapping[str, Any], *, store: ResultStore | None = 
         start_to_close_deadline_unix_ms=int(assignment.get("start_to_close_deadline_unix_ms") or 0),
         store=store,
         inputs=dict(assignment.get("inputs") or {}),
+        _trace=trace_context_from_environment(environ),
+        _task_api=from_environment(environ) if task_api is FROM_ENVIRONMENT else task_api,
     )
 
 
@@ -216,12 +258,20 @@ def run_handler(
     Retrying inside the worker would hide failures from the control plane's retry
     policy, its backoff, and its `retry_on` classification, and would make
     `attempt_number` a lie.
+
+    The call runs inside a child span of the platform's trace when there is a
+    trace context and OpenTelemetry is installed (nexus.tracing.task_span).
     """
-    return definition.fn(ctx, **kwargs)
+    with task_span(ctx):
+        return definition.fn(ctx, **kwargs)
 
 
 def execute_assignment(
-    assignment: Mapping[str, Any], *, modules: Sequence[str] = (), store: ResultStore | None = None
+    assignment: Mapping[str, Any],
+    *,
+    modules: Sequence[str] = (),
+    store: ResultStore | None = None,
+    task_api: TaskAPIClient | None | _Source = FROM_ENVIRONMENT,
 ) -> dict[str, Any]:
     """Execute one assignment and return a ReportResult-shaped outcome dict.
 
@@ -249,7 +299,17 @@ def execute_assignment(
             "ERROR_CLASS_NOT_FOUND", "HandlerNotFound", str(e), started_ms, retryable=False
         )
 
-    ctx = build_context(assignment, store=store)
+    ctx = build_context(assignment, store=store, task_api=task_api)
+    try:
+        return _execute(ctx, definition, assignment, started_ms)
+    finally:
+        # Deliver usage still pending and log the attempt's totals.
+        ctx._finish()  # noqa: SLF001 - same package
+
+
+def _execute(
+    ctx: TaskContext, definition: TaskDefinition[Any], assignment: Mapping[str, Any], started_ms: int
+) -> dict[str, Any]:
     try:
         kwargs = _resolve_inputs(ctx, definition, assignment)
     except Exception as e:
@@ -287,6 +347,7 @@ def execute_assignment(
     except Exception as e:
         tb = traceback.format_exc()
         ctx.log.error("task failed", error_type=type(e).__name__, error=str(e))
+        declare_error(ctx, e)
         detail_ref = ""
         try:
             # The full traceback goes to the result store, not into the metadata
@@ -296,16 +357,23 @@ def execute_assignment(
             detail_ref = blob["key"] if blob else ""
         except Exception:  # pragma: no cover - never let diagnostics mask the error
             pass
+        error_class = _classify(e)
+        error: dict[str, Any] = {
+            "class": error_class,
+            "type": type(e).__name__,
+            "message": str(e)[:2000],
+            "retryable": error_class
+            in (
+                "ERROR_CLASS_TRANSIENT", "ERROR_CLASS_TIMEOUT", "ERROR_CLASS_INFRASTRUCTURE",
+                "ERROR_CLASS_OOM", "ERROR_CLASS_RATE_LIMITED",
+            ),
+            "detail_ref": detail_ref,
+        }
+        if isinstance(e, RateLimited) and e.retry_after_ms is not None:
+            error["retry_after_ms"] = e.retry_after_ms
         return {
             "outcome": "ATTEMPT_OUTCOME_FAILED",
-            "error": {
-                "class": _classify(e),
-                "type": type(e).__name__,
-                "message": str(e)[:2000],
-                "retryable": _classify(e)
-                in ("ERROR_CLASS_TRANSIENT", "ERROR_CLASS_TIMEOUT", "ERROR_CLASS_INFRASTRUCTURE", "ERROR_CLASS_OOM"),
-                "detail_ref": detail_ref,
-            },
+            "error": error,
             "metrics": {"wall_ms": int(time.time() * 1000) - started_ms},
         }
 
@@ -328,6 +396,8 @@ def _classify(e: BaseException) -> str:
     capacity. Conservative: unrecognized exceptions are APPLICATION (terminal
     unless the author explicitly lists them in retry_on).
     """
+    if isinstance(e, RateLimited):
+        return "ERROR_CLASS_RATE_LIMITED"
     if isinstance(e, TimeoutError):
         return "ERROR_CLASS_TIMEOUT"
     if isinstance(e, (ConnectionError, BrokenPipeError)):
@@ -341,6 +411,28 @@ def _classify(e: BaseException) -> str:
     if isinstance(e, OSError):
         return "ERROR_CLASS_INFRASTRUCTURE"
     return "ERROR_CLASS_APPLICATION"
+
+
+def declare_error(ctx: TaskContext, e: BaseException) -> None:
+    """Tell the agent how to classify the failure about to be reported.
+
+    ``POST /v1/error`` (ADR-0032 §3). The agent honours a declared class only
+    if the process then fails, and only from the set a workload may claim; a
+    class outside that set is not sent. ``RateLimited`` carries its
+    ``retry_after_ms``. Best effort: a declaration that cannot be delivered
+    is logged, and the failure is reported without it.
+    """
+    api = ctx._task_api  # noqa: SLF001 - same package
+    if api is None:
+        return
+    short = _classify(e).removeprefix("ERROR_CLASS_").lower()
+    if short not in _DECLARABLE_CLASSES:
+        return
+    retry_after_ms = e.retry_after_ms if isinstance(e, RateLimited) else None
+    try:
+        api.report_error(short, type(e).__name__, str(e), retry_after_ms)
+    except TaskAPIError as err:
+        ctx.log.warning("error class not delivered to the agent", error=str(err))
 
 
 def _failure_outcome(

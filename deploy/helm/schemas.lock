@@ -1,0 +1,44 @@
+# Kubernetes and CRD JSON schemas deploy/helm/validate.sh checks the chart
+# against, pinned by source commit AND by SHA-256 of each file.
+#
+# validate.sh fetches each file below into its schema cache (default
+# ~/.cache/kgf-nexus/kubeconform-schemas) from the pinned commit, refuses any
+# file whose SHA-256 differs, and then runs kubeconform against the cache ONLY:
+# no schema is ever read from a floating branch. Once the cache is warm the
+# check needs no network (SCHEMA_OFFLINE=1 makes a cold cache an error rather
+# than a download).
+#
+# Sources (the commit pins are the `commit` lines):
+#   k8s/   https://raw.githubusercontent.com/yannh/kubernetes-json-schema/<k8s>/...
+#   crds/  https://raw.githubusercontent.com/datreeio/CRDs-catalog/<crds>/...
+#
+# To add a kind, or move the commits or KUBE_VERSION: edit the lines below (any
+# placeholder hash will do for a new line) and run
+#   deploy/helm/validate.sh --update-schema-lock
+# which downloads each file from the pinned commit, rewrites its hash, and
+# prints the diff for review. The files are addressed by git commit, so the
+# content cannot change underneath a pin; the hashes also catch a proxy or
+# mirror serving something else.
+commit k8s de494cc24a8c0b999c3240319d0dab08626d31da
+commit crds ad3b08c5045129d7bb1eeffd8e61719b2c8dd1e2
+1db2c4fecb34d1cf4c5a95b8eb85c45a6c5da1700a3b3992f6fea1ca3f9185b0 k8s/v1.29.0-standalone-strict/configmap-v1.json
+3788afa5070e22cfeb3e48d02562e3bb71ccd7b632d84b94a505a05bab1abf4c k8s/v1.29.0-standalone-strict/service-v1.json
+dff52c024ebc6202d762035f62e14baca42eabff1e2977cffe3179a97bca8f70 k8s/v1.29.0-standalone-strict/serviceaccount-v1.json
+41594d989218dbfe12190b332eb26dcc1b2474ad920e8d150d7630a0d0fb7d9e k8s/v1.29.0-standalone-strict/deployment-apps-v1.json
+202fc97f6676ab5319d57c79db6eb2d91700e1404d9270a04deb0cc83d5cdca5 k8s/v1.29.0-standalone-strict/statefulset-apps-v1.json
+28e52fedfdd29078eacd20309321249245a531e70c28e7635c08079b44e32d91 k8s/v1.29.0-standalone-strict/horizontalpodautoscaler-autoscaling-v2.json
+33d1c26db8b8b755b2f9799bef12a0c23070e5ab8f37de59e9da09293a483269 k8s/v1.29.0-standalone-strict/cronjob-batch-v1.json
+727cceca9e9fcdee6ec6cdb0efb577a82a0852deb5deb4eb7ebbed96167fc1e1 k8s/v1.29.0-standalone-strict/job-batch-v1.json
+d5220881be8889f79a047e9902f984017d291f8d8c26b0d132c0f3c94b5a871d k8s/v1.29.0-standalone-strict/networkpolicy-networking-v1.json
+290b124aeb1f921cbcf424ce49dceebe053f36489636998c42fc39bfb740af97 k8s/v1.29.0-standalone-strict/poddisruptionbudget-policy-v1.json
+b45e843fd8892bff4a7987d0bdc06e895ab12f85f91d251e060f168367882080 k8s/v1.29.0-standalone-strict/clusterrole-rbac-v1.json
+9c30159bac26ffc5d6a5acdd0bcafd90d3cd3648d2522b43c0ec39bc56878c7f k8s/v1.29.0-standalone-strict/clusterrolebinding-rbac-v1.json
+77c8ae0df25e49ba3b062af42f7bd9b67a9e858978c030fd560c8f113da9088e k8s/v1.29.0-standalone-strict/role-rbac-v1.json
+3adacdd9e922f9080fbbde63e4126b5dc466d8f5261ff9b327ca6fe2486a9841 k8s/v1.29.0-standalone-strict/rolebinding-rbac-v1.json
+dd4b4c3244f2f6af879971f3042df86cd6e30b732a6fd9e50829169de19d43cf crds/cert-manager.io/certificate_v1.json
+6cf8c19d58f7bfb9dcf08e5b826d75c0637eda310ebf2148aa83a8a858bc717f crds/cert-manager.io/issuer_v1.json
+a33fd47f73be948090327c6d2076f4739217111e1caf8a2999a5562c59eade9c crds/monitoring.coreos.com/podmonitor_v1.json
+8978f86e2a7cb281a9ca7bc30d857e0553666658dfe062078c51e99d3f20cd14 crds/monitoring.coreos.com/servicemonitor_v1.json
+85575b3a7d79416f8b09658cf6a3f9a6b79544bbf10c4c465c78bdaab1ea0364 crds/gateway.networking.k8s.io/gateway_v1.json
+55ac5a206d83a21bd8bb177b0fa76402d10d867c63d46c5a75fbfff5f811a7e7 crds/gateway.networking.k8s.io/gatewayclass_v1.json
+e5692e62edd9b8a14bd2527d0a732e174a649131aa4d47159737dc6527c59ca5 crds/gateway.networking.k8s.io/httproute_v1.json

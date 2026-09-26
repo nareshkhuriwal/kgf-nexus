@@ -98,6 +98,26 @@ func TestUnknownEnumValueIsLeftAlone(t *testing.T) {
 	}
 }
 
+// The DAG engine re-reads the stored (short-spelling) spec with protojson, whose
+// DiscardUnknown drops an unrecognised enum string to the zero value. Found by
+// the simulated spot e2e: `capacity: spot_preferred` materialized as
+// SPOT_ALLOWED, and `preempted` in no_retry_on vanished.
+func TestPlacementCapacityAndPreemptedSurviveMaterialization(t *testing.T) {
+	spec := parse(t, `{"api_version":"nexus.dev/v1","namespace":"d","name":"n","tasks":[
+	 {"id":"a","task_ref":"x.y","placement":{"capacity":"on_demand_only","max_preemptions":2},
+	  "retry":{"no_retry_on":["preempted"]}},
+	 {"id":"b","task_ref":"x.y","placement":{"capacity":"spot_preferred"}}]}`)
+	if got := spec.GetTasks()[0].GetPlacement().GetCapacity(); got != nexusv1.CapacityPreference_CAPACITY_PREFERENCE_ON_DEMAND_ONLY {
+		t.Fatalf("on_demand_only materialized as %v", got)
+	}
+	if got := spec.GetTasks()[1].GetPlacement().GetCapacity(); got != nexusv1.CapacityPreference_CAPACITY_PREFERENCE_SPOT_PREFERRED {
+		t.Fatalf("spot_preferred materialized as %v", got)
+	}
+	if nr := spec.GetTasks()[0].GetRetry().GetNoRetryOn(); len(nr) != 1 || nr[0] != nexusv1.ErrorClass_ERROR_CLASS_PREEMPTED {
+		t.Fatalf("no_retry_on: [preempted] materialized as %v", nr)
+	}
+}
+
 // TestTaskSpecViewParsesProtoNamesWithQuotedInts is the regression test for the
 // second half of the silent retry loss.
 //

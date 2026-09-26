@@ -27,10 +27,14 @@ import (
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/taskapi"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/worker"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
+	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
 )
 
 // version is stamped at build time (-ldflags "-X main.version=..."). It is
@@ -80,6 +84,8 @@ func main() {
 		maxUninterruptible = flag.Duration("max-uninterruptible",
 			envDuration("NEXUS_MAX_UNINTERRUPTIBLE", worker.DefaultUninterruptibleCeiling),
 			"platform ceiling on how long cancelling an uninterruptible task waits before SIGKILL (ADR-0015)")
+		taskAPIRoot = flag.String("task-api-root", envOr("NEXUS_TASK_API_ROOT", taskapi.DefaultRoot),
+			"directory for per-attempt workload API sockets (ADR-0032); keep it short: a socket path is limited to 104 bytes on macOS")
 		allowUnenforceable = flag.Bool("allow-unenforceable-limits",
 			os.Getenv("NEXUS_ALLOW_UNENFORCEABLE_LIMITS") == "true",
 			"DEVELOPMENT ONLY: run tasks whose resource limits the subprocess executor cannot enforce")
@@ -113,6 +119,27 @@ func main() {
 	// set but unreadable, none where NEXUS_NATS_REQUIRE_AUTH or NEXUS_ENV=
 	// production demands them -- is fatal, like a malformed NEXUS_K8S_*: an
 	// agent quietly running without hints would hide the deployment bug.
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter. Flushed
+	// last, after the session loop has reported its final results.
+	shutdownTracing, err := tracing.Setup(ctx, tracing.Options{Service: "nexus-agent", Version: version, Log: log})
+	if err != nil {
+		log.Error("invalid OpenTelemetry configuration", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(sctx)
+	}()
+
+	// The result-store configuration the agent holds locally (ADR-0027). A
+	// malformed mode is fatal for the same reason a malformed NEXUS_K8S_* is.
+	localStore, err := objstore.ConfigFromEnv(nil)
+	if err != nil {
+		log.Error("invalid result-store configuration", "error", err)
+		os.Exit(1)
+	}
+
 	busCfg, err := bus.ConfigFromEnv("nexus-agent")
 	if err != nil {
 		log.Error("invalid NATS configuration", "error", err)
@@ -120,6 +147,45 @@ func main() {
 	}
 	if bus.RequireAuthOverridden() {
 		log.Warn("NEXUS_NATS_REQUIRE_AUTH=false overrides NEXUS_ENV: dispatch hints may be received without credentials")
+	}
+
+	// Secret providers (ADR-0025): only THIS namespace's block of the file is
+	// loaded; another tenant's credentials never enter this process. A file
+	// that does not parse or validate is fatal, like a malformed NEXUS_K8S_*.
+	secretResolver, err := secrets.LoadForNamespace(os.Getenv(secrets.EnvConfigPath), *namespace)
+	if err != nil {
+		log.Error("invalid secrets configuration", "error", err)
+		os.Exit(1)
+	}
+	if root := os.Getenv("NEXUS_SECRETS_DIR_ROOT"); root != "" {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			log.Error("NEXUS_SECRETS_DIR_ROOT is not usable", "path", root, "error", err)
+			os.Exit(1)
+		}
+		executor.SecretsRoot = root
+	}
+	if secretResolver != nil {
+		log.Info("secret providers configured", "namespace", *namespace, "schemes", secretResolver.Schemes(),
+			"secrets_dir_root", executor.SecretsRoot)
+		// A core dump or a same-UID ptrace of this process would expose every
+		// resolved value; refuse both where the OS allows.
+		if herr := secrets.HardenProcess(); herr != nil {
+			log.Warn("could not harden the agent process against core dumps", "error", herr)
+		}
+	} else {
+		log.Info("no secret providers configured for this namespace; tasks that declare secrets will fail PERMISSION_DENIED",
+			"namespace", *namespace, "config", os.Getenv(secrets.EnvConfigPath))
+	}
+
+	// Subprocess tasks inherit a minimal environment (F151); an operator may
+	// pass more by name. The agent's own credentials never pass.
+	var passthrough []string
+	for _, p := range splitCSV(os.Getenv("NEXUS_SUBPROCESS_ENV_PASSTHROUGH")) {
+		if secrets.IsAgentCredentialEnv(p) {
+			log.Warn("NEXUS_SUBPROCESS_ENV_PASSTHROUGH names an agent credential; it is ignored", "pattern", p)
+			continue
+		}
+		passthrough = append(passthrough, p)
 	}
 
 	cfg := worker.Config{
@@ -145,10 +211,15 @@ func main() {
 			SecretAccessKey: os.Getenv("NEXUS_S3_SECRET_ACCESS_KEY"),
 			SessionToken:    os.Getenv("NEXUS_S3_SESSION_TOKEN"),
 			UseTLS:          os.Getenv("NEXUS_S3_USE_TLS") == "true",
+			Local:           localStore,
+			BackendSet:      os.Getenv(objstore.EnvBackend) != "",
 		},
 		AllowUnenforceableLimits: *allowUnenforceable,
 		Bus:                      busCfg,
 		MaxUninterruptible:       *maxUninterruptible,
+		Secrets:                  secretResolver,
+		SubprocessEnvPassthrough: passthrough,
+		TaskAPIRoot:              *taskAPIRoot,
 	}
 
 	// The kubernetes executor is opt-in: it exists only when NEXUS_K8S_NAMESPACE
@@ -189,6 +260,10 @@ func main() {
 	reg := metrics.NewServiceRegistry("agent", version)
 	cfg.Metrics = agentmetrics.New(reg)
 	cfg.Readiness = &worker.Readiness{}
+	if err := configurePlacement(&cfg, kcfg, kEnabled, log); err != nil {
+		log.Error("invalid placement configuration", "error", err)
+		os.Exit(1)
+	}
 	stopMetrics := serveMetrics(*metricsAddr, reg, cfg.Readiness, log)
 	defer stopMetrics()
 
@@ -300,9 +375,9 @@ func newLogger(level, format string) *slog.Logger {
 	}
 	opts := &slog.HandlerOptions{Level: lv}
 	if strings.EqualFold(format, "text") {
-		return slog.New(slog.NewTextHandler(os.Stderr, opts))
+		return slog.New(tracing.LogHandler(slog.NewTextHandler(os.Stderr, opts)))
 	}
-	return slog.New(slog.NewJSONHandler(os.Stderr, opts))
+	return slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stderr, opts)))
 }
 
 // advertisedDisk resolves the scratch-disk capacity this agent advertises.

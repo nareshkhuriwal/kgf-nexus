@@ -20,6 +20,10 @@ import { permissionForPath } from './Permissions';
  */
 
 import {
+  IconAsset,
+  IconBell,
+  IconSensor,
+  IconWebhook,
   IconAudit,
   IconCluster,
   IconShield,
@@ -28,6 +32,7 @@ import {
   IconDag,
   IconGauge,
   IconKey,
+  IconBot,
   IconRuns,
   IconServer,
   IconUsers,
@@ -82,11 +87,19 @@ export const NAV_GROUPS: NavGroup[] = [
       // this console mid-incident is looking for a run, not for the catalog.
       { to: '/runs', label: 'Runs', icon: IconRuns },
       { to: '/workflows', label: 'Workflows', icon: IconDag },
+      // Observe, not Automate: an asset is what the runs produced, read after
+      // the fact, and its lineage answers "where did this come from".
+      { to: '/assets', label: 'Assets', icon: IconAsset },
     ],
   },
   {
     label: 'Automate',
-    items: [{ to: '/schedules', label: 'Schedules', icon: IconClock }],
+    items: [
+      { to: '/schedules', label: 'Schedules', icon: IconClock },
+      { to: '/triggers', label: 'Triggers', icon: IconWebhook },
+      { to: '/sensors', label: 'Sensors', icon: IconSensor },
+      { to: '/notifications', label: 'Notifications', icon: IconBell },
+    ],
   },
   {
     label: 'Fleet',
@@ -100,6 +113,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: '/admin/roles', label: 'Roles & permissions', icon: IconShield, adminOnly: true },
       { to: '/admin/users', label: 'Users', icon: IconUsers, adminOnly: true },
       { to: '/admin/tokens', label: 'Tokens', icon: IconKey, adminOnly: true },
+      { to: '/admin/service-accounts', label: 'Service accounts', icon: IconBot, adminOnly: true },
       { to: '/admin/audit', label: 'Audit', icon: IconAudit, adminOnly: true },
     ],
   },

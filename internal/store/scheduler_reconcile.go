@@ -127,10 +127,11 @@ func (s *SchedulerStore) expireOne(
 	// held its row is re-selected on the next pass while its lease is still
 	// expired, or its worker still DEAD, and a result that won the row has
 	// made the reclaim unnecessary.
-	const lockQ = `
+	lockQ := `
 SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.state, a.worker_id,
        a.resource_request, a.scheduled_at, a.priority, a.queue,
-       n.spec_json, n.attempts_used, n.max_attempts, r.deadline_at, n.retry_floor
+       n.spec_json, n.attempts_used, n.max_attempts, r.deadline_at, n.retry_floor,
+       ` + s.freeRetriesColumn() + `
   FROM task_attempts a
   JOIN task_nodes    n ON n.run_id = a.run_id AND n.node_id = a.node_id
   JOIN workflow_runs r ON r.id = a.run_id
@@ -151,7 +152,7 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.state, a.worker_id,
 	if err := tx.QueryRow(ctx, lockQ, attemptID).Scan(
 		&att.ID, &att.RunID, &att.NodeID, &att.AttemptNumber, &state, &workerID,
 		&reqJSON, &att.ScheduledAt, &att.Priority, &att.Queue,
-		&specJSON, &attemptsUsed, &nodeMax, &runDeadline, &att.RetryFloor,
+		&specJSON, &attemptsUsed, &nodeMax, &runDeadline, &att.RetryFloor, &att.FreeRetries,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -244,6 +245,10 @@ UPDATE task_attempts
 	used := attemptsUsed
 	if n := att.AttemptNumber - att.RetryFloor; n > used {
 		used = n
+	}
+	// Free RATE_LIMITED retries were never charged (ADR-0032 §3).
+	if used -= att.FreeRetries; used < 0 {
+		used = 0
 	}
 	maxAttempts := nodeMax
 	if spec.MaxAttempts > 0 {

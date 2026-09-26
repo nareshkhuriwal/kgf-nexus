@@ -43,8 +43,11 @@
 #      diverges fresh and upgraded databases), and every new one must sort after
 #      the previous highest (otherwise upgraded and fresh databases apply it in
 #      different orders -- services/migrations/README.md).
-#   c. Starts a disposable Postgres (container nexus-w2c-compat-pg-<port>, bound
-#      to 127.0.0.1 on port 55688 or 55689 only).
+#   c. Starts a disposable Postgres (container <prefix>-pg-<port>, default
+#      nexus-compat-pg-55688, bound to 127.0.0.1 only). The container carries
+#      the label org.kgf-nexus.compat-smoke=<prefix>; the script never removes a
+#      container of that name WITHOUT the label (it refuses instead), and never
+#      starts on a port something else already listens on.
 #   d. UPGRADE PATH, not a fresh install: applies the previous tree's migrations
 #      with the previous tree's deploy/migrate.sh (the database production has),
 #      then this tree's with this tree's deploy/migrate.sh
@@ -83,7 +86,13 @@
 # ENVIRONMENT
 #   NEXUS_COMPAT_PREVIOUS_REF   override the previous revision
 #   NEXUS_COMPAT_MAIN_REF       main ref for the fallback (default origin/main)
-#   NEXUS_COMPAT_PG_PORT        55688 (default) or 55689; nothing else
+#   NEXUS_COMPAT_PG_PORT        host port for the disposable Postgres (default
+#                               55688; 1024-65535). Must be free.
+#   NEXUS_COMPAT_NAME_PREFIX    container name prefix (default nexus-compat); the
+#                               container is <prefix>-pg-<port>. Lower-case
+#                               letters, digits, '.', '_' and '-' only. Give
+#                               concurrent runs on one host distinct prefixes
+#                               or ports.
 #   NEXUS_COMPAT_PG_IMAGE       default postgres:16-alpine (what compose ships)
 #   NEXUS_COMPAT_PKGS           packages of the OLD tree to test (default: every
 #                               package with an integration-tagged _test.go file)
@@ -112,11 +121,21 @@ done
 
 PG_PORT=${NEXUS_COMPAT_PG_PORT:-55688}
 case "$PG_PORT" in
-  55688|55689) ;;
-  *) die "NEXUS_COMPAT_PG_PORT must be 55688 or 55689 (got $PG_PORT)";;
+  ''|*[!0-9]*) die "NEXUS_COMPAT_PG_PORT must be a number (got '$PG_PORT')";;
 esac
+if [ "$PG_PORT" -lt 1024 ] || [ "$PG_PORT" -gt 65535 ]; then
+  die "NEXUS_COMPAT_PG_PORT must be in 1024-65535 (got $PG_PORT)"
+fi
 PG_IMAGE=${NEXUS_COMPAT_PG_IMAGE:-postgres:16-alpine}
-PG_NAME="nexus-w2c-compat-pg-${PG_PORT}"
+NAME_PREFIX=${NEXUS_COMPAT_NAME_PREFIX:-nexus-compat}
+# A docker name, and no room for a glob or a flag: the name is the only thing
+# this script ever removes, so it must not be able to match anything else.
+[[ "$NAME_PREFIX" =~ ^[a-z0-9][a-z0-9_.-]{0,40}$ ]] \
+  || die "NEXUS_COMPAT_NAME_PREFIX must match ^[a-z0-9][a-z0-9_.-]{0,40}\$ (got '$NAME_PREFIX')"
+PG_NAME="${NAME_PREFIX}-pg-${PG_PORT}"
+# Ownership label: set on the container this script starts, and required on any
+# container of the same name before the script will remove it.
+OWNER_LABEL=org.kgf-nexus.compat-smoke
 PG_USER=nexus
 PG_PASS=nexus-compat-password
 PKGS=${NEXUS_COMPAT_PKGS:-}
@@ -182,8 +201,8 @@ cleanup() {
   if [ "${NEXUS_COMPAT_KEEP:-0}" = "1" ]; then
     say "NEXUS_COMPAT_KEEP=1: leaving container $PG_NAME and $WORK in place"
   else
-    # Only ever the one container this script names.
-    docker rm -f "$PG_NAME" >/dev/null 2>&1 || true
+    # Only the container this run started (by id), never a namesake.
+    if [ -n "${PG_ID:-}" ]; then docker rm -f "$PG_ID" >/dev/null 2>&1 || true; fi
     rm -rf "$WORK"
   fi
   exit "$rc"
@@ -237,11 +256,27 @@ else
 fi
 
 # ── c. disposable Postgres ─────────────────────────────────────────────────
+# A container of this name left by a crashed earlier run of THIS script is
+# replaced; anything else of that name is someone else's, and is left alone.
+if docker container inspect "$PG_NAME" >/dev/null 2>&1; then
+  existing_label=$(docker container inspect -f "{{ index .Config.Labels \"$OWNER_LABEL\" }}" "$PG_NAME")
+  if [ "$existing_label" = "$NAME_PREFIX" ]; then
+    say "removing $PG_NAME left behind by an earlier compat-smoke run"
+    docker rm -f "$PG_NAME" >/dev/null
+  else
+    die "a container named $PG_NAME exists and was not started by this script (label $OWNER_LABEL='${existing_label}'); refusing to remove it. Choose another NEXUS_COMPAT_NAME_PREFIX or NEXUS_COMPAT_PG_PORT"
+  fi
+fi
+# The port must be free before we claim it: docker would otherwise fail late,
+# or -- worse -- a stray local Postgres on it would answer our DSN.
+if (exec 3<>"/dev/tcp/127.0.0.1/$PG_PORT") 2>/dev/null; then
+  die "127.0.0.1:$PG_PORT is already in use; set NEXUS_COMPAT_PG_PORT to a free port"
+fi
 say "starting $PG_NAME ($PG_IMAGE) on 127.0.0.1:$PG_PORT"
-docker rm -f "$PG_NAME" >/dev/null 2>&1 || true   # idempotent: a crashed earlier run
-docker run -d --name "$PG_NAME" -p "127.0.0.1:${PG_PORT}:5432" \
+PG_ID=$(docker run -d --name "$PG_NAME" --label "$OWNER_LABEL=$NAME_PREFIX" \
+  -p "127.0.0.1:${PG_PORT}:5432" \
   -e POSTGRES_USER="$PG_USER" -e POSTGRES_PASSWORD="$PG_PASS" -e POSTGRES_DB=nexus \
-  "$PG_IMAGE" >/dev/null
+  "$PG_IMAGE") || die "docker run failed for $PG_NAME"
 for i in $(seq 1 60); do
   # -d nexus: the bootstrap database answers before initdb has finished.
   docker exec "$PG_NAME" pg_isready -U "$PG_USER" -d nexus >/dev/null 2>&1 && break

@@ -4,6 +4,12 @@
 package main
 
 import (
+	"go.opentelemetry.io/otel/trace"
+
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"encoding/json"
 	"fmt"
@@ -145,10 +151,15 @@ func (s *GRPCServer) MaterializeRun(ctx context.Context, req *MaterializeRunRequ
 	if req.GetRunID() == "" {
 		return nil, status.Error(codes.InvalidArgument, "run_id is required")
 	}
+	ctx, span := tracing.Start(ctx, "run.materialize", trace.WithAttributes(tracing.AttrRunID.String(req.RunID)))
+	defer span.End()
 	res, err := s.engine.Materialize(ctx, req.RunID)
 	if err != nil {
+		tracing.End(span, err)
 		return nil, toStatus(err)
 	}
+	span.SetAttributes(attribute.Int64("nexus.nodes", res.NodesInserted),
+		attribute.Int("nexus.attempts_created", len(res.AttemptsCreated)))
 	out := &MaterializeRunResponse{
 		RunID:          res.RunID,
 		NodesInserted:  res.NodesInserted,
@@ -167,10 +178,16 @@ func (s *GRPCServer) ReconcileRun(ctx context.Context, req *ReconcileRunRequest)
 	if req.GetRunID() == "" {
 		return nil, status.Error(codes.InvalidArgument, "run_id is required")
 	}
+	ctx, span := tracing.Start(ctx, "run.reconcile", trace.WithAttributes(tracing.AttrRunID.String(req.RunID)))
+	defer span.End()
 	res, err := s.engine.Reconcile(ctx, req.RunID)
 	if err != nil {
+		tracing.End(span, err)
 		return nil, toStatus(err)
 	}
+	span.SetAttributes(attribute.String("nexus.run_state", string(res.RunState)),
+		attribute.Bool("nexus.run_terminal", res.RunTerminal),
+		attribute.Int("nexus.attempts_created", len(res.AttemptsCreated)))
 	out := &ReconcileRunResponse{
 		RunID:       res.RunID,
 		Frontier:    res.Frontier,

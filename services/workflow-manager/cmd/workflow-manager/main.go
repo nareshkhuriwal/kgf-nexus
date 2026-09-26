@@ -12,6 +12,8 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"fmt"
@@ -35,6 +37,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/grpcapi"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/runs"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/schedules"
+	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/sensors"
 	"github.com/khuriwalgroup/kgf-nexus/services/workflow-manager/timers"
 )
 
@@ -53,6 +56,9 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter; flushed last.
+	defer tracing.SetupOrExit(ctx, "workflow-manager", version, log)()
 
 	dbCtx, dbCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer dbCancel()
@@ -99,7 +105,9 @@ func run() error {
 		// never find anything, and its counter is an alarm rather than a metric.
 		StalledRunAge:      cfg.StalledRunAge,
 		StalledRunInterval: cfg.StalledRunInterval,
-		Metrics:            timers.NewMetrics(reg),
+		// Re-issues a CANCELLING run's attempt cancellation (F109).
+		CancelSweepInterval: cfg.CancelSweepInterval,
+		Metrics:             timers.NewMetrics(reg),
 	}, log)
 
 	registerTimerHandlers(rec, runSvc, schedClient, log)
@@ -108,6 +116,7 @@ func run() error {
 	// timers package because only this file knows how to reach the run service,
 	// which is the same reason the timer handlers are injected.
 	rec.OnStalledRun(runSvc.ReconcileStalled)
+	rec.OnCancellingRun(runSvc.ReconcileCancelling)
 
 	// ── gRPC API ──────────────────────────────────────────────────────────
 	// The JSON codec must be registered before the server starts: the spec half of
@@ -173,7 +182,7 @@ func run() error {
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 	go func() {
 		log.Info("gRPC listener started", "addr", cfg.GRPCAddr)
 		if err := grpcSrv.Serve(grpcLis); err != nil {
@@ -208,6 +217,30 @@ func run() error {
 		defer close(schedDone)
 		if err := schedSvc.Run(ctx); err != nil {
 			errCh <- fmt.Errorf("schedule fire loop: %w", err)
+		}
+	}()
+
+	// The sensor loop (ADR-0028), for the same reasons as the fire loop: each
+	// sensor is leased with SKIP LOCKED and every observation is a unique row,
+	// so any number of replicas may run it without a leader.
+	listers := sensors.NewRegistry()
+	if s3cfg, ok := sensors.S3ConfigFromEnv(os.Getenv); ok {
+		listers.Register("s3", func(context.Context) (sensors.ObjectLister, error) { return sensors.NewS3Lister(s3cfg) })
+	} else {
+		log.Info("no S3 endpoint configured for sensors (NEXUS_SENSOR_S3_ENDPOINT); object-store sensors will report an error")
+	}
+	sensorCfg := sensors.DefaultConfig()
+	if v := os.Getenv("NEXUS_SENSOR_INTERVAL"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			sensorCfg.Interval = d
+		}
+	}
+	sensorSvc := sensors.New(db, sensors.NewRunsAdapter(runSvc), listers, sensorCfg, log)
+	sensorDone := make(chan struct{})
+	go func() {
+		defer close(sensorDone)
+		if err := sensorSvc.Run(ctx); err != nil {
+			errCh <- fmt.Errorf("sensor loop: %w", err)
 		}
 	}()
 
@@ -311,6 +344,7 @@ type config struct {
 	TimerBacklogInterval time.Duration
 	StalledRunAge        time.Duration
 	StalledRunInterval   time.Duration
+	CancelSweepInterval  time.Duration
 
 	ScheduleInterval      time.Duration
 	ScheduleBatchSize     int
@@ -351,6 +385,8 @@ func loadConfig() config {
 		// Coarse: this is a backstop for something that should never happen, so it
 		// costs a query a minute rather than a query a second.
 		StalledRunInterval: time.Duration(envInt("NEXUS_STALLED_RUN_INTERVAL_SEC", 60)) * time.Second,
+		// Short: the cancel sweep races the killed task's late result (F109).
+		CancelSweepInterval: time.Duration(envInt("NEXUS_CANCEL_SWEEP_INTERVAL_SEC", 5)) * time.Second,
 
 		// Cron's resolution is a minute, so polling faster than this buys nothing;
 		// this bounds how late a tick can be to roughly one interval.
@@ -373,7 +409,7 @@ func newLogger() *slog.Logger {
 	if v := os.Getenv("NEXUS_LOG_LEVEL"); v != "" {
 		_ = level.UnmarshalText([]byte(v))
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})).
+	return slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))).
 		With("service", "workflow-manager")
 }
 

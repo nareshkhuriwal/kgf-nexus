@@ -65,4 +65,13 @@ deploy/.env
 
 # NATS NKey seeds (deploy/nats/nexus-nats-auth.sh, `make k8s-dev-up`). Never commit.
 /.dev-nats/
+
+# Pinned, checksum-verified tools (deploy/scripts/pinned-tool.sh)
+/.tools/
+
+# Air-gap bundles (make airgap-bundle)
+/dist/
+
+# Documentation site build output (make docs)
+/docs-site/site/
 .dev-postgres/

@@ -85,6 +85,40 @@ variable "object_store_credentials" {
   sensitive = true
 }
 
+variable "postgres_ca_bundle" {
+  description = "PEM root CA bundle of an EXTERNAL database, for sslmode=verify-full. Written to the <release>-postgres-ca Secret and mounted by the chart (postgres.caBundle). null: no bundle (the in-cluster Postgres, which serves no TLS)."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.postgres_ca_bundle == null || can(regex("-----BEGIN CERTIFICATE-----", coalesce(var.postgres_ca_bundle, "x")))
+    error_message = "postgres_ca_bundle must be PEM certificates (-----BEGIN CERTIFICATE-----)."
+  }
+}
+
+variable "runtime_db_roles" {
+  description = "Least-privilege runtime logins (chart postgres.runtimeRoles): a generated password per service login in the <release>-db-logins Secret, created in the database by the chart's db-roles Job as the owner login. The owner password then reaches only the migrate, bootstrap and db-roles Jobs."
+  type        = bool
+  default     = false
+}
+
+variable "runtime_db_password_version" {
+  description = "Bump to rotate every runtime login's password: new passwords are generated, the db-roles Job re-runs and the pods roll (chart postgres.runtimeRoles.passwordRevision)."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.runtime_db_password_version >= 1 && floor(var.runtime_db_password_version) == var.runtime_db_password_version
+    error_message = "runtime_db_password_version must be a positive integer."
+  }
+}
+
+variable "generate_object_store_credentials" {
+  description = "With object_store_credentials null: true generates root credentials for the in-cluster MinIO; false writes NO S3 key pair, for a store the pods reach with a cloud identity (IRSA, EKS Pod Identity, Azure or GKE workload identity). The identity itself is bound to the chart's ServiceAccounts (chart_values.serviceAccounts.apiGateway / agent / artifactGC), which the environments annotate."
+  type        = bool
+  default     = true
+}
+
 variable "helm_timeout_seconds" {
   description = "How long Helm waits for every workload and Job to become ready."
   type        = number

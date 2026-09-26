@@ -145,7 +145,9 @@ func (w *wfmGRPC) createRun(ctx context.Context, req rest.CreateRunRequest) (sto
 		if err := w.conn.Invoke(ctx, "/nexus.v1.WorkflowSpecService/GetSpec", &wfmGetSpecRequest{
 			Namespace: req.Namespace, SpecName: req.SpecName,
 		}, &got, grpc.ForceCodec(wfmJSONCodec{})); err != nil {
-			return store.RunRow{}, false, fmt.Errorf("resolve spec %q: %w", req.SpecName, err)
+			// Re-attach the sentinel: an unknown spec_name is the owner's
+			// NotFound, and wrapped bare it reached the client as a 500.
+			return store.RunRow{}, false, fmt.Errorf("resolve spec %q: %w", req.SpecName, reattachSentinel(err))
 		}
 		specID = got.ID
 	}

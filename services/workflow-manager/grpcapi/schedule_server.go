@@ -306,6 +306,11 @@ func (s *SpecServer) BackfillAction(ctx context.Context, req *BackfillActionRequ
 	if errors.Is(err, store.ErrBackfillNotFound) {
 		return nil, status.Error(codes.NotFound, "backfill not found")
 	}
+	if errors.Is(err, store.ErrBackfillStateConflict) {
+		// FailedPrecondition, the code the run lifecycle uses for the same
+		// refusal: the request was well formed, the backfill's state forbids it.
+		return nil, status.Errorf(codes.FailedPrecondition, "cannot %s: %v", req.Action, err)
+	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%s backfill: %v", req.Action, err)
 	}

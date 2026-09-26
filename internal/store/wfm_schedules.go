@@ -620,29 +620,63 @@ func WFMAdvanceBackfill(ctx context.Context, db GWDB, id string, cursorAt *time.
 	return nil
 }
 
-// WFMSetBackfillState moves a backfill to a terminal or paused state.
+// ErrBackfillStateConflict means a backfill was not in a state the requested
+// transition may leave (F119). Match it with errors.Is; errors.As with
+// *BackfillStateConflict gives the state the backfill was actually in.
+var ErrBackfillStateConflict = errors.New("backfill is not in a state this transition may leave")
+
+// BackfillStateConflict is the detail behind ErrBackfillStateConflict.
+type BackfillStateConflict struct {
+	ID      string
+	To      string
+	From    []string // the states the transition may leave
+	Current string   // the state the backfill was in when the transition was refused
+}
+
+func (e *BackfillStateConflict) Error() string {
+	return fmt.Sprintf("backfill %s is %s; it can move to %s only from %s",
+		e.ID, e.Current, e.To, strings.Join(e.From, " or "))
+}
+
+// Is makes errors.Is(err, ErrBackfillStateConflict) hold.
+func (e *BackfillStateConflict) Is(target error) bool { return target == ErrBackfillStateConflict }
+
+// WFMTransitionBackfill moves a backfill to state `to`, but only from one of the
+// states in `from`: a compare-and-set on the row (F119).
+//
+// The condition is in the UPDATE itself, so two concurrent transitions are
+// serialized by the row lock and the second is re-evaluated against the state
+// the first committed -- read-then-write in the caller would let a resume and a
+// cancel both succeed, and a resume of a CANCELLED backfill revive it. When no
+// row matches, one more read tells a missing backfill (ErrBackfillNotFound)
+// from one in another state (*BackfillStateConflict). That read is after the
+// refusal and only explains it; it never decides anything.
 //
 // ended_at is set only for the terminal states, so a paused backfill that is later
 // resumed does not carry a misleading end time.
-func WFMSetBackfillState(ctx context.Context, db GWDB, namespace, id, state string, detail map[string]any) (Backfill, error) {
+func WFMTransitionBackfill(ctx context.Context, db GWDB, namespace, id, to string, from []string, detail map[string]any) (Backfill, error) {
 	body, err := json.Marshal(emptyIfNil(detail))
 	if err != nil {
 		return Backfill{}, fmt.Errorf("encode backfill detail: %w", err)
 	}
-	terminal := state == BackfillCompleted || state == BackfillCancelled || state == BackfillFailed
+	terminal := to == BackfillCompleted || to == BackfillCancelled || to == BackfillFailed
 	b, err := scanBackfill(db.QueryRow(ctx, `
 		UPDATE schedule_backfills
 		   SET state = $3,
 		       detail = CASE WHEN $4::jsonb = '{}'::jsonb THEN detail ELSE $4::jsonb END,
 		       ended_at = CASE WHEN $5 THEN now() ELSE NULL END,
 		       updated_at = now()
-		 WHERE id = $1::uuid AND namespace = $2
-		RETURNING `+backfillCols, id, namespace, state, body, terminal))
+		 WHERE id = $1::uuid AND namespace = $2 AND state = ANY($6::text[])
+		RETURNING `+backfillCols, id, namespace, to, body, terminal, from))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Backfill{}, ErrBackfillNotFound
+		cur, gerr := WFMGetBackfill(ctx, db, namespace, id)
+		if gerr != nil {
+			return Backfill{}, gerr
+		}
+		return Backfill{}, &BackfillStateConflict{ID: id, To: to, From: from, Current: cur.State}
 	}
 	if err != nil {
-		return Backfill{}, fmt.Errorf("set backfill %s state %s: %w", id, state, err)
+		return Backfill{}, fmt.Errorf("move backfill %s to %s: %w", id, to, err)
 	}
 	return b, nil
 }

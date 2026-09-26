@@ -412,3 +412,54 @@ func TestIntegration_RetryAFailedExpansionChild(t *testing.T) {
 		t.Errorf("template = %s once every child succeeded, want SUCCEEDED", got)
 	}
 }
+
+// F145: a failure the scheduler refused to retry (here APPLICATION, not in the
+// default retry set) with budget left must FAIL the node and end the run. It
+// used to stay RUNNING forever: the budget said "between tries" and nothing
+// would ever create the next try.
+func TestIntegration_RefusedRetryWithBudgetLeftFailsTheNode(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	spec := linearSpec()
+	spec.Tasks[1].Retry = &nexusv1.RetryPolicy{MaxAttempts: 4}
+	runID := seedRun(t, pool, spec)
+	e := newTestEngine(t, pool)
+	if _, err := e.Materialize(ctx, runID); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	settleAttempt(t, pool, runID, "a", domain.AttemptSucceeded, map[string]any{"out": "a-value"})
+	if _, err := e.Reconcile(ctx, runID); err != nil {
+		t.Fatalf("Reconcile after a: %v", err)
+	}
+	settleAttempt(t, pool, runID, "b", domain.AttemptFailed, nil)
+
+	// Without a refusal the node is between tries: attempts 2-4 remain.
+	if _, err := e.Reconcile(ctx, runID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := nodeStates(t, pool, runID)["b"]; got != "RUNNING" {
+		t.Fatalf("b = %s with budget left and no refusal; want RUNNING", got)
+	}
+
+	// The scheduler's refusal, as it writes it in the terminal transaction.
+	var attemptID string
+	if err := pool.QueryRow(ctx, `SELECT id::text FROM task_attempts
+	    WHERE run_id = $1::uuid AND node_id = 'b' ORDER BY attempt_number DESC LIMIT 1`, runID).Scan(&attemptID); err != nil {
+		t.Fatalf("read attempt: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO run_events (run_id, seq, node_id, attempt_id, kind, payload, actor)
+		VALUES ($1::uuid, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id = $1::uuid),
+		        'b', $2::uuid, 'RetryExhausted',
+		        '{"reason":"error_class_not_in_retry_on","error_class":"ERROR_CLASS_APPLICATION"}'::jsonb, 'scheduler')`,
+		runID, attemptID); err != nil {
+		t.Fatalf("seed refusal: %v", err)
+	}
+	rec, err := e.Reconcile(ctx, runID)
+	if err != nil {
+		t.Fatalf("Reconcile after refusal: %v", err)
+	}
+	if got := nodeStates(t, pool, runID); got["b"] != "FAILED" || got["c"] != "UPSTREAM_FAILED" || rec.RunState != domain.RunFailed {
+		t.Fatalf("after refusal: nodes %v, run %s; want b FAILED, c UPSTREAM_FAILED, run FAILED", got, rec.RunState)
+	}
+}

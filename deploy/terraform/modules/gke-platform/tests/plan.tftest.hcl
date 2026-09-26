@@ -43,6 +43,14 @@ run "secure_defaults" {
     error_message = "Cloud SQL must require TLS."
   }
   assert {
+    condition     = google_sql_database_instance.this.settings[0].ip_configuration[0].server_ca_mode == "GOOGLE_MANAGED_CAS_CA"
+    error_message = "Cloud SQL must use the shared CA hierarchy, whose server certificates carry the DNS name verify-full checks."
+  }
+  assert {
+    condition     = google_dns_managed_zone.postgres.visibility == "private" && google_dns_record_set.postgres.type == "A"
+    error_message = "The instance's DNS name must resolve only inside the VPC, to its private IP."
+  }
+  assert {
     condition     = google_sql_database_instance.this.settings[0].backup_configuration[0].point_in_time_recovery_enabled
     error_message = "Point-in-time recovery must be on."
   }

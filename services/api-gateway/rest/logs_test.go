@@ -55,7 +55,9 @@ func (d *logsDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row 
 			// scheduled_at, dispatched_at (F120), started_at, ended_at, cache_hit_of
 			time.Now(), (*time.Time)(nil), (*time.Time)(nil), (*time.Time)(nil), (*string)(nil),
 			// attempt_progress (migration 0024): no report yet.
-			(*string)(nil), (*float64)(nil), (*time.Time)(nil), (*time.Time)(nil)}}
+			(*string)(nil), (*float64)(nil), (*time.Time)(nil), (*time.Time)(nil),
+			// attempt_usage (migration 0036): no units reported.
+			[]byte(nil), (*time.Time)(nil)}}
 	}
 	return d.restDB.QueryRow(ctx, sql, args...)
 }

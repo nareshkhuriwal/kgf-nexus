@@ -59,12 +59,20 @@ type WorkerAssignment struct {
 	// InputRefsJSON is task_attempts.input_refs verbatim: the attempt's resolved
 	// inputs as the DAG engine wrote them.
 	InputRefsJSON []byte
+	// TraceContext is task_attempts.trace_context (migration 0028): the W3C
+	// traceparent of whatever made the attempt ready, or "" when untraced.
+	// The scheduler parents its dispatch span on it (ADR-0026).
+	TraceContext string
 
 	// claimedRequest is the resource request that was just committed, used only
 	// to decrement the local capacity budget within one multi-task poll. Not
 	// exported: the authoritative ledger is workers.committed, and exposing this
 	// would invite a caller to do capacity arithmetic outside the transaction.
 	claimedRequest *nexusv1.ResourceVector
+	// Reserved is the vector committed for this attempt (the request plus the
+	// shared GPU device it was placed on). Sent to the agent as
+	// TaskAssignment.reserved, so it uses the same device (ADR-0029 §2).
+	Reserved *nexusv1.ResourceVector
 }
 
 // pollWorker is a row-locked polling worker, with the matching attributes the
@@ -78,6 +86,9 @@ type pollWorker struct {
 	WorkerCandidate
 	Executors []string
 	Labels    map[string]string
+	// facts are the worker's placement facts: effective labels (own overlaid
+	// with its cluster's), cached artifacts, and cluster quota headroom.
+	facts workerFacts
 }
 
 // ClaimForWorker runs the §5.3 atomic claim PINNED to one worker, for a worker
@@ -206,7 +217,10 @@ func (s *SchedulerStore) claimOneForWorker(
 	}
 
 	var skipped []uuid.UUID
+	// The deferral's peer read happens at most once per transaction.
+	var peers peerSet
 	for i := 0; i < lookAhead; i++ {
+		worker.Placed = nil
 		cand, err := s.selectCandidateForWorker(ctx, tx, now, worker, budget, skipped)
 		if errors.Is(err, ErrNoCandidate) {
 			// Nothing this worker can take. Before giving up, explain any attempt
@@ -232,6 +246,34 @@ func (s *SchedulerStore) claimOneForWorker(
 		}
 		if err != nil {
 			return nil, err
+		}
+
+		// Placement (ADR-0029 §4, ADR-0030, ADR-0031). The hard constraints are
+		// already SQL pre-filter clauses; this Go check is the belt to those
+		// braces, so the two can never disagree in the direction that places a
+		// task where it must not run.
+		if ok, _ := domain.Eligible(worker.facts.Labels, cand.Spec.Placement); !ok {
+			skipped = append(skipped, cand.ID)
+			continue
+		}
+		// A cluster known to be out of quota for this pod is skipped for this
+		// worker, not waited on: another cluster may have room.
+		if reason, err := s.headroomBlocks(ctx, tx, now, worker.ID, &worker.facts, cand); err != nil {
+			return nil, err
+		} else if reason != "" {
+			if err := s.markBlocked(ctx, tx, cand.ID, reason); err != nil {
+				return nil, err
+			}
+			skipped = append(skipped, cand.ID)
+			continue
+		}
+		// Bounded delay scheduling: leave it for a strictly better live worker.
+		if deferIt, err := s.shouldDefer(ctx, tx, now, worker, cand, &peers); err != nil {
+			return nil, err
+		} else if deferIt {
+			s.notifyDeferred()
+			skipped = append(skipped, cand.ID)
+			continue
 		}
 
 		// §5.3 step 4: the named global semaphore, checked inside the same
@@ -280,6 +322,18 @@ func (s *SchedulerStore) claimOneForWorker(
 			}
 		}
 
+		// The placed vector: the request plus the shared GPU device chosen for
+		// it, under this worker's row lock. finishWorkerCandidate's Fits
+		// already passed, so a refusal here is impossible short of a ledger
+		// bug; it is still handled as a shortfall, never as an over-commit.
+		if short := s.placeOn(&worker.WorkerCandidate, cand.ResourceRequest); short != nil {
+			if err := s.markBlocked(ctx, tx, cand.ID, domain.ShortfallReason(short)); err != nil {
+				return nil, err
+			}
+			skipped = append(skipped, cand.ID)
+			continue
+		}
+
 		// §5.3 step 5, unchanged and shared with the background loop: this is
 		// THE claim transaction.
 		dispatch, ok, err := s.commitDispatch(ctx, tx, now, cand, &worker.WorkerCandidate)
@@ -294,7 +348,7 @@ func (s *SchedulerStore) claimOneForWorker(
 			continue
 		}
 
-		idemKey, specJSON, inputRefs, err := s.assignmentDetails(ctx, tx, cand)
+		idemKey, specJSON, inputRefs, traceCtx, err := s.assignmentDetails(ctx, tx, cand)
 		if err != nil {
 			return nil, err
 		}
@@ -327,7 +381,9 @@ func (s *SchedulerStore) claimOneForWorker(
 			LeaseExpiresAt: dispatch.ExpiresAt,
 			SpecJSON:       specJSON,
 			InputRefsJSON:  inputRefs,
+			TraceContext:   traceCtx,
 			claimedRequest: cand.ResourceRequest,
+			Reserved:       worker.Placed,
 		}
 		// The start_to_close deadline is an absolute instant derived from
 		// control-plane `now`, matching the timer row committed above, so the
@@ -362,23 +418,30 @@ func (s *SchedulerStore) lockWorkerForClaim(
 	// expired and its work retried elsewhere, and handing it MORE work in that
 	// state manufactures the duplicate execution the lease design exists to
 	// prevent.
-	const q = `
-SELECT id, hostname, capacity, committed, executors, labels
-  FROM workers
- WHERE id = $1
-   AND state = 'ACTIVE'
-   AND $2 = ANY(queues)
-   AND last_heartbeat_at > $3
- FOR UPDATE SKIP LOCKED`
+	// The placement facts (effective labels, cached artifacts, cluster
+	// headroom) ride on the same row read: correlated lookups by the cluster's
+	// unique name, so a worker without a cluster label costs two index probes
+	// that find nothing.
+	q := `
+SELECT w.id, w.hostname, w.capacity, w.committed, w.executors, w.labels, ` + s.placementCols() + `
+  FROM workers w` + s.placementJoin() + `
+ WHERE w.id = $1
+   AND w.state = 'ACTIVE'
+   AND $2 = ANY(w.queues)
+   AND w.last_heartbeat_at > $3
+ FOR UPDATE OF w SKIP LOCKED`
 
 	var (
-		w                WorkerCandidate
-		capJSON, comJSON []byte
-		labelsJSON       []byte
-		executors        []string
+		w                           WorkerCandidate
+		capJSON, comJSON            []byte
+		labelsJSON, factLabels      []byte
+		executors, cached           []string
+		clusterLabels, headroomJSON []byte
+		headroomAt                  *time.Time
 	)
 	err := tx.QueryRow(ctx, q, workerID, s.cfg.Queue, now.Add(-s.cfg.LivenessWindow)).
-		Scan(&w.ID, &w.Hostname, &capJSON, &comJSON, &executors, &labelsJSON)
+		Scan(&w.ID, &w.Hostname, &capJSON, &comJSON, &executors, &labelsJSON,
+			&factLabels, &cached, &clusterLabels, &headroomJSON, &headroomAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -400,6 +463,10 @@ SELECT id, hostname, capacity, committed, executors, labels
 		// column problem.
 		_ = json.Unmarshal(labelsJSON, &out.Labels)
 	}
+	if s.placementMissing {
+		factLabels = labelsJSON
+	}
+	out.facts = scanFacts(factLabels, cached, clusterLabels, headroomJSON, headroomAt)
 	return out, nil
 }
 
@@ -431,11 +498,16 @@ func (s *SchedulerStore) selectCandidateForWorker(
 	if err != nil {
 		return nil, fmt.Errorf("marshal worker labels: %w", err)
 	}
+	effJSON, err := json.Marshal(worker.facts.Labels)
+	if err != nil {
+		return nil, fmt.Errorf("marshal effective labels: %w", err)
+	}
 
 	args := []any{
 		s.cfg.Queue, now, s.cfg.AgingRate, skip, executors, labelsJSON,
 		budget.GetCpuMillis(), budget.GetMemoryBytes(),
 		int64(budget.GetGpuCount()), budget.GetDiskBytes(), worker.ID,
+		effJSON, domain.IsSpot(worker.facts.Labels), domain.CostTier(worker.facts.Labels),
 	}
 
 	if s.windowed && s.cfg.ClaimWindow > 0 {
@@ -465,8 +537,9 @@ func (s *SchedulerStore) selectCandidateForWorker(
 // quietly pick a different attempt than the scan it replaces.
 //
 // Parameters, shared by both callers: $1 queue, $2 now, $3 aging rate,
-// $4 skip ids, $5 executors, $6 worker labels, $7-$10 budget, $11 worker id.
-// The windowed caller adds $12, the window's ids.
+// $4 skip ids, $5 executors, $6 worker labels, $7-$10 budget, $11 worker id,
+// $12 effective labels (own + cluster), $13 worker is spot, $14 cost tier.
+// The windowed caller adds $15, the window's ids.
 //
 // Aging is in the ORDER BY for the same reason as in selectCandidate: a
 // background UPDATE-based ager would rewrite every PENDING row every tick, and
@@ -521,12 +594,40 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.queue, a.priority,
    -- treats a non-fit as "wait your turn"), so two A100s sat idle behind one
    -- busy A10 while A100 work waited. Waiting stays correct for a capacity
    -- shortage; it was never correct for a model this worker does not have.
-   AND (COALESCE((a.resource_request ->> 'gpu_count')::bigint, 0) = 0
+   AND ((COALESCE((a.resource_request ->> 'gpu_count')::bigint, 0) = 0
+         AND NOT (a.resource_request ?| ARRAY['mig','gpu_share_milli','gpu_share_memory_bytes']))
         OR COALESCE(a.resource_request ->> 'gpu_kind', '') = ''
         OR a.resource_request ->> 'gpu_kind' =
            (SELECT capacity ->> 'gpu_kind' FROM workers WHERE id = $11))
    AND COALESCE((a.resource_request ->> 'gpu_memory_bytes')::bigint, 0) <=
        COALESCE((SELECT (capacity ->> 'gpu_memory_bytes')::bigint FROM workers WHERE id = $11), 0)
+   -- Fractional GPUs (ADR-0029 §5): a MIG profile this worker has too few
+   -- instances of, or a shared slice larger than every one of its shared
+   -- devices, can NEVER run here, so it must not be this worker's candidate
+   -- (it would stop the poll at it, the A10/A100 defect above). Each clause
+   -- is guarded by a key test; the keys are written only when non-zero, so a
+   -- CPU-only attempt pays one '?' per clause.
+   AND (NOT (a.resource_request ? 'mig') OR NOT EXISTS (
+        SELECT 1 FROM jsonb_each_text(CASE WHEN jsonb_typeof(a.resource_request -> 'mig') = 'object'
+                                           THEN a.resource_request -> 'mig' ELSE '{}'::jsonb END) m
+         WHERE m.value::bigint > COALESCE(
+               ((SELECT capacity FROM workers WHERE id = $11) -> 'mig' ->> m.key)::bigint, 0)))
+   AND (NOT (a.resource_request ?| ARRAY['gpu_share_milli','gpu_share_memory_bytes']) OR EXISTS (
+        SELECT 1 FROM jsonb_each(COALESCE((SELECT capacity -> 'gpu_shares' FROM workers WHERE id = $11), '{}'::jsonb)) d
+         WHERE COALESCE((d.value ->> 'milli')::bigint, 0) >= COALESCE((a.resource_request ->> 'gpu_share_milli')::bigint, 0)
+           AND COALESCE((d.value ->> 'memory_bytes')::bigint, 0) >= COALESCE((a.resource_request ->> 'gpu_share_memory_bytes')::bigint, 0)))
+   -- Hard placement constraints (ADR-0030 §1, ADR-0031 §2), against the
+   -- EFFECTIVE labels. Guarded by the placement key, which only specs that
+   -- declare one carry.
+   AND (NOT (n.spec_json ? 'placement') OR (
+        $12::jsonb @> COALESCE(n.spec_json #> '{placement,required_labels}',
+                               n.spec_json #> '{placement,requiredLabels}', '{}'::jsonb)
+    AND (NOT $13::bool OR COALESCE(n.spec_json #>> '{placement,capacity}', '')
+                          NOT IN ('CAPACITY_PREFERENCE_ON_DEMAND_ONLY', 'on_demand_only', '2'))
+    AND (COALESCE(NULLIF(COALESCE(n.spec_json #>> '{placement,max_cost_tier}',
+                                  n.spec_json #>> '{placement,maxCostTier}'), ''), '0')::int = 0
+         OR $14::int <= COALESCE(n.spec_json #>> '{placement,max_cost_tier}',
+                                 n.spec_json #>> '{placement,maxCostTier}')::int)))
    ` + extraWhere + `
  ORDER BY ` + orderBy + `
  LIMIT 1
@@ -576,7 +677,7 @@ func (s *SchedulerStore) selectCandidateWindowed(
 		}
 
 		row := tx.QueryRow(ctx, workerCandidateSQL(
-			"AND a.id = ANY($12::uuid[])",
+			"AND a.id = ANY($15::uuid[])",
 			// The same order the window was read in, with the configured rate
 			// passed as a parameter: this sorts at most ClaimWindow rows, so it
 			// needs no index, and it keeps the pick identical to the window's.
@@ -728,16 +829,20 @@ func (s *SchedulerStore) finishWorkerCandidate(
 // value every at-least-once guarantee depends on.
 func (s *SchedulerStore) assignmentDetails(
 	ctx context.Context, tx pgx.Tx, cand *Candidate,
-) (idempotencyKey string, specJSON, inputRefs []byte, err error) {
+) (idempotencyKey string, specJSON, inputRefs []byte, traceCtx string, err error) {
+	var tc *string
 	err = tx.QueryRow(ctx, `
-SELECT a.idempotency_key, n.spec_json::text, a.input_refs::text
+SELECT a.idempotency_key, n.spec_json::text, a.input_refs::text, a.trace_context
   FROM task_attempts a
   JOIN task_nodes n ON n.run_id = a.run_id AND n.node_id = a.node_id
- WHERE a.id = $1`, cand.ID).Scan(&idempotencyKey, &specJSON, &inputRefs)
+ WHERE a.id = $1`, cand.ID).Scan(&idempotencyKey, &specJSON, &inputRefs, &tc)
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("load assignment details for attempt %s: %w", cand.ID, err)
+		return "", nil, nil, "", fmt.Errorf("load assignment details for attempt %s: %w", cand.ID, err)
 	}
-	return idempotencyKey, specJSON, inputRefs, nil
+	if tc != nil {
+		traceCtx = *tc
+	}
+	return idempotencyKey, specJSON, inputRefs, traceCtx, nil
 }
 
 // PendingCancellations lists the attempts this worker holds that the control

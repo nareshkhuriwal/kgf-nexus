@@ -4,6 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 */}}
 
 {{- define "nexus.required" -}}
+{{- include "nexus.dbRequired" . -}}
 {{- if and .Values.postgres.pitr.enabled (not .Values.postgres.enabled) -}}
 {{- fail "postgres.pitr.enabled needs the in-cluster postgres (postgres.enabled=true). A managed database (Azure Flexible Server, RDS, Cloud SQL) must use the provider's automated backups and point-in-time restore instead -- see docs/OPERATIONS.md §4." -}}
 {{- end -}}
@@ -11,7 +12,7 @@ SPDX-License-Identifier: Apache-2.0
 {{- fail "postgres.pitr.enabled requires postgres.pitr.existingSecret (s3-key, s3-key-secret, cipher-pass), postgres.pitr.repo.s3.bucket and postgres.pitr.repo.s3.endpoint" -}}
 {{- end -}}
 {{- if not .Values.existingSecret -}}
-{{- fail "existingSecret is required: the name of a Secret holding postgres-password, minio-root-user, minio-root-password and worker-api-key (deploy/terraform creates it)" -}}
+{{- fail "existingSecret is required: the name of a Secret holding postgres-password and worker-api-key, plus minio-root-user and minio-root-password for static S3 keys (deploy/terraform creates it)" -}}
 {{- end -}}
 {{- if not .Values.image.tag -}}
 {{- fail "image.tag is required: pin an immutable tag (a git SHA), never latest" -}}
@@ -69,31 +70,10 @@ imagePullSecrets:
 {{- end }}
 {{- end -}}
 
-{{/*
-The database URL is assembled in the pod from the Secret, never rendered into
-a manifest: $(NEXUS_DB_PASSWORD) is Kubernetes' own env expansion, so the
-password exists only in the Secret and the container's environment.
-The password must be URL-safe (deploy/terraform generates alphanumerics).
-Required: the services have no built-in DSN and exit at startup without this
-(internal/config.DSN, docs/OPERATIONS.md §8).
-*/}}
-{{- define "nexus.dbEnv" -}}
-- name: NEXUS_DB_PASSWORD
-  valueFrom:
-    secretKeyRef: { name: {{ .Values.existingSecret }}, key: postgres-password }
-- name: DATABASE_URL
-  value: "postgres://{{ .Values.postgres.user }}:$(NEXUS_DB_PASSWORD)@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.database }}?sslmode={{ .Values.postgres.sslmode }}"
-{{- with (.Values.postgres.pool).maxConns }}
-- { name: NEXUS_DB_MAX_CONNS, value: {{ . | quote }} }
-{{- end }}
-{{- with (.Values.postgres.pool).minConns }}
-- { name: NEXUS_DB_MIN_CONNS, value: {{ . | quote }} }
-{{- end }}
-{{- end -}}
-
 {{/* Peer addresses and logging, shared by every control-plane service. */}}
 {{- define "nexus.serviceEnv" -}}
-{{ include "nexus.dbEnv" . }}
+{{- $key := index . 1 -}}{{- with index . 0 -}}
+{{ include "nexus.dbEnv" (list . $key) }}
 - { name: LOG_LEVEL, value: {{ .Values.logLevel | quote }} }
 - { name: NEXUS_LOG_LEVEL, value: {{ .Values.logLevel | quote }} }
 - { name: LOG_FORMAT, value: json }
@@ -109,6 +89,7 @@ Required: the services have no built-in DSN and exit at startup without this
 - { name: EVENT_SERVICE_ADDR, value: "event-service:9090" }
 - { name: NEXUS_EVENT_SERVICE_ADDR, value: "event-service:9090" }
 - { name: API_GATEWAY_ADDR, value: "api-gateway:9091" }
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -134,23 +115,137 @@ two listeners (config drift recorded in F38); all are set, as compose does.
 {{- join "," $out -}}
 {{- end -}}
 
+{{/*
+Refuse a result-store configuration that would start pods which cannot reach
+the store, naming the fix. Run from nexus.resultStoreEnv, so every template
+that renders a result-store client checks it.
+*/}}
+{{- define "nexus.resultStoreRequired" -}}
+{{- $rs := .Values.resultStore -}}
+{{- if and .Values.minio.enabled (ne $rs.backend "s3") -}}
+{{- fail (printf "minio.enabled=true runs an in-cluster MinIO, but resultStore.backend=%s would never use it: set minio.enabled=false (the %s store is external)" $rs.backend $rs.backend) -}}
+{{- end -}}
+{{- if and .Values.minio.enabled (not (has $rs.s3.credentials (list "static" "auto"))) -}}
+{{- fail (printf "minio.enabled=true needs resultStore.s3.credentials static or auto (MinIO authenticates with its root key pair); %q is a cloud-identity mode for an external S3 store -- set minio.enabled=false or credentials=static" $rs.s3.credentials) -}}
+{{- end -}}
+{{- if eq $rs.backend "azblob" -}}
+{{- if not (or $rs.azure.account $rs.azure.endpoint) -}}
+{{- fail "resultStore.backend=azblob needs resultStore.azure.account: the storage account NAME (deploy/terraform/environments/aks sets it from the provisioned account)" -}}
+{{- end -}}
+{{- if and (eq $rs.azure.auth "shared-key") (not $rs.azure.keySecret.name) -}}
+{{- fail "resultStore.azure.auth=shared-key needs resultStore.azure.keySecret.name: a Secret holding the account key (prefer auth=workload-identity; aks-platform's account has shared keys disabled)" -}}
+{{- end -}}
+{{- if eq $rs.azure.auth "workload-identity" -}}
+{{- include "nexus.resultStoreIdentityRequired" (list . "azure.workload.identity/client-id" "resultStore.azure.auth=workload-identity") -}}
+{{- end -}}
+{{- end -}}
+{{- if and (eq $rs.backend "s3") (eq $rs.s3.credentials "web-identity") -}}
+{{- include "nexus.resultStoreIdentityRequired" (list . "eks.amazonaws.com/role-arn" "resultStore.s3.credentials=web-identity (IRSA)") -}}
+{{- end -}}
+{{- if and (eq $rs.backend "gcs") (eq $rs.gcs.auth "none") (not $rs.gcs.endpoint) -}}
+{{- fail "resultStore.gcs.auth=none is unauthenticated and only for an emulator: set resultStore.gcs.endpoint to it, or use auth=auto (Workload Identity) against real GCS" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Result-store client environment: api-gateway, the agents, artifact-gc and the
+minio-init Job. The variables are the objstore contract (internal/objstore
+config.go). The RESULT_STORE_* names without the NEXUS_ prefix are the older
+spelling some readers (and minio-init) still use; they are kept for s3 only,
+the one backend they ever described.
+*/}}
 {{- define "nexus.resultStoreEnv" -}}
+{{- include "nexus.resultStoreRequired" . -}}
+{{- $rs := .Values.resultStore -}}
+- { name: NEXUS_RESULT_STORE_BACKEND, value: {{ $rs.backend | quote }} }
+- { name: NEXUS_RESULT_STORE_BUCKET, value: {{ .Values.minio.bucket | quote }} }
+- { name: NEXUS_RESULT_STORE_REGION, value: {{ .Values.minio.region | quote }} }
+- { name: NEXUS_RESULT_STORE_PART_SIZE_BYTES, value: {{ $rs.partSizeBytes | int64 | toString | quote }} }
+- { name: RESULT_STORE_INLINE_THRESHOLD_BYTES, value: {{ .Values.minio.inlineThresholdBytes | int64 | toString | quote }} }
+{{- if eq $rs.backend "s3" }}
+{{- $secret := $rs.s3.accessKeySecret.name | default .Values.existingSecret }}
+- { name: NEXUS_S3_CREDENTIALS, value: {{ $rs.s3.credentials | quote }} }
+{{- if has $rs.s3.credentials (list "static" "auto") }}
+{{- /* auto against an external store: optional references, so a Secret
+       without a key pair lets the binary fall through to the pod's AWS
+       identity instead of failing pod start. static, or the in-cluster MinIO
+       (which cannot start without its root pair either): required, so a
+       missing key is a visible CreateContainerConfigError, never a client
+       that quietly goes looking for another identity. */}}
+{{- $optional := and (eq $rs.s3.credentials "auto") (not .Values.minio.enabled) }}
 - name: NEXUS_S3_ACCESS_KEY_ID
-  valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: minio-root-user } }
+  valueFrom: { secretKeyRef: { name: {{ $secret }}, key: {{ $rs.s3.accessKeySecret.accessKeyIdKey }}, optional: {{ $optional }} } }
 - name: RESULT_STORE_ACCESS_KEY
-  valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: minio-root-user } }
+  valueFrom: { secretKeyRef: { name: {{ $secret }}, key: {{ $rs.s3.accessKeySecret.accessKeyIdKey }}, optional: {{ $optional }} } }
 - name: NEXUS_S3_SECRET_ACCESS_KEY
-  valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: minio-root-password } }
+  valueFrom: { secretKeyRef: { name: {{ $secret }}, key: {{ $rs.s3.accessKeySecret.secretAccessKeyKey }}, optional: {{ $optional }} } }
 - name: RESULT_STORE_SECRET_KEY
-  valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: minio-root-password } }
+  valueFrom: { secretKeyRef: { name: {{ $secret }}, key: {{ $rs.s3.accessKeySecret.secretAccessKeyKey }}, optional: {{ $optional }} } }
+{{- end }}
 - { name: RESULT_STORE_ENDPOINT, value: {{ .Values.minio.endpoint | quote }} }
 - { name: NEXUS_RESULT_STORE_ENDPOINT, value: {{ .Values.minio.endpoint | quote }} }
 - { name: NEXUS_S3_USE_TLS, value: {{ .Values.minio.useTLS | toString | quote }} }
 - { name: RESULT_STORE_BUCKET, value: {{ .Values.minio.bucket | quote }} }
-- { name: NEXUS_RESULT_STORE_BUCKET, value: {{ .Values.minio.bucket | quote }} }
 - { name: RESULT_STORE_REGION, value: {{ .Values.minio.region | quote }} }
-- { name: NEXUS_RESULT_STORE_REGION, value: {{ .Values.minio.region | quote }} }
-- { name: RESULT_STORE_INLINE_THRESHOLD_BYTES, value: {{ .Values.minio.inlineThresholdBytes | int64 | toString | quote }} }
+{{- else if eq $rs.backend "azblob" }}
+{{- with $rs.azure.endpoint }}
+- { name: NEXUS_RESULT_STORE_ENDPOINT, value: {{ . | quote }} }
+{{- end }}
+- { name: NEXUS_AZURE_STORAGE_ACCOUNT, value: {{ $rs.azure.account | quote }} }
+- { name: NEXUS_AZURE_STORAGE_AUTH, value: {{ $rs.azure.auth | quote }} }
+{{- with $rs.azure.clientId }}
+- { name: NEXUS_AZURE_CLIENT_ID, value: {{ . | quote }} }
+{{- end }}
+{{- if and $rs.azure.keySecret.name (has $rs.azure.auth (list "shared-key" "auto")) }}
+- name: NEXUS_AZURE_STORAGE_KEY
+  valueFrom: { secretKeyRef: { name: {{ $rs.azure.keySecret.name }}, key: {{ $rs.azure.keySecret.key }} } }
+{{- end }}
+{{- else if eq $rs.backend "gcs" }}
+{{- with $rs.gcs.endpoint }}
+- { name: NEXUS_RESULT_STORE_ENDPOINT, value: {{ . | quote }} }
+{{- end }}
+- { name: NEXUS_GCS_AUTH, value: {{ $rs.gcs.auth | quote }} }
+{{- end }}
+{{- end -}}
+
+{{/*
+OpenTelemetry trace export, the STANDARD OTEL_* variables, for every Nexus
+process. Nothing at all when tracing.enabled is false: the binaries then keep
+their tracer off. OTEL_SERVICE_NAME is never set -- each binary names itself.
+k8s.namespace.name and k8s.pod.name come from the downward API through two
+chart-private variables, defined BEFORE the $(VAR) reference that expands them
+(Kubernetes only expands variables declared earlier in the list), and named
+so they cannot collide with a container's own POD_NAME.
+*/}}
+{{- define "nexus.tracingEnv" -}}
+{{- $t := .Values.tracing -}}
+{{- if $t.enabled }}
+{{- if not $t.endpoint -}}
+{{- fail "tracing.enabled needs tracing.endpoint: the OTLP collector, e.g. http://otel-collector.observability:4317 (protocol grpc) or :4318 (http/protobuf)" -}}
+{{- end -}}
+{{- if and $t.headersSecret.name (not $t.headersSecret.key) -}}
+{{- fail "tracing.headersSecret.name needs tracing.headersSecret.key: the key in that Secret holding the OTEL_EXPORTER_OTLP_HEADERS value" -}}
+{{- end }}
+- { name: OTEL_TRACES_EXPORTER, value: otlp }
+- { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $t.endpoint | quote }} }
+- { name: OTEL_EXPORTER_OTLP_PROTOCOL, value: {{ $t.protocol | quote }} }
+- { name: OTEL_EXPORTER_OTLP_INSECURE, value: {{ ternary "true" "false" $t.insecure | quote }} }
+- { name: OTEL_TRACES_SAMPLER, value: {{ $t.sampler | quote }} }
+- { name: OTEL_TRACES_SAMPLER_ARG, value: {{ $t.samplerArg | quote }} }
+{{- if $t.headersSecret.name }}
+- name: OTEL_EXPORTER_OTLP_HEADERS
+  valueFrom: { secretKeyRef: { name: {{ $t.headersSecret.name }}, key: {{ $t.headersSecret.key }} } }
+{{- end }}
+- name: NEXUS_OTEL_K8S_NAMESPACE
+  valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+- name: NEXUS_OTEL_K8S_POD
+  valueFrom: { fieldRef: { fieldPath: metadata.name } }
+{{- $attrs := list }}
+{{- with $t.resourceAttributes }}{{ $attrs = append $attrs . }}{{ end }}
+{{- $attrs = append $attrs "k8s.namespace.name=$(NEXUS_OTEL_K8S_NAMESPACE)" }}
+{{- $attrs = append $attrs "k8s.pod.name=$(NEXUS_OTEL_K8S_POD)" }}
+- { name: OTEL_RESOURCE_ATTRIBUTES, value: {{ join "," $attrs | quote }} }
+{{- end }}
 {{- end -}}
 
 {{/*
@@ -256,8 +351,11 @@ rejected at runtime, with nothing in the manifest pointing at why.
 {{- range .publicKeys }}{{ if not (regexMatch $keyRe .) }}{{ fail (printf "nats.auth.tenants: %q is not a user public NKey (U...)" .) }}{{ end }}{{ end -}}
 {{- $_ := set $seen .namespace true -}}
 {{- end -}}
-{{- if and .Values.agents (not (hasKey $seen .Values.nexusNamespace)) -}}
-{{- fail (printf "nats.auth.tenants has no entry for nexusNamespace %q, so this chart's agents could not receive dispatch hints" .Values.nexusNamespace) -}}
+{{- range .Values.agents -}}
+{{- $ns := .namespace | default $.Values.nexusNamespace -}}
+{{- if not (hasKey $seen $ns) -}}
+{{- fail (printf "nats.auth.tenants has no entry for namespace %q (agent %s), so that agent could not receive dispatch hints" $ns .name) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if $n.tls.enabled -}}
@@ -282,6 +380,7 @@ migration shipped in the migrate image of the SAME tag is recorded -- which is
 exactly "the migration job for this release has finished".
 */}}
 {{- define "nexus.waitForSchema" -}}
+{{- $key := index . 1 -}}{{- with index . 0 -}}
 - name: wait-for-schema
   image: {{ include "nexus.image" (list . "migrate") }}
   imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -291,17 +390,33 @@ exactly "the migration job for this release has finished".
       set -eu
       latest=$(ls /migrations/*.up.sql | sort | tail -n 1 | xargs basename | sed 's/\.up\.sql$//')
       echo "waiting for migration $latest"
-      until [ "$(psql "$DATABASE_URL" -tAc "SELECT 1 FROM schema_migrations WHERE version = '$latest'" 2>/dev/null)" = "1" ]; do
+      # Say WHY it is still waiting: a wrong CA bundle, a host name the
+      # certificate lacks or a runtime login not created yet otherwise shows
+      # only as a pod stuck in Init (F133). libpq never prints the password.
+      last=""; n=0
+      while :; do
+        out=$(psql "$DATABASE_URL" -tAc "SELECT 1 FROM schema_migrations WHERE version = '$latest'" 2>&1 | head -n 1) || true
+        [ "$out" = "1" ] && break
+        [ -n "$out" ] || out="migration $latest not recorded yet"
+        if [ "$out" != "$last" ] || [ $((n % 30)) -eq 0 ]; then
+          echo "wait-for-schema: not ready: $out"
+          last=$out
+        fi
+        n=$((n + 1))
         sleep 2
       done
       echo "schema at $latest"
   env:
-{{ include "nexus.dbEnv" . | indent 4 }}
+{{ include "nexus.dbEnv" (list . $key) | indent 4 }}
+  {{- with include "nexus.dbVolumeMounts" . }}
+  volumeMounts: {{- . | indent 4 }}
+  {{- end }}
   securityContext:
 {{ include "nexus.containerSecurity" . | indent 4 }}
   resources:
     requests: { cpu: 10m, memory: 16Mi }
     limits: { memory: 64Mi }
+{{- end -}}
 {{- end -}}
 
 {{/* Non-root, no privilege escalation, no capabilities: the Nexus images run as uid 10001. */}}
@@ -350,11 +465,16 @@ when metrics.podAnnotations is true. Argument: (list $root port).
 */}}
 {{- define "nexus.metricsAnnotations" -}}
 {{- $root := index . 0 -}}{{- $port := index . 1 -}}
-{{- if $root.Values.metrics.podAnnotations }}
+{{- $db := and (gt (len .) 2) (index . 2) -}}
+{{- $dbAnn := ternary (include "nexus.dbRevisionAnnotation" $root) "" $db -}}
+{{- if or $root.Values.metrics.podAnnotations $dbAnn }}
 annotations:
+  {{- if $root.Values.metrics.podAnnotations }}
   prometheus.io/scrape: "true"
   prometheus.io/port: {{ $port | quote }}
   prometheus.io/path: /metrics
+  {{- end }}
+  {{- with $dbAnn }}{{ . | indent 2 }}{{ end }}
 {{- end }}
 {{- end -}}
 
@@ -405,4 +525,26 @@ deploy/docker-compose.pitr.yml.
 {{- with $p.extraEnv }}
 {{ toYaml . }}
 {{- end }}
+{{- end -}}
+
+{{- /*
+Notifications, webhook triggers and sensors (ADR-0028). The gateway seals
+channel and trigger secrets and the event-service opens them, so both read
+the SAME key from one Secret. No key configured is a supported state: inline
+secrets are then refused and only secret references work.
+*/ -}}
+{{- define "nexus.eventsEnv" -}}
+{{- $e := .Values.events | default dict -}}
+{{- $k := $e.secretKey | default dict -}}
+{{- if $k.existingSecret }}
+- name: NEXUS_SECRET_KEY
+  valueFrom:
+    secretKeyRef: { name: {{ $k.existingSecret | quote }}, key: {{ $k.key | default "secret-key" | quote }} }
+{{- end }}
+{{- if $k.previousKey }}
+- name: NEXUS_SECRET_KEY_PREVIOUS
+  valueFrom:
+    secretKeyRef: { name: {{ $k.existingSecret | quote }}, key: {{ $k.previousKey | quote }} }
+{{- end }}
+- { name: NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS, value: {{ $e.allowPrivateTargets | default false | toString | quote }} }
 {{- end -}}

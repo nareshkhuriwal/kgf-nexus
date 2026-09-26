@@ -35,6 +35,7 @@ import { DagView } from '../components/DagView';
 import { AttemptList } from '../components/AttemptDetail';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { PlacementPanel } from '../components/PlacementPanel';
+import { RunUsagePanel } from '../components/UsageUnits';
 import { LogTail } from '../components/LogTail';
 import { EventTimeline } from '../components/EventTimeline';
 import { ExecutionTimeline, type TimelineMode } from '../components/ExecutionTimeline';
@@ -341,6 +342,10 @@ export function RunDetailPage({ namespace }: { namespace: string }) {
           live={!terminal}
         />
       )}
+
+      {/* Beside placement (what the run asked the cluster for): what it spent
+          at providers. Waits for the attempts so it never flashes "none". */}
+      {attemptsQuery.data !== undefined && <RunUsagePanel attempts={attemptsQuery.data} />}
 
       <div className="panel">
         <div className="panel-head">

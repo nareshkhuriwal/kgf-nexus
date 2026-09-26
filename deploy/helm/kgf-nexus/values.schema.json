@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "kgf-nexus chart values",
-  "description": "Validated by Helm on install, upgrade, template and lint. Top-level keys are closed so a misspelt section fails instead of being silently ignored; sections that pre-date this schema accept extra keys (backwards compatibility), the sections added with it are closed. Cross-field rules (existingSecret, image.tag, NATS identities, PITR, apply-mode UID, GC delete confirmation, PDB vs replicas) are enforced by the templates with a message naming the fix.",
+  "description": "Validated by Helm on install, upgrade, template and lint. Top-level keys are closed so a misspelt section fails instead of being silently ignored; sections that pre-date this schema accept extra keys (backwards compatibility), the sections added with it are closed. Cross-field rules (existingSecret, image.tag, NATS identities, PITR, apply-mode UID, GC delete confirmation, database TLS and runtime logins, GPU requests vs advertised capacity, shared ServiceAccounts, PDB vs replicas, result-store backend vs MinIO and cloud identity, tracing endpoint) are enforced by the templates with a message naming the fix.",
   "type": "object",
   "additionalProperties": false,
   "definitions": {
@@ -48,7 +48,34 @@
       }
     },
     "dnsName": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" },
+    "secretKey": { "type": "string", "pattern": "^[-._a-zA-Z0-9]+$", "maxLength": 253, "description": "A key inside a Secret's data." },
     "k8sName": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63 },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$", "maxLength": 253 },
+        "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+        "automountServiceAccountToken": { "type": ["boolean", "null"] },
+        "podLabels": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "dbParams": {
+      "type": "object",
+      "description": "libpq/pgx connection parameters; values are URL-encoded. Connection-identity keys (user, host, sslmode, ...) are refused by the templates.",
+      "propertyNames": { "pattern": "^[a-z_]+$" },
+      "additionalProperties": { "type": ["string", "number", "boolean"] }
+    },
+    "dbConnection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "user": { "type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$" },
+        "passwordKey": { "type": "string", "pattern": "^[-._a-zA-Z0-9]+$" },
+        "params": { "$ref": "#/definitions/dbParams" }
+      }
+    },
+
     "service": {
       "type": "object",
       "additionalProperties": true,
@@ -104,6 +131,42 @@
         "user": { "type": "string", "minLength": 1 },
         "database": { "type": "string", "minLength": 1 },
         "sslmode": { "enum": ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"] },
+        "caBundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Root CA bundle for verify-ca/verify-full: a Secret OR a ConfigMap holding `key`.",
+          "properties": {
+            "secretName": { "type": "string" },
+            "configMapName": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 }
+          }
+        },
+        "params": { "$ref": "#/definitions/dbParams" },
+        "connections": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "apiGateway": { "$ref": "#/definitions/dbConnection" },
+            "workflowManager": { "$ref": "#/definitions/dbConnection" },
+            "dagEngine": { "$ref": "#/definitions/dbConnection" },
+            "scheduler": { "$ref": "#/definitions/dbConnection" },
+            "resourceManager": { "$ref": "#/definitions/dbConnection" },
+            "eventService": { "$ref": "#/definitions/dbConnection" },
+            "artifactGC": { "$ref": "#/definitions/dbConnection" },
+            "migrate": { "$ref": "#/definitions/dbConnection" }
+          }
+        },
+        "runtimeRoles": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "existingSecret": { "type": "string" },
+            "scope": { "enum": ["union", "service"] },
+            "passwordRevision": { "type": "integer", "minimum": 1 },
+            "connectionLimit": { "type": "integer", "minimum": -1 }
+          }
+        },
         "maxConnections": { "type": "integer", "minimum": 10 },
         "pool": {
           "type": "object",
@@ -135,12 +198,97 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "endpoint": { "type": "string", "pattern": "^https?://" },
-        "bucket": { "type": "string", "minLength": 3 },
+        "bucket": { "type": "string", "minLength": 3, "description": "The result bucket -- or the Azure container under resultStore.backend=azblob." },
+        "region": { "type": "string" },
         "useTLS": { "type": "boolean" },
         "inlineThresholdBytes": { "type": "integer", "minimum": 0 },
         "image": { "type": "string", "minLength": 1, "description": "S3 server image; pin by digest (OPERATIONS §22)." },
         "mcImage": { "type": "string", "minLength": 1, "description": "Bucket-init client image (mc); the pinned Silo image bundles one." },
         "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "resultStore": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Result-store backend and credentials for api-gateway, the workflow-manager (sensors), the agents and artifact-gc. Cross-field rules (azure.account for azblob, a key Secret for shared-key, minio.enabled only with s3 static/auto) are template guards.",
+      "properties": {
+        "backend": { "enum": ["s3", "azblob", "gcs"] },
+        "partSizeBytes": {
+          "type": "integer",
+          "minimum": 5242880,
+          "maximum": 536870912,
+          "multipleOf": 262144,
+          "description": "Multipart part / Azure block / GCS chunk size, the range the binaries accept (NEXUS_RESULT_STORE_PART_SIZE_BYTES): at least S3's 5 MiB minimum part, at most 512 MiB (one part is buffered per upload), a multiple of GCS's 256 KiB chunk."
+        },
+        "s3": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "credentials": { "enum": ["auto", "static", "web-identity", "pod-identity", "iam", "env", "anonymous"] },
+            "accessKeySecret": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": { "oneOf": [{ "const": "" }, { "$ref": "#/definitions/k8sName" }] },
+                "accessKeyIdKey": { "$ref": "#/definitions/secretKey" },
+                "secretAccessKeyKey": { "$ref": "#/definitions/secretKey" }
+              }
+            }
+          }
+        },
+        "azure": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "account": { "type": "string", "pattern": "^$|^[a-z0-9]{3,24}$", "description": "Storage account name: 3-24 lowercase letters and digits." },
+            "endpoint": { "type": "string", "pattern": "^$|^https?://" },
+            "auth": { "enum": ["auto", "workload-identity", "managed-identity", "shared-key"] },
+            "clientId": {
+              "type": "string",
+              "pattern": "^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "description": "Client ID (a GUID) of a user-assigned managed identity: NEXUS_AZURE_CLIENT_ID."
+            },
+            "keySecret": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": { "oneOf": [{ "const": "" }, { "$ref": "#/definitions/k8sName" }] },
+                "key": { "$ref": "#/definitions/secretKey" }
+              }
+            }
+          }
+        },
+        "gcs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "auth": { "enum": ["auto", "none"] },
+            "endpoint": { "type": "string", "pattern": "^$|^https?://" }
+          }
+        }
+      }
+    },
+    "tracing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "OpenTelemetry trace export (standard OTEL_* variables) for every Nexus process. endpoint is required when enabled (template guard).",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "endpoint": { "type": "string", "pattern": "^$|^https?://" },
+        "protocol": { "enum": ["grpc", "http/protobuf"] },
+        "insecure": { "type": "boolean" },
+        "sampler": { "enum": ["always_on", "always_off", "traceidratio", "parentbased_always_on", "parentbased_always_off", "parentbased_traceidratio"] },
+        "samplerArg": { "type": "string", "pattern": "^(0(\\.[0-9]+)?|1(\\.0+)?)$", "description": "Sampling ratio 0..1, as a string (the OTEL variable is a string)." },
+        "headersSecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "oneOf": [{ "const": "" }, { "$ref": "#/definitions/k8sName" }] },
+            "key": { "oneOf": [{ "const": "" }, { "$ref": "#/definitions/secretKey" }] }
+          }
+        },
+        "resourceAttributes": { "type": "string", "pattern": "^$|^[^=,\\s]+=[^,]*(,[^=,\\s]+=[^,]*)*$" },
+        "publicEndpoint": { "type": "boolean", "description": "NEXUS_TRACING_PUBLIC_ENDPOINT on api-gateway: inbound REST trace context becomes a link, not the parent." }
       }
     },
     "nats": {
@@ -162,6 +310,22 @@
       }
     },
     "mailpit": { "type": "object", "properties": { "enabled": { "type": "boolean" } } },
+    "events": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "secretKey": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 },
+            "previousKey": { "type": "string" }
+          }
+        },
+        "allowPrivateTargets": { "type": "boolean" }
+      }
+    },
     "smtp": {
       "type": "object",
       "additionalProperties": true,
@@ -169,6 +333,18 @@
         "host": { "type": "string" },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "tls": { "enum": ["starttls", "implicit", "none"] }
+      }
+    },
+    "kgf": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "authMode": { "enum": ["standalone", "kgf", "both"] },
+        "contextKeysUrl": { "type": "string" },
+        "contextPublicKeys": { "type": "string" },
+        "audience": { "type": "string", "minLength": 1 },
+        "userIssuers": { "type": "string" },
+        "servicePrincipals": { "type": "string" }
       }
     },
     "migrate": {
@@ -228,19 +404,100 @@
           "cpuMillis": { "type": "integer", "minimum": 1 },
           "memoryBytes": { "type": "integer", "minimum": 1 },
           "gpuCount": { "type": "integer", "minimum": 0 },
+          "gpuKind": { "type": "string" },
+          "gpuMemoryBytes": { "type": "integer", "minimum": 0 },
+          "gpu": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "requestDevices": { "type": "boolean", "description": "Request gpuCount devices of resourceName (default true). false = simulated capacity, which requires the label simulated=true." },
+              "resourceName": { "type": "string", "pattern": "^[a-z0-9.-]+/[a-z0-9._-]+$" },
+              "tolerate": { "type": "boolean", "description": "Tolerate the <resourceName>:NoSchedule taint (default true)." }
+            }
+          },
+          "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
+          "tolerations": { "type": "array", "items": { "type": "object" } },
+          "affinity": { "type": "object" },
+          "serviceAccount": { "$ref": "#/definitions/serviceAccount" },
           "diskBytes": { "type": "integer", "minimum": 1 },
+          "namespace": { "type": "string", "minLength": 1 },
+          "workerApiKeySecretKey": { "type": "string", "minLength": 1 },
+          "natsSeedKey": { "type": "string", "minLength": 1 },
           "resources": { "$ref": "#/definitions/resources" },
-          "podDisruptionBudget": { "$ref": "#/definitions/pdb" }
+          "podDisruptionBudget": { "$ref": "#/definitions/pdb" },
+          "gpuMig": { "type": "string" },
+          "gpuShared": { "type": "string" },
+          "gpuDiscovery": { "enum": ["", "nvidia-smi"] },
+          "capacityType": { "enum": ["", "on-demand", "spot"] },
+          "eviction": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "sources": { "type": "string" },
+              "taints": { "type": "string" },
+              "grace": { "$ref": "#/definitions/duration" }
+            }
+          },
+          "artifactCache": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["bytes"],
+            "properties": {
+              "bytes": { "type": "string" },
+              "sizeLimit": { "type": "string" },
+              "verify": { "enum": ["", "hit"] }
+            }
+          }
         }
+      }
+    },
+    "agentPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "minVersion": { "type": "string", "pattern": "^$|^v?[0-9]+\\.[0-9]+(\\.[0-9]+)?(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$" },
+        "requiredCapabilities": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } }
       }
     },
     "agentDefaults": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "gpuResourceName": { "type": "string", "pattern": "^[a-z0-9.-]+/[a-z0-9._-]+$" },
         "heartbeatIntervalMs": { "type": "integer", "minimum": 100 },
         "drainGrace": { "$ref": "#/definitions/duration" },
-        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 }
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 },
+        "secrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "configSecret": { "type": "string" },
+            "fileSecrets": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "secretName", "mountPath"],
+                "properties": {
+                  "name": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" },
+                  "secretName": { "type": "string", "minLength": 1 },
+                  "mountPath": { "type": "string", "pattern": "^/" }
+                }
+              }
+            },
+            "workloadIdentityClientId": { "type": "string" },
+            "subprocessEnvPassthrough": { "type": "string" },
+            "tmpfsSizeLimit": { "$ref": "#/definitions/quantityOrNumber" }
+          }
+        }
+      }
+    },
+    "auditExport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sinkKeySecret": { "type": "string" },
+        "sinkAllowCIDRs": { "type": "string" }
       }
     },
     "metrics": {
@@ -278,6 +535,37 @@
         },
         "resources": { "$ref": "#/definitions/resources" },
         "podDisruptionBudget": { "$ref": "#/definitions/pdb" }
+      }
+    },
+    "serviceAccounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "automountServiceAccountToken": { "type": "boolean" },
+        "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+        "apiGateway": { "$ref": "#/definitions/serviceAccount" },
+        "workflowManager": { "$ref": "#/definitions/serviceAccount" },
+        "dagEngine": { "$ref": "#/definitions/serviceAccount" },
+        "scheduler": { "$ref": "#/definitions/serviceAccount" },
+        "resourceManager": { "$ref": "#/definitions/serviceAccount" },
+        "eventService": { "$ref": "#/definitions/serviceAccount" },
+        "agent": { "$ref": "#/definitions/serviceAccount" },
+        "artifactGC": { "$ref": "#/definitions/serviceAccount" },
+        "ui": { "$ref": "#/definitions/serviceAccount" },
+        "jobs": { "$ref": "#/definitions/serviceAccount" }
+      }
+    },
+    "claimPlacement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policy": { "enum": ["pack", "spread"] },
+        "wait": { "$ref": "#/definitions/duration" },
+        "headroomTTL": { "$ref": "#/definitions/duration" },
+        "maxPreemptionRetries": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "preemptionRetryDelay": { "$ref": "#/definitions/duration" },
+        "clusterName": { "type": "string" }
       }
     },
     "placement": {
@@ -350,6 +638,8 @@
         "replicas": { "type": "integer", "minimum": 1 },
         "interval": { "$ref": "#/definitions/duration" },
         "jobLabelSelector": { "type": "string" },
+        "clusterLabels": { "type": "string" },
+        "gpuResources": { "type": "string" },
         "logLevel": { "enum": ["debug", "info", "warn", "error"] },
         "workerNamespaces": { "type": "array", "items": { "$ref": "#/definitions/k8sName" }, "uniqueItems": true },
         "observeNodes": { "type": "boolean" },

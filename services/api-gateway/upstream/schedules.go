@@ -11,6 +11,8 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/rest"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Schedule WRITES go through workflow-manager, which owns the table.
@@ -212,6 +214,15 @@ func (c *WorkflowManagerClient) backfillAction(ctx context.Context, namespace, i
 	if err := c.grpc.conn.Invoke(ctx, "/nexus.v1.WorkflowSpecService/BackfillAction",
 		&wfmBackfillActionRequest{Namespace: namespace, ID: id, Action: action},
 		&resp, grpc.ForceCodec(wfmJSONCodec{})); err != nil {
+		switch status.Code(err) {
+		case codes.FailedPrecondition:
+			// Re-attach the store sentinel the owner matched on, as the run
+			// lifecycle does for ErrRunStateConflict (F119).
+			return store.Backfill{}, fmt.Errorf("%s backfill %s: %w: %s",
+				action, id, store.ErrBackfillStateConflict, status.Convert(err).Message())
+		case codes.NotFound:
+			return store.Backfill{}, fmt.Errorf("%s backfill %s: %w", action, id, store.ErrBackfillNotFound)
+		}
 		return store.Backfill{}, fmt.Errorf("%s backfill %s: %w", action, id, err)
 	}
 	return resp.Backfill, nil

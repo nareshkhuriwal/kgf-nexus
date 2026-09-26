@@ -1,0 +1,17 @@
+# Hand-written test input for `nexusctl import prefect` (original to this repository).
+name: etl
+prefect-version: 3.8.6
+deployments:
+  - name: report-hourly
+    entrypoint: etl_flows.py:report
+    parameters:
+      total: 0
+    work_pool:
+      name: default
+    schedules:
+      - cron: "15 * * * *"
+        timezone: "America/New_York"
+      - interval: 1800
+        active: false
+  - name: missing
+    entrypoint: other.py:nope

@@ -13,7 +13,7 @@ and ignores this chart's defaults, so sections added since then are simply
 absent. Fail with the fix rather than a nil-pointer error deep in a template.
 */}}
 {{- define "nexus.valuesComplete" -}}
-{{- range $section := list "placement" "podDisruptionBudget" "autoscaling" "tls" "clusterController" "artifactGC" -}}
+{{- range $section := list "placement" "podDisruptionBudget" "autoscaling" "tls" "clusterController" "artifactGC" "serviceAccounts" "resultStore" "tracing" "agentPolicy" "kgf" "claimPlacement" -}}
 {{- if not (hasKey $.Values $section) -}}
 {{- fail (printf "values section %q is missing: this looks like `helm upgrade --reuse-values` from an older chart version, which drops the new version's defaults. Upgrade with --reset-then-reuse-values (keeps your previous overrides) or with -f <your values file> (docs/OPERATIONS.md §20.2)" $section) -}}
 {{- end -}}
@@ -27,16 +27,22 @@ Pod-spec placement fields for one component. Rendered at pod-spec level:
 {{- define "nexus.placement" -}}
 {{- $root := index . 0 -}}{{- $component := index . 1 -}}
 {{- $p := $root.Values.placement -}}
+{{- /* Optional third argument: per-workload nodeSelector / tolerations /
+       affinity that REPLACE the global ones (agents[] entries). */ -}}
+{{- $o := dict -}}{{- if gt (len .) 2 }}{{ $o = index . 2 | default dict }}{{ end -}}
+{{- $nodeSelector := ternary $o.nodeSelector $p.nodeSelector (hasKey $o "nodeSelector") -}}
+{{- $tolerations := ternary $o.tolerations $p.tolerations (hasKey $o "tolerations") -}}
+{{- $affinity := ternary $o.affinity $p.affinity (hasKey $o "affinity") -}}
 {{- with $p.priorityClassName }}
 priorityClassName: {{ . | quote }}
 {{- end }}
-{{- with $p.nodeSelector }}
+{{- with $nodeSelector }}
 nodeSelector: {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with $p.tolerations }}
+{{- with $tolerations }}
 tolerations: {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with $p.affinity }}
+{{- with $affinity }}
 affinity: {{- toYaml . | nindent 2 }}
 {{- end }}
 {{- if $p.topologySpread.enabled }}

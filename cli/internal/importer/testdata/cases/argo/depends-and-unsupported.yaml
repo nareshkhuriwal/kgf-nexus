@@ -1,0 +1,112 @@
+# Hand-written test input for `nexusctl import argo` (original to this repository).
+# depends expressions, retry policies, resources, and templates Nexus cannot run.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: Depends-And-Unsupported
+spec:
+  entrypoint: main
+  onExit: cleanup
+  parallelism: 2
+  arguments:
+    parameters:
+      - name: env
+        value: staging
+      - name: shards
+        value: '["a","b"]'
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: A
+            template: work
+          - name: B
+            depends: "A.Succeeded"
+            template: work
+          - name: C
+            depends: A
+            template: flaky
+          - name: all-done
+            depends: "(B.Succeeded || B.Failed) && (C.Succeeded || C.Failed || C.Errored)"
+            template: work
+          - name: either
+            depends: "B || C"
+            template: work
+          - name: not-c
+            depends: "A && !C.Skipped"
+            template: work
+          - name: gated
+            dependencies: [A]
+            template: work
+            when: "{{workflow.parameters.env}} == prod"
+          - name: remote
+            dependencies: [A]
+            templateRef:
+              name: shared-templates
+              template: publish
+          - name: approve
+            dependencies: [gated]
+            template: wait-approval
+          - name: per-shard
+            dependencies: [A]
+            template: shard-work
+            arguments:
+              parameters:
+                - name: shard
+                  value: "{{item}}"
+            withParam: "{{workflow.parameters.shards}}"
+          - name: fields
+            dependencies: [A]
+            template: shard-work
+            arguments:
+              parameters:
+                - name: shard
+                  value: "{{item.name}}"
+            withItems:
+              - {name: x}
+              - {name: y}
+    - name: work
+      container:
+        image: alpine:3.23
+        command: [sh, -c, "echo {{workflow.parameters.env}} {{workflow.name}}"]
+        resources:
+          requests: {cpu: 500m, memory: 256Mi}
+          limits: {cpu: "1", memory: 1Gi, nvidia.com/gpu: "1"}
+      activeDeadlineSeconds: 600
+    - name: flaky
+      retryStrategy:
+        limit: "4"
+        retryPolicy: OnError
+        backoff: {duration: "5s", factor: "3", maxDuration: "5m", cap: "1m"}
+        affinity:
+          nodeAntiAffinity: {}
+      memoize:
+        key: "flaky"
+        maxAge: "1h"
+        cache:
+          configMap: {name: memo}
+      synchronization:
+        mutex: {name: flaky-lock}
+      container:
+        image: alpine:3.23
+        command: [sh, -c]
+        args: ["exit 0"]
+        env:
+          - name: TOKEN
+            valueFrom:
+              secretKeyRef: {name: creds, key: token}
+    - name: shard-work
+      inputs:
+        parameters:
+          - name: shard
+      script:
+        image: python:3.12-alpine
+        command: [python]
+        source: |
+          print("{{inputs.parameters.shard}}")
+    - name: wait-approval
+      suspend: {}
+    - name: cleanup
+      container:
+        image: alpine:3.23
+        command: [echo, bye]

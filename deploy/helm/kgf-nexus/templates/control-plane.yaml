@@ -9,34 +9,54 @@ so the two deployments cannot drift in behaviour.
 {{- $root := . -}}
 {{- include "nexus.valuesComplete" . -}}
 {{- $svcs := list
-  (dict "name" "api-gateway" "key" "apiGateway" "image" "api-gateway" "grpc" 9091 "resultStore" true "hpa" true "tls" true "extra" (list
+  (dict "name" "api-gateway" "key" "apiGateway" "image" "api-gateway" "grpc" 9091 "resultStore" true "events" true "hpa" true "tls" true "extra" (list
       (dict "name" "AUTH_MODE" "value" "api_key")
       (dict "name" "NEXUS_SMTP_HOST" "value" (.Values.smtp.host | toString))
       (dict "name" "NEXUS_SMTP_PORT" "value" (.Values.smtp.port | toString))
       (dict "name" "NEXUS_SMTP_TLS" "value" (.Values.smtp.tls | toString))
       (dict "name" "NEXUS_SMTP_FROM" "value" (.Values.smtp.from | toString))
-      (dict "name" "NEXUS_PUBLIC_URL" "value" (.Values.smtp.publicUrl | toString))))
-  (dict "name" "workflow-manager" "key" "workflowManager" "image" "workflow-manager" "grpc" 9090 "hpa" true "tls" true "extra" (list
+      (dict "name" "NEXUS_PUBLIC_URL" "value" (.Values.smtp.publicUrl | toString))
+      (dict "name" "NEXUS_MIN_AGENT_VERSION" "value" (.Values.agentPolicy.minVersion | default "" | toString))
+      (dict "name" "NEXUS_REQUIRED_AGENT_CAPABILITIES" "value" (join "," (.Values.agentPolicy.requiredCapabilities | default list)))
+      (dict "name" "NEXUS_AUTH_MODE" "value" (.Values.kgf.authMode | toString))
+      (dict "name" "NEXUS_KGF_CONTEXT_KEYS_URL" "value" (.Values.kgf.contextKeysUrl | toString))
+      (dict "name" "NEXUS_KGF_CONTEXT_PUBLIC_KEYS" "value" (.Values.kgf.contextPublicKeys | toString))
+      (dict "name" "NEXUS_KGF_AUDIENCE" "value" (.Values.kgf.audience | toString))
+      (dict "name" "NEXUS_KGF_USER_ISSUERS" "value" (.Values.kgf.userIssuers | toString))
+      (dict "name" "NEXUS_KGF_SERVICE_PRINCIPALS" "value" (.Values.kgf.servicePrincipals | toString))))
+  (dict "name" "workflow-manager" "key" "workflowManager" "image" "workflow-manager" "grpc" 9090 "resultStore" true "hpa" true "tls" true "extra" (list
       (dict "name" "TIMER_POLL_INTERVAL_MS" "value" "1000")))
   (dict "name" "dag-engine" "key" "dagEngine" "image" "dag-engine" "grpc" 9090 "hpa" true "tls" true "extra" (list))
   (dict "name" "resource-manager" "key" "resourceManager" "image" "resource-manager" "grpc" 9090 "tls" true "extra" (list
       (dict "name" "WORKER_LIVENESS_TIMEOUT_MS" "value" "15000")
       (dict "name" "RECONCILE_INTERVAL_MS" "value" "10000")))
-  (dict "name" "event-service" "key" "eventService" "image" "event-service" "grpc" 9090 "nats" true "hpa" true "extra" (list
+  (dict "name" "event-service" "key" "eventService" "image" "event-service" "grpc" 9090 "nats" true "events" true "hpa" true "extra" (list
+      (dict "name" "NEXUS_SMTP_HOST" "value" (.Values.smtp.host | toString))
+      (dict "name" "NEXUS_SMTP_PORT" "value" (.Values.smtp.port | toString))
+      (dict "name" "NEXUS_SMTP_TLS" "value" (.Values.smtp.tls | toString))
+      (dict "name" "NEXUS_SMTP_FROM" "value" (.Values.smtp.from | toString))
+      (dict "name" "NEXUS_CONSOLE_URL" "value" (.Values.smtp.publicUrl | toString))
       (dict "name" "NEXUS_OUTBOX_RETENTION" "value" "1h")
       (dict "name" "NEXUS_OUTBOX_MAX_AGE" "value" "24h")
       (dict "name" "EVENT_SSE_KEEPALIVE_MS" "value" "15000")))
 -}}
 {{- range .Values.schedulers }}
-{{- $svcs = append $svcs (dict "name" .name "key" "" "image" "scheduler" "grpc" 9090 "replicas" (.replicas | default 1) "scheduler" . "tls" true "extra" (list
+{{- $svcs = append $svcs (dict "name" .name "key" "" "sa" "scheduler" "image" "scheduler" "grpc" 9090 "replicas" (.replicas | default 1) "scheduler" . "tls" true "extra" (list
       (dict "name" "NEXUS_QUEUE" "value" .queue)
       (dict "name" "SCHEDULER_BIN_PACKING" "value" "best_fit")
       (dict "name" "SCHEDULER_LOOKAHEAD" "value" "32")
       (dict "name" "SCHEDULER_AGING_MS" "value" "30000")
       (dict "name" "SCHEDULER_POLL_INTERVAL_MS" "value" "500")
-      (dict "name" "LEASE_TTL_MS" "value" "30000"))) }}
+      (dict "name" "LEASE_TTL_MS" "value" "30000")
+      (dict "name" "NEXUS_PLACEMENT_POLICY" "value" ($root.Values.claimPlacement.policy | default "pack"))
+      (dict "name" "NEXUS_PLACEMENT_WAIT" "value" ($root.Values.claimPlacement.wait | default "3s"))
+      (dict "name" "NEXUS_CLUSTER_HEADROOM_TTL" "value" ($root.Values.claimPlacement.headroomTTL | default "2m"))
+      (dict "name" "NEXUS_MAX_PREEMPTION_RETRIES" "value" ($root.Values.claimPlacement.maxPreemptionRetries | default 5 | int64 | toString))
+      (dict "name" "NEXUS_PREEMPTION_RETRY_DELAY" "value" ($root.Values.claimPlacement.preemptionRetryDelay | default "2s")))) }}
 {{- end }}
 {{- range $svcs }}
+{{- $saKey := .sa | default .key }}
+{{- $sa := include "nexus.saFor" (list $root $saKey nil) | fromYaml }}
 {{- $over := dict }}
 {{- if .key }}{{ $over = index $root.Values.services .key | default dict }}{{ end }}
 {{- if .scheduler }}{{ $over = .scheduler }}{{ end }}
@@ -108,20 +128,23 @@ spec:
     matchLabels: {{- include "nexus.selector" (list $root .name) | nindent 6 }}
   template:
     metadata:
-      labels: {{- include "nexus.labels" (list $root .name) | nindent 8 }}
-      {{- include "nexus.metricsAnnotations" (list $root $metricsPort) | nindent 6 }}
+      labels:
+        {{- include "nexus.labels" (list $root .name) | nindent 8 }}
+        {{- include "nexus.saPodLabels" $sa | indent 8 }}
+      {{- include "nexus.metricsAnnotations" (list $root $metricsPort true) | nindent 6 }}
     spec:
+      {{- include "nexus.podIdentity" $sa | nindent 6 }}
       {{- include "nexus.pullSecrets" $root | nindent 6 }}
       securityContext: {{- include "nexus.podSecurity" $root | nindent 8 }}
       {{- include "nexus.placement" (list $root .name) | nindent 6 }}
       initContainers:
-        {{- include "nexus.waitForSchema" $root | nindent 8 }}
+        {{- include "nexus.waitForSchema" (list $root $saKey) | nindent 8 }}
       containers:
         - name: {{ .name }}
           image: {{ include "nexus.image" (list $root .image) }}
           imagePullPolicy: {{ $root.Values.image.pullPolicy }}
           env:
-            {{- include "nexus.serviceEnv" $root | nindent 12 }}
+            {{- include "nexus.serviceEnv" (list $root $saKey) | nindent 12 }}
             {{- include "nexus.listenEnv" (list .grpc) | nindent 12 }}
             {{- if .resultStore }}
             {{- include "nexus.resultStoreEnv" $root | nindent 12 }}
@@ -132,13 +155,33 @@ spec:
             {{- range .extra }}
             - { name: {{ .name }}, value: {{ .value | quote }} }
             {{- end }}
+            {{- if .events }}
+            {{- include "nexus.eventsEnv" $root | nindent 12 }}
+            {{- end }}
             {{- if .tls }}
             {{- include "nexus.tlsEnv" (list $root "server") | nindent 12 }}
             {{- end }}
             {{- if $isGateway }}
             # The ops listener: /metrics and the probes, never the public port.
             - { name: NEXUS_METRICS_ADDR, value: {{ printf ":%d" $metricsPort | quote }} }
+            {{- if $root.Values.tracing.publicEndpoint }}
+            # Inbound REST trace context becomes a link, never the parent: the
+            # callers are untrusted. Independent of tracing.enabled, because
+            # propagation runs even when no span is exported.
+            - { name: NEXUS_TRACING_PUBLIC_ENDPOINT, value: "true" }
             {{- end }}
+            {{- with $root.Values.auditExport }}
+            {{- if .sinkKeySecret }}
+            # Seals audit sink signing secrets (ADR-0025).
+            - name: NEXUS_AUDIT_SINK_KEY
+              valueFrom: { secretKeyRef: { name: {{ .sinkKeySecret | quote }}, key: audit-sink-key } }
+            {{- end }}
+            {{- if .sinkAllowCIDRs }}
+            - { name: NEXUS_AUDIT_SINK_ALLOW_CIDRS, value: {{ .sinkAllowCIDRs | quote }} }
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- include "nexus.tracingEnv" $root | nindent 12 }}
           ports:
             - { name: http, containerPort: 8080 }
             - { name: grpc, containerPort: {{ .grpc }} }
@@ -163,6 +206,7 @@ spec:
             readOnlyRootFilesystem: true
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            {{- include "nexus.dbVolumeMounts" $root | nindent 12 }}
             {{- if .nats }}
             {{- include "nexus.natsVolumeMounts" $root | nindent 12 }}
             {{- end }}
@@ -171,6 +215,7 @@ spec:
             {{- end }}
       volumes:
         - { name: tmp, emptyDir: {} }
+        {{- include "nexus.dbVolumes" $root | nindent 8 }}
         {{- if .nats }}
         {{- include "nexus.natsVolumes" (list $root "event-service" "") | nindent 8 }}
         {{- end }}

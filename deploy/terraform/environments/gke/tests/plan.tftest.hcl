@@ -31,6 +31,7 @@ override_module {
     artifact_bucket                   = "kgf-nexus-prod-usc1-results-abc123"
     artifact_hmac_credentials         = { access_key_id = "GOOGEXAMPLE", secret_access_key = "mock-secret" }
     artifact_service_account          = "kgf-nexus-prod-usc1-art@my-nexus-project.iam.gserviceaccount.com"
+    postgres_ca_bundle                = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
   }
 }
 
@@ -42,12 +43,43 @@ run "plan_example" {
   command = plan
 
   assert {
-    condition     = output.object_store.endpoint == "https://storage.googleapis.com"
-    error_message = "Nexus should use the GCS XML (S3 interoperability) endpoint."
+    condition     = local.artifact_identity.name == "nexus-artifacts" && length(local.agents) == 1
+    error_message = "The result-store ServiceAccount must be the one the platform identity trusts, and the GPU agent present only with the GPU pool."
+  }
+
+  assert {
+    condition     = output.object_store.backend == "gcs" && output.object_store.k8s_service_account == "nexus-artifacts"
+    error_message = "Nexus should use native GCS through Workload Identity (the nexus-artifacts ServiceAccount) by default."
   }
 
   assert {
     condition     = kubernetes_storage_class_v1.regional_ssd.parameters["replication-type"] == "regional-pd"
     error_message = "The StorageClass should use regional persistent disks."
+  }
+}
+
+run "gpu_pool_hosts_a_gpu_agent" {
+  command = plan
+
+  variables {
+    gpu_pool = merge(var.gpu_pool, { enabled = true })
+  }
+
+  assert {
+    condition     = length(local.agents) == 2 && local.agents[1].gpuCount >= 1 && local.agents[1].nodeSelector["nexus.khuriwalgroup.com/pool"] == "gpu"
+    error_message = "With the GPU pool on, a GPU agent requesting its devices must be placed on it."
+  }
+}
+
+run "hmac_fallback" {
+  command = plan
+
+  variables {
+    artifact_identity = "hmac"
+  }
+
+  assert {
+    condition     = output.object_store.backend == "s3" && output.object_store.endpoint == "https://storage.googleapis.com"
+    error_message = "The HMAC fallback should use the GCS XML (S3 interoperability) endpoint."
   }
 }

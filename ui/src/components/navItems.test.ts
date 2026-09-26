@@ -19,7 +19,17 @@ describe('the shared destination list', () => {
     expect(paths).not.toContain('/admin/tokens');
     expect(paths).not.toContain('/admin/audit');
     // The non-admin destinations are untouched by the gate.
-    expect(paths).toEqual(['/', '/runs', '/workflows', '/schedules', '/workers']);
+    expect(paths).toEqual([
+      '/',
+      '/runs',
+      '/workflows',
+      '/assets',
+      '/schedules',
+      '/triggers',
+      '/sensors',
+      '/notifications',
+      '/workers',
+    ]);
   });
 
   it('shows them to an admin', () => {

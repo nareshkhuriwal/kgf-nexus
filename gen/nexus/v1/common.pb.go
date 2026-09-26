@@ -100,21 +100,34 @@ const (
 	ErrorClass_ERROR_CLASS_NOT_FOUND ErrorClass = 8
 	// Infrastructure fault (result store down, executor failure). Retryable.
 	ErrorClass_ERROR_CLASS_INFRASTRUCTURE ErrorClass = 9
+	// Retryable: an external provider throttled the task (HTTP 429, or 503 with
+	// Retry-After) past what the task's own retries absorbed. Retried WITHOUT
+	// charging the retry budget, up to a platform cap, after
+	// TaskError.retry_after_ms (ADR-0032).
+	ErrorClass_ERROR_CLASS_RATE_LIMITED ErrorClass = 10
+	// The worker's node is being reclaimed (spot/preemptible eviction, ADR-0030):
+	// the agent sent the checkpoint signal and the workload ended because of it.
+	// Retried against a SEPARATE budget (task_nodes.preemptions_used), so an
+	// eviction does not spend the task's max_attempts. Only the agent reports it;
+	// a node that vanished without notice is still WORKER_LOST.
+	ErrorClass_ERROR_CLASS_PREEMPTED ErrorClass = 11
 )
 
 // Enum value maps for ErrorClass.
 var (
 	ErrorClass_name = map[int32]string{
-		0: "ERROR_CLASS_UNSPECIFIED",
-		1: "ERROR_CLASS_TRANSIENT",
-		2: "ERROR_CLASS_TIMEOUT",
-		3: "ERROR_CLASS_WORKER_LOST",
-		4: "ERROR_CLASS_VALIDATION",
-		5: "ERROR_CLASS_PERMISSION_DENIED",
-		6: "ERROR_CLASS_APPLICATION",
-		7: "ERROR_CLASS_OOM",
-		8: "ERROR_CLASS_NOT_FOUND",
-		9: "ERROR_CLASS_INFRASTRUCTURE",
+		0:  "ERROR_CLASS_UNSPECIFIED",
+		1:  "ERROR_CLASS_TRANSIENT",
+		2:  "ERROR_CLASS_TIMEOUT",
+		3:  "ERROR_CLASS_WORKER_LOST",
+		4:  "ERROR_CLASS_VALIDATION",
+		5:  "ERROR_CLASS_PERMISSION_DENIED",
+		6:  "ERROR_CLASS_APPLICATION",
+		7:  "ERROR_CLASS_OOM",
+		8:  "ERROR_CLASS_NOT_FOUND",
+		9:  "ERROR_CLASS_INFRASTRUCTURE",
+		10: "ERROR_CLASS_RATE_LIMITED",
+		11: "ERROR_CLASS_PREEMPTED",
 	}
 	ErrorClass_value = map[string]int32{
 		"ERROR_CLASS_UNSPECIFIED":       0,
@@ -127,6 +140,8 @@ var (
 		"ERROR_CLASS_OOM":               7,
 		"ERROR_CLASS_NOT_FOUND":         8,
 		"ERROR_CLASS_INFRASTRUCTURE":    9,
+		"ERROR_CLASS_RATE_LIMITED":      10,
+		"ERROR_CLASS_PREEMPTED":         11,
 	}
 )
 
@@ -231,7 +246,26 @@ type ResourceVector struct {
 	GpuMemoryBytes int64 `protobuf:"varint,5,opt,name=gpu_memory_bytes,json=gpuMemoryBytes,proto3" json:"gpu_memory_bytes,omitempty"`
 	DiskBytes      int64 `protobuf:"varint,6,opt,name=disk_bytes,json=diskBytes,proto3" json:"disk_bytes,omitempty"`
 	// Arbitrary countable constraints, e.g. {"license_token": 1}.
-	Custom        map[string]int64 `protobuf:"bytes,7,rep,name=custom,proto3" json:"custom,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	Custom map[string]int64 `protobuf:"bytes,7,rep,name=custom,proto3" json:"custom,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	// MIG instances by profile, e.g. {"1g.10gb": 1}. On a request: instances
+	// needed per profile. On capacity / committed: the worker's instances of each
+	// profile / how many are reserved. Pooled per profile, because every instance
+	// of a profile is interchangeable; the agent names the instance (its UUID).
+	Mig map[string]int64 `protobuf:"bytes,60,rep,name=mig,proto3" json:"mig,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	// Shared-GPU (MPS or time-slicing) request: a fraction of ONE shared device
+	// in thousandths (250 = a quarter). 0 with gpu_share_memory_bytes > 0 means
+	// "pack by memory only". On committed: the sum over reservations
+	// (informational; gpu_shares is the ledger).
+	GpuShareMilli int32 `protobuf:"varint,61,opt,name=gpu_share_milli,json=gpuShareMilli,proto3" json:"gpu_share_milli,omitempty"`
+	// Shared-GPU request: VRAM needed on that ONE device. A QUANTITY subtracted
+	// from the device, unlike gpu_memory_bytes, which is a floor on a whole
+	// device and never subtracted.
+	GpuShareMemoryBytes int64 `protobuf:"varint,62,opt,name=gpu_share_memory_bytes,json=gpuShareMemoryBytes,proto3" json:"gpu_share_memory_bytes,omitempty"`
+	// Shared devices by device key (the device index as a string). On capacity:
+	// each shared device's full size (milli = 1000). On committed: what is
+	// reserved on each. On a reservation: exactly the one device the request was
+	// placed on, which is what makes release exact. Never set on a request.
+	GpuShares     map[string]*GPUShare `protobuf:"bytes,63,rep,name=gpu_shares,json=gpuShares,proto3" json:"gpu_shares,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -315,6 +349,87 @@ func (x *ResourceVector) GetCustom() map[string]int64 {
 	return nil
 }
 
+func (x *ResourceVector) GetMig() map[string]int64 {
+	if x != nil {
+		return x.Mig
+	}
+	return nil
+}
+
+func (x *ResourceVector) GetGpuShareMilli() int32 {
+	if x != nil {
+		return x.GpuShareMilli
+	}
+	return 0
+}
+
+func (x *ResourceVector) GetGpuShareMemoryBytes() int64 {
+	if x != nil {
+		return x.GpuShareMemoryBytes
+	}
+	return 0
+}
+
+func (x *ResourceVector) GetGpuShares() map[string]*GPUShare {
+	if x != nil {
+		return x.GpuShares
+	}
+	return nil
+}
+
+// GPUShare is one shared device's compute (thousandths) and memory.
+type GPUShare struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Milli         int64                  `protobuf:"varint,1,opt,name=milli,proto3" json:"milli,omitempty"`
+	MemoryBytes   int64                  `protobuf:"varint,2,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GPUShare) Reset() {
+	*x = GPUShare{}
+	mi := &file_nexus_v1_common_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GPUShare) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GPUShare) ProtoMessage() {}
+
+func (x *GPUShare) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_common_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GPUShare.ProtoReflect.Descriptor instead.
+func (*GPUShare) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_common_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *GPUShare) GetMilli() int64 {
+	if x != nil {
+		return x.Milli
+	}
+	return 0
+}
+
+func (x *GPUShare) GetMemoryBytes() int64 {
+	if x != nil {
+		return x.MemoryBytes
+	}
+	return 0
+}
+
 // ResourceRequest separates scheduling cost from enforcement ceiling.
 // `request` is subtracted from worker capacity by the scheduler; `limit` is
 // enforced by the executor via cgroups/container limits. limit >= request
@@ -330,7 +445,7 @@ type ResourceRequest struct {
 
 func (x *ResourceRequest) Reset() {
 	*x = ResourceRequest{}
-	mi := &file_nexus_v1_common_proto_msgTypes[1]
+	mi := &file_nexus_v1_common_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -342,7 +457,7 @@ func (x *ResourceRequest) String() string {
 func (*ResourceRequest) ProtoMessage() {}
 
 func (x *ResourceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_common_proto_msgTypes[1]
+	mi := &file_nexus_v1_common_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -355,7 +470,7 @@ func (x *ResourceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceRequest.ProtoReflect.Descriptor instead.
 func (*ResourceRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_common_proto_rawDescGZIP(), []int{1}
+	return file_nexus_v1_common_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ResourceRequest) GetRequest() *ResourceVector {
@@ -393,7 +508,7 @@ type Timeouts struct {
 
 func (x *Timeouts) Reset() {
 	*x = Timeouts{}
-	mi := &file_nexus_v1_common_proto_msgTypes[2]
+	mi := &file_nexus_v1_common_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -405,7 +520,7 @@ func (x *Timeouts) String() string {
 func (*Timeouts) ProtoMessage() {}
 
 func (x *Timeouts) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_common_proto_msgTypes[2]
+	mi := &file_nexus_v1_common_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -418,7 +533,7 @@ func (x *Timeouts) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Timeouts.ProtoReflect.Descriptor instead.
 func (*Timeouts) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_common_proto_rawDescGZIP(), []int{2}
+	return file_nexus_v1_common_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Timeouts) GetScheduleToStartMs() int64 {
@@ -471,7 +586,7 @@ type RetryPolicy struct {
 
 func (x *RetryPolicy) Reset() {
 	*x = RetryPolicy{}
-	mi := &file_nexus_v1_common_proto_msgTypes[3]
+	mi := &file_nexus_v1_common_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -483,7 +598,7 @@ func (x *RetryPolicy) String() string {
 func (*RetryPolicy) ProtoMessage() {}
 
 func (x *RetryPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_common_proto_msgTypes[3]
+	mi := &file_nexus_v1_common_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -496,7 +611,7 @@ func (x *RetryPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetryPolicy.ProtoReflect.Descriptor instead.
 func (*RetryPolicy) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_common_proto_rawDescGZIP(), []int{3}
+	return file_nexus_v1_common_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *RetryPolicy) GetMaxAttempts() int32 {
@@ -572,14 +687,18 @@ type TaskError struct {
 	Retryable bool `protobuf:"varint,4,opt,name=retryable,proto3" json:"retryable,omitempty"`
 	// Reference into the result store for a full stack trace / diagnostic blob,
 	// rather than inlining unbounded text into the metadata store.
-	DetailRef     string `protobuf:"bytes,5,opt,name=detail_ref,json=detailRef,proto3" json:"detail_ref,omitempty"`
+	DetailRef string `protobuf:"bytes,5,opt,name=detail_ref,json=detailRef,proto3" json:"detail_ref,omitempty"`
+	// How long the provider asked the caller to wait (its Retry-After), for
+	// ERROR_CLASS_RATE_LIMITED. 0 = not stated; the retry policy's backoff is
+	// used instead. The scheduler clamps it (ADR-0032).
+	RetryAfterMs  int64 `protobuf:"varint,6,opt,name=retry_after_ms,json=retryAfterMs,proto3" json:"retry_after_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TaskError) Reset() {
 	*x = TaskError{}
-	mi := &file_nexus_v1_common_proto_msgTypes[4]
+	mi := &file_nexus_v1_common_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -591,7 +710,7 @@ func (x *TaskError) String() string {
 func (*TaskError) ProtoMessage() {}
 
 func (x *TaskError) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_common_proto_msgTypes[4]
+	mi := &file_nexus_v1_common_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -604,7 +723,7 @@ func (x *TaskError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskError.ProtoReflect.Descriptor instead.
 func (*TaskError) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_common_proto_rawDescGZIP(), []int{4}
+	return file_nexus_v1_common_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *TaskError) GetClass() ErrorClass {
@@ -642,6 +761,13 @@ func (x *TaskError) GetDetailRef() string {
 	return ""
 }
 
+func (x *TaskError) GetRetryAfterMs() int64 {
+	if x != nil {
+		return x.RetryAfterMs
+	}
+	return 0
+}
+
 // ResultRef discriminates inline from blob storage. Small results are inlined
 // to avoid two network round-trips for `{"rows": 42}`; large ones go to the
 // result store. Consumers see one uniform interface. (ADR-0008.)
@@ -660,7 +786,7 @@ type ResultRef struct {
 
 func (x *ResultRef) Reset() {
 	*x = ResultRef{}
-	mi := &file_nexus_v1_common_proto_msgTypes[5]
+	mi := &file_nexus_v1_common_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -672,7 +798,7 @@ func (x *ResultRef) String() string {
 func (*ResultRef) ProtoMessage() {}
 
 func (x *ResultRef) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_common_proto_msgTypes[5]
+	mi := &file_nexus_v1_common_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -685,7 +811,7 @@ func (x *ResultRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResultRef.ProtoReflect.Descriptor instead.
 func (*ResultRef) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_common_proto_rawDescGZIP(), []int{5}
+	return file_nexus_v1_common_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ResultRef) GetKind() isResultRef_Kind {
@@ -755,7 +881,7 @@ type BlobRef struct {
 
 func (x *BlobRef) Reset() {
 	*x = BlobRef{}
-	mi := &file_nexus_v1_common_proto_msgTypes[6]
+	mi := &file_nexus_v1_common_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -767,7 +893,7 @@ func (x *BlobRef) String() string {
 func (*BlobRef) ProtoMessage() {}
 
 func (x *BlobRef) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_common_proto_msgTypes[6]
+	mi := &file_nexus_v1_common_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -780,7 +906,7 @@ func (x *BlobRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlobRef.ProtoReflect.Descriptor instead.
 func (*BlobRef) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_common_proto_rawDescGZIP(), []int{6}
+	return file_nexus_v1_common_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *BlobRef) GetBucket() string {
@@ -817,7 +943,7 @@ type ExecutionMetrics struct {
 
 func (x *ExecutionMetrics) Reset() {
 	*x = ExecutionMetrics{}
-	mi := &file_nexus_v1_common_proto_msgTypes[7]
+	mi := &file_nexus_v1_common_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -829,7 +955,7 @@ func (x *ExecutionMetrics) String() string {
 func (*ExecutionMetrics) ProtoMessage() {}
 
 func (x *ExecutionMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_common_proto_msgTypes[7]
+	mi := &file_nexus_v1_common_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -842,7 +968,7 @@ func (x *ExecutionMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutionMetrics.ProtoReflect.Descriptor instead.
 func (*ExecutionMetrics) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_common_proto_rawDescGZIP(), []int{7}
+	return file_nexus_v1_common_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ExecutionMetrics) GetPeakMemoryBytes() int64 {
@@ -884,7 +1010,7 @@ var File_nexus_v1_common_proto protoreflect.FileDescriptor
 
 const file_nexus_v1_common_proto_rawDesc = "" +
 	"\n" +
-	"\x15nexus/v1/common.proto\x12\bnexus.v1\"\xcc\x02\n" +
+	"\x15nexus/v1/common.proto\x12\bnexus.v1\"\xb0\x05\n" +
 	"\x0eResourceVector\x12\x1d\n" +
 	"\n" +
 	"cpu_millis\x18\x01 \x01(\x03R\tcpuMillis\x12!\n" +
@@ -894,10 +1020,24 @@ const file_nexus_v1_common_proto_rawDesc = "" +
 	"\x10gpu_memory_bytes\x18\x05 \x01(\x03R\x0egpuMemoryBytes\x12\x1d\n" +
 	"\n" +
 	"disk_bytes\x18\x06 \x01(\x03R\tdiskBytes\x12<\n" +
-	"\x06custom\x18\a \x03(\v2$.nexus.v1.ResourceVector.CustomEntryR\x06custom\x1a9\n" +
+	"\x06custom\x18\a \x03(\v2$.nexus.v1.ResourceVector.CustomEntryR\x06custom\x123\n" +
+	"\x03mig\x18< \x03(\v2!.nexus.v1.ResourceVector.MigEntryR\x03mig\x12&\n" +
+	"\x0fgpu_share_milli\x18= \x01(\x05R\rgpuShareMilli\x123\n" +
+	"\x16gpu_share_memory_bytes\x18> \x01(\x03R\x13gpuShareMemoryBytes\x12F\n" +
+	"\n" +
+	"gpu_shares\x18? \x03(\v2'.nexus.v1.ResourceVector.GpuSharesEntryR\tgpuShares\x1a9\n" +
 	"\vCustomEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"u\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\x1a6\n" +
+	"\bMigEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\x1aP\n" +
+	"\x0eGpuSharesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12(\n" +
+	"\x05value\x18\x02 \x01(\v2\x12.nexus.v1.GPUShareR\x05value:\x028\x01\"C\n" +
+	"\bGPUShare\x12\x14\n" +
+	"\x05milli\x18\x01 \x01(\x03R\x05milli\x12!\n" +
+	"\fmemory_bytes\x18\x02 \x01(\x03R\vmemoryBytes\"u\n" +
 	"\x0fResourceRequest\x122\n" +
 	"\arequest\x18\x01 \x01(\v2\x18.nexus.v1.ResourceVectorR\arequest\x12.\n" +
 	"\x05limit\x18\x02 \x01(\v2\x18.nexus.v1.ResourceVectorR\x05limit\"\xba\x01\n" +
@@ -918,14 +1058,15 @@ const file_nexus_v1_common_proto_rawDesc = "" +
 	"\x06jitter\x18\x06 \x01(\tR\x06jitter\x12/\n" +
 	"\bretry_on\x18\a \x03(\x0e2\x14.nexus.v1.ErrorClassR\aretryOn\x124\n" +
 	"\vno_retry_on\x18\b \x03(\x0e2\x14.nexus.v1.ErrorClassR\tnoRetryOn\x129\n" +
-	"\x19retry_on_different_worker\x18\t \x01(\bR\x16retryOnDifferentWorker\"\xa2\x01\n" +
+	"\x19retry_on_different_worker\x18\t \x01(\bR\x16retryOnDifferentWorker\"\xc8\x01\n" +
 	"\tTaskError\x12*\n" +
 	"\x05class\x18\x01 \x01(\x0e2\x14.nexus.v1.ErrorClassR\x05class\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x18\n" +
 	"\amessage\x18\x03 \x01(\tR\amessage\x12\x1c\n" +
 	"\tretryable\x18\x04 \x01(\bR\tretryable\x12\x1d\n" +
 	"\n" +
-	"detail_ref\x18\x05 \x01(\tR\tdetailRef\"\x98\x01\n" +
+	"detail_ref\x18\x05 \x01(\tR\tdetailRef\x12$\n" +
+	"\x0eretry_after_ms\x18\x06 \x01(\x03R\fretryAfterMs\"\x98\x01\n" +
 	"\tResultRef\x12\x18\n" +
 	"\x06inline\x18\x01 \x01(\fH\x00R\x06inline\x12'\n" +
 	"\x04blob\x18\x02 \x01(\v2\x11.nexus.v1.BlobRefH\x00R\x04blob\x12!\n" +
@@ -949,7 +1090,7 @@ const file_nexus_v1_common_proto_rawDesc = "" +
 	"\x1cBACKOFF_STRATEGY_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16BACKOFF_STRATEGY_FIXED\x10\x01\x12\x1b\n" +
 	"\x17BACKOFF_STRATEGY_LINEAR\x10\x02\x12 \n" +
-	"\x1cBACKOFF_STRATEGY_EXPONENTIAL\x10\x03*\xa6\x02\n" +
+	"\x1cBACKOFF_STRATEGY_EXPONENTIAL\x10\x03*\xdf\x02\n" +
 	"\n" +
 	"ErrorClass\x12\x1b\n" +
 	"\x17ERROR_CLASS_UNSPECIFIED\x10\x00\x12\x19\n" +
@@ -961,7 +1102,10 @@ const file_nexus_v1_common_proto_rawDesc = "" +
 	"\x17ERROR_CLASS_APPLICATION\x10\x06\x12\x13\n" +
 	"\x0fERROR_CLASS_OOM\x10\a\x12\x19\n" +
 	"\x15ERROR_CLASS_NOT_FOUND\x10\b\x12\x1e\n" +
-	"\x1aERROR_CLASS_INFRASTRUCTURE\x10\t*\x8f\x01\n" +
+	"\x1aERROR_CLASS_INFRASTRUCTURE\x10\t\x12\x1c\n" +
+	"\x18ERROR_CLASS_RATE_LIMITED\x10\n" +
+	"\x12\x19\n" +
+	"\x15ERROR_CLASS_PREEMPTED\x10\v*\x8f\x01\n" +
 	"\x0fIdempotencyMode\x12 \n" +
 	"\x1cIDEMPOTENCY_MODE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19IDEMPOTENCY_MODE_REQUIRED\x10\x01\x12 \n" +
@@ -981,35 +1125,41 @@ func file_nexus_v1_common_proto_rawDescGZIP() []byte {
 }
 
 var file_nexus_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_nexus_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_nexus_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_nexus_v1_common_proto_goTypes = []any{
 	(BackoffStrategy)(0),     // 0: nexus.v1.BackoffStrategy
 	(ErrorClass)(0),          // 1: nexus.v1.ErrorClass
 	(IdempotencyMode)(0),     // 2: nexus.v1.IdempotencyMode
 	(*ResourceVector)(nil),   // 3: nexus.v1.ResourceVector
-	(*ResourceRequest)(nil),  // 4: nexus.v1.ResourceRequest
-	(*Timeouts)(nil),         // 5: nexus.v1.Timeouts
-	(*RetryPolicy)(nil),      // 6: nexus.v1.RetryPolicy
-	(*TaskError)(nil),        // 7: nexus.v1.TaskError
-	(*ResultRef)(nil),        // 8: nexus.v1.ResultRef
-	(*BlobRef)(nil),          // 9: nexus.v1.BlobRef
-	(*ExecutionMetrics)(nil), // 10: nexus.v1.ExecutionMetrics
-	nil,                      // 11: nexus.v1.ResourceVector.CustomEntry
+	(*GPUShare)(nil),         // 4: nexus.v1.GPUShare
+	(*ResourceRequest)(nil),  // 5: nexus.v1.ResourceRequest
+	(*Timeouts)(nil),         // 6: nexus.v1.Timeouts
+	(*RetryPolicy)(nil),      // 7: nexus.v1.RetryPolicy
+	(*TaskError)(nil),        // 8: nexus.v1.TaskError
+	(*ResultRef)(nil),        // 9: nexus.v1.ResultRef
+	(*BlobRef)(nil),          // 10: nexus.v1.BlobRef
+	(*ExecutionMetrics)(nil), // 11: nexus.v1.ExecutionMetrics
+	nil,                      // 12: nexus.v1.ResourceVector.CustomEntry
+	nil,                      // 13: nexus.v1.ResourceVector.MigEntry
+	nil,                      // 14: nexus.v1.ResourceVector.GpuSharesEntry
 }
 var file_nexus_v1_common_proto_depIdxs = []int32{
-	11, // 0: nexus.v1.ResourceVector.custom:type_name -> nexus.v1.ResourceVector.CustomEntry
-	3,  // 1: nexus.v1.ResourceRequest.request:type_name -> nexus.v1.ResourceVector
-	3,  // 2: nexus.v1.ResourceRequest.limit:type_name -> nexus.v1.ResourceVector
-	0,  // 3: nexus.v1.RetryPolicy.strategy:type_name -> nexus.v1.BackoffStrategy
-	1,  // 4: nexus.v1.RetryPolicy.retry_on:type_name -> nexus.v1.ErrorClass
-	1,  // 5: nexus.v1.RetryPolicy.no_retry_on:type_name -> nexus.v1.ErrorClass
-	1,  // 6: nexus.v1.TaskError.class:type_name -> nexus.v1.ErrorClass
-	9,  // 7: nexus.v1.ResultRef.blob:type_name -> nexus.v1.BlobRef
-	8,  // [8:8] is the sub-list for method output_type
-	8,  // [8:8] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	12, // 0: nexus.v1.ResourceVector.custom:type_name -> nexus.v1.ResourceVector.CustomEntry
+	13, // 1: nexus.v1.ResourceVector.mig:type_name -> nexus.v1.ResourceVector.MigEntry
+	14, // 2: nexus.v1.ResourceVector.gpu_shares:type_name -> nexus.v1.ResourceVector.GpuSharesEntry
+	3,  // 3: nexus.v1.ResourceRequest.request:type_name -> nexus.v1.ResourceVector
+	3,  // 4: nexus.v1.ResourceRequest.limit:type_name -> nexus.v1.ResourceVector
+	0,  // 5: nexus.v1.RetryPolicy.strategy:type_name -> nexus.v1.BackoffStrategy
+	1,  // 6: nexus.v1.RetryPolicy.retry_on:type_name -> nexus.v1.ErrorClass
+	1,  // 7: nexus.v1.RetryPolicy.no_retry_on:type_name -> nexus.v1.ErrorClass
+	1,  // 8: nexus.v1.TaskError.class:type_name -> nexus.v1.ErrorClass
+	10, // 9: nexus.v1.ResultRef.blob:type_name -> nexus.v1.BlobRef
+	4,  // 10: nexus.v1.ResourceVector.GpuSharesEntry.value:type_name -> nexus.v1.GPUShare
+	11, // [11:11] is the sub-list for method output_type
+	11, // [11:11] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_nexus_v1_common_proto_init() }
@@ -1017,7 +1167,7 @@ func file_nexus_v1_common_proto_init() {
 	if File_nexus_v1_common_proto != nil {
 		return
 	}
-	file_nexus_v1_common_proto_msgTypes[5].OneofWrappers = []any{
+	file_nexus_v1_common_proto_msgTypes[6].OneofWrappers = []any{
 		(*ResultRef_Inline)(nil),
 		(*ResultRef_Blob)(nil),
 	}
@@ -1027,7 +1177,7 @@ func file_nexus_v1_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nexus_v1_common_proto_rawDesc), len(file_nexus_v1_common_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   9,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

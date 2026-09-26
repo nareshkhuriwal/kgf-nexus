@@ -3,6 +3,12 @@
 
 package store
 
+import (
+	"context"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+)
+
 // Transactional outbox writers (migration 0016, ADR-0003).
 //
 // Every fact worth announcing on the bus writes its outbox row IN THE SAME
@@ -34,15 +40,27 @@ const (
 // outboxTaskReadyCTE announces a newly PENDING attempt as a dispatch hint.
 //
 // It is appended to a `WITH a AS (INSERT INTO task_attempts ... RETURNING id,
-// run_id, queue, scheduled_at, ...)` and emits one row per attempt actually
-// inserted. available_at is the attempt's scheduled_at, so a hint for work that
+// run_id, queue, scheduled_at, trace_context, ...)` and emits one row per
+// attempt actually inserted. The hint carries the attempt's trace context
+// (migration 0028), so the published message joins the run's trace. available_at is the attempt's scheduled_at, so a hint for work that
 // is not yet claimable (a retry scheduled into the future) is published when it
 // becomes claimable rather than waking the fleet early for nothing.
 const outboxTaskReadyCTE = `
 ob AS (
-  INSERT INTO outbox (topic, namespace, routing_key, payload, available_at)
+  INSERT INTO outbox (topic, namespace, routing_key, payload, available_at, trace_context)
   SELECT 'task_ready', r.namespace, a.queue,
          jsonb_build_object('attempt_id', a.id, 'run_id', a.run_id, 'queue', a.queue),
-         GREATEST(a.scheduled_at, now())
+         GREATEST(a.scheduled_at, now()), a.trace_context
     FROM a JOIN workflow_runs r ON r.id = a.run_id
 )`
+
+// retryTrace is the trace context a retry attempt records: the caller's when
+// it has one, else the failed attempt's. The retry timer loop runs outside any
+// request, so without the fallback every retry would fall out of the run's
+// trace exactly when an operator most wants to follow it.
+func retryTrace(ctx context.Context, prev *string) *string {
+	if tp := tracing.NullableTraceparent(ctx); tp != nil {
+		return tp
+	}
+	return prev
+}

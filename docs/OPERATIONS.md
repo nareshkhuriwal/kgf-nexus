@@ -6,7 +6,7 @@
 and restore and the ordering between the two stores, the restore drills and their
 measured results, point-in-time recovery with pgBackRest and its timed drills
 (§4), what these procedures do *not* cover, the RPO/RTO each approach actually
-delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), and third-party images and toolchains: what is pinned and why (§22).
+delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), third-party images and toolchains: what is pinned and why (§22), cost management, which moved to KGF billing (§23), running Nexus inside KGF Cloud: context authentication, tenancy mapping and service accounts (§24), task secrets, the audit trail and air-gapped installation (§25), tracing and the result-store backends (§26), notifications, webhook triggers, sensors and asset lineage (§27), fractional GPUs, spot capacity, model caches and multi-cluster placement (§28), and AI workloads: usage units, shared rate limits and checkpoints (§29).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -2140,6 +2140,10 @@ To check any target by hand, run `curl -s localhost:19100/metrics | grep nexus_b
   summed into `queue="_other"`.
 - The cluster-controller's `pool` label is the binding name an operator
   configured.
+- The gateway rate-limit families are labelled by bucket **kind** (`address`,
+  `auth_failure`, `auth_failure_repeat`, `credential`, `email_address`,
+  `email_recipient`), never by the client address, credential or recipient
+  the bucket is keyed on.
 
 If a caller passes labels that do not match a family's declared labels, the
 package normalizes them and logs `metrics: label set does not match` once per
@@ -2168,6 +2172,9 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_http_request_duration_seconds` | H | method, route, code | api-gateway, event-service | REST latency, 1 ms–60 s. SSE tails are observed when they end |
 | `nexus_http_response_size_bytes` | H | method, route | api-gateway, event-service | Response size |
 | `nexus_http_requests_in_flight` | G | — | api-gateway, event-service | Concurrent requests, open SSE tails included |
+| `nexus_gateway_ratelimit_rejections_total` | C | bucket (address/auth_failure/credential/email_address/email_recipient) | api-gateway | Requests refused by a limiter (§16): a 429, or the silent drop of `email_recipient`. A rise in `auth_failure` is credential stuffing; a rise in `address` or `credential` from legitimate clients means the limit is too tight |
+| `nexus_gateway_ratelimit_buckets` | G | bucket (the above plus auth_failure_repeat) | api-gateway | Live keys each limiter tracks, per replica. Only enabled limiters report. At the per-limiter cap of 100000 the least recently used key is evicted; see `_evictions_total` |
+| `nexus_gateway_ratelimit_evictions_total` | C | bucket | api-gateway | Buckets dropped at the entry cap rather than by idling. Non-zero: the cap is too small for the traffic, or the gateway is being sprayed from many addresses |
 | `grpc_server_started_total` | C | grpc_type, grpc_service, grpc_method | api-gateway (worker API), workflow-manager, dag-engine, scheduler, resource-manager | RPCs started |
 | `grpc_server_handled_total` | C | grpc_type, grpc_service, grpc_method, grpc_code | same | RPCs finished, by status. `Unauthenticated` on the gateway: bad worker keys |
 | `grpc_server_handling_seconds` | H | grpc_type, grpc_service, grpc_method | same | RPC latency, 1 ms–120 s. `PollTask` is a long poll by design |
@@ -2189,6 +2196,8 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_dag_map_expansions_total` | C | — | dag-engine | Map templates expanded |
 | `nexus_dag_fanin_refused_total` | C | — | dag-engine | Fan-ins refused for exceeding `NEXUS_DAG_MAX_FANIN_BYTES` |
 | `nexus_dag_run_state_published_total` | C | state, result | dag-engine | Run state publishes. `result="error"` on a terminal state: a run may be stranded |
+| `nexus_dag_operator_retries_total` | C | result (reset/invalid/not_retryable/not_found/conflict/error) | dag-engine | Operator retries (§18) applied to a run's graph. `invalid` and `not_retryable` are the caller's problem; `conflict` means a concurrent writer won and a retry of the request may succeed; `error` > 0 needs a look |
+| `nexus_dag_operator_retry_nodes_reset_total` | C | — | dag-engine | Nodes reset by operator retries, selected nodes and their dependents alike |
 | `nexus_rm_reservations_total` | C | result (granted/refused/not_found/error) | resource-manager | Reserve calls |
 | `nexus_rm_reserve_duration_seconds` | H | result | resource-manager | Reserve latency |
 | `nexus_rm_releases_total` | C | result (released/absent/error) | resource-manager | Releases. `absent` is expected duplicate traffic |
@@ -2215,13 +2224,22 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_agent_result_store_upload_bytes_total` | C | result | agent | Output bytes. `uploaded` counts bytes actually transferred |
 | `nexus_agent_result_store_upload_duration_seconds` | H | result | agent | Upload latency. Inline outputs are not observed |
 | `nexus_agent_result_store_upload_size_bytes` | H | — | agent | Uploaded output sizes |
+| `nexus_objstore_operations_total` | C | backend, op, outcome (ok/not_found/exists/error) | agent, api-gateway, artifact-gc | Every result-store call (§26.5). `outcome="error"` rising: the store or its credentials |
+| `nexus_objstore_operation_duration_seconds` | H | backend, op | agent, api-gateway, artifact-gc | Call latency; for `get`, time to open the object |
+| `nexus_objstore_bytes_total` | C | backend, direction (in/out) | agent, api-gateway, artifact-gc | Payload bytes through the result store |
 | `nexus_agent_sessions_total` | C | — | agent | Registrations. More than 1 per process means the control plane forced a re-registration |
 | `nexus_agent_advertised_capacity` | G | resource | agent | Capacity advertised for scheduling, which the runtime does not necessarily enforce |
 | `nexus_agent_result_report_failures_total` | C | — | agent | Reports not delivered. The WAL retains them |
 | `nexus_agent_registration_attempts_total` | C | result (ok/retryable_error/permanent_error) | agent | Register calls. An agent that starts before the gateway retries `Unavailable`, `DeadlineExceeded`, `ResourceExhausted`, `Aborted` and `Internal` with capped exponential backoff (0.5 s to 30 s, full jitter) and stays not-ready meanwhile; a rising `retryable_error` with no `ok` means the gateway is unreachable or its auth backend is down. `permanent_error` (bad API key, wrong role, invalid request) exits the process with a message naming the fix |
 | `nexus_agent_registered` | G | — | agent | 1 while the agent holds a registered session; the `/readyz` condition |
+| `nexus_agent_log_dropped_lines_total`, `_dropped_bytes_total` | C | — | agent | Task log lines (and their bytes) dropped because shipping fell behind and the buffer was full (§19). Non-zero: the object store or the gateway is slow or unreachable from this agent |
+| `nexus_agent_log_truncated_lines_total`, `_truncated_bytes_total` | C | — | agent | Task log lines omitted by the per-attempt cap (head and tail are kept). Steady growth: a task logs more than the cap; raise it or quiet the task |
+| `nexus_agent_log_fenced_bytes_total` | C | — | agent | Task output refused after an attempt's log shipping was fenced (lease rejected, or a gateway without `ReportLogs`) |
+| `nexus_agent_log_finalize_total` | C | outcome (finalized/fenced/timeout/partial) | agent | Attempt logs finalized. Every outcome but `finalized` leaves a partial log. `timeout` or `partial` rising: object store trouble; `fenced` rising: lease loss (see `nexus_scheduler_attempts_lost_total`) |
 | `nexus_artifact_gc_last_run_objects` | G | disposition | artifact-gc | Last sweep: scanned, live_refs, reachable, too_young, orphan, deleted, delete_error |
 | `nexus_artifact_gc_last_run_orphan_bytes` | G | — | artifact-gc | Reclaimable bytes found |
+| `nexus_artifact_gc_last_run_log_objects` | G | disposition (scanned/orphan/deleted/delete_error) | artifact-gc | The task-log share of the last sweep (§19): log objects examined, collectable, collected and not removable. A subset of `_last_run_objects` |
+| `nexus_artifact_gc_last_run_log_bytes` | G | disposition (orphan/deleted) | artifact-gc | Task-log bytes collectable and actually reclaimed by the last sweep (`deleted` is 0 in a dry run) |
 | `nexus_artifact_gc_last_run_duration_seconds` | G | — | artifact-gc | Pass duration |
 | `nexus_artifact_gc_last_success_timestamp_seconds`, `_last_failure_timestamp_seconds` | G | — | artifact-gc | Batch-job liveness, via the Pushgateway |
 | `nexus_artifact_gc_dry_run` | G | — | artifact-gc | 1 when nothing was deleted |
@@ -2325,7 +2343,7 @@ variables as the agent, which compose (`x-minio-env`) and Helm
 
 | Setting (api-gateway) | Default | Meaning |
 |---|---|---|
-| `NEXUS_S3_ACCESS_KEY_ID`, `NEXUS_S3_SECRET_ACCESS_KEY` | unset | READ credentials for log objects. Unset: the logs route answers 501 and agents are told not to ship. |
+| `NEXUS_S3_ACCESS_KEY_ID`, `NEXUS_S3_SECRET_ACCESS_KEY` | unset | READ credentials for log objects on the `s3` backend, or any credential mode / backend in §26.3 (IRSA, Pod Identity, Azure or GCS workload identity). If the gateway cannot open the store: the logs route answers 501 and agents are told not to ship. |
 | `NEXUS_RESULT_STORE_ENDPOINT`, `_BUCKET`, `_REGION`, `NEXUS_S3_USE_TLS` | compose values | Where logs are read from; identical to where agents write. |
 | `NEXUS_LOG_SHIPPING` | `true` | `false` turns the feature off fleet-wide (501 + no shipping). |
 | `NEXUS_LOG_MAX_BYTES_PER_ATTEMPT` | 64 MiB | Per-attempt cap on shipped (encoded) bytes. Past it the head is kept, the last 2 MiB is kept, and the omission is written into the log and the index. |
@@ -2490,6 +2508,11 @@ durations, a `latest` tag, and any misspelt **top-level** key at install time.
 | `image.digests.<component>` | `{}` | `sha256:<64 hex>` per image; renders `<ref>:<tag>@<digest>`. The release pipeline writes it (`deploy/scripts/helm-image-digests.py`, §22) |
 | `nexusNamespace` | `default` | the Nexus tenant the agents serve and bootstrap creates |
 | `postgres.enabled` / `.host` / `.sslmode` | `true` / `postgres` / `disable` | `false` + host for a managed database (use `verify-full`) |
+| `postgres.caBundle.secretName` / `.configMapName` / `.key` | `""` / `""` / `ca.crt` | root CAs for `verify-ca`/`verify-full`, mounted as `sslrootcert`, §20.11 |
+| `postgres.params`, `postgres.connections.<c>.params` | `{}` | extra libpq parameters, global and per connection (`apiGateway` … `artifactGC`, `migrate`), §20.11 |
+| `postgres.runtimeRoles.enabled` / `.scope` / `.existingSecret` / `.passwordRevision` / `.connectionLimit` | off / union / `existingSecret` / 1 / -1 | per-service logins instead of the owner, §20.12 |
+| `serviceAccounts.<component>` `{name, annotations, automountServiceAccountToken, podLabels}` | `nexus-<component>`, token not mounted | per-component identity (IRSA, Workload Identity), §20.13 |
+| `agents[].nodeSelector` / `.tolerations` / `.affinity` / `.gpu` / `.serviceAccount` | global placement; GPUs requested when `gpuCount > 0` | agent pools and GPU devices, §20.14 |
 | `postgres.pitr.*` | off | pgBackRest archiving, §4 |
 | `minio.enabled` / `.endpoint` / `.useTLS` | `true` / `http://minio:9000` / `false` | object store |
 | `minio.image` / `.mcImage` | digest-pinned `pgsty/silo` | in-cluster S3 server and bucket-init client, §22 |
@@ -2556,12 +2579,14 @@ up in place (TLS §5.0). REST, probes and `/metrics` stay HTTP.
   Gateway rate limits are per replica (§16.6): N replicas admit up to N× a
   client's rate.
 - **resource-manager** has no HPA and the chart refuses one.
-- **Schedulers:** not autoscaled by default. ADR-0018 measured claim cost as
-  linear in a queue's PENDING backlog and bound by **Postgres** CPU, not the
-  scheduler's: 1→16 replicas gives ~6× at a 1k backlog, ~5× at 10k, and mostly
-  adds latency at 100k. CPU on the scheduler pod is therefore the wrong signal.
-  Size `schedulers[].replicas` (2–4 per busy queue) and watch
-  `nexus_claim_seconds` / `nexus_pending_attempts` once they exist.
+- **Schedulers:** not autoscaled by default. Claim cost is bound by
+  **Postgres** CPU, not the scheduler's (ADR-0018). Since the windowed pull
+  claim (§15), it no longer grows with the backlog, but extra replicas stop
+  helping once the database is saturated. The laptop curves are in
+  [BENCHMARKS.md](BENCHMARKS.md). CPU on the scheduler pod is therefore the
+  wrong signal. Size `schedulers[].replicas` (2–4 per busy queue) and watch
+  `nexus_scheduler_claim_duration_seconds` (p99 against ADR-0018's 250 ms
+  trigger) and `nexus_scheduler_pending_attempts` (§17.4).
   `schedulers[].autoscaling` exists for an operator who has measured their own
   curve; the cluster controller reports scheduler HPAs either way.
 - **Workers** are scaled by the cluster controller (apply mode) or by hand.
@@ -2673,9 +2698,15 @@ external gRPC Service.
       registry, ideally referenced by digest; `image.pullPolicy: IfNotPresent`.
 - [ ] `existingSecret` created from a secret manager, not a shell history; the
       Postgres password is URL-safe.
-- [ ] `postgres.enabled=false` with a managed database, `sslmode: verify-full`,
-      and the provider's PITR (§4); or `postgres.pitr.enabled` with an off-cluster
+- [ ] `postgres.enabled=false` with a managed database, `sslmode: verify-full`
+      with `postgres.caBundle` holding the provider's ROOT CAs (§20.11), and the
+      provider's PITR (§4); or `postgres.pitr.enabled` with an off-cluster
       repository whose cipher passphrase is stored outside the cluster.
+- [ ] `postgres.runtimeRoles.enabled` so no service connects as the owner
+      (§20.12); the owner password is then used only by the three Jobs.
+- [ ] Cloud identity bound to `serviceAccounts.{apiGateway,agent,artifactGC}`
+      only (§20.13); GPU agents request their devices and sit on the GPU pool
+      (§20.14); simulated GPUs never in production.
 - [ ] `minio.enabled=false` with a managed bucket and `useTLS: true`; the
       artifact backup of §7 in place.
 - [ ] `nats.auth.mode: nkey` with keys generated off-cluster (§11.7), and
@@ -2698,7 +2729,312 @@ external gRPC Service.
       expand/contract, `make compat-smoke` passed for the release, upgrade with
       `-f` values, then wait on pod readiness.
 - [ ] `deploy/helm/validate.sh` passes on your values file (copy it into
-      `ci/` or run `helm lint --strict -f`).
+      `ci/`). Running `helm lint --strict -f` by hand is **not** enough on
+      Helm 4 (§20.10); `helm template -f` must exit 0.
+- [ ] After every install or upgrade, readiness and restart counts were
+      checked as in §20.10, not only Helm's `--wait`.
+
+### 20.10 Helm 4: what lint and `--wait` do not tell you
+
+Two Helm 4 behaviours make its own exit codes weaker gates than they look.
+`deploy/helm/validate.sh` (CI: GitHub job `helm`, Azure stage `Helm`) is built
+around both. Helm and kubeconform are pinned and checksum-verified
+(`deploy/scripts/pinned-tool.sh`), and so are the Kubernetes and CRD schemas
+(`deploy/helm/schemas.lock`).
+
+**`helm lint` does not fail on the chart's guards.** Every guard in the chart
+(`existingSecret is required`, `confirmDelete=true`, the PDB and HPA checks, …)
+is a template `fail`. Helm 4's lint logs such a `fail` at INFO
+(`level=INFO msg="funcMap fail" message=...`) and still reports
+`0 chart(s) failed`, exit 0. Helm 3 printed it as an `[ERROR]`. A lint-only gate
+therefore passes values the chart would refuse at install time. Lint also does
+not apply `key: null` overrides from `-f` files the way install and template
+do. With `ci/external-deps-values.yaml` (which nulls
+`podDisruptionBudget.maxUnavailable`), lint "fails" the PDB guard on every
+service although the real render is fine. So:
+
+- The gate is `helm template` with the same values and `--kube-version`. It
+  coalesces values exactly as `helm install` does, and exits 1 with
+  `execution error at (...): <message>` when a guard fires. `validate.sh`
+  asserts that exit status and prints the error. It then checks the output with
+  kubeconform. It still runs `helm lint --strict` for lint's own findings, and
+  prints lint's `funcMap fail` lines as a note when the render passed.
+- `validate.sh` proves the gate itself with a probe:
+  `artifactGC.mode=delete` without `confirmDelete` must fail the render step,
+  although `helm lint` exits 0 on it.
+- By hand: `helm template nexus deploy/helm/kgf-nexus -f my-values.yaml
+  --kube-version <your cluster's> >/dev/null && echo OK`. Treat lint's exit code
+  as advisory.
+
+**`helm install/upgrade --wait` can return while a pod is crash-looping.** Seen
+in §20.8: the release reported `deployed` with an agent in `CrashLoopBackOff`.
+`--wait` considers a Deployment ready once enough replicas were Ready at some
+point, and a container that passes its probes briefly and then restarts
+satisfies it. After every install or upgrade:
+
+```sh
+for d in $(kubectl -n nexus get deploy -o name); do
+  kubectl -n nexus rollout status "$d" --timeout=5m || exit 1
+done
+kubectl -n nexus wait --for=condition=Ready pod \
+  -l 'app.kubernetes.io/component notin (migrate,bootstrap,minio-init,artifact-gc)' --timeout=5m
+# Then, a minute later: nothing restarting.
+kubectl -n nexus get pods -o custom-columns='POD:.metadata.name,RESTARTS:.status.containerStatuses[*].restartCount,STATE:.status.containerStatuses[*].state.waiting.reason' \
+  | awk 'NR==1 || $2 ~ /[1-9]/ || $3 ~ /CrashLoop|Error/'
+```
+
+A non-empty list after the header means the upgrade is not done. Read
+`kubectl -n nexus logs <pod> --previous` before retrying or rolling back
+(§6.3). An agent restarting once or twice on a cold install is the known
+first-registration race noted in §20.8. More restarts than that, or any
+restarting control-plane pod, is a failed rollout.
+
+**Why the chart's bootstrap Job writes to the database.** The `bootstrap` Job
+inserts the tenant row and the hashes of `worker-api-key` (and
+`admin-api-key`, if set) from `existingSecret` directly into Postgres. This is
+the one place a credential is created by SQL rather than by the API, because
+nothing can call the API yet. The agents need a worker credential when they
+first start, a fresh install has no user or token to authenticate a
+`POST /tokens`, and self-registration (what `nexusctl up` uses locally) needs
+e-mail verification, which a production install cannot automate. The Job uses
+the chart's database credentials, is idempotent, and stores only SHA-256 hashes.
+Once the release is up, mint further credentials, including rotated worker
+tokens (role `worker`, scope `worker_rpc`, F114), through the console or
+`POST /v1/namespaces/{ns}/tokens`, and revoke the bootstrap keys. Locally,
+`nexusctl up` mints both of its credentials through the API and writes nothing
+to the database (cli/README.md, "Local quick start").
+
+### 20.11 Database TLS: verify-full and the CA bundle
+
+`sslmode=require` encrypts but accepts any server that answers, so anyone who
+can redirect the database's address (DNS, a compromised pod on the path)
+collects every service's password. `verify-full` checks the certificate chain
+against a CA the operator chose **and** that the certificate names the host in
+the DSN.
+
+```yaml
+postgres:
+  enabled: false
+  host: nexus-pg.postgres.database.azure.com   # the name the certificate carries
+  sslmode: verify-full
+  caBundle: { secretName: nexus-postgres-ca, key: ca.crt }   # or configMapName
+  params: { connect_timeout: "10" }                          # optional, every connection
+  connections:
+    scheduler: { params: { statement_timeout: "30000" } }    # optional, one connection
+```
+
+The bundle is mounted read-only at `/etc/nexus/postgres-ca/ca.crt` in every pod
+that connects (services, their `wait-for-schema` init containers, the migrate,
+bootstrap and db-roles Jobs, artifact-gc) and every `DATABASE_URL` carries
+`sslmode=verify-full&sslrootcert=/etc/nexus/postgres-ca/ca.crt`. The Go
+services (pgx) then trust exactly that file, verify the host name and have no
+fallback; psql (libpq) in the Jobs does the same
+(`internal/config/dsn_tls_test.go`). The chart refuses `verify-*` without a
+bundle, a bundle with a non-verifying mode, both a Secret and a ConfigMap, TLS
+modes against the in-cluster postgres (it serves none), and identity keys
+(`user`, `host`, `sslmode`, `sslrootcert`, …) smuggled through `params`.
+
+**What goes in the bundle: root CAs only, never an intermediate or the server
+certificate** (providers rotate those unannounced). deploy/terraform supplies:
+
+| Cloud | Bundle | Source and pinning |
+|---|---|---|
+| AKS (Flexible Server) | `ca-bundles/azure-postgres-roots.pem`: DigiCert Global Root G2 + Microsoft RSA Root CA 2017 | vendored; `ca-bundles/refresh.sh` pins each download's SHA-256 and each root's fingerprint; environments refuse a file that no longer matches `SHA256SUMS` |
+| EKS (RDS) | `ca-bundles/rds-global-bundle.pem`: every RDS CA in every commercial region (the instance uses `rds-ca-rsa2048-g1`) | vendored, pinned the same way |
+| GKE (Cloud SQL) | every CA the instance trusts (`google_sql_ca_certs`: current, upcoming, previous) | read from the Cloud SQL Admin API at plan time. The instance uses the shared CA hierarchy (`GOOGLE_MANAGED_CAS_CA`), whose server certificates carry the instance DNS name; a private Cloud DNS zone resolves that name to the private IP and it is the host Nexus uses. The per-instance CA puts no usable name in the certificate for private services access, so verify-full was impossible with it. |
+
+**Rotation.** pgx reads `sslrootcert` when a pool is built, so the Go services
+need a restart to pick up a new bundle; the Jobs read it per connection.
+
+1. *New root announced / RDS bundle changed.* `ca-bundles/refresh.sh` fails
+   its check. Review the change (a new root, not a removed one), update the pin
+   in `refresh.sh`, `refresh.sh --write`, commit, `terraform apply` (updates the
+   `<release>-postgres-ca` Secret), then
+   `kubectl -n <ns> rollout restart deploy` so every pool trusts old **and** new.
+   Only after that switch the server (RDS: `ca_cert_identifier`; Azure/Cloud SQL:
+   the provider's rotation). Remove the old root in a later release.
+2. *Cloud SQL CA rotation.* `gcloud sql ssl server-ca-certs create --instance …`
+   (adds the upcoming CA), `terraform apply` (the bundle now has both), restart
+   the Deployments, then `gcloud sql ssl server-ca-certs rotate`. Server
+   *certificates* renew automatically in the maintenance window
+   (`AUTOMATIC_ROTATION_DURING_MAINTENANCE`) and need nothing.
+3. *Your own CA (self-managed Postgres).* Put old and new root in one bundle,
+   restart, switch the server certificate, drop the old root later.
+
+**Prove it** before relying on it: `TAG=<tag> deploy/scripts/db-tls-drill.sh`
+starts a TLS-only Postgres with a private CA and checks, with the real images,
+migrate (libpq), db-roles (pgx) and every service connecting over verify-full
+as their own logins, and refusal of a wrong CA, a host name the certificate
+lacks and plaintext. After an install: `SELECT usename, ssl, version FROM
+pg_stat_activity JOIN pg_stat_ssl USING (pid)` shows every Nexus session.
+
+### 20.12 Runtime logins: services never connect as the owner
+
+Migration 0005 created one NOLOGIN group role per service carrying ADR-0011's
+grants, but nothing created logins, so every service ran as the owner login —
+on a managed server, the provider's admin (`azure_pg_admin`, `rds_superuser`,
+`cloudsqlsuperuser` member) with DDL, CREATEROLE and every table.
+
+```yaml
+postgres:
+  user: nexus                  # owner: migrate, bootstrap, db-roles Jobs only
+  runtimeRoles:
+    enabled: true
+    existingSecret: nexus-db-logins   # keys: postgres-password-<component>
+    scope: union
+```
+
+`nexus-db-logins` holds one URL-safe password (≥ 16 of `A-Z a-z 0-9 . _ ~ -`)
+per `postgres.connections.<c>.passwordKey`: api-gateway, workflow-manager,
+dag-engine, scheduler, resource-manager, event-service, and artifact-gc when the
+CronJob is on. The **db-roles Job** (`nexus-db-roles` in the migrate image) runs
+as the owner **inside the cluster** — the only place a managed server's private
+endpoint is reachable, which is why Terraform does not run this SQL — and in
+one transaction:
+
+- creates each login `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
+  NOBYPASSRLS`, or refuses to adopt an existing role with any of those;
+- sets its password from a **SCRAM-SHA-256 verifier computed in the Job**, so
+  the plaintext never reaches the server, its statement log or pgaudit;
+- grants the `nexus_*` group roles of the chosen scope and revokes any other
+  `nexus_*` membership; artifact-gc gets SELECT on every table plus default
+  privileges for tables later migrations create, and nothing else.
+
+Services wait in `wait-for-schema` until their own login works, so ordering
+needs nothing extra. The owner password is then mounted only by the three Jobs.
+
+`scope`:
+
+- `union` (default): every login joins all six group roles — the union of the
+  DML the platform grants, still with no DDL, no ownership, no TRUNCATE, no role
+  management, and `run_events` still append-only. Verified live (§20.15).
+- `service`: each login joins only its own group role, ADR-0011's write matrix
+  enforced at the database. Migration 0037 grants the cross-owner writes the
+  strict run found (the scheduler's timer lease and dead-worker reaping, the
+  gateway's batched lease renewal, tenant lookups; F132), and the e2e stack
+  runs this way with `deploy/e2e/docker-compose.service-logins.yml`. Still
+  opt-in: the default stays `union` until production installs have run it.
+
+**A server shared with other databases (F153).** Roles are cluster-wide, not
+per database: the six `nexus_*` group roles are shared by every Nexus database
+on the server (each migration only adds grants inside its own database), and a
+login made for one Nexus database inherits its group's grants in all of them,
+connecting through PUBLIC's default CONNECT. On a shared server:
+
+- give each installation its own login names (the chart's
+  `postgres.connections.<c>.user`), or one install's db-roles Job resets the
+  other's passwords and `nexus_*` memberships;
+- revoke PUBLIC's CONNECT on each Nexus database, as its owner:
+  `REVOKE CONNECT ON DATABASE nexus FROM PUBLIC;` The db-roles Job grants
+  CONNECT on its own database to each login it manages, so that installation's
+  services keep working and no other installation's logins get in;
+- never roll 0005 back on a shared server: its rollback drops the group roles
+  when no database still grants them anything.
+
+**Rotation.** Put new passwords in the Secret (Terraform:
+`runtime_db_password_version += 1`), bump `postgres.runtimeRoles.passwordRevision`
+(Terraform does both). The db-roles Job re-runs under a new name and every
+connecting pod rolls (the revision is a pod annotation). Existing sessions
+survive a password change; each pod reconnects with the new one after its
+restart. The owner password rotates as before (deploy/terraform README), and
+now restarts only the Jobs' next run.
+
+### 20.13 ServiceAccounts and cloud identity
+
+Every Nexus pod runs under its own ServiceAccount (`nexus-api-gateway`,
+`nexus-scheduler`, `nexus-agent`, `nexus-artifact-gc`, `nexus-jobs`, …), never
+`default`, with **no API token mounted** (`automountServiceAccountToken:
+false`); none of them calls the Kubernetes API. An agent whose `executors`
+include `kubernetes` defaults to a mounted token (it launches task Jobs; bind
+its RBAC yourself). The cluster controller keeps its own RBAC-bound account.
+
+A cloud identity is bound by naming one account for the components that use
+the result store — api-gateway (task logs), workflow-manager (object-store
+sensors, §27), agents, artifact-gc — and nothing
+else. The chart creates a shared account once and refuses two components
+naming it with different settings:
+
+```yaml
+serviceAccounts:
+  apiGateway: &artifacts
+    name: nexus-artifacts
+    annotations: { eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/<name>-nexus-artifacts }
+    # GKE: { iam.gke.io/gcp-service-account: <gsa>@<project>.iam.gserviceaccount.com }
+    # AKS: { azure.workload.identity/client-id: <id> }
+  workflowManager: *artifacts
+  agent: *artifacts
+  artifactGC: *artifacts
+```
+
+IRSA, EKS Pod Identity and Azure Workload Identity inject their own projected
+token and GKE uses the metadata server, so all work with the API token
+unmounted. The Terraform environments set exactly this, with the platform
+modules' trust (`nexus_service_account = "nexus-artifacts"`); under EKS Pod
+Identity the association names the account and no annotation is needed.
+
+These are the accounts the result-store clients authenticate with (§26):
+`resultStore.s3.credentials` `web-identity`/`pod-identity`/`auto`,
+`resultStore.azure.auth=workload-identity` and `resultStore.gcs.auth=auto` all
+take the identity bound here. With `resultStore.backend=azblob` and
+`auth=workload-identity` the chart adds the pod label
+`azure.workload.identity/use: "true"` to exactly these four components (the
+webhook injects the federated token only into labelled pods), and it refuses
+to create their accounts without the `azure.workload.identity/client-id`
+annotation; `s3.credentials=web-identity` likewise requires
+`eks.amazonaws.com/role-arn`. With `serviceAccounts.create=false` the accounts
+are yours and are not inspected. There is no separate result-store
+ServiceAccount setting: one identity model for every pod.
+
+### 20.14 Agent pools and GPUs
+
+An `agents[]` entry may set `nodeSelector`, `tolerations` and `affinity`; each
+replaces the global `placement.*` value for that agent. With `gpuCount > 0` the
+agent pod **requests `gpuCount` devices** of `gpu.resourceName`
+(`agentDefaults.gpuResourceName`, `nvidia.com/gpu`) in requests and limits, and
+tolerates the `<resourceName>:NoSchedule` taint the deploy/terraform GPU pools
+carry. So what the agent advertises (`NEXUS_GPU_COUNT`, `--gpu-kind`,
+`--gpu-memory-bytes`) is what the kubelet allocated and mounted, and task
+subprocesses see those devices. An explicit device limit different from
+`gpuCount` is refused. `gpu: { requestDevices: false }` advertises without
+allocating — **simulated** capacity — and the chart then requires the label
+`simulated=true` (the dev environment's agents use it).
+
+```yaml
+agents:
+  - name: agent-gpu
+    queues: gpu
+    labels: zone=cluster,accelerator=nvidia
+    cpuMillis: 3000
+    memoryBytes: 10737418240
+    gpuCount: 1
+    gpuKind: nvidia-l4
+    gpuMemoryBytes: 25769803776
+    diskBytes: 161061273600
+    nodeSelector: { nexus.khuriwalgroup.com/pool: gpu }
+    resources: { requests: { cpu: 500m, memory: 1Gi }, limits: { memory: 12Gi } }
+```
+
+The AKS/EKS/GKE environments add exactly such an agent (variable `gpu_agent`)
+when their GPU pool is enabled, next to a CPU agent pinned to the cpu pool.
+Size the agent inside one GPU node. GPU execution itself is still unqualified
+on real hardware (production brief).
+
+### 20.15 What was verified for F115 (2026-09-26, docker-desktop)
+
+| Check | Result |
+|---|---|
+| `deploy/helm/validate.sh` | 5 values files lint and validate strictly (57, 83, 47, 48, 58 objects); 33 refusals with the expected message, 17 of them new (TLS without a bundle, bundle without verification, TLS on in-cluster postgres, reserved params, owner as runtime login, shared login, owner password key, bad scope and login names, GPU limit mismatch, unlabelled simulated GPUs, bad resource name, conflicting shared ServiceAccount, the controller's account, a misspelt key) |
+| `deploy/scripts/db-tls-drill.sh` (containers `nexus-w3c-drill-*`, port 55791) | 18/18: migrate (libpq) and db-roles (pgx) over verify-full; the six services as their own logins with TLSv1.3 sessions and event-service `/readyz` 200; wrong CA, wrong host name and plaintext refused (libpq, pgx and a running service, which stays unready); runtime login refused DDL |
+| `internal/dbroles` integration (migrated Postgres 16) | logins authenticate with client-side verifiers; attributes and connection limit; own-table writes allowed, other writes, DDL and `run_events` DELETE refused; read-only login reads later tables and writes none; rotation invalidates the old password and moves membership; privileged or missing roles refused with no partial change |
+| Helm install, namespace `nexus-w3c-helm`, images `w3c-f115a` | external TLS-only Postgres with a private CA in the namespace; `verify-full`, `runtimeRoles` (union), a shared `nexus-artifacts` account for gateway/agents/GC, a simulated GPU agent. All pods Ready; migrate, bootstrap, db-roles Complete; `hello_dag` SUCCEEDED; every service session in `pg_stat_ssl` was TLSv1.3 as its own `*_login`, none as the owner; artifact-gc ran as the read-only login under `nexus-artifacts` with no token; from a pod, a rogue CA, a wrong host name, a bare IP and plaintext were refused and the runtime login could neither `CREATE TABLE` nor `TRUNCATE run_events` |
+| `scope: service` on the same release | `hello_dag` SUCCEEDED, but the scheduler's timer claim and dead-worker reaping were denied (F132) |
+| `make tf-validate` / `make tf-lint` | all modules and environments valid, mocked-plan tests pass (new: CA Secret, runtime logins, non-PEM refusal, Cloud SQL shared CA and private DNS, GPU agent on the GPU pool, pinned bundle); tflint clean, checkov 296 passed / 0 failed, trivy clean |
+
+Not verified: any managed database (no cloud apply, F115 part 6), in
+particular that Cloud SQL's `google_sql_ca_certs` returns the shared-CA root
+and that the PSA DNS name resolves through the private zone; real GPU
+scheduling (no GPU node); IRSA/Workload Identity tokens reaching the object
+store (the client change is separate).
 
 ---
 
@@ -2969,3 +3305,1406 @@ Node **24** ("Krypton"), Active LTS until 2026-10-20 and maintained until
 2028-04-30 (github.com/nodejs/Release, `schedule.json`). The exact patch
 (`24.21.0`) is pinned in all three CI definitions and in the Dockerfile, and
 they move together. Node 26 becomes LTS on 2026-10-28; move once it has.
+
+---
+
+## 23. Cost management: moved to KGF billing
+
+Cost management (price books, budgets and cost reporting) is not part of
+Nexus: inside KGF Cloud it belongs to KGF billing, which prices usage for
+every KGF service alike (docs/KGF-INTEGRATION.md). Nexus meters and exports
+the usage it is authoritative for (the scheduler-owned usage ledger and its
+export, §21) and enforces namespace quotas; it keeps no prices, currencies or
+budgets. This section number is kept so the references to §24 and later stay
+stable.
+
+---
+
+## 24. Running Nexus inside KGF Cloud: context authentication, tenancy mapping and service accounts
+
+**Design:** [ADR-0024](adr/0024-nexus-inside-kgf-cloud.md). **Migration:**
+`0032_kgf_context_and_service_accounts`. **Verified:** `kgfctx` unit tests
+(including a conformance vector minted by kgf-cloud's own `pkg/tenantctx`
+signer and re-minted byte for byte), `authn` unit tests of the action mapping,
+and the PostgreSQL integration suite (`TestIntegrationKGF*`,
+`TestIntegrationServiceAccountsAndTokenCeilings`,
+`TestIntegrationUsersCursorPagination`). **Not verified:** a live kgf-gateway
+forwarding to Nexus; the tests mint contexts in the gateway's format but do
+not run kgf-cloud's processes.
+
+In KGF Cloud, kgf-identity owns people and kgf-gateway authenticates every
+request, then forwards it to the provider with a freshly signed Ed25519
+`X-KGF-Context` (`kgf-cloud/docs/platform-services.md`). In KGF mode Nexus
+trusts that context instead of its own passwords and sessions.
+
+### 24.1 Modes
+
+| `NEXUS_AUTH_MODE` | People | Machine credentials | `/v1/auth/login`, `/register`, email flows |
+| --- | --- | --- | --- |
+| `standalone` (default) | Nexus sessions | API keys, scoped and service-account tokens | served |
+| `kgf` | KGF context only; Nexus sessions refused | yes | **not served** (404) |
+| `both` | KGF context or Nexus session | yes | served |
+
+The worker gRPC listener is the same in every mode. Use `both` only while
+migrating a standalone installation into KGF; `kgf` is the target.
+
+Requests that would confuse identity are refused, never guessed at:
+
+| Request | Answer |
+| --- | --- |
+| `X-KGF-Context` **and** `Authorization` (kgf, both) | `400 ambiguous_credentials` |
+| `X-KGF-Context` in `standalone` without KGF keys | `400 kgf_context_not_accepted` |
+| `X-KGF-Context` with a Nexus credential in `standalone` **with** KGF keys | accepted: the credential authenticates and authorizes; the context, if it verifies, only attributes the audit row (§25.2) |
+| Nexus session (`nxsess_…`) in `kgf` | `401` |
+| Context with no subscription or resource group | `403 kgf_scope_required` |
+| Pure KGF service context not listed in `NEXUS_KGF_SERVICE_PRINCIPALS` | `403 kgf_service_not_allowed` |
+| Any verification failure (signature, key, expiry, audience, issuer, replay) | one opaque `401`; the reason is logged at INFO (`kgf context refused`) |
+
+### 24.2 Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `NEXUS_AUTH_MODE` | `standalone` | `standalone`, `kgf` or `both`. Anything else stops startup. |
+| `NEXUS_KGF_CONTEXT_KEYS_URL` | — | kgf-gateway's key document, e.g. `http://kgf-gateway.kgf-platform.svc:18080/.well-known/kgf-context.json`. |
+| `NEXUS_KGF_CONTEXT_PUBLIC_KEYS` | — | Alternatively, static base64url Ed25519 public keys, comma separated (the value of the gateway's `key` field). Exactly one of the two is required in `kgf`/`both`; in `standalone` either one turns on audit attribution only (§25.2). |
+| `NEXUS_KGF_CONTEXT_KEYS_REFRESH_SEC` | `300` | Periodic refresh of the key document. |
+| `NEXUS_KGF_AUDIENCE` | `kgf-nexus` | The audience kgf-gateway mints for Nexus: `kgf-` + the manifest `id`. Must match the name Nexus is registered under. |
+| `NEXUS_KGF_USER_ISSUERS` | `kgf-gateway` | Issuers allowed to carry a human principal. Add a KGF facade service here only if it delegates (`obo`) to Nexus. |
+| `NEXUS_KGF_SERVICE_PRINCIPALS` | — | KGF services that may call Nexus for themselves, with the role they act as: `svc:kgf-billing=viewer,svc:kgf-orchestrator=operator`. Unlisted services are refused. |
+| `NEXUS_KGF_ACCEPT_ANY_AUDIENCE` | `false` | Accept tenantctx's wildcard audience `*`. Only for KGF's single-process local profile. |
+
+Helm: the `kgf:` values block (`authMode`, `contextKeysUrl`,
+`contextPublicKeys`, `audience`, `userIssuers`, `servicePrincipals`) sets
+these on the api-gateway; the schema rejects an unknown mode. Compose passes
+`NEXUS_AUTH_MODE`, `NEXUS_KGF_CONTEXT_KEYS_URL` and
+`NEXUS_KGF_CONTEXT_PUBLIC_KEYS` through.
+
+**Startup and readiness.** The gateway logs `authentication mode: KGF
+context` with the audience, issuers and key source. With a key URL it tries a
+first fetch; if kgf-gateway is not up yet it logs a WARN and starts, and
+`/readyz` fails (`kgf_context_keys`) until a key is held, so the load balancer
+does not send it traffic it would refuse.
+
+**Registering Nexus in KGF.** kgf-gateway routes `KGF.Nexus` to the manifest's
+`internalURL`. Today `kgf-cloud/services/nexus` (the simulation provider) owns
+that registration. Pointing KGF at this gateway is a kgf-cloud change: the
+manifest endpoint (or a facade that delegates with
+`tenantctx.Signer.DelegateFrom` to audience `kgf-nexus`) and the actions in
+24.6. Nothing in this repository changes kgf-cloud.
+
+### 24.3 Key rotation
+
+kgf-gateway publishes `{"keys":[{"kid","alg":"EdDSA","key"}]}` with
+`kid = "kgf-" + hex(sha256(key)[:6])`. Nexus:
+
+- refetches immediately when it sees an unknown `kid` (at most once per 30 s),
+  so a new gateway key is trusted on its first token;
+- keeps a key that left the document for 5 minutes (the maximum context
+  lifetime), so tokens minted just before the rotation still verify;
+- ignores a published key whose `kid` is not its derived id;
+- keeps its keys through a failed refresh.
+
+To rotate: deploy the gateway with the new key; nothing is needed on Nexus.
+With static keys, add the new key to `NEXUS_KGF_CONTEXT_PUBLIC_KEYS` first,
+roll the gateway, then remove the old one after 5 minutes.
+
+### 24.4 Tenancy mapping
+
+Each KGF (organization, subscription, resource group) is one Nexus tenant
+namespace, created on the first request that names it:
+
+```
+namespace = "kgf-" + hex(sha256("kgf-nexus/v1" \0 org \0 sub \0 rg))[:32]      (lower-cased)
+```
+
+`whoami` reports it together with the KGF identity. Read the mapping, or find
+a namespace's KGF scope, with:
+
+```sql
+SELECT namespace, organization, subscription, resource_group, created_at
+  FROM kgf_scopes WHERE organization = 'org-acme' ORDER BY created_at;
+```
+
+Every request's path namespace must equal the caller's mapped namespace
+(`/v1/namespaces/<ns>/…`); another is `403`. Two organizations with equal
+subscription and group names get different namespaces. A tenant with the
+derived name that was not created by this mapping is refused
+(`namespace_conflict` in the log), never adopted. Deleting a KGF resource
+group does not delete its Nexus tenant; its data follows Nexus's retention.
+
+### 24.5 Authorization
+
+The context's role (the delegated person's, for an `obo` context) becomes
+KGF's built-in action set (operator = Contributor, viewer = Reader), and a
+Nexus permission is held when its KGF action is in that set:
+
+| KGF role | Holds |
+| --- | --- |
+| `operator` | every permission in the table in ADR-0024 §4: pipelines, runs (create, control, delete), schedules, backfills, workers (drain, quarantine), infrastructure, quotas, usage, audit, roles, service accounts, tokens |
+| `viewer` | every `…/read` action: workflows, runs, task metadata, **logs and results**, schedules, backfills, workers, infrastructure, quotas, usage, audit, roles, service accounts |
+| either | **never** `users.view` or `users.manage`: KGF owns people |
+| either | **never** `audit.manage` (retention, legal hold, purge, SIEM sinks; §25.2): changing what evidence is kept must not ride on a Contributor wildcard. It stays with the platform owner's Nexus machine credential (an admin API key, or a service account an administrator bound) |
+
+A viewer reading task logs and results follows KGF's Reader ("view every
+resource"); Nexus's own Viewer preset is narrower. Permissions not in the
+table are denied.
+
+### 24.6 KGF.Nexus actions to declare in kgf-cloud
+
+The manifest declares `KGF.Nexus/pipelines/{read,list,write,delete,run}`.
+Nexus also evaluates these, which kgf-cloud should add to
+`services/nexus/manifest.json` so custom KGF roles can name them:
+
+```
+KGF.Nexus/pipelines/cache/action
+KGF.Nexus/pipelines/runs/{read,delete}
+KGF.Nexus/pipelines/runs/{logs,results}/read
+KGF.Nexus/pipelines/runs/{cancel,pause,resume,retry}/action
+KGF.Nexus/schedules/{read,write,delete}
+KGF.Nexus/schedules/backfills/{read,write}
+KGF.Nexus/workers/read
+KGF.Nexus/workers/{drain,quarantine}/action
+KGF.Nexus/{infrastructure,quotas}/{read,write}
+KGF.Nexus/{usage,auditEvents}/read
+KGF.Nexus/{roles,serviceAccounts}/{read,write}
+KGF.Nexus/notifications/{read,write}
+KGF.Nexus/{triggers,sensors}/{read,write,delete}
+KGF.Nexus/assets/read
+```
+
+### 24.7 Audit and support references
+
+Every audit row written for a KGF principal also carries the chained KGF
+columns of §25.2 (`kgf_organization`, `kgf_subscription`,
+`kgf_resource_group`, `kgf_principal`, `kgf_on_behalf_of`), taken from the
+context that authenticated it; `request_id` is one column, added by 0032 and
+shared with §25.2. It has `actor_kind = 'kgf'`,
+`actor_label` = the KGF principal (the person, for a delegated context),
+`request_id` = the KGF request id, and `detail.kgf` = organization,
+subscription, resource group, role, issuer, token id and, for a delegated
+context, `via` (the acting service). Responses carry `X-Request-ID` with the
+same value. To resolve a KGF support reference:
+
+```bash
+curl -H "X-KGF-Context: …" "$NEXUS/v1/namespaces/$NS/audit?request_id=<id>"
+```
+
+```sql
+SELECT occurred_at, action, outcome, actor_label, detail->'kgf'
+  FROM audit_log WHERE request_id = '<id>';   -- indexed
+```
+
+### 24.8 Service accounts for agents and CI
+
+Machine credentials stay Nexus's: **service accounts** hold role bindings, and
+their tokens carry a permission ceiling (`POST …/tokens` with
+`service_account_id` and `permissions`). Effective grants are the account's
+current roles ∩ the ceiling, re-read on every request; disabling the account
+refuses its tokens at once. In KGF mode an **operator** manages service
+accounts, custom roles and tokens for its resource group; a binding or ceiling
+can hold only permissions the operator holds, never an identity-administration
+grant (`users.manage`, `roles.manage`, `tokens.manage`,
+`service_accounts.manage`), and an unceilinged token can be minted only by a
+Nexus administrator. Grant-bearing tokens never speak the worker protocol.
+
+`GET /v1/namespaces/{ns}/users?limit=&cursor=&q=` is keyset-paginated (at most
+200 per page, server-side search); in KGF mode it is denied (KGF owns people).
+
+### 24.9 Mixed versions, upgrade and rollback
+
+Apply `0032_kgf_context_and_service_accounts` (no-transaction: it builds the
+`audit_log.request_id` index `CONCURRENTLY`; re-run it if interrupted), then
+deploy the gateway. During a rolling upgrade an old replica ignores the new
+columns: a service-account token is stored with an empty scope list, so an old
+replica grants it nothing; a ceilinged token is stored with only the coarse
+scopes its ceiling implies. An old replica does not understand
+`X-KGF-Context`: switch `NEXUS_AUTH_MODE` to `kgf` only once every replica
+runs the new gateway.
+
+Rollback: set `NEXUS_AUTH_MODE=standalone`, roll the gateway back, then (only
+if required) apply the down migration after exporting `kgf_scopes` and
+`service_accounts`. KGF-provisioned tenants remain as ordinary tenants.
+
+### 24.10 Known limits
+
+- The replay guard is per replica (as in kgf-cloud's tenantctx); the audience
+  check and the one-minute lifetime bound the window.
+- Authorization follows the flat role in the context. A KGF custom role
+  narrower than Contributor or Reader is enforced by kgf-gateway's coarse
+  check, not re-derived here, until contexts carry assignments.
+- The per-replica provisioning cache means the first request for a new scope
+  on each replica runs one small transaction.
+
+---
+
+## 25. Task secrets, the audit trail, and air-gapped installation
+
+ADR-0025. Nexus runs as a service of KGF Cloud; §25.1 and §25.3 are Nexus's
+own mechanisms, §25.2 feeds KGF Cloud's audit and compliance program
+(docs/SOC2-READINESS.md). Migration 0033 is required for §25.2.
+
+### 25.1 Worker-side secret resolution
+
+A task declares references, never values:
+
+```yaml
+runtime:
+  secrets:
+    - { name: DB_PASSWORD, ref: "vault://kv/team-a/db#password" }        # env (default)
+    - { name: tls.key,     ref: "akv:///nexus-team-a-tls-key", inject: file }
+```
+
+`inject: env` sets the variable `name`; `inject: file` writes
+`$NEXUS_SECRETS_DIR/<name>` (0400) and keeps the value out of the
+environment. **Prefer `file`**: environment variables are visible to
+same-host root (`docker inspect`, `/proc/<pid>/environ`). The agent resolves
+every declared secret **before** the workload is prepared; a task gets all of
+them or does not start.
+
+**Configuration** (`NEXUS_SECRETS_CONFIG`, mode 0600/0640, never group- or
+world-writable; unknown keys are rejected so a typo cannot disable a control).
+Keyed by namespace: the agent loads **only its own `--namespace` block** and
+never constructs another tenant's providers.
+
+```yaml
+version: 1
+tenants:
+  team-a:
+    timeout: 30s
+    env:   { allow: ["TEAM_A_*"] }                 # env://NAME; "*" is refused
+    file:  { allow_dirs: ["/var/run/secrets/nexus"], max_bytes: 65536 }
+    vault:
+      address: https://vault.internal:8200
+      namespace: team-a                            # Vault Enterprise namespace, optional
+      mounts: ["kv"]                               # KV v2 mounts; longest prefix wins
+      allow_paths: ["kv/team-a"]                   # required; agent-side second fence
+      auth: { method: kubernetes, role: nexus-team-a }   # or approle / token (files only)
+      tls:  { ca_file: /etc/nexus/vault-ca.pem }
+    akv:
+      default_vault: kgf-platform-kv-prod          # KGF stamp Key Vault (global.keyVaultName)
+      allow_vaults: ["kgf-platform-kv-prod"]
+      allow_secret_prefixes: ["nexus-team-a-"]     # isolation inside the shared vault
+      auth: { method: workload_identity }          # KGF stamp workload identity
+```
+
+| Scheme | Ref | Notes |
+|---|---|---|
+| `env://` | `env://NAME` | Agent environment, allow-listed. The agent's own credentials (`NEXUS_API_KEY`, `NEXUS_S3_*`, NATS, `VAULT_TOKEN`, `AZURE_CLIENT_SECRET`, ...) are never resolvable. |
+| `file://` | `file:///abs/path` | Must stay inside `allow_dirs` after symlink resolution; 1 MiB cap. On KGF Cloud, mount the CSI-projected Key Vault secret (`agentDefaults.secrets.fileSecrets`) and allow its directory. |
+| `vault://` | `vault://<mount>/<path>[?version=N][#field]` | KV v2. No field: the secret's data map as JSON. Auth `kubernetes` (projected SA token), `approle` (role id + secret-id file), `token` (token file, re-read on every login so Vault Agent can rotate it). Plain `http` and `insecure_skip_verify` only for loopback. A 403 triggers one re-login. |
+| `akv://` | `akv://<vault>/<secret>[/<version>]`, or `akv:///<secret>` for `default_vault` | Official Azure SDK. `workload_identity` (KGF's convention: the stamp's federated identity; chart `agentDefaults.secrets.workloadIdentityClientId`), `managed_identity`, `client_secret` / `client_certificate` (files). Secret names follow KGF's service-prefixed kebab-case (`nexus-<tenant>-<name>`); `allow_secret_prefixes` enforces it. |
+
+`aws-sm://` and `gcp-sm://` are not implemented.
+
+**Failure classes** (`TaskError.type = SecretResolutionFailed`): malformed ref,
+reserved `NEXUS_*` name, clash with `runtime.env`, missing field ->
+`VALIDATION`; scheme not configured for the tenant, not allow-listed, 401/403
+-> `PERMISSION_DENIED`; absent secret/version -> `NOT_FOUND`; unreachable,
+timeout, 429, 5xx, sealed Vault -> `TRANSIENT` (retryable). None is retried by
+the agent itself; the control plane's retry policy decides.
+
+**Where values go, and do not.** Executors: subprocess (env + files),
+docker (`--env-file` 0600, removed right after `docker run`; files bind-mounted
+read-only at `/run/nexus/secrets`), kubernetes (the per-attempt Secret, by
+`secretKeyRef` and a projected volume; never a literal in the pod spec).
+Host-side files live under `NEXUS_SECRETS_DIR_ROOT` (the chart mounts a
+memory-backed emptyDir there) and are removed by Cleanup on every path.
+Values never enter the WAL, the result store (unless the task writes them into
+its own output), reports, events or agent log lines; shipped task logs, the
+agent-log copy, progress notes and error messages pass the ADR-0020 redactor
+(per line, exact match, values under 3 bytes are not redactable and are named
+in a WARN). With providers configured the agent sets `RLIMIT_CORE=0` and, on
+Linux, `PR_SET_DUMPABLE=0`.
+
+**Subprocess executor (F138, F151).** A subprocess task's environment is
+built from an allow-list, never inherited wholesale: `PATH`, `HOME`, `LANG`,
+`LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `USER`, `LOGNAME`, `NEXUS_TASK_MODULES`,
+`NEXUS_RESULT_DIR`, then `runtime.env`, env-injected secrets and the
+platform task contract: the `NEXUS_*` variables (attempt, run, node,
+idempotency key, directories, outputs, deadline, attempt number,
+`NEXUS_INLINE_THRESHOLD_BYTES`), the attempt's `TRACEPARENT`/`TRACESTATE`
+(ADR-0026) and its workload API `NEXUS_TASK_API`/`NEXUS_TASK_API_TOKEN`
+(ADR-0032), all set explicitly per attempt. Pass anything else explicitly with
+`NEXUS_SUBPROCESS_ENV_PASSTHROUGH=GLOB[,GLOB...]` (default empty; Helm
+`agentDefaults.secrets.subprocessEnvPassthrough`). The agent's own credentials
+(`NEXUS_API_KEY`, `NEXUS_S3_*`, `NEXUS_RESULT_STORE_*`, `RESULT_STORE_*`,
+`NEXUS_AZURE_*`, `NEXUS_GCS_*`, NATS, Vault, Azure, AWS -- including the IRSA
+and Pod Identity token files -- GCP, the mTLS client key, OTLP exporter
+headers, and any inherited `NEXUS_TASK_API*`) never pass, whatever the pattern
+says. Docker and
+Kubernetes tasks start from an empty environment. The subprocess executor
+still runs tasks as the agent's user: development-grade, as ADR-0007 says.
+
+**Local runs and replay** (`nexus.local`, `nexusctl run --local`,
+`nexusctl replay`) run on the developer's own machine: tasks inherit the
+developer's full environment plus the `NEXUS_*` contract (so a local task can
+use the developer's tools and credentials), and `SecretRef`s are **not**
+resolved; export the values a task needs, under the names it declares.
+Nothing from a local run leaves the machine.
+
+**Tests.** `make test-vault` (a digest-pinned Vault 1.21.4 dev container:
+token and AppRole login, KV v2 fields and versions, policy denial, revoked
+token, sealed server). Azure Key Vault is covered by a fake behind the
+`AKVGetter` interface; **manual test against a real vault**:
+
+1. `az keyvault secret set --vault-name <vault> --name nexus-team-a-probe --value "$(openssl rand -hex 16)"`;
+   grant the agent's identity *Key Vault Secrets User* on the secret or vault.
+2. Configure the tenant's `akv:` block (workload identity on AKS; for a laptop
+   use `client_secret` with a secret file).
+3. Submit a task with `{ name: PROBE, ref: "akv:///nexus-team-a-probe", inject: file }`
+   that runs `sha256sum "$NEXUS_SECRETS_DIR/PROBE"`; compare with the local
+   `sha256sum` of the value. Then `echo "$(cat $NEXUS_SECRETS_DIR/PROBE)"` and
+   confirm the attempt log shows `[REDACTED:PROBE]`.
+4. Negative: a name without the tenant prefix -> `PERMISSION_DENIED`; a missing
+   name -> `NOT_FOUND`; revoke the role -> `PERMISSION_DENIED`.
+
+### 25.2 The audit trail: pagination, export, KGF Cloud, sinks, retention, hash chain
+
+**Routes** (Administrator; the Auditor role has `audit.view`, only
+Administrator has `audit.manage`):
+
+| Route | Permission | |
+|---|---|---|
+| `GET /v1/namespaces/{ns}/audit?limit=&cursor=&since=&until=&action=&outcome=&actor_id=` | audit.view | newest first; `next_cursor` is an opaque keyset cursor (stable while rows arrive), `null` on the last page |
+| `GET .../audit/export?format=ndjson\|csv\|kgf&since=&until=&action=&outcome=&actor_id=` | audit.view | streamed from one REPEATABLE READ snapshot, no row cap |
+| `GET/PUT .../audit/policy` `{retention_days|null, revision}` | view / manage | |
+| `POST .../audit/legal-hold` `{hold, reason, revision}` | audit.manage | a reason is required to set a hold |
+| `POST .../audit/purge` | audit.manage | apply retention now (the gateway also runs it hourly) |
+| `GET/POST .../audit/sinks`, `PUT/DELETE .../audit/sinks/{id}`, `POST .../audit/sinks/{id}/rotate-secret` | view / manage | |
+
+**Formats.** `ndjson` is the verifiable export: a header (`encoding`,
+`complete` = unfiltered, `anchor` = the genesis or latest purge checkpoint,
+`chain_started_at`), one `audit` record per row in chain order with `chain_seq`,
+`prev_hash`, `row_hash`, and a trailer with the row count and the chain head.
+`csv` is RFC 4180 with a quote prefixed to any cell starting `= + - @`, tab or
+CR (the same neutralisation KGF's export applies). `kgf` is KGF Cloud's audit
+event shape, one per line.
+
+**KGF Cloud.** KGF has no audit ingestion API today (its `audit_events` are
+written by its own services and exported per project), so Nexus provides the
+KGF-shaped export and a KGF-format sink for a KGF-side collector. Mapping:
+
+| KGF field | From |
+|---|---|
+| `organization_id` | verified KGF context `org`; empty when the request carried none (the collector maps by `nexus.namespace`) |
+| `id` | `nexus:<namespace>:<chain_seq>` (stable, so redelivery de-duplicates on KGF's `(organization_id, id)` key) |
+| `action` | `nexus.` + Nexus action (KGF's dotted lower-case style), e.g. `nexus.token.create` |
+| `resource_id` | `/organizations/{org}/subscriptions/{sub}/resourceGroups/{rg}/providers/KGF.Nexus/namespaces/{ns}/{target_kind}/{target_id}` (KGF authz scope form) when the KGF scope is known, else `nexus://namespaces/{ns}/...` |
+| `subscription_id`, `resource_group` | verified context `sub`, `rg` |
+| `created_at` | `occurred_at`, RFC 3339 UTC |
+| `principal`, `on_behalf_of` | verified context `principal`, `obo`; else `nexus:<actor_kind>:<label>` |
+| `request_id` | verified context `request_id`, else the caller's `X-Request-ID` (sanitised, correlation only) |
+| `outcome`, `source` (`kgf-nexus`), `kgf_attributed` | |
+| `nexus{}` | namespace, audit id, Nexus action, actor, target, client IP, detail |
+| `chain{}` | encoding, seq, prev_hash, row_hash: tamper evidence survives the hand-over |
+
+Attribution uses the ONE KGF context verifier of §24 (`internal/kgfctx`):
+the same keys (`NEXUS_KGF_CONTEXT_PUBLIC_KEYS` or `NEXUS_KGF_CONTEXT_KEYS_URL`),
+audience (`NEXUS_KGF_AUDIENCE`, default `kgf-nexus`), user issuers
+(`NEXUS_KGF_USER_ISSUERS`, default `kgf-gateway`), replay guard and
+tenantctx-identical checks. Chart: the `kgf` block. Where the attribution comes
+from depends on `NEXUS_AUTH_MODE`:
+
+| Mode | Attribution |
+|---|---|
+| `kgf`, `both`, request authenticated by `X-KGF-Context` | the context that authenticated it; the actor is recorded as `actor_kind = 'kgf'` (§24.7) |
+| `standalone` with keys configured | an `X-KGF-Context` sent **with** a Nexus credential, if it verifies: **attribution only**, the Nexus credential alone authorizes. An unverifiable or replayed token contributes nothing and is logged at WARN |
+| `standalone` without keys | none; a request carrying `X-KGF-Context` is refused (`400 kgf_context_not_accepted`, §24.2) rather than silently ignored |
+| any mode, machine credential without a context | none; `request_id` is the caller's sanitised `X-Request-ID` |
+
+**Sinks.** A webhook sink receives NDJSON batches (`format: nexus` records or
+`format: kgf` events), `POST`ed with `Content-Type: application/x-ndjson` and
+`X-Nexus-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>." + body)>`,
+`X-Nexus-Delivery: <sink>:<first>-<last>` (stable per batch: de-duplicate on
+it), `X-Nexus-Namespace`, `X-Nexus-Format`. Verify: recompute the HMAC over the
+exact body bytes with the secret, compare in constant time, and reject a `t`
+older than your tolerance (300 s). Any 2xx acknowledges the batch and advances
+the sink's cursor; anything else is retried with capped exponential backoff
+(5 s doubling to 10 min, full jitter): **at least once**. Only one gateway
+replica delivers a given sink at a time (advisory lock). The signing secret is
+generated by Nexus, returned **once** at creation or rotation, and stored
+AES-256-GCM-sealed (bound to the namespace) under `NEXUS_AUDIT_SINK_KEY` or
+`NEXUS_AUDIT_SINK_KEY_FILE` (32 random bytes, base64: `openssl rand -base64 32`;
+chart `auditExport.sinkKeySecret`, key `audit-sink-key`). Without the key,
+sink creation answers 503 `sinks_disabled`. Rotating the gateway key makes
+existing sinks fail with "rotate the sink's secret": rotate each sink.
+Destinations are `https` only and may not resolve to loopback, link-local
+(169.254.169.254), private or unspecified addresses unless listed in
+`NEXUS_AUDIT_SINK_ALLOW_CIDRS` (checked at configuration AND at dial time, no
+proxies, no redirects). `NEXUS_AUDIT_SINK_ALLOW_HTTP=true` is for development.
+
+**Retention and legal hold.** `retention_days` null (default) keeps everything.
+Rows leave `audit_log` only through `audit_purge()` (SECURITY DEFINER; the
+gateway role stays INSERT-only), which: does nothing without a policy; refuses
+under legal hold; removes only a **prefix** of the chain, and never a row an
+enabled sink has not acknowledged; writes a `purge` checkpoint (seq and hash of
+the last removed row) in the same transaction. Triggers make `audit_log`
+UPDATE-proof and DELETE-proof for every role outside `audit_purge()`.
+
+**Hash chain.** Per namespace. `row_hash = hex(sha256(canonical_v1))`, where
+canonical_v1 is the compact JSON array
+
+```
+["nexus-audit-v1", namespace, chain_seq, occurred_at, actor_id|null, actor_kind,
+ actor_label, action, target_kind, target_id, outcome, detail, client_ip,
+ kgf_organization, kgf_subscription, kgf_resource_group, kgf_principal,
+ kgf_on_behalf_of, request_id, prev_hash]
+```
+
+with `occurred_at` as `YYYY-MM-DDTHH:MM:SS.ffffffZ` (UTC, microseconds),
+`actor_id` lower-case, `detail` re-encoded from PostgreSQL's jsonb form with
+numbers verbatim, object keys sorted, no whitespace and no HTML escaping, and
+strings as Go's `encoding/json` writes them. `prev_hash` of seq 1 is
+`hex(sha256("nexus-audit-v1:genesis:" + namespace))`. The append locks the
+namespace's `audit_chain_heads` row in the change's transaction, so replicas
+cannot fork the chain. Rows written before 0033 carry no chain position and are
+reported as pre-chain; a row without a position written after the chain
+started (an older gateway replica mid-upgrade, or direct SQL) is reported as
+**unchained** and fails verification unless `--allow-unchained`.
+
+**Verify.** `nexusctl audit verify` (via the API) or
+`nexusctl audit verify --file export.ndjson` (offline, no credentials): exit
+0 intact, **8** broken, printing the first broken sequence (altered row, gap,
+reordered row, broken link, truncated tail). Evidence procedure: export
+(`nexusctl audit export --file audit-<date>.ndjson`), verify, store the file and
+the reported head **outside** the database (or keep a SIEM sink). The chain
+proves retained rows were not altered relative to each other; a superuser who
+rewrites the whole tail is caught only by comparing with a copy held elsewhere.
+
+**Fail-closed decision (F139).** Security grants (login, user create / enable /
+update / password reset / email verified, roles, tokens minted, tenant
+creation, platform/cluster/quota configuration, every audit-configuration
+change) commit **with** their audit row or not at all: `503 audit_unavailable`.
+Revocations (logout, token revoke, user disable, sessions revoked, role delete)
+are never blocked; a failed write logs `AUDIT RECORD LOST` at ERROR.
+Operational actions (retries, deletes of runs/specs/schedules, quarantine,
+cache invalidation, email-link sends) log and continue. The table is
+`auditActionClasses` in `services/api-gateway/rest/audit.go`; a test fails the
+build if any action string is unclassified. Alert on
+`increase(nexus_audit_write_failures_total[5m]) > 0` (labels `class`,
+`blocked`), `nexus_audit_sink_delivery_failures_total` rising, and on a sink
+whose `last_success_at` is older than your RPO.
+
+**Migration 0033** is additive and `no-transaction` (a concurrent index):
+re-runnable after a partial apply. Apply it before rolling out the new gateway;
+old replicas keep writing unchained rows until replaced. Rollback
+(`0033_*.down.sql`) drops the chain columns, checkpoints, policies and sinks:
+**export first**, or the tamper evidence for retained rows is lost.
+
+### 25.3 Air-gapped installation
+
+`make airgap-bundle` (on a connected host; `AIRGAP_VERSION=`, `PLATFORMS=`)
+writes `dist/nexus-airgap-<version>.tar.gz` and its `.sha256`: every image the
+chart and compose reference, resolved and saved **by digest** (skopeo when
+installed, else `docker save`), the packaged chart, `nexusctl` and
+`nexus-agent` binaries, the SDK wheel, `schemas/`, `manifest.json` and
+`SHA256SUMS` (cosign-signed when cosign is installed; the manifest says
+`"signed": false` otherwise). Inside the gap, `load.sh --registry
+<host>[/path]` verifies checksums (and the signature), pushes every image,
+records the digest the **registry** reports, and writes `values-airgap.yaml`
+pinning every chart image to `<registry>/...@sha256`, then proves it with
+`helm template`. `make airgap-test` repeats this against a throwaway local
+registry. Full procedure, what is not included, and the digest caveats:
+docs/AIRGAP.md.
+
+---
+
+## 26. Tracing and result-store backends
+
+Two production features share this section because they share configuration
+surfaces (env, Helm values, compose) and one verification loop: OpenTelemetry
+tracing (ADR-0026) and the native S3, Azure Blob and GCS result-store backends
+(ADR-0027).
+
+### 26.1 Turning tracing on
+
+Tracing is **off** until you point it at a collector. Every service and the
+agent read only the standard OpenTelemetry variables:
+
+| Variable | Nexus default | Notes |
+|---|---|---|
+| `OTEL_TRACES_EXPORTER` | unset (off) | `otlp` or `console` turns tracing on; `none` forces it off. An unknown value fails startup. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` / `_TRACES_ENDPOINT` | unset | Setting either also turns tracing on. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | `grpc` for port 4317. `http/json` is refused. |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `_INSECURE`, `_CERTIFICATE`, `_TIMEOUT`, `_COMPRESSION` | SDK defaults | Read by the exporter itself. Keep headers (API tokens) in a Secret. |
+| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Also `parentbased_always_on/off`, `traceidratio`, `always_on/off`. |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | The chart defaults to `0.1`. |
+| `OTEL_SERVICE_NAME` | the binary's name | Do not set it fleet-wide: every service would report as one. |
+| `OTEL_RESOURCE_ATTRIBUTES` | — | e.g. `deployment.environment.name=prod`. |
+| `OTEL_BSP_*` | SDK defaults | Batch size, queue, delay. The queue drops when full; export never blocks work. |
+| `OTEL_SDK_DISABLED` | — | `true` forces tracing off. |
+| `NEXUS_TRACING_PUBLIC_ENDPOINT` (gateway) | `false` | `true`: an inbound REST `traceparent` becomes a **link**, not the parent (untrusted callers cannot force sampling or join your traces). |
+
+**Helm:** `tracing.enabled=true`, `tracing.endpoint=http://otel-collector.observability:4317`,
+`tracing.protocol=grpc`, `tracing.samplerArg="0.1"`, optional
+`tracing.headersSecret.{name,key}`, `tracing.resourceAttributes`,
+`tracing.publicEndpoint`. The chart refuses `enabled` without an endpoint.
+**Compose:** `docker compose --profile tracing up -d` starts a pinned Jaeger v2
+(UI on `127.0.0.1:16686`), then run the stack with
+`OTEL_TRACES_EXPORTER=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318`.
+
+Each process logs `OpenTelemetry tracing enabled` with exporter, sampler and
+endpoint at startup. Exporter errors (collector down) are logged at most once a
+minute per process; spans are dropped, work is not slowed.
+
+### 26.2 Reading a run's trace
+
+One run is one trace: the API request that created it, `run.create`
+(workflow-manager), `run.materialize` / `run.reconcile` (dag-engine),
+`attempt.dispatch` (scheduler, one per attempt, linked to the worker poll that
+claimed it), `attempt.execute` with `prepare_inputs`, `run`, `finalize_logs`,
+`store_outputs`, `report_result` (agent), `objstore.*` result-store calls, and
+database queries. Search your backend by `nexus.run_id` or `nexus.attempt_id`
+(span attributes), or take `trace_id` from any log line: every record logged
+with a request context, and every line of an attempt's agent log, carries
+`trace_id` and `span_id`.
+
+Task code sees the attempt's context as `TRACEPARENT` / `TRACESTATE`. The
+Python SDK (`pip install 'nexus-sdk[opentelemetry]'`) runs the handler in a
+child span and exposes `ctx.traceparent`; configure a `TracerProvider` in the
+task image (for example `opentelemetry-instrument`) to export the task's own
+spans. A run created before migration 0028, or by an untraced caller, is
+dispatched under the worker's poll trace instead.
+
+**Sizing.** At ratio 1.0 every query is a span; a 1 000-attempt fan-out is tens
+of thousands of spans in one trace, which some backends truncate. Sample in
+production (0.01–0.1) and raise the ratio for a namespace under investigation
+by sending a sampled `traceparent` with the run's creation request.
+
+**Upgrade order.** Apply `0028_trace_context` (two nullable columns, no
+rewrite) with the other migrations, then roll services. Old agents ignore
+`TaskAssignment.trace_context`. Rollback: roll the scheduler, dag-engine,
+workflow-manager and event-service back before `0028_…down.sql`.
+
+### 26.3 Choosing and configuring the result-store backend
+
+| Setting | Values | Applies to |
+|---|---|---|
+| `NEXUS_RESULT_STORE_BACKEND` | `s3` (default), `azblob`, `gcs` | gateway, agents, artifact-gc |
+| `NEXUS_RESULT_STORE_ENDPOINT` / `_BUCKET` / `_REGION` | S3 endpoint; the Azure container / GCS bucket in `_BUCKET`; endpoint optional for Azure (sovereign cloud, private DNS, Azurite) and empty for real GCS | all |
+| `NEXUS_RESULT_STORE_PART_SIZE_BYTES` | 5 MiB – 512 MiB, default 16 MiB | multipart part / Azure block / GCS chunk |
+| `NEXUS_S3_CREDENTIALS` | `auto`, `static`, `web-identity`, `pod-identity`, `iam`, `env`, `anonymous` | s3 |
+| `NEXUS_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_SESSION_TOKEN` / `_USE_TLS` | static keys, as before | s3 |
+| `NEXUS_AZURE_STORAGE_ACCOUNT` | account name | azblob |
+| `NEXUS_AZURE_STORAGE_AUTH` | `auto`, `workload-identity`, `managed-identity`, `shared-key` | azblob |
+| `NEXUS_AZURE_STORAGE_KEY`, `NEXUS_AZURE_CLIENT_ID` | shared key (from a Secret); user-assigned identity / client id override | azblob |
+| `NEXUS_GCS_AUTH` | `auto` (ADC, Workload Identity), `none` (emulators only) | gcs |
+
+**`auto` resolution.** S3: static keys if both are set; else an AWS identity
+visible in the environment (`AWS_WEB_IDENTITY_TOKEN_FILE`,
+`AWS_CONTAINER_CREDENTIALS_*`, `AWS_ACCESS_KEY_ID`); else startup reports "no
+S3 credentials". EC2 instance roles are never probed implicitly (an IMDS probe
+hangs off EC2): use `iam`. Azure: a configured key, else workload identity when
+`AZURE_FEDERATED_TOKEN_FILE` is present, else managed identity.
+
+**Per cloud** (the Terraform environments do this by default; F115). "ServiceAccount"
+means `serviceAccounts.apiGateway`, `.workflowManager`, `.agent` and
+`.artifactGC`, the four result-store clients, which the environments point at one shared
+`nexus-artifacts` account (§20.13):
+
+| Cloud | Backend and identity | Chart values |
+|---|---|---|
+| EKS | `s3`, Pod Identity (`pod-identity`) or IRSA (`web-identity`) | `resultStore.s3.credentials`, ServiceAccount (IRSA: annotation `eks.amazonaws.com/role-arn`) |
+| AKS | `azblob`, `workload-identity` | `resultStore.azure.account`, `.clientId`; ServiceAccount annotation `azure.workload.identity/client-id` (the chart adds the pod label `azure.workload.identity/use: "true"`) |
+| GKE | `gcs`, Workload Identity | ServiceAccount annotation `iam.gke.io/gcp-service-account` |
+| anywhere | `s3` + static keys (Silo/MinIO, GCS HMAC interop at `https://storage.googleapis.com`) | `resultStore.s3.accessKeySecret` |
+
+The gateway advertises its backend to agents; an agent's own
+`NEXUS_RESULT_STORE_BACKEND` wins. **Upgrade agents before** moving a
+deployment to `azblob` or `gcs`: an old agent ignores the advertisement and
+speaks S3. Changing backends never migrates objects: copy the bucket first
+(`rclone sync`, `azcopy copy`, `gcloud storage cp -r`), keeping keys identical,
+then switch every component at once.
+
+The first log line to check is the gateway's `durable task logs enabled`
+(now with `backend`) or the WARN naming why the store could not be opened.
+
+### 26.4 Least privilege and lifecycle
+
+| Principal | S3 (IAM) | Azure (RBAC) | GCS (IAM) |
+|---|---|---|---|
+| agents | `s3:GetObject`, `s3:PutObject` on `<bucket>/<namespace>/*`; `s3:ListBucket` for the readiness probe | `Storage Blob Data Contributor` on the container (Azure RBAC has no prefix scope; use a container per trust boundary) | `roles/storage.objectUser` on the bucket (IAM Conditions on `resource.name.startsWith` for per-namespace scope) |
+| gateway (logs) | `s3:GetObject` on `<bucket>/*/logs/*` | `Storage Blob Data Reader` on the container | `roles/storage.objectViewer` |
+| artifact-gc | `s3:ListBucket`, `s3:GetObject`, `s3:DeleteObject` | `Storage Blob Data Contributor` | `roles/storage.objectUser` |
+
+Every backend's bucket existence check works with these object-level roles.
+
+Lifecycle rules on the bucket are housekeeping only; **reachability is decided
+by artifact-gc**, so never add an age-based expiry on current objects (it
+deletes outputs a live run still references). Provision, as the Terraform
+modules do: abort incomplete multipart uploads after 7 days (S3, GCS; Azure
+discards uncommitted blocks after 7 days by itself), expire noncurrent
+versions after 30 days (S3 rule, GCS rule, Azure management policy), soft
+delete for accidental deletes. Log retention remains `artifact-gc
+-log-retention` (§19.2).
+
+**Deduplicated outputs are refreshed.** An output identical to an existing
+object more than an hour old is re-uploaded instead of reused (F141), so the
+GC's grace period (§7.7) always covers it. Expect `uploaded` rather than
+`deduplicated` in `nexus_agent_result_store_puts_total` for such repeats.
+
+### 26.5 Metrics
+
+`nexus_objstore_operations_total{backend,op,outcome}`,
+`nexus_objstore_operation_duration_seconds{backend,op}` and
+`nexus_objstore_bytes_total{backend,direction}` are exported by the agent, the
+gateway and artifact-gc (§17.4). `outcome` is `ok`, `not_found`, `exists` or
+`error`. Alert on a rising `outcome="error"` rate per backend; `not_found` on
+`op="get"` at the gateway means log objects were removed out of band (the log
+API reports `expired`).
+
+### 26.6 Verifying
+
+```sh
+make objstore-conformance   # one suite against Silo, Azurite and fake-gcs-server; a skip fails
+make tracing-e2e            # real binaries + Jaeger: one trace from API to agent and back
+make test-stores-down
+```
+
+Both start pinned containers with `make test-stores-up`
+(`TEST_STORES_NAME`, `TEST_*_PORT` override names and loopback ports). On a
+new cloud deployment, additionally: submit the fan-out example with a > 64 MiB
+artifact (multipart), run `artifact-gc` in dry-run and `-check-refs`, read a
+task log through the console, and find the run's trace in your backend. Record
+the results here per cloud; none has been recorded yet (F115).
+
+---
+
+## 27. Notifications, webhook triggers, sensors and asset lineage
+
+ADR-0028 describes the design. This section covers running it. Migration 0034 adds the
+tables. Services never migrate themselves, so apply it with the migrate job before
+you deploy code that uses it (§6). No NATS subject or permission changes: the
+notifier reads the outbox from Postgres, so everything here works with the bus
+disabled.
+
+| Piece | Runs in | Tables it writes |
+|---|---|---|
+| Channel/rule/trigger/sensor configuration, hook receiver | api-gateway | `notification_channels`, `notification_rules`, `notification_rule_channels`, `webhook_triggers`, `webhook_receipts`, `sensors` (+ INSERT on `notification_deliveries` for test and redrive) |
+| Notifier (evaluate, SLA sweep, dispatch) and lineage recorder | event-service | `notification_deliveries`, `notification_channel_windows`, `notification_incidents`, `assets`, `asset_lineage_edges`, `asset_materializations`, `outbox.notified_at` |
+| Sensor loop | workflow-manager | `sensor_state`, `sensor_observations` (+ runs, through the run service) |
+
+Every loop is safe with any number of replicas and needs no leader: claims use
+`FOR UPDATE SKIP LOCKED` or a lease, and every output is keyed by a unique
+constraint.
+
+### 27.1 Configuration
+
+| Variable | Service | Default | Meaning |
+|---|---|---|---|
+| `NEXUS_SECRET_KEY` / `_FILE` | gateway, event-service | unset | 32-byte key (base64 or hex) sealing channel and trigger secrets (AES-256-GCM). **Both services need the same value.** Unset: inline channel secrets and webhook triggers are refused (503 `secret_key_unconfigured`); `secret_ref` channels still work. A malformed value stops the service at startup. |
+| `NEXUS_SECRET_KEY_PREVIOUS` / `_FILE` | gateway, event-service | unset | A retired key that still opens old ciphertexts during a rotation (§27.2). |
+| `NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS` | gateway, event-service | `false` | Allows `http://` and private, loopback and link-local destinations. Keep it false in shared deployments: otherwise a channel can be aimed at internal services and at the cloud metadata endpoint. Compose sets it true for local receivers. |
+| `NEXUS_PUBLIC_URL` | gateway | unset | Turns a trigger's hook path into the absolute `url` shown to operators. |
+| `NEXUS_CONSOLE_URL` | event-service | unset | Links each notification to `<console>/runs/<id>`. |
+| `NEXUS_SMTP_*` | event-service | mail disabled | Email channels. The settings are the same as the gateway's (§10). With no host, email deliveries fail permanently and say why. |
+| `NEXUS_NOTIFY_EVAL_BATCH`, `_EVAL_INTERVAL`, `_DISPATCH_BATCH`, `_DISPATCH_INTERVAL`, `_CONCURRENCY`, `_SLA_INTERVAL`, `_BASE_BACKOFF`, `_MAX_BACKOFF`, `_RETENTION` | event-service | 200, 1s, 50, 1s, 8, 30s, 30s, 1h, 720h | Notifier tuning. |
+| `NEXUS_SENSOR_S3_ENDPOINT`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_SESSION_TOKEN`, `_CREDENTIALS`, `_USE_TLS` | workflow-manager | the result store's `NEXUS_RESULT_STORE_*` / `NEXUS_S3_*` | The store that `s3://` sensors list. `_CREDENTIALS` takes the result store's modes (`auto`, `static`, `web-identity`, `pod-identity`, `iam`, `env`, `anonymous`; §26.3), so a sensor watching the platform's own bucket uses the same keyless identity; the Helm chart gives the workflow-manager the result-store ServiceAccount for that (§20.13). |
+| `NEXUS_SENSOR_INTERVAL` | workflow-manager | 2s | How often a replica looks for due sensors. Each sensor's own `poll_interval_seconds` decides how often it is actually polled. |
+
+In Helm, set `events.secretKey.existingSecret` (and `key`, and `previousKey`
+during a rotation) to a Secret you create. Set `events.allowPrivateTargets` only
+for on-premises receivers.
+
+```sh
+kubectl -n nexus create secret generic nexus-events --from-literal=secret-key="$(openssl rand -base64 32)"
+helm upgrade nexus deploy/helm/kgf-nexus --reuse-values --set events.secretKey.existingSecret=nexus-events
+```
+
+Compose ships a **public development key** so a local stack works out of the
+box. Never deploy it.
+
+### 27.2 Rotating the secret key
+
+Every ciphertext records which key sealed it.
+
+1. Put the new key in `NEXUS_SECRET_KEY` and the old key in
+   `NEXUS_SECRET_KEY_PREVIOUS`, on the gateway **and** the event-service. Roll
+   both.
+2. Re-seal: rotate every webhook trigger (`nexusctl trigger rotate-secret <name>`
+   re-seals the grace-period copy under the new key), and re-save every channel
+   with an inline secret (`PUT` with `secret`).
+3. Remove `NEXUS_SECRET_KEY_PREVIOUS`.
+
+If a key is lost, its ciphertexts cannot be opened. Deliveries on those
+channels go to the dead letters with "the channel secret could not be opened",
+and the hooks answer 401. Recover by re-entering channel secrets and rotating
+trigger secrets.
+
+### 27.3 Channels and rules
+
+| Kind | Secret (inline `secret` or `secret_ref: env:NAME \| file:/path`) | `config` |
+|---|---|---|
+| `slack_webhook` | incoming-webhook URL | — |
+| `slack_bot` | bot token (`chat:write`) | `channel` (id) |
+| `teams` | Workflows (Power Automate) webhook URL; sends an Adaptive Card 1.4 | — |
+| `pagerduty` | Events API v2 routing key | `severity`: critical \| error \| warning \| info |
+| `webhook` | HMAC signing key; generated and **shown once** when omitted | `url` |
+| `email` | — | `to`: 1–20 addresses |
+
+Reads never return a secret. They show only `{configured, source, hint}`, where the
+hint is a URL's host or the last four characters of the secret. A `secret_ref` is
+resolved by the **event-service** in its own environment. Refs that name platform
+credentials (`NEXUS_SECRET_KEY*`, `DATABASE_URL`, `PG*`, `NEXUS_NATS*`, and the
+S3 secrets) are refused.
+
+A rule matches events in its namespace:
+
+- **Events:** `run.failed`, `run.succeeded`, `run.timed_out`, `run.sla_exceeded`
+  (needs `sla_seconds`: a run still active this long after creation) and
+  `attempt.lost`.
+- **Filters:** an optional list of workflow names and labels (every `k=v` must
+  appear in the workflow's spec `labels`).
+- **Targets:** one or more channels.
+- **Rules never page about history.** A rule matches only facts at or after its
+  creation.
+- **Budget and quota events are not available** (F142). Nothing durable records
+  them yet.
+
+```sh
+nexusctl notify channel-create oncall --kind pagerduty --secret-env PD_ROUTING_KEY --severity critical
+nexusctl notify channel-create ops-hook --kind webhook --url https://hooks.example.com/nexus   # prints the signing secret once
+nexusctl notify rule-create etl-failures --event run.failed --event run.timed_out \
+    --event run.sla_exceeded --sla 2h --workflow nightly-etl --label team=data --channel oncall
+nexusctl notify channel-test oncall      # queued and sent like a real one; waits for the outcome
+```
+
+### 27.4 Delivery semantics
+
+- **One delivery per event per channel.** The key is `UNIQUE(channel, event_key)`.
+  The event key is the fact's identity, such as `run_state:<run>:<state_version>`
+  or `run_event:<id>`. Two rules that match one event on one channel send once.
+- **At-least-once to the receiver.** A dispatcher leases a delivery for 60 s, sends
+  it outside any transaction, and records the outcome only while it still holds
+  the lease. A crash mid-send means the delivery is sent again, so every send
+  carries a stable dedup key:
+  - webhooks: `Idempotency-Key` and `X-Nexus-Delivery`
+  - PagerDuty: `dedup_key`
+
+  Slack, Teams and SMTP cannot deduplicate, so a crash inside that window can
+  send one duplicate message.
+- **Retries.** Backoff is exponential with jitter: 30 s, doubling, capped at 1 h,
+  and never shorter than a receiver's `Retry-After`. A delivery gets at most 8
+  attempts (about 4 h). 408, 425, 429, 5xx and network errors are retried. Any
+  other 4xx is permanent, as are a refused private address, a redirect (never
+  followed), a disabled channel, and a secret that cannot be opened. A permanent
+  failure goes straight to the **dead letters** (`state=dead`).
+- **Redrive.** `nexusctl notify redrive <id>` (or the console) inserts a **new**
+  delivery that keeps the original dedup key. The dead row stays as evidence.
+- **Rate limit.** Each channel has a fixed one-minute window,
+  `rate_limit_per_minute` (default 30). The limit is exact across replicas. An
+  over-limit delivery waits for the next window and spends no attempt.
+- **PagerDuty.** A trigger opens an incident per (rule, channel, workflow). Repeat
+  failures reuse its dedup key, so they group into one incident. The next
+  `run.succeeded` of that workflow sends a `resolve` with the same key. A success
+  with nothing open sends nothing, and a channel test resolves itself.
+- **Retention.** Delivered and dead rows are pruned after `NEXUS_NOTIFY_RETENTION`
+  (30 days). Outbox rows are kept until the notifier has evaluated them, up to
+  the relay's `NEXUS_OUTBOX_MAX_AGE` (24 h). A notifier that is down for longer
+  than that loses notifications for the oldest facts.
+
+Receivers of the generic webhook verify
+`X-Nexus-Signature: v1=hex(HMAC-SHA256(key, X-Nexus-Timestamp + "." + body))`,
+reject stale timestamps, and deduplicate on `Idempotency-Key`.
+
+### 27.5 Inbound webhook triggers
+
+```sh
+nexusctl trigger create github-push --workflow build \
+    --map repo='$.payload.repository.name' --map ref='$.payload.ref' \
+    --idempotency-key-path '$.payload.after'           # prints url and secret ONCE
+export NEXUS_TRIGGER_SECRET=...                           # the printed secret
+nexusctl trigger fire github-push --data '{"after":"abc","ref":"main","repository":{"name":"svc"}}'
+```
+
+A sender POSTs JSON to `/v1/hooks/<ns>/<trigger-id>` with:
+
+```
+X-Nexus-Timestamp: <unix seconds>
+X-Nexus-Signature: v1=<hex HMAC-SHA256(secret, timestamp + "." + raw body)>
+```
+
+For example: `sig=$(printf '%s.%s' "$ts" "$body" | openssl dgst -sha256 -hmac "$secret" | cut -d' ' -f2)`.
+
+| Answer | Meaning |
+|---|---|
+| 202 `{run_id, created}` | Run created (`created: true`), or an existing run for the same idempotency key. |
+| 401 | Missing or bad signature, or a timestamp outside `tolerance_seconds` (default 300). |
+| 404 | Unknown **or disabled** trigger. They are indistinguishable, so the route cannot enumerate triggers. |
+| 409 `replayed` | This exact signed delivery was already accepted. |
+| 422 | Not JSON, no value at the idempotency key path, a params path missing from the payload, the workflow gone, or a required param missing. |
+| 429 | The workflow's `max_active_runs` or the namespace run quota. The delivery is recorded as rejected, so **retrying the identical request is accepted** once there is room. |
+
+Params come from `params_mapping`. Each value is a JSONPath into
+`{"payload": body, "trigger": {id, name}}`, a template (`"{{ $.payload.ref }}"`),
+or a literal. Runs record `trigger_kind: webhook` and
+`trigger_detail: {trigger_id, trigger_name, delivery}`.
+
+The audit log records every create, update, delete and rotation (with the actor)
+and every delivery as `trigger.fire`, including refusals (`outcome=denied`).
+`nexusctl trigger deliveries <name>` shows the last 7 days.
+
+Rotation: `nexusctl trigger rotate-secret <name> --grace 24h` returns the new
+secret. The old one keeps verifying until the grace period ends, and `--grace 0`
+revokes it immediately.
+
+Put the hook route behind the gateway's per-address rate limit (§16). It is the
+one route an unauthenticated sender can reach besides login.
+
+### 27.6 Sensors
+
+```sh
+nexusctl sensor create landing --workflow ingest --uri s3://raw/landing/ --pattern '**/*.parquet' \
+    --map path='$.object.uri' --map size='$.object.size' --poll 1m
+nexusctl sensor create after-etl --workflow report --upstream nightly-etl --map date='$.run.params.date'
+nexusctl sensor list                    # status, triggered, pending, last error
+nexusctl sensor observations landing    # what it saw and which run it started
+```
+
+- **Exactly one run per object or upstream run.** An observation is claimed by a
+  unique row. Its run is created under `sensor:<id>:<hash>`, and a crash between
+  the two is retried under the same key.
+- **Baseline vs backfill.** By default the first full sweep records what already
+  exists as `baseline` and triggers nothing. `--backfill` triggers for everything.
+  Changing a sensor's definition restarts its sweep. Without backfill, it
+  re-baselines.
+- **Durable cursor.** Listing resumes after the last key (S3 `StartAfter`), 1000
+  keys per pass, and wraps at the end of the prefix. An object whose key sorts
+  behind the cursor is found on the next sweep. `sensor_observations` grows with
+  the number of distinct keys and is removed only when the sensor is deleted.
+  Prefer prefixes that are pruned upstream.
+- **Status:**
+  - `waiting`: no replica has picked it up yet
+  - `initializing`: first sweep in progress
+  - `ok`
+  - `error`: see `last_error`; polling backs off to at most 15 min
+  - `stale`: no replica has polled it for 5 min. Check that the workflow-manager
+    is running.
+  - `disabled`
+- **Object stores.** `s3://` is served now. `gs://` and `az://` definitions are
+  accepted and report "no object-store lister is configured" until native
+  listers are registered. The lister interface (`sensors.ObjectLister`) is two
+  behaviours: list after a key, and page.
+
+### 27.7 Asset lineage
+
+Tasks declare `assets: {produces: [{uri, name}], consumes: [...]}` in the spec,
+or `@task(produces=..., consumes=...)` in the SDK. The notifier records each
+run's edges the first time it sees the run. When a producing node succeeds it
+records a **materialization**. A memoized (cache-hit) node does not count as one.
+Query lineage with `nexusctl asset list | get <uri> | graph --uri <uri>`, the
+console's Assets page, or `GET /v1/namespaces/<ns>/assets/{,detail,graph}`.
+Lineage is **declared**: it states what a task said it touches, not what it did.
+
+### 27.8 Monitoring
+
+| Metric | Alert when |
+|---|---|
+| `nexus_notify_pending_deliveries` | Growing for 15 min: receivers are down or rate limits are too low. |
+| `nexus_notify_oldest_due_delivery_seconds` | > 600: deliveries are due and not being sent. Is the event-service running, and does it have DB connections? |
+| `nexus_notify_dead_letters_total{kind}` | Any increase. Inspect `nexusctl notify deliveries --state dead`. |
+| `nexus_notify_send_attempts_total{kind,outcome}` | Rising `retry` ratio. |
+| `nexus_notify_eval_errors_total` | Any increase: a fact could not be evaluated; see the event-service log. |
+| `nexus_notify_rate_limited_total` | Sustained: raise the channel's `rate_limit_per_minute` or narrow its rules. |
+| `nexus_outbox_backlog_rows` (existing) | Also counts rows waiting for the notifier when NATS is disabled. |
+
+### 27.9 Upgrade and rollback
+
+Upgrade:
+
+- 0034 is additive: new tables, plus one nullable `outbox` column added with
+  `CREATE INDEX CONCURRENTLY` (`migrate: no-transaction`, safe to re-run).
+- A mixed fleet is safe. Old writers leave `notified_at` NULL, which means "not
+  yet evaluated". An old relay may prune a published row an hour after
+  publishing, which in practice is long after a new notifier evaluated it.
+- Deploy order: migrate, then the event-service, workflow-manager and gateway
+  (any order among the three).
+
+Rollback:
+
+- Roll back the code, then apply `0034_*.down.sql` only if you mean to discard
+  all of it: configuration, delivery history, trigger secrets, sensor state and
+  lineage.
+- Export first: `pg_dump -t 'notification_*' -t 'webhook_*' -t 'sensor*' -t 'asset*'`.
+
+---
+
+## 28. Fractional GPUs, spot capacity, model caches and multi-cluster placement
+
+Design: [ADR-0029](adr/0029-gpu-sharing-and-packing.md) (MIG, shared GPUs,
+packing), [ADR-0030](adr/0030-spot-capacity-and-model-cache.md) (spot,
+eviction, artifact cache), [ADR-0031](adr/0031-multi-cluster-placement.md)
+(multi-cluster placement). Migration 0035. Findings F146, F147.
+
+Nothing here changes behaviour until it is configured: a task without the new
+fields, on agents without the new settings, is scheduled exactly as before.
+
+### 28.1 What a task can ask for
+
+| Author field | Meaning |
+|---|---|
+| `resources.request.mig: {"1g.10gb": 1}` | MIG instances of a profile. Exact: each instance is its own device. |
+| `resources.request.gpu_share_milli: 250` | A quarter of ONE shared GPU (MPS or time-sliced). |
+| `resources.request.gpu_share_memory_bytes` | VRAM on that ONE shared GPU, subtracted from the device, so several jobs pack onto it. |
+| `placement.capacity` | `spot_allowed` (default), `spot_preferred`, `on_demand_only` (hard). |
+| `placement.required_labels` | Hard: the worker's labels overlaid with its cluster's must contain these (e.g. `nexus.io/region`). |
+| `placement.max_cost_tier` | Hard: `nexus.io/cost-tier` at most this. |
+| `placement.preferred_data_locality`, `preferred_labels` | Soft. |
+| `placement.artifacts` | Models/datasets served from the agent's node-local cache (`$NEXUS_ARTIFACT_<NAME>`); cached workers preferred. |
+| `placement.max_preemptions` | Retries after spot evictions, which do not spend `retry.max_attempts` (default 5). |
+| `prefer_same_worker_as` | Soft: the host that ran that node's successful attempt. Read since F146. |
+
+In the SDK: `Gpu(count=0, share=0.25, share_memory="18Gi")`,
+`Gpu(count=0, mig={"1g.10gb": 1})`, `Placement(...)`, `Artifact(...)`.
+
+A soft preference is honoured by **bounded delay scheduling**: a polling
+worker skips an attempt that a strictly better live worker could take, for at
+most `NEXUS_PLACEMENT_WAIT` (default 3 s) after the attempt became due. A hard
+constraint that no worker meets leaves the attempt PENDING indefinitely -- as
+`node_selector` always has.
+
+### 28.2 Configuring GPU workers
+
+| Agent setting | Example | Notes |
+|---|---|---|
+| `NEXUS_GPU_COUNT` | `2` | Whole GPUs, indices 0..n-1 (unchanged). |
+| `NEXUS_GPU_MIG` | `1g.10gb=MIG-aaa,MIG-bbb;3g.40gb=MIG-ccc` | Real instance UUIDs. A count (`1g.10gb=3`) synthesizes UUIDs and labels the worker `simulated=true`. |
+| `NEXUS_GPU_SHARED` | `2:mps:80Gi,3:timeslice:24Gi` | Shared devices; indices must not overlap the whole ones. |
+| `NEXUS_GPU_DISCOVERY=nvidia-smi` | | Reads whole GPUs and MIG instances from `nvidia-smi -L` instead. |
+| `NEXUS_GPU_MPS_PIPE_DIR` | `/tmp/nvidia-mps` | Mounted into containers on MPS devices (with `--ipc=host`). |
+| `NEXUS_K8S_MIG_RESOURCE_PREFIX` | `nvidia.com/mig-` | Kubernetes executor, device plugin `mixed` strategy. |
+| `NEXUS_K8S_GPU_SHARED_RESOURCE` | `nvidia.com/gpu.shared` | Required for shared slices on the kubernetes executor; unset refuses them. |
+
+A device is in exactly one mode; the agent refuses to start on an inventory
+that counts one twice. Re-partitioning MIG needs an agent restart (a new
+session).
+
+**Isolation (read before enabling shared devices).** MIG isolates memory,
+compute and faults in hardware. MPS enforces the VRAM declaration
+(`CUDA_MPS_PINNED_DEVICE_MEM_LIMIT`) and a compute share
+(`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE`), but a fatal fault in one client kills
+every client on the device, and clients must share a UID. **Time-slicing
+enforces nothing**: a job that exceeds its declared VRAM can OOM its
+neighbours. Untrusted tenants belong on MIG or whole devices.
+
+**Kubernetes caveat.** On the kubernetes executor the device plugin, not the
+agent, picks the physical GPU for a shared replica: Nexus's per-device packing
+bounds the worker's total, but per-device VRAM is only enforced by MPS.
+
+### 28.3 Spot workers and eviction
+
+The agent advertises `nexus.io/capacity-type` (`NEXUS_CAPACITY_TYPE`, else read
+from its Node's `karpenter.sh/capacity-type`, `eks.amazonaws.com/capacityType`,
+`cloud.google.com/gke-spot`, `cloud.google.com/gke-preemptible` or
+`kubernetes.azure.com/scalesetpriority`; that read needs `get` on its Node and
+`NEXUS_NODE_NAME`, which the chart sets from `spec.nodeName`).
+
+`NEXUS_EVICTION_SOURCES` (comma list): `kubernetes` (own Node's taints, needs
+`get nodes`), `aws` (IMDSv2 spot instance-action), `gcp` (metadata
+`preempted`), `azure` (Scheduled Events Preempt/Terminate), `file`
+(`NEXUS_EVICTION_FILE`; for node-local handlers and tests). `NEXUS_EVICTION_TAINTS`
+replaces the default taint list; `NEXUS_EVICTION_POLL` (5 s),
+`NEXUS_EVICTION_GRACE` (25 s, for notices without a deadline) and
+`NEXUS_EVICTION_MAX_GRACE` (90 s) tune it.
+
+On a notice the agent stops polling, reports `drain_reason` (the gateway marks
+it DRAINING), and sends every running task SIGTERM with the notice's time
+minus 5 s. A task that exits non-zero is reported `PREEMPTED` and retried
+against `task_nodes.preemptions_used`; exit 0 is a success. The scheduler moves
+a worker that reports `PREEMPTED` to DRAINING in the same transaction, so the
+retry can never be handed back to it (not even by a long poll it had already
+parked). **Checkpointing
+tasks should exit non-zero (143) after writing their checkpoint.** A spot
+worker with no eviction source logs a warning: its reclaimed tasks become LOST
+and spend the ordinary budget.
+
+Scheduler: `NEXUS_MAX_PREEMPTION_RETRIES` (5), `NEXUS_PREEMPTION_RETRY_DELAY`
+(2 s). Metrics: `nexus_agent_eviction_notices_total{source}`,
+`nexus_agent_tasks_preempted_total`; `PREEMPTED` in
+`nexus_agent_tasks_completed_total{error_class}`.
+
+### 28.4 Node-local artifact cache
+
+`NEXUS_ARTIFACT_CACHE_DIR` enables it; `NEXUS_ARTIFACT_CACHE_BYTES` bounds it
+(default 50Gi), `NEXUS_ARTIFACT_CACHE_MAX_ENTRIES` optionally bounds the count,
+`NEXUS_ARTIFACT_CACHE_VERIFY=hit` re-hashes on every hit. Entries in use are
+pinned; eviction is least-recently-used among the rest. Downloads are
+single-flight and sha256-verified before they become visible; a mismatch fails
+the attempt as VALIDATION and increments
+`nexus_agent_artifact_cache_integrity_failures_total` -- **alert on any rate**.
+Other metrics: `..._hits_total`, `..._misses_total`, `..._evictions_total`,
+`..._evicted_bytes_total`, `..._bytes`, `..._fetch_seconds`.
+
+The cache is not part of `disk_bytes`; size the volume for both. In Helm
+(`agents[].artifactCache`) it is an `emptyDir` with `sizeLimit` above the
+bound, so it does not survive pod replacement; use a local PV or hostPath (and
+accept its security review) where warm restarts matter. The kubernetes
+executor's pods run on other nodes, so its tasks get no cache (the agent
+advertises nothing for them). Presigned URIs are redacted from logs and cache
+metadata.
+
+### 28.5 Clusters
+
+Label agents with their cluster: `NEXUS_CLUSTER_NAME` (Helm
+`claimPlacement.clusterName`), which must name a cluster registered **in the
+same namespace**. The cluster-controller publishes `NEXUS_CLUSTER_LABELS`
+(Helm `clusterController.clusterLabels`, e.g.
+`nexus.io/cost-tier=1,nexus.io/data-locality=lake-eu|s3-eu-west-1`) over the
+observed `nexus.io/region` and `nexus.io/provider`, and each bound namespace's
+ResourceQuota headroom (`NEXUS_CLUSTER_GPU_RESOURCES` names what counts as a
+GPU). Check what the claim sees:
+
+```sql
+SELECT c.name, cs.labels, cs.headroom, cs.headroom_observed_at
+  FROM clusters c JOIN cluster_status cs ON cs.cluster_id = c.id;
+```
+
+Headroom gates only kubernetes-executor attempts on workers labelled
+`nexus.io/k8s-task-namespace`, only while younger than
+`NEXUS_CLUSTER_HEADROOM_TTL` (2 m), and is reduced by reservations made since
+the observation. A gated attempt reads
+`waiting_for_cluster_quota: cluster <c> namespace <ns> <dim> (need N, headroom H)`.
+It is a routing guard: the API server's quota admission remains the enforcement.
+
+### 28.6 Scheduler placement settings and their cost
+
+| Setting | Default | |
+|---|---|---|
+| `NEXUS_PLACEMENT_POLICY` | `pack` | `spread` balances load instead of minimizing waste. |
+| `NEXUS_PLACEMENT_WAIT` | `3s` | 0 disables pull-path deferral. |
+| `NEXUS_CLUSTER_HEADROOM_TTL` | `2m` | |
+
+Metric: `nexus_scheduler_placement_deferrals_total`. A sustained high rate with
+growing queue age means preferences point at workers that are always busy;
+lower the wait or relax the preference.
+
+Claim latency before and after this change, measured with `tests/bench` at the
+ADR-0018 cells on the same machine and database, alternating binaries, is
+recorded in the table below (laptop numbers: Apple M4 Pro, Postgres 16 in
+Docker Desktop, 64 workers).
+
+**Read these as laptop numbers taken under contention.** Apple M4 Pro,
+Postgres 16.15 in Docker Desktop (`shared_buffers=512MB`), 64 workers,
+3,000 claims per cell (backlog/2 at 1k). Other sessions' benchmark and
+cluster containers ran on the same machine throughout (`docker stats` showed a
+second Postgres benchmark at ~100 % CPU), so single cells swing by 2-3x
+between runs of the SAME binary. Before = `integrate/wave-2`, after = this
+branch; binaries alternated on one migrated database (0035 applied, which the
+old binary ignores). Three rounds; round 3 ran on the quietest machine and is
+shown. Full tables: rounds 1-3 reproduce with `NEXUS_BENCH_*` as in
+`tests/bench/dispatch_test.go`.
+
+| path | backlog | replicas | before claims/s | after claims/s | before p50 / p99 | after p50 / p99 |
+|---|---:|---:|---:|---:|---:|---:|
+| pull | 1,000 | 1 | 172 | 172 | 5.0 / 14.0 ms | 5.3 / 12.9 ms |
+| pull | 1,000 | 4 | 501 | 507 | 7.0 / 18.3 ms | 6.6 / 22.5 ms |
+| pull | 1,000 | 16 | 871 | 846 | 15.7 / 72.8 ms | 15.6 / 83.9 ms |
+| pull | 10,000 | 1 | 130 | 140 | 6.1 / 28.2 ms | 6.1 / 21.2 ms |
+| pull | 10,000 | 4 | 383 | 515 | 8.6 / 37.9 ms | 6.9 / 17.6 ms |
+| pull | 10,000 | 16 | 999 | 754 | 13.8 / 54.4 ms | 16.4 / 125.5 ms |
+| pull | 100,000 | 1 | 131 | 136 | 6.1 / 24.1 ms | 6.1 / 24.1 ms |
+| pull | 100,000 | 4 | 435 | 262 | 7.5 / 35.6 ms | 11.6 / 63.1 ms |
+| pull | 100,000 | 16 | 785 | 815 | 16.0 / 112.4 ms | 16.5 / 69.6 ms |
+| push | 1,000 | 1 | 74 | 32 | 12.1 / 29.8 ms | 18.7 / 158.5 ms |
+| push | 1,000 | 4 | 67 | 128 | 43.4 / 197.6 ms | 22.7 / 79.6 ms |
+| push | 1,000 | 16 | 47 | 145 | 169.6 / 534.3 ms | 48.8 / 141.9 ms |
+| push | 10,000 | 1 | 21 | 30 | 46.2 / 91.0 ms | 31.4 / 61.1 ms |
+| push | 10,000 | 4 | 30 | 73 | 99.8 / 467.9 ms | 37.5 / 166.6 ms |
+| push | 10,000 | 16 | 12 | 47 | 849 ms / 4.30 s | 161 ms / 934 ms |
+| push | 100,000 | 1 | 3 | 3 | 358 / 828 ms | 332 / 603 ms |
+| push | 100,000 | 4 | 7 | 7 | 398 ms / 2.19 s | 400 ms / 1.53 s |
+| push | 100,000 | 16 | 7 | 4 | 1.63 / 7.52 s | 3.05 / 11.84 s |
+
+GPU work on the new path (`NEXUS_BENCH_GPU=true`: every attempt a shared-GPU
+slice on workers with 8 shared devices each; after only, round 3):
+
+| path | backlog | replicas | claims/s | p50 / p99 |
+|---|---:|---:|---:|---:|
+| pull | 1,000 | 1 | 159 | 5.3 / 17.5 ms |
+| pull | 10,000 | 1 | 159 | 5.4 / 16.4 ms |
+| pull | 100,000 | 1 | 158 | 5.6 / 15.3 ms |
+| pull | 100,000 | 16 | 745 | 17.2 / 69.3 ms |
+| push | 1,000 | 1 | 116 | 8.0 / 14.4 ms |
+| push | 10,000 | 1 | 27 | 32.9 / 68.6 ms |
+
+**Reading.** On the pull path (the default deployment) single-replica p50 is
+unchanged within 0.3 ms at every backlog, and across three rounds the
+before/after differences change sign from round to round: no regression is
+distinguishable from the machine's noise. Non-GPU claims do strictly more work
+only in reading the cluster columns (one guarded LATERAL lookup that is skipped
+for a worker without `nexus.io/cluster`) and decoding a slightly wider worker
+row; everything else is behind `resource_request ? ...` / `spec_json ?
+'placement'` guards or `WantsScoring`, which a plain CPU task never passes.
+Fractional-GPU claims cost the same as non-GPU ones on the pull path. The push
+path is unwindowed (ADR-0018) and, under contention, its cells swing both ways
+(round 1 after was worse at 16 replicas, round 3 after is better in 7 of 9
+cells); the one structural addition there, per-worker cluster lookups, was
+collapsed into the guarded LATERAL join after round 1. Re-measure on
+production-class hardware with no co-tenant load before relying on any single
+cell.
+
+### 28.7 Rollout and rollback
+
+1. Apply migration 0035 (additive; metadata-only column adds). A scheduler
+   started before it logs "placement facts are off" and dispatches as before.
+2. Roll the scheduler, resource manager and gateway, then agents, then the
+   cluster-controller. Old agents ignore `TaskAssignment.reserved` and place
+   shared slices locally with the same rule; old gateways drop the new
+   heartbeat fields (the stored cache set is then left alone).
+3. Rollback: `NEXUS_PLACEMENT_WAIT=0` stops deferral; removing an agent's GPU
+   settings removes its fractional capacity at its next session. Attempts
+   holding fractional reservations complete normally. Revert 0035 only after
+   every service is back on a release that does not read it.
+
+**Order hazard:** do not submit specs with `placement` or fractional requests
+to a gateway older than this release (it rejects them at the schema), and do
+not run such tasks on old schedulers (they ignore the constraints).
+
+### 28.8 What needs real hardware to qualify
+
+Everything above is verified with simulated devices (unit, property,
+integration and compose end-to-end tests). These claims are **not** qualified
+until run on the named hardware:
+
+| Area | Needs | What to verify |
+|---|---|---|
+| MIG discovery | A100/H100 with MIG enabled, mixed profiles | `NEXUS_GPU_DISCOVERY=nvidia-smi` parses the real `nvidia-smi -L` (driver branch differences), UUIDs match `nvidia-smi mig -lgi` |
+| MIG isolation, docker | Same, NVIDIA container toolkit | `--gpus device=MIG-...` exposes exactly the instance; two tasks on different instances cannot see each other's memory; `nvidia-smi` inside shows one device |
+| MIG, kubernetes | GPU operator / device plugin with `mixed` strategy | `nvidia.com/mig-<profile>` requests schedule and bind; quota headroom counts them via `NEXUS_CLUSTER_GPU_RESOURCES` |
+| MPS limits | Volta+ GPU with the MPS control daemon | `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` refuses allocations past the declared VRAM; `ACTIVE_THREAD_PERCENTAGE` caps SMs; the pipe mount and `--ipc=host` work under the container toolkit; one client's fatal fault behaviour documented |
+| MPS/time-slicing on kubernetes | Device plugin with sharing config (`replicas`) | shared replicas bind; per-device placement is advisory as documented |
+| Time-slicing | Any NVIDIA GPU | throughput interference of packed jobs, to set sane `gpu_share_milli` guidance |
+| VRAM packing economics | H100 80 GB | several vLLM/Triton servers packed by `gpu_share_memory_bytes` with `gpu_memory_utilization` derived from `NEXUS_GPU_SHARE_MEMORY_BYTES` |
+| Spot, AWS | EC2 spot instance (or AWS FIS "send spot interruption") | IMDSv2 notice seen within one poll; tasks checkpoint and report PREEMPTED before the instance stops; NTH taint path |
+| Spot, GCP | Spot/preemptible VM, `gcloud compute instances simulate-maintenance-event` | `preempted` flips; 30 s budget suffices for report |
+| Spot, Azure | Spot VMSS, `simulateEviction` API | Scheduled Events Preempt observed, `NotBefore` deadline honoured |
+| Spot, Kubernetes | Karpenter/cluster-autoscaler interruption | taint observed; `get nodes` RBAC; capacity-type discovery from Node labels |
+| Artifact cache at scale | Local NVMe, 100 GB+ models | fetch throughput, `VERIFY=hit` cost, eviction under pinned load, disk-pressure interaction with kubelet |
+| Headroom accuracy | A cluster with ResourceQuotas under concurrent dispatch | refusal rate at the quota edge vs the guard's prediction |
+
+### 28.9 Known gaps
+
+- Quotas (ADR-0021) do not count MIG instances or shared fractions yet
+  (`max_gpu_count` counts whole devices); mirror them with `max_custom` if a
+  hard cap is needed now.
+- Pull-path deferral reads at most 256 peer workers per tenant and queue.
+- Cluster labels need a running cluster-controller; without one only the
+  agent's own labels count.
+- The console does not display placement specs, fractional GPU ledgers or
+  cluster labels yet (visible through the API and SQL above).
+
+---
+
+## 29. AI workloads: usage units, shared rate limits and checkpoints
+
+Design: [ADR-0032](adr/0032-ai-workloads-usage-rate-limits-checkpoints.md).
+Migration 0036. Findings F148 (Python heartbeats never reached the control
+plane; the workload API) and F149 (retries under role separation; the same gap as F147, whose grant
+lives in 0035; F132, 0037).
+
+### 29.1 What a task can do
+
+A task started by the subprocess or docker executor finds an agent-local
+socket in `NEXUS_TASK_API` (with a bearer token in `NEXUS_TASK_API_TOKEN`).
+Through it, and through the SDK calls that wrap it, a task can:
+
+| SDK call | What reaches the control plane |
+|---|---|
+| `ctx.report_usage({...})`, `ctx.report_tokens(...)`, `LLMClient` | cumulative usage units on the attempt (`attempt_usage`), copied into the usage ledger's `custom` object when the attempt ends |
+| `ctx.acquire_permits(keys, requests=, tokens=)`, `LLMClient` | permits from the namespace's shared token buckets (`rate_limit_buckets`) |
+| `ctx.checkpoint(state)` / `ctx.resume()` | an immutable object `<ns>/checkpoints/<idempotency_key>/<attempt_id>/<seq>` and a forward-only pointer (`task_checkpoints`) |
+| `ctx.heartbeat()` / `ctx.progress()` | ReportProgress, which re-arms the heartbeat timeout (before 0036 these were no-ops under a real agent, F148) |
+| raising `nexus.RateLimited` | `ERROR_CLASS_RATE_LIMITED` with the provider's Retry-After |
+
+The **kubernetes executor** does not offer the socket yet: pods run on other
+nodes. There the SDK degrades to in-process behaviour (usage logged, permits
+process-local, checkpoints in `ctx.store`); do not rely on shared limits or
+recorded token usage for tasks on that executor.
+
+The gateway advertises the capabilities at registration
+(`NEXUS_WORKLOAD_API`, default `true`; `NEXUS_MAX_CHECKPOINT_BYTES`, default
+64 MiB). The agent's socket root is `NEXUS_TASK_API_ROOT` / `-task-api-root`
+(default `/tmp/nexus-task`; it must be owned by the agent user and short,
+because a Unix socket path is limited to 104 bytes on Darwin). If the root is
+unusable the agent logs one ERROR at registration and runs tasks without the
+workload API. The docker executor bind-mounts the socket directory at
+`/run/nexus-task`; that works on Linux hosts and was not verified under
+Docker Desktop's VM.
+
+### 29.2 Usage units and the ledger
+
+Keys are `<kind>:<subject>[:<qualifier>]`:
+
+```
+tokens:<provider>/<model>:input     tokens:<provider>/<model>:output
+tokens:<provider>/<model>:cached    requests:<provider>/<model>
+```
+
+Provider and model never contain `:` (the SDK maps any to `_`, so
+`ft:gpt-4o-mini:org:x` is reported as `openai/ft_gpt-4o-mini_org_x`). Values are
+non-negative integers, at most 64 keys per attempt. The price book prices
+every ledger `custom` key that contains `:` as a unit with no time factor.
+
+```sql
+-- Tokens by model for one namespace, last 7 days, from the ledger.
+SELECT key, sum(value::numeric) AS units
+  FROM usage_ledger, jsonb_each_text(custom) AS c(key, value)
+ WHERE namespace = 'team-a' AND ended_at > now() - interval '7 days'
+   AND strpos(key, ':') > 0
+ GROUP BY key ORDER BY key;
+```
+
+Units reported by an attempt that later failed, was LOST or was cancelled are in
+its ledger row: they were spent. The console shows them per attempt and summed
+per run ("Usage (all attempts)"). Usage is self-reported by task code; treat
+it as cost attribution, not as the provider's invoice. Usage keys cannot be
+quota-limited yet (`max_custom` names refuse `:`); that is a follow-up.
+
+### 29.3 Configuring shared rate limits
+
+Limits are part of the quotas document (`quotas.manage`, audited, revisioned):
+
+```sh
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  $API/v1/namespaces/$NS/quotas -d '{
+    "revision": 7,
+    "quotas": {"max_inflight_attempts": 200,
+               "rate_limits": {
+                 "openai":             {"requests_per_second": 50},
+                 "openai/gpt-4o-mini": {"requests_per_second": 20, "tokens_per_minute": 2000000}}}}'
+```
+
+A key is `<provider>` or `<provider>/<model>`; `LLMClient` asks for both by
+default, all or none. `burst_requests` / `burst_tokens` default to one second
+of requests (at least 1) and one minute of tokens. A PUT that omits
+`rate_limits` keeps the stored ones. While quotas are locked, a namespace
+administrator may only lower a rate or add a key. Unconfigured keys are
+unlimited. Inspect the live buckets:
+
+```sql
+SELECT t.namespace, b.key, round(b.request_level::numeric, 2) AS requests,
+       round(b.token_level::numeric) AS tokens, b.granted_requests, b.granted_tokens, b.denied
+  FROM rate_limit_buckets b JOIN tenants t ON t.id = b.tenant_id ORDER BY 1, 2;
+```
+
+A bucket is state, not configuration: deleting its row resets it to full.
+
+### 29.4 Throttling and retries
+
+`LLMClient` retries a 429/503 in the task, honouring `Retry-After`, up to
+`max_retries`; past that (or when the provider asks for longer than
+`max_retry_wait_s`) the task fails `RATE_LIMITED`. The scheduler then retries
+it **without charging the retry budget**, after the provider's Retry-After
+clamped to [1 s, 15 min], up to `NEXUS_RATE_LIMITED_FREE_RETRIES` per node
+(scheduler flag `-rate-limited-free-retries`; default 10, negative disables).
+The RetryScheduled event says `"charged": false` and `free_retries_used`.
+Past the cap the failure is charged like TRANSIENT. `no_retry_on:
+[rate_limited]` vetoes it. An operator retry (§18) resets the count.
+
+### 29.5 Checkpoints
+
+A retry, and an operator retry of the node, resume from the latest
+checkpoint of the node's idempotency key; a new run starts clean. The pointer
+moves only forward (a higher attempt number, or the same attempt and a higher
+seq), and only while the saving attempt holds its lease, so a zombie cannot
+overwrite a newer checkpoint. `ctx.resume()` verifies the object's sha256 and
+returns `None` (and logs) if it is missing or corrupt; starting over is always
+correct.
+
+artifact-gc (§7) treats the pointer of every node that has not SUCCEEDED as
+live. Superseded checkpoints, fenced uploads, the checkpoints of succeeded
+nodes and everything of a deleted run are orphans, collected after the grace
+period. `make artifact-gc` prints how many checkpoint objects it examined.
+
+### 29.6 Capacity: the permit service
+
+Every permit is one short statement on the bucket row, never inside the
+dispatch claim. Measured with `make bench-pg && make bench-ratelimit`
+(`tests/bench/ratelimit_test.go`) on the ADR-0018 laptop (Apple M4 Pro,
+Postgres 16.15 in Docker Desktop, 10 vCPU; other workloads were running, so
+treat the numbers as indicative), 8 callers per replica, every request
+granted:
+
+| keys | replicas (x8 callers) | permits/s | p50 | p99 |
+|---|---:|---:|---:|---:|
+| 1 hot | 1 | 817 | 7.9 ms | 36 ms |
+| 1 hot | 4 | 625 | 31 ms | 258 ms |
+| 1 hot | 16 | 373 | 179 ms | 1.65 s |
+| 16 spread | 1 | 1,072 | 6.3 ms | 25 ms |
+| 16 spread | 4 | 1,624 | 16 ms | 76 ms |
+| 16 spread | 16 | 775 | 105 ms | 670 ms |
+
+The first implementation held the row lock across three client round trips
+and managed 506 / 300 / 118 permits/s on the hot key; the single-statement
+version replaced it. Under a saturated 100 req/s limit, granted permits never
+exceeded burst + rate x elapsed at 1, 4 or 16 replicas (e.g. 594 granted
+against a ceiling of 600 in 5 s).
+
+**Reading it.** A single key sustains several hundred permits per second
+with 8-32 concurrent callers, far above typical provider limits; with 128
+callers queued on one row, latency grows to seconds. Spread load (per-model
+keys) scales with replicas until the database CPU saturates. Permit traffic
+shares the database with dispatch: pull-claim throughput at a 10k backlog with
+4 replicas measured 175-184 claims/s alone and 75-161 claims/s beside 270-300
+permits/s on one hot key (two runs). Size limits so the fleet's permit rate
+stays in the low hundreds per second per key, and prefer fewer, larger calls
+(batching prompts) to many tiny ones.
+
+### 29.7 Metrics
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `nexus_scheduler_usage_reports_total` | `result` (stored, unchanged, stale, invalid, error) | ReportUsage calls |
+| `nexus_scheduler_usage_units_total` | `kind` (tokens, requests, other) | growth of reported units; `rate(...{kind="tokens"}[5m])` is the fleet's token throughput |
+| `nexus_scheduler_permit_requests_total` | `result` (granted, denied, unlimited, settled, stale, invalid, error) | AcquirePermits calls |
+| `nexus_scheduler_permit_duration_seconds` | | latency of one permit call |
+| `nexus_scheduler_checkpoints_total` | `result` (saved, superseded, stale, invalid, error) | SaveCheckpoint calls |
+| `nexus_agent_workload_api_requests_total` | `endpoint`, `code` | requests tasks made to their socket |
+| `nexus_agent_usage_flushes_total` | `result` (ok, stale, error) | usage snapshots sent |
+| `nexus_agent_checkpoints_total` | `result` (saved, stale, too_large, error) | checkpoints written by the agent |
+
+Keys and model names are never labels. Worth alerting on: a sustained
+`permit_requests_total{result="error"}`, `permit_duration_seconds` p99 above
+1 s (a hot key; spread it or raise the limit), and
+`usage_reports_total{result="invalid"}` (a task reporting malformed keys).
+
+### 29.8 Running the AI examples and templates
+
+`examples/llm_batch_inference` and `examples/llm_eval` run against the SDK's
+mock model server; nothing calls a real provider. Without a stack:
+
+```sh
+python3 examples/llm_batch_inference/check_local.py
+python3 examples/llm_eval/check_local.py
+```
+
+On a stack, the AI overlay adds a Python-capable agent and the mock sidecar
+(`mock-llm:8089`, injecting a 429 every 7th call):
+
+```sh
+E2E_PROJECT=nexus-ai E2E_PORT_BASE=55711 E2E_AI=1 deploy/e2e/e2e-stack.sh up
+. ui/e2e/.stack.env
+NEXUS_ENDPOINT=$E2E_API_URL NEXUS_API_KEY=$E2E_API_KEY SUITE=ai examples/run-suite.sh
+```
+
+`nexusctl init llm-batch-inference | llm-eval | fine-tune` generate projects
+with the same patterns and their own mock-backed tests.
+
+**Real providers.** Point `base_url` at `https://api.openai.com` or
+`https://api.anthropic.com`, set `api_key_env` to the variable that holds the
+key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), and deliver that variable to the
+task through the platform's secret mechanism, never in a spec, a parameter or
+a log. Configure `rate_limits` (§29.3) at or below the organisation's provider
+limits before the first large run: the platform limit is what keeps a
+5,000-way fan-out inside them.
+
+### 29.9 Upgrading and rolling back
+
+Apply 0036 before rolling out services. A scheduler started without it logs
+"the workload API is off", keeps the pre-0036 ledger statement and ignores
+free retries; its workload RPCs answer Unavailable. A gateway without the
+feature (`NEXUS_WORKLOAD_API=false`, or an old build) advertises nothing and
+agents offer tasks no usage, permit or checkpoint endpoints; the SDK falls
+back in-process. Rolling back 0036 (`0036_workload_api.down.sql`) drops
+reported units not yet in the ledger, bucket state and checkpoint pointers;
+set `NEXUS_WORKLOAD_API=false` and restart the gateways and schedulers first.

@@ -39,6 +39,9 @@ var catalog = []Template{
 	{Name: "ml-training", Summary: "Hyperparameter grid via .map, train, evaluate, select the best, quality gate."},
 	{Name: "batch-inference", Summary: "Shard a dataset, .map inference with per-shard checkpoints, aggregate.", GPUOption: true},
 	{Name: "file-fanout", Summary: "List objects under a prefix, process each, fan in a manifest with max_bytes."},
+	{Name: "llm-batch-inference", Summary: "Shard prompts, .map LLM calls under shared rate limits, resume mid-shard from checkpoints, total tokens."},
+	{Name: "llm-eval", Summary: "Answer a reference set, grade (exact, regex, LLM-as-judge), metrics, fail the run below min_accuracy."},
+	{Name: "fine-tune", Summary: "Validate data, submit a fine-tuning job idempotently, poll, gate on held-out accuracy vs base, register.", GPUOption: true},
 }
 
 // List returns the templates in display order.
@@ -104,7 +107,7 @@ const commonDir = "files/_common"
 // renames maps embedded names to their on-disk names. Dotfiles are stored
 // without the dot so they are visible in the repository and not mistaken for
 // this repository's own configuration.
-var renames = map[string]string{"gitignore": ".gitignore"}
+var renames = map[string]string{"gitignore": ".gitignore", "dockerignore": ".dockerignore"}
 
 // Render produces the files of a template with vars substituted, sorted by path.
 func Render(name string, v Vars) ([]File, error) {

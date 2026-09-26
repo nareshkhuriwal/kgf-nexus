@@ -4,6 +4,8 @@
 package store
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,6 +36,28 @@ type vectorJSON struct {
 	GPUMemoryBytes int64            `json:"gpu_memory_bytes"`
 	DiskBytes      int64            `json:"disk_bytes"`
 	Custom         map[string]int64 `json:"custom"`
+	// Fractional GPUs (ADR-0029). omitempty, unlike the fields above: a vector
+	// with no fractional GPU encodes to exactly the bytes it always did, so the
+	// pull claim's `resource_request ? 'mig'` guards stay false for every
+	// attempt that does not use one, and old readers see nothing new.
+	Mig                 map[string]int64     `json:"mig,omitempty"`
+	GPUShareMilli       int32                `json:"gpu_share_milli,omitempty"`
+	GPUShareMemoryBytes int64                `json:"gpu_share_memory_bytes,omitempty"`
+	GPUShares           map[string]shareJSON `json:"gpu_shares,omitempty"`
+}
+
+// shareJSON is one shared GPU device's entry.
+type shareJSON struct {
+	Milli       int64 `json:"milli"`
+	MemoryBytes int64 `json:"memory_bytes"`
+}
+
+// shareJSONLoose reads a device entry in either number spelling, and in
+// protojson's camelCase for the memory field.
+type shareJSONLoose struct {
+	Milli            json.Number `json:"milli"`
+	MemoryBytes      json.Number `json:"memory_bytes"`
+	MemoryBytesCamel json.Number `json:"memoryBytes"`
 }
 
 // vectorJSONLoose is the READ shape of the same columns.
@@ -53,6 +77,11 @@ type vectorJSONLoose struct {
 	GPUMemoryBytes json.Number            `json:"gpu_memory_bytes"`
 	DiskBytes      json.Number            `json:"disk_bytes"`
 	Custom         map[string]json.Number `json:"custom"`
+
+	Mig                 map[string]json.Number    `json:"mig"`
+	GPUShareMilli       json.Number               `json:"gpu_share_milli"`
+	GPUShareMemoryBytes json.Number               `json:"gpu_share_memory_bytes"`
+	GPUShares           map[string]shareJSONLoose `json:"gpu_shares"`
 }
 
 // encodeVector serializes a ResourceVector for a JSONB column. A nil vector
@@ -68,6 +97,18 @@ func encodeVector(v *nexusv1.ResourceVector) ([]byte, error) {
 		GPUMemoryBytes: v.GetGpuMemoryBytes(),
 		DiskBytes:      v.GetDiskBytes(),
 		Custom:         v.GetCustom(),
+
+		GPUShareMilli:       v.GetGpuShareMilli(),
+		GPUShareMemoryBytes: v.GetGpuShareMemoryBytes(),
+	}
+	if len(v.GetMig()) > 0 {
+		out.Mig = v.GetMig()
+	}
+	if len(v.GetGpuShares()) > 0 {
+		out.GPUShares = make(map[string]shareJSON, len(v.GetGpuShares()))
+		for k, sh := range v.GetGpuShares() {
+			out.GPUShares[k] = shareJSON{Milli: sh.GetMilli(), MemoryBytes: sh.GetMemoryBytes()}
+		}
 	}
 	b, err := json.Marshal(out)
 	if err != nil {
@@ -101,6 +142,7 @@ func decodeVector(b []byte) (*nexusv1.ResourceVector, error) {
 			out.Custom[k] = looseInt64(v)
 		}
 	}
+	decodeFractionalGPU(&in, out)
 
 	// The SAME columns are written in two dialects by two services, so the reader
 	// must accept both or silently read zeros.
@@ -128,6 +170,28 @@ func decodeVector(b []byte) (*nexusv1.ResourceVector, error) {
 	// one encoder should own these columns.
 	applyProtoJSONVector(b, out)
 	return out, nil
+}
+
+// decodeFractionalGPU copies the ADR-0029 fields out of the loose shape.
+func decodeFractionalGPU(in *vectorJSONLoose, out *nexusv1.ResourceVector) {
+	if len(in.Mig) > 0 {
+		out.Mig = make(map[string]int64, len(in.Mig))
+		for k, v := range in.Mig {
+			out.Mig[k] = looseInt64(v)
+		}
+	}
+	out.GpuShareMilli = int32(looseInt64(in.GPUShareMilli))
+	out.GpuShareMemoryBytes = looseInt64(in.GPUShareMemoryBytes)
+	if len(in.GPUShares) > 0 {
+		out.GpuShares = make(map[string]*nexusv1.GPUShare, len(in.GPUShares))
+		for k, v := range in.GPUShares {
+			mem := looseInt64(v.MemoryBytes)
+			if mem == 0 {
+				mem = looseInt64(v.MemoryBytesCamel)
+			}
+			out.GpuShares[k] = &nexusv1.GPUShare{Milli: looseInt64(v.Milli), MemoryBytes: mem}
+		}
+	}
 }
 
 // looseInt64 reads an int64 that may have been written as a JSON number or, by
@@ -160,6 +224,10 @@ func applyProtoJSONVector(b []byte, out *nexusv1.ResourceVector) {
 		GPUMemoryBytes *json.Number     `json:"gpuMemoryBytes"`
 		DiskBytes      *json.Number     `json:"diskBytes"`
 		Custom         map[string]int64 `json:"custom"`
+
+		GPUShareMilli       *json.Number              `json:"gpuShareMilli"`
+		GPUShareMemoryBytes *json.Number              `json:"gpuShareMemoryBytes"`
+		GPUShares           map[string]shareJSONLoose `json:"gpuShares"`
 	}
 	// A document that is not this dialect simply yields no fields; that is the
 	// snake_case case, already handled above.
@@ -186,6 +254,17 @@ func applyProtoJSONVector(b []byte, out *nexusv1.ResourceVector) {
 	}
 	if len(pj.Custom) > 0 && len(out.Custom) == 0 {
 		out.Custom = pj.Custom
+	}
+	if v, ok := numInt64(pj.GPUShareMilli); ok && out.GpuShareMilli == 0 {
+		out.GpuShareMilli = int32(v)
+	}
+	if v, ok := numInt64(pj.GPUShareMemoryBytes); ok && out.GpuShareMemoryBytes == 0 {
+		out.GpuShareMemoryBytes = v
+	}
+	if len(pj.GPUShares) > 0 && len(out.GpuShares) == 0 {
+		tmp := &nexusv1.ResourceVector{}
+		decodeFractionalGPU(&vectorJSONLoose{GPUShares: pj.GPUShares}, tmp)
+		out.GpuShares = tmp.GpuShares
 	}
 }
 
@@ -252,8 +331,8 @@ WITH ev AS (
   VALUES ($1, $2, $3, $4, $5, $6, $7)
   RETURNING id
 )
-INSERT INTO outbox (topic, ref_id) SELECT 'run_event', id FROM ev`,
-		runID, seq, nullString(nodeID), attemptID, kind, body, actor,
+INSERT INTO outbox (topic, ref_id, trace_context) SELECT 'run_event', id, $8 FROM ev`,
+		runID, seq, nullString(nodeID), attemptID, kind, body, actor, tracing.NullableTraceparent(ctx),
 	); err != nil {
 		return fmt.Errorf("append run_event %s: %w", kind, err)
 	}

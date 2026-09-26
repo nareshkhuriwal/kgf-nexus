@@ -38,18 +38,32 @@ static credentials (`credentials.NewStaticV4` in
 
 | Cloud | Artifact store Nexus uses today | How | Status |
 |---|---|---|---|
-| AWS | **Amazon S3**, native | IAM-user key pair limited to one bucket. An explicit deny blocks every request that does not come through the VPC's S3 gateway endpoint. | Works now. The IRSA / Pod Identity role is also provisioned, but it stays unused until the chart and client can use it (F115). |
-| GCP | **GCS through its S3 interoperability (XML) API** | HMAC key of a service account that has `roles/storage.objectUser` on one bucket. It is stored in the kgf-nexus credentials Secret. | Works with minio-go, which special-cases `storage.googleapis.com` (for example, it deletes objects one at a time because GCS has no multi-object delete). Large multipart uploads and the GC sweep have **not** been exercised against GCS (F115). |
-| Azure | **In-cluster MinIO on a Premium SSD PVC** | The chart's own MinIO (`minio.enabled=true`) on the `nexus-premium-ssd` StorageClass. | Works, but you operate it: capacity, backups (`make backup-artifacts`) and availability are yours. Azure Blob has **no S3 endpoint**. |
+| AWS | **Amazon S3**, native (`s3` backend) | **EKS Pod Identity** by default (`artifact_identity = "pod-identity"`), or IRSA (`"irsa"`): a role limited to one bucket and one KMS key, no secret in the cluster. The IAM-user key pair remains as the opt-in `"static"` fallback. | Keyless path implemented (ADR-0027); not yet applied to a real account (F115). |
+| GCP | **GCS, native** (`gcs` backend, `cloud.google.com/go/storage`) | **GKE Workload Identity** by default (`artifact_identity = "workload-identity"`): the chart's `nexus-artifacts` ServiceAccount impersonates a Google service account with object access on one bucket. The HMAC key and GCS's S3 interoperability API remain as the opt-in `"hmac"` fallback. | Keyless path implemented; conformance-tested against fake-gcs-server, not yet against real GCS (F115). |
+| Azure | **Azure Blob, native** (`azblob` backend) by default (`azure_blob_native_backend = true`) | AKS workload identity federated to the user-assigned identity with `Storage Blob Data Contributor` on the one private container. | Implemented and conformance-tested against Azurite; not yet applied to a real subscription (F115). `false` keeps the in-cluster MinIO on a Premium SSD PVC. |
 
-Azure Blob is **not** used by Nexus today. The storage account, the private
-container, the private endpoint and a workload identity with `Storage Blob
-Data Contributor` on that container are all provisioned. They wait for a
-native Blob backend, which does not exist yet. The `azure_blob_native_backend`
-variable is reserved for that backend, and its validation refuses `true`.
-Two other routes exist, and neither is wired: an S3-to-Blob gateway such as
-s3proxy (MinIO's own gateway mode was removed in 2022), or the native backend.
-Both are tracked in F115.
+All three backends sit behind one result-store interface (`internal/objstore`,
+ADR-0027) and pass one conformance suite; docs/OPERATIONS.md §26 has the
+configuration, the per-cloud least-privilege scopes and the lifecycle rules.
+Switching an existing environment between backends does not migrate objects:
+copy the bucket first (rclone, azcopy, gcloud storage cp).
+
+**ServiceAccounts.** Each environment binds its object-store identity to one
+chart ServiceAccount, `nexus-artifacts`, which the chart creates and gives to
+exactly the components that use the result store: api-gateway (task logs), the
+workflow-manager (object-store sensors), the agents and artifact-gc (chart
+`serviceAccounts.apiGateway` / `.workflowManager` / `.agent` / `.artifactGC`). The environment sets its annotation: the IRSA role ARN on EKS
+(only with `artifact_identity = "irsa"`; Pod Identity's association names the
+account instead), `iam.gke.io/gcp-service-account` on GKE (Workload Identity),
+and the workload identity client id on AKS, where the chart also adds the
+`azure.workload.identity/use` pod label to the result-store pods. Every other
+component runs under its own account with no API token mounted
+(docs/OPERATIONS.md §20.13).
+
+**GPU pools.** When the GPU pool is enabled, the environment adds a GPU agent
+(`gpu_agent`) pinned to it with `nodeSelector`; the chart requests its
+`nvidia.com/gpu` devices and tolerates the pool's taint. A CPU agent is pinned
+to the cpu pool.
 
 ## Version choices
 
@@ -87,10 +101,23 @@ validated on 2026-09-13 (`deploy/AZURE-PROVISIONING.md`). GKE follows the
 - **No public database endpoint anywhere.** Azure uses a delegated subnet with
   `public_network_access_enabled = false`. RDS has `publicly_accessible =
   false`, sits in isolated subnets with no internet route, and accepts
-  connections only from the node security groups. Cloud SQL has no IPv4
+  connections only from the node security groups.  Cloud SQL has no IPv4
   address and uses a private IP over private services access. TLS is required
   on all three (`require_secure_transport`, `rds.force_ssl=1`,
-  `ENCRYPTED_ONLY`), and Nexus connects with `sslmode=require`.
+  `ENCRYPTED_ONLY`), and Nexus connects with **`sslmode=verify-full`**: every
+  pod checks the chain against the provider's root CAs and the host name
+  (docs/OPERATIONS.md §20.11). The bundles are vendored in `ca-bundles/` with
+  their upstream sources and SHA-256 pinned (`ca-bundles/refresh.sh`), and an
+  environment refuses a bundle that no longer matches `SHA256SUMS`. Cloud SQL
+  uses the shared CA hierarchy so its certificates carry the instance DNS name,
+  which a private Cloud DNS zone resolves; its CAs come from the Cloud SQL
+  Admin API.
+- **No service runs as the database admin.** `runtime_db_roles` (default on)
+  generates one password per service login into `kgf-nexus-db-logins`; the
+  chart's db-roles Job creates the logins inside the cluster, where the private
+  endpoint is reachable (Terraform cannot run SQL against it). The admin
+  password is then mounted only by the migrate, bootstrap and db-roles Jobs
+  (docs/OPERATIONS.md §20.12).
 - **Encryption at rest everywhere.** Azure uses platform-managed keys, with
   infrastructure double encryption on the storage account. AWS uses one
   customer-managed KMS key, rotated yearly, for RDS, S3, ECR, Secrets Manager,
@@ -139,12 +166,19 @@ for simplicity. If you split it, the platform outputs are the interface.
 
 ## Rotating credentials
 
-- **Database password.** Increase `postgres_password_version` by one and run
-  apply. A new password is generated, and the same apply writes it to the
+- **Database admin password.** Increase `postgres_password_version` by one and
+  run apply. A new password is generated, and the same apply writes it to the
   server, the secret store (Key Vault, Secrets Manager or Secret Manager) and
-  the kgf-nexus credentials Secret. Then restart the Nexus Deployments, which
-  read the Secret only at start. Connections fail between those two steps, so
-  do this in a maintenance window.
+  the kgf-nexus credentials Secret. With runtime logins on, only the migrate,
+  bootstrap and db-roles Jobs use it, so nothing needs restarting (without
+  them, restart every Deployment; connections fail until then).
+- **Runtime login passwords.** Increase `runtime_db_password_version`. The same
+  apply writes new passwords to `kgf-nexus-db-logins` and bumps the chart's
+  `passwordRevision`: the db-roles Job re-runs and every connecting pod rolls.
+- **Database CA bundle.** See docs/OPERATIONS.md §20.11: add the new root
+  (`ca-bundles/refresh.sh --write` after updating its pin; on GKE create the
+  upcoming Cloud SQL CA), apply, `kubectl rollout restart` the Deployments, and
+  only then switch the server.
 - **S3 key (EKS).** `-replace=module.platform.aws_iam_access_key.artifacts[0]`.
 - **GCS HMAC key (GKE).** Create the new key, roll the Secret, then deactivate
   and delete the old key. A plain `-replace` does it in one step, with a short

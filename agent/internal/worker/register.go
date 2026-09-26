@@ -124,6 +124,8 @@ func permanentHint(err error) string {
 		return "the API key is valid but not a worker key for this namespace; issue a worker-role key for NEXUS_NAMESPACE"
 	case codes.InvalidArgument:
 		return "the control plane rejected the registration request; check the agent's queues, capacity and hostname settings"
+	case codes.FailedPrecondition:
+		return "the control plane refuses this agent (too old, or missing a required capability; see the reason); upgrade the agent"
 	case codes.Unimplemented:
 		return "the control-plane address does not serve the worker protocol; check NEXUS_CONTROL_PLANE"
 	}

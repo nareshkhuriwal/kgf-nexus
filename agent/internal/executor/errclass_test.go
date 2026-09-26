@@ -95,6 +95,7 @@ func TestClassifyErrorMapsRealFailures(t *testing.T) {
 		{"runtime unavailable", ErrRuntimeUnavailable, nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE, true},
 		{"limit unenforceable", ErrLimitUnenforceable, nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE, true},
 		{"invalid spec", ErrValidation, nexusv1.ErrorClass_ERROR_CLASS_VALIDATION, false},
+		{"output over max_bytes", fmt.Errorf("%w: output %q", ErrOutputTooLarge, "x"), nexusv1.ErrorClass_ERROR_CLASS_VALIDATION, false},
 		{"permission denied", os.ErrPermission, nexusv1.ErrorClass_ERROR_CLASS_PERMISSION_DENIED, false},
 		{"deadline", context.DeadlineExceeded, nexusv1.ErrorClass_ERROR_CLASS_TIMEOUT, true},
 		{"cancelled", context.Canceled, nexusv1.ErrorClass_ERROR_CLASS_WORKER_LOST, true},

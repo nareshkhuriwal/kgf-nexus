@@ -18,6 +18,10 @@
 #                    base compose file uses; see docker-compose.minio-local.yml
 #   E2E_NAMESPACE    namespace the keys are minted in (default default)
 #   E2E_READY_TIMEOUT_S  seconds to wait for the stack (default 600)
+#   E2E_EXTRA_COMPOSE    optional overlay file(s), space-separated, applied last
+#   E2E_DATABASE_URL     optional: the DSN `make seed` uses from the host, for
+#                        an overlay whose services use a database outside the
+#                        stack (default: the stack's own postgres service)
 #
 # Port layout, from E2E_PORT_BASE (B):
 #   B+0 console (nginx)   B+1 REST gateway   B+2 Postgres   B+3 MinIO S3
@@ -57,6 +61,16 @@ files=(-f deploy/docker-compose.yml -f deploy/e2e/docker-compose.e2e.yml)
 if [[ -n "${E2E_MINIO_IMAGE:-}" ]]; then
   files+=(-f deploy/e2e/docker-compose.minio-local.yml)
 fi
+# E2E_AI=1 adds the AI-workload overlay: a Python-capable agent and the mock
+# LLM sidecar, for examples/llm_* (ADR-0032, OPERATIONS §29.8).
+if [[ "${E2E_AI:-}" == 1 ]]; then
+  files+=(-f deploy/e2e/docker-compose.ai.yml)
+fi
+# Optional overlays, space-separated, applied last (e.g. the simulated-GPU and
+# spot overlay deploy/e2e/docker-compose.gpu-sim.yml, ADR-0029/0030).
+for extra in ${E2E_EXTRA_COMPOSE:-}; do
+  files+=(-f "$extra")
+done
 compose() { docker compose -p "$PROJECT" "${files[@]}" "$@"; }
 
 log() { printf '[e2e-stack] %s\n' "$*" >&2; }
@@ -148,7 +162,9 @@ ui_ready() {
 }
 
 seed() {
-  local dsn="postgres://nexus:nexus-dev-password@localhost:${NEXUS_POSTGRES_PORT}/nexus?sslmode=disable"
+  # E2E_DATABASE_URL: the stack's database as the HOST reaches it, when an
+  # overlay points the services at a database outside the stack.
+  local dsn="${E2E_DATABASE_URL:-postgres://nexus:nexus-dev-password@localhost:${NEXUS_POSTGRES_PORT}/nexus?sslmode=disable}"
   if command -v psql >/dev/null 2>&1; then
     NEXUS_DEV_API_KEY="$ADMIN_KEY" NEXUS_WORKER_API_KEY="$WORKER_KEY" \
       make --no-print-directory seed DATABASE_URL="$dsn" NAMESPACE="$NS" >/dev/null

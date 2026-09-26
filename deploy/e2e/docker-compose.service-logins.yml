@@ -1,0 +1,86 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# Every control-plane service on ITS OWN database login (ADR-0011's write
+# matrix enforced, CONTRACT-FINDINGS F132): the compose equivalent of the Helm
+# chart's `postgres.runtimeRoles.scope: service`. After the migrations,
+# nexus-db-roles (the chart's db-roles Job, in the migrate image) creates one
+# LOGIN per service, a member of exactly that service's group role from
+# migration 0005, and each service connects as it. A missing grant then fails
+# the way it would in a strict production install: "permission denied".
+#
+#   E2E_EXTRA_COMPOSE=deploy/e2e/docker-compose.service-logins.yml make e2e
+#
+# Logins are CLUSTER-wide roles (F153): on a database server shared with other
+# Nexus databases give each stack its own NEXUS_E2E_LOGIN_PREFIX, or one
+# stack's db-roles run resets another's passwords and memberships.
+#
+#   NEXUS_E2E_LOGIN_PREFIX  login names <prefix>_<service>_login (default nexus_e2e)
+#   NEXUS_E2E_DB            host:port/database the services reach (default the
+#                           stack's own postgres:5432/nexus)
+#   NEXUS_E2E_OWNER_URL     the owner DSN db-roles runs as (default the stack's)
+#
+# TEST ONLY. The passwords below are fixed and published; production passwords
+# come from a Secret (OPERATIONS §20.12).
+
+x-login-pw: &login-pw
+  PW_API_GATEWAY: gw-login-e2e-0123456789
+  PW_WORKFLOW_MANAGER: wfm-login-e2e-0123456789
+  PW_DAG_ENGINE: dag-login-e2e-0123456789
+  PW_SCHEDULER: sched-login-e2e-0123456789
+  PW_RESOURCE_MANAGER: rm-login-e2e-0123456789
+  PW_EVENT_SERVICE: evt-login-e2e-0123456789
+
+x-after-db-roles: &after-db-roles
+  db-roles:
+    condition: service_completed_successfully
+
+services:
+  db-roles:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.migrate
+    entrypoint: ["/usr/local/bin/nexus-db-roles"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *login-pw
+      DATABASE_URL: ${NEXUS_E2E_OWNER_URL:-postgres://nexus:nexus-dev-password@postgres:5432/nexus?sslmode=disable}
+      NEXUS_DB_ROLES: >-
+        [{"login":"${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_api_gateway_login","member_of":["nexus_api_gateway"],"password_env":"PW_API_GATEWAY"},
+         {"login":"${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_workflow_manager_login","member_of":["nexus_workflow_manager"],"password_env":"PW_WORKFLOW_MANAGER"},
+         {"login":"${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_dag_engine_login","member_of":["nexus_dag_engine"],"password_env":"PW_DAG_ENGINE"},
+         {"login":"${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_scheduler_login","member_of":["nexus_scheduler"],"password_env":"PW_SCHEDULER"},
+         {"login":"${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_resource_manager_login","member_of":["nexus_resource_manager"],"password_env":"PW_RESOURCE_MANAGER"},
+         {"login":"${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_event_service_login","member_of":["nexus_event_service"],"password_env":"PW_EVENT_SERVICE"}]
+    restart: "no"
+
+  api-gateway:
+    depends_on: *after-db-roles
+    environment:
+      DATABASE_URL: postgres://${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_api_gateway_login:gw-login-e2e-0123456789@${NEXUS_E2E_DB:-postgres:5432/nexus}?sslmode=disable
+  workflow-manager:
+    depends_on: *after-db-roles
+    environment:
+      DATABASE_URL: postgres://${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_workflow_manager_login:wfm-login-e2e-0123456789@${NEXUS_E2E_DB:-postgres:5432/nexus}?sslmode=disable
+  dag-engine:
+    depends_on: *after-db-roles
+    environment:
+      DATABASE_URL: postgres://${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_dag_engine_login:dag-login-e2e-0123456789@${NEXUS_E2E_DB:-postgres:5432/nexus}?sslmode=disable
+  scheduler:
+    depends_on: *after-db-roles
+    environment:
+      DATABASE_URL: postgres://${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_scheduler_login:sched-login-e2e-0123456789@${NEXUS_E2E_DB:-postgres:5432/nexus}?sslmode=disable
+  scheduler-gpu:
+    depends_on: *after-db-roles
+    environment:
+      DATABASE_URL: postgres://${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_scheduler_login:sched-login-e2e-0123456789@${NEXUS_E2E_DB:-postgres:5432/nexus}?sslmode=disable
+  resource-manager:
+    depends_on: *after-db-roles
+    environment:
+      DATABASE_URL: postgres://${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_resource_manager_login:rm-login-e2e-0123456789@${NEXUS_E2E_DB:-postgres:5432/nexus}?sslmode=disable
+  event-service:
+    depends_on: *after-db-roles
+    environment:
+      DATABASE_URL: postgres://${NEXUS_E2E_LOGIN_PREFIX:-nexus_e2e}_event_service_login:evt-login-e2e-0123456789@${NEXUS_E2E_DB:-postgres:5432/nexus}?sslmode=disable

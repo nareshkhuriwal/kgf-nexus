@@ -148,6 +148,15 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; c
 @media(prefers-color-scheme:light){:root:not([data-theme='dark']) .main a:not(.btn):not(.ops-metric) {color:color-mix(in srgb,var(--accent) 62%,#172b4d);}}
 :root[data-theme='light'] .main a:not(.btn):not(.ops-metric) {color:color-mix(in srgb,var(--accent) 62%,#172b4d);}
 
+/* Usage units (ADR-0032 §2): tokens by model, other units verbatim. The
+   scroller is focusable so a keyboard user can pan a table wider than a phone. */
+.usage-scroll { overflow-x: auto; }
+.usage-scroll + .usage-scroll { margin-top: 10px; }
+.usage-table th, .usage-table td { padding: 5px 8px; }
+.usage-table .usage-key { font-family: var(--mono); font-weight: 400; overflow-wrap: anywhere; text-align: left; }
+.usage-table tfoot th, .usage-table tfoot td { border-top: 1px solid var(--console-line); font-weight: 600; }
+.usage-meta { margin-top: 6px; font-size: 12px; }
+
 .permission-disclosure { margin-top: 18px; }
 .permission-disclosure summary { cursor: pointer; font-size: 13px; color: var(--fg-muted); }
 .permission-disclosure .credential-permissions { margin-top: 12px; }

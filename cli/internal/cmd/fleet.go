@@ -91,7 +91,7 @@ problem.`,
 					output.Str(w, "state"),
 					queues,
 					cpu, mem, gpu,
-					output.Str(w, "running_attempts"),
+					runningCell(w),
 					output.Age(w, "last_heartbeat_at"),
 				})
 			}
@@ -100,13 +100,28 @@ problem.`,
 	}
 }
 
+// runningCell is the worker's in-flight attempt count, which the listing sends
+// as "active_attempts" ("running_attempts" is accepted as a fallback).
+func runningCell(w map[string]any) string {
+	if _, ok := w["active_attempts"]; ok {
+		return fmt.Sprintf("%d", output.Int(w, "active_attempts"))
+	}
+	return output.Str(w, "running_attempts")
+}
+
 // capacityCell renders "committed/advertised" for one resource dimension.
 //
 // Both numbers together are the useful reading: 0/64 means idle, 64/64 means
 // saturated, and a committed figure that exceeds advertised means the ledger has
 // drifted and heartbeat reconciliation has not caught up yet.
 func capacityCell(w map[string]any, field string, isCPU bool) string {
-	adv, _ := w["advertised"].(map[string]any)
+	// The worker listing calls the advertised vector "capacity" (rest.workerPayload);
+	// "advertised" is the capacity REPORT's name and is kept as a fallback. Reading
+	// only "advertised" left every capacity column blank.
+	adv, _ := w["capacity"].(map[string]any)
+	if adv == nil {
+		adv, _ = w["advertised"].(map[string]any)
+	}
 	com, _ := w["committed"].(map[string]any)
 	if adv == nil && com == nil {
 		return "-"
@@ -349,8 +364,8 @@ the last seq you saw and nothing is missed in the gap.`,
 			for _, ev := range output.Items(result, "events") {
 				t.Rows = append(t.Rows, []string{
 					output.Str(ev, "seq"),
-					output.Str(ev, "at"),
-					output.Str(ev, "type"),
+					eventTime(ev),
+					firstStr(ev, "kind", "type"),
 					firstStr(ev, "node_id", "node"),
 					eventDetail(ev),
 				})
@@ -363,8 +378,8 @@ the last seq you saw and nothing is missed in the gap.`,
 func formatEventLine(ev map[string]any) string {
 	return fmt.Sprintf("%-6s %-22s %-26s %-18s %s",
 		output.Str(ev, "seq"),
-		output.Str(ev, "at"),
-		output.Str(ev, "type"),
+		eventTime(ev),
+		firstStr(ev, "kind", "type"),
 		firstStr(ev, "node_id", "node"),
 		eventDetail(ev))
 }
@@ -383,7 +398,7 @@ func eventDetail(ev map[string]any) string {
 	if s := output.Str(ev, "state"); s != "-" {
 		return s
 	}
-	return "-"
+	return eventPayloadDetail(ev)
 }
 
 func configCmd() *command {

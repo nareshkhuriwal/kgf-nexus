@@ -14,6 +14,10 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
+
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"fmt"
@@ -23,6 +27,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,10 +37,13 @@ import (
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/mail"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
+	"github.com/khuriwalgroup/kgf-nexus/internal/secretbox"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/auditexport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/health"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
@@ -61,7 +69,10 @@ func run() error {
 	log := newLogger()
 	slog.SetDefault(log)
 
-	cfg := loadConfig()
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
 	// Refuse to start rather than hand every worker a threshold that would push
 	// multi-megabyte results through ReportResult and into task_attempts. The
 	// agent clamps too; failing here is what makes the misconfiguration visible.
@@ -73,6 +84,9 @@ func run() error {
 	// derives from it, so one signal unwinds the whole process in order.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter; flushed last.
+	defer tracing.SetupOrExit(ctx, "api-gateway", version, log)()
 
 	// A bounded startup timeout: a gateway that hangs forever on an unreachable
 	// database looks identical to one that is merely slow, and the orchestrator
@@ -129,7 +143,18 @@ func run() error {
 	// store, so it needs read credentials; without them the route answers 501
 	// and agents are told not to ship, rather than filling a store nobody can
 	// read back.
-	logStreamer, logShipping := logBackend(cfg, db, log)
+	logStreamer, logShipping := logBackend(ctx, cfg, db, reg, log)
+
+	// Notifications, webhook triggers, sensors and lineage (ADR-0028). A
+	// malformed secret key is fatal; an absent one is not -- the gateway then
+	// refuses to store inline secrets (503) instead of storing them in clear.
+	secretBox, err := secretbox.FromEnv(os.Getenv)
+	if err != nil {
+		return fmt.Errorf("NEXUS_SECRET_KEY: %w", err)
+	}
+	if secretBox == nil {
+		log.Warn("NEXUS_SECRET_KEY is not set: webhook triggers and inline channel secrets cannot be created")
+	}
 
 	// ── REST listener ─────────────────────────────────────────────────────
 	api := rest.New(db, auth, wfmClient, rmClient, logStreamer, log).
@@ -147,7 +172,16 @@ func run() error {
 		WithFleetHealth(upstream.Fleet{WFM: wfmClient, RM: rmClient, Sched: schedClient}).
 		// Memo invalidation rides the scheduler client's dag-engine connection,
 		// the gateway's one existing route to the owner of memo_invalidations.
-		WithCacheInvalidator(schedClient)
+		WithCacheInvalidator(schedClient).
+		// Rejections and bucket counts per limiter kind (docs/OPERATIONS.md §17);
+		// limiters enabled below are instrumented as they are built.
+		WithRateLimitMetrics(rest.NewRateLimitMetrics(reg)).
+		WithEvents(rest.EventsConfig{
+			Secrets:             secretBox,
+			TriggeredRuns:       wfmClient,
+			AllowPrivateTargets: os.Getenv("NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS") == "true",
+			PublicURL:           os.Getenv("NEXUS_PUBLIC_URL"),
+		})
 
 	// Rate limiting is opt-in because a limit guessed wrong is itself an outage:
 	// the right number depends on fleet size and the console's poll interval. Off
@@ -166,16 +200,53 @@ func run() error {
 		return err
 	}
 	api = api.WithEmailFlows(emailCfg)
+	mode, kgfAuth, kgfAttrib, kgfReady, err := kgfConfig(ctx, db, log)
+	if err != nil {
+		return err
+	}
+	api = api.WithKGF(mode, kgfAuth)
 
-	hc := health.New(map[string]health.Check{
+	// Audit export (ADR-0025): sink secrets are sealed under
+	// NEXUS_AUDIT_SINK_KEY(_FILE); without it sinks are refused (503) but
+	// listing, export, retention and legal hold all work. A malformed key or
+	// destination policy is fatal, like any other security configuration.
+	auditKeys, err := auditexport.KeyringFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	sinkPolicy, err := auditexport.PolicyFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	api = api.WithAuditExport(auditKeys, sinkPolicy)
+	// KGF Cloud attribution in standalone mode (ADR-0025 with ADR-0024): with
+	// KGF's context keys configured, a request that authenticates with a Nexus
+	// credential and carries a verifying X-KGF-Context has its KGF
+	// organization, scope, principal and request id recorded -- attribution
+	// only. In kgf/both mode the context authenticates, and attribution comes
+	// from that principal (kgfAttrib is nil there).
+	api = api.WithKGFContext(kgfAttrib)
+	rest.RegisterAuditMetrics(reg)
+	deliverer := &auditexport.Deliverer{DB: db, Keys: auditKeys, Policy: sinkPolicy, Log: log}
+	deliverer.RegisterMetrics(reg)
+	purger := &auditexport.Purger{DB: db, Log: log}
+	purger.RegisterMetrics(reg)
+
+	checks := map[string]health.Check{
 		// Readiness depends on the database because a gateway that cannot reach
 		// Postgres can authenticate nothing and serve nothing useful.
 		"postgres": func(ctx context.Context) error { return pool.Ping(ctx) },
-	})
+	}
+	if kgfReady != nil {
+		// In KGF mode a gateway without the context verification keys can
+		// authenticate no person, so it is not ready (ADR-0024 §2).
+		checks["kgf_context_keys"] = kgfReady
+	}
+	hc := health.New(checks)
 
 	restSrv := &http.Server{
 		Addr:    cfg.RESTAddr,
-		Handler: publicHandler(api.Routes(), hc, httpMetrics),
+		Handler: tracing.HTTPMiddleware(publicHandler(api.Routes(), hc, httpMetrics)),
 		// ReadHeaderTimeout, not ReadTimeout: a slow-header client is an attack, but
 		// a legitimately slow BODY (a large spec over a poor link) is not.
 		ReadHeaderTimeout: 10 * time.Second,
@@ -237,8 +308,27 @@ func run() error {
 		Bucket:               cfg.ResultStoreBucket,
 		Region:               cfg.ResultStoreRegion,
 		InlineThresholdBytes: cfg.InlineThresholdBytes,
+		// Agents speak the same API the gateway does unless their own
+		// NEXUS_RESULT_STORE_BACKEND says otherwise (ADR-0027).
+		Backend: cfg.Store.Backend,
 	}
 	wcfg.LogShipping = logShipping
+	// The agent admission gate (docs/COMPATIBILITY.md §4.4). Both off by
+	// default. A policy that cannot be applied (an unparsable minimum) stops
+	// the gateway here instead of refusing every agent at Register.
+	wcfg.AgentPolicy = agentPolicyFromEnv()
+	if err := wcfg.AgentPolicy.Validate(); err != nil {
+		return fmt.Errorf("NEXUS_MIN_AGENT_VERSION / NEXUS_REQUIRED_AGENT_CAPABILITIES: %w", err)
+	}
+	if wcfg.AgentPolicy.MinVersion != "" || len(wcfg.AgentPolicy.RequiredCapabilities) > 0 {
+		log.Info("agent admission gate enabled",
+			"min_agent_version", wcfg.AgentPolicy.MinVersion,
+			"required_agent_capabilities", wcfg.AgentPolicy.RequiredCapabilities)
+	}
+	if cfg.WorkloadAPI {
+		wcfg.WorkloadAPI = workergrpc.DefaultWorkloadAPI()
+		wcfg.WorkloadAPI.MaxCheckpointBytes = cfg.MaxCheckpointBytes
+	}
 	nexusv1.RegisterWorkerServiceServer(workerSrv,
 		workergrpc.NewServer(db, rmClient, schedClient, wcfg, log))
 
@@ -262,7 +352,17 @@ func run() error {
 	sweeper.Interval = cfg.SessionSweepInterval
 	sweeper.BatchLimit = cfg.SessionSweepLimit
 
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 6)
+	go func() {
+		if err := deliverer.Run(ctx); err != nil {
+			errCh <- fmt.Errorf("audit sink deliverer: %w", err)
+		}
+	}()
+	go func() {
+		if err := purger.Run(ctx); err != nil {
+			errCh <- fmt.Errorf("audit retention purger: %w", err)
+		}
+	}()
 	go func() {
 		if err := opsSrv.Serve(); err != nil {
 			errCh <- fmt.Errorf("metrics listener: %w", err)
@@ -369,20 +469,27 @@ type config struct {
 	SessionSweepInterval time.Duration
 	SessionSweepLimit    int
 
-	// Result-store READ credentials for serving logs (ADR-0020). The same
-	// variables the agent reads, so compose needs no new settings.
-	ResultStoreAccessKey string
-	ResultStoreSecretKey string
-	ResultStoreUseTLS    bool
+	// Store is the result-store configuration for serving logs (ADR-0020,
+	// ADR-0027): the same NEXUS_RESULT_STORE_* / NEXUS_S3_* / NEXUS_AZURE_* /
+	// NEXUS_GCS_* variables the agent reads, so compose needs no new settings.
+	Store objstore.Config
 	// LogShipping turns durable task logs on (default) or off.
 	LogShipping        bool
 	LogMaxBytes        int64
 	LogChunkBytes      int64
 	LogFlushIntervalMs int
+	// WorkloadAPI offers tasks usage reporting, shared rate limits and
+	// checkpoints through their agent (ADR-0032). On by default.
+	WorkloadAPI        bool
+	MaxCheckpointBytes int64
 }
 
-func loadConfig() config {
-	return config{
+func loadConfig() (config, error) {
+	store, err := objstore.ConfigFromEnv(nil)
+	if err != nil {
+		return config{}, err
+	}
+	c := config{
 		// Separate ports, per §3.2: worker traffic must not contend with UI queries.
 		RESTAddr:            env("NEXUS_REST_ADDR", ":8080"),
 		GRPCAddr:            env("NEXUS_GRPC_ADDR", ":9090"),
@@ -393,7 +500,7 @@ func loadConfig() config {
 		ResourceManagerAddr: env("NEXUS_RESOURCE_MANAGER_ADDR", ""),
 		SchedulerAddr:       env("NEXUS_SCHEDULER_ADDR", ""),
 		DAGEngineAddr:       env("NEXUS_DAG_ENGINE_ADDR", env("DAG_ENGINE_ADDR", "")),
-		ResultStoreEndpoint: env("NEXUS_RESULT_STORE_ENDPOINT", "http://localhost:9000"),
+		ResultStoreEndpoint: env("NEXUS_RESULT_STORE_ENDPOINT", defaultEndpoint(store.Backend)),
 		ResultStoreBucket:   env("NEXUS_RESULT_STORE_BUCKET", "nexus-results"),
 		ResultStoreRegion:   env("NEXUS_RESULT_STORE_REGION", "us-east-1"),
 		// Results at or below this size come back inline, avoiding two round-trips
@@ -407,14 +514,26 @@ func loadConfig() config {
 			int(sessions.DefaultInterval/time.Second))) * time.Second,
 		SessionSweepLimit: envInt("NEXUS_SESSION_SWEEP_LIMIT", sessions.DefaultBatchLimit),
 
-		ResultStoreAccessKey: env("NEXUS_S3_ACCESS_KEY_ID", ""),
-		ResultStoreSecretKey: env("NEXUS_S3_SECRET_ACCESS_KEY", ""),
-		ResultStoreUseTLS:    envBool("NEXUS_S3_USE_TLS", false),
-		LogShipping:          envBool("NEXUS_LOG_SHIPPING", true),
-		LogMaxBytes:          int64(envInt("NEXUS_LOG_MAX_BYTES_PER_ATTEMPT", 64<<20)),
-		LogChunkBytes:        int64(envInt("NEXUS_LOG_CHUNK_BYTES", 256<<10)),
-		LogFlushIntervalMs:   envInt("NEXUS_LOG_FLUSH_INTERVAL_MS", 2000),
+		Store:              store,
+		LogShipping:        envBool("NEXUS_LOG_SHIPPING", true),
+		LogMaxBytes:        int64(envInt("NEXUS_LOG_MAX_BYTES_PER_ATTEMPT", 64<<20)),
+		LogChunkBytes:      int64(envInt("NEXUS_LOG_CHUNK_BYTES", 256<<10)),
+		LogFlushIntervalMs: envInt("NEXUS_LOG_FLUSH_INTERVAL_MS", 2000),
+		WorkloadAPI:        envBool("NEXUS_WORKLOAD_API", true),
+		MaxCheckpointBytes: int64(envInt("NEXUS_MAX_CHECKPOINT_BYTES", workergrpc.DefaultMaxCheckpointBytes)),
 	}
+	c.Store.Endpoint, c.Store.Bucket, c.Store.Region = c.ResultStoreEndpoint, c.ResultStoreBucket, c.ResultStoreRegion
+	return c, nil
+}
+
+// defaultEndpoint keeps the historical local default for S3 only: Azure and
+// GCS derive their endpoints from the account and the SDK, and a localhost
+// default would point them at nothing.
+func defaultEndpoint(backend string) string {
+	if backend == objstore.BackendS3 {
+		return "http://localhost:9000"
+	}
+	return ""
 }
 
 // version is stamped at build time (-ldflags "-X main.version=...").
@@ -439,27 +558,26 @@ func publicHandler(api http.Handler, hc *health.Handler, m *metrics.HTTPMetrics)
 // logBackend builds the log reader and the policy advertised to agents. Both
 // are off together: an agent is told to ship only when this gateway can serve
 // what it ships.
-func logBackend(cfg config, db store.GWDB, log *slog.Logger) (rest.LogStreamer, *nexusv1.LogShippingConfig) {
+func logBackend(ctx context.Context, cfg config, db store.GWDB, reg *metrics.Registry, log *slog.Logger) (rest.LogStreamer, *nexusv1.LogShippingConfig) {
 	if !cfg.LogShipping {
 		log.Warn("durable task logs are DISABLED (NEXUS_LOG_SHIPPING=false); agents will not ship logs and the logs route answers 501")
 		return nil, nil
 	}
-	reader, err := logs.NewMinIOReader(logs.MinIOConfig{
-		Endpoint: cfg.ResultStoreEndpoint, Bucket: cfg.ResultStoreBucket, Region: cfg.ResultStoreRegion,
-		AccessKeyID: cfg.ResultStoreAccessKey, SecretAccessKey: cfg.ResultStoreSecretKey, UseTLS: cfg.ResultStoreUseTLS,
-	})
+	store, err := objstore.Open(ctx, cfg.Store)
 	if err != nil {
 		log.Warn("durable task logs are unavailable: the gateway cannot read the result store; agents will not ship logs and the logs route answers 501",
-			"error", err, "fix", "set NEXUS_S3_ACCESS_KEY_ID and NEXUS_S3_SECRET_ACCESS_KEY (a read-only credential scoped to */logs/* is enough)")
+			"backend", cfg.Store.Backend, "error", err,
+			"fix", "give the gateway read access to */logs/*: static S3 keys, a cloud workload identity (NEXUS_S3_CREDENTIALS, NEXUS_AZURE_STORAGE_AUTH, NEXUS_GCS_AUTH), see OPERATIONS §26")
 		return nil, nil
 	}
+	reader := logs.NewStoreReader(objstore.Instrument(store, objstore.NewMetrics(reg)))
 	policy := &nexusv1.LogShippingConfig{
 		Enabled:            true,
 		MaxBytesPerAttempt: cfg.LogMaxBytes,
 		ChunkBytes:         cfg.LogChunkBytes,
 		FlushIntervalMs:    int32(cfg.LogFlushIntervalMs),
 	}
-	log.Info("durable task logs enabled", "bucket", cfg.ResultStoreBucket,
+	log.Info("durable task logs enabled", "backend", cfg.Store.Backend, "bucket", cfg.ResultStoreBucket,
 		"max_bytes_per_attempt", cfg.LogMaxBytes, "chunk_bytes", cfg.LogChunkBytes,
 		"flush_interval_ms", cfg.LogFlushIntervalMs)
 	return logs.NewReader(logs.StoreIndex{DB: db}, reader, logs.Limits{}), policy
@@ -472,7 +590,7 @@ func newLogger() *slog.Logger {
 	}
 	// JSON, because these logs are aggregated and queried by run_id rather than
 	// read by eye.
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})).
+	return slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))).
 		With("service", "api-gateway")
 }
 
@@ -519,6 +637,18 @@ func envFloat(key string, def float64) float64 {
 		return def
 	}
 	return f
+}
+
+// agentPolicyFromEnv reads the agent admission gate: NEXUS_MIN_AGENT_VERSION
+// (a semantic version) and NEXUS_REQUIRED_AGENT_CAPABILITIES (comma-separated).
+func agentPolicyFromEnv() domain.AgentPolicy {
+	p := domain.AgentPolicy{MinVersion: strings.TrimSpace(os.Getenv("NEXUS_MIN_AGENT_VERSION"))}
+	for _, c := range strings.Split(os.Getenv("NEXUS_REQUIRED_AGENT_CAPABILITIES"), ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			p.RequiredCapabilities = append(p.RequiredCapabilities, c)
+		}
+	}
+	return p
 }
 
 func env(key, def string) string {
@@ -600,6 +730,82 @@ func emailFlowConfig(log *slog.Logger) (rest.EmailFlowConfig, error) {
 		}()
 	}
 	return cfg, nil
+}
+
+// kgfConfig reads KGF Cloud context authentication (ADR-0024,
+// docs/OPERATIONS.md §24) and attribution (ADR-0025, §25). One kgfctx
+// verifier -- keys, audience, user issuers, replay guard -- serves both.
+//
+//   - NEXUS_AUTH_MODE=kgf or both: a key source is mandatory (a gateway that
+//     could verify no context would refuse every KGF request, so a
+//     misconfiguration stops startup) and the context AUTHENTICATES; the
+//     returned authenticator wraps the verifier.
+//   - standalone (the default): Nexus credentials authenticate. With a key
+//     source configured, the verifier is returned for audit ATTRIBUTION only;
+//     without one, nil, and an X-KGF-Context is refused rather than ignored.
+func kgfConfig(ctx context.Context, db store.GWDB, log *slog.Logger) (rest.AuthMode, *authn.KGFAuthenticator, *kgfctx.Verifier, health.Check, error) {
+	mode, err := rest.ParseAuthMode(os.Getenv("NEXUS_AUTH_MODE"))
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	var keys kgfctx.KeySource
+	var ready health.Check
+	static, url := env("NEXUS_KGF_CONTEXT_PUBLIC_KEYS", ""), env("NEXUS_KGF_CONTEXT_KEYS_URL", "")
+	switch {
+	case static != "" && url != "":
+		return "", nil, nil, nil, errors.New("set NEXUS_KGF_CONTEXT_PUBLIC_KEYS or NEXUS_KGF_CONTEXT_KEYS_URL, not both")
+	case static != "":
+		sk, err := kgfctx.ParseStaticKeys(static)
+		if err != nil || len(sk) == 0 {
+			return "", nil, nil, nil, fmt.Errorf("NEXUS_KGF_CONTEXT_PUBLIC_KEYS: %v", err)
+		}
+		keys = sk
+	case url != "":
+		rk := kgfctx.NewRemoteKeys(url, &http.Client{Timeout: 5 * time.Second}, log)
+		rk.Refresh = time.Duration(envInt("NEXUS_KGF_CONTEXT_KEYS_REFRESH_SEC", 300)) * time.Second
+		keys, ready = rk, rk.Ready
+		if err := rk.Ready(ctx); err != nil {
+			// Not fatal: KGF's gateway may start after Nexus. /readyz reports it
+			// in kgf/both mode.
+			log.Warn("KGF context keys are not available yet; KGF contexts are refused until they are", "url", url, "error", err)
+		}
+	case mode == rest.AuthStandalone:
+		log.Info("authentication mode: standalone (Nexus credentials only; no KGF attribution keys configured)")
+		return mode, nil, nil, nil, nil
+	default:
+		return "", nil, nil, nil, errors.New("NEXUS_AUTH_MODE=" + string(mode) + " needs NEXUS_KGF_CONTEXT_KEYS_URL or NEXUS_KGF_CONTEXT_PUBLIC_KEYS")
+	}
+	var issuers []string
+	for _, i := range strings.Split(env("NEXUS_KGF_USER_ISSUERS", "kgf-gateway"), ",") {
+		if i = strings.TrimSpace(i); i != "" {
+			issuers = append(issuers, i)
+		}
+	}
+	verifier := kgfctx.Verifier{
+		Keys: keys, Audience: env("NEXUS_KGF_AUDIENCE", "kgf-nexus"),
+		AcceptAnyAudience: envBool("NEXUS_KGF_ACCEPT_ANY_AUDIENCE", false),
+		UserIssuers:       issuers, Seen: kgfctx.NewMemoryReplayGuard(),
+	}
+	if verifier.AcceptAnyAudience {
+		log.Warn("NEXUS_KGF_ACCEPT_ANY_AUDIENCE=true: contexts minted for every KGF service are accepted here")
+	}
+	if mode == rest.AuthStandalone {
+		log.Info("authentication mode: standalone; X-KGF-Context is verified for audit attribution only",
+			"audience", verifier.Audience, "user_issuers", issuers, "keys_url", url, "static_keys", static != "")
+		return mode, nil, &verifier, nil, nil
+	}
+	services, err := authn.ParseServicePrincipals(env("NEXUS_KGF_SERVICE_PRINCIPALS", ""))
+	if err != nil {
+		return "", nil, nil, nil, fmt.Errorf("NEXUS_KGF_SERVICE_PRINCIPALS: %w", err)
+	}
+	k := &authn.KGFAuthenticator{
+		Verifier:          verifier,
+		Provisioner:       authn.StoreProvisioner{DB: db},
+		ServicePrincipals: services,
+	}
+	log.Info("authentication mode: KGF context", "mode", string(mode), "audience", k.Verifier.Audience,
+		"user_issuers", issuers, "keys_url", url, "static_keys", static != "", "service_principals", len(services))
+	return mode, k, nil, ready, nil
 }
 
 // envBool reads a boolean, keeping the default on an unparseable value for the

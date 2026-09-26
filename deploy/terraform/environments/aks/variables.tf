@@ -140,24 +140,28 @@ variable "premium_disk_sku" {
 
 variable "azure_blob_native_backend" {
   description = <<-EOT
-    RESERVED for the native Azure Blob result-store backend, which does NOT
-    EXIST YET (F115). Nexus speaks only the S3 API and Azure Blob has none, so
-    on AKS the result store is the in-cluster MinIO on Premium SSD. The Blob
-    account and container are provisioned already; when the backend ships,
-    this switch will turn MinIO off and point Nexus at Blob via workload
-    identity. It cannot be enabled until then.
+    true: Nexus stores results and logs in the provisioned Blob container
+    through the native azblob backend (resultStore.backend=azblob), keyless:
+    AKS workload identity federates the nexus-artifacts ServiceAccount to the
+    user-assigned identity that holds Storage Blob Data Contributor on that one
+    container. The in-cluster MinIO is not deployed and the credentials Secret
+    holds no S3 key pair.
+    false: the in-cluster MinIO on a Premium SSD PVC, as before; you then own
+    its capacity, backups and availability.
+    Switching an environment that already holds results in MinIO does NOT
+    migrate them: copy the bucket into the container first (rclone, azcopy),
+    or keep false.
   EOT
   type        = bool
-  default     = false
-
-  validation {
-    condition     = !var.azure_blob_native_backend
-    error_message = "The native Azure Blob backend is not implemented yet (F115). Nexus on AKS uses the in-cluster MinIO; leave azure_blob_native_backend = false."
-  }
+  # Default true. The Blob account is zone-redundant, versioned, soft-deleted,
+  # private-endpoint-only and audited, and needs no key; a single MinIO pod on
+  # one PVC is none of those. No AKS environment has been applied yet (F115),
+  # so there is no MinIO data this default could strand.
+  default = true
 }
 
 variable "minio_storage_size" {
-  description = "Size of the in-cluster MinIO volume (Premium SSD) holding every result and log. Plan capacity here: it is the whole artifact store on AKS."
+  description = "Size of the in-cluster MinIO volume (Premium SSD), used ONLY with azure_blob_native_backend = false. It is then the whole artifact store: plan capacity here."
   type        = string
   default     = "200Gi"
 }
@@ -202,4 +206,45 @@ variable "postgres_password_version" {
   description = "Bump to rotate the database password: a new one is generated and written to the server, the secret store and (through the environment) the kgf-nexus credentials Secret in one apply. Restart the Nexus pods afterwards."
   type        = number
   default     = 1
+}
+
+# ── Database hardening and agent pools (F115) ─────────────────────────────
+
+variable "runtime_db_roles" {
+  description = "Services connect as their own least-privilege logins, created by the chart's db-roles Job; the managed server's admin login then reaches only the migrate, bootstrap and db-roles Jobs (docs/OPERATIONS.md §20.12)."
+  type        = bool
+  default     = true
+}
+
+variable "runtime_db_password_version" {
+  description = "Bump to rotate every runtime login's password in one apply (the db-roles Job re-runs and the pods roll)."
+  type        = number
+  default     = 1
+}
+
+variable "gpu_agent" {
+  description = "The Nexus agent placed on the GPU pool when it is enabled: what it advertises (gpu_count devices of gpu_kind, and CPU/memory) and requests from the device plugin. Size it inside one GPU node (default: Standard_NC4as_T4_v3: 4 vCPU, 28 GiB, one T4)."
+  type = object({
+    replicas       = number
+    gpu_count      = number
+    gpu_kind       = string
+    gpu_memory_gib = number
+    cpu_millis     = number
+    memory_gib     = number
+    disk_gib       = number
+  })
+  default = {
+    replicas       = 1
+    gpu_count      = 1
+    gpu_kind       = "nvidia-t4"
+    gpu_memory_gib = 16
+    cpu_millis     = 3000
+    memory_gib     = 20
+    disk_gib       = 100
+  }
+
+  validation {
+    condition     = var.gpu_agent.gpu_count >= 1 && var.gpu_agent.replicas >= 0
+    error_message = "gpu_agent.gpu_count must be at least 1 (a GPU agent requests its devices) and replicas non-negative."
+  }
 }

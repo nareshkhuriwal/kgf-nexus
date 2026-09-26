@@ -10,6 +10,8 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/gpu"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
@@ -46,6 +48,16 @@ type Registry struct {
 	// device 1 sat idle.
 	gpus    map[string][]int
 	gpuHeld map[int]bool
+
+	// Fractional GPUs (ADR-0029 §2). inv names the MIG instances and shared
+	// devices; migHeld marks instances taken and migOf maps an attempt to the
+	// instances it holds. The shared-device ledger is committed.GpuShares:
+	// an attempt's active vector is its PLACED vector, naming its device.
+	inv     gpu.Inventory
+	migHeld map[string]bool
+	migOf   map[string][]string
+	// MPSPipeDir is handed to executors for MPS-shared devices.
+	MPSPipeDir string
 }
 
 // NewRegistry builds a registry over the capacity advertised at registration.
@@ -56,7 +68,17 @@ func NewRegistry(capacity *nexusv1.ResourceVector) *Registry {
 		active:    make(map[string]*nexusv1.ResourceVector),
 		gpus:      make(map[string][]int),
 		gpuHeld:   make(map[int]bool),
+		migHeld:   make(map[string]bool),
+		migOf:     make(map[string][]string),
 	}
+}
+
+// NewRegistryWithGPUs is NewRegistry with a fractional-GPU inventory; the
+// capacity must already include it (gpu.Inventory.ApplyTo).
+func NewRegistryWithGPUs(capacity *nexusv1.ResourceVector, inv gpu.Inventory) *Registry {
+	r := NewRegistry(capacity)
+	r.inv = inv
+	return r
 }
 
 // Admit performs the LOCAL admission check and commits the resources on success.
@@ -68,6 +90,17 @@ func NewRegistry(capacity *nexusv1.ResourceVector) *Registry {
 // with it. The check and the commit are one critical section so two concurrent
 // admissions cannot both see the same free capacity and both succeed.
 func (r *Registry) Admit(attemptID string, request *nexusv1.ResourceVector) (bool, string) {
+	return r.AdmitReserved(attemptID, request, nil)
+}
+
+// AdmitReserved is Admit honouring the control plane's placement: reserved is
+// TaskAssignment.reserved, which names the shared GPU device the control
+// plane's ledger charged. The agent uses THAT device or refuses -- placing the
+// slice elsewhere would make the control plane's per-device ledger and the
+// real usage diverge, which is the over-allocation per-device accounting
+// exists to prevent (ADR-0029 §2). A nil reserved (an older scheduler) places
+// locally with the same rule the control plane uses.
+func (r *Registry) AdmitReserved(attemptID string, request, reserved *nexusv1.ResourceVector) (bool, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -82,6 +115,14 @@ func (r *Registry) Admit(attemptID string, request *nexusv1.ResourceVector) (boo
 	ok, short := domain.Fits(r.capacity, r.committed, request)
 	if !ok {
 		return false, domain.ShortfallReason(short)
+	}
+	placed, why := r.placeShared(request, reserved)
+	if why != "" {
+		return false, why
+	}
+	migs, why := r.pickMIG(request)
+	if why != "" {
+		return false, why
 	}
 	// Name the devices in the same critical section as the count, so two
 	// concurrent admissions can never pick the same free device.
@@ -102,9 +143,96 @@ func (r *Registry) Admit(attemptID string, request *nexusv1.ResourceVector) (boo
 		}
 		r.gpus[attemptID] = devices
 	}
-	r.active[attemptID] = request
-	r.committed = domain.AddVec(r.committed, request)
+	for _, u := range migs {
+		r.migHeld[u] = true
+	}
+	if len(migs) > 0 {
+		r.migOf[attemptID] = migs
+	}
+	r.active[attemptID] = placed
+	r.committed = domain.AddVec(r.committed, placed)
 	return true, ""
+}
+
+// placeShared resolves the shared-device slice. Called with r.mu held.
+func (r *Registry) placeShared(request, reserved *nexusv1.ResourceVector) (*nexusv1.ResourceVector, string) {
+	if !domain.UsesSharedGPU(request) {
+		out := domain.CloneVec(request)
+		out.GpuShares = nil
+		return out, ""
+	}
+	dev, named := domain.SharedDevice(reserved)
+	if !named {
+		p, ok, short := domain.Place(r.capacity, r.committed, request, domain.PolicyPack)
+		if !ok {
+			return nil, domain.ShortfallReason(short)
+		}
+		return p, ""
+	}
+	// The named device must exist here and hold the slice by THIS ledger.
+	c, ok := r.capacity.GetGpuShares()[dev]
+	if !ok {
+		return nil, "gpu_share_device_unknown: " + dev
+	}
+	only := domain.CloneVec(r.capacity)
+	only.GpuShares = map[string]*nexusv1.GPUShare{dev: c}
+	if fits, short := domain.Fits(only, r.committed, request); !fits {
+		return nil, "gpu_share_device_full: " + dev + " " + domain.ShortfallReason(short)
+	}
+	out := domain.CloneVec(request)
+	out.GpuShares = map[string]*nexusv1.GPUShare{dev: {
+		Milli: int64(request.GetGpuShareMilli()), MemoryBytes: request.GetGpuShareMemoryBytes()}}
+	return out, ""
+}
+
+// pickMIG names free MIG instances for the request. Called with r.mu held.
+func (r *Registry) pickMIG(request *nexusv1.ResourceVector) ([]string, string) {
+	var out []string
+	profiles := make([]string, 0, len(request.GetMig()))
+	for p := range request.GetMig() {
+		profiles = append(profiles, p)
+	}
+	sort.Strings(profiles)
+	for _, p := range profiles {
+		need := request.GetMig()[p]
+		for _, u := range r.inv.MIG[p] {
+			if need == 0 {
+				break
+			}
+			if !r.migHeld[u] {
+				out = append(out, u)
+				need--
+			}
+		}
+		if need > 0 {
+			// Fits passed on the count, so the named set disagrees with the
+			// ledger. Refuse rather than hand out an instance someone holds.
+			return nil, "mig_instances_unavailable: " + p
+		}
+	}
+	return out, ""
+}
+
+// GPUAssignment is the fractional-GPU part of an admitted attempt, for the
+// executor.
+func (r *Registry) GPUAssignment(attemptID string) executor.GPUAssignment {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	g := executor.GPUAssignment{MIG: append([]string(nil), r.migOf[attemptID]...), MPSPipeDir: r.MPSPipeDir}
+	placed := r.active[attemptID]
+	if len(placed.GetMig()) > 0 {
+		g.MIGProfiles = map[string]int64{}
+		for p, n := range placed.GetMig() {
+			g.MIGProfiles[p] = n
+		}
+	}
+	if dev, ok := domain.SharedDevice(placed); ok {
+		g.SharedDevice = dev
+		g.SharedMode = r.inv.Shared[dev].Mode
+		g.ShareMilli = int64(placed.GetGpuShareMilli())
+		g.ShareMemoryBytes = placed.GetGpuShareMemoryBytes()
+	}
+	return g
 }
 
 // GPUDevices is the device indices an admitted attempt holds, lowest first, or
@@ -131,6 +259,10 @@ func (r *Registry) Release(attemptID string) {
 		delete(r.gpuHeld, d)
 	}
 	delete(r.gpus, attemptID)
+	for _, u := range r.migOf[attemptID] {
+		delete(r.migHeld, u)
+	}
+	delete(r.migOf, attemptID)
 }
 
 // RunningAttemptIDs is the heartbeat's ground truth. Sorted so the wire payload

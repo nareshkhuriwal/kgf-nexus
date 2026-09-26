@@ -12,6 +12,9 @@ PROTOC        ?= protoc
 # protoc plugins install into GOBIN, which is not on PATH in every shell.
 GOBIN         ?= $(shell $(GO) env GOPATH)/bin
 NAMESPACE     ?= default
+# The tenant `make seed` mints the worker (agent) key for. Defaults to NAMESPACE;
+# set it with NEXUS_AGENT_NAMESPACE when the compose agents serve another tenant.
+AGENT_NAMESPACE ?= $(or $(NEXUS_AGENT_NAMESPACE),$(NAMESPACE))
 
 # The database `make up` starts, which is what seed and the migrate targets act
 # on unless told otherwise. It used to default to a bare "local dev database"
@@ -28,10 +31,13 @@ MIGRATIONS    := services/migrations
 
 # test-nats and sdk-test have their own .PHONY lines so a merge that edits the
 # list below does not conflict with them.
-.PHONY: test-nats
+.PHONY: test-nats test-vault airgap-bundle airgap-test
 .PHONY: sdk-test
 .PHONY: sdk-typecheck
 .PHONY: check-doc-refs
+.PHONY: check-go-version
+.PHONY: objstore-conformance tracing-e2e test-stores-up test-stores-down
+.PHONY: docs docs-serve docs-clean
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test e2e e2e-up e2e-down seed submit-example chaos clean \
         backup backup-artifacts backup-all restore-drill artifact-gc check-refs \
@@ -89,6 +95,22 @@ chaos: ## Kill workers mid-task and assert exactly-one-logical-effect (needs `ma
 test-nats: ## Run the NATS/outbox and broker-authorization integration tests in isolated containers (needs Docker, helm)
 	tests/nats/run-integration.sh
 
+# Worker-side secret resolution against a REAL Vault (ADR-0025, OPERATIONS
+# §25.1). A throwaway dev-mode container, pinned by digest, on its own port;
+# the test seals it at the end (NEXUS_TEST_VAULT_ALLOW_SEAL), which is why the
+# container is always removed. KEEP=1 leaves it up.
+VAULT_IMAGE      ?= docker.io/hashicorp/vault:1.21.4@sha256:4e33b126a59c0c333b76fb4e894722462659a6bec7c48c9ee8cea56fccfd2569
+VAULT_TEST_NAME  ?= nexus-test-vault
+VAULT_TEST_PORT  ?= 55561
+test-vault: ## Run the secret-provider integration tests against a pinned dev-mode Vault container (needs Docker)
+	@docker rm -f $(VAULT_TEST_NAME) >/dev/null 2>&1 || true
+	docker run -d --name $(VAULT_TEST_NAME) --cap-add IPC_LOCK -p 127.0.0.1:$(VAULT_TEST_PORT):8200 \
+	  -e VAULT_DEV_ROOT_TOKEN_ID=nexus-test-root -e VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200 '$(VAULT_IMAGE)' >/dev/null
+	@for i in $$(seq 1 30); do curl -fsS http://127.0.0.1:$(VAULT_TEST_PORT)/v1/sys/health >/dev/null 2>&1 && break; sleep 1; done
+	NEXUS_TEST_VAULT_ADDR=http://127.0.0.1:$(VAULT_TEST_PORT) NEXUS_TEST_VAULT_ROOT_TOKEN=nexus-test-root \
+	  NEXUS_TEST_VAULT_ALLOW_SEAL=1 $(GO) test -count=1 -run 'Vault' -v ./agent/internal/secrets/; \
+	  rc=$$?; [ "$(KEEP)" = "1" ] || docker rm -f $(VAULT_TEST_NAME) >/dev/null; exit $$rc
+
 # ── Benchmarks (ADR-0016, ADR-0018) ───────────────────────────────────────
 # The benchmarks write hundreds of thousands of rows, so they never default to a
 # database: BENCH_DSN must be set explicitly, and `make bench-pg` provides a
@@ -105,6 +127,66 @@ BENCH_MINIO       ?= localhost:$(BENCH_MINIO_PORT)
 # Keep in step with deploy/docker-compose.yml.
 S3_IMAGE          ?= docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
 
+# The Azure Blob and GCS emulators for the result-store conformance suite
+# (ADR-0027), and the OpenTelemetry backend for the tracing end-to-end test
+# (ADR-0026). Pinned by digest like the S3 image; bump deliberately.
+AZURITE_IMAGE     ?= mcr.microsoft.com/azure-storage/azurite:3.35.0@sha256:647c63a91102a9d8e8000aab803436e1fc85fbb285e7ce830a82ee5d6661cf37
+FAKE_GCS_IMAGE    ?= docker.io/fsouza/fake-gcs-server:1.52.3@sha256:666f86b873120818b10a5e68d99401422fcf8b00c1f27fe89599c35236f48b4c
+JAEGER_IMAGE      ?= docker.io/jaegertracing/jaeger:2.10.0@sha256:8c593d8048d86334eb52dba26633b6c846b8ecbe5c22905702c932ae97baeb42
+# Disposable test stores: container prefix and loopback ports, overridable so
+# parallel checkouts do not collide.
+TEST_STORES_NAME  ?= nexus-teststores
+TEST_PG_PORT      ?= 55641
+TEST_S3_PORT      ?= 55642
+TEST_AZURITE_PORT ?= 55643
+TEST_GCS_PORT     ?= 55644
+TEST_OTLP_PORT    ?= 55645
+TEST_JAEGER_PORT  ?= 55646
+TEST_PG_PASSWORD  ?= teststores
+TEST_S3_USER      ?= teststores
+TEST_S3_SECRET    ?= teststores-secret
+# Azurite's published development account (not a secret; documented by Microsoft).
+AZURITE_KEY       := Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
+TEST_STORE_ENV = \
+  NEXUS_TEST_S3_ENDPOINT=127.0.0.1:$(TEST_S3_PORT) NEXUS_TEST_S3_ACCESS_KEY_ID=$(TEST_S3_USER) \
+  NEXUS_TEST_S3_SECRET_ACCESS_KEY=$(TEST_S3_SECRET) \
+  NEXUS_TEST_AZBLOB_ENDPOINT=http://127.0.0.1:$(TEST_AZURITE_PORT)/devstoreaccount1 \
+  NEXUS_TEST_AZBLOB_ACCOUNT=devstoreaccount1 NEXUS_TEST_AZBLOB_KEY='$(AZURITE_KEY)' \
+  NEXUS_TEST_GCS_ENDPOINT=http://127.0.0.1:$(TEST_GCS_PORT)
+
+test-stores-up: ## Start pinned Postgres, Silo, Azurite, fake-gcs-server and Jaeger for the storage and tracing suites
+	@docker inspect $(TEST_STORES_NAME)-pg >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-pg \
+	  -e POSTGRES_PASSWORD=$(TEST_PG_PASSWORD) -p 127.0.0.1:$(TEST_PG_PORT):5432 postgres:16-alpine >/dev/null
+	@docker inspect $(TEST_STORES_NAME)-s3 >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-s3 \
+	  -e MINIO_ROOT_USER=$(TEST_S3_USER) -e MINIO_ROOT_PASSWORD=$(TEST_S3_SECRET) \
+	  -p 127.0.0.1:$(TEST_S3_PORT):9000 $(S3_IMAGE) server /data >/dev/null
+	@docker inspect $(TEST_STORES_NAME)-azurite >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-azurite \
+	  -p 127.0.0.1:$(TEST_AZURITE_PORT):10000 $(AZURITE_IMAGE) \
+	  azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --skipApiVersionCheck --loose >/dev/null
+	@# -external-url makes the resumable-upload Location point back at the published port.
+	@docker inspect $(TEST_STORES_NAME)-gcs >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-gcs \
+	  -p 127.0.0.1:$(TEST_GCS_PORT):4443 $(FAKE_GCS_IMAGE) -scheme http -port 4443 \
+	  -public-host 127.0.0.1:$(TEST_GCS_PORT) -external-url http://127.0.0.1:$(TEST_GCS_PORT) -backend memory >/dev/null
+	@docker inspect $(TEST_STORES_NAME)-jaeger >/dev/null 2>&1 || docker run -d --name $(TEST_STORES_NAME)-jaeger \
+	  -p 127.0.0.1:$(TEST_OTLP_PORT):4317 -p 127.0.0.1:$(TEST_JAEGER_PORT):16686 $(JAEGER_IMAGE) >/dev/null
+	@for i in $$(seq 1 30); do docker exec $(TEST_STORES_NAME)-pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+	@sleep 2
+
+test-stores-down: ## Remove the containers test-stores-up started
+	-docker rm -f $(TEST_STORES_NAME)-pg $(TEST_STORES_NAME)-s3 $(TEST_STORES_NAME)-azurite \
+	  $(TEST_STORES_NAME)-gcs $(TEST_STORES_NAME)-jaeger
+
+objstore-conformance: test-stores-up ## Run the result-store conformance suite against Silo, Azurite and fake-gcs-server
+	@# A skipped backend looks like a pass in `go test` output (F85), so a skip fails the target.
+	@out=$$($(TEST_STORE_ENV) $(GO) test -count=1 -v -run Conformance ./internal/objstore/... 2>&1); status=$$?; \
+	  echo "$$out" | grep -E '^(--- |ok|FAIL|PASS)|skipping'; \
+	  if echo "$$out" | grep -q "skipping integration test"; then echo "a backend was SKIPPED"; exit 1; fi; exit $$status
+
+tracing-e2e: test-stores-up ## One trace from API to agent and back, read from Jaeger (ADR-0026)
+	$(TEST_STORE_ENV) NEXUS_E2E_PG_DSN='postgres://postgres:$(TEST_PG_PASSWORD)@127.0.0.1:$(TEST_PG_PORT)/postgres?sslmode=disable' \
+	  NEXUS_E2E_OTLP_GRPC=127.0.0.1:$(TEST_OTLP_PORT) NEXUS_E2E_JAEGER_QUERY=http://127.0.0.1:$(TEST_JAEGER_PORT) \
+	  $(GO) test -tags tracing_e2e -count=1 -v -timeout 10m ./tests/tracing/
+
 print-s3-image: ## Print the pinned S3 (Silo) image reference, for CI and scripts
 	@echo '$(S3_IMAGE)'
 
@@ -115,6 +197,42 @@ verify-s3-image: ## Verify the pinned S3 image's GitHub build provenance (needs 
 
 check-doc-refs: ## Fail if any "OPERATIONS §N" reference in the repo names a section that does not exist
 	python3 deploy/scripts/check-operations-refs.py
+
+check-go-version: ## Fail unless go.mod, CONTRACT.md, CI and the service image name the same Go version
+	$(GO) test -count=1 ./tests/repo
+
+# ── Documentation site (docs-site/README.md) ───────────────────────────────
+# MkDocs Material from a hash-locked lock file, in its own venv. The CLI
+# reference is generated from a nexusctl built here, the API reference from
+# api/openapi.yaml, the SDK reference from docstrings (static analysis). The
+# build is --strict (every warning, including a broken link or anchor, fails)
+# and is followed by a link/anchor check over the rendered HTML.
+DOCS_PYTHON   ?= python3
+DOCS_VENV     ?= docs-site/.venv
+DOCS_NEXUSCTL ?= docs-site/.venv/bin/nexusctl
+
+$(DOCS_VENV)/.installed: docs-site/requirements.txt
+	@$(DOCS_PYTHON) -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
+	  || { echo "docs: $(DOCS_PYTHON) is $$($(DOCS_PYTHON) --version 2>&1); the docs build needs 3.11+ (set DOCS_PYTHON)"; exit 1; }
+	$(DOCS_PYTHON) -m venv $(DOCS_VENV)
+	$(DOCS_VENV)/bin/python -m pip install --quiet --upgrade pip
+	$(DOCS_VENV)/bin/python -m pip install --quiet --require-hashes -r docs-site/requirements.txt
+	@touch $@
+
+docs: $(DOCS_VENV)/.installed ## Build the documentation site (strict) and check every link and anchor
+	$(GO) build -o $(DOCS_NEXUSCTL) ./cli/cmd/nexusctl
+	cd docs-site && NO_MKDOCS_2_WARNING=1 NEXUS_DOCS_NEXUSCTL='$(abspath $(DOCS_NEXUSCTL))' \
+	  '$(abspath $(DOCS_VENV))/bin/mkdocs' build --strict --clean
+	$(DOCS_VENV)/bin/python docs-site/scripts/check_links.py docs-site/site
+	@echo "docs: built docs-site/site (open docs-site/site/index.html, or run make docs-serve)"
+
+docs-serve: $(DOCS_VENV)/.installed ## Preview the documentation site at http://127.0.0.1:8000
+	$(GO) build -o $(DOCS_NEXUSCTL) ./cli/cmd/nexusctl
+	cd docs-site && NO_MKDOCS_2_WARNING=1 NEXUS_DOCS_NEXUSCTL='$(abspath $(DOCS_NEXUSCTL))' \
+	  '$(abspath $(DOCS_VENV))/bin/mkdocs' serve --strict
+
+docs-clean: ## Remove the built site and the docs venv
+	rm -rf docs-site/site $(DOCS_VENV)
 
 bench-pg: ## Start a disposable, migrated Postgres + MinIO for the benchmarks
 	@docker inspect $(BENCH_NAME)-pg >/dev/null 2>&1 || docker run -d --name $(BENCH_NAME)-pg \
@@ -132,6 +250,11 @@ bench-dispatch: ## Claims/sec and p50/p99 claim latency vs replicas and backlog 
 	@test -n "$(BENCH_DSN)" || { echo "BENCH_DSN is unset; run 'make bench-pg' and export what it prints"; exit 1; }
 	NEXUS_BENCH_DSN='$(BENCH_DSN)' $(GO) test -tags bench -count=1 -v -timeout 120m \
 	  -run TestDispatchCeiling ./tests/bench/
+
+bench-ratelimit: ## Permit throughput/latency, saturation correctness, and claims with permit traffic (ADR-0032; needs BENCH_DSN)
+	@test -n "$(BENCH_DSN)" || { echo "BENCH_DSN is unset; run 'make bench-pg' and export what it prints"; exit 1; }
+	NEXUS_BENCH_DSN='$(BENCH_DSN)' $(GO) test -tags bench -count=1 -v -timeout 60m \
+	  -run TestRateLimiterCeiling ./tests/bench/
 
 bench-inline: ## Postgres-inline vs MinIO round trip by payload size (needs BENCH_DSN)
 	@test -n "$(BENCH_DSN)" || { echo "BENCH_DSN is unset; run 'make bench-pg' and export what it prints"; exit 1; }
@@ -163,23 +286,56 @@ migrate-down: ## Roll back all *.down.sql migrations, newest first (DESTRUCTIVE)
 	echo "migrate-down: done"
 
 # ── Compose ───────────────────────────────────────────────────────────────
-up: ## Bring up the full stack (postgres, minio, migrations, 6 services, 2 agents, ui)
+# deploy/docker-compose.yml requires NEXUS_WORKER_API_KEY (the agents'
+# credential), and Compose refuses to parse the file while it is unset. On a
+# fresh checkout nothing has set it, so `make up` used to die inside Compose
+# with a bare interpolation error. The first-run entry point is `make
+# quickstart` (nexusctl up), which mints both credentials through the API;
+# `make up` is the drive-it-yourself path, and now says so before Compose runs.
+up: ## Bring up the full stack with your own keys (first run on a fresh checkout: `make quickstart`)
+	@if [ -z "$${NEXUS_WORKER_API_KEY:-}" ]; then \
+	  echo "make up: NEXUS_WORKER_API_KEY is not set, and the agents cannot start without it." >&2; \
+	  echo "" >&2; \
+	  echo "  First run on this checkout? Use the quick start: it brings the stack up," >&2; \
+	  echo "  registers a tenant and mints the admin and worker tokens through the API" >&2; \
+	  echo "  (cli/README.md, 'Local quick start'):" >&2; \
+	  echo "      make quickstart" >&2; \
+	  echo "" >&2; \
+	  echo "  Or drive Compose yourself with a key you generate, then install it:" >&2; \
+	  echo '      export NEXUS_WORKER_API_KEY=$$(make -s worker-key)' >&2; \
+	  echo "      make up && make seed" >&2; \
+	  exit 2; \
+	fi
 	$(COMPOSE) up --build -d
 	@echo
 	@echo "UI      http://localhost:$${NEXUS_UI_PORT:-3000}"
 	@echo "API     http://localhost:$${NEXUS_API_PORT:-8090}/v1/namespaces/$(NAMESPACE)/runs"
 	@echo "MinIO   http://localhost:$${NEXUS_MINIO_CONSOLE_PORT:-9001}"
 	@echo
-	@echo "Next:   make seed   # create a dev API key"
+	@echo "Next:   make seed   # installs this worker key for the agents, and an admin key"
 
+# The first-run path. QUICKSTART_ARGS passes flags through, e.g.
+#   make quickstart QUICKSTART_ARGS="-p nexus-mine --api-port 18090"
+QUICKSTART_ARGS ?=
+.PHONY: quickstart worker-key
+quickstart: ## First run: start the stack, register a tenant, mint admin + worker tokens via the API (nexusctl up)
+	$(GO) run ./cli/cmd/nexusctl up $(QUICKSTART_ARGS)
+
+worker-key: ## Print a fresh random worker key (export as NEXUS_WORKER_API_KEY before `make up`, then `make seed`)
+	@if command -v openssl >/dev/null 2>&1; then printf 'nxs_worker_%s\n' "$$(openssl rand -hex 32)"; \
+	else printf 'nxs_worker_%s\n' "$$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"; fi
+
+# These only address existing containers, but Compose still parses the whole
+# file, so they pass a placeholder when the key is unset. It reaches no
+# container: nothing is created by down, logs or ps.
 down: ## Stop the stack and remove volumes (DESTROYS local run history)
-	$(COMPOSE) down -v
+	NEXUS_WORKER_API_KEY="$${NEXUS_WORKER_API_KEY:-unused-by-down}" $(COMPOSE) down -v
 
 logs: ## Tail logs for all services
-	$(COMPOSE) logs -f --tail=100
+	@NEXUS_WORKER_API_KEY="$${NEXUS_WORKER_API_KEY:-unused-by-logs}" $(COMPOSE) logs -f --tail=100
 
 ps: ## Show container status
-	$(COMPOSE) ps
+	@NEXUS_WORKER_API_KEY="$${NEXUS_WORKER_API_KEY:-unused-by-ps}" $(COMPOSE) ps
 
 # ── Kubernetes dev environment (deploy/terraform/environments/dev) ────────
 # The whole platform on Docker Desktop's Kubernetes, via the kgf-nexus Helm
@@ -338,8 +494,11 @@ sdk-test: $(SDK_VENV)/.installed sdk-typecheck ## Type-check, then run the Pytho
 # belong to a registered tenant" (F121). Idempotent, and the same statement the
 # Helm bootstrap job and deploy/pitr-seed.sh already run.
 seed: ## Generate and install API keys (prints each plaintext exactly once)
-	@command -v psql >/dev/null || { echo "psql not found; run: $(COMPOSE) exec postgres psql -U nexus -d nexus"; exit 1; }
 	@set -euo pipefail; \
+	if ! command -v psql >/dev/null 2>&1; then \
+	  echo "seed: no psql on PATH; using the compose stack's own postgres container" >&2; \
+	  psql() { shift; NEXUS_WORKER_API_KEY="$${NEXUS_WORKER_API_KEY:-unused}" $(COMPOSE) exec -T postgres psql -U nexus -d nexus "$$@"; }; \
+	fi; \
 	gen() { \
 	  if command -v openssl >/dev/null 2>&1; then \
 	    printf 'nxs_%s_%s' "$$1" "$$(openssl rand -hex 32)"; \
@@ -356,15 +515,18 @@ seed: ## Generate and install API keys (prints each plaintext exactly once)
 	  "INSERT INTO api_keys (namespace, name, key_hash, role) \
 	   VALUES ('$(NAMESPACE)', 'admin-$$(date +%Y%m%d%H%M%S)', '$$HASH', 'admin') \
 	   ON CONFLICT (key_hash) DO NOTHING"; \
+	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
+	  "INSERT INTO tenants (namespace, name) VALUES ('$(AGENT_NAMESPACE)', '$(AGENT_NAMESPACE)') \
+	   ON CONFLICT (namespace) DO NOTHING"; \
 	WKEY="$${NEXUS_WORKER_API_KEY:-$$(gen worker)}"; \
 	WHASH=$$(printf '%s' "$$WKEY" | shasum -a 256 | cut -d' ' -f1); \
 	psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -q -c \
 	  "INSERT INTO api_keys (namespace, name, key_hash, role) \
-	   VALUES ('$(NAMESPACE)', 'worker-$$(date +%Y%m%d%H%M%S)', '$$WHASH', 'worker') \
+	   VALUES ('$(AGENT_NAMESPACE)', 'worker-$$(date +%Y%m%d%H%M%S)', '$$WHASH', 'worker') \
 	   ON CONFLICT (key_hash) DO NOTHING"; \
 	echo ""; \
 	echo "  admin  key (console, CLI):  $$KEY"; \
-	echo "  worker key (agents):        $$WKEY"; \
+	echo "  worker key (agents, namespace $(AGENT_NAMESPACE)): $$WKEY"; \
 	echo ""; \
 	echo "  Only the SHA-256 hash is stored, so these cannot be recovered."; \
 	echo "  Copy the admin key into the console via the header's \"Set API key\"."; \
@@ -477,6 +639,20 @@ check-refs: ## Report rows whose result object is MISSING; read-only (OPERATIONS
 	$(GO) run ./services/artifact-gc/cmd/artifact-gc -check-refs \
 	  -database-url '$(ARTIFACT_GC_DSN)' -endpoint '$(ARTIFACT_GC_ENDPOINT)' $(ARTIFACT_GC_FLAGS)
 
+# ── Air-gapped installation (ADR-0025 §3, docs/AIRGAP.md) ─────────────────
+# The bundle is built on a CONNECTED host and carried across the gap:
+# digest-pinned images, the packaged chart, nexusctl/nexus-agent binaries, the
+# SDK wheel, schemas/, manifest.json + SHA256SUMS (cosign-signed when cosign is
+# installed). PLATFORMS=linux/amd64,linux/arm64 builds both; the default is the
+# Docker host's platform.
+AIRGAP_VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+PLATFORMS        ?=
+airgap-bundle: ## Build dist/nexus-airgap-$(AIRGAP_VERSION).tar.gz for an offline install (needs Docker, helm, go)
+	python3 deploy/airgap/build-bundle.py --version '$(AIRGAP_VERSION)' $(if $(PLATFORMS),--platforms '$(PLATFORMS)')
+
+airgap-test: ## Load the bundle into a throwaway local registry and prove every chart image resolves by digest (needs Docker, helm)
+	deploy/airgap/test-load.sh 'dist/nexus-airgap-$(AIRGAP_VERSION).tar.gz'
+
 clean: ## Remove build artefacts
 	rm -rf ui/dist ui/node_modules/.vite
 	$(GO) clean -cache -testcache
@@ -502,10 +678,16 @@ license-report: ## List the license of every module compiled into the binaries
 
 # Fails when a first-party source file is missing its SPDX identifier. Generated
 # code is exempt: it is rewritten by protoc and would lose the header anyway.
+# So are the `nexusctl init` scaffolds (cli/internal/templates/files/): they are
+# copied into the user's own project, where our header would mislabel their code.
 license-check: ## Assert every first-party source file carries an SPDX identifier
+	@# testdata/upstream/ holds byte-for-byte, sha256-pinned copies of upstream
+	@# example DAGs (Apache-2.0, original ASF headers kept; see each README), not first-party code.
 	@missing=0; \
 	for f in $$(git ls-files '*.go' '*.ts' '*.tsx' '*.py' '*.sh' '*.sql' '*.proto' \
-	            | grep -v '/gen/' | grep -v '^gen/'); do \
+	            | grep -v '/gen/' | grep -v '^gen/' \
+	            | grep -v '^cli/internal/templates/files/' \
+            | grep -v '^cli/internal/importer/testdata/upstream/'); do \
 	  if ! head -5 "$$f" | grep -q 'SPDX-License-Identifier'; then \
 	    echo "missing SPDX header: $$f"; missing=1; \
 	  fi; \
@@ -515,7 +697,32 @@ license-check: ## Assert every first-party source file carries an SPDX identifie
 # The previous release's database integration suite against THIS tree's schema,
 # reached by the real upgrade path (previous migrations, then these). ADR-0011
 # rule 5 says old replicas survive the new schema; this is the test that says
-# so. Disposable Postgres on 127.0.0.1:55688. docs/COMPATIBILITY.md §7.
+# so. Disposable Postgres on 127.0.0.1:55688, container nexus-compat-pg-55688;
+# NEXUS_COMPAT_PG_PORT and NEXUS_COMPAT_NAME_PREFIX move both. docs/COMPATIBILITY.md §7.
 .PHONY: compat-smoke
 compat-smoke: ## Run the previous release's DB integration suite against this tree's migrated schema
 	tests/compat/previous-release-smoke.sh
+
+# ── Pinned tools, chart and proto checks ──────────────────────────────────
+# Every tool is one exact release, downloaded into .tools/ and refused unless
+# its SHA-256 matches the pin in deploy/scripts/pinned-tool.sh.
+.PHONY: tools helm-validate proto-lint proto-breaking proto-check actionlint
+tools: ## Install the pinned, checksum-verified helm, kubeconform and buf into .tools/
+	@for t in helm kubeconform buf; do deploy/scripts/pinned-tool.sh $$t; done
+
+helm-validate: ## Lint, render and schema-check the Helm chart offline-capable (deploy/helm/validate.sh)
+	deploy/helm/validate.sh
+
+proto-lint: ## buf lint over proto/ (exceptions in proto/buf.yaml)
+	proto/check.sh lint
+
+proto-breaking: ## buf breaking against the previous main (BUF_AGAINST=<rev> overrides)
+	proto/check.sh breaking
+
+proto-check: ## buf lint and buf breaking
+	proto/check.sh all
+
+# actionlint in its digest-pinned image, over .github/workflows (needs Docker).
+ACTIONLINT_IMAGE ?= rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+actionlint: ## Lint the GitHub workflows with the pinned actionlint image
+	docker run --rm -v "$(CURDIR):/repo:ro" -w /repo $(ACTIONLINT_IMAGE) -color

@@ -21,6 +21,7 @@ import (
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics/metricstest"
 )
@@ -39,12 +40,14 @@ type scriptedGateway struct {
 	sticky bool
 	calls  int
 	keys   []string
+	last   *nexusv1.RegisterRequest
 	called chan struct{}
 }
 
 func (g *scriptedGateway) Register(ctx context.Context, req *nexusv1.RegisterRequest) (*nexusv1.RegisterResponse, error) {
 	g.mu.Lock()
 	g.calls++
+	g.last = req
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		g.keys = append(g.keys, strings.Join(md.Get("x-api-key"), ","))
 	}
@@ -189,7 +192,7 @@ func TestRegisterFailsFastOnPermanentErrors(t *testing.T) {
 		{codes.Unauthenticated, "NEXUS_API_KEY"},
 		{codes.PermissionDenied, "worker-role key"},
 		{codes.InvalidArgument, "rejected the registration request"},
-		{codes.FailedPrecondition, "retrying cannot fix"},
+		{codes.FailedPrecondition, "upgrade the agent"},
 		{codes.Unimplemented, "NEXUS_CONTROL_PLANE"},
 	} {
 		t.Run(tc.code.String(), func(t *testing.T) {
@@ -212,6 +215,23 @@ func TestRegisterFailsFastOnPermanentErrors(t *testing.T) {
 				t.Errorf("registration_attempts{permanent_error} = %v, want 1", got)
 			}
 		})
+	}
+}
+
+// TestRegisterAdvertisesCapabilities: the agent sends this build's
+// capabilities, which is what the gateway's admission gate checks
+// (NEXUS_REQUIRED_AGENT_CAPABILITIES, docs/COMPATIBILITY.md §4.4).
+func TestRegisterAdvertisesCapabilities(t *testing.T) {
+	g := &scriptedGateway{}
+	a, _ := testAgent(t, dialFake(t, g), fastBackoff)
+	if err := a.register(context.Background()); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	got := strings.Join(g.last.GetCapabilities(), ",")
+	if want := strings.Join(domain.AgentCapabilities(), ","); got != want {
+		t.Errorf("capabilities = %q, want %q", got, want)
 	}
 }
 

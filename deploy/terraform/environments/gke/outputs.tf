@@ -18,7 +18,9 @@ output "database" {
     port            = 5432
     database        = module.platform.postgres_database
     user            = module.platform.postgres_user
-    sslmode         = "require"
+    sslmode         = "verify-full"
+    ca_bundle       = "${module.nexus.namespace}/kgf-nexus-postgres-ca (key ca.crt)"
+    runtime_logins  = var.runtime_db_roles ? "${module.nexus.namespace}/kgf-nexus-db-logins (postgres-password-<component>); the admin login is used only by the migrate, bootstrap and db-roles Jobs" : "off: every service connects as the admin login"
     connection_name = module.platform.postgres_instance_connection_name
     password_secret = module.platform.postgres_password_secret
     k8s_secret      = "${module.nexus.namespace}/kgf-nexus-credentials (key postgres-password)"
@@ -26,12 +28,16 @@ output "database" {
 }
 
 output "object_store" {
-  description = "Nexus result store: GCS through the S3 interoperability API."
+  description = "Nexus result store: GCS, natively through Workload Identity or through the S3 interoperability API with an HMAC key."
   value = {
-    endpoint        = "https://storage.googleapis.com"
-    bucket          = module.platform.artifact_bucket
-    service_account = module.platform.artifact_service_account
-    credentials     = "${module.nexus.namespace}/kgf-nexus-credentials (keys minio-root-user, minio-root-password): HMAC key of the service account"
+    backend             = var.artifact_identity == "workload-identity" ? "gcs" : "s3"
+    endpoint            = var.artifact_identity == "workload-identity" ? "GCS JSON API (default endpoint)" : "https://storage.googleapis.com"
+    bucket              = module.platform.artifact_bucket
+    service_account     = module.platform.artifact_service_account
+    k8s_service_account = local.artifact_service_account
+    credentials = (var.artifact_identity == "workload-identity"
+      ? "GKE Workload Identity as ${module.platform.artifact_service_account}, no key"
+    : "${module.nexus.namespace}/kgf-nexus-credentials (keys minio-root-user, minio-root-password): HMAC key of the service account")
   }
 }
 

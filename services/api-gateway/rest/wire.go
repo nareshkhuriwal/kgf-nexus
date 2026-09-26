@@ -187,7 +187,21 @@ func attemptPayload(a store.AttemptRow) map[string]any {
 		// CHANGE of message ("pod Pending since ...").
 		"progress_at":         a.ProgressAt,
 		"progress_message_at": a.ProgressMessageAt,
+		// Usage units the TASK reported through the workload API (ADR-0032
+		// §2): cumulative totals keyed tokens:<provider>/<model>:input and so
+		// on. {} when nothing was reported. These are the numbers copied into
+		// the usage ledger when the attempt ended.
+		"usage_units":       usageUnitsJSON(a.UsageUnits),
+		"usage_reported_at": a.UsageReportedAt,
 	}
+}
+
+// usageUnitsJSON is the stored units object, or {} for none.
+func usageUnitsJSON(b []byte) json.RawMessage {
+	if len(b) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return json.RawMessage(b)
 }
 
 func eventPayload(e store.EventRow) map[string]any {

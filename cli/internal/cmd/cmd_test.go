@@ -760,6 +760,59 @@ func TestRunGetRendersNodeStates(t *testing.T) {
 	}
 }
 
+// The gateway's real run document (api/openapi.yaml): node state and
+// attempts_used on the node, everything about an execution on its attempts.
+// The table used to read attempt_count, worker and duration_ms off the node,
+// fields the gateway never sends, so every one printed "-" and the attempt id
+// that `nexusctl logs` needs was nowhere on screen.
+func TestRunGetShowsTheLatestAttemptFromTheGatewayDocument(t *testing.T) {
+	h := newHarness(t)
+	h.replyJSON(200, `{
+      "id":"run-1","spec_name":"etl","state":"FAILED",
+      "nodes":[
+        {"node_id":"extract","state":"SUCCEEDED","attempts_used":1,"max_attempts":4},
+        {"node_id":"load","state":"FAILED","attempts_used":2,"max_attempts":2}
+      ],
+      "attempts":[
+        {"id":"att-e1","node_id":"extract","attempt_number":1,"state":"SUCCEEDED",
+         "worker_hostname":"agent-cpu-1","started_at":"2026-09-26T06:54:00Z","ended_at":"2026-09-26T06:54:01.5Z"},
+        {"id":"att-l1","node_id":"load","attempt_number":1,"state":"FAILED",
+         "error":{"class":"ERROR_CLASS_TRANSIENT","message":"reset"}},
+        {"id":"att-l2","node_id":"load","attempt_number":2,"state":"FAILED",
+         "error":{"class":"ERROR_CLASS_APPLICATION","message":"boom"}}
+      ]}`)
+	code, out, errb := h.run("run", "get", "run-1")
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errb)
+	}
+	for _, want := range []string{"LAST ATTEMPT", "1/4", "att-e1", "agent-cpu-1", " 1s ", "2/2", "att-l2", "application: boom"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output should contain %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "att-l1") || strings.Contains(out, "reset") {
+		t.Errorf("an earlier attempt leaked into the row, got:\n%s", out)
+	}
+}
+
+func TestEventsTableReadsKindTimeAndPayload(t *testing.T) {
+	h := newHarness(t)
+	h.replyJSON(200, `{"events":[
+      {"seq":6,"kind":"AttemptFailed","node_id":"load","occurred_at":"2026-09-26T06:54:02.123Z",
+       "payload":{"state":"FAILED","error_class":"ERROR_CLASS_APPLICATION"}},
+      {"seq":7,"kind":"RetryExhausted","node_id":"load","occurred_at":"2026-09-26T06:54:02.2Z",
+       "payload":{"reason":"error_class_not_in_retry_on"}}]}`)
+	code, out, errb := h.run("events", "run-1")
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errb)
+	}
+	for _, want := range []string{"AttemptFailed", "06:54:02.123", "RetryExhausted", "error_class_not_in_retry_on"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output should contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
 func TestEmptyListingExplainsRatherThanShowingABareHeader(t *testing.T) {
 	h := newHarness(t)
 	h.env["NEXUS_NAMESPACE"] = "prod"
@@ -774,6 +827,47 @@ func TestEmptyListingExplainsRatherThanShowingABareHeader(t *testing.T) {
 	// Explaining the consequence is the actionable part.
 	if !strings.Contains(out, "queue") {
 		t.Errorf("should explain what happens with no workers, got:\n%s", out)
+	}
+}
+
+// TestWorkerListShowsCapacity: `worker ls` renders committed/advertised from
+// the fields the gateway actually sends (rest.workerPayload: "capacity",
+// "committed", "active_attempts"). It read "advertised" and
+// "running_attempts", which the worker listing never had, so the cpu, memory,
+// gpu and running columns were always "-".
+func TestWorkerListShowsCapacity(t *testing.T) {
+	h := newHarness(t)
+	h.env["NEXUS_NAMESPACE"] = "prod"
+	h.replyJSON(200, `{"workers":[{
+		"id":"w-1","hostname":"node-a","queues":["default"],"executors":["subprocess"],
+		"state":"ACTIVE","labels":{},
+		"capacity":{"cpu_millis":8000,"memory_bytes":17179869184,"gpu_count":2,"gpu_kind":"","gpu_memory_bytes":0,"disk_bytes":0,"custom":null},
+		"committed":{"cpu_millis":2000,"memory_bytes":4294967296,"gpu_count":1},
+		"agent_version":"1.4.0","registered_at":"2026-09-25T10:00:00Z",
+		"last_heartbeat_at":"2026-09-25T10:00:00Z","active_attempts":3}]}`)
+	code, out, errb := h.run("worker", "ls")
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errb)
+	}
+	var row string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "w-1") {
+			row = l
+		}
+	}
+	fields := strings.Fields(row)
+	if len(fields) < 7 {
+		t.Fatalf("no worker row in:\n%s", out)
+	}
+	cpu, mem, gpu, running := fields[3], fields[4], fields[5], fields[6]
+	if cpu == "-" || mem == "-" || gpu == "-" || running == "-" {
+		t.Fatalf("capacity columns are blank: cpu=%s mem=%s gpu=%s running=%s\n%s", cpu, mem, gpu, running, out)
+	}
+	if gpu != "1/2" || running != "3" {
+		t.Errorf("gpu=%s running=%s, want 1/2 and 3\n%s", gpu, running, out)
+	}
+	if !strings.Contains(cpu, "/") || !strings.Contains(mem, "/") {
+		t.Errorf("cpu=%s mem=%s, want committed/advertised\n%s", cpu, mem, out)
 	}
 }
 

@@ -47,6 +47,7 @@ locals {
       cpuMillis      = 4000
       memoryBytes    = 32 * local.gib
       gpuCount       = 2
+      gpu            = { requestDevices = false } # simulated: advertise, do not allocate
       gpuKind        = "nvidia-a100"
       gpuMemoryBytes = 40 * local.gib
       diskBytes      = 50 * local.gib
@@ -60,6 +61,7 @@ locals {
       cpuMillis      = 4000
       memoryBytes    = 16 * local.gib
       gpuCount       = 1
+      gpu            = { requestDevices = false } # simulated: advertise, do not allocate
       gpuKind        = "nvidia-a10"
       gpuMemoryBytes = 24 * local.gib
       diskBytes      = 50 * local.gib

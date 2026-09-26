@@ -15,6 +15,8 @@
 #                                scheduling and the mixed CPU/GPU exit
 #                                criterion are actually exercisable
 #   ui                         → nginx, serves the console and proxies /v1
+#   jaeger                     → OPTIONAL trace collector + UI, only with
+#                                `--profile tracing` (see x-tracing-env)
 #
 # Credentials below are DEV-ONLY and deliberately obvious. They exist so
 # `docker compose up` works with no setup; they are not a secret-management
@@ -34,8 +36,36 @@ x-postgres-env: &postgres-env
   # Postgres must merge this fragment, directly or through *service-env.
   DATABASE_URL: postgres://nexus:nexus-dev-password@postgres:5432/nexus?sslmode=disable
 
+# OpenTelemetry trace export (ADR-0026), the STANDARD variables, passed
+# through from the shell so an operator's usual OTEL_* settings apply as-is.
+# OFF unless set: OTEL_TRACES_EXPORTER defaults to none, and every other value
+# defaults to empty, which the binaries and the OTel SDK treat as unset. To
+# trace the whole stack into the bundled Jaeger:
+#
+#   OTEL_TRACES_EXPORTER=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 \
+#     docker compose -f deploy/docker-compose.yml --profile tracing up
+#
+# then open http://localhost:16686. Any other collector works the same way
+# (grpc: OTEL_EXPORTER_OTLP_PROTOCOL=grpc and port 4317). OTEL_SERVICE_NAME is
+# deliberately absent: each binary names itself, and one shared value would
+# merge every service into one in the trace UI. Propagation of W3C trace
+# context between the services is always on, traced or not.
+x-tracing-env: &tracing-env
+  OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+  OTEL_EXPORTER_OTLP_INSECURE: ${OTEL_EXPORTER_OTLP_INSECURE:-}
+  OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+  # Parent-based: the process that starts a trace decides once and every hop
+  # follows, so a trace is whole or absent. 1.0 keeps every new trace -- right
+  # for a laptop; production sizes it down (the chart's default is 0.1).
+  OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}
+  OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
+  OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment.name=compose}
+  OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-}
+
 x-service-env: &service-env
-  <<: *postgres-env
+  <<: [*postgres-env, *tracing-env]
   LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
   # Both spellings: services added later read NEXUS_LOG_LEVEL (the prefixed
   # convention every other setting here follows), while the earlier ones read
@@ -85,6 +115,10 @@ x-nats-init-wait: &nats-init-wait
     condition: service_completed_successfully
 
 x-minio-env: &minio-env
+  # s3 = the MinIO below. azblob and gcs exist (internal/objstore) but need
+  # their own account/identity variables, which this laptop stack does not
+  # model; it is here so every result-store client is told the same backend.
+  NEXUS_RESULT_STORE_BACKEND: ${NEXUS_RESULT_STORE_BACKEND:-s3}
   RESULT_STORE_ENDPOINT: http://minio:9000
   NEXUS_RESULT_STORE_ENDPOINT: http://minio:9000
   NEXUS_S3_USE_TLS: "false"
@@ -99,6 +133,17 @@ x-minio-env: &minio-env
   # Results at or below this size are inlined in Postgres rather than costing two
   # round-trips to the blob store (ADR-0008; §12 proposes 64 KiB).
   RESULT_STORE_INLINE_THRESHOLD_BYTES: "65536"
+
+# Notifications, webhook triggers and sensors (ADR-0028, docs/OPERATIONS.md §27).
+# NEXUS_SECRET_KEY seals channel and trigger secrets at rest; the gateway seals,
+# the event-service opens, so both must hold the SAME key. The default below is a
+# DEVELOPMENT key, public in this file: any real deployment sets its own
+# (openssl rand -base64 32) or leaves it unset and uses secret references.
+x-events-env: &events-env
+  NEXUS_SECRET_KEY: ${NEXUS_SECRET_KEY:-ZGV2LW9ubHktbmV4dXMtc2VjcmV0LWtleS0zMmJ5dGU=}
+  # Local receivers (a webhook on the host, Mailpit) are private addresses; a
+  # real deployment keeps this false so a channel cannot reach internal services.
+  NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS: ${NEXUS_NOTIFY_ALLOW_PRIVATE_TARGETS:-true}
 
 x-go-build: &go-build
   context: ..
@@ -195,7 +240,8 @@ services:
     image: natsio/nats-box:0.18.0
     user: "0:0"
     entrypoint: ["sh", "/nexus/nexus-nats-auth.sh"]
-    command: ["compose-init", "--tenant", "${NEXUS_NAMESPACE:-default}"]
+    # The agents' tenant: their NKey may subscribe to its dispatch hints only.
+    command: ["compose-init", "--tenant", "${NEXUS_AGENT_NAMESPACE:-${NEXUS_NAMESPACE:-default}}"]
     environment:
       NEXUS_NATS_DIR: /store
     volumes:
@@ -327,7 +373,11 @@ services:
         SERVICE_PATH: services/api-gateway/cmd/api-gateway
     depends_on: *depends-on-db
     environment:
-      <<: [*service-env, *minio-env]
+      <<: [*service-env, *minio-env, *events-env]
+      # true = an inbound REST traceparent becomes a span link, not the parent,
+      # so callers cannot pick the trace a request joins. Set it where the REST
+      # port faces callers you do not control; a laptop does not.
+      NEXUS_TRACING_PUBLIC_ENDPOINT: ${NEXUS_TRACING_PUBLIC_ENDPOINT:-false}
       HTTP_ADDR: ":8080"        # REST for humans, CLI, UI (§8.2)
       NEXUS_HTTP_ADDR: ":8080"
       NEXUS_REST_ADDR: ":8080"
@@ -341,6 +391,10 @@ services:
                                 # contends with UI queries (§3.2)
       # Static API keys are the MVP authn story (§11). `make seed` inserts one.
       AUTH_MODE: api_key
+      # Agent admission gate (docs/COMPATIBILITY.md §4.4); off unless set. The
+      # compose agents are "dev" builds, so a minimum version refuses them.
+      NEXUS_MIN_AGENT_VERSION: ${NEXUS_MIN_AGENT_VERSION:-}
+      NEXUS_REQUIRED_AGENT_CAPABILITIES: ${NEXUS_REQUIRED_AGENT_CAPABILITIES:-}
       # Email verification and password recovery (docs/OPERATIONS.md, "Email").
       # Defaults send to the Mailpit catcher below, so every flow is testable
       # locally and nothing leaves the laptop. Each value is overridable because
@@ -355,6 +409,11 @@ services:
       # Links in emails point at the console, which is where the verify and
       # reset pages live -- not at this gateway.
       NEXUS_PUBLIC_URL: ${NEXUS_PUBLIC_URL:-http://localhost:3000}
+      # KGF Cloud context authentication (ADR-0024, OPERATIONS §24). Standalone
+      # unless set; kgf/both need the gateway's key document or static keys.
+      NEXUS_AUTH_MODE: ${NEXUS_AUTH_MODE:-standalone}
+      NEXUS_KGF_CONTEXT_KEYS_URL: ${NEXUS_KGF_CONTEXT_KEYS_URL:-}
+      NEXUS_KGF_CONTEXT_PUBLIC_KEYS: ${NEXUS_KGF_CONTEXT_PUBLIC_KEYS:-}
       # The operations listener: /metrics, /healthz, /readyz. NOT the REST port,
       # which is the public ingress (docs/OPERATIONS.md, "Metrics").
       NEXUS_METRICS_ADDR: ":8088"
@@ -374,7 +433,9 @@ services:
         SERVICE_PATH: services/workflow-manager/cmd/workflow-manager
     depends_on: *depends-on-db
     environment:
-      <<: *service-env
+      # minio-env: object-store sensors (ADR-0028) list the result store unless
+      # NEXUS_SENSOR_S3_* names another endpoint.
+      <<: [*service-env, *minio-env]
       HTTP_ADDR: ":8080"
       NEXUS_HTTP_ADDR: ":8080"
       NEXUS_REST_ADDR: ":8080"
@@ -530,7 +591,7 @@ services:
     volumes:
       - nats-auth-event-service:/etc/nexus/nats:ro
     environment:
-      <<: [*service-env, *nats-env]
+      <<: [*service-env, *nats-env, *events-env]
       HTTP_ADDR: ":8080"
       NEXUS_HTTP_ADDR: ":8080"
       NEXUS_REST_ADDR: ":8080"
@@ -540,6 +601,15 @@ services:
       NEXUS_GRPC_ADDR: ":9090"
       NEXUS_WFM_GRPC_ADDR: ":9090"
       RM_GRPC_ADDR: ":9090"
+      # Notification email goes through the same SMTP settings as the gateway's
+      # account mail (Mailpit locally), and links point at the console.
+      NEXUS_SMTP_HOST: ${NEXUS_SMTP_HOST:-mailpit}
+      NEXUS_SMTP_PORT: ${NEXUS_SMTP_PORT:-1025}
+      NEXUS_SMTP_TLS: ${NEXUS_SMTP_TLS:-none}
+      NEXUS_SMTP_USERNAME: ${NEXUS_SMTP_USERNAME:-}
+      NEXUS_SMTP_PASSWORD: ${NEXUS_SMTP_PASSWORD:-}
+      NEXUS_SMTP_FROM: ${NEXUS_SMTP_FROM:-KGF Nexus <no-reply@nexus.localhost>}
+      NEXUS_CONSOLE_URL: ${NEXUS_PUBLIC_URL:-http://localhost:3000}
       # Outbox relay tuning (services/event-service/relay). Defaults shown.
       NEXUS_OUTBOX_RETENTION: 1h
       NEXUS_OUTBOX_MAX_AGE: 24h
@@ -567,12 +637,16 @@ services:
       api-gateway:
         condition: service_healthy
     environment:
-      <<: [*minio-env, *nats-env]
+      <<: [*minio-env, *nats-env, *tracing-env]
       # Workers hold an API token and never database credentials: a compromised
       # worker cannot corrupt runs it never touched (§3.1 invariant 2).
       NEXUS_CONTROL_PLANE: api-gateway:9091
-      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
-      NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
+      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?is unset. First run on a fresh checkout - use `make quickstart` (nexusctl up). Own keys - export NEXUS_WORKER_API_KEY=$$(make -s worker-key), then make up and make seed}
+      # The tenant this agent serves: NEXUS_AGENT_NAMESPACE, else the stack's
+      # NEXUS_NAMESPACE, else "default". The worker key must belong to it
+      # (`make seed AGENT_NAMESPACE=...`), and nats-init issues the agent NKey
+      # for the same tenant.
+      NEXUS_NAMESPACE: ${NEXUS_AGENT_NAMESPACE:-${NEXUS_NAMESPACE:-default}}
       NEXUS_QUEUES: default
       NEXUS_LABELS: "zone=local,accelerator=none"
       NEXUS_EXECUTORS: subprocess,docker
@@ -592,6 +666,7 @@ services:
       # a task but not how it ended, and report INDETERMINATE rather than
       # guessing (§6.3).
       NEXUS_WAL_DIR: /var/lib/nexus/wal
+      NEXUS_WORK_DIR: ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     ports:
       # /metrics (agent), loopback only.
@@ -605,6 +680,19 @@ services:
       # socket is effectively root on the host — acceptable on a laptop, never
       # in production, where the k8s executor (ADR-0007) is the answer.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Attempt work directories, at the SAME path on the host and in the
+      # agent: the docker executor bind-mounts them into task containers by
+      # path, and the daemon resolves that path on the host (F144).
+      - ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}:${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
+    # The agent runs as uid 10001, so it can use that socket only through the
+    # socket's group. Docker Desktop's VM-side socket is root:root 0660, hence
+    # the default 0; on a Linux host the socket is usually root:docker, and
+    # `nexusctl up` sets NEXUS_DOCKER_SOCKET_GID from it (for plain compose:
+    # NEXUS_DOCKER_SOCKET_GID=$(stat -c %g /var/run/docker.sock)). Without it
+    # the agent logs "docker daemon unreachable", advertises no docker
+    # executor, and every docker task waits unplaced (F144).
+    group_add:
+      - "${NEXUS_DOCKER_SOCKET_GID:-0}"
     restart: unless-stopped
 
   agent-gpu:
@@ -618,10 +706,14 @@ services:
       api-gateway:
         condition: service_healthy
     environment:
-      <<: [*minio-env, *nats-env]
+      <<: [*minio-env, *nats-env, *tracing-env]
       NEXUS_CONTROL_PLANE: api-gateway:9091
-      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
-      NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
+      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?is unset. First run on a fresh checkout - use `make quickstart` (nexusctl up). Own keys - export NEXUS_WORKER_API_KEY=$$(make -s worker-key), then make up and make seed}
+      # The tenant this agent serves: NEXUS_AGENT_NAMESPACE, else the stack's
+      # NEXUS_NAMESPACE, else "default". The worker key must belong to it
+      # (`make seed AGENT_NAMESPACE=...`), and nats-init issues the agent NKey
+      # for the same tenant.
+      NEXUS_NAMESPACE: ${NEXUS_AGENT_NAMESPACE:-${NEXUS_NAMESPACE:-default}}
       # Subscribes to BOTH queues so gpu work has somewhere to go while the
       # cpu-only agent still handles the default queue.
       NEXUS_QUEUES: default,gpu
@@ -638,10 +730,21 @@ services:
       NEXUS_GPU_COUNT: "2"
       NEXUS_GPU_KIND: ${NEXUS_GPU_KIND:-nvidia-a100}
       NEXUS_GPU_MEMORY_BYTES: "42949672960"
+      # Fractional GPUs (ADR-0029), simulated like the whole ones: one A100
+      # partitioned into MIG instances (synthetic UUIDs; the agent labels the
+      # worker simulated=true) and two shared devices, one time-sliced and one
+      # under MPS. Indices 2 and 3 because 0 and 1 are the whole GPUs above:
+      # a device is in exactly one mode. examples/gpu_sharing runs on these.
+      NEXUS_GPU_MIG: "1g.10gb=3;3g.40gb=1"
+      NEXUS_GPU_SHARED: "2:timeslice:40Gi,3:mps:40Gi"
+      # Node-local model/dataset cache (ADR-0030 §4).
+      NEXUS_ARTIFACT_CACHE_DIR: /var/lib/nexus/artifacts
+      NEXUS_ARTIFACT_CACHE_BYTES: 2Gi
       NEXUS_DISK_BYTES: "53687091200"
       NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
       NEXUS_METRICS_ADDR: ":8089"
       NEXUS_WAL_DIR: /var/lib/nexus/wal
+      NEXUS_WORK_DIR: ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     ports:
       # /metrics (agent), loopback only.
@@ -652,6 +755,12 @@ services:
       - nats-auth-agent:/etc/nexus/nats:ro
       - chaos-effects:/var/lib/nexus/effects
       - /var/run/docker.sock:/var/run/docker.sock
+      # Attempt work directories, at the SAME path on the host and in the
+      # agent: the docker executor bind-mounts them into task containers by
+      # path, and the daemon resolves that path on the host (F144).
+      - ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}:${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
+    group_add:
+      - "${NEXUS_DOCKER_SOCKET_GID:-0}"  # see agent-cpu (F144)
     restart: unless-stopped
 
   # A SECOND gpu agent, advertising nvidia-a10 rather than a100.
@@ -674,10 +783,14 @@ services:
       api-gateway:
         condition: service_healthy
     environment:
-      <<: [*minio-env, *nats-env]
+      <<: [*minio-env, *nats-env, *tracing-env]
       NEXUS_CONTROL_PLANE: api-gateway:9091
-      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?run `make seed` first, then export NEXUS_WORKER_API_KEY}
-      NEXUS_NAMESPACE: ${NEXUS_NAMESPACE:-default}
+      NEXUS_API_KEY: ${NEXUS_WORKER_API_KEY:?is unset. First run on a fresh checkout - use `make quickstart` (nexusctl up). Own keys - export NEXUS_WORKER_API_KEY=$$(make -s worker-key), then make up and make seed}
+      # The tenant this agent serves: NEXUS_AGENT_NAMESPACE, else the stack's
+      # NEXUS_NAMESPACE, else "default". The worker key must belong to it
+      # (`make seed AGENT_NAMESPACE=...`), and nats-init issues the agent NKey
+      # for the same tenant.
+      NEXUS_NAMESPACE: ${NEXUS_AGENT_NAMESPACE:-${NEXUS_NAMESPACE:-default}}
       NEXUS_QUEUES: default,gpu
       NEXUS_LABELS: "zone=local,accelerator=nvidia"
       NEXUS_EXECUTORS: subprocess,docker
@@ -690,6 +803,7 @@ services:
       NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
       NEXUS_METRICS_ADDR: ":8089"
       NEXUS_WAL_DIR: /var/lib/nexus/wal
+      NEXUS_WORK_DIR: ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
       LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
       NEXUS_LOG_LEVEL: ${NEXUS_LOG_LEVEL:-info}
     ports:
@@ -701,6 +815,33 @@ services:
       - nats-auth-agent:/etc/nexus/nats:ro
       - chaos-effects:/var/lib/nexus/effects
       - /var/run/docker.sock:/var/run/docker.sock
+      # Attempt work directories, at the SAME path on the host and in the
+      # agent: the docker executor bind-mounts them into task containers by
+      # path, and the daemon resolves that path on the host (F144).
+      - ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}:${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
+    group_add:
+      - "${NEXUS_DOCKER_SOCKET_GID:-0}"  # see agent-cpu (F144)
+    restart: unless-stopped
+
+  # ── Tracing (optional) ────────────────────────────────────────────────────
+  # Jaeger v2 (an OpenTelemetry Collector distribution) as the OTLP receiver,
+  # span store (in memory: gone on restart) and UI. Started ONLY with
+  # `--profile tracing`, and nothing depends_on it: a stack without it is the
+  # default, and a collector that is down costs spans, never requests.
+  # Pinned by digest like every upstream image here (OPERATIONS §22).
+  jaeger:
+    image: jaegertracing/jaeger:2.10.0@sha256:8c593d8048d86334eb52dba26633b6c846b8ecbe5c22905702c932ae97baeb42
+    profiles: ["tracing"]
+    environment:
+      # Jaeger v2's bundled config binds its receivers and UI to localhost
+      # unless told otherwise, which would refuse every other container.
+      JAEGER_LISTEN_HOST: 0.0.0.0
+    ports:
+      # Loopback only: OTLP from processes on the host (the Python SDK, a
+      # locally run service) and the UI. Containers use jaeger:4317/4318.
+      - "127.0.0.1:${NEXUS_OTLP_GRPC_PORT:-4317}:4317"
+      - "127.0.0.1:${NEXUS_OTLP_HTTP_PORT:-4318}:4318"
+      - "127.0.0.1:${NEXUS_JAEGER_UI_PORT:-16686}:16686"
     restart: unless-stopped
 
   # ── UI ──────────────────────────────────────────────────────────────────

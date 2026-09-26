@@ -18,19 +18,32 @@ output "database" {
     port            = 5432
     database        = module.platform.postgres_database
     user            = module.platform.postgres_user
-    sslmode         = "require"
+    sslmode         = "verify-full"
+    ca_bundle       = "${module.nexus.namespace}/kgf-nexus-postgres-ca (key ca.crt)"
+    runtime_logins  = var.runtime_db_roles ? "${module.nexus.namespace}/kgf-nexus-db-logins (postgres-password-<component>); the admin login is used only by the migrate, bootstrap and db-roles Jobs" : "off: every service connects as the admin login"
     password_secret = module.platform.postgres_password_secret_id
     k8s_secret      = "${module.nexus.namespace}/kgf-nexus-credentials (key postgres-password)"
   }
 }
 
 output "object_store" {
-  description = "Where Nexus artifacts live on AKS today, and the provisioned-but-unused Blob target (F115)."
+  description = "Where Nexus results and logs live, and how the pods authenticate to it."
   value = {
-    active              = "in-cluster MinIO (PVC on StorageClass nexus-premium-ssd)"
-    blob_account        = module.platform.artifact_storage_account
-    blob_container      = module.platform.artifact_container
-    blob_backend_status = var.azure_blob_native_backend ? "enabled" : "not implemented (F115)"
+    backend = var.azure_blob_native_backend ? "azblob" : "s3"
+    active = (var.azure_blob_native_backend
+      ? "Azure Blob container ${module.platform.artifact_container} in ${module.platform.artifact_storage_account} (private endpoint)"
+    : "in-cluster MinIO (PVC on StorageClass nexus-premium-ssd)")
+    blob_account   = module.platform.artifact_storage_account
+    blob_container = module.platform.artifact_container
+    # Honest about what is and is not proven: the backend exists and is
+    # selected, but no AKS environment has been applied yet (F115).
+    blob_backend_status = (var.azure_blob_native_backend
+      ? "enabled: native azblob backend, AKS workload identity (ServiceAccount ${local.artifact_service_account}); not yet exercised on a live cluster (F115)"
+    : "available, disabled (azure_blob_native_backend = false): results go to the in-cluster MinIO")
+    identity_client_id = module.platform.nexus_workload_identity_client_id
+    # The chart-created account api-gateway, workflow-manager, the agents and
+    # artifact-gc share.
+    service_account = local.artifact_service_account
   }
 }
 

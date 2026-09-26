@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 )
 
@@ -56,6 +57,24 @@ type SubprocessExecutor struct {
 	// safer than silently running unconstrained, and the resulting
 	// INFRASTRUCTURE error tells the operator to use docker.
 	AllowUnenforceableLimits bool
+
+	// InheritDeny are extra variables (path.Match globs) removed from the
+	// environment a task inherits from the agent, on top of the agent's own
+	// credentials, which are always removed (F138). The agent sets it to the
+	// tenant's env:// allow-list: a variable a task may only obtain by
+	// declaring it must not also arrive by inheritance.
+	//
+	// The subprocess executor runs the task as the agent's own user, so a
+	// hostile task can still read the agent's memory or /proc/<agent>/environ
+	// on hosts without PR_SET_DUMPABLE protection. This is one more reason
+	// the executor is development-grade.
+	InheritDeny []string
+
+	// EnvPassthrough are extra agent-process variables (path.Match globs)
+	// passed to subprocess tasks, on top of the minimal base set (F151).
+	// Operator configuration (NEXUS_SUBPROCESS_ENV_PASSTHROUGH), default
+	// empty. The agent's own credentials never pass, whatever it lists.
+	EnvPassthrough []string
 }
 
 // subprocState is the per-attempt private state hung off Prepared/Handle.
@@ -150,11 +169,22 @@ func (e *SubprocessExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepar
 		return Prepared{}, err
 	}
 
+	env := buildEnvScrubbed(spec, e.EnvPassthrough, e.InheritDeny, workDir, filepath.Join(workDir, InputDirName),
+		OutputFilePath(spec, workDir), filepath.Join(workDir, OutputDirName))
+	secretFiles, err := stageSecretFiles(workDir, spec.Secrets)
+	if err != nil {
+		_ = removeSecrets(workDir)
+		os.RemoveAll(workDir)
+		return Prepared{}, err
+	}
+	if secretFiles != "" {
+		env = append(env, secrets.EnvSecretsDir+"="+secretFiles)
+	}
+
 	st := &subprocState{
-		argv:      argv,
-		outputDir: workDir,
-		env: buildEnv(spec, workDir, filepath.Join(workDir, InputDirName),
-			OutputFilePath(spec, workDir), filepath.Join(workDir, OutputDirName)),
+		argv:            argv,
+		outputDir:       workDir,
+		env:             env,
 		workDir:         workDir,
 		declaredOutputs: spec.DeclaredOutputs,
 		stdoutOutput:    spec.StdoutOutput,
@@ -368,16 +398,19 @@ enforce:
 		}
 	}
 
+	// Output still in the pipes belongs to the attempt: drain it (bounded)
+	// BEFORE the outcome is built -- with a log sink, stdout reaches a
+	// declared stdout output through the drain, so reading the buffer first
+	// could report an empty or partial output -- and before the log file
+	// closes and the caller finalizes the shipped log.
+	st.capture.finish(captureDrainGrace)
+
 	o := e.buildOutcome(st, waitErr, timedOut, h.StartedAt)
 
 	st.waitMu.Lock()
 	st.waited, st.outcome = true, o
 	close(st.waitDone)
 	st.waitMu.Unlock()
-
-	// Output still in the pipes belongs to the attempt: drain it (bounded)
-	// before the log file closes and before the caller finalizes the shipped log.
-	st.capture.finish(captureDrainGrace)
 
 	// Flush and close the log sink only after the process is reaped, so no
 	// write races the close.
@@ -506,6 +539,11 @@ func (e *SubprocessExecutor) Cleanup(ctx context.Context, h Handle) error {
 	}
 	if h.WorkDir == "" {
 		return nil
+	}
+	// Secrets first: of everything an attempt leaves on disk, they are the
+	// thing that must not outlive it.
+	if err := removeSecrets(h.WorkDir); err != nil {
+		return err
 	}
 	// RemoveAll on an absent path is already a no-op, which is what makes
 	// repeated Cleanup calls safe.

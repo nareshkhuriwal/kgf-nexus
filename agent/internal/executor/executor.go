@@ -17,6 +17,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 )
 
@@ -43,10 +44,34 @@ type TaskSpec struct {
 	RunID     string
 	NodeID    string
 
+	// TraceEnv is the attempt's W3C trace context as process environment
+	// (TRACEPARENT, and TRACESTATE when set), following the OpenTelemetry
+	// environment-carrier convention (ADR-0026). Every executor passes it to
+	// the workload with the platform variables, so an instrumented task (the
+	// Python SDK with its opentelemetry extra, or any program honouring the
+	// convention) continues the attempt's trace. Empty when untraced.
+	TraceEnv map[string]string
+
 	// IdempotencyKey is handed to the workload as NEXUS_IDEMPOTENCY_KEY. It is
 	// stable across retries by construction, which is the mechanism that lets
 	// a handler deduplicate its own side effects.
 	IdempotencyKey string
+
+	// AttemptNumber is the 1-based attempt number, exported as
+	// NEXUS_ATTEMPT_NUMBER so a handler (and the SDK's ctx.attempt_number) can
+	// tell a first run from a retry without asking the control plane.
+	AttemptNumber int32
+
+	// TaskAPISocket is the HOST path of the attempt's workload-API socket
+	// (ADR-0032 §1), or empty when the attempt has none. The subprocess
+	// executor exports it as-is; the docker executor bind-mounts its directory
+	// at ContainerTaskAPIDir and exports the container path; the kubernetes
+	// executor exports nothing, because a pod on another node cannot reach a
+	// socket on this host (F148).
+	TaskAPISocket string
+	// TaskAPIToken is the socket's per-attempt bearer token, exported as
+	// NEXUS_TASK_API_TOKEN wherever TaskAPISocket is exported.
+	TaskAPIToken string
 
 	Runtime *nexusv1.RuntimeSpec
 
@@ -60,6 +85,16 @@ type TaskSpec struct {
 	// these (CUDA_VISIBLE_DEVICES, docker --gpus device=...) so concurrent GPU
 	// attempts land on different devices. Nil means none were assigned.
 	GPUDevices []int
+
+	// Artifacts maps a declared artifact name to its file in the agent's
+	// node-local cache (ADR-0030 §4). Exposed as NEXUS_ARTIFACT_<NAME>; the
+	// docker executor mounts each read-only. Nil for executors whose workload
+	// runs elsewhere (kubernetes), where a node-local path means nothing.
+	Artifacts map[string]string
+
+	// GPU is the fractional-GPU assignment (MIG instances, a shared-device
+	// slice), named by the worker's registry at admission (ADR-0029 §2).
+	GPU GPUAssignment
 
 	// Inputs are already-resolved references. Staging them is the executor's
 	// job because the payload must never transit the control plane (ADR-0008).
@@ -109,6 +144,11 @@ type TaskSpec struct {
 	// tagged by stream; for the others the runner follows Logs() into it. Nil
 	// leaves every executor's capture exactly as it was before log shipping.
 	LogSink LogSink
+
+	// Secrets are the attempt's RESOLVED secret values (ADR-0025), delivered
+	// by each executor as declared (env or file). They are never logged:
+	// secrets.Secret formats as [REDACTED]. Nil when the task declares none.
+	Secrets []secrets.Secret
 }
 
 // Prepared is an executor's staged, not-yet-running workload: a materialised
@@ -277,4 +317,38 @@ const (
 	// SDK's ctx.store -- inlines exactly what the agent itself would, instead
 	// of a compiled-in 64 KiB. Exported only when the agent knows the value.
 	EnvInlineThreshold = "NEXUS_INLINE_THRESHOLD_BYTES"
+	// EnvAttemptNumber is the attempt's 1-based number (TaskSpec.AttemptNumber).
+	EnvAttemptNumber = "NEXUS_ATTEMPT_NUMBER"
+	// EnvTaskAPI is the attempt's workload API as the workload sees it:
+	// unix://<socket path> (ADR-0032 §1). Absent when the executor cannot give
+	// the workload a path to the agent (kubernetes, F148); the SDK then keeps
+	// usage, permits and checkpoints in-process.
+	EnvTaskAPI = "NEXUS_TASK_API"
+	// EnvTaskAPIToken is the bearer token every request to EnvTaskAPI must
+	// carry. Exported exactly when EnvTaskAPI is.
+	EnvTaskAPIToken = "NEXUS_TASK_API_TOKEN"
 )
+
+// traceEnvList renders TraceEnv as KEY=VALUE pairs in a fixed order. Only the
+// two convention keys are passed, whatever the map holds: the trace context
+// arrives from the control plane, and nothing else from it belongs in a task's
+// environment.
+func traceEnvList(spec TaskSpec) []string {
+	var out []string
+	for _, k := range []string{"TRACEPARENT", "TRACESTATE"} {
+		if v := spec.TraceEnv[k]; v != "" {
+			out = append(out, k+"="+v)
+		}
+	}
+	return out
+}
+
+// ContainerTaskAPIDir is where the docker executor mounts the directory that
+// holds the attempt's task-API socket. The directory rather than the socket
+// file: a bind mount of a socket FILE pins the inode that existed at
+// container start, while the directory form works with every storage driver
+// and with rootless docker.
+const ContainerTaskAPIDir = "/run/nexus-task"
+
+// TaskAPIScheme prefixes the socket path in EnvTaskAPI.
+const TaskAPIScheme = "unix://"

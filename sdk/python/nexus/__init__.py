@@ -62,16 +62,23 @@ from .context import (
     TaskContext,
     derive_idempotency_key,
 )
+from ._taskapi import CheckpointInfo, StaleCheckpoint, StaleLease
+from .ratelimit import PermitGrant, RateLimited
 from .scheduling import Backfill, BackfillState, OverlapPolicy, Schedule, SchedulePreview
 from .task import TaskDefinition, registry, task
+from .tracing import TraceContext
 from .types import (
+    Asset,
     Cache,
+    Artifact,
     Cancellation,
     Concurrency,
     Gpu,
+    Placement,
     Resources,
     Retry,
     Runtime,
+    SecretInject,
     SecretRef,
     SpecError,
     Timeouts,
@@ -133,14 +140,18 @@ __all__ = [
     "Param",
     "registry",
     # declaration types
+    "Asset",
     "Resources",
     "Gpu",
+    "Placement",
+    "Artifact",
     "Timeouts",
     "Retry",
     "Cache",
     "Cancellation",
     "Runtime",
     "SecretRef",
+    "SecretInject",
     "Concurrency",
     "ValueSpec",
     "ValueSpecLike",
@@ -153,6 +164,13 @@ __all__ = [
     "StructuredLogger",
     "derive_idempotency_key",
     "EffectNotRecorded",
+    "TraceContext",
+    # AI workloads (ADR-0032): nexus.usage, nexus.llm, nexus.testing
+    "RateLimited",
+    "PermitGrant",
+    "CheckpointInfo",
+    "StaleLease",
+    "StaleCheckpoint",
     # client
     "NexusClient",
     "NexusError",

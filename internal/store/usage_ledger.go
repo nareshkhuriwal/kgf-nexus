@@ -4,10 +4,13 @@
 package store
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -104,7 +107,7 @@ WITH src AS (
   RETURNING id, attempt_id, tenant_id, namespace, run_id, node_id, attempt_number, outcome,
             queue, pool, ended_at, reserved_seconds, cpu_core_seconds, memory_gib_seconds, gpu_seconds
 ), ob AS (
-  INSERT INTO outbox (topic, namespace, routing_key, payload)
+  INSERT INTO outbox (topic, namespace, routing_key, payload, trace_context)
   SELECT 'usage_recorded', namespace, run_id::text,
          jsonb_build_object(
            'ledger_id', id, 'attempt_id', attempt_id, 'tenant_id', tenant_id,
@@ -112,10 +115,34 @@ WITH src AS (
            'attempt_number', attempt_number, 'outcome', outcome, 'queue', queue,
            'pool', pool, 'ended_at', ended_at, 'reserved_seconds', reserved_seconds,
            'cpu_core_seconds', cpu_core_seconds, 'memory_gib_seconds', memory_gib_seconds,
-           'gpu_seconds', gpu_seconds)
+           'gpu_seconds', gpu_seconds),
+         $2
     FROM ins
 )
 SELECT outcome FROM ins`
+
+// recordUsageWithUnitsSQL is recordUsageSQL with the attempt's reported usage
+// units (attempt_usage, migration 0036, ADR-0032 §2) merged into `custom`, and
+// announced as usage_units on the outbox row. Same statement, so the units are
+// recorded in the same transaction as the terminal transition. Usage keys all
+// contain ':' and no custom resource name can, so `||` never overwrites a
+// reserved resource. Every terminal caller locked the attempt row FOR UPDATE
+// before this statement, and RecordUsage holds FOR NO KEY UPDATE on it while it
+// writes, so the units read here are final: a report either committed before
+// the transition or is refused as stale after it.
+var recordUsageWithUnitsSQL = strings.NewReplacer(
+	`THEN a.resource_request -> 'custom' ELSE '{}'::jsonb END AS custom,`,
+	`THEN a.resource_request -> 'custom' ELSE '{}'::jsonb END
+           || COALESCE((SELECT u.units FROM attempt_usage u WHERE u.attempt_id = a.id), '{}'::jsonb) AS custom,`,
+	`queue, pool, ended_at, reserved_seconds, cpu_core_seconds, memory_gib_seconds, gpu_seconds
+), ob AS (`,
+	`queue, pool, ended_at, reserved_seconds, cpu_core_seconds, memory_gib_seconds, gpu_seconds,
+            (SELECT COALESCE(jsonb_object_agg(e.key, e.value), '{}'::jsonb)
+               FROM jsonb_each(custom) e WHERE strpos(e.key, ':') > 0) AS usage_units
+), ob AS (`,
+	`'gpu_seconds', gpu_seconds)`,
+	`'gpu_seconds', gpu_seconds, 'usage_units', usage_units)`,
+).Replace(recordUsageSQL)
 
 // recordUsage writes the attempt's ledger row in the caller's transaction and
 // returns its outcome, or "" when nothing was written: the attempt never held a
@@ -125,8 +152,12 @@ func (s *SchedulerStore) recordUsage(ctx context.Context, tx pgx.Tx, attemptID u
 	if s.meteringMissing {
 		return "", nil
 	}
+	q := recordUsageSQL
+	if !s.workloadMissing {
+		q = recordUsageWithUnitsSQL
+	}
 	var outcome string
-	err := tx.QueryRow(ctx, recordUsageSQL, attemptID).Scan(&outcome)
+	err := tx.QueryRow(ctx, q, attemptID, tracing.NullableTraceparent(ctx)).Scan(&outcome)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}

@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Every optional feature on at once: mTLS with a self-signed bootstrap CA,
-# HPAs, the cluster controller in apply mode, custom PDBs and a scheduler HPA.
+# HPAs, the cluster controller in apply mode, custom PDBs, a scheduler HPA and
+# OpenTelemetry tracing (headers from a Secret, public REST endpoint).
 # Render-only (deploy/helm/validate.sh); apply mode's UID check is skipped by
 # `helm template` because lookup returns nothing there.
 existingSecret: nexus-credentials
@@ -51,3 +52,12 @@ artifactGC:
   logRetention: 720h
   pushgatewayUrl: http://prometheus-pushgateway.monitoring:9091
   timeZone: Europe/London
+# Tracing on, with a vendor header from a Secret and an untrusted REST edge.
+tracing:
+  enabled: true
+  endpoint: http://otel-collector.observability:4317
+  protocol: grpc
+  samplerArg: "0.25"
+  headersSecret: { name: otel-vendor, key: headers }
+  resourceAttributes: deployment.environment.name=ci,cloud.region=local
+  publicEndpoint: true

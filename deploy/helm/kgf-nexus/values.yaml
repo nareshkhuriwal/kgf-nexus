@@ -37,8 +37,9 @@ logLevel: info
 
 # Credentials. REQUIRED: the name of a Secret in the release namespace with:
 #   postgres-password     password for the nexus database user (URL-safe)
-#   minio-root-user       object store access key
-#   minio-root-password   object store secret key
+#   minio-root-user       S3 access key (the in-cluster MinIO or an external
+#   minio-root-password   S3 store) and its secret. Not needed when the result
+#                         store uses a cloud identity (resultStore below)
 #   worker-api-key        API key the agents authenticate with (nxs_worker_...)
 #   admin-api-key         optional; bootstrap installs it as an admin key
 #   nats-event-service-nkey, nats-agent-nkey
@@ -59,9 +60,74 @@ postgres:
   image: postgres:16-alpine
   host: postgres        # used when enabled=false
   port: 5432
+  # The OWNER login: it owns the schema and runs the migrate, bootstrap and
+  # db-roles Jobs (password: existingSecret key postgres-password). With
+  # runtimeRoles.enabled=false it is ALSO what every service connects as;
+  # production should enable runtimeRoles so no service holds DDL rights.
   user: nexus
   database: nexus
+  # disable | require | verify-ca | verify-full. PRODUCTION: verify-full with
+  # caBundle below, so every pod checks the server certificate's chain AND its
+  # host name; require encrypts but accepts any server that answers. The
+  # in-cluster postgres (enabled=true) serves no TLS, so it takes disable.
   sslmode: disable
+  # Trust anchors for verify-ca/verify-full: the managed database's ROOT CA(s),
+  # never an intermediate or the server certificate (they rotate unannounced).
+  # One of secretName / configMapName, holding `key`. Mounted read-only at
+  # /etc/nexus/postgres-ca/ca.crt in every pod that connects, and passed as
+  # sslrootcert. deploy/terraform creates it from pinned bundles
+  # (deploy/terraform/ca-bundles). Rotation: docs/OPERATIONS.md §20.11.
+  caBundle:
+    secretName: ""
+    configMapName: ""
+    key: ca.crt
+  # Extra libpq/pgx connection parameters on EVERY connection, e.g.
+  # { connect_timeout: "10", target_session_attrs: read-write }. Values are
+  # URL-encoded. user, password, host, port, dbname and the ssl* keys are
+  # refused here: they have their own settings.
+  params: {}
+  # Per-connection settings, merged over params. `user`/`passwordKey` apply only
+  # with runtimeRoles.enabled; `params` always. migrate covers the migrate,
+  # bootstrap and db-roles Jobs (always the owner login).
+  connections:
+    apiGateway:      { user: nexus_api_gateway_login,      passwordKey: postgres-password-api-gateway,      params: {} }
+    workflowManager: { user: nexus_workflow_manager_login, passwordKey: postgres-password-workflow-manager, params: {} }
+    dagEngine:       { user: nexus_dag_engine_login,       passwordKey: postgres-password-dag-engine,       params: {} }
+    scheduler:       { user: nexus_scheduler_login,        passwordKey: postgres-password-scheduler,        params: {} }
+    resourceManager: { user: nexus_resource_manager_login, passwordKey: postgres-password-resource-manager, params: {} }
+    eventService:    { user: nexus_event_service_login,    passwordKey: postgres-password-event-service,    params: {} }
+    artifactGC:      { user: nexus_artifact_gc_login,      passwordKey: postgres-password-artifact-gc,      params: {} }
+    migrate:         { params: {} }
+  # Least-privilege runtime logins (docs/OPERATIONS.md §20.12). When enabled,
+  # each service connects as its own LOGIN role, a member of the NOLOGIN group
+  # role migration 0005 created for it (nexus_api_gateway, nexus_scheduler,
+  # ...), so it holds exactly ADR-0011's grants and no DDL; artifact-gc gets a
+  # read-only login. A db-roles Job, running as the owner login inside the
+  # cluster (where a managed server's private endpoint is reachable), creates
+  # the logins and sets their passwords from SCRAM verifiers computed in the
+  # Job, so no plaintext reaches the server. The owner password then reaches
+  # only the three Jobs.
+  runtimeRoles:
+    enabled: false
+    # union (default): every runtime login joins ALL six service group roles:
+    #   the DML the platform grants to any service, and nothing else -- no
+    #   DDL, no table ownership, no TRUNCATE, no role management, run_events
+    #   still append-only. Separate logins still give per-service passwords,
+    #   connection limits and pg_stat_activity attribution.
+    # service: each login joins ONLY its own group role (ADR-0011's write
+    #   matrix enforced at the database). Migration 0037 grants the paths the
+    #   strict e2e run found (CONTRACT-FINDINGS F132); opt-in until production
+    #   installs have run it (docs/OPERATIONS.md §20.12).
+    scope: union
+    # Secret holding each connections.<c>.passwordKey (URL-safe, >= 16 chars:
+    # A-Z a-z 0-9 . _ ~ -). Empty = existingSecret.
+    existingSecret: ""
+    # Bump after changing the passwords in the Secret: the db-roles Job re-runs
+    # under a new name and every connecting pod rolls to read the new value.
+    passwordRevision: 1
+    # Per-login concurrent session cap (-1 = none). Size above the pool's
+    # max_conns x replicas, or scale-out fails at connect.
+    connectionLimit: -1
   # Per-service connection pool caps (NEXUS_DB_MAX_CONNS / NEXUS_DB_MIN_CONNS).
   # Empty keeps each service's own default (16 for most). Set these when the
   # database is shared and its max_connections is small, e.g. a workstation's
@@ -154,6 +220,157 @@ minio:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { memory: 1Gi }
 
+# ─── Result store: which backend and how it authenticates ───────────────
+# Read by EVERY result-store client: api-gateway (task logs), the
+# workflow-manager (object-store sensors), the agents (outputs, logs) and
+# artifact-gc. They must all agree on the backend and the
+# bucket, so this one block is rendered identically into each of them.
+#
+# The bucket (or Azure container) and region are minio.bucket / minio.region
+# above WHATEVER the backend: their names predate the other backends, and every
+# existing values file already sets them. The S3 endpoint is minio.endpoint;
+# azblob and gcs take their own endpoint below, because their default is "the
+# provider's public endpoint", never the in-cluster MinIO.
+#
+# minio.enabled (the in-cluster MinIO) is only valid with backend s3 and
+# credentials static or auto: MinIO authenticates with its root key pair, never
+# with a cloud identity. The chart refuses the other combinations rather than
+# run a MinIO that nothing talks to (set minio.enabled=false).
+resultStore:
+  # s3     -- Amazon S3, MinIO, or any S3-compatible store -- including GCS
+  #           through its XML interoperability API with an HMAC key (endpoint
+  #           https://storage.googleapis.com, credentials static).
+  # azblob -- Azure Blob Storage, native. minio.bucket is the CONTAINER.
+  # gcs    -- Google Cloud Storage, native JSON API, keyless on GKE.
+  backend: s3
+  # Multipart part / Azure block / GCS resumable chunk size, 5 MiB..512 MiB.
+  # Each in-flight upload buffers about one part in memory, so this times an
+  # agent's concurrent uploads is the memory its uploads need. 5 MiB is S3's
+  # minimum part; a multiple of 256 KiB keeps GCS from rounding it.
+  partSizeBytes: 16777216
+  s3:
+    # auto         -- the static key pair when the Secret holds one (the key
+    #                 references are optional in this mode), else the AWS
+    #                 identity visible in the pod's environment: AWS_* keys,
+    #                 IRSA, EKS Pod Identity, ECS. Never EC2 instance metadata
+    #                 (probing it hangs off EC2; use iam for that).
+    # static       -- ONLY the key pair (accessKeySecret below). A missing key
+    #                 fails pod start instead of silently falling through.
+    # web-identity -- IRSA: AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE, injected
+    #                 by the EKS pod-identity webhook from the ServiceAccount's
+    #                 eks.amazonaws.com/role-arn annotation.
+    # pod-identity -- EKS Pod Identity: AWS_CONTAINER_CREDENTIALS_FULL_URI +
+    #                 AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE, injected by the Pod
+    #                 Identity agent for a ServiceAccount with an association.
+    # iam          -- the whole chain including ECS task roles and EC2 IMDS.
+    #                 Nodes with an IMDS hop limit of 1 (the eks-platform
+    #                 default) deny IMDS to pods, on purpose.
+    # env          -- AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY that YOU inject
+    #                 into the pods; the chart renders none.
+    # anonymous    -- unsigned requests: a public bucket or a test store only.
+    # Only static and auto render key references, so for every other mode the
+    # Secret need not hold minio-root-user / minio-root-password at all.
+    credentials: auto
+    # Where the static key pair lives. Empty name = existingSecret, under the
+    # historical key names (they hold any S3 key pair, not only MinIO's). The
+    # in-cluster MinIO reads its root credentials from the same place.
+    accessKeySecret:
+      name: ""
+      accessKeyIdKey: minio-root-user
+      secretAccessKeyKey: minio-root-password
+  azure:
+    # REQUIRED for backend azblob: the storage account NAME (not a URL).
+    account: ""
+    # Empty = https://<account>.blob.core.windows.net/. Set it for a sovereign
+    # cloud (…blob.core.chinacloudapi.cn) or Azurite in a test cluster. A private
+    # endpoint needs nothing here: its private DNS zone answers the public name.
+    endpoint: ""
+    # auto              -- shared key if keySecret.name is set, else workload
+    #                      identity if the webhook injected
+    #                      AZURE_FEDERATED_TOKEN_FILE, else managed identity.
+    # workload-identity -- AKS workload identity (production). The chart adds
+    #                      the pod label azure.workload.identity/use: "true" to
+    #                      every result-store pod; the ServiceAccounts they run
+    #                      as (serviceAccounts.apiGateway / .workflowManager / .agent / .artifactGC
+    #                      below) must carry azure.workload.identity/client-id,
+    #                      and the chart refuses to create them without it.
+    # managed-identity  -- the node's (kubelet's) identity, or the user-assigned
+    #                      identity clientId selects.
+    # shared-key        -- the account key from keySecret. Accounts with shared
+    #                      keys disabled (aks-platform's) refuse it.
+    auth: auto
+    # Optional NEXUS_AZURE_CLIENT_ID: selects a user-assigned managed identity,
+    # or overrides the AZURE_CLIENT_ID the workload-identity webhook injects
+    # (normally unnecessary: the webhook takes it from the SA annotation).
+    clientId: ""
+    # The account key, for auth shared-key (REQUIRED there) or auto.
+    keySecret:
+      name: ""
+      key: azure-storage-key
+  gcs:
+    # auto -- Application Default Credentials: GKE Workload Identity through
+    #         the metadata server (the ServiceAccount annotated
+    #         iam.gke.io/gcp-service-account=<gsa>@<project>.iam.gserviceaccount.com),
+    #         or GOOGLE_APPLICATION_CREDENTIALS.
+    # none -- unauthenticated; an emulator (fake-gcs-server) only, and it
+    #         needs endpoint below.
+    auth: auto
+    # Empty = the public JSON API. Emulators only.
+    endpoint: ""
+  # Cloud identity: the result-store pods (api-gateway, workflow-manager,
+  # agents, artifact-gc) run as serviceAccounts.apiGateway / .workflowManager /
+  # .agent / .artifactGC (below), so a
+  # cloud identity (IRSA role, EKS Pod Identity association, Azure workload
+  # identity, GKE Workload Identity) is bound to those accounts' annotations
+  # and reaches ONLY the pods that use the store (docs/OPERATIONS.md §20.13).
+  # s3 web-identity and azblob workload-identity are refused when the chart
+  # would create those accounts without the annotation the identity needs.
+
+# ─── Distributed tracing (OpenTelemetry, off by default) ─────────────────
+# When enabled, every control-plane service and scheduler, the agents,
+# artifact-gc and the cluster controller get the STANDARD OTEL_* variables and
+# export spans over OTLP. Disabled, no OTEL_* variable is rendered and every
+# process leaves its tracer off (W3C trace-context propagation stays on either
+# way, so a partly traced deployment still produces connected traces).
+# OTEL_SERVICE_NAME is deliberately not set: each binary names itself, and one
+# value for all would merge every service into one in the trace UI.
+tracing:
+  enabled: false
+  # REQUIRED when enabled: the collector (an OpenTelemetry Collector, Jaeger,
+  # a vendor endpoint), e.g. http://otel-collector.observability:4317 (grpc)
+  # or http://otel-collector.observability:4318 (http/protobuf).
+  endpoint: ""
+  # grpc | http/protobuf. Must match the endpoint's port.
+  protocol: grpc
+  # Plaintext to the collector. True suits a collector inside the cluster (the
+  # spans never leave the pod network); set false and use https:// for one
+  # reached across a network you do not control.
+  insecure: true
+  # parentbased_traceidratio honours an incoming trace's sampling decision and
+  # keeps samplerArg of NEW traces. Also accepted: always_on, always_off,
+  # traceidratio, parentbased_always_on, parentbased_always_off.
+  sampler: parentbased_traceidratio
+  # A STRING, as the OTEL variable is: "0.1" keeps 10% of new traces. The
+  # binaries default to 1.0 when unset; 10% is a production-sized default.
+  samplerArg: "0.1"
+  # Optional OTEL_EXPORTER_OTLP_HEADERS from a Secret (never a plain value: it
+  # is usually a vendor credential), e.g. "authorization=Bearer <token>" or
+  # "x-honeycomb-team=<key>". Both name and key, or neither.
+  headersSecret:
+    name: ""
+    key: ""
+  # OTEL_RESOURCE_ATTRIBUTES, comma-separated key=value, e.g.
+  # "deployment.environment.name=prod,cloud.region=westeurope". The chart
+  # appends k8s.namespace.name and k8s.pod.name.
+  resourceAttributes: ""
+  # NEXUS_TRACING_PUBLIC_ENDPOINT on api-gateway: an inbound REST traceparent
+  # becomes a span LINK instead of the parent, so an untrusted caller cannot
+  # choose the trace ID (or the sampling decision) of what the platform does
+  # for it. Set true when the REST API is reachable by callers you do not
+  # control. Rendered whenever true, even with tracing disabled, because
+  # propagation is always on and would otherwise forward the caller's context.
+  publicEndpoint: false
+
 nats:
   # The event bus is optional (ADR-0003): disabled, the agents long-poll.
   enabled: true
@@ -230,6 +447,41 @@ smtp:
   # Where emailed links point: the console's public URL.
   publicUrl: ""
 
+# ─── KGF Cloud (ADR-0024, docs/OPERATIONS.md §24) ────────────────────────
+# One kgfctx verifier for the gateway-signed X-KGF-Context:
+#   authMode standalone -- Nexus credentials authenticate. With keys below,
+#                          a context that verifies alongside a Nexus credential
+#                          ATTRIBUTES the audit row (organization, scope,
+#                          principal, request id) and never authorizes; without
+#                          keys an X-KGF-Context is refused (400).
+#   authMode kgf|both   -- the context authenticates people (keys REQUIRED);
+#                          audit rows are attributed to that context.
+kgf:
+  authMode: standalone
+  # Exactly one key source when set: KGF's /.well-known/kgf-context.json, or
+  # static base64url Ed25519 public keys (comma-separated).
+  contextKeysUrl: ""
+  contextPublicKeys: ""
+  audience: kgf-nexus
+  # Issuers entitled to assert a human principal (comma-separated).
+  userIssuers: kgf-gateway
+  # KGF services allowed to call Nexus for themselves: "svc:kgf-billing=viewer".
+  servicePrincipals: ""
+
+# Notifications, webhook triggers and sensors (ADR-0028, OPERATIONS §27).
+events:
+  secretKey:
+    # A Secret holding a 32-byte key (base64 or hex): openssl rand -base64 32.
+    # Empty = no key: inline channel secrets and webhook triggers are refused;
+    # channel secret references (env:/file:) still work.
+    existingSecret: ""
+    key: secret-key
+    # During a key rotation, the key of the retired value in the same Secret.
+    previousKey: ""
+  # Lets channels reach private and loopback addresses (on-premises receivers).
+  # Off by default so a channel cannot be pointed at internal services.
+  allowPrivateTargets: false
+
 migrate:
   resources:
     requests: { cpu: 50m, memory: 64Mi }
@@ -271,6 +523,34 @@ schedulers:
 
 # Worker agents. Real hardware only by default; simulated capacity belongs in a
 # dev environment and must be labelled as such.
+#
+# Optional per entry, beyond the capacity it advertises:
+#   gpuCount / gpuKind / gpuMemoryBytes   what the agent ADVERTISES (--gpu-count,
+#       --gpu-kind, --gpu-memory-bytes). With gpuCount > 0 the pod also REQUESTS
+#       that many devices of gpu.resourceName (default agentDefaults.
+#       gpuResourceName, nvidia.com/gpu) from the device plugin, so it lands on a
+#       node that has them and the devices are mounted: advertised == allocated.
+#       It also tolerates the <resourceName>:NoSchedule taint GPU pools carry.
+#   gpu: { requestDevices: false }   advertise without allocating: SIMULATED
+#       capacity only, and the chart then requires "simulated=true" in labels.
+#   gpu: { resourceName: amd.com/gpu }   another device plugin's resource.
+#   nodeSelector / tolerations / affinity   REPLACE placement.* for this agent
+#       (e.g. { nexus.khuriwalgroup.com/pool: gpu }).
+#   serviceAccount: { name, annotations, automountServiceAccountToken, podLabels }
+#       overrides serviceAccounts.agent for this agent.
+#   namespace, workerApiKeySecretKey, natsSeedKey, podDisruptionBudget,
+#       resources, customResources.
+#
+# Each agent serves nexusNamespace unless it sets `namespace`. An agent of
+# another tenant also needs a worker key minted for that tenant
+# (`workerApiKeySecretKey`, a key in existingSecret; default worker-api-key),
+# a nats.auth.tenants entry for it and, with NKey auth, that tenant's seed
+# (`natsSeedKey`). The chart refuses to render an agent whose namespace has no
+# tenant entry. See docs/MULTITENANCY.md, "Agent namespace".
+#   - name: agent-team-ml
+#     namespace: team-ml
+#     workerApiKeySecretKey: worker-api-key-team-ml
+#     natsSeedKey: nats-agent-nkey-team-ml
 agents:
   - name: agent-cpu
     replicas: 1
@@ -285,12 +565,73 @@ agents:
       requests: { cpu: 250m, memory: 256Mi }
       limits: { memory: 4Gi }
 
+# Agent admission gate at Register (docs/COMPATIBILITY.md §4.4). Off by default.
+# An agent older than minVersion (a semantic version; a "dev" build then never
+# qualifies), or missing any requiredCapabilities, is refused with
+# FAILED_PRECONDITION and exits instead of retrying. Capabilities of this
+# release's agent: log_shipping, progress, uninterruptible_cancel,
+# output_max_bytes.
+agentPolicy:
+  minVersion: ""
+  requiredCapabilities: []
+
+# Optional per-agent keys (ADR-0029/0030/0031), all off by default:
+#   gpuMig: "1g.10gb=MIG-...,MIG-...;3g.40gb=MIG-..."   MIG instances by profile
+#   gpuShared: "4:mps:80Gi"                             shared devices (mps|timeslice)
+#   gpuDiscovery: nvidia-smi                            read GPUs/MIG from nvidia-smi -L
+#   capacityType: spot                                  else discovered from the Node, else on-demand
+#   eviction: { sources: "kubernetes,aws", taints: "", grace: 25s }
+#   artifactCache: { bytes: 200Gi, sizeLimit: 220Gi, verify: "" }
+# The kubernetes eviction source and Node capacity-type discovery need `get` on
+# the agent's own Node (OPERATIONS §28.3).
+
+# Claim-time placement (ADR-0029 §4, ADR-0030, ADR-0031). Not to be confused
+# with `placement`, which places the chart's own pods.
+claimPlacement:
+  # pack (best fit, least waste) or spread.
+  policy: pack
+  # Pull-path delay scheduling: how long an attempt with a preference waits
+  # for a strictly better live worker before any fitting worker may take it.
+  wait: 3s
+  # Cluster quota headroom older than this gates nothing.
+  headroomTTL: 2m
+  # Retries after PREEMPTED (spot eviction) that do not spend max_attempts.
+  maxPreemptionRetries: 5
+  preemptionRetryDelay: 2s
+  # The registered cluster this release's agents run in (clusters.name);
+  # empty = no cluster labels for them.
+  clusterName: ""
+
 agentDefaults:
+  # Extended resource a GPU agent requests (agents[].gpu.resourceName overrides).
+  gpuResourceName: nvidia.com/gpu
   heartbeatIntervalMs: 5000
   # Must stay below terminationGracePeriodSeconds, or Kubernetes kills an agent
   # mid-drain and strands its attempts until their leases expire.
   drainGrace: 60s
   terminationGracePeriodSeconds: 90
+  # Worker-side secret resolution (ADR-0025, OPERATIONS §25.1). configSecret
+  # names a Secret whose key `secrets.yaml` is the per-tenant provider file
+  # (only this release's nexusNamespace block is loaded). Empty: no providers,
+  # and a task that declares a secret fails PERMISSION_DENIED.
+  secrets:
+    configSecret: ""
+    # Extra Secret volumes for file:// refs, e.g. a KGF Cloud CSI-projected
+    # Key Vault secret: [{ name: kv, secretName: nexus-kv, mountPath: /var/run/secrets/nexus }]
+    # (list mountPath under file.allow_dirs in secrets.yaml).
+    fileSecrets: []
+    # Azure workload identity for akv:// (the KGF stamp's workload identity
+    # client id): sets AZURE_CLIENT_ID and the azure.workload.identity/use pod
+    # label on the agents. The federated credential must trust the agents'
+    # ServiceAccount (serviceAccounts.agent, or agents[].serviceAccount).
+    workloadIdentityClientId: ""
+    # Extra agent-environment variables subprocess tasks may inherit (globs,
+    # comma-separated), beyond PATH/HOME/LANG/TZ/TMPDIR and the task contract
+    # (F151). The agent's own credentials never pass. Default: none.
+    subprocessEnvPassthrough: ""
+    # Host-side secret files (docker/subprocess executors) live on a
+    # memory-backed emptyDir, never on the work volume's disk.
+    tmpfsSizeLimit: 64Mi
 
 # Prometheus scraping (docs/OPERATIONS.md, "Metrics"). Every Nexus pod serves
 # /metrics on a port that no external Service exposes: the gateway on its
@@ -319,6 +660,18 @@ metrics:
   podMonitor:
     enabled: null
 
+# Audit export (ADR-0025, OPERATIONS §25.2).
+auditExport:
+  # Secret holding key `audit-sink-key` (openssl rand -base64 32): seals SIEM
+  # sink signing secrets. Empty: sinks are refused (503); export, retention
+  # and legal hold still work.
+  sinkKeySecret: ""
+  # Internal CIDRs a sink may deliver to (an on-premises SIEM). Loopback,
+  # link-local and private ranges are refused otherwise.
+  sinkAllowCIDRs: ""
+  # KGF Cloud attribution of audit rows uses the kgf block's keys (one
+  # verifier for authentication and attribution): see kgf above.
+
 # Host-based routing via the Gateway API (templates/gateway.yaml). Off by
 # default: it needs a Gateway API implementation installed in the cluster.
 gateway:
@@ -343,6 +696,43 @@ ui:
   resources:
     requests: { cpu: 25m, memory: 32Mi }
     limits: { memory: 128Mi }
+
+# ─── ServiceAccounts (one per component) ─────────────────────────────────
+# Every Nexus pod runs under its own ServiceAccount, never `default`, so a
+# cloud identity can be bound to exactly the components that need it:
+#   EKS IRSA          annotations: { eks.amazonaws.com/role-arn: arn:aws:iam::...:role/... }
+#   EKS Pod Identity  nothing here: an aws_eks_pod_identity_association names the SA
+#   GKE               annotations: { iam.gke.io/gcp-service-account: <gsa>@<project>.iam.gserviceaccount.com }
+#   AKS               annotations: { azure.workload.identity/client-id: <client-id> }
+#                     podLabels:   { azure.workload.identity/use: "true" }
+# Only the result-store users (apiGateway for logs, workflowManager for
+# object-store sensors, agent, artifactGC) need one.
+# The API token is NOT mounted unless a component sets
+# automountServiceAccountToken: true; none of them calls the Kubernetes API
+# (an agent whose executors include "kubernetes" defaults to true). IRSA,
+# Pod Identity and Azure Workload Identity inject their own projected token and
+# GKE uses the metadata server, so all of them work with the token unmounted.
+# Components may SHARE an account by naming the same `name`; the chart creates
+# it once and refuses conflicting settings. The cluster controller keeps its
+# own RBAC-bound account (clusterController).
+serviceAccounts:
+  # false = the named accounts must already exist (name "" = `default`).
+  create: true
+  automountServiceAccountToken: false
+  # Added to every account the chart creates.
+  annotations: {}
+  # Per component: name (default nexus-<component>), annotations,
+  # automountServiceAccountToken (null = the default above), podLabels.
+  apiGateway: {}
+  workflowManager: {}
+  dagEngine: {}
+  scheduler: {}        # every schedulers[] Deployment
+  resourceManager: {}
+  eventService: {}
+  agent: {}            # every agents[] entry, unless it sets serviceAccount
+  artifactGC: {}
+  ui: {}
+  jobs: {}             # migrate, bootstrap, db-roles
 
 # ─── Pod placement (every Nexus Deployment) ──────────────────────────────
 # Applied to the control-plane services, schedulers, agents, console and the
@@ -474,6 +864,12 @@ clusterController:
   interval: 15s
   jobLabelSelector: nexus.io/attempt-id
   logLevel: info
+  # ADR-0031. Operator-declared cluster placement labels, published with every
+  # report over the observed region and provider, e.g.
+  # "nexus.io/cost-tier=1,nexus.io/data-locality=lake-eu|s3-eu-west-1".
+  clusterLabels: ""
+  # Extended resources counted as gpu_count in the published quota headroom.
+  gpuResources: ""
   # Namespaces holding the worker Deployments bound to this cluster. A
   # read-only Role is created in each (and the apply Role under apply.enabled).
   # Empty = this release's namespace, where the chart's own agents run. Never

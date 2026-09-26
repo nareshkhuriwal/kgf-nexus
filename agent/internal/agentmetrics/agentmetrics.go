@@ -16,11 +16,14 @@
 package agentmetrics
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
+	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
 )
 
 // TaskBuckets span a second to a day: tasks are batch work, and a histogram
@@ -49,11 +52,38 @@ type Metrics struct {
 
 	registrations *metrics.CounterVec
 	registered    *metrics.Gauge
+
+	logDroppedLines   *metrics.Counter
+	logDroppedBytes   *metrics.Counter
+	logTruncatedLines *metrics.Counter
+	logTruncatedBytes *metrics.Counter
+	logFencedBytes    *metrics.Counter
+	logFinalize       *metrics.CounterVec
+
+	// objstore holds the result-store client families shared with the gateway
+	// and the GC (nexus_objstore_*), labelled by backend and operation.
+	objstore *objstore.Metrics
+
+	workloadAPI   *metrics.CounterVec
+	usageFlushes  *metrics.CounterVec
+	checkpointOps *metrics.CounterVec
+
+	placement placementMetrics
+}
+
+// ObjectStore returns the result-store client instruments, or nil (record
+// nothing) on a nil Metrics.
+func (m *Metrics) ObjectStore() *objstore.Metrics {
+	if m == nil {
+		return nil
+	}
+	return m.objstore
 }
 
 // New registers the agent families on reg.
 func New(reg *metrics.Registry) *Metrics {
-	return &Metrics{
+	m := &Metrics{
+		objstore: objstore.NewMetrics(reg),
 		running: reg.NewGauge("nexus_agent_tasks_running",
 			"Attempts currently executing on this agent, by executor.", "executor"),
 		started: reg.NewCounter("nexus_agent_tasks_started_total",
@@ -100,7 +130,82 @@ func New(reg *metrics.Registry) *Metrics {
 			"result"),
 		registered: reg.NewGauge("nexus_agent_registered",
 			"1 while the agent holds a registered session (the /readyz condition), else 0.").Gauge(),
+
+		logDroppedLines: reg.NewCounter("nexus_agent_log_dropped_lines_total",
+			"Task log lines dropped because shipping fell behind and the in-memory buffer was full (the log carries a marker in their place).").Counter(),
+		logDroppedBytes: reg.NewCounter("nexus_agent_log_dropped_bytes_total",
+			"Bytes of the task log lines counted by nexus_agent_log_dropped_lines_total.").Counter(),
+		logTruncatedLines: reg.NewCounter("nexus_agent_log_truncated_lines_total",
+			"Task log lines omitted by the per-attempt log cap (the head and tail are kept).").Counter(),
+		logTruncatedBytes: reg.NewCounter("nexus_agent_log_truncated_bytes_total",
+			"Bytes of the task log lines counted by nexus_agent_log_truncated_lines_total.").Counter(),
+		logFencedBytes: reg.NewCounter("nexus_agent_log_fenced_bytes_total",
+			"Task output bytes refused because the attempt's log shipping was fenced (its lease was rejected, or the control plane does not implement ReportLogs).").Counter(),
+		logFinalize: reg.NewCounter("nexus_agent_log_finalize_total",
+			"Attempt logs finalized, by outcome: finalized (complete), fenced, timeout (finalize budget ran out) or partial (chunks never reached the store). Every outcome but finalized leaves a partial log.",
+			"outcome"),
+
+		workloadAPI: reg.NewCounter("nexus_agent_workload_api_requests_total",
+			"Requests a workload made to its attempt's task API socket (ADR-0032), by endpoint (info, usage, progress, permits, settle, checkpoint_put, checkpoint_get, error, other) and HTTP status code.",
+			"endpoint", "code"),
+		usageFlushes: reg.NewCounter("nexus_agent_usage_flushes_total",
+			"Usage snapshots sent to the control plane with ReportUsage, by result: ok, stale (the attempt no longer owns its lease; flushing stops) or error.",
+			"result"),
+		checkpointOps: reg.NewCounter("nexus_agent_checkpoints_total",
+			"Checkpoint saves requested by workloads, by result: saved, stale (fenced: stale lease or an older checkpoint), too_large or error.",
+			"result"),
 	}
+	m.placement = newPlacementMetrics(reg)
+	return m
+}
+
+// Workload API label values. Closed sets: anything else is folded into
+// "other" so a workload cannot mint series by requesting arbitrary paths.
+var (
+	workloadEndpoints = map[string]bool{"info": true, "usage": true, "progress": true, "permits": true,
+		"settle": true, "checkpoint_put": true, "checkpoint_get": true, "error": true, "other": true}
+	usageFlushResults = map[string]bool{"ok": true, "stale": true, "error": true}
+	checkpointResults = map[string]bool{"saved": true, "stale": true, "too_large": true, "error": true}
+)
+
+// WorkloadAPIRequest records one request to an attempt's task API. code is
+// the HTTP status the agent answered; only the codes the API can produce are
+// kept distinct, the rest are "other".
+func (m *Metrics) WorkloadAPIRequest(endpoint string, code int) {
+	if m == nil {
+		return
+	}
+	if !workloadEndpoints[endpoint] {
+		endpoint = "other"
+	}
+	c := "other"
+	switch code {
+	case 200, 204, 400, 401, 404, 405, 409, 413, 500, 501, 503:
+		c = strconv.Itoa(code)
+	}
+	m.workloadAPI.With(metrics.Labels{"endpoint": endpoint, "code": c}).Inc()
+}
+
+// UsageFlush records one ReportUsage attempt: ok, stale or error.
+func (m *Metrics) UsageFlush(result string) {
+	if m == nil {
+		return
+	}
+	if !usageFlushResults[result] {
+		result = "error"
+	}
+	m.usageFlushes.With(metrics.Labels{"result": result}).Inc()
+}
+
+// Checkpoint records one checkpoint save: saved, stale, too_large or error.
+func (m *Metrics) Checkpoint(result string) {
+	if m == nil {
+		return
+	}
+	if !checkpointResults[result] {
+		result = "error"
+	}
+	m.checkpointOps.With(metrics.Labels{"result": result}).Inc()
 }
 
 // RegistrationAttempt records one Register call's result: ok,
@@ -212,4 +317,19 @@ func (m *Metrics) SessionStarted(capacity *nexusv1.ResourceVector) {
 // enumLabel turns "ATTEMPT_OUTCOME_TIMED_OUT" into "timed_out".
 func enumLabel(s, prefix string) string {
 	return strings.ToLower(strings.TrimPrefix(s, prefix))
+}
+
+// LogShipped records one attempt's log shipping, from the shipper's Close. A
+// Stats with no Outcome (a repeated Close, which did nothing) is ignored, so an
+// attempt is never counted twice.
+func (m *Metrics) LogShipped(st logship.Stats) {
+	if m == nil || st.Outcome == "" {
+		return
+	}
+	m.logDroppedLines.Add(float64(st.DroppedLines))
+	m.logDroppedBytes.Add(float64(st.DroppedBytes))
+	m.logTruncatedLines.Add(float64(st.TruncatedLines))
+	m.logTruncatedBytes.Add(float64(st.TruncatedBytes))
+	m.logFencedBytes.Add(float64(st.FencedBytes))
+	m.logFinalize.With(metrics.Labels{"outcome": string(st.Outcome)}).Inc()
 }

@@ -72,13 +72,21 @@ module "platform" {
   postgres    = var.postgres
 
   nexus_kubernetes_namespace = var.namespace
+  nexus_service_account      = local.artifact_service_account
   postgres_password_version  = var.postgres_password_version
+}
+
+locals {
+  # The native Blob backend (azblob over workload identity), or the in-cluster
+  # MinIO when false.
+  blob = var.azure_blob_native_backend
 }
 
 # ── In-cluster platform pieces ────────────────────────────────────────────
 
 # Premium SSD for every stateful volume the chart creates (NATS JetStream and,
-# on AKS today, MinIO). Retain: deleting the release never deletes the disk.
+# with azure_blob_native_backend = false, MinIO). Retain: deleting the release
+# never deletes the disk.
 resource "kubernetes_storage_class_v1" "premium_ssd" {
   metadata {
     name = "nexus-premium-ssd"
@@ -116,6 +124,88 @@ resource "helm_release" "nvidia_device_plugin" {
   })]
 }
 
+# ── Result-store identity, database CA, agent pools ──────────────────────
+
+locals {
+  gib = 1073741824
+
+  # The ONE ServiceAccount the platform's object-store identity trusts
+  # (module.platform nexus_service_account). The chart gives it to exactly
+  # the components that touch the result store: api-gateway (task logs), the
+  # agents and artifact-gc. Every other component keeps its own account.
+  artifact_service_account = "nexus-artifacts"
+  artifact_identity = {
+    name = local.artifact_service_account
+    # Azure Workload Identity: the federated credential on this identity
+    # names system:serviceaccount:<namespace>:nexus-artifacts. The chart
+    # creates the account with this annotation, and adds the pod label
+    # azure.workload.identity/use to the result-store pods itself under
+    # resultStore.backend=azblob + auth=workload-identity. Annotated with or
+    # without Blob, so flipping azure_blob_native_backend never renames it.
+    annotations = { "azure.workload.identity/client-id" = module.platform.nexus_workload_identity_client_id }
+  }
+
+  cpu_agent = {
+    name         = "agent-cpu"
+    replicas     = 1
+    queues       = "default"
+    labels       = "zone=cluster,accelerator=none"
+    executors    = "subprocess"
+    cpuMillis    = 2000
+    memoryBytes  = 4 * local.gib
+    gpuCount     = 0
+    diskBytes    = 10 * local.gib
+    nodeSelector = { "nexus.khuriwalgroup.com/pool" = "cpu" }
+    resources    = { requests = { cpu = "250m", memory = "256Mi" }, limits = { memory = "4Gi" } }
+  }
+
+  # On the tainted GPU pool: the chart requests gpuCount nvidia.com/gpu from
+  # the device plugin (advertised == allocated) and tolerates the
+  # nvidia.com/gpu NoSchedule taint; the nodeSelector keeps it off CPU nodes.
+  gpu_agent = {
+    name           = "agent-gpu"
+    replicas       = var.gpu_agent.replicas
+    queues         = "gpu"
+    labels         = "zone=cluster,accelerator=nvidia"
+    executors      = "subprocess"
+    cpuMillis      = var.gpu_agent.cpu_millis
+    memoryBytes    = var.gpu_agent.memory_gib * local.gib
+    gpuCount       = var.gpu_agent.gpu_count
+    gpuKind        = var.gpu_agent.gpu_kind
+    gpuMemoryBytes = var.gpu_agent.gpu_memory_gib * local.gib
+    diskBytes      = var.gpu_agent.disk_gib * local.gib
+    nodeSelector   = { "nexus.khuriwalgroup.com/pool" = "gpu" }
+    resources = {
+      requests = { cpu = "500m", memory = "1Gi" }
+      limits   = { memory = "22Gi" }
+    }
+  }
+
+  agents = concat([local.cpu_agent], slice([local.gpu_agent], 0, var.gpu_pool.enabled ? 1 : 0))
+}
+
+# The Azure Database for PostgreSQL root CA bundle, vendored with its upstream source and SHA-256 pinned
+# (deploy/terraform/ca-bundles/refresh.sh). Refused if the file no longer
+# matches SHA256SUMS, so a hand edit cannot change the trust anchors unseen.
+locals {
+  ca_bundle_dir = "${path.module}/../../ca-bundles"
+  ca_bundle_pins = {
+    for l in compact(split("\n", file("${local.ca_bundle_dir}/SHA256SUMS"))) :
+    element(split("  ", l), 1) => element(split("  ", l), 0)
+  }
+  postgres_ca_bundle_file = "azure-postgres-roots.pem"
+  postgres_ca_bundle      = file("${local.ca_bundle_dir}/${local.postgres_ca_bundle_file}")
+}
+
+resource "terraform_data" "postgres_ca_bundle_pin" {
+  lifecycle {
+    precondition {
+      condition     = sha256(local.postgres_ca_bundle) == lookup(local.ca_bundle_pins, local.postgres_ca_bundle_file, "")
+      error_message = "ca-bundles/${local.postgres_ca_bundle_file} does not match its pin in ca-bundles/SHA256SUMS. Regenerate it with ca-bundles/refresh.sh --write (which verifies the upstream source) instead of editing it."
+    }
+  }
+}
+
 # ── Nexus ─────────────────────────────────────────────────────────────────
 
 module "nexus" {
@@ -129,8 +219,14 @@ module "nexus" {
 
   nats_credentials_dir = var.nats_credentials_dir
 
-  # The managed server's password; MinIO keeps generated root credentials.
-  postgres_password = module.platform.postgres_password
+  # The managed server's password. MinIO (only without the Blob backend)
+  # keeps generated root credentials; with Blob the Secret holds no S3 key.
+  postgres_password                 = module.platform.postgres_password
+  generate_object_store_credentials = !local.blob
+
+  postgres_ca_bundle          = local.postgres_ca_bundle
+  runtime_db_roles            = var.runtime_db_roles
+  runtime_db_password_version = var.runtime_db_password_version
 
   chart_values = {
     postgres = {
@@ -139,21 +235,44 @@ module "nexus" {
       port     = 5432
       user     = module.platform.postgres_user
       database = module.platform.postgres_database
-      # Encrypted, server identity not verified: the chart cannot mount a CA
-      # bundle for verify-full yet (F115). Traffic never leaves the VNet.
-      sslmode = "require"
+      # verify-full against the managed server's CA (the kgf-nexus module
+      # mounts postgres_ca_bundle and sets it); the services connect as
+      # their own runtime logins, not the admin (runtime_db_roles).
+      sslmode = "verify-full"
     }
 
-    # No S3 endpoint exists for Azure Blob: the result store is the in-cluster
-    # MinIO on Premium SSD until the native Blob backend lands (F115).
+    # The result store: the provisioned Blob container through workload
+    # identity, or (azure_blob_native_backend = false) the in-cluster MinIO on
+    # Premium SSD. The values keep one shape either way -- only leaves change
+    # -- so the two cases cannot drift apart structurally. minio.bucket is the
+    # Blob CONTAINER under backend azblob. The chart adds the pod label
+    # azure.workload.identity/use itself; the Blob account is reached over its
+    # private endpoint, whose private DNS zone answers the public name.
     minio = {
-      enabled = true
+      enabled = !local.blob
+      bucket  = local.blob ? module.platform.artifact_container : "nexus-results"
       storage = { size = var.minio_storage_size, storageClass = kubernetes_storage_class_v1.premium_ssd.metadata[0].name }
+    }
+    resultStore = {
+      backend = local.blob ? "azblob" : "s3"
+      azure = {
+        account = local.blob ? module.platform.artifact_storage_account : ""
+        auth    = local.blob ? "workload-identity" : "auto"
+      }
     }
 
     nats = {
       storage = { storageClass = kubernetes_storage_class_v1.premium_ssd.metadata[0].name }
     }
+
+    serviceAccounts = {
+      apiGateway      = local.artifact_identity
+      workflowManager = local.artifact_identity
+      agent           = local.artifact_identity
+      artifactGC      = local.artifact_identity
+    }
+
+    agents = local.agents
   }
 
   chart_values_overrides = var.chart_values_overrides

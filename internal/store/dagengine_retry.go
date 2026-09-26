@@ -69,6 +69,8 @@ func (s *DAGEngineStore) ApplyRetryResets(ctx context.Context, runID string, res
 		UPDATE task_nodes n
 		   SET state = $3::node_state,
 		       attempts_used = 0,
+		       free_retries = 0,
+		       preemptions_used = 0,
 		       retry_floor = GREATEST(n.retry_floor, COALESCE(
 		           (SELECT MAX(a.attempt_number) FROM task_attempts a
 		             WHERE a.run_id = n.run_id AND a.node_id = n.node_id), 0))

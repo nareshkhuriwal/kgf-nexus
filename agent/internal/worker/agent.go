@@ -14,15 +14,21 @@ import (
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/artifactcache"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/eviction"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/gpu"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/heartbeat"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/lease"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/taskapi"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
 )
 
 // Client is the full worker RPC surface, satisfied by the generated gRPC client
@@ -65,6 +71,16 @@ type Config struct {
 	// Zero means worker.DefaultUninterruptibleCeiling.
 	MaxUninterruptible time.Duration
 
+	// Secrets resolves task SecretRefs with THIS namespace's providers only
+	// (ADR-0025; secrets.LoadForNamespace). Nil: no providers, and a task
+	// that declares a secret fails PERMISSION_DENIED.
+	Secrets *secrets.Resolver
+
+	// SubprocessEnvPassthrough are extra agent-process variables (globs)
+	// subprocess tasks may inherit beyond the minimal base set
+	// (NEXUS_SUBPROCESS_ENV_PASSTHROUGH; F151). Default empty.
+	SubprocessEnvPassthrough []string
+
 	// AllowUnenforceableLimits relaxes the subprocess executor's refusal to run
 	// tasks whose limits it cannot honour. Development only.
 	AllowUnenforceableLimits bool
@@ -91,6 +107,29 @@ type Config struct {
 	// ends, for the process's /readyz. Built once by the caller, like
 	// Metrics, so it spans REREGISTER. Optional.
 	Readiness *Readiness
+
+	// TaskAPIRoot is where per-attempt workload-API sockets are created
+	// (ADR-0032 §1). Empty means taskapi.DefaultRoot. Keep it short: a Unix
+	// socket path is limited to 104 bytes on Darwin and 108 on Linux.
+	TaskAPIRoot string
+
+	// GPU is the fractional-GPU inventory (ADR-0029); Capacity must already
+	// include it. The zero value means whole GPUs only.
+	GPU gpu.Inventory
+	// MPSPipeDir is the MPS server's pipe directory, mounted into containers
+	// on MPS-shared devices. Empty means /tmp/nvidia-mps.
+	MPSPipeDir string
+	// Eviction are the node eviction notice sources (ADR-0030 §2). Empty
+	// disables eviction handling: a reclaimed node then produces LOST
+	// attempts, as before.
+	Eviction []eviction.Source
+	// EvictionGrace is the checkpoint window for a notice without a
+	// deadline; EvictionMaxGrace caps any window. Zero means the defaults.
+	EvictionGrace    time.Duration
+	EvictionMaxGrace time.Duration
+	// Cache is the node-local artifact cache (ADR-0030 §4). Built once by the
+	// caller, like Metrics, so it survives REREGISTER. Nil disables it.
+	Cache *artifactcache.Cache
 }
 
 // ResultStoreCredentials are the parts of result-store access the agent holds
@@ -104,6 +143,37 @@ type ResultStoreCredentials struct {
 	SecretAccessKey string
 	SessionToken    string
 	UseTLS          bool
+
+	// Local is the rest of the agent's own result-store configuration
+	// (objstore.ConfigFromEnv): the S3 credential mode, the Azure account and
+	// auth mode, the GCS auth mode, the part size. Its Backend, when
+	// BackendSet, overrides the one the control plane advertises -- an agent
+	// in another cloud may reach the same data through a different API.
+	Local      objstore.Config
+	BackendSet bool
+}
+
+// storeConfig merges the advertised location with the local credentials.
+func (c ResultStoreCredentials) storeConfig(adv *nexusv1.ResultStoreConfig) objstore.Config {
+	oc := c.Local
+	switch {
+	case c.BackendSet && oc.Backend != "":
+	case adv.GetBackend() != "":
+		oc.Backend = adv.GetBackend()
+	default:
+		oc.Backend = objstore.BackendS3
+	}
+	oc.Endpoint = c.Endpoint
+	if oc.Endpoint == "" {
+		oc.Endpoint = adv.GetEndpoint()
+	}
+	oc.Bucket = adv.GetBucket()
+	oc.Region = adv.GetRegion()
+	oc.UseTLS = c.UseTLS
+	if c.AccessKeyID != "" || c.SecretAccessKey != "" {
+		oc.S3.AccessKeyID, oc.S3.SecretAccessKey, oc.S3.SessionToken = c.AccessKeyID, c.SecretAccessKey, c.SessionToken
+	}
+	return oc
 }
 
 // Agent is the worker agent process.
@@ -135,6 +205,11 @@ type Agent struct {
 	drainOnce sync.Once
 	draining  atomic.Bool
 	stopAll   context.CancelFunc
+
+	// evicting is set by the first eviction notice; drainReason is what the
+	// heartbeat tells the control plane (ADR-0030 §2).
+	evicting    atomic.Bool
+	drainReason atomic.Value
 }
 
 // New builds an agent. The executors it supports are constructed here and
@@ -161,7 +236,7 @@ func New(cfg Config, client Client, log *slog.Logger) (*Agent, error) {
 	}
 	return &Agent{
 		cfg: cfg, client: client, log: log, wal: w,
-		registry:   NewRegistry(cfg.Capacity),
+		registry:   newAgentRegistry(cfg),
 		reregister: make(chan struct{}, 1),
 	}, nil
 }
@@ -267,6 +342,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}()
 
+	// Spot/preemptible eviction notices, if any source is configured.
+	a.watchEvictions(runCtx)
+
 	var runErr error
 	select {
 	case <-ctx.Done():
@@ -315,6 +393,9 @@ func (a *Agent) register(ctx context.Context) error {
 		Capacity:     a.cfg.Capacity,
 		Executors:    kinds,
 		AgentVersion: a.cfg.AgentVersion,
+		// What this build implements, for the gateway's admission gate
+		// (docs/COMPATIBILITY.md §4.4).
+		Capabilities: domain.AgentCapabilities(),
 	})
 	if err != nil {
 		return fmt.Errorf("agent: register: %w", err)
@@ -342,11 +423,13 @@ func (a *Agent) register(ctx context.Context) error {
 	a.runner.WorkerID = a.workerID
 	a.runner.Metrics = a.cfg.Metrics
 	a.runner.UninterruptibleCeiling = a.cfg.MaxUninterruptible
+	a.runner.Secrets = a.cfg.Secrets
 	// The control plane's threshold, clamped, also governs the no-store path:
 	// a worker without an object store must refuse exactly what a worker with
 	// one would have sent to it (ADR-0016).
 	a.runner.InlineThreshold = domain.ClampInlineThreshold(resp.GetResultStore().GetInlineThresholdBytes())
 	a.configureLogShipping(resp.GetLogShipping())
+	a.configureWorkloadAPI(resp.GetWorkloadApi())
 	// The keeper revokes into the runner and the runner renews through the
 	// keeper, so one of the two edges must be wired after construction.
 	a.keeper.SetHandler(a.runner)
@@ -355,7 +438,17 @@ func (a *Agent) register(ctx context.Context) error {
 	a.hb.Observe = a.cfg.Metrics.Heartbeat
 	a.cfg.Metrics.SessionStarted(a.cfg.Capacity)
 	a.puller = NewPuller(a.workerID, a.cfg.Queues, a.client, a.registry, a.keeper, a.runner, a.log)
+	a.runner.Cache = a.cfg.Cache
+	a.hb.Extra = a.heartbeatExtra
 	return nil
+}
+
+// newAgentRegistry builds the registry over the advertised capacity and the
+// fractional-GPU inventory.
+func newAgentRegistry(cfg Config) *Registry {
+	r := NewRegistryWithGPUs(cfg.Capacity, cfg.GPU)
+	r.MPSPipeDir = cfg.MPSPipeDir
+	return r
 }
 
 // buildExecutors constructs the substrates this worker supports.
@@ -369,6 +462,10 @@ func (a *Agent) buildExecutors() map[string]executor.Executor {
 		"subprocess": &executor.SubprocessExecutor{
 			Root: a.cfg.WorkDir, Log: a.log,
 			AllowUnenforceableLimits: a.cfg.AllowUnenforceableLimits,
+			// Variables a task may only receive by declaring them (env://)
+			// must not also arrive by inheritance (F138).
+			InheritDeny:    a.cfg.Secrets.EnvAllowPatterns(),
+			EnvPassthrough: a.cfg.SubprocessEnvPassthrough,
 		},
 	}
 	probe, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -437,9 +534,11 @@ func (a *Agent) reattachKubernetes(ctx context.Context) {
 			}
 			log.Info("harvested the outcome of an attempt that finished while the agent was down",
 				"exit_code", o.ExitCode, "succeeded", o.Succeeded())
+			// No workload API: the attempt ran under a previous session, so
+			// nothing was declared or recorded through this agent.
 			a.runner.reportOutcome(rctx, &nexusv1.TaskAssignment{
 				AttemptId: e.AttemptID, RunId: e.RunID, NodeId: e.NodeID, LeaseToken: e.LeaseToken,
-			}, o, log)
+			}, o, log, attemptFacts{})
 			_ = k.Cleanup(rctx, h)
 		case state == executor.ReattachRunning:
 			log.Warn("killing an attempt Job that outlived its agent session; its lease cannot be renewed " +
@@ -484,28 +583,61 @@ func (a *Agent) configureLogShipping(cfg *nexusv1.LogShippingConfig) {
 		"flush_interval_ms", cfg.GetFlushIntervalMs())
 }
 
-func (a *Agent) initResultStore(cfg *nexusv1.ResultStoreConfig) {
-	endpoint := a.cfg.ResultStore.Endpoint
-	if endpoint == "" {
-		endpoint = cfg.GetEndpoint()
+// configureWorkloadAPI records what the control plane offers the workload API
+// for this session (ADR-0032). The per-attempt socket is served whatever it
+// offers -- progress and declared errors need nothing new upstream -- but usage,
+// rate limits and checkpoints are offered to the workload only when the
+// gateway advertised them AND this client can forward them.
+func (a *Agent) configureWorkloadAPI(cfg *nexusv1.WorkloadApiConfig) {
+	a.runner.Namespace = a.cfg.Namespace
+	a.runner.TaskAPIRoot = a.cfg.TaskAPIRoot
+	if err := taskapi.CheckRoot(a.cfg.TaskAPIRoot); err != nil {
+		// Not fatal: the attempts still run, without a workload API, and the
+		// SDK falls back to its in-process behaviour. But usage units reported
+		// by tasks on this worker are then NOT recorded, which is why this is
+		// an error an operator must see.
+		a.log.Error("the workload API socket root is unusable; tasks on this worker get no workload API "+
+			"(usage units are not recorded); set NEXUS_TASK_API_ROOT to a short, agent-owned directory",
+			"root", a.cfg.TaskAPIRoot, "error", err)
+		a.runner.TaskAPIDisabled = true
 	}
-	if endpoint == "" {
+	a.runner.WorkloadAPI = cfg
+	up, ok := a.client.(taskapi.Upstream)
+	if !ok {
+		if cfg != nil {
+			a.log.Warn("the control plane offers the workload API but this client cannot forward it")
+		}
+		return
+	}
+	a.runner.WorkloadUpstream = up
+	if cfg == nil {
+		a.log.Info("the control plane predates the workload API; tasks get progress and declared errors only")
+		return
+	}
+	a.log.Info("workload API enabled",
+		"usage_reporting", cfg.GetUsageReporting(), "rate_limits", cfg.GetRateLimits(),
+		"checkpoints", cfg.GetCheckpoints() && a.store != nil, "max_checkpoint_bytes", cfg.GetMaxCheckpointBytes())
+}
+
+func (a *Agent) initResultStore(cfg *nexusv1.ResultStoreConfig) {
+	oc := a.cfg.ResultStore.storeConfig(cfg)
+	// An S3 store is located by its endpoint; Azure and GCS by account and
+	// bucket (their endpoints are optional), so only S3 needs one to exist.
+	if cfg.GetBucket() == "" || (oc.Backend == objstore.BackendS3 && oc.Endpoint == "") {
 		a.log.Warn("control plane supplied no result store; outputs will be inlined only")
 		return
 	}
-	c, err := resultstore.New(resultstore.Config{
-		Endpoint:        endpoint,
-		Bucket:          cfg.GetBucket(),
-		Region:          cfg.GetRegion(),
-		Namespace:       a.cfg.Namespace,
-		AccessKeyID:     a.cfg.ResultStore.AccessKeyID,
-		SecretAccessKey: a.cfg.ResultStore.SecretAccessKey,
-		SessionToken:    a.cfg.ResultStore.SessionToken,
-		UseTLS:          a.cfg.ResultStore.UseTLS,
-		InlineThreshold: cfg.GetInlineThresholdBytes(),
-		Log:             a.log,
-		OnPut:           a.cfg.Metrics.ResultStorePut,
-	})
+	store, err := objstore.Open(context.Background(), oc)
+	var c *resultstore.Client
+	if err == nil {
+		c, err = resultstore.New(resultstore.Config{
+			Store:           objstore.Instrument(store, a.cfg.Metrics.ObjectStore()),
+			Namespace:       a.cfg.Namespace,
+			InlineThreshold: cfg.GetInlineThresholdBytes(),
+			Log:             a.log,
+			OnPut:           a.cfg.Metrics.ResultStorePut,
+		})
+	}
 	if err != nil {
 		// Not fatal. A worker that refuses to boot because object storage is
 		// briefly unavailable silently shrinks the fleet; a worker that boots and

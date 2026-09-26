@@ -155,6 +155,10 @@ func taskToProto(t map[string]any) (*nexusv1.TaskSpec, error) {
 		}
 	}
 
+	if p, ok := obj(t, "placement"); ok {
+		ts.Placement = placementToProto(p)
+	}
+
 	if c, ok := obj(t, "cache"); ok {
 		ts.Cache = &nexusv1.CachePolicy{
 			Enabled: boolean(c, "enabled"),
@@ -185,13 +189,14 @@ func taskToProto(t map[string]any) (*nexusv1.TaskSpec, error) {
 			if !ok {
 				continue
 			}
-			// Only name and ref are carried. There is deliberately no field here
+			// Only name, ref and inject are carried. There is deliberately no field here
 			// that could hold a secret VALUE: the worker resolves the ref at
 			// execution time, so a compromise of the metadata store leaks no
 			// credentials.
 			rs.Secrets = append(rs.Secrets, &nexusv1.SecretRef{
-				Name: str(sm, "name"),
-				Ref:  str(sm, "ref"),
+				Name:   str(sm, "name"),
+				Ref:    str(sm, "ref"),
+				Inject: str(sm, "inject"),
 			})
 		}
 		ts.Runtime = rs
@@ -214,7 +219,54 @@ func resourceVector(m map[string]any) *nexusv1.ResourceVector {
 			rv.Custom[k] = toI64(v)
 		}
 	}
+	// Fractional GPUs (ADR-0029). gpu_shares is never authored: it is the
+	// control plane's per-device ledger, and the schema rejects it.
+	if c, ok := obj(m, "mig"); ok && len(c) > 0 {
+		rv.Mig = make(map[string]int64, len(c))
+		for k, v := range c {
+			rv.Mig[k] = toI64(v)
+		}
+	}
+	rv.GpuShareMilli = i32(m, "gpu_share_milli")
+	rv.GpuShareMemoryBytes = i64(m, "gpu_share_memory_bytes")
 	return rv
+}
+
+// placementToProto decodes PlacementSpec (ADR-0030, ADR-0031).
+func placementToProto(p map[string]any) *nexusv1.PlacementSpec {
+	ps := &nexusv1.PlacementSpec{
+		Capacity:        capacityPreference(strOr(p, "capacity", "spot_allowed")),
+		RequiredLabels:  strMap(p, "required_labels"),
+		MaxCostTier:     i32(p, "max_cost_tier"),
+		PreferredLabels: strMap(p, "preferred_labels"),
+		MaxPreemptions:  i32(p, "max_preemptions"),
+	}
+	for _, v := range arr(p, "preferred_data_locality") {
+		if s, ok := v.(string); ok {
+			ps.PreferredDataLocality = append(ps.PreferredDataLocality, s)
+		}
+	}
+	for _, raw := range arr(p, "artifacts") {
+		a, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		ps.Artifacts = append(ps.Artifacts, &nexusv1.CacheArtifact{
+			Name: str(a, "name"), Key: str(a, "key"), Uri: str(a, "uri"), SizeBytes: i64(a, "size_bytes"),
+		})
+	}
+	return ps
+}
+
+func capacityPreference(s string) nexusv1.CapacityPreference {
+	switch s {
+	case "spot_preferred", "CAPACITY_PREFERENCE_SPOT_PREFERRED":
+		return nexusv1.CapacityPreference_CAPACITY_PREFERENCE_SPOT_PREFERRED
+	case "on_demand_only", "CAPACITY_PREFERENCE_ON_DEMAND_ONLY":
+		return nexusv1.CapacityPreference_CAPACITY_PREFERENCE_ON_DEMAND_ONLY
+	default:
+		return nexusv1.CapacityPreference_CAPACITY_PREFERENCE_SPOT_ALLOWED
+	}
 }
 
 func valueSpecMap(m map[string]any, key string) map[string]*nexusv1.ValueSpec {
@@ -313,6 +365,10 @@ func errorClass(s string) nexusv1.ErrorClass {
 		return nexusv1.ErrorClass_ERROR_CLASS_NOT_FOUND
 	case "infrastructure", "ERROR_CLASS_INFRASTRUCTURE":
 		return nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE
+	case "rate_limited", "ERROR_CLASS_RATE_LIMITED":
+		return nexusv1.ErrorClass_ERROR_CLASS_RATE_LIMITED
+	case "preempted", "ERROR_CLASS_PREEMPTED":
+		return nexusv1.ErrorClass_ERROR_CLASS_PREEMPTED
 	default:
 		return nexusv1.ErrorClass_ERROR_CLASS_UNSPECIFIED
 	}

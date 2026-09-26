@@ -21,14 +21,20 @@ version choices, the security model and finding F115.
 
 ### The artifact store on AKS (read this)
 
-Nexus's result store speaks only S3, and Azure Blob has no S3 endpoint. **On
-AKS, Nexus uses its in-cluster MinIO**, on a `minio_storage_size` Premium SSD
-volume (200 GiB by default). That volume is the whole artifact store, so you
-must size it, monitor it and back it up (`make backup-artifacts`,
-docs/OPERATIONS.md §7). The Blob account, the container and the workload
-identity are provisioned for the native Blob backend, which **does not exist
-yet**. `azure_blob_native_backend` is reserved for it and refuses `true`
-(F115).
+By default (`azure_blob_native_backend = true`) Nexus stores results and logs
+in the provisioned **Blob container** through its native Azure Blob backend
+(ADR-0027): the chart's `nexus-artifacts` ServiceAccount is federated to the user-assigned
+identity that holds `Storage Blob Data Contributor` on that one container, the
+pods carry `azure.workload.identity/use: "true"`, and no storage key exists in
+the cluster. Reads, writes and listing go over the private endpoint.
+
+With `azure_blob_native_backend = false` the chart's **in-cluster MinIO** runs
+instead, on a `minio_storage_size` Premium SSD volume (200 GiB by default).
+That volume is then the whole artifact store: you size it, monitor it and back
+it up (`make backup-artifacts`, docs/OPERATIONS.md §7). Switching an
+environment that already holds results does not migrate them; copy the bucket
+into the container first (docs/OPERATIONS.md §26). Neither mode has been
+applied to a real subscription yet (F115).
 
 ## Prerequisites
 
@@ -69,7 +75,7 @@ apply. Deletion protection is deliberate.
 |---|---|
 | `kubeconfig_command` | `az aks get-credentials ... && kubelogin convert-kubeconfig -l azurecli` |
 | `registry` | ACR login server |
-| `database` | Host, port, database, user, `sslmode=require`, the **Key Vault secret ID** of the password, and the Kubernetes Secret key. The password itself is never printed. |
+| `database` | Host, port, database, user, `sslmode=verify-full` (pinned CA bundle in `kgf-nexus-postgres-ca`), the runtime logins Secret, the **Key Vault secret ID** of the password, and the Kubernetes Secret key. The password itself is never printed. |
 | `object_store` | What stores artifacts today (MinIO) and the unused Blob target |
 | `key_vault_uri`, `namespace`, `console_access` | As named |
 | `admin_api_key` | Sensitive: `terraform output -raw admin_api_key` |

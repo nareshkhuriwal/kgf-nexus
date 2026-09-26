@@ -81,13 +81,19 @@ func (r *rmGRPC) registerWorker(ctx context.Context, req *nexusv1.RegisterReques
 // Returned: whether the worker session is still known, which the gateway turns into a
 // REREGISTER directive rather than an error, so a healthy host recovers itself.
 func (r *rmGRPC) heartbeat(ctx context.Context, workerID string, runningAttemptIDs []string) (workerKnown bool, releasedCount int, err error) {
-	ctx, cancel := withCallTimeout(ctx)
-	defer cancel()
-
-	resp, err := r.client.HeartbeatWorker(ctx, &rmv1.HeartbeatWorkerRequest{
+	return r.heartbeatWithFacts(ctx, &rmv1.HeartbeatWorkerRequest{
 		WorkerId:          workerID,
 		RunningAttemptIds: runningAttemptIDs,
 	})
+}
+
+// heartbeatWithFacts is heartbeat carrying the placement facts the agent
+// reported (ADR-0030 §4), in the same RPC.
+func (r *rmGRPC) heartbeatWithFacts(ctx context.Context, req *rmv1.HeartbeatWorkerRequest) (workerKnown bool, releasedCount int, err error) {
+	ctx, cancel := withCallTimeout(ctx)
+	defer cancel()
+
+	resp, err := r.client.HeartbeatWorker(ctx, req)
 	if err != nil {
 		return false, 0, fmt.Errorf("heartbeat worker: %w", err)
 	}

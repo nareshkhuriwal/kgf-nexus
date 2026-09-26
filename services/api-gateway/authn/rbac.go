@@ -18,10 +18,17 @@ const AdministratorRole = "Administrator"
 var ModuleActions = map[string][]string{
 	"overview": {"view"}, "workflows": {"view", "publish", "delete", "cache.invalidate"}, "runs": {"view", "create", "cancel", "pause", "resume", "retry", "delete"},
 	"tasks": {"view", "logs.view", "results.view"}, "schedules": {"view", "create", "update", "delete"}, "backfills": {"view", "create", "update"},
-	"workers": {"view", "drain", "quarantine"}, "infrastructure": {"view", "configure"}, "users": {"view", "manage"}, "tokens": {"view", "manage"}, "audit": {"view"}, "roles": {"view", "manage"},
+	"workers": {"view", "drain", "quarantine"}, "infrastructure": {"view", "configure"}, "users": {"view", "manage"}, "tokens": {"view", "manage"}, "audit": {"view", "manage"}, "roles": {"view", "manage"},
+	// ADR-0024 §6: non-human identities for agents and CI.
+	"service_accounts": {"view", "manage"},
 	// ADR-0021. quotas.view is broad (it explains a quota_exceeded pending
 	// reason); usage.view is cost data and is granted deliberately.
 	"quotas": {"view", "manage"}, "usage": {"view"},
+	// ADR-0028. notifications.manage is admin-class in the legacy mapping (it
+	// configures egress and secrets); a trigger or sensor is a standing
+	// authorization to create runs, so creating one also requires runs.create.
+	"notifications": {"view", "manage"}, "triggers": {"view", "create", "update", "delete"},
+	"sensors": {"view", "create", "update", "delete"}, "assets": {"view"},
 }
 
 func Catalog() []string {
@@ -35,9 +42,11 @@ func Catalog() []string {
 	return out
 }
 func Builtins() map[string][]string {
-	viewer := []string{"overview.view", "workflows.view", "runs.view", "tasks.view", "schedules.view", "backfills.view", "workers.view", "quotas.view"}
+	viewer := []string{"overview.view", "workflows.view", "runs.view", "tasks.view", "schedules.view", "backfills.view", "workers.view", "quotas.view",
+		"notifications.view", "triggers.view", "sensors.view", "assets.view"}
 	operator := append(append([]string{}, viewer...), "runs.create", "runs.cancel", "runs.pause", "runs.resume", "runs.retry", "tasks.logs.view", "tasks.results.view", "schedules.create", "schedules.update", "backfills.create", "backfills.update")
-	return map[string][]string{AdministratorRole: Catalog(), "Viewer": viewer, "Workflow Operator": operator, "Workflow Developer": append(append([]string{}, operator...), "workflows.publish", "schedules.delete", "workflows.cache.invalidate"), "Infrastructure Operator": {"workers.view", "workers.drain", "workers.quarantine", "infrastructure.view", "infrastructure.configure", "quotas.view", "quotas.manage", "usage.view"}, "Auditor": {"audit.view", "users.view", "roles.view", "tokens.view", "quotas.view", "usage.view"}}
+	return map[string][]string{AdministratorRole: Catalog(), "Viewer": viewer, "Workflow Operator": operator, "Workflow Developer": append(append([]string{}, operator...), "workflows.publish", "schedules.delete", "workflows.cache.invalidate",
+		"triggers.create", "triggers.update", "triggers.delete", "sensors.create", "sensors.update", "sensors.delete", "notifications.manage"), "Infrastructure Operator": {"workers.view", "workers.drain", "workers.quarantine", "infrastructure.view", "infrastructure.configure", "quotas.view", "quotas.manage", "usage.view"}, "Auditor": {"audit.view", "users.view", "roles.view", "tokens.view", "service_accounts.view", "quotas.view", "usage.view"}}
 }
 func (a *Authenticator) WithRBAC() *Authenticator { a.rbac = true; return a }
 func (a *Authenticator) resolveRBAC(ctx context.Context, p Principal) (Principal, error) {
@@ -84,30 +93,28 @@ func (a *Authenticator) resolveRBAC(ctx context.Context, p Principal) (Principal
 	return p, nil
 }
 func (p Principal) Allows(permission string) bool {
-	known := false
-	for _, grant := range Catalog() {
-		if grant == permission {
-			known = true
-			break
-		}
-	}
-	if !known {
+	if !Known(permission) {
 		return false
 	}
 	if p.Grants != nil {
 		return p.Grants[permission]
 	}
+	return legacyAllows(p, permission)
+}
+
+// legacyAllows is the unbound (role + scopes) mapping onto the catalog.
+func legacyAllows(p Principal, permission string) bool {
 	// Legacy compatibility is explicit until the account receives an assignment.
 	if p.Role == RoleWorker {
 		return false
 	}
 	if strings.HasSuffix(permission, ".view") {
 		module := strings.Split(permission, ".")[0]
-		if module == "users" || module == "tokens" || module == "audit" || module == "infrastructure" || module == "usage" {
+		if module == "users" || module == "tokens" || module == "audit" || module == "infrastructure" || module == "usage" || module == "service_accounts" {
 			return p.Role == RoleAdmin && p.HasScope(ActionAdminWrite)
 		}
 
-		return p.HasScope(ActionRead) && (p.Role == RoleAdmin || (p.Role == RoleReader && !strings.HasPrefix(permission, "users.") && !strings.HasPrefix(permission, "tokens.") && !strings.HasPrefix(permission, "audit.") && !strings.HasPrefix(permission, "roles.") && !strings.HasPrefix(permission, "infrastructure.") && !strings.HasPrefix(permission, "usage.")))
+		return p.HasScope(ActionRead) && (p.Role == RoleAdmin || (p.Role == RoleReader && !strings.HasPrefix(permission, "users.") && !strings.HasPrefix(permission, "tokens.") && !strings.HasPrefix(permission, "audit.") && !strings.HasPrefix(permission, "roles.") && !strings.HasPrefix(permission, "infrastructure.") && !strings.HasPrefix(permission, "usage.") && !strings.HasPrefix(permission, "service_accounts.")))
 	}
 	action := ActionWrite
 	if strings.HasSuffix(permission, ".manage") || permission == "workers.drain" || permission == "workers.quarantine" || permission == "infrastructure.configure" || permission == "runs.delete" || permission == "workflows.delete" {
@@ -130,6 +137,8 @@ func ValidateGrants(grants map[string]bool) error {
 		"runs.create":      {"workflows.view"},
 		"schedules.create": {"workflows.view", "runs.create", "runs.view"},
 		"backfills.create": {"runs.create", "runs.view", "schedules.view"},
+		"triggers.create":  {"workflows.view", "runs.create", "runs.view"},
+		"sensors.create":   {"workflows.view", "runs.create", "runs.view"},
 	}
 	for grant, needs := range required {
 		if grants[grant] {

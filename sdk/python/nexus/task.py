@@ -25,8 +25,11 @@ from typing import TYPE_CHECKING, Any, Callable, Generic, Mapping, Sequence, Typ
 
 from .sourcemap import SourceLocation
 from .types import (
+    Asset,
+    AssetLike,
     Cache,
     Cancellation,
+    Placement,
     Concurrency,
     IdempotencyMode,
     Resources,
@@ -38,6 +41,7 @@ from .types import (
     ValueSpec,
     ValueSpecLike,
     coerce_idempotency,
+    coerce_assets,
     coerce_trigger_rule,
 )
 
@@ -117,11 +121,14 @@ class _Declaration:
     runtime: Runtime | None
     node_selector: Mapping[str, str] | None
     prefer_same_worker_as: str | None
+    placement: Placement | None
     concurrency: Concurrency | None
     priority: int
     trigger_rule: str
     inputs: Mapping[str, ValueSpec] | None
     outputs: Mapping[str, ValueSpec] | None
+    produces: tuple[Asset, ...] = ()
+    consumes: tuple[Asset, ...] = ()
 
 
 class TaskDefinition(Generic[R]):
@@ -320,11 +327,25 @@ class TaskDefinition(Generic[R]):
             spec["node_selector"] = {str(k): str(v) for k, v in sorted(d.node_selector.items())}
         if d.prefer_same_worker_as:
             spec["prefer_same_worker_as"] = d.prefer_same_worker_as
+        if d.placement is not None:
+            # Omitted when empty, so a task without placement hashes as before.
+            placement = d.placement.to_wire()
+            if placement:
+                spec["placement"] = placement
         if d.concurrency is not None:
             spec["concurrency_key"] = d.concurrency.key
             spec["concurrency_limit"] = d.concurrency.limit
         if d.priority:
             spec["priority"] = d.priority
+        if d.produces or d.consumes:
+            # Omitted entirely when nothing is declared, so a task without
+            # lineage keeps its content address (ADR-0028).
+            assets: dict[str, Any] = {}
+            if d.produces:
+                assets["produces"] = [a.to_wire() for a in d.produces]
+            if d.consumes:
+                assets["consumes"] = [a.to_wire() for a in d.consumes]
+            spec["assets"] = assets
         return spec
 
     def __repr__(self) -> str:
@@ -346,11 +367,14 @@ def _as_author_kwargs(d: _Declaration) -> dict[str, Any]:
         "runtime": d.runtime,
         "node_selector": d.node_selector,
         "prefer_same_worker_as": d.prefer_same_worker_as,
+        "placement": d.placement,
         "concurrency": d.concurrency,
         "priority": d.priority,
         "trigger_rule": d.trigger_rule,
         "inputs": d.inputs,
         "outputs": d.outputs,
+        "produces": d.produces,
+        "consumes": d.consumes,
     }
 
 
@@ -421,6 +445,10 @@ def _build_declaration(fn: Callable[..., Any], kw: Mapping[str, Any]) -> _Declar
     if runtime is not None:
         runtime.to_wire()
 
+    placement = Placement.coerce(kw.get("placement"))
+    if placement is not None:
+        placement.to_wire()
+
     raw_resources = kw.get("resources")
     resources: Resources | None
     if isinstance(raw_resources, Mapping):
@@ -467,11 +495,14 @@ def _build_declaration(fn: Callable[..., Any], kw: Mapping[str, Any]) -> _Declar
         "runtime",
         "node_selector",
         "prefer_same_worker_as",
+        "placement",
         "concurrency",
         "priority",
         "trigger_rule",
         "inputs",
         "outputs",
+        "produces",
+        "consumes",
     }
     if unknown:
         raise SpecError(
@@ -491,11 +522,14 @@ def _build_declaration(fn: Callable[..., Any], kw: Mapping[str, Any]) -> _Declar
         runtime=runtime,
         node_selector=dict(kw["node_selector"]) if kw.get("node_selector") else None,
         prefer_same_worker_as=kw.get("prefer_same_worker_as"),
+        placement=placement,
         concurrency=concurrency,
         priority=int(kw.get("priority") or 0),
         trigger_rule=trigger_rule,
         inputs=inputs,
         outputs=outputs,
+        produces=coerce_assets(f"task {task_ref!r}: produces", kw.get("produces")),
+        consumes=coerce_assets(f"task {task_ref!r}: consumes", kw.get("consumes")),
     )
 
 
@@ -520,11 +554,14 @@ def task(
     runtime: Runtime | Mapping[str, Any] | None = None,
     node_selector: Mapping[str, str] | None = None,
     prefer_same_worker_as: str | None = None,
+    placement: Placement | Mapping[str, Any] | None = None,
     concurrency: Concurrency | Mapping[str, Any] | None = None,
     priority: int = 0,
     trigger_rule: TriggerRule = "all_success",
     inputs: Mapping[str, ValueSpecLike] | None = None,
     outputs: Mapping[str, ValueSpecLike] | None = None,
+    produces: Sequence[AssetLike] | AssetLike | None = None,
+    consumes: Sequence[AssetLike] | AssetLike | None = None,
 ) -> Callable[[Callable[..., R]], TaskDefinition[R]]: ...
 
 
@@ -544,11 +581,14 @@ def task(
     runtime: Runtime | Mapping[str, Any] | None = None,
     node_selector: Mapping[str, str] | None = None,
     prefer_same_worker_as: str | None = None,
+    placement: Placement | Mapping[str, Any] | None = None,
     concurrency: Concurrency | Mapping[str, Any] | None = None,
     priority: int = 0,
     trigger_rule: TriggerRule = "all_success",
     inputs: Mapping[str, ValueSpecLike] | None = None,
     outputs: Mapping[str, ValueSpecLike] | None = None,
+    produces: Sequence[AssetLike] | AssetLike | None = None,
+    consumes: Sequence[AssetLike] | AssetLike | None = None,
 ) -> TaskDefinition[R] | Callable[[Callable[..., R]], TaskDefinition[R]]:
     """Declare a task. Compiles to a TaskSpec; does not hook the scheduler.
 
@@ -580,6 +620,10 @@ def task(
     FAILED with reason=indeterminate_outcome and waits for a human, because the
     platform cannot know whether it already ran (ADR-0006 point 5).
 
+    `produces=` / `consumes=` declare the data assets the task writes and reads
+    (URI strings, `Asset(uri, name)` or mappings), recorded as lineage per run;
+    a producing node's success is recorded as a materialization (ADR-0028).
+
     `cancellation=Cancellation(max_wait="5m")` (or `cancellation=True`) declares
     the task uninterruptible: a cancel sends no SIGTERM and waits, bounded by
     `max_wait` and the worker's platform ceiling, then SIGKILLs (ADR-0015).
@@ -601,11 +645,14 @@ def task(
                 "runtime": runtime,
                 "node_selector": node_selector,
                 "prefer_same_worker_as": prefer_same_worker_as,
+                "placement": placement,
                 "concurrency": concurrency,
                 "priority": priority,
                 "trigger_rule": trigger_rule,
                 "inputs": inputs,
                 "outputs": outputs,
+                "produces": produces,
+                "consumes": consumes,
             },
         )
         definition: TaskDefinition[R] = TaskDefinition(fn, decl)

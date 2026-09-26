@@ -25,17 +25,33 @@ Other ways in:
 
 ## 1. Bring-up
 
+**First run on a fresh checkout** (needs Docker with Compose v2, and Go):
+
 ```bash
 git clone <repo> && cd kgf-nexus
-
-# From the repo root. The compose file lives in deploy/ but the build context is
-# the repo root, because the Go module and the shared internal/ + gen/ packages
-# live there.
-docker compose -f deploy/docker-compose.yml up --build
-
-# or, equivalently
-make up
+make quickstart        # = go run ./cli/cmd/nexusctl up
 ```
+
+`make quickstart` brings the stack up, waits for health, registers a tenant
+through the API, mints the admin key and the agents' worker token through the
+API, starts the agents, and prints the console URL and credentials once
+(cli/README.md, "Local quick start"). Pass flags with `QUICKSTART_ARGS`, e.g.
+`make quickstart QUICKSTART_ARGS="-p my-stack --api-port 18090"`.
+
+**Driving Compose yourself.** The agents' credential, `NEXUS_WORKER_API_KEY`,
+has no default: Compose refuses to parse the file while it is unset, and
+`make up` stops before Compose with the two options above. Generate a key,
+start the stack, then install the key (§2):
+
+```bash
+export NEXUS_WORKER_API_KEY=$(make -s worker-key)
+make up                # docker compose -f deploy/docker-compose.yml up --build -d
+make seed              # installs that worker key and prints a new admin key
+```
+
+The compose file lives in deploy/ but the build context is the repo root,
+because the Go module and the shared internal/ + gen/ packages live there.
+`make down`, `make logs` and `make ps` work with or without the key set.
 
 Then:
 
@@ -98,50 +114,48 @@ curl -s localhost:8090/healthz
 
 ## 2. Seed an API key
 
+`make quickstart` does this for you, through the API. This section is for a
+stack started with `make up` and your own `NEXUS_WORKER_API_KEY`.
+
 MVP authn is static API keys, hashed at rest with SHA-256
 (`internal/store.HashAPIKey`). Two keys are needed: an **admin** key for humans,
-the CLI and the UI, and a **worker** key that the two agents already carry via
+the CLI and the UI, and a **worker** key that the agents already carry via
 `NEXUS_WORKER_API_KEY`.
 
 ```bash
-# Against the compose database:
-DATABASE_URL='postgres://nexus:nexus-dev-password@localhost:55433/nexus?sslmode=disable' make seed
+make seed    # host psql if installed, else the stack's own postgres container
 ```
 
-Output:
+It creates the `default` tenant row if missing, installs the SHA-256 of the
+exported `NEXUS_WORKER_API_KEY` (role `worker`) and of a newly generated admin
+key (or `NEXUS_DEV_API_KEY`, if set), and prints both plaintexts once:
 
 ```
-seed: admin  key = dev-admin-key
-seed: worker key = dev-worker-key  (matches the agents' NEXUS_WORKER_API_KEY)
+  admin  key (console, CLI):  nxs_admin_<64 hex>
+  worker key (agents):        nxs_worker_<64 hex>
 ```
 
-Or by hand, if you would rather not depend on a local `psql`:
+Use the admin key:
 
 ```bash
-KEY=dev-admin-key
-HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
-docker compose -f deploy/docker-compose.yml exec -T postgres \
-  psql -U nexus -d nexus -c \
-  "INSERT INTO api_keys (namespace, name, key_hash, role)
-   VALUES ('default','dev-admin','$HASH','admin')
-   ON CONFLICT (key_hash) DO NOTHING"
-```
-
-Use it:
-
-```bash
-curl -s -H "Authorization: Bearer dev-admin-key" \
+export NEXUS_API_KEY=nxs_admin_...
+curl -s -H "Authorization: Bearer $NEXUS_API_KEY" \
   localhost:8090/v1/namespaces/default/runs | jq
 ```
+
+Once you hold an admin key, further credentials, including rotated worker
+tokens (role `worker`, scope `worker_rpc`), are better minted through
+`POST /v1/namespaces/default/tokens` or the console: those are audited, expire
+and can be revoked.
 
 The **worker** role deliberately cannot read the REST surface. A worker
 credential lives on every execution host — the least trustworthy place in the
 system — so a compromised host must not be able to enumerate other namespaces'
 runs.
 
-Override the plaintext keys with `NEXUS_DEV_API_KEY` and
-`NEXUS_WORKER_API_KEY`. If you change the worker key, change it in **both** the
-seed and the agents' environment, or the agents will fail to register.
+If you change the worker key, export the new value and run both `make up`
+(to restart the agents with it) and `make seed` (to install it), or the agents
+will fail to register.
 
 ---
 
@@ -154,7 +168,7 @@ user's process, and the control plane only ever parses data (ADR-0004).
 ```bash
 go build -o ./nexusctl ./cli/cmd/nexusctl
 
-export NEXUS_API_KEY=dev-admin-key
+export NEXUS_API_KEY=<the admin key>
 export NEXUS_ADDR=http://localhost:8090
 
 # Start here: 3 tasks in a line.
@@ -173,12 +187,12 @@ or, without the CLI:
 
 ```bash
 curl -s -X POST localhost:8090/v1/namespaces/default/specs \
-  -H 'Authorization: Bearer dev-admin-key' \
+  -H "Authorization: Bearer $NEXUS_API_KEY" \
   -H 'Content-Type: application/yaml' \
   --data-binary @examples/ten_node_mixed/compiled.yaml
 
 curl -s -X POST localhost:8090/v1/namespaces/default/runs \
-  -H 'Authorization: Bearer dev-admin-key' \
+  -H "Authorization: Bearer $NEXUS_API_KEY" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: my-first-run' \
   -d '{"spec_name":"ten-node-mixed","params":{}}'
@@ -229,10 +243,11 @@ file next to `docker-compose.yml`.
 | `NEXUS_POSTGRES_PORT` | `55433` | Published Postgres port |
 | `NEXUS_MINIO_PORT` / `_CONSOLE_PORT` | `9000` / `9001` | MinIO |
 | `NEXUS_NAMESPACE` | `default` | Single namespace for the MVP |
+| `NEXUS_AGENT_NAMESPACE` | `$NEXUS_NAMESPACE` | Tenant the compose agents serve; `make seed` mints the worker key and nats-init the agent NKey for it (docs/MULTITENANCY.md, "Agent namespace") |
 | `NEXUS_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `NEXUS_RESULT_BUCKET` | `nexus-results` | MinIO bucket (auto-created) |
-| `NEXUS_WORKER_API_KEY` | `dev-worker-key` | Agent credential |
-| `NEXUS_DEV_API_KEY` | `dev-admin-key` | Admin credential for `make seed` |
+| `NEXUS_WORKER_API_KEY` | none: required (`make -s worker-key`) | Agent credential; `make quickstart` supplies it |
+| `NEXUS_DEV_API_KEY` | generated | Admin credential `make seed` installs |
 | `NEXUS_GPU_KIND` | `nvidia-a100` | Advertised GPU model on `agent-gpu` |
 | `MINIO_ROOT_USER` / `_PASSWORD` | `nexusadmin` / `nexus-dev-password` | **DEV ONLY** |
 
@@ -295,8 +310,10 @@ independently, so the rest of the console keeps working.
 
 **No workers in the fleet view**
 `docker compose logs -f agent-cpu agent-gpu`. Almost always the API key: the
-agents present `NEXUS_WORKER_API_KEY` (default `dev-worker-key`) and it must
-exist in `api_keys` with role `worker`. Run `make seed`.
+agents present `NEXUS_WORKER_API_KEY`, and it must be a live credential with
+role `worker` in the agents' namespace. With `make up`, run `make seed` with the
+same key exported. With `make quickstart`, `nexusctl up` warns when its worker
+token has expired.
 
 **Tasks stay `PENDING` forever**
 Check the attempt's `pending_reason` in the console — it is populated precisely
@@ -326,7 +343,7 @@ executor, drop the mount and set `AGENT_EXECUTORS: subprocess`.
 
 **Reset everything**
 ```bash
-docker compose -f deploy/docker-compose.yml down -v   # also drops run history
-docker compose -f deploy/docker-compose.yml up --build
-make seed
+make down                     # also drops run history
+make up && make seed          # with NEXUS_WORKER_API_KEY exported
+# or, for a quickstart stack:  nexusctl down --volumes && nexusctl up
 ```

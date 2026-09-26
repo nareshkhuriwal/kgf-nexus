@@ -36,9 +36,10 @@ resource "random_password" "postgres" {
 }
 
 # Root credentials for the in-cluster MinIO, unless the caller supplies a key
-# pair for an external S3-compatible store (Amazon S3, GCS HMAC interop).
+# pair for an external S3-compatible store (Amazon S3, GCS HMAC interop) or
+# the store is reached with a cloud identity and needs no key at all.
 resource "random_password" "minio" {
-  count   = var.object_store_credentials == null ? 1 : 0
+  count   = var.object_store_credentials == null && var.generate_object_store_credentials ? 1 : 0
   length  = 32
   special = false
 }
@@ -73,11 +74,20 @@ locals {
   postgres_password = (
     var.postgres_password != null ? var.postgres_password : random_password.postgres[0].result
   )
-  object_store_access_key = (
-    var.object_store_credentials != null ? var.object_store_credentials.access_key_id : "nexus"
-  )
-  object_store_secret_key = (
-    var.object_store_credentials != null ? var.object_store_credentials.secret_access_key : random_password.minio[0].result
+  # The S3 key pair for the Secret: the caller's, the generated MinIO root
+  # pair, or NONE. None matters: the chart's default credential mode (auto)
+  # prefers a key pair over the pod's cloud identity, so a placeholder pair
+  # written "just in case" would shadow IRSA / Pod Identity with keys that S3
+  # rejects.
+  object_store_keys = (
+    var.object_store_credentials != null ? {
+      "minio-root-user"     = var.object_store_credentials.access_key_id
+      "minio-root-password" = var.object_store_credentials.secret_access_key
+    } :
+    var.generate_object_store_credentials ? {
+      "minio-root-user"     = "nexus"
+      "minio-root-password" = random_password.minio[0].result
+    } : {}
   )
 
   # NATS identities, from a directory deploy/nats/nexus-nats-auth.sh wrote
@@ -114,15 +124,82 @@ resource "kubernetes_secret_v1" "credentials" {
     }
   }
 
+  # The chart's key names (minio-root-*) predate external stores: they hold
+  # the S3 key pair whether the store is the in-cluster MinIO or not.
   data = merge({
     "postgres-password" = local.postgres_password
-    # The chart's key names predate external stores: they hold the S3 key pair
-    # whether the store is the in-cluster MinIO or not.
-    "minio-root-user"     = local.object_store_access_key
-    "minio-root-password" = local.object_store_secret_key
-    "worker-api-key"      = local.worker_api_key
-    "admin-api-key"       = local.admin_api_key
-  }, local.nats_seeds)
+    "worker-api-key"    = local.worker_api_key
+    "admin-api-key"     = local.admin_api_key
+  }, local.object_store_keys, local.nats_seeds)
+}
+
+# ── Database: server verification and runtime logins ────────────────────
+
+# The managed database's root CAs, for sslmode=verify-full (chart
+# postgres.caBundle). Public certificates, but a Secret rather than a
+# ConfigMap so that replacing the trust anchors needs Secret write access.
+resource "kubernetes_secret_v1" "postgres_ca" {
+  count = var.postgres_ca_bundle == null ? 0 : 1
+
+  metadata {
+    name      = "${var.release_name}-postgres-ca"
+    namespace = kubernetes_namespace_v1.this.metadata[0].name
+    labels = {
+      "app.kubernetes.io/part-of"    = "kgf-nexus"
+      "app.kubernetes.io/managed-by" = "terraform"
+    }
+  }
+  data = { "ca.crt" = var.postgres_ca_bundle }
+}
+
+# One login per service, never the owner (docs/OPERATIONS.md §20.12). The chart's
+# db-roles Job creates them inside the cluster, because Terraform cannot reach
+# a managed server's private endpoint to run SQL. Alphanumeric: embedded in a
+# postgres:// URL, and nexus-db-roles accepts only URL-safe passwords.
+locals {
+  runtime_db_logins = var.runtime_db_roles ? toset([
+    "api-gateway", "workflow-manager", "dag-engine", "scheduler",
+    "resource-manager", "event-service", "artifact-gc",
+  ]) : toset([])
+}
+
+resource "random_password" "runtime_db" {
+  for_each = local.runtime_db_logins
+  length   = 32
+  special  = false
+  keepers  = { version = var.runtime_db_password_version }
+}
+
+resource "kubernetes_secret_v1" "db_logins" {
+  count = var.runtime_db_roles ? 1 : 0
+
+  metadata {
+    name      = "${var.release_name}-db-logins"
+    namespace = kubernetes_namespace_v1.this.metadata[0].name
+    labels = {
+      "app.kubernetes.io/part-of"    = "kgf-nexus"
+      "app.kubernetes.io/managed-by" = "terraform"
+    }
+  }
+  data = { for k, p in random_password.runtime_db : "postgres-password-${k}" => p.result }
+}
+
+locals {
+  database_values = var.postgres_ca_bundle == null ? {} : {
+    postgres = {
+      sslmode  = "verify-full"
+      caBundle = { secretName = kubernetes_secret_v1.postgres_ca[0].metadata[0].name, key = "ca.crt" }
+    }
+  }
+  runtime_role_values = var.runtime_db_roles ? {
+    postgres = {
+      runtimeRoles = {
+        enabled          = true
+        existingSecret   = kubernetes_secret_v1.db_logins[0].metadata[0].name
+        passwordRevision = var.runtime_db_password_version
+      }
+    }
+  } : {}
 }
 
 resource "helm_release" "nexus" {
@@ -152,6 +229,10 @@ resource "helm_release" "nexus" {
     }),
     yamlencode(local.nats_auth_values),
     yamlencode(var.chart_values),
+    # After the environment's values: the CA bundle and runtime logins this
+    # module created must be the ones the chart mounts.
+    yamlencode(local.database_values),
+    yamlencode(local.runtime_role_values),
     # Last, so an operator's per-deployment overrides win over the values a
     # cloud environment derives from its infrastructure. Helm deep-merges.
     yamlencode(var.chart_values_overrides),

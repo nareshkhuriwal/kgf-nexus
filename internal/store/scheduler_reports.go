@@ -150,6 +150,9 @@ type AppliedResult struct {
 	// Applied is false when the CAS found nothing to move — a duplicate report,
 	// or an attempt already expired and retried elsewhere.
 	Applied bool
+	// Stale is set, with Applied false, when the attempt had been reclaimed
+	// as LOST: the reporter's lease is gone and the result was not used.
+	Stale bool
 	// Retry is set when the outcome was retryable and a retry was scheduled.
 	Retry bool
 	// UsageRecorded is true when the attempt's usage-ledger row was written in
@@ -197,10 +200,12 @@ func (s *SchedulerStore) ApplyResult(
 	// into a no-op exactly as skipping did, and a peer applying the same result
 	// is seen as terminal. The wait cannot deadlock on this statement because it
 	// is the transaction's first lock. See lockAttemptForTransition.
-	const lockQ = `
+	lockQ := `
 SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
        a.resource_request, a.scheduled_at, a.priority, a.queue,
-       n.spec_json, n.attempts_used, n.max_attempts, r.deadline_at, n.retry_floor
+       n.spec_json, n.attempts_used, n.max_attempts, r.deadline_at, n.retry_floor,
+       ` + s.freeRetriesColumn() + `,
+       ` + s.preemptionsUsedCol() + `
   FROM task_attempts a
   JOIN task_nodes    n ON n.run_id = a.run_id AND n.node_id = a.node_id
   JOIN workflow_runs r ON r.id = a.run_id
@@ -214,17 +219,32 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.worker_id,
 		reqJSON, specJSON        []byte
 		attemptsUsed, maxAttempt int32
 		runDeadline              *time.Time
+		preemptionsUsed          int32
 	)
 	err = s.lockAttemptForTransition(ctx, tx, func() error {
 		return tx.QueryRow(ctx, lockQ, attemptID).Scan(
 			&cand.ID, &cand.RunID, &cand.NodeID, &cand.AttemptNumber, &workerID,
 			&reqJSON, &cand.ScheduledAt, &cand.Priority, &cand.Queue,
-			&specJSON, &attemptsUsed, &maxAttempt, &runDeadline, &cand.RetryFloor)
+			&specJSON, &attemptsUsed, &maxAttempt, &runDeadline, &cand.RetryFloor, &cand.FreeRetries, &preemptionsUsed)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Already terminal: a duplicate report (the expected consequence of
 		// at-least-once delivery), or an attempt a reconciler or cancel moved
 		// first. Never "locked by someone else" any more -- that waits above.
+		//
+		// Tell a reclaim from a duplicate (F104 residual). LOST is written only
+		// by the lease reconciler and the liveness sweep, which also delete the
+		// lease: this reporter is no longer the owner and its result was not
+		// used, so it is answered stale_lease_token. Any other terminal state
+		// means a result (this one, delivered twice) or a cancel settled the
+		// attempt, and the report stays an accepted no-op, so at-least-once
+		// delivery never makes an agent retry a result that landed. A read of
+		// the committed row: it decides only the answer, never a write.
+		var cur string
+		if serr := tx.QueryRow(ctx, `SELECT state::text FROM task_attempts WHERE id = $1`,
+			attemptID).Scan(&cur); serr == nil && cur == string(domain.AttemptLost) {
+			return AppliedResult{Applied: false, Stale: true}, nil
+		}
 		return AppliedResult{Applied: false}, nil
 	}
 	if err != nil {
@@ -341,12 +361,34 @@ UPDATE task_attempts
 	// crash cannot leave an attempt failed with no retry scheduled and no record
 	// that one was owed.
 	if state != string(domain.AttemptSucceeded) {
+		cand.preemptionsUsed = preemptionsUsed
+		// Free RATE_LIMITED retries were never charged (ADR-0032 §3).
+		charged := attemptsUsed - cand.FreeRetries
+		if charged < 0 {
+			charged = 0
+		}
 		decision, _, rerr := s.evaluateAndScheduleRetryWithClass(
-			ctx, tx, now, &cand, errClass, attemptsUsed, maxAttempt, runDeadline)
+			ctx, tx, now, &cand, errClass, req.GetError().GetRetryAfterMs(), charged, maxAttempt, runDeadline)
 		if rerr != nil {
 			return AppliedResult{}, rerr
 		}
 		out.Retry = decision.Retry
+	}
+
+	// A PREEMPTED report is the worker saying its node is being reclaimed
+	// (ADR-0030 §2). Stop dispatching to it in THIS transaction: its eviction
+	// drain_reason reaches the gateway only on its next heartbeat, and in that
+	// gap a long poll it had already parked -- or the push loop -- handed the
+	// preemption retry straight back to the dying worker, which refused it and
+	// let it go LOST (found by tests/gpusim). The scheduler already owns this
+	// column for the DEAD transition (0005); ACTIVE -> DRAINING is the only
+	// move made here, and a worker in any other state is left alone.
+	if errClass == nexusv1.ErrorClass_ERROR_CLASS_PREEMPTED && workerID != nil {
+		if _, err := tx.Exec(ctx,
+			`UPDATE workers SET state = 'DRAINING' WHERE id = $1 AND state = 'ACTIVE'`, *workerID,
+		); err != nil {
+			return AppliedResult{}, fmt.Errorf("drain preempted worker %s: %w", *workerID, err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -366,7 +408,7 @@ UPDATE task_attempts
 // told it.
 func (s *SchedulerStore) evaluateAndScheduleRetryWithClass(
 	ctx context.Context, tx pgx.Tx, now time.Time, att *Candidate,
-	class nexusv1.ErrorClass, attemptsUsed, maxAttempts int32, runDeadline *time.Time,
+	class nexusv1.ErrorClass, retryAfterMs int64, attemptsUsed, maxAttempts int32, runDeadline *time.Time,
 ) (domain.RetryDecision, time.Time, error) {
 	policy := att.Spec.RetryPolicy()
 
@@ -376,8 +418,31 @@ func (s *SchedulerStore) evaluateAndScheduleRetryWithClass(
 		stcExceeded = true
 	}
 
-	decision := domain.ShouldRetry(class, att.Spec.IdempotencyModeProto(),
-		attemptsUsed, maxAttempts, stcExceeded, policy)
+	// A provider throttle (ADR-0032 §3) is retried without charging the
+	// budget up to the node's cap, then like TRANSIENT. Needs migration 0036's
+	// free_retries; before it, RATE_LIMITED is judged by the ordinary policy.
+	rateLimited := class == nexusv1.ErrorClass_ERROR_CLASS_RATE_LIMITED && !s.workloadMissing
+	var (
+		decision  domain.RetryDecision
+		free      bool // a RATE_LIMITED retry not charged to attempts_used
+		preempted bool // a PREEMPTED retry charged to preemptions_used instead
+	)
+	if rateLimited {
+		decision, free = domain.RateLimitedDecision(att.Spec.IdempotencyModeProto(),
+			attemptsUsed, maxAttempts, att.FreeRetries, s.freeRetryCap(), stcExceeded, policy)
+	} else if class == nexusv1.ErrorClass_ERROR_CLASS_PREEMPTED {
+		// ADR-0030 §3: an eviction the agent announced spends the preemption
+		// budget, not max_attempts, until that budget is gone.
+		maxP := s.cfg.MaxPreemptions
+		if p := att.Spec.Placement; p != nil && p.MaxPreemptions > 0 {
+			maxP = p.MaxPreemptions
+		}
+		decision, preempted = domain.ShouldRetryPreempted(att.Spec.IdempotencyModeProto(),
+			attemptsUsed, maxAttempts, att.preemptionsUsed, maxP, stcExceeded, policy)
+	} else {
+		decision = domain.ShouldRetry(class, att.Spec.IdempotencyModeProto(),
+			attemptsUsed, maxAttempts, stcExceeded, policy)
+	}
 
 	if decision.Warn {
 		if err := appendEvent(ctx, tx, att.RunID, att.NodeID, &att.ID,
@@ -404,19 +469,52 @@ func (s *SchedulerStore) evaluateAndScheduleRetryWithClass(
 	}
 
 	delay := domain.Backoff(policy, att.AttemptNumber-att.RetryFloor)
-	fireAt := now.Add(delay)
-	if err := insertTimer(ctx, tx, domain.TimerRetryBackoff, att.ID, fireAt, map[string]any{
+	if rateLimited {
+		delay = domain.RateLimitedDelay(retryAfterMs, policy, att.AttemptNumber-att.RetryFloor)
+	}
+	if free {
+		// Recorded NOW, in the terminal transaction, not when the retry
+		// attempt is created: the DAG engine derives the node's exhaustion
+		// from this column while the backoff timer is still pending, and
+		// would otherwise mark the node FAILED before its free retry exists.
+		if _, err := tx.Exec(ctx, `
+UPDATE task_nodes SET free_retries = free_retries + 1
+ WHERE run_id = $1 AND node_id = $2`, att.RunID, att.NodeID); err != nil {
+			return decision, time.Time{}, fmt.Errorf("record free retry for %s/%s: %w", att.RunID, att.NodeID, err)
+		}
+	}
+	payload := map[string]any{
 		"run_id": att.RunID.String(), "node_id": att.NodeID,
 		"next_attempt_number": att.AttemptNumber + 1,
 		"reason":              decision.Reason,
-	}); err != nil {
+	}
+	if preempted {
+		// The node is gone, not the task broken: a short fixed delay, and the
+		// retry timer charges preemptions_used instead of attempts_used.
+		delay = s.cfg.PreemptionRetryDelay
+		payload["charge"] = chargePreemption
+	}
+	fireAt := now.Add(delay)
+	if err := insertTimer(ctx, tx, domain.TimerRetryBackoff, att.ID, fireAt, payload); err != nil {
 		return decision, time.Time{}, err
 	}
+	event := map[string]any{
+		"reason": decision.Reason, "backoff_ms": delay.Milliseconds(),
+		"next_attempt_number": att.AttemptNumber + 1,
+	}
+	if preempted {
+		event["charged_to"] = "preemptions_used"
+		event["preemptions_used"] = att.preemptionsUsed + 1
+	}
+	if rateLimited {
+		event["charged"] = !free
+		event["free_retries_used"] = att.FreeRetries + boolToInt32(free)
+		if retryAfterMs > 0 {
+			event["retry_after_ms"] = retryAfterMs
+		}
+	}
 	if err := appendEvent(ctx, tx, att.RunID, att.NodeID, &att.ID,
-		domain.EventRetryScheduled, domain.ActorScheduler, map[string]any{
-			"reason": decision.Reason, "backoff_ms": delay.Milliseconds(),
-			"next_attempt_number": att.AttemptNumber + 1,
-		}); err != nil {
+		domain.EventRetryScheduled, domain.ActorScheduler, event); err != nil {
 		return decision, time.Time{}, err
 	}
 	return decision, fireAt, nil
@@ -596,4 +694,20 @@ func nullableJSON(b []byte) any {
 		return nil
 	}
 	return b
+}
+
+// freeRetriesColumn is the select-list expression for task_nodes.free_retries,
+// or a constant 0 before migration 0036 (DetectWorkloadSchema).
+func (s *SchedulerStore) freeRetriesColumn() string {
+	if s.workloadMissing {
+		return "0"
+	}
+	return "n.free_retries"
+}
+
+func boolToInt32(b bool) int32 {
+	if b {
+		return 1
+	}
+	return 0
 }

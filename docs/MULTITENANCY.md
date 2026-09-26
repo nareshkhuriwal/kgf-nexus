@@ -22,6 +22,18 @@ An optional, separately enrolled platform operator can use `/v1/platform/tenants
 
 Apply migration 0013 before the new gateway. Backfill preserves existing data. The UI can then expose customer registration. No billing subscription, cloud scaling or resource provisioning is triggered. Before exposing self-service registration publicly, add signup abuse controls and configure tenant quotas (namespace quotas are enforced since migration 0027, ADR-0021, but every namespace starts unlimited; see OPERATIONS §21); email verification and password recovery exist since migration 0017 but require a configured SMTP server (docs/OPERATIONS.md §10). Multi-namespace membership, customer suspension and ownership-transfer workflows require separate lifecycle work.
 
+## Agent namespace
+
+A worker agent serves exactly one namespace: `NEXUS_NAMESPACE` (flag `-namespace`), default `default`. It registers there, polls only that namespace's queues, prefixes its result-store keys with it, and subscribes to that tenant's dispatch hints on NATS. Three things must agree with it, and each deployment path sets them together:
+
+- the worker API key must be minted for that namespace (the gateway authorizes `Register` against the requested namespace);
+- with NATS NKey authorization, the agent's NKey must be issued for that tenant (`nexus-nats-auth.sh init --tenant <ns>`); an NKey for another tenant cannot subscribe to its hints;
+- the namespace must be registered in `tenants` (migration 0014).
+
+**Compose.** `NEXUS_AGENT_NAMESPACE` selects the agents' tenant and falls back to `NEXUS_NAMESPACE`, then `default`, so the development stack is unchanged. `nats-init` issues the agent NKey for the same tenant, and `make seed AGENT_NAMESPACE=<ns>` (or with `NEXUS_AGENT_NAMESPACE` exported) registers the tenant and mints the worker key in it. The console and CLI keep using `NEXUS_NAMESPACE`. Changing the agent tenant of an existing stack needs the NKey reissued: remove the `nats-auth-*` volumes or run `nexus-nats-auth.sh init --tenant <ns>` in `nats-init`.
+
+**Helm.** Agents serve `nexusNamespace` unless an `agents[]` entry sets `namespace`. Such an entry also names its worker key in `existingSecret` (`workerApiKeySecretKey`, default `worker-api-key`) and, with NKey authorization, its seed (`natsSeedKey`). The chart refuses to render an agent whose namespace has no `nats.auth.tenants` entry; `deploy/helm/validate.sh` checks both the refusal and the rendered override.
+
 ## Explicit row ownership (migration 0014)
 
 All 24 customer-owned tables now have a non-null, indexed `tenant_id` foreign key. Namespace-based rows derive it from `tenants`; dependent rows derive it from the run, attempt, schedule or user. Database triggers support older service insert statements while rejecting supplied mismatches and ownership changes. Composite foreign keys prevent cross-tenant spec/run, worker/attempt, worker/lease, worker/reservation, schedule/backfill, token/user and owner/user relationships.
@@ -58,3 +70,7 @@ The migration preserves historical cross-tenant worker-link evidence in `audit_l
 **Audit actions:** `user.email_verification_sent`, `user.email_verified`, `user.password_reset_requested` (outcome `error` when delivery failed), `user.password_reset`, and `session.login` denied with reason `email not verified`. Audit rows record token ids, never tokens.
 
 **Known limits.** A registration made with someone else's address still reserves that address's single self-service registration until an operator removes it. Nothing expires unverified registrations. The per-IP and per-address limits are in memory per replica; only the hourly issuance cap is shared. Per-IP limiting trusts `X-Real-IP` only from a private or loopback peer (the console's nginx). A client that can reach the gateway directly from a private network can forge that header, which leaves the per-address and database caps as the bound.
+
+## Inside KGF Cloud (migration 0032)
+
+When Nexus runs as a KGF Cloud service (`NEXUS_AUTH_MODE=kgf|both`, ADR-0024, OPERATIONS §24), tenancy is derived from the signed KGF context rather than registered: each KGF (organization, subscription, resource group) maps to one Nexus tenant whose namespace is `kgf-` followed by 32 hex characters of a SHA-256 over the three names, provisioned on the first request that names it and recorded in `kgf_scopes`. The organization is part of the hash, so equal subscription and group names in two organizations never share a namespace, and a namespace that exists but was not provisioned for that triple is refused rather than adopted. Every existing isolation rule applies unchanged, because a KGF principal is an ordinary principal of its mapped namespace: the path namespace must match, resource ownership is checked per namespace (F101), and tenant ownership is enforced by the 0014 triggers.

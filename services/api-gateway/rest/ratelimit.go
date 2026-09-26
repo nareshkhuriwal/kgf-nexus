@@ -14,8 +14,10 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 )
 
@@ -196,6 +198,11 @@ type verdict struct {
 type rateLimiter struct {
 	cfg   RateLimitConfig
 	clock func() time.Time
+	// kind names the bucket in metrics (a limiterKind constant); never a key.
+	kind string
+	// inst is nil until RateLimitMetrics are attached, and every use is
+	// nil-safe. Atomic because reject() reads it outside mu.
+	inst atomic.Pointer[limiterInstruments]
 
 	mu      sync.Mutex
 	buckets map[string]*list.Element
@@ -257,6 +264,7 @@ func (l *rateLimiter) take(key string) verdict {
 	l.evictIdle(now)
 
 	b := l.touch(key, now)
+	l.observeSizeLocked()
 	if b.tokens >= 1 {
 		b.tokens--
 		return verdict{ok: true, limit: l.limit(), remaining: int(b.tokens)}
@@ -278,6 +286,7 @@ func (l *rateLimiter) blocked(key string) verdict {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.evictIdle(now)
+	defer l.observeSizeLocked()
 
 	if _, ok := l.buckets[key]; !ok {
 		return verdict{ok: true, limit: l.limit(), remaining: l.limit()}
@@ -307,6 +316,9 @@ func (l *rateLimiter) touch(key string, now time.Time) *bucket {
 	for len(l.buckets) >= l.cfg.MaxEntries {
 		l.removeBack()
 		l.pressureEvictions++
+		if in := l.inst.Load(); in != nil {
+			in.evictions.Inc()
+		}
 	}
 	// A new key starts full, so a first request is never rejected. Starting
 	// empty would make every cold client's first call a 429.
@@ -346,6 +358,45 @@ func (l *rateLimiter) refusal(b *bucket) verdict {
 		wait = time.Second
 	}
 	return verdict{ok: false, limit: l.limit(), remaining: 0, retryAfter: wait}
+}
+
+// observeSizeLocked publishes the live bucket count. The map only changes
+// inside take and blocked, so setting the gauge there keeps it exact without a
+// scrape-time lock. Caller holds mu.
+func (l *rateLimiter) observeSizeLocked() {
+	if in := l.inst.Load(); in != nil {
+		in.size.Set(float64(len(l.buckets)))
+	}
+}
+
+// reject counts one request refused by this limiter. Called by the HTTP guards
+// that turn a refusal into a 429 (or a silent drop), not by take: the
+// auth-failure spend and the repeat-suppression lookup also see refusals, and
+// neither refuses a request.
+func (l *rateLimiter) reject() {
+	if l == nil {
+		return
+	}
+	if in := l.inst.Load(); in != nil {
+		in.rejections.Inc()
+	}
+}
+
+// instrument attaches m's series for this limiter's kind. Nil-safe on both.
+func (l *rateLimiter) instrument(m *RateLimitMetrics) {
+	if l == nil || m == nil {
+		return
+	}
+	lbl := metrics.Labels{"bucket": l.kind}
+	in := &limiterInstruments{
+		rejections: m.rejections.With(lbl),
+		size:       m.buckets.With(lbl),
+		evictions:  m.evictions.With(lbl),
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.inst.Store(in)
+	l.observeSizeLocked()
 }
 
 // size reports the number of live buckets.
@@ -406,6 +457,7 @@ func (a *API) rateLimited(w http.ResponseWriter, r *http.Request) bool {
 	if v.ok {
 		return false
 	}
+	a.limits.address.reject()
 	writeRateLimited(w, v, "too many requests from this address; retry after "+retryAfterSeconds(v)+"s")
 	return true
 }
@@ -417,6 +469,7 @@ func (a *API) authAttemptBlocked(w http.ResponseWriter, r *http.Request) bool {
 	if v.ok {
 		return false
 	}
+	a.limits.authFailures.reject()
 	writeRateLimited(w, v, "too many failed authentication attempts from this address; retry after "+retryAfterSeconds(v)+"s")
 	return true
 }
@@ -449,6 +502,7 @@ func (a *API) credentialRateLimited(w http.ResponseWriter, p authn.Principal) bo
 	if v.ok {
 		return false
 	}
+	a.limits.credential.reject()
 	writeRateLimited(w, v, "too many requests for this credential; retry after "+retryAfterSeconds(v)+"s")
 	return true
 }
@@ -504,12 +558,12 @@ type gatewayLimiters struct {
 
 func newGatewayLimiters(cfg GatewayRateLimits, clock func() time.Time) gatewayLimiters {
 	g := gatewayLimiters{
-		address:      newRateLimiter(cfg.PerAddress, clock),
-		authFailures: newRateLimiter(cfg.AuthFailures, clock),
-		credential:   newRateLimiter(cfg.PerCredential, clock),
+		address:      newKindLimiter(limiterAddress, cfg.PerAddress, clock),
+		authFailures: newKindLimiter(limiterAuthFailure, cfg.AuthFailures, clock),
+		credential:   newKindLimiter(limiterCredential, cfg.PerCredential, clock),
 	}
 	if g.authFailures != nil {
-		g.failureSeen = newRateLimiter(RateLimitConfig{
+		g.failureSeen = newKindLimiter(limiterAuthFailureRepeat, RateLimitConfig{
 			RequestsPerSecond: 1 / repeatFailureWindow.Seconds(),
 			Burst:             1,
 			IdleEviction:      repeatFailureWindow,
@@ -526,6 +580,13 @@ func newGatewayLimiters(cfg GatewayRateLimits, clock func() time.Time) gatewayLi
 	return g
 }
 
+// instrument attaches m to every enabled limiter.
+func (g gatewayLimiters) instrument(m *RateLimitMetrics) {
+	for _, l := range []*rateLimiter{g.address, g.authFailures, g.credential, g.failureSeen} {
+		l.instrument(m)
+	}
+}
+
 // fingerprint is the failureSeen key for one presented value from one address.
 func (g gatewayLimiters) fingerprint(addr, material string) string {
 	m := hmac.New(sha256.New, g.fpKey)
@@ -533,4 +594,71 @@ func (g gatewayLimiters) fingerprint(addr, material string) string {
 	m.Write([]byte{0})
 	m.Write([]byte(material))
 	return hex.EncodeToString(m.Sum(nil)[:16])
+}
+
+// ── metrics ──────────────────────────────────────────────────────────────
+
+// Limiter kinds: the bucket label of the rate-limit metrics. A closed set, so
+// the series count is fixed by the code, never by the traffic.
+const (
+	limiterAddress           = "address"
+	limiterAuthFailure       = "auth_failure"
+	limiterAuthFailureRepeat = "auth_failure_repeat"
+	limiterCredential        = "credential"
+	limiterEmailAddress      = "email_address"
+	limiterEmailRecipient    = "email_recipient"
+)
+
+func newKindLimiter(kind string, cfg RateLimitConfig, clock func() time.Time) *rateLimiter {
+	l := newRateLimiter(cfg, clock)
+	if l != nil {
+		l.kind = kind
+	}
+	return l
+}
+
+// RateLimitMetrics are the gateway limiters' instruments.
+//
+// Labelled by bucket KIND only (address, auth_failure, auth_failure_repeat,
+// credential, email_address, email_recipient). Never by the key: a client
+// address, credential id or recipient as a label would be exactly the
+// unbounded series set the limiter's own MaxEntries exists to prevent.
+type RateLimitMetrics struct {
+	rejections *metrics.CounterVec
+	buckets    *metrics.GaugeVec
+	evictions  *metrics.CounterVec
+}
+
+type limiterInstruments struct {
+	rejections *metrics.Counter
+	size       *metrics.Gauge
+	evictions  *metrics.Counter
+}
+
+// NewRateLimitMetrics registers the rate-limit families on reg.
+func NewRateLimitMetrics(reg *metrics.Registry) *RateLimitMetrics {
+	return &RateLimitMetrics{
+		rejections: reg.NewCounter("nexus_gateway_ratelimit_rejections_total",
+			"Requests refused by a gateway rate limiter (429, or a silent drop for email_recipient), by bucket kind.",
+			"bucket"),
+		buckets: reg.NewGauge("nexus_gateway_ratelimit_buckets",
+			"Live keys tracked by a gateway rate limiter, by bucket kind. Bounded by each limiter's entry cap (default 100000), past which the least recently used key is evicted.",
+			"bucket"),
+		evictions: reg.NewCounter("nexus_gateway_ratelimit_evictions_total",
+			"Buckets dropped because a limiter reached its entry cap (not idle eviction), by bucket kind. Non-zero: the cap is too small, or the gateway is being sprayed from many addresses.",
+			"bucket"),
+	}
+}
+
+// WithRateLimitMetrics instruments the gateway's limiters. Order-independent
+// with WithRateLimits and WithEmailFlows: limiters built later are
+// instrumented as they are built.
+func (a *API) WithRateLimitMetrics(m *RateLimitMetrics) *API {
+	a.limitMetrics = m
+	a.limits.instrument(m)
+	if a.email != nil {
+		a.email.ipLim.instrument(m)
+		a.email.adLim.instrument(m)
+	}
+	return a
 }

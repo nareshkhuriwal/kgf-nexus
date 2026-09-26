@@ -163,6 +163,12 @@ func groups() []*group {
 		backfillGroup(),
 		workerGroup(),
 		cacheGroup(),
+		auditGroup(),
+		triggerGroup(),
+		sensorGroup(),
+		notifyGroup(),
+		assetGroup(),
+		importGroup(),
 	}
 }
 
@@ -395,6 +401,8 @@ Local quick start (Docker):
 
 Projects:
   init                Create a workflow project from a template (--list)
+  import              Convert Airflow, Prefect or Argo pipelines into specs
+                      (import airflow|prefect|argo <path>)
 
 Workflow specs:
   workflow submit     Submit a spec (JSON, YAML or .py); --dry-run, --watch
@@ -426,6 +434,17 @@ Fleet and diagnostics:
   logs                Stream an attempt's logs (--follow)
   events              Stream run events (--follow, via SSE)
   cache invalidate    Stop reusing memoized results
+
+Events, triggers and lineage (ADR-0028):
+  trigger list|get|create|update|delete|rotate-secret|deliveries|fire
+  sensor list|get|create|update|delete|enable|disable|observations
+  notify channels|channel-get|channel-create|channel-delete|channel-test|
+         rules|rule-create|rule-delete|deliveries|redrive
+  asset list|get|graph
+
+Audit (ADR-0025):
+  audit export        Download the audit trail (NDJSON, CSV or KGF events)
+  audit verify        Verify the hash chain, via the API or offline
 
 Other:
   config view         Show the resolved configuration (never prints key material)

@@ -16,6 +16,8 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"errors"
 	"flag"
@@ -67,6 +69,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter; flushed last.
+	defer tracing.SetupOrExit(ctx, "cluster-controller", version, log)()
+
 	err := run(ctx, log, runConfig{
 		cluster: *clusterName, rmAddr: *rmAddr, httpAddr: *httpAddr, identity: *identity, leaseNS: *leaseNS,
 		allowApply: *allowApply, interval: *interval, jobSelector: *jobSelector, kubeconfig: *kubeconfig,
@@ -114,6 +119,9 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	ctl, err := controller.New(controller.Config{
 		ClusterName: cfg.cluster, Identity: cfg.identity, AllowApply: cfg.allowApply,
 		Interval: cfg.interval, JobLabelSelector: cfg.jobSelector,
+		ClusterLabels:    parseKV(os.Getenv("NEXUS_CLUSTER_LABELS")),
+		TaskNamespaces:   splitNonEmpty(os.Getenv("NEXUS_CLUSTER_TASK_NAMESPACES")),
+		GPUResourceNames: splitNonEmpty(os.Getenv("NEXUS_CLUSTER_GPU_RESOURCES")),
 	}, kube, rmv1.NewClusterControllerServiceClient(conn), log)
 	if err != nil {
 		return err
@@ -223,7 +231,7 @@ func newLogger(level string) *slog.Logger {
 	default:
 		lv = slog.LevelInfo
 	}
-	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lv}))
+	return slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lv})))
 }
 
 func hostname() string {
@@ -250,4 +258,27 @@ func envDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// parseKV reads "k=v,k2=v2" (NEXUS_CLUSTER_LABELS). A pair without "=" is
+// ignored rather than fatal: labels are placement hints, and the controller's
+// observation duties must not stop over one.
+func parseKV(s string) map[string]string {
+	out := map[string]string{}
+	for _, p := range splitNonEmpty(s) {
+		if k, v, ok := strings.Cut(p, "="); ok && strings.TrimSpace(k) != "" {
+			out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	return out
+}
+
+func splitNonEmpty(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

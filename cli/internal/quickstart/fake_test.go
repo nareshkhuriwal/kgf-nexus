@@ -26,8 +26,9 @@ import (
 // fakeDocker is a scripted, stateful stand-in for the docker CLI. It models just
 // enough of Compose for the orchestration to be exercised end to end: services
 // come up when `up` names them, one-shot jobs exit 0, `port` answers with the
-// fake API's address, and `exec psql` records the worker key hash in the fake
-// gateway so the agents can "authenticate".
+// fake API's address. Agents "authenticate" when their key is a worker token
+// the fake gateway minted; `exec psql` is still modelled so a regression to a
+// direct database write is visible (the tests assert it never happens).
 type fakeDocker struct {
 	mu sync.Mutex
 	t  *testing.T
@@ -298,6 +299,9 @@ type fakeGateway struct {
 	requireVerify bool
 	registerFail  int // status to answer register with, 0 = normal
 	verifyFail    bool
+	// workerTokenFail makes minting the worker token fail (500).
+	workerTokenFail bool
+	workerTokens    int // worker tokens minted
 
 	tenants     map[string]string // email -> namespace
 	verified    map[string]bool
@@ -446,11 +450,35 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.tokenCreate++
-		secret := fmt.Sprintf("nxtok_adminsecret%04d", g.tokenCreate)
-		g.tokens[secret] = ns
 		exp := time.Now().Add(90 * 24 * time.Hour)
-		writeJSONT(w, 201, map[string]any{"id": "tok-1", "name": str("name"), "role": str("role"),
-			"expires_at": exp, "token": secret, "token_shown_once": true})
+		id := fmt.Sprintf("tok-%d", g.tokenCreate)
+		switch role := str("role"); role {
+		case "admin":
+			secret := fmt.Sprintf("nxtok_adminsecret%04d", g.tokenCreate)
+			g.tokens[secret] = ns
+			writeJSONT(w, 201, map[string]any{"id": id, "name": str("name"), "role": role,
+				"expires_at": exp, "token": secret, "token_shown_once": true})
+		case "worker":
+			// As the gateway does (admin.go createToken + F114): a worker token
+			// is usable by agents only with the worker_rpc scope.
+			scopes, _ := body["scopes"].([]any)
+			if len(scopes) != 1 || scopes[0] != "worker_rpc" {
+				writeJSONT(w, 422, map[string]any{"error": "invalid_token_request", "problems": []string{"worker needs worker_rpc"}})
+				return
+			}
+			if g.workerTokenFail {
+				writeJSONT(w, 500, map[string]string{"error": "internal"})
+				return
+			}
+			secret := fmt.Sprintf("nxtok_workersecret%04d", g.tokenCreate)
+			sum := sha256.Sum256([]byte(secret))
+			g.workerHash[hex.EncodeToString(sum[:])] = ns
+			g.workerTokens++
+			writeJSONT(w, 201, map[string]any{"id": id, "name": str("name"), "role": role,
+				"expires_at": exp, "token": secret, "token_shown_once": true})
+		default:
+			writeJSONT(w, 422, map[string]any{"error": "invalid_token_request"})
+		}
 	case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/workers"):
 		ns := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/namespaces/"), "/workers")
 		if g.tokens[bearer(r)] != ns {

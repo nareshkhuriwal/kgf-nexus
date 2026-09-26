@@ -30,6 +30,10 @@ const (
 	WorkerService_ReportProgress_FullMethodName = "/nexus.v1.WorkerService/ReportProgress"
 	WorkerService_ReportResult_FullMethodName   = "/nexus.v1.WorkerService/ReportResult"
 	WorkerService_ReportLogs_FullMethodName     = "/nexus.v1.WorkerService/ReportLogs"
+	WorkerService_ReportUsage_FullMethodName    = "/nexus.v1.WorkerService/ReportUsage"
+	WorkerService_AcquirePermits_FullMethodName = "/nexus.v1.WorkerService/AcquirePermits"
+	WorkerService_SaveCheckpoint_FullMethodName = "/nexus.v1.WorkerService/SaveCheckpoint"
+	WorkerService_GetCheckpoint_FullMethodName  = "/nexus.v1.WorkerService/GetCheckpoint"
 )
 
 // WorkerServiceClient is the client API for WorkerService service.
@@ -67,6 +71,18 @@ type WorkerServiceClient interface {
 	// this RPC answers UNIMPLEMENTED; agents only call it when RegisterResponse
 	// advertised log_shipping.enabled.
 	ReportLogs(ctx context.Context, in *ReportLogsRequest, opts ...grpc.CallOption) (*Ack, error)
+	// Cumulative usage-unit totals for the attempt (tokens, requests, ...).
+	// Merged per key with max, so a duplicate or reordered report is harmless.
+	ReportUsage(ctx context.Context, in *ReportUsageRequest, opts ...grpc.CallOption) (*Ack, error)
+	// Token-bucket permits against the namespace's shared rate limits, or (with
+	// settle) a correction of tokens already taken. Never waits server-side.
+	AcquirePermits(ctx context.Context, in *AcquirePermitsRequest, opts ...grpc.CallOption) (*AcquirePermitsResponse, error)
+	// Registers a checkpoint object the agent has ALREADY written to the result
+	// store. Accepted only while the lease is live and only if newer than the
+	// stored checkpoint for the attempt's idempotency key.
+	SaveCheckpoint(ctx context.Context, in *SaveCheckpointRequest, opts ...grpc.CallOption) (*Ack, error)
+	// The latest checkpoint for the attempt's idempotency key, if any.
+	GetCheckpoint(ctx context.Context, in *GetCheckpointRequest, opts ...grpc.CallOption) (*GetCheckpointResponse, error)
 }
 
 type workerServiceClient struct {
@@ -157,6 +173,46 @@ func (c *workerServiceClient) ReportLogs(ctx context.Context, in *ReportLogsRequ
 	return out, nil
 }
 
+func (c *workerServiceClient) ReportUsage(ctx context.Context, in *ReportUsageRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, WorkerService_ReportUsage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) AcquirePermits(ctx context.Context, in *AcquirePermitsRequest, opts ...grpc.CallOption) (*AcquirePermitsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AcquirePermitsResponse)
+	err := c.cc.Invoke(ctx, WorkerService_AcquirePermits_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) SaveCheckpoint(ctx context.Context, in *SaveCheckpointRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, WorkerService_SaveCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) GetCheckpoint(ctx context.Context, in *GetCheckpointRequest, opts ...grpc.CallOption) (*GetCheckpointResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetCheckpointResponse)
+	err := c.cc.Invoke(ctx, WorkerService_GetCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // WorkerServiceServer is the server API for WorkerService service.
 // All implementations must embed UnimplementedWorkerServiceServer
 // for forward compatibility.
@@ -192,6 +248,18 @@ type WorkerServiceServer interface {
 	// this RPC answers UNIMPLEMENTED; agents only call it when RegisterResponse
 	// advertised log_shipping.enabled.
 	ReportLogs(context.Context, *ReportLogsRequest) (*Ack, error)
+	// Cumulative usage-unit totals for the attempt (tokens, requests, ...).
+	// Merged per key with max, so a duplicate or reordered report is harmless.
+	ReportUsage(context.Context, *ReportUsageRequest) (*Ack, error)
+	// Token-bucket permits against the namespace's shared rate limits, or (with
+	// settle) a correction of tokens already taken. Never waits server-side.
+	AcquirePermits(context.Context, *AcquirePermitsRequest) (*AcquirePermitsResponse, error)
+	// Registers a checkpoint object the agent has ALREADY written to the result
+	// store. Accepted only while the lease is live and only if newer than the
+	// stored checkpoint for the attempt's idempotency key.
+	SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*Ack, error)
+	// The latest checkpoint for the attempt's idempotency key, if any.
+	GetCheckpoint(context.Context, *GetCheckpointRequest) (*GetCheckpointResponse, error)
 	mustEmbedUnimplementedWorkerServiceServer()
 }
 
@@ -225,6 +293,18 @@ func (UnimplementedWorkerServiceServer) ReportResult(context.Context, *ReportRes
 }
 func (UnimplementedWorkerServiceServer) ReportLogs(context.Context, *ReportLogsRequest) (*Ack, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportLogs not implemented")
+}
+func (UnimplementedWorkerServiceServer) ReportUsage(context.Context, *ReportUsageRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportUsage not implemented")
+}
+func (UnimplementedWorkerServiceServer) AcquirePermits(context.Context, *AcquirePermitsRequest) (*AcquirePermitsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AcquirePermits not implemented")
+}
+func (UnimplementedWorkerServiceServer) SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method SaveCheckpoint not implemented")
+}
+func (UnimplementedWorkerServiceServer) GetCheckpoint(context.Context, *GetCheckpointRequest) (*GetCheckpointResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetCheckpoint not implemented")
 }
 func (UnimplementedWorkerServiceServer) mustEmbedUnimplementedWorkerServiceServer() {}
 func (UnimplementedWorkerServiceServer) testEmbeddedByValue()                       {}
@@ -391,6 +471,78 @@ func _WorkerService_ReportLogs_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkerService_ReportUsage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportUsageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).ReportUsage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_ReportUsage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).ReportUsage(ctx, req.(*ReportUsageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_AcquirePermits_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AcquirePermitsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).AcquirePermits(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_AcquirePermits_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).AcquirePermits(ctx, req.(*AcquirePermitsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_SaveCheckpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SaveCheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).SaveCheckpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_SaveCheckpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).SaveCheckpoint(ctx, req.(*SaveCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_GetCheckpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetCheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).GetCheckpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_GetCheckpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).GetCheckpoint(ctx, req.(*GetCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // WorkerService_ServiceDesc is the grpc.ServiceDesc for WorkerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -429,6 +581,22 @@ var WorkerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReportLogs",
 			Handler:    _WorkerService_ReportLogs_Handler,
+		},
+		{
+			MethodName: "ReportUsage",
+			Handler:    _WorkerService_ReportUsage_Handler,
+		},
+		{
+			MethodName: "AcquirePermits",
+			Handler:    _WorkerService_AcquirePermits_Handler,
+		},
+		{
+			MethodName: "SaveCheckpoint",
+			Handler:    _WorkerService_SaveCheckpoint_Handler,
+		},
+		{
+			MethodName: "GetCheckpoint",
+			Handler:    _WorkerService_GetCheckpoint_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

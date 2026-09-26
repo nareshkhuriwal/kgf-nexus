@@ -4,6 +4,7 @@
 package worker
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -11,15 +12,24 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/artifactcache"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/taskapi"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
 )
 
 // LegacyOutputName is the output name given to a result produced under the
@@ -82,24 +92,44 @@ type Runner struct {
 	// LogFinalizeTimeout overrides the shipper's finalize budget; zero uses
 	// logship.DefaultFinalizeTimeout.
 	LogFinalizeTimeout time.Duration
-	// SecretValues resolves the attempt's secret VALUES for log redaction. Nil
-	// today: nothing in the platform resolves SecretRefs on the worker yet, and
-	// the resolver that does must be wired here (ADR-0020).
+	// SecretValues adds values to redact beyond the attempt's own resolved
+	// secrets, which are always redacted (ADR-0025). Optional.
 	SecretValues func(a *nexusv1.TaskAssignment) map[string]string
-	// Namespace prefixes the attempt's log objects; the agent's namespace.
+	// Secrets resolves the attempt's SecretRefs with this tenant's providers
+	// (ADR-0025). Nil means no providers: a task that declares a secret fails
+	// PERMISSION_DENIED instead of running without it. Set before first Run.
+	Secrets *secrets.Resolver
+	// Namespace prefixes the attempt's log and checkpoint objects; the
+	// agent's namespace.
 	Namespace string
+
+	// WorkloadAPI is RegisterResponse.workload_api (ADR-0032). Nil offers
+	// workloads no usage, rate limits or checkpoints; the socket is still
+	// served for progress and declared errors. Set before the first Run.
+	WorkloadAPI *nexusv1.WorkloadApiConfig
+	// WorkloadUpstream forwards the workload API's calls. Nil disables
+	// everything that needs the control plane.
+	WorkloadUpstream taskapi.Upstream
+	// TaskAPIRoot is where per-attempt sockets are created; empty means
+	// taskapi.DefaultRoot.
+	TaskAPIRoot string
+	// TaskAPIDisabled serves no workload API at all (the root was found
+	// unusable at registration).
+	TaskAPIDisabled bool
+	// CheckpointStore overrides the result store for checkpoint objects. Nil
+	// uses the result store; tests set it to an in-memory store.
+	CheckpointStore taskapi.ObjectStore
+	// Cache is the node-local artifact cache (ADR-0030 §4). Nil disables it:
+	// artifacts are then the task's own business, as before.
+	Cache *artifactcache.Cache
 }
 
 // newShipper starts the attempt's log shipper, or returns nil when shipping is
 // off (old gateway, no result store, no indexer) -- the attempt then runs
 // exactly as it did before ADR-0020.
-func (r *Runner) newShipper(a *nexusv1.TaskAssignment, log *slog.Logger) *logship.Shipper {
+func (r *Runner) newShipper(a *nexusv1.TaskAssignment, redactor *logship.Redactor, log *slog.Logger) *logship.Shipper {
 	if r.LogShipping == nil || !r.LogShipping.GetEnabled() || r.LogIndexer == nil || r.store == nil || r.Namespace == "" {
 		return nil
-	}
-	var secrets map[string]string
-	if r.SecretValues != nil {
-		secrets = r.SecretValues(a)
 	}
 	return logship.New(logship.Config{
 		Namespace:       r.Namespace,
@@ -109,7 +139,7 @@ func (r *Runner) newShipper(a *nexusv1.TaskAssignment, log *slog.Logger) *logshi
 		FlushInterval:   time.Duration(r.LogShipping.GetFlushIntervalMs()) * time.Millisecond,
 		FinalizeTimeout: r.LogFinalizeTimeout,
 		SpoolDir:        r.LogSpoolDir,
-		Redactor:        logship.NewRedactor(secrets),
+		Redactor:        redactor,
 		Token:           func() string { return r.currentToken(a) },
 		Log:             log,
 	}, r.store, r.LogIndexer)
@@ -124,7 +154,9 @@ func (r *Runner) finishLogs(ctx context.Context, ship *logship.Shipper, log *slo
 	st := ship.Close(context.WithoutCancel(ctx))
 	log.Info("attempt log shipped", "lines", st.Lines, "bytes", st.Bytes, "chunks", st.Chunks,
 		"finalized", st.Finalized, "compacted", st.Compacted, "truncated_lines", st.TruncatedLines,
-		"dropped_lines", st.DroppedLines, "redactions", st.Redactions, "fenced", st.Fenced)
+		"dropped_lines", st.DroppedLines, "redactions", st.Redactions, "fenced", st.Fenced,
+		"outcome", st.Outcome)
+	r.Metrics.LogShipped(st)
 }
 
 // DefaultUninterruptibleCeiling bounds a deferred cancellation when the agent is
@@ -176,10 +208,25 @@ type runningTask struct {
 	handle   *executor.Handle
 	handleMu sync.Mutex
 
+	// redactor replaces the attempt's secret values in everything that leaves
+	// the runner as text: shipped logs, the agent-log copy, progress notes
+	// and the reported error message. Set once, before the workload starts;
+	// nil redacts nothing.
+	redactor *logship.Redactor
+
 	// kind and started feed the task metrics. Written by the attempt's own
 	// goroutine before any report, and read by that goroutine only.
 	kind    string
 	started time.Time
+
+	// cancelRequested is set once the agent has decided to stop the workload
+	// (Cancel, a revoked lease, an uninterruptible bound expiring). A
+	// workload that then dies of our signal did not fail for the reason it
+	// may have declared through the workload API.
+	cancelRequested atomic.Bool
+	// preempted is set by Preempt: the node is being reclaimed, and a
+	// non-successful outcome is reported as PREEMPTED (ADR-0030 §2).
+	preempted atomic.Bool
 }
 
 // NewRunner builds a runner over the executors this worker advertises.
@@ -208,8 +255,24 @@ func (r *Runner) Executors() []string {
 // including a panic in task-adjacent code.
 func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 	attemptID := a.GetAttemptId()
-	log := r.log.With("attempt_id", attemptID, "run_id", a.GetRunId(),
-		"node_id", a.GetNodeId(), "attempt_number", a.GetAttemptNumber())
+
+	// Continue the run's trace from the dispatch span the scheduler recorded
+	// (ADR-0026). The attempt's whole life on this worker -- inputs, workload,
+	// logs, outputs, report -- is one span with phase children, and the log
+	// lines of this attempt carry its trace_id.
+	ctx, span := tracing.Start(tracing.Extract(ctx, a.GetTraceContext()), "attempt.execute",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			tracing.AttrRunID.String(a.GetRunId()),
+			tracing.AttrNodeID.String(a.GetNodeId()),
+			tracing.AttrAttemptID.String(attemptID),
+			tracing.AttrAttemptNumber.Int(int(a.GetAttemptNumber())),
+			tracing.AttrWorkerID.String(r.WorkerID),
+			tracing.AttrExecutor.String(a.GetSpec().GetRuntime().GetExecutor())))
+	defer span.End()
+
+	log := tracing.WithTrace(ctx, r.log.With("attempt_id", attemptID, "run_id", a.GetRunId(),
+		"node_id", a.GetNodeId(), "attempt_number", a.GetAttemptNumber()))
 
 	// A per-attempt cancellable context, so a CANCEL_ATTEMPT directive or a lease
 	// revocation can tear down THIS attempt without touching its siblings.
@@ -308,28 +371,96 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 	token := a.GetLeaseToken()
 	r.reporter.ReportStarted(taskCtx, attemptID, token)
 
-	spec, err := r.buildExecutorSpec(taskCtx, a)
+	// ── Secrets: resolved BEFORE anything is prepared (ADR-0025) ─────────────
+	// A task either gets every secret it declared or never starts. Values live
+	// in this goroutine's memory and the executor's injection only; they are
+	// wiped when the attempt ends.
+	secCtx, secSpan := tracing.Start(taskCtx, "attempt.resolve_secrets",
+		trace.WithAttributes(attribute.Int("nexus.secrets", len(a.GetSpec().GetRuntime().GetSecrets()))))
+	resolved, serr := r.resolveSecrets(secCtx, a)
+	// The error text names the reference and the provider, never a value.
+	tracing.End(secSpan, serr)
+	if serr != nil {
+		span.SetStatus(otelcodes.Error, "secrets could not be resolved")
+		c := secretFailure(serr)
+		log.Error("could not resolve the task's secrets; the workload was not started",
+			"error", c.Message, "class", c.Class.String(), "retryable", c.Retryable)
+		r.reportFailure(taskCtx, a, c, executor.Outcome{})
+		return
+	}
+	defer secrets.Wipe(resolved)
+	rt.redactor = r.buildRedactor(a, resolved, log)
+
+	// Cached artifacts are pinned for the whole attempt, so LRU eviction can
+	// never pull a model out from under a running task (ADR-0030 §4).
+	artifacts, releaseArtifacts, aerr := r.acquireArtifacts(taskCtx, a, kind, log)
+	defer releaseArtifacts()
+	if aerr != nil {
+		span.SetStatus(otelcodes.Error, "a declared artifact could not be provided")
+		c := classifyArtifactError(aerr)
+		log.Error("could not provide a declared artifact", "error", aerr, "class", c.Class.String())
+		r.reportFailure(taskCtx, a, c, executor.Outcome{})
+		return
+	}
+
+	inCtx, inSpan := tracing.Start(taskCtx, "attempt.prepare_inputs",
+		trace.WithAttributes(attribute.Int("nexus.inputs", len(a.GetInputs()))))
+	spec, err := r.buildExecutorSpec(inCtx, a)
+	tracing.End(inSpan, err)
 	if err != nil {
+		span.SetStatus(otelcodes.Error, "inputs could not be prepared")
 		c := executor.ClassifyError(err)
 		log.Error("could not prepare the task specification", "error", err, "class", c.Class.String())
 		r.reportFailure(taskCtx, a, c, executor.Outcome{})
 		return
 	}
+	spec.Secrets = resolved
+	if rt.redactor != nil && spec.OnPhase != nil {
+		onPhase := spec.OnPhase
+		spec.OnPhase = func(phase, detail string) { onPhase(phase, redactString(rt.redactor, detail)) }
+	}
 
-	ship := r.newShipper(a, log)
+	spec.Artifacts = artifacts
+
+	// The workload API exists before Prepare, because the executor bakes the
+	// socket into the workload's environment and mounts, and is torn down on
+	// every exit path, so nothing can act for this attempt once Run returns.
+	api := r.startTaskAPI(taskCtx, a, exec, log)
+	if api != nil {
+		defer api.Close()
+		spec.TaskAPISocket = api.SocketPath()
+		spec.TaskAPIToken = api.Token()
+	}
+
+	ship := r.newShipper(a, rt.redactor, log)
 	if ship != nil {
 		spec.LogSink = ship
 	}
-	outcome, prepErr := r.execute(taskCtx, exec, rt, spec, log)
-	r.finishLogs(ctx, ship, log)
+	runCtx, runSpan := tracing.Start(taskCtx, "attempt.run",
+		trace.WithAttributes(tracing.AttrExecutor.String(exec.Kind())))
+	// The workload's own spans (TRACEPARENT) are children of attempt.run.
+	spec.TraceEnv = tracing.TaskEnv(runCtx)
+	outcome, prepErr := r.execute(runCtx, exec, rt, spec, log)
+	runSpan.SetAttributes(attribute.Int("nexus.exit_code", int(outcome.ExitCode)))
+	tracing.End(runSpan, prepErr)
+
+	// Both are lease-fenced and both must land before the result report,
+	// which releases the lease.
+	logCtx, logSpan := tracing.Start(ctx, "attempt.finalize_logs")
+	facts := r.finishTaskAPI(logCtx, api, rt, log)
+	r.finishLogs(logCtx, ship, log)
+	logSpan.End()
 	if prepErr != nil {
+		span.SetStatus(otelcodes.Error, "execution failed")
 		c := executor.ClassifyError(prepErr)
-		log.Error("execution failed before or during the workload", "error", prepErr, "class", c.Class.String())
+		c.Message = redactString(rt.redactor, c.Message)
+		log.Error("execution failed before or during the workload",
+			"error", redactString(rt.redactor, prepErr.Error()), "class", c.Class.String())
 		r.reportFailure(taskCtx, a, c, outcome)
 		return
 	}
 
-	r.reportOutcome(ctx, a, outcome, log)
+	r.reportOutcome(ctx, a, outcome, log, facts)
 }
 
 // execute drives Prepare → Start → Wait → Cleanup. Cleanup runs on EVERY path,
@@ -376,7 +507,7 @@ func (r *Runner) execute(ctx context.Context, exec executor.Executor, rt *runnin
 	if spec.LogSink != nil {
 		followDone = r.followIntoSink(ctx, exec, handle, spec.LogSink, log)
 	} else {
-		r.streamLogs(ctx, exec, handle, log)
+		r.streamLogs(ctx, exec, handle, rt.redactor, log)
 	}
 
 	outcome, err := exec.Wait(ctx, handle)
@@ -425,7 +556,13 @@ func (r *Runner) followIntoSink(ctx context.Context, exec executor.Executor, h e
 // must not be able to block the runner or exhaust the agent's memory. The log
 // stream is a diagnostic, not a result — losing the tail of a pathological log is
 // strictly better than losing the task.
-func (r *Runner) streamLogs(ctx context.Context, exec executor.Executor, h executor.Handle, log *slog.Logger) {
+//
+// Read by LINE, not by fixed-size chunk, so the redactor -- which matches per
+// line (ADR-0020) -- sees every secret whole rather than split across two
+// reads. A line longer than the scanner's cap ends the copy: this is a
+// diagnostic, and a truncated one is better than an unredacted one.
+func (r *Runner) streamLogs(ctx context.Context, exec executor.Executor, h executor.Handle,
+	redactor *logship.Redactor, log *slog.Logger) {
 	rc, err := exec.Logs(ctx, h)
 	if err != nil {
 		log.Warn("could not open the workload log stream", "error", err)
@@ -434,19 +571,14 @@ func (r *Runner) streamLogs(ctx context.Context, exec executor.Executor, h execu
 	go func() {
 		defer rc.Close()
 		const maxLogBytes = 16 << 20 // 16 MiB per attempt
-		lr := io.LimitReader(rc, maxLogBytes)
-		buf := make([]byte, 32<<10)
-		for {
-			n, err := lr.Read(buf)
-			if n > 0 {
-				log.Info("task log", "output", string(buf[:n]))
-			}
-			if err != nil {
-				if !errors.Is(err, io.EOF) && ctx.Err() == nil {
-					log.Debug("log stream ended", "error", err)
-				}
-				return
-			}
+		sc := bufio.NewScanner(io.LimitReader(rc, maxLogBytes))
+		sc.Buffer(make([]byte, 32<<10), 256<<10)
+		for sc.Scan() {
+			line, _ := redactor.Apply(sc.Text())
+			log.Info("task log", "output", line)
+		}
+		if err := sc.Err(); err != nil && !errors.Is(err, io.EOF) && ctx.Err() == nil {
+			log.Debug("log stream ended", "error", err)
 		}
 	}()
 }
@@ -502,11 +634,13 @@ func (r *Runner) buildExecutorSpec(ctx context.Context, a *nexusv1.TaskAssignmen
 		RunID:          a.GetRunId(),
 		NodeID:         a.GetNodeId(),
 		IdempotencyKey: a.GetIdempotencyKey(),
+		AttemptNumber:  a.GetAttemptNumber(),
 		Runtime:        spec.GetRuntime(),
 		Limit:          effectiveLimit(spec.GetResources()),
 		// The devices the registry named at admission, so concurrent GPU
 		// attempts on this worker never share one.
 		GPUDevices:           r.registry.GPUDevices(a.GetAttemptId()),
+		GPU:                  r.registry.GPUAssignment(a.GetAttemptId()),
 		Inputs:               inputs,
 		DeclaredOutputs:      declaredOutputNames(spec),
 		StdoutOutput:         spec.GetRuntime().GetStdoutOutput(),
@@ -596,9 +730,11 @@ func effectiveLimit(rr *nexusv1.ResourceRequest) *nexusv1.ResourceVector {
 }
 
 // reportOutcome converts an executor Outcome into a ReportResult and delivers it
-// through the reporter (which owns the WAL ordering).
+// through the reporter (which owns the WAL ordering). facts carries what the
+// workload API learned (a declared failure, an agent-initiated cancel); the
+// zero value classifies from the Outcome alone.
 func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
-	o executor.Outcome, log *slog.Logger) {
+	o executor.Outcome, log *slog.Logger, facts attemptFacts) {
 
 	// Detached context: the result MUST be reported even when the parent context
 	// is being cancelled by shutdown. A completed task whose report we abandoned
@@ -606,6 +742,8 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 	// prevent, and reporting now is cheaper than replaying at next boot.
 	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 	defer cancel()
+	reportCtx, span := tracing.Start(reportCtx, "attempt.report_result")
+	defer span.End()
 
 	token := r.currentToken(a)
 	req := &nexusv1.ReportResultRequest{
@@ -624,15 +762,25 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 	switch {
 	case o.Succeeded():
 		req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED
-		refs, err := r.storeOutputs(reportCtx, a, o, log)
-		if err != nil {
+		outCtx, outSpan := tracing.Start(reportCtx, "attempt.store_outputs")
+		refs, err := r.storeOutputs(outCtx, a, o, log)
+		outSpan.SetAttributes(attribute.Int("nexus.outputs", len(refs)))
+		tracing.End(outSpan, err)
+		switch {
+		case errors.Is(err, executor.ErrOutputTooLarge):
+			// The workload broke its own declared bound: terminal VALIDATION,
+			// and nothing was uploaded (checkOutputBounds runs first).
+			log.Error("a task output exceeds its declared max_bytes; failing the attempt", "error", err)
+			req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED
+			req.Error = executor.ClassifyError(err).ToProto()
+		case err != nil:
 			// We cannot persist an output, so we cannot honestly claim success: a
 			// downstream task would read a reference to nothing. INFRASTRUCTURE +
 			// retryable is the truthful report.
 			log.Error("could not store the task outputs; reporting INFRASTRUCTURE failure", "error", err)
 			req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED
 			req.Error = executor.ClassifyError(fmt.Errorf("%w: %v", executor.ErrResultStore, err)).ToProto()
-		} else if len(refs) > 0 {
+		case len(refs) > 0:
 			req.Outputs = refs
 		}
 	case o.TimedOut:
@@ -641,14 +789,38 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 	default:
 		req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED
 		req.Error = executor.ClassifiedFromOutcome(o, "").ToProto()
+		if te, ok := declaredTaskError(o, facts); ok {
+			log.Info("classifying the failure as the workload declared it",
+				"class", te.GetClass().String(), "type", te.GetType(), "retry_after_ms", te.GetRetryAfterMs(),
+				"observed_class", req.GetError().GetClass().String())
+			req.Error = te
+		}
 	}
 
+	// An announced eviction overrides whatever the workload declared: the
+	// node going away is why the attempt ended (ADR-0030 §2).
+	if req.Outcome != nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED && r.preempted(a.GetAttemptId()) {
+		asPreempted(req)
+	}
+	if req.Error != nil {
+		// A kubernetes failure message can carry the pod's log tail
+		// (FallbackToLogsOnError); it must not carry a secret into the
+		// control plane's attempt history.
+		req.Error.Message = r.redactAttempt(a.GetAttemptId(), req.Error.GetMessage())
+	}
 	entry := wal.Entry{
 		AttemptID: a.GetAttemptId(), LeaseToken: token,
 		RunID: a.GetRunId(), NodeID: a.GetNodeId(),
 	}
+	span.SetAttributes(tracing.AttrOutcome.String(req.GetOutcome().String()))
+	if req.GetOutcome() != nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED {
+		span.SetStatus(otelcodes.Error, req.GetError().GetType())
+	}
 	err := r.reporter.ReportResult(reportCtx, req, entry)
 	r.observeReport(a.GetAttemptId(), req, err)
+	if err != nil {
+		span.RecordError(err)
+	}
 	if err != nil {
 		log.Error("failed to report the attempt result", "error", err)
 	}
@@ -684,6 +856,12 @@ func (r *Runner) storeOutputs(ctx context.Context, a *nexusv1.TaskAssignment,
 		return nil, nil
 	}
 
+	// Every bound is checked before ANY output is written, so an attempt that
+	// breaks one leaves no object behind for the orphan sweep.
+	if err := checkOutputBounds(a.GetSpec(), produced); err != nil {
+		return nil, err
+	}
+
 	refs := make(map[string]*nexusv1.ResultRef, len(produced))
 	for name, out := range produced {
 		ref, err := r.putOutput(ctx, out)
@@ -702,6 +880,37 @@ func (r *Runner) storeOutputs(ctx context.Context, a *nexusv1.TaskAssignment,
 		}
 	}
 	return refs, nil
+}
+
+// checkOutputBounds enforces each output's declared ValueSpec.max_bytes
+// against the bytes that would be stored: the inline payload, or the blob the
+// store would upload (F125).
+//
+// Here and not in an executor: every executor's outputs converge on
+// storeOutputs, so a container that writes its own files, a non-Python
+// handler and a Python handler not started through the SDK entrypoint are all
+// held to the bound the gateway's submit-time fan-in proof (dag/validate.go)
+// assumed. Names are checked in sorted order so the error is deterministic
+// when several outputs are oversized. 0 means undeclared, and an output the
+// spec does not declare has no bound.
+func checkOutputBounds(spec *nexusv1.TaskSpec, produced map[string]executor.NamedOutput) error {
+	decl := spec.GetOutputs()
+	if len(decl) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(produced))
+	for name := range produced {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		limit := decl[name].GetMaxBytes()
+		if size := int64(len(produced[name].Bytes)); limit > 0 && size > limit {
+			return fmt.Errorf("%w: output %q is %d bytes, over its declared max_bytes=%d",
+				executor.ErrOutputTooLarge, name, size, limit)
+		}
+	}
+	return nil
 }
 
 // putOutput inlines a small payload and writes a large one to object storage.
@@ -741,6 +950,7 @@ func (r *Runner) reportFailure(ctx context.Context, a *nexusv1.TaskAssignment,
 	defer cancel()
 
 	token := r.currentToken(a)
+	c.Message = r.redactAttempt(a.GetAttemptId(), c.Message)
 	req := &nexusv1.ReportResultRequest{
 		AttemptId:     a.GetAttemptId(),
 		LeaseToken:    token,
@@ -754,6 +964,9 @@ func (r *Runner) reportFailure(ctx context.Context, a *nexusv1.TaskAssignment,
 	}
 	if c.Class == nexusv1.ErrorClass_ERROR_CLASS_TIMEOUT {
 		req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_TIMED_OUT
+	}
+	if r.preempted(a.GetAttemptId()) {
+		asPreempted(req)
 	}
 	entry := wal.Entry{AttemptID: a.GetAttemptId(), LeaseToken: token,
 		RunID: a.GetRunId(), NodeID: a.GetNodeId()}
@@ -792,6 +1005,7 @@ func (r *Runner) Cancel(attemptID string, grace time.Duration, reason string) {
 		return
 	}
 	log.Warn("cancelling attempt", "grace", grace)
+	rt.cancelRequested.Store(true)
 
 	go func() {
 		rt.handleMu.Lock()
@@ -883,6 +1097,7 @@ func (r *Runner) cancelUninterruptible(rt *runningTask, log *slog.Logger) {
 		h, exec := rt.handle, rt.exec
 		rt.handleMu.Unlock()
 		log.Warn("uninterruptible cancellation bound expired; SIGKILL", "bound", bound)
+		rt.cancelRequested.Store(true)
 		if h != nil && exec != nil {
 			if err := exec.Signal(context.Background(), *h, executor.SignalKill); err != nil {
 				log.Warn("SIGKILL delivery failed", "error", err)

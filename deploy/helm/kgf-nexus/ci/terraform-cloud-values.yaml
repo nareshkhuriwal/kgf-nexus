@@ -41,13 +41,69 @@ postgres:
   port: 5432
   user: nexus
   database: nexus
-  sslmode: require
+  sslmode: verify-full
+  # modules/kgf-nexus database_values / runtime_role_values (postgres_ca_bundle,
+  # runtime_db_roles)
+  caBundle: { secretName: kgf-nexus-postgres-ca, key: ca.crt }
+  runtimeRoles:
+    enabled: true
+    existingSecret: kgf-nexus-db-logins
+    passwordRevision: 1
+# environments/eks chart_values: the result-store identity and agent pools.
+# EKS Pod Identity (the default artifact_identity): the association names
+# nexus-artifacts, so the account carries no annotation. Under
+# artifact_identity = "irsa" it carries the role ARN (ci/s3-irsa-values.yaml).
+serviceAccounts:
+  apiGateway:
+    name: nexus-artifacts
+    annotations: {}
+  workflowManager:
+    name: nexus-artifacts
+    annotations: {}
+  agent:
+    name: nexus-artifacts
+    annotations: {}
+  artifactGC:
+    name: nexus-artifacts
+    annotations: {}
+agents:
+  - name: agent-cpu
+    replicas: 1
+    queues: default
+    labels: zone=cluster,accelerator=none
+    executors: subprocess
+    cpuMillis: 2000
+    memoryBytes: 4294967296
+    gpuCount: 0
+    diskBytes: 10737418240
+    nodeSelector: { nexus.khuriwalgroup.com/pool: cpu }
+    resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { memory: 4Gi } }
+  - name: agent-gpu
+    replicas: 1
+    queues: gpu
+    labels: zone=cluster,accelerator=nvidia
+    executors: subprocess
+    cpuMillis: 3000
+    memoryBytes: 10737418240
+    gpuCount: 1
+    gpuKind: nvidia-l4
+    gpuMemoryBytes: 25769803776
+    diskBytes: 161061273600
+    nodeSelector: { nexus.khuriwalgroup.com/pool: gpu }
+    resources: { requests: { cpu: 500m, memory: 1Gi }, limits: { memory: 12Gi } }
 minio:
   enabled: false
   endpoint: https://s3.eu-west-1.amazonaws.com
   bucket: nexus-artifacts-x
   region: eu-west-1
   useTLS: true
+# The result store through EKS Pod Identity (the eks environment's default
+# artifact_identity): no key pair; the identity reaches the nexus-artifacts
+# ServiceAccount above.
+resultStore:
+  backend: s3
+  s3:
+    credentials: pod-identity
 
 # chart_values_overrides (terraform.tfvars.example, plus other features' keys)
 logLevel: info

@@ -21,7 +21,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	nexusapi "github.com/khuriwalgroup/kgf-nexus/api"
+	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
+	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/auditexport"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/authn"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/logs"
 	"github.com/khuriwalgroup/kgf-nexus/services/api-gateway/spec"
@@ -105,6 +108,8 @@ type API struct {
 	// is nil when disabled, which is the zero-config default and what keeps dev
 	// and the existing tests unchanged. See ratelimit.go.
 	limits gatewayLimiters
+	// limitMetrics instruments every limiter; nil records nothing.
+	limitMetrics *RateLimitMetrics
 	// schedules is nil when no schedule upstream is configured, in which case the
 	// schedule routes answer 501 rather than the gateway refusing to start. That
 	// keeps a gateway usable against a workflow-manager that predates schedules,
@@ -126,11 +131,31 @@ type API struct {
 	// cache is nil unless WithCacheInvalidator was called; its route answers 501.
 	cache CacheInvalidator
 
+	// authMode and kgf select and perform KGF context authentication
+	// (ADR-0024); the zero value is standalone. See kgf.go.
+	authMode AuthMode
+	kgf      *authn.KGFAuthenticator
+
 	// assignments reads an attempt's assignment for replay; nil means the
 	// store-backed reader. inlineThreshold is the configured ADR-0016 boundary
 	// reported alongside it. See assignment.go.
 	assignments     AssignmentReader
 	inlineThreshold int64
+
+	// auditKeys seals audit sink signing secrets; nil disables sink creation
+	// (503 sinks_disabled). sinkPolicy bounds where sinks may point. See
+	// audit.go and ADR-0025.
+	auditKeys  *auditexport.Keyring
+	sinkPolicy auditexport.URLPolicy
+	// kgfAttribution verifies KGF Cloud's X-KGF-Context for audit
+	// ATTRIBUTION ONLY in standalone mode, where a Nexus credential
+	// authenticates and authorizes; nil when KGF's keys are not configured.
+	// In kgf/both mode the context authenticates instead (kgf above) and
+	// attribution comes from that principal. See audit.go attachKGF.
+	kgfAttribution *kgfctx.Verifier
+	// events is nil unless WithEvents was called; the ADR-0028 routes then
+	// answer 501 (the hook route 404s: it does not exist here).
+	events *EventsConfig
 }
 
 // New builds the REST API.
@@ -155,6 +180,7 @@ func (a *API) WithRateLimit(cfg RateLimitConfig) *API {
 // WithRateLimits enables the three gateway limiters with explicit settings.
 func (a *API) WithRateLimits(cfg GatewayRateLimits) *API {
 	a.limits = newGatewayLimiters(cfg, a.clock)
+	a.limits.instrument(a.limitMetrics)
 	return a
 }
 
@@ -310,6 +336,11 @@ func (a *API) Routes() http.Handler {
 	// The schema the gateway actually enforces, served so authors and the SDK can
 	// validate locally against the same grammar rather than a documented copy of it.
 	mux.HandleFunc("GET /v1/schemas/workflow-spec-v1.json", a.serveSchema)
+	// The OpenAPI description of this very route set, unauthenticated like the
+	// schema above and for the same reason: a client generator or an API explorer
+	// must be able to read the contract before it holds a credential.
+	// openapi_test.go keeps the document and Routes() in lockstep.
+	mux.HandleFunc("GET /v1/openapi.yaml", serveOpenAPI)
 
 	mux.Handle("GET /v1/namespaces/{ns}/platform/config", a.guard(authn.ActionAdminWrite, a.platformGet))
 	mux.Handle("PUT /v1/namespaces/{ns}/platform/config", a.guard(authn.ActionAdminWrite, a.platformPut))
@@ -318,6 +349,7 @@ func (a *API) Routes() http.Handler {
 	a.registerQuotaRoutes(mux)
 	a.registerRBACRoutes(mux)
 	a.registerIdentityRoutes(mux)
+	a.registerEventRoutes(mux)
 
 	return mux
 }
@@ -338,12 +370,16 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 	}
 
 	// THE ONE UNGUARDED ROUTE. Rate-limited and fully audited inside the handler.
-	mux.HandleFunc("POST /v1/auth/login", a.login)
-	mux.HandleFunc("POST /v1/auth/register", a.registerCustomer)
+	// In KGF mode people sign in through KGF Cloud (ADR-0024 §1): Nexus's own
+	// password, registration and email routes are not served at all.
+	if a.passwordRoutesEnabled() {
+		mux.HandleFunc("POST /v1/auth/login", a.login)
+		mux.HandleFunc("POST /v1/auth/register", a.registerCustomer)
+	}
 	// Email verification and password recovery: unguarded for the same reason as
 	// login (the caller has no credential), rate limited per IP and per address
 	// inside the handlers. Registered only when the flows are wired.
-	if a.email != nil {
+	if a.email != nil && a.passwordRoutesEnabled() {
 		mux.HandleFunc("POST /v1/auth/email/verification", a.requestVerificationEmail)
 		mux.HandleFunc("POST /v1/auth/email/verify", a.verifyEmail)
 		mux.HandleFunc("POST /v1/auth/password/forgot", a.forgotPassword)
@@ -379,8 +415,12 @@ func (a *API) registerIdentityRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/namespaces/{ns}/tokens/{id}/revoke", a.guard(authn.ActionAdminWrite, a.revokeToken))
 
 	// The audit trail records who changed what. Admin-only: it names accounts and
-	// the actions taken against them.
-	mux.Handle("GET /v1/namespaces/{ns}/audit", a.guard(authn.ActionAdminWrite, a.listAudit))
+	// the actions taken against them. Paging, export, retention, legal hold and
+	// SIEM sinks (ADR-0025): audit.go.
+	a.registerAuditRoutes(mux)
+
+	// Service accounts for agents and CI (ADR-0024 §6).
+	a.registerServiceAccountRoutes(mux)
 }
 
 // guard authenticates, authorizes for the path's namespace, and then dispatches.
@@ -411,10 +451,15 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 		// unchanged api_keys lookup. Every credential kind therefore passes through
 		// this one enforcement point, which is what keeps "who may do what"
 		// answerable by reading this function.
-		p, err := a.auth.AuthenticateCredential(r.Context(), presented)
+		p, err, handled := a.authenticateRequest(w, r, presented)
+		if handled {
+			return
+		}
 		if errors.Is(err, authn.ErrUnauthenticated) {
 			if presented != "" {
 				a.recordAuthFailure(r, presented)
+			} else if ctxToken := r.Header.Get(kgfctx.Header); ctxToken != "" {
+				a.recordAuthFailure(r, "kgf\x00"+ctxToken)
 			}
 			// No detail about WHY. Distinguishing "no such key" from "revoked"
 			// would make this endpoint an oracle for probing valid keys.
@@ -452,16 +497,20 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 				return
 			}
 		}
-		// Identity mutation and delegation remain restricted to unbound administrators.
+		// Identity mutation remains restricted to unbound administrators for
+		// Nexus credentials (ADR-0012). A KGF principal is the exception for the
+		// Nexus-internal machine identities (roles, service accounts, tokens):
+		// in KGF mode there is no Nexus administrator, and the KGF role already
+		// decided (ADR-0024 §4). users.manage is never granted to one.
 		if p.Grants != nil {
 			for _, permission := range required {
-				if permission == "users.manage" || permission == "tokens.manage" || permission == "roles.manage" {
+				if authn.Reserved(permission) && (p.KGF == nil || permission == "users.manage") {
 					writeError(w, 403, "forbidden", "Delegation requires a namespace administrator")
 					return
 				}
 			}
 		}
-		h(w, r.WithContext(authn.WithPrincipal(r.Context(), p)), p)
+		h(w, a.attachKGF(r.WithContext(authn.WithPrincipal(r.Context(), p)), p), p)
 	})
 }
 
@@ -760,6 +809,19 @@ func (a *API) serveSchema(w http.ResponseWriter, r *http.Request) {
 	// hard; a client re-fetching it on every validation is pure waste.
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	_, _ = w.Write(b)
+}
+
+// openAPIDocument is read once: the embedded bytes are immutable for the life
+// of the binary, so copying them per request would be pure waste.
+var openAPIDocument = nexusapi.OpenAPIYAML()
+
+// serveOpenAPI serves api/openapi.yaml byte-for-byte as compiled in.
+func serveOpenAPI(w http.ResponseWriter, _ *http.Request) {
+	// application/yaml is the registered media type (RFC 9512).
+	w.Header().Set("Content-Type", "application/yaml")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("Content-Length", strconv.Itoa(len(openAPIDocument)))
+	_, _ = w.Write(openAPIDocument)
 }
 
 // ── runs ──────────────────────────────────────────────────────────────────
@@ -1341,7 +1403,9 @@ func (a *API) capacity(w http.ResponseWriter, r *http.Request, _ authn.Principal
 // with the detail in the log, never in the response, because an error string can
 // carry SQL or internal identifiers.
 func (a *API) fail(w http.ResponseWriter, r *http.Request, op string, err error) {
-	if errors.Is(err, store.ErrNotFound) {
+	// A malformed id (not a UUID) names nothing, so it is the same 404 as an
+	// unknown one rather than the 500 Postgres' cast error used to produce.
+	if errors.Is(err, store.ErrNotFound) || store.IsMalformedID(err) {
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}

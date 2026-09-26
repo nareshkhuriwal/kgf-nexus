@@ -96,10 +96,11 @@ _TRIGGER_RULE = _aliases(
     "TRIGGER_RULE_", "all_success", "all_done", "one_success", "one_failed", "none_failed", "all_skipped"
 )
 _BACKOFF = _aliases("BACKOFF_STRATEGY_", "fixed", "linear", "exponential")
+_CAPACITY = _aliases("CAPACITY_PREFERENCE_", "spot_allowed", "spot_preferred", "on_demand_only")
 _ERROR_CLASS = {
     **_aliases(
         "ERROR_CLASS_", "transient", "timeout", "worker_lost", "validation", "permission_denied",
-        "application", "oom", "not_found", "infrastructure",
+        "application", "oom", "not_found", "infrastructure", "rate_limited", "preempted",
     ),
     # Architecture 4.3's spelling of ERROR_CLASS_VALIDATION (F20).
     "validation_error": "validation",
@@ -131,6 +132,11 @@ def normalize_enums(spec: Any) -> Any:
         t = dict(raw)
         _norm_field(t, "idempotency", _IDEMPOTENCY)
         _norm_field(t, "trigger_rule", _TRIGGER_RULE)
+        placement = t.get("placement")
+        if isinstance(placement, dict):
+            p = dict(placement)
+            _norm_field(p, "capacity", _CAPACITY)
+            t["placement"] = p
         retry = t.get("retry")
         if isinstance(retry, dict):
             r = dict(retry)

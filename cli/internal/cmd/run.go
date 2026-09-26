@@ -280,27 +280,36 @@ func printRunDetail(env *Environment, result any) error {
 	}
 	fmt.Fprintln(env.IO.Out)
 	t := &output.Table{
-		Columns: []string{"node", "state", "attempts", "worker", "duration", "error"},
+		Columns: []string{"node", "state", "attempts", "last attempt", "worker", "duration", "error"},
 		Empty:   "No nodes reported yet (the DAG may still be expanding).",
 	}
+	// The gateway reports node state on the node and everything about an
+	// execution on its attempts; the row shows the node's LATEST attempt, whose
+	// id is what `nexusctl logs` and `replay` take.
+	latest := latestAttempts(output.Items(m["attempts"], "attempts"))
 	for _, n := range nodes {
-		errText := "-"
-		if e, ok := n["error"].(map[string]any); ok {
-			errText = truncateCell(output.Str(e, "message"), 48)
-			if cls := output.Str(e, "class"); cls != "-" {
-				errText = shortEnum(cls, "ERROR_CLASS_") + ": " + errText
-			}
-		} else if s := output.Str(n, "error"); s != "-" {
-			errText = truncateCell(s, 48)
+		id := firstStr(n, "node_id", "id")
+		a := latest[id]
+		errText := attemptError(n)
+		if errText == "-" && a != nil {
+			errText = attemptError(a)
 		}
-		t.Rows = append(t.Rows, []string{
-			firstStr(n, "node_id", "id"),
-			shortEnum(output.Str(n, "state"), "NODE_STATE_"),
-			output.Str(n, "attempt_count"),
-			firstStr(n, "worker_id", "worker"),
-			output.Millis(output.Int(n, "duration_ms")),
-			errText,
-		})
+		attempts := firstStr(n, "attempts_used", "attempt_count")
+		if attempts != "-" {
+			if max := output.Str(n, "max_attempts"); max != "-" {
+				attempts += "/" + max
+			}
+		}
+		row := []string{id, shortEnum(output.Str(n, "state"), "NODE_STATE_"), attempts, "-",
+			firstStr(n, "worker_id", "worker"), output.Millis(output.Int(n, "duration_ms")), errText}
+		if a != nil {
+			row[3] = output.Str(a, "id")
+			row[4] = firstStr(a, "worker_hostname", "worker_id")
+			if d := spanBetween(a, "started_at", "ended_at"); d != "" {
+				row[5] = d
+			}
+		}
+		t.Rows = append(t.Rows, row)
 	}
 	if err := output.New(output.FormatTable, env.IO.Out).Print(nil, t); err != nil {
 		return err
@@ -382,7 +391,7 @@ Examples:
 					shortEnum(output.Str(r, "state"), "RUN_STATE_"),
 					nodes,
 					output.Age(r, "created_at"),
-					output.Millis(output.Int(r, "duration_ms")),
+					runDuration(r),
 				})
 			}
 			return p.Print(result, t)

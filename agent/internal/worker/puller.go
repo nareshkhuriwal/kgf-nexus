@@ -199,7 +199,9 @@ func (p *Puller) dispatch(ctx context.Context, a *nexusv1.TaskAssignment) {
 	log := p.log.With("attempt_id", attemptID, "run_id", a.GetRunId(), "node_id", a.GetNodeId())
 
 	request := a.GetSpec().GetResources().GetRequest()
-	if ok, reason := p.registry.Admit(attemptID, request); !ok {
+	// reserved names the shared GPU device the control plane charged; the
+	// registry uses exactly that device or refuses (ADR-0029 §2).
+	if ok, reason := p.registry.AdmitReserved(attemptID, request, a.GetReserved()); !ok {
 		// Rejecting means NOT tracking the lease: letting it expire is how the
 		// control plane learns the placement failed. Reporting a failure instead
 		// would consume one of the task's retry attempts for a scheduling

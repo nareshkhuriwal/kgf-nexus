@@ -2650,10 +2650,28 @@ pass. `ExpireScheduleToStart` uses a plain conditional UPDATE. `RecordProgress`
 never locks the attempt row. None of them can drop a result or a report.
 `cancelOneAttempt` could, and is F109.
 
-**Residual.** When the lease reconciler wins the row, the late result is
-ignored and the agent is still told `Accepted: true`, as before; its lease is
-gone, so any later RPC for the attempt is rejected as stale. Answering
-`stale_lease_token` in that case would be more precise and changes no state.
+**Residual (FIXED on `fix/control-plane-open-bugs`).** When the lease
+reconciler won the row, the late result was ignored and the agent was still
+told `Accepted: true`. Now, when `ApplyResult` finds the attempt already
+terminal, it reads the committed state in the same transaction: `LOST` --
+written only by the lease reconciler and the liveness sweep, which also
+delete the lease -- sets `AppliedResult.Stale`, reported as `stale_lease` on
+the scheduler's `ApplyResultResponse` (an additive JSON field; an older
+gateway ignores it). The gateway's `SchedulerClient.ApplyResult` turns it
+into `store.ErrStaleLeaseToken`, and `ReportResult` answers
+`Ack{accepted:false, reason:"stale_lease_token"}`, the fence's own answer.
+The agent drops the result, which is right: a retry owns the work.
+
+At-least-once delivery and the duplicate-success rule are unchanged: any
+other terminal state (`SUCCEEDED`, `FAILED`, `TIMED_OUT` from a result that
+landed, or `CANCELLED`) is still an accepted no-op, so a duplicate of a
+delivered result is never retried and never answered stale; contended rows
+still wait or return `Unavailable` as above. The read only chooses the
+answer and writes nothing. Held by `TestResultWaitingOnAReclaimStaysFenced`
+(now also asserts `StaleLease`, failed before), the duplicate resend in
+`TestResultBusyPastTheLockTimeoutIsRetryable` (asserts not stale), and
+`TestResultFencedByAReclaimIsStale` (`services/api-gateway/workergrpc`,
+failed before). The race tests pass 20 of 20 with `-race -count=20`.
 
 **How it is held.** `services/scheduler/result_race_integration_test.go`:
 `TestResultIsNotSkippedWhileMarkStartedHoldsTheAttempt` stalls the real
@@ -2819,7 +2837,7 @@ scheduler logs "lease reconciliation incomplete" with the number recovered.
 head of the batch. It recovered 0 attempts before the fix and now recovers the
 other two, then the repaired one on the next pass.
 
-### F109. A run cancel skipped attempts that were being started or dispatched — FIXED (partly open)
+### F109. A run cancel skipped attempts that were being started or dispatched — FIXED
 
 **Severity:** medium. Found while checking the SKIP LOCKED sites for F104.
 
@@ -2835,12 +2853,36 @@ and the waiting cancel then cancels it. All attempts are tried and the errors
 are joined; a busy one surfaces as `Unavailable` from the scheduler.
 `TestCancelIsNotSkippedWhileMarkStartedHoldsTheAttempt` failed before the fix.
 
-**Open.** workflow-manager's `Cancel` logs a failed `CancelRunAttempts` as
-"reconciler will retry", but nothing calls it again for a CANCELLING run. The
-heartbeat still delivers CANCEL_ATTEMPT for every in-flight attempt of a
-CANCELLING run (`PendingCancellations`), so the work stops, but the attempt
-then ends through `ApplyResult` (usually FAILED) rather than CANCELLED.
-Re-issuing the fan-out periodically for CANCELLING runs would close this.
+**Formerly open, now FIXED (`fix/control-plane-open-bugs`).** workflow-manager's
+`Cancel` logged a failed `CancelRunAttempts` as "reconciler will retry", but
+nothing called it again for a CANCELLING run. The heartbeat still delivered
+CANCEL_ATTEMPT (`PendingCancellations`), so the work stopped, but each
+attempt then ended through `ApplyResult` (usually FAILED) rather than
+CANCELLED.
+
+The timer reconciler now runs a cancel sweep every
+`NEXUS_CANCEL_SWEEP_INTERVAL_SEC` (default 5 s; short because it races the
+killed task's late result). `store.WFMListCancellingRuns` lists CANCELLING
+runs oldest first, at most `BatchSize` per pass, and
+`runs.Service.ReconcileCancelling` re-issues `CancelRunAttempts` while any
+attempt is PENDING, DISPATCHED or RUNNING, then finalizes with the existing
+`MaybeFinalizeCancel` CAS. It is idempotent and needs no leader: the fan-out
+skips terminal attempts and cancels each live one in its own compare-and-set
+transaction, so replicas racing on one run cancel each attempt once. A run
+no longer CANCELLING is left alone; a failed fan-out is logged and retried
+next pass, and never finalizes over live attempts. Bounded per pass by the
+batch size and per run by its live attempts; a run leaves the sweep as soon
+as it is CANCELLED.
+
+Held by `services/workflow-manager/runs/cancel_reconcile_integration_test.go`
+against real Postgres and the scheduler's real `CancelRunAttempts`:
+`TestCancellingRunIsReissuedUntilEveryAttemptIsCancelled` (the first fan-out
+fails; one reconcile cancels all attempts and the run; a second appends no
+events), `TestReconcileCancellingKeepsFailingUntilTheSchedulerAnswers`, and
+`TestConcurrentCancelReconcilesCancelEachAttemptOnce` (6 replicas on 12
+attempts: exactly one `AttemptCancelled` each), 20 of 20 with
+`-race -count=20`; `TestCancelSweepReissuesEveryCancellingRun` covers the
+sweep itself.
 
 ### F110. Agents crash-looped when they registered before the gateway was ready — FIXED
 
@@ -3077,13 +3119,17 @@ seed a legacy `api_keys` worker row. `up` could now mint the agents' token
 through the API after registering the tenant; the bootstrap Job needs a key
 known before install (the Secret), so it keeps the SQL step.
 
-### F115. Cloud platforms: the result store is S3-only with static keys, the chart cannot use cloud identities or GPU pools, and nothing has been applied — OPEN
+### F115. Cloud platforms: the result store is S3-only with static keys, the chart cannot use cloud identities or GPU pools, and nothing has been applied — PARTLY FIXED (parts 1–5 fixed in code; part 6, the cloud acceptance, open)
 
 **Severity:** medium (deployment blocker for Azure-native artifacts and for
 keyless and GPU operation on every cloud; not a correctness defect). Found
 while building the AKS, EKS and GKE Terraform (`deploy/terraform/modules/
 {aks,eks,gke}-platform`, `environments/{aks,eks,gke}`,
 `feat/terraform-cloud-clusters`).
+
+**Update 2026-09-26 (feat/otel-and-storage-backends, ADR-0027): parts 1 and 2
+are FIXED in code and in the Terraform defaults; their cloud acceptance
+(part 6) is still open.** The original text follows, then what changed.
 
 **1. Azure Blob has no working path.** The result store talks to storage only
 through the S3 API: minio-go in `agent/internal/resultstore`,
@@ -3094,34 +3140,39 @@ PVC, and the operator owns its capacity, backups and availability. The Blob
 account, the private container, the private endpoint and a workload identity
 with `Storage Blob Data Contributor` on that container are provisioned but
 **unused**. The `azure_blob_native_backend` variable in `environments/aks` is
-reserved and its validation refuses `true`. There are two ways forward:
-(a) a native Blob backend behind the result-store interface, using
-`azblob` with workload identity; or (b) an S3-to-Blob gateway such as s3proxy
-in front of the container, which is another component to run and secure and
-has uncertain multipart and conditional-request fidelity. (a) is the
-recommendation.
+reserved and its validation refuses `true`.
 
-**2. Only static credentials.** All three clients build
-`credentials.NewStaticV4(...)`. This means:
-- **EKS** needs an IAM user with an access key (checkov CKV_AWS_273 and
-  CKV_AWS_40, accepted and documented). It is contained as far as a key can
-  be: the policy covers one bucket and one KMS key, and an explicit deny
-  blocks any request that does not arrive through the VPC's S3 gateway
-  endpoint. The target design, an IRSA / Pod Identity role trusted for
-  `nexus/kgf-nexus` with its Pod Identity association, is provisioned and
-  unused.
-- **GKE** uses an HMAC key for GCS's S3 interoperability API. The Workload
-  Identity binding for the same service account is provisioned and unused.
+*Fixed:* option (a). All three result-store users now go through
+`internal/objstore`, which has a native `azblob` backend (official SDK v1.8.1,
+azidentity v1.14.1: workload identity, managed identity, shared key; block
+blobs uploaded as staged blocks committed by a block list). The refuse-`true`
+validation is gone and `azure_blob_native_backend` **defaults to true**: the
+chart gets `resultStore.backend=azblob`, `NEXUS_AZURE_STORAGE_AUTH=workload-identity`,
+the ServiceAccount client-id annotation and the pod label, and no in-cluster
+MinIO. The storage account keeps `shared_access_key_enabled = false`. A
+management policy now expires noncurrent blob versions after 30 days, matching
+the S3 and GCS rules. Conformance-tested against Azurite.
 
-  Fix: use minio-go's credential chain (`credentials.NewChainCredentials`
-  with `IAM`, which understands `AWS_WEB_IDENTITY_TOKEN_FILE` / IRSA and the
-  Pod Identity container-credentials endpoint; verified present in minio-go
-  v7.3.0 `pkg/credentials/iam_aws.go`) whenever no static key is configured.
-  On GKE, a keyless path needs a native GCS client (Workload Identity
-  tokens), because minio-go can sign only S3-style HMAC requests.
+**2. Only static credentials.** All three clients built
+`credentials.NewStaticV4(...)`, so EKS needed an IAM-user access key and GKE an
+HMAC key for GCS's S3 interoperability API; the IRSA / Pod Identity role and
+the Workload Identity binding were provisioned and unused.
+
+*Fixed:* the `s3` backend takes `NEXUS_S3_CREDENTIALS` =
+`auto | static | web-identity | pod-identity | iam | env | anonymous` over
+minio-go's IAM provider (IRSA web identity, EKS Pod Identity container
+credentials, ECS, IMDSv2); `auto` uses static keys when set and otherwise any
+AWS workload identity visible in the environment, and fails with a message
+naming the fix rather than sending unsigned requests. A native `gcs` backend
+(`cloud.google.com/go/storage` v1.68.0, Application Default Credentials) gives
+GKE a keyless path. Terraform defaults: **EKS** `artifact_identity =
+"pod-identity"` (`"irsa"` and the static IAM-user key are opt-in), **GKE**
+`artifact_identity = "workload-identity"` (the HMAC key is created only for
+`"hmac"`). The gateway no longer requires static keys to serve logs.
 
 **3. The chart has no ServiceAccount, nodeSelector, tolerations or GPU
-resource requests.** Without a ServiceAccount, (2) cannot be adopted even
+resource requests.** — **ADDRESSED** (`fix/f115-chart-db-hardening`, see
+the resolution below). Without a ServiceAccount, (2) cannot be adopted even
 after the client change. Without tolerations and `nvidia.com/gpu` limits, the
 tainted GPU pools that all three modules can create (`gpu_pool` /
 `gpu_node_group`, `nvidia.com/gpu=present:NoSchedule`) **cannot host a Nexus
@@ -3132,14 +3183,17 @@ agents request none. Fix: per-agent `serviceAccountName`, `nodeSelector`,
 chart-level ServiceAccount with annotations. GPU execution then still needs
 qualification on real hardware (production brief).
 
-**4. `sslmode=require`, not `verify-full`.** All three managed databases
+**4. `sslmode=require`, not `verify-full`.** — **ADDRESSED** (resolution
+below). All three managed databases
 enforce TLS, but the chart cannot mount a CA bundle (Azure DigiCert/Microsoft
 roots, the RDS global bundle, the Cloud SQL instance CA), so the server's
 identity is not verified. Traffic never leaves the private network, which
 limits the risk. Fix: a `postgres.caSecret` value, mounted in each pod, with
 `sslrootcert=` added to `DATABASE_URL`.
 
-**5. The database user is the managed server's admin user.** Migrations
+**5. The database user is the managed server's admin user.** —
+**ADDRESSED**, with the strict per-service scope left to F132 (resolution
+below). Migrations
 create per-service NOLOGIN roles and so need CREATEROLE, which the admin
 login has: `azure_pg_admin`, `rds_superuser` or `cloudsqlsuperuser`. The
 services then run as that same login. Fix: a bootstrap step creates a
@@ -3149,11 +3203,73 @@ migration login and a lower-privileged runtime login.
 `make tf-validate` runs fmt, `init -backend=false`, validate, and
 `terraform test` with **mocked** providers. `make tf-lint` runs tflint,
 checkov and trivy. No cloud API has accepted these plans, and no Nexus
-workload has run on AKS, EKS or GKE. In particular, large multipart uploads
-and the GC sweep have not been run against GCS interop. Acceptance: one
+workload has run on AKS, EKS or GKE. The storage backends pass one
+conformance suite (multipart, atomic visibility of failed uploads, ranged
+reads, lazy listing, create-if-absent, not-found classification) against Silo,
+Azurite and fake-gcs-server (`make objstore-conformance`), but emulators are
+not the clouds: throttling, IAM propagation, Azure's 50 000-block limit and
+real Workload Identity token exchange are unexercised. Acceptance: one
 apply per cloud in a scratch account, then the fan-out/fan-in example with a
 >64 MiB artifact (multipart), the artifact GC sweep, and a PITR restore of
 the managed database, with results recorded in docs/OPERATIONS.md.
+
+**Resolution of parts 3-5 (`fix/f115-chart-db-hardening`).**
+
+- *Part 4, verify-full.* `postgres.caBundle` (Secret or ConfigMap) is mounted at
+  `/etc/nexus/postgres-ca/ca.crt` in every pod that connects and passed as
+  `sslrootcert`; `postgres.params` / `postgres.connections.<c>.params` carry
+  further libpq parameters globally and per connection. The chart refuses
+  verify modes without a bundle and identity keys in `params`. pgx is pinned to
+  treat the bundle as the only roots, check the host and never fall back
+  (`internal/config/dsn_tls_test.go`). Terraform: the RDS global bundle and the
+  Azure roots (DigiCert Global Root G2, Microsoft RSA Root CA 2017) are vendored
+  in `deploy/terraform/ca-bundles` with SHA-256-pinned sources and root
+  fingerprints (`refresh.sh`), and the environments refuse a bundle that no
+  longer matches `SHA256SUMS`; Cloud SQL moves to the shared CA hierarchy
+  (`GOOGLE_MANAGED_CAS_CA`, whose certificates carry the instance DNS name),
+  with a private Cloud DNS zone for that name and every trusted CA from
+  `google_sql_ca_certs`. `deploy/scripts/db-tls-drill.sh` (18/18) and a live
+  install prove the positive path and the refusals (wrong CA, wrong host, IP,
+  plaintext). Rotation: OPERATIONS §20.11.
+- *Part 5, admin login.* `nexus-db-roles` (in the migrate image) creates one
+  LOGIN role per service, never SUPERUSER/CREATEROLE/CREATEDB/REPLICATION/
+  BYPASSRLS, with the password set from a client-side SCRAM verifier; the chart
+  runs it as the db-roles Job (owner login, inside the cluster, where a managed
+  server's private endpoint is reachable), and Terraform generates the
+  passwords (`runtime_db_roles`, on by default). The admin password now reaches
+  only the migrate, bootstrap and db-roles Jobs, and no service can run DDL,
+  TRUNCATE or rewrite `run_events`. Logins default to the union of the six
+  group roles because the strict per-service mapping breaks the scheduler
+  (F132). OPERATIONS §20.12.
+- *Part 3, identity and GPU pools.* Every component has its own ServiceAccount
+  with no API token mounted; annotations and pod labels per component; one
+  shared `nexus-artifacts` account for api-gateway, agents and artifact-gc,
+  which each platform module's identity now trusts (IRSA role ARN, GKE service
+  account, Azure client id + workload-identity label). Agents take per-entry
+  `nodeSelector`/`tolerations`/`affinity`; `gpuCount > 0` requests that many
+  `nvidia.com/gpu` (configurable) and tolerates the pool taint, and simulated
+  GPUs must say so. The environments add a GPU agent on the GPU pool.
+  OPERATIONS §20.13-20.14.
+
+**Integration (wave 3).** Parts 1-2 and 3-5 were built on separate branches
+with two ServiceAccount models: `resultStore.serviceAccountName` plus
+`resultStore.podLabels` and a Terraform-created `kgf-nexus` account, against
+the chart's per-component `serviceAccounts`. One model remains, the chart's:
+the result-store clients run as `serviceAccounts.apiGateway` / `.agent` /
+`.artifactGC` (and, since ADR-0028, `.workflowManager` for object-store
+sensors), which the environments point at one chart-created
+`nexus-artifacts` account that the platform identities trust.
+`resultStore.serviceAccountName` / `.podLabels` and the kgf-nexus module's
+`service_account` variable are gone (never released). The chart adds the
+`azure.workload.identity/use` pod label to those three components under
+`azblob` + `workload-identity`, and refuses to create their accounts without
+the annotation that `workload-identity` or `s3.credentials=web-identity`
+needs. On EKS the role ARN annotation is set only for `artifact_identity =
+"irsa"`; Pod Identity's association names the account.
+
+Still open: part 6 (no cloud apply; in particular the Cloud SQL shared-CA
+bundle and PSA DNS name, real workload-identity token exchange for the native
+backends, and GPU execution on real hardware, are unverified).
 
 ### F116. The SDK derived a different idempotency key from the control plane — FIXED
 
@@ -3234,7 +3350,7 @@ The CLI also surfaced only "spec failed validation" for a 422, because it read
 `details` and the validator sends `problems`. It now prints one line per problem
 (`/tasks/0/resources: cpu required`), capped at 20.
 
-### F119. Backfill pause, resume and cancel have no from-state guard — OPEN
+### F119. Backfill pause, resume and cancel have no from-state guard — FIXED
 
 **Severity:** MEDIUM. `store.WFMSetBackfillState` updates `state` by id and
 namespace with no condition on the current state, and `PauseBackfill`,
@@ -3251,12 +3367,36 @@ RUNNING<->PAUSED or {RUNNING,PAUSED}->CANCELLED (exit code 5 / `Conflict`),
 without sending the action. This is read-then-act and so racy, and the console
 and direct API callers are not covered.
 
-**Proposed fix.** Add `AND state = ANY($allowed)` to the UPDATE for operator
-actions (pause: RUNNING; resume: PAUSED; cancel: RUNNING or PAUSED), return a
-distinct `ErrBackfillStateConflict` when no row matches but the backfill exists,
-and map it to 409 `backfill_state_conflict` in `failBackfill`, as `lifecycle`
-already does for runs. The driver's own completion path keeps its unconditional
-transition.
+**Fix (`fix/control-plane-open-bugs`).** `store.WFMTransitionBackfill`
+replaces `WFMSetBackfillState` and updates only `WHERE state = ANY($from)`,
+so concurrent transitions serialize on the row lock and the loser is
+re-evaluated against what the winner committed. Operator transitions: pause
+from RUNNING; resume from PAUSED; cancel from RUNNING or PAUSED. When no row
+matches, one read tells `ErrBackfillNotFound` from
+`*BackfillStateConflict` (matched as `ErrBackfillStateConflict`, carrying
+the current state). workflow-manager maps it to `FailedPrecondition`; the
+gateway re-attaches the sentinel and answers `409 backfill_state_conflict`
+with the current `state`. A missing backfill is now `backfill_not_found`
+(it answered `schedule_not_found` over gRPC).
+
+One deliberate departure from the proposal: the driver's COMPLETED and
+FAILED transitions are also CAS, from RUNNING only. A pass claims a RUNNING
+backfill and works without its row lock, so an operator's cancel that
+committed mid-pass was overwritten by the pass's completion; a paused
+backfill that is resumed reaches completion again by observing its cursor.
+The pass also re-reads the state before each tick and stops once the
+backfill is no longer RUNNING, bounding what a mid-pass cancel can still
+create to the run in flight.
+
+The nexusctl and SDK pre-checks stay (they spare a confirmation prompt and
+protect against older servers), with their comments updated. Held by
+`services/workflow-manager/schedules/backfill_state_integration_test.go`:
+the full from-state x action table (refusals change nothing, including
+`ended_at`), cancel-then-resume-then-pass, driver completion after cancel,
+and 5 rounds of 24 concurrent pause/resume/cancel calls whose successes must
+form a legal serial history (exactly one cancel wins, pauses and resumes
+alternate, every refusal is a conflict) -- 20 of 20 with `-race -count=20`.
+`TestBackfillActionConflictIs409` pins the gateway mapping.
 
 ### F120. Attempts never carried dispatched_at on the wire, so queue wait was unmeasurable in the console — FIXED
 
@@ -3393,7 +3533,7 @@ Regenerate after changing an example:
 `python3 sdk/python/tests/parity/make_spec_hash_golden.py`, then
 `go test ./cli/internal/spec -run TestSpecHashGolden -update-spec-hash-golden`.
 
-### F125. The worker agent does not enforce a declared output `max_bytes` — OPEN
+### F125. The worker agent does not enforce a declared output `max_bytes` — FIXED
 
 **Severity:** medium (a declared bound that only one authoring path enforces).
 
@@ -3417,3 +3557,999 @@ is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
 `ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
 report the output. Test it in `agent/internal/worker` for both inline and blob
 outputs, and in the NATS/e2e path with a non-SDK executor.
+
+**Fix (`fix/control-plane-open-bugs`).** Every executor's outputs --
+subprocess, docker and kubernetes alike -- converge on
+`Runner.storeOutputs` (`agent/internal/worker/runner.go`), so the bound is
+enforced there by `checkOutputBounds`, for every output and before any is
+inlined or uploaded. An output over its `ValueSpec.max_bytes` (0 =
+undeclared; the legacy `output.json` is checked under its name `result`)
+fails the attempt with the new sentinel `executor.ErrOutputTooLarge`, which
+the existing classifier maps to `ERROR_CLASS_VALIDATION`, type
+`OutputTooLarge`, not retryable; the message names the output, its size and
+the bound, and no outputs are reported. Before, a blob-sized oversized
+output on a store-less worker failed as a retryable INFRASTRUCTURE error and
+was sent around the fleet. The agent now advertises the capability
+`output_max_bytes` (F129), so an operator can refuse agents that predate
+this.
+
+Held by `agent/internal/worker/maxbytes_test.go` (inline and blob sizes on
+each executor kind through a fake executor, a real subprocess writing its
+own output file, inclusive bound and undeclared outputs) and
+`maxbytes_integration_test.go` against a real S3 store (the oversized blob
+is never uploaded; the same output within its bound is). All failed before.
+Not done: the NATS/e2e run with a non-SDK executor the proposal mentions;
+the unit and S3 tests cover the code path every executor takes.
+
+### F126. Not-found paths answered 500 — FIXED
+
+**Severity:** medium (a client error reported as a platform fault).
+
+`POST /v1/namespaces/{ns}/runs` with a `spec_name` that names nothing
+answered 500: the gateway resolves the name through workflow-manager's
+`GetSpec`, which correctly answers `NotFound`, but `createRun` wrapped that
+status without re-attaching `store.ErrNotFound`, so the REST layer's 404
+mapping never matched. The sweep for the same class found more:
+
+- **Every id-addressed route answered 500 for an id that is not a UUID**
+  (runs, run events and lifecycle actions, run delete, spec by id, attempt
+  logs, backfills, workers, worker drain and quarantine history): Postgres
+  rejects the cast with `22P02` and `fail` mapped only `ErrNotFound`. New
+  `store.IsMalformedID` maps it to 404 in the gateway's `fail` and
+  `failBackfill`, and to `NotFound` in workflow-manager's `runError` and
+  `GetSpec`.
+- A `spec_id` from another namespace in `runs.Create` was a plain error,
+  hence `Internal` and 500; it is now `ErrNotFound` (and no longer names the
+  other tenant's namespace).
+- A missing backfill over gRPC answered `schedule_not_found` (F119).
+
+Held by `TestCreateRunWithAnUnknownSpecNameIsNotFound`
+(`services/api-gateway/upstream`, over bufconn; failed before),
+`TestIntegrationUnknownAndMalformedIDsAre404` (16 routes x unknown and
+malformed ids against real Postgres, 404 with a problem body; every
+malformed case failed before) and `TestNotFoundPathsAreNotFound`.
+
+### F127. `nexusctl worker ls` capacity columns were always "-" — FIXED
+
+**Severity:** low. The CLI was at fault, not the API: the worker listing
+sends the advertised vector as `capacity` and the in-flight count as
+`active_attempts` (`rest.workerPayload`), while `worker ls` read
+`advertised` (the name the separate capacity *report* uses) and
+`running_attempts`. It now reads the listing's names and keeps the old ones
+as fallbacks. `TestWorkerListShowsCapacity` (`cli/internal/cmd`) uses the
+gateway's payload shape and failed before.
+
+### F128. Repository gates missed what they claimed to check — FIXED
+
+**Severity:** medium (a gate that reads as protection that is not there).
+
+1. **Migration safety gate** (`internal/migrations/safety.go`). It passed
+   `DROP CONSTRAINT`, `DROP INDEX`, `DROP TRIGGER`, `DROP` of a type, domain,
+   function, procedure, view, sequence or schema, `TRUNCATE`,
+   `ALTER COLUMN ... DROP DEFAULT`, validating `ADD CONSTRAINT` (FOREIGN KEY,
+   CHECK, UNIQUE, PRIMARY KEY, EXCLUDE without `NOT VALID`/`USING INDEX`),
+   unbounded `DELETE`, and a `RENAME` of anything but a table (an index, an
+   enum value, a type, a sequence, a function, a view). All are rules now.
+   The `ALTER COLUMN TYPE` rule is anchored on `ALTER [COLUMN] <name> [SET
+   DATA] TYPE`, so a column named `type` no longer matches; `SET NOT NULL`
+   and `ADD COLUMN ... NOT NULL` without a default were already covered.
+   Exemptions read the whole file: statements on a table the migration
+   creates, and an index, trigger, function, view or type dropped and
+   re-created under the same name (the tenant-trigger and INVALID-index
+   idioms of 0017-0027). Applied migrations now flagged are accepted with
+   reasons: 0014 (validating tenant constraints, covered by its triggers),
+   0017 (`DROP DEFAULT` on a nullable column, the fail-safe direction) and
+   0023 (drops an INVALID index by a run-time name). Tests:
+   `TestDestructiveFormsAreCaught` (30 statements, all passed the gate
+   before) and `TestSafeFormsOfTheNewRulesAreNotFlagged`.
+2. **Go version.** CONTRACT.md said Go 1.27; go.mod (`go 1.25.0`), CI
+   (`GO_VERSION: "1.25"`) and `deploy/Dockerfile.service` are 1.25. The
+   header now says 1.25, and `tests/repo` (`TestGoVersionIsStatedConsistently`,
+   also `make check-go-version`) fails when any of the four disagree.
+3. **`make check-doc-refs` failed on `integrate/wave-2`**: the checker read
+   its own docstring (which spells out the anchor-link syntax) as a broken reference.
+   It now skips itself.
+
+### F129. Agents could be neither refused nor pointed at another tenant — FIXED
+
+**Severity:** medium. Two gaps in how the fleet is admitted.
+
+1. **No minimum version or capability gate.** Nothing compared
+   `agent_version` with anything (COMPATIBILITY §4.3), so an N-2 agent, or
+   one that silently ignores a task semantic (the uninterruptible-cancel
+   hazard), registered and took work. `RegisterRequest` gains
+   `repeated string capabilities = 8` (additive; regenerated with the pinned
+   protoc 29.3 / protoc-gen-go 1.36.12 / protoc-gen-go-grpc 1.6.2), and the
+   agent advertises `domain.AgentCapabilities()`: `log_shipping`,
+   `progress`, `uninterruptible_cancel`, `output_max_bytes`. The gateway's
+   `Register` applies `domain.AgentPolicy` from `NEXUS_MIN_AGENT_VERSION`
+   (semantic-version precedence; with a minimum set, a non-semver `dev`
+   build is refused) and `NEXUS_REQUIRED_AGENT_CAPABILITIES` before writing
+   any row, and answers `FAILED_PRECONDITION` naming every unmet
+   requirement. The agent's register backoff already treated that code as
+   permanent; its hint now says to upgrade the agent. Off by default; an
+   unparsable policy stops the gateway at startup and is rejected by the
+   Helm schema (`agentPolicy`). Documented in docs/COMPATIBILITY.md §4.4.
+   Tests: `TestCompareAgentVersions`, `TestAgentPolicy`,
+   `TestRegisterEnforcesTheAgentPolicy`, `TestRegisterAdvertisesCapabilities`.
+2. **Agent namespace.** The agent already read `NEXUS_NAMESPACE`, but
+   compose tied it to the stack-wide `NEXUS_NAMESPACE` (shared with the
+   console), `make seed` minted the worker key only in `NAMESPACE`, and
+   every Helm agent served `nexusNamespace` with one worker key. Now
+   `NEXUS_AGENT_NAMESPACE` selects the compose agents' tenant (falling back
+   to `NEXUS_NAMESPACE`, then `default`) and `nats-init` issues their NKey
+   for it; `make seed` registers `AGENT_NAMESPACE` and mints the worker key
+   there; Helm `agents[]` take `namespace` and `workerApiKeySecretKey`
+   (`natsSeedKey` existed), and the chart refuses an agent whose namespace
+   has no `nats.auth.tenants` entry. `deploy/helm/validate.sh` covers the
+   refusal and the rendered override. Documented in docs/MULTITENANCY.md,
+   "Agent namespace". `default` stays the development default.
+
+### F130. `make up` failed on a fresh checkout, and both CI examples jobs with it — FIXED
+
+**Severity:** medium for onboarding and CI. The documented first command did
+not work, and the examples-and-chaos gate could not have passed. No production
+impact.
+
+`deploy/docker-compose.yml` interpolates `${NEXUS_WORKER_API_KEY:?...}` into
+every agent, and Compose refuses to parse the whole file while the variable is
+unset. On a fresh checkout nothing sets it, so `make up` (and `make down`,
+`make logs`, `make ps`, which parse the same file) died with a bare
+interpolation error. Its message said "run `make seed` first", but `make seed`
+needs the stack up. deploy/README.md still documented a `dev-worker-key`
+default that no longer existed. The GitHub `examples` job and the Azure
+`EndToEnd` stage both started with `make up` and no key. They then inserted an
+admin key into `default` with no tenant row, which F121's trigger refuses. The
+GitHub job also shared the id `e2e` with the browser job, so YAML silently kept
+only the later of the two.
+
+`nexusctl up` also still inserted its worker key into `api_keys` through
+`docker compose exec` into Postgres, after F114 made API-minted worker tokens
+usable. That key was not audited, had no expiry, and was invisible in the
+console.
+
+**Fix.**
+- `make quickstart` (`go run ./cli/cmd/nexusctl up`) is the documented first-run
+  entry point (README, deploy/README.md §1, cli/README.md).
+- `make up` checks for the key before Compose runs, and exits 2 with both
+  options: `make quickstart`, or `export NEXUS_WORKER_API_KEY=$(make -s
+  worker-key)`, then `make up && make seed`. The Compose message says the same.
+- `make down`, `make logs` and `make ps` pass a placeholder, so they work
+  without the key.
+- `make seed` falls back to the stack's own psql when the host has none.
+- `nexusctl up` mints the worker token through `POST /v1/namespaces/{ns}/tokens`
+  (role `worker`, scope `worker_rpc`) with the same session as the admin key.
+  It writes nothing to the database, records the token's id and expiry, and
+  warns on `up` when the token has expired or expires within a week.
+- The SQL bootstrap remains only in the Helm chart's bootstrap Job, where no
+  API caller exists yet (docs/OPERATIONS.md §20.10).
+- CI generates both keys first, then runs `make up` and `make seed`. The
+  examples job is renamed `examples`.
+
+**Verified.** Unit tests: `nexusctl up` mints two tokens and runs no `exec`;
+a failed worker-token mint is a seed failure, the session is still logged out
+and no agent starts; the expiry warning fires. A fresh `git clone` of the branch
+into a temp directory, with no NEXUS_WORKER_API_KEY in the environment. There,
+`make up` was refused (exit 2) with the message above. `make quickstart` then
+ran under compose project `nexus-w3b-fresh` on ports 55782-55789, with an
+override dropping the fixed 191xx metrics ports. The stack became healthy, the
+tenant was registered, and `3 worker(s) registered`. In its database,
+`api_keys` had 0 rows. `scoped_tokens` held `nexusctl-up-admin` (admin) and
+`nexusctl-up-worker` (worker, `["worker_rpc"]`), both with an expiry, and 3
+workers were ACTIVE. `nexusctl down --volumes` then removed it. The CI jobs
+themselves run only in real CI.
+
+### F131. CI's chart and proto gates were missing, floating or blind to Helm 4 — FIXED
+
+**Severity:** medium. A chart the product's own guards reject, or a
+wire-breaking proto change, could merge with green CI.
+
+- `deploy/helm/validate.sh` (lint, kubeconform, the refused-values cases) ran in
+  neither GitHub CI nor the Azure PR pipeline. CI ran a bare `helm lint` with
+  whatever helm the runner image carried, and kubeconform was never installed.
+  The script read CRD schemas from the datreeio catalog's `main` branch, which
+  can change without a commit here.
+- Under Helm 4, `helm lint` logs a template `fail` at INFO and exits 0, so a
+  lint gate passes values the chart refuses at install. Lint also ignores
+  `key: null` overrides, so on `ci/external-deps-values.yaml` it logs nine
+  false PDB refusals that the real render does not have. `helm --wait` also
+  returned while a pod was crash-looping (§20.8).
+- Nothing checked proto changes. A renumbered field or a changed type compiles
+  on both sides and breaks only old agents during a rolling upgrade.
+- `.github/workflows/ci.yml` had two jobs with id `e2e` (see F130). Without
+  actionlint, nothing noticed.
+
+**Fix.**
+- `deploy/scripts/pinned-tool.sh` installs helm v4.3.0, kubeconform v0.8.0 and
+  buf v1.73.0 into `.tools/`. It refuses any download whose SHA-256 differs
+  from the committed pin (taken from each project's release checksum file),
+  and re-verifies cached binaries.
+- `validate.sh` uses those tools. It checks against Kubernetes and CRD schemas
+  pinned by source commit and per-file SHA-256 in `deploy/helm/schemas.lock`,
+  read from a local cache only. A warm cache needs no network, and
+  `SCHEMA_OFFLINE=1` makes a cold cache an error.
+- `validate.sh` asserts the `helm template` render (the same coalescing and
+  guards as install), not lint's exit code. A probe proves the gate fails on
+  values whose guard lint swallows.
+- `proto/buf.yaml`: STANDARD lint, with the two rules the existing API
+  deliberately departs from (shared `Ack` / `RunActionResponse` /
+  `ReleaseResponse`) excepted per file rather than reformatted. `proto/check.sh`
+  runs `buf breaking` (FILE rules) against the previous main, using the same
+  resolution as compat-smoke.
+- New targets: `make tools`, `helm-validate`, `proto-lint`, `proto-breaking`,
+  `proto-check` and `actionlint` (digest-pinned image).
+- CI: GitHub jobs `helm` (now validate.sh), `proto` and `workflow-lint`; Azure
+  stages `Helm` and `Proto`, both required by the quality gate.
+- Operator guidance for lint and `--wait`: docs/OPERATIONS.md §20.10.
+- Two gates that already failed on integrate/wave-2 were fixed along the way.
+  `make check-doc-refs` flagged its own docstring's example anchor.
+  `make license-check` (Azure UnitTest) flagged the `nexusctl init` scaffolds
+  under cli/internal/templates/files/. Those are user-project content, now
+  exempt with the reason stated in the Makefile.
+
+**Verified locally.** validate.sh passes: 4 values files rendered and
+schema-valid (47/73/38/47 objects), the probe refused, 16 bad values refused.
+It also passes with `SCHEMA_OFFLINE=1`, and fails with a clear message on a
+cold cache. A tampered pin is refused (`CHECKSUM MISMATCH`, nothing
+installed). `buf lint` and `buf breaking` pass against origin/main 82b9ec8. A
+deliberate break (`memory_bytes` int64 -> string, `disk_bytes` renumbered 6 ->
+16) failed with both changes named, and was reverted. actionlint is clean, and
+every pipeline file parses with duplicate keys rejected. The CI jobs
+themselves, and the Azure `Build.Reason`/`fetchDepth` handling, run only in
+real CI.
+
+### F132. The per-service database roles do not cover what the scheduler writes — FIXED
+
+**Severity:** medium (blocks the strict form of ADR-0011's enforced ownership;
+no runtime impact with the default `runtimeRoles.scope: union`).
+
+Migration 0005 made ADR-0011's write matrix a set of NOLOGIN group roles, and
+`internal/store/service_roles_integration_test.go` checks the grants against
+the matrix. Nothing ever ran a service AS its role: every deployment connected
+as the owner. The first install with one group role per login (F115 part 5,
+`postgres.runtimeRoles.scope: service`, namespace `nexus-w3c-helm`) left the
+scheduler unready, with two loops denied on every tick:
+
+- `ClaimDueTimers` (`internal/store/scheduler_timers.go`): `UPDATE timers SET
+  claimed_by, claimed_at ... FOR UPDATE SKIP LOCKED`, and the release path
+  `UPDATE timers SET claimed_by = NULL`. `nexus_scheduler` has only INSERT and
+  DELETE on `timers` (0005: "deadline timers"); the timer *runner* that later
+  moved into the scheduler also claims them. Denied 495 times in ten minutes.
+- `ReapDeadWorkers` (`internal/store/scheduler_liveness.go`): `DELETE FROM
+  workers` for long-DEAD workers with no leases or reservations.
+  `nexus_scheduler` has only `UPDATE (committed, state)` on `workers`.
+
+`hello_dag` still SUCCEEDED under the strict scope, and no other service logged
+a denial on that path, so the gap is the scheduler's background loops. Other
+paths (schedules, backfills, retries, cancellation, deletion, quotas, the
+cluster registry) were not exercised under the strict scope.
+
+**Proposed fix.** An additive migration granting `nexus_scheduler` `UPDATE
+(claimed_by, claimed_at) ON timers` and `DELETE ON workers`, each recorded as a
+documented exception in 0005's style and in `service_roles_integration_test.go`
+(the `allowed` map and a column-scope assertion), or moving dead-worker reaping
+to resource-manager, which owns `workers`. Then run the e2e and integration
+suites with every service on its own login (`scope: service`) to find the
+remaining paths, and make `service` the chart default.
+
+**Fix (wave 3, migration 0037).** `deploy/e2e/docker-compose.service-logins.yml`
+runs the e2e stack the way `scope: service` runs the chart: after the
+migrations, `nexus-db-roles` creates one LOGIN per service, a member of that
+service's 0005 group role only, and every service connects as it. Running it
+found three more denials beyond the two above, and 0037 grants all of them,
+column-scoped wherever the statement allows:
+
+- `nexus_scheduler`: `UPDATE (claimed_by, claimed_at) ON timers` (the timer
+  lease; never `fire_at`, `kind` or `payload`) and `DELETE ON workers` (the
+  dead-worker reaper).
+- `nexus_api_gateway`: `UPDATE (expires_at, renewed_at) ON leases`. The
+  batched lease renewal (`GatewayRenewLeases`, ADR-0010) was denied on every
+  `ExtendLease`, so any attempt longer than one lease TTL would have been
+  reclaimed as LOST.
+- every service but the gateway: `SELECT (id, namespace) ON tenants`. The
+  dag-engine's memo lookup resolves a tenant id from the namespace; it was
+  denied, and the engine then ran without memoization (silently slower, no
+  error surfaced). Never the contact or registration e-mail columns.
+
+The retry-budget columns are 0035's (`attempts_used`, `preemptions_used`, F147)
+and 0036's (`free_retries`); F149 was the same gap as F147.
+`service_roles_integration_test.go` records the new cross-owner exceptions
+(the `allowed` map and a column-scope assertion on `timers`).
+
+**Verified** on a strict stack (every service on its own login, host
+PostgreSQL 18.3): the Playwright e2e suite (3/3), then schedules
+(create/update/enable/disable/delete), a backfill (pause/resume/cancel), runs
+(create/pause/resume/cancel/retry), quotas with rate limits, tokens and service
+accounts, audit list/export/policy/legal hold/verify, a notification channel
+test and rule, a webhook trigger that created a run which SUCCEEDED, a
+`run_succeeded` sensor that created its downstream run, cache invalidation and
+worker quarantine/release. No service logged a permission error afterwards.
+The Go integration suites connect as the owner by design; the grant matrix is
+held by the role tests.
+
+**Still open.** The chart default stays `runtimeRoles.scope: union`; making
+`service` the default is a follow-up, as are paths not exercised above (the
+multicluster registry, KGF-mode audit export, and the kubernetes executor).
+
+### F133. wait-for-schema hid why a pod was stuck in Init — FIXED
+
+**Severity:** low (operability).
+
+The chart's `wait-for-schema` init container ran `psql ... 2>/dev/null` in a
+loop until the newest migration was recorded. Any connection failure -- a CA
+bundle that does not match the server, a host name the certificate lacks, a
+runtime login the db-roles Job has not created, a wrong password -- was
+indistinguishable from "migrations still running": the pod sat in `Init:0/1`
+with an empty log. With verify-full and runtime logins (F115) those are the
+likely misconfigurations.
+
+**Fix.** The loop logs `wait-for-schema: not ready: <first line of psql's
+error>` whenever the reason changes and every minute otherwise (libpq's
+messages name the host and the failure, never the password). Checked with the
+migrate image against an unresolvable host and in the verify-full install.
+
+### F134–F135. Reserved: cost management (held out; moves to KGF billing)
+
+F134 and F135 were recorded on `feat/cost-management` (price books, budgets,
+cost reporting). That branch is held out of Nexus: inside KGF Cloud, cost
+belongs to KGF billing, and Nexus exports usage for it (docs/OPERATIONS.md
+§21, §23). The numbers stay reserved so later findings keep their ids.
+
+### F136. Nexus could not accept KGF Cloud's identity, so a KGF user needed a second Nexus account — FIXED
+
+**Severity:** high (integration blocker: Nexus is a service of KGF Cloud).
+
+KGF Cloud's kgf-identity owns people and kgf-gateway authenticates every
+request and forwards it with a signed `X-KGF-Context`
+(`kgf-cloud/pkg/tenantctx`). Nexus authenticated only its own passwords,
+sessions and API keys, knew nothing of KGF organizations, subscriptions or
+resource groups, and recorded audit rows that could not be joined to KGF's by
+request id. Every KGF user of Nexus would have needed a separate Nexus
+account, onboarding and offboarding.
+
+**Fix (ADR-0024, migration 0032, OPERATIONS §24).** `NEXUS_AUTH_MODE=kgf|both`
+verifies the context exactly as tenantctx does (conformance vector minted by
+kgf-cloud's own signer), maps each KGF organization/subscription/resource
+group to one Nexus tenant namespace provisioned on first use, grants the
+Nexus permissions whose `KGF.Nexus/*` action the KGF role covers (deny by
+default; never user administration), refuses a request carrying both a
+context and a Nexus credential, and attributes audit rows to the KGF
+principal and request id. `standalone` stays the default. A first draft that
+built OIDC/SAML sign-in inside Nexus was withdrawn and reverted (`e3dc95c`):
+sign-in is KGF's.
+
+### F137. kgf-cloud declares too few KGF.Nexus actions, and tenantctx accepts a wildcard audience — OPEN (kgf-cloud)
+
+**Severity:** medium.
+
+1. `kgf-cloud/services/nexus/manifest.json` declares only
+   `KGF.Nexus/pipelines/{read,list,write,delete,run}`. Nexus's permission
+   mapping needs run control, logs and results, schedules, backfills, workers,
+   infrastructure, quotas, usage, audit, roles and service accounts
+   (OPERATIONS §24.6). The built-in Contributor and Reader cover them by
+   wildcard, so the flat roles work today, but a KGF custom role cannot name
+   them, and kgf-gateway's coarse check derives `…/write` for every POST.
+2. `tenantctx.Verifier.Verify` accepts the audience `*` even when the
+   verifier declares its own audience, although its comment says such a
+   deployment refuses it. A wildcard-audience token is replayable against every
+   provider. Nexus refuses it unless `NEXUS_KGF_ACCEPT_ANY_AUDIENCE=true`.
+3. tenantctx's replay guard is per process, so a context replayed against
+   another replica within its minute is accepted there. Nexus mirrors this and
+   documents it (OPERATIONS §24.10).
+
+**Proposed (in kgf-cloud):** declare the actions in 24.6 in the Nexus
+manifest; make `Verify` refuse `*` when `Audience` is set (or drop
+`AnyAudience`); consider a shared replay store for providers with
+side-effecting routes. Nothing in this repository changes kgf-cloud.
+
+### F138. The subprocess executor handed every task the agent's own credentials — FIXED
+
+**Severity:** high (a task could impersonate its worker and read the result store directly).
+
+`executor.buildEnv` started the workload environment from `os.Environ()`, so a
+subprocess task inherited everything the agent was started with:
+`NEXUS_API_KEY` (the worker credential that registers with the control plane),
+`NEXUS_S3_ACCESS_KEY_ID` / `NEXUS_S3_SECRET_ACCESS_KEY` (result-store keys
+scoped to the namespace, not to the attempt), NATS credentials, and any
+provider credential an operator put there. A task could therefore register a
+fake worker, claim other tasks' attempts in its namespace, or read and
+overwrite other attempts' results. The docker and kubernetes executors were
+unaffected: they start from an empty environment. ADR-0025's `env://`
+provider made the gap sharper, because a variable a task may only receive by
+declaring it would also have arrived by inheritance.
+
+**Fix (ADR-0025):** the inherited environment is scrubbed of the agent's
+credential variables (`secrets.IsAgentCredentialEnv`: `NEXUS_API_KEY`,
+`NEXUS_S3_*`, `NEXUS_NATS_PASSWORD*`, `NEXUS_NATS_CREDS`, the NKey seed and TLS
+key files, `NEXUS_SECRETS_CONFIG`, `VAULT_TOKEN`, `VAULT_SECRET_ID`,
+`AZURE_CLIENT_SECRET`, the Azure certificate and federated-token paths, AWS and
+GCP credentials) and of every name on the tenant's `env://` allow-list
+(`SubprocessExecutor.InheritDeny`); those can never be resolved through
+`env://` either. F151 then replaced the deny-list with an explicit allow-list
+(the subprocess environment is now built, not filtered). With secret providers configured the agent also sets
+`RLIMIT_CORE=0` and, on Linux, `PR_SET_DUMPABLE=0`, so a same-UID task cannot
+read the agent's memory through `/proc`. The subprocess executor still runs
+tasks as the agent's user and remains development-grade (ADR-0007). Test:
+`TestSubprocessInjectsSecretsAndScrubsAgentCredentials`.
+
+### F139. Audit writes failed open: a credential could be minted with no audit record — FIXED
+
+**Severity:** high (an audit trail that can silently miss the events it exists for).
+
+`API.auditAttempt` wrote the audit row after the change and, on failure, only
+logged: "refusing an operation because its audit record could not be written
+would mean a database hiccup blocks administration". The consequence was that
+a session could be issued, a user created or enabled, a password reset, or a
+scoped token minted, and the audit table would never know. Nor could an
+auditor tell: the trail had no ordering or integrity evidence, a 1000-row
+listing cap, no export, no retention policy and no legal hold.
+
+**Fix (ADR-0025, migration 0033):** every audited action is classed in
+`auditActionClasses` (`services/api-gateway/rest/audit.go`), and a test fails
+the build when an action string in the code is unclassified. **Security
+grants** now commit with their audit row in one transaction
+(`IdentityAdmin.WithinTx`, `auditedTx`) or not at all (`503
+audit_unavailable`); the password reset also became atomic with its session
+revocation, removing the old `partial_reset` state. **Revocations** are never
+blocked (a revocation refused because the log is down keeps a credential
+alive) and a failed write is logged as `AUDIT RECORD LOST`. **Operational**
+actions log and count. Every failure increments
+`nexus_audit_write_failures_total{class,blocked}`. The trail itself became a
+per-namespace hash chain with keyset pagination, NDJSON/CSV/KGF export,
+signed SIEM sinks, retention with legal hold, and `nexusctl audit verify`
+(OPERATIONS §25.2). Tests: `TestFailedAuditBlocksAndRollsBackSecurityGrants`,
+`TestFailedAuditNeverBlocksARevocation`, `TestEveryAuditedActionIsClassified`,
+and the Postgres suites `TestAuditChainIsUnforkedUnderConcurrentReplicas`,
+`TestAuditTamperingIsDetected`, `TestAuditLogIsAppendOnlyForEveryRole`,
+`TestIntegrationAuditAPI`.
+
+### F140. The architecture promised traces and trace ids on every log line; nothing produced either — FIXED
+
+**Severity:** medium (operability; no correctness impact). ARCHITECTURE §9
+promised "structured JSON logs with `trace_id` ... on every line" and
+"OpenTelemetry traces spanning submit → dispatch → execute → report". No
+service created a span, no hop propagated a `traceparent`, no log line had a
+trace id, and the go.mod carried OpenTelemetry only as an unused transitive
+dependency. Diagnosing a slow run meant joining six services' logs by
+timestamp.
+
+Three boundaries made a naive fix insufficient: the transactional outbox (a
+fact commits in one service, the relay publishes later), the attempt row (the
+dag-engine inserts it inside one request, a worker poll claims it in another)
+and the task process (no shared memory with the agent). Tracing only the
+synchronous hops would have produced one trace per request and no trace per
+run.
+
+**Fix (ADR-0026, OPERATIONS §26):** `internal/tracing` configures the pinned
+OpenTelemetry SDK from the standard `OTEL_*` variables in every service and
+the agent (off by default, parent-based ratio sampling, a malformed setting
+fails startup). W3C context crosses REST (route-template server spans), every
+gRPC hop (otelgrpc via the shared server and dial options), Postgres (otelpgx
+on every pool), the outbox (`outbox.trace_context`, migration 0028; the relay
+publishes each row as a child of its writer and injects NATS headers), the
+attempt row (`task_attempts.trace_context`; the scheduler's
+`attempt.dispatch` is a child of it and links the poll), the assignment
+(`TaskAssignment.trace_context`, additive) and the task process
+(`TRACEPARENT`/`TRACESTATE`; the Python SDK's `opentelemetry` extra continues
+it). slog records logged with a context carry `trace_id`/`span_id`, and every
+line of an attempt's agent log does.
+
+**Verified:** unit tests with the in-memory exporter (propagation over gRPC
+metadata, NATS headers, HTTP route naming and the public-endpoint link mode,
+dispatch parenting, log enrichment); `make tracing-e2e` runs the real
+binaries against Postgres, Silo and a pinned Jaeger v2 and asserts one trace
+holding the gateway, workflow-manager, dag-engine, scheduler and agent spans
+of a two-node run, result-store puts and database spans, with each task given
+a TRACEPARENT in that trace.
+
+**Remaining:** NATS consumers only wake loops and do not continue the trace
+(the attempt row carries it instead); very large fan-outs make very large
+traces, so production should sample (§26.2).
+
+### F141. A deduplicated output could be collected between the put and the report that references it — FIXED
+
+**Severity:** high (silent loss of a successful task's output), narrow window.
+Found while defining the result-store contract (ADR-0027).
+
+`resultstore.Client.Put` skipped the upload when an object with the same
+content address already existed. The artifact GC deletes unreferenced objects
+whose last-modified time is older than its grace period (24 h). An orphan with
+the same bytes as a new output -- a pruned run's output, or any identical
+payload written more than a day ago and no longer referenced -- is exactly
+such an object. Put reused it without touching it; if the GC's pass listed it
+before the new attempt's report committed `output_ref`, the object was
+deleted and the run recorded SUCCEEDED with a reference to nothing. The
+list-then-query ordering does not help: the object is old, so the grace
+period, which is what covers in-flight writes, did not apply.
+
+**Fix:** a deduplicated put reuses the existing object only if it was modified
+within the last hour (`resultstore.DedupeRefreshAge`); an older one is
+re-uploaded, refreshing its modification time and putting it back inside
+every grace period with 23 hours of margin. The common savings (a retry, or a
+fan-out producing identical outputs moments apart) are kept.
+`TestPutRefreshesOldDeduplicatedObjects` pins it. Operators see these repeats
+as `uploaded`, not `deduplicated`, in `nexus_agent_result_store_puts_total`.
+
+### F142. No durable budget or quota fact exists to notify on — OPEN
+
+**Severity:** low (a requested notification trigger cannot be offered honestly).
+
+ADR-0028's rules were asked to fire "on a budget or quota event if the subjects
+exist". They do not. A namespace run-quota refusal (ADR-0021) is a synchronous
+429 at run creation. The workflow-manager returns `ResourceExhausted` and
+writes nothing durable. A claim-time quota is a pending *reason* recomputed on
+every claim, not an event. No outbox topic or `run_events` kind records either,
+and `nexus.usage.recorded` announces consumption, not a limit being reached.
+There is also no budget concept anywhere in the tree. A rule that subscribed to
+"quota exceeded" would therefore never fire. The gateway refuses such an event
+type, and the message names this finding, instead of accepting a rule that can
+never match.
+
+**Proposed fix.** When quotas gain a durable transition, add an outbox topic
+and a `notify.EventType` for it. A transition means a namespace crossing into
+and out of "at limit", recorded once per crossing: for example, a
+`quota_state` row with a CAS on `at_limit`, written by the scheduler with an
+outbox row in the same statement. The notifier will then evaluate the new topic
+like `run_state`, with a dedup key per crossing.
+
+**Scope after integration (wave 3).** Budgets are not a Nexus concept: cost
+management was held out and moves to KGF billing (OPERATIONS §23), which
+alerts on its own budgets from the usage Nexus exports. Only the quota half of
+this finding remains Nexus's.
+
+### F143. Schedules silently ignored a pinned `spec_version` — FIXED
+
+**Severity:** medium (a documented control had no effect).
+
+`schedules.spec_version` is documented as "pin a version to opt out of tracking
+edits", and `nexusctl schedule create --spec-version` and the gateway accept
+and store it. But `schedules.RunsAdapter.Create` never passed it on, and
+`runs.CreateRequest` had no field for it. So every tick ran the **latest**
+version of the workflow, however it was pinned. A reviewed definition could
+change under a production schedule without anyone editing the schedule.
+
+**Fix (this branch).** `runs.CreateRequest.SpecVersion` resolves (namespace,
+name, version) through `store.WFMGetSpecVersion`, and a missing version is
+`NotFound`. The schedule adapter passes the schedule's pin. Webhook triggers
+and sensors use the same field. Existing schedules with a pin now run the
+pinned version. Operators who relied, unknowingly, on "latest" should check
+`GET /v1/namespaces/<ns>/schedules` for a `spec_version`.
+
+### F144. The quick-start journey was broken end to end — FIXED
+
+**Severity:** high for anyone following the quick start: no generated project
+ran end to end. Found while running the docs-site quickstart for real on an
+isolated stack (compose project `nexus-w3i-qs`). A `nexusctl init` project
+could not run on the local stack. Four independent defects, each enough on
+its own, plus two that hid what happened:
+
+1. **The template installed an unrelated PyPI package as the SDK.** The shared
+   `requirements.txt` listed `nexus-sdk>=0.1.0`, and the `Dockerfile` ran
+   `pip install -r requirements.txt`. On PyPI, `nexus-sdk` is the Blue Brain
+   Nexus SDK (0.3.2, module `nexussdk`), so `docker build` "succeeded":
+
+   ```
+   $ docker run --rm --entrypoint pip orders-etl:0.1.0 show nexus-sdk
+   Name: nexus-sdk
+   Version: 0.3.2
+   Summary: Python SDK for Blue Brain Nexus v1.
+   ```
+
+   The same line put the wrong package in a developer's virtualenv.
+2. **The handler module was not importable in the task container.** The docker
+   executor runs with `--workdir /nexus` (the attempt mount), so
+   `python -m nexus.entrypoint --module dag` from `WORKDIR /app` failed with
+   `No module named 'dag'` (exit 2, classified APPLICATION). The image also
+   copied only `dag.py`, so project data never reached a task.
+3. **The compose agents could not run the docker executor at all.** The agent
+   image had no Docker CLI, and the agent (uid 10001) could not use the mounted
+   root-owned socket, so every agent logged "docker daemon unreachable; not
+   advertising the docker executor". Every task with `executor: docker`,
+   including every template task, stayed `READY` and never got placed.
+4. **Attempt work directories were invisible to the task container.** The
+   docker executor bind-mounts the attempt directory by path, and the daemon
+   resolves that path on the host, not inside the agent container.
+5. **`nexusctl run get` and `nexusctl events` printed `-` in most columns.**
+   They read `attempt_count`, `worker_id` and `duration_ms` off each node, and
+   `at`/`type` off each event. The gateway sends none of these: node state and
+   `attempts_used` are on the node, the execution is on `attempts[]`, and an
+   event has `occurred_at`, `kind` and `payload`. So the attempt id that
+   `nexusctl logs` needs appeared nowhere on screen.
+6. **`run --local --host-executor` could not run a template.** The local
+   runner ran a container task's command in the attempt directory, so
+   `--module dag` and relative data paths did not resolve.
+
+**Fix.**
+
+- Templates: `requirements.txt` no longer names the SDK and says why. The
+  `Dockerfile` installs it from a named build context
+  (`docker build --build-context nexus-sdk=<checkout>/sdk/python ...`) and
+  fails loudly without one. It sets `PYTHONPATH=/app` and copies the project,
+  filtered by a new `.dockerignore`. `nexusctl init` prints the next steps with
+  the checkout's SDK path. The `etl` template ships `data/orders.csv`, 31 rows
+  with one invalid row, so a first run needs no external data.
+- Agent image: `deploy/Dockerfile.service` adds `docker-cli` to the agent image
+  only.
+- Compose: the three agents join the socket's group
+  (`group_add: ${NEXUS_DOCKER_SOCKET_GID:-0}`; 0 is right for Docker Desktop).
+  `nexusctl up` sets the variable from `/var/run/docker.sock` on Linux. The
+  agents keep their work directories at the same host and container path
+  (`NEXUS_AGENT_WORK_DIR`, default `/tmp/nexus-agent-work`), which `nexusctl up`
+  creates with mode 1777 before compose would create it root-owned.
+- CLI: `run get` shows `attempts_used/max_attempts` and the latest attempt's
+  id, worker and duration. `events` shows time, kind and a payload summary.
+  `run list` computes the duration from `started_at`/`ended_at`.
+- Local runner: with `--host-executor`, a docker or kubernetes task runs from
+  the directory the run was started in, which is on `PYTHONPATH`. This stands
+  in for the image's working directory.
+
+**Verified:** every quickstart command on `nexus-w3i-qs`. The agent registers
+with `"executors":["subprocess","docker"]`. The `orders-etl` run goes through
+the docker executor to `SUCCEEDED` in 6 s, with 30 rows loaded and one row
+rejected. `logs`, `events` and `run get` show the attempts, and
+`run --local dag.py --host-executor` succeeds. Tests:
+`TestRunGetShowsTheLatestAttemptFromTheGatewayDocument`,
+`TestEventsTableReadsKindTimeAndPayload` and
+`test_host_executor_runs_a_container_task_from_the_launch_directory`.
+
+**Still open.** The SDK is not published under a name the project controls. A
+package-index release under a distinct name, for example `kgf-nexus-sdk`, would
+let templates pin it by version again. That needs an owner decision. Mounting
+the Docker socket remains a laptop-only arrangement (deploy/README.md).
+
+### F145. A failure the scheduler refused to retry left its node RUNNING forever — FIXED
+
+**Severity:** high (a run never ends). Found by the same quickstart: a task
+that failed with a non-retryable class while retry budget remained.
+
+The scheduler decides retries (`internal/store/scheduler_reports.go`,
+`evaluateAndScheduleRetryWithClass`). When it refuses, for example because
+`APPLICATION` is not in the default retry set, `VALIDATION`/`NOT_FOUND`/
+`PERMISSION_DENIED` are always terminal, `schedule_to_close` was blown, or a
+`LOST` attempt has `idempotency: none`, it writes a `RetryExhausted` (or
+`IndeterminateOutcome`) event and schedules no retry. The DAG engine, however,
+derived node state from the attempt count alone
+(`services/dag-engine/engine.go`, `deriveNodeStates`): a failed attempt with
+`attempt_number < max_attempts` meant "between tries", so the node stayed
+`RUNNING`. Nothing would ever create the next attempt, so the run never
+reached a terminal state. The default `max_attempts` is 3, so any application
+error in a task with default retries hung its run:
+
+```
+run_events: AttemptFailed {"error_class":"ERROR_CLASS_APPLICATION"}
+            RetryExhausted {"reason":"error_class_not_in_retry_on","attempts_used":1,"max_attempts":4}
+task_nodes: extract RUNNING     (run RUNNING, indefinitely)
+```
+
+**Fix.** `LoadAttempts` also reads whether a refusal event names each attempt.
+The scheduler appends that event in the same transaction as the terminal
+attempt write, so the two are never seen apart. `deriveNodeStates` treats a
+refused last attempt as exhausted. An operator retry creates new attempts
+above the retry floor, so an old refusal does not affect them.
+
+**Tests.** `TestDeriveNodeStates` has three new cases: a refused failure with
+budget left fails the node, a refused LOST fails it, and a refusal on an
+earlier attempt does not override a later success. Reverting the fix fails all
+three. `TestIntegration_RefusedRetryWithBudgetLeftFailsTheNode` runs against a
+real, migrated Postgres: without a refusal the node is `RUNNING`; with the
+scheduler's event, the node is `FAILED`, the downstream node is
+`UPSTREAM_FAILED` and the run is `FAILED`. All of `services/dag-engine`'s
+integration tests pass.
+
+### F146. `prefer_same_worker_as` was parsed and never read — FIXED
+
+**Severity:** low (a documented soft preference that did nothing).
+
+`TaskSpec.prefer_same_worker_as` ("soft data-locality hint: prefer the worker
+that ran this node", task.proto field 9) has been accepted by the schema,
+decoded by the gateway, emitted by the SDK and stored in every node spec since
+Phase 0. No scheduler code read it: `TaskSpecView` did not even have the field,
+so a task that declared it was placed exactly as one that did not, and nothing
+told the author.
+
+**Fix (ADR-0030 §5):** the claim resolves the named node's most recent
+SUCCEEDED attempt in the same run to its worker's **hostname** (worker ids are
+per session, ADR-0010 point 7; the data lives on the host) and adds it to the
+placement score. It is a soft preference like every other one: the push path
+picks the matching worker among those that fit, and the pull path defers the
+attempt to it for at most `NEXUS_PLACEMENT_WAIT`. Test:
+`TestPreferSameWorkerAsIsRead` (a worker on another host polls first and is
+refused; the preferred host gets the task).
+
+### F147. The scheduler's database role could not charge the retry budget it owns — FIXED
+
+**Severity:** medium under per-service database roles (every automatic retry
+failed); none with the single superuser role compose and the chart use today.
+
+`CreatePendingRetry` (scheduler_timers.go) creates a retry attempt and, in the
+same transaction, increments `task_nodes.attempts_used`. Migration 0005 granted
+UPDATE on that column only to `nexus_dag_engine`, so a scheduler connected as
+`nexus_scheduler` -- the ADR-0011 least-privilege deployment 0005 exists for --
+failed every retry-backoff timer with `permission denied for table
+task_nodes (SQLSTATE 42501)`: no retry was ever created, and the timer was
+retried forever. Nothing tested the scheduler role against that statement.
+
+**Fix (migration 0035):** `GRANT UPDATE (attempts_used, preemptions_used) ON
+task_nodes TO nexus_scheduler`, column-scoped like 0005's `event_seq` grant.
+`TestIntegrationSchedulerRoleChargesRetryBudgets` runs as the scheduler role;
+with the grant revoked it fails with exactly the error above.
+
+**Integration (wave 3).** F149 (the AI workload pack) found the same gap and
+granted the same column again in 0036. The grant now exists once, here in
+0035; 0036 grants only `free_retries`. F132 is the general form of this gap,
+and 0037 holds the rest of it.
+
+### F148. A running task had no channel to the control plane; Python heartbeats were silent no-ops — FIXED (kubernetes: OPEN)
+
+**Severity:** high (a task declaring `timeouts.heartbeat` could not keep itself
+alive; no usage, rate-limit or checkpoint feature could exist).
+
+`TaskContext.heartbeat()` and `progress()` call `_heartbeat_fn`, which neither
+`nexus.entrypoint` nor `nexus.worker` ever set. Under a real agent both were
+no-ops, so a long Python task with a heartbeat timeout was timed out while
+working, and the progress message the console shows never came from Python
+tasks. More generally the only workload-to-agent path was the output
+directory, read after exit: a task could not report what it consumed, ask for
+a shared rate-limit permit, or save partial state.
+
+**Fix (ADR-0032, migration 0036).** The agent serves each attempt an HTTP API
+on a per-attempt Unix socket with a bearer token (`NEXUS_TASK_API`,
+`NEXUS_TASK_API_TOKEN`) and forwards to four new lease-fenced worker RPCs
+(ReportUsage, AcquirePermits, SaveCheckpoint, GetCheckpoint) plus the existing
+ReportProgress. The SDK's heartbeat/progress, usage, permits and
+checkpoint/resume use it. Proven by the agent's `taskapi` tests, the SDK's
+`test_workload_api.py` against a fake socket server, and on a stack with the
+AI overlay: `examples/llm_batch_inference` crashed a shard after 10 of 30
+prompts, and the retry resumed from the checkpoint and asked only the other
+20 (OPERATIONS §29.8).
+
+**Still open.** The kubernetes executor's pods run on other nodes and get no
+socket: tasks there fall back in-process (usage only logged, permits not
+shared, checkpoints in `ctx.store`). Closing it needs a network-reachable,
+per-attempt authenticated endpoint on the agent (or a sidecar), with the same
+fencing.
+
+### F149. The scheduler could not charge the retry budget under role separation — FIXED
+
+**Severity:** high (every automatic retry failed on a deployment that uses
+the per-service database roles).
+
+`CreatePendingRetry` (scheduler_timers.go) inserts the retry attempt and, in
+the same transaction, runs `UPDATE task_nodes SET attempts_used = attempts_used
++ 1`. Migration 0005 granted `UPDATE (attempts_used)` on `task_nodes` to the
+DAG engine only; the scheduler role has no UPDATE on the table. With the
+service roles in force the statement fails with permission denied, the
+transaction rolls back and the retry timer is released to fire again, forever:
+no retry is ever created. Development stacks that connect every service as the
+database owner never saw it.
+
+**Fix.** The same gap as F147 (found in parallel on the GPU branch). After
+integration each grant exists once: migration 0035 grants
+`UPDATE (attempts_used, preemptions_used)` (F147) and 0036 only
+`UPDATE (free_retries) ON task_nodes TO nexus_scheduler`, column-scoped like
+every other cross-owner grant. `TestSchedulerRoleCanChargeTheRetryBudget` runs
+the statement as `nexus_scheduler` and also asserts the grant did not widen to
+other columns. See F132 for the rest of the per-service matrix.
+
+### F150. The benchmark re-run: stale dispatch figures in the docs, a benchmarked push path the scheduler never runs, and host noise the harness does not record — PARTLY FIXED
+
+**Severity:** low (documentation and measurement hygiene; no correctness
+defect). Found while re-running `make bench-dispatch`, `make bench-inline` and
+the ADR-0021 quota cells for [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
+(2026-09-26; raw output in `docs/benchmarks/raw/`).
+
+**1. The documents quoted pre-Stage-1 dispatch numbers and named metrics as
+missing that exist. FIXED here.**
+- OPERATIONS §20.5 still said claim cost was "linear in a queue's PENDING
+  backlog".
+- ARCHITECTURE §12's resolution of question 6 gave only the pre-Stage-1
+  figures (~40–200/s at 10k).
+- ADR-0018 and OPERATIONS §20.5 told operators to watch
+  `nexus_claim_seconds` / `nexus_pending_attempts` "once they exist". They
+  exist as `nexus_scheduler_claim_duration_seconds` and
+  `nexus_scheduler_pending_attempts` (OPERATIONS §17.4,
+  `services/scheduler/metrics.go`).
+
+All three now point at the shipped metric names and at BENCHMARKS.md. The
+re-run confirms Stage 1: with the pull claim at 1 replica, p50 is 5.7 ms at
+both 10k and 100k backlog, against 27 ms and 262 ms before.
+
+**2. `bench-dispatch` spends most of its time on a path production does not run.
+OPEN.**
+- The shipped scheduler always starts with a nil notifier, so its push loop is
+  off (`services/scheduler/main.go`, `NewSchedulerWithLogger`; F81). Workers
+  are served only by `ClaimForWorker`.
+- The push claim (`store.Claim`) is still the unwindowed, fair-share-ordered
+  scan: about 0.4 s p50 at a 100k backlog. Its cells hit the 90 s cap, so they
+  take most of the benchmark's wall clock.
+- An A/B against the pre-quota build (`b7bd493`) found no ADR-0021 regression.
+  The builds are within noise of each other.
+
+Proposed: make the push path opt-in in the harness
+(`NEXUS_BENCH_MODES=pull` by default). Then either window `Claim` the way
+0023 windowed the pull claim, or delete the push loop if no deployment will
+enable a notifier. Record the choice in ADR-0018.
+
+**3. Laptop noise is large and the harness does not record it. OPEN.**
+- Identical code moved single cells by 2–5× between runs while other stacks
+  shared the host (load average 9–38, 16–48 containers).
+- Which 16-replica pull cell collapsed changed between runs:
+  - run 1: 10k/16 at 153/s with p99 1.03 s;
+  - run 2: 100k/16 at 143/s with p99 597 ms.
+
+  In each run the other cell was healthy.
+- At 16 replicas this 10-vCPU Docker VM is oversubscribed, and p99 can exceed
+  ADR-0018's 250 ms trigger.
+- The harness prints the PostgreSQL version and `GOMAXPROCS` only.
+
+Proposed: print host load, CPU count, the Docker VM limits and the per-cell
+database CPU in the table header, and run each cell at least twice. The
+per-cell count in ADR-0018's method (2,000 dispatches) also differs from the
+harness default (3,000). Say which one a published table used.
+
+**4. The chaos suite could not be pointed at an isolated compose project
+without a rendered file.** `tests/chaos` passes one `-f` file
+(`NEXUS_COMPOSE_FILE`), so an isolated project with the e2e port override
+(needed so `--scale scheduler=3` does not publish the default metrics ports)
+had to be run from a `docker compose config` render of both files.
+BENCHMARKS.md §4 records how it was run. Proposed: accept a
+comma-separated list in `NEXUS_COMPOSE_FILE`, or `COMPOSE_FILE` itself. OPEN.
+
+**5. Two committed examples fail on the compose stack for reasons that are not
+scheduler faults. OPEN.**
+Found by the example sweep in the same run
+(`docs/benchmarks/raw/chaos-2026-09-26.txt`).
+
+- `gpu_scheduling`'s audit decides which GPU model a worker has from its
+  hostname pattern (`agent-gpu-a10`, `agent-gpu-`; `examples/gpu_scheduling/dag.py`
+  `_CAPACITY`). Under compose `HOSTNAME` is the container ID, so every correctly
+  placed job was reported as misplaced and the audit FAILED. The database showed
+  the A100 jobs on the nvidia-a100 worker and the A10 jobs on the nvidia-a10
+  worker. The example only works where agents are Kubernetes pods named after
+  their Deployment. Proposed: have each job report the worker's advertised
+  `gpu_kind` (or the agent's `NEXUS_WORKER_LABELS`) instead of a hostname.
+- `ml_capacity_test` runs `python3` in the subprocess executor. The compose
+  agents are Alpine images without Python (`deploy/Dockerfile.service`), so
+  `generate_data` FAILED with `ERROR_CLASS_NOT_FOUND`. Proposed: rewrite those steps as
+  shell tasks, as the passing subprocess examples are written, or run them in
+  the Docker executor with a Python image and skip the example where no
+  Docker-capable agent is registered.
+
+Separately, the sweep's 120 s per-example budget is too short on a loaded host
+when examples run back to back on three workers. Six examples that were still
+RUNNING at 120 s had SUCCEEDED when checked after the suite. That is a test
+budget question, not a platform defect.
+
+### F151. Subprocess tasks inherited the agent's entire environment, including its worker credential and result-store keys — FIXED
+
+**Severity:** high (verified on a live stack: a probe task printed `NEXUS_API_KEY` and `NEXUS_S3_*` / `RESULT_STORE_*`).
+
+`executor.buildEnv` started every subprocess task's environment from
+`os.Environ()`. On the compose stack the agent carries its worker API key,
+the result-store endpoint, bucket and access keys (both the `NEXUS_S3_*` and
+`RESULT_STORE_*` spellings), NATS credential paths and everything else it was
+started with, so any subprocess task could register as a worker, claim other
+attempts in the namespace, or read and overwrite other attempts' results.
+Docker and Kubernetes tasks were not affected: both build the workload
+environment from scratch. F138's deny-list (drop known credential names)
+narrowed this but still passed every variable nobody had thought to list.
+
+**Fix:** the subprocess environment is now an explicit allow-list
+(`buildEnvScrubbed`, `subprocessBaseEnv`): `PATH` (a default when the agent
+has none), `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `USER`,
+`LOGNAME`, the SDK task contract settings `NEXUS_TASK_MODULES` and
+`NEXUS_RESULT_DIR`, then the declared `runtime.env`, the env-injected
+secrets (ADR-0025), and the platform variables the executor sets
+(`NEXUS_ATTEMPT_ID`, `NEXUS_RUN_ID`, `NEXUS_NODE_ID`, `NEXUS_IDEMPOTENCY_KEY`,
+`NEXUS_WORK_DIR`, `NEXUS_INPUT_DIR`, `NEXUS_OUTPUT_FILE`, `NEXUS_OUTPUT_DIR`,
+`NEXUS_OUTPUT_NAMES`, `NEXUS_DEADLINE_UNIX_MS`, `NEXUS_INLINE_THRESHOLD_BYTES`,
+`NEXUS_SECRETS_DIR`, `CUDA_VISIBLE_DEVICES`). Nothing else. Operators may pass
+more with `NEXUS_SUBPROCESS_ENV_PASSTHROUGH` (comma-separated globs; Helm
+`agentDefaults.secrets.subprocessEnvPassthrough`; default empty); the agent's
+own credentials (`secrets.IsAgentCredentialEnv`, now including
+`NEXUS_RESULT_STORE_*` and `RESULT_STORE_*`) never pass even when a pattern
+matches them, and names on the tenant's `env://` allow-list pass only by
+declaration. TRACEPARENT is not propagated today (no tracing context exists
+on the agent). Regression tests, written first:
+`TestSubprocessTaskEnvironmentIsMinimalAndExplicit` (a task dumps `env`),
+`TestContainerTaskEnvironmentsNeverCarryAgentCredentials` (docker and
+kubernetes env builders, and the rendered Job's containers) and
+`TestDockerContainerEnvironmentHasNoAgentCredentials` (a real container).
+
+**Local runner and replay** (`nexus.local`, `nexusctl run --local`,
+`nexusctl replay`): these run on the developer's own machine and deliberately
+start from the developer's environment plus the `NEXUS_*` task contract, so a
+task can use the tools and credentials the developer already has; they
+resolve no `SecretRef`s. Documented in OPERATIONS §25.1 rather than changed.
+
+### F152. A run whose last attempt was lost with no retry budget stayed RUNNING forever — FIXED
+
+**Severity:** medium (a run never reached a terminal state, so its
+schedule's overlap policy, its notifications and its operator all waited on a
+run that could not finish). Pre-existing; found by the simulated spot/GPU e2e
+(`tests/gpusim`) on `feat/gpu-and-multicluster-scheduling`.
+
+When a node's last attempt ended through lease expiry (LOST) with its retry
+budget already spent, the scheduler wrote the terminal attempt and scheduled
+nothing, and nothing reconciled the node afterwards: no result report arrived
+to trigger the DAG engine, so the node still read RUNNING. The stalled-run
+sweep (`WFMListStalledRuns`, `internal/store/wfm_runs.go`) looked only for
+runs whose nodes were all terminal, so it skipped this run, which then stayed
+RUNNING forever.
+
+**Fix.** The stalled-run sweep also treats a node whose attempts have all
+ended with no retry scheduled (no pending `retry_backoff` timer) as settled,
+so the run is handed back to the DAG engine, which derives the node's final
+state (with F145's refusal events and the pending-retry probe, a node with a
+retry on its way is never taken for exhausted). Held by
+`TestIntegrationListStalledRuns` (an unreconciled run with its budget spent is
+reported stalled; a run with a retry scheduled is not).
+
+### F153. Database roles are cluster-wide: Nexus databases sharing a server share their group roles, and a login made for one can write another — PARTLY FIXED
+
+**Severity:** medium on a server shared by several Nexus installations (a
+login for one installation connects to another's database with its group
+role's write grants); none on a dedicated server. Found while moving the
+wave-3 integration onto a shared host PostgreSQL 18.3.
+
+Checked against two databases migrated on one server (`nexus_integ3` and
+`nexus_integ3_strict`):
+
+- **Grants are per database and idempotent.** Every migration's GRANT is
+  scoped to its own database's tables and guarded on the role existing;
+  migrating the second database left the first database's grants
+  identical (a hash of `information_schema.role_table_grants` and
+  `column_privileges`, 582 rows, before and after). Every migration through
+  0037 applies cleanly on PostgreSQL 18.3.
+- **Group roles are shared.** 0005 creates the six `nexus_*` NOLOGIN roles
+  once per *server* (`IF NOT EXISTS`); every later database reuses them. Two
+  migrations running concurrently against different databases can both see
+  the role missing, and one then fails with `duplicate_object`; re-running it
+  succeeds, since the check is repeated. PostgreSQL has no cross-database
+  lock a migration could take (advisory locks are per database), so this is
+  documented, not locked.
+- **Logins cross databases.** A login created by `nexus-db-roles` for one
+  database (`nexus_integ3s_scheduler_login`, member of `nexus_scheduler`)
+  connected to the *other* database through PUBLIC's default CONNECT and held
+  `UPDATE` on its `task_attempts`. Two installations using the chart's default
+  login names also reset each other's passwords and memberships on every
+  db-roles run.
+- **0005's rollback** revokes the shared roles' grants in its own database and
+  drops them only when nothing else holds them (the drop is guarded).
+- `TestServiceRolesExist` and `TestIntegration_NewTableGrants` counted
+  `nexus\_%` roles, which on a shared server also matches other
+  installations' `nexus_*_login` roles (the first failed, the second skipped
+  silently); both now count the six group roles by name.
+
+**Running the suites on a shared server.** The full integration suite at
+`-p 1` with default parallelism opened up to 16 connections and, with the
+server near `max_connections`, eight concurrency tests failed at connect
+("too many clients"); with `NEXUS_DB_MAX_CONNS=3` and `-parallel 2` the peak
+was 18 and they passed. `TestNATSRolledBackFactIsNeverPublished` needs a
+database with no unpublished outbox backlog (the relay publishes five batches
+and expects its row among them); in the full suite's shared database it saw
+3,433 other rows and failed, and it passes on its own database, which is why
+`tests/nats/run-integration.sh` uses one.
+
+**Fix.** `nexus-db-roles` now grants CONNECT on its own database to every
+login it manages (read-only logins already had it), so an operator can
+`REVOKE CONNECT ON DATABASE <db> FROM PUBLIC` on each Nexus database without
+locking out that installation's own services;
+`TestApplyCreatesLeastPrivilegeLogins` asserts the explicit grant. The e2e
+per-service-login overlay takes a login prefix (`NEXUS_E2E_LOGIN_PREFIX`).
+OPERATIONS §20.12 documents the shared-server rules (distinct login names per
+installation, revoke PUBLIC CONNECT, never roll back 0005).
+
+**Still open.** Per-installation group role names (a prefix on the six
+`nexus_*` roles) would isolate installations without relying on CONNECT, but
+the names are fixed in migrations 0005 onwards and in the chart; that is a
+design change for a later release. Not fixed either: the chart does not revoke
+PUBLIC's CONNECT itself (the db-roles Job could, behind a value).
+
+**PostgreSQL 18.** Nothing in the schema or grants failed on 18.3. The host
+server uses `trust` authentication for local connections, so
+`TestApplyRotatesAndConverges` cannot prove an old password stops working
+there; it now detects a server that accepts any password and logs instead of
+failing. PostgreSQL 15 and later no longer grant CREATE on schema `public` to
+PUBLIC, so the migrate login must own the database or hold CREATE on `public`
+(a non-owner migrate login fails with "permission denied for schema public").

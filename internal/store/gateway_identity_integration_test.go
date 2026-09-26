@@ -440,7 +440,7 @@ func TestIntegrationAuditAppendAndList(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM audit_log WHERE namespace = $1`, ns) })
 
-	rows, err := GatewayListAudit(ctx, pool, ns, AuditFilter{})
+	rows, _, err := GatewayListAudit(ctx, pool, ns, AuditFilter{})
 	if err != nil {
 		t.Fatalf("list audit: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestIntegrationAuditAppendAndList(t *testing.T) {
 
 	// A DENIED outcome must be recorded as loudly as a success: an audit log of
 	// only successes cannot show an attack in progress.
-	denied, err := GatewayListAudit(ctx, pool, ns, AuditFilter{Outcome: AuditDenied})
+	denied, _, err := GatewayListAudit(ctx, pool, ns, AuditFilter{Outcome: AuditDenied})
 	if err != nil {
 		t.Fatalf("filter by outcome: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestIntegrationAuditAppendAndList(t *testing.T) {
 		t.Errorf("outcome filter returned %d rows, want the one denied login", len(denied))
 	}
 
-	byAction, err := GatewayListAudit(ctx, pool, ns, AuditFilter{Action: "user.create"})
+	byAction, _, err := GatewayListAudit(ctx, pool, ns, AuditFilter{Action: "user.create"})
 	if err != nil {
 		t.Fatalf("filter by action: %v", err)
 	}
@@ -488,7 +488,7 @@ func TestIntegrationAuditIsNamespaceScoped(t *testing.T) {
 		_, _ = pool.Exec(ctx, `DELETE FROM audit_log WHERE namespace IN ($1, $2)`, nsA, nsB)
 	})
 
-	rows, err := GatewayListAudit(ctx, pool, nsA, AuditFilter{})
+	rows, _, err := GatewayListAudit(ctx, pool, nsA, AuditFilter{})
 	if err != nil {
 		t.Fatalf("list A: %v", err)
 	}
@@ -520,7 +520,7 @@ func TestIntegrationAuditDetailIsStructured(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM audit_log WHERE namespace = $1`, ns) })
 
-	rows, err := GatewayListAudit(ctx, pool, ns, AuditFilter{})
+	rows, _, err := GatewayListAudit(ctx, pool, ns, AuditFilter{})
 	if err != nil {
 		t.Fatalf("list audit: %v", err)
 	}

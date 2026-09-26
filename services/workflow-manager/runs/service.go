@@ -84,6 +84,9 @@ type CreateRequest struct {
 	// millisecond later cannot change what this run executes (ADR-0004).
 	SpecID   string
 	SpecName string
+	// SpecVersion pins a version of SpecName instead of the latest (schedules,
+	// webhook triggers and sensors that opted out of tracking edits; F143).
+	SpecVersion *int32
 
 	IdempotencyKey string
 	TriggerKind    string
@@ -115,6 +118,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	switch {
 	case req.SpecID != "":
 		spec, err = store.WFMGetSpecByID(ctx, s.db, req.SpecID)
+	case req.SpecName != "" && req.SpecVersion != nil:
+		spec, err = store.WFMGetSpecVersion(ctx, s.db, req.Namespace, req.SpecName, *req.SpecVersion)
 	case req.SpecName != "":
 		spec, err = store.WFMGetLatestSpec(ctx, s.db, req.Namespace, req.SpecName)
 	default:
@@ -126,7 +131,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (CreateResult, 
 	if spec.Namespace != req.Namespace {
 		// Namespaces are the tenancy boundary; a run must never execute a spec
 		// belonging to another tenant even if its UUID is known.
-		return CreateResult{}, fmt.Errorf("spec %s belongs to namespace %s, not %s", spec.ID, spec.Namespace, req.Namespace)
+		// ErrNotFound, so the caller gets the 404 an unknown id gets (it was a
+		// 500), and without naming the other tenant's namespace.
+		return CreateResult{}, fmt.Errorf("%w: spec %s is not in namespace %s", store.ErrNotFound, spec.ID, req.Namespace)
 	}
 
 	policy, err := parsePolicy(spec.SpecJSON)
@@ -275,8 +282,9 @@ func (s *Service) Cancel(ctx context.Context, runID string) (store.RunRow, error
 
 	if err := s.sched.CancelRunAttempts(ctx, runID); err != nil {
 		// The run is already CANCELLING and that state is durable, so a failure
-		// here delays cancellation rather than losing it: the reconciler retries.
-		s.log.ErrorContext(ctx, "failed to request attempt cancellation; reconciler will retry",
+		// here delays cancellation rather than losing it: the cancel sweep calls
+		// ReconcileCancelling for every CANCELLING run (F109).
+		s.log.ErrorContext(ctx, "failed to request attempt cancellation; the cancel sweep will re-issue it",
 			"run_id", runID, "error", err)
 	}
 
@@ -304,6 +312,39 @@ func (s *Service) Cancel(ctx context.Context, runID string) (store.RunRow, error
 	}
 
 	return s.MaybeFinalizeCancel(ctx, runID)
+}
+
+// ReconcileCancelling re-issues a CANCELLING run's attempt cancellation and
+// finalizes the run once nothing is in flight (CONTRACT-FINDINGS F109).
+//
+// Called by the cancel sweep for every CANCELLING run. Idempotent: the
+// scheduler's fan-out skips attempts that are already terminal and cancels each
+// live one in its own compare-and-set transaction, so a repeat, or two replicas
+// racing, cancel each attempt once; MaybeFinalizeCancel is a CAS too. A run that
+// is no longer CANCELLING is left alone. Bounded: one fan-out per call, over
+// the run's live attempts only. A failed fan-out is returned and the run stays
+// CANCELLING for the next sweep -- it is never finalized over live attempts.
+func (s *Service) ReconcileCancelling(ctx context.Context, runID string) error {
+	run, err := store.WFMGetRun(ctx, s.db, runID)
+	if err != nil {
+		return err
+	}
+	if run.State != string(domain.RunCancelling) {
+		return nil
+	}
+	counts, err := store.WFMCountRunAttemptsByState(ctx, s.db, runID)
+	if err != nil {
+		return err
+	}
+	if inFlight(counts) > 0 {
+		if err := s.sched.CancelRunAttempts(ctx, runID); err != nil {
+			return fmt.Errorf("re-issue attempt cancellation for run %s: %w", runID, err)
+		}
+		s.log.InfoContext(ctx, "re-issued attempt cancellation for a CANCELLING run",
+			"run_id", runID, "in_flight", inFlight(counts))
+	}
+	_, err = s.MaybeFinalizeCancel(ctx, runID)
+	return err
 }
 
 // MaybeFinalizeCancel advances CANCELLING -> CANCELLED once nothing is in flight.

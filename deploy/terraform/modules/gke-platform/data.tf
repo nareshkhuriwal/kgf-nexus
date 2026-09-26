@@ -32,13 +32,21 @@ resource "google_sql_database_instance" "this" {
 
     deletion_protection_enabled = var.deletion_protection
 
-    # No public IP at all; TLS required on the private one (sslmode=require
-    # works without client certificates).
+    # No public IP at all; TLS required on the private one. The shared CA
+    # hierarchy (GOOGLE_MANAGED_CAS_CA) is what makes sslmode=verify-full
+    # possible: its server certificates carry the instance's DNS name as a SAN
+    # for every connection type, while the per-instance CA names it only for
+    # Private Service Connect. Nexus connects to that name (private zone
+    # below) and verifies it against the instance's trusted CAs.
     ip_configuration {
       ipv4_enabled                                  = false
       private_network                               = google_compute_network.this.id
       enable_private_path_for_google_cloud_services = true
       ssl_mode                                      = "ENCRYPTED_ONLY"
+      server_ca_mode                                = "GOOGLE_MANAGED_CAS_CA"
+      # The server certificate (not the CA) renews in the maintenance
+      # window; clients trust the CA, so nothing changes for them.
+      server_certificate_rotation_mode = "AUTOMATIC_ROTATION_DURING_MAINTENANCE"
     }
 
     # Automated backups + write-ahead logs = point-in-time recovery (the
@@ -89,6 +97,53 @@ resource "google_sql_database_instance" "this" {
   }
 
   depends_on = [google_service_networking_connection.private_services]
+}
+
+# The instance's private-services-access DNS name
+# (<uid>.<project-label>.<region>.sql-psa.goog), resolvable only inside this
+# VPC through a private zone. Cloud SQL publishes the name but creates no
+# record for private services access; this zone is that record.
+locals {
+  postgres_dns_name = trimsuffix(one([
+    for d in google_sql_database_instance.this.dns_names : d.name
+    if d.connection_type == "PRIVATE_SERVICES_ACCESS"
+  ]), ".")
+}
+
+resource "google_dns_managed_zone" "postgres" {
+  project     = var.project_id
+  name        = "${var.name}-pg-psa"
+  dns_name    = "${local.postgres_dns_name}."
+  description = "Private record for the Nexus Cloud SQL instance, so clients verify its certificate by name (sslmode=verify-full)."
+  visibility  = "private"
+  labels      = local.labels
+
+  private_visibility_config {
+    networks {
+      network_url = google_compute_network.this.id
+    }
+  }
+
+  depends_on = [google_project_service.this]
+}
+
+resource "google_dns_record_set" "postgres" {
+  project      = var.project_id
+  managed_zone = google_dns_managed_zone.postgres.name
+  name         = google_dns_managed_zone.postgres.dns_name
+  type         = "A"
+  ttl          = 300
+  rrdatas      = [google_sql_database_instance.this.private_ip_address]
+}
+
+# Every CA the instance currently trusts: the one that signed the serving
+# certificate, one added for an upcoming rotation, and one rotated out. The
+# bundle Nexus mounts is all of them, so a CA rotation started with
+# `gcloud sql ssl server-ca-certs create` reaches the pods (next apply) before
+# the instance switches (docs/OPERATIONS.md §20.11).
+data "google_sql_ca_certs" "postgres" {
+  project  = var.project_id
+  instance = google_sql_database_instance.this.name
 }
 
 resource "google_sql_database" "nexus" {
@@ -186,19 +241,29 @@ resource "google_storage_bucket_iam_member" "artifacts" {
   member = google_service_account.artifacts.member
 }
 
-# What works TODAY: an HMAC key for the service account, because the Nexus S3
-# client (minio-go, static credentials) talks to GCS's XML API in S3
+# OPT-IN fallback (artifact_hmac_key, default false): an HMAC key for the
+# service account, for the s3 backend against GCS's XML API in S3
 # interoperability mode. The environment root writes it into the kgf-nexus
 # credentials Secret. Rotate by creating a second key, rolling the Secret,
-# then setting the old key INACTIVE and deleting it.
+# then setting the old key INACTIVE and deleting it. Unlike the default below
+# it is a long-lived secret; prefer Workload Identity.
 resource "google_storage_hmac_key" "artifacts" {
+  count                 = var.artifact_hmac_key ? 1 : 0
   project               = var.project_id
   service_account_email = google_service_account.artifacts.email
 }
 
-# The target design, prepared now: the same service account through Workload
-# Identity (no key at all). Unused until the chart grows a ServiceAccount and
-# the client a GCS or token-based path (F115).
+# Existing state (created before the count) keeps its key instead of being
+# destroyed and recreated under a new address.
+moved {
+  from = google_storage_hmac_key.artifacts
+  to   = google_storage_hmac_key.artifacts[0]
+}
+
+# The default: the native gcs backend acts as this service account through
+# GKE Workload Identity -- the nexus-artifacts ServiceAccount, annotated
+# iam.gke.io/gcp-service-account, gets short-lived tokens from the metadata
+# server. No key exists anywhere.
 resource "google_service_account_iam_member" "artifacts_workload_identity" {
   service_account_id = google_service_account.artifacts.name
   role               = "roles/iam.workloadIdentityUser"

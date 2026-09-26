@@ -267,6 +267,29 @@ func (c *ResourceManagerClient) RecordHeartbeat(ctx context.Context, workerID st
 	return nil
 }
 
+// RecordHeartbeatFacts is RecordHeartbeat carrying the agent's cached
+// artifact keys (ADR-0030 §4). Same single RPC; the running set is still
+// passed empty for the reason RecordHeartbeat gives.
+func (c *ResourceManagerClient) RecordHeartbeatFacts(ctx context.Context, workerID string, cached []string, reported bool) error {
+	if c.grpc == nil {
+		return fmt.Errorf("record heartbeat: %w (resource-manager owns workers)", ErrUpstreamNotConfigured)
+	}
+	_, _, err := c.grpc.heartbeatWithFacts(ctx, &rmv1.HeartbeatWorkerRequest{
+		WorkerId: workerID, CachedArtifacts: cached, CachedArtifactsReported: reported,
+	})
+	return err
+}
+
+// DrainWorkerForReason marks a worker DRAINING because the agent said it
+// stopped taking work on its own, e.g. a spot interruption notice (ADR-0030
+// §2), so the push path stops dispatching to it too.
+func (c *ResourceManagerClient) DrainWorkerForReason(ctx context.Context, workerID, reason string) error {
+	if c.grpc == nil {
+		return fmt.Errorf("drain worker: %w (resource-manager owns workers)", ErrUpstreamNotConfigured)
+	}
+	return c.grpc.setState(ctx, workerID, rmv1.WorkerState_WORKER_STATE_DRAINING, "agent: "+reason)
+}
+
 // ReleaseReservation returns leaked capacity to the pool.
 //
 // This is the call heartbeat reconciliation depends on (§3.2), and it goes through
@@ -577,6 +600,11 @@ func (c *SchedulerClient) ApplyResult(ctx context.Context, req *nexusv1.ReportRe
 	applied, err := c.grpc.applyResult(ctx, req)
 	if err != nil {
 		return err
+	}
+	if applied.StaleLease {
+		// Not applied because a reclaim won the attempt: the caller answers
+		// the worker stale_lease_token (F104).
+		return fmt.Errorf("apply result for attempt %s: %w", req.GetAttemptId(), store.ErrStaleLeaseToken)
 	}
 	if !applied.Applied || c.dag == nil {
 		return nil

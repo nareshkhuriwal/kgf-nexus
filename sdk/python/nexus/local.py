@@ -31,11 +31,24 @@ WHAT IS NOT (the parity limits, stated rather than papered over):
     GPU placement does not exist (CUDA_VISIBLE_DEVICES is not set);
   * executors: ``subprocess`` tasks and Python handlers only. ``docker`` and
     ``kubernetes`` tasks are refused unless ``host_executor=True``, which runs
-    their command on the host -- a different environment from their image;
+    their command on the host -- a different environment from their image --
+    in the directory the run was started from, with that directory on
+    PYTHONPATH (standing in for the image's working directory);
   * memoization is within ONE run (no cross-run cache, no invalidations);
   * no pause, resume, operator retry, schedules or events API;
   * results live in a FileResultStore under the run directory, not in an
-    object store, and secrets referenced by the spec are not resolved.
+    object store, and secrets referenced by the spec are not resolved;
+  * tracing: there is no attempt span. A valid TRACEPARENT/TRACESTATE in this
+    process's environment (e.g. from a CI job's trace) is handed to every task
+    as-is, so handlers join that trace; an invalid one is not passed on.
+  * no workload API (ADR-0032): ``ctx.report_usage`` accumulates on the
+    context and is logged, ``ctx.acquire_permits`` uses a process-local bucket
+    (unlimited unless NEXUS_LOCAL_RATE_LIMITS sets limits), and a
+    ``rate_limited`` failure is retried like a transient one, charged to the
+    retry budget and without honouring its retry_after. Checkpoints DO carry
+    across retries: every attempt of a node shares the run's result store and
+    the node's idempotency key, so ``ctx.resume()`` in attempt 2 returns what
+    attempt 1 passed to ``ctx.checkpoint()``.
 """
 
 from __future__ import annotations
@@ -68,6 +81,7 @@ from .context import (
     ref_payload,
 )
 from .task import TaskDefinition, registry
+from .tracing import TRACEPARENT_ENV, TRACESTATE_ENV, trace_context_from_environment
 from .workflow import CompiledWorkflow, WorkflowDefinition
 
 __all__ = ["run", "LocalRunResult", "NodeResult", "AttemptRecord", "LocalRunError", "main"]
@@ -323,6 +337,12 @@ class _Runner:
         self.max_fanout_ceiling = max_fanout_ceiling
         self.inline_threshold = clamp_inline_threshold(inline_threshold)
         self.host_executor = host_executor
+        #: Where the run was started. A docker/kubernetes task run with
+        #: host_executor stands in for its image, whose working directory holds
+        #: the project, so it runs HERE (not in the attempt directory) with this
+        #: directory importable -- otherwise `python -m nexus.entrypoint
+        #: --module dag` and relative paths like data/orders.csv cannot resolve.
+        self.launch_dir = os.getcwd()
         #: Replay pins the control plane's key instead of deriving one.
         self.fixed_idempotency_key: str | None = None
         self.rng = random.Random(seed)
@@ -579,6 +599,20 @@ class _Runner:
             "NEXUS_INLINE_THRESHOLD_BYTES": str(self.inline_threshold),
             "NEXUS_LOCAL_RUN": "1",
         })
+        # The agent exports the attempt's W3C context as TRACEPARENT/TRACESTATE.
+        # Locally there is no attempt span, so the runner's own context (when
+        # valid) stands in for it; a malformed or task-set value is not passed on.
+        env.pop(TRACEPARENT_ENV, None)
+        env.pop(TRACESTATE_ENV, None)
+        trace = trace_context_from_environment(os.environ)
+        if trace is not None:
+            env[TRACEPARENT_ENV] = trace.traceparent
+            if trace.tracestate:
+                env[TRACESTATE_ENV] = trace.tracestate
+        # A local run has no workload API. If this runner itself runs inside a
+        # Nexus task, its children must not act on that task's attempt.
+        env.pop("NEXUS_TASK_API", None)
+        env.pop("NEXUS_TASK_API_TOKEN", None)
         deadline = self._deadline_s(spec)
         if deadline:
             env["NEXUS_DEADLINE_UNIX_MS"] = str(int((time.time() + deadline) * 1000))
@@ -614,14 +648,23 @@ class _Runner:
             with open(os.path.join(a.work_dir, "inputs", _safe(name)), "wb") as f:
                 f.write(self.store.get_bytes(ref))
         argv = [str(x) for x in (rt.get("command") or [])] + [str(x) for x in (rt.get("args") or [])]
-        cwd = str(rt.get("working_dir") or a.work_dir)
+        env = self._base_env(a, spec)
+        if str(rt.get("executor") or "subprocess") == "subprocess":
+            cwd = str(rt.get("working_dir") or a.work_dir)
+        else:
+            # host_executor standing in for an image (see launch_dir). An image
+            # working_dir names a path inside the image, which means nothing here.
+            cwd = self.launch_dir
+            env["PYTHONPATH"] = os.pathsep.join(
+                [self.launch_dir] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+            )
         stdout_path = os.path.join(a.work_dir, "stdout.log")
         stderr_path = os.path.join(a.work_dir, "stderr.log")
         started = time.monotonic()
         with open(stdout_path, "wb") as so, open(stderr_path, "wb") as se:
             try:
                 proc = subprocess.Popen(
-                    argv, cwd=cwd, env=self._base_env(a, spec), stdout=so, stderr=se,
+                    argv, cwd=cwd, env=env, stdout=so, stderr=se,
                     stdin=subprocess.DEVNULL, start_new_session=True,
                 )
             except FileNotFoundError as e:
@@ -697,7 +740,7 @@ class _Runner:
         with open(os.path.join(a.work_dir, "assignment.json"), "w", encoding="utf-8") as f:
             json.dump(assignment, f, sort_keys=True, indent=2)
         if self.isolation == "inprocess":
-            outcome = execute_assignment(assignment, store=self.store)
+            outcome = execute_assignment(assignment, store=self.store, task_api=None)
             return self._python_outcome(a, spec, outcome)
         outcome_path = os.path.join(a.work_dir, "outcome.json")
         argv = [self.python, "-m", "nexus.worker", "--assignment", os.path.join(a.work_dir, "assignment.json"),

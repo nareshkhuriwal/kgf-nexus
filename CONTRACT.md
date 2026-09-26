@@ -1,6 +1,6 @@
 # FROZEN CONTRACT — Phase 1. Read before writing code. Do not modify.
 
-Module: `github.com/khuriwalgroup/kgf-nexus`  ·  Go 1.27  ·  Postgres 16  ·  MinIO
+Module: `github.com/khuriwalgroup/kgf-nexus`  ·  Go 1.25 (go.mod; checked by tests/repo)  ·  Postgres 16  ·  MinIO
 Generated protobuf types: import `nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"`
 
 ## Files you MUST NOT edit

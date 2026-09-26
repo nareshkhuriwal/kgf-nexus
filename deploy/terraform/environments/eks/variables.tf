@@ -156,6 +156,26 @@ variable "nvidia_device_plugin_version" {
   default     = "0.20.1"
 }
 
+variable "artifact_identity" {
+  description = <<-EOT
+    How the result-store pods authenticate to S3:
+      pod-identity -- EKS Pod Identity (default): the platform's association
+                      binds the nexus-artifacts ServiceAccount to the artifact role;
+                      nothing on the ServiceAccount, no key anywhere.
+      irsa         -- IRSA: the ServiceAccount is annotated with the role ARN
+                      and the webhook injects a web-identity token.
+      static       -- opt-in fallback: an IAM user key pair (usable only through
+                      this VPC's S3 endpoint) in the credentials Secret.
+  EOT
+  type        = string
+  default     = "pod-identity"
+
+  validation {
+    condition     = contains(["pod-identity", "irsa", "static"], var.artifact_identity)
+    error_message = "artifact_identity must be pod-identity, irsa or static."
+  }
+}
+
 variable "chart_values_overrides" {
   description = "Chart values deep-merged last (agents, replicas, gateway, SMTP, NATS TLS...)."
   type        = any
@@ -166,4 +186,45 @@ variable "postgres_password_version" {
   description = "Bump to rotate the database password: a new one is generated and written to the server, the secret store and (through the environment) the kgf-nexus credentials Secret in one apply. Restart the Nexus pods afterwards."
   type        = number
   default     = 1
+}
+
+# ── Database hardening and agent pools (F115) ─────────────────────────────
+
+variable "runtime_db_roles" {
+  description = "Services connect as their own least-privilege logins, created by the chart's db-roles Job; the managed server's admin login then reaches only the migrate, bootstrap and db-roles Jobs (docs/OPERATIONS.md §20.12)."
+  type        = bool
+  default     = true
+}
+
+variable "runtime_db_password_version" {
+  description = "Bump to rotate every runtime login's password in one apply (the db-roles Job re-runs and the pods roll)."
+  type        = number
+  default     = 1
+}
+
+variable "gpu_agent" {
+  description = "The Nexus agent placed on the GPU pool when it is enabled: what it advertises (gpu_count devices of gpu_kind, and CPU/memory) and requests from the device plugin. Size it inside one GPU node (default: g6.xlarge: 4 vCPU, 16 GiB, one L4)."
+  type = object({
+    replicas       = number
+    gpu_count      = number
+    gpu_kind       = string
+    gpu_memory_gib = number
+    cpu_millis     = number
+    memory_gib     = number
+    disk_gib       = number
+  })
+  default = {
+    replicas       = 1
+    gpu_count      = 1
+    gpu_kind       = "nvidia-l4"
+    gpu_memory_gib = 24
+    cpu_millis     = 3000
+    memory_gib     = 10
+    disk_gib       = 150
+  }
+
+  validation {
+    condition     = var.gpu_agent.gpu_count >= 1 && var.gpu_agent.replicas >= 0
+    error_message = "gpu_agent.gpu_count must be at least 1 (a GPU agent requests its devices) and replicas non-negative."
+  }
 }

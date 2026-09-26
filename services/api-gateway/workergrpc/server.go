@@ -74,6 +74,26 @@ type Scheduler interface {
 	PendingCancellations(ctx context.Context, workerID string) ([]string, error)
 }
 
+// HeartbeatFactsRecorder is the optional ResourceManager extension that carries
+// the agent's placement facts (ADR-0030 §4). Optional so existing test fakes
+// keep compiling; the production client implements it.
+type HeartbeatFactsRecorder interface {
+	RecordHeartbeatFacts(ctx context.Context, workerID string, cached []string, reported bool) error
+}
+
+// AgentDrainer is the optional ResourceManager extension that marks a worker
+// DRAINING at the agent's own request (ADR-0030 §2).
+type AgentDrainer interface {
+	DrainWorkerForReason(ctx context.Context, workerID, reason string) error
+}
+
+func truncateReason(s string) string {
+	if len(s) > 128 {
+		return s[:128]
+	}
+	return s
+}
+
 // Config tunes the worker protocol's timing.
 type Config struct {
 	// HeartbeatInterval is what the server TELLS workers to use. Server-controlled
@@ -99,6 +119,14 @@ type Config struct {
 	// disabled means agents ship no logs -- the right answer for a gateway that
 	// cannot READ them back, since objects nobody can serve are pure cost.
 	LogShipping *nexusv1.LogShippingConfig
+	// AgentPolicy is the admission gate at Register: a minimum agent_version
+	// and capabilities every agent must advertise (docs/COMPATIBILITY.md §4.4).
+	// The zero value admits every agent.
+	AgentPolicy domain.AgentPolicy
+	// WorkloadAPI is advertised to workers at registration (ADR-0032). Nil
+	// offers none of it: agents then expose no usage, permit or checkpoint
+	// endpoints to their tasks, and the RPCs answer Unimplemented.
+	WorkloadAPI *nexusv1.WorkloadApiConfig
 }
 
 // DefaultConfig is the tuning from ADR-0010 and §5.5.
@@ -157,6 +185,19 @@ func (s *Server) Register(ctx context.Context, req *nexusv1.RegisterRequest) (*n
 	if req.GetCapacity() == nil {
 		return nil, status.Error(codes.InvalidArgument, "advertised capacity is required")
 	}
+	// The version and capability gate, before any row is written. An agent
+	// that is too old, or lacks a behaviour the operator requires, would run
+	// tasks with older semantics without anyone noticing (the N-1 hazard,
+	// docs/COMPATIBILITY.md §4.3). FAILED_PRECONDITION because the request is
+	// well formed and the agent itself must change; the agent's register
+	// backoff treats it as permanent and exits with the reason.
+	if err := s.cfg.AgentPolicy.Check(req.GetAgentVersion(), req.GetCapabilities()); err != nil {
+		s.log.WarnContext(ctx, "refused an incompatible agent",
+			"namespace", req.GetNamespace(), "hostname", req.GetHostname(),
+			"agent_version", req.GetAgentVersion(), "capabilities", req.GetCapabilities(),
+			"principal", p.Name, "reason", err)
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
 
 	sessionToken, err := newOpaqueToken()
 	if err != nil {
@@ -189,6 +230,7 @@ func (s *Server) Register(ctx context.Context, req *nexusv1.RegisterRequest) (*n
 		LeaseTtlMs:          int32(s.cfg.LeaseTTL.Milliseconds()),
 		ResultStore:         s.cfg.ResultStore,
 		LogShipping:         s.cfg.LogShipping,
+		WorkloadApi:         s.advertisedWorkloadAPI(),
 	}, nil
 }
 
@@ -245,8 +287,26 @@ func (s *Server) Heartbeat(ctx context.Context, req *nexusv1.HeartbeatRequest) (
 		}, nil
 	}
 
-	if err := s.rm.RecordHeartbeat(ctx, workerID, req.GetFreeCapacity(), req.GetCpuUtilization(), req.GetMemoryUtilization()); err != nil {
+	if hf, ok := s.rm.(HeartbeatFactsRecorder); ok && req.GetCachedArtifactsReported() {
+		if err := hf.RecordHeartbeatFacts(ctx, workerID, req.GetCachedArtifacts(), true); err != nil {
+			return nil, status.Errorf(codes.Internal, "record heartbeat: %v", err)
+		}
+	} else if err := s.rm.RecordHeartbeat(ctx, workerID, req.GetFreeCapacity(), req.GetCpuUtilization(), req.GetMemoryUtilization()); err != nil {
 		return nil, status.Errorf(codes.Internal, "record heartbeat: %v", err)
+	}
+
+	// The agent stopped taking work on its own (an eviction notice). Pull
+	// dispatch already stopped with its polling; DRAINING stops the push path
+	// too. Best effort: the next beat repeats it.
+	if reason := req.GetDrainReason(); reason != "" && state == string(domain.WorkerActive) {
+		if d, ok := s.rm.(AgentDrainer); ok {
+			if err := d.DrainWorkerForReason(ctx, workerID, truncateReason(reason)); err != nil {
+				s.log.WarnContext(ctx, "could not mark a self-draining worker DRAINING", "worker_id", workerID, "error", err)
+			} else {
+				s.log.InfoContext(ctx, "worker is draining itself", "worker_id", workerID, "reason", reason)
+				state = "DRAINING"
+			}
+		}
 	}
 
 	directives, err := s.reconcileAndBuildDirectives(ctx, workerID, state, req.GetRunningAttemptIds())
@@ -544,6 +604,17 @@ func (s *Server) ReportResult(ctx context.Context, req *nexusv1.ReportResultRequ
 		return ack, nil
 	}
 	if err := s.sch.ApplyResult(ctx, req); err != nil {
+		if errors.Is(err, store.ErrStaleLeaseToken) {
+			// The lease reconciler or liveness sweep reclaimed the attempt
+			// after the fence above passed, and the scheduler ignored the
+			// result (F104). The same answer the fence gives: the agent drops
+			// the result, which is right because a retry owns the work now. A
+			// duplicate of a result that did land is not stale and falls
+			// through to Accepted below.
+			s.log.WarnContext(ctx, "attempt result arrived after its lease was reclaimed; rejected as stale",
+				"attempt_id", req.GetAttemptId())
+			return &nexusv1.Ack{Accepted: false, Reason: store.ReasonStaleLeaseToken}, nil
+		}
 		// Never Ack{accepted:true} and never Ack{accepted:false} here: the
 		// result was not applied, and both Acks make the agent drop it from its
 		// WAL. A transport error keeps it there to be resent. A scheduler that

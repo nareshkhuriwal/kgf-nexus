@@ -199,7 +199,7 @@ Owns the lifecycle of a `WorkflowRun`. Responsibilities:
 - Enforcing run-level policies: overall run timeout, concurrency limits (`max_active_runs` per workflow), failure policy (`fail_fast` vs. `continue_on_failure`).
 - Handling operator interventions: `cancel`, `pause`, `resume`, and `retry` — of the whole run or of selected nodes and their dependents (§5.2, Operator retry).
 - **Timer management.** A durable timer table drives all deadline-based work: schedule-to-start expiry, start-to-close expiry, heartbeat expiry, retry backoff. A single reconciler polls `timers WHERE fire_at <= now()` with `FOR UPDATE SKIP LOCKED`. Using the database as the timer store rather than in-memory timers means a control-plane restart loses nothing.
-- Backfill: generating a bounded set of runs over a historical interval with its own concurrency cap, so a backfill cannot starve live traffic.
+- Backfill: generating a bounded set of runs over a historical interval with its own concurrency cap, so a backfill cannot starve live traffic. Its operator transitions are compare-and-set on the row: pause only from `RUNNING`, resume only from `PAUSED`, cancel from `RUNNING` or `PAUSED`; anything else is `409 backfill_state_conflict` naming the current state, so `COMPLETED`, `CANCELLED` and `FAILED` are final. The driver's own `COMPLETED`/`FAILED` transitions apply only to a backfill still `RUNNING`, so they never overwrite an operator's pause or cancel (F119).
 
 #### DAG Engine
 Pure dependency logic, deliberately kept free of I/O beyond its own transaction. Responsibilities:
@@ -704,7 +704,7 @@ runtime:
   command: ["python", "-m", "train"]
   env:
     LOG_LEVEL: info
-  secrets:                     # injected by worker from its provider;
+  secrets:                     # resolved by the worker agent (ADR-0025);
     - name: S3_CREDENTIALS     # never stored in the metadata store
       ref: vault://kv/ml/s3
 
@@ -978,7 +978,7 @@ Rules that keep this from becoming a footgun:
 - **Refusal is explicit.** Over `max_fanout`, not an array, missing, or not inline: the template becomes `FAILED` with the reason on the record and an `ExpansionFailed` event; nothing is materialized; downstream propagates as for any failure.
 - **Children** inherit the template's spec (minus `map`), trigger rule, retry budget and incoming edges; the element is written onto the child's spec as an `input_literals` entry. Their idempotency key is `sha256(run_id ‖ template_node_id ‖ map_index ‖ version)`.
 - **Fan-in.** Downstream nodes depend on the template, never on children, so a 10,000-item fan-in has one predecessor. The template's state is the aggregate of its children (any failed → `FAILED`; else any cancelled → `CANCELLED`; else any skipped → `SKIPPED`; else `SUCCEEDED`), folded in the same reconcile pass in which the last child settles. A downstream input bound to a template output receives an inline JSON array, one element per child in `map_index` order: the child's inline JSON value, `{"inline_base64": …}` for non-JSON inline bytes, `{"result_ref": …}` for a blob, `null` for a child that did not succeed.
-- **The fan-in is bounded.** The array is assembled in the control plane, so it is capped at `NEXUS_DAG_MAX_FANIN_BYTES` (default 16 MiB, allowed 64 KiB–256 MiB; the JSON payload before base64). Children's outputs are never loaded with the rest of the run; they are streamed from Postgres in `map_index` order and the size is checked **before each element is appended**, so an over-limit fan-in stops reading at the element that would cross the limit and never holds more than the limit. The consuming node is then `FAILED` without an attempt, in one transaction with a `fan_in_refusals` row (`reason = fan_in_too_large`, the limit, how many children fit, how to raise it or restructure) and a `FanInRejected` event; the run view shows it as "fan-in too large". Not retried: the same children produce the same array. At submit time, a template output declaring `max_bytes` is rejected (`map_fan_in_too_large`) when `max_fanout × max_bytes` could exceed the limit (the gateway checks against the default; the engine re-checks against its configured limit at materialize).
+- **The fan-in is bounded.** The array is assembled in the control plane, so it is capped at `NEXUS_DAG_MAX_FANIN_BYTES` (default 16 MiB, allowed 64 KiB–256 MiB; the JSON payload before base64). Children's outputs are never loaded with the rest of the run; they are streamed from Postgres in `map_index` order and the size is checked **before each element is appended**, so an over-limit fan-in stops reading at the element that would cross the limit and never holds more than the limit. The consuming node is then `FAILED` without an attempt, in one transaction with a `fan_in_refusals` row (`reason = fan_in_too_large`, the limit, how many children fit, how to raise it or restructure) and a `FanInRejected` event; the run view shows it as "fan-in too large". Not retried: the same children produce the same array. At submit time, a template output declaring `max_bytes` is rejected (`map_fan_in_too_large`) when `max_fanout × max_bytes` could exceed the limit (the gateway checks against the default; the engine re-checks against its configured limit at materialize). The worker agent holds every task to that promise on every executor: an output larger than its declared `max_bytes` fails the attempt with terminal `VALIDATION` (`OutputTooLarge`, naming the output, its size and the bound) before anything is inlined or uploaded (F125).
 - **Pause / cancel / fail_fast** withhold expansion exactly as they withhold the frontier. Cancel settles unexpanded templates and pending children `CANCELLED`; pause leaves them `PENDING` to be dispatched on resume (an expanded template does not count as in flight).
 - **Not implemented:** `min_success_ratio` (use `all_done` / `none_failed` on the fan-in); nested maps inside one template; expanding over a blob collection; re-expanding a template on retry (an expanded template is retried through its children; a refused expansion is not retryable — §5.2, Operator retry).
 
@@ -1286,6 +1286,10 @@ message HeartbeatResponse {
 
 ### 8.2 Public REST API (sketch)
 
+The complete, tested contract is [`api/openapi.yaml`](../api/openapi.yaml)
+(OpenAPI 3.1, also served at `GET /v1/openapi.yaml`); the sketch below is the
+original outline.
+
 ```
 POST   /v1/namespaces/{ns}/specs                 submit/validate spec
 GET    /v1/namespaces/{ns}/specs/{name}/versions
@@ -1301,6 +1305,10 @@ GET    /v1/namespaces/{ns}/workers               fleet view
 GET    /v1/namespaces/{ns}/workers/{id}          detail + the tasks running on it
 POST   /v1/namespaces/{ns}/workers/{id}/drain
 GET    /v1/namespaces/{ns}/capacity              advertised vs committed
+GET    /v1/namespaces/{ns}/audit                 keyset-paged audit trail (?cursor=, since, until)
+GET    /v1/namespaces/{ns}/audit/export          ndjson (verifiable) | csv | kgf (ADR-0025)
+GET|PUT /v1/namespaces/{ns}/audit/policy         retention; POST .../audit/legal-hold, .../audit/purge
+*      /v1/namespaces/{ns}/audit/sinks[/{id}]    signed SIEM webhook sinks (+ /rotate-secret)
 ```
 
 ### 8.3 SDK sketch
@@ -1337,7 +1345,7 @@ The decorator does **not** execute at DAG-build time in the control plane. It co
 
 **Secrets.** Never stored in the metadata store. The spec holds a *reference* (`vault://...`); the worker resolves it at execution time through its own configured provider. The control plane never sees secret values, so a metadata-store compromise does not leak credentials.
 
-**Observability.** Structured JSON logs with `trace_id` / `run_id` / `attempt_id` on every line. OpenTelemetry traces spanning submit → dispatch → execute → report, so a slow pipeline can be diagnosed end-to-end. Prometheus metrics: queue depth by queue and namespace, dispatch latency, `schedule_to_start` distribution (the single best indicator of capacity shortfall), attempt outcomes by state, worker utilization, lease-expiry rate (the best indicator of fleet instability).
+**Observability.** Structured JSON logs with `trace_id` / `run_id` / `attempt_id` on every line. OpenTelemetry traces spanning submit → dispatch → execute → report, so a slow pipeline can be diagnosed end-to-end (implemented by ADR-0026: the context crosses the outbox and the attempt row, and reaches task processes as `TRACEPARENT`; OPERATIONS §26). Prometheus metrics: queue depth by queue and namespace, dispatch latency, `schedule_to_start` distribution (the single best indicator of capacity shortfall), attempt outcomes by state, worker utilization, lease-expiry rate (the best indicator of fleet instability).
 
 **Retention.** Terminal runs older than the retention window are archived to object storage and pruned from Postgres. Partition `run_events` and `task_attempts` by month so pruning is a partition drop rather than a mass `DELETE`. Designing this in from the start avoids the operational cliff every orchestrator hits at scale.
 
@@ -1426,7 +1434,7 @@ Asset/lineage layer over the task core (the Dagster idea, added without rewritin
 | 3 | Yes, bounded: `cancellation.uninterruptible` sends no SIGTERM, waits min(declared ≤ 1 h, agent ceiling default 10 m), then SIGKILL. Does not extend `start_to_close`. Implemented and tested. | [ADR-0015](adr/0015-bounded-uninterruptible-tasks.md) |
 | 4 | 64 KiB stays the default (measured: inline beats a MinIO round trip up to between 64 and 256 KiB; every shipped result is < 1 KiB), configurable within [1 B, 1 MiB], applied consistently. | [ADR-0016](adr/0016-inline-result-threshold.md) |
 | 5 | Weighted fair share across namespaces (in-flight ÷ weight) ahead of priority + aging within a namespace, inside the unchanged claim. Implemented (migration 0022) and tested for starvation-freedom, weights, aging and no double dispatch. | [ADR-0017](adr/0017-weighted-fair-share-across-namespaces.md) |
-| 6 | The assumption above does **not** hold for the current claim: its cost is linear in the queue's PENDING backlog (laptop: ~1.1k/s at 1k backlog with 16 replicas; ~40–200/s at 10k; single digits to ~20/s at 100k). Fix the scan in SQL first; build a dedicated dispatch path only if claim p99 > 250 ms, backlog > 50k, or demand > 70 % of measured capacity persists afterwards. | [ADR-0018](adr/0018-postgres-dispatch-ceiling.md) |
+| 6 | The assumption above does **not** hold for the current claim: its cost is linear in the queue's PENDING backlog (laptop: ~1.1k/s at 1k backlog with 16 replicas; ~40–200/s at 10k; single digits to ~20/s at 100k). Fix the scan in SQL first; build a dedicated dispatch path only if claim p99 > 250 ms, backlog > 50k, or demand > 70 % of measured capacity persists afterwards. Stage 1 (the windowed pull claim) has since shipped. The pull path no longer slows with backlog; see [BENCHMARKS.md](BENCHMARKS.md) for the current laptop curves. | [ADR-0018](adr/0018-postgres-dispatch-ceiling.md) |
 
 ---
 
@@ -1451,3 +1459,10 @@ Asset/lineage layer over the task core (the Dagster idea, added without rewritin
 | [ADR-0016](adr/0016-inline-result-threshold.md) | Inline-vs-blob result threshold (§12 Q4) |
 | [ADR-0017](adr/0017-weighted-fair-share-across-namespaces.md) | Weighted fair share across namespaces (§12 Q5) |
 | [ADR-0018](adr/0018-postgres-dispatch-ceiling.md) | Postgres dispatch ceiling, trigger and migration path (§12 Q6) |
+| [ADR-0024](adr/0024-nexus-inside-kgf-cloud.md) | Nexus inside KGF Cloud: X-KGF-Context authentication, one namespace per KGF resource group |
+| [ADR-0025](adr/0025-secret-resolution-audit-export-airgap.md) | Worker-side secret resolution, tamper-evident audit export, air-gapped install |
+| [ADR-0026](adr/0026-opentelemetry-tracing.md) | OpenTelemetry tracing across services, the outbox and task processes |
+| [ADR-0027](adr/0027-result-store-backends.md) | Result-store backends: S3 (credential chain), Azure Blob, GCS |
+| [ADR-0028](adr/0028-event-triggers-notifications-sensors-lineage.md) | Notifications, webhook triggers, sensors and declared asset lineage (Phase 3/4) |
+| [ADR-0032](adr/0032-ai-workloads-usage-rate-limits-checkpoints.md) | AI workloads: the workload API, usage units, shared rate limits, checkpoints |
+| [ADR-0033](adr/0033-nexus-as-kgf-nexus-service.md) | Nexus as the KGF.Nexus service of KGF Cloud |

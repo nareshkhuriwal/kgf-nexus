@@ -26,6 +26,9 @@ type observation struct {
 	objects       []*rmv1.ObservedObject
 	completeKinds []string
 	errs          []error
+	// nodes is the full Node list when it succeeded, for the cluster's
+	// placement labels (ADR-0031); nil when the list failed.
+	nodes []corev1.Node
 }
 
 // observe collects the snapshot. Each kind is complete or not independently:
@@ -86,6 +89,7 @@ func (c *Controller) observe(ctx context.Context, a *rmv1.ClusterAssignment) obs
 		o.errs = append(o.errs, fmt.Errorf("observe nodes: %w", err))
 	} else {
 		o.completeKinds = append(o.completeKinds, "Node")
+		o.nodes = nodes.Items
 		for i := range nodes.Items {
 			o.objects = append(o.objects, nodeObject(&nodes.Items[i]))
 		}

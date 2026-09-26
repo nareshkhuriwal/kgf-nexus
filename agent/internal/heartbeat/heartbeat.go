@@ -94,6 +94,10 @@ type Loop struct {
 	// Observe, when set, is told each beat's result, round-trip time and the
 	// failure streak after it. Set before Run; it must not block.
 	Observe func(ok bool, d time.Duration, consecutiveFailures int64)
+
+	// Extra, when set, fills the ADR-0030 fields of each beat (drain_reason,
+	// cached_artifacts). Set before Run; it must be cheap and must not block.
+	Extra func(req *nexusv1.HeartbeatRequest)
 }
 
 // New builds a heartbeat loop. initialInterval comes from
@@ -162,6 +166,9 @@ func (l *Loop) beat(ctx context.Context) {
 		FreeCapacity:      l.state.FreeCapacity(),
 		CpuUtilization:    cpu,
 		MemoryUtilization: mem,
+	}
+	if l.Extra != nil {
+		l.Extra(req)
 	}
 
 	// A per-beat timeout derived from the parent context, so shutdown cancels a

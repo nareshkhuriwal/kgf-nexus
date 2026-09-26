@@ -173,15 +173,21 @@ variable "postgres" {
 # ── Artifacts ─────────────────────────────────────────────────────────────
 
 variable "nexus_kubernetes_namespace" {
-  description = "Kubernetes namespace of the Nexus release (Workload Identity binding for the future native path)."
+  description = "Kubernetes namespace of the Nexus release (scope of the Workload Identity binding)."
   type        = string
   default     = "nexus"
 }
 
 variable "nexus_service_account" {
-  description = "Kubernetes ServiceAccount bound to the artifact service account through Workload Identity. The chart does not create one yet (F115)."
+  description = "Kubernetes ServiceAccount bound to the artifact service account through Workload Identity: the chart's shared result-store account (nexus-artifacts), which the chart creates with the iam.gke.io annotation and gives to api-gateway, workflow-manager, the agents and artifact-gc."
   type        = string
-  default     = "kgf-nexus"
+  default     = "nexus-artifacts"
+}
+
+variable "artifact_hmac_key" {
+  description = "Also create an HMAC key for the artifact service account, for the S3-interoperability fallback. Off by default: the native gcs backend uses Workload Identity and needs no key."
+  type        = bool
+  default     = false
 }
 
 variable "artifact_noncurrent_version_days" {

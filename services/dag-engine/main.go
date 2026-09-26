@@ -4,6 +4,8 @@
 package main
 
 import (
+	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -56,7 +58,7 @@ func run() error {
 	// JSON to stderr: these logs are scraped, not read in a terminal. Every
 	// reconcile log carries run_id and node_id (CONTRACT.md logging convention)
 	// so one run can be reconstructed by filtering on it.
-	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(*logLevel)}))
+	log := slog.New(tracing.LogHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(*logLevel)})))
 	slog.SetDefault(log)
 	log = log.With("service", "dag-engine")
 
@@ -64,6 +66,9 @@ func run() error {
 	// still exits cleanly.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Tracing (ADR-0026): off unless OTEL_* configures an exporter; flushed last.
+	defer tracing.SetupOrExit(ctx, "dag-engine", version, log)()
 
 	pool, err := store.NewPool(ctx, store.DefaultPoolConfig(*dsn))
 	if err != nil {

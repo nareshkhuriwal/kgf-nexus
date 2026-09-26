@@ -171,7 +171,7 @@ func TestLinesAreNumberedContiguouslyAndTaggedByStream(t *testing.T) {
 			t.Errorf("record %d = %s/%q, want %s/%q", i, recs[i].S, recs[i].M, w.s, w.m)
 		}
 	}
-	if !stats.Finalized || idx.final.GetTotalLines() != 3 {
+	if !stats.Finalized || stats.Outcome != FinalizeFinalized || idx.final.GetTotalLines() != 3 {
 		t.Fatalf("final = %+v stats = %+v, want finalized with 3 lines", idx.final, stats)
 	}
 	for _, r := range idx.reqs {
@@ -368,6 +368,13 @@ func TestWritesNeverBlockOnAStalledStore(t *testing.T) {
 	if stats.DroppedLines == 0 || idx.final.GetDroppedLines() != stats.DroppedLines {
 		t.Fatalf("dropped stats=%d final=%d; a bounded buffer must drop and count", stats.DroppedLines, idx.final.GetDroppedLines())
 	}
+	// Every written line is at least 40 bytes plus its newline.
+	if stats.DroppedBytes < 41*stats.DroppedLines {
+		t.Fatalf("dropped bytes %d for %d dropped lines; bytes are under-counted", stats.DroppedBytes, stats.DroppedLines)
+	}
+	if stats.Outcome != FinalizeFinalized {
+		t.Fatalf("outcome = %q, want finalized once the store recovered", stats.Outcome)
+	}
 	recs := allRecords(t, st, idx)
 	assertContiguous(t, recs)
 	var marker bool
@@ -393,7 +400,7 @@ func TestStaleLeaseStopsShipping(t *testing.T) {
 		fmt.Fprintf(s.Writer("stdout"), "line %d\n", i)
 	}
 	stats := s.Close(context.Background())
-	if !stats.Fenced || stats.Finalized {
+	if !stats.Fenced || stats.Finalized || stats.Outcome != FinalizeFenced {
 		t.Fatalf("stats = %+v, want fenced and not finalized", stats)
 	}
 	idx.mu.Lock()
@@ -401,6 +408,43 @@ func TestStaleLeaseStopsShipping(t *testing.T) {
 	idx.mu.Unlock()
 	if n != 1 {
 		t.Fatalf("%d ReportLogs calls after a stale-lease rejection; the first rejection must stop shipping", n)
+	}
+}
+
+// TestWritesAfterFencingAreCountedAndCloseReportsOnce: output that arrives after
+// the lease was rejected is refused and counted, and a second Close reports no
+// outcome so the attempt cannot be counted twice.
+func TestWritesAfterFencingAreCountedAndCloseReportsOnce(t *testing.T) {
+	st, idx := newMemStore(), newFakeIndex()
+	idx.respond = func(*nexusv1.ReportLogsRequest) (*nexusv1.Ack, error) {
+		return &nexusv1.Ack{Accepted: false, Reason: "stale_lease_token"}, nil
+	}
+	cfg := testConfig(t)
+	cfg.ChunkBytes = 64
+	s := New(cfg, st, idx)
+	for i := 0; i < 20; i++ {
+		fmt.Fprintf(s.Writer("stdout"), "line %d\n", i)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		fenced := s.fenced
+		s.mu.Unlock()
+		if fenced {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the shipper was never fenced")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	fmt.Fprint(s.Writer("stdout"), "after the fence\n") // 16 bytes
+	stats := s.Close(context.Background())
+	if stats.FencedBytes != 16 || stats.Outcome != FinalizeFenced {
+		t.Fatalf("stats = %+v, want 16 fenced bytes and outcome fenced", stats)
+	}
+	if again := s.Close(context.Background()); again.Outcome != "" {
+		t.Fatalf("a repeated Close reported outcome %q; it must report none", again.Outcome)
 	}
 }
 
@@ -478,6 +522,9 @@ func TestFinalizeIsBoundedWhenTheStoreIsDown(t *testing.T) {
 	}
 	if stats.Finalized {
 		t.Fatal("a log whose chunks never uploaded must not be reported finalized")
+	}
+	if stats.Outcome != FinalizePartial && stats.Outcome != FinalizeTimeout {
+		t.Fatalf("outcome = %q, want partial or timeout", stats.Outcome)
 	}
 }
 

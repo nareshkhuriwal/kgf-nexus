@@ -113,6 +113,32 @@ func (s *RMStore) RegisterWorker(ctx context.Context, w Worker, sessionTokenHash
 	return id, nil
 }
 
+// maxCachedArtifacts bounds what a heartbeat may store (ADR-0030 §4).
+const maxCachedArtifacts = 256
+
+// RecordCachedArtifacts stores the artifact keys a worker's node-local cache
+// holds, writing only when the set changed so a steady fleet's heartbeats do
+// not rewrite every worker row every beat.
+func (s *RMStore) RecordCachedArtifacts(ctx context.Context, workerID string, keys []string) error {
+	if keys == nil {
+		keys = []string{}
+	}
+	if len(keys) > maxCachedArtifacts {
+		keys = keys[:maxCachedArtifacts]
+	}
+	for i, k := range keys {
+		if len(k) > 512 {
+			keys[i] = k[:512]
+		}
+	}
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE workers SET cached_artifacts = $2
+		 WHERE id = $1 AND cached_artifacts IS DISTINCT FROM $2`, workerID, keys); err != nil {
+		return fmt.Errorf("store: record cached artifacts for worker %s: %w", workerID, err)
+	}
+	return nil
+}
+
 // GetWorker loads one worker row.
 func (s *RMStore) GetWorker(ctx context.Context, workerID string) (*Worker, error) {
 	row := s.pool.QueryRow(ctx, `

@@ -85,6 +85,30 @@ func (s StoreIdentityAdmin) AppendAudit(ctx context.Context, e store.AuditEntry)
 	return store.GatewayAppendAudit(ctx, s.DB, e)
 }
 
-func (s StoreIdentityAdmin) ListAudit(ctx context.Context, namespace string, f store.AuditFilter) ([]store.AuditRow, error) {
+// ListUsersPage is the keyset-paginated listing (ADR-0024 §6).
+func (s StoreIdentityAdmin) ListUsersPage(ctx context.Context, namespace string, limit int, cursor, search string) (store.UsersPage, error) {
+	return store.GatewayListUsersPage(ctx, s.DB, namespace, limit, cursor, search)
+}
+
+// CreateScopedTokenWith mints a service-account or ceilinged token (ADR-0024 §6).
+func (s StoreIdentityAdmin) CreateScopedTokenWith(ctx context.Context, spec store.TokenSpec) (string, store.ScopedTokenRow, error) {
+	return store.GatewayCreateScopedTokenWith(ctx, s.DB, spec)
+}
+
+func (s StoreIdentityAdmin) ListAudit(ctx context.Context, namespace string, f store.AuditFilter) ([]store.AuditRow, string, error) {
 	return store.GatewayListAudit(ctx, s.DB, namespace, f)
+}
+
+// WithinTx binds every identity operation fn performs to one transaction (a
+// SAVEPOINT when s is itself transactional) and commits only on success.
+func (s StoreIdentityAdmin) WithinTx(ctx context.Context, fn func(IdentityAdmin) error) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(StoreIdentityAdmin{DB: tx}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
