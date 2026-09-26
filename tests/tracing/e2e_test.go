@@ -345,8 +345,8 @@ func TestOneTraceFromAPIToAgentAndBack(t *testing.T) {
 func task(id, script string, root bool) map[string]any {
 	t := map[string]any{
 		"id": id, "task_ref": "e2e." + id, "version": 1, "queue": "default",
-		"runtime": map[string]any{"executor": "subprocess", "command": []string{"sh", "-c"}, "args": []string{script}},
-		"outputs": map[string]any{"result": map[string]any{"type": "json", "required": true}},
+		"runtime":   map[string]any{"executor": "subprocess", "command": []string{"sh", "-c"}, "args": []string{script}},
+		"outputs":   map[string]any{"result": map[string]any{"type": "json", "required": true}},
 		"resources": map[string]any{"request": map[string]any{"cpu_millis": 100, "memory_bytes": 67108864}},
 		"retry":     map[string]any{"max_attempts": 1},
 	}
