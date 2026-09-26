@@ -14,6 +14,9 @@
 //	E2E_EXTRA_COMPOSE=deploy/e2e/docker-compose.gpu-sim.yml deploy/e2e/e2e-stack.sh up
 //	go test -tags gpusim -count=1 -v -timeout 30m ./tests/gpusim/
 //
+// A stack on an external database (no postgres container) also needs
+// NEXUS_GPUSIM_DATABASE_URL, the DSN the test reads it with.
+//
 // Simulated means the capacity and device names are real ledger entries and
 // the agent hands out real device assignments, but no CUDA runs: this proves
 // the scheduling, accounting, assignment and eviction machinery, not the GPU
@@ -82,8 +85,18 @@ func compose(t *testing.T, args ...string) string {
 	return string(out)
 }
 
+// psql queries the stack's database: the stack's postgres container, or, when
+// NEXUS_GPUSIM_DATABASE_URL is set, a database outside the stack (a stack run
+// against the host's PostgreSQL has no postgres container).
 func psql(t *testing.T, q string) string {
 	t.Helper()
+	if dsn := os.Getenv("NEXUS_GPUSIM_DATABASE_URL"); dsn != "" {
+		out, err := exec.Command("psql", dsn, "-v", "ON_ERROR_STOP=1", "-tAc", q).CombinedOutput()
+		if err != nil {
+			t.Fatalf("psql %q: %v\n%s", q, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
 	return strings.TrimSpace(compose(t, "exec", "-T", "postgres", "psql", "-U", "nexus", "-d", "nexus", "-tAc", q))
 }
 
