@@ -17,6 +17,8 @@ import json
 import os
 import shutil
 import socketserver
+import ssl
+import subprocess
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler
@@ -30,9 +32,49 @@ class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     fake: "FakeTaskAPI"
 
 
+class _TLSServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    """The agent's network listener (F148): HTTPS on loopback."""
+
+    daemon_threads = True
+    allow_reuse_address = True
+    fake: "FakeTaskAPI"
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # A client that refuses our certificate aborts the handshake; that is
+        # the behaviour under test, not a server fault worth a traceback.
+        pass
+
+
+def make_ca_and_cert(directory: str, host: str = "127.0.0.1") -> tuple[str, str, str]:
+    """A throwaway CA and a serving certificate for ``host`` signed by it, the
+    shape the agent mints in memory. Returns (ca_pem, cert_file, key_file).
+    Needs the ``openssl`` CLI; callers skip when it is missing."""
+    def run(*args: str) -> None:
+        subprocess.run(["openssl", *args], check=True, capture_output=True, cwd=directory)
+
+    run("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", "ca.key")
+    run("req", "-x509", "-new", "-key", "ca.key", "-subj", "/CN=fake agent CA", "-days", "1",
+        "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign",
+        "-out", "ca.pem")
+    run("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", "srv.key")
+    run("req", "-new", "-key", "srv.key", "-subj", f"/CN={host}", "-out", "srv.csr")
+    san = f"IP:{host}" if host.replace(".", "").isdigit() else f"DNS:{host}"
+    with open(os.path.join(directory, "ext.cnf"), "w") as f:
+        f.write(f"subjectAltName={san}\nextendedKeyUsage=serverAuth\n")
+    run("x509", "-req", "-in", "srv.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial",
+        "-days", "1", "-extfile", "ext.cnf", "-out", "srv.pem")
+    with open(os.path.join(directory, "ca.pem")) as f:
+        ca_pem = f.read()
+    return ca_pem, os.path.join(directory, "srv.pem"), os.path.join(directory, "srv.key")
+
+
+def openssl_available() -> bool:
+    return shutil.which("openssl") is not None
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server: _Server
+    server: _Server | _TLSServer
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         pass
@@ -139,10 +181,12 @@ class FakeTaskAPI:
     """Start with ``with FakeTaskAPI() as api:``; ``api.client()`` / ``api.env``."""
 
     def __init__(self, *, token: str = "test-token", attempt_id: str = "att-1",
-                 capabilities: dict[str, bool] | None = None) -> None:
+                 capabilities: dict[str, bool] | None = None, tls: bool = False) -> None:
         # sun_path is 104 bytes on Darwin: pytest's tmp_path is too long.
         self.dir = tempfile.mkdtemp(prefix="nxapi", dir="/tmp")
         self.path = os.path.join(self.dir, "api.sock")
+        self.tls = tls
+        self.ca_pem = ""
         self.token = token
         self.attempt_id = attempt_id
         self.capabilities = capabilities or {"usage": True, "rate_limits": True,
@@ -161,7 +205,17 @@ class FakeTaskAPI:
         self.stale = False
         self.seq = 0
         self.max_checkpoint_bytes = 1 << 20
-        self._server = _Server(self.path, _Handler)
+        self._server: _Server | _TLSServer
+        if tls:
+            self.ca_pem, cert, key = make_ca_and_cert(self.dir)
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            ctx.load_cert_chain(cert, key)
+            self._server = _TLSServer(("127.0.0.1", 0), _Handler, bind_and_activate=True)
+            self._server.socket = ctx.wrap_socket(self._server.socket, server_side=True)
+            self.port = self._server.server_address[1]
+        else:
+            self._server = _Server(self.path, _Handler)
         self._server.fake = self
         self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
 
@@ -171,10 +225,19 @@ class FakeTaskAPI:
             self.force[path] = (status, times)
 
     @property
+    def url(self) -> str:
+        return f"https://127.0.0.1:{self.port}"
+
+    @property
     def env(self) -> dict[str, str]:
+        if self.tls:
+            return {"NEXUS_TASK_API": self.url, "NEXUS_TASK_API_TOKEN": self.token,
+                    "NEXUS_TASK_API_CA": self.ca_pem}
         return {"NEXUS_TASK_API": f"unix://{self.path}", "NEXUS_TASK_API_TOKEN": self.token}
 
     def client(self, **kw: Any) -> TaskAPIClient:
+        if self.tls:
+            return TaskAPIClient.https(self.url, self.token, ca_pem=self.ca_pem, **kw)
         return TaskAPIClient(self.path, self.token, **kw)
 
     def __enter__(self) -> "FakeTaskAPI":

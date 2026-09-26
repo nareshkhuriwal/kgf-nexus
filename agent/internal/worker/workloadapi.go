@@ -70,20 +70,29 @@ func declaredTaskError(o executor.Outcome, f attemptFacts) (*nexusv1.TaskError, 
 }
 
 // startTaskAPI serves the attempt's workload API, or returns nil when the
-// attempt gets none: the executor cannot reach a local socket (kubernetes,
-// F148), the root is unusable, or the socket could not be created.
+// attempt gets none: a kubernetes attempt on an agent with no network
+// listener, an unusable socket root, or a socket that could not be created.
+//
+// A kubernetes pod runs on another node and cannot reach a socket here, so
+// its API is served on the agent's TLS listener instead (TaskAPINetwork,
+// F148), routed by the attempt's token.
 //
 // A failure here degrades rather than fails the attempt. The SDK keeps usage,
-// permits and checkpoints in-process without a socket, so the task still runs
-// correctly; what is lost is the usage record and the shared limit, which is
-// why it is logged at ERROR.
+// permits and checkpoints in-process without a workload API, so the task still
+// runs correctly; what is lost is the usage record and the shared limit, which
+// is why it is logged at ERROR.
 func (r *Runner) startTaskAPI(ctx context.Context, a *nexusv1.TaskAssignment,
 	exec executor.Executor, log *slog.Logger) *taskapi.Server {
-	if r.TaskAPIDisabled {
+	_, remote := exec.(*executor.KubernetesExecutor)
+	switch {
+	case remote && r.TaskAPINetwork == nil:
+		return nil
+	case !remote && r.TaskAPIDisabled:
 		return nil
 	}
-	if _, remote := exec.(*executor.KubernetesExecutor); remote {
-		return nil
+	var network *taskapi.Network
+	if remote {
+		network = r.TaskAPINetwork
 	}
 	var store taskapi.ObjectStore
 	switch {
@@ -99,6 +108,7 @@ func (r *Runner) startTaskAPI(ctx context.Context, a *nexusv1.TaskAssignment,
 		IdempotencyKey: a.GetIdempotencyKey(),
 		Namespace:      r.Namespace,
 		Root:           r.TaskAPIRoot,
+		Network:        network,
 		Workload:       r.WorkloadAPI,
 		Upstream:       r.WorkloadUpstream,
 		Store:          store,

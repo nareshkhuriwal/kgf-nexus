@@ -11,6 +11,28 @@
       "description": "A Go duration, e.g. 30s, 15m, 24h."
     },
     "quantityOrNumber": { "type": ["string", "number"] },
+    "agentKubernetes": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The kubernetes executor (agentDefaults.kubernetes, overridden per agent).",
+      "properties": {
+        "namespace": { "type": "string", "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" },
+        "serviceAccount": { "type": "string" },
+        "helperImage": { "type": "string" },
+        "gpuResourceName": { "type": "string", "pattern": "^$|^[a-z0-9.-]+/[A-Za-z0-9._-]+$" },
+        "migResourcePrefix": { "type": "string", "pattern": "^$|^[a-z0-9.-]+/[A-Za-z0-9._-]*[-/._]$", "description": "Joined to a MIG profile: nvidia.com/mig- + 1g.10gb." },
+        "sharedGpuResourceName": { "type": "string", "pattern": "^$|^[a-z0-9.-]+/[A-Za-z0-9._-]+$" },
+        "gpuKindLabel": { "type": "string" },
+        "taskApi": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "port": { "type": "integer", "minimum": 1024, "maximum": 65535 }
+          }
+        }
+      }
+    },
     "resources": {
       "type": "object",
       "additionalProperties": false,
@@ -428,6 +450,7 @@
           "gpuMig": { "type": "string" },
           "gpuShared": { "type": "string" },
           "gpuDiscovery": { "enum": ["", "nvidia-smi"] },
+          "kubernetes": { "$ref": "#/definitions/agentKubernetes" },
           "capacityType": { "enum": ["", "on-demand", "spot"] },
           "eviction": {
             "type": "object",
@@ -464,6 +487,7 @@
       "additionalProperties": false,
       "properties": {
         "gpuResourceName": { "type": "string", "pattern": "^[a-z0-9.-]+/[a-z0-9._-]+$" },
+        "kubernetes": { "$ref": "#/definitions/agentKubernetes" },
         "heartbeatIntervalMs": { "type": "integer", "minimum": 100 },
         "drainGrace": { "$ref": "#/definitions/duration" },
         "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 },

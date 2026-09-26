@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/proto"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -112,6 +113,10 @@ func k8sJobName(attemptID string) string {
 }
 
 func k8sSecretName(jobName string) string { return jobName + "-inputs" }
+
+// k8sTaskAPITokenKey is the attempt Secret's key holding the workload API
+// bearer token (F148).
+const k8sTaskAPITokenKey = "nexus-task-api.token"
 
 // k8sLabelValue renders an id as a label value, hashing when it does not fit
 // the grammar. Labels are for selection only; the exact id is in an annotation.
@@ -216,6 +221,68 @@ func (e *KubernetesExecutor) k8sResources(limit *nexusv1.ResourceVector, gpu ...
 	return corev1.ResourceRequirements{Requests: rl.DeepCopy(), Limits: rl}, enforced, nil
 }
 
+// k8sDeviceVector is the enforcement ceiling with its GPU dimensions replaced
+// by what was RESERVED: the devices the agent's registry admitted, else the
+// scheduler's request. Devices are not burstable and, on Kubernetes, the pod's
+// extended-resource request IS the allocation, so a ceiling that names no GPU
+// (`limit: {cpu, memory}` beside `request: {mig: ...}`) must still produce a
+// MIG pod -- and a ceiling naming more GPUs than were reserved must not take
+// devices the Nexus ledger never charged to this worker.
+func k8sDeviceVector(spec TaskSpec) *nexusv1.ResourceVector {
+	v := &nexusv1.ResourceVector{}
+	if spec.Limit != nil {
+		v = proto.Clone(spec.Limit).(*nexusv1.ResourceVector)
+	}
+	req := spec.Request
+	switch {
+	case len(spec.GPUDevices) > 0:
+		v.GpuCount = int32(len(spec.GPUDevices))
+	case req != nil:
+		v.GpuCount = req.GetGpuCount()
+	}
+	if req != nil {
+		if v.GpuKind == "" {
+			v.GpuKind = req.GetGpuKind()
+		}
+		v.Mig = req.GetMig()
+		v.GpuShareMilli = req.GetGpuShareMilli()
+		v.GpuShareMemoryBytes = req.GetGpuShareMemoryBytes()
+	}
+	return v
+}
+
+// k8sGPUEnv describes the attempt's GPU slice to the workload (ADR-0029 §2:
+// NEXUS_GPU_MODE and, for a shared slice, its declared size) and NOTHING
+// device-specific. The device plugin decides which device, MIG instance or
+// MPS replica the pod gets and exports CUDA_VISIBLE_DEVICES / NVIDIA_* and the
+// MPS client limits itself; the agent's own device names describe a node the
+// pod may not even run on.
+func k8sGPUEnv(spec TaskSpec, dev *nexusv1.ResourceVector) map[string]string {
+	mode := ""
+	switch {
+	case spec.GPU.SharedDevice != "":
+		mode = "shared-" + spec.GPU.SharedMode
+	case domain.UsesSharedGPU(dev):
+		mode = "shared"
+	case len(spec.GPU.MIGProfiles) > 0 || len(spec.GPU.MIG) > 0 || len(dev.GetMig()) > 0:
+		mode = "mig"
+	case dev.GetGpuCount() > 0:
+		mode = "whole"
+	default:
+		return nil
+	}
+	env := map[string]string{EnvGPUMode: mode}
+	if strings.HasPrefix(mode, "shared") {
+		milli, mem := spec.GPU.ShareMilli, spec.GPU.ShareMemoryBytes
+		if spec.GPU.SharedDevice == "" {
+			milli, mem = int64(dev.GetGpuShareMilli()), dev.GetGpuShareMemoryBytes()
+		}
+		env[EnvGPUShareMilli] = strconv.FormatInt(milli, 10)
+		env[EnvGPUShareMemoryBytes] = strconv.FormatInt(mem, 10)
+	}
+	return env
+}
+
 // k8sEnv builds the container environment. Task env first, platform variables
 // LAST and overriding, so a task cannot lie to itself about its own
 // idempotency key — the same precedence the docker executor applies. Sorted so
@@ -224,6 +291,13 @@ func (e *KubernetesExecutor) k8sResources(limit *nexusv1.ResourceVector, gpu ...
 func k8sEnv(spec TaskSpec) []corev1.EnvVar {
 	m := map[string]string{}
 	for k, v := range spec.Runtime.GetEnv() {
+		switch k {
+		case EnvTaskAPI, EnvTaskAPIToken, EnvTaskAPICA:
+			// Platform-owned: buildJob sets them (the token by reference)
+			// when the agent serves this attempt, and a task must not aim
+			// its own SDK at another endpoint.
+			continue
+		}
 		m[k] = v
 	}
 	for _, kv := range dockerEnv(TaskSpec{
@@ -234,14 +308,16 @@ func k8sEnv(spec TaskSpec) []corev1.EnvVar {
 		InlineThresholdBytes: spec.InlineThresholdBytes,
 		TraceEnv:             spec.TraceEnv,
 		// TaskAPISocket and TaskAPIToken deliberately NOT copied: the pod runs
-		// on another node and has no path to this agent's socket, so exporting
-		// NEXUS_TASK_API would send the SDK to a socket that does not exist.
-		// Without it the SDK keeps usage, permits and checkpoints in-process
-		// (ADR-0032 §1 and §6; F148, open).
+		// on another node and has no path to this agent's socket. The network
+		// listener (TaskAPIURL) is exported by buildJob instead, with the token
+		// by Secret reference (ADR-0032 addendum, F148).
 		// Runtime deliberately nil: task env is already in m, and re-adding it
 		// here would let it override the platform variables below.
 	}, k8sWorkDir) {
 		k, v, _ := strings.Cut(kv, "=")
+		m[k] = v
+	}
+	for k, v := range k8sGPUEnv(spec, k8sDeviceVector(spec)) {
 		m[k] = v
 	}
 	keys := make([]string, 0, len(m))
@@ -281,7 +357,8 @@ func (e *KubernetesExecutor) buildJob(spec TaskSpec, workerID string) (*batchv1.
 	name := k8sJobName(spec.AttemptID)
 	grace := orDefaultGrace(spec.GraceAfterTerm)
 
-	res, enforced, err := e.k8sResources(spec.Limit, spec.GPU)
+	dev := k8sDeviceVector(spec)
+	res, enforced, err := e.k8sResources(dev, spec.GPU)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -335,6 +412,13 @@ func (e *KubernetesExecutor) buildJob(spec TaskSpec, workerID string) (*batchv1.
 			inputItems = append(inputItems, corev1.KeyToPath{Key: k, Path: k})
 		}
 		sort.Slice(inputItems, func(i, j int) bool { return inputItems[i].Key < inputItems[j].Key })
+	}
+	remoteAPI := spec.TaskAPIURL != "" && spec.TaskAPIToken != ""
+	if remoteAPI {
+		// Same Secret, its own key: the key contains a dot, so it can collide
+		// neither with an input (sanitised [A-Za-z0-9_-]) nor with a task
+		// secret ("nexus-secret-" prefix), and no volume projects it.
+		data[k8sTaskAPITokenKey] = []byte(spec.TaskAPIToken)
 	}
 	secretEnvVars, secretItems, err := k8sSecretData(spec.Secrets, k8sSecretName(name), data)
 	if err != nil {
@@ -394,6 +478,21 @@ func (e *KubernetesExecutor) buildJob(spec TaskSpec, workerID string) (*batchv1.
 	// Env-injected secrets by REFERENCE: a literal value in the pod spec is
 	// readable by anyone who can get pods, and lands in etcd backups.
 	taskEnv = append(taskEnv, secretEnvVars...)
+	if remoteAPI {
+		// The workload API over the agent's TLS listener (F148). The URL and
+		// the CA certificate are public; the token is the credential and goes
+		// by reference, like every other secret.
+		taskEnv = append(taskEnv,
+			corev1.EnvVar{Name: EnvTaskAPI, Value: spec.TaskAPIURL},
+			corev1.EnvVar{Name: EnvTaskAPICA, Value: string(spec.TaskAPICA)},
+			corev1.EnvVar{Name: EnvTaskAPIToken, ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: k8sSecretName(name)},
+					Key:                  k8sTaskAPITokenKey,
+				},
+			}},
+		)
+	}
 	// The collector mounts the two volumes SIDE BY SIDE, not nested as the
 	// task does: a read-only volume cannot host the mountpoint of another, and
 	// the collector starts before the task has created /nexus/outputs.
@@ -456,7 +555,7 @@ func (e *KubernetesExecutor) buildJob(spec TaskSpec, workerID string) (*batchv1.
 	for k, v := range cfg.NodeSelector {
 		nodeSelector[k] = v
 	}
-	if kind := spec.Limit.GetGpuKind(); kind != "" && spec.Limit.GetGpuCount() > 0 && cfg.GPUKindLabel != "" {
+	if kind := dev.GetGpuKind(); kind != "" && dev.GetGpuCount() > 0 && cfg.GPUKindLabel != "" {
 		// The Nexus scheduler matched gpu_kind against this WORKER's advertised
 		// capacity; this pins the pod to nodes that really carry that model,
 		// so the two schedulers cannot disagree about which GPU runs the task.

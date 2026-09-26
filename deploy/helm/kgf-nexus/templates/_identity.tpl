@@ -126,10 +126,37 @@ automountServiceAccountToken: {{ .automount }}
 {{- (($a.gpu | default dict).resourceName) | default $root.Values.agentDefaults.gpuResourceName | default "nvidia.com/gpu" -}}
 {{- end -}}
 
+{{/* "true" when an agent entry runs the kubernetes executor. args: agent. */}}
+{{- define "nexus.agentUsesKubernetes" -}}
+{{- if has "kubernetes" (splitList "," (.executors | default "subprocess" | nospace)) }}true{{ end -}}
+{{- end -}}
+
+{{/*
+The kubernetes executor settings of one agent, as YAML: agentDefaults.kubernetes
+overridden key by key by agents[].kubernetes (taskApi merged the same way), the
+namespace defaulting to the release's. args: root, agent.
+*/}}
+{{- define "nexus.agentK8s" -}}
+{{- $root := index . 0 -}}{{- $a := index . 1 -}}
+{{- $d := deepCopy ($root.Values.agentDefaults.kubernetes | default dict) -}}
+{{- $o := deepCopy ($a.kubernetes | default dict) -}}
+{{- $api := merge (deepCopy ($o.taskApi | default dict)) (deepCopy ($d.taskApi | default dict)) -}}
+{{- $k := merge $o $d -}}
+{{- $_ := set $k "taskApi" $api -}}
+{{- if not $k.namespace }}{{ $_ := set $k "namespace" $root.Release.Namespace }}{{ end -}}
+{{- toYaml $k -}}
+{{- end -}}
+
+{{/*
+Whether the agent POD requests GPU devices. Never for a kubernetes-executor
+agent: its gpuCount/gpuMig/gpuShared describe the task pool, whose devices each
+task pod requests itself, per attempt, from the device plugin (ADR-0029 §2).
+The agent pod holding them would strand exactly the devices it advertises.
+*/}}
 {{- define "nexus.agentRequestsGPUs" -}}
 {{- $a := index . 1 -}}
 {{- $g := $a.gpu | default dict -}}
-{{- if and (gt (int ($a.gpuCount | default 0)) 0) (or (kindIs "invalid" $g.requestDevices) $g.requestDevices) }}true{{ end -}}
+{{- if and (not (include "nexus.agentUsesKubernetes" $a)) (gt (int ($a.gpuCount | default 0)) 0) (or (kindIs "invalid" $g.requestDevices) $g.requestDevices) }}true{{ end -}}
 {{- end -}}
 
 {{/*
@@ -157,7 +184,7 @@ args: root, agent.
 {{- $_ := set $requests $res $count -}}
 {{- $_ := set $r "limits" $limits -}}
 {{- $_ := set $r "requests" $requests -}}
-{{- else if gt $count 0 -}}
+{{- else if and (gt $count 0) (not (include "nexus.agentUsesKubernetes" $a)) -}}
 {{- if not (has "simulated=true" (splitList "," ($a.labels | default "" | nospace))) -}}
 {{- fail (printf "agents[%s]: gpuCount=%d with gpu.requestDevices=false advertises GPUs the pod is not allocated. That is SIMULATED capacity and must carry the label simulated=true (a production agent requests its devices: leave requestDevices unset)" $a.name $count) -}}
 {{- end -}}

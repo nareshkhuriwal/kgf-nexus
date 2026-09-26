@@ -1,0 +1,81 @@
+{{- /*
+Copyright 2026 Khuriwal Group
+SPDX-License-Identifier: Apache-2.0
+
+What an agent running the kubernetes executor needs in its TASK namespace
+(OPERATIONS §13): the least-privilege Role the executor probes for at start
+(deploy/k8s/agent-rbac.yaml is the same Role for a hand-applied install), and,
+when the workload API is on, a NetworkPolicy letting task pods reach the
+agent's TLS listener and nothing else the policy opens (F148, OPERATIONS
+§29.10). With a default-deny egress policy on task pods (deploy/k8s/
+executor-policies.yaml) this is the one hole; without one it is inert.
+*/ -}}
+{{- $root := . -}}
+{{- range .Values.agents }}
+{{- if include "nexus.agentUsesKubernetes" . }}
+{{- $k := include "nexus.agentK8s" (list $root .) | fromYaml }}
+{{- $sa := include "nexus.saFor" (list $root "agent" .serviceAccount (.executors | default "subprocess")) | fromYaml }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-executor" .name }}
+  namespace: {{ $k.namespace }}
+  labels: {{- include "nexus.labels" (list $root .name) | nindent 4 }}
+rules:
+  # One Job per attempt; list/watch feed the executor's informer.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Pods are observed (phase, exit codes, OOM) and deleted to deliver
+  # SIGTERM-with-grace on cancel, lease loss and the deadline backstop.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  # Task log streaming and the collector's output dump.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # The per-attempt Secret: inputs, resolved task secrets and the workload
+  # API token. Created immutable, deleted with the attempt.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-executor" .name }}
+  namespace: {{ $k.namespace }}
+  labels: {{- include "nexus.labels" (list $root .name) | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ printf "%s-executor" .name }} }
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa.name }}
+    namespace: {{ $root.Release.Namespace }}
+{{- if $k.taskApi.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-task-api" .name }}
+  namespace: {{ $k.namespace }}
+  labels: {{- include "nexus.labels" (list $root .name) | nindent 4 }}
+spec:
+  # Every task pod the kubernetes executor creates carries these labels.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: nexus-agent
+      app.kubernetes.io/component: task-attempt
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ $root.Release.Namespace | quote }} }
+          podSelector:
+            matchLabels: {{- include "nexus.selector" (list $root .name) | nindent 14 }}
+      ports:
+        - { port: {{ int $k.taskApi.port }}, protocol: TCP }
+{{- end }}
+{{- end }}
+{{- end }}

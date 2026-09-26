@@ -1,13 +1,21 @@
 # Copyright 2026 Khuriwal Group
 # SPDX-License-Identifier: Apache-2.0
 
-"""Client for the agent-local workload API (ADR-0032 §1).
+"""Client for the agent's workload API (ADR-0032 §1 and its addendum).
 
 The worker agent serves each attempt a small HTTP/1.1 JSON API on a Unix
 domain socket it creates for that attempt, and exports:
 
     NEXUS_TASK_API        unix:///abs/path/api.sock (as the workload sees it)
     NEXUS_TASK_API_TOKEN  sent as ``Authorization: Bearer <token>``
+
+A kubernetes pod runs on another node and cannot reach that socket, so for
+it the agent serves the same API on a TLS listener (F148):
+
+    NEXUS_TASK_API        https://<agent host>:<port>
+    NEXUS_TASK_API_CA     the PEM CA certificate to verify it against (the
+                          agent's own, minted in memory); never skipped
+    NEXUS_TASK_API_TOKEN  as above, delivered from the attempt's Secret
 
 The agent is the only thing that talks to the control plane: it adds the lease
 token and forwards over its own authenticated connection. The workload never
@@ -40,6 +48,8 @@ import http.client
 import json
 import os
 import socket
+import ssl
+import urllib.parse
 from typing import Any, Mapping, Sequence
 
 __all__ = [
@@ -56,14 +66,17 @@ __all__ = [
     "StoredCheckpoint",
     "from_environment",
     "parse_address",
+    "parse_https",
     "ENV_TASK_API",
     "ENV_TASK_API_TOKEN",
+    "ENV_TASK_API_CA",
     "DEFAULT_TIMEOUT_S",
     "CHECKPOINT_TIMEOUT_S",
 ]
 
 ENV_TASK_API = "NEXUS_TASK_API"
 ENV_TASK_API_TOKEN = "NEXUS_TASK_API_TOKEN"
+ENV_TASK_API_CA = "NEXUS_TASK_API_CA"
 DEFAULT_TIMEOUT_S = 10.0
 CHECKPOINT_TIMEOUT_S = 120.0
 # Error bodies are for humans; never let one grow without bound in a message.
@@ -191,8 +204,38 @@ class _Response:
         return json.loads(self.body)
 
 
+def parse_https(address: str) -> tuple[str, int]:
+    """The (host, port) of an ``https://host:port`` address; ValueError for
+    anything else. No path, query or credentials: the API's paths are fixed."""
+    parts = urllib.parse.urlsplit(address)
+    if parts.scheme != "https":
+        raise ValueError(f"workload API address {address!r} is not https://host:port")
+    if parts.path not in ("", "/") or parts.query or parts.fragment or parts.username or parts.password:
+        raise ValueError(f"workload API address {address!r} must be exactly https://host:port")
+    try:
+        port = parts.port
+    except ValueError as e:
+        raise ValueError(f"workload API address {address!r} has an invalid port") from e
+    if not parts.hostname or not port:
+        raise ValueError(f"workload API address {address!r} needs a host and a port")
+    return parts.hostname, port
+
+
+def _tls_context(ca_pem: str | None) -> ssl.SSLContext:
+    """Verification is never optional: the agent's own CA when it is given
+    (the kubernetes executor always gives it), else the system roots."""
+    try:
+        ctx = ssl.create_default_context(cadata=ca_pem) if ca_pem else ssl.create_default_context()
+    except (ssl.SSLError, ValueError) as e:
+        raise ValueError(f"{ENV_TASK_API_CA} does not hold a PEM certificate: {e}") from e
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
 class TaskAPIClient:
-    """A client of one attempt's workload API socket.
+    """A client of one attempt's workload API: the agent's per-attempt Unix
+    socket, or (kubernetes pods on other nodes, F148) the agent's TLS
+    listener, verified against the CA the agent handed the pod.
 
     Thread-safe: it holds no connection between requests, so handlers that fan
     calls out over a thread pool can share the context's client.
@@ -202,13 +245,39 @@ class TaskAPIClient:
         if not socket_path:
             raise ValueError("workload API socket path is empty")
         self.socket_path = socket_path
+        self.url = ""
+        self._https: tuple[str, int] | None = None
+        self._tls: ssl.SSLContext | None = None
         self._token = token
         self.timeout_s = timeout_s
         self._info: dict[str, Any] | None = None
 
+    @classmethod
+    def https(cls, url: str, token: str, *, ca_pem: str | None = None,
+              timeout_s: float = DEFAULT_TIMEOUT_S) -> "TaskAPIClient":
+        """A client of the agent's network listener at ``https://host:port``."""
+        host, port = parse_https(url)
+        c = cls.__new__(cls)
+        c.socket_path = ""
+        c.url = url.rstrip("/")
+        c._https = (host, port)
+        c._tls = _tls_context(ca_pem)
+        c._token = token
+        c.timeout_s = timeout_s
+        c._info = None
+        return c
+
     def __repr__(self) -> str:
         # Never the token.
+        if self._https is not None:
+            return f"TaskAPIClient(url={self.url!r})"
         return f"TaskAPIClient(socket={self.socket_path!r})"
+
+    def _connection(self, timeout: float) -> http.client.HTTPConnection:
+        if self._https is not None:
+            host, port = self._https
+            return http.client.HTTPSConnection(host, port, timeout=timeout, context=self._tls)
+        return _UnixHTTPConnection(self.socket_path, timeout)
 
     # ── transport ────────────────────────────────────────────────────────────
     def _request(
@@ -220,7 +289,7 @@ class TaskAPIClient:
         content_type: str = "application/json",
         timeout_s: float | None = None,
     ) -> _Response:
-        conn = _UnixHTTPConnection(self.socket_path, timeout_s or self.timeout_s)
+        conn = self._connection(timeout_s or self.timeout_s)
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
         if body is not None:
             headers["Content-Type"] = content_type
@@ -389,15 +458,23 @@ def parse_address(address: str) -> str | None:
 def from_environment(env: Mapping[str, str] | None = None) -> TaskAPIClient | None:
     """The attempt's workload API client, or None when there is none.
 
-    None under the local runner, in unit tests, and under the kubernetes
-    executor (F149), which do not export ``NEXUS_TASK_API``. An address that is
-    not ``unix://`` is ignored rather than guessed at.
+    ``unix://`` is the agent-local socket (subprocess, docker); ``https://`` is
+    the agent's network listener for a kubernetes pod (F148), verified against
+    ``NEXUS_TASK_API_CA``. None under the local runner, in unit tests, and on a
+    kubernetes agent with no listener, which export no ``NEXUS_TASK_API``.
+    Anything else -- notably plain ``http://``, which would send the bearer
+    token in clear -- is ignored rather than guessed at. A malformed https
+    address or CA raises ValueError: that is a platform misconfiguration, not
+    a reason to run silently without the API.
     """
     e = os.environ if env is None else env
     raw = (e.get(ENV_TASK_API) or "").strip()
     if not raw:
         return None
+    token = e.get(ENV_TASK_API_TOKEN) or ""
+    if raw.startswith("https://"):
+        return TaskAPIClient.https(raw, token, ca_pem=(e.get(ENV_TASK_API_CA) or None))
     path = parse_address(raw)
     if path is None:
         return None
-    return TaskAPIClient(path, e.get(ENV_TASK_API_TOKEN) or "")
+    return TaskAPIClient(path, token)
