@@ -58,6 +58,18 @@ type Config struct {
 	MaxJobsReported int
 	// Now is injectable for deterministic cooldown tests.
 	Now func() time.Time
+
+	// ClusterLabels are the operator-declared placement labels published with
+	// every report (NEXUS_CLUSTER_LABELS: cost tier, data locality ...),
+	// merged over the observed region and provider (ADR-0031 §1).
+	ClusterLabels map[string]string
+	// TaskNamespaces are the namespaces whose ResourceQuota headroom is
+	// published (NEXUS_CLUSTER_TASK_NAMESPACES); empty means the bound worker
+	// namespaces.
+	TaskNamespaces []string
+	// GPUResourceNames count as gpu_count in the headroom (default
+	// nvidia.com/gpu).
+	GPUResourceNames []string
 }
 
 func (c *Config) defaults() {
@@ -233,8 +245,22 @@ func (c *Controller) runOnce(ctx context.Context) error {
 	if len(cycleErrs) > 0 {
 		lastErr = errors.Join(cycleErrs...).Error()
 	}
+	// Placement facts (ADR-0031). Labels only from a complete Node list, and
+	// headroom only when every quota list succeeded: a partial view must
+	// never replace the stored one.
+	facts := &rmv1.ReportObservationsRequest{}
+	if obs.nodes != nil {
+		facts.Labels, facts.LabelsReported = clusterLabels(c.cfg.ClusterLabels, obs.nodes), true
+	}
+	if hr, ok, herr := c.headroom(ctx, a); herr != nil {
+		cycleErrs = append(cycleErrs, herr)
+	} else if ok {
+		facts.Headroom, facts.HeadroomReported = hr, true
+	}
 	rctx, cancel = c.rpcCtx(ctx)
 	_, err = c.rm.ReportObservations(rctx, &rmv1.ReportObservationsRequest{
+		Labels: facts.Labels, LabelsReported: facts.LabelsReported,
+		Headroom: facts.Headroom, HeadroomReported: facts.HeadroomReported,
 		ClusterId: a.GetClusterId(), ControllerIdentity: c.cfg.Identity, ObservedClusterUid: uid,
 		KubernetesVersion: version, ObservedRevision: observed, EffectiveMode: mode.String(),
 		EffectiveModeReason: mode.Reason, CompleteKinds: obs.completeKinds, Objects: obs.objects,
