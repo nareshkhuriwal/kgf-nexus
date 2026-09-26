@@ -198,8 +198,14 @@ func k8sEnv(spec TaskSpec) []corev1.EnvVar {
 	for _, kv := range dockerEnv(TaskSpec{
 		AttemptID: spec.AttemptID, RunID: spec.RunID, NodeID: spec.NodeID,
 		IdempotencyKey: spec.IdempotencyKey, DeclaredOutputs: spec.DeclaredOutputs,
+		AttemptNumber:        spec.AttemptNumber,
 		StartToCloseDeadline: spec.StartToCloseDeadline,
 		InlineThresholdBytes: spec.InlineThresholdBytes,
+		// TaskAPISocket and TaskAPIToken deliberately NOT copied: the pod runs
+		// on another node and has no path to this agent's socket, so exporting
+		// NEXUS_TASK_API would send the SDK to a socket that does not exist.
+		// Without it the SDK keeps usage, permits and checkpoints in-process
+		// (ADR-0032 §1 and §6; F149, open).
 		// Runtime deliberately nil: task env is already in m, and re-adding it
 		// here would let it override the platform variables below.
 	}, k8sWorkDir) {

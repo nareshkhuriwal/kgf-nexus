@@ -208,6 +208,7 @@ func TestLogsOfASubprocessTaskAreReadableWhileRunningAndAfterCompletion(t *testi
 	runner.LogIndexer = gatewayIndexer{srv: env.srv, ns: env.ns}
 	runner.LogSpoolDir = filepath.Join(dir, "spool")
 	runner.Namespace = env.ns
+	runner.TaskAPIRoot = testTaskAPIRoot(t)
 	if err := os.MkdirAll(runner.LogSpoolDir, 0o700); err != nil {
 		t.Fatal(err)
 	}

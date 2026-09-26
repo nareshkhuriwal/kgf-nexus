@@ -122,6 +122,17 @@ func buildEnv(spec TaskSpec, workDir, inputDir, outputFile, outputDir string) []
 	if spec.InlineThresholdBytes > 0 {
 		env = append(env, EnvInlineThreshold+"="+strconv.FormatInt(spec.InlineThresholdBytes, 10))
 	}
+	if spec.AttemptNumber > 0 {
+		env = append(env, EnvAttemptNumber+"="+strconv.FormatInt(int64(spec.AttemptNumber), 10))
+	}
+	// The subprocess shares the agent's filesystem, so the host path IS the
+	// workload's path (ADR-0032 §1).
+	if spec.TaskAPISocket != "" {
+		env = append(env,
+			EnvTaskAPI+"="+TaskAPIScheme+spec.TaskAPISocket,
+			EnvTaskAPIToken+"="+spec.TaskAPIToken,
+		)
+	}
 	// A GPU request without device isolation is pinned by convention only; a
 	// workload can override this, which is precisely the fidelity gap that
 	// makes subprocess development-grade.

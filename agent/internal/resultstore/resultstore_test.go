@@ -6,6 +6,7 @@ package resultstore
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -82,5 +83,31 @@ func TestStripScheme(t *testing.T) {
 		if got := stripScheme(in); got != want {
 			t.Errorf("stripScheme(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestCheckpointKeysAreConfinedToTheNamespacePrefix: a checkpoint write or read
+// outside <namespace>/checkpoints/ is refused before any network call, so a bug
+// in key construction cannot reach another tenant's objects (ADR-0032 §4).
+func TestCheckpointKeysAreConfinedToTheNamespacePrefix(t *testing.T) {
+	c := &Client{namespace: "team-ml"}
+	for _, key := range []string{
+		"team-ml/logs/a1/0",
+		"other/checkpoints/k/a1/1",
+		"team-ml/checkpoints/../../other/x",
+		"team-mlx/checkpoints/k/a1/1",
+	} {
+		if err := c.PutCheckpointObject(t.Context(), key, strings.NewReader("x"), 1); !errors.Is(err, ErrCheckpointKeyOutsideNamespace) {
+			t.Errorf("put %q: err = %v, want ErrCheckpointKeyOutsideNamespace", key, err)
+		}
+		if _, err := c.GetCheckpointObject(t.Context(), "", key, 10); !errors.Is(err, ErrCheckpointKeyOutsideNamespace) {
+			t.Errorf("get %q: err = %v, want ErrCheckpointKeyOutsideNamespace", key, err)
+		}
+	}
+	if !c.checkpointKeyAllowed("team-ml/checkpoints/k/a1/1") {
+		t.Error("the attempt's own checkpoint key was refused")
+	}
+	if (&Client{}).checkpointKeyAllowed("checkpoints/k/a1/1") {
+		t.Error("a client with no namespace must refuse every checkpoint key")
 	}
 }

@@ -11,12 +11,14 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/taskapi"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
@@ -86,8 +88,26 @@ type Runner struct {
 	// today: nothing in the platform resolves SecretRefs on the worker yet, and
 	// the resolver that does must be wired here (ADR-0020).
 	SecretValues func(a *nexusv1.TaskAssignment) map[string]string
-	// Namespace prefixes the attempt's log objects; the agent's namespace.
+	// Namespace prefixes the attempt's log and checkpoint objects; the
+	// agent's namespace.
 	Namespace string
+
+	// WorkloadAPI is RegisterResponse.workload_api (ADR-0032). Nil offers
+	// workloads no usage, rate limits or checkpoints; the socket is still
+	// served for progress and declared errors. Set before the first Run.
+	WorkloadAPI *nexusv1.WorkloadApiConfig
+	// WorkloadUpstream forwards the workload API's calls. Nil disables
+	// everything that needs the control plane.
+	WorkloadUpstream taskapi.Upstream
+	// TaskAPIRoot is where per-attempt sockets are created; empty means
+	// taskapi.DefaultRoot.
+	TaskAPIRoot string
+	// TaskAPIDisabled serves no workload API at all (the root was found
+	// unusable at registration).
+	TaskAPIDisabled bool
+	// CheckpointStore overrides the result store for checkpoint objects. Nil
+	// uses the result store; tests set it to an in-memory store.
+	CheckpointStore taskapi.ObjectStore
 }
 
 // newShipper starts the attempt's log shipper, or returns nil when shipping is
@@ -180,6 +200,12 @@ type runningTask struct {
 	// goroutine before any report, and read by that goroutine only.
 	kind    string
 	started time.Time
+
+	// cancelRequested is set once the agent has decided to stop the workload
+	// (Cancel, a revoked lease, an uninterruptible bound expiring). A
+	// workload that then dies of our signal did not fail for the reason it
+	// may have declared through the workload API.
+	cancelRequested atomic.Bool
 }
 
 // NewRunner builds a runner over the executors this worker advertises.
@@ -316,11 +342,24 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 		return
 	}
 
+	// The workload API exists before Prepare, because the executor bakes the
+	// socket into the workload's environment and mounts, and is torn down on
+	// every exit path, so nothing can act for this attempt once Run returns.
+	api := r.startTaskAPI(taskCtx, a, exec, log)
+	if api != nil {
+		defer api.Close()
+		spec.TaskAPISocket = api.SocketPath()
+		spec.TaskAPIToken = api.Token()
+	}
+
 	ship := r.newShipper(a, log)
 	if ship != nil {
 		spec.LogSink = ship
 	}
 	outcome, prepErr := r.execute(taskCtx, exec, rt, spec, log)
+	// Both are lease-fenced and both must land before the result report,
+	// which releases the lease.
+	facts := r.finishTaskAPI(ctx, api, rt, log)
 	r.finishLogs(ctx, ship, log)
 	if prepErr != nil {
 		c := executor.ClassifyError(prepErr)
@@ -329,7 +368,7 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 		return
 	}
 
-	r.reportOutcome(ctx, a, outcome, log)
+	r.reportOutcome(ctx, a, outcome, log, facts)
 }
 
 // execute drives Prepare → Start → Wait → Cleanup. Cleanup runs on EVERY path,
@@ -502,6 +541,7 @@ func (r *Runner) buildExecutorSpec(ctx context.Context, a *nexusv1.TaskAssignmen
 		RunID:          a.GetRunId(),
 		NodeID:         a.GetNodeId(),
 		IdempotencyKey: a.GetIdempotencyKey(),
+		AttemptNumber:  a.GetAttemptNumber(),
 		Runtime:        spec.GetRuntime(),
 		Limit:          effectiveLimit(spec.GetResources()),
 		// The devices the registry named at admission, so concurrent GPU
@@ -596,9 +636,11 @@ func effectiveLimit(rr *nexusv1.ResourceRequest) *nexusv1.ResourceVector {
 }
 
 // reportOutcome converts an executor Outcome into a ReportResult and delivers it
-// through the reporter (which owns the WAL ordering).
+// through the reporter (which owns the WAL ordering). facts carries what the
+// workload API learned (a declared failure, an agent-initiated cancel); the
+// zero value classifies from the Outcome alone.
 func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
-	o executor.Outcome, log *slog.Logger) {
+	o executor.Outcome, log *slog.Logger, facts attemptFacts) {
 
 	// Detached context: the result MUST be reported even when the parent context
 	// is being cancelled by shutdown. A completed task whose report we abandoned
@@ -641,6 +683,12 @@ func (r *Runner) reportOutcome(ctx context.Context, a *nexusv1.TaskAssignment,
 	default:
 		req.Outcome = nexusv1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED
 		req.Error = executor.ClassifiedFromOutcome(o, "").ToProto()
+		if te, ok := declaredTaskError(o, facts); ok {
+			log.Info("classifying the failure as the workload declared it",
+				"class", te.GetClass().String(), "type", te.GetType(), "retry_after_ms", te.GetRetryAfterMs(),
+				"observed_class", req.GetError().GetClass().String())
+			req.Error = te
+		}
 	}
 
 	entry := wal.Entry{
@@ -792,6 +840,7 @@ func (r *Runner) Cancel(attemptID string, grace time.Duration, reason string) {
 		return
 	}
 	log.Warn("cancelling attempt", "grace", grace)
+	rt.cancelRequested.Store(true)
 
 	go func() {
 		rt.handleMu.Lock()
@@ -883,6 +932,7 @@ func (r *Runner) cancelUninterruptible(rt *runningTask, log *slog.Logger) {
 		h, exec := rt.handle, rt.exec
 		rt.handleMu.Unlock()
 		log.Warn("uninterruptible cancellation bound expired; SIGKILL", "bound", bound)
+		rt.cancelRequested.Store(true)
 		if h != nil && exec != nil {
 			if err := exec.Signal(context.Background(), *h, executor.SignalKill); err != nil {
 				log.Warn("SIGKILL delivery failed", "error", err)

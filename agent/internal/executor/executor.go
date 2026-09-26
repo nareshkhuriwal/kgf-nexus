@@ -48,6 +48,22 @@ type TaskSpec struct {
 	// a handler deduplicate its own side effects.
 	IdempotencyKey string
 
+	// AttemptNumber is the 1-based attempt number, exported as
+	// NEXUS_ATTEMPT_NUMBER so a handler (and the SDK's ctx.attempt_number) can
+	// tell a first run from a retry without asking the control plane.
+	AttemptNumber int32
+
+	// TaskAPISocket is the HOST path of the attempt's workload-API socket
+	// (ADR-0032 §1), or empty when the attempt has none. The subprocess
+	// executor exports it as-is; the docker executor bind-mounts its directory
+	// at ContainerTaskAPIDir and exports the container path; the kubernetes
+	// executor exports nothing, because a pod on another node cannot reach a
+	// socket on this host (F149).
+	TaskAPISocket string
+	// TaskAPIToken is the socket's per-attempt bearer token, exported as
+	// NEXUS_TASK_API_TOKEN wherever TaskAPISocket is exported.
+	TaskAPIToken string
+
 	Runtime *nexusv1.RuntimeSpec
 
 	// Limit is the ENFORCEMENT ceiling (cgroup / container limit), which is
@@ -277,4 +293,24 @@ const (
 	// SDK's ctx.store -- inlines exactly what the agent itself would, instead
 	// of a compiled-in 64 KiB. Exported only when the agent knows the value.
 	EnvInlineThreshold = "NEXUS_INLINE_THRESHOLD_BYTES"
+	// EnvAttemptNumber is the attempt's 1-based number (TaskSpec.AttemptNumber).
+	EnvAttemptNumber = "NEXUS_ATTEMPT_NUMBER"
+	// EnvTaskAPI is the attempt's workload API as the workload sees it:
+	// unix://<socket path> (ADR-0032 §1). Absent when the executor cannot give
+	// the workload a path to the agent (kubernetes, F149); the SDK then keeps
+	// usage, permits and checkpoints in-process.
+	EnvTaskAPI = "NEXUS_TASK_API"
+	// EnvTaskAPIToken is the bearer token every request to EnvTaskAPI must
+	// carry. Exported exactly when EnvTaskAPI is.
+	EnvTaskAPIToken = "NEXUS_TASK_API_TOKEN"
 )
+
+// ContainerTaskAPIDir is where the docker executor mounts the directory that
+// holds the attempt's task-API socket. The directory rather than the socket
+// file: a bind mount of a socket FILE pins the inode that existed at
+// container start, while the directory form works with every storage driver
+// and with rootless docker.
+const ContainerTaskAPIDir = "/run/nexus-task"
+
+// TaskAPIScheme prefixes the socket path in EnvTaskAPI.
+const TaskAPIScheme = "unix://"

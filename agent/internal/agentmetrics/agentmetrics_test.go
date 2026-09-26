@@ -103,4 +103,42 @@ func TestNilAgentMetricsIsSafe(t *testing.T) {
 	// even when metrics are disabled.
 	f := m.ResultStorePut
 	f("error", 1, time.Millisecond)
+	m.WorkloadAPIRequest("usage", 200)
+	m.UsageFlush("ok")
+	m.Checkpoint("saved")
+}
+
+// TestWorkloadAPIMetricsHaveClosedLabels: the task-API families exist and a
+// workload cannot mint series through the endpoint, code or result labels.
+func TestWorkloadAPIMetricsHaveClosedLabels(t *testing.T) {
+	reg := metrics.NewServiceRegistry("agent", "test")
+	m := New(reg)
+	m.WorkloadAPIRequest("usage", 200)
+	m.WorkloadAPIRequest("not-an-endpoint", 200)
+	m.WorkloadAPIRequest("usage", 418)
+	m.UsageFlush("ok")
+	m.UsageFlush("weird")
+	m.Checkpoint("saved")
+	m.Checkpoint("nope")
+
+	mux := metrics.OpsMux(reg, func(*http.ServeMux) {})
+	fams := metricstest.Scrape(t, mux, "/metrics")
+	metricstest.RequireFamilies(t, fams, "nexus_agent_workload_api_requests_total",
+		"nexus_agent_usage_flushes_total", "nexus_agent_checkpoints_total")
+	for _, c := range []struct {
+		fam    string
+		labels map[string]string
+	}{
+		{"nexus_agent_workload_api_requests_total", map[string]string{"endpoint": "usage", "code": "200"}},
+		{"nexus_agent_workload_api_requests_total", map[string]string{"endpoint": "other", "code": "200"}},
+		{"nexus_agent_workload_api_requests_total", map[string]string{"endpoint": "usage", "code": "other"}},
+		{"nexus_agent_usage_flushes_total", map[string]string{"result": "ok"}},
+		{"nexus_agent_usage_flushes_total", map[string]string{"result": "error"}},
+		{"nexus_agent_checkpoints_total", map[string]string{"result": "saved"}},
+		{"nexus_agent_checkpoints_total", map[string]string{"result": "error"}},
+	} {
+		if s := metricstest.Find(fams, c.fam, c.labels); s == nil || s.GetCounter().GetValue() != 1 {
+			t.Errorf("%s%v = %v, want 1", c.fam, c.labels, s)
+		}
+	}
 }
