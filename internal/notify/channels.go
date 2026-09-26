@@ -252,6 +252,11 @@ func (s *Sender) pagerDuty(ctx context.Context, ch Channel, m Message) Outcome {
 		}
 	}
 	o, _ := s.postJSON(ctx, url, ev, nil)
+	if o.OK() && m.Action == ActionTest {
+		// A test must not leave an incident open on someone's on-call rotation:
+		// resolve it straight away under the same dedup key.
+		o, _ = s.postJSON(ctx, url, map[string]any{"routing_key": key, "event_action": "resolve", "dedup_key": m.DedupKey}, nil)
+	}
 	return o
 }
 
