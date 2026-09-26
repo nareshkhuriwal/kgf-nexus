@@ -42,12 +42,12 @@ package chaos
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -57,12 +57,9 @@ const (
 	// the scheduler must first NOTICE the worker is gone. The budget allows for
 	// lease expiry, the LOST transition, a retry backoff, a fresh dispatch, and
 	// the 25s the task itself sleeps.
-	runBudget  = 5 * time.Minute
-	pollEvery  = 2 * time.Second
-	composeCwd = "../.."
+	runBudget = 5 * time.Minute
+	pollEvery = 2 * time.Second
 )
-
-var composeFile = envOr("NEXUS_COMPOSE_FILE", "deploy/docker-compose.yml")
 
 // Compose derives every container name from the project name, which
 // docker-compose.yml pins to `nexus` and COMPOSE_PROJECT_NAME overrides. CI
@@ -231,8 +228,20 @@ func requireStack(t *testing.T) {
 	}
 }
 
+// psql queries the stack's database: through the host's psql when
+// NEXUS_CHAOS_DATABASE_URL names it (a stack on the host's PostgreSQL, which has
+// no postgres container), otherwise inside the stack's postgres service.
 func psql(t *testing.T, query string) string {
 	t.Helper()
+	if dsn := chaosDatabaseURL(); dsn != "" {
+		cmd := exec.Command("psql", dsn, "-v", "ON_ERROR_STOP=1", "-tAc", query)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("psql %q: %v: %s", query, err, strings.TrimSpace(stderr.String()))
+		}
+		return strings.TrimSpace(stdout.String())
+	}
 	out, err := composeOut(t, "exec", "-T", "postgres",
 		"psql", "-U", "nexus", "-d", "nexus", "-tAc", query)
 	if err != nil {
@@ -243,7 +252,7 @@ func psql(t *testing.T, query string) string {
 
 func composeOut(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	full := append([]string{"compose", "-f", composeFile}, args...)
+	full := append(append([]string{"compose"}, composeFileArgs(os.Getenv)...), args...)
 	cmd := exec.Command("docker", full...)
 	cmd.Dir = composeCwd
 	var stdout, stderr bytes.Buffer
@@ -257,34 +266,44 @@ func composeOut(t *testing.T, args ...string) (string, error) {
 // createRun submits through the REST gateway rather than inserting rows,
 // because a chaos test that seeded the database directly would skip the very
 // admission path an operator uses.
+//
+// It registers the workflow's committed example first and runs that exact
+// version. It used to create the run by spec NAME and rely on the example
+// sweep having registered the spec; the sweep runs after these tests, so on a
+// fresh stack both failed with spec_not_found, and on a reused one they ran
+// whatever version happened to be registered last.
 func createRun(t *testing.T, workflow string) string {
 	t.Helper()
-	endpoint := envOr("NEXUS_ENDPOINT", "http://localhost:8090")
-	key := os.Getenv("NEXUS_API_KEY")
-	if key == "" {
+	if os.Getenv("NEXUS_API_KEY") == "" {
 		t.Skip("NEXUS_API_KEY is unset; the chaos suite creates runs through the gateway")
 	}
-	body := fmt.Sprintf(`{"spec_name":%q}`, workflow)
-	out, err := curl(t, "-X", "POST",
-		endpoint+"/v1/namespaces/default/runs",
-		"-H", "Authorization: Bearer "+key,
-		"-H", "Content-Type: application/json",
-		"--data", body)
-	if err != nil {
-		t.Fatalf("create run: %v", err)
+	path, specID := registeredExample(t, workflow)
+	return createRunFromSpec(t, specID, requiredParamsFor(t, path))
+}
+
+var (
+	registeredMu sync.Mutex
+	registered   = map[string][2]string{} // workflow -> {path, spec id}
+)
+
+// registeredExample submits the committed example that declares workflow
+// (idempotent: specs are content-addressed) and returns its path and spec id.
+func registeredExample(t *testing.T, workflow string) (string, string) {
+	t.Helper()
+	registeredMu.Lock()
+	defer registeredMu.Unlock()
+	if r, ok := registered[workflow]; ok {
+		return r[0], r[1]
 	}
-	var resp struct {
-		ID      string `json:"id"`
-		Error   string `json:"error"`
-		Message string `json:"message"`
+	for _, ex := range discoverExamples(t) {
+		if ex.Workflow == workflow {
+			id := submitSpec(t, ex.Path)
+			registered[workflow] = [2]string{ex.Path, id}
+			return ex.Path, id
+		}
 	}
-	if err := json.Unmarshal([]byte(out), &resp); err != nil {
-		t.Fatalf("decode create-run response %q: %v", out, err)
-	}
-	if resp.ID == "" {
-		t.Fatalf("create run failed: %s %s (%s)", resp.Error, resp.Message, out)
-	}
-	return resp.ID
+	t.Fatalf("no committed example declares workflow %q", workflow)
+	return "", ""
 }
 
 // curl runs one HTTP request against the gateway. The chaos package shells out
@@ -299,8 +318,24 @@ func curl(t *testing.T, args ...string) (string, error) {
 	// than a fault, and a test that treats it as one is flaky for a reason that
 	// has nothing to do with what it asserts. --retry-connrefused covers the same
 	// during a rolling restart.
-	base := []string{"-s", "--retry", "3", "--retry-delay", "1", "--retry-connrefused"}
-	out, err := exec.Command("curl", append(base, args...)...).Output()
+	//
+	// The body goes to a file, not stdout: curl also retries a 5xx, and on
+	// stdout every attempt's body was concatenated ("{...error...}{...run...}"),
+	// which the caller could not decode. A file is truncated before each retry,
+	// so only the final response is read. A POST that creates something must
+	// carry an Idempotency-Key for that retry to be safe (createRunFromSpec).
+	f, err := os.CreateTemp("", "nexus-chaos-curl-*")
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	_ = f.Close()
+	defer os.Remove(name)
+	base := []string{"-s", "--retry", "3", "--retry-delay", "1", "--retry-connrefused", "-o", name}
+	if err := exec.Command("curl", append(base, args...)...).Run(); err != nil {
+		return "", err
+	}
+	out, err := os.ReadFile(name)
 	return string(out), err
 }
 

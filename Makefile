@@ -121,7 +121,7 @@ lint: ## go vet over the whole module
 # PostgreSQL. The example sweep gives each example its own budget
 # (tests/chaos/config.go; NEXUS_CHAOS_EXAMPLE_BUDGET, _SCALE, NEXUS_CHAOS_EXAMPLES),
 # so the whole suite can take well over the 20 minutes it once had.
-CHAOS_TIMEOUT ?= 120m
+CHAOS_TIMEOUT ?= 180m
 chaos: ## Kill workers mid-task and assert exactly-one-logical-effect (needs `make up` + NEXUS_API_KEY)
 	@test -n "$$NEXUS_API_KEY" || { echo "NEXUS_API_KEY is unset; run 'make seed' and export it"; exit 1; }
 	$(GO) test -tags chaos -count=1 -v -timeout $(CHAOS_TIMEOUT) ./tests/chaos/
