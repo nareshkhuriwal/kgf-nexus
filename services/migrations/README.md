@@ -43,5 +43,9 @@ filenames; none of them counts files or expects consecutive numbers.
 - `TestVersionNumbersAreUnique` fails when two files share a version.
 - `TestVersionGapsAreOnlyTheKnownOnes` fails when a version appears below the
   current highest (filling 0019, for example) or when a new gap opens.
+  Numbers handed to parallel branches that have not merged yet (0028-0035 on
+  the ADR-0032 branch, which holds 0036) are listed in `reservedVersions`:
+  they may be absent, and the integrator removes each entry as its file lands.
+  They must all land before any database applies a higher number.
 - `TestMigrationFilenamesAreWellFormed` fails on names that break the
   `NNNN_description.{up,down}.sql` pattern, and on a `.down.sql` with no `.up.sql`.
