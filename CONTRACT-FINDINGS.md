@@ -4393,10 +4393,10 @@ without a rendered file.** `tests/chaos` passes one `-f` file
 (needed so `--scale scheduler=3` does not publish the default metrics ports)
 had to be run from a `docker compose config` render of both files.
 BENCHMARKS.md §4 records how it was run. Proposed: accept a
-comma-separated list in `NEXUS_COMPOSE_FILE`, or `COMPOSE_FILE` itself. OPEN.
+comma-separated list in `NEXUS_COMPOSE_FILE`, or `COMPOSE_FILE` itself. FIXED in F157.
 
 **5. Two committed examples fail on the compose stack for reasons that are not
-scheduler faults. OPEN.**
+scheduler faults. FIXED in F157.**
 Found by the example sweep in the same run
 (`docs/benchmarks/raw/chaos-2026-09-26.txt`).
 
@@ -4418,7 +4418,7 @@ Found by the example sweep in the same run
 Separately, the sweep's 120 s per-example budget is too short on a loaded host
 when examples run back to back on three workers. Six examples that were still
 RUNNING at 120 s had SUCCEEDED when checked after the suite. That is a test
-budget question, not a platform defect.
+budget question, not a platform defect. FIXED in F157 (per-example budgets, and a run past its budget is cancelled so it cannot starve the next example).
 
 ### F151. Subprocess tasks inherited the agent's entire environment, including its worker credential and result-store keys — FIXED
 
@@ -4553,3 +4553,177 @@ there; it now detects a server that accepts any password and logs instead of
 failing. PostgreSQL 15 and later no longer grant CREATE on schema `public` to
 PUBLIC, so the migrate login must own the database or hold CREATE on `public`
 (a non-owner migrate login fails with "permission denied for schema public").
+
+### F156. Console gaps: a guessed webhook URL, no version pin or priority on sensors, no way to clear a channel secret, and an audit trail capped at one page — FIXED
+
+**Severity:** medium (the webhook URL is handed to a third party next to a
+freshly issued secret; a wrong one fails silently). Found in the console
+review of the event-driven screens and the audit page.
+
+1. **Trigger URL guessed from the page origin.** Without `NEXUS_PUBLIC_URL`
+   the console built a trigger's hook URL from its own origin, which is wrong
+   whenever a proxy serves the console and the hooks under different names.
+   The gateway now always decides: from `Forwarded` / `X-Forwarded-Host` /
+   `-Proto` / `-Prefix` only when the TCP peer is listed in the new
+   `NEXUS_TRUSTED_PROXIES` (CIDRs; a catch-all is refused; Helm
+   `events.trustedProxies`), otherwise from `NEXUS_PUBLIC_URL` (now validated
+   at startup). Every trigger response carries `url_source`
+   (`forwarded` | `config` | `unknown`); when unknown, `url` is omitted, the
+   gateway warns at startup, and the console shows the path with a warning and
+   a signing example that says `<public address>` instead of guessing.
+   Forwarded headers are never read from an untrusted peer, and a malformed
+   forwarded host, scheme or prefix falls back to configuration. Checked live
+   on the w4b compose stack: `url_source: config`, and a forged
+   `X-Forwarded-Host` from an untrusted peer was ignored.
+2. **Sensor form lacked `priority` and `workflow_version`.** Both forms
+   (trigger and sensor) now share one version/priority block. Clearing the
+   version on an edit sends `workflow_version: null`, which the gateway now
+   reads as "unpin": before, an explicit null decoded as absent, so once a
+   trigger or sensor was pinned no request could remove the pin short of
+   switching workflows. Absent still keeps the pin; a quoted number is refused
+   (400).
+3. **A channel's stored secret could not be cleared.** `PUT
+   .../notification-channels/{name}` accepts `clear_secret: true`: it removes
+   the sealed value or reference, disables the channel in the same write (it
+   cannot deliver without one) and is audited with `secret_cleared`. Enabling
+   it again is refused until a secret is supplied. A webhook's signing key can
+   only be replaced (every delivery stays signed); kinds without a secret
+   refuse it. The console offers a confirmed "Clear secret" row action,
+   disables Enable on a secretless channel, and asks for a secret when an edit
+   re-enables one.
+4. **The audit page fetched one window of 200 and stopped**, and its only
+   export was a CSV of selected rows built in the browser. It now walks the
+   gateway's keyset cursor (Next/Previous, page size sent as `limit`, a filter
+   change restarts from the newest page, only the newest page polls) and
+   downloads the server's NDJSON (hash-chain header and trailer), CSV or KGF
+   export of every entry the filters match, byte for byte; an NDJSON file
+   without its trailer is flagged as incomplete.
+
+Tests: gateway unit tests for the URL resolver and the version pin,
+integration tests for the pin/unpin and clear-secret flows (host PostgreSQL),
+the OpenAPI example check, and vitest for every console change. `npm run
+typecheck`, `vitest` (1138 tests) and `npm run build` pass.
+
+### F157. Test tooling that drifted, flaked or started its own Postgres — FIXED
+
+**Severity:** low for the product, high for trust in the suites: each of
+these turned a green run into a claim it could not support, or a red one into
+noise.
+
+1. **The console's Administrator fixture drifted from the RBAC catalog.**
+   `MODULE_ACTIONS` in `ui/src/test/permissions.tsx` was a hand copy of
+   `ModuleActions` and lacked `workers.quarantine`, `audit.manage` and
+   `workflows.cache.invalidate`, so component tests could not render the
+   quarantine controls at all. The fixture now reads
+   `ui/src/test/permission-catalog.json`, which
+   `TestUIPermissionCatalogMatchesModuleActions` keeps byte-identical to
+   `ModuleActions` (regenerate with `-update-catalog`), and a vitest asserts
+   every permission the console gates a control on exists in it.
+2. **`TestSubprocessSinkSeparatesStreamsAndKeepsTheLocalLog` failed about one
+   run in ten under load.** With a log sink, a declared stdout output reaches
+   its buffer only through the pipe drain, after the sink write for the same
+   bytes, and Wait built the outcome before draining, so the attempt reported
+   SUCCEEDED with an empty output. Main already drained first (merge
+   `a8c27d7`); restoring the old order reproduces 8 failures in 100 under
+   load. `TestSubprocessStdoutOutputWaitsForTheDrain` now pins it
+   deterministically with a slow sink (fails 3/3 on the old order). Proof:
+   `go test -race -count=100` of both tests, 100/100 each, at load average
+   36-61 on 14 cores (a `go test -race ./internal/... ./services/...
+   ./cli/...` loop with a fresh GOCACHE, plus 12 CPU-burning containers).
+3. **`TestConformanceMemoryLimitEnforced/docker` "did not report
+   OOMKilled".** containerd publishes a task's exit and its OOM event
+   separately and the daemon sets `OOMKilled` only when it handles the OOM
+   event, so one inspect straight after `docker wait` can read false for a
+   container the kernel OOM-killed; the attempt was then classified as a
+   plain SIGKILL (APPLICATION, not retried on a bigger worker) instead of OOM.
+   A 137 exit under a memory limit, not a deadline kill, now re-inspects for up
+   to 3 s until the flag settles
+   (`TestDockerOOMFlagThatSettlesAfterTheExitIsReported`, with a fake
+   `docker`). The workload also allocates 256 MiB in 1 MiB pieces instead of
+   one ever-doubling string, whose tens-of-MiB requests a host with heuristic
+   overcommit can refuse (the shell then exits "out of memory" and no OOM kill
+   happens). Proof: `-count=20` under the same load, 20/20. On this Docker
+   Desktop (29.6.2, cgroup v2, `vm.overcommit_memory=1`) neither mechanism
+   reproduced in 40 direct probes, so these are fixes for the two ways the
+   assertion can fail, not a measured failure rate.
+4. **`wall_ms` truncated to 0.** A task that finishes inside a millisecond (a
+   trivial command on Linux) reported `wall_ms: 0`, which failed
+   `TestConformanceSuccessAndOutput/subprocess` 4 runs in 5 in a Linux
+   container. Wall time is now rounded up.
+5. **Test and bench scripts started Postgres containers.**
+   `tests/nats/run-integration.sh`, `tests/compat/previous-release-smoke.sh`,
+   `make test-stores-up` / `tracing-e2e` / `bench-pg`, `make up` and
+   `deploy/e2e/e2e-stack.sh` all ran their own Postgres, against the project
+   rule that Postgres comes from the host. They now create (and drop)
+   databases on the server `NEXUS_TEST_PG_SERVER` names, the workstation's by
+   default (`tests/lib/hostpg.sh`: databases tagged by COMMENT so only a
+   tool's own is ever dropped, a free-slot check, retries on "too many
+   clients"); the stacks use `deploy/docker-compose.host-db.yml`, which
+   switches the bundled postgres off. `NEXUS_BUNDLED_POSTGRES=1` /
+   `E2E_BUNDLED_POSTGRES=1` opt back in (CI runners, which have no host
+   server, do; the nats and compat CI jobs get a service container as their
+   server). Documented exceptions, which need a server they control: the PITR
+   overlay and the backup/restore drills built on it (data directory,
+   `archive_command`, restarts), the DB TLS drill (server certificates,
+   hostssl-only `pg_hba`), and a plain `docker compose up` / `make quickstart`,
+   the zero-install first run.
+   Two further defects surfaced while running them on the shared host server:
+   `NEXUS_DB_MAX_CONNS=2` in a suite's environment deadlocked the scheduler's
+   MarkStarted race tests for 20 minutes (they hold one connection while the
+   code under test needs another), so the suites raise a cap below 3 to 3; and
+   compat's triage died silently under `pipefail` when only a package failed.
+   Results on host PostgreSQL 18.3: `tests/nats/run-integration.sh` passed
+   (16 TestNATS* tests, plus the 7 authorization tests against both the
+   compose and the Helm/TLS broker); `make compat-smoke` (previous `4580cae`)
+   passed, 728 tests, 0 failures. Both dropped their databases.
+6. **The chaos suite** accepted one compose file (F150 item 4), gave every
+   example 120 s (F150's budget note), created its chaos runs by spec name
+   assuming the example sweep, which runs later, had registered them
+   (spec_not_found on a fresh stack), and let curl retry a failed POST onto
+   stdout, concatenating the bodies into undecodable output. Now:
+   `NEXUS_COMPOSE_FILE` takes a comma-separated list (or `COMPOSE_FILE` is
+   left to compose); budgets are per example (`tests/chaos/config.go`, default
+   5 min, `NEXUS_CHAOS_EXAMPLE_BUDGET`, `_SCALE`, `NEXUS_CHAOS_EXAMPLES`), and
+   a run still going at its budget is cancelled and drained so it cannot
+   starve the next example (in the F150 sweep one slow example cascaded into
+   six failures); chaos runs register their committed example and run that
+   exact version; response bodies are read from a file curl truncates per
+   retry, and run creation carries an Idempotency-Key so a retried POST cannot
+   create a second run. `make chaos` has a 180 min timeout.
+7. **F150 item 5's two examples.** `gpu_scheduling` identifies each job's
+   worker by `NEXUS_WORKER_ID` and the GPUs it advertises
+   (`NEXUS_WORKER_GPU_KIND` / `_COUNT`, which every executor now exports)
+   instead of Kubernetes pod-name hostnames; `ml_capacity_test` runs its
+   Python steps in the docker executor from a digest-pinned
+   `python:3.13-alpine`, which also restricts them to Docker-capable workers.
+
+**Chaos suite on the host database** (compose project `nexus-w4b-chaos`,
+database `nexus_w4b_chaos` on host PostgreSQL 18.3, every service pool capped
+at 2, no postgres container, `NEXUS_COMPOSE_FILE` naming the base file, the
+e2e port overlay and the host-database overlay):
+
+- First full run (`make chaos` equivalent, 33 min): the example sweep ran 15
+  examples (the two AI examples skip without the AI overlay). 12 SUCCEEDED,
+  among them the two F150 failures: `gpu_scheduling` 10/10 nodes in 1 min 10 s
+  (audit passed against the advertised GPUs), `ml_capacity_test` 34/34 in
+  43 s (docker executor); also `image_processing_gpu` 26/26 in 8 min 5 s and
+  `fanout_scale` 503/503 in 29 s. `credit_risk_ml` was still RUNNING at its
+  then 20 min budget (44 of 50 CV trials done; trials took 2-8 min each on the
+  loaded host) and was cancelled and drained as designed; the next two
+  examples then hit 500s while the workflow-manager (2 connections) worked
+  through that cancel, which exposed the curl-concatenation defect above. The
+  two worker-kill/replica tests failed with spec_not_found (the ordering
+  defect above).
+- After those fixes (budget 40 min for `credit_risk_ml`, 15 min for
+  `image_processing_gpu`), the failed parts re-run on the same stack: all
+  PASS. `TestKillingAWorkerMidTaskYieldsExactlyOneLogicalEffect` (worker
+  SIGKILLed mid-task; `slow` executed twice, one effect; 65 s),
+  `TestKillingAWorkerLeavesNoCapacityLeaked`,
+  `TestSchedulerReplicasNeverDoubleDispatchUnderLoad` (3 scheduler replicas,
+  8 concurrent storms, peak 26 overlapping dispatches, no double dispatch),
+  and `credit_risk_ml` 110/110 in 7 min 17 s, `csv_sales_pipeline` 49/49,
+  `dispatch_storm` 26/26.
+
+So every committed example ran to SUCCEEDED on the host database, and the
+three chaos properties held; they were not all in one uninterrupted run. The
+stack and its database were removed afterwards.
