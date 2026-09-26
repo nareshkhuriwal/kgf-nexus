@@ -4279,7 +4279,7 @@ granted the same column again in 0036. The grant now exists once, here in
 0035; 0036 grants only `free_retries`. F132 is the general form of this gap,
 and 0037 holds the rest of it.
 
-### F148. A running task had no channel to the control plane; Python heartbeats were silent no-ops — FIXED (kubernetes: OPEN)
+### F148. A running task had no channel to the control plane; Python heartbeats were silent no-ops — FIXED
 
 **Severity:** high (a task declaring `timeouts.heartbeat` could not keep itself
 alive; no usage, rate-limit or checkpoint feature could exist).
@@ -4303,11 +4303,26 @@ AI overlay: `examples/llm_batch_inference` crashed a shard after 10 of 30
 prompts, and the retry resumed from the checkpoint and asked only the other
 20 (OPERATIONS §29.8).
 
-**Still open.** The kubernetes executor's pods run on other nodes and get no
-socket: tasks there fall back in-process (usage only logged, permits not
-shared, checkpoints in `ctx.store`). Closing it needs a network-reachable,
-per-attempt authenticated endpoint on the agent (or a sidecar), with the same
-fencing.
+**Kubernetes (was open; fixed 2026-09-26, ADR-0032 addendum, OPERATIONS
+§29.10).** The kubernetes executor's pods run on other nodes and got no
+socket: tasks there fell back in-process (usage only logged, permits not
+shared, checkpoints in `ctx.store`). The agent now serves the same
+per-attempt API on one TLS listener (`NEXUS_K8S_TASK_API_ADVERTISE`), routed
+by the attempt's 256-bit token: the pod gets the URL and the agent's
+in-memory CA as env and the token only by reference to the attempt's
+immutable Secret; the token acts as exactly its attempt, is revoked when the
+attempt's run on the agent ends, and every call is lease-fenced as before;
+another agent's (tenant's) tokens are refused. A gateway endpoint with a
+dispatch-minted token and an in-pod sidecar were considered and rejected (the
+addendum records why: lost final increments, non-idempotent increments, the
+checkpoint write ordering, pod egress to the control plane). Proven by
+`agent/internal/taskapi/network_test.go`, the pod-spec tests, the SDK's https
+tests and `agent/e2e/k8staskapi` on docker-desktop: usage, permits,
+checkpoint and resume, and heartbeats of a kubernetes task reached
+`attempt_usage`, the usage ledger, `task_checkpoints`, the store and
+`rate_limit_buckets`; a token after its attempt ended, and each tenant's
+token on the other tenant's agent, got 401. The Helm chart configures it by
+default for kubernetes-executor agents (F159).
 
 ### F149. The scheduler could not charge the retry budget under role separation — FIXED
 
@@ -4485,7 +4500,7 @@ retry on its way is never taken for exhausted). Held by
 `TestIntegrationListStalledRuns` (an unreconciled run with its budget spent is
 reported stalled; a run with a retry scheduled is not).
 
-### F153. Database roles are cluster-wide: Nexus databases sharing a server share their group roles, and a login made for one can write another — PARTLY FIXED
+### F153. Database roles are cluster-wide: Nexus databases sharing a server share their group roles, and a login made for one can write another — FIXED (opt-in; see the 2026-09-26 update)
 
 **Severity:** medium on a server shared by several Nexus installations (a
 login for one installation connects to another's database with its group
@@ -4540,11 +4555,45 @@ per-service-login overlay takes a login prefix (`NEXUS_E2E_LOGIN_PREFIX`).
 OPERATIONS §20.12 documents the shared-server rules (distinct login names per
 installation, revoke PUBLIC CONNECT, never roll back 0005).
 
-**Still open.** Per-installation group role names (a prefix on the six
+**Still open (as of the first fix).** Per-installation group role names (a prefix on the six
 `nexus_*` roles) would isolate installations without relying on CONNECT, but
 the names are fixed in migrations 0005 onwards and in the chart; that is a
 design change for a later release. Not fixed either: the chart does not revoke
 PUBLIC's CONNECT itself (the db-roles Job could, behind a value).
+
+**Update 2026-09-26: both, additively.** Migrations 0005-0037 stay untouched.
+Migration 0038 adds an opt-in prefix (`NEXUS_DB_ROLE_PREFIX`, chart
+`postgres.groupRolePrefix`): `deploy/migrate.sh` calls
+`nexus_ensure_role_prefix` after every migrate, which creates
+`<prefix>_<service>` NOLOGIN roles and MOVES every privilege the shared
+`nexus_<service>` held in that database (relations, columns, routines, the
+schema, the database) onto them, then fails if anything is left (a grant made
+by a third role would survive a REVOKE). Run again after later migrations it
+moves their grants too; migrations after 0038 must name roles through
+`nexus_role('<service>')` (so a REVOKE reaches a prefixed role as well), which
+`TestNoLiteralGroupRolesAfterThePrefixMigration` enforces. No prefix: nothing
+is created or moved, existing installations unchanged. `nexus-db-roles` takes
+the same prefix (refusing one the database was not migrated with), and
+revokes PUBLIC's CONNECT on its database behind
+`NEXUS_DB_REVOKE_PUBLIC_CONNECT` (`postgres.runtimeRoles.revokePublicConnect`),
+after granting CONNECT to each login it manages. Proven in
+`internal/dbroles/prefix_integration_test.go` on PostgreSQL 18.3: the move
+reproduces each role's exact privilege inventory on the prefixed role and
+leaves nothing on the shared one, a late literal grant is moved by the sync,
+a second prefix and malformed prefixes are refused, the rollback path moves
+everything back -- all inside a rolled-back transaction, so no role or grant
+outlives the test on the shared server; and a foreign login that connected
+before the revoke gets "permission denied for database" after it while the
+managed login still connects.
+
+**Limits, stated.** The prefix must be unique on the server (two installations
+choosing the same one share roles again; nothing can see another database's
+choice). It is fixed once applied. Adopting it on an existing installation
+needs a maintenance window: between the migrate Job's move and the db-roles
+Job's new memberships the running services hold no privileges (OPERATIONS
+§20.12). In a prefixed installation roll 0038 back before any earlier
+migration, whose down files revoke from the shared names. Distinct login names
+per installation remain the operator's job, as before.
 
 **PostgreSQL 18.** Nothing in the schema or grants failed on 18.3. The host
 server uses `trust` authentication for local connections, so
@@ -4553,3 +4602,197 @@ there; it now detects a server that accepts any password and logs instead of
 failing. PostgreSQL 15 and later no longer grant CREATE on schema `public` to
 PUBLIC, so the migrate login must own the database or hold CREATE on `public`
 (a non-owner migrate login fails with "permission denied for schema public").
+
+### F154. Tenant creation was guarded on `read`: the handler's own check was the only barrier to a new tenant — FIXED
+
+**Severity:** high by class, low as shipped. `POST /v1/platform/tenants`
+creates a tenant and its administrator account -- the most privileged write
+in the product -- and was registered with `a.guard(authn.ActionRead, ...)`.
+Its `routePermissions` entry is empty (the permission catalog is per
+namespace and this route is not), so for this route the coarse action is the
+guard's WHOLE decision, and `read` let every credential through: reader API
+keys, reader sessions, role-bound sessions, scoped tokens. What stopped them
+was `platformOperator` inside the handler (an unbound administrator's session
+listed in `platform_operators`). That check is correct today, so no
+unprivileged caller could create a tenant on 4580cae; but a route whose
+authorization lives only in its handler is one refactor away from being
+open, and the OpenAPI document advertised the route as `x-nexus-action: read`.
+
+**Fix.** The route is guarded on `admin_write`, so a read-only credential is
+refused by the guard before the body (a tenant and its administrator's
+password) is read; `platformOperator` and the quotas route's
+`isPlatformOperator` are now one function, which also refuses a KGF
+principal explicitly. The document says `admin_write`. Tests, written first:
+`TestCreatingATenantNeedsAdminWrite` (the route's guard),
+`TestAReadOnlyCredentialCannotReachTenantCreation` (refused without reading
+the body), the class check `TestMutatingRoutesWithoutAPermissionAreNotGuardedOnRead`
+(every state-changing route with an empty permission entry must be guarded on
+`write` or `admin_write`; `POST /v1/auth/logout` is the one documented
+exception), and the Postgres matrix `TestIntegrationTenantCreationAuthorization`
+(reader key, reader session, role-bound session, admin key, admin scoped
+token and a non-operator admin session all get 403 and create nothing; a
+platform operator's session gets 201). `GET /v1/platform/tenants` and
+`GET /v1/platform/usage` stay guarded on `read` with the operator check in the
+handler: they change nothing, and the class check does not cover reads.
+
+### F155. REST handler inconsistencies: limits, bodies, revisions, nulls, audit answers and the CLI — FIXED
+
+**Severity:** low to medium; one audit-trail defect. A sweep of the gateway's
+REST handlers and nexusctl, fixing each with a test written first.
+
+**List limits.** Each listing parsed `limit` its own way. The run list reset
+anything above 500 to 100, the audit store reset anything above 1000 to 100,
+the attention panel reset anything above 200 to 50 -- so asking for more than
+the cap returned FEWER rows than asking for the cap -- and negative or
+non-numeric values silently became the default. `GET .../specs/{name}/versions`
+passed the caller's limit to Postgres unbounded. Now one rule, applied by
+`rest.listLimit` on every list endpoint and by `store.ClampLimit` underneath
+(defaults and maxima declared once, `internal/store/limits.go`): absent is the
+default, a positive integer is capped at the listing's maximum, and zero,
+negative or non-integer is 400 `invalid_limit` (`invalid_recent_limit` for a
+worker's `recent_limit`). The notification-delivery `before` cursor, which
+silently ignored a malformed value, is validated too. Attempt-log `limit`/`tail`
+keep their own page semantics (ADR-0020) and are unchanged.
+
+**The attention panel's `truncated`** was `len(items) == limit`, true for a
+namespace with exactly `limit` items where nothing was dropped. The store now
+fetches one row past the cap (`GatewayListAttentionPage`).
+
+**Request bodies.** `readBody` reported every failure as "exceeds N bytes or
+could not be read", so spec submission answered a reset connection with 413
+`spec_too_large`; the routes that decoded straight from the request (roles,
+role assignments, users, service accounts, audit policy, legal hold and sinks,
+notification channels and rules, triggers, sensors) answered an OVERSIZED body
+with 400, and the schedule routes called it `unreadable_body`. Webhook
+`rotate-secret` ignored the read error entirely and rotated with the default
+24-hour grace instead of the one the caller sent (possibly 0, "revoke now").
+Now an over-size body is 413 on every route (`body_too_large`, keeping
+`spec_too_large` and the hook's `payload_too_large`) and any other read
+failure is 400 `unreadable_body`; `TestOversizedBodiesAre413OnEveryRoute`
+sends an over-size body to every POST/PUT/PATCH route and requires 413 from
+each handler that reads it.
+
+**Revisions.** Revisioned writes disagreed on what `revision: 0` meant: create
+if absent (quotas, platform config, clusters, roles, role assignments, audit
+policy) or overwrite unconditionally (notification channels and rules,
+triggers, sensors); a negative revision was 409 on some and 400 on others; and
+`PUT .../service-accounts/{id}` answered 409 for an account that does not
+exist. One rule now (api/openapi.yaml "Revisions"): the revision last read,
+409 if stale; 0 creates only if absent, so it is 409 on an object that exists
+and there is no unconditional overwrite; negative is 400 `invalid_revision`; a
+missing object is 404. This is a wire change for the four ADR-0028 update
+routes: a client that relied on omitting `revision` to overwrite now gets 409.
+The console always sent the revision it read; nexusctl's partial updates
+(`trigger update`, `sensor update|enable|disable`, and the client's channel and
+rule updates) now read the current revision just before writing, so a
+concurrent change becomes a 409 instead of a silent overwrite.
+
+**Nulls.** `GET .../platform/config` served `"pools": null`, `"tolerations":
+null` and `"node_selector": null` for a policy saved without them
+(`platform.Config.Normalize`, applied on every read and write). The cluster
+list could not return null on 4580cae -- the store already returned `[]` --
+but the handler now guarantees it too, pinned by
+`TestEmptyClusterListIsAnArray`. `GET .../users/{id}/roles` keeps its
+documented `roles: null` for a legacy (unassigned) account: there the null
+carries meaning, and `legacy` says so.
+
+**Answers.** `PUT .../users/{id}` returned `email_verified: false` for every
+account because it never read the column; it now returns the row as written,
+including migration 0017's un-verification on an address change.
+`GET /v1/account/tenant` for a namespace with no tenant row was 500; it is 404
+`tenant_not_found`. `POST .../audit/sinks` answered 422 with no `message`; the
+body now names the invalid fields (`message`, `field`, `fields`, and
+`problems` one per field), and the update route does the same. A failed audit
+write on a role save or delete, a role assignment, a user create or edit, or a
+tenant creation was 500; it is 503 `audit_unavailable` with the change rolled
+back, the F139 answer every other security grant gives.
+
+**Audit trail.** Tenant onboarding wrote its `tenant.create` rows with the
+outcome `"OK"` -- not `success` -- so no outcome filter or export found them,
+and without the client address. It now writes `success` with the address, and
+`GatewayAppendAudit` refuses any outcome other than `success`, `denied` or
+`error`. Rows already written as `OK` are left as they are (the log is
+append-only); find them with `SELECT * FROM audit_log WHERE outcome = 'OK'`.
+
+**nexusctl.** Every 429 was described as "rate limiting". A namespace quota
+(`namespace_quota_exceeded`), an exhausted budget (`budget_exceeded`) and a
+workflow's `max_active_runs` are not rate limits and backoff does not clear
+them, so the error now names the cause, the dimension, the used/limit (or
+spent/amount) figures and the `Retry-After`, which `APIError.RetryAfter` also
+carries. `compile --show --output yaml` had the yaml.v3 leading-newline bug
+the importer hit: a task command `"\necho hi\n"` rendered as a literal block
+that parsed back as `"echo hi\n"`, a different spec with a different hash.
+`spec.EncodeYAML` now checks every rendering by parsing it back and quotes
+the strings the literal style would change; the importer uses the same
+encoder.
+
+**Not changed.** 409 bodies still say `revision_conflict` on some routes and
+`conflict` on others (clients branch on the status; renaming codes would break
+the ones that do not). `run.delete` is classed operational but audited inside
+its transaction, so its audit failure is still a 500 that blocks the delete.
+
+### F158. Kubernetes task pods requested their GPUs from the enforcement ceiling, not the reservation — FIXED
+
+**Severity:** high for GPU pools on the kubernetes executor (a MIG or GPU task
+could run with no device at all, or take devices the Nexus ledger never
+charged).
+
+The kubernetes executor built the pod's device-plugin request from
+`effectiveLimit(resources)`: `limit` when present, else `request`. On
+Kubernetes that request IS the allocation. A spec with
+`request: {mig: {1g.10gb: 1}}` (or `gpu_count: 1`) beside
+`limit: {cpu_millis, memory_bytes}` -- a normal way to cap CPU and memory --
+reserved the MIG instance on the worker and then launched a pod that asked for
+no GPU; `limit.gpu_count` above `request.gpu_count` took devices the scheduler
+had not reserved. MIG profiles were partly shielded (the registry's admitted
+profiles were preferred), whole GPUs and `gpu_kind` pinning were not. The pod
+also carried no `NEXUS_GPU_MODE` / slice size (ADR-0029 §2 promises them on
+every executor), and nothing validated the resource names, so a typo meant
+every GPU pod sat Pending until its start timeout.
+
+**Fix.** The pod requests what the agent's registry admitted: the admitted
+whole-GPU count, MIG instances per profile, one shared replica; `gpu_kind`
+from the request when the ceiling omits it (`k8sDeviceVector`,
+`TaskSpec.Request`). The pod gets `NEXUS_GPU_MODE` and the slice size, and no
+agent-side device index or MIG UUID (the device plugin chooses those). Resource
+names and the MIG prefix are validated at start. Tests:
+`agent/internal/executor/kubernetes_gpu_test.go` (MIG and shared requests from
+the admission with a CPU-only ceiling, requests == limits on the task
+container only, a configurable prefix, refusal without a shared resource,
+admitted whole GPUs, config validation); Helm values
+`agentDefaults.kubernetes.{gpuResourceName, migResourcePrefix,
+sharedGpuResourceName, gpuKindLabel}`.
+
+**Not qualified on GPU hardware.** The pod specs are unit-tested and the chart
+renders; no MIG or MPS device plugin was available (OPERATIONS §28.8).
+
+### F159. The Helm chart could not run the kubernetes executor, and a kubernetes agent's own pod took the GPUs it advertised — FIXED
+
+**Severity:** medium (a chart-deployed agent with `executors: kubernetes`
+silently never advertised the executor; a GPU one also stranded its pool's
+devices).
+
+The chart rendered no `NEXUS_K8S_*` variable at all: an `agents[]` entry with
+`executors: kubernetes` got an API token (the ServiceAccount automount keyed on
+that executor) but no target namespace, so the executor stayed disabled and
+kubernetes-runtime tasks never found a worker. There was no Role for Jobs,
+pods, logs and Secrets, and no workload-API wiring. And with `gpuCount > 0`
+the chart made the AGENT pod request that many devices from the device plugin
+-- for a kubernetes agent the very devices its task pods need, so every GPU
+task pod would wait for devices the idle agent held.
+
+**Fix.** A kubernetes-executor agent renders its executor from
+`agentDefaults.kubernetes` / `agents[].kubernetes` (task namespace, task
+ServiceAccount, helper image, device-plugin names, the workload-API listener
+on the pod IP with its container port), a Role and RoleBinding in the task
+namespace mirroring `deploy/k8s/agent-rbac.yaml`, and an egress NetworkPolicy
+letting task pods reach exactly the listener port. Its own pod requests no
+GPU; `gpuCount`/`gpuMig`/`gpuShared` describe the task pool. `validate.sh`
+renders a MIG+MPS kubernetes agent (`ci/gpu-spot-values.yaml`) through
+kubeconform and asserts the rendered names, listener, RBAC and the absence of
+an agent GPU request; malformed resource names are refused by the schema.
+
+**Remaining.** A kubernetes agent configured with MIG counts is labelled
+`simulated=true` by the agent (it cannot see the devices); on such an agent
+the label means "allocated by the device plugin". The chart was verified by
+rendering, not by installing a GPU pool.

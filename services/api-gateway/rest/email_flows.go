@@ -370,7 +370,7 @@ func (a *API) requestEmailLink(w http.ResponseWriter, r *http.Request, purpose s
 	}
 	body, err := readBody(r, maxLoginBytes)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req struct {
@@ -635,7 +635,7 @@ func (a *API) verifyEmail(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := readBody(r, maxLoginBytes)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req struct {
@@ -669,7 +669,7 @@ func (a *API) resetPasswordWithLink(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := readBody(r, maxLoginBytes)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var req struct {

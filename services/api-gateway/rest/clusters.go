@@ -34,13 +34,19 @@ func (a *API) clustersList(w http.ResponseWriter, r *http.Request, p authn.Princ
 		a.fail(w, r, "list clusters", err)
 		return
 	}
+	// Always a list: a namespace with no clusters is `[]`, never null. The
+	// store promises the same; the wire contract is pinned here so it does not
+	// depend on that promise holding.
+	if views == nil {
+		views = []store.ClusterView{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"clusters": views, "observed_at": a.clock().UTC()})
 }
 
 func (a *API) clusterPut(w http.ResponseWriter, r *http.Request, p authn.Principal) {
 	body, err := readBody(r, 64<<10)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", err.Error())
+		writeBodyError(w, err)
 		return
 	}
 	var spec store.ClusterSpec
@@ -54,6 +60,9 @@ func (a *API) clusterPut(w http.ResponseWriter, r *http.Request, p authn.Princip
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_cluster", err.Error())
+		return
+	}
+	if !revisionOK(w, spec.DesiredRevision) {
 		return
 	}
 	// The path is authoritative for the name, so a body cannot rename a

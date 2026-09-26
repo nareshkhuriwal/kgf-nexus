@@ -83,8 +83,11 @@ func (a *API) putRole(w http.ResponseWriter, r *http.Request, p authn.Principal)
 		Permissions []string `json:"permissions"`
 		Revision    int64    `json:"revision"`
 	}
-	if decodeRBACBody(w, r, &b) != nil {
-		writeError(w, 400, "invalid", "Invalid role")
+	if err := decodeRBACBody(w, r, &b); err != nil {
+		rejectBody(w, err, http.StatusBadRequest, "invalid", "Invalid role")
+		return
+	}
+	if !revisionOK(w, b.Revision) {
 		return
 	}
 	name := r.PathValue("name")
@@ -146,7 +149,9 @@ func (a *API) putRole(w http.ResponseWriter, r *http.Request, p authn.Principal)
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
-		a.fail(w, r, "save role", err)
+		if !a.auditUnavailable(w, r, err) {
+			a.fail(w, r, "save role", err)
+		}
 		return
 	}
 	writeJSON(w, 200, map[string]any{"saved": true})
@@ -195,7 +200,9 @@ func (a *API) deleteRole(w http.ResponseWriter, r *http.Request, p authn.Princip
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
-		a.fail(w, r, "delete role", err)
+		if !a.auditUnavailable(w, r, err) {
+			a.fail(w, r, "delete role", err)
+		}
 		return
 	}
 	w.WriteHeader(204)
@@ -230,8 +237,11 @@ func (a *API) userRoles(w http.ResponseWriter, r *http.Request, p authn.Principa
 		Roles    []string `json:"roles"`
 		Revision int64    `json:"revision"`
 	}
-	if decodeRBACBody(w, r, &b) != nil || len(b.Roles) > 20 {
-		writeError(w, 400, "invalid", "Invalid roles")
+	if err := decodeRBACBody(w, r, &b); err != nil || len(b.Roles) > 20 {
+		rejectBody(w, err, http.StatusBadRequest, "invalid", "Invalid roles")
+		return
+	}
+	if !revisionOK(w, b.Revision) {
 		return
 	}
 	tx, err := a.db.Begin(r.Context())
@@ -313,7 +323,9 @@ func (a *API) userRoles(w http.ResponseWriter, r *http.Request, p authn.Principa
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
-		a.fail(w, r, "assign roles", err)
+		if !a.auditUnavailable(w, r, err) {
+			a.fail(w, r, "assign roles", err)
+		}
 		return
 	}
 	writeJSON(w, 200, map[string]any{"roles": b.Roles})
@@ -329,7 +341,16 @@ func rbacAudit(r *http.Request, tx pgx.Tx, p authn.Principal, action, target str
 	}
 	e := store.AuditEntry{Namespace: p.Namespace, ActorID: actorID, Detail: detail, ActorKind: string(p.Kind), ActorLabel: p.Name, Action: action, TargetKind: "rbac", TargetID: target, Outcome: "success", ClientIP: clientIP(r)}
 	attributeKGF(p, &e)
-	return store.GatewayAppendAudit(r.Context(), tx, e)
+	// A failure is an AUDIT failure, reported as such: the change rolls back
+	// with it (it is in this transaction) and the caller answers 503
+	// audit_unavailable through auditUnavailable, the F139 fail-closed rule.
+	// It used to surface as a bare error and a 500, which told the operator
+	// the server was broken rather than "retry shortly, nothing changed".
+	if err := store.GatewayAppendAudit(r.Context(), tx, e); err != nil {
+		countAuditFailure(ClassOf(action), true)
+		return auditWriteError{err}
+	}
+	return nil
 }
 
 func permittedEventPayload(e store.EventRow, p authn.Principal) map[string]any {
@@ -340,11 +361,14 @@ func permittedEventPayload(e store.EventRow, p authn.Principal) map[string]any {
 	return out
 }
 
+// decodeRBACBody decodes one strict JSON object of at most 32 KiB. A body over
+// the limit comes back as *bodyTooLargeError, which the callers answer with
+// 413 through rejectBody; anything else is theirs to call malformed.
 func decodeRBACBody(w http.ResponseWriter, r *http.Request, out any) error {
 	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32768))
 	d.DisallowUnknownFields()
 	if err := d.Decode(out); err != nil {
-		return err
+		return bodyError(err)
 	}
 	var extra any
 	if err := d.Decode(&extra); err != io.EOF {
@@ -427,7 +451,9 @@ func (a *API) createUserWithRole(w http.ResponseWriter, r *http.Request, p authn
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
-		a.fail(w, r, "create user", err)
+		if !a.auditUnavailable(w, r, err) {
+			a.fail(w, r, "create user", err)
+		}
 		return
 	}
 	result := userPayload(user)

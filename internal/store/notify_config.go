@@ -101,7 +101,9 @@ RETURNING `+channelCols, c.ID, c.Namespace, c.Name, c.Kind, cfg, sec.Ciphertext,
 	return scanChannel(row)
 }
 
-// NotifyUpdateChannel updates a channel by name. revision 0 skips the check.
+// NotifyUpdateChannel updates a channel by name if it is still at revision.
+// There is no unconditional form: revision 0 names no stored channel (they start
+// at 1), so it is a conflict like any other stale revision (F155).
 func NotifyUpdateChannel(ctx context.Context, q GWQuerier, c NotificationChannel, sec ChannelSecretUpdate, revision int64) (NotificationChannel, error) {
 	cfg, err := jsonb(c.Config)
 	if err != nil {
@@ -119,7 +121,7 @@ UPDATE notification_channels
        secret_hint       = CASE WHEN $4 THEN secret_hint ELSE $7 END,
        rate_limit_per_minute = $8, enabled = $9,
        updated_at = now(), revision = revision + 1
- WHERE namespace = $1 AND name = $2 AND ($10 = 0 OR revision = $10)
+ WHERE namespace = $1 AND name = $2 AND revision = $10
 RETURNING `+channelCols, c.Namespace, c.Name, cfg, sec.Keep, sec.Ciphertext, ref, sec.Hint,
 		c.RateLimitPerMinute, c.Enabled, revision)
 	out, err := scanChannel(row)
@@ -253,7 +255,7 @@ func NotifyResolveChannelIDs(ctx context.Context, q GWQuerier, ns string, names 
 	return out, nil
 }
 
-// NotifyUpsertRule creates (revision < 0) or updates a rule and replaces its
+// NotifyUpsertRule creates (create) or updates (at exactly revision) a rule and replaces its
 // channel links, in the caller's transaction.
 func NotifyUpsertRule(ctx context.Context, tx pgx.Tx, r NotificationRule, create bool, revision int64) (NotificationRule, error) {
 	labels, err := jsonb(r.Labels)
@@ -274,7 +276,7 @@ VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8) RETURNING id::text`,
 UPDATE notification_rules
    SET events = $3, workflows = $4, labels = $5::jsonb, sla_seconds = $6, enabled = $7,
        updated_at = now(), revision = revision + 1
- WHERE namespace = $1 AND name = $2 AND ($8 = 0 OR revision = $8)
+ WHERE namespace = $1 AND name = $2 AND revision = $8
 RETURNING id::text`, r.Namespace, r.Name, r.Events, r.Workflows, labels, r.SLASeconds, r.Enabled, revision).Scan(&id)
 		if errors.Is(err, pgx.ErrNoRows) {
 			if _, gerr := NotifyGetRule(ctx, tx, r.Namespace, r.Name); gerr == nil {
@@ -394,9 +396,7 @@ func scanDelivery(row pgx.Row) (NotificationDelivery, error) {
 
 // NotifyListDeliveries pages a namespace's deliveries, newest first.
 func NotifyListDeliveries(ctx context.Context, q GWQuerier, ns string, f DeliveryFilter) ([]NotificationDelivery, error) {
-	if f.Limit <= 0 || f.Limit > 500 {
-		f.Limit = 100
-	}
+	f.Limit = ClampLimit(f.Limit, DefaultDelivery, MaxDeliveryPage)
 	rows, err := q.Query(ctx, `SELECT `+deliveryCols+`
   FROM notification_deliveries d
   JOIN notification_channels c ON c.id = d.channel_id

@@ -1764,7 +1764,30 @@ requests 50m CPU and 32Mi of memory, on top of the task's own request.
 | `NEXUS_K8S_WRITABLE_ROOT_FS` | `false` | Set to `true` only for images that must write outside `/nexus` and `/tmp`. |
 | `NEXUS_K8S_NODE_SELECTOR`, `NEXUS_K8S_TOLERATIONS` | none | Pins this worker's pods to a node pool. Format: `k=v,k2=v2` and `key=value:Effect,key:Effect`. |
 | `NEXUS_K8S_GPU_RESOURCE` | unset: GPU tasks are refused | The device-plugin resource, for example `nvidia.com/gpu`. |
+| `NEXUS_K8S_MIG_RESOURCE_PREFIX` | `nvidia.com/mig-` | Joined to a MIG profile: `nvidia.com/mig-1g.10gb` (device plugin `mixed` strategy). Must end in `-`, `/`, `.` or `_`. |
+| `NEXUS_K8S_GPU_SHARED_RESOURCE` | unset: shared-GPU tasks are refused | The replicated resource a shared (MPS or time-sliced) slice requests one of, for example `nvidia.com/gpu.shared`. |
 | `NEXUS_K8S_GPU_KIND_LABEL` | unset | A node label, for example `nvidia.com/gpu.product`. When set, `gpu_kind` becomes a nodeSelector on that label. |
+| `NEXUS_K8S_TASK_API_ADVERTISE` | unset: no workload API for pods | `host:port` at which task pods reach this agent's workload-API TLS listener (§29.10): the pod IP (`$(NEXUS_POD_IP):9443`), a Service name, or `host.docker.internal:<port>` for an agent outside a local cluster. Setting it enables the listener. |
+| `NEXUS_K8S_TASK_API_LISTEN` | `:<port of the advertised address>` | The address the listener binds. |
+| `NEXUS_K8S_TASK_API_EXTRA_NAMES` | none | Further DNS names or IPs for the listener's certificate. |
+
+Device-plugin resource names are validated at start; a malformed one stops the
+agent rather than leaving every GPU pod Pending on a resource no plugin
+advertises. A task pod requests the devices the agent's registry **admitted**
+(the reservation), never its enforcement ceiling: `limit: {cpu, memory}` beside
+`request: {mig: {1g.10gb: 1}}` still gets `nvidia.com/mig-1g.10gb: 1`, and a
+ceiling naming more whole GPUs than were reserved does not take them (F158).
+The pod sees `NEXUS_GPU_MODE` (and, for a shared slice, its declared size), but
+no device index or instance UUID from the agent: the device plugin chooses and
+exports those.
+
+**Helm.** An `agents[]` entry whose `executors` include `kubernetes` renders
+all of this from `agentDefaults.kubernetes` (overridden per agent by
+`agents[].kubernetes`): the task namespace, the device-plugin names, the
+workload-API listener on the pod IP with its container port, a Role and
+RoleBinding in the task namespace, and a NetworkPolicy letting task pods reach
+that port. The agent's own pod requests no GPU: `gpuCount`, `gpuMig` (as
+`profile=count`) and `gpuShared` describe the task pool (F159).
 | `NEXUS_K8S_TTL_AFTER_FINISHED` | `10m` | Lets the Job controller delete Jobs the agent never cleaned up. This is also the window in which a restarted agent can harvest a finished attempt. |
 | `NEXUS_K8S_IMAGE_PULL_TIMEOUT` | `10m` | How long a **transient** pull failure may last. A pull that fails as not-found or unauthorised fails immediately. |
 | `NEXUS_K8S_START_TIMEOUT` | `10m` | How long an attempt may go unscheduled or unstarted before it fails as retryable. |
@@ -1821,8 +1844,16 @@ NEXUS_K8S_CONFORMANCE=1 go test ./agent/internal/executor/ ./agent/internal/work
 
 The tests refuse to run unless the context name is recognisably local **and**
 its API server is on a loopback address. They create namespace
-`nexus-k8s-exec-test`, with Pod Security "restricted" enforced, and delete it
-afterwards. Set `NEXUS_K8S_KEEP_NAMESPACE=1` to keep it for debugging.
+`nexus-k8s-exec-test` (or `NEXUS_K8S_TEST_NAMESPACE`), with Pod Security
+"restricted" enforced, and delete it afterwards. Set
+`NEXUS_K8S_KEEP_NAMESPACE=1` to keep it for debugging.
+
+The workload API's end-to-end test (§29.10) runs the real control-plane
+binaries and two agents against the same guarded cluster:
+
+```bash
+NEXUS_TEST_DATABASE_URL=postgres://...migrated-db... make k8s-taskapi-e2e
+```
 
 Check that the subtests actually ran (F89). Each `…/kubernetes` line should take
 seconds, not `0.00s`. A `-run` pattern that does not match the three-level
@@ -2924,10 +2955,33 @@ connecting through PUBLIC's default CONNECT. On a shared server:
 - give each installation its own login names (the chart's
   `postgres.connections.<c>.user`), or one install's db-roles Job resets the
   other's passwords and `nexus_*` memberships;
-- revoke PUBLIC's CONNECT on each Nexus database, as its owner:
-  `REVOKE CONNECT ON DATABASE nexus FROM PUBLIC;` The db-roles Job grants
-  CONNECT on its own database to each login it manages, so that installation's
-  services keep working and no other installation's logins get in;
+- revoke PUBLIC's CONNECT on each Nexus database. The db-roles Job does it
+  with `postgres.runtimeRoles.revokePublicConnect: true`
+  (`NEXUS_DB_REVOKE_PUBLIC_CONNECT=true`), after granting CONNECT on its own
+  database to each login it manages, so that installation's services keep
+  working and no other installation's logins get in. Any other role that must
+  connect (a backup or monitoring login) then needs its own
+  `GRANT CONNECT ON DATABASE <db> TO <role>`. By hand, as the owner:
+  `REVOKE CONNECT ON DATABASE nexus FROM PUBLIC;`
+- give each installation its own group roles: `postgres.groupRolePrefix:
+  acme` (`NEXUS_DB_ROLE_PREFIX=acme` for `deploy/migrate.sh` and
+  `nexus-db-roles`). Migration 0038 then creates `acme_api_gateway` ...
+  `acme_event_service` and moves every grant this database gave the shared
+  `nexus_*` roles onto them; migrate.sh repeats the move after every later
+  migration, and the runtime logins join the `acme_*` roles. Other
+  installations' logins, members of the shared `nexus_*` roles, hold nothing
+  in this database even if they can connect. The prefix must be unique on the
+  server (two installations choosing the same one share roles again), and it
+  is fixed once applied; `nexus-db-roles` refuses a prefix the database was not
+  migrated with. With no prefix nothing changes: existing installations keep
+  the shared names. Adopting a prefix on an existing installation takes a
+  **maintenance window**: from the moment the migrate Job moves the grants
+  until the db-roles Job has made the logins members of the new roles (seconds
+  in one `helm upgrade`), running services hold no privileges and fail their
+  queries. Scale the services to zero, upgrade with the prefix, scale back. A
+  new installation has no such window (its services start after both Jobs).
+  Rolling back: roll 0038 back first (it moves every grant back to `nexus_*`),
+  then re-run db-roles without the prefix;
 - never roll 0005 back on a shared server: its rollback drops the group roles
   when no database still grants them anything.
 
@@ -3999,7 +4053,9 @@ constraint.
 | `NEXUS_CONSOLE_URL` | event-service | unset | Links each notification to `<console>/runs/<id>`. |
 | `NEXUS_SMTP_*` | event-service | mail disabled | Email channels. The settings are the same as the gateway's (§10). With no host, email deliveries fail permanently and say why. |
 | `NEXUS_NOTIFY_EVAL_BATCH`, `_EVAL_INTERVAL`, `_DISPATCH_BATCH`, `_DISPATCH_INTERVAL`, `_CONCURRENCY`, `_SLA_INTERVAL`, `_BASE_BACKOFF`, `_MAX_BACKOFF`, `_RETENTION` | event-service | 200, 1s, 50, 1s, 8, 30s, 30s, 1h, 720h | Notifier tuning. |
-| `NEXUS_SENSOR_S3_ENDPOINT`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_SESSION_TOKEN`, `_CREDENTIALS`, `_USE_TLS` | workflow-manager | the result store's `NEXUS_RESULT_STORE_*` / `NEXUS_S3_*` | The store that `s3://` sensors list. `_CREDENTIALS` takes the result store's modes (`auto`, `static`, `web-identity`, `pod-identity`, `iam`, `env`, `anonymous`; §26.3), so a sensor watching the platform's own bucket uses the same keyless identity; the Helm chart gives the workflow-manager the result-store ServiceAccount for that (§20.13). |
+| `NEXUS_SENSOR_S3_ENDPOINT`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_SESSION_TOKEN`, `_CREDENTIALS`, `_USE_TLS` | workflow-manager | the result store's `NEXUS_RESULT_STORE_*` / `NEXUS_S3_*` | The store that `s3://` sensors list. The result-store fallback applies only when the result store is `s3`: an Azure or GCS store's endpoint is never handed to the S3 client. `_CREDENTIALS` takes the result store's modes (`auto`, `static`, `web-identity`, `pod-identity`, `iam`, `env`, `anonymous`; §26.3), so a sensor watching the platform's own bucket uses the same keyless identity; the Helm chart gives the workflow-manager the result-store ServiceAccount for that (§20.13). |
+| `NEXUS_SENSOR_AZURE_STORAGE_ACCOUNT`, `_AUTH`, `_KEY`, `NEXUS_SENSOR_AZURE_CLIENT_ID`, `NEXUS_SENSOR_AZBLOB_ENDPOINT` | workflow-manager | the result store's `NEXUS_AZURE_*` and endpoint, **only when** `NEXUS_RESULT_STORE_BACKEND=azblob` | The storage account `azblob://` / `az://` sensors list. `_AUTH` takes the result store's modes (`auto`, `workload-identity`, `managed-identity`, `shared-key`). A malformed mode stops the service at startup. |
+| `NEXUS_SENSOR_GCS_AUTH`, `NEXUS_SENSOR_GCS_ENDPOINT`, `NEXUS_SENSOR_GCS_ENABLED` | workflow-manager | the result store's `NEXUS_GCS_AUTH` and endpoint, **only when** `NEXUS_RESULT_STORE_BACKEND=gcs` | `gcs://` / `gs://` sensors. `auto` is Application Default Credentials (GKE Workload Identity); `none` is for an emulator and requires `_ENDPOINT`. ADC needs no setting, so on another result-store backend opt in with `NEXUS_SENSOR_GCS_ENABLED=true`. |
 | `NEXUS_SENSOR_INTERVAL` | workflow-manager | 2s | How often a replica looks for due sensors. Each sensor's own `poll_interval_seconds` decides how often it is actually polled. |
 
 In Helm, set `events.secretKey.existingSecret` (and `key`, and `previousKey`
@@ -4181,10 +4237,20 @@ nexusctl sensor observations landing    # what it saw and which run it started
   - `stale`: no replica has polled it for 5 min. Check that the workflow-manager
     is running.
   - `disabled`
-- **Object stores.** `s3://` is served now. `gs://` and `az://` definitions are
-  accepted and report "no object-store lister is configured" until native
-  listers are registered. The lister interface (`sensors.ObjectLister`) is two
-  behaviours: list after a key, and page.
+- **Object stores.** `s3://bucket/prefix`, `azblob://container/prefix` (alias
+  `az://`) and `gcs://bucket/prefix` (alias `gs://`) are served, each by the
+  result store's own backend (`internal/objstore`), so they authenticate the
+  way the store does (§26.3). In an Azure URI the host is the CONTAINER; the
+  storage account comes from configuration (§27.1), never from the URI, so a
+  sensor definition cannot aim the platform's identity at another account. A
+  scheme with no configured store reports "no object-store lister is
+  configured". GCS and S3 resume a listing server-side (StartOffset,
+  StartAfter); Azure's XML listing has no start key, so an Azure sensor re-reads
+  the keys under its prefix up to its cursor on each poll: keep Azure prefixes
+  narrow (a dated directory rather than a whole container). Proven by
+  `services/workflow-manager/sensors/native_integration_test.go` against
+  Azurite and fake-gcs-server, and the `ListAfter` case of the objstore
+  conformance suite on all three backends.
 
 ### 27.7 Asset lineage
 
@@ -4273,7 +4339,19 @@ constraint that no worker meets leaves the attempt PENDING indefinitely -- as
 | `NEXUS_GPU_DISCOVERY=nvidia-smi` | | Reads whole GPUs and MIG instances from `nvidia-smi -L` instead. |
 | `NEXUS_GPU_MPS_PIPE_DIR` | `/tmp/nvidia-mps` | Mounted into containers on MPS devices (with `--ipc=host`). |
 | `NEXUS_K8S_MIG_RESOURCE_PREFIX` | `nvidia.com/mig-` | Kubernetes executor, device plugin `mixed` strategy. |
-| `NEXUS_K8S_GPU_SHARED_RESOURCE` | `nvidia.com/gpu.shared` | Required for shared slices on the kubernetes executor; unset refuses them. |
+| `NEXUS_K8S_GPU_SHARED_RESOURCE` | unset (e.g. `nvidia.com/gpu.shared`) | Required for shared slices on the kubernetes executor; unset refuses them. |
+
+**Kubernetes agents.** A kubernetes-executor agent advertises its task pool:
+`NEXUS_GPU_MIG=1g.10gb=14;3g.40gb=4` (counts: the device plugin allocates the
+instances per pod) and `NEXUS_GPU_SHARED=0:mps:40Gi` (the per-device figure
+bounds how much Nexus packs onto the worker). Every task pod requests exactly
+its reservation: `nvidia.com/mig-<profile>: n`, one unit of
+`NEXUS_K8S_GPU_SHARED_RESOURCE`, or the admitted count of
+`NEXUS_K8S_GPU_RESOURCE` (§13.2, F158). In Helm these are
+`agentDefaults.kubernetes.{gpuResourceName, migResourcePrefix,
+sharedGpuResourceName, gpuKindLabel}`. An agent configured with counts is
+labelled `simulated=true`, because the agent cannot see the devices; on a
+kubernetes agent that label means "allocated by the device plugin", not "fake".
 
 A device is in exactly one mode; the agent refuses to start on an inventory
 that counts one twice. Re-partitioning MIG needs an agent restart (a new
@@ -4516,10 +4594,13 @@ Through it, and through the SDK calls that wrap it, a task can:
 | `ctx.heartbeat()` / `ctx.progress()` | ReportProgress, which re-arms the heartbeat timeout (before 0036 these were no-ops under a real agent, F148) |
 | raising `nexus.RateLimited` | `ERROR_CLASS_RATE_LIMITED` with the provider's Retry-After |
 
-The **kubernetes executor** does not offer the socket yet: pods run on other
-nodes. There the SDK degrades to in-process behaviour (usage logged, permits
-process-local, checkpoints in `ctx.store`); do not rely on shared limits or
-recorded token usage for tasks on that executor.
+A task on the **kubernetes executor** runs on another node and cannot reach a
+socket; it gets the same API over the agent's TLS listener instead
+(`NEXUS_TASK_API=https://...`, §29.10), when the agent sets
+`NEXUS_K8S_TASK_API_ADVERTISE` (the Helm chart does, by default). Without it
+the SDK degrades to in-process behaviour (usage logged, permits
+process-local, checkpoints in `ctx.store`) and the agent logs a warning at
+start.
 
 The gateway advertises the capabilities at registration
 (`NEXUS_WORKLOAD_API`, default `true`; `NEXUS_MAX_CHECKPOINT_BYTES`, default
@@ -4708,3 +4789,54 @@ agents offer tasks no usage, permit or checkpoint endpoints; the SDK falls
 back in-process. Rolling back 0036 (`0036_workload_api.down.sql`) drops
 reported units not yet in the ledger, bucket state and checkpoint pointers;
 set `NEXUS_WORKLOAD_API=false` and restart the gateways and schedulers first.
+
+### 29.10 Kubernetes tasks: the workload API over the network
+
+Design: [ADR-0032, addendum](adr/0032-ai-workloads-usage-rate-limits-checkpoints.md#addendum-2026-09-26-the-workload-api-for-kubernetes-pods-f148).
+Finding F148.
+
+A kubernetes agent with `NEXUS_K8S_TASK_API_ADVERTISE` set serves every
+attempt's workload API on one TLS listener and hands each pod:
+
+| Pod variable | Value | How it arrives |
+|---|---|---|
+| `NEXUS_TASK_API` | `https://<advertised host:port>` | literal env (public) |
+| `NEXUS_TASK_API_CA` | the agent's CA certificate, PEM | literal env (public) |
+| `NEXUS_TASK_API_TOKEN` | 256 random bits, this attempt only | `secretKeyRef` to the attempt's immutable Secret (`nexus-<attempt>-inputs`, key `nexus-task-api.token`) |
+
+What an operator can rely on:
+
+- **The task never holds an agent credential.** The token is minted by the
+  agent per attempt; the agent adds the lease token and forwards over its own
+  authenticated worker connection, exactly as for the socket. The worker
+  session credential, the lease token and the result-store keys never enter
+  the pod.
+- **A token is one attempt.** The listener routes by the token and the token is
+  registered for exactly one attempt; there is no attempt id in any request to
+  forge.
+- **Revocation.** The token stops working (401) the moment the attempt's run on
+  the agent ends: success, failure, cancel or lease loss. Until then every call
+  is lease-fenced by the gateway and again by the scheduler, so a token whose
+  lease was reclaimed while its pod still runs gets 409 `stale_lease`.
+- **Tenancy.** An agent serves one namespace and knows only the attempts it
+  launched: a token minted by another agent (another tenant) is refused.
+- **Encryption.** TLS 1.2 or later; the CA and serving key are generated in the
+  agent's memory at start and never written anywhere. The SDK verifies against
+  `NEXUS_TASK_API_CA` and never falls back to plain `http://` or to skipping
+  verification. An agent restart changes the CA; the previous session's
+  attempts are LOST anyway.
+- **Network.** Task pods must reach the advertised address on its port. The
+  chart renders an egress NetworkPolicy in the task namespace for exactly that
+  (`<agent>-task-api`); `deploy/k8s/executor-policies.yaml` has the same hole in
+  its default-deny. No other agent port is opened to task pods.
+
+Operate it through the existing metrics (§29.7): requests on the listener are
+`nexus_agent_workload_api_requests_total`, with `code="401"` for refused or
+revoked tokens. The agent logs `workload API network listener serving remote
+attempts` with the URL at start, and a warning when a kubernetes agent has no
+listener. Verified by `agent/e2e/k8staskapi` on docker-desktop (Kubernetes
+1.34.3): a pod reported usage, took shared permits, checkpointed, failed and
+was retried; the retry resumed from the checkpoint; `attempt_usage`, the usage
+ledger, `task_checkpoints`, the checkpoint objects, `rate_limit_buckets` and the
+heartbeats all held the expected values; a token after its attempt ended, and
+each tenant's token on the other tenant's agent, were refused.

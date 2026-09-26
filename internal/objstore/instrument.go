@@ -145,6 +145,19 @@ func (i *instrumented) List(ctx context.Context, prefix string, fn func(ObjectIn
 	return err
 }
 
+// ListAfter keeps the wrapped backend's server-side start key: without it the
+// decorator would hide AfterLister and every resumed listing would walk the
+// prefix from the beginning.
+func (i *instrumented) ListAfter(ctx context.Context, prefix, startAfter string, fn func(ObjectInfo) error) error {
+	ctx, span, start := i.start(ctx, "list", "", attribute.String("nexus.objstore.prefix", prefix),
+		attribute.String("nexus.objstore.start_after", startAfter))
+	n := 0
+	err := ListAfter(ctx, i.s, prefix, startAfter, func(o ObjectInfo) error { n++; return fn(o) })
+	span.SetAttributes(attribute.Int("nexus.objstore.listed", n))
+	i.finish(span, "list", start, err)
+	return err
+}
+
 func (i *instrumented) Delete(ctx context.Context, key string) error {
 	ctx, span, start := i.start(ctx, "delete", key)
 	err := i.s.Delete(ctx, key)

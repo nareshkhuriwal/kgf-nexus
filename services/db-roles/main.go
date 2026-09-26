@@ -12,6 +12,12 @@
 // The spec names the environment variable holding each password, never the
 // password itself, so it can live in a manifest. Output names logins and the
 // grants changed; it never prints a password or a verifier.
+//
+// On a server shared by several Nexus installations (F153, OPERATIONS §20.12):
+//
+//	NEXUS_DB_ROLE_PREFIX=acme            the installation's group roles are acme_*
+//	                                     (the migrate job's same setting, 0038)
+//	NEXUS_DB_REVOKE_PUBLIC_CONNECT=true  REVOKE CONNECT ON DATABASE <this> FROM PUBLIC
 package main
 
 import (
@@ -44,7 +50,19 @@ func run(log *slog.Logger) error {
 	if strings.TrimSpace(spec) == "" {
 		return fmt.Errorf("NEXUS_DB_ROLES is empty: nothing to do (the chart sets it when postgres.runtimeRoles.enabled)")
 	}
-	logins, err := dbroles.ParseSpec([]byte(spec))
+	// F153: the installation's group-role prefix (the migrate job's
+	// NEXUS_DB_ROLE_PREFIX, migration 0038) and whether to shut PUBLIC out of
+	// this database, so logins made for other installations on a shared
+	// server cannot connect here at all.
+	opts := dbroles.Options{GroupPrefix: strings.TrimSpace(os.Getenv("NEXUS_DB_ROLE_PREFIX"))}
+	switch v := strings.TrimSpace(os.Getenv("NEXUS_DB_REVOKE_PUBLIC_CONNECT")); v {
+	case "", "false":
+	case "true":
+		opts.RevokePublicConnect = true
+	default:
+		return fmt.Errorf("NEXUS_DB_REVOKE_PUBLIC_CONNECT=%q: want true or false", v)
+	}
+	logins, err := dbroles.ParseSpecWithOptions([]byte(spec), opts)
 	if err != nil {
 		return err
 	}
@@ -60,7 +78,7 @@ func run(log *slog.Logger) error {
 	}
 	defer conn.Close(context.Background())
 
-	results, err := dbroles.Apply(ctx, conn, logins, os.Getenv)
+	results, err := dbroles.ApplyWithOptions(ctx, conn, logins, os.Getenv, opts)
 	if err != nil {
 		return err
 	}
@@ -68,6 +86,10 @@ func run(log *slog.Logger) error {
 		log.Info("runtime login in place",
 			"login", r.Login, "created", r.Created, "read_only", r.ReadOnly,
 			"granted", r.Granted, "revoked", r.Revoked, "version", version)
+	}
+	if opts.RevokePublicConnect {
+		log.Info("PUBLIC's CONNECT on this database revoked; only the owner and the logins above connect",
+			"version", version)
 	}
 	return nil
 }

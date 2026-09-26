@@ -48,6 +48,8 @@ type restDB struct {
 	// run absent here reads as not found in that namespace.
 	runs  map[string]store.RunRow
 	nodes map[string][]store.NodeRow
+	// runListLimits records the LIMIT of every run listing, in order.
+	runListLimits []int
 }
 
 // addRun seeds a run and its nodes (node id -> state).
@@ -139,6 +141,12 @@ func (d *restDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row 
 	// rather than on "EXISTS", so it keeps working if the query is reformatted.
 	// GatewayGetRun: the run select joined to its spec, scoped by namespace.
 	// Checked before the spec lookup below, whose FROM clause it also contains.
+	// GatewayTenant: no namespace in these tests has a tenant row.
+	case strings.Contains(sql, "FROM tenants WHERE namespace"):
+		return errRow{pgx.ErrNoRows}
+	// GatewayCountRuns first: it reads the same table with a count.
+	case strings.Contains(sql, "SELECT count(*) FROM workflow_runs r"):
+		return valueRow{[]any{int64(0)}}
 	case strings.Contains(sql, "FROM workflow_runs r"):
 		run, ok := d.runs[args[0].(string)+"\x00"+args[1].(string)]
 		if !ok {
@@ -157,7 +165,27 @@ func (d *restDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, 
 	if strings.Contains(sql, "FROM task_nodes") {
 		return &nodeScanRows{rows: d.nodes[args[0].(string)], i: -1}, nil
 	}
+	// GatewayClusterList: a namespace with no clusters.
+	if strings.Contains(sql, "FROM clusters WHERE namespace") {
+		return &nodeScanRows{i: -1}, nil
+	}
+	// GatewayListRuns: an empty page, recording the LIMIT the store asked for
+	// (always its last argument) so a test can pin how the handler capped it.
+	if strings.Contains(sql, "FROM workflow_runs r") && strings.Contains(sql, "ORDER BY r.created_at DESC LIMIT") {
+		d.runListLimits = append(d.runListLimits, args[len(args)-1].(int))
+		return &nodeScanRows{i: -1}, nil
+	}
 	return nil, fmt.Errorf("restDB: unhandled Query: %s", sql)
+}
+
+// lastRunListLimit is the LIMIT of the most recent run listing, or 0.
+func (d *restDB) lastRunListLimit() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.runListLimits) == 0 {
+		return 0
+	}
+	return d.runListLimits[len(d.runListLimits)-1]
 }
 
 // runScanRow scans a store.RunRow in the column order of store's runSelect.
@@ -218,6 +246,8 @@ func (r valueRow) Scan(dest ...any) error {
 		// fails with "unsupported destination" rather than an answer.
 		case *bool:
 			*p = r.vals[i].(bool)
+		case *int64:
+			*p = r.vals[i].(int64)
 		default:
 			return fmt.Errorf("unsupported destination %T", d)
 		}

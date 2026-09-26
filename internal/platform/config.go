@@ -82,6 +82,30 @@ func Name(s string) bool { return len(s) > 0 && len(s) <= 63 && namePattern.Matc
 func Default() Config {
 	return Config{Scheduler: Scheduler{1, 4, 65, 300, DefaultFairShareWeight}, Pools: []Pool{}, Profiles: []PodProfile{}}
 }
+
+// Normalize replaces absent collections with empty ones, so the document
+// always serialises its lists as [] and its maps as {} -- never null.
+//
+// A PUT that omits `pools`, or sends `"tolerations": null`, decodes to nil;
+// stored and served back as-is, the console then read null where it expects a
+// list. Every reader and writer of the policy calls this, so a document saved
+// before it existed is served normalized too.
+func (c *Config) Normalize() {
+	if c.Pools == nil {
+		c.Pools = []Pool{}
+	}
+	if c.Profiles == nil {
+		c.Profiles = []PodProfile{}
+	}
+	for i := range c.Profiles {
+		if c.Profiles[i].NodeSelector == nil {
+			c.Profiles[i].NodeSelector = map[string]string{}
+		}
+		if c.Profiles[i].Tolerations == nil {
+			c.Profiles[i].Tolerations = []Toleration{}
+		}
+	}
+}
 func (c Config) Validate() error {
 	if c.Revision < 0 {
 		return fmt.Errorf("revision cannot be negative")

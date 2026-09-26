@@ -58,13 +58,59 @@ type Login struct {
 }
 
 var (
-	loginRe = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
-	groupRe = regexp.MustCompile(`^nexus_[a-z_]+$`)
-	envRe   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	loginRe  = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+	envRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	prefixRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,39}$`)
 )
 
-// ParseSpec decodes and validates a JSON array of logins.
-func ParseSpec(raw []byte) ([]Login, error) {
+// DefaultGroupPrefix names the shared group roles 0005 created.
+const DefaultGroupPrefix = "nexus"
+
+// Options are the installation-wide settings of one run (F153).
+type Options struct {
+	// GroupPrefix is the installation's group-role prefix (migration 0038,
+	// NEXUS_DB_ROLE_PREFIX): member_of names must be <prefix>_<service>.
+	// Empty means DefaultGroupPrefix. Apply refuses a prefix the database was
+	// not migrated with.
+	GroupPrefix string
+	// RevokePublicConnect revokes PUBLIC's CONNECT on this database after
+	// granting CONNECT to every managed login, so logins made for other
+	// installations on the same server cannot connect here at all.
+	RevokePublicConnect bool
+}
+
+func (o Options) prefix() string {
+	if o.GroupPrefix == "" {
+		return DefaultGroupPrefix
+	}
+	return o.GroupPrefix
+}
+
+func matchesAny(res []*regexp.Regexp, s string) bool {
+	for _, re := range res {
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// groupPattern matches the group roles of prefix.
+func groupPattern(prefix string) *regexp.Regexp {
+	return regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `_[a-z_]+$`)
+}
+
+// ParseSpec decodes and validates a JSON array of logins for the shared
+// (nexus_*) group roles.
+func ParseSpec(raw []byte) ([]Login, error) { return ParseSpecWithOptions(raw, Options{}) }
+
+// ParseSpecWithOptions is ParseSpec for an installation's group-role prefix.
+func ParseSpecWithOptions(raw []byte, opts Options) ([]Login, error) {
+	if !prefixRe.MatchString(opts.prefix()) {
+		return nil, fmt.Errorf("group role prefix %q must match %s", opts.GroupPrefix, prefixRe)
+	}
+	groupRe := groupPattern(opts.prefix())
+	sharedRe := groupPattern(DefaultGroupPrefix)
 	var logins []Login
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
@@ -79,11 +125,12 @@ func ParseSpec(raw []byte) ([]Login, error) {
 		if !loginRe.MatchString(l.Name) {
 			return nil, fmt.Errorf("login %d: name %q must match %s", i, l.Name, loginRe)
 		}
-		if groupRe.MatchString(l.Name) && !strings.HasSuffix(l.Name, "_login") {
-			// nexus_<service> is the group role's own name space. A login named
-			// like a group role is how "grant the login" turns into "give the
-			// group role a password".
-			return nil, fmt.Errorf("login %q: names of the form nexus_* are reserved for group roles unless they end in _login", l.Name)
+		if (groupRe.MatchString(l.Name) || sharedRe.MatchString(l.Name)) && !strings.HasSuffix(l.Name, "_login") {
+			// <prefix>_<service> is the group role's own name space. A login
+			// named like a group role is how "grant the login" turns into
+			// "give the group role a password".
+			return nil, fmt.Errorf("login %q: names of the form %s_* are reserved for group roles unless they end in _login",
+				l.Name, opts.prefix())
 		}
 		if seen[l.Name] {
 			return nil, fmt.Errorf("login %q is listed twice", l.Name)
@@ -94,7 +141,7 @@ func ParseSpec(raw []byte) ([]Login, error) {
 		}
 		for _, g := range l.MemberOf {
 			if !groupRe.MatchString(g) {
-				return nil, fmt.Errorf("login %q: group %q is not a nexus_* group role", l.Name, g)
+				return nil, fmt.Errorf("login %q: group %q is not a %s_* group role", l.Name, g, opts.prefix())
 			}
 		}
 		if !envRe.MatchString(l.PasswordEnv) {
@@ -116,9 +163,28 @@ type Result struct {
 	ReadOnly bool
 }
 
-// Apply converges every login in one transaction on conn. password returns the
-// value of an environment variable (os.Getenv in production).
+// Apply converges every login in one transaction on conn, for the shared
+// group roles. password returns the value of an environment variable
+// (os.Getenv in production).
 func Apply(ctx context.Context, conn *pgx.Conn, logins []Login, password func(string) string) ([]Result, error) {
+	return ApplyWithOptions(ctx, conn, logins, password, Options{})
+}
+
+// databasePrefix is the group-role prefix this database was migrated with:
+// migration 0038's record, or the shared default before 0038.
+func databasePrefix(ctx context.Context, tx pgx.Tx) (string, error) {
+	var p string
+	err := tx.QueryRow(ctx, `SELECT CASE WHEN to_regprocedure('nexus_role_prefix()') IS NULL
+		THEN 'nexus' ELSE nexus_role_prefix() END`).Scan(&p)
+	return p, err
+}
+
+// ApplyWithOptions is Apply for an installation's Options.
+func ApplyWithOptions(ctx context.Context, conn *pgx.Conn, logins []Login, password func(string) string,
+	opts Options) ([]Result, error) {
+	if !prefixRe.MatchString(opts.prefix()) {
+		return nil, fmt.Errorf("group role prefix %q must match %s", opts.GroupPrefix, prefixRe)
+	}
 	// Verify and hash every password before touching the database, so a missing
 	// Secret key fails the Job without a half-applied transaction to roll back.
 	verifiers := make(map[string]string, len(logins))
@@ -145,16 +211,42 @@ func Apply(ctx context.Context, conn *pgx.Conn, logins []Login, password func(st
 		return nil, fmt.Errorf("current_user: %w", err)
 	}
 
+	// The prefix must be the one the database's grants sit on: logins in
+	// acme_* groups on a database migrated for nexus_* would hold nothing,
+	// and the reverse would hand this installation's logins the shared roles.
+	dbPrefix, err := databasePrefix(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("read the database's group role prefix: %w", err)
+	}
+	if dbPrefix != opts.prefix() {
+		return nil, fmt.Errorf("this database's group roles are %s_* (migration 0038), but this run was given prefix %q: "+
+			"set NEXUS_DB_ROLE_PREFIX to match the migrate job's", dbPrefix, opts.prefix())
+	}
+	manage := []*regexp.Regexp{groupPattern(opts.prefix()), groupPattern(DefaultGroupPrefix)}
+
 	results := make([]Result, 0, len(logins))
 	for _, l := range logins {
 		if l.Name == self {
 			return nil, fmt.Errorf("login %q is the owner login this job runs as; a runtime login must be a different role", l.Name)
 		}
-		r, err := applyOne(ctx, tx, l, verifiers[l.Name])
+		r, err := applyOne(ctx, tx, l, verifiers[l.Name], manage)
 		if err != nil {
 			return nil, fmt.Errorf("login %q: %w", l.Name, err)
 		}
 		results = append(results, r)
+	}
+	if opts.RevokePublicConnect {
+		// After every managed login holds CONNECT explicitly (applyOne), so
+		// this installation keeps working; the owner keeps its implicit
+		// rights. Idempotent.
+		var db string
+		if err := tx.QueryRow(ctx, `SELECT current_database()`).Scan(&db); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`REVOKE CONNECT ON DATABASE %s FROM PUBLIC`,
+			pgx.Identifier{db}.Sanitize())); err != nil {
+			return nil, fmt.Errorf("revoke PUBLIC's CONNECT: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
@@ -182,7 +274,7 @@ func readRole(ctx context.Context, tx pgx.Tx, name string) (roleAttrs, error) {
 	return a, nil
 }
 
-func applyOne(ctx context.Context, tx pgx.Tx, l Login, verifier string) (Result, error) {
+func applyOne(ctx context.Context, tx pgx.Tx, l Login, verifier string, groups []*regexp.Regexp) (Result, error) {
 	res := Result{Login: l.Name, ReadOnly: l.ReadOnly}
 	ident := pgx.Identifier{l.Name}.Sanitize()
 
@@ -207,7 +299,7 @@ func applyOne(ctx context.Context, tx pgx.Tx, l Login, verifier string) (Result,
 		if a.super || a.createRole || a.createDB || a.replication || a.bypassRLS {
 			return res, fmt.Errorf("role exists with SUPERUSER, CREATEROLE, CREATEDB, REPLICATION or BYPASSRLS; refusing to use it as a least-privilege runtime login")
 		}
-		if !a.canLogin && groupRe.MatchString(l.Name) {
+		if !a.canLogin && matchesAny(groups, l.Name) {
 			return res, fmt.Errorf("role exists as a NOLOGIN group role; refusing to turn it into a login")
 		}
 	}
@@ -269,9 +361,11 @@ func applyOne(ctx context.Context, tx pgx.Tx, l Login, verifier string) (Result,
 		res.Granted = append(res.Granted, g)
 	}
 	for _, g := range current {
-		// Only nexus_* groups are ours to revoke: a provider's own roles
+		// Only Nexus groups -- this installation's prefix and the shared
+		// nexus_* (a login moved to a prefixed installation must leave the
+		// shared roles) -- are ours to revoke: a provider's own roles
 		// (rds_iam, azure_pg_admin, cloudsqliamuser) are left alone.
-		if !groupRe.MatchString(g) || slices.Contains(l.MemberOf, g) {
+		if !matchesAny(groups, g) || slices.Contains(l.MemberOf, g) {
 			continue
 		}
 		if _, err := tx.Exec(ctx, fmt.Sprintf(`REVOKE %s FROM %s`, pgx.Identifier{g}.Sanitize(), ident)); err != nil {

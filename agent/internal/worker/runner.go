@@ -113,8 +113,11 @@ type Runner struct {
 	// TaskAPIRoot is where per-attempt sockets are created; empty means
 	// taskapi.DefaultRoot.
 	TaskAPIRoot string
-	// TaskAPIDisabled serves no workload API at all (the root was found
-	// unusable at registration).
+	// TaskAPINetwork serves kubernetes attempts' workload API over TLS
+	// (F148). Nil gives those attempts none.
+	TaskAPINetwork *taskapi.Network
+	// TaskAPIDisabled serves no socket workload API (the root was found
+	// unusable at registration). The network listener is unaffected.
 	TaskAPIDisabled bool
 	// CheckpointStore overrides the result store for checkpoint objects. Nil
 	// uses the result store; tests set it to an in-memory store.
@@ -430,6 +433,8 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 		defer api.Close()
 		spec.TaskAPISocket = api.SocketPath()
 		spec.TaskAPIToken = api.Token()
+		spec.TaskAPIURL = api.URL()
+		spec.TaskAPICA = api.CAPEM()
 	}
 
 	ship := r.newShipper(a, rt.redactor, log)
@@ -637,6 +642,7 @@ func (r *Runner) buildExecutorSpec(ctx context.Context, a *nexusv1.TaskAssignmen
 		AttemptNumber:  a.GetAttemptNumber(),
 		Runtime:        spec.GetRuntime(),
 		Limit:          effectiveLimit(spec.GetResources()),
+		Request:        spec.GetResources().GetRequest(),
 		// The devices the registry named at admission, so concurrent GPU
 		// attempts on this worker never share one.
 		GPUDevices:           r.registry.GPUDevices(a.GetAttemptId()),

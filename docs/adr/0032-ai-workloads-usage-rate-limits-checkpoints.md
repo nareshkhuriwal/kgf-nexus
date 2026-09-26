@@ -81,9 +81,10 @@ lingering grandchild process cannot act on a finished attempt.
   `/run/nexus-task` and `NEXUS_TASK_API` names the container path. This works
   with `--network none` (the executor's default), which is the point: a task
   that declared no network still reaches its own agent and nothing else.
-- **kubernetes**: pods run on other nodes and have no path to the agent. The
-  variables are not exported, and the SDK degrades as described in §6
-  (F148, still open for kubernetes).
+- **kubernetes**: pods run on other nodes and have no path to the socket. The
+  agent serves them the same API over a TLS listener, routed by the token (see
+  the addendum below; F148). Without a listener configured the variables are
+  not exported, and the SDK degrades as described in §6.
 
 Endpoints (all JSON; errors are `{"error": "<code>", "message": "..."}`):
 
@@ -392,7 +393,8 @@ limits are enforced only for calls made through the permit API: a task that
 calls a provider directly is unmetered and unthrottled. Usage units are
 self-reported by the workload and are exactly as trustworthy as the task code
 (fine for cost attribution inside a tenant, not a substitute for the
-provider's invoice). The kubernetes executor has no workload API yet (F148, open).
+provider's invoice). The kubernetes executor's workload API needs a network
+path from task pods to the agent (the addendum; F148).
 A checkpoint is at-least-once state, not a transaction with the task's external
 effects: the effect journal and idempotency keys still apply.
 
@@ -423,3 +425,118 @@ are unchanged. Usage keys ride in the ledger's existing `custom` object.
 7. **Checkpoint object overwritten in place** (one key per node). Rejected:
    a zombie's late PUT would replace the live attempt's bytes, and object
    stores offer no conditional write we can rely on across providers.
+
+## Addendum (2026-09-26): the workload API for kubernetes pods (F148)
+
+- **Status:** Proposed with the ADR; implemented and verified on a local
+  cluster (OPERATIONS §29.10).
+
+### Context
+
+A kubernetes attempt's pod runs on another node, so the per-attempt Unix
+socket of §1 is unreachable: F148 stayed open for that executor, and its
+tasks kept usage in-process (never in the ledger), took process-local permits
+(`workers × limit` against a provider) and wrote checkpoints to `ctx.store`.
+The requirements for a fix: the task must never hold an agent credential (the
+worker session, the lease token, result-store keys); a credential it does hold
+must act only as its own attempt, only for the workload RPCs (usage, permits,
+checkpoints, heartbeat and progress, the declared error), and stop working when
+the attempt's lease ends; and nothing another tenant's pod holds may work.
+
+### Decision: the agent serves the same API on a TLS listener, routed by the attempt token
+
+- The agent (`NEXUS_K8S_TASK_API_ADVERTISE`) runs ONE TLS listener
+  (`taskapi.Network`) and serves every remote attempt's existing per-attempt
+  server (`taskapi.Server`: the same handlers, usage batching, fencing and
+  close/final-flush ordering as the socket) behind it. A request is routed by
+  its bearer token, looked up by SHA-256 so map timing leaks nothing; the
+  attempt's own handler then compares the whole header in constant time.
+- The token is the socket's: 256 random bits minted by the agent when the
+  attempt starts, registered for exactly that attempt, and **revoked when the
+  attempt's Run returns** (finished, cancelled, lease revoked): `Close`
+  unregisters it before anything else and refuses requests that race it, so no
+  usage increment can follow the final snapshot. Until then every upstream call
+  carries the attempt's current lease token and is fenced by the gateway and
+  again by the scheduler (409 `stale_lease` once the lease is gone).
+- The pod receives `NEXUS_TASK_API=https://<advertised host:port>`,
+  `NEXUS_TASK_API_CA` (the agent's CA certificate, public) and
+  `NEXUS_TASK_API_TOKEN` by `secretKeyRef` to the attempt's existing immutable
+  Secret, never as a literal in the pod spec. Task env cannot override them.
+- TLS (1.2+): the agent mints a P-256 CA and a serving certificate for the
+  advertised host at start, in memory only; the SDK pins the CA and never
+  falls back to plain HTTP or to unverified TLS. A restart makes new keys,
+  which is also when the previous session's attempts are LOST.
+- Tenancy is structural: an agent serves one namespace and routes only tokens
+  it minted, so another tenant's pod token is 401 here, and the CA a pod pins
+  validates no other agent.
+- Network: the one hole in a default-deny task namespace is egress to the
+  agent pods on that port (chart: `<agent>-task-api` NetworkPolicy;
+  `deploy/k8s/executor-policies.yaml`), the analogue of the docker executor's
+  socket mount under `--network none`.
+
+### Alternatives considered
+
+1. **A gateway endpoint with an attempt-scoped token minted at dispatch.** The
+   claim would mint a token bound to the lease (a row or a signed claim),
+   the pod would call the gateway, and lease deletion would revoke it.
+   Rejected, for four reasons:
+   - *It loses usage.* A pod's last increments race the agent's
+     `ReportResult`; the terminal transaction refuses usage after it (§2), and
+     with no agent in the path nothing can order "every increment, then the
+     result". The agent's final flush exists precisely for this. The declared
+     error class (`POST /v1/error`) is also carried on the agent's result
+     report and has no gateway equivalent.
+   - *Increments are not idempotent.* The workload posts increments; the
+     scheduler stores cumulative snapshots merged by max (§2), which is what
+     makes retries and reordering harmless. A stateless, replicated gateway
+     would need per-request dedupe state in Postgres to accept increments.
+   - *Checkpoints need the result store.* The agent writes the object before
+     registering it (the ordering the GC's safety argument rests on); the
+     gateway would have to proxy bodies up to 64 MiB into the store.
+   - *It opens the control plane to task pods and taxes dispatch.* Pods would
+     need egress to the gateway, which ADR-0032's alternative 1 already
+     rejected for docker, and minting in the claim adds a write to the one
+     transaction ADR-0018 measured as the dispatch ceiling.
+2. **A per-attempt sidecar or proxy in the pod.** It would still need a network
+   path and a credential to something outside the pod -- the agent (then it is
+   this design plus a hop, a second image and its resources per attempt) or
+   the gateway (then it holds a lease-capable credential inside a pod the task
+   shares a network namespace with, which is what the requirements forbid).
+   Rejected: no isolation gained, a moving part added.
+3. **An agent-side listener per attempt (one port each).** Structural identity
+   by port instead of by token, at the cost of a port range to open, allocate
+   and police. The token already gives the same one-attempt identity.
+
+### Consequences
+
+- Kubernetes tasks get usage in the ledger, shared permits, checkpoints and
+  resume, heartbeats and declared error classes, with the same guarantees as
+  the socket.
+- Task pods must reach the agent pod's advertised address (the chart and
+  manifests configure it; an agent outside the cluster advertises a routable
+  host, e.g. `host.docker.internal` on Docker Desktop). Without it the agent
+  warns at start and the SDK's in-process fallback applies, as before.
+- The agent's token lives only in its memory: an attempt re-attached after an
+  agent restart has no workload API, which matches its fate (it is LOST).
+
+### Evidence
+
+- `agent/internal/taskapi/network_test.go`: TLS only (plain HTTP and TLS 1.1
+  refused), verified only against the agent's own CA, a token acts as exactly
+  its attempt, revocation on close, 409 on a stale lease, another agent's
+  tokens refused, the certificate names the advertised host.
+- `agent/internal/executor/kubernetes_taskapi_test.go`: the pod spec carries
+  the URL and CA, the token only by Secret reference, nothing in annotations or
+  the collector, and task env cannot override them.
+- SDK `tests/test_workload_api.py`: https with a pinned CA round-trips usage,
+  checkpoints and heartbeats; no CA or another agent's CA is refused, never
+  downgraded; plain http is ignored.
+- `agent/e2e/k8staskapi` (docker-desktop, Kubernetes 1.34.3, the real
+  control-plane binaries, Postgres 18.3, Silo): a pod took three permits,
+  reported 30/15 tokens and 3 requests, checkpointed and failed TRANSIENT; the
+  retry resumed from the checkpoint and did only the other three calls. Each
+  attempt's `attempt_usage` and ledger row hold exactly its units, the
+  checkpoint pointer is the retry's, both checkpoint objects exist, the bucket
+  granted 6 permits, and the task's heartbeats reached the attempt. A token
+  after its attempt ended, a token used while another attempt runs, and each
+  tenant's token on the other tenant's agent were refused (401).

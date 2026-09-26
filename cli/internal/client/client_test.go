@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/cli/internal/config"
 )
@@ -127,6 +128,73 @@ func TestStatusSpecificHints(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("status %d hint should mention %q, got:\n%s", status, want, err.Error())
+		}
+	}
+}
+
+// TestTooManyRequestsSaysWhy: a 429 has four causes with four different
+// remedies, and nexusctl called every one "rate limiting". A quota or budget
+// refusal is not a rate limit -- retrying with backoff will not help until the
+// window or period rolls over -- so the error names the dimension, the numbers
+// and the Retry-After instead.
+func TestTooManyRequestsSaysWhy(t *testing.T) {
+	cases := []struct {
+		name, body, retryAfter string
+		want                   []string
+		wantRetry              time.Duration
+		notRateLimit           bool
+	}{
+		{
+			name: "namespace quota",
+			body: `{"error":"namespace_quota_exceeded","message":"namespace quota runs_per_hour exhausted (100 of 100)",` +
+				`"dimension":"runs_per_hour","used":100,"limit":100,"retry_after_seconds":1200}`,
+			retryAfter: "1200", wantRetry: 20 * time.Minute, notRateLimit: true,
+			want: []string{"namespace quota", "runs_per_hour", "100 of 100", "retry after 20m0s"},
+		},
+		{
+			name: "budget",
+			body: `{"error":"budget_exceeded","message":"budget_exceeded: monthly (spent 105.5 of 100 USD)",` +
+				`"dimension":"budget","budget":"monthly","spent":105.5,"amount":100,"currency":"USD","retry_after_seconds":90}`,
+			retryAfter: "90", wantRetry: 90 * time.Second, notRateLimit: true,
+			want: []string{"budget", "monthly", "105.5 of 100 USD", "retry after 1m30s"},
+		},
+		{
+			name:         "max active runs",
+			body:         `{"error":"max_active_runs","message":"workflow etl already has 3 active runs"}`,
+			notRateLimit: true,
+			want:         []string{"max_active_runs", "active runs"},
+		},
+		{
+			name:       "rate limit",
+			body:       `{"error":"rate_limited","message":"Too many requests. Try again shortly."}`,
+			retryAfter: "5", wantRetry: 5 * time.Second,
+			want: []string{"rate limiting", "retry after 5s"},
+		},
+	}
+	for _, tc := range cases {
+		c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			if tc.retryAfter != "" {
+				w.Header().Set("Retry-After", tc.retryAfter)
+			}
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(tc.body))
+		})
+		_, err := c.CreateRun(t.Context(), CreateRunOptions{SpecName: "etl"})
+		apiErr, ok := err.(*APIError)
+		if !ok {
+			t.Fatalf("%s: want *APIError, got %T (%v)", tc.name, err, err)
+		}
+		text := err.Error()
+		for _, want := range tc.want {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s: error should mention %q, got:\n%s", tc.name, want, text)
+			}
+		}
+		if tc.notRateLimit && strings.Contains(text, "rate limiting") {
+			t.Errorf("%s: called a %s refusal rate limiting:\n%s", tc.name, tc.name, text)
+		}
+		if apiErr.RetryAfter != tc.wantRetry {
+			t.Errorf("%s: RetryAfter = %v, want %v", tc.name, apiErr.RetryAfter, tc.wantRetry)
 		}
 	}
 }

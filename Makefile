@@ -36,7 +36,7 @@ MIGRATIONS    := services/migrations
 .PHONY: sdk-typecheck
 .PHONY: check-doc-refs
 .PHONY: check-go-version
-.PHONY: objstore-conformance tracing-e2e test-stores-up test-stores-down
+.PHONY: objstore-conformance tracing-e2e k8s-taskapi-e2e test-stores-up test-stores-down
 .PHONY: docs docs-serve docs-clean
 .PHONY: help proto build test lint migrate-up migrate-down up down logs ps \
         ui-dev ui-build ui-test e2e e2e-up e2e-down seed submit-example chaos clean \
@@ -186,6 +186,17 @@ tracing-e2e: test-stores-up ## One trace from API to agent and back, read from J
 	$(TEST_STORE_ENV) NEXUS_E2E_PG_DSN='postgres://postgres:$(TEST_PG_PASSWORD)@127.0.0.1:$(TEST_PG_PORT)/postgres?sslmode=disable' \
 	  NEXUS_E2E_OTLP_GRPC=127.0.0.1:$(TEST_OTLP_PORT) NEXUS_E2E_JAEGER_QUERY=http://127.0.0.1:$(TEST_JAEGER_PORT) \
 	  $(GO) test -tags tracing_e2e -count=1 -v -timeout 10m ./tests/tracing/
+
+# F148 end to end on a LOCAL cluster (k8stest's guard): a kubernetes task pod
+# reports usage, takes shared permits, checkpoints and resumes through the
+# agent's workload-API listener, then the transport is attacked from outside.
+# Needs a MIGRATED database the suite may write (NEXUS_TEST_DATABASE_URL); it
+# never creates or drops one. K8S_E2E_NAMESPACE is created and deleted.
+K8S_E2E_NAMESPACE ?= nexus-k8s-e2e
+k8s-taskapi-e2e: test-stores-up ## Kubernetes task pods through the workload API, into the ledger (F148; needs NEXUS_TEST_DATABASE_URL, docker-desktop/kind)
+	@test -n "$$NEXUS_TEST_DATABASE_URL" || { echo "set NEXUS_TEST_DATABASE_URL to a migrated database"; exit 1; }
+	$(TEST_STORE_ENV) NEXUS_K8S_CONFORMANCE=1 NEXUS_K8S_TEST_NAMESPACE=$(K8S_E2E_NAMESPACE) \
+	  $(GO) test -tags k8s_e2e -count=1 -v -timeout 20m ./agent/e2e/k8staskapi/
 
 print-s3-image: ## Print the pinned S3 (Silo) image reference, for CI and scripts
 	@echo '$(S3_IMAGE)'

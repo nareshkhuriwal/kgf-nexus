@@ -162,9 +162,7 @@ func WFMGetScheduleByID(ctx context.Context, db GWDB, id string) (Schedule, erro
 
 // WFMListSchedules lists a namespace's schedules, newest first.
 func WFMListSchedules(ctx context.Context, db GWDB, namespace string, limit int) ([]Schedule, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
+	limit = ClampLimit(limit, DefaultSchedule, MaxSchedulePage)
 	rows, err := db.Query(ctx,
 		`SELECT `+scheduleCols+` FROM schedules WHERE namespace = $1
 		 ORDER BY created_at DESC LIMIT $2`, namespace, limit)
@@ -494,9 +492,7 @@ func WFMGetBackfill(ctx context.Context, db GWDB, namespace, id string) (Backfil
 
 // WFMListBackfills lists a schedule's backfills, newest first.
 func WFMListBackfills(ctx context.Context, db GWDB, namespace, scheduleID string, limit int) ([]Backfill, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
+	limit = ClampLimit(limit, DefaultBackfill, MaxBackfillPage)
 	rows, err := db.Query(ctx,
 		`SELECT `+backfillCols+` FROM schedule_backfills
 		  WHERE namespace = $1 AND schedule_id = $2::uuid

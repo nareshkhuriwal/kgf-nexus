@@ -10,8 +10,8 @@ requests-per-second, and a per-process limiter would admit ``workers x limit``.
 API, which grants all keys or none and never waits server-side; the SDK sleeps
 ``retry_after_ms`` (plus jitter) and asks again.
 
-When there is no workload API -- the local runner, unit tests, the kubernetes
-executor (F149) -- :class:`LocalRateLimiter` stands in: the same token-bucket
+When there is no workload API -- the local runner, unit tests, a kubernetes
+agent with no listener configured -- :class:`LocalRateLimiter` stands in: the same token-bucket
 semantics, but process-local. It is UNLIMITED unless limits are configured in
 ``NEXUS_LOCAL_RATE_LIMITS``, and it says once, loudly, that its limits are not
 shared with any other process.

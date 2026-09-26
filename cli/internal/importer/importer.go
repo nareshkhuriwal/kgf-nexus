@@ -23,8 +23,6 @@ import (
 	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	clispec "github.com/khuriwalgroup/kgf-nexus/cli/internal/spec"
 )
 
@@ -235,55 +233,19 @@ func renderYAML(w *Workflow, source string) []byte {
 	return b.Bytes()
 }
 
-// specYAML renders a spec as YAML that parses back to the SAME document.
-// yaml.v3's literal block style is readable for scripts but drops a leading
-// newline (and mangles some whitespace-only lines), which would silently
-// change a command. Every rendering is therefore checked by parsing it back;
-// a string that does not survive is double-quoted instead.
+// specYAML renders a spec as YAML that parses back to the SAME document,
+// keeping the struct's field order. yaml.v3's literal block style drops a
+// leading newline (and mangles some whitespace-only lines), which would
+// silently change a command; clispec.EncodeYAML checks every rendering by
+// parsing it back, and `compile --show` uses the same encoder.
 func specYAML(s *Spec) []byte {
 	want, _ := json.Marshal(s)
-	wantDoc, err := clispec.Parse(want, "spec")
-	for _, quoteAll := range []bool{false, true} {
-		// Built from the JSON (valid YAML, struct field order kept), not with
-		// Node.Encode, which round-trips through yaml.v3's own emitter and
-		// fails on the very strings this guards against.
-		var n yaml.Node
-		if err := yaml.Unmarshal(want, &n); err != nil {
-			break
-		}
-		styleStrings(&n, quoteAll)
-		var b bytes.Buffer
-		enc := yaml.NewEncoder(&b)
-		enc.SetIndent(2)
-		_ = enc.Encode(&n)
-		_ = enc.Close()
-		got, perr := clispec.Parse(b.Bytes(), "spec")
-		if err != nil || (perr == nil && got.Hash == wantDoc.Hash) {
-			return b.Bytes()
-		}
+	out, err := clispec.EncodeYAML(want)
+	if err != nil {
+		// A spec that does not parse cannot be checked; JSON is valid YAML.
+		return want
 	}
-	// Unreachable in practice: JSON is valid YAML and always round-trips.
-	return want
-}
-
-func styleStrings(n *yaml.Node, quoteAll bool) {
-	switch {
-	case n.Kind == yaml.MappingNode || n.Kind == yaml.SequenceNode:
-		n.Style = 0 // block, not JSON's flow style
-	case n.Kind == yaml.ScalarNode && n.Tag == "!!str" && strings.Contains(n.Value, "\n"):
-		risky := strings.HasPrefix(n.Value, "\n") || strings.HasPrefix(n.Value, " ") ||
-			strings.Contains(n.Value, " \n") || strings.Contains(n.Value, "\t")
-		if quoteAll || risky {
-			n.Style = yaml.DoubleQuotedStyle
-		} else {
-			n.Style = yaml.LiteralStyle
-		}
-	case n.Kind == yaml.ScalarNode:
-		n.Style = 0 // the emitter quotes only where YAML needs it
-	}
-	for _, c := range n.Content {
-		styleStrings(c, quoteAll)
-	}
+	return out
 }
 
 // collect lists the files to analyse, plus side files (prefect.yaml).

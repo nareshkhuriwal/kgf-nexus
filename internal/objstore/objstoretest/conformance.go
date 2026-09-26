@@ -81,6 +81,19 @@ func UniqueBucket(prefix string) string {
 	return strings.ToLower(prefix) + "-" + hex.EncodeToString(b)
 }
 
+// BucketPrefixVar names the prefix of every bucket the suites create, so
+// several checkouts sharing one set of emulators never touch each other's
+// buckets. Default "nexus".
+const BucketPrefixVar = "NEXUS_TEST_BUCKET_PREFIX"
+
+// BucketPrefix is the configured test bucket prefix.
+func BucketPrefix() string {
+	if p := strings.ToLower(strings.TrimSpace(os.Getenv(BucketPrefixVar))); p != "" {
+		return p
+	}
+	return "nexus"
+}
+
 // Opener builds a store for a bucket name. The suite uses it to open the
 // bucket under test and a bucket that must not exist.
 type Opener func(t testing.TB, bucket string) objstore.Store
@@ -90,7 +103,7 @@ func Run(t *testing.T, open Opener) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	bucket := UniqueBucket("nexus-w3g-conf")
+	bucket := UniqueBucket(BucketPrefix() + "-conf")
 	s := open(t, bucket)
 	if err := s.CreateBucket(ctx); err != nil {
 		t.Fatalf("create bucket: %v", err)
@@ -105,7 +118,7 @@ func Run(t *testing.T, open Opener) {
 		if err != nil || !ok {
 			t.Fatalf("BucketExists = %v, %v; want true", ok, err)
 		}
-		missing := open(t, UniqueBucket("nexus-w3g-absent"))
+		missing := open(t, UniqueBucket(BucketPrefix()+"-absent"))
 		ok, err = missing.BucketExists(ctx)
 		if err != nil || ok {
 			t.Fatalf("BucketExists(absent) = %v, %v; want false, nil (only a positive answer may be false)", ok, err)
@@ -308,6 +321,48 @@ func Run(t *testing.T, open Opener) {
 		ccancel()
 		if err := s.List(cctx, "list/", func(objstore.ObjectInfo) error { return nil }); err == nil {
 			t.Fatalf("list with a cancelled context succeeded")
+		}
+	})
+
+	t.Run("ListAfter", func(t *testing.T) {
+		// A data-arrival sensor resumes a listing from its durable cursor:
+		// strictly after the last key it saw, still bounded by the prefix,
+		// still in lexical order, still stoppable. "after/b" itself and keys
+		// outside the prefix must never be reported.
+		keys := []string{"after/a", "after/b", "after/b0", "after/c/1", "after/d", "afterx/z"}
+		putMany(t, s, keys)
+		collect := func(prefix, after string) []string {
+			t.Helper()
+			var got []string
+			if err := objstore.ListAfter(ctx, s, prefix, after, func(o objstore.ObjectInfo) error {
+				got = append(got, o.Key)
+				return nil
+			}); err != nil {
+				t.Fatalf("ListAfter(%q, %q): %v", prefix, after, err)
+			}
+			return got
+		}
+		for _, c := range []struct {
+			prefix, after string
+			want          []string
+		}{
+			{"after/", "", []string{"after/a", "after/b", "after/b0", "after/c/1", "after/d"}},
+			{"after/", "after/b", []string{"after/b0", "after/c/1", "after/d"}},
+			{"after/", "after/bz", []string{"after/c/1", "after/d"}},
+			{"after/", "after/d", nil},
+			// A cursor before the prefix lists the whole prefix.
+			{"after/", "a", []string{"after/a", "after/b", "after/b0", "after/c/1", "after/d"}},
+		} {
+			if got := collect(c.prefix, c.after); strings.Join(got, ",") != strings.Join(c.want, ",") {
+				t.Errorf("ListAfter(%q, %q) = %v; want %v", c.prefix, c.after, got, c.want)
+			}
+		}
+		count := 0
+		if err := objstore.ListAfter(ctx, s, "after/", "after/a", func(objstore.ObjectInfo) error {
+			count++
+			return objstore.ErrStop
+		}); err != nil || count != 1 {
+			t.Fatalf("ErrStop through ListAfter: count=%d err=%v", count, err)
 		}
 	})
 

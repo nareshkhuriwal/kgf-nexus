@@ -224,10 +224,11 @@ func run() error {
 	// sensor is leased with SKIP LOCKED and every observation is a unique row,
 	// so any number of replicas may run it without a leader.
 	listers := sensors.NewRegistry()
-	if s3cfg, ok := sensors.S3ConfigFromEnv(os.Getenv); ok {
-		listers.Register("s3", func(context.Context) (sensors.ObjectLister, error) { return sensors.NewS3Lister(s3cfg) })
-	} else {
-		log.Info("no S3 endpoint configured for sensors (NEXUS_SENSOR_S3_ENDPOINT); object-store sensors will report an error")
+	if err := sensors.RegisterFromEnv(listers, os.Getenv); err != nil {
+		return fmt.Errorf("object-store sensor configuration: %w", err)
+	}
+	if len(listers.Schemes()) == 0 {
+		log.Info("no object store configured for sensors (NEXUS_SENSOR_S3_*, NEXUS_SENSOR_AZURE_*, NEXUS_SENSOR_GCS_*); object-store sensors will report an error")
 	}
 	sensorCfg := sensors.DefaultConfig()
 	if v := os.Getenv("NEXUS_SENSOR_INTERVAL"); v != "" {
