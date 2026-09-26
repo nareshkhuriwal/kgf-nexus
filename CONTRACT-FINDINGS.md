@@ -3417,3 +3417,63 @@ is reported: when an output's `ValueSpec.max_bytes > 0` and the encoded value
 `ERROR_CLASS_VALIDATION` naming the output, the size and the bound, and do not
 report the output. Test it in `agent/internal/worker` for both inline and blob
 outputs, and in the NATS/e2e path with a non-SDK executor.
+
+### F138. The subprocess executor handed every task the agent's own credentials — FIXED
+
+**Severity:** high (a task could impersonate its worker and read the result store directly).
+
+`executor.buildEnv` started the workload environment from `os.Environ()`, so a
+subprocess task inherited everything the agent was started with:
+`NEXUS_API_KEY` (the worker credential that registers with the control plane),
+`NEXUS_S3_ACCESS_KEY_ID` / `NEXUS_S3_SECRET_ACCESS_KEY` (result-store keys
+scoped to the namespace, not to the attempt), NATS credentials, and any
+provider credential an operator put there. A task could therefore register a
+fake worker, claim other tasks' attempts in its namespace, or read and
+overwrite other attempts' results. The docker and kubernetes executors were
+unaffected: they start from an empty environment. ADR-0025's `env://`
+provider made the gap sharper, because a variable a task may only receive by
+declaring it would also have arrived by inheritance.
+
+**Fix (ADR-0025):** the inherited environment is scrubbed of the agent's
+credential variables (`secrets.IsAgentCredentialEnv`: `NEXUS_API_KEY`,
+`NEXUS_S3_*`, `NEXUS_NATS_PASSWORD*`, `NEXUS_NATS_CREDS`, the NKey seed and TLS
+key files, `NEXUS_SECRETS_CONFIG`, `VAULT_TOKEN`, `VAULT_SECRET_ID`,
+`AZURE_CLIENT_SECRET`, the Azure certificate and federated-token paths, AWS and
+GCP credentials) and of every name on the tenant's `env://` allow-list
+(`SubprocessExecutor.InheritDeny`); those can never be resolved through
+`env://` either. With secret providers configured the agent also sets
+`RLIMIT_CORE=0` and, on Linux, `PR_SET_DUMPABLE=0`, so a same-UID task cannot
+read the agent's memory through `/proc`. The subprocess executor still runs
+tasks as the agent's user and remains development-grade (ADR-0007). Test:
+`TestSubprocessInjectsSecretsAndScrubsAgentCredentials`.
+
+### F139. Audit writes failed open: a credential could be minted with no audit record — FIXED
+
+**Severity:** high (an audit trail that can silently miss the events it exists for).
+
+`API.auditAttempt` wrote the audit row after the change and, on failure, only
+logged: "refusing an operation because its audit record could not be written
+would mean a database hiccup blocks administration". The consequence was that
+a session could be issued, a user created or enabled, a password reset, or a
+scoped token minted, and the audit table would never know. Nor could an
+auditor tell: the trail had no ordering or integrity evidence, a 1000-row
+listing cap, no export, no retention policy and no legal hold.
+
+**Fix (ADR-0025, migration 0033):** every audited action is classed in
+`auditActionClasses` (`services/api-gateway/rest/audit.go`), and a test fails
+the build when an action string in the code is unclassified. **Security
+grants** now commit with their audit row in one transaction
+(`IdentityAdmin.WithinTx`, `auditedTx`) or not at all (`503
+audit_unavailable`); the password reset also became atomic with its session
+revocation, removing the old `partial_reset` state. **Revocations** are never
+blocked (a revocation refused because the log is down keeps a credential
+alive) and a failed write is logged as `AUDIT RECORD LOST`. **Operational**
+actions log and count. Every failure increments
+`nexus_audit_write_failures_total{class,blocked}`. The trail itself became a
+per-namespace hash chain with keyset pagination, NDJSON/CSV/KGF export,
+signed SIEM sinks, retention with legal hold, and `nexusctl audit verify`
+(OPERATIONS §25.2). Tests: `TestFailedAuditBlocksAndRollsBackSecurityGrants`,
+`TestFailedAuditNeverBlocksARevocation`, `TestEveryAuditedActionIsClassified`,
+and the Postgres suites `TestAuditChainIsUnforkedUnderConcurrentReplicas`,
+`TestAuditTamperingIsDetected`, `TestAuditLogIsAppendOnlyForEveryRole`,
+`TestIntegrationAuditAPI`.

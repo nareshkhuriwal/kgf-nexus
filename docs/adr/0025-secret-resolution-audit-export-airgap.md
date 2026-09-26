@@ -31,6 +31,20 @@ the metadata store; migrations are additive (ADR-0011 rule 5); the agent is
 bound to exactly one namespace (`--namespace`), and a namespace is exactly one
 tenant (MULTITENANCY.md).
 
+**Nexus is a service of KGF Cloud** (kgf-cloud: the `KGF.Nexus` provider
+behind KGF's gateway), not a standalone platform. Organization-level concerns
+-- identity, access reviews, vendor management, the compliance program --
+belong to KGF Cloud. Two KGF conventions bind this ADR: KGF's gateway signs an
+Ed25519 **context token** (`X-KGF-Context`, kgf-cloud `pkg/tenantctx`) naming
+the organization, subscription, resource group, principal and request id of
+every request it forwards; and KGF keeps secrets in one **platform Key Vault**
+per environment (`kgf-platform-kv-<env>`, RBAC), reached through **workload
+identity** and projected by the Key Vault CSI driver, with service-prefixed
+kebab-case secret names. KGF's own audit is `audit_events` (organization_id,
+id, action, resource_id, subscription_id, resource_group, created_at), written
+by its services and exported per project; KGF has **no endpoint that ingests
+another service's audit events**.
+
 ## Decision
 
 ### 1. Secrets are resolved by the agent, per tenant, at attempt start
@@ -52,7 +66,7 @@ returns `[]Resolved{Name, Value, Inject}`. Providers:
 | `env://` | `env://NAME` | the agent's own environment | NAME must match the tenant's allow-list (glob). Default allow-list is **empty**: an agent's environment holds its own control-plane credential, and `env://NEXUS_API_KEY` must not be expressible. |
 | `file://` | `file:///abs/path` | a mounted secret file (Kubernetes Secret volume, CSI driver, systemd credential) | Path must be absolute, is `filepath.Clean`ed, symlinks resolved, and must stay under an allow-listed directory prefix after resolution. Size-capped (1 MiB). |
 | `vault://` | `vault://<mount>/<path>[?version=N][#<field>]` | HashiCorp Vault KV v2 over its HTTP API | Auth: `kubernetes`, `approle`, `token` (tokens and secret-ids read from files, never inline config). Vault Enterprise namespaces (`X-Vault-Namespace`). TLS with CA file, server name, optional client cert; `insecure_skip_verify` refused unless the address is loopback. Mount+path must match the tenant's allow-listed prefixes. No field ⇒ the secret's `data` map as JSON. KV has no lease to renew; the agent re-authenticates when its token expires or is rejected. |
-| `akv://` | `akv://<vault-name>/<secret-name>[/<version>]` | Azure Key Vault via the official Azure SDK (`azidentity`, `azsecrets`) | Auth: workload identity, managed identity, or client credentials (secret or certificate read from a file). The vault name must be allow-listed for the tenant; the vault URL is derived (`https://<name>.vault.azure.net`) unless configured (sovereign clouds). |
+| `akv://` | `akv://<vault-name>/<secret-name>[/<version>]`, or `akv:///<secret-name>` for the tenant's `default_vault` | Azure Key Vault via the official Azure SDK (`azidentity`, `azsecrets`) | Auth: workload identity (KGF's convention: the stamp's federated identity), managed identity, or client credentials (secret or certificate read from a file). The vault name must be allow-listed for the tenant; the vault URL is derived (`https://<name>.vault.azure.net`) unless configured (sovereign clouds). On KGF Cloud `default_vault` is the platform vault, and `allow_secret_prefixes` (`nexus-<tenant>-`) is the tenant fence inside that shared vault. |
 
 `aws-sm://` and `gcp-sm://` are **not** implemented in this change; they fit
 the same interface and are listed as a gap rather than stubbed.
@@ -74,8 +88,10 @@ into the environment. Per executor:
 
 - **subprocess:** env appended after the task env and before platform vars;
   files in a per-attempt directory removed by Cleanup.
-- **docker:** env through `--env-file` written 0600 in the attempt workdir and
-  removed on cleanup (never on the `docker run` argv, where `ps` shows it);
+- **docker:** env through `--env-file` written 0600 beside (never inside) the
+  bind-mounted work directory and removed as soon as `docker run` has read it
+  (never on the `docker run` argv, where `ps` shows it); a multi-line value
+  cannot be an env-file entry and is refused with "use inject: file";
   files bind-mounted read-only at `/run/nexus/secrets`. Values remain
   visible to anyone with access to the Docker socket (`docker inspect`), who is
   root on that host anyway — documented, not hidden.
@@ -86,7 +102,9 @@ into the environment. Per executor:
   backups would see.
 
 Platform variables still override task variables; a secret may not use a
-`NEXUS_*` name (rejected as VALIDATION).
+`NEXUS_*` name (rejected as VALIDATION), nor a name also set in `runtime.env`.
+Host-side secret files live under `NEXUS_SECRETS_DIR_ROOT` when set (the Helm
+chart mounts a memory-backed emptyDir there), so they never reach a disk.
 
 **Where values never go.** Values live in agent memory for the attempt and in
 the substrate-specific injection above. They are not placed in: the WAL
@@ -115,20 +133,35 @@ chosen by cause:
 - **Cursor pagination.** `GET /audit` gains `cursor` / `next_cursor`: an
   opaque keyset cursor, stable under concurrent inserts, with `since`/`until`
   filters. The existing response shape is a superset (additive).
-- **Export.** `GET /audit/export?format=ndjson|csv&since=&until=&action=&outcome=&actor_id=`
-  streams rows in chain order with no row cap and bounded memory. CSV is
-  RFC 4180 with formula-injection neutralisation (a cell starting with
-  `= + - @` is prefixed with `'`).
-- **Sinks.** Per-namespace sinks (webhook; syslog RFC 5424 over TCP/TLS as an
-  option) configured by an admin. Delivery is **at-least-once from a durable
+- **Export.** `GET /audit/export?format=ndjson|csv|kgf&since=&until=&action=&outcome=&actor_id=`
+  streams rows in chain order from one snapshot, with no row cap and bounded
+  memory. CSV is RFC 4180 with formula-injection neutralisation (a cell
+  starting with `= + - @` is prefixed with `'`, as KGF's own export does).
+- **KGF Cloud compatibility.** When a request carries an `X-KGF-Context` that
+  verifies against KGF's configured public keys (same rules as kgf-cloud's
+  `tenantctx.Verifier`: EdDSA, kid, lifetime, audience `nexus`, only a
+  user-issuer may assert a person), the audit row records the KGF
+  organization, subscription, resource group, principal, on-behalf-of and
+  request id -- all covered by the hash chain. The token is used for
+  **attribution only**; Nexus's own credentials still authorize, and an
+  unverifiable token contributes nothing. `format=kgf` (export and sinks)
+  emits KGF's audit event shape (organization_id, id, action, resource_id,
+  subscription_id, resource_group, created_at) with the Nexus facts and the
+  chain position alongside; the field mapping is in OPERATIONS §25.2.
+- **Sinks.** Because KGF has no ingestion endpoint, Nexus keeps a generic,
+  standalone webhook sink (format `nexus` or `kgf`) configured per namespace
+  by an admin; syslog and OTLP are not implemented. Delivery is **at-least-once from a durable
   per-sink cursor** over the append-only chain — the audit table itself is the
   outbox, so no second copy of each row is written and a sink added later can
   be back-filled from any position still retained. Webhook bodies are
   NDJSON batches signed with HMAC-SHA256 over `timestamp + "." + body`
   (`X-Nexus-Signature: t=<unix>,v1=<hex>`), retried with capped exponential
-  backoff, and the signing secret is stored as a *reference* resolved at send
-  time or, where stored, encrypted — never returned by the API. Exactly one
-  gateway replica delivers a given sink at a time (advisory lock).
+  backoff. The signing secret is generated by the gateway, returned once, and
+  stored AES-256-GCM-sealed (bound to the namespace) under the gateway's
+  `NEXUS_AUDIT_SINK_KEY`; it is never returned again. Destinations are HTTPS
+  and may not resolve to internal addresses unless allow-listed (checked at
+  dial time). Exactly one gateway replica delivers a given sink at a time
+  (advisory lock).
 - **Retention and legal hold.** Per-namespace `retention_days` (default: keep
   forever) and a `legal_hold` flag with reason and actor. Purging runs through
   a `SECURITY DEFINER` function, not a grant: the gateway role stays
@@ -137,7 +170,9 @@ chosen by cause:
   **chain checkpoint** (last purged sequence and hash) so verification of the
   remainder still starts from a known anchor.
 - **Hash chain.** Each namespace has its own chain: `chain_seq`,
-  `prev_hash`, `row_hash = sha256(canonical_v1(row) || prev_hash)`. The
+  `prev_hash`, `row_hash = sha256(canonical_v1(row))`, where canonical_v1 is a
+  JSON array of every column including the KGF attribution and, last,
+  `prev_hash`. The
   append takes a row lock on the namespace's chain head in the same
   transaction as the insert, so concurrent gateway replicas cannot fork the
   chain. The canonical encoding is defined in code and in OPERATIONS §25 so
@@ -148,13 +183,17 @@ chosen by cause:
   from rewriting the whole tail. Anchoring is external: the SIEM sink and
   exports carry `row_hash`, so a rewritten tail disagrees with the copy
   already delivered.
-- **Fail-closed where it matters.** Actions are classed. **Security-sensitive**
-  actions (authentication success, session and credential lifecycle, user and
-  role changes, RBAC, tenancy, audit configuration: retention, legal hold,
-  sinks) write their audit row in the same transaction as the change, or, where
-  the change is not transactional with the audit store, before responding
-  with success — and **fail the request (503 `audit_unavailable`) if the audit
-  write fails.** Denied attempts remain denied if the audit write fails.
+- **Fail-closed where it matters.** Actions are classed. **Security grants**
+  (authentication success, users created/enabled/updated, password resets,
+  tokens minted, role assignment, tenancy, platform/cluster/quota
+  configuration, and every audit-configuration change: retention, legal hold,
+  sinks) write their audit row in the same transaction as the change and
+  **fail the request (503 `audit_unavailable`) with the change rolled back if
+  the audit write fails.** **Security revocations** (logout, token revoke, user
+  disable, sessions revoked, role delete) are **never** blocked -- refusing to
+  revoke because the audit store is down would keep a credential alive -- and
+  a failed write is logged as `AUDIT RECORD LOST` and counted. Denied
+  attempts remain denied if the audit write fails.
   **Operational** actions (run retry/delete, schedules, quarantine, cluster
   and platform configuration that already audit transactionally keep doing
   so) log and count the failure (`nexus_audit_write_failures_total`) rather
@@ -231,3 +270,10 @@ formats are versioned (`"v": 1`).
 7. **Fail closed for every audited action.** Rejected: a database hiccup would
    block run retries and schedule edits during the incident an operator is
    trying to fix, with no security benefit.
+8. **Write Nexus audit rows into KGF Cloud's `audit_events` directly.**
+   Rejected: KGF exposes no ingestion API, its table is owned by KGF services
+   under tenant RLS, and a second writer would couple Nexus to KGF's schema
+   and credentials. A KGF-shaped export and sink let a KGF-side collector own
+   the write.
+9. **Trust KGF headers without verification.** Rejected: any caller could
+   then claim any KGF organization or principal in the audit trail.

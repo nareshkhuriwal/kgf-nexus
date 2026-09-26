@@ -65,3 +65,6 @@ deploy/.env
 
 # NATS NKey seeds (deploy/nats/nexus-nats-auth.sh, `make k8s-dev-up`). Never commit.
 /.dev-nats/
+
+# Air-gap bundles (make airgap-bundle)
+/dist/

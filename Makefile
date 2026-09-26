@@ -28,7 +28,7 @@ MIGRATIONS    := services/migrations
 
 # test-nats and sdk-test have their own .PHONY lines so a merge that edits the
 # list below does not conflict with them.
-.PHONY: test-nats test-vault
+.PHONY: test-nats test-vault airgap-bundle airgap-test
 .PHONY: sdk-test
 .PHONY: sdk-typecheck
 .PHONY: check-doc-refs
@@ -491,6 +491,20 @@ artifact-gc: ## Report orphaned result-store objects; deletes NOTHING (ADR-0008)
 check-refs: ## Report rows whose result object is MISSING; read-only (OPERATIONS 7.6)
 	$(GO) run ./services/artifact-gc/cmd/artifact-gc -check-refs \
 	  -database-url '$(ARTIFACT_GC_DSN)' -endpoint '$(ARTIFACT_GC_ENDPOINT)' $(ARTIFACT_GC_FLAGS)
+
+# ── Air-gapped installation (ADR-0025 §3, docs/AIRGAP.md) ─────────────────
+# The bundle is built on a CONNECTED host and carried across the gap:
+# digest-pinned images, the packaged chart, nexusctl/nexus-agent binaries, the
+# SDK wheel, schemas/, manifest.json + SHA256SUMS (cosign-signed when cosign is
+# installed). PLATFORMS=linux/amd64,linux/arm64 builds both; the default is the
+# Docker host's platform.
+AIRGAP_VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+PLATFORMS        ?=
+airgap-bundle: ## Build dist/nexus-airgap-$(AIRGAP_VERSION).tar.gz for an offline install (needs Docker, helm, go)
+	python3 deploy/airgap/build-bundle.py --version '$(AIRGAP_VERSION)' $(if $(PLATFORMS),--platforms '$(PLATFORMS)')
+
+airgap-test: ## Load the bundle into a throwaway local registry and prove every chart image resolves by digest (needs Docker, helm)
+	deploy/airgap/test-load.sh 'dist/nexus-airgap-$(AIRGAP_VERSION).tar.gz'
 
 clean: ## Remove build artefacts
 	rm -rf ui/dist ui/node_modules/.vite
