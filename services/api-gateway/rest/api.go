@@ -131,6 +131,10 @@ type API struct {
 	// reported alongside it. See assignment.go.
 	assignments     AssignmentReader
 	inlineThreshold int64
+
+	// events is nil unless WithEvents was called; the ADR-0028 routes then
+	// answer 501 (the hook route 404s: it does not exist here).
+	events *EventsConfig
 }
 
 // New builds the REST API.
@@ -318,6 +322,7 @@ func (a *API) Routes() http.Handler {
 	a.registerQuotaRoutes(mux)
 	a.registerRBACRoutes(mux)
 	a.registerIdentityRoutes(mux)
+	a.registerEventRoutes(mux)
 
 	return mux
 }

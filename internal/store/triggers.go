@@ -177,11 +177,16 @@ type WebhookReceipt struct {
 }
 
 // TriggerClaimReceipt records a signed delivery. false means the same
-// signature was already received: a replay.
+// signature was already received and not rejected: a replay. A delivery whose
+// earlier attempt was REJECTED (the run could not be created) may be claimed
+// again, so a sender retrying the identical request after an outage succeeds.
 func TriggerClaimReceipt(ctx context.Context, q GWQuerier, ns, triggerID, digest string) (bool, error) {
 	tag, err := q.Exec(ctx, `
-INSERT INTO webhook_receipts (trigger_id, signature_digest, namespace, outcome, http_status)
-VALUES ($1, $2, $3, 'accepted', 202) ON CONFLICT DO NOTHING`, triggerID, digest, ns)
+INSERT INTO webhook_receipts AS w (trigger_id, signature_digest, namespace, outcome, http_status)
+VALUES ($1, $2, $3, 'accepted', 202)
+ON CONFLICT (trigger_id, signature_digest) DO UPDATE
+   SET outcome = 'accepted', http_status = 202, received_at = now(), detail = ''
+ WHERE w.outcome = 'rejected'`, triggerID, digest, ns)
 	if err != nil {
 		return false, err
 	}
