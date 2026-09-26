@@ -192,6 +192,8 @@ func errorClassFromString(s string) nexusv1.ErrorClass {
 		return nexusv1.ErrorClass_ERROR_CLASS_NOT_FOUND
 	case "infrastructure", "ERROR_CLASS_INFRASTRUCTURE":
 		return nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE
+	case "preempted", "ERROR_CLASS_PREEMPTED":
+		return nexusv1.ErrorClass_ERROR_CLASS_PREEMPTED
 	default:
 		return nexusv1.ErrorClass_ERROR_CLASS_UNSPECIFIED
 	}

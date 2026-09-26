@@ -66,9 +66,11 @@ from .scheduling import Backfill, BackfillState, OverlapPolicy, Schedule, Schedu
 from .task import TaskDefinition, registry, task
 from .types import (
     Cache,
+    Artifact,
     Cancellation,
     Concurrency,
     Gpu,
+    Placement,
     Resources,
     Retry,
     Runtime,
@@ -135,6 +137,8 @@ __all__ = [
     # declaration types
     "Resources",
     "Gpu",
+    "Placement",
+    "Artifact",
     "Timeouts",
     "Retry",
     "Cache",
