@@ -129,7 +129,12 @@ stderr, so `-o json` output stays parseable.
 | 5 | Conflict (HTTP 409, or a refused state transition): wrong state, name taken, still referenced |
 | 6 | Authentication or authorization (HTTP 401/403) |
 | 7 | Control plane unreachable, or answered 502/503/504 |
+| 8 | `nexusctl audit verify`: the audit hash chain is broken (altered, missing, reordered or truncated rows; ADR-0025) |
 | 130 | Interrupted (Ctrl-C) |
+
+`nexusctl audit export [--format ndjson|csv] [--since/--until/--action/--outcome/--actor-id] [--file P]`
+downloads the audit trail; `nexusctl audit verify [--file export.ndjson]` recomputes the
+hash chain from the API, or offline from an export (OPERATIONS §25.2).
 
 So `nexusctl schedule get nightly >/dev/null 2>&1 || nexusctl schedule create ...`
 can tell "does not exist" (4) from an outage (7). Codes are only ever added,
