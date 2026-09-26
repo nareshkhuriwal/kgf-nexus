@@ -16,6 +16,7 @@
 package agentmetrics
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,6 +63,10 @@ type Metrics struct {
 	// objstore holds the result-store client families shared with the gateway
 	// and the GC (nexus_objstore_*), labelled by backend and operation.
 	objstore *objstore.Metrics
+
+	workloadAPI   *metrics.CounterVec
+	usageFlushes  *metrics.CounterVec
+	checkpointOps *metrics.CounterVec
 }
 
 // ObjectStore returns the result-store client instruments, or nil (record
@@ -137,7 +142,66 @@ func New(reg *metrics.Registry) *Metrics {
 		logFinalize: reg.NewCounter("nexus_agent_log_finalize_total",
 			"Attempt logs finalized, by outcome: finalized (complete), fenced, timeout (finalize budget ran out) or partial (chunks never reached the store). Every outcome but finalized leaves a partial log.",
 			"outcome"),
+
+		workloadAPI: reg.NewCounter("nexus_agent_workload_api_requests_total",
+			"Requests a workload made to its attempt's task API socket (ADR-0032), by endpoint (info, usage, progress, permits, settle, checkpoint_put, checkpoint_get, error, other) and HTTP status code.",
+			"endpoint", "code"),
+		usageFlushes: reg.NewCounter("nexus_agent_usage_flushes_total",
+			"Usage snapshots sent to the control plane with ReportUsage, by result: ok, stale (the attempt no longer owns its lease; flushing stops) or error.",
+			"result"),
+		checkpointOps: reg.NewCounter("nexus_agent_checkpoints_total",
+			"Checkpoint saves requested by workloads, by result: saved, stale (fenced: stale lease or an older checkpoint), too_large or error.",
+			"result"),
 	}
+}
+
+// Workload API label values. Closed sets: anything else is folded into
+// "other" so a workload cannot mint series by requesting arbitrary paths.
+var (
+	workloadEndpoints = map[string]bool{"info": true, "usage": true, "progress": true, "permits": true,
+		"settle": true, "checkpoint_put": true, "checkpoint_get": true, "error": true, "other": true}
+	usageFlushResults = map[string]bool{"ok": true, "stale": true, "error": true}
+	checkpointResults = map[string]bool{"saved": true, "stale": true, "too_large": true, "error": true}
+)
+
+// WorkloadAPIRequest records one request to an attempt's task API. code is
+// the HTTP status the agent answered; only the codes the API can produce are
+// kept distinct, the rest are "other".
+func (m *Metrics) WorkloadAPIRequest(endpoint string, code int) {
+	if m == nil {
+		return
+	}
+	if !workloadEndpoints[endpoint] {
+		endpoint = "other"
+	}
+	c := "other"
+	switch code {
+	case 200, 204, 400, 401, 404, 405, 409, 413, 500, 501, 503:
+		c = strconv.Itoa(code)
+	}
+	m.workloadAPI.With(metrics.Labels{"endpoint": endpoint, "code": c}).Inc()
+}
+
+// UsageFlush records one ReportUsage attempt: ok, stale or error.
+func (m *Metrics) UsageFlush(result string) {
+	if m == nil {
+		return
+	}
+	if !usageFlushResults[result] {
+		result = "error"
+	}
+	m.usageFlushes.With(metrics.Labels{"result": result}).Inc()
+}
+
+// Checkpoint records one checkpoint save: saved, stale, too_large or error.
+func (m *Metrics) Checkpoint(result string) {
+	if m == nil {
+		return
+	}
+	if !checkpointResults[result] {
+		result = "error"
+	}
+	m.checkpointOps.With(metrics.Labels{"result": result}).Inc()
 }
 
 // RegistrationAttempt records one Register call's result: ok,

@@ -229,6 +229,9 @@ window that mechanism 3 does *not* close.
 | `ctx.remaining_ms()` | Time left before `start_to_close`, per control-plane time. |
 | `ctx.traceparent` / `ctx.tracestate` / `ctx.trace_id` | The attempt's W3C trace context, or None (see Tracing). |
 | `ctx.trace_headers()` | W3C headers for an outbound call so the callee joins the trace. |
+| `ctx.report_usage` / `report_tokens` / `usage_totals` | Usage units: tokens, requests, anything countable. See below. |
+| `ctx.acquire_permits` / `settle_permits` | Shared provider rate limits. See below. |
+| `ctx.checkpoint(state)` / `ctx.resume()` | Resume a retry mid-task. See below. |
 
 ## Tracing
 
@@ -258,6 +261,185 @@ carries the currently active span, otherwise the platform's own context.
 
 `nexus.local` has no attempt span: a valid `TRACEPARENT`/`TRACESTATE` in the
 runner's environment is handed to every task instead.
+
+## AI workloads: usage, rate limits, checkpoints
+
+Batch inference, evaluation and fine-tuning are ordinary DAGs. What they need
+beyond that is on the context (ADR-0032, OPERATIONS §29):
+
+```python
+from nexus import Retry, TaskContext, task
+from nexus.llm import LLMClient
+
+@task(retry=Retry(max_attempts=3, retry_on=["transient", "rate_limited"]))
+def label(ctx: TaskContext, prompts: list[str]) -> list[str]:
+    llm = LLMClient(ctx, provider="openai", model="gpt-4o-mini",
+                    base_url="https://api.openai.com", api_key_env="OPENAI_API_KEY")
+    state = ctx.resume() or {"next": 0, "out": []}      # a retry picks up here
+    for i in range(state["next"], len(prompts)):
+        state["out"].append(llm.complete(prompts[i], max_tokens=64).text)
+        state["next"] = i + 1
+        if i % 100 == 99:
+            ctx.checkpoint(state)
+        ctx.progress(state["next"] / len(prompts))
+    return state["out"]
+```
+
+### The workload API
+
+Under a worker agent (subprocess and docker executors) each attempt gets a
+private HTTP/1.1 JSON API on a Unix socket: `NEXUS_TASK_API=unix:///…/api.sock`
+and `NEXUS_TASK_API_TOKEN` (sent as `Authorization: Bearer`). The agent adds
+the lease token and forwards to the control plane; the task never holds a
+platform credential. The context methods below use it when it is there, and
+nothing in a handler needs to know. Endpoints: `GET /v1/info`,
+`POST /v1/usage`, `POST /v1/progress`, `POST /v1/permits`,
+`POST /v1/permits/settle`, `PUT`/`GET /v1/checkpoint`, `POST /v1/error`
+(ADR-0032 §1 has the table and the status codes).
+
+| Member | Purpose |
+|---|---|
+| `ctx.report_usage({key: n})` | Report usage **increments**; returns the attempt's totals. |
+| `ctx.report_tokens(provider, model, *, input_tokens=0, output_tokens=0, cached_tokens=0, requests=1)` | One call's tokens under the agreed keys. |
+| `ctx.usage_totals` | This attempt's totals so far (a copy). |
+| `ctx.acquire_permits(keys, *, requests=1, tokens=0, timeout=None)` → `PermitGrant` | Block until the platform grants all keys; raises `nexus.RateLimited` past `timeout` or the task's deadline. |
+| `ctx.settle_permits(keys, tokens)` | Settle an estimate with `actual - estimate` (debt or refund). |
+| `ctx.checkpoint(state)` → `CheckpointInfo` | Durably save JSON state (canonical JSON, at most 64 MiB). |
+| `ctx.resume()` → state or `None` | The latest checkpoint of this work, from any earlier attempt. |
+| `ctx.heartbeat()` / `ctx.progress()` | Now reach the control plane (F148); calls within 1 s are coalesced. |
+
+`StaleLease` (and its subclass `StaleCheckpoint`) from any of these means the
+platform has taken the attempt away; a retry may already be running. Stop.
+When a handler fails, the worker entrypoints declare its class to the agent
+(`POST /v1/error`), including `rate_limited` with the provider's retry-after.
+
+### Usage keys
+
+Model calls are billed per token, not per CPU-second, so usage units ride into
+the usage ledger with the attempt's end, including for a failed attempt. The
+key convention is shared with the price books, so it is a contract:
+
+```
+tokens:<provider>/<model>:input      tokens:<provider>/<model>:output
+tokens:<provider>/<model>:cached     requests:<provider>/<model>
+<kind>:<subject>[:<qualifier>]       e.g. images:openai/dall-e-3, units:embeddings
+```
+
+`kind` and `qualifier` are `[a-z][a-z0-9_]{0,31}`, `subject` is
+`[A-Za-z0-9][A-Za-z0-9._/@+-]{0,127}`, a key is at most 200 bytes, values are
+integers in `[0, 10^15]`, and an attempt has at most 64 keys.
+`nexus.usage.token_units(provider, model, *, input_tokens=0, output_tokens=0,
+cached_tokens=0, requests=0)` builds the token keys, omitting zeros;
+`usage_subject` lower-cases the provider and maps characters outside the
+subject alphabet to `_` (the `:` in an OpenAI fine-tuned model id).
+
+### Rate limits
+
+Limits are namespace policy in the quotas document
+(`PUT /v1/namespaces/{ns}/quotas`), shared by every worker and scheduler
+replica:
+
+```json
+"rate_limits": {
+  "openai/gpt-4o-mini": {"requests_per_second": 50, "tokens_per_minute": 2000000},
+  "anthropic":          {"requests_per_second": 10, "burst_requests": 20}
+}
+```
+
+A permit ask is all keys or none and never waits on the server: the SDK
+sleeps `retry_after_ms` plus jitter and asks again. Keys with no configured
+limit are granted at once. A task that gives up raises `nexus.RateLimited`
+(error class `rate_limited`, also a valid `Retry(retry_on=[...])` spelling),
+which the scheduler retries after the provider's `Retry-After` without
+charging the retry budget, up to a cap. A task that calls a provider without
+permits is not throttled at all: use `LLMClient`, or call `acquire_permits`
+yourself.
+
+### LLMClient
+
+```python
+LLMClient(ctx, *, provider="openai" | "anthropic", model, base_url,
+          api_key=None, api_key_env=None, rate_limit_keys=None, usage_provider=None,
+          max_retries=5, max_retry_wait_s=60.0, timeout_s=60.0)
+llm.complete(prompt_or_messages, *, max_tokens=256, temperature=0.0, system=None) -> Completion
+# Completion(text, input_tokens, output_tokens, model, finish_reason, raw, cached_tokens)
+```
+
+Per call it estimates tokens (`ceil(chars/4) + max_tokens`), acquires permits
+on `rate_limit_keys` (default `[provider, provider/model]`), posts with the
+standard library, retries 429/503 honouring `Retry-After` (seconds or an HTTP
+date) with exponential backoff and jitter, and on success settles
+`actual - estimate` and reports usage under `usage_provider` (default
+`provider`). Exhausted retries raise `RateLimited`; 401/403 raise
+`LLMAuthError` (terminal), other 4xx `LLMRequestError` (terminal), persistent
+5xx or network errors `LLMUnavailable` (transient). The key is never logged
+and never shown by `repr`.
+
+### Pointing at a real provider
+
+| Provider | `base_url` | Key |
+|---|---|---|
+| OpenAI (or compatible) | `https://api.openai.com` | `api_key_env="OPENAI_API_KEY"` |
+| Anthropic | `https://api.anthropic.com` | `api_key_env="ANTHROPIC_API_KEY"` |
+
+Supply the key through the platform's secret mechanism (a `SecretRef`,
+resolved by the worker at execution time and never stored by the control
+plane) so that it reaches the task as the environment variable `api_key_env`
+names, **never in a spec, a parameter or an input**: those are stored and
+shown. Give the task network egress (the
+docker executor defaults to `--network none`), and configure the namespace's
+`rate_limits` for the model's real limits before fanning out. Nothing in this
+repository calls a real provider; every test and example uses the mock below.
+
+### Without a workload API
+
+The local runner, unit tests and the kubernetes executor (F149) have no
+workload API. The same calls then work in-process:
+
+- **usage** accumulates on the context and is logged (`"msg": "usage"`) when
+  the task ends;
+- **permits** come from a process-local token bucket with the platform's
+  semantics, **unlimited** unless `NEXUS_LOCAL_RATE_LIMITS` sets limits in the
+  quotas' shape (`{"openai": {"requests_per_second": 2}}`); a WARN says once
+  that nothing is shared with other processes;
+- **checkpoints** go to `ctx.store` under `checkpoints/<idempotency_key>`. The
+  local runner keeps one result store per run and every attempt of a node has
+  the same idempotency key, so `ctx.resume()` in a local retry returns what the
+  failed attempt checkpointed. A unit test does the same by building two
+  contexts over one store with one key. The local runner retries
+  `rate_limited` like `transient` (charged to the budget, without honouring
+  `retry_after`).
+
+### The mock model server
+
+`nexus.testing.MockLLMServer` speaks OpenAI (`/v1/chat/completions`) and
+Anthropic (`/v1/messages`), plus OpenAI-style fine-tuning (`/v1/files` as a
+JSON body `{purpose, filename, content}`, not multipart;
+`/v1/fine_tuning/jobs`, whose status advances
+`validating_files → queued → running → succeeded` one step per poll) and
+`/v1/models`:
+
+```python
+from nexus.testing import MockLLMServer
+
+with MockLLMServer(rate_limit_every=5, retry_after_s=0.1) as mock:
+    llm = LLMClient(ctx, provider="openai", model="mock-large",
+                    base_url=mock.base_url, api_key="test")
+    llm.complete("What is 12 + 7?").text      # "19"
+    mock.stats.requests["/v1/chat/completions"], mock.stats.total_tokens
+```
+
+Answers are deterministic: arithmetic ("What is 12 + 7?"), sentiment
+("Classify the sentiment …" → positive/negative/neutral), a strict grader
+(system "You are a strict grader", lines `Reference:` and `Candidate:` → PASS
+or FAIL), otherwise `Summary: <first 8 words>`. Tokens are whitespace word
+counts. A base model named `*small*` gets about 30% of arithmetic wrong (by a
+hash of the question) so an eval gate can fail it; `ft:` fine-tunes answer
+correctly. `fail_first=N` answers the first N completions 503 and
+`rate_limit_every=N` every Nth 429, both with `Retry-After`. A missing key is
+401. As a compose sidecar:
+`python -m nexus.testing.mock_llm --host 0.0.0.0 --port 8089 [--rate-limit-every N] [--retry-after S] [--fail-first N]`
+(health check: `GET /healthz`).
 
 ## Client
 

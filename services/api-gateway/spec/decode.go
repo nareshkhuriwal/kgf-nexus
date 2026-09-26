@@ -314,6 +314,8 @@ func errorClass(s string) nexusv1.ErrorClass {
 		return nexusv1.ErrorClass_ERROR_CLASS_NOT_FOUND
 	case "infrastructure", "ERROR_CLASS_INFRASTRUCTURE":
 		return nexusv1.ErrorClass_ERROR_CLASS_INFRASTRUCTURE
+	case "rate_limited", "ERROR_CLASS_RATE_LIMITED":
+		return nexusv1.ErrorClass_ERROR_CLASS_RATE_LIMITED
 	default:
 		return nexusv1.ErrorClass_ERROR_CLASS_UNSPECIFIED
 	}

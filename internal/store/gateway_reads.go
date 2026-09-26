@@ -510,6 +510,11 @@ type AttemptRow struct {
 	// report; ProgressMessageAt is when the message last changed.
 	ProgressAt        *time.Time
 	ProgressMessageAt *time.Time
+	// UsageUnits is the attempt's reported usage units (attempt_usage,
+	// migration 0036, ADR-0032): a JSON object {key: integer}, nil when the
+	// task reported none. UsageReportedAt is the latest accepted report.
+	UsageUnits      []byte
+	UsageReportedAt *time.Time
 }
 
 // GatewayListRunAttempts returns every attempt of a run, including terminal ones.
@@ -522,10 +527,12 @@ func GatewayListRunAttempts(ctx context.Context, q GWQuerier, runID string) ([]A
 		SELECT a.id::text, a.run_id::text, a.node_id, a.attempt_number, a.state::text, a.queue,
 		       a.worker_id::text, w.hostname, a.pending_reason, a.error::text, a.metrics::text,
 		       a.scheduled_at, a.dispatched_at, a.started_at, a.ended_at, a.cache_hit_of::text,
-		       p.message, p.fraction, p.reported_at, p.message_changed_at
+		       p.message, p.fraction, p.reported_at, p.message_changed_at,
+		       u.units::text, u.reported_at
 		  FROM task_attempts a
 		  LEFT JOIN workers w ON w.id = a.worker_id
 		  LEFT JOIN attempt_progress p ON p.attempt_id = a.id
+		  LEFT JOIN attempt_usage u ON u.attempt_id = a.id
 		 WHERE a.run_id = $1
 		 ORDER BY a.node_id, a.attempt_number`,
 		runID,
@@ -541,7 +548,8 @@ func GatewayListRunAttempts(ctx context.Context, q GWQuerier, runID string) ([]A
 		if err := rows.Scan(&a.ID, &a.RunID, &a.NodeID, &a.AttemptNumber, &a.State, &a.Queue,
 			&a.WorkerID, &a.WorkerHostname, &a.PendingReason, &a.Error, &a.Metrics,
 			&a.ScheduledAt, &a.DispatchedAt, &a.StartedAt, &a.EndedAt, &a.CacheHitOf,
-			&a.ProgressMessage, &a.ProgressFraction, &a.ProgressAt, &a.ProgressMessageAt); err != nil {
+			&a.ProgressMessage, &a.ProgressFraction, &a.ProgressAt, &a.ProgressMessageAt,
+			&a.UsageUnits, &a.UsageReportedAt); err != nil {
 			return nil, fmt.Errorf("scan attempt: %w", err)
 		}
 		out = append(out, a)
@@ -556,17 +564,20 @@ func GatewayGetAttempt(ctx context.Context, q GWQuerier, namespace, attemptID st
 		SELECT a.id::text, a.run_id::text, a.node_id, a.attempt_number, a.state::text, a.queue,
 		       a.worker_id::text, w.hostname, a.pending_reason, a.error::text, a.metrics::text,
 		       a.scheduled_at, a.dispatched_at, a.started_at, a.ended_at, a.cache_hit_of::text,
-		       p.message, p.fraction, p.reported_at, p.message_changed_at
+		       p.message, p.fraction, p.reported_at, p.message_changed_at,
+		       u.units::text, u.reported_at
 		  FROM task_attempts a
 		  JOIN workflow_runs r ON r.id = a.run_id
 		  LEFT JOIN workers w ON w.id = a.worker_id
 		  LEFT JOIN attempt_progress p ON p.attempt_id = a.id
+		  LEFT JOIN attempt_usage u ON u.attempt_id = a.id
 		 WHERE a.id = $1 AND r.namespace = $2`,
 		attemptID, namespace,
 	).Scan(&a.ID, &a.RunID, &a.NodeID, &a.AttemptNumber, &a.State, &a.Queue,
 		&a.WorkerID, &a.WorkerHostname, &a.PendingReason, &a.Error, &a.Metrics,
 		&a.ScheduledAt, &a.DispatchedAt, &a.StartedAt, &a.EndedAt, &a.CacheHitOf,
-		&a.ProgressMessage, &a.ProgressFraction, &a.ProgressAt, &a.ProgressMessageAt)
+		&a.ProgressMessage, &a.ProgressFraction, &a.ProgressAt, &a.ProgressMessageAt,
+		&a.UsageUnits, &a.UsageReportedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AttemptRow{}, ErrNotFound
 	}

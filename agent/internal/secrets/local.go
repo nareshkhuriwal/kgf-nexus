@@ -100,6 +100,10 @@ var agentCredentialEnv = []string{
 	"NEXUS_TLS_*KEY_FILE",
 	"OTEL_EXPORTER_OTLP_*HEADERS",
 	"OTEL_EXPORTER_OTLP_*CLIENT_KEY",
+	// A workload API address and bearer token are per attempt (ADR-0032) and
+	// set explicitly; one inherited from the agent's own environment (an agent
+	// started inside another task) would let a task act on that other attempt.
+	"NEXUS_TASK_API*",
 }
 
 // IsAgentCredentialEnv reports whether name is one of the agent's own

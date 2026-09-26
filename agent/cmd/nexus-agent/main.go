@@ -28,6 +28,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/agentmetrics"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/executor"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/taskapi"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/worker"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
@@ -83,6 +84,8 @@ func main() {
 		maxUninterruptible = flag.Duration("max-uninterruptible",
 			envDuration("NEXUS_MAX_UNINTERRUPTIBLE", worker.DefaultUninterruptibleCeiling),
 			"platform ceiling on how long cancelling an uninterruptible task waits before SIGKILL (ADR-0015)")
+		taskAPIRoot = flag.String("task-api-root", envOr("NEXUS_TASK_API_ROOT", taskapi.DefaultRoot),
+			"directory for per-attempt workload API sockets (ADR-0032); keep it short: a socket path is limited to 104 bytes on macOS")
 		allowUnenforceable = flag.Bool("allow-unenforceable-limits",
 			os.Getenv("NEXUS_ALLOW_UNENFORCEABLE_LIMITS") == "true",
 			"DEVELOPMENT ONLY: run tasks whose resource limits the subprocess executor cannot enforce")
@@ -216,6 +219,7 @@ func main() {
 		MaxUninterruptible:       *maxUninterruptible,
 		Secrets:                  secretResolver,
 		SubprocessEnvPassthrough: passthrough,
+		TaskAPIRoot:              *taskAPIRoot,
 	}
 
 	// The kubernetes executor is opt-in: it exists only when NEXUS_K8S_NAMESPACE

@@ -29,7 +29,8 @@ func writeSpec(t *testing.T, content string) string {
 func TestInitListsTemplates(t *testing.T) {
 	h := newHarness(t)
 	code, out, _ := h.run("init", "--list")
-	for _, want := range []string{"etl", "ml-training", "batch-inference", "file-fanout", "--gpu"} {
+	for _, want := range []string{"etl", "ml-training", "batch-inference", "file-fanout",
+		"llm-batch-inference", "llm-eval", "fine-tune", "--gpu"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--list missing %q:\n%s", want, out)
 		}
@@ -39,7 +40,7 @@ func TestInitListsTemplates(t *testing.T) {
 	}
 	_, out, _ = h.run("init", "--list", "-o", "json")
 	var list []map[string]any
-	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list) != 4 {
+	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list) != 7 {
 		t.Errorf("json list: %v %q", err, out)
 	}
 }

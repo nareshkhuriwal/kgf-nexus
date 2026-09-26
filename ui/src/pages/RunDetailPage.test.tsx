@@ -758,3 +758,69 @@ describe('execution timeline selection', () => {
     expect(await screen.findByText('node · shard[3]')).toBeInTheDocument();
   });
 });
+
+describe('usage (all attempts)', () => {
+  /**
+   * ADR-0032 §2. Both extract attempts FAILED, yet the tokens they consumed
+   * were spent: the run roll-up must sum them, not show only the latest.
+   */
+  it('sums tokens by model across every attempt, failed ones included', async () => {
+    const [a1, a2] = failedRun.attempts;
+    serveRun({
+      ...failedRun,
+      attempts: [
+        {
+          ...a1,
+          usage_units: {
+            'tokens:openai/gpt-4o-mini:input': 1200,
+            'tokens:openai/gpt-4o-mini:output': 340,
+            'requests:openai/gpt-4o-mini': 3,
+          },
+          usage_reported_at: '2026-09-12T10:01:00Z',
+        },
+        {
+          ...a2,
+          usage_units: {
+            'tokens:openai/gpt-4o-mini:input': 800,
+            'tokens:anthropic/claude-x:input': 50,
+            'requests:openai/gpt-4o-mini': 2,
+            'requests:anthropic/claude-x': 1,
+          },
+          usage_reported_at: '2026-09-12T10:03:00Z',
+        },
+      ],
+    });
+    wrap('/runs/run-aaaaaaaaaaaa');
+
+    const panel = await screen.findByTestId('run-usage');
+    expect(within(panel).getByText('Usage (all attempts)')).toBeInTheDocument();
+    expect(within(panel).getByText('2 of 2 attempts reported')).toBeInTheDocument();
+    const table = within(panel).getByRole('table', { name: /tokens by model/i });
+    const cells = (name: RegExp) =>
+      within(within(table).getByRole('row', { name })).getAllByRole('cell').map((c) => c.textContent);
+    expect(cells(/openai\/gpt-4o-mini/)).toEqual(['2,000', '340', '—', '5']);
+    expect(cells(/anthropic\/claude-x/)).toEqual(['50', '—', '—', '1']);
+    expect(cells(/^Total/)).toEqual(['2,050', '340', '—', '6']);
+    expect(panel).toHaveTextContent(/including failed, lost and cancelled/);
+    expect(panel).toHaveTextContent(/2 of the reporting attempts did not succeed/);
+  });
+
+  it('states that no usage was reported rather than showing zeros', async () => {
+    serveRun({
+      ...failedRun,
+      attempts: failedRun.attempts.map((a) => ({ ...a, usage_units: {}, usage_reported_at: null })),
+    });
+    wrap('/runs/run-aaaaaaaaaaaa');
+    const panel = await screen.findByTestId('run-usage');
+    expect(within(panel).getByRole('status')).toHaveTextContent(/No usage reported/);
+    expect(within(panel).queryByRole('table')).not.toBeInTheDocument();
+  });
+
+  it('is absent when the gateway predates usage reporting', async () => {
+    serveRun();
+    wrap('/runs/run-aaaaaaaaaaaa');
+    await screen.findByText(/daily-etl/);
+    await screen.findByRole('list', { name: /execution timeline/i });
+    expect(screen.queryByTestId('run-usage')).not.toBeInTheDocument();
+  });
+});

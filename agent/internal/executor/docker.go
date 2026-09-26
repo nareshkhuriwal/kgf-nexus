@@ -13,6 +13,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,11 +63,14 @@ type dockerState struct {
 	env         []string
 	workDir     string
 	containerWD string
-	limit       *nexusv1.ResourceVector
-	gpuDevices  []int
-	deadline    time.Time
-	grace       time.Duration
-	name        string
+	// taskAPIDir is the host directory holding the attempt's task-API socket,
+	// mounted at ContainerTaskAPIDir; empty when the attempt has none.
+	taskAPIDir string
+	limit      *nexusv1.ResourceVector
+	gpuDevices []int
+	deadline   time.Time
+	grace      time.Duration
+	name       string
 	// declaredOutputs and stdoutOutput are copied from the spec at Prepare so
 	// inspectOutcome can collect outputs without the spec, which Wait does not
 	// receive.
@@ -226,6 +231,7 @@ func (e *DockerExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepared, 
 		env:             dockerEnv(spec, containerWD),
 		workDir:         workDir,
 		containerWD:     containerWD,
+		taskAPIDir:      taskAPIDirOf(spec),
 		limit:           spec.Limit,
 		gpuDevices:      spec.GPUDevices,
 		deadline:        spec.StartToCloseDeadline,
@@ -284,29 +290,7 @@ func (e *DockerExecutor) Start(ctx context.Context, p Prepared) (Handle, error) 
 		return Handle{}, fmt.Errorf("%w: docker: Start called with foreign Prepared", ErrValidation)
 	}
 
-	args := []string{"run", "--detach", "--name", st.name,
-		"--network", e.network(),
-		"--workdir", st.containerWD,
-		"--volume", st.workDir + ":" + st.containerWD,
-		// Labels make orphan reconciliation a filtered list rather than a guess.
-		"--label", "nexus.attempt_id=" + p.AttemptID,
-		"--label", "nexus.managed=true",
-	}
-	args = append(args, dockerLimitArgs(st.limit, st.gpuDevices)...)
-	for _, kv := range st.env {
-		args = append(args, "--env", kv)
-	}
-	if st.envFile != "" {
-		// Read by the docker CLI; the values never reach its argv.
-		args = append(args, "--env-file", st.envFile)
-	}
-	if st.secretFiles != "" {
-		args = append(args,
-			"--volume", st.secretFiles+":"+ContainerSecretsDir+":ro",
-			"--env", secrets.EnvSecretsDir+"="+ContainerSecretsDir)
-	}
-	args = append(args, st.image)
-	args = append(args, st.argv...)
+	args := dockerRunArgs(st, p.AttemptID, e.network())
 
 	out, err := e.output(ctx, 2*time.Minute, args...)
 	if st.envFile != "" {
@@ -696,7 +680,64 @@ func dockerEnv(spec TaskSpec, containerWD string) []string {
 	if spec.InlineThresholdBytes > 0 {
 		env = append(env, EnvInlineThreshold+"="+strconv.FormatInt(spec.InlineThresholdBytes, 10))
 	}
+	if spec.AttemptNumber > 0 {
+		env = append(env, EnvAttemptNumber+"="+strconv.FormatInt(int64(spec.AttemptNumber), 10))
+	}
+	// The socket's directory is mounted at ContainerTaskAPIDir (dockerRunArgs),
+	// so the workload is told the CONTAINER path. This works under
+	// --network none, which is the point: a task that declared no network still
+	// reaches its own agent and nothing else (ADR-0032 §1).
+	if spec.TaskAPISocket != "" {
+		env = append(env,
+			EnvTaskAPI+"="+TaskAPIScheme+path.Join(ContainerTaskAPIDir, filepath.Base(spec.TaskAPISocket)),
+			EnvTaskAPIToken+"="+spec.TaskAPIToken,
+		)
+	}
 	return env
+}
+
+// dockerRunArgs builds the `docker run` argument list. Split out of Start so
+// the mounts and environment a container receives are testable without a
+// daemon.
+func dockerRunArgs(st *dockerState, attemptID, network string) []string {
+	args := []string{"run", "--detach", "--name", st.name,
+		"--network", network,
+		"--workdir", st.containerWD,
+		"--volume", st.workDir + ":" + st.containerWD,
+		// Labels make orphan reconciliation a filtered list rather than a guess.
+		"--label", "nexus.attempt_id=" + attemptID,
+		"--label", "nexus.managed=true",
+	}
+	if st.taskAPIDir != "" {
+		// Read-write: connecting to a Unix socket is a write on the socket
+		// file. The directory holds nothing but the socket; the agent creates
+		// it per attempt and removes it when the attempt ends.
+		args = append(args, "--volume", st.taskAPIDir+":"+ContainerTaskAPIDir)
+	}
+	args = append(args, dockerLimitArgs(st.limit, st.gpuDevices)...)
+	for _, kv := range st.env {
+		args = append(args, "--env", kv)
+	}
+	if st.envFile != "" {
+		// Secret values (ADR-0025): read by the docker CLI; the values never
+		// reach its argv.
+		args = append(args, "--env-file", st.envFile)
+	}
+	if st.secretFiles != "" {
+		args = append(args,
+			"--volume", st.secretFiles+":"+ContainerSecretsDir+":ro",
+			"--env", secrets.EnvSecretsDir+"="+ContainerSecretsDir)
+	}
+	args = append(args, st.image)
+	return append(args, st.argv...)
+}
+
+// taskAPIDirOf is the directory to mount for the attempt's task-API socket.
+func taskAPIDirOf(spec TaskSpec) string {
+	if spec.TaskAPISocket == "" {
+		return ""
+	}
+	return filepath.Dir(spec.TaskAPISocket)
 }
 
 func (e *DockerExecutor) run(ctx context.Context, timeout time.Duration, args ...string) error {

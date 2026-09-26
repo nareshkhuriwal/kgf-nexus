@@ -20,6 +20,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/logship"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/resultstore"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/secrets"
+	"github.com/khuriwalgroup/kgf-nexus/agent/internal/taskapi"
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
@@ -103,6 +104,11 @@ type Config struct {
 	// ends, for the process's /readyz. Built once by the caller, like
 	// Metrics, so it spans REREGISTER. Optional.
 	Readiness *Readiness
+
+	// TaskAPIRoot is where per-attempt workload-API sockets are created
+	// (ADR-0032 §1). Empty means taskapi.DefaultRoot. Keep it short: a Unix
+	// socket path is limited to 104 bytes on Darwin and 108 on Linux.
+	TaskAPIRoot string
 }
 
 // ResultStoreCredentials are the parts of result-store access the agent holds
@@ -394,6 +400,7 @@ func (a *Agent) register(ctx context.Context) error {
 	// one would have sent to it (ADR-0016).
 	a.runner.InlineThreshold = domain.ClampInlineThreshold(resp.GetResultStore().GetInlineThresholdBytes())
 	a.configureLogShipping(resp.GetLogShipping())
+	a.configureWorkloadAPI(resp.GetWorkloadApi())
 	// The keeper revokes into the runner and the runner renews through the
 	// keeper, so one of the two edges must be wired after construction.
 	a.keeper.SetHandler(a.runner)
@@ -488,9 +495,11 @@ func (a *Agent) reattachKubernetes(ctx context.Context) {
 			}
 			log.Info("harvested the outcome of an attempt that finished while the agent was down",
 				"exit_code", o.ExitCode, "succeeded", o.Succeeded())
+			// No workload API: the attempt ran under a previous session, so
+			// nothing was declared or recorded through this agent.
 			a.runner.reportOutcome(rctx, &nexusv1.TaskAssignment{
 				AttemptId: e.AttemptID, RunId: e.RunID, NodeId: e.NodeID, LeaseToken: e.LeaseToken,
-			}, o, log)
+			}, o, log, attemptFacts{})
 			_ = k.Cleanup(rctx, h)
 		case state == executor.ReattachRunning:
 			log.Warn("killing an attempt Job that outlived its agent session; its lease cannot be renewed " +
@@ -533,6 +542,42 @@ func (a *Agent) configureLogShipping(cfg *nexusv1.LogShippingConfig) {
 	a.log.Info("durable task logs enabled",
 		"max_bytes_per_attempt", cfg.GetMaxBytesPerAttempt(), "chunk_bytes", cfg.GetChunkBytes(),
 		"flush_interval_ms", cfg.GetFlushIntervalMs())
+}
+
+// configureWorkloadAPI records what the control plane offers the workload API
+// for this session (ADR-0032). The per-attempt socket is served whatever it
+// offers -- progress and declared errors need nothing new upstream -- but usage,
+// rate limits and checkpoints are offered to the workload only when the
+// gateway advertised them AND this client can forward them.
+func (a *Agent) configureWorkloadAPI(cfg *nexusv1.WorkloadApiConfig) {
+	a.runner.Namespace = a.cfg.Namespace
+	a.runner.TaskAPIRoot = a.cfg.TaskAPIRoot
+	if err := taskapi.CheckRoot(a.cfg.TaskAPIRoot); err != nil {
+		// Not fatal: the attempts still run, without a workload API, and the
+		// SDK falls back to its in-process behaviour. But usage units reported
+		// by tasks on this worker are then NOT recorded, which is why this is
+		// an error an operator must see.
+		a.log.Error("the workload API socket root is unusable; tasks on this worker get no workload API "+
+			"(usage units are not recorded); set NEXUS_TASK_API_ROOT to a short, agent-owned directory",
+			"root", a.cfg.TaskAPIRoot, "error", err)
+		a.runner.TaskAPIDisabled = true
+	}
+	a.runner.WorkloadAPI = cfg
+	up, ok := a.client.(taskapi.Upstream)
+	if !ok {
+		if cfg != nil {
+			a.log.Warn("the control plane offers the workload API but this client cannot forward it")
+		}
+		return
+	}
+	a.runner.WorkloadUpstream = up
+	if cfg == nil {
+		a.log.Info("the control plane predates the workload API; tasks get progress and declared errors only")
+		return
+	}
+	a.log.Info("workload API enabled",
+		"usage_reporting", cfg.GetUsageReporting(), "rate_limits", cfg.GetRateLimits(),
+		"checkpoints", cfg.GetCheckpoints() && a.store != nil, "max_checkpoint_bytes", cfg.GetMaxCheckpointBytes())
 }
 
 func (a *Agent) initResultStore(cfg *nexusv1.ResultStoreConfig) {

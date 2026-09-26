@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -128,5 +129,58 @@ func TestNewRequiresEndpointAndBucket(t *testing.T) {
 	}
 	if _, err := New(Config{Endpoint: "localhost:9000"}); err == nil {
 		t.Error("expected an error with no bucket")
+	}
+}
+
+// TestCheckpointKeysAreConfinedToTheNamespacePrefix: a checkpoint write or read
+// outside <namespace>/checkpoints/ is refused before any network call, so a bug
+// in key construction cannot reach another tenant's objects (ADR-0032 §4).
+func TestCheckpointKeysAreConfinedToTheNamespacePrefix(t *testing.T) {
+	c := &Client{namespace: "team-ml"}
+	for _, key := range []string{
+		"team-ml/logs/a1/0",
+		"other/checkpoints/k/a1/1",
+		"team-ml/checkpoints/../../other/x",
+		"team-mlx/checkpoints/k/a1/1",
+	} {
+		if err := c.PutCheckpointObject(t.Context(), key, strings.NewReader("x"), 1); !errors.Is(err, ErrCheckpointKeyOutsideNamespace) {
+			t.Errorf("put %q: err = %v, want ErrCheckpointKeyOutsideNamespace", key, err)
+		}
+		if _, err := c.GetCheckpointObject(t.Context(), "", key, 10); !errors.Is(err, ErrCheckpointKeyOutsideNamespace) {
+			t.Errorf("get %q: err = %v, want ErrCheckpointKeyOutsideNamespace", key, err)
+		}
+	}
+	if !c.checkpointKeyAllowed("team-ml/checkpoints/k/a1/1") {
+		t.Error("the attempt's own checkpoint key was refused")
+	}
+	if (&Client{}).checkpointKeyAllowed("checkpoints/k/a1/1") {
+		t.Error("a client with no namespace must refuse every checkpoint key")
+	}
+}
+
+// TestCheckpointRoundTripThroughTheStore: checkpoints go through the result
+// store's backend interface (ADR-0027), bounded on read, with a missing object
+// distinct from a failure and another bucket refused.
+func TestCheckpointRoundTripThroughTheStore(t *testing.T) {
+	c, err := New(Config{Store: objstoretest.NewMemory("results"), Namespace: "team-ml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	key := "team-ml/checkpoints/k/a1/1"
+	if _, err := c.GetCheckpointObject(ctx, "", key, 10); !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("missing: err = %v, want ErrObjectNotFound", err)
+	}
+	if err := c.PutCheckpointObject(ctx, key, strings.NewReader("state-1"), 7); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := c.GetCheckpointObject(ctx, "results", key, 7); err != nil || string(b) != "state-1" {
+		t.Fatalf("get = %q, %v", b, err)
+	}
+	if _, err := c.GetCheckpointObject(ctx, "", key, 6); !errors.Is(err, ErrObjectTooLarge) {
+		t.Fatalf("bound: err = %v, want ErrObjectTooLarge", err)
+	}
+	if _, err := c.GetCheckpointObject(ctx, "elsewhere", key, 10); err == nil || !strings.Contains(err.Error(), "elsewhere") {
+		t.Fatalf("other bucket: err = %v", err)
 	}
 }

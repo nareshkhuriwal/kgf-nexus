@@ -37,6 +37,99 @@ type Quotas struct {
 	// enforced: refusing a write after the fact would fail work that already
 	// ran, which is the wrong response to a budget signal.
 	StorageSoftLimitBytes int64 `json:"storage_soft_limit_bytes"`
+
+	// RateLimits are shared token-bucket limits on calls to external
+	// providers, keyed by "<provider>" or "<provider>/<model>" (ADR-0032 §3).
+	// Enforced by the permit service (AcquirePermits), never in the claim.
+	// Absent means no key is limited.
+	RateLimits map[string]RateLimit `json:"rate_limits,omitempty"`
+}
+
+// RateLimit is one key's shared limit. At least one rate must be set; a zero
+// rate leaves that dimension unlimited. Bursts default to one second of
+// requests (at least 1) and one minute of tokens.
+type RateLimit struct {
+	RequestsPerSecond float64 `json:"requests_per_second,omitempty"`
+	TokensPerMinute   int64   `json:"tokens_per_minute,omitempty"`
+	BurstRequests     int64   `json:"burst_requests,omitempty"`
+	BurstTokens       int64   `json:"burst_tokens,omitempty"`
+}
+
+// Rate-limit bounds. As for quotas, they reject nonsense, not ambition.
+const (
+	MaxRateLimitKeys          = 64
+	MaxRequestsPerSecond      = 1_000_000
+	MaxTokensPerMinute        = 1_000_000_000_000
+	MaxRateLimitBurstRequests = 100_000_000
+)
+
+var rateLimitKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,127}$`)
+
+// Validate rejects a limit the permit service could not evaluate safely.
+func (r RateLimit) Validate(key string) error {
+	switch {
+	case !rateLimitKeyPattern.MatchString(key):
+		return fmt.Errorf("rate-limit key %q must be <provider> or <provider>/<model>", key)
+	case r.RequestsPerSecond < 0 || r.RequestsPerSecond > MaxRequestsPerSecond ||
+		r.RequestsPerSecond != r.RequestsPerSecond: // NaN
+		return fmt.Errorf("rate_limits.%s.requests_per_second must be between 0 and %d", key, MaxRequestsPerSecond)
+	case r.TokensPerMinute < 0 || r.TokensPerMinute > MaxTokensPerMinute:
+		return fmt.Errorf("rate_limits.%s.tokens_per_minute must be between 0 and %d", key, int64(MaxTokensPerMinute))
+	case r.RequestsPerSecond == 0 && r.TokensPerMinute == 0:
+		return fmt.Errorf("rate_limits.%s sets no rate; remove the key to lift the limit", key)
+	case r.BurstRequests < 0 || r.BurstRequests > MaxRateLimitBurstRequests:
+		return fmt.Errorf("rate_limits.%s.burst_requests must be between 0 (default) and %d", key, MaxRateLimitBurstRequests)
+	case r.BurstTokens < 0 || r.BurstTokens > MaxTokensPerMinute:
+		return fmt.Errorf("rate_limits.%s.burst_tokens must be between 0 (default) and %d", key, int64(MaxTokensPerMinute))
+	case r.BurstRequests > 0 && r.RequestsPerSecond == 0:
+		return fmt.Errorf("rate_limits.%s.burst_requests needs requests_per_second", key)
+	case r.BurstTokens > 0 && r.TokensPerMinute == 0:
+		return fmt.Errorf("rate_limits.%s.burst_tokens needs tokens_per_minute", key)
+	}
+	return nil
+}
+
+// looserThan lists the fields of next that relax r (a raised rate or burst, or
+// a limited dimension made unlimited).
+func (r RateLimit) looserThan(next RateLimit, key string) []string {
+	var out []string
+	rate := func(name string, cur, nxt float64) {
+		if cur > 0 && (nxt == 0 || nxt > cur) {
+			out = append(out, "rate_limits."+key+"."+name)
+		}
+	}
+	rate("requests_per_second", r.RequestsPerSecond, next.RequestsPerSecond)
+	rate("tokens_per_minute", float64(r.TokensPerMinute), float64(next.TokensPerMinute))
+	// A burst is looser when it grows; 0 is the default, compared as such.
+	burst := func(name string, cur, nxt, curDefault, nxtDefault float64) {
+		if cur == 0 {
+			cur = curDefault
+		}
+		if nxt == 0 {
+			nxt = nxtDefault
+		}
+		if nxt > cur {
+			out = append(out, "rate_limits."+key+"."+name)
+		}
+	}
+	burst("burst_requests", float64(r.BurstRequests), float64(next.BurstRequests),
+		defaultBurstRequests(r.RequestsPerSecond), defaultBurstRequests(next.RequestsPerSecond))
+	burst("burst_tokens", float64(r.BurstTokens), float64(next.BurstTokens),
+		float64(r.TokensPerMinute), float64(next.TokensPerMinute))
+	return out
+}
+
+func defaultBurstRequests(rps float64) float64 {
+	if rps <= 0 {
+		return 0
+	}
+	if rps < 1 {
+		return 1
+	}
+	if c := float64(int64(rps)); c < rps {
+		return c + 1
+	}
+	return rps
 }
 
 // Quota bounds. Wide on purpose: they exist to reject nonsense (negative
@@ -88,6 +181,19 @@ func (q Quotas) Validate() error {
 			return fmt.Errorf("custom quota %q must be between 1 and %d; remove it to lift the limit", k, int64(MaxQuotaCustom))
 		}
 	}
+	if len(q.RateLimits) > MaxRateLimitKeys {
+		return fmt.Errorf("at most %d rate-limit keys", MaxRateLimitKeys)
+	}
+	keys := make([]string, 0, len(q.RateLimits))
+	for k := range q.RateLimits {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if err := q.RateLimits[k].Validate(k); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -108,6 +214,14 @@ func (q Quotas) Equal(o Quotas) bool {
 	}
 	for k, v := range q.MaxCustom {
 		if w, ok := o.MaxCustom[k]; !ok || w != v {
+			return false
+		}
+	}
+	if len(q.RateLimits) != len(o.RateLimits) {
+		return false
+	}
+	for k, v := range q.RateLimits {
+		if w, ok := o.RateLimits[k]; !ok || w != v {
 			return false
 		}
 	}
@@ -156,6 +270,15 @@ func (q Quotas) Loosened(next Quotas) []string {
 		if !tighter(v, next.MaxCustom[k]) {
 			out = append(out, "max_custom."+k)
 		}
+	}
+	// A rate limit removed is a rate limit lifted; one added only tightens.
+	for k, v := range q.RateLimits {
+		n, ok := next.RateLimits[k]
+		if !ok {
+			out = append(out, "rate_limits."+k)
+			continue
+		}
+		out = append(out, v.looserThan(n, k)...)
 	}
 	sort.Strings(out)
 	return out

@@ -57,6 +57,11 @@ files=(-f deploy/docker-compose.yml -f deploy/e2e/docker-compose.e2e.yml)
 if [[ -n "${E2E_MINIO_IMAGE:-}" ]]; then
   files+=(-f deploy/e2e/docker-compose.minio-local.yml)
 fi
+# E2E_AI=1 adds the AI-workload overlay: a Python-capable agent and the mock
+# LLM sidecar, for examples/llm_* (ADR-0032, OPERATIONS §29.8).
+if [[ "${E2E_AI:-}" == 1 ]]; then
+  files+=(-f deploy/e2e/docker-compose.ai.yml)
+fi
 compose() { docker compose -p "$PROJECT" "${files[@]}" "$@"; }
 
 log() { printf '[e2e-stack] %s\n' "$*" >&2; }

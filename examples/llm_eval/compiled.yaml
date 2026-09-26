@@ -1,0 +1,251 @@
+api_version: nexus.dev/v1
+description: Evaluate a model with exact, regex and LLM-as-judge graders; the quality
+  gate fails the run below min_accuracy.
+edges:
+- from_node_id: answer
+  output_to_input:
+    answered: answers
+  to_node_id: grade
+- from_node_id: answer
+  output_to_input:
+    answered: answers
+  to_node_id: verdict
+- from_node_id: grade
+  output_to_input:
+    graded: result
+  to_node_id: verdict
+- from_node_id: load
+  output_to_input: {}
+  to_node_id: answer
+name: llm-eval
+namespace: default
+params:
+  base_url:
+    default_json: '"http://mock-llm:8089"'
+    type: string
+  batch_size:
+    default_json: '10'
+    type: int
+  judge_model:
+    default_json: '"mock-large"'
+    type: string
+  min_accuracy:
+    default_json: '0.9'
+    type: float
+  model:
+    default_json: '"mock-large"'
+    type: string
+run_timeout_ms: 1800000
+tasks:
+- id: answer
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    base_url: base_url
+    model: model
+  inputs:
+    base_url:
+      required: true
+      type: json
+    batch:
+      required: true
+      type: json
+    model:
+      required: true
+      type: json
+  map:
+    item_input: batch
+    max_fanout: 16
+    over_node_id: load
+    over_output: result
+  outputs:
+    answers:
+      max_bytes: 16384
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 100
+      memory_bytes: 134217728
+  retry:
+    initial_ms: 1000
+    jitter: full
+    max_attempts: 3
+    max_ms: 10000
+    multiplier: 2.0
+    retry_on:
+    - ERROR_CLASS_INFRASTRUCTURE
+    - ERROR_CLASS_RATE_LIMITED
+    - ERROR_CLASS_TRANSIENT
+    - ERROR_CLASS_WORKER_LOST
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - llm_eval.answer
+    command:
+    - python3
+    - -m
+    - nexus.entrypoint
+    - --module
+    - /opt/nexus/examples/llm_eval/dag.py
+    executor: subprocess
+  task_ref: llm_eval.answer
+  timeouts:
+    heartbeat_ms: 120000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 600000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: grade
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    base_url: base_url
+    judge_model: judge_model
+  inputs:
+    answered:
+      required: true
+      type: json
+    base_url:
+      required: true
+      type: json
+    judge_model:
+      required: true
+      type: json
+  outputs:
+    result:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 100
+      memory_bytes: 134217728
+  retry:
+    initial_ms: 1000
+    jitter: full
+    max_attempts: 3
+    max_ms: 10000
+    multiplier: 2.0
+    retry_on:
+    - ERROR_CLASS_INFRASTRUCTURE
+    - ERROR_CLASS_RATE_LIMITED
+    - ERROR_CLASS_TRANSIENT
+    - ERROR_CLASS_WORKER_LOST
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - llm_eval.grade
+    command:
+    - python3
+    - -m
+    - nexus.entrypoint
+    - --module
+    - /opt/nexus/examples/llm_eval/dag.py
+    executor: subprocess
+  task_ref: llm_eval.grade
+  timeouts:
+    heartbeat_ms: 120000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 600000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: load
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    batch_size: batch_size
+  inputs:
+    batch_size:
+      required: true
+      type: json
+  outputs:
+    result:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 100
+      memory_bytes: 134217728
+  retry:
+    initial_ms: 1000
+    jitter: full
+    max_attempts: 2
+    max_ms: 600000
+    multiplier: 2.0
+    retry_on:
+    - ERROR_CLASS_INFRASTRUCTURE
+    - ERROR_CLASS_TRANSIENT
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - llm_eval.load
+    command:
+    - python3
+    - -m
+    - nexus.entrypoint
+    - --module
+    - /opt/nexus/examples/llm_eval/dag.py
+    executor: subprocess
+  task_ref: llm_eval.load
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+- id: verdict
+  idempotency: IDEMPOTENCY_MODE_REQUIRED
+  input_params:
+    min_accuracy: min_accuracy
+    model: model
+  inputs:
+    answered:
+      required: true
+      type: json
+    graded:
+      required: true
+      type: json
+    min_accuracy:
+      required: true
+      type: json
+    model:
+      required: true
+      type: json
+  outputs:
+    verdict:
+      required: true
+      type: json
+  queue: default
+  resources:
+    request:
+      cpu_millis: 100
+      memory_bytes: 134217728
+  retry:
+    initial_ms: 10000
+    jitter: full
+    max_attempts: 1
+    max_ms: 600000
+    multiplier: 2.0
+    strategy: BACKOFF_STRATEGY_EXPONENTIAL
+  runtime:
+    args:
+    - llm_eval.verdict
+    command:
+    - python3
+    - -m
+    - nexus.entrypoint
+    - --module
+    - /opt/nexus/examples/llm_eval/dag.py
+    executor: subprocess
+  task_ref: llm_eval.verdict
+  timeouts:
+    heartbeat_ms: 300000
+    schedule_to_close_ms: 14400000
+    schedule_to_start_ms: 1800000
+    start_to_close_ms: 300000
+  trigger_rule: TRIGGER_RULE_ALL_SUCCESS
+  version: 1
+

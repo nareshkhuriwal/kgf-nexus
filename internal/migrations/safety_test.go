@@ -420,26 +420,22 @@ func TestVersionNumbersAreUnique(t *testing.T) {
 var migrationName = regexp.MustCompile(`^([0-9]{4})_[a-z0-9_]+\.(up|down)\.sql$`)
 
 // knownVersionGaps are version numbers below the current highest that no
-// migration uses, and never will.
+// migration uses, and never will (services/migrations/README.md, "Known
+// gaps"). ONE documented set; there is no list of numbers "reserved" for
+// branches still in flight.
 //
-// 0019 was skipped: no file with that number has existed on any branch of the
-// repository (services/migrations/README.md). It must stay empty. The appliers
-// run every file whose basename is not in the ledger, in lexical order, so a
-// 0019 added now would run AFTER 0020 and every later migration on every
-// existing database and BEFORE them on a fresh one, and the two would not be
-// guaranteed to agree.
-var knownVersionGaps = map[int]bool{19: true}
-
-// reservedVersions are numbers handed to parallel branches that have not all
-// merged yet. Unlike a known gap, a reserved number may be present OR absent:
-// the wave-3 branches were each given numbers (0028–0031 elsewhere, 0032 to the
-// SSO branch), so any one branch on its own has a hole below its migration that
-// is filled only when the integration branch merges the others.
+//   - 0019 was skipped: no file with that number has existed on any branch.
+//   - 0029 and 0030 were handed to wave-3 branches that landed their schema
+//     under other numbers; nothing ever used them.
+//   - 0031 was the cost-management branch's (price books, budgets). That
+//     branch was held out: cost management moves to KGF billing
+//     (docs/OPERATIONS.md §23), so 0031 will not be created in this repo.
 //
-// Not an escape hatch for a dropped migration: the numbers are fixed here, and
-// the integration branch removes this map once every reserved migration has
-// landed, after which a missing one fails again.
-var reservedVersions = map[int]bool{28: true, 29: true, 30: true, 31: true}
+// A gap must stay empty. The appliers run every file whose basename is not in
+// the ledger, in lexical order, so a 0019 (or 0029-0031) added now would run
+// AFTER every later migration on every existing database and BEFORE them on a
+// fresh one, and the two would not be guaranteed to agree.
+var knownVersionGaps = map[int]bool{19: true, 29: true, 30: true, 31: true}
 
 // TestVersionGapsAreOnlyTheKnownOnes pins the version sequence.
 //
@@ -459,7 +455,7 @@ func TestVersionGapsAreOnlyTheKnownOnes(t *testing.T) {
 			t.Errorf("migration version %04d is a recorded gap and must stay unused: "+
 				"a file there runs after every later migration on existing databases "+
 				"but before them on fresh ones. Renumber it to %04d", v, highest+1)
-		case !versions[v] && !knownVersionGaps[v] && !reservedVersions[v]:
+		case !versions[v] && !knownVersionGaps[v]:
 			t.Errorf("migration version %04d is missing below the highest (%04d). "+
 				"If a merge dropped it, restore it; if the number was deliberately "+
 				"skipped, record it in knownVersionGaps and services/migrations/README.md",

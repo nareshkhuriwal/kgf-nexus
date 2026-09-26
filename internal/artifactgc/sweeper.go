@@ -116,8 +116,10 @@ type Stats struct {
 	LogDeleted      int
 	LogDeletedBytes int64
 	LogDeleteErrors int
-	DryRun          bool
-	Duration        time.Duration
+	// CheckpointObjects: listed objects under a <namespace>/checkpoints/ prefix.
+	CheckpointObjects int
+	DryRun            bool
+	Duration          time.Duration
 	// OrphanKeys lists the collectable keys, capped, so a dry run is auditable
 	// rather than just a count.
 	OrphanKeys []string
@@ -177,6 +179,13 @@ func NewSweeper(db Querier, store ObjectLister, log *slog.Logger, cfg Config) *S
 			return nil, err
 		}
 		for k := range logs {
+			live[k] = struct{}{}
+		}
+		ckpts, err := LiveCheckpointKeys(ctx, s.db)
+		if err != nil {
+			return nil, err
+		}
+		for k := range ckpts {
 			live[k] = struct{}{}
 		}
 		return live, nil
@@ -300,6 +309,9 @@ func (s *Sweeper) Once(ctx context.Context) (Stats, error) {
 		if IsLogKey(c.Key) {
 			st.LogObjects++
 		}
+		if IsCheckpointKey(c.Key) {
+			st.CheckpointObjects++
+		}
 	}
 	if len(candidates) == 0 {
 		st.Duration = time.Since(start)
@@ -411,6 +423,7 @@ func (s *Sweeper) logStats(msg string, st Stats) {
 		"log_orphans", st.LogOrphans,
 		"log_deleted", st.LogDeleted,
 		"log_deleted_bytes", st.LogDeletedBytes,
+		"checkpoint_objects_examined", st.CheckpointObjects,
 		"ref_sources", RefSources(),
 		"duration", st.Duration,
 	)

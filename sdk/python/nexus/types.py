@@ -64,6 +64,7 @@ ErrorClass = Literal[
     "oom",
     "not_found",
     "infrastructure",
+    "rate_limited",
 ]
 
 _ERROR_CLASS_NAMES: dict[str, str] = {
@@ -80,6 +81,9 @@ _ERROR_CLASS_NAMES: dict[str, str] = {
     "oom": "ERROR_CLASS_OOM",
     "not_found": "ERROR_CLASS_NOT_FOUND",
     "infrastructure": "ERROR_CLASS_INFRASTRUCTURE",
+    # A provider 429/503 the task's own retries did not absorb (ADR-0032 §3).
+    # Retried without charging the retry budget, up to a cap.
+    "rate_limited": "ERROR_CLASS_RATE_LIMITED",
 }
 
 BackoffStrategy = Literal["fixed", "linear", "exponential"]

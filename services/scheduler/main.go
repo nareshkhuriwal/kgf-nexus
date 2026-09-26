@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -67,6 +68,10 @@ func run() error {
 		backlogInterval = flag.Duration("backlog-sample-interval",
 			envDuration("NEXUS_BACKLOG_SAMPLE_INTERVAL", 15*time.Second),
 			"how often the PENDING backlog gauges are refreshed (0 = never)")
+		// ADR-0032 §3: provider throttles retried without charging the budget.
+		freeRetries = flag.Int("rate-limited-free-retries",
+			envInt("NEXUS_RATE_LIMITED_FREE_RETRIES", 0),
+			"RATE_LIMITED retries per node not charged to its retry budget (0 = default 10, negative = none)")
 	)
 	flag.Parse()
 
@@ -106,6 +111,7 @@ func run() error {
 	claimCfg.Quotas = *quotas
 	claimCfg.ClaimWindow = *claimWindow
 	claimCfg.ClaimWindowPages = *claimWindowPages
+	claimCfg.RateLimitedFreeRetries = int32(*freeRetries)
 
 	st := store.NewSchedulerStore(pool, claimCfg, instanceID)
 	// Decided once, here, before the store serves a claim. An unindexed or
@@ -135,6 +141,14 @@ func run() error {
 	if claimCfg.Quotas && !qs.Quotas {
 		log.Warn("namespace quotas are not enforced: namespace_quota_limits is missing",
 			"why", "migration 0027 is not applied; apply it and restart")
+	}
+	ws, err := st.DetectWorkloadSchema(ctx)
+	if err != nil {
+		return err
+	}
+	if !ws.Present {
+		log.Warn("the workload API is off: usage units, rate-limit permits and checkpoints are unavailable",
+			"why", "migration 0036 is not applied; apply it and restart (ADR-0032)")
 	}
 	sched := NewSchedulerWithLogger(st, log)
 
@@ -190,7 +204,7 @@ func run() error {
 	grpcOpts := append(grpcMetrics.ServerOptions(), config.PeerServerOptions()...)
 	grpcSrv := grpc.NewServer(append(grpcOpts, sopts...)...)
 	Register(grpcSrv, NewGRPCServer(st, log).WithMetrics(schedMetrics))
-	RegisterReports(grpcSrv, NewReportServer(st, log))
+	RegisterReports(grpcSrv, NewReportServer(st, log).WithMetrics(schedMetrics))
 
 	grpcErr := make(chan error, 1)
 	go func() {
@@ -324,6 +338,16 @@ func envDuration(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return def
+}
+
+// envInt reads an integer, falling back on absence or a malformed value.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
 		}
 	}
 	return def

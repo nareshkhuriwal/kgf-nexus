@@ -71,6 +71,9 @@ type DENodeRow struct {
 	// (migration 0026). Attempts at or below it are history: LoadAttempts does
 	// not return them, and the retry budget counts from above it.
 	RetryFloor int32
+	// FreeRetries counts RATE_LIMITED retries not charged to the budget
+	// (migration 0036, ADR-0032 §3); the exhaustion test subtracts it.
+	FreeRetries int32
 }
 
 // DEEdgeRow mirrors a task_edges row.
@@ -144,7 +147,7 @@ func (s *DAGEngineStore) LoadSpec(ctx context.Context, specID string) (*nexusv1.
 // LoadNodes reads every node of a run.
 func (s *DAGEngineStore) LoadNodes(ctx context.Context, runID string) ([]DENodeRow, error) {
 	const q = `SELECT run_id::text, node_id, task_ref, state::text, trigger_rule,
-	                  max_attempts, attempts_used, parent_node_id, map_index, spec_json, retry_floor
+	                  max_attempts, attempts_used, parent_node_id, map_index, spec_json, retry_floor, free_retries
 	             FROM task_nodes WHERE run_id = $1::uuid ORDER BY node_id`
 	rows, err := s.pool.Query(ctx, q, runID)
 	if err != nil {
@@ -158,7 +161,7 @@ func (s *DAGEngineStore) LoadNodes(ctx context.Context, runID string) ([]DENodeR
 		var state string
 		var raw []byte
 		if err := rows.Scan(&n.RunID, &n.NodeID, &n.TaskRef, &state, &n.TriggerRule,
-			&n.MaxAttempts, &n.AttemptsUsed, &n.ParentNodeID, &n.MapIndex, &raw, &n.RetryFloor); err != nil {
+			&n.MaxAttempts, &n.AttemptsUsed, &n.ParentNodeID, &n.MapIndex, &raw, &n.RetryFloor, &n.FreeRetries); err != nil {
 			return nil, fmt.Errorf("scan node row: %w", err)
 		}
 		n.State = domain.NodeState(state)

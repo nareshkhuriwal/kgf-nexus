@@ -148,11 +148,14 @@ func TestSubprocessTaskEnvironmentIsMinimalAndExplicit(t *testing.T) {
 	// The agent's OWN trace context must not reach the task: the task gets
 	// the attempt's, set explicitly (ADR-0026).
 	t.Setenv("TRACEPARENT", "00-11111111111111111111111111111111-2222222222222222-01")
+	// Nor may a task API of the agent's own environment (an agent run inside
+	// another task): the attempt's is set explicitly.
+	t.Setenv("NEXUS_TASK_API_TOKEN", "the-agents-own-leaked-token")
 	// An operator's passthrough globs that also match the agent's
 	// credentials: the credentials still never pass.
 	e := &SubprocessExecutor{Root: t.TempDir(), AllowUnenforceableLimits: true,
 		EnvPassthrough: []string{"OPERATOR_PASSTHROUGH_*", "NEXUS_API_KEY", "NEXUS_S3_*", "NEXUS_AZURE_*",
-			"NEXUS_TLS_*", "AWS_*", "OTEL_EXPORTER_OTLP_HEADERS"}}
+			"NEXUS_TLS_*", "AWS_*", "OTEL_EXPORTER_OTLP_HEADERS", "NEXUS_TASK_*"}}
 	const attemptTrace = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 	spec := TaskSpec{
 		AttemptID: "env-dump", RunID: "r", NodeID: "n", IdempotencyKey: "k",
@@ -160,9 +163,13 @@ func TestSubprocessTaskEnvironmentIsMinimalAndExplicit(t *testing.T) {
 		DeclaredOutputs:      []string{"env"},
 		StartToCloseDeadline: time.Now().Add(30 * time.Second),
 		Secrets:              testSecrets()[:1],
-		// The task contract the SDK relies on (ADR-0016, ADR-0026).
+		// The task contract the SDK relies on (ADR-0016, ADR-0026, ADR-0032):
+		// the attempt's trace, inline threshold, number and workload API.
 		InlineThresholdBytes: 65536,
 		TraceEnv:             map[string]string{"TRACEPARENT": attemptTrace, "TRACESTATE": "nexus=1"},
+		AttemptNumber:        2,
+		TaskAPISocket:        "/run/nexus-agent/tasks/env-dump/api.sock",
+		TaskAPIToken:         "per-attempt-task-api-token",
 	}
 	ctx := context.Background()
 	p, err := e.Prepare(ctx, spec)
@@ -187,13 +194,17 @@ func TestSubprocessTaskEnvironmentIsMinimalAndExplicit(t *testing.T) {
 		got[k] = v
 		seen[k]++
 	}
-	if seen["TRACEPARENT"] != 1 {
-		t.Errorf("TRACEPARENT appears %d times; the agent's own must not be inherited", seen["TRACEPARENT"])
+	for _, k := range []string{"TRACEPARENT", "NEXUS_TASK_API_TOKEN"} {
+		if seen[k] != 1 {
+			t.Errorf("%s appears %d times; the agent's own must not be inherited", k, seen[k])
+		}
 	}
 	for k, want := range map[string]string{"TASK_VAR": "t", "DB_PASSWORD": "pw-env-value-1",
 		"OPERATOR_PASSTHROUGH_X": "allowed", "NEXUS_TASK_MODULES": "tasks.etl", "NEXUS_ATTEMPT_ID": "env-dump",
 		"NEXUS_IDEMPOTENCY_KEY": "k", "NEXUS_RUN_ID": "r", "NEXUS_NODE_ID": "n",
-		"NEXUS_INLINE_THRESHOLD_BYTES": "65536", "TRACEPARENT": attemptTrace, "TRACESTATE": "nexus=1"} {
+		"NEXUS_INLINE_THRESHOLD_BYTES": "65536", "TRACEPARENT": attemptTrace, "TRACESTATE": "nexus=1",
+		"NEXUS_ATTEMPT_NUMBER": "2", "NEXUS_TASK_API": "unix:///run/nexus-agent/tasks/env-dump/api.sock",
+		"NEXUS_TASK_API_TOKEN": "per-attempt-task-api-token"} {
 		if got[k] != want {
 			t.Errorf("%s = %q, want %q", k, got[k], want)
 		}

@@ -105,7 +105,7 @@ func aliasTable(prefix string, shortForms ...string) map[string]string {
 func errorClassTable() map[string]string {
 	out := aliasTable("ERROR_CLASS_",
 		"transient", "timeout", "worker_lost", "validation", "permission_denied",
-		"application", "oom", "not_found", "infrastructure")
+		"application", "oom", "not_found", "infrastructure", "rate_limited")
 	out["validation_error"] = "validation"
 	return out
 }

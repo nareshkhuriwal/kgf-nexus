@@ -328,3 +328,93 @@ func (c *Client) PutLogObject(ctx context.Context, key string, body io.Reader, s
 	}
 	return nil
 }
+
+// ErrCheckpointKeyOutsideNamespace refuses a checkpoint write or read outside
+// this worker's own <namespace>/checkpoints/ prefix (ADR-0032 §4). The key is
+// built by the agent and the gateway refuses to register a foreign one anyway;
+// refusing here means a bug cannot reach another tenant's objects with
+// credentials that happen to be broader than they should be.
+var ErrCheckpointKeyOutsideNamespace = errors.New("resultstore: checkpoint key outside this namespace's checkpoint prefix")
+
+// ErrObjectNotFound is returned by GetCheckpointObject when the object does not
+// exist. Distinct from a transport failure because the caller treats the two
+// differently: a missing checkpoint means "resume from scratch", a store that
+// is down means "try again".
+var ErrObjectNotFound = errors.New("resultstore: object not found")
+
+// ErrObjectTooLarge is returned by GetCheckpointObject when the object is
+// larger than the caller's bound.
+var ErrObjectTooLarge = errors.New("resultstore: object larger than the permitted size")
+
+func (c *Client) checkpointKeyAllowed(key string) bool {
+	return c.namespace != "" && strings.HasPrefix(key, c.namespace+"/checkpoints/") &&
+		!strings.Contains(key, "..")
+}
+
+// PutCheckpointObject writes one checkpoint at an explicit key under
+// <namespace>/checkpoints/ (ADR-0032 §4), through whichever backend the
+// result store uses (ADR-0027).
+//
+// Not content-addressed, unlike Put: the key names the attempt and its
+// per-attempt sequence number, which is what makes every checkpoint object
+// immutable and never overwritten (a new checkpoint is a new seq, hence a new
+// key), so a zombie's late upload cannot replace a live attempt's bytes.
+func (c *Client) PutCheckpointObject(ctx context.Context, key string, body io.Reader, size int64) error {
+	if !c.checkpointKeyAllowed(key) {
+		return fmt.Errorf("%w: %q", ErrCheckpointKeyOutsideNamespace, key)
+	}
+	if err := c.store.Put(ctx, key, body, size,
+		objstore.PutOptions{ContentType: "application/octet-stream"}); err != nil {
+		return fmt.Errorf("resultstore: put checkpoint %s/%s: %w", c.bucket, key, err)
+	}
+	return nil
+}
+
+// GetCheckpointObject reads one checkpoint object by key, refusing to read more
+// than maxBytes. bucket may be empty for the client's own bucket; any other
+// bucket is refused, as Get refuses one (a client is bound to one store).
+//
+// The read is bounded twice -- by the object's stated size before any byte is
+// transferred, and by a LimitReader while reading -- because the object store
+// is a second failure domain: an object replaced out of band must not be able
+// to make the agent allocate without limit.
+func (c *Client) GetCheckpointObject(ctx context.Context, bucket, key string, maxBytes int64) ([]byte, error) {
+	if !c.checkpointKeyAllowed(key) {
+		return nil, fmt.Errorf("%w: %q", ErrCheckpointKeyOutsideNamespace, key)
+	}
+	if bucket != "" && bucket != c.bucket {
+		return nil, fmt.Errorf("resultstore: checkpoint %s/%s is in bucket %q, but this worker's result store is %q",
+			bucket, key, bucket, c.bucket)
+	}
+	bucket = c.bucket
+	info, err := c.store.Stat(ctx, key)
+	if errors.Is(err, objstore.ErrNotFound) {
+		return nil, fmt.Errorf("%w: %s/%s", ErrObjectNotFound, bucket, key)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resultstore: stat checkpoint %s/%s: %w", bucket, key, err)
+	}
+	if maxBytes > 0 && info.Size > maxBytes {
+		return nil, fmt.Errorf("%w: %s/%s is %d bytes, limit %d", ErrObjectTooLarge, bucket, key, info.Size, maxBytes)
+	}
+	rc, err := c.store.Get(ctx, key, 0, -1)
+	if errors.Is(err, objstore.ErrNotFound) {
+		return nil, fmt.Errorf("%w: %s/%s", ErrObjectNotFound, bucket, key)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resultstore: get checkpoint %s/%s: %w", bucket, key, err)
+	}
+	defer rc.Close()
+	r := io.Reader(rc)
+	if maxBytes > 0 {
+		r = io.LimitReader(rc, maxBytes+1)
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("resultstore: read checkpoint %s/%s: %w", bucket, key, err)
+	}
+	if maxBytes > 0 && int64(len(b)) > maxBytes {
+		return nil, fmt.Errorf("%w: %s/%s exceeds %d bytes", ErrObjectTooLarge, bucket, key, maxBytes)
+	}
+	return b, nil
+}

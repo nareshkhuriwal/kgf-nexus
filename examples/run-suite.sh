@@ -9,6 +9,13 @@
 #   SUITE=long examples/run-suite.sh      # the long ones: credit-risk ML (~11 min)
 #                                         # and GPU image processing (~7 min)
 #   SCALE=large examples/run-suite.sh     # bigger inputs
+#   SUITE=ai examples/run-suite.sh        # opt-in: LLM batch inference (a shard crashes
+#                                         # and resumes from its checkpoint) and LLM eval
+#                                         # (a quality gate). Needs the AI overlay: a mock
+#                                         # model server reachable as http://mock-llm:8089,
+#                                         # an agent with Python 3 + the Nexus SDK, and
+#                                         # examples/ mounted at /opt/nexus/examples.
+#                                         # Not part of the default suite or SUITE=all.
 #
 # Every workflow checks its own result (row accounting, a model quality gate, a
 # GPU oversubscription audit, an exact fan-in sum) and FAILS its run if the
@@ -39,11 +46,13 @@ if [ "$SCALE" = large ]; then
   gpu_params="hold_seconds=20";               scale_params="count=1500"
   credit_params="rows=100000 epochs=10 seed=2026 min_auc=0.75"; images_params="images=6 size=512 denoise_passes=3 min_accuracy=0.9"
   infer_params="records=60000 shard_size=1000"
+  llmbatch_params="records=1200 shard_size=100 crash_shard=5 crash_after=40"; llmeval_params="batch_size=5 min_accuracy=0.9"
 else
   csv_params="rows_per_region=20000 seed=7";  ml_params="rows=20000 seed=11 min_r2=0.95"
   gpu_params="hold_seconds=15";               scale_params="count=500"
   credit_params="rows=60000 epochs=10 seed=2026 min_auc=0.75"; images_params="images=4 size=384 denoise_passes=2 min_accuracy=0.9"
   infer_params="records=2000 shard_size=250"
+  llmbatch_params="records=120 shard_size=30 crash_shard=1 crash_after=10"; llmeval_params="batch_size=10 min_accuracy=0.9"
 fi
 
 # key | example dir | workflow name | params | node whose output is the verdict
@@ -55,9 +64,12 @@ workloads=(
   "infer|batch_inference|batch-inference|$infer_params|verify"
   "credit|credit_risk_ml|credit-risk-ml|$credit_params|model_card"
   "images|image_processing_gpu|image-processing-gpu|$images_params|quality_report"
+  "llmbatch|llm_batch_inference|llm-batch-inference|$llmbatch_params|verify"
+  "llmeval|llm_eval|llm-eval|$llmeval_params|verdict"
 )
 SUITE=${SUITE:-csv ml gpu scale infer}
 [ "$SUITE" = long ] && SUITE="credit images"
+[ "$SUITE" = ai ] && SUITE="llmbatch llmeval"
 [ "$SUITE" = all ] && SUITE="csv ml gpu scale infer credit images"
 
 json() { python3 -c "import sys,json; d=json.load(sys.stdin); print(eval(sys.argv[1]))" "$1"; }

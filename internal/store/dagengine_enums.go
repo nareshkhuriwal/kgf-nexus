@@ -73,6 +73,7 @@ var errorClassNames = map[string]string{
 	"permission_denied": "ERROR_CLASS_PERMISSION_DENIED",
 	"application":       "ERROR_CLASS_APPLICATION", "oom": "ERROR_CLASS_OOM",
 	"not_found": "ERROR_CLASS_NOT_FOUND", "infrastructure": "ERROR_CLASS_INFRASTRUCTURE",
+	"rate_limited": "ERROR_CLASS_RATE_LIMITED",
 }
 
 var backoffStrategyNames = map[string]string{

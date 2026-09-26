@@ -391,6 +391,9 @@ func newTestRunner(t *testing.T, c ReportClient) (*Runner, *Registry, *wal.WAL) 
 		},
 	}
 	r := NewRunner(execs, reg, newFakeLeases(), NewReporter(c, w, testLog()), w, nil, testLog())
+	// Each test's attempt sockets live in a private root rather than the
+	// shared default under /tmp (ADR-0032).
+	r.TaskAPIRoot = testTaskAPIRoot(t)
 	return r, reg, w
 }
 

@@ -163,6 +163,29 @@ func TestIntegrationQuotasAndUsageAPI(t *testing.T) {
 		t.Errorf("quota.update audit rows = %d, want 3", n)
 	}
 
+	// Rate limits (ADR-0032): an operator sets them; a client that omits the
+	// key keeps them (an older console must not erase them); a locked
+	// namespace admin cannot raise one.
+	rev := int64(call("GET", qA, "", adminA, 200)["revision"].(float64))
+	call("PUT", qA, fmt.Sprintf(`{"revision":%d,"quotas":{"locked":true,"max_inflight_attempts":5,"max_cpu_millis":8000,"max_runs_per_hour":100,
+		"rate_limits":{"openai/gpt-4o-mini":{"requests_per_second":5,"tokens_per_minute":90000}}}}`, rev), opTok, 200)
+	call("PUT", qA, fmt.Sprintf(`{"revision":%d,"quotas":{"locked":true,"max_inflight_attempts":4,"max_cpu_millis":8000,"max_runs_per_hour":100}}`, rev+1), adminA, 200)
+	kept := call("GET", qA, "", adminA, 200)["quotas"].(map[string]any)
+	if rl, _ := kept["rate_limits"].(map[string]any); rl["openai/gpt-4o-mini"] == nil {
+		t.Fatalf("a PUT that omitted rate_limits erased them: %v", kept)
+	}
+	raised := call("PUT", qA, fmt.Sprintf(`{"revision":%d,"quotas":{"locked":true,"max_inflight_attempts":4,"max_cpu_millis":8000,"max_runs_per_hour":100,
+		"rate_limits":{"openai/gpt-4o-mini":{"requests_per_second":50,"tokens_per_minute":90000}}}}`, rev+2), adminA, 403)
+	// Raising the rate also raises the default burst; both are named.
+	if fmt.Sprint(raised["loosened"]) != "[rate_limits.openai/gpt-4o-mini.burst_requests rate_limits.openai/gpt-4o-mini.requests_per_second]" {
+		t.Fatalf("locked rate-limit raise: %v", raised)
+	}
+	call("PUT", qA, fmt.Sprintf(`{"revision":%d,"quotas":{"rate_limits":{"bad key":{"requests_per_second":1}}}}`, rev+2), adminA, 400)
+	var viewKeys int
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM namespace_rate_limits WHERE namespace=$1 AND key='openai/gpt-4o-mini' AND requests_per_second=5 AND tokens_per_minute=90000`, nsA).Scan(&viewKeys); err != nil || viewKeys != 1 {
+		t.Fatalf("namespace_rate_limits does not expose the stored limit: %d %v", viewKeys, err)
+	}
+
 	// Usage: A's rollup sees A's ledger only.
 	for _, row := range []struct {
 		ns  string

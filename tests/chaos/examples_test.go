@@ -124,6 +124,14 @@ func discoverExamples(t *testing.T) []example {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
+		// The AI-workload examples (ADR-0032) need the AI overlay: an agent
+		// with Python and the SDK, the examples mounted at /opt/nexus, and the
+		// mock LLM sidecar. They are covered on a stack that has it, and by
+		// their own check_local.py everywhere else.
+		if strings.Contains(string(body), "/opt/nexus/examples/") && os.Getenv("NEXUS_AI_OVERLAY") != "1" {
+			t.Logf("skipping %s: needs the AI overlay (set NEXUS_AI_OVERLAY=1 on a stack that has it)", path)
+			continue
+		}
 		name := workflowName(string(body))
 		if name == "" {
 			t.Errorf("%s declares no top-level name; it cannot be run", path)

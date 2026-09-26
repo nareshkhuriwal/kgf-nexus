@@ -325,6 +325,10 @@ func run() error {
 			"min_agent_version", wcfg.AgentPolicy.MinVersion,
 			"required_agent_capabilities", wcfg.AgentPolicy.RequiredCapabilities)
 	}
+	if cfg.WorkloadAPI {
+		wcfg.WorkloadAPI = workergrpc.DefaultWorkloadAPI()
+		wcfg.WorkloadAPI.MaxCheckpointBytes = cfg.MaxCheckpointBytes
+	}
 	nexusv1.RegisterWorkerServiceServer(workerSrv,
 		workergrpc.NewServer(db, rmClient, schedClient, wcfg, log))
 
@@ -474,6 +478,10 @@ type config struct {
 	LogMaxBytes        int64
 	LogChunkBytes      int64
 	LogFlushIntervalMs int
+	// WorkloadAPI offers tasks usage reporting, shared rate limits and
+	// checkpoints through their agent (ADR-0032). On by default.
+	WorkloadAPI        bool
+	MaxCheckpointBytes int64
 }
 
 func loadConfig() (config, error) {
@@ -511,6 +519,8 @@ func loadConfig() (config, error) {
 		LogMaxBytes:        int64(envInt("NEXUS_LOG_MAX_BYTES_PER_ATTEMPT", 64<<20)),
 		LogChunkBytes:      int64(envInt("NEXUS_LOG_CHUNK_BYTES", 256<<10)),
 		LogFlushIntervalMs: envInt("NEXUS_LOG_FLUSH_INTERVAL_MS", 2000),
+		WorkloadAPI:        envBool("NEXUS_WORKLOAD_API", true),
+		MaxCheckpointBytes: int64(envInt("NEXUS_MAX_CHECKPOINT_BYTES", workergrpc.DefaultMaxCheckpointBytes)),
 	}
 	c.Store.Endpoint, c.Store.Bucket, c.Store.Region = c.ResultStoreEndpoint, c.ResultStoreBucket, c.ResultStoreRegion
 	return c, nil

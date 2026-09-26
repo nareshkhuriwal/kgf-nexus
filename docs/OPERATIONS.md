@@ -6,7 +6,7 @@
 and restore and the ordering between the two stores, the restore drills and their
 measured results, point-in-time recovery with pgBackRest and its timed drills
 (§4), what these procedures do *not* cover, the RPO/RTO each approach actually
-delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), third-party images and toolchains: what is pinned and why (§22), cost management, which moved to KGF billing (§23), running Nexus inside KGF Cloud: context authentication, tenancy mapping and service accounts (§24), task secrets, the audit trail and air-gapped installation (§25), tracing and the result-store backends (§26), and notifications, webhook triggers, sensors and asset lineage (§27).
+delivers, the schema-migration procedure, TLS certificate rotation (§9), email delivery (§10), the NATS event bus and its authorization (§11), the cluster controller (§12), the Kubernetes executor (§13), dynamic expansion, memoization and quarantine (§14), the windowed pull claim at large backlogs (§15), gateway rate limiting (§16), metrics: endpoints, scrape configuration and the metrics catalogue (§17), operator retry of a failed run (§18), durable task logs: retention and sizing (§19), installing with Helm: values reference and production checklist (§20), namespace quotas and usage metering (§21), third-party images and toolchains: what is pinned and why (§22), cost management, which moved to KGF billing (§23), running Nexus inside KGF Cloud: context authentication, tenancy mapping and service accounts (§24), task secrets, the audit trail and air-gapped installation (§25), tracing and the result-store backends (§26), notifications, webhook triggers, sensors and asset lineage (§27), and AI workloads: usage units, shared rate limits and checkpoints (§29).
 
 This document states what has been verified and marks what has not. An
 operations runbook that overclaims is worse than none, because it is trusted
@@ -4199,3 +4199,218 @@ Rollback:
   all of it: configuration, delivery history, trigger secrets, sensor state and
   lineage.
 - Export first: `pg_dump -t 'notification_*' -t 'webhook_*' -t 'sensor*' -t 'asset*'`.
+
+---
+
+## 29. AI workloads: usage units, shared rate limits and checkpoints
+
+Design: [ADR-0032](adr/0032-ai-workloads-usage-rate-limits-checkpoints.md).
+Migration 0036. Findings F148 (Python heartbeats never reached the control
+plane; the workload API) and F149 (retries under role separation).
+
+### 29.1 What a task can do
+
+A task started by the subprocess or docker executor finds an agent-local
+socket in `NEXUS_TASK_API` (with a bearer token in `NEXUS_TASK_API_TOKEN`).
+Through it, and through the SDK calls that wrap it, a task can:
+
+| SDK call | What reaches the control plane |
+|---|---|
+| `ctx.report_usage({...})`, `ctx.report_tokens(...)`, `LLMClient` | cumulative usage units on the attempt (`attempt_usage`), copied into the usage ledger's `custom` object when the attempt ends |
+| `ctx.acquire_permits(keys, requests=, tokens=)`, `LLMClient` | permits from the namespace's shared token buckets (`rate_limit_buckets`) |
+| `ctx.checkpoint(state)` / `ctx.resume()` | an immutable object `<ns>/checkpoints/<idempotency_key>/<attempt_id>/<seq>` and a forward-only pointer (`task_checkpoints`) |
+| `ctx.heartbeat()` / `ctx.progress()` | ReportProgress, which re-arms the heartbeat timeout (before 0036 these were no-ops under a real agent, F148) |
+| raising `nexus.RateLimited` | `ERROR_CLASS_RATE_LIMITED` with the provider's Retry-After |
+
+The **kubernetes executor** does not offer the socket yet: pods run on other
+nodes. There the SDK degrades to in-process behaviour (usage logged, permits
+process-local, checkpoints in `ctx.store`); do not rely on shared limits or
+recorded token usage for tasks on that executor.
+
+The gateway advertises the capabilities at registration
+(`NEXUS_WORKLOAD_API`, default `true`; `NEXUS_MAX_CHECKPOINT_BYTES`, default
+64 MiB). The agent's socket root is `NEXUS_TASK_API_ROOT` / `-task-api-root`
+(default `/tmp/nexus-task`; it must be owned by the agent user and short,
+because a Unix socket path is limited to 104 bytes on Darwin). If the root is
+unusable the agent logs one ERROR at registration and runs tasks without the
+workload API. The docker executor bind-mounts the socket directory at
+`/run/nexus-task`; that works on Linux hosts and was not verified under
+Docker Desktop's VM.
+
+### 29.2 Usage units and the ledger
+
+Keys are `<kind>:<subject>[:<qualifier>]`:
+
+```
+tokens:<provider>/<model>:input     tokens:<provider>/<model>:output
+tokens:<provider>/<model>:cached    requests:<provider>/<model>
+```
+
+Provider and model never contain `:` (the SDK maps any to `_`, so
+`ft:gpt-4o-mini:org:x` is reported as `openai/ft_gpt-4o-mini_org_x`). Values are
+non-negative integers, at most 64 keys per attempt. The price book prices
+every ledger `custom` key that contains `:` as a unit with no time factor.
+
+```sql
+-- Tokens by model for one namespace, last 7 days, from the ledger.
+SELECT key, sum(value::numeric) AS units
+  FROM usage_ledger, jsonb_each_text(custom) AS c(key, value)
+ WHERE namespace = 'team-a' AND ended_at > now() - interval '7 days'
+   AND strpos(key, ':') > 0
+ GROUP BY key ORDER BY key;
+```
+
+Units reported by an attempt that later failed, was LOST or was cancelled are in
+its ledger row: they were spent. The console shows them per attempt and summed
+per run ("Usage (all attempts)"). Usage is self-reported by task code; treat
+it as cost attribution, not as the provider's invoice. Usage keys cannot be
+quota-limited yet (`max_custom` names refuse `:`); that is a follow-up.
+
+### 29.3 Configuring shared rate limits
+
+Limits are part of the quotas document (`quotas.manage`, audited, revisioned):
+
+```sh
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  $API/v1/namespaces/$NS/quotas -d '{
+    "revision": 7,
+    "quotas": {"max_inflight_attempts": 200,
+               "rate_limits": {
+                 "openai":             {"requests_per_second": 50},
+                 "openai/gpt-4o-mini": {"requests_per_second": 20, "tokens_per_minute": 2000000}}}}'
+```
+
+A key is `<provider>` or `<provider>/<model>`; `LLMClient` asks for both by
+default, all or none. `burst_requests` / `burst_tokens` default to one second
+of requests (at least 1) and one minute of tokens. A PUT that omits
+`rate_limits` keeps the stored ones. While quotas are locked, a namespace
+administrator may only lower a rate or add a key. Unconfigured keys are
+unlimited. Inspect the live buckets:
+
+```sql
+SELECT t.namespace, b.key, round(b.request_level::numeric, 2) AS requests,
+       round(b.token_level::numeric) AS tokens, b.granted_requests, b.granted_tokens, b.denied
+  FROM rate_limit_buckets b JOIN tenants t ON t.id = b.tenant_id ORDER BY 1, 2;
+```
+
+A bucket is state, not configuration: deleting its row resets it to full.
+
+### 29.4 Throttling and retries
+
+`LLMClient` retries a 429/503 in the task, honouring `Retry-After`, up to
+`max_retries`; past that (or when the provider asks for longer than
+`max_retry_wait_s`) the task fails `RATE_LIMITED`. The scheduler then retries
+it **without charging the retry budget**, after the provider's Retry-After
+clamped to [1 s, 15 min], up to `NEXUS_RATE_LIMITED_FREE_RETRIES` per node
+(scheduler flag `-rate-limited-free-retries`; default 10, negative disables).
+The RetryScheduled event says `"charged": false` and `free_retries_used`.
+Past the cap the failure is charged like TRANSIENT. `no_retry_on:
+[rate_limited]` vetoes it. An operator retry (§18) resets the count.
+
+### 29.5 Checkpoints
+
+A retry, and an operator retry of the node, resume from the latest
+checkpoint of the node's idempotency key; a new run starts clean. The pointer
+moves only forward (a higher attempt number, or the same attempt and a higher
+seq), and only while the saving attempt holds its lease, so a zombie cannot
+overwrite a newer checkpoint. `ctx.resume()` verifies the object's sha256 and
+returns `None` (and logs) if it is missing or corrupt; starting over is always
+correct.
+
+artifact-gc (§7) treats the pointer of every node that has not SUCCEEDED as
+live. Superseded checkpoints, fenced uploads, the checkpoints of succeeded
+nodes and everything of a deleted run are orphans, collected after the grace
+period. `make artifact-gc` prints how many checkpoint objects it examined.
+
+### 29.6 Capacity: the permit service
+
+Every permit is one short statement on the bucket row, never inside the
+dispatch claim. Measured with `make bench-pg && make bench-ratelimit`
+(`tests/bench/ratelimit_test.go`) on the ADR-0018 laptop (Apple M4 Pro,
+Postgres 16.15 in Docker Desktop, 10 vCPU; other workloads were running, so
+treat the numbers as indicative), 8 callers per replica, every request
+granted:
+
+| keys | replicas (x8 callers) | permits/s | p50 | p99 |
+|---|---:|---:|---:|---:|
+| 1 hot | 1 | 817 | 7.9 ms | 36 ms |
+| 1 hot | 4 | 625 | 31 ms | 258 ms |
+| 1 hot | 16 | 373 | 179 ms | 1.65 s |
+| 16 spread | 1 | 1,072 | 6.3 ms | 25 ms |
+| 16 spread | 4 | 1,624 | 16 ms | 76 ms |
+| 16 spread | 16 | 775 | 105 ms | 670 ms |
+
+The first implementation held the row lock across three client round trips
+and managed 506 / 300 / 118 permits/s on the hot key; the single-statement
+version replaced it. Under a saturated 100 req/s limit, granted permits never
+exceeded burst + rate x elapsed at 1, 4 or 16 replicas (e.g. 594 granted
+against a ceiling of 600 in 5 s).
+
+**Reading it.** A single key sustains several hundred permits per second
+with 8-32 concurrent callers, far above typical provider limits; with 128
+callers queued on one row, latency grows to seconds. Spread load (per-model
+keys) scales with replicas until the database CPU saturates. Permit traffic
+shares the database with dispatch: pull-claim throughput at a 10k backlog with
+4 replicas measured 175-184 claims/s alone and 75-161 claims/s beside 270-300
+permits/s on one hot key (two runs). Size limits so the fleet's permit rate
+stays in the low hundreds per second per key, and prefer fewer, larger calls
+(batching prompts) to many tiny ones.
+
+### 29.7 Metrics
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `nexus_scheduler_usage_reports_total` | `result` (stored, unchanged, stale, invalid, error) | ReportUsage calls |
+| `nexus_scheduler_usage_units_total` | `kind` (tokens, requests, other) | growth of reported units; `rate(...{kind="tokens"}[5m])` is the fleet's token throughput |
+| `nexus_scheduler_permit_requests_total` | `result` (granted, denied, unlimited, settled, stale, invalid, error) | AcquirePermits calls |
+| `nexus_scheduler_permit_duration_seconds` | | latency of one permit call |
+| `nexus_scheduler_checkpoints_total` | `result` (saved, superseded, stale, invalid, error) | SaveCheckpoint calls |
+| `nexus_agent_workload_api_requests_total` | `endpoint`, `code` | requests tasks made to their socket |
+| `nexus_agent_usage_flushes_total` | `result` (ok, stale, error) | usage snapshots sent |
+| `nexus_agent_checkpoints_total` | `result` (saved, stale, too_large, error) | checkpoints written by the agent |
+
+Keys and model names are never labels. Worth alerting on: a sustained
+`permit_requests_total{result="error"}`, `permit_duration_seconds` p99 above
+1 s (a hot key; spread it or raise the limit), and
+`usage_reports_total{result="invalid"}` (a task reporting malformed keys).
+
+### 29.8 Running the AI examples and templates
+
+`examples/llm_batch_inference` and `examples/llm_eval` run against the SDK's
+mock model server; nothing calls a real provider. Without a stack:
+
+```sh
+python3 examples/llm_batch_inference/check_local.py
+python3 examples/llm_eval/check_local.py
+```
+
+On a stack, the AI overlay adds a Python-capable agent and the mock sidecar
+(`mock-llm:8089`, injecting a 429 every 7th call):
+
+```sh
+E2E_PROJECT=nexus-ai E2E_PORT_BASE=55711 E2E_AI=1 deploy/e2e/e2e-stack.sh up
+. ui/e2e/.stack.env
+NEXUS_ENDPOINT=$E2E_API_URL NEXUS_API_KEY=$E2E_API_KEY SUITE=ai examples/run-suite.sh
+```
+
+`nexusctl init llm-batch-inference | llm-eval | fine-tune` generate projects
+with the same patterns and their own mock-backed tests.
+
+**Real providers.** Point `base_url` at `https://api.openai.com` or
+`https://api.anthropic.com`, set `api_key_env` to the variable that holds the
+key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), and deliver that variable to the
+task through the platform's secret mechanism, never in a spec, a parameter or
+a log. Configure `rate_limits` (§29.3) at or below the organisation's provider
+limits before the first large run: the platform limit is what keeps a
+5,000-way fan-out inside them.
+
+### 29.9 Upgrading and rolling back
+
+Apply 0036 before rolling out services. A scheduler started without it logs
+"the workload API is off", keeps the pre-0036 ledger statement and ignores
+free retries; its workload RPCs answer Unavailable. A gateway without the
+feature (`NEXUS_WORKLOAD_API=false`, or an old build) advertises nothing and
+agents offer tasks no usage, permit or checkpoint endpoints; the SDK falls
+back in-process. Rolling back 0036 (`0036_workload_api.down.sql`) drops
+reported units not yet in the ledger, bucket state and checkpoint pointers;
+set `NEXUS_WORKLOAD_API=false` and restart the gateways and schedulers first.

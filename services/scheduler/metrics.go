@@ -37,6 +37,14 @@ type Metrics struct {
 	quotaBlocked  *metrics.CounterVec
 	usageWrites   *metrics.CounterVec
 
+	// The workload API (ADR-0032). Keys are author-chosen, so no family is
+	// labelled by key: usage is labelled by kind (tokens, requests, other).
+	usageReports   *metrics.CounterVec
+	usageUnits     *metrics.CounterVec
+	permits        *metrics.CounterVec
+	permitDuration *metrics.HistogramVec
+	checkpoints    *metrics.CounterVec
+
 	pending     *metrics.GaugeVec
 	oldestAge   *metrics.GaugeVec
 	backlogSeen map[string]bool
@@ -88,6 +96,22 @@ func NewMetrics(reg *metrics.Registry, queue string) *Metrics {
 		usageWrites: reg.NewCounter("nexus_scheduler_usage_ledger_writes_total",
 			"Usage-ledger rows written, one per dispatched attempt that ended, by outcome (ADR-0021).",
 			"queue", "outcome"),
+		usageReports: reg.NewCounter("nexus_scheduler_usage_reports_total",
+			"ReportUsage calls handled, by result (stored, unchanged, stale, invalid, error) (ADR-0032).",
+			"queue", "result"),
+		usageUnits: reg.NewCounter("nexus_scheduler_usage_units_total",
+			"Growth of attempts' reported usage units, by kind (tokens, requests, other). rate() of kind=tokens is the fleet's token throughput.",
+			"queue", "kind"),
+		permits: reg.NewCounter("nexus_scheduler_permit_requests_total",
+			"AcquirePermits calls, by result (granted, denied, unlimited, settled, stale, invalid, error).",
+			"queue", "result"),
+		permitDuration: reg.NewHistogram("nexus_scheduler_permit_duration_seconds",
+			"Latency of one AcquirePermits transaction.",
+			[]float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1},
+			"queue"),
+		checkpoints: reg.NewCounter("nexus_scheduler_checkpoints_total",
+			"SaveCheckpoint calls, by result (saved, superseded, stale, invalid, error).",
+			"queue", "result"),
 		pending: reg.NewGauge("nexus_scheduler_pending_attempts",
 			"PENDING attempts per queue, fleet-wide (every replica reports every queue: aggregate with max by (queue)).",
 			"queue"),
@@ -128,6 +152,35 @@ func (m *Metrics) UsageRecorded(outcome string) {
 		return
 	}
 	m.usageWrites.With(metrics.Labels{"queue": m.queue, "outcome": outcome}).Inc()
+}
+
+func (m *Metrics) observeUsageReport(result string, growth map[string]int64) {
+	if m == nil {
+		return
+	}
+	m.usageReports.With(metrics.Labels{"queue": m.queue, "result": result}).Inc()
+	for kind, n := range growth {
+		if n > 0 {
+			m.usageUnits.With(metrics.Labels{"queue": m.queue, "kind": kind}).Add(float64(n))
+		}
+	}
+}
+
+func (m *Metrics) observePermit(result string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.permits.With(metrics.Labels{"queue": m.queue, "result": result}).Inc()
+	if d > 0 {
+		m.permitDuration.With(metrics.Labels{"queue": m.queue}).Observe(d.Seconds())
+	}
+}
+
+func (m *Metrics) observeCheckpoint(result string) {
+	if m == nil {
+		return
+	}
+	m.checkpoints.With(metrics.Labels{"queue": m.queue, "result": result}).Inc()
 }
 
 func (m *Metrics) observeLost(l store.LostAttempt, cause string) {
