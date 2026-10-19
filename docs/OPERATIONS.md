@@ -2491,12 +2491,19 @@ the reason). They are never silently omitted.
 
 ## 20. Installing with Helm
 
-The chart is `deploy/helm/kgf-nexus` (chart 0.2.0). One release per Kubernetes
-namespace: Services have fixed names (`api-gateway`, `postgres`, …) exactly as
-compose does. `deploy/terraform` drives it for the environments it owns; this
-section is for installing it directly. The design documents behind each part
-are docs/TLS.md (mTLS), docs/CLUSTER-SCALING.md (controller), §7.7/§19.2
-(artifact GC) and ADR-0018 (scheduler scaling).
+The chart is `deploy/helm/kgf-nexus` (chart 0.3.0), published as
+`oci://ghcr.io/<owner>/charts/kgf-nexus`. One control-plane release per
+Kubernetes namespace: Services have fixed names (`api-gateway`, `postgres`, …)
+exactly as compose does. Worker pools may be separate releases (§20.16).
+`deploy/terraform` drives it for the environments it owns; this section is
+for installing it directly. On an AKS cluster you already run, follow
+[docs/INSTALL-AKS.md](INSTALL-AKS.md), which uses
+`deploy/helm/kgf-nexus/examples/aks-existing-cluster.yaml`. The design
+documents behind each part are docs/TLS.md (mTLS), docs/CLUSTER-SCALING.md
+(controller), §7.7/§19.2 (artifact GC), ADR-0018 (scheduler scaling),
+ADR-0035 (component-scoped releases, runtime identity) and
+[docs/IMAGES.md](IMAGES.md) (what each image needs, for anything the chart
+does not render).
 
 ### 20.1 Before you install
 
@@ -2509,6 +2516,8 @@ are docs/TLS.md (mTLS), docs/CLUSTER-SCALING.md (controller), §7.7/§19.2
 | metrics-server | HPAs (`autoscaling.enabled`) | `kubectl get apiservice v1beta1.metrics.k8s.io` |
 | cert-manager (v1.18+) | `tls.enabled` with `tls.certManager.enabled` | `kubectl get crd certificates.cert-manager.io` |
 | A PriorityClass | only if `placement.priorityClassName` is set | `kubectl get priorityclass` |
+| Pod Security `restricted` on the namespace (recommended) | every pod the chart renders passes it, and so do the kubernetes executor's task pods (§20.17) | `kubectl label ns nexus pod-security.kubernetes.io/enforce=restricted` |
+| A network-policy engine | only for `networkPolicy.enabled` and `nats.networkPolicy` to take effect (AKS: Azure NPM, Calico or Cilium) | AKS: `az aks show -g <rg> -n <cluster> --query networkProfile.networkPolicy` |
 
 ### 20.2 Install, upgrade, uninstall
 
@@ -2580,10 +2589,23 @@ durations, a `latest` tag, and any misspelt **top-level** key at install time.
 | `artifactGC.grace` / `.logRetention` / `.maxObjects` / `.prefix` / `.pushgatewayUrl` | 24h / `""` / 10000 / `""` / `""` | sweep tuning and metrics |
 | `metrics.serviceMonitor.enabled` / `.podMonitor.enabled` | off / follows | prometheus-operator objects, §17 |
 | `gateway.*` | off | Gateway API routes |
+| `components.controlPlane.enabled` | `true` | `false` = a worker-pool release: agents (and the cluster controller) only, §20.16 |
+| `cluster.name` | `""` | the registered cluster name; `NEXUS_CLUSTER_NAME` on every Nexus process (agents: `claimPlacement.clusterName` when set), next to the downward-API pod, namespace and node |
+| `agentDefaults.controlPlane.address` | `api-gateway:9091` | the worker gRPC endpoint the agents dial; another namespace: `api-gateway.<ns>.svc:9091` |
+| `agentDefaults.controlPlane.tls.enabled` / `.caSecretName` / `.serverName` | off / `""` / `""` | verify that endpoint against a Secret's `ca.crt` (required when enabled), and the name to verify (`NEXUS_TLS_SERVER_NAME`, also under `tls.enabled`) |
+| `agentDefaults.nats.url` | `nats://nats:4222` | the broker the agents dial while `nats.enabled`; `""` = they long-poll |
+| `agentDefaults.kubernetes.taskNodeSelector` / `.taskTolerations` | `{}` / `[]` | where the kubernetes executor's TASK pods run (per agent: `agents[].kubernetes`) |
+| `schedulers[].nodeSelector` / `.tolerations` / `.affinity` / `.topologySpread` | `placement.*` | per-scheduler placement; the first three replace `placement.*`, `topologySpread` merges over it |
+| `networkPolicy.enabled` / `.ingressFrom` / `.metricsFrom` / `.minioFrom` | off / any / none / none | ingress default-deny for the control plane with explicit allows, §20.17 |
+| `ui.service.port` | 80 | the console Service's port; the container listens on 8080 (unprivileged nginx) |
 
-`deploy/helm/kgf-nexus/ci/*-values.yaml` are three complete, validated
-examples: minimal, every feature on, and the production shape (managed database
-and object store, external issuer, HPAs, `minAvailable` PDBs).
+`deploy/helm/kgf-nexus/ci/*-values.yaml` are complete, validated values files:
+minimal, every feature on, the production shape (managed database and object
+store, external issuer, HPAs, `minAvailable` PDBs), each cloud's result-store
+identity, GPU pools, and the two AKS examples. Those two are the files users
+copy, `deploy/helm/kgf-nexus/examples/aks-existing-cluster.yaml` and
+`examples/aks-worker-pool.yaml`, and `validate.sh` fails if an example and its
+`ci/` copy differ by more than the `<owner>` placeholder.
 
 ### 20.4 mTLS between services
 
@@ -2610,6 +2632,10 @@ up in place (TLS §5.0). REST, probes and `/metrics` stay HTTP.
 - **External agents** dial `api-gateway-external`: add that name to
   `tls.certManager.gatewayExtraDnsNames` and enrol the agents per TLS §5.5.
   During that enrolment `tls.requireClientCert=false` is the documented bridge.
+  A worker-pool release (§20.16) with `tls.enabled` issues its agents' leaf from
+  the same `issuerRef` (the chart refuses a self-signed CA there), and
+  `agentDefaults.controlPlane.tls.serverName` names the SAN to verify when the
+  address it dials is not one.
 - **BYO certificates:** `tls.certManager.enabled=false` and create the
   `nexus-<component>-tls` Secrets yourself (SANs as in
   `deploy/k8s/cert-certificates.yaml`).
@@ -2643,6 +2669,13 @@ up in place (TLS §5.0). REST, probes and `/metrics` stay HTTP.
 - **Placement:** zone-then-hostname spread with `ScheduleAnyway` by default.
   `DoNotSchedule` needs nodes that carry `topology.kubernetes.io/zone`; on a
   cluster without zone labels, drop that key or pods stay Pending.
+  `placement.nodeSelector` / `.tolerations` / `.affinity` apply to every
+  Deployment; a `schedulers[]` or `agents[]` entry's own replace them for that
+  workload, so the schedulers can sit on a system pool (tolerating its
+  `CriticalAddonsOnly` taint) while the rest runs on a user pool, and a
+  scheduler's `topologySpread` can be stricter than the global one. The
+  kubernetes executor's task pods are placed separately, by
+  `agentDefaults.kubernetes.taskNodeSelector` / `.taskTolerations`.
 
 ### 20.6 Cluster controller via Helm
 
@@ -2777,6 +2810,14 @@ external gRPC Service.
       Helm 4 (§20.10); `helm template -f` must exit 0.
 - [ ] After every install or upgrade, readiness and restart counts were
       checked as in §20.10, not only Helm's `--wait`.
+- [ ] `cluster.name` set to the name registered in the console, so every
+      instance is placed on its cluster, pod and node.
+- [ ] The release namespace (and the task namespace) enforce Pod Security
+      `restricted` (§20.17); `networkPolicy.enabled` with `metricsFrom` naming
+      your Prometheus, where a network-policy engine runs.
+- [ ] Worker pools that scale or upgrade on their own cadence are their own
+      releases, each in its own namespace, with every cross-release setting in
+      §20.16 in place.
 
 ### 20.10 Helm 4: what lint and `--wait` do not tell you
 
@@ -3102,6 +3143,161 @@ particular that Cloud SQL's `google_sql_ca_certs` returns the shared-CA root
 and that the PSA DNS name resolves through the private zone; real GPU
 scheduling (no GPU node); IRSA/Workload Identity tokens reaching the object
 store (the client change is separate).
+
+### 20.16 Existing clusters and worker-pool releases
+
+**On a cluster you already run** the chart needs nothing a managed cluster
+does not have: no CRDs (unless you turn on `tls.certManager`,
+`metrics.serviceMonitor` or `gateway`), no cluster-scoped objects (unless
+`clusterController.observeNodes`), and no privileged pod. On AKS,
+[docs/INSTALL-AKS.md](INSTALL-AKS.md) walks through every step, and its values
+are `deploy/helm/kgf-nexus/examples/aks-existing-cluster.yaml`:
+
+- Azure Database for PostgreSQL Flexible Server over `verify-full` (§20.11),
+  with runtime logins (§20.12).
+- Blob Storage through workload identity (§20.13).
+- The images from GHCR (`image.registry: ghcr.io/`,
+  `image.repositoryPrefix: <owner>/kgf-nexus/`, §22.4).
+- The schedulers on the system pool, the rest of the control plane and the
+  agents on a CPU pool, and GPU task pods on a tainted GPU pool.
+- The cluster controller in plan mode.
+- NetworkPolicy (§20.17).
+
+Every value you must change is marked `REPLACE` there.
+
+**Worker-pool releases.** `components.controlPlane.enabled=false` installs the
+chart as agents only. It renders their ServiceAccount, the kubernetes
+executor's Role and task-API NetworkPolicy, and their PodDisruptionBudgets,
+plus the cluster controller if enabled. It renders no Service, StatefulSet,
+Job, CronJob, Gateway route or control-plane account. The database settings,
+`services`, `schedulers` and `ui` are ignored.
+
+A pool is scaled, upgraded and placed on its own, against a control plane
+another release installed:
+
+```sh
+helm upgrade --install nexus-pool-gpu oci://ghcr.io/<owner>/charts/kgf-nexus --version 0.3.0 \
+  -n nexus-pool-gpu --set components.controlPlane.enabled=false \
+  --set existingSecret=nexus-pool-gpu-credentials -f aks-worker-pool.yaml
+kubectl -n nexus-pool-gpu wait --for=condition=Ready pod -l nexus.khuriwalgroup.com/role=agent --timeout=5m
+```
+
+Readiness is registration: an agent turns Ready once the control plane
+accepted it, so the wait above proves the two releases agree. Give each pool
+release its own namespace. The chart's names are fixed per namespace:
+ServiceAccount `nexus-agent`, and one Deployment and PodDisruptionBudget per
+`agents[].name`. Two releases in one namespace collide on them, and Helm
+refuses the second.
+
+What the two releases must agree on. The chart checks each release on its
+own, never the pair; a mismatch shows as an agent that never turns Ready, or
+that registers but never gets dispatch hints.
+
+| In the pool release | Must match, in the control-plane release |
+|---|---|
+| `agentDefaults.controlPlane.address` | its gateway: `api-gateway.<namespace>.svc:9091` in the same cluster. From another cluster: `services.apiGateway.external` or your own load balancer, under mTLS also a name in `tls.certManager.gatewayExtraDnsNames`. A bare `api-gateway:9091` resolves only in the control plane's own namespace, and NOTES.txt warns about it. |
+| `tls.enabled` + `tls.certManager.issuerRef` | the same ClusterIssuer, so the pool's `nexus-agent-tls` chains to the CA the gateway trusts. The chart refuses a pool with a self-signed CA. |
+| `agentDefaults.controlPlane.tls` (`caSecretName`, `serverName`) | the CA and a SAN of whatever terminates TLS in front of the gateway |
+| `agentDefaults.nats.url` (`""` = long-poll) | `nats://nats.<namespace>.svc:4222`, and `nats.networkPolicy.extraFrom` admitting the pool namespace's agent pods (example in aks-existing-cluster.yaml) |
+| the seed under `nats-agent-nkey` (or `agents[].natsSeedKey`) | its public key in `nats.auth.tenants` for the Nexus namespace the agents serve (§11.7). Under `nats.tls`, the pool sets `nats.tls.clientSecrets.agent` or `caSecret` (the chart refuses neither). |
+| `worker-api-key` in `existingSecret` | a worker key of `nexusNamespace` (or `agents[].namespace`): the bootstrap key, or one minted with `POST /v1/namespaces/{ns}/tokens` (§20.10) |
+| `resultStore.*`, `minio.bucket` | the same store. With workload identity, a federated credential for `system:serviceaccount:<pool namespace>:<agent account>`. Against the control plane's in-cluster MinIO: `minio.endpoint: http://minio.<namespace>.svc:9000`, the key pair in the pool's Secret, and `networkPolicy.minioFrom` when §20.17's policy is on. |
+| `cluster.name` | the registered cluster, as on the control plane |
+| the pool namespace | listed in `clusterController.workerNamespaces`, so the controller observes it |
+
+**Upgrades.** The control plane goes first, then the pools at their own pace:
+an agent one minor version behind is supported
+([COMPATIBILITY.md §4.2](COMPATIBILITY.md#42-upgrade-order)).
+`agentPolicy.minVersion` on the control plane refuses older ones once every
+pool is upgraded.
+
+**Runtime identity.** Every Nexus process in either kind of release reports
+`NEXUS_POD_NAME`, `NEXUS_POD_NAMESPACE` and `NEXUS_NODE_NAME` from the
+downward API, and `NEXUS_CLUSTER_NAME` from `cluster.name`. The agents report
+`claimPlacement.clusterName` instead when it is set. Set `cluster.name` to the
+name the cluster is registered under, and the console places every scheduler
+replica, service instance and worker on its cluster, node and pod.
+
+### 20.17 Pod Security and NetworkPolicy
+
+**Pod Security.** Every pod the chart renders passes the Kubernetes Pod
+Security Standards `restricted` profile, init containers and every optional
+component included:
+
+- `runAsNonRoot` with a numeric non-root user: 10001 for the Nexus images,
+  101 for the console, 70 for the in-cluster postgres, 1000 for MinIO, NATS
+  and Mailpit;
+- a `RuntimeDefault` seccomp profile;
+- `allowPrivilegeEscalation: false`;
+- every capability dropped;
+- only restricted volume types.
+
+The kubernetes executor's task pods are created restricted too. So enforce it
+on the release namespace and the task namespace:
+
+```sh
+kubectl label ns nexus nexus-tasks pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+```
+
+`deploy/helm/validate.sh` runs `deploy/helm/pss-restricted.py` over every
+`ci/` render, so a template change that would break this fails CI.
+
+Two changes in chart 0.3.0 made it hold:
+
+- The console image is now nginx-unprivileged on port 8080. The Service port
+  stays `ui.service.port`.
+- The in-cluster postgres starts as uid 70 rather than root. An existing
+  volume is already owned by uid 70.
+
+Root filesystems are read-only everywhere except the agents and the Jobs:
+subprocess tasks run inside the agent container, and the Jobs' psql needs
+nothing. The writable paths are in
+[docs/IMAGES.md §5](IMAGES.md#5-writable-paths-and-volumes).
+
+**NetworkPolicy.** `networkPolicy.enabled` (off by default) renders an
+**ingress** default-deny for this release's control-plane pods: the six
+services, the schedulers, the console, and the in-cluster postgres and MinIO.
+It then renders one allow per real path:
+
+| Policy | Admits |
+|---|---|
+| `nexus-api-gateway` | REST (8080) and worker gRPC (9091) from `networkPolicy.ingressFrom`. Empty means any source, because the gateway is the front door, and this release's agents and console are always admitted. |
+| `nexus-ui` | the console from `ingressFrom` (empty = any) |
+| `nexus-control-plane-peers` | each service's `http` and `grpc` ports from the other services, the schedulers and the cluster controller |
+| `nexus-postgres` | 5432 from the services (and their `wait-for-schema` init containers), the migrate, bootstrap and db-roles Jobs, and artifact-gc |
+| `nexus-minio` | S3 from api-gateway, workflow-manager, artifact-gc, minio-init, this release's agents and `networkPolicy.minioFrom`. The MinIO console port is not opened. |
+| `nexus-metrics` | the gateway's ops port and every service's health/metrics port from `networkPolicy.metricsFrom`. **Unset, nothing outside the release can scrape them.** |
+
+Ports are referenced by name, so they follow the containers.
+
+- **Not selected.** The agents (their task pods reach the task API through
+  the executor's own policy in the task namespace), NATS (it has its own
+  `nats.networkPolicy`) and the Jobs.
+- **Egress.** Not restricted. The services reach endpoints the chart cannot
+  enumerate: the database, Blob or S3, Entra ID for workload identity, OTLP,
+  SMTP, and webhook targets.
+- **Probes.** Kubelet probes come from the node, which Azure NPM, Calico and
+  Cilium allow by default.
+- **No engine.** Without a network-policy engine the objects are accepted and
+  do nothing.
+- **Worker pools elsewhere.** Pool releases in other namespaces reach the
+  gateway through `ingressFrom` (empty admits them) and the broker through
+  `nats.networkPolicy.extraFrom` (§20.16).
+
+### 20.18 What was verified for ADR-0035 (2026-10-19, static and containers)
+
+| Check | Result |
+|---|---|
+| `deploy/helm/validate.sh` (Helm v4.3.0, kubeconform v0.8.0, K8s 1.29.0 schemas) | 12 values files lint, render and validate strictly, the two AKS examples among them (71 and 6 objects). Every pod template passes `pss-restricted.py`. 71 refusals, 14 of them new: a pool with no agents or no Secret, a pool on a self-signed CA, pool NATS TLS without client material, control-plane TLS without a CA, a server name without TLS, a malformed address, NATS URL or cluster name, a misspelt key, a bad spread policy or toleration. Three new render assertions: a pool renders agents only and dials what it is told; identity on every Nexus process with no duplicated variable; the agents' control-plane TLS. |
+| Renders of the ten pre-existing `ci/` files, previous chart against this one | No object added or removed. The only field changes are the identity variables, `RM_LOG_LEVEL` on resource-manager, the console's security context, port 8080, `/healthz` probes and two emptyDirs, postgres's security context, and (from the version) `helm.sh/chart` and the Job-name hash. |
+| Images built from the branch (scheduler, agent, api-gateway, migrate) | Ports, user `10001:10001`, stop signal and labels as docs/IMAGES.md states. The agent alone carries docker-cli, bash and the WAL directories. An unknown `SERVICE` fails the build. |
+| Console runtime | nginx-unprivileged 1.30.5 with this `nginx.conf` served `/healthz` and the bundle under a read-only root, all capabilities dropped and no-new-privileges, as uid 101, with tmpfs on `/etc/nginx/conf.d` and `/tmp` only. |
+| postgres as uid 70 | `postgres:16-alpine`, started as 70:70 with no capabilities on a root-owned, group-70 volume (what `fsGroup` produces), initialised `PGDATA` and accepted connections. |
+
+Not verified: an install on a live cluster, AKS or otherwise (no cluster was
+touched), the NetworkPolicy under a real policy engine, a cross-namespace or
+cross-cluster pool registering, and the services reading the identity
+variables (that is their side of ADR-0035).
 
 ---
 
