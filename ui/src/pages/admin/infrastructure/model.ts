@@ -608,7 +608,8 @@ export function poolLive(
 ): PoolLive[] {
   return pools.map((pool) => {
     const matching = (workers ?? []).filter((w) => servesQueue(w, pool.queue));
-    const live = matching.filter((w) => w.state === 'ACTIVE' || w.state === 'DRAINING');
+    // Capacity and load count only workers that are heartbeating: a quiet one may already be gone.
+    const live = matching.filter((w) => (w.state === 'ACTIVE' && !heartbeatStale(w, now)) || w.state === 'DRAINING');
     const reported = live.filter((w) => typeof w.active_attempts === 'number');
     const deployments: PoolDeployment[] = [];
     let bound = false;
