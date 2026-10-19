@@ -51,8 +51,9 @@ type Config struct {
 	// RPCTimeout bounds every call to the resource manager and the API server,
 	// so one hung dependency cannot stall the loop indefinitely.
 	RPCTimeout time.Duration
-	// JobLabelSelector selects task Jobs to report. Jobs are reported, never
-	// created or deleted here.
+	// JobLabelSelector selects task Jobs to report (default: the kubernetes
+	// executor's nexus.dev/attempt label). Jobs are reported, never created or
+	// deleted here.
 	JobLabelSelector string
 	// MaxJobsReported caps Jobs per report; the rest are counted, not listed.
 	MaxJobsReported int
@@ -63,9 +64,9 @@ type Config struct {
 	// every report (NEXUS_CLUSTER_LABELS: cost tier, data locality ...),
 	// merged over the observed region and provider (ADR-0031 §1).
 	ClusterLabels map[string]string
-	// TaskNamespaces are the namespaces whose ResourceQuota headroom is
-	// published (NEXUS_CLUSTER_TASK_NAMESPACES); empty means the bound worker
-	// namespaces.
+	// TaskNamespaces are where task pods run (NEXUS_CLUSTER_TASK_NAMESPACES):
+	// task Jobs are observed there and their ResourceQuota headroom is
+	// published. Empty means the bound worker namespaces.
 	TaskNamespaces []string
 	// GPUResourceNames count as gpu_count in the headroom (default
 	// nvidia.com/gpu).
@@ -80,7 +81,7 @@ func (c *Config) defaults() {
 		c.RPCTimeout = 10 * time.Second
 	}
 	if c.JobLabelSelector == "" {
-		c.JobLabelSelector = "nexus.io/attempt-id"
+		c.JobLabelSelector = DefaultJobLabelSelector
 	}
 	if c.MaxJobsReported <= 0 {
 		c.MaxJobsReported = 500

@@ -22,6 +22,19 @@ import (
 // namespace. deploy/k8s labels them this way.
 const SchedulerSelector = "app.kubernetes.io/part-of=kgf-nexus,app.kubernetes.io/component=scheduler"
 
+// The kubernetes executor's task Job metadata (agent/internal/executor/
+// kubernetes_spec.go): every Job it creates carries the label, and the
+// annotations hold the full ids (a label value is hashed when too long).
+const (
+	DefaultJobLabelSelector = "nexus.dev/attempt"
+	jobAnnAttemptID         = "nexus.dev/attempt-id"
+	jobAnnRunID             = "nexus.dev/run-id"
+	// Read as a fallback, for Jobs created by hand with the selector this
+	// controller used before it matched the executor.
+	legacyJobLabelAttemptID = "nexus.io/attempt-id"
+	legacyJobLabelRunID     = "nexus.io/run-id"
+)
+
 type observation struct {
 	objects       []*rmv1.ObservedObject
 	completeKinds []string
@@ -95,15 +108,11 @@ func (c *Controller) observe(ctx context.Context, a *rmv1.ClusterAssignment) obs
 		}
 	}
 
+	// Task Jobs live where the kubernetes executor creates them -- its
+	// NEXUS_K8S_NAMESPACE, which is not necessarily a worker namespace.
 	jobsOK := true
 	var jobs []batchv1.Job
-	seen := map[string]bool{}
-	for _, b := range a.GetBindings() {
-		ns := b.GetKubernetesNamespace()
-		if seen[ns] {
-			continue
-		}
-		seen[ns] = true
+	for _, ns := range c.taskNamespaces(a) {
 		kctx, cancel := c.rpcCtx(ctx)
 		list, err := c.kube.BatchV1().Jobs(ns).List(kctx, metav1.ListOptions{LabelSelector: c.cfg.JobLabelSelector})
 		cancel()
@@ -293,7 +302,16 @@ func jobObject(j *batchv1.Job) *rmv1.ObservedObject {
 			"state": state, "active": j.Status.Active, "succeeded": j.Status.Succeeded, "failed": j.Status.Failed,
 			"start_time": ts(j.Status.StartTime), "completion_time": ts(j.Status.CompletionTime),
 			// The join back to Nexus: which attempt this Job runs.
-			"attempt_id": j.Labels["nexus.io/attempt-id"], "run_id": j.Labels["nexus.io/run-id"],
+			"attempt_id": jobMeta(j, jobAnnAttemptID, legacyJobLabelAttemptID),
+			"run_id":     jobMeta(j, jobAnnRunID, legacyJobLabelRunID),
 		}),
 	}
+}
+
+// jobMeta is the executor's annotation, else the legacy label.
+func jobMeta(j *batchv1.Job, annotation, legacyLabel string) string {
+	if v := j.Annotations[annotation]; v != "" {
+		return v
+	}
+	return j.Labels[legacyLabel]
 }

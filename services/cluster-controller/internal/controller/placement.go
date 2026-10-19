@@ -124,20 +124,29 @@ func clampNonNeg(v int64) int64 {
 	return v
 }
 
+// taskNamespaces are where task pods run: the configured
+// NEXUS_CLUSTER_TASK_NAMESPACES, else the bound worker namespaces (where an
+// agent whose kubernetes executor uses its own namespace runs its Jobs).
+func (c *Controller) taskNamespaces(a *rmv1.ClusterAssignment) []string {
+	if len(c.cfg.TaskNamespaces) > 0 {
+		return c.cfg.TaskNamespaces
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, b := range a.GetBindings() {
+		if ns := b.GetKubernetesNamespace(); !seen[ns] {
+			seen[ns] = true
+			out = append(out, ns)
+		}
+	}
+	return out
+}
+
 // headroom lists the task namespaces' quotas and computes their room. Returns
 // reported=false when any list failed, so a partial view never replaces the
 // stored one.
 func (c *Controller) headroom(ctx context.Context, a *rmv1.ClusterAssignment) ([]*rmv1.NamespaceHeadroom, bool, error) {
-	namespaces := c.cfg.TaskNamespaces
-	if len(namespaces) == 0 {
-		seen := map[string]bool{}
-		for _, b := range a.GetBindings() {
-			if ns := b.GetKubernetesNamespace(); !seen[ns] {
-				seen[ns] = true
-				namespaces = append(namespaces, ns)
-			}
-		}
-	}
+	namespaces := c.taskNamespaces(a)
 	gpus := c.cfg.GPUResourceNames
 	if len(gpus) == 0 {
 		gpus = []string{"nvidia.com/gpu"}
