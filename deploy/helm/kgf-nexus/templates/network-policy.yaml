@@ -1,0 +1,179 @@
+{{- /*
+Copyright 2026 Khuriwal Group
+SPDX-License-Identifier: Apache-2.0
+
+Ingress default-deny for the control plane, with explicit allows
+(networkPolicy in values.yaml, docs/OPERATIONS.md §20.17). NetworkPolicies
+are additive: the first selects every control-plane pod of this release and
+allows nothing, each later one opens exactly one path. Ports are referenced by
+NAME (http, grpc, metrics, postgres, s3), so they follow the containers.
+
+Not selected: the agents (their task pods and the task API reach them; the
+kubernetes executor's own policy covers that hop), NATS (nats.networkPolicy)
+and the Jobs, which serve nothing. Egress is left open on purpose: the
+services reach endpoints the chart cannot know.
+*/ -}}
+{{- include "nexus.valuesComplete" . }}
+{{- $np := .Values.networkPolicy }}
+{{- if and $np.enabled (include "nexus.controlPlaneEnabled" .) }}
+{{- $services := list "api-gateway" "workflow-manager" "dag-engine" "resource-manager" "event-service" }}
+{{- range .Values.schedulers }}{{ $services = append $services .name }}{{ end }}
+{{- $selected := concat $services (list "ui") }}
+{{- if .Values.postgres.enabled }}{{ $selected = append $selected "postgres" }}{{ end }}
+{{- if include "nexus.minioInRelease" . }}{{ $selected = append $selected "minio" }}{{ end }}
+{{- $release := dict "app.kubernetes.io/name" "kgf-nexus" "app.kubernetes.io/instance" .Release.Name }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nexus-default-deny
+  labels: {{- include "nexus.labels" (list . "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- toYaml $release | nindent 6 }}
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: {{ toJson $selected }} }
+  policyTypes: ["Ingress"]
+---
+# The services call one another (peer gRPC and HTTP), and the cluster
+# controller calls resource-manager.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nexus-control-plane-peers
+  labels: {{- include "nexus.labels" (list . "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- toYaml $release | nindent 6 }}
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: {{ toJson $services }} }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{- toYaml $release | nindent 14 }}
+            matchExpressions:
+              - { key: app.kubernetes.io/component, operator: In, values: {{ toJson (append $services "cluster-controller") }} }
+      ports:
+        - { port: http, protocol: TCP }
+        - { port: grpc, protocol: TCP }
+---
+# The platform's front door: REST and worker gRPC on api-gateway, and the
+# console. From networkPolicy.ingressFrom, or from anywhere when it is empty;
+# this release's agents and console are always admitted.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nexus-api-gateway
+  labels: {{- include "nexus.labels" (list . "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "nexus.selector" (list . "api-gateway") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - { port: http, protocol: TCP }
+        - { port: grpc, protocol: TCP }
+      {{- with $np.ingressFrom }}
+      from:
+        - podSelector:
+            matchLabels: {{- include "nexus.selector" (list $ "ui") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+              nexus.khuriwalgroup.com/role: agent
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.ui.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nexus-ui
+  labels: {{- include "nexus.labels" (list . "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "nexus.selector" (list . "ui") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - { port: http, protocol: TCP }
+      {{- with $np.ingressFrom }}
+      from: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- with $np.metricsFrom }}
+---
+# /metrics: the gateway's ops listener ("metrics"), every other service's
+# health listener ("http").
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nexus-metrics
+  labels: {{- include "nexus.labels" (list $ "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- toYaml $release | nindent 6 }}
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: {{ toJson $services }} }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from: {{- toYaml . | nindent 8 }}
+      ports:
+        - { port: metrics, protocol: TCP }
+        - { port: http, protocol: TCP }
+{{- end }}
+{{- if .Values.postgres.enabled }}
+---
+# The in-cluster database: the services (and their wait-for-schema init
+# containers), the migrate/bootstrap/db-roles Jobs and artifact-gc.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nexus-postgres
+  labels: {{- include "nexus.labels" (list . "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "nexus.selector" (list . "postgres") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{- toYaml $release | nindent 14 }}
+            matchExpressions:
+              - { key: app.kubernetes.io/component, operator: In, values: {{ toJson (concat $services (list "migrate" "bootstrap" "db-roles" "artifact-gc")) }} }
+      ports:
+        - { port: postgres, protocol: TCP }
+{{- end }}
+{{- if include "nexus.minioInRelease" . }}
+---
+# The in-cluster MinIO: the result-store clients (api-gateway, workflow-manager
+# sensors, artifact-gc, the agents), the bucket-init Job, and
+# networkPolicy.minioFrom (worker-pool releases elsewhere). Its console port
+# is not opened.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nexus-minio
+  labels: {{- include "nexus.labels" (list . "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "nexus.selector" (list . "minio") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{- toYaml $release | nindent 14 }}
+            matchExpressions:
+              - { key: app.kubernetes.io/component, operator: In, values: ["api-gateway", "workflow-manager", "artifact-gc", "minio-init"] }
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name | quote }}
+              nexus.khuriwalgroup.com/role: agent
+        {{- with $np.minioFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - { port: s3, protocol: TCP }
+{{- end }}
+{{- end }}

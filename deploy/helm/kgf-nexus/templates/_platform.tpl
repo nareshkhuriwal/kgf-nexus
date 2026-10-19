@@ -13,7 +13,7 @@ and ignores this chart's defaults, so sections added since then are simply
 absent. Fail with the fix rather than a nil-pointer error deep in a template.
 */}}
 {{- define "nexus.valuesComplete" -}}
-{{- range $section := list "placement" "podDisruptionBudget" "autoscaling" "tls" "clusterController" "artifactGC" "serviceAccounts" "resultStore" "tracing" "agentPolicy" "kgf" "claimPlacement" -}}
+{{- range $section := list "placement" "podDisruptionBudget" "autoscaling" "tls" "clusterController" "artifactGC" "serviceAccounts" "resultStore" "tracing" "agentPolicy" "kgf" "claimPlacement" "components" "cluster" "networkPolicy" -}}
 {{- if not (hasKey $.Values $section) -}}
 {{- fail (printf "values section %q is missing: this looks like `helm upgrade --reuse-values` from an older chart version, which drops the new version's defaults. Upgrade with --reset-then-reuse-values (keeps your previous overrides) or with -f <your values file> (docs/OPERATIONS.md §20.2)" $section) -}}
 {{- end -}}
@@ -28,11 +28,17 @@ Pod-spec placement fields for one component. Rendered at pod-spec level:
 {{- $root := index . 0 -}}{{- $component := index . 1 -}}
 {{- $p := $root.Values.placement -}}
 {{- /* Optional third argument: per-workload nodeSelector / tolerations /
-       affinity that REPLACE the global ones (agents[] entries). */ -}}
+       affinity that REPLACE the global ones (agents[] and schedulers[]
+       entries), and a topologySpread merged key by key over the global one
+       (schedulers[] entries). */ -}}
 {{- $o := dict -}}{{- if gt (len .) 2 }}{{ $o = index . 2 | default dict }}{{ end -}}
 {{- $nodeSelector := ternary $o.nodeSelector $p.nodeSelector (hasKey $o "nodeSelector") -}}
 {{- $tolerations := ternary $o.tolerations $p.tolerations (hasKey $o "tolerations") -}}
 {{- $affinity := ternary $o.affinity $p.affinity (hasKey $o "affinity") -}}
+{{- /* Key by key with hasKey, not sprig's merge, which treats false as
+       unset: a scheduler's topologySpread.enabled=false must win. */ -}}
+{{- $ts := deepCopy $p.topologySpread -}}
+{{- range $k, $v := ($o.topologySpread | default dict) }}{{ $_ := set $ts $k $v }}{{ end -}}
 {{- with $p.priorityClassName }}
 priorityClassName: {{ . | quote }}
 {{- end }}
@@ -45,12 +51,12 @@ tolerations: {{- toYaml . | nindent 2 }}
 {{- with $affinity }}
 affinity: {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- if $p.topologySpread.enabled }}
+{{- if $ts.enabled }}
 topologySpreadConstraints:
-{{- range $p.topologySpread.topologyKeys }}
-  - maxSkew: {{ $p.topologySpread.maxSkew }}
+{{- range $ts.topologyKeys }}
+  - maxSkew: {{ $ts.maxSkew }}
     topologyKey: {{ . }}
-    whenUnsatisfiable: {{ $p.topologySpread.whenUnsatisfiable }}
+    whenUnsatisfiable: {{ $ts.whenUnsatisfiable }}
     # Only this revision's pods count, so a rolling update is not skewed by
     # the pods it is about to replace.
     matchLabelKeys: [pod-template-hash]
@@ -58,6 +64,18 @@ topologySpreadConstraints:
       matchLabels: {{- include "nexus.selector" (list $root $component) | nindent 8 }}
 {{- end }}
 {{- end }}
+{{- end -}}
+
+{{/*
+Placement overrides for one schedulers[] entry, as YAML for nexus.placement's
+override argument: only the keys the entry sets, so an absent one keeps
+placement.*. args: root, scheduler entry (nil for the other services).
+*/}}
+{{- define "nexus.schedulerPlacement" -}}
+{{- $s := index . 1 | default dict -}}
+{{- $o := dict -}}
+{{- range $k := list "nodeSelector" "tolerations" "affinity" "topologySpread" }}{{ if hasKey $s $k }}{{ $_ := set $o $k (index $s $k) }}{{ end }}{{ end -}}
+{{- toYaml $o -}}
 {{- end -}}
 
 {{/*

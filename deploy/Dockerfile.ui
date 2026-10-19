@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
 # Multi-stage build for the React operator console.
 #
 # The runtime image serves static files through nginx and proxies /v1 to the
@@ -31,16 +34,41 @@ ENV VITE_NEXUS_API_BASE=${VITE_NEXUS_API_BASE} \
 
 RUN npm run build
 
-FROM nginx:1.27-alpine AS runtime
+# NGINX's own unprivileged build of the official image: the same entrypoint and
+# template handling, but nginx runs as uid 101 and listens on 8080, so the
+# console needs no root and meets Kubernetes Pod Security "restricted" like
+# every other Nexus image. The stable branch, pinned by digest (the multi-arch
+# index) so a rebuild of the same commit serves with the same bytes. Bump:
+#   docker buildx imagetools inspect nginxinc/nginx-unprivileged:<v>-alpine<a>
+FROM nginxinc/nginx-unprivileged:1.30.5-alpine3.24@sha256:56b8272e43a0525f67aed68d1e0794a712d10e3e45a563e118e9a77c817e6f86 AS runtime
 
-# A template, not a static config: the official nginx image renders
-# /etc/nginx/templates/*.template into conf.d at start, substituting ONLY the
-# variables the filter admits -- so nginx's own $host, $uri etc. are untouched.
-# The defaults reproduce the compose setup exactly; Kubernetes overrides them.
+# A template, not a static config: the image's entrypoint renders
+# /etc/nginx/templates/*.template into /etc/nginx/conf.d at start, substituting
+# ONLY the variables the filter admits -- so nginx's own $host, $uri etc. are
+# untouched. The defaults reproduce the compose setup exactly; Kubernetes
+# overrides them. Writable at runtime: /etc/nginx/conf.d (the rendered config)
+# and /tmp (pid and temp files); everything else may be read-only.
 ENV NGINX_ENVSUBST_FILTER="^NEXUS_" \
     NEXUS_DNS_RESOLVER="127.0.0.11" \
     NEXUS_GATEWAY_UPSTREAM="api-gateway:8080"
 COPY deploy/nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html
 
-EXPOSE 80
+# OCI labels (docs/IMAGES.md); the release workflow sets the same keys.
+ARG VERSION=dev
+ARG REVISION=""
+ARG SOURCE=https://github.com/nareshkhuriwal/kgf-nexus
+LABEL org.opencontainers.image.title="kgf-nexus/ui" \
+      org.opencontainers.image.description="KGF Nexus operator console: the static bundle behind nginx, proxying /v1 to the api-gateway" \
+      org.opencontainers.image.source="${SOURCE}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.vendor="Khuriwal Group" \
+      org.opencontainers.image.documentation="${SOURCE}/blob/main/docs/IMAGES.md"
+
+# Stated rather than inherited, so the contract is visible here: uid 101,
+# port 8080 (the console and /healthz), SIGQUIT for nginx's graceful stop.
+USER 101:101
+EXPOSE 8080
+STOPSIGNAL SIGQUIT

@@ -9,13 +9,16 @@ lifetimes, key type and rotation policy.
 Issuer: tls.certManager.issuerRef (production: a ClusterIssuer whose CA key
 lives outside this namespace, deploy/k8s/cert-issuer.yaml). With no issuerRef
 name, a self-signed CA is bootstrapped HERE -- a test-cluster convenience.
+A worker-pool release (components.controlPlane.enabled=false) issues only the
+agent's (and the cluster controller's) client leaf, from the control plane's
+ClusterIssuer.
 */ -}}
 {{- include "nexus.valuesComplete" . }}
 {{- $t := .Values.tls }}
 {{- /* NEXUS_REQUIRE_TLS covers EVERY connection the agent makes, the NATS hop
 included (the agent refuses to start with a plaintext broker), so requiring
 peer TLS with a plaintext broker would render a release whose agents crash-loop. */}}
-{{- if and $t.enabled $t.requirePeerTLS .Values.nats.enabled (not .Values.nats.tls.enabled) (.Values.agents) }}
+{{- if and $t.enabled $t.requirePeerTLS (include "nexus.agentsUseNats" .) (not .Values.nats.tls.enabled) (.Values.agents) }}
 {{- fail "tls.requirePeerTLS makes the agents refuse a plaintext NATS connection: enable nats.tls too (tls.certManager.natsLeaves=true issues nexus-nats-tls, nexus-event-service-tls and uses nexus-agent-tls -- see docs/OPERATIONS.md §20.4), or set tls.requirePeerTLS=false" }}
 {{- end }}
 {{- if and $t.enabled $t.certManager.enabled }}
@@ -64,18 +67,21 @@ spec:
 {{- end }}
 {{- $schedNames := list }}
 {{- range .Values.schedulers }}{{ $schedNames = append $schedNames .name }}{{ end }}
-{{- $leaves := list
+{{- $leaves := list }}
+{{- if include "nexus.controlPlaneEnabled" . }}
+{{- $leaves = list
   (dict "leaf" "api-gateway" "hosts" (list "api-gateway") "extra" $cm.gatewayExtraDnsNames "server" true)
   (dict "leaf" "workflow-manager" "hosts" (list "workflow-manager") "server" true)
   (dict "leaf" "dag-engine" "hosts" (list "dag-engine") "server" true)
   (dict "leaf" "scheduler" "hosts" $schedNames "server" true)
   (dict "leaf" "resource-manager" "hosts" (list "resource-manager") "server" true)
-  (dict "leaf" "agent" "cn" "nexus-agent" "server" false)
 }}
+{{- end }}
+{{- $leaves = append $leaves (dict "leaf" "agent" "cn" "nexus-agent" "server" false) }}
 {{- if .Values.clusterController.enabled }}
 {{- $leaves = append $leaves (dict "leaf" "cluster-controller" "cn" "nexus-cluster-controller" "server" false) }}
 {{- end }}
-{{- if $cm.natsLeaves }}
+{{- if and $cm.natsLeaves (include "nexus.controlPlaneEnabled" .) }}
 {{- $leaves = append $leaves (dict "leaf" "nats" "hosts" (list "nats") "server" true "serverOnly" true) }}
 {{- $leaves = append $leaves (dict "leaf" "event-service" "cn" "event-service" "server" false) }}
 {{- end }}

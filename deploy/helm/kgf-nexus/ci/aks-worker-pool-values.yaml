@@ -1,0 +1,97 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# A WORKER-POOL release on AKS: agents only, scaled, upgraded and placed
+# apart from the control plane they serve (examples/aks-existing-cluster.yaml,
+# release "nexus" in namespace "nexus"). This one fronts a GPU node pool; a
+# CPU pool is the same file with the GPU keys removed. One namespace per pool
+# release keeps its fixed names (ServiceAccount nexus-agent, the agent
+# Deployments) from colliding with another release's. Values marked REPLACE
+# are yours; docs/INSTALL-AKS.md walks through them.
+#
+#   helm upgrade --install nexus-pool-gpu oci://ghcr.io/example-owner/charts/kgf-nexus \
+#     --version <chart version> -n nexus-pool-gpu \
+#     --set components.controlPlane.enabled=false \
+#     --set existingSecret=nexus-pool-gpu-credentials \
+#     -f aks-worker-pool.yaml
+#
+# What must exist first (docs/OPERATIONS.md §20.16):
+#   - namespace nexus-pool-gpu, labelled pod-security.kubernetes.io/enforce=restricted
+#     (the task namespace, nexus-tasks, already exists for the control plane);
+#   - Secret nexus-pool-gpu-credentials in it: worker-api-key (a worker key of
+#     the Nexus namespace below) and nats-agent-nkey (a seed whose public key
+#     is in the control-plane release's nats.auth.tenants);
+#   - a federated credential on the result-store identity for
+#     system:serviceaccount:nexus-pool-gpu:nexus-agent;
+#   - in the control-plane release: this namespace admitted to NATS
+#     (nats.networkPolicy.extraFrom) and, for the cluster controller to see the
+#     pool, listed in clusterController.workerNamespaces;
+#   - the NVIDIA device plugin on the GPU pool.
+
+# What this release runs: agents only. The install command sets both of these
+# as well; they are here so the file is complete on its own.
+components:
+  controlPlane:
+    enabled: false
+existingSecret: nexus-pool-gpu-credentials
+
+# REPLACE: the same registered cluster name as the control-plane release.
+cluster:
+  name: aks-prod-weu
+nexusNamespace: default
+
+image:
+  registry: ghcr.io/
+  repositoryPrefix: "example-owner/kgf-nexus/"   # REPLACE example-owner
+  tag: v0.1.0                              # REPLACE: the control plane's release
+  pullPolicy: IfNotPresent
+
+# Where the agents dial: the control-plane release's Services, by FQDN (a bare
+# name resolves only inside its own namespace). From another cluster, the
+# endpoint that release exposes, with agentDefaults.controlPlane.tls.
+agentDefaults:
+  controlPlane:
+    address: api-gateway.nexus.svc:9091
+  nats:
+    url: nats://nats.nexus.svc:4222
+  kubernetes:
+    namespace: nexus-tasks
+
+# The control plane's broker identity model: NKey, no broker in this release.
+nats:
+  auth: { mode: nkey }
+
+# The same result store as the control plane, through the same identity.
+minio:
+  enabled: false
+  bucket: nexus-results
+resultStore:
+  backend: azblob
+  azure:
+    account: kgfnexusprodweu       # REPLACE
+    auth: workload-identity
+serviceAccounts:
+  agent:
+    name: nexus-agent
+    annotations: { azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000 }   # REPLACE
+
+agents:
+  - name: agent-gpu-a100
+    replicas: 1
+    queues: gpu
+    labels: "zone=cluster,accelerator=nvidia"
+    executors: kubernetes
+    cpuMillis: 64000
+    memoryBytes: 472446402560      # 440 GiB of task pods
+    diskBytes: 429496729600
+    gpuCount: 4                    # REPLACE: GPUs in the pool
+    gpuKind: nvidia-a100
+    gpuMemoryBytes: 85899345920
+    # The agent pod: small, on the cpu pool. Its task pods: on the GPU pool.
+    nodeSelector: { kubernetes.azure.com/agentpool: cpu }   # REPLACE
+    kubernetes:
+      taskNodeSelector: { kubernetes.azure.com/agentpool: gpu }   # REPLACE
+      taskTolerations: [{ key: sku, operator: Equal, value: gpu, effect: NoSchedule }]
+    resources:
+      requests: { cpu: 250m, memory: 256Mi }
+      limits: { memory: 1Gi }

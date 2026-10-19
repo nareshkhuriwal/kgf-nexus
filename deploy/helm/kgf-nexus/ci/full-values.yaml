@@ -38,6 +38,9 @@ schedulers:
     queue: default
     replicas: 3
     podDisruptionBudget: { minAvailable: 2, maxUnavailable: null }
+    nodeSelector: { kubernetes.azure.com/mode: system }
+    tolerations: [{ key: CriticalAddonsOnly, operator: Exists, effect: NoSchedule }]
+    topologySpread: { maxSkew: 2, topologyKeys: [topology.kubernetes.io/zone] }
     resources:
       requests: { cpu: 250m, memory: 128Mi }
       limits: { memory: 512Mi }
@@ -61,3 +64,21 @@ tracing:
   headersSecret: { name: otel-vendor, key: headers }
   resourceAttributes: deployment.environment.name=ci,cloud.region=local
   publicEndpoint: true
+# Runtime identity, per-scheduler placement, the agents' own control-plane
+# TLS over this release's mTLS, and the control plane's NetworkPolicy with
+# every peer list set (ADR-0035).
+cluster:
+  name: ci-cluster
+agentDefaults:
+  controlPlane:
+    address: api-gateway.nexus-validate.svc:9091
+    tls: { enabled: true, caSecretName: nexus-gateway-ca, serverName: workers.example.com }
+networkPolicy:
+  enabled: true
+  ingressFrom:
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress } }
+  metricsFrom:
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } }
+  minioFrom:
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: nexus-pool } }
+      podSelector: { matchLabels: { nexus.khuriwalgroup.com/role: agent } }

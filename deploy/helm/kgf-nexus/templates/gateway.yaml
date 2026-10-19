@@ -11,7 +11,8 @@ environment installs Envoy Gateway (deploy/terraform/environments/dev).
   <hosts.api>      -> api-gateway  (REST for nexusctl and the SDK)
   <hosts.mail>     -> mailpit UI   (only when mailpit is enabled)
 */ -}}
-{{- if .Values.gateway.enabled }}
+{{- /* Routes to the console and the api-gateway: control plane only. */}}
+{{- if and .Values.gateway.enabled (include "nexus.controlPlaneEnabled" .) }}
 {{- if .Values.gateway.createGatewayClass }}
 ---
 apiVersion: gateway.networking.k8s.io/v1

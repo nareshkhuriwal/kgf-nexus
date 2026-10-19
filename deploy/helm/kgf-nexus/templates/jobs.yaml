@@ -6,8 +6,10 @@ Schema migration and bootstrap. Plain Jobs rather than Helm hooks on purpose: a
 post-install hook would run only after `helm --wait` saw every Deployment
 ready, but the services wait for the schema (wait-for-schema), so the two would
 wait on each other forever. Named per image tag: a new release runs them again;
-re-applying the same release changes nothing.
+re-applying the same release changes nothing. Not in a worker-pool release: it
+never touches the database.
 */ -}}
+{{- if include "nexus.controlPlaneEnabled" . }}
 {{- $sa := include "nexus.saFor" (list . "jobs" nil) | fromYaml }}
 ---
 apiVersion: batch/v1
@@ -196,4 +198,5 @@ spec:
       {{- with include "nexus.dbVolumes" . }}
       volumes: {{- . | indent 8 }}
       {{- end }}
+{{- end }}
 {{- end }}

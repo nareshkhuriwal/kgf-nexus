@@ -1,0 +1,235 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# KGF Nexus on an EXISTING AKS cluster: the full install -- control plane,
+# schedulers, worker agents, console and cluster controller -- against Azure
+# Database for PostgreSQL Flexible Server (verify-full TLS) and Azure Blob
+# Storage through workload identity, with the images the release workflow
+# publishes to GHCR. Every value marked REPLACE is yours; docs/INSTALL-AKS.md
+# creates everything this file refers to, step by step.
+#
+#   helm upgrade --install nexus oci://ghcr.io/<owner>/charts/kgf-nexus \
+#     --version <chart version> -n nexus -f aks-existing-cluster.yaml \
+#     --wait --wait-for-jobs --timeout 15m
+#
+# What must exist first (docs/INSTALL-AKS.md, docs/OPERATIONS.md §20.16):
+#   - the cluster's OIDC issuer and workload identity enabled; a user-assigned
+#     managed identity with "Storage Blob Data Contributor" on the storage
+#     account, federated with system:serviceaccount:nexus:nexus-artifacts and
+#     system:serviceaccount:nexus:nexus-agent (and the worker-pool namespaces'
+#     agent accounts, examples/aks-worker-pool.yaml);
+#   - the Blob container (minio.bucket) in that account;
+#   - the Flexible Server reachable from the pods (VNet integration or a
+#     private endpoint), its database, and an owner login that can CREATE in it;
+#   - namespaces nexus (the release) and nexus-tasks (task pods), both
+#     labelled pod-security.kubernetes.io/enforce=restricted;
+#   - Secrets in nexus: nexus-credentials (postgres-password, worker-api-key,
+#     admin-api-key, nats-event-service-nkey, nats-agent-nkey), nexus-db-logins
+#     (one postgres-password-<component> per service), and nexus-postgres-ca
+#     (the Flexible Server roots: deploy/terraform/ca-bundles/azure-postgres-roots.pem);
+#   - NATS identities from deploy/nats/nexus-nats-auth.sh (public keys below);
+#   - for the GPU pool: the NVIDIA device plugin on its nodes.
+#
+# Node pools assumed (AKS labels every node kubernetes.azure.com/agentpool=<pool>):
+#   system  the AKS system pool (CriticalAddonsOnly taint): the schedulers only
+#   cpu     a user pool: control plane, console, agents, CPU task pods
+#   gpu     optional user pool, tainted sku=gpu:NoSchedule: GPU task pods only
+#
+# Pod Security: every pod of this release, and every task pod the agents
+# create, meets the "restricted" profile (docs/OPERATIONS.md §20.17).
+
+# REPLACE: the name you register this cluster under in the console
+# (Infrastructure -> Clusters). Every process reports it with its pod and node.
+cluster:
+  name: aks-prod-weu
+
+existingSecret: nexus-credentials
+nexusNamespace: default
+
+image:
+  registry: ghcr.io/
+  # REPLACE <owner>: the GitHub owner whose release workflow published the
+  # images, in lower case.
+  repositoryPrefix: "<owner>/kgf-nexus/"
+  # REPLACE: a published release (vX.Y.Z) or main commit (12 hex digits).
+  # Pin the digests too: the release's image-digests artifact has them as
+  # Helm values (docs/OPERATIONS.md §22.4).
+  tag: v0.1.0
+  pullPolicy: IfNotPresent
+  # Private GHCR packages only:
+  # pullSecrets: [ghcr-pull]
+
+# ── Database: Azure Database for PostgreSQL Flexible Server ───────────────
+postgres:
+  enabled: false
+  host: nexus-prod-weu.postgres.database.azure.com   # REPLACE
+  port: 5432
+  user: nexusadmin                                   # REPLACE: the owner login
+  database: nexus
+  sslmode: verify-full
+  caBundle: { secretName: nexus-postgres-ca, key: ca.crt }
+  params: { connect_timeout: "10" }
+  # Each service connects as its own login, never the owner (§20.12).
+  runtimeRoles:
+    enabled: true
+    existingSecret: nexus-db-logins
+
+# ── Result store: Azure Blob Storage, keyless ─────────────────────────────
+minio:
+  enabled: false
+  bucket: nexus-results            # the Blob CONTAINER
+resultStore:
+  backend: azblob
+  azure:
+    account: kgfnexusprodweu       # REPLACE: the storage account name
+    auth: workload-identity
+
+# The result-store clients share one workload identity. The agents launch
+# task Jobs through the Kubernetes API, so they mount a token and need their
+# own account (a second federated credential on the same identity).
+serviceAccounts:
+  apiGateway: &artifacts
+    name: nexus-artifacts
+    annotations: { azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000 }   # REPLACE
+  workflowManager: *artifacts
+  artifactGC: *artifacts
+  agent:
+    name: nexus-agent
+    annotations: { azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000 }   # REPLACE
+
+# ── Event bus ─────────────────────────────────────────────────────────────
+nats:
+  storage: { storageClass: managed-csi-premium }
+  auth:
+    mode: nkey
+    # REPLACE all four: `deploy/nats/nexus-nats-auth.sh helm-values`.
+    eventService: { publicKeys: [UREPLACEWITHEVENTSERVICEPUBLICKEYAAAAAAAAAAAAAAAAAAAAAAA] }
+    monitor: { publicKeys: [UREPLACEWITHMONITORPUBLICKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAA] }
+    tenants:
+      # This release's agents, and the GPU worker-pool release's.
+      - namespace: default
+        publicKeys:
+          - UREPLACEWITHAGENTPUBLICKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          - UREPLACEWITHGPUPOOLAGENTPUBLICKEYAAAAAAAAAAAAAAAAAAAAAAA
+  networkPolicy:
+    # Admit the worker-pool releases' agents (examples/aks-worker-pool.yaml).
+    extraFrom:
+      - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: nexus-pool-gpu } }
+        podSelector: { matchLabels: { nexus.khuriwalgroup.com/role: agent } }
+
+# mTLS between services (docs/TLS.md) needs cert-manager and a ClusterIssuer
+# (deploy/k8s/cert-issuer.yaml). Recommended for production; worker-pool
+# releases then set the same issuerRef:
+# tls:
+#   enabled: true
+#   certManager:
+#     issuerRef: { name: nexus-internal-ca, kind: ClusterIssuer }
+#     natsLeaves: true
+# nats:
+#   tls:
+#     enabled: true
+#     secretName: nexus-nats-tls
+#     clientSecrets: { eventService: nexus-event-service-tls, agent: nexus-agent-tls }
+
+# ── Control plane ─────────────────────────────────────────────────────────
+services:
+  apiGateway: { replicas: 2 }
+  workflowManager: { replicas: 2 }
+  dagEngine: { replicas: 2 }
+  resourceManager: { replicas: 2 }
+  eventService: { replicas: 2 }
+# metrics-server is part of AKS: the four stateless services scale on CPU.
+autoscaling:
+  enabled: true
+
+# Pinned to the system pool, away from the batch nodes their queues fill: a
+# scheduler is small, and dispatch stops without it. Two per queue, spread
+# across zones strictly (they tolerate one zone's loss).
+schedulers:
+  - name: scheduler
+    queue: default
+    replicas: 2
+    nodeSelector: { kubernetes.azure.com/mode: system }
+    tolerations: [{ key: CriticalAddonsOnly, operator: Exists, effect: NoSchedule }]
+    topologySpread: { whenUnsatisfiable: DoNotSchedule }
+  - name: scheduler-gpu
+    queue: gpu
+    replicas: 2
+    nodeSelector: { kubernetes.azure.com/mode: system }
+    tolerations: [{ key: CriticalAddonsOnly, operator: Exists, effect: NoSchedule }]
+    topologySpread: { whenUnsatisfiable: DoNotSchedule }
+
+# Everything else on the cpu pool, spread across zones, then nodes.
+placement:
+  nodeSelector: { kubernetes.azure.com/agentpool: cpu }   # REPLACE: your pool's name
+  # A PriorityClass above your batch workloads, created beforehand:
+  # priorityClassName: nexus-critical
+
+ui:
+  replicas: 2
+
+# ── Workers ───────────────────────────────────────────────────────────────
+# The agents run the kubernetes executor: each attempt is a Job in
+# nexus-tasks, placed on the pool the agent fronts. The agent pods are small
+# and stay on the cpu pool; cpuMillis/memoryBytes/gpuCount describe the TASK
+# pool they hand out.
+agentDefaults:
+  kubernetes:
+    namespace: nexus-tasks
+
+agents:
+  - name: agent-cpu
+    replicas: 1
+    queues: default
+    labels: "zone=cluster,accelerator=none"
+    executors: kubernetes
+    cpuMillis: 16000
+    memoryBytes: 68719476736       # 64 GiB of task pods
+    diskBytes: 107374182400
+    nodeSelector: { kubernetes.azure.com/agentpool: cpu }   # REPLACE
+    kubernetes:
+      taskNodeSelector: { kubernetes.azure.com/agentpool: cpu }   # REPLACE
+    resources:
+      requests: { cpu: 250m, memory: 256Mi }
+      limits: { memory: 1Gi }
+  # Optional: delete without a GPU pool (and scheduler-gpu above), or run it
+  # as its own release instead (examples/aks-worker-pool.yaml).
+  - name: agent-gpu
+    replicas: 1
+    queues: gpu
+    labels: "zone=cluster,accelerator=nvidia"
+    executors: kubernetes
+    cpuMillis: 32000
+    memoryBytes: 236223201280      # 220 GiB of task pods
+    diskBytes: 214748364800
+    gpuCount: 2                    # REPLACE: GPUs in the pool
+    gpuKind: nvidia-a100
+    gpuMemoryBytes: 85899345920
+    nodeSelector: { kubernetes.azure.com/agentpool: cpu }   # REPLACE
+    kubernetes:
+      taskNodeSelector: { kubernetes.azure.com/agentpool: gpu }   # REPLACE
+      taskTolerations: [{ key: sku, operator: Equal, value: gpu, effect: NoSchedule }]
+    resources:
+      requests: { cpu: 250m, memory: 256Mi }
+      limits: { memory: 1Gi }
+
+# ── Operations ────────────────────────────────────────────────────────────
+# Reports this cluster, every scheduler and worker to the console. Plan mode:
+# it observes and proposes, never scales (apply: docs/OPERATIONS.md §20.6).
+clusterController:
+  enabled: true
+  clusterName: aks-prod-weu        # REPLACE: the same name as cluster.name
+  # The release namespace and the task namespace. Add each worker-pool
+  # release's namespace once it exists (a Role is created in every entry).
+  workerNamespaces: [nexus, nexus-tasks]
+
+# Ingress default-deny for the control plane. Inert without a network-policy
+# engine (Azure NPM, Calico or Cilium).
+networkPolicy:
+  enabled: true
+  # Azure Monitor managed Prometheus scrapes from kube-system.
+  metricsFrom:
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+
+artifactGC:
+  mode: report

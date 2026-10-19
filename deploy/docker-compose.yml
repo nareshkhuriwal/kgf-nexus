@@ -906,10 +906,12 @@ services:
         # gateway is down, so it does not strictly need to wait. Waiting anyway
         # means the first page load after `up` shows data instead of an error.
         condition: service_healthy
+    # The console's nginx runs unprivileged and listens on 8080
+    # (deploy/Dockerfile.ui, deploy/nginx.conf).
     ports:
-      - "${NEXUS_UI_PORT:-3000}:80"
+      - "${NEXUS_UI_PORT:-3000}:8080"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/healthz || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/healthz || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5

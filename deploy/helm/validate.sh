@@ -21,8 +21,14 @@
 #    from a local cache filled from COMMIT-PINNED sources and checked against
 #    the SHA-256 of every file in schemas.lock. No schema is read from a
 #    floating branch, and a warm cache needs no network at all.
-# 3. Negative cases: values that MUST be refused -- by values.schema.json or by
-#    a template guard -- and the message that must name the fix.
+# 3. Every pod template of every render passes Pod Security "restricted"
+#    (pss-restricted.py), so a namespace enforcing it admits the whole release.
+# 4. The shipped examples (kgf-nexus/examples/*.yaml) are exactly their ci/
+#    copies, <owner> aside, so step 1 validates what users copy.
+# 5. Negative cases: values that MUST be refused -- by values.schema.json or by
+#    a template guard -- and the message that must name the fix. Then positive
+#    cases: what given values must render (worker-pool releases, runtime
+#    identity, the agents' control-plane settings, placement).
 #
 # Tools: helm and kubeconform are the versions pinned in
 # deploy/scripts/pinned-tool.sh, downloaded once into .tools/ and verified by
@@ -167,6 +173,22 @@ for values in "$chart"/ci/*-values.yaml; do
   lint_and_render "$name" "$tmp/$name.yaml" -f "$values" || { fail=1; continue; }
   if ! "$kubeconform" -strict -summary -kubernetes-version "$kube_version" "${schema_args[@]}" "$tmp/$name.yaml"; then
     fail=1
+  fi
+  python3 -I "$here/pss-restricted.py" "$tmp/$name.yaml" || fail=1
+done
+
+# The examples users copy are validated through their ci/ copies: identical
+# but for the <owner> placeholder (an image path a render cannot leave open).
+echo "== examples match their ci/ copies"
+for example in "$chart"/examples/*.yaml; do
+  copy="$chart/ci/$(basename "$example" .yaml)-values.yaml"
+  if [ ! -f "$copy" ]; then
+    echo "FAIL: $example has no validated copy $copy"; fail=1
+  elif ! sed 's/<owner>/example-owner/g' "$example" | diff -u - "$copy" >"$tmp/example.diff"; then
+    echo "FAIL: $copy differs from $example (regenerate: sed 's/<owner>/example-owner/g'):"
+    sed 's/^/    /' "$tmp/example.diff" | head -20; fail=1
+  else
+    echo "ok   $(basename "$example") = ci/$(basename "$copy")"
   fi
 done
 
@@ -346,6 +368,106 @@ then
   echo "ok   rendered: azblob workload identity on exactly api-gateway, workflow-manager, agents and artifact-gc"
 else
   echo "FAIL: azblob workload identity did not reach exactly the result-store clients"; tail -5 "$tmp/wi"; fail=1
+fi
+
+# ── Component-scoped releases, runtime identity, agent dialing (ADR-0035) ──
+pool=(--set components.controlPlane.enabled=false)
+must_fail "worker pool with no agents"          "agents is empty"              "${pool[@]}" --set-json 'agents=[]'
+must_fail "worker pool without existingSecret"  "a worker-pool release (components.controlPlane.enabled=false) needs the Secret" "${pool[@]}" --set existingSecret=
+must_fail "worker pool on a self-signed CA"     "needs tls.certManager.issuerRef" "${pool[@]}" --set tls.enabled=true --set tls.requirePeerTLS=false
+must_fail "worker pool NATS mTLS, no client cert" "needs nats.tls.clientSecrets.agent" "${pool[@]}" --set nats.tls.enabled=true
+must_fail "worker pool NATS TLS, no CA"         "needs nats.tls.caSecret"      "${pool[@]}" --set nats.tls.enabled=true --set nats.tls.verifyClients=false
+must_fail "misspelt components key"            "additional properties 'controlplane' not allowed" --set components.controlplane.enabled=false
+must_fail "control-plane TLS without a CA"      "needs agentDefaults.controlPlane.tls.caSecretName" --set agentDefaults.controlPlane.tls.enabled=true
+must_fail "server name without any TLS"         "has no effect without TLS"    --set agentDefaults.controlPlane.tls.serverName=workers.example.com
+must_fail "control-plane address without port"  "/agentDefaults/controlPlane/address" --set agentDefaults.controlPlane.address=api-gateway
+must_fail "NATS URL that is not nats://"        "/agentDefaults/nats/url"      --set agentDefaults.nats.url=http://nats:4222
+must_fail "cluster name the registry refuses"   "/cluster/name"                --set cluster.name=Prod_Cluster
+must_fail "scheduler spread policy misspelt"    "whenUnsatisfiable"            --set-json 'schedulers=[{"name":"scheduler","queue":"default","topologySpread":{"whenUnsatisfiable":"Never"}}]'
+must_fail "task toleration with a bad effect"   "/agentDefaults/kubernetes/taskTolerations/0/effect" --set-json 'agentDefaults.kubernetes.taskTolerations=[{"key":"sku","effect":"Never"}]'
+must_fail "misspelt networkPolicy key"          "additional properties 'ingresFrom' not allowed" --set-json 'networkPolicy={"enabled":true,"ingresFrom":[]}'
+
+# A worker-pool release renders agents and nothing else -- no Service,
+# StatefulSet, Job, CronJob, ConfigMap or control-plane account -- even with
+# no schedulers, and its agents dial what agentDefaults names.
+if "$helm" template nexus-pool "$chart" -n nexus-pool -f "$chart/ci/aks-worker-pool-values.yaml" \
+    --set-json 'schedulers=[]' >"$tmp/pool" 2>&1 &&
+   python3 - "$tmp/pool" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+kinds = {d["kind"] for d in docs}
+assert kinds <= {"ServiceAccount", "Deployment", "PodDisruptionBudget", "Role", "RoleBinding", "NetworkPolicy"}, kinds
+sas = {d["metadata"]["name"] for d in docs if d["kind"] == "ServiceAccount"}
+assert sas == {"nexus-agent"}, sas
+deps = [d for d in docs if d["kind"] == "Deployment"]
+assert deps, "no agent Deployment"
+for d in deps:
+    tpl = d["spec"]["template"]
+    assert tpl["metadata"]["labels"].get("nexus.khuriwalgroup.com/role") == "agent", d["metadata"]["name"]
+    env = {e["name"]: e.get("value") for e in tpl["spec"]["containers"][0]["env"]}
+    assert env["NEXUS_CONTROL_PLANE"] == "api-gateway.nexus.svc:9091", env["NEXUS_CONTROL_PLANE"]
+    assert env["NEXUS_NATS_URL"] == "nats://nats.nexus.svc:4222", env.get("NEXUS_NATS_URL")
+    assert env["NEXUS_CLUSTER_NAME"] == "aks-prod-weu"
+    assert env["NEXUS_K8S_NODE_SELECTOR"] == "kubernetes.azure.com/agentpool=gpu"
+    assert env["NEXUS_K8S_TOLERATIONS"] == "sku=gpu:NoSchedule"
+PY
+then
+  echo "ok   rendered: worker-pool release = agents only, dialing agentDefaults.controlPlane and agentDefaults.nats"
+else
+  echo "FAIL: the worker-pool release did not render as expected"; tail -5 "$tmp/pool"; fail=1
+fi
+
+# Runtime identity on every Nexus process: the downward-API pod, namespace
+# and node on each container of a Nexus image but the console and the Jobs,
+# NEXUS_CLUSTER_NAME = cluster.name (claimPlacement.clusterName for the
+# agents), and no container that sets one variable twice. agentDefaults.nats.url
+# "" takes NATS away from the agents only. The cluster controller renders its
+# own identity (templates/cluster-controller.yaml, clusterController.clusterName)
+# and is checked for duplicates only.
+if "$helm" template nexus "$chart" -f "$chart/ci/full-values.yaml" --set claimPlacement.clusterName=gpu-claims \
+    --set agentDefaults.nats.url= >"$tmp/identity" 2>&1 &&
+   python3 - "$tmp/identity" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"] in ("Deployment", "CronJob")]
+seen = set()
+for d in docs:
+    tpl = d["spec"]["jobTemplate"]["spec"]["template"] if d["kind"] == "CronJob" else d["spec"]["template"]
+    agent = tpl["metadata"]["labels"].get("nexus.khuriwalgroup.com/role") == "agent"
+    for c in tpl["spec"].get("initContainers", []) + tpl["spec"]["containers"]:
+        names = [e["name"] for e in c.get("env", [])]
+        assert len(names) == len(set(names)), (d["metadata"]["name"], c["name"], "duplicate env")
+    c = tpl["spec"]["containers"][0]
+    if "kgf-nexus/ui:" in c["image"] or d["metadata"]["name"] == "nexus-cluster-controller":
+        continue
+    env = {e["name"]: e for e in c.get("env", [])}
+    for var, field in (("NEXUS_POD_NAME", "metadata.name"), ("NEXUS_POD_NAMESPACE", "metadata.namespace"), ("NEXUS_NODE_NAME", "spec.nodeName")):
+        assert env[var]["valueFrom"]["fieldRef"]["fieldPath"] == field, (d["metadata"]["name"], var)
+    want = "gpu-claims" if agent else "ci-cluster"
+    assert env["NEXUS_CLUSTER_NAME"]["value"] == want, (d["metadata"]["name"], env["NEXUS_CLUSTER_NAME"])
+    if agent:
+        assert "NEXUS_NATS_URL" not in env, d["metadata"]["name"]
+    if d["metadata"]["name"] == "event-service":
+        assert env["NEXUS_NATS_URL"]["value"] == "nats://nats:4222"
+    seen.add(d["metadata"]["name"])
+for want in ("api-gateway", "workflow-manager", "dag-engine", "scheduler", "scheduler-gpu", "resource-manager", "event-service", "agent-cpu", "artifact-gc"):
+    assert want in seen, (want, sorted(seen))
+PY
+then
+  echo "ok   rendered: pod/namespace/node/cluster identity on every Nexus process; agents' NATS follows agentDefaults.nats.url"
+else
+  echo "FAIL: runtime identity or agent NATS did not render as expected"; tail -5 "$tmp/identity"; fail=1
+fi
+
+# The agents' control-plane TLS over this release's mTLS (ci/full-values.yaml):
+# the client leaf stays, the CA comes from caSecretName, the name is overridden.
+if grep -A40 'NEXUS_CONTROL_PLANE, value: "api-gateway.nexus-validate.svc:9091"' "$tmp/full.yaml" >"$tmp/cptls" &&
+   grep -qF 'name: NEXUS_TLS_CLIENT_CERT_FILE, value: /etc/nexus/tls/tls.crt' "$tmp/cptls" &&
+   grep -qF 'name: NEXUS_TLS_CA_FILE, value: "/etc/nexus/control-plane-ca/ca.crt"' "$tmp/cptls" &&
+   grep -qF 'name: NEXUS_TLS_SERVER_NAME, value: "workers.example.com"' "$tmp/cptls" &&
+   grep -qF 'secretName: nexus-gateway-ca' "$tmp/full.yaml"; then
+  echo "ok   rendered: agents verify the control plane against agentDefaults.controlPlane.tls.caSecretName and serverName"
+else
+  echo "FAIL: agentDefaults.controlPlane.tls did not render as expected"; fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then

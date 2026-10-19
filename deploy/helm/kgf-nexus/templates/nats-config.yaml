@@ -19,7 +19,7 @@ checks every role against it. Change one, change both.
     monitor         read-only $SYS server/account queries
 No anonymous user exists, so an unauthenticated connection is refused.
 */ -}}
-{{- if .Values.nats.enabled }}
+{{- if and .Values.nats.enabled (include "nexus.controlPlaneEnabled" .) }}
 {{- include "nexus.natsAuthRequired" . }}
 {{- $a := .Values.nats.auth -}}
 ---
