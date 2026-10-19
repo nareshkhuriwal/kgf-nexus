@@ -133,7 +133,13 @@ nats:
 
 # ── Control plane ─────────────────────────────────────────────────────────
 services:
-  apiGateway: { replicas: 2 }
+  apiGateway:
+    replicas: 2
+    # A single-organisation install: whoever may view a namespace's
+    # infrastructure also runs this cluster, so they see the control plane's
+    # pods, nodes and cluster too (ADR-0037 §4). Keep the default,
+    # platform-operators, if tenants you do not trust share this install.
+    componentTopology: infrastructure-viewers
   workflowManager: { replicas: 2 }
   dagEngine: { replicas: 2 }
   resourceManager: { replicas: 2 }

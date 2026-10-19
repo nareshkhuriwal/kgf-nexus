@@ -386,6 +386,20 @@ must_fail "cluster name the registry refuses"   "/cluster/name"                -
 must_fail "scheduler spread policy misspelt"    "whenUnsatisfiable"            --set-json 'schedulers=[{"name":"scheduler","queue":"default","topologySpread":{"whenUnsatisfiable":"Never"}}]'
 must_fail "task toleration with a bad effect"   "/agentDefaults/kubernetes/taskTolerations/0/effect" --set-json 'agentDefaults.kubernetes.taskTolerations=[{"key":"sku","effect":"Never"}]'
 must_fail "misspelt networkPolicy key"          "additional properties 'ingresFrom' not allowed" --set-json 'networkPolicy={"enabled":true,"ingresFrom":[]}'
+must_fail "component topology the gateway refuses" "/services/apiGateway/componentTopology" --set services.apiGateway.componentTopology=everyone
+
+# NEXUS_COMPONENT_TOPOLOGY (ADR-0037 §4) reaches the api-gateway, and only it:
+# platform-operators by default, infrastructure-viewers in the AKS example.
+for case in "minimal:platform-operators" "aks-existing-cluster:infrastructure-viewers"; do
+  file=${case%%:*} want=${case#*:}
+  if "$helm" template nexus "$chart" -f "$chart/ci/$file-values.yaml" >"$tmp/topology" 2>&1 &&
+     [ "$(grep -c 'name: NEXUS_COMPONENT_TOPOLOGY' "$tmp/topology")" = 1 ] &&
+     grep -A80 -E 'image: .*/api-gateway:' "$tmp/topology" | grep -qF "name: NEXUS_COMPONENT_TOPOLOGY, value: \"$want\""; then
+    echo "ok   rendered: NEXUS_COMPONENT_TOPOLOGY=$want on the api-gateway alone ($file)"
+  else
+    echo "FAIL: NEXUS_COMPONENT_TOPOLOGY did not render $want on the api-gateway alone ($file)"; fail=1
+  fi
+done
 
 # A worker-pool release renders agents and nothing else -- no Service,
 # StatefulSet, Job, CronJob, ConfigMap or control-plane account -- even with

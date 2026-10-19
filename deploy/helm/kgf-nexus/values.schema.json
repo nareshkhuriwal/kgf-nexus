@@ -1065,7 +1065,22 @@
       "additionalProperties": false,
       "properties": {
         "apiGateway": {
-          "$ref": "#/definitions/service"
+          "allOf": [
+            {
+              "$ref": "#/definitions/service"
+            },
+            {
+              "properties": {
+                "componentTopology": {
+                  "enum": [
+                    "platform-operators",
+                    "infrastructure-viewers"
+                  ],
+                  "description": "NEXUS_COMPONENT_TOPOLOGY on the api-gateway: who sees the control plane's pods, nodes and cluster (ADR-0037 \u00a74)."
+                }
+              }
+            }
+          ]
         },
         "workflowManager": {
           "$ref": "#/definitions/service"

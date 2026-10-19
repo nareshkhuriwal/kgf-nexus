@@ -567,6 +567,17 @@ serviceDefaults:
 services:
   apiGateway:
     replicas: 1
+    # Who sees the control plane's placement in the console's Infrastructure
+    # page (NEXUS_COMPONENT_TOPOLOGY, ADR-0037 §4, OPERATIONS §31.2):
+    #   platform-operators     -- only platform operators see pods, nodes and
+    #                             the cluster; every other infrastructure.view
+    #                             holder sees component health under opaque
+    #                             labels. For a shared installation (KGF Cloud).
+    #   infrastructure-viewers -- every infrastructure.view holder sees it: a
+    #                             single-organisation install, where whoever
+    #                             administers a namespace also runs the cluster.
+    # Anything else stops the gateway, so the schema refuses it.
+    componentTopology: platform-operators
     # Exposure outside the cluster, as a SEPARATE Service. The in-cluster
     # api-gateway Service always keeps 8080 (REST) and 9091 (worker gRPC).
     external:

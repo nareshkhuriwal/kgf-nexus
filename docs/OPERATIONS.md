@@ -2657,6 +2657,7 @@ durations, a `latest` tag, and any misspelt **top-level** key at install time.
 | `schedulers[].nodeSelector` / `.tolerations` / `.affinity` / `.topologySpread` | `placement.*` | per-scheduler placement; the first three replace `placement.*`, `topologySpread` merges over it |
 | `networkPolicy.enabled` / `.ingressFrom` / `.metricsFrom` / `.minioFrom` | off / any / none / none | ingress default-deny for the control plane with explicit allows, §20.17 |
 | `ui.service.port` | 80 | the console Service's port; the container listens on 8080 (unprivileged nginx) |
+| `services.apiGateway.componentTopology` | `platform-operators` | `NEXUS_COMPONENT_TOPOLOGY`: who sees the control plane's pods, nodes and cluster (§31.2); `infrastructure-viewers` for a single-organisation install |
 
 `deploy/helm/kgf-nexus/ci/*-values.yaml` are complete, validated values files:
 minimal, every feature on, the production shape (managed database and object
