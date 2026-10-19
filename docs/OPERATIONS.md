@@ -2772,6 +2772,29 @@ The scheduler Deployments carry `app.kubernetes.io/component=scheduler` and
 per-queue component), which is the selector the controller uses; before 0.2.0
 the chart's schedulers were invisible to it (F113).
 
+**Scheduler HPAs (ADR-0036, §12.7).** A scheduler with
+`schedulers[].autoscaling.enabled` has an HPA. With
+`clusterController.enabled`, `apply.enabled` and
+`apply.schedulerAutoscaling` (the default), the chart hands that HPA to the
+controller in three ways:
+
+- it annotates it `nexus.khuriwalgroup.com/autoscaling-owner: cluster-controller`;
+- it binds `patch` on it, by name;
+- on every upgrade it re-renders the four fields the controller manages from
+  the live HPA: `minReplicas`, `maxReplicas`, the CPU target and
+  `behavior.scaleDown.stabilizationWindowSeconds`.
+
+So `helm upgrade` never reverts the settings saved in the console. The
+`schedulers[].autoscaling` values for those four fields only seed a new HPA;
+change them in the console. Everything else on the HPA still comes from
+values: the memory metric, the scale-down policies, scale-up. The first
+upgrade that hands an existing HPA over applies the values once, then the
+controller takes it from there. In plan mode, with
+`apply.schedulerAutoscaling: false`, or without the controller, the HPA stays
+Helm's: no annotation, no patch Role, and the console shows any difference as
+`plan_only` or `drift`. `helm template` cannot read the live HPA, so it always
+shows the values.
+
 ### 20.7 Artifact GC CronJob
 
 Report-only by default (`artifactGC.mode=report`): the nightly job logs what it

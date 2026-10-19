@@ -984,7 +984,9 @@ podDisruptionBudget:
 # claim cost as linear in the queue's PENDING backlog and bound by Postgres
 # CPU, not the scheduler's own: past a ~10k backlog more replicas add latency.
 # Size it with schedulers[].replicas. schedulers[].autoscaling (same shape)
-# exists for operators who have measured their own curve (OPERATIONS §20).
+# exists for operators who have measured their own curve (OPERATIONS §20);
+# with the cluster controller in apply mode it then follows the scheduler
+# settings saved in the console (clusterController.apply.schedulerAutoscaling).
 autoscaling:
   enabled: false
   minReplicas: 2
@@ -1108,11 +1110,15 @@ clusterController:
     expectedClusterUID: ""
     # ADR-0036: in apply mode, also keep the scheduler HPAs' minReplicas,
     # maxReplicas, CPU target and scale-down window at the scheduler settings
-    # saved in the console. Binds patch on the autoscaled schedulers' HPAs
-    # (by name, this namespace). The controller still changes only an HPA
-    # annotated nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller;
-    # false (or an HPA without it) leaves the HPA to Helm/GitOps and reports
-    # the difference as drift.
+    # saved in the console. With enabled and apply.enabled, this hands the
+    # chart's scheduler HPAs (schedulers[].autoscaling.enabled) to the
+    # controller: they are annotated
+    # nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller, patch on
+    # them (by name, this namespace) is bound, and on `helm upgrade` their four
+    # managed fields are re-rendered from the live HPA, so an upgrade never
+    # reverts what the controller applied (the values for them only seed a new
+    # HPA). false leaves them to Helm and the controller reports any
+    # difference as drift. The stateless services' HPAs are always Helm's.
     schedulerAutoscaling: true
   terminationGracePeriodSeconds: 30
   resources:

@@ -60,7 +60,8 @@ Least privilege:
 {{- $schedulerHPAs = append $schedulerHPAs .name }}
 {{- end }}
 {{- end }}
-{{- $applySchedulers := and $cc.apply.enabled (ne (toString $cc.apply.schedulerAutoscaling) "false") }}
+{{- /* The same condition annotates those HPAs for the controller (nexus.hpa). */}}
+{{- $applySchedulers := include "nexus.controllerOwnsSchedulerHPAs" . }}
 ---
 apiVersion: v1
 kind: ServiceAccount

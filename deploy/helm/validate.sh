@@ -473,6 +473,113 @@ else
   echo "FAIL: agentDefaults.controlPlane.tls did not render as expected"; fail=1
 fi
 
+# Scheduler HPAs the cluster controller owns (ADR-0036). One condition
+# (nexus.controllerOwnsSchedulerHPAs) both annotates a scheduler's HPA for the
+# controller and binds the controller's patch on it: controller on, apply on,
+# apply.schedulerAutoscaling not false. The stateless services' HPAs are never
+# annotated; every other combination annotates nothing and grants no patch.
+hpa_base=(--set autoscaling.enabled=true --set clusterController.clusterName=c
+  --set clusterController.apply.expectedClusterUID=00000000-0000-0000-0000-000000000000
+  --set-json 'schedulers=[{"name":"scheduler","queue":"default","autoscaling":{"enabled":true,"minReplicas":2,"maxReplicas":4}},{"name":"scheduler-gpu","queue":"gpu"}]')
+hpa_case() { # <want owned: yes|no> <description> <helm args...>
+  local want=$1 what=$2; shift 2
+  if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" "${hpa_base[@]}" "$@" >"$tmp/hpa" 2>&1 &&
+     python3 - "$tmp/hpa" "$want" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+owned = sys.argv[2] == "yes"
+key = "nexus.khuriwalgroup.com/autoscaling-owner"
+hpas = {d["metadata"]["name"]: d for d in docs if d["kind"] == "HorizontalPodAutoscaler"}
+assert set(hpas) >= {"scheduler", "api-gateway"}, sorted(hpas)
+assert "scheduler-gpu" not in hpas, "a scheduler without its own autoscaling got an HPA"
+for name, h in hpas.items():
+    ann = (h["metadata"].get("annotations") or {}).get(key)
+    want = "cluster-controller" if (owned and name == "scheduler") else None
+    assert ann == want, (name, ann)
+s = hpas["scheduler"]["spec"]
+assert (s["minReplicas"], s["maxReplicas"]) == (2, 4), s   # values: lookup is empty here
+roles = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Role"}
+role = roles.get("nexus-cluster-controller-apply-scheduler")
+if owned:
+    patch = [r for r in role["rules"] if "patch" in r["verbs"]]
+    assert patch and patch[0]["resourceNames"] == ["scheduler"], role["rules"]
+else:
+    assert role is None, "patch on scheduler HPAs bound although the chart does not hand them over"
+PY
+  then
+    echo "ok   rendered: $what"
+  else
+    echo "FAIL: $what"; tail -5 "$tmp/hpa"; fail=1
+  fi
+}
+hpa_case yes "scheduler HPA annotated for the controller, and patch bound on it, in apply mode" \
+  --set clusterController.enabled=true --set clusterController.apply.enabled=true
+hpa_case no  "scheduler HPA left to Helm in plan mode" \
+  --set clusterController.enabled=true
+hpa_case no  "scheduler HPA left to Helm with apply.schedulerAutoscaling=false" \
+  --set clusterController.enabled=true --set clusterController.apply.enabled=true --set clusterController.apply.schedulerAutoscaling=false
+hpa_case no  "scheduler HPA left to Helm without the controller" \
+  --set clusterController.apply.enabled=true
+
+# An owned HPA keeps the controller's four fields across `helm upgrade`: they
+# come from the live object when it carries the owner annotation. lookup is
+# empty under `helm template`, so the merge is rendered in a probe chart over
+# this chart's helpers with live objects given as values.
+probe="$tmp/hpa-probe"
+mkdir -p "$probe/templates"
+cp "$chart"/templates/_*.tpl "$probe/templates/"
+printf 'apiVersion: v2\nname: hpa-probe\nversion: 0.0.0\n' >"$probe/Chart.yaml"
+cat >"$probe/templates/probe.yaml" <<'TPL'
+{{- $a := dict "minReplicas" 2 "maxReplicas" 6 "targetCPUUtilizationPercentage" 70 "targetMemoryUtilizationPercentage" 80 "behavior" (dict "scaleDown" (dict "stabilizationWindowSeconds" 300 "policies" (list (dict "type" "Pods" "value" 1 "periodSeconds" 60)))) }}
+{{- range $case, $live := .Values.cases }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: {{ $case }} }
+data:
+  settings: {{ include "nexus.hpaOwnedSettings" (list $a $live) | fromYaml | toJson | quote }}
+{{- end }}
+TPL
+cat >"$tmp/hpa-live.yaml" <<'YAML'
+cases:
+  owned:
+    metadata: { annotations: { nexus.khuriwalgroup.com/autoscaling-owner: cluster-controller } }
+    spec:
+      minReplicas: 3
+      maxReplicas: 10
+      metrics:
+        - { type: Resource, resource: { name: memory, target: { type: Utilization, averageUtilization: 80 } } }
+        - { type: Resource, resource: { name: cpu, target: { type: Utilization, averageUtilization: 55 } } }
+      behavior: { scaleDown: { stabilizationWindowSeconds: 120 } }
+  owned-defaults:
+    metadata: { annotations: { nexus.khuriwalgroup.com/autoscaling-owner: cluster-controller } }
+    spec: { maxReplicas: 5, metrics: [] }
+  not-owned:
+    metadata: { annotations: { example.com/other: x } }
+    spec: { minReplicas: 5, maxReplicas: 9 }
+  absent: {}
+YAML
+if "$helm" template probe "$probe" -f "$tmp/hpa-live.yaml" >"$tmp/hpa-probe.out" 2>&1 &&
+   python3 - "$tmp/hpa-probe.out" <<'PY'
+import json, sys, yaml
+got = {d["metadata"]["name"]: json.loads(d["data"]["settings"]) for d in yaml.safe_load_all(open(sys.argv[1])) if d}
+def four(s):
+    return (s["minReplicas"], s["maxReplicas"], s["targetCPUUtilizationPercentage"], s["behavior"]["scaleDown"]["stabilizationWindowSeconds"])
+assert four(got["owned"]) == (3, 10, 55, 120), got["owned"]
+# Unset on the live object: Kubernetes' minReplicas default, values elsewhere.
+assert four(got["owned-defaults"]) == (1, 5, 70, 300), got["owned-defaults"]
+assert four(got["not-owned"]) == (2, 6, 70, 300), got["not-owned"]
+assert four(got["absent"]) == (2, 6, 70, 300), got["absent"]
+for s in got.values():   # never the controller's: still from values
+    assert s["targetMemoryUtilizationPercentage"] == 80, s
+    assert s["behavior"]["scaleDown"]["policies"] == [{"type": "Pods", "value": 1, "periodSeconds": 60}], s
+PY
+then
+  echo "ok   rendered: an owned HPA keeps the live min/max/CPU/scale-down window; values elsewhere and when not owned"
+else
+  echo "FAIL: the owned-HPA live merge did not render as expected"; tail -5 "$tmp/hpa-probe.out"; fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "validate: FAILED" >&2
   exit 1

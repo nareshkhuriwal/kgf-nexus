@@ -230,7 +230,10 @@ spec:
         {{- end }}
 {{- include "nexus.pdb" (list $root .name .name $floor $over.podDisruptionBudget) }}
 {{- if $hpa.enabled }}
-{{- include "nexus.hpa" (list $root .name .name $hpa) }}
+{{- /* A scheduler's HPA is the cluster controller's to tune when it is in
+       apply mode with schedulerAutoscaling (ADR-0036); the stateless
+       services' HPAs stay Helm's. */}}
+{{- include "nexus.hpa" (list $root .name .name $hpa (and .scheduler (include "nexus.controllerOwnsSchedulerHPAs" $root))) }}
 {{- end }}
 {{- end }}
 {{- end }}
