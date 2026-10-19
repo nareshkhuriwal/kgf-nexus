@@ -13,12 +13,14 @@
 #     --wait --wait-for-jobs --timeout 15m
 #
 # What must exist first (docs/INSTALL-AKS.md, docs/OPERATIONS.md §20.16):
-#   - the cluster's OIDC issuer and workload identity enabled; a user-assigned
-#     managed identity with "Storage Blob Data Contributor" on the storage
-#     account, federated with system:serviceaccount:nexus:nexus-artifacts and
+#   - the cluster's OIDC issuer and workload identity enabled;
+#   - the Blob container (minio.bucket) in the storage account;
+#   - a user-assigned managed identity holding "Storage Blob Data Contributor"
+#     on that CONTAINER -- not the storage account, which would open every
+#     container in it (docs/OPERATIONS.md §26.4) -- federated with
+#     system:serviceaccount:nexus:nexus-artifacts and
 #     system:serviceaccount:nexus:nexus-agent (and the worker-pool namespaces'
 #     agent accounts, examples/aks-worker-pool.yaml);
-#   - the Blob container (minio.bucket) in that account;
 #   - the Flexible Server reachable from the pods (VNet integration or a
 #     private endpoint), its database, and an owner login that can CREATE in it;
 #   - namespaces nexus (the release) and nexus-tasks (task pods), both
