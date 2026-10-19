@@ -129,22 +129,49 @@ automountServiceAccountToken: {{ .automount }}
 {{- end -}}
 
 {{/*
-Refuse an executors list the agent could not honour. The agent discovers its
-executors instead of reading a list: subprocess is always offered, kubernetes
-when its configuration (rendered for "kubernetes" here) passes the RBAC
-probe, and docker only when `docker info` reaches a daemon -- which a chart
-pod never does: the chart mounts no Docker socket, and a Pod Security
-restricted pod cannot. args: agent.
+An agent's executors, normalized: the comma-separated agents[].executors
+(default subprocess), trimmed and de-duplicated in order. The agent builds and
+advertises exactly these (NEXUS_EXECUTORS, docs/IMAGES.md §4.3). args: agent.
+*/}}
+{{- define "nexus.agentExecutors" -}}
+{{- $out := list -}}
+{{- range splitList "," (.executors | default "subprocess") -}}
+{{- $e := trim . -}}
+{{- if and $e (not (has $e $out)) }}{{ $out = append $out $e }}{{ end -}}
+{{- end -}}
+{{- join "," $out -}}
+{{- end -}}
+
+{{/*
+The executor that runs an agent's tasks naming none (NEXUS_DEFAULT_EXECUTOR):
+agents[].defaultExecutor, else the first of its executors. args: agent.
+*/}}
+{{- define "nexus.agentDefaultExecutor" -}}
+{{- .defaultExecutor | default (first (splitList "," (include "nexus.agentExecutors" .))) -}}
+{{- end -}}
+
+{{/*
+Refuse executors the agent could not honour. The agent fails at startup when
+an executor in NEXUS_EXECUTORS cannot be built, and docker never can be in a
+chart pod: `docker info` needs a daemon socket, which the chart does not mount
+and a Pod Security restricted pod cannot. The default must be one of the
+executors: a worker never runs a task on an executor it does not advertise.
+args: agent.
 */}}
 {{- define "nexus.agentExecutorsRequired" -}}
-{{- if has "docker" (splitList "," (.executors | default "subprocess" | nospace)) -}}
-{{- fail (printf "agents[%s].executors includes docker, which the agent offers only when `docker info` reaches a Docker daemon; the chart mounts no daemon socket (a Pod Security restricted pod cannot), so it would silently never be offered. Use kubernetes (each attempt a Job, docs/OPERATIONS.md §13) or subprocess" .name) -}}
+{{- $execs := splitList "," (include "nexus.agentExecutors" .) -}}
+{{- if has "docker" $execs -}}
+{{- fail (printf "agents[%s].executors includes docker, which needs a Docker daemon socket in the agent pod; the chart mounts none (a Pod Security restricted pod cannot), so the agent would refuse to start. Use kubernetes (each attempt a Job, docs/OPERATIONS.md §13) or subprocess" .name) -}}
+{{- end -}}
+{{- $def := include "nexus.agentDefaultExecutor" . -}}
+{{- if not (has $def $execs) -}}
+{{- fail (printf "agents[%s].defaultExecutor %s is not one of its executors (%s): a worker runs a task that names no executor on its default, so the default must be an executor it advertises" .name $def (join "," $execs)) -}}
 {{- end -}}
 {{- end -}}
 
 {{/* "true" when an agent entry runs the kubernetes executor. args: agent. */}}
 {{- define "nexus.agentUsesKubernetes" -}}
-{{- if has "kubernetes" (splitList "," (.executors | default "subprocess" | nospace)) }}true{{ end -}}
+{{- if has "kubernetes" (splitList "," (include "nexus.agentExecutors" .)) }}true{{ end -}}
 {{- end -}}
 
 {{/*

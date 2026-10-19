@@ -184,12 +184,15 @@ ui:
   replicas: 2
 
 # ── Workers ───────────────────────────────────────────────────────────────
-# The agents run the kubernetes executor: each attempt is a Job in
-# nexus-tasks, placed on the pool the agent fronts. The agent pods are small
-# and stay on the cpu pool; cpuMillis/memoryBytes/gpuCount describe the TASK
-# pool they hand out. An agent always offers the subprocess executor as well,
-# and a task that names no executor runs as a subprocess inside the agent pod
-# (within its 1Gi): give these queues' tasks runtime.executor: kubernetes.
+# The agents run the kubernetes executor and nothing else (executors:
+# kubernetes, which is also their default): every attempt is its own Job in
+# nexus-tasks, placed on the pool the agent fronts by taskNodeSelector and
+# taskTolerations. The agent pods are small and stay on the cpu pool, and no
+# task runs inside them; cpuMillis/memoryBytes/gpuCount describe the TASK
+# pool they hand out. A task that names no runtime.executor runs as a pod
+# here when it has a runtime.image; one without an image, or one naming
+# subprocess, waits for a worker that can run it and says so in its
+# pending_reason.
 # Once the controller runs in apply mode and a pool is bound to an agent's
 # Deployment, add replicasManagedByController: true to that agent, so
 # `helm upgrade` keeps the count the controller set (OPERATIONS §20.6).

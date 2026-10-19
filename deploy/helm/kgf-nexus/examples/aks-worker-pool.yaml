@@ -98,8 +98,9 @@ agents:
     gpuKind: nvidia-a100
     gpuMemoryBytes: 85899345920
     # The agent pod: small, on the cpu pool. Its task pods: on the GPU pool.
-    # Tasks for this queue should set runtime.executor: kubernetes; one that
-    # names no executor runs as a subprocess inside this agent pod.
+    # kubernetes is its only executor and its default, so every task of this
+    # queue is its own pod there (one naming no executor needs a
+    # runtime.image; nothing runs inside the agent pod).
     nodeSelector: { kubernetes.azure.com/agentpool: cpu }   # REPLACE
     kubernetes:
       taskNodeSelector: { kubernetes.azure.com/agentpool: gpu }   # REPLACE
