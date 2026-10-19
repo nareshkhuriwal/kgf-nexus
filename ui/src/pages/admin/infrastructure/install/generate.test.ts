@@ -16,6 +16,7 @@ import {
   ENV,
   installScript,
   installSteps,
+  federatedSubjects,
   newPool,
   poolNamespace,
   poolValues,
@@ -52,8 +53,8 @@ describe('defaults', () => {
       'kgf-nexus',
     );
     expect(pools.map((p) => [p.name, p.kind, p.namespace, p.cpuMillis, p.memoryGiB, p.gpuCount, p.replicas, p.saved])).toEqual([
-      ['cpu', 'cpu', 'kgf-nexus-cpu', 4000, 8, 0, 1, true],
-      ['gpu', 'gpu', 'kgf-nexus-gpu', 2000, 64, 2, 1, true],
+      ['cpu', 'cpu', 'kgf-nexus-pool-cpu', 4000, 8, 0, 1, true],
+      ['gpu', 'gpu', 'kgf-nexus-pool-gpu', 2000, 64, 2, 1, true],
     ]);
   });
 
@@ -62,8 +63,9 @@ describe('defaults', () => {
   });
 
   it('keeps pool namespaces valid DNS labels', () => {
+    expect(poolNamespace('nexus', 'gpu')).toBe('nexus-pool-gpu');
     expect(poolNamespace('a'.repeat(60), 'pool')).toHaveLength(63);
-    expect(poolNamespace('a'.repeat(61), 'pool').endsWith('-')).toBe(false);
+    expect(poolNamespace('a'.repeat(57), 'pool').endsWith('-')).toBe(false);
   });
 });
 
@@ -98,15 +100,22 @@ describe('validateInstall', () => {
     expect(validateInstall(input({ imageTag: 'ca0e00a1b2c3' })).imageTag).toBeUndefined();
   });
 
+  it('defaults to the chart’s production choices', () => {
+    const d = defaultInstallInput('default', undefined);
+    expect([d.namespace, d.releaseName, d.secretName, d.dbSslMode, d.dbCaSecret, d.dbRuntimeRoles, d.dbLoginsSecret, d.chartVersion, d.imageTag]).toEqual([
+      'nexus', 'nexus', 'nexus-credentials', 'verify-full', 'nexus-postgres-ca', true, 'nexus-db-logins', '0.3.0', 'v0.3.0',
+    ]);
+  });
+
   it('requires the CA secret only for verify-full', () => {
-    expect(validateInstall(input({ dbSslMode: 'verify-full' })).dbCaSecret).toMatch(/root CA/);
-    expect(validateInstall(input({ dbSslMode: 'verify-full', dbCaSecret: 'pg-ca' })).dbCaSecret).toBeUndefined();
+    expect(validateInstall(input({ dbSslMode: 'verify-full', dbCaSecret: '' })).dbCaSecret).toMatch(/root CA/);
+    expect(validateInstall(input({ dbSslMode: 'require', dbCaSecret: '' })).dbCaSecret).toBeUndefined();
   });
 
   it('keeps pools out of the control plane’s namespace and out of each other’s', () => {
     const i = input();
-    i.pools[0]!.namespace = 'kgf-nexus';
-    i.pools[1]!.namespace = 'kgf-nexus';
+    i.pools[0]!.namespace = 'nexus';
+    i.pools[1]!.namespace = 'nexus';
     const e = validateInstall(i);
     expect(e['pools.0.namespace']).toMatch(/not the control plane’s/);
     expect(e['pools.1.namespace']).toMatch(/not the control plane’s/);
@@ -137,47 +146,60 @@ describe('control-plane values', () => {
     const v = asWritten(controlPlaneValues(input())) as Record<string, any>;
     expect(v.cluster).toEqual({ name: 'aks-prod' });
     expect(v.components).toEqual({ controlPlane: { enabled: true } });
-    expect(v.image).toEqual({ registry: 'ghcr.io/', repositoryPrefix: 'nareshkhuriwal/kgf-nexus/', tag: 'v0.2.0' });
-    expect(v.postgres).toEqual({ enabled: false, host: 'nexus-pg.postgres.database.azure.com', port: 5432, user: 'nexus', database: 'nexus', sslmode: 'require' });
+    expect(v.image).toEqual({ registry: 'ghcr.io/', repositoryPrefix: 'nareshkhuriwal/kgf-nexus/', tag: 'v0.3.0' });
+    expect(v.existingSecret).toBe('nexus-credentials');
+    expect(v.postgres).toEqual({
+      enabled: false,
+      host: 'nexus-pg.postgres.database.azure.com',
+      port: 5432,
+      user: 'nexus',
+      database: 'nexus',
+      sslmode: 'verify-full',
+      caBundle: { secretName: 'nexus-postgres-ca', key: 'ca.crt' },
+      runtimeRoles: { enabled: true, existingSecret: 'nexus-db-logins' },
+    });
     expect(v.minio).toEqual({ enabled: false, bucket: 'nexus-results' });
     expect(v.resultStore).toEqual({ backend: 'azblob', azure: { account: 'nexusresults01', auth: 'workload-identity' } });
-    expect(v.serviceAccounts.apiGateway).toEqual({ annotations: { 'azure.workload.identity/client-id': '11111111-2222-3333-4444-555555555555' } });
+    const artifacts = { name: 'nexus-artifacts', annotations: { 'azure.workload.identity/client-id': '11111111-2222-3333-4444-555555555555' } };
+    expect(v.serviceAccounts).toEqual({ apiGateway: artifacts, workflowManager: artifacts, artifactGC: artifacts });
     expect(v.nats).toEqual({ enabled: false });
     expect(v.schedulers.map((s: { name: string; queue: string }) => [s.name, s.queue])).toEqual([
       ['scheduler', 'default'],
       ['scheduler-gpu', 'gpu'],
     ]);
     expect(v.schedulers[0].nodeSelector).toEqual({ 'kubernetes.azure.com/agentpool': 'system' });
+    expect(v.schedulers[0].tolerations).toEqual([{ key: 'CriticalAddonsOnly', operator: 'Exists', effect: 'NoSchedule' }]);
     expect(v.schedulers[0].autoscaling).toMatchObject({ enabled: true, minReplicas: 2, maxReplicas: 6, targetCPUUtilizationPercentage: 65 });
     expect(v.agents).toEqual([]);
     expect(v.tls).toBeUndefined();
-    expect(v.clusterController).toEqual({ enabled: true, clusterName: 'aks-prod', workerNamespaces: ['kgf-nexus-cpu', 'kgf-nexus-gpu'], apply: { enabled: false } });
+    expect(v.clusterController).toEqual({ enabled: true, clusterName: 'aks-prod', workerNamespaces: ['nexus-pool-cpu', 'nexus-pool-gpu'], apply: { enabled: false } });
   });
 
-  it('adds the CA bundle, pull secret, NATS and TLS only when chosen', () => {
-    const v = asWritten(
-      controlPlaneValues(input({ dbSslMode: 'verify-full', dbCaSecret: 'pg-ca', privateRegistry: true, eventBus: 'nats', agentTls: true, owner: 'acme' })),
-    ) as Record<string, any>;
-    expect(v.postgres.caBundle).toEqual({ secretName: 'pg-ca', key: 'ca.crt' });
+  it('adds the pull secret, NATS admission and mTLS only when chosen', () => {
+    const v = asWritten(controlPlaneValues(input({ dbSslMode: 'require', dbRuntimeRoles: false, privateRegistry: true, eventBus: 'nats', mtls: true, owner: 'acme' }))) as Record<string, any>;
+    expect(v.postgres.caBundle).toBeUndefined();
+    expect(v.postgres.runtimeRoles).toBeUndefined();
     expect(v.image.pullSecrets).toEqual(['ghcr-pull']);
     expect(v.image.repositoryPrefix).toBe('acme/kgf-nexus/');
-    expect(v.nats).toEqual({ enabled: true });
-    expect(v.tls).toEqual({ enabled: true, certManager: { gatewayExtraDnsNames: ['api-gateway.kgf-nexus.svc.cluster.local'] } });
+    expect(v.nats.enabled).toBe(true);
+    expect(v.nats.networkPolicy.extraFrom[1]).toEqual({
+      namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'nexus-pool-gpu' } },
+      podSelector: { matchLabels: { 'nexus.khuriwalgroup.com/role': 'agent' } },
+    });
+    expect(v.tls).toEqual({ enabled: true, certManager: { issuerRef: { name: 'nexus-internal-ca', kind: 'ClusterIssuer' } } });
   });
 });
 
 describe('worker-pool values', () => {
-  it('installs agents only, dialling the gateway across namespaces', () => {
+  it('installs agents only, dialling the gateway by FQDN, tasks placed on the pool', () => {
     const i = input();
     const v = asWritten(poolValues(i, { ...i.pools[1]!, nodePool: 'gpua100' })) as Record<string, any>;
     expect(v.components).toEqual({ controlPlane: { enabled: false } });
-    expect(v.postgres).toEqual({ enabled: false });
-    expect(v.nats).toEqual({ enabled: false });
+    expect(v.existingSecret).toBe('nexus-credentials');
     expect(v.resultStore.backend).toBe('azblob');
-    expect(v.agentDefaults).toEqual({
-      controlPlane: { address: 'api-gateway.kgf-nexus.svc.cluster.local:9091', tls: { enabled: false } },
-      nats: { url: '' },
-    });
+    expect(v.serviceAccounts.agent.name).toBe('nexus-agent');
+    expect(v.agentDefaults).toEqual({ controlPlane: { address: 'api-gateway.nexus.svc:9091' }, nats: { url: '' } });
+    expect(v.nats).toBeUndefined();
     expect(v.agents).toEqual([
       {
         name: 'gpu',
@@ -189,24 +211,35 @@ describe('worker-pool values', () => {
         memoryBytes: 8 * 1024 ** 3,
         gpuCount: 2,
         diskBytes: 20 * 1024 ** 3,
-        nodeSelector: { 'kubernetes.azure.com/agentpool': 'gpua100' },
-        tolerations: [{ key: 'sku', operator: 'Equal', value: 'gpu', effect: 'NoSchedule' }],
+        kubernetes: {
+          taskNodeSelector: { 'kubernetes.azure.com/agentpool': 'gpua100' },
+          taskTolerations: [{ key: 'sku', operator: 'Equal', value: 'gpu', effect: 'NoSchedule' }],
+        },
       },
     ]);
   });
 
-  it('verifies the gateway with the CA secret when TLS is on', () => {
-    const i = input({ agentTls: true, agentTlsCaSecret: 'nexus-ca' });
+  it('places the agent itself when tasks run inside it', () => {
+    const i = input();
+    const v = asWritten(poolValues(i, { ...i.pools[0]!, executor: 'subprocess', nodePool: 'cpu' })) as Record<string, any>;
+    expect(v.agents[0].nodeSelector).toEqual({ 'kubernetes.azure.com/agentpool': 'cpu' });
+    expect(v.agents[0].kubernetes).toBeUndefined();
+  });
+
+  it('takes dispatch hints from the control plane’s broker on the NATS event bus', () => {
+    const i = input({ eventBus: 'nats', mtls: true });
     const v = asWritten(poolValues(i, i.pools[0]!)) as Record<string, any>;
-    expect(v.agentDefaults.controlPlane.tls).toEqual({ enabled: true, caSecretName: 'nexus-ca', serverName: 'api-gateway.kgf-nexus.svc.cluster.local' });
+    expect(v.agentDefaults.nats).toEqual({ url: 'nats://nats.nexus.svc:4222' });
+    expect(v.nats).toEqual({ auth: { mode: 'nkey' } });
+    expect(v.tls.certManager.issuerRef.name).toBe('nexus-internal-ca');
   });
 });
 
 describe('values files', () => {
   it('writes YAML that reads back as exactly the values tree', () => {
-    const i = input({ eventBus: 'nats', privateRegistry: true, dbSslMode: 'verify-full', dbCaSecret: 'pg-ca' });
+    const i = input({ eventBus: 'nats', privateRegistry: true, mtls: true });
     const files = valuesFiles(i);
-    expect(files.map((f) => f.path)).toEqual(['kgf-nexus-values.yaml', 'kgf-nexus-pool-cpu-values.yaml', 'kgf-nexus-pool-gpu-values.yaml']);
+    expect(files.map((f) => f.path)).toEqual(['nexus-values.yaml', 'nexus-pool-cpu-values.yaml', 'nexus-pool-gpu-values.yaml']);
     expect(readYaml(files[0]!.content)).toEqual(asWritten(controlPlaneValues(i)));
     expect(readYaml(files[2]!.content)).toEqual(asWritten(poolValues(i, i.pools[1]!)));
     expect(files[0]!.content.startsWith('# KGF Nexus full install — AKS cluster "aks-prod"')).toBe(true);
@@ -220,19 +253,45 @@ describe('values files', () => {
   });
 
   it('says when a pool is not a saved pool', () => {
-    const i = input({ pools: [newPool('adhoc', 'adhoc', 'kgf-nexus', false)] });
+    const i = input({ pools: [newPool('adhoc', 'adhoc', 'nexus', false)] });
     expect(valuesFiles(i)[1]!.content).toContain('Not a saved pool: the cluster controller will not scale it.');
   });
 });
 
 describe('install steps', () => {
-  it('creates every namespace, idempotently', () => {
+  it('creates every namespace idempotently, enforcing restricted Pod Security', () => {
     const ns = installSteps(input()).find((s) => s.id === 'namespaces')!.script;
     expect(ns.split('\n')).toEqual([
-      'kubectl create namespace kgf-nexus --dry-run=client -o yaml | kubectl apply -f -',
-      'kubectl create namespace kgf-nexus-cpu --dry-run=client -o yaml | kubectl apply -f -',
-      'kubectl create namespace kgf-nexus-gpu --dry-run=client -o yaml | kubectl apply -f -',
+      'kubectl create namespace nexus --dry-run=client -o yaml | kubectl apply -f -',
+      'kubectl label namespace nexus pod-security.kubernetes.io/enforce=restricted --overwrite',
+      'kubectl create namespace nexus-pool-cpu --dry-run=client -o yaml | kubectl apply -f -',
+      'kubectl label namespace nexus-pool-cpu pod-security.kubernetes.io/enforce=restricted --overwrite',
+      'kubectl create namespace nexus-pool-gpu --dry-run=client -o yaml | kubectl apply -f -',
+      'kubectl label namespace nexus-pool-gpu pod-security.kubernetes.io/enforce=restricted --overwrite',
     ]);
+  });
+
+  it('federates the identity with exactly the service accounts that use the result store', () => {
+    expect(federatedSubjects(input())).toEqual([
+      'system:serviceaccount:nexus:nexus-artifacts',
+      'system:serviceaccount:nexus-pool-cpu:nexus-agent',
+      'system:serviceaccount:nexus-pool-gpu:nexus-agent',
+    ]);
+    const script = installSteps(input()).find((s) => s.id === 'identity')!.script;
+    expect(script).toContain('AKS_OIDC_ISSUER="$(az aks show --ids /subscriptions/0000/');
+    expect(script.match(/az identity federated-credential create/g)).toHaveLength(3);
+    expect(script).toContain('--subject system:serviceaccount:nexus-pool-gpu:nexus-agent');
+    expect(installSteps(input({ providerResourceId: '' })).find((s) => s.id === 'identity')!.script).toContain(': "${AKS_OIDC_ISSUER:?');
+  });
+
+  it('creates the database CA and the per-service logins once', () => {
+    const secrets = installSteps(input()).find((s) => s.id === 'secrets')!.script;
+    expect(secrets).toMatch(/create secret generic nexus-postgres-ca \\\n\s+--from-file=ca\.crt=deploy\/terraform\/ca-bundles\/azure-postgres-roots\.pem/);
+    expect(secrets).toContain('kubectl -n nexus get secret nexus-db-logins >/dev/null 2>&1 || \\');
+    expect(secrets.match(/--from-literal=postgres-password-[a-z-]+="\$\(openssl rand -hex 24\)"/g)).toHaveLength(7);
+    const plain = installSteps(input({ dbSslMode: 'require', dbRuntimeRoles: false })).find((s) => s.id === 'secrets')!.script;
+    expect(plain).not.toContain('nexus-postgres-ca');
+    expect(plain).not.toContain('nexus-db-logins');
   });
 
   it('refers to secrets only through environment variables, and guards them', () => {
@@ -241,6 +300,7 @@ describe('install steps', () => {
     expect(secrets).toContain(`--from-literal=postgres-password="$${ENV.pgPassword}"`);
     expect(secrets).toContain(`--from-literal=worker-api-key="$${ENV.bootstrapKey}"`);
     expect(secrets.match(/--from-literal=worker-api-key="\$NEXUS_WORKER_TOKEN"/g)).toHaveLength(2);
+    expect(secrets).not.toMatch(/nxs_|password=[^"]/);
     expect(secrets).not.toContain('docker-registry');
   });
 
@@ -256,18 +316,19 @@ describe('install steps', () => {
     const steps = installSteps(input());
     expect(steps.find((s) => s.id === 'control-plane')!.script).toBe(
       [
-        'helm upgrade --install kgf-nexus oci://ghcr.io/nareshkhuriwal/charts/kgf-nexus \\',
-        '  --version 0.2.0 \\',
-        '  --namespace kgf-nexus \\',
-        '  --values kgf-nexus-values.yaml \\',
+        'helm upgrade --install nexus oci://ghcr.io/nareshkhuriwal/charts/kgf-nexus \\',
+        '  --version 0.3.0 \\',
+        '  --namespace nexus \\',
+        '  --values nexus-values.yaml \\',
         '  --wait \\',
+        '  --wait-for-jobs \\',
         '  --timeout 15m',
       ].join('\n'),
     );
     const pools = steps.find((s) => s.id === 'pools')!.script;
-    expect(pools).toContain('helm upgrade --install kgf-nexus-pool-gpu oci://ghcr.io/nareshkhuriwal/charts/kgf-nexus \\\n');
-    expect(pools).toContain('--namespace kgf-nexus-gpu');
-    expect(pools).toContain('--values kgf-nexus-pool-gpu-values.yaml');
+    expect(pools).toContain('helm upgrade --install nexus-pool-gpu oci://ghcr.io/nareshkhuriwal/charts/kgf-nexus \\\n');
+    expect(pools).toContain('--namespace nexus-pool-gpu');
+    expect(pools).toContain('--values nexus-pool-gpu-values.yaml');
   });
 
   it('generates and passes the NATS identities only for the NATS event bus', () => {
@@ -275,7 +336,10 @@ describe('install steps', () => {
     const steps = installSteps(input({ eventBus: 'nats' }));
     expect(steps.find((s) => s.id === 'nats')!.script).toContain('deploy/nats/nexus-nats-auth.sh helm-values > nats-auth-values.yaml');
     expect(steps.find((s) => s.id === 'control-plane')!.script).toContain('--values nats-auth-values.yaml');
-    expect(steps.find((s) => s.id === 'secrets')!.script).toContain('--from-file=nats-agent-nkey="$NEXUS_NATS_DIR"/agent-default/user.nk');
+    const secrets = steps.find((s) => s.id === 'secrets')!.script;
+    expect(secrets).toContain('--from-file=nats-event-service-nkey="$NEXUS_NATS_DIR"/event-service/user.nk');
+    // The pool releases' agents take dispatch hints too, so their Secrets carry the agent seed.
+    expect(secrets.match(/--from-file=nats-agent-nkey="\$NEXUS_NATS_DIR"\/agent-default\/user.nk/g)).toHaveLength(3);
   });
 
   it('checks the cluster with az only when the resource ID is known', () => {
@@ -284,7 +348,7 @@ describe('install steps', () => {
   });
 
   it.skipIf(!hasSh)('produces a script a real shell parses', () => {
-    for (const i of [input(), input({ eventBus: 'nats', privateRegistry: true, agentTls: true, clusterName: "it's $(id)" })]) {
+    for (const i of [input(), input({ eventBus: 'nats', privateRegistry: true, mtls: true, providerResourceId: '', clusterName: "it's $(id)" })]) {
       expect(() => sh(installScript(i), {}, ['-n'])).not.toThrow();
     }
   });

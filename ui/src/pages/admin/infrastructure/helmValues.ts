@@ -25,8 +25,8 @@ import { toYaml, type YamlMapping } from '../../../lib/yaml';
 /** The GitHub owner whose releases this console points at by default. */
 export const GITHUB_OWNER = 'nareshkhuriwal';
 export const REPO_NAME = 'kgf-nexus';
-/** The chart version in deploy/helm/kgf-nexus/Chart.yaml when this console was built. */
-export const DEFAULT_CHART_VERSION = '0.2.0';
+/** The chart version (deploy/helm/kgf-nexus/Chart.yaml) the AKS install was built against. */
+export const DEFAULT_CHART_VERSION = '0.3.0';
 
 export const DOCS = {
   installAks: 'docs/INSTALL-AKS.md',
@@ -36,6 +36,7 @@ export const DOCS = {
   tls: 'docs/TLS.md',
   operations: 'docs/OPERATIONS.md',
   values: 'deploy/helm/kgf-nexus/values.yaml',
+  azurePostgresRoots: 'deploy/terraform/ca-bundles/azure-postgres-roots.pem',
 } as const;
 
 export function repoUrl(owner = GITHUB_OWNER): string {
