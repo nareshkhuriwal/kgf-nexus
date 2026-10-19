@@ -588,7 +588,7 @@ export function VerifyStep({ namespace, input, canViewWorkers, now }: { namespac
       <p className="infra-verify-progress" role="status" aria-live="polite">
         {progress.done ? `All ${progress.total} checks verified. ${input.clusterName} is running Nexus.` : `${progress.ok} of ${progress.total} checks verified.`}
       </p>
-      <ul className="infra-verify">
+      <ul className="infra-verify" aria-label="Install checks">
         {items.map((it) => {
           const v = CHECK_VISUAL[it.status];
           return (
