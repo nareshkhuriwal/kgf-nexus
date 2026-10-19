@@ -190,9 +190,17 @@ Executors are **discovered**, not configured:
   socket mounted into the agent. That socket is root-equivalent on the host.
 - **kubernetes** is available with `NEXUS_K8S_NAMESPACE` set.
 
-The chart's `executors` key decides which `NEXUS_K8S_*` variables it renders.
-Its `NEXUS_EXECUTORS` and `NEXUS_HEARTBEAT_INTERVAL_MS` are not read by the
-agent: the heartbeat interval comes from the gateway's Register response.
+The agent reads no executor list. A task that names no executor
+(`runtime.executor`) runs as a subprocess on whichever worker claims it, so
+on a kubernetes agent it runs inside the agent's own container. There is no
+setting yet that stops an agent from offering subprocess.
+
+The chart's `agents[].executors` decides which configuration it renders:
+`kubernetes` renders the `NEXUS_K8S_*` variables, the executor's Role and
+the task-API policy. It refuses `docker`, because a chart pod has no Docker
+daemon to reach. The heartbeat interval is not an agent setting either: the
+gateway dictates it in the Register response (ADR-0005). Compose still sets
+`NEXUS_EXECUTORS` and `NEXUS_HEARTBEAT_INTERVAL_MS`, which have no effect.
 
 ### 4.4 Result store (api-gateway, agents, artifact-gc, workflow-manager sensors)
 

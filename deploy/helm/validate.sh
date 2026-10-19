@@ -388,6 +388,26 @@ must_fail "task toleration with a bad effect"   "/agentDefaults/kubernetes/taskT
 must_fail "misspelt networkPolicy key"          "additional properties 'ingresFrom' not allowed" --set-json 'networkPolicy={"enabled":true,"ingresFrom":[]}'
 must_fail "component topology the gateway refuses" "/services/apiGateway/componentTopology" --set services.apiGateway.componentTopology=everyone
 
+# Executors are discovered by the agent, never read from a list: the chart
+# renders the kubernetes executor's configuration for "kubernetes", refuses
+# docker (no daemon socket in a chart pod), and renders neither
+# NEXUS_EXECUTORS nor NEXUS_HEARTBEAT_INTERVAL_MS, which no binary reads.
+one_agent='{"name":"agent-x","queues":"default","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824'
+must_fail "docker executor in a chart pod"      "the chart mounts no daemon socket" --set-json "agents[0]=$one_agent,\"executors\":\"subprocess,docker\"}"
+must_fail "an executor the agent does not have" "/agents/0/executors"          --set-json "agents[0]=$one_agent,\"executors\":\"podman\"}"
+dead=0
+for values in "$chart"/ci/*-values.yaml; do
+  name=$(basename "$values" -values.yaml)
+  if [ -f "$tmp/$name.yaml" ] && grep -qE 'NEXUS_EXECUTORS|NEXUS_HEARTBEAT_INTERVAL_MS' "$tmp/$name.yaml"; then
+    echo "FAIL: ci/$name renders NEXUS_EXECUTORS or NEXUS_HEARTBEAT_INTERVAL_MS, which the agent does not read"; dead=1; fail=1
+  fi
+done
+if [ "$dead" = 0 ] && "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set agentDefaults.heartbeatIntervalMs=5000 >/dev/null 2>&1; then
+  echo "ok   rendered: no dead agent variable in any ci/ render; agentDefaults.heartbeatIntervalMs still accepted"
+elif [ "$dead" = 0 ]; then
+  echo "FAIL: agentDefaults.heartbeatIntervalMs is no longer accepted (older values files set it)"; fail=1
+fi
+
 # NEXUS_COMPONENT_TOPOLOGY (ADR-0037 §4) reaches the api-gateway, and only it:
 # platform-operators by default, infrastructure-viewers in the AKS example.
 for case in "minimal:platform-operators" "aks-existing-cluster:infrastructure-viewers"; do

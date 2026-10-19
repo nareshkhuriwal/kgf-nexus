@@ -1176,7 +1176,9 @@
             "type": "string"
           },
           "executors": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^\\s*(subprocess|kubernetes|docker)\\s*(,\\s*(subprocess|kubernetes|docker)\\s*)*$",
+            "description": "Comma-separated: subprocess (always offered by the agent), kubernetes (renders the kubernetes executor's configuration). docker is refused by the templates: the chart mounts no Docker daemon."
           },
           "cpuMillis": {
             "type": "integer",
@@ -1346,7 +1348,8 @@
         },
         "heartbeatIntervalMs": {
           "type": "integer",
-          "minimum": 100
+          "minimum": 100,
+          "description": "Ignored: not rendered, never read by the agent (the control plane sets the heartbeat interval at registration, ADR-0005). Accepted so older values files still validate."
         },
         "drainGrace": {
           "$ref": "#/definitions/duration"

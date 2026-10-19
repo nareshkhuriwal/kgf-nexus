@@ -178,7 +178,9 @@ ui:
 # The agents run the kubernetes executor: each attempt is a Job in
 # nexus-tasks, placed on the pool the agent fronts. The agent pods are small
 # and stay on the cpu pool; cpuMillis/memoryBytes/gpuCount describe the TASK
-# pool they hand out.
+# pool they hand out. An agent always offers the subprocess executor as well,
+# and a task that names no executor runs as a subprocess inside the agent pod
+# (within its 1Gi): give these queues' tasks runtime.executor: kubernetes.
 agentDefaults:
   kubernetes:
     namespace: nexus-tasks

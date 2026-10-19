@@ -3209,6 +3209,22 @@ agents:
 
 The AKS/EKS/GKE environments add exactly such an agent (variable `gpu_agent`)
 when their GPU pool is enabled, next to a CPU agent pinned to the cpu pool.
+
+`agents[].executors` selects configuration, not what the agent offers. The
+agent discovers its executors (docs/IMAGES.md §4.3):
+
+- **subprocess** is always offered.
+- **kubernetes** is offered when the configuration the chart renders for it
+  passes the executor's RBAC probe.
+- **docker** needs a daemon socket a chart pod does not have, so the chart
+  refuses it.
+
+A task that names no `runtime.executor` therefore runs as a subprocess even
+on a kubernetes agent, inside the agent pod. Route such queues' tasks with
+`runtime.executor: kubernetes`. The chart no longer renders
+`NEXUS_EXECUTORS` or `NEXUS_HEARTBEAT_INTERVAL_MS`: the agent never read
+either, and the control plane sets the heartbeat interval (ADR-0005).
+`agentDefaults.heartbeatIntervalMs` is still accepted and ignored.
 Size the agent inside one GPU node. GPU execution itself is still unqualified
 on real hardware (production brief).
 

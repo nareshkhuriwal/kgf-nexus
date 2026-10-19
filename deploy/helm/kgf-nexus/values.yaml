@@ -615,6 +615,21 @@ schedulers:
 # Worker agents. Real hardware only by default; simulated capacity belongs in a
 # dev environment and must be labelled as such.
 #
+# executors: which optional executor the chart configures for this agent.
+#   The agent DISCOVERS its executors; it reads no list (docs/IMAGES.md §4.3):
+#     subprocess  always offered, and not something the chart can turn off;
+#     kubernetes  offered when NEXUS_K8S_NAMESPACE is set and its RBAC probe
+#                 passes -- "kubernetes" here renders that configuration, the
+#                 task-namespace Role and the task-API policy, and mounts the
+#                 API token;
+#     docker      offered only when `docker info` reaches a daemon. The chart
+#                 mounts no Docker socket (a restricted pod cannot), so it is
+#                 refused here rather than silently never offered.
+#   A task that names no executor (runtime.executor) runs as a SUBPROCESS on
+#   whichever worker claims it, a kubernetes agent included: inside that agent
+#   pod, within its resources. Give tasks for a kubernetes agent's queues
+#   runtime.executor: kubernetes.
+#
 # Optional per entry, beyond the capacity it advertises:
 #   gpuCount / gpuKind / gpuMemoryBytes   what the agent ADVERTISES (--gpu-count,
 #       --gpu-kind, --gpu-memory-bytes). With gpuCount > 0 the pod also REQUESTS
@@ -778,7 +793,9 @@ agentDefaults:
     taskApi:
       enabled: true
       port: 9443
-  heartbeatIntervalMs: 5000
+  # heartbeatIntervalMs: no longer rendered, and still accepted so older
+  # values files validate. The agent never read it: the control plane sets
+  # the heartbeat interval in its Register response (ADR-0005).
   # Must stay below terminationGracePeriodSeconds, or Kubernetes kills an agent
   # mid-drain and strands its attempts until their leases expire.
   drainGrace: 60s
