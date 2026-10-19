@@ -37,6 +37,13 @@ type KGFIdentity struct {
 	RequestID string `json:"request_id,omitempty"`
 	Issuer    string `json:"issuer"`
 	TokenID   string `json:"token_id"`
+	// ResourceID and Workspace are set for a workspace context (ADR-0034):
+	// the normalised KGF.Nexus workspace resource id from `res`.
+	ResourceID string `json:"resource_id,omitempty"`
+	Workspace  string `json:"workspace,omitempty"`
+	// Provisioner marks the front's own service context (role service, no
+	// obo, with `res`): it may call only the workspace provisioning routes.
+	Provisioner bool `json:"provisioner,omitempty"`
 }
 
 // AuditDetail is what an audit row records about the KGF identity.
@@ -47,6 +54,12 @@ func (k *KGFIdentity) AuditDetail() map[string]any {
 	}
 	if k.Via != "" {
 		d["via"] = k.Via
+	}
+	if k.ResourceID != "" {
+		d["resource_id"] = k.ResourceID
+	}
+	if k.Provisioner {
+		d["provisioner"] = true
 	}
 	return d
 }
@@ -59,6 +72,20 @@ var (
 	// ErrKGFServiceNotAllowed: a KGF service acting for itself that is not
 	// configured in NEXUS_KGF_SERVICE_PRINCIPALS (403).
 	ErrKGFServiceNotAllowed = errors.New("kgf service principal is not allowed")
+	// ErrKGFResourceInvalid: `res` is malformed or outside the token's
+	// subscription and resource group (403 kgf_resource_invalid).
+	ErrKGFResourceInvalid = errors.New("kgf context resource id is invalid")
+	// ErrKGFResourceNotAllowed: `res` asserted by an issuer that is not a
+	// front (403 kgf_resource_not_allowed).
+	ErrKGFResourceNotAllowed = errors.New("kgf context issuer may not name a resource")
+	// ErrKGFResourceRequired: a front's token without `res`, or not a service
+	// context (403 kgf_resource_required / kgf_front_context_invalid).
+	ErrKGFResourceRequired = errors.New("kgf front context must name a workspace")
+	ErrKGFFrontShape       = errors.New("kgf front context must be a service context")
+	// ErrWorkspaceNotProvisioned: a delegated workspace context for a
+	// workspace that is not provisioned and active (404
+	// workspace_not_provisioned). Never provisioned lazily.
+	ErrWorkspaceNotProvisioned = errors.New("kgf workspace is not provisioned")
 )
 
 // KGFActions maps every Nexus permission that a KGF principal can hold to the
@@ -221,10 +248,27 @@ func (s StoreProvisioner) ProvisionKGFNamespace(ctx context.Context, sc store.KG
 	return store.GatewayProvisionKGFNamespace(ctx, s.DB, sc)
 }
 
+// WorkspaceStore resolves an ACTIVE workspace to its namespace (ADR-0034).
+// It must never create one: store.ErrKGFWorkspaceNotProvisioned for absent
+// or deleted workspaces.
+type WorkspaceStore interface {
+	ActiveKGFWorkspace(ctx context.Context, w store.KGFWorkspace) (string, error)
+}
+
+// ActiveKGFWorkspace implements WorkspaceStore.
+func (s StoreProvisioner) ActiveKGFWorkspace(ctx context.Context, w store.KGFWorkspace) (string, error) {
+	return store.GatewayActiveKGFWorkspace(ctx, s.DB, w)
+}
+
 // KGFAuthenticator verifies KGF contexts and resolves them to principals.
 type KGFAuthenticator struct {
 	Verifier    kgfctx.Verifier
 	Provisioner Provisioner
+	// Workspaces resolves workspace (`res`) contexts. Nil falls back to the
+	// Provisioner when it implements WorkspaceStore (StoreProvisioner does);
+	// with neither, every delegated workspace context is refused as not
+	// provisioned (fail closed).
+	Workspaces WorkspaceStore
 	// ServicePrincipals maps a KGF service principal ("svc:kgf-billing") to
 	// the flat role it acts with when it calls Nexus for itself. Services not
 	// listed are refused (ADR-0024 §4).
@@ -264,8 +308,22 @@ func (k *KGFAuthenticator) Authenticate(ctx context.Context, token string) (Prin
 		now = k.Now()
 	}
 	c, err := k.Verifier.Verify(token, now)
-	if err != nil {
+	switch {
+	case errors.Is(err, kgfctx.ErrResourceInvalid):
+		return Principal{}, ErrKGFResourceInvalid
+	case errors.Is(err, kgfctx.ErrResourceNotAllowed):
+		return Principal{}, ErrKGFResourceNotAllowed
+	case errors.Is(err, kgfctx.ErrResourceRequired):
+		return Principal{}, ErrKGFResourceRequired
+	case errors.Is(err, kgfctx.ErrFrontShape):
+		return Principal{}, ErrKGFFrontShape
+	case err != nil:
 		return Principal{}, fmt.Errorf("%w: %v", ErrUnauthenticated, err)
+	}
+	if c.Resource != "" {
+		// Only a front's token reaches here with `res` (the Verifier refuses
+		// it from any other issuer).
+		return k.authenticateWorkspace(ctx, c)
 	}
 	principal, role := c.Effective()
 	via := ""
@@ -313,5 +371,86 @@ func (k *KGFAuthenticator) Authenticate(ctx context.Context, token string) (Prin
 			Organization: c.Organization, Subscription: c.Subscription, ResourceGroup: c.ResourceGroup,
 			Principal: principal, Role: role, Via: via, RequestID: c.RequestID, Issuer: c.Issuer, TokenID: c.TokenID,
 		},
+	}, nil
+}
+
+func (k *KGFAuthenticator) workspaces() WorkspaceStore {
+	if k.Workspaces != nil {
+		return k.Workspaces
+	}
+	if ws, ok := k.Provisioner.(WorkspaceStore); ok {
+		return ws
+	}
+	return nil
+}
+
+// authenticateWorkspace resolves a front's workspace context (ADR-0034 §3):
+//
+//   - provisioner (role service, no obo): a principal that the guard lets
+//     reach ONLY PUT/DELETE /v1/kgf/workspace, holding no Nexus permission.
+//     Its namespace is the derived one, whether or not it exists yet.
+//   - delegated (role service, obo + obo_role): the obo person with obo_role,
+//     mapped through KGFGrants exactly as a gateway-issued context with that
+//     role, in the workspace's namespace -- which must already be provisioned
+//     and active. Never provisioned here.
+func (k *KGFAuthenticator) authenticateWorkspace(ctx context.Context, c kgfctx.Claims) (Principal, error) {
+	id, err := kgfctx.ParseWorkspaceID(c.Resource)
+	if err != nil {
+		return Principal{}, ErrKGFResourceInvalid
+	}
+	ws := store.KGFWorkspace{Organization: c.Organization, Subscription: c.Subscription, ResourceGroup: c.ResourceGroup,
+		Workspace: id.Workspace, ResourceID: id.Normalized()}
+	if !ws.Complete() {
+		return Principal{}, ErrKGFResourceInvalid
+	}
+	derived := store.KGFWorkspaceNamespace(ws.Organization, ws.ResourceID)
+	identity := &KGFIdentity{
+		Organization: c.Organization, Subscription: c.Subscription, ResourceGroup: c.ResourceGroup,
+		RequestID: c.RequestID, Issuer: c.Issuer, TokenID: c.TokenID,
+		ResourceID: ws.ResourceID, Workspace: id.Workspace,
+	}
+	if c.IsService() {
+		identity.Principal, identity.Role, identity.Provisioner = c.Principal, kgfctx.RoleService, true
+		return Principal{
+			KeyID:     "kgf:" + c.Organization + ":" + c.Principal,
+			Namespace: derived,
+			Name:      c.Principal,
+			Role:      RoleReader,
+			Kind:      KindKGF,
+			// Non-nil and empty: the guard's fine-grained path, where this
+			// principal holds no Nexus permission at all.
+			Grants:    map[string]bool{},
+			RoleNames: []string{"KGF workspace provisioner"},
+			KGF:       identity,
+		}, nil
+	}
+	if !c.IsDelegated() {
+		return Principal{}, ErrKGFFrontShape
+	}
+	lookup := k.workspaces()
+	if lookup == nil {
+		return Principal{}, ErrWorkspaceNotProvisioned
+	}
+	ns, err := lookup.ActiveKGFWorkspace(ctx, ws)
+	if errors.Is(err, store.ErrKGFWorkspaceNotProvisioned) {
+		return Principal{}, ErrWorkspaceNotProvisioned
+	}
+	if err != nil {
+		return Principal{}, fmt.Errorf("resolve kgf workspace: %w", err)
+	}
+	if ns != derived {
+		return Principal{}, fmt.Errorf("resolve kgf workspace: derived %s, stored %s", derived, ns)
+	}
+	principal, role := c.Effective()
+	identity.Principal, identity.Role, identity.Via = principal, role, c.Principal
+	return Principal{
+		KeyID:     "kgf:" + c.Organization + ":" + principal,
+		Namespace: ns,
+		Name:      principal,
+		Role:      RoleReader,
+		Kind:      KindKGF,
+		Grants:    KGFGrants(role),
+		RoleNames: []string{"KGF " + role},
+		KGF:       identity,
 	}, nil
 }

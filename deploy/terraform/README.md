@@ -3,22 +3,29 @@
 Everything under this directory installs KGF Nexus with the Helm chart in
 `deploy/helm/kgf-nexus`. The `kgf-nexus` module installs the release into a
 cluster that already exists. The three cloud platform modules create that
-cluster and the managed services around it.
+cluster and the managed services around it; `environments/aks-existing`
+instead installs onto an AKS cluster, database and storage account you
+already run, and creates only Nexus's identities and the release.
 
 ```
 modules/
-  kgf-nexus/      namespace, generated credentials Secret, Helm release (any cluster)
+  kgf-nexus/      namespace (optional), generated credentials Secret, Helm release (any cluster)
   aks-platform/   Azure: VNet, AKS, ACR, PostgreSQL Flexible Server, Blob, Key Vault, Log Analytics
   eks-platform/   AWS:   VPC (3 AZ), EKS, ECR, RDS PostgreSQL, S3, KMS, CloudWatch
   gke-platform/   GCP:   VPC, regional GKE, Artifact Registry, Cloud SQL, GCS, Secret Manager
 environments/
   dev/            Docker Desktop / kind (existing; make k8s-dev-up)
   aks/ eks/ gke/  platform module + in-cluster pieces + kgf-nexus, one root each
+  aks-existing/   an EXISTING AKS cluster, Flexible Server and storage account (data
+                  sources): workload identities, role assignments and kgf-nexus only
 ```
 
 Each cloud environment has its own README with the apply procedure, the
 outputs and a cost note: [aks](environments/aks/README.md),
+[aks-existing](environments/aks-existing/README.md),
 [eks](environments/eks/README.md) and [gke](environments/gke/README.md).
+The full guide for an existing AKS cluster, with and without Terraform, is
+[docs/INSTALL-AKS.md](../../docs/INSTALL-AKS.md).
 
 **Status: validated offline only.** Nothing here has been applied to any
 cloud from this repository. `make tf-validate` checks formatting, runs
@@ -31,16 +38,18 @@ these modules and a verified production deployment.
 
 ## The object store: the one thing that differs per cloud
 
-The chart's result store speaks **only the S3 API**. It uses minio-go with
-static credentials (`credentials.NewStaticV4` in
-`agent/internal/resultstore`, `services/api-gateway/logs` and
-`internal/artifactgc`). Here is what that means on each cloud today:
+The result store has three native backends behind one interface
+(`internal/objstore`, ADR-0027): `s3` (minio-go: static keys, or an AWS
+identity -- IRSA, EKS Pod Identity), `azblob` (Azure SDK: workload identity,
+managed identity or a shared key) and `gcs` (Google Cloud Storage client:
+Application Default Credentials). Each cloud environment uses its cloud's
+native store with a keyless identity by default:
 
 | Cloud | Artifact store Nexus uses today | How | Status |
 |---|---|---|---|
 | AWS | **Amazon S3**, native (`s3` backend) | **EKS Pod Identity** by default (`artifact_identity = "pod-identity"`), or IRSA (`"irsa"`): a role limited to one bucket and one KMS key, no secret in the cluster. The IAM-user key pair remains as the opt-in `"static"` fallback. | Keyless path implemented (ADR-0027); not yet applied to a real account (F115). |
 | GCP | **GCS, native** (`gcs` backend, `cloud.google.com/go/storage`) | **GKE Workload Identity** by default (`artifact_identity = "workload-identity"`): the chart's `nexus-artifacts` ServiceAccount impersonates a Google service account with object access on one bucket. The HMAC key and GCS's S3 interoperability API remain as the opt-in `"hmac"` fallback. | Keyless path implemented; conformance-tested against fake-gcs-server, not yet against real GCS (F115). |
-| Azure | **Azure Blob, native** (`azblob` backend) by default (`azure_blob_native_backend = true`) | AKS workload identity federated to the user-assigned identity with `Storage Blob Data Contributor` on the one private container. | Implemented and conformance-tested against Azurite; not yet applied to a real subscription (F115). `false` keeps the in-cluster MinIO on a Premium SSD PVC. |
+| Azure | **Azure Blob, native** (`azblob` backend) by default (`azure_blob_native_backend = true`; always in `aks-existing`) | AKS workload identity federated to the user-assigned identity with `Storage Blob Data Contributor` on the one private container. | Implemented and conformance-tested against Azurite; not yet applied to a real subscription (F115). In `aks`, `false` keeps the in-cluster MinIO on a Premium SSD PVC. |
 
 All three backends sit behind one result-store interface (`internal/objstore`,
 ADR-0027) and pass one conformance suite; docs/OPERATIONS.md §26 has the
@@ -56,7 +65,10 @@ workflow-manager (object-store sensors), the agents and artifact-gc (chart
 (only with `artifact_identity = "irsa"`; Pod Identity's association names the
 account instead), `iam.gke.io/gcp-service-account` on GKE (Workload Identity),
 and the workload identity client id on AKS, where the chart also adds the
-`azure.workload.identity/use` pod label to the result-store pods. Every other
+`azure.workload.identity/use` pod label to the result-store pods.
+`aks-existing` goes one step further and gives the agents their own account
+(`nexus-agent`), because its optional Key Vault identity must reach the agents
+and nothing else (its README, "Identities and ServiceAccounts"). Every other
 component runs under its own account with no API token mounted
 (docs/OPERATIONS.md §20.13).
 
@@ -195,5 +207,4 @@ These checks need `terraform` 1.11 or later, or Docker, in which case the
 pinned `hashicorp/terraform` image is used. They also need network access to
 the Terraform registry for providers and modules. Set `TF_PLUGIN_CACHE_DIR`
 to reuse downloads. CI runs both targets: the `terraform` job in
-`.github/workflows/ci.yml` and the `Terraform` stage in
-`.azure-pipelines/pr-build-validation.yml`.
+`.github/workflows/ci.yml`.

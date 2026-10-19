@@ -45,6 +45,12 @@ service ClusterControllerService {
   // Appends a scaling event and updates the persisted cooldown/idle state.
   rpc RecordScaling(RecordScalingRequest) returns (RecordScalingResponse);
 
+  // Records one cycle's reconcile of the scheduler HorizontalPodAutoscalers
+  // against the namespace's saved scheduler settings (ADR-0036): per HPA the
+  // controller's progress, and the event for anything it planned, changed or
+  // refused. The HPA itself is patched by the controller, never through here.
+  rpc RecordSchedulerAutoscaling(RecordSchedulerAutoscalingRequest) returns (RecordSchedulerAutoscalingResponse);
+
   rpc ReportReconcileError(ReportReconcileErrorRequest) returns (ReportReconcileErrorResponse);
 }
 
@@ -62,6 +68,39 @@ message ClusterAssignment {
   string mode = 8;
   int64 desired_revision = 9;
   repeated PoolBinding bindings = 10;
+  // ADR-0036: the cluster namespace's saved scheduler autoscaling settings and
+  // the controller's persisted memory per scheduler HPA. Unset from a resource
+  // manager that predates it; the controller then leaves every HPA alone.
+  SchedulerAutoscaling scheduler_autoscaling = 11;
+}
+
+// The four HorizontalPodAutoscaler settings Nexus manages on a scheduler
+// Deployment's HPA. Nothing else about the HPA is Nexus's to change.
+message SchedulerAutoscalingSettings {
+  int32 min_replicas = 1;
+  int32 max_replicas = 2;
+  // The CPU utilization target; 0 = the HPA has no CPU utilization metric.
+  int32 target_cpu_percent = 3;
+  // behavior.scaleDown.stabilizationWindowSeconds (Kubernetes' 300 when unset).
+  int32 scale_down_stabilization_seconds = 4;
+}
+
+message SchedulerAutoscaling {
+  // platform_config.scheduler of the cluster's namespace.
+  SchedulerAutoscalingSettings desired = 1;
+  // The platform_config revision the settings come from. 0 = never saved:
+  // the defaults are nobody's decision, and the controller applies nothing.
+  int64 config_revision = 2;
+  // Persisted controller memory (cluster_scaling_state, target hpa/<name>).
+  repeated SchedulerHPAMemory hpas = 3;
+}
+
+message SchedulerHPAMemory {
+  string kubernetes_namespace = 1;
+  string hpa_name = 2;
+  // When the controller last patched this HPA; 0 = never. Bounds the patch
+  // rate across restarts and leader changes.
+  int64 last_applied_at_unix_ms = 3;
 }
 
 message PoolBinding {
@@ -247,6 +286,51 @@ message RecordScalingRequest {
 }
 
 message RecordScalingResponse {}
+
+message RecordSchedulerAutoscalingRequest {
+  string cluster_id = 1;
+  string actor = 2;
+  // The mode the cycle ran in: plan | apply.
+  string mode = 3;
+  // True when the HPA list in the control-plane namespace succeeded in full:
+  // stored state for scheduler HPAs not in `targets` is then removed. False
+  // updates the listed targets and leaves every other row alone.
+  bool complete = 4;
+  repeated SchedulerHPAReconcile targets = 5;
+}
+
+// One scheduler HPA's reconcile in one cycle.
+message SchedulerHPAReconcile {
+  // The control-plane namespace; refused for any other.
+  string kubernetes_namespace = 1;
+  string hpa_name = 2;
+  // The scheduler Deployment the HPA scales.
+  string deployment = 3;
+  string hpa_uid = 4;
+  // Whether the HPA carries the controller-ownership annotation.
+  bool managed = 5;
+  // The controller's own progress: in_sync | applying | blocked | plan |
+  // not_configured.
+  string result = 6;
+  // One line for the console.
+  string reason = 7;
+  // Why the HPA cannot converge without a human (result blocked or
+  // not_configured); empty otherwise.
+  string error = 8;
+  // The platform_config revision this reconcile used.
+  int64 config_revision = 9;
+  // The HPA's settings as observed after any patch made this cycle.
+  SchedulerAutoscalingSettings observed = 10;
+  // The audit event: hpa_plan | hpa_update | hpa_refused. Empty = state only.
+  string action = 11;
+  // True only when the HPA was patched this cycle.
+  bool applied = 12;
+  SchedulerAutoscalingSettings from = 13;
+  SchedulerAutoscalingSettings to = 14;
+  string detail_json = 15;
+}
+
+message RecordSchedulerAutoscalingResponse {}
 
 message ReportReconcileErrorRequest {
   string cluster_id = 1;

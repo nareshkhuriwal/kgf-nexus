@@ -10,14 +10,17 @@
 //     scheduler HPA -- with generation, observedGeneration and timestamps -- to
 //     the resource manager, which owns the observed-cluster tables.
 //  2. PLAN: turn queued demand into a bounded desired worker count with the
-//     same platform.Plan the console previews.
+//     same platform.Plan the console previews, and compare each scheduler
+//     HPA's settings with the namespace's saved scheduler policy.
 //  3. APPLY (only when explicitly enabled per cluster AND in this process):
 //     scale worker Deployments out, and scale them in only after draining the
-//     chosen workers and confirming they hold no leases.
+//     chosen workers and confirming they hold no leases; move an opted-in
+//     scheduler HPA's four settings toward the saved policy (ADR-0036).
 //
-// It does NOT scale the scheduler (a Kubernetes HPA on CPU does), and it does
-// NOT scale nodes (the AKS cluster autoscaler does). Two controllers writing
-// one target fight; each target here has exactly one writer.
+// It does NOT scale the scheduler (its HPA does, on CPU; the controller only
+// sets that HPA's bounds and target), and it does NOT scale nodes (the AKS
+// cluster autoscaler does). Two controllers writing one target fight; each
+// target here has exactly one writer.
 package controller
 
 import (
@@ -51,8 +54,9 @@ type Config struct {
 	// RPCTimeout bounds every call to the resource manager and the API server,
 	// so one hung dependency cannot stall the loop indefinitely.
 	RPCTimeout time.Duration
-	// JobLabelSelector selects task Jobs to report. Jobs are reported, never
-	// created or deleted here.
+	// JobLabelSelector selects task Jobs to report (default: the kubernetes
+	// executor's nexus.dev/attempt label). Jobs are reported, never created or
+	// deleted here.
 	JobLabelSelector string
 	// MaxJobsReported caps Jobs per report; the rest are counted, not listed.
 	MaxJobsReported int
@@ -63,13 +67,19 @@ type Config struct {
 	// every report (NEXUS_CLUSTER_LABELS: cost tier, data locality ...),
 	// merged over the observed region and provider (ADR-0031 §1).
 	ClusterLabels map[string]string
-	// TaskNamespaces are the namespaces whose ResourceQuota headroom is
-	// published (NEXUS_CLUSTER_TASK_NAMESPACES); empty means the bound worker
-	// namespaces.
+	// TaskNamespaces are where task pods run (NEXUS_CLUSTER_TASK_NAMESPACES):
+	// task Jobs are observed there and their ResourceQuota headroom is
+	// published. Empty means the bound worker namespaces.
 	TaskNamespaces []string
 	// GPUResourceNames count as gpu_count in the headroom (default
 	// nvidia.com/gpu).
 	GPUResourceNames []string
+
+	// SchedulerPatchInterval is the least time between two patches of one
+	// scheduler HPA (ADR-0036): with platform.NextHPAStep's bounded step, it
+	// bounds how fast a saved setting resizes the scheduler fleet, and how
+	// often the controller rewrites an HPA another writer keeps reverting.
+	SchedulerPatchInterval time.Duration
 }
 
 func (c *Config) defaults() {
@@ -80,7 +90,10 @@ func (c *Config) defaults() {
 		c.RPCTimeout = 10 * time.Second
 	}
 	if c.JobLabelSelector == "" {
-		c.JobLabelSelector = "nexus.io/attempt-id"
+		c.JobLabelSelector = DefaultJobLabelSelector
+	}
+	if c.SchedulerPatchInterval <= 0 {
+		c.SchedulerPatchInterval = time.Minute
 	}
 	if c.MaxJobsReported <= 0 {
 		c.MaxJobsReported = 500
@@ -101,6 +114,10 @@ type Controller struct {
 	// lastDecision suppresses duplicate plan-mode events: a pool that wants
 	// three more workers every 15 seconds for an hour is one decision, not 240.
 	lastDecision map[string]string
+	// hpaApplied is when this process last patched each scheduler HPA
+	// ("<namespace>/<name>"), in case recording it in the resource manager
+	// failed: the patch interval must hold either way.
+	hpaApplied map[string]time.Time
 
 	lastSuccess atomic.Int64
 	cycles      atomic.Int64
@@ -122,7 +139,7 @@ func New(cfg Config, kube kubernetes.Interface, rm rmv1.ClusterControllerService
 	}
 	cfg.defaults()
 	return &Controller{cfg: cfg, kube: kube, rm: rm, log: log.With("cluster", cfg.ClusterName, "identity", cfg.Identity),
-		lastDecision: map[string]string{}}, nil
+		lastDecision: map[string]string{}, hpaApplied: map[string]time.Time{}}, nil
 }
 
 // LastSuccess is when a cycle last completed without error (zero if never).
@@ -218,6 +235,10 @@ func (c *Controller) runOnce(ctx context.Context) error {
 		cycleErrs = append(cycleErrs, idErr)
 	}
 	cycleErrs = append(cycleErrs, obs.errs...)
+
+	// Scheduler HPAs before the pools: a patched HPA replaces its listed
+	// observation, so this cycle's report already shows the result.
+	cycleErrs = append(cycleErrs, c.reconcileSchedulers(ctx, a, mode, &obs)...)
 
 	// Bindings are reconciled in a stable order so logs and events read the
 	// same way every cycle.

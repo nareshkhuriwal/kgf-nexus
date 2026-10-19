@@ -3,9 +3,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Turn a release digest map into chart values, and prove the chart uses them.
 
-The release pipeline publishes a digest map, one entry per image it built:
+A release publishes a digest map, one entry per image it built:
 
-    {"api-gateway": "<acr>/nexus/api-gateway@sha256:...", "agent": ..., ...}
+    {"api-gateway": "ghcr.io/<owner>/kgf-nexus/api-gateway@sha256:...", "agent": ..., ...}
+
+This repository's release workflow (.github/workflows/release.yml) publishes
+one for GHCR; KGF Cloud's own release pipeline publishes one of the same shape
+for its ACR (<acr>/nexus/<image>).
+
+`collect` assembles that map from one file per image, as the release
+workflow's build jobs leave them, and refuses it unless it is exactly the
+expected image set, every reference is digest-pinned and all of them share one
+repository base.
 
 `values` turns it into a Helm values file: image.registry and
 image.repositoryPrefix from the common repository base, and image.digests keyed
@@ -23,6 +32,7 @@ camelCase and nothing read a digest there, so every release ran by tag.)
     the kustomize base in deploy/k8s/cluster-controller releases).
 
 Usage:
+    helm-image-digests.py collect DIR --expect NAME[,NAME...] > digests.json
     helm-image-digests.py values DIGESTS_JSON > release-images.yaml
     helm-image-digests.py check --chart deploy/helm/kgf-nexus DIGESTS_JSON \\
         [--values FILE]... [--set K=V]... [--not-in-chart NAME]...
@@ -39,6 +49,7 @@ Output is JSON (valid YAML), so no YAML library is needed.
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -87,6 +98,36 @@ def split_map(digests):
     if problems:
         fail("the digest map is not usable:\n  " + "\n  ".join(problems))
     return bases.pop(), out
+
+
+def collect(directory, expect):
+    """Return the map assembled from DIRECTORY or fail with every problem found.
+
+    Each regular file in DIRECTORY is named for one image and holds that image's
+    digest-pinned reference. A build job that failed or never ran leaves no
+    file, which is the missing case below; a map with a hole in it must never
+    reach a release, because whatever deploys it would run that image by tag.
+    """
+    found, empty, problems = {}, set(), []
+    for name in sorted(os.listdir(directory)):
+        path = os.path.join(directory, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            ref = fh.read().strip()
+        if ref:
+            found[name] = ref
+        else:
+            empty.add(name)
+            problems.append(f"{name}: the file is empty (did its push step run?)")
+    for name in sorted(set(expect) - set(found) - empty):
+        problems.append(f"{name}: no digest was published (did its build job run?)")
+    for name in sorted(set(found) - set(expect)):
+        problems.append(f"{name}: not in the expected image set {sorted(expect)}")
+    if problems:
+        fail("the digest map is not releasable:\n  " + "\n  ".join(problems))
+    split_map(found)  # every reference pinned, named for its image, one base
+    return found
 
 
 def values_for(digests):
@@ -178,6 +219,10 @@ def self_test(chart, sets):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    g = sub.add_parser("collect")
+    g.add_argument("dir")
+    g.add_argument("--expect", action="append", required=True,
+                   help="image names, comma-separated or repeated")
     v = sub.add_parser("values")
     v.add_argument("digests")
     c = sub.add_parser("check")
@@ -191,7 +236,13 @@ def main():
     t.add_argument("--set", action="append", default=[])
     a = ap.parse_args()
 
-    if a.cmd == "values":
+    if a.cmd == "collect":
+        expect = [n.strip() for arg in a.expect for n in arg.split(",") if n.strip()]
+        if not expect:
+            fail("--expect named no images")
+        json.dump(collect(a.dir, expect), sys.stdout, indent=2, sort_keys=True)
+        print()
+    elif a.cmd == "values":
         json.dump(values_for(load_digests(a.digests)), sys.stdout, indent=2, sort_keys=True)
         print()
     elif a.cmd == "check":

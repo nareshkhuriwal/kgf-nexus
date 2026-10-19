@@ -9,7 +9,7 @@
  * is recognised in either of the two forms it arrives in.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 import {
   COMMANDS,
   PER_GROUP,
@@ -31,7 +31,7 @@ import {
   type SearchSources,
 } from './commands';
 
-function ctx(): CommandContext & { navigate: ReturnType<typeof vi.fn> } {
+function ctx(): CommandContext & { navigate: Mock<(to: string) => void> } {
   return { navigate: vi.fn() };
 }
 

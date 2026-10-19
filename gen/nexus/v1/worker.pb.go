@@ -200,9 +200,13 @@ type RegisterResponse struct {
 	LogShipping *LogShippingConfig `protobuf:"bytes,6,opt,name=log_shipping,json=logShipping,proto3" json:"log_shipping,omitempty"`
 	// Absent from a gateway that predates the workload API (ADR-0032): the agent
 	// then offers the workload none of it.
-	WorkloadApi   *WorkloadApiConfig `protobuf:"bytes,7,opt,name=workload_api,json=workloadApi,proto3" json:"workload_api,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	WorkloadApi *WorkloadApiConfig `protobuf:"bytes,7,opt,name=workload_api,json=workloadApi,proto3" json:"workload_api,omitempty"`
+	// True when this control plane records attempt placements (ReportPlacement,
+	// ADR-0037). False from a gateway that predates the RPC or whose database
+	// lacks migration 0042: the agent then reports none.
+	PlacementReporting bool `protobuf:"varint,8,opt,name=placement_reporting,json=placementReporting,proto3" json:"placement_reporting,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *RegisterResponse) Reset() {
@@ -282,6 +286,13 @@ func (x *RegisterResponse) GetWorkloadApi() *WorkloadApiConfig {
 		return x.WorkloadApi
 	}
 	return nil
+}
+
+func (x *RegisterResponse) GetPlacementReporting() bool {
+	if x != nil {
+		return x.PlacementReporting
+	}
+	return false
 }
 
 // WorkloadApiConfig says which workload-API capabilities this control plane
@@ -1668,6 +1679,156 @@ func (x *LogFinal) GetChunkCount() int64 {
 	return 0
 }
 
+type ReportPlacementRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AttemptId     string                 `protobuf:"bytes,1,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
+	LeaseToken    string                 `protobuf:"bytes,2,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	Placement     *AttemptPlacement      `protobuf:"bytes,3,opt,name=placement,proto3" json:"placement,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportPlacementRequest) Reset() {
+	*x = ReportPlacementRequest{}
+	mi := &file_nexus_v1_worker_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportPlacementRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportPlacementRequest) ProtoMessage() {}
+
+func (x *ReportPlacementRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_worker_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportPlacementRequest.ProtoReflect.Descriptor instead.
+func (*ReportPlacementRequest) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ReportPlacementRequest) GetAttemptId() string {
+	if x != nil {
+		return x.AttemptId
+	}
+	return ""
+}
+
+func (x *ReportPlacementRequest) GetLeaseToken() string {
+	if x != nil {
+		return x.LeaseToken
+	}
+	return ""
+}
+
+func (x *ReportPlacementRequest) GetPlacement() *AttemptPlacement {
+	if x != nil {
+		return x.Placement
+	}
+	return nil
+}
+
+// AttemptPlacement is where one attempt's workload runs (ADR-0037). Every field
+// may be empty, meaning "not known": a pod that is not scheduled yet has no
+// node, and an agent outside Kubernetes has no pod. The control plane stores
+// what it is told and never derives one field from another.
+type AttemptPlacement struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The executor running the workload: "kubernetes", "docker" or
+	// "subprocess" (the "k8s" alias is reported as "kubernetes").
+	Executor string `protobuf:"bytes,1,opt,name=executor,proto3" json:"executor,omitempty"`
+	// The registered cluster (clusters.name) the agent runs in: its
+	// NEXUS_CLUSTER_NAME. Empty outside a registered cluster.
+	Cluster string `protobuf:"bytes,2,opt,name=cluster,proto3" json:"cluster,omitempty"`
+	// The Kubernetes namespace of `pod`.
+	K8SNamespace string `protobuf:"bytes,3,opt,name=k8s_namespace,json=k8sNamespace,proto3" json:"k8s_namespace,omitempty"`
+	// kubernetes: the attempt's own pod. subprocess and docker: the agent's pod
+	// (NEXUS_POD_NAME), since the workload runs beside the agent; a docker agent
+	// outside Kubernetes reports the container id here instead.
+	Pod string `protobuf:"bytes,4,opt,name=pod,proto3" json:"pod,omitempty"`
+	// kubernetes: the pod's spec.nodeName once it is scheduled. subprocess and
+	// docker: the agent's node (NEXUS_NODE_NAME).
+	K8SNode       string `protobuf:"bytes,5,opt,name=k8s_node,json=k8sNode,proto3" json:"k8s_node,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AttemptPlacement) Reset() {
+	*x = AttemptPlacement{}
+	mi := &file_nexus_v1_worker_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttemptPlacement) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttemptPlacement) ProtoMessage() {}
+
+func (x *AttemptPlacement) ProtoReflect() protoreflect.Message {
+	mi := &file_nexus_v1_worker_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttemptPlacement.ProtoReflect.Descriptor instead.
+func (*AttemptPlacement) Descriptor() ([]byte, []int) {
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *AttemptPlacement) GetExecutor() string {
+	if x != nil {
+		return x.Executor
+	}
+	return ""
+}
+
+func (x *AttemptPlacement) GetCluster() string {
+	if x != nil {
+		return x.Cluster
+	}
+	return ""
+}
+
+func (x *AttemptPlacement) GetK8SNamespace() string {
+	if x != nil {
+		return x.K8SNamespace
+	}
+	return ""
+}
+
+func (x *AttemptPlacement) GetPod() string {
+	if x != nil {
+		return x.Pod
+	}
+	return ""
+}
+
+func (x *AttemptPlacement) GetK8SNode() string {
+	if x != nil {
+		return x.K8SNode
+	}
+	return ""
+}
+
 // ReportUsageRequest carries the attempt's CUMULATIVE usage units. Keys follow
 // ADR-0032's convention (tokens:<provider>/<model>:input, requests:<provider>/
 // <model>, ...); values are non-negative totals, never deltas.
@@ -1682,7 +1843,7 @@ type ReportUsageRequest struct {
 
 func (x *ReportUsageRequest) Reset() {
 	*x = ReportUsageRequest{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[21]
+	mi := &file_nexus_v1_worker_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1694,7 +1855,7 @@ func (x *ReportUsageRequest) String() string {
 func (*ReportUsageRequest) ProtoMessage() {}
 
 func (x *ReportUsageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[21]
+	mi := &file_nexus_v1_worker_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1707,7 +1868,7 @@ func (x *ReportUsageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportUsageRequest.ProtoReflect.Descriptor instead.
 func (*ReportUsageRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{21}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ReportUsageRequest) GetAttemptId() string {
@@ -1750,7 +1911,7 @@ type AcquirePermitsRequest struct {
 
 func (x *AcquirePermitsRequest) Reset() {
 	*x = AcquirePermitsRequest{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[22]
+	mi := &file_nexus_v1_worker_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1762,7 +1923,7 @@ func (x *AcquirePermitsRequest) String() string {
 func (*AcquirePermitsRequest) ProtoMessage() {}
 
 func (x *AcquirePermitsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[22]
+	mi := &file_nexus_v1_worker_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1775,7 +1936,7 @@ func (x *AcquirePermitsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcquirePermitsRequest.ProtoReflect.Descriptor instead.
 func (*AcquirePermitsRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{22}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *AcquirePermitsRequest) GetAttemptId() string {
@@ -1838,7 +1999,7 @@ type AcquirePermitsResponse struct {
 
 func (x *AcquirePermitsResponse) Reset() {
 	*x = AcquirePermitsResponse{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[23]
+	mi := &file_nexus_v1_worker_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1850,7 +2011,7 @@ func (x *AcquirePermitsResponse) String() string {
 func (*AcquirePermitsResponse) ProtoMessage() {}
 
 func (x *AcquirePermitsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[23]
+	mi := &file_nexus_v1_worker_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1863,7 +2024,7 @@ func (x *AcquirePermitsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcquirePermitsResponse.ProtoReflect.Descriptor instead.
 func (*AcquirePermitsResponse) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{23}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *AcquirePermitsResponse) GetAccepted() bool {
@@ -1917,7 +2078,7 @@ type SaveCheckpointRequest struct {
 
 func (x *SaveCheckpointRequest) Reset() {
 	*x = SaveCheckpointRequest{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[24]
+	mi := &file_nexus_v1_worker_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1929,7 +2090,7 @@ func (x *SaveCheckpointRequest) String() string {
 func (*SaveCheckpointRequest) ProtoMessage() {}
 
 func (x *SaveCheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[24]
+	mi := &file_nexus_v1_worker_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1942,7 +2103,7 @@ func (x *SaveCheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SaveCheckpointRequest.ProtoReflect.Descriptor instead.
 func (*SaveCheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{24}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *SaveCheckpointRequest) GetAttemptId() string {
@@ -1997,7 +2158,7 @@ type GetCheckpointRequest struct {
 
 func (x *GetCheckpointRequest) Reset() {
 	*x = GetCheckpointRequest{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[25]
+	mi := &file_nexus_v1_worker_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2009,7 +2170,7 @@ func (x *GetCheckpointRequest) String() string {
 func (*GetCheckpointRequest) ProtoMessage() {}
 
 func (x *GetCheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[25]
+	mi := &file_nexus_v1_worker_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2022,7 +2183,7 @@ func (x *GetCheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCheckpointRequest.ProtoReflect.Descriptor instead.
 func (*GetCheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{25}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *GetCheckpointRequest) GetAttemptId() string {
@@ -2058,7 +2219,7 @@ type GetCheckpointResponse struct {
 
 func (x *GetCheckpointResponse) Reset() {
 	*x = GetCheckpointResponse{}
-	mi := &file_nexus_v1_worker_proto_msgTypes[26]
+	mi := &file_nexus_v1_worker_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2070,7 +2231,7 @@ func (x *GetCheckpointResponse) String() string {
 func (*GetCheckpointResponse) ProtoMessage() {}
 
 func (x *GetCheckpointResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nexus_v1_worker_proto_msgTypes[26]
+	mi := &file_nexus_v1_worker_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2083,7 +2244,7 @@ func (x *GetCheckpointResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCheckpointResponse.ProtoReflect.Descriptor instead.
 func (*GetCheckpointResponse) Descriptor() ([]byte, []int) {
-	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{26}
+	return file_nexus_v1_worker_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *GetCheckpointResponse) GetAccepted() bool {
@@ -2172,7 +2333,7 @@ const file_nexus_v1_worker_proto_rawDesc = "" +
 	"\fcapabilities\x18\b \x03(\tR\fcapabilities\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xea\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9b\x03\n" +
 	"\x10RegisterResponse\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12#\n" +
 	"\rsession_token\x18\x02 \x01(\tR\fsessionToken\x122\n" +
@@ -2181,7 +2342,8 @@ const file_nexus_v1_worker_proto_rawDesc = "" +
 	"leaseTtlMs\x12>\n" +
 	"\fresult_store\x18\x05 \x01(\v2\x1b.nexus.v1.ResultStoreConfigR\vresultStore\x12>\n" +
 	"\flog_shipping\x18\x06 \x01(\v2\x1b.nexus.v1.LogShippingConfigR\vlogShipping\x12>\n" +
-	"\fworkload_api\x18\a \x01(\v2\x1b.nexus.v1.WorkloadApiConfigR\vworkloadApi\"\xb1\x01\n" +
+	"\fworkload_api\x18\a \x01(\v2\x1b.nexus.v1.WorkloadApiConfigR\vworkloadApi\x12/\n" +
+	"\x13placement_reporting\x18\b \x01(\bR\x12placementReporting\"\xb1\x01\n" +
 	"\x11WorkloadApiConfig\x12'\n" +
 	"\x0fusage_reporting\x18\x01 \x01(\bR\x0eusageReporting\x12\x1f\n" +
 	"\vrate_limits\x18\x02 \x01(\bR\n" +
@@ -2306,7 +2468,19 @@ const file_nexus_v1_worker_proto_rawDesc = "" +
 	"\x0ftruncated_bytes\x18\x06 \x01(\x03R\x0etruncatedBytes\x12#\n" +
 	"\rdropped_lines\x18\a \x01(\x03R\fdroppedLines\x12\x1f\n" +
 	"\vchunk_count\x18\b \x01(\x03R\n" +
-	"chunkCount\"\xcd\x01\n" +
+	"chunkCount\"\x92\x01\n" +
+	"\x16ReportPlacementRequest\x12\x1d\n" +
+	"\n" +
+	"attempt_id\x18\x01 \x01(\tR\tattemptId\x12\x1f\n" +
+	"\vlease_token\x18\x02 \x01(\tR\n" +
+	"leaseToken\x128\n" +
+	"\tplacement\x18\x03 \x01(\v2\x1a.nexus.v1.AttemptPlacementR\tplacement\"\x9a\x01\n" +
+	"\x10AttemptPlacement\x12\x1a\n" +
+	"\bexecutor\x18\x01 \x01(\tR\bexecutor\x12\x18\n" +
+	"\acluster\x18\x02 \x01(\tR\acluster\x12#\n" +
+	"\rk8s_namespace\x18\x03 \x01(\tR\fk8sNamespace\x12\x10\n" +
+	"\x03pod\x18\x04 \x01(\tR\x03pod\x12\x19\n" +
+	"\bk8s_node\x18\x05 \x01(\tR\ak8sNode\"\xcd\x01\n" +
 	"\x12ReportUsageRequest\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x01 \x01(\tR\tattemptId\x12\x1f\n" +
@@ -2364,7 +2538,7 @@ const file_nexus_v1_worker_proto_rawDesc = "" +
 	"\x1aDIRECTIVE_KIND_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14DIRECTIVE_KIND_DRAIN\x10\x01\x12!\n" +
 	"\x1dDIRECTIVE_KIND_CANCEL_ATTEMPT\x10\x02\x12\x1d\n" +
-	"\x19DIRECTIVE_KIND_REREGISTER\x10\x032\xc6\x06\n" +
+	"\x19DIRECTIVE_KIND_REREGISTER\x10\x032\x8a\a\n" +
 	"\rWorkerService\x12A\n" +
 	"\bRegister\x12\x19.nexus.v1.RegisterRequest\x1a\x1a.nexus.v1.RegisterResponse\x12D\n" +
 	"\tHeartbeat\x12\x1a.nexus.v1.HeartbeatRequest\x1a\x1b.nexus.v1.HeartbeatResponse\x12A\n" +
@@ -2374,7 +2548,8 @@ const file_nexus_v1_worker_proto_rawDesc = "" +
 	"\x0eReportProgress\x12\x1f.nexus.v1.ReportProgressRequest\x1a\r.nexus.v1.Ack\x12<\n" +
 	"\fReportResult\x12\x1d.nexus.v1.ReportResultRequest\x1a\r.nexus.v1.Ack\x128\n" +
 	"\n" +
-	"ReportLogs\x12\x1b.nexus.v1.ReportLogsRequest\x1a\r.nexus.v1.Ack\x12:\n" +
+	"ReportLogs\x12\x1b.nexus.v1.ReportLogsRequest\x1a\r.nexus.v1.Ack\x12B\n" +
+	"\x0fReportPlacement\x12 .nexus.v1.ReportPlacementRequest\x1a\r.nexus.v1.Ack\x12:\n" +
 	"\vReportUsage\x12\x1c.nexus.v1.ReportUsageRequest\x1a\r.nexus.v1.Ack\x12S\n" +
 	"\x0eAcquirePermits\x12\x1f.nexus.v1.AcquirePermitsRequest\x1a .nexus.v1.AcquirePermitsResponse\x12@\n" +
 	"\x0eSaveCheckpoint\x12\x1f.nexus.v1.SaveCheckpointRequest\x1a\r.nexus.v1.Ack\x12P\n" +
@@ -2393,7 +2568,7 @@ func file_nexus_v1_worker_proto_rawDescGZIP() []byte {
 }
 
 var file_nexus_v1_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_nexus_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_nexus_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
 var file_nexus_v1_worker_proto_goTypes = []any{
 	(DirectiveKind)(0),             // 0: nexus.v1.DirectiveKind
 	(*RegisterRequest)(nil),        // 1: nexus.v1.RegisterRequest
@@ -2417,72 +2592,77 @@ var file_nexus_v1_worker_proto_goTypes = []any{
 	(*ReportLogsRequest)(nil),      // 19: nexus.v1.ReportLogsRequest
 	(*LogChunk)(nil),               // 20: nexus.v1.LogChunk
 	(*LogFinal)(nil),               // 21: nexus.v1.LogFinal
-	(*ReportUsageRequest)(nil),     // 22: nexus.v1.ReportUsageRequest
-	(*AcquirePermitsRequest)(nil),  // 23: nexus.v1.AcquirePermitsRequest
-	(*AcquirePermitsResponse)(nil), // 24: nexus.v1.AcquirePermitsResponse
-	(*SaveCheckpointRequest)(nil),  // 25: nexus.v1.SaveCheckpointRequest
-	(*GetCheckpointRequest)(nil),   // 26: nexus.v1.GetCheckpointRequest
-	(*GetCheckpointResponse)(nil),  // 27: nexus.v1.GetCheckpointResponse
-	nil,                            // 28: nexus.v1.RegisterRequest.LabelsEntry
-	nil,                            // 29: nexus.v1.ReportResultRequest.OutputsEntry
-	nil,                            // 30: nexus.v1.ReportUsageRequest.UnitsEntry
-	(*ResourceVector)(nil),         // 31: nexus.v1.ResourceVector
-	(*TaskAssignment)(nil),         // 32: nexus.v1.TaskAssignment
-	(AttemptOutcome)(0),            // 33: nexus.v1.AttemptOutcome
-	(*TaskError)(nil),              // 34: nexus.v1.TaskError
-	(*ExecutionMetrics)(nil),       // 35: nexus.v1.ExecutionMetrics
-	(*ResultRef)(nil),              // 36: nexus.v1.ResultRef
+	(*ReportPlacementRequest)(nil), // 22: nexus.v1.ReportPlacementRequest
+	(*AttemptPlacement)(nil),       // 23: nexus.v1.AttemptPlacement
+	(*ReportUsageRequest)(nil),     // 24: nexus.v1.ReportUsageRequest
+	(*AcquirePermitsRequest)(nil),  // 25: nexus.v1.AcquirePermitsRequest
+	(*AcquirePermitsResponse)(nil), // 26: nexus.v1.AcquirePermitsResponse
+	(*SaveCheckpointRequest)(nil),  // 27: nexus.v1.SaveCheckpointRequest
+	(*GetCheckpointRequest)(nil),   // 28: nexus.v1.GetCheckpointRequest
+	(*GetCheckpointResponse)(nil),  // 29: nexus.v1.GetCheckpointResponse
+	nil,                            // 30: nexus.v1.RegisterRequest.LabelsEntry
+	nil,                            // 31: nexus.v1.ReportResultRequest.OutputsEntry
+	nil,                            // 32: nexus.v1.ReportUsageRequest.UnitsEntry
+	(*ResourceVector)(nil),         // 33: nexus.v1.ResourceVector
+	(*TaskAssignment)(nil),         // 34: nexus.v1.TaskAssignment
+	(AttemptOutcome)(0),            // 35: nexus.v1.AttemptOutcome
+	(*TaskError)(nil),              // 36: nexus.v1.TaskError
+	(*ExecutionMetrics)(nil),       // 37: nexus.v1.ExecutionMetrics
+	(*ResultRef)(nil),              // 38: nexus.v1.ResultRef
 }
 var file_nexus_v1_worker_proto_depIdxs = []int32{
-	28, // 0: nexus.v1.RegisterRequest.labels:type_name -> nexus.v1.RegisterRequest.LabelsEntry
-	31, // 1: nexus.v1.RegisterRequest.capacity:type_name -> nexus.v1.ResourceVector
+	30, // 0: nexus.v1.RegisterRequest.labels:type_name -> nexus.v1.RegisterRequest.LabelsEntry
+	33, // 1: nexus.v1.RegisterRequest.capacity:type_name -> nexus.v1.ResourceVector
 	5,  // 2: nexus.v1.RegisterResponse.result_store:type_name -> nexus.v1.ResultStoreConfig
 	4,  // 3: nexus.v1.RegisterResponse.log_shipping:type_name -> nexus.v1.LogShippingConfig
 	3,  // 4: nexus.v1.RegisterResponse.workload_api:type_name -> nexus.v1.WorkloadApiConfig
-	31, // 5: nexus.v1.HeartbeatRequest.free_capacity:type_name -> nexus.v1.ResourceVector
+	33, // 5: nexus.v1.HeartbeatRequest.free_capacity:type_name -> nexus.v1.ResourceVector
 	8,  // 6: nexus.v1.HeartbeatResponse.directives:type_name -> nexus.v1.Directive
 	0,  // 7: nexus.v1.Directive.kind:type_name -> nexus.v1.DirectiveKind
-	31, // 8: nexus.v1.PollTaskRequest.free_capacity:type_name -> nexus.v1.ResourceVector
-	32, // 9: nexus.v1.PollTaskResponse.assignments:type_name -> nexus.v1.TaskAssignment
+	33, // 8: nexus.v1.PollTaskRequest.free_capacity:type_name -> nexus.v1.ResourceVector
+	34, // 9: nexus.v1.PollTaskResponse.assignments:type_name -> nexus.v1.TaskAssignment
 	13, // 10: nexus.v1.ExtendLeaseRequest.renewals:type_name -> nexus.v1.LeaseRenewal
 	15, // 11: nexus.v1.ExtendLeaseResponse.grants:type_name -> nexus.v1.LeaseGrant
-	33, // 12: nexus.v1.ReportResultRequest.outcome:type_name -> nexus.v1.AttemptOutcome
-	29, // 13: nexus.v1.ReportResultRequest.outputs:type_name -> nexus.v1.ReportResultRequest.OutputsEntry
-	34, // 14: nexus.v1.ReportResultRequest.error:type_name -> nexus.v1.TaskError
-	35, // 15: nexus.v1.ReportResultRequest.metrics:type_name -> nexus.v1.ExecutionMetrics
+	35, // 12: nexus.v1.ReportResultRequest.outcome:type_name -> nexus.v1.AttemptOutcome
+	31, // 13: nexus.v1.ReportResultRequest.outputs:type_name -> nexus.v1.ReportResultRequest.OutputsEntry
+	36, // 14: nexus.v1.ReportResultRequest.error:type_name -> nexus.v1.TaskError
+	37, // 15: nexus.v1.ReportResultRequest.metrics:type_name -> nexus.v1.ExecutionMetrics
 	20, // 16: nexus.v1.ReportLogsRequest.chunks:type_name -> nexus.v1.LogChunk
 	21, // 17: nexus.v1.ReportLogsRequest.final:type_name -> nexus.v1.LogFinal
-	30, // 18: nexus.v1.ReportUsageRequest.units:type_name -> nexus.v1.ReportUsageRequest.UnitsEntry
-	36, // 19: nexus.v1.ReportResultRequest.OutputsEntry.value:type_name -> nexus.v1.ResultRef
-	1,  // 20: nexus.v1.WorkerService.Register:input_type -> nexus.v1.RegisterRequest
-	6,  // 21: nexus.v1.WorkerService.Heartbeat:input_type -> nexus.v1.HeartbeatRequest
-	9,  // 22: nexus.v1.WorkerService.PollTask:input_type -> nexus.v1.PollTaskRequest
-	11, // 23: nexus.v1.WorkerService.ReportStarted:input_type -> nexus.v1.ReportStartedRequest
-	12, // 24: nexus.v1.WorkerService.ExtendLease:input_type -> nexus.v1.ExtendLeaseRequest
-	16, // 25: nexus.v1.WorkerService.ReportProgress:input_type -> nexus.v1.ReportProgressRequest
-	17, // 26: nexus.v1.WorkerService.ReportResult:input_type -> nexus.v1.ReportResultRequest
-	19, // 27: nexus.v1.WorkerService.ReportLogs:input_type -> nexus.v1.ReportLogsRequest
-	22, // 28: nexus.v1.WorkerService.ReportUsage:input_type -> nexus.v1.ReportUsageRequest
-	23, // 29: nexus.v1.WorkerService.AcquirePermits:input_type -> nexus.v1.AcquirePermitsRequest
-	25, // 30: nexus.v1.WorkerService.SaveCheckpoint:input_type -> nexus.v1.SaveCheckpointRequest
-	26, // 31: nexus.v1.WorkerService.GetCheckpoint:input_type -> nexus.v1.GetCheckpointRequest
-	2,  // 32: nexus.v1.WorkerService.Register:output_type -> nexus.v1.RegisterResponse
-	7,  // 33: nexus.v1.WorkerService.Heartbeat:output_type -> nexus.v1.HeartbeatResponse
-	10, // 34: nexus.v1.WorkerService.PollTask:output_type -> nexus.v1.PollTaskResponse
-	18, // 35: nexus.v1.WorkerService.ReportStarted:output_type -> nexus.v1.Ack
-	14, // 36: nexus.v1.WorkerService.ExtendLease:output_type -> nexus.v1.ExtendLeaseResponse
-	18, // 37: nexus.v1.WorkerService.ReportProgress:output_type -> nexus.v1.Ack
-	18, // 38: nexus.v1.WorkerService.ReportResult:output_type -> nexus.v1.Ack
-	18, // 39: nexus.v1.WorkerService.ReportLogs:output_type -> nexus.v1.Ack
-	18, // 40: nexus.v1.WorkerService.ReportUsage:output_type -> nexus.v1.Ack
-	24, // 41: nexus.v1.WorkerService.AcquirePermits:output_type -> nexus.v1.AcquirePermitsResponse
-	18, // 42: nexus.v1.WorkerService.SaveCheckpoint:output_type -> nexus.v1.Ack
-	27, // 43: nexus.v1.WorkerService.GetCheckpoint:output_type -> nexus.v1.GetCheckpointResponse
-	32, // [32:44] is the sub-list for method output_type
-	20, // [20:32] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	23, // 18: nexus.v1.ReportPlacementRequest.placement:type_name -> nexus.v1.AttemptPlacement
+	32, // 19: nexus.v1.ReportUsageRequest.units:type_name -> nexus.v1.ReportUsageRequest.UnitsEntry
+	38, // 20: nexus.v1.ReportResultRequest.OutputsEntry.value:type_name -> nexus.v1.ResultRef
+	1,  // 21: nexus.v1.WorkerService.Register:input_type -> nexus.v1.RegisterRequest
+	6,  // 22: nexus.v1.WorkerService.Heartbeat:input_type -> nexus.v1.HeartbeatRequest
+	9,  // 23: nexus.v1.WorkerService.PollTask:input_type -> nexus.v1.PollTaskRequest
+	11, // 24: nexus.v1.WorkerService.ReportStarted:input_type -> nexus.v1.ReportStartedRequest
+	12, // 25: nexus.v1.WorkerService.ExtendLease:input_type -> nexus.v1.ExtendLeaseRequest
+	16, // 26: nexus.v1.WorkerService.ReportProgress:input_type -> nexus.v1.ReportProgressRequest
+	17, // 27: nexus.v1.WorkerService.ReportResult:input_type -> nexus.v1.ReportResultRequest
+	19, // 28: nexus.v1.WorkerService.ReportLogs:input_type -> nexus.v1.ReportLogsRequest
+	22, // 29: nexus.v1.WorkerService.ReportPlacement:input_type -> nexus.v1.ReportPlacementRequest
+	24, // 30: nexus.v1.WorkerService.ReportUsage:input_type -> nexus.v1.ReportUsageRequest
+	25, // 31: nexus.v1.WorkerService.AcquirePermits:input_type -> nexus.v1.AcquirePermitsRequest
+	27, // 32: nexus.v1.WorkerService.SaveCheckpoint:input_type -> nexus.v1.SaveCheckpointRequest
+	28, // 33: nexus.v1.WorkerService.GetCheckpoint:input_type -> nexus.v1.GetCheckpointRequest
+	2,  // 34: nexus.v1.WorkerService.Register:output_type -> nexus.v1.RegisterResponse
+	7,  // 35: nexus.v1.WorkerService.Heartbeat:output_type -> nexus.v1.HeartbeatResponse
+	10, // 36: nexus.v1.WorkerService.PollTask:output_type -> nexus.v1.PollTaskResponse
+	18, // 37: nexus.v1.WorkerService.ReportStarted:output_type -> nexus.v1.Ack
+	14, // 38: nexus.v1.WorkerService.ExtendLease:output_type -> nexus.v1.ExtendLeaseResponse
+	18, // 39: nexus.v1.WorkerService.ReportProgress:output_type -> nexus.v1.Ack
+	18, // 40: nexus.v1.WorkerService.ReportResult:output_type -> nexus.v1.Ack
+	18, // 41: nexus.v1.WorkerService.ReportLogs:output_type -> nexus.v1.Ack
+	18, // 42: nexus.v1.WorkerService.ReportPlacement:output_type -> nexus.v1.Ack
+	18, // 43: nexus.v1.WorkerService.ReportUsage:output_type -> nexus.v1.Ack
+	26, // 44: nexus.v1.WorkerService.AcquirePermits:output_type -> nexus.v1.AcquirePermitsResponse
+	18, // 45: nexus.v1.WorkerService.SaveCheckpoint:output_type -> nexus.v1.Ack
+	29, // 46: nexus.v1.WorkerService.GetCheckpoint:output_type -> nexus.v1.GetCheckpointResponse
+	34, // [34:47] is the sub-list for method output_type
+	21, // [21:34] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_nexus_v1_worker_proto_init() }
@@ -2498,7 +2678,7 @@ func file_nexus_v1_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nexus_v1_worker_proto_rawDesc), len(file_nexus_v1_worker_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   30,
+			NumMessages:   32,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

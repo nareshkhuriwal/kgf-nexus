@@ -22,18 +22,19 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	WorkerService_Register_FullMethodName       = "/nexus.v1.WorkerService/Register"
-	WorkerService_Heartbeat_FullMethodName      = "/nexus.v1.WorkerService/Heartbeat"
-	WorkerService_PollTask_FullMethodName       = "/nexus.v1.WorkerService/PollTask"
-	WorkerService_ReportStarted_FullMethodName  = "/nexus.v1.WorkerService/ReportStarted"
-	WorkerService_ExtendLease_FullMethodName    = "/nexus.v1.WorkerService/ExtendLease"
-	WorkerService_ReportProgress_FullMethodName = "/nexus.v1.WorkerService/ReportProgress"
-	WorkerService_ReportResult_FullMethodName   = "/nexus.v1.WorkerService/ReportResult"
-	WorkerService_ReportLogs_FullMethodName     = "/nexus.v1.WorkerService/ReportLogs"
-	WorkerService_ReportUsage_FullMethodName    = "/nexus.v1.WorkerService/ReportUsage"
-	WorkerService_AcquirePermits_FullMethodName = "/nexus.v1.WorkerService/AcquirePermits"
-	WorkerService_SaveCheckpoint_FullMethodName = "/nexus.v1.WorkerService/SaveCheckpoint"
-	WorkerService_GetCheckpoint_FullMethodName  = "/nexus.v1.WorkerService/GetCheckpoint"
+	WorkerService_Register_FullMethodName        = "/nexus.v1.WorkerService/Register"
+	WorkerService_Heartbeat_FullMethodName       = "/nexus.v1.WorkerService/Heartbeat"
+	WorkerService_PollTask_FullMethodName        = "/nexus.v1.WorkerService/PollTask"
+	WorkerService_ReportStarted_FullMethodName   = "/nexus.v1.WorkerService/ReportStarted"
+	WorkerService_ExtendLease_FullMethodName     = "/nexus.v1.WorkerService/ExtendLease"
+	WorkerService_ReportProgress_FullMethodName  = "/nexus.v1.WorkerService/ReportProgress"
+	WorkerService_ReportResult_FullMethodName    = "/nexus.v1.WorkerService/ReportResult"
+	WorkerService_ReportLogs_FullMethodName      = "/nexus.v1.WorkerService/ReportLogs"
+	WorkerService_ReportPlacement_FullMethodName = "/nexus.v1.WorkerService/ReportPlacement"
+	WorkerService_ReportUsage_FullMethodName     = "/nexus.v1.WorkerService/ReportUsage"
+	WorkerService_AcquirePermits_FullMethodName  = "/nexus.v1.WorkerService/AcquirePermits"
+	WorkerService_SaveCheckpoint_FullMethodName  = "/nexus.v1.WorkerService/SaveCheckpoint"
+	WorkerService_GetCheckpoint_FullMethodName   = "/nexus.v1.WorkerService/GetCheckpoint"
 )
 
 // WorkerServiceClient is the client API for WorkerService service.
@@ -71,6 +72,15 @@ type WorkerServiceClient interface {
 	// this RPC answers UNIMPLEMENTED; agents only call it when RegisterResponse
 	// advertised log_shipping.enabled.
 	ReportLogs(ctx context.Context, in *ReportLogsRequest, opts ...grpc.CallOption) (*Ack, error)
+	// Where the attempt's workload runs (ADR-0037): the executor, the cluster
+	// and, on Kubernetes, the pod, its namespace and its node. Fenced like every
+	// attempt RPC, so a stale lease cannot relocate an attempt. The latest
+	// report wins: the agent sends one whenever the placement changes (a
+	// kubernetes pod is created, then scheduled onto a node). Advisory: a lost
+	// report leaves the placement unknown and never affects the attempt. A
+	// gateway that predates this RPC answers UNIMPLEMENTED; agents only call it
+	// when RegisterResponse advertised placement_reporting.
+	ReportPlacement(ctx context.Context, in *ReportPlacementRequest, opts ...grpc.CallOption) (*Ack, error)
 	// Cumulative usage-unit totals for the attempt (tokens, requests, ...).
 	// Merged per key with max, so a duplicate or reordered report is harmless.
 	ReportUsage(ctx context.Context, in *ReportUsageRequest, opts ...grpc.CallOption) (*Ack, error)
@@ -173,6 +183,16 @@ func (c *workerServiceClient) ReportLogs(ctx context.Context, in *ReportLogsRequ
 	return out, nil
 }
 
+func (c *workerServiceClient) ReportPlacement(ctx context.Context, in *ReportPlacementRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, WorkerService_ReportPlacement_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *workerServiceClient) ReportUsage(ctx context.Context, in *ReportUsageRequest, opts ...grpc.CallOption) (*Ack, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Ack)
@@ -248,6 +268,15 @@ type WorkerServiceServer interface {
 	// this RPC answers UNIMPLEMENTED; agents only call it when RegisterResponse
 	// advertised log_shipping.enabled.
 	ReportLogs(context.Context, *ReportLogsRequest) (*Ack, error)
+	// Where the attempt's workload runs (ADR-0037): the executor, the cluster
+	// and, on Kubernetes, the pod, its namespace and its node. Fenced like every
+	// attempt RPC, so a stale lease cannot relocate an attempt. The latest
+	// report wins: the agent sends one whenever the placement changes (a
+	// kubernetes pod is created, then scheduled onto a node). Advisory: a lost
+	// report leaves the placement unknown and never affects the attempt. A
+	// gateway that predates this RPC answers UNIMPLEMENTED; agents only call it
+	// when RegisterResponse advertised placement_reporting.
+	ReportPlacement(context.Context, *ReportPlacementRequest) (*Ack, error)
 	// Cumulative usage-unit totals for the attempt (tokens, requests, ...).
 	// Merged per key with max, so a duplicate or reordered report is harmless.
 	ReportUsage(context.Context, *ReportUsageRequest) (*Ack, error)
@@ -293,6 +322,9 @@ func (UnimplementedWorkerServiceServer) ReportResult(context.Context, *ReportRes
 }
 func (UnimplementedWorkerServiceServer) ReportLogs(context.Context, *ReportLogsRequest) (*Ack, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportLogs not implemented")
+}
+func (UnimplementedWorkerServiceServer) ReportPlacement(context.Context, *ReportPlacementRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportPlacement not implemented")
 }
 func (UnimplementedWorkerServiceServer) ReportUsage(context.Context, *ReportUsageRequest) (*Ack, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportUsage not implemented")
@@ -471,6 +503,24 @@ func _WorkerService_ReportLogs_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkerService_ReportPlacement_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportPlacementRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).ReportPlacement(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_ReportPlacement_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).ReportPlacement(ctx, req.(*ReportPlacementRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _WorkerService_ReportUsage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ReportUsageRequest)
 	if err := dec(in); err != nil {
@@ -581,6 +631,10 @@ var WorkerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReportLogs",
 			Handler:    _WorkerService_ReportLogs_Handler,
+		},
+		{
+			MethodName: "ReportPlacement",
+			Handler:    _WorkerService_ReportPlacement_Handler,
 		},
 		{
 			MethodName: "ReportUsage",

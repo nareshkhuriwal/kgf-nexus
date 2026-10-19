@@ -75,7 +75,7 @@ because it decides what fair share can mean here:
   first; it is at worst one concurrent dispatch stale, which affects fairness by
   one dispatch and correctness not at all.
 - **Configuration:** `fair_share_weight` (1–100, default 1) in the namespace's
-  platform config, via the existing API and the Cluster & scaling → Scheduler
+  platform config, via the existing API and the Infrastructure → Scheduler
   tab. Changing the weight requires a **platform operator** (403 for a namespace
   admin): raising your own weight takes share from every other namespace.
   A client that omits the field keeps the default. `NEXUS_FAIR_SHARE=false`

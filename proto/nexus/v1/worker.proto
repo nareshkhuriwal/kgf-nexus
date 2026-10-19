@@ -44,6 +44,15 @@ service WorkerService {
   // this RPC answers UNIMPLEMENTED; agents only call it when RegisterResponse
   // advertised log_shipping.enabled.
   rpc ReportLogs(ReportLogsRequest) returns (Ack);
+  // Where the attempt's workload runs (ADR-0037): the executor, the cluster
+  // and, on Kubernetes, the pod, its namespace and its node. Fenced like every
+  // attempt RPC, so a stale lease cannot relocate an attempt. The latest
+  // report wins: the agent sends one whenever the placement changes (a
+  // kubernetes pod is created, then scheduled onto a node). Advisory: a lost
+  // report leaves the placement unknown and never affects the attempt. A
+  // gateway that predates this RPC answers UNIMPLEMENTED; agents only call it
+  // when RegisterResponse advertised placement_reporting.
+  rpc ReportPlacement(ReportPlacementRequest) returns (Ack);
 
   // ── The workload API (ADR-0032) ─────────────────────────────────────────
   // The agent serves each attempt a local socket and forwards what the task
@@ -99,6 +108,10 @@ message RegisterResponse {
   // Absent from a gateway that predates the workload API (ADR-0032): the agent
   // then offers the workload none of it.
   WorkloadApiConfig workload_api = 7;
+  // True when this control plane records attempt placements (ReportPlacement,
+  // ADR-0037). False from a gateway that predates the RPC or whose database
+  // lacks migration 0042: the agent then reports none.
+  bool placement_reporting = 8;
 }
 
 // WorkloadApiConfig says which workload-API capabilities this control plane
@@ -312,6 +325,34 @@ message LogFinal {
   // unreachable for long enough that the bounded buffer filled).
   int64 dropped_lines = 7;
   int64 chunk_count = 8;
+}
+
+message ReportPlacementRequest {
+  string attempt_id = 1;
+  string lease_token = 2;
+  AttemptPlacement placement = 3;
+}
+
+// AttemptPlacement is where one attempt's workload runs (ADR-0037). Every field
+// may be empty, meaning "not known": a pod that is not scheduled yet has no
+// node, and an agent outside Kubernetes has no pod. The control plane stores
+// what it is told and never derives one field from another.
+message AttemptPlacement {
+  // The executor running the workload: "kubernetes", "docker" or
+  // "subprocess" (the "k8s" alias is reported as "kubernetes").
+  string executor = 1;
+  // The registered cluster (clusters.name) the agent runs in: its
+  // NEXUS_CLUSTER_NAME. Empty outside a registered cluster.
+  string cluster = 2;
+  // The Kubernetes namespace of `pod`.
+  string k8s_namespace = 3;
+  // kubernetes: the attempt's own pod. subprocess and docker: the agent's pod
+  // (NEXUS_POD_NAME), since the workload runs beside the agent; a docker agent
+  // outside Kubernetes reports the container id here instead.
+  string pod = 4;
+  // kubernetes: the pod's spec.nodeName once it is scheduled. subprocess and
+  // docker: the agent's node (NEXUS_NODE_NAME).
+  string k8s_node = 5;
 }
 
 // ReportUsageRequest carries the attempt's CUMULATIVE usage units. Keys follow

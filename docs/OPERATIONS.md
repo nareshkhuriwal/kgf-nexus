@@ -1233,7 +1233,8 @@ that window immediately, restart the gateway after step 5.
 ### 9.5 Portainer-managed Docker host
 
 The deploy pipeline renders only the base compose file
-(`.azure-pipelines/templates/deploy-portainer-host.yml` → `deploy/render_compose.py`).
+(`deploy/render_compose.py`, run by KGF Cloud's release pipeline, whose
+Azure DevOps definitions live in the kgf-cloud repository).
 It does not know about TLS, so TLS on this host is a one-time manual setup,
 followed by monthly renewals.
 
@@ -1640,16 +1641,28 @@ Design and safety argument: docs/CLUSTER-SCALING.md. This section is the runbook
 - Migration `0018_cluster_registry` applied (additive; safe before the new
   gateway and resource-manager are deployed).
 - A resource-manager that serves `ClusterControllerService` (this release), reachable
-  from the controller at `NEXUS_RM_ADDR`. The controller uses the same TLS
-  environment as other peers (`internal/transport`).
+  from the controller at `NEXUS_RM_ADDR` -- `resource-manager.<ns>.svc:9090` for
+  the chart's (`clusterController.resourceManagerAddress` in a Helm install).
+  The controller uses the same TLS environment as other peers
+  (`internal/transport`).
 - The worker Deployment follows `deploy/k8s/cluster-controller/base/worker-deployment.example.yaml`:
   no hostname override, CPU/memory requests, `terminationGracePeriodSeconds` at
-  least `NEXUS_DRAIN_GRACE`, no HPA of its own.
-- The cluster-controller image, pinned by digest. The release pipeline builds
-  and pushes `<acr>/nexus/cluster-controller`; `deploy/scripts/cluster-controller-overlay.sh`
+  least `NEXUS_DRAIN_GRACE`, no HPA of its own, the gateway's worker port
+  (`api-gateway.<ns>.svc:9091`) with a worker key (`NEXUS_API_KEY`), and
+  `NEXUS_CLUSTER_NAME` set to the registered name (it scopes the pod ↔ worker
+  join to this cluster).
+- Task Jobs are observed where the kubernetes executor runs them:
+  `NEXUS_CLUSTER_TASK_NAMESPACES` (the base sets `nexus-workers`; the chart
+  derives it from its kubernetes-executor agents), each with the observe Role.
+- The cluster-controller image, pinned by digest. The release workflow
+  builds and pushes `ghcr.io/<owner>/kgf-nexus/cluster-controller` (§22.4;
+  KGF Cloud's release pipeline pushes `<acr>/nexus/cluster-controller`);
+  `deploy/scripts/cluster-controller-overlay.sh`
   renders `base` or `apply` with that digest (the `kustomize edit set image`
   retarget, as a throwaway overlay) and fails if any container would run
-  something else. `templates/deploy-aks.yml` runs it when its
+  something else. The release workflow proves both modes against every digest
+  map it publishes; KGF Cloud's release pipeline (its `deploy-aks.yml`
+  template, in the kgf-cloud repository) runs it when its
   `clusterController` parameter is `base` or `apply` (default `none`). By hand:
   `NAMESPACE=kgf-nexus deploy/scripts/cluster-controller-overlay.sh base <acr>/nexus/cluster-controller@sha256:<digest> | kubectl apply -f -`.
   On a local kind/Docker Desktop cluster, `make k8s-dev-images` builds and loads
@@ -1662,10 +1675,11 @@ kubectl apply -k deploy/k8s/cluster-controller/base   # after setting NEXUS_CLUS
 kubectl -n kgf-nexus get lease nexus-cluster-controller-<cluster> -o jsonpath='{.spec.holderIdentity}'
 ```
 
-In the console (Cluster & scaling → Live cluster) confirm: a report under a minute
+In the console (Govern → Infrastructure → Clusters) confirm: a report under a minute
 old, "Controller running: plan", the observed UID, desired = observed revision,
-the scheduler HPA with `ScalingActive`, and plan-only events that match what you
-would have done by hand. `/readyz` is `standby` on the follower and fails on the
+the scheduler HPA with `ScalingActive`, scheduler autoscaling `in_sync` or
+`plan_only` (an `hpa_plan` event says what apply would change), task Jobs
+listed, and plan-only events that match what you would have done by hand. `/readyz` is `standby` on the follower and fails on the
 leader after four intervals without a successful cycle -- alert on that.
 
 ### 12.3 Enabling apply
@@ -1675,6 +1689,10 @@ leader after four intervals without a successful cycle -- alert on that.
 2. `kubectl apply -k deploy/k8s/cluster-controller/apply`.
 3. Watch for `scale_out` / `drain` / `scale_in` events and "Controller running:
    apply". If the tab still says plan, its reason names the missing opt-in.
+4. Scheduler autoscaling (§12.7) applies once the scheduler HPA carries
+   `nexus.khuriwalgroup.com/autoscaling-owner: cluster-controller` -- the apply
+   overlay adds it to `scaling.yaml`'s HPA. Expect `hpa_update` events and the
+   state to reach `in_sync`; a large change takes a few one-minute steps.
 
 Keep registry ceilings (`max_replicas`) at what the budget allows: there is no
 provider cost estimate, and budget alerts are not hard caps.
@@ -1684,7 +1702,10 @@ provider cost estimate, and budget alerts are not hard caps.
 Fastest to slowest, all safe at any moment:
 
 1. Console: **Switch to plan**. The next cycle (≤ 15 s) stops mutating; the resource
-   manager refuses drains immediately.
+   manager refuses drains immediately. To hand only the scheduler HPA back to
+   its other owner, remove its `nexus.khuriwalgroup.com/autoscaling-owner`
+   annotation (`kubectl -n kgf-nexus annotate hpa scheduler
+   nexus.khuriwalgroup.com/autoscaling-owner-`); it is never written again.
 2. `kubectl apply -k deploy/k8s/cluster-controller/base` (drops the apply Role
    binding and `NEXUS_CONTROLLER_ALLOW_APPLY`).
 3. `kubectl -n kgf-nexus scale deploy/nexus-cluster-controller --replicas=0`.
@@ -1695,26 +1716,69 @@ pod that is no longer going to be removed can simply be deleted
 
 ### 12.5 Diagnosing a pool that does not scale
 
-The Live cluster tab shows the last decision and its holds per Deployment. The
+The Clusters tab shows the last decision and its holds per Deployment. The
 common ones: `scale-in cooldown`, `removal of drained pods held: pod … is not
 Running and Ready` (fix the pod), `pod … kept: holds N live lease(s)` (working as
 intended -- it is removed when the work finishes), `namespace quota: …` (raise the
 quota or the pod requests are undeclared), and `deployment changed since it was
-read` (someone else is writing replicas -- find the second writer).
+read` (someone else is writing replicas -- find the second writer). For the
+scheduler HPA see §12.7.
 
 ### 12.6 Testing locally
 
 The end-to-end test only runs against `docker-desktop` or `kind-*` contexts, in
-namespace `nexus-scaling-test`, which it creates and deletes:
+namespace `nexus-scaling-test`, which it creates and deletes. The database is a
+disposable one on the host's PostgreSQL (`tests/lib/hostpg-db.sh`; never a
+Postgres container):
 
 ```sh
-docker run -d --name nexus-scaling-pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=nexus \
-  -p 127.0.0.1:55531:5432 postgres:16-alpine   # then apply services/migrations/*.up.sql
-NEXUS_TEST_DATABASE_URL=postgres://postgres:test@localhost:55531/nexus \
+dsn=$(tests/lib/hostpg-db.sh create nexus_it_scaling)   # created and migrated
+NEXUS_TEST_DATABASE_URL=$dsn \
   go test -tags k8s_integration -run TestK8s -v ./services/cluster-controller/internal/controller/
-NEXUS_TEST_DATABASE_URL=postgres://postgres:test@localhost:55531/nexus \
-  go test -tags integration -run TestIntegrationClusterRegistry ./internal/store/
+NEXUS_TEST_DATABASE_URL=$dsn \
+  go test -tags integration -run 'TestIntegration(ClusterRegistry|SchedulerAutoscaling|PodWorkersAreClusterScoped)' ./internal/store/
+NEXUS_TEST_DATABASE_URL=$dsn \
+  go test -tags integration -run TestIntegrationClusterViewShape ./services/api-gateway/rest/
+tests/lib/hostpg-db.sh drop nexus_it_scaling
 ```
+
+### 12.7 Scheduler autoscaling
+
+ADR-0036; design in docs/CLUSTER-SCALING.md, "Scheduler autoscaling". The
+scheduler settings saved in the console (Scheduler: min/max replicas, CPU
+target, scale-down cooldown) are applied to the scheduler HPA by the
+controller, in apply mode, on an HPA that opts in. The cluster view's
+`scheduler_autoscaling.state`, and what to do:
+
+| State | Meaning | Action |
+|---|---|---|
+| `in_sync` | The HPA has the saved settings | none |
+| `plan_only` | They differ; the controller runs in plan mode | enable apply (§12.3), or accept |
+| `applying` | Apply mode; the controller has not yet reconciled the saved revision, or is moving the HPA in bounded steps (replica bounds at most halve or double per patch, one patch a minute) | wait; `hpa_update` events show each step |
+| `drift` | Apply mode; it reconciled and cannot converge. `last_error` names why | see below |
+| `not_observed` | No HPA scales a scheduler Deployment | add one (`scaling.yaml`, or `schedulers[].autoscaling` in the chart) |
+
+`drift` reasons: **not controller-owned** -- the HPA lacks
+`nexus.khuriwalgroup.com/autoscaling-owner: cluster-controller`; annotate it,
+or change the settings where the HPA is managed (Helm values, Git).
+**No CPU utilization metric** -- the HPA scales on something else; the
+controller will not change what it scales on. **Never saved** -- save the
+Scheduler settings once. **Patch forbidden** -- the apply RBAC lacks
+`horizontalpodautoscalers` patch for this HPA's name in the control-plane
+namespace (re-apply `deploy/k8s/cluster-controller/apply`, or name the HPA in
+`rbac-apply.yaml` if it is not `scheduler`). **Changed under every attempt**
+-- another writer is rewriting the HPA; find it (`kubectl get hpa -o yaml
+--show-managed-fields`: the controller's writes are `nexus-cluster-controller`).
+
+A `kubectl apply -k` / `helm upgrade` resets an owned HPA's four settings to
+the rendered values; the controller restores the saved ones within a minute
+(an `hpa_update` event). Exporting the saved settings as the scheduler's Helm
+values avoids the round trip.
+
+Metrics: `nexus_controller_scheduler_hpa_actions_total{action,mode}` (`hpa_plan`,
+`hpa_update`, `hpa_refused`) and `nexus_controller_scheduler_hpa_blocked{hpa}`,
+1 while an HPA differs and apply mode cannot converge it -- alert on
+`max(nexus_controller_scheduler_hpa_blocked) == 1` for 15 minutes.
 
 ## 13. Kubernetes executor
 
@@ -1723,9 +1787,14 @@ notes). It is opt-in per agent: setting `NEXUS_K8S_NAMESPACE` enables it, and
 the agent advertises `kubernetes` (and its alias `k8s`) only after a startup
 probe passes. The probe checks that the cluster is reachable, that the server is
 1.29 or later (native sidecars), and, through SelfSubjectAccessReview, that the
-agent holds the RBAC verbs the executor uses. If the probe fails, the agent logs
+agent holds the RBAC verbs the executor uses. If the probe fails, what happens
+depends on `NEXUS_EXECUTORS` (docs/IMAGES.md §4.3). Unset, the agent logs
 `kubernetes executor configured but not usable; not advertising it` with the
-reason and keeps serving its other executors.
+reason and keeps serving its other executors. When the list names kubernetes,
+the agent stops before registering, with the probe's reason, rather than run as
+a worker that cannot do what it was deployed for; with `NEXUS_EXECUTORS=kubernetes`
+(the chart's `executors: kubernetes`) every attempt on the worker is a Job,
+including a task that names no executor and has a `runtime.image`.
 
 ### 13.1 Deploying
 
@@ -2251,6 +2320,10 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_controller_pool_replicas` | G | pool, kind (current/desired) | cluster-controller | Replicas observed and planned |
 | `nexus_controller_last_success_timestamp_seconds` | G | — | cluster-controller | Alert on the leader when `time() - this > 4 * interval` |
 | `nexus_controller_leader` | G | — | cluster-controller | 1 on the leader. Alert if `sum() != 1` for 5 minutes: no leader, or two |
+| `nexus_controller_scheduler_hpa_actions_total` | C | action (hpa_plan/hpa_update/hpa_refused), mode (plan/apply) | cluster-controller | Scheduler HPA autoscaling events (ADR-0036, §12.7): `hpa_plan` what plan mode would change, `hpa_update` a patch applied, `hpa_refused` a patch the API server refused. `hpa_refused` rising: RBAC or another writer |
+| `nexus_controller_scheduler_hpa_blocked` | G | hpa (the HPA's name) | cluster-controller | 1 while, in apply mode, a scheduler HPA differs from the saved settings and cannot converge without a human (not opted in, no CPU metric, patches refused); 0 otherwise. Alert on `max(this) == 1` for 15 minutes |
+| `nexus_instance_heartbeat_failures_total` | C | op (beat/prune/shutdown) | api-gateway, workflow-manager, dag-engine, scheduler, resource-manager, event-service | Failed service-instance registry writes (ADR-0037, §31.4). Every `op` series exists from start. `op="beat"` rising: this replica shows as stale in the console; `prune` failures alone are harmless |
+| `nexus_instance_heartbeat_last_success_timestamp_seconds` | G | — | the same six | Last successful registry beat (every 10 s). `time() - this > 30` is the console's stale condition, as an alert |
 | `nexus_agent_tasks_running` | G | executor | agent | Attempts executing |
 | `nexus_agent_tasks_started_total` | C | executor | agent | Attempts started |
 | `nexus_agent_tasks_completed_total` | C | executor, outcome, error_class | agent | Attempts reported. `error_class="infrastructure"` rising on one host: a quarantine candidate |
@@ -2268,6 +2341,8 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_objstore_bytes_total` | C | backend, direction (in/out) | agent, api-gateway, artifact-gc | Payload bytes through the result store |
 | `nexus_agent_sessions_total` | C | — | agent | Registrations. More than 1 per process means the control plane forced a re-registration |
 | `nexus_agent_advertised_capacity` | G | resource | agent | Capacity advertised for scheduling, which the runtime does not necessarily enforce |
+| `nexus_agent_executor_advertised` | G | executor (subprocess/docker/kubernetes) | agent | 1 for each executor the latest registration advertised (`NEXUS_EXECUTORS`, or discovery), 0 for the others. A kubernetes pool agent with `subprocess` at 1 runs tasks inside its own pod |
+| `nexus_agent_executor_default` | G | executor | agent | 1 for the executor that runs tasks naming none (`NEXUS_DEFAULT_EXECUTOR`, the `nexus.io/default-executor` label) |
 | `nexus_agent_result_report_failures_total` | C | — | agent | Reports not delivered. The WAL retains them |
 | `nexus_agent_registration_attempts_total` | C | result (ok/retryable_error/permanent_error) | agent | Register calls. An agent that starts before the gateway retries `Unavailable`, `DeadlineExceeded`, `ResourceExhausted`, `Aborted` and `Internal` with capped exponential backoff (0.5 s to 30 s, full jitter) and stays not-ready meanwhile; a rising `retryable_error` with no `ok` means the gateway is unreachable or its auth backend is down. `permanent_error` (bad API key, wrong role, invalid request) exits the process with a message naming the fix |
 | `nexus_agent_registered` | G | — | agent | 1 while the agent holds a registered session; the `/readyz` condition |
@@ -2486,24 +2561,33 @@ the reason). They are never silently omitted.
 
 ## 20. Installing with Helm
 
-The chart is `deploy/helm/kgf-nexus` (chart 0.2.0). One release per Kubernetes
-namespace: Services have fixed names (`api-gateway`, `postgres`, …) exactly as
-compose does. `deploy/terraform` drives it for the environments it owns; this
-section is for installing it directly. The design documents behind each part
-are docs/TLS.md (mTLS), docs/CLUSTER-SCALING.md (controller), §7.7/§19.2
-(artifact GC) and ADR-0018 (scheduler scaling).
+The chart is `deploy/helm/kgf-nexus` (chart 0.3.0), published as
+`oci://ghcr.io/<owner>/charts/kgf-nexus`. One control-plane release per
+Kubernetes namespace: Services have fixed names (`api-gateway`, `postgres`, …)
+exactly as compose does. Worker pools may be separate releases (§20.16).
+`deploy/terraform` drives it for the environments it owns; this section is
+for installing it directly. On an AKS cluster you already run, follow
+[docs/INSTALL-AKS.md](INSTALL-AKS.md), which uses
+`deploy/helm/kgf-nexus/examples/aks-existing-cluster.yaml`. The design
+documents behind each part are docs/TLS.md (mTLS), docs/CLUSTER-SCALING.md
+(controller), §7.7/§19.2 (artifact GC), ADR-0018 (scheduler scaling),
+ADR-0035 (component-scoped releases, runtime identity) and
+[docs/IMAGES.md](IMAGES.md) (what each image needs, for anything the chart
+does not render).
 
 ### 20.1 Before you install
 
 | Need | Why | Check |
 |---|---|---|
 | Kubernetes ≥ 1.29 | `kubeVersion` in Chart.yaml; `matchLabelKeys` in spread constraints | `kubectl version` |
-| Images for **one immutable tag**: api-gateway, workflow-manager, dag-engine, scheduler, resource-manager, event-service, agent, migrate, ui, **artifact-gc**, **cluster-controller** | every component renders `<registry><prefix><component>:<tag>`; the last two are new in 0.2.0 | the release pipeline builds all eleven (`.azure-pipelines/templates/images.yml`); locally `make k8s-dev-images` |
+| Images for **one immutable tag**: api-gateway, workflow-manager, dag-engine, scheduler, resource-manager, event-service, agent, migrate, ui, **artifact-gc**, **cluster-controller** | every component renders `<registry><prefix><component>:<tag>`; the last two are new in 0.2.0 | the release workflow builds all eleven and publishes them to GHCR by digest (`.github/workflows/release.yml`, §22.4); KGF Cloud's release pipeline builds the same set for its ACR; locally `make k8s-dev-images` |
 | A credentials Secret (`existingSecret`) | no credential is ever rendered into a manifest | keys `postgres-password`, `minio-root-user`, `minio-root-password`, `worker-api-key`, optional `admin-api-key` |
 | NATS identities (`nats.auth`) | the chart refuses an unauthenticated broker | §11.7; `nats.auth.mode=none` only for a throwaway cluster |
 | metrics-server | HPAs (`autoscaling.enabled`) | `kubectl get apiservice v1beta1.metrics.k8s.io` |
 | cert-manager (v1.18+) | `tls.enabled` with `tls.certManager.enabled` | `kubectl get crd certificates.cert-manager.io` |
 | A PriorityClass | only if `placement.priorityClassName` is set | `kubectl get priorityclass` |
+| Pod Security `restricted` on the namespace (recommended) | every pod the chart renders passes it, and so do the kubernetes executor's task pods (§20.17) | `kubectl label ns nexus pod-security.kubernetes.io/enforce=restricted` |
+| A network-policy engine | only for `networkPolicy.enabled` and `nats.networkPolicy` to take effect (AKS: Azure NPM, Calico or Cilium) | AKS: `az aks show -g <rg> -n <cluster> --query networkProfile.networkPolicy` |
 
 ### 20.2 Install, upgrade, uninstall
 
@@ -2544,7 +2628,7 @@ durations, a `latest` tag, and any misspelt **top-level** key at install time.
 | `existingSecret` | — (required) | Secret with the credentials in §20.1 |
 | `image.tag` | — (required) | immutable tag for every Nexus image; `latest` is refused |
 | `image.registry`, `image.repositoryPrefix`, `image.pullSecrets` | `""`, `kgf-nexus/`, `[]` | image location |
-| `image.digests.<component>` | `{}` | `sha256:<64 hex>` per image; renders `<ref>:<tag>@<digest>`. The release pipeline writes it (`deploy/scripts/helm-image-digests.py`, §22) |
+| `image.digests.<component>` | `{}` | `sha256:<64 hex>` per image; renders `<ref>:<tag>@<digest>`. A release writes it: `release-images.yaml` in the release workflow's `image-digests` artifact (`deploy/scripts/helm-image-digests.py`, §22.4) |
 | `nexusNamespace` | `default` | the Nexus tenant the agents serve and bootstrap creates |
 | `postgres.enabled` / `.host` / `.sslmode` | `true` / `postgres` / `disable` | `false` + host for a managed database (use `verify-full`) |
 | `postgres.caBundle.secretName` / `.configMapName` / `.key` | `""` / `""` / `ca.crt` | root CAs for `verify-ca`/`verify-full`, mounted as `sslrootcert`, §20.11 |
@@ -2564,7 +2648,7 @@ durations, a `latest` tag, and any misspelt **top-level** key at install time.
 | `ui.replicas` | 1 | console replicas |
 | `placement.priorityClassName` | `""` | PriorityClass for every Nexus pod (must exist) |
 | `placement.topologySpread.*` | on, zone then hostname, `ScheduleAnyway` | spread replicas; `DoNotSchedule` makes it a hard rule |
-| `placement.nodeSelector` / `.tolerations` / `.affinity` | empty | applied to every Nexus Deployment and the GC job |
+| `placement.nodeSelector` / `.tolerations` / `.affinity` | empty | applied to every Nexus Deployment, the in-cluster postgres/MinIO/NATS StatefulSets and the GC job |
 | `podDisruptionBudget.enabled` / `.maxUnavailable` / `.minAvailable` | on / 1 / null | a PDB for every Deployment whatever its size; `minAvailable ≥ replicas` is refused |
 | `autoscaling.enabled` / `.minReplicas` / `.maxReplicas` / `.targetCPUUtilizationPercentage` / `.targetMemoryUtilizationPercentage` / `.behavior` | off / 2 / 6 / 70 / null / 1 pod per 60 s down, 300 s window | HPAs for the four stateless services |
 | `tls.enabled` / `.requireClientCert` / `.requirePeerTLS` / `.reloadInterval` / `.caBundleConfigMap` | off / true / true / 10s / `""` | gRPC mTLS, §20.4 |
@@ -2575,10 +2659,26 @@ durations, a `latest` tag, and any misspelt **top-level** key at install time.
 | `artifactGC.grace` / `.logRetention` / `.maxObjects` / `.prefix` / `.pushgatewayUrl` | 24h / `""` / 10000 / `""` / `""` | sweep tuning and metrics |
 | `metrics.serviceMonitor.enabled` / `.podMonitor.enabled` | off / follows | prometheus-operator objects, §17 |
 | `gateway.*` | off | Gateway API routes |
+| `components.controlPlane.enabled` | `true` | `false` = a worker-pool release: agents (and the cluster controller) only, §20.16 |
+| `cluster.name` | `""` | the registered cluster name; `NEXUS_CLUSTER_NAME` on every Nexus process (agents: `claimPlacement.clusterName` when set), next to the downward-API pod, namespace and node |
+| `agentDefaults.controlPlane.address` | `api-gateway:9091` | the worker gRPC endpoint the agents dial; another namespace: `api-gateway.<ns>.svc:9091` |
+| `agentDefaults.controlPlane.tls.enabled` / `.caSecretName` / `.serverName` | off / `""` / `""` | verify that endpoint against a Secret's `ca.crt` (required when enabled), and the name to verify (`NEXUS_TLS_SERVER_NAME`, also under `tls.enabled`) |
+| `agentDefaults.nats.url` | `nats://nats:4222` | the broker the agents dial while `nats.enabled`; `""` = they long-poll |
+| `agentDefaults.kubernetes.taskNodeSelector` / `.taskTolerations` | `{}` / `[]` | where the kubernetes executor's TASK pods run (per agent: `agents[].kubernetes`) |
+| `schedulers[].nodeSelector` / `.tolerations` / `.affinity` / `.topologySpread` | `placement.*` | per-scheduler placement; the first three replace `placement.*`, `topologySpread` merges over it |
+| `networkPolicy.enabled` / `.ingressFrom` / `.metricsFrom` / `.minioFrom` | off / any / none / none | ingress default-deny for the control plane with explicit allows, §20.17 |
+| `ui.service.port` | 80 | the console Service's port; the container listens on 8080 (unprivileged nginx) |
+| `bootstrap.registerWorkerKey` | `true` | `false`: the bootstrap Job registers no static `worker-api-key`, and the agents use scoped worker tokens (§20.10) |
+| `agentDefaults.workerApiKeySecretKey` | `worker-api-key` | the key in `existingSecret` holding the agents' credential; `agents[].workerApiKeySecretKey` overrides it |
+| `services.apiGateway.componentTopology` | `platform-operators` | `NEXUS_COMPONENT_TOPOLOGY`: who sees the control plane's pods, nodes and cluster (§31.2); `infrastructure-viewers` for a single-organisation install |
 
-`deploy/helm/kgf-nexus/ci/*-values.yaml` are three complete, validated
-examples: minimal, every feature on, and the production shape (managed database
-and object store, external issuer, HPAs, `minAvailable` PDBs).
+`deploy/helm/kgf-nexus/ci/*-values.yaml` are complete, validated values files:
+minimal, every feature on, the production shape (managed database and object
+store, external issuer, HPAs, `minAvailable` PDBs), each cloud's result-store
+identity, GPU pools, and the two AKS examples. Those two are the files users
+copy, `deploy/helm/kgf-nexus/examples/aks-existing-cluster.yaml` and
+`examples/aks-worker-pool.yaml`, and `validate.sh` fails if an example and its
+`ci/` copy differ by more than the `<owner>` placeholder.
 
 ### 20.4 mTLS between services
 
@@ -2605,6 +2705,10 @@ up in place (TLS §5.0). REST, probes and `/metrics` stay HTTP.
 - **External agents** dial `api-gateway-external`: add that name to
   `tls.certManager.gatewayExtraDnsNames` and enrol the agents per TLS §5.5.
   During that enrolment `tls.requireClientCert=false` is the documented bridge.
+  A worker-pool release (§20.16) with `tls.enabled` issues its agents' leaf from
+  the same `issuerRef` (the chart refuses a self-signed CA there), and
+  `agentDefaults.controlPlane.tls.serverName` names the SAN to verify when the
+  address it dials is not one.
 - **BYO certificates:** `tls.certManager.enabled=false` and create the
   `nexus-<component>-tls` Secrets yourself (SANs as in
   `deploy/k8s/cert-certificates.yaml`).
@@ -2638,6 +2742,13 @@ up in place (TLS §5.0). REST, probes and `/metrics` stay HTTP.
 - **Placement:** zone-then-hostname spread with `ScheduleAnyway` by default.
   `DoNotSchedule` needs nodes that carry `topology.kubernetes.io/zone`; on a
   cluster without zone labels, drop that key or pods stay Pending.
+  `placement.nodeSelector` / `.tolerations` / `.affinity` apply to every
+  Deployment; a `schedulers[]` or `agents[]` entry's own replace them for that
+  workload, so the schedulers can sit on a system pool (tolerating its
+  `CriticalAddonsOnly` taint) while the rest runs on a user pool, and a
+  scheduler's `topologySpread` can be stricter than the global one. The
+  kubernetes executor's task pods are placed separately, by
+  `agentDefaults.kubernetes.taskNodeSelector` / `.taskTolerations`.
 
 ### 20.6 Cluster controller via Helm
 
@@ -2655,14 +2766,16 @@ permission anywhere.
    `control_plane_namespace` = the release namespace, `mode: plan`). Until then
    the leader logs `cluster not registered` and, after four intervals, reports
    NotReady — which is the alert you want.
-2. Confirm in the console (Live cluster): a fresh report, effective mode `plan`,
+2. Confirm in the console (Infrastructure → Clusters): a fresh report, effective mode `plan`,
    the observed kube-system UID, the scheduler Deployments and HPAs.
 3. **Apply** needs all three opt-ins (CLUSTER-SCALING, "Apply is three
    independent opt-ins"): the registry entry in apply mode with the UID
    (console), **and** `clusterController.apply.enabled=true` with
    `apply.expectedClusterUID` set to that UID. The chart then sets the process
    flag and binds the apply Role (`deployments/scale` update, `pods` patch,
-   worker namespaces only). On a real install/upgrade the chart compares the
+   worker namespaces only) and, with `apply.schedulerAutoscaling` (default
+   true), patch on the autoscaled schedulers' HPAs by name in the release
+   namespace (§12.7). On a real install/upgrade the chart compares the
    UID with the live cluster and refuses a mismatch, so values written for one
    cluster cannot enable apply on another. (`helm template` cannot look it up.)
 4. Back out: console **Switch to plan**, then `apply.enabled=false` (drops the
@@ -2672,6 +2785,54 @@ The scheduler Deployments carry `app.kubernetes.io/component=scheduler` and
 `app.kubernetes.io/part-of=kgf-nexus` on the Deployment object (pods keep their
 per-queue component), which is the selector the controller uses; before 0.2.0
 the chart's schedulers were invisible to it (F113).
+
+**Scheduler HPAs (ADR-0036, §12.7).** A scheduler with
+`schedulers[].autoscaling.enabled` has an HPA. With
+`clusterController.enabled`, `apply.enabled` and
+`apply.schedulerAutoscaling` (the default), the chart hands that HPA to the
+controller in three ways:
+
+- it annotates it `nexus.khuriwalgroup.com/autoscaling-owner: cluster-controller`;
+- it binds `patch` on it, by name;
+- on every upgrade it re-renders the four fields the controller manages from
+  the live HPA: `minReplicas`, `maxReplicas`, the CPU target and
+  `behavior.scaleDown.stabilizationWindowSeconds`.
+
+So `helm upgrade` never reverts the settings saved in the console. The
+`schedulers[].autoscaling` values for those four fields only seed a new HPA;
+change them in the console. Everything else on the HPA still comes from
+values: the memory metric, the scale-down policies, scale-up. The first
+upgrade that hands an existing HPA over applies the values once, then the
+controller takes it from there. In plan mode, with
+`apply.schedulerAutoscaling: false`, or without the controller, the HPA stays
+Helm's: no annotation, no patch Role, and the console shows any difference as
+`plan_only` or `drift`. `helm template` cannot read the live HPA, so it always
+shows the values.
+
+**Worker Deployments the controller scales.** In apply mode the controller
+sets the replica count of every worker Deployment bound to a pool. A
+`helm upgrade` that re-renders `agents[].replicas` resets that count. The
+controller then scales back after its cooldown, and on the way it may drain
+workers the reset had added.
+
+`agents[].replicasManagedByController: true` hands the count to the
+controller. Once the Deployment exists, every render keeps its live
+`spec.replicas`, 0 included, and `replicas` only seeds a new Deployment.
+Change the count through the pool's binding in the console, or with
+`kubectl scale`, not in values.
+
+When the opt-in is honoured:
+
+- **A release running the control plane:** only while its own controller can
+  apply (`clusterController.enabled` and `apply.enabled`). In plan mode the
+  value applies as before.
+- **A worker-pool release (§20.16):** always. It has no controller of its
+  own; the one scaling it runs in the control-plane release, with the pool's
+  namespace in its `workerNamespaces`.
+
+Set the opt-in on exactly the agents whose Deployments are bound to a pool,
+and only once apply is enabled for them. Under `helm template` the lookup is
+empty, so it shows the value.
 
 ### 20.7 Artifact GC CronJob
 
@@ -2772,11 +2933,19 @@ external gRPC Service.
       Helm 4 (§20.10); `helm template -f` must exit 0.
 - [ ] After every install or upgrade, readiness and restart counts were
       checked as in §20.10, not only Helm's `--wait`.
+- [ ] `cluster.name` set to the name registered in the console, so every
+      instance is placed on its cluster, pod and node.
+- [ ] The release namespace (and the task namespace) enforce Pod Security
+      `restricted` (§20.17); `networkPolicy.enabled` with `metricsFrom` naming
+      your Prometheus, where a network-policy engine runs.
+- [ ] Worker pools that scale or upgrade on their own cadence are their own
+      releases, each in its own namespace, with every cross-release setting in
+      §20.16 in place.
 
 ### 20.10 Helm 4: what lint and `--wait` do not tell you
 
 Two Helm 4 behaviours make its own exit codes weaker gates than they look.
-`deploy/helm/validate.sh` (CI: GitHub job `helm`, Azure stage `Helm`) is built
+`deploy/helm/validate.sh` (CI: the `helm` job of `.github/workflows/ci.yml`) is built
 around both. Helm and kubeconform are pinned and checksum-verified
 (`deploy/scripts/pinned-tool.sh`), and so are the Kubernetes and CRD schemas
 (`deploy/helm/schemas.lock`).
@@ -2842,6 +3011,19 @@ tokens (role `worker`, scope `worker_rpc`, F114), through the console or
 `POST /v1/namespaces/{ns}/tokens`, and revoke the bootstrap keys. Locally,
 `nexusctl up` mints both of its credentials through the API and writes nothing
 to the database (cli/README.md, "Local quick start").
+
+The bootstrap worker key is static: it never expires, and every agent that
+holds it is the same credential. Once a scoped token works:
+
+1. Put the token in `existingSecret` under a key of your choice.
+2. Point `agentDefaults.workerApiKeySecretKey` (or an agent's own
+   `agents[].workerApiKeySecretKey`) at that key.
+3. Set `bootstrap.registerWorkerKey: false`, so the Job stops registering
+   `worker-api-key`. That stops future registrations only.
+4. Revoke `bootstrap-worker` in the console.
+
+Worker-pool releases (§20.16) run no bootstrap Job, so they should start on
+scoped tokens: one per pool, revoked on its own.
 
 ### 20.11 Database TLS: verify-full and the CA bundle
 
@@ -3078,6 +3260,39 @@ agents:
 
 The AKS/EKS/GKE environments add exactly such an agent (variable `gpu_agent`)
 when their GPU pool is enabled, next to a CPU agent pinned to the cpu pool.
+
+`agents[].executors` is the exact set of executors the agent builds and
+advertises, rendered as `NEXUS_EXECUTORS` (docs/IMAGES.md §4.3; default
+`subprocess`):
+
+- **subprocess** runs tasks as processes inside the agent pod, within its
+  resources (and, with `gpuCount`, its devices).
+- **kubernetes** runs each attempt as its own Job in the task namespace, on the
+  nodes `kubernetes.taskNodeSelector` / `taskTolerations` choose. It also
+  renders the executor's configuration, Role and task-API policy; the agent
+  does not start if the RBAC probe fails.
+- **docker** needs a daemon socket a chart pod does not have, so the chart
+  refuses it (the agent would not start).
+
+`agents[].defaultExecutor` (default: the first of `executors`; rendered as
+`NEXUS_DEFAULT_EXECUTOR`) runs a task that names no `runtime.executor`, and
+the chart refuses one that is not among `executors`. So an agent with
+`executors: kubernetes` runs every task of its queues as a pod and nothing
+inside its own pod: the AKS examples' agents are such agents. A task naming
+no executor is given to it only with a `runtime.image` and without
+`runtime.stdout_output`, which the kubernetes executor refuses (the scheduler
+reads the agent's `nexus.io/default-executor` label); otherwise it waits with
+a `waiting_for_worker` reason naming the fix, and a task naming `subprocess`
+waits for a worker that offers subprocess. An agent that should run both says
+`executors: subprocess,kubernetes` and picks its `defaultExecutor`.
+
+Upgrading from a chart that rendered no `NEXUS_EXECUTORS`: an agent with
+`executors: kubernetes` used to offer subprocess as well and ran unnamed tasks
+inside its pod. It now runs them as pods, or leaves image-less ones waiting;
+add `subprocess` to its executors to keep the old behaviour. The chart does not
+render `NEXUS_HEARTBEAT_INTERVAL_MS`: the control plane sets the heartbeat
+interval (ADR-0005), and `agentDefaults.heartbeatIntervalMs` is still accepted
+and ignored.
 Size the agent inside one GPU node. GPU execution itself is still unqualified
 on real hardware (production brief).
 
@@ -3097,6 +3312,161 @@ particular that Cloud SQL's `google_sql_ca_certs` returns the shared-CA root
 and that the PSA DNS name resolves through the private zone; real GPU
 scheduling (no GPU node); IRSA/Workload Identity tokens reaching the object
 store (the client change is separate).
+
+### 20.16 Existing clusters and worker-pool releases
+
+**On a cluster you already run** the chart needs nothing a managed cluster
+does not have: no CRDs (unless you turn on `tls.certManager`,
+`metrics.serviceMonitor` or `gateway`), no cluster-scoped objects (unless
+`clusterController.observeNodes`), and no privileged pod. On AKS,
+[docs/INSTALL-AKS.md](INSTALL-AKS.md) walks through every step, and its values
+are `deploy/helm/kgf-nexus/examples/aks-existing-cluster.yaml`:
+
+- Azure Database for PostgreSQL Flexible Server over `verify-full` (§20.11),
+  with runtime logins (§20.12).
+- Blob Storage through workload identity (§20.13).
+- The images from GHCR (`image.registry: ghcr.io/`,
+  `image.repositoryPrefix: <owner>/kgf-nexus/`, §22.4).
+- The schedulers on the system pool, the rest of the control plane and the
+  agents on a CPU pool, and GPU task pods on a tainted GPU pool.
+- The cluster controller in plan mode.
+- NetworkPolicy (§20.17).
+
+Every value you must change is marked `REPLACE` there.
+
+**Worker-pool releases.** `components.controlPlane.enabled=false` installs the
+chart as agents only. It renders their ServiceAccount, the kubernetes
+executor's Role and task-API NetworkPolicy, and their PodDisruptionBudgets,
+plus the cluster controller if enabled. It renders no Service, StatefulSet,
+Job, CronJob, Gateway route or control-plane account. The database settings,
+`services`, `schedulers` and `ui` are ignored.
+
+A pool is scaled, upgraded and placed on its own, against a control plane
+another release installed:
+
+```sh
+helm upgrade --install nexus-pool-gpu oci://ghcr.io/<owner>/charts/kgf-nexus --version 0.3.0 \
+  -n nexus-pool-gpu --set components.controlPlane.enabled=false \
+  --set existingSecret=nexus-pool-gpu-credentials -f aks-worker-pool.yaml
+kubectl -n nexus-pool-gpu wait --for=condition=Ready pod -l nexus.khuriwalgroup.com/role=agent --timeout=5m
+```
+
+Readiness is registration: an agent turns Ready once the control plane
+accepted it, so the wait above proves the two releases agree. Give each pool
+release its own namespace. The chart's names are fixed per namespace:
+ServiceAccount `nexus-agent`, and one Deployment and PodDisruptionBudget per
+`agents[].name`. Two releases in one namespace collide on them, and Helm
+refuses the second.
+
+What the two releases must agree on. The chart checks each release on its
+own, never the pair; a mismatch shows as an agent that never turns Ready, or
+that registers but never gets dispatch hints.
+
+| In the pool release | Must match, in the control-plane release |
+|---|---|
+| `agentDefaults.controlPlane.address` | its gateway: `api-gateway.<namespace>.svc:9091` in the same cluster. From another cluster: `services.apiGateway.external` or your own load balancer, under mTLS also a name in `tls.certManager.gatewayExtraDnsNames`. A bare `api-gateway:9091` resolves only in the control plane's own namespace, and NOTES.txt warns about it. |
+| `tls.enabled` + `tls.certManager.issuerRef` | the same ClusterIssuer, so the pool's `nexus-agent-tls` chains to the CA the gateway trusts. The chart refuses a pool with a self-signed CA. |
+| `agentDefaults.controlPlane.tls` (`caSecretName`, `serverName`) | the CA and a SAN of whatever terminates TLS in front of the gateway |
+| `agentDefaults.nats.url` (`""` = long-poll) | `nats://nats.<namespace>.svc:4222`, and `nats.networkPolicy.extraFrom` admitting the pool namespace's agent pods (example in aks-existing-cluster.yaml) |
+| the seed under `nats-agent-nkey` (or `agents[].natsSeedKey`) | its public key in `nats.auth.tenants` for the Nexus namespace the agents serve (§11.7). Under `nats.tls`, the pool sets `nats.tls.clientSecrets.agent` or `caSecret` (the chart refuses neither). |
+| `worker-api-key` in `existingSecret` (or the key `agentDefaults.workerApiKeySecretKey` names) | a worker credential of `nexusNamespace` (or `agents[].namespace`). Prefer a scoped token minted for this pool (role `worker`, scope `worker_rpc`, §20.10) to the control plane's static bootstrap key: it can be revoked without touching any other pool |
+| `resultStore.*`, `minio.bucket` | the same store. With workload identity, a federated credential for `system:serviceaccount:<pool namespace>:<agent account>`. Against the control plane's in-cluster MinIO: `minio.endpoint: http://minio.<namespace>.svc:9000`, the key pair in the pool's Secret, and `networkPolicy.minioFrom` when §20.17's policy is on. |
+| `cluster.name` | the registered cluster, as on the control plane |
+| the pool namespace | listed in `clusterController.workerNamespaces`, so the controller observes it |
+
+**Upgrades.** The control plane goes first, then the pools at their own pace:
+an agent one minor version behind is supported
+([COMPATIBILITY.md §4.2](COMPATIBILITY.md#42-upgrade-order)).
+`agentPolicy.minVersion` on the control plane refuses older ones once every
+pool is upgraded.
+
+**Runtime identity.** Every Nexus process in either kind of release reports
+`NEXUS_POD_NAME`, `NEXUS_POD_NAMESPACE` and `NEXUS_NODE_NAME` from the
+downward API, and `NEXUS_CLUSTER_NAME` from `cluster.name`. The agents report
+`claimPlacement.clusterName` instead when it is set. Set `cluster.name` to the
+name the cluster is registered under, and the console places every scheduler
+replica, service instance and worker on its cluster, node and pod.
+
+### 20.17 Pod Security and NetworkPolicy
+
+**Pod Security.** Every pod the chart renders passes the Kubernetes Pod
+Security Standards `restricted` profile, init containers and every optional
+component included:
+
+- `runAsNonRoot` with a numeric non-root user: 10001 for the Nexus images,
+  101 for the console, 70 for the in-cluster postgres, 1000 for MinIO, NATS
+  and Mailpit;
+- a `RuntimeDefault` seccomp profile;
+- `allowPrivilegeEscalation: false`;
+- every capability dropped;
+- only restricted volume types.
+
+The kubernetes executor's task pods are created restricted too. So enforce it
+on the release namespace and the task namespace:
+
+```sh
+kubectl label ns nexus nexus-tasks pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+```
+
+`deploy/helm/validate.sh` runs `deploy/helm/pss-restricted.py` over every
+`ci/` render, so a template change that would break this fails CI.
+
+Two changes in chart 0.3.0 made it hold:
+
+- The console image is now nginx-unprivileged on port 8080. The Service port
+  stays `ui.service.port`.
+- The in-cluster postgres starts as uid 70 rather than root. An existing
+  volume is already owned by uid 70.
+
+Root filesystems are read-only everywhere except the agents and the Jobs:
+subprocess tasks run inside the agent container, and the Jobs' psql needs
+nothing. The writable paths are in
+[docs/IMAGES.md §5](IMAGES.md#5-writable-paths-and-volumes).
+
+**NetworkPolicy.** `networkPolicy.enabled` (off by default) renders an
+**ingress** default-deny for this release's control-plane pods: the six
+services, the schedulers, the console, and the in-cluster postgres and MinIO.
+It then renders one allow per real path:
+
+| Policy | Admits |
+|---|---|
+| `nexus-api-gateway` | REST (8080) and worker gRPC (9091) from `networkPolicy.ingressFrom`. Empty means any source, because the gateway is the front door, and this release's agents and console are always admitted. |
+| `nexus-ui` | the console from `ingressFrom` (empty = any) |
+| `nexus-control-plane-peers` | each service's `http` and `grpc` ports from the other services, the schedulers and the cluster controller |
+| `nexus-postgres` | 5432 from the services (and their `wait-for-schema` init containers), the migrate, bootstrap and db-roles Jobs, and artifact-gc |
+| `nexus-minio` | S3 from api-gateway, workflow-manager, artifact-gc, minio-init, this release's agents and `networkPolicy.minioFrom`. The MinIO console port is not opened. |
+| `nexus-metrics` | the gateway's ops port and every service's health/metrics port from `networkPolicy.metricsFrom`. **Unset, nothing outside the release can scrape them.** |
+
+Ports are referenced by name, so they follow the containers.
+
+- **Not selected.** The agents (their task pods reach the task API through
+  the executor's own policy in the task namespace), NATS (it has its own
+  `nats.networkPolicy`) and the Jobs.
+- **Egress.** Not restricted. The services reach endpoints the chart cannot
+  enumerate: the database, Blob or S3, Entra ID for workload identity, OTLP,
+  SMTP, and webhook targets.
+- **Probes.** Kubelet probes come from the node, which Azure NPM, Calico and
+  Cilium allow by default.
+- **No engine.** Without a network-policy engine the objects are accepted and
+  do nothing.
+- **Worker pools elsewhere.** Pool releases in other namespaces reach the
+  gateway through `ingressFrom` (empty admits them) and the broker through
+  `nats.networkPolicy.extraFrom` (§20.16).
+
+### 20.18 What was verified for ADR-0035 (2026-10-19, static and containers)
+
+| Check | Result |
+|---|---|
+| `deploy/helm/validate.sh` (Helm v4.3.0, kubeconform v0.8.0, K8s 1.29.0 schemas) | 12 values files lint, render and validate strictly, the two AKS examples among them (71 and 6 objects). Every pod template passes `pss-restricted.py`. 71 refusals, 14 of them new: a pool with no agents or no Secret, a pool on a self-signed CA, pool NATS TLS without client material, control-plane TLS without a CA, a server name without TLS, a malformed address, NATS URL or cluster name, a misspelt key, a bad spread policy or toleration. Three new render assertions: a pool renders agents only and dials what it is told; identity on every Nexus process with no duplicated variable; the agents' control-plane TLS. |
+| Renders of the ten pre-existing `ci/` files, previous chart against this one | No object added or removed. The only field changes are the identity variables, `RM_LOG_LEVEL` on resource-manager, the console's security context, port 8080, `/healthz` probes and two emptyDirs, postgres's security context, and (from the version) `helm.sh/chart` and the Job-name hash. |
+| Images built from the branch (scheduler, agent, api-gateway, migrate) | Ports, user `10001:10001`, stop signal and labels as docs/IMAGES.md states. The agent alone carries docker-cli, bash and the WAL directories. An unknown `SERVICE` fails the build. |
+| Console runtime | nginx-unprivileged 1.30.5 with this `nginx.conf` served `/healthz` and the bundle under a read-only root, all capabilities dropped and no-new-privileges, as uid 101, with tmpfs on `/etc/nginx/conf.d` and `/tmp` only. |
+| postgres as uid 70 | `postgres:16-alpine`, started as 70:70 with no capabilities on a root-owned, group-70 volume (what `fsGroup` produces), initialised `PGDATA` and accepted connections. |
+
+Not verified: an install on a live cluster, AKS or otherwise (no cluster was
+touched), the NetworkPolicy under a real policy engine, a cross-namespace or
+cross-cluster pool registering, and the services reading the identity
+variables (that is their side of ADR-0035).
 
 ---
 
@@ -3311,7 +3681,10 @@ the digest is what Docker and Kubernetes actually resolve.
 |---|---|---|
 | S3 result store and backup store (server) | `docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46` (multi-arch index: amd64 + arm64) | `deploy/docker-compose.yml` (`minio`), `deploy/docker-compose.pitr.yml` (`backup-store`, `NEXUS_PITR_MINIO_IMAGE`), Helm `minio.image`, Makefile `S3_IMAGE` (bench, CI) |
 | `mc` bucket-init jobs | the **same** Silo image (it bundles a version-matched `mc`) | compose `minio-init`, `backup-store-init` (`NEXUS_PITR_MC_IMAGE`), Helm `minio.mcImage` |
-| Console build | `node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1` | `deploy/Dockerfile.ui`; CI uses Node `24.21.0` (`.github/workflows/ci.yml`, both Azure pipelines) |
+| Console build | `node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1` | `deploy/Dockerfile.ui`; CI uses Node `24.21.0` (`.github/workflows/ci.yml`, and KGF Cloud's Azure pipelines) |
+| Console runtime | `nginxinc/nginx-unprivileged:1.30.5-alpine3.24@sha256:56b8272e43a0525f67aed68d1e0794a712d10e3e45a563e118e9a77c817e6f86` (uid 101, port 8080) | `deploy/Dockerfile.ui` (`runtime` stage); docs/IMAGES.md |
+| Image builder (release workflow) | `moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea` | `.github/workflows/release.yml` (`docker/setup-buildx-action` `driver-opts`) |
+| arm64 emulation for the images' runtime stages | `docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0` | `.github/workflows/release.yml` (`docker/setup-qemu-action` `image`) |
 
 ### 22.1 The S3 store: why Silo, and not MinIO
 
@@ -3365,8 +3738,103 @@ tests against (GitHub Actions).
 Node 20 reached end of life on 2026-04-30. The console builds and CI run on
 Node **24** ("Krypton"), Active LTS until 2026-10-20 and maintained until
 2028-04-30 (github.com/nodejs/Release, `schedule.json`). The exact patch
-(`24.21.0`) is pinned in all three CI definitions and in the Dockerfile, and
-they move together. Node 26 becomes LTS on 2026-10-28; move once it has.
+(`24.21.0`) is pinned in `.github/workflows/ci.yml` (`NODE_VERSION`), in
+`deploy/Dockerfile.ui` and in this section's table, and they move together:
+`tests/repo` (`make check-go-version`, and the unit tests in CI) fails when
+they disagree. KGF Cloud's Azure pipelines, in the kgf-cloud repository, carry
+the same pin. Node 26 becomes LTS on 2026-10-28; move once it has.
+
+### 22.4 Nexus's own images: the release workflow
+
+Every first-party image is built by `.github/workflows/release.yml`, which
+`.github/workflows/ci.yml` calls; it is never triggered on its own.
+
+| Event | What happens |
+|---|---|
+| Pull request | `images`: all eleven images built for `linux/amd64` and `linux/arm64`, one job per image, after the unit tests pass, and the Helm chart packaged, linted and rendered. Nothing is pushed and the run holds no registry credential. |
+| Push to `main` | after **every** CI job has passed on that commit (`quality gate`), `publish` pushes `ghcr.io/<owner>/kgf-nexus/<image>:<commit>` (12 hex digits) and `:main`, then the chart as `oci://ghcr.io/<owner>/charts/kgf-nexus:<version>-main.g<commit>`. |
+| Tag `vX.Y.Z[-pre]` | the whole CI suite on the tagged commit, then `publish` pushes `:vX.Y.Z` and the chart at Chart.yaml's `version`. A tag that is not a release version is refused. |
+
+Documentation-only changes (`docs/**`, `*.md` outside `sdk/`) build and
+publish nothing. Nothing is ever tagged `latest` (the chart refuses it), and
+`main` moves with every merge: install by the commit or version tag, and by
+digest.
+
+The names are the chart's own: `image.registry: ghcr.io/` and
+`image.repositoryPrefix: <owner>/kgf-nexus/` (the lower-cased repository
+owner). After the images are pushed, one job collects every digest and refuses
+the map unless it holds exactly the eleven images, each digest-pinned under one
+repository base; then it renders the chart with the map, with the cluster
+controller off and on, and the cluster-controller overlay in both modes, and
+fails unless every Nexus image runs exactly its digest (the checks KGF Cloud's
+release runs before `helm upgrade`, F112). Only then is the map published, as
+the run's `image-digests` artifact:
+
+| File | Use |
+|---|---|
+| `digests.json` | `{"<image>": "ghcr.io/<owner>/kgf-nexus/<image>@sha256:...", ...}`; `deploy/render_compose.py --digests digests.json` renders a compose file a Docker host can pull (§9.5, `deploy/portainer/README.md`) |
+| `release-images.yaml` | Helm values: `image.registry`, `image.repositoryPrefix`, `image.digests` |
+
+```sh
+helm upgrade --install kgf-nexus deploy/helm/kgf-nexus -n kgf-nexus \
+  -f my-values.yaml -f release-images.yaml --set image.tag=<commit or vX.Y.Z>
+```
+
+Pass `release-images.yaml` last, so no other values file can override what was
+built.
+
+**Provenance.** Each image carries a Sigstore-signed SLSA build-provenance
+attestation bound to the release workflow, and BuildKit's SBOM and provenance
+in its index. The signed attestation is produced only while the repository is
+public: GitHub signs a private repository's attestations only on GitHub
+Enterprise Cloud, so a private repository's release skips that step and says
+so in the run summary (BuildKit's SBOM and provenance are still attached):
+
+```sh
+gh attestation verify oci://ghcr.io/<owner>/kgf-nexus/api-gateway@sha256:<digest> \
+  --repo <owner>/kgf-nexus --signer-workflow <owner>/kgf-nexus/.github/workflows/release.yml
+docker buildx imagetools inspect ghcr.io/<owner>/kgf-nexus/api-gateway@sha256:<digest> \
+  --format '{{ json .SBOM }}'
+```
+
+**The Helm chart.** Packaged once per run from the commit (`chart` job):
+`helm package` (the pinned helm) with Chart.yaml's version on a `vX.Y.Z` tag,
+or that version plus a SemVer pre-release naming the commit
+(`<version>-main.g<commit>` on `main`, `-dev.g<commit>` on a pull request), so
+a version range never selects a build of `main`; `appVersion` is the image
+tag. The job then checks the **package**, not the source directory: its files
+are exactly what git tracks under `deploy/helm/kgf-nexus` (examples included),
+its Chart.yaml carries that version, and `helm lint --strict` and
+`helm template` pass. In push mode, and only after the digest map has
+validated, `chart-publish` pushes those bytes to
+`oci://ghcr.io/<owner>/charts/kgf-nexus`, pulls them back (they must be
+identical; the digest is recorded), and attests them like the images:
+
+```sh
+helm show chart oci://ghcr.io/<owner>/charts/kgf-nexus --version <version>
+gh attestation verify oci://ghcr.io/<owner>/charts/kgf-nexus:<version> \
+  --repo <owner>/kgf-nexus --signer-workflow <owner>/kgf-nexus/.github/workflows/release.yml
+helm upgrade --install kgf-nexus oci://ghcr.io/<owner>/charts/kgf-nexus --version <version> -n kgf-nexus \
+  -f my-values.yaml -f release-images.yaml --set image.tag=<commit or vX.Y.Z>
+```
+
+A published chart version is immutable: a re-run that would push the same
+bytes keeps them, and different bytes under an existing version fail the job
+(bump `version` in Chart.yaml; a release tag's chart must change version
+whenever its content does). The run's `helm-chart` artifact holds the package
+and `helm-chart-release` holds `chart.json` (reference, version, digest,
+`appVersion`); the run summary prints the install command. On an AKS cluster
+you already run, docs/INSTALL-AKS.md uses exactly this chart.
+
+**One-time setup.** GHCR creates each package on its first push, private. Make
+each of the eleven image packages and the `charts/kgf-nexus` package public
+(package settings), or give the cluster a pull secret (`image.pullSecrets`)
+and Helm a `helm registry login ghcr.io`. Nothing else needs configuring: the
+push uses the workflow's own token.
+
+KGF's own deployments (its ACR, AKS and Portainer host) are released by KGF
+Cloud's Azure DevOps pipelines in the kgf-cloud repository, which build the
+same eleven images into `<acr>/nexus/<image>`.
 
 ---
 
@@ -3427,25 +3895,28 @@ Requests that would confuse identity are refused, never guessed at:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `NEXUS_AUTH_MODE` | `standalone` | `standalone`, `kgf` or `both`. Anything else stops startup. |
-| `NEXUS_KGF_CONTEXT_KEYS_URL` | — | kgf-gateway's key document, e.g. `http://kgf-gateway.kgf-platform.svc:18080/.well-known/kgf-context.json`. |
-| `NEXUS_KGF_CONTEXT_PUBLIC_KEYS` | — | Alternatively, static base64url Ed25519 public keys, comma separated (the value of the gateway's `key` field). Exactly one of the two is required in `kgf`/`both`; in `standalone` either one turns on audit attribution only (§25.2). |
-| `NEXUS_KGF_CONTEXT_KEYS_REFRESH_SEC` | `300` | Periodic refresh of the key document. |
-| `NEXUS_KGF_AUDIENCE` | `kgf-nexus` | The audience kgf-gateway mints for Nexus: `kgf-` + the manifest `id`. Must match the name Nexus is registered under. |
-| `NEXUS_KGF_USER_ISSUERS` | `kgf-gateway` | Issuers allowed to carry a human principal. Add a KGF facade service here only if it delegates (`obo`) to Nexus. |
+| `NEXUS_KGF_CONTEXT_KEYS_URL` | — | Key documents, **comma separated**: kgf-gateway's, e.g. `http://kgf-gateway.kgf-platform.svc:18080/.well-known/kgf-context.json`, and each provider front's (ADR-0034). Each serves `{"keys":[{"kid","alg":"EdDSA","key"}]}` and is fetched and rotated independently (§24.3). Only `http://` and `https://` URLs are accepted. |
+| `NEXUS_KGF_CONTEXT_PUBLIC_KEYS` | — | Static base64url Ed25519 public keys, comma separated (the value of a document's `key` field). **Merged** with the key documents: a context verifies under any of them. At least one key source is required in `kgf`/`both`; in `standalone` any turns on audit attribution only (§25.2). |
+| `NEXUS_KGF_CONTEXT_KEYS_REFRESH_SEC` | `300` | Periodic refresh of each key document. |
+| `NEXUS_KGF_AUDIENCE` | `kgf-nexus` | The audience a context must name, or a comma-separated list of them. kgf-gateway mints `kgf-` + the manifest `id`; the KGF.Nexus front mints `kgf-nexus-engine` (§24.11), so a deployment serving both sets `kgf-nexus,kgf-nexus-engine`. `*` is refused here (see the next row but one). |
+| `NEXUS_KGF_USER_ISSUERS` | `kgf-gateway` | Issuers allowed to carry a human principal. Add a KGF facade service here only if it delegates (`obo`) to Nexus without naming a workspace. |
+| `NEXUS_KGF_FRONT_ISSUERS` | — | KGF provider fronts, comma separated (KGF sets `kgf-nexus`): the only issuers whose contexts may, and must, name a KGF.Nexus workspace (`res`), and the only ones that may provision workspaces (§24.11). An issuer may not be in both lists (startup fails). Empty: every context naming a workspace is refused. |
 | `NEXUS_KGF_SERVICE_PRINCIPALS` | — | KGF services that may call Nexus for themselves, with the role they act as: `svc:kgf-billing=viewer,svc:kgf-orchestrator=operator`. Unlisted services are refused. |
 | `NEXUS_KGF_ACCEPT_ANY_AUDIENCE` | `false` | Accept tenantctx's wildcard audience `*`. Only for KGF's single-process local profile. |
 
 Helm: the `kgf:` values block (`authMode`, `contextKeysUrl`,
-`contextPublicKeys`, `audience`, `userIssuers`, `servicePrincipals`) sets
-these on the api-gateway; the schema rejects an unknown mode. Compose passes
-`NEXUS_AUTH_MODE`, `NEXUS_KGF_CONTEXT_KEYS_URL` and
-`NEXUS_KGF_CONTEXT_PUBLIC_KEYS` through.
+`contextPublicKeys`, `audience`, `userIssuers`, `frontIssuers`,
+`servicePrincipals`) sets these on the api-gateway; the schema rejects an
+unknown mode. Compose passes `NEXUS_AUTH_MODE`, `NEXUS_KGF_CONTEXT_KEYS_URL`,
+`NEXUS_KGF_CONTEXT_PUBLIC_KEYS` and `NEXUS_KGF_FRONT_ISSUERS` through.
 
 **Startup and readiness.** The gateway logs `authentication mode: KGF
-context` with the audience, issuers and key source. With a key URL it tries a
-first fetch; if kgf-gateway is not up yet it logs a WARN and starts, and
-`/readyz` fails (`kgf_context_keys`) until a key is held, so the load balancer
-does not send it traffic it would refuse.
+context` with the audience, issuers and key sources. For each key URL it tries
+a first fetch; if the gateway or a front is not up yet it logs a WARN and
+starts. `/readyz` fails (`kgf_context_keys`) until at least one key is held
+from any source, so the load balancer does not send it traffic it would
+refuse. One document being down does not make the gateway unready: contexts
+signed by the other issuers still verify.
 
 **Registering Nexus in KGF.** kgf-gateway routes `KGF.Nexus` to the manifest's
 `internalURL`. Today `kgf-cloud/services/nexus` (the simulation provider) owns
@@ -3596,6 +4067,44 @@ if required) apply the down migration after exporting `kgf_scopes` and
   check, not re-derived here, until contexts carry assignments.
 - The per-replica provisioning cache means the first request for a new scope
   on each replica runs one small transaction.
+
+### 24.11 KGF.Nexus workspaces
+
+A KGF.Nexus **workspace** (`/subscriptions/{sub}/resourceGroups/{rg}/providers/KGF.Nexus/workspaces/{ws}`)
+is its own Nexus tenant namespace, several per resource group, provisioned
+explicitly by the KGF.Nexus provider front (ADR-0034,
+[KGF-INTEGRATION.md §15](KGF-INTEGRATION.md#15-kgfnexus-workspaces-and-the-engine-ui)).
+
+```
+namespace = "kgf-" + hex(sha256("kgf-nexus/v2" \0 org \0 lower(resource id)))[:32]
+```
+
+- **Configure:** apply migration `0040_kgf_workspaces`, then set
+  `NEXUS_KGF_FRONT_ISSUERS=kgf-nexus`, add the front's key document to
+  `NEXUS_KGF_CONTEXT_KEYS_URL` (comma separated), and add the audience the
+  front mints to `NEXUS_KGF_AUDIENCE` (`kgf-nexus,kgf-nexus-engine` keeps
+  kgf-gateway's per-resource-group contexts working beside the front's).
+- **Provision / delete:** only the front's own service context calls
+  `PUT` / `DELETE /v1/kgf/workspace`. Nothing is provisioned on first use: a
+  person's context for a workspace that is not active gets
+  `404 workspace_not_provisioned`.
+- **Read the mapping:**
+
+  ```sql
+  SELECT namespace, resource_id, state, created_at, deleted_at
+    FROM kgf_workspaces WHERE organization = 'org-acme' ORDER BY created_at;
+  ```
+
+- **Deleted workspaces** keep their tenant, specs, runs, logs, usage ledger and
+  audit chain (ordinary Nexus retention); deletion revokes the namespace's API
+  keys, scoped tokens and service accounts. It does **not** cancel in-flight
+  runs or disable schedules, triggers and sensors: those rows are owned by
+  other services (ADR-0011), and with every credential revoked no agent of the
+  namespace can claim work. A deleted workspace's resource id cannot be
+  provisioned again (`409 workspace_deleted`); KGF must use a new name.
+- **Rollback:** unset `NEXUS_KGF_FRONT_ISSUERS` (every workspace context is
+  then refused), roll the gateway back, then, only if required, apply
+  `0040`'s down migration after exporting `kgf_workspaces`.
 
 ---
 
@@ -4461,8 +4970,10 @@ SELECT c.name, cs.labels, cs.headroom, cs.headroom_observed_at
   FROM clusters c JOIN cluster_status cs ON cs.cluster_id = c.id;
 ```
 
-Headroom gates only kubernetes-executor attempts on workers labelled
-`nexus.io/k8s-task-namespace`, only while younger than
+Headroom gates only kubernetes-executor attempts (a task naming kubernetes,
+or naming no executor on a worker whose `nexus.io/default-executor` is
+kubernetes) on workers labelled `nexus.io/k8s-task-namespace`, only while
+younger than
 `NEXUS_CLUSTER_HEADROOM_TTL` (2 m), and is reduced by reservations made since
 the observation. A gated attempt reads
 `waiting_for_cluster_quota: cluster <c> namespace <ns> <dim> (need N, headroom H)`.
@@ -4937,3 +5448,144 @@ Order does not matter for correctness: an old dag-engine ignores the queue
 (rows wait for the new one), and the trigger enqueues whatever version of the
 scheduler wrote the terminal attempt. To roll back, roll the dag-engine back
 first, then 0039 (§6.4).
+
+## 31. Live infrastructure: component instances and task runners
+
+The console's Infrastructure page shows every control-plane process and every
+running task, live (ADR-0037). Two things feed it:
+
+- **The service-instance registry** (`service_instances`, migration 0041).
+  Every api-gateway, workflow-manager, dag-engine, scheduler, resource-manager
+  and event-service process writes its own row every 10 seconds: where it runs,
+  its version, when it started, whether it is ready, and a small detail object.
+- **Attempt placement** (`attempt_runtime`, migration 0042). Every agent reports,
+  for each attempt it runs, the executor, the cluster and, on Kubernetes, the
+  pod, its namespace and its node (`ReportPlacement` on the worker API).
+
+### 31.1 Runtime identity
+
+Every process, control plane and agent alike, reads where it runs from four
+variables. The Helm chart sets them on every Deployment and StatefulSet from the
+downward API and the release (§20); set them yourself in any other Kubernetes
+manifest.
+
+| Variable | Source | Unset |
+|---|---|---|
+| `NEXUS_POD_NAME` | `metadata.name` | the host name is the instance (compose: the container id) |
+| `NEXUS_POD_NAMESPACE` | `metadata.namespace` | empty |
+| `NEXUS_NODE_NAME` | `spec.nodeName` | empty |
+| `NEXUS_CLUSTER_NAME` | the cluster's registry name (`clusters.name`) | empty |
+
+Two processes must never share an identity (component, cluster, pod namespace,
+instance): they would overwrite each other's row. Pod names guarantee that on
+Kubernetes; on other hosts, keep host names distinct.
+
+### 31.2 Component instances
+
+`GET /v1/namespaces/{ns}/platform/components` (`infrastructure.view`) lists
+the registry by component, always all six, in the order above. Each instance is:
+
+| State | Meaning |
+|---|---|
+| `ready` | wrote within the last 30 s, and its own `/readyz` answered 2xx |
+| `not_ready` | wrote within the last 30 s, and its `/readyz` did not; `detail.readiness` says why (`draining`, `degraded: ...`, a failed check). A graceful shutdown writes this once, with `detail.shutting_down: true` |
+| `stale` | has not written for 30 s, by the database clock: crashed, stopped, partitioned from the database, or its connection pool is exhausted |
+
+A replaced pod stays listed as `stale` and is pruned 24 hours after its last
+write, so right after a rolling deploy each component shows its new instances
+ready and its old ones stale. Readiness is asked of the process's own
+`/readyz` handler, so the registry and the load balancer always agree.
+
+**Detail.** Every row: `readiness`, `pid`, `heartbeat_interval_seconds`,
+`db_pool` (`max`, `total`, `acquired`, `idle`, `empty_acquires_total`) and, on
+the last write, `shutting_down`. The scheduler adds `queue`, `claims_total`,
+`claim_errors_total`, `dispatched_total`, `lost_total`, `claims_recent`,
+`dispatched_recent`, `recent_window_seconds` (the `*_recent` values cover one
+beat) and, once its backlog sampler has run, `pending_attempts`,
+`oldest_pending_age_seconds` and `backlog_sampled_at` for its own queue. The
+api-gateway adds `placement_reporting` (§31.3).
+
+**Who sees the control plane's placement.** The control plane belongs to the
+installation, not to a namespace, so by default only a **platform operator**
+sees pod namespace, node, cluster and the detail. Everyone else with
+`infrastructure.view` sees component health only: state, version, start and
+last-seen times and the readiness reason, each instance under a stable opaque
+label (`scheduler-1a2b3c4d5e6f`). The response's `topology_visible` says which
+view was served.
+
+- **A single-organisation installation** (Nexus on your own AKS cluster) sets
+  `NEXUS_COMPONENT_TOPOLOGY=infrastructure-viewers` on the api-gateway: every
+  `infrastructure.view` holder then sees the full view. The default is
+  `platform-operators`; any other value stops the gateway at startup.
+- **To enrol a platform operator** (a database operator's action; the gateway
+  only reads the table), take an existing enabled administrator's user id:
+
+  ```sql
+  INSERT INTO platform_operators (user_id) VALUES ('<user-uuid>');
+  ```
+
+  The operator's sign-in session then sees the full view; API keys and tokens
+  never do.
+
+### 31.3 Task runners
+
+`GET /v1/namespaces/{ns}/platform/task-runners?limit=N` (`infrastructure.view`;
+default 200, at most 1000) lists the namespace's DISPATCHED and RUNNING
+attempts, newest dispatch first, with the worker that holds each one, the
+placement its agent reported, the latest progress line, and counts over all of
+them by executor and by cluster. What the placement means:
+
+| Executor | `pod`, `k8s_namespace`, `k8s_node` |
+|---|---|
+| `kubernetes` | the attempt's own pod; `k8s_node` stays empty until the scheduler binds the pod. `kubectl -n <k8s_namespace> logs <pod>` reaches it |
+| `subprocess` | the agent's own pod and node (the workload runs inside the agent's pod) |
+| `docker` | the agent's own pod and node; outside Kubernetes, `pod` is the container's short id (`docker inspect <pod>` on `worker_host`) |
+
+Placement fields are empty, and `placement_reported_at` is null, when nothing
+was reported:
+
+- the agent predates `ReportPlacement`, or its gateway does not offer it --
+  the gateway logs `attempt placement reporting is off: migration 0042 is not
+  applied` at startup, and its registry row shows `placement_reporting: false`;
+  apply 0042 and restart the gateway;
+- the attempt is DISPATCHED and its workload has not started yet;
+- the attempt ended before its first report landed (reports are advisory and
+  never delay or fail a task).
+
+An agent outside Kubernetes reports an empty cluster unless it sets
+`NEXUS_CLUSTER_NAME`; such attempts are counted under `""` in `by_cluster`.
+
+### 31.4 Monitoring
+
+- `nexus_instance_heartbeat_failures_total{op="beat"}` rising on a process: its
+  registry writes fail and the console shows it stale. The process logs
+  `service instance heartbeat failed` once per outage (and `recovered` after);
+  the error says whether the database refused the statement (migration 0041
+  missing, a grant missing) or the 2 s deadline passed (look at
+  `nexus_db_pool_empty_acquires_total` for pool exhaustion). Nothing else in
+  the process is affected.
+- `time() - nexus_instance_heartbeat_last_success_timestamp_seconds > 30` is the
+  console's stale condition as an alert expression.
+- `op="prune"` failures are harmless one by one; another process prunes.
+
+To look at the registry directly:
+
+```sql
+SELECT component, instance, node, ready, now() - last_seen_at AS silent, detail->>'readiness'
+  FROM service_instances ORDER BY component, instance;
+```
+
+### 31.5 Upgrading and rolling back
+
+Apply 0041 and 0042 before rolling the services (§6.3); both are additive. In
+either order with the services nothing breaks: a process that predates them
+writes no row, a newer process against a database without 0041 counts a failed
+beat every 10 s and runs normally, and a gateway that finds no
+`attempt_runtime` at startup does not offer placement reporting (agents then
+report nothing). Agents and gateways of any mix interoperate: an old agent
+never reports, an old gateway never advertises.
+
+To roll back (§6.4): roll the api-gateway back, or restart it, before reverting
+0042 (a gateway that found the table at startup keeps offering the RPC, and its
+writes would fail; agents log it and their tasks are unaffected), then revert
+0041. Both down migrations only drop their own table.

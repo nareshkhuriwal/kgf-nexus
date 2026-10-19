@@ -10,7 +10,8 @@
 # Nothing here can change the cluster. The mutating permissions live in
 # apply/rbac-apply.yaml and are bound only when a cluster is deliberately put
 # into apply mode. Add a worker Role/RoleBinding pair per additional bound
-# worker namespace; never widen this to a ClusterRole over all namespaces.
+# worker or task namespace (NEXUS_CLUSTER_TASK_NAMESPACES); never widen this to
+# a ClusterRole over all namespaces.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

@@ -448,8 +448,12 @@ services:
       # KGF Cloud context authentication (ADR-0024, OPERATIONS §24). Standalone
       # unless set; kgf/both need the gateway's key document or static keys.
       NEXUS_AUTH_MODE: ${NEXUS_AUTH_MODE:-standalone}
+      # Comma-separated key-document URLs (gateway and provider fronts), merged
+      # with the static keys (ADR-0034).
       NEXUS_KGF_CONTEXT_KEYS_URL: ${NEXUS_KGF_CONTEXT_KEYS_URL:-}
       NEXUS_KGF_CONTEXT_PUBLIC_KEYS: ${NEXUS_KGF_CONTEXT_PUBLIC_KEYS:-}
+      # KGF provider fronts allowed to name a KGF.Nexus workspace (`res`).
+      NEXUS_KGF_FRONT_ISSUERS: ${NEXUS_KGF_FRONT_ISSUERS:-}
       # The operations listener: /metrics, /healthz, /readyz. NOT the REST port,
       # which is the public ingress (docs/OPERATIONS.md, "Metrics").
       NEXUS_METRICS_ADDR: ":8088"
@@ -691,7 +695,13 @@ services:
       NEXUS_NAMESPACE: ${NEXUS_AGENT_NAMESPACE:-${NEXUS_NAMESPACE:-default}}
       NEXUS_QUEUES: default
       NEXUS_LABELS: "zone=local,accelerator=none"
-      NEXUS_EXECUTORS: subprocess,docker
+      # No NEXUS_EXECUTORS: the agent DISCOVERS its executors -- subprocess
+      # always, docker when the socket below is usable -- and runs a task that
+      # names no executor as a subprocess. Naming docker in NEXUS_EXECUTORS
+      # would make an unusable socket (F144: a wrong NEXUS_DOCKER_SOCKET_GID)
+      # stop the agent instead of leaving docker tasks unplaced with a warning
+      # (docs/IMAGES.md §4.3). The heartbeat interval is the gateway's
+      # (ADR-0005), not an agent setting.
       # 8 cores / 16 GiB / no GPU.
       NEXUS_CPU_MILLIS: "8000"
       NEXUS_MEMORY_BYTES: "17179869184"
@@ -702,7 +712,6 @@ services:
       # worker advertising one, that half of the fit check was dead code in
       # practice and the node could never be placed.
       NEXUS_CUSTOM_RESOURCES: "license_token=2"
-      NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
       NEXUS_METRICS_ADDR: ":8089"
       # The local write-ahead log is what lets a restarted agent know it started
       # a task but not how it ended, and report INDETERMINATE rather than
@@ -763,7 +772,7 @@ services:
       # node_selector with no worker carrying the label is unsatisfiable, and the
       # example is the Phase 1 exit criterion, so the label ships with the fleet.
       NEXUS_LABELS: "zone=local,accelerator=nvidia,gpu-interconnect=nvlink"
-      NEXUS_EXECUTORS: subprocess,docker
+      # Executors discovered, as on agent-cpu.
       # 4 cores / 32 GiB / 2 simulated GPUs. Advertised capacity is a ledger
       # entry, not a hardware probe, so the scheduler's GPU matching is
       # exercisable on a machine with no GPU at all.
@@ -783,7 +792,6 @@ services:
       NEXUS_ARTIFACT_CACHE_DIR: /var/lib/nexus/artifacts
       NEXUS_ARTIFACT_CACHE_BYTES: 2Gi
       NEXUS_DISK_BYTES: "53687091200"
-      NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
       NEXUS_METRICS_ADDR: ":8089"
       NEXUS_WAL_DIR: /var/lib/nexus/wal
       NEXUS_WORK_DIR: ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
@@ -835,14 +843,13 @@ services:
       NEXUS_NAMESPACE: ${NEXUS_AGENT_NAMESPACE:-${NEXUS_NAMESPACE:-default}}
       NEXUS_QUEUES: default,gpu
       NEXUS_LABELS: "zone=local,accelerator=nvidia"
-      NEXUS_EXECUTORS: subprocess,docker
+      # Executors discovered, as on agent-cpu.
       NEXUS_CPU_MILLIS: "4000"
       NEXUS_MEMORY_BYTES: "17179869184"
       NEXUS_GPU_COUNT: "1"
       NEXUS_GPU_KIND: nvidia-a10
       NEXUS_GPU_MEMORY_BYTES: "25769803776"
       NEXUS_DISK_BYTES: "53687091200"
-      NEXUS_HEARTBEAT_INTERVAL_MS: "5000"
       NEXUS_METRICS_ADDR: ":8089"
       NEXUS_WAL_DIR: /var/lib/nexus/wal
       NEXUS_WORK_DIR: ${NEXUS_AGENT_WORK_DIR:-/tmp/nexus-agent-work}
@@ -902,10 +909,12 @@ services:
         # gateway is down, so it does not strictly need to wait. Waiting anyway
         # means the first page load after `up` shows data instead of an error.
         condition: service_healthy
+    # The console's nginx runs unprivileged and listens on 8080
+    # (deploy/Dockerfile.ui, deploy/nginx.conf).
     ports:
-      - "${NEXUS_UI_PORT:-3000}:80"
+      - "${NEXUS_UI_PORT:-3000}:8080"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/healthz || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/healthz || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5

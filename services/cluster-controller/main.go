@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Command cluster-controller is the narrowly scoped in-cluster controller that
-// reports Kubernetes state to Nexus and scales worker Deployments from queued
-// demand (docs/CLUSTER-SCALING.md).
+// reports Kubernetes state to Nexus, scales worker Deployments from queued
+// demand, and keeps opted-in scheduler HPAs at the namespace's saved scheduler
+// settings (docs/CLUSTER-SCALING.md, ADR-0036).
 //
 // It has NO database credential: everything goes through the resource
 // manager's ClusterControllerService. It runs in plan (dry-run) mode unless the
@@ -49,14 +50,21 @@ func main() {
 		clusterName = flag.String("cluster", os.Getenv("NEXUS_CLUSTER_NAME"), "registry name of this cluster (clusters.name)")
 		rmAddr      = flag.String("resource-manager", config.Addr("resource-manager:50052", "NEXUS_RM_ADDR"), "resource-manager gRPC address")
 		httpAddr    = flag.String("http-addr", envOr("CONTROLLER_HTTP_ADDR", ":8090"), "health endpoint listen address")
-		identity    = flag.String("identity", envOr("POD_NAME", hostname()), "leader-election identity (the pod name in-cluster)")
-		leaseNS     = flag.String("lease-namespace", envOr("POD_NAMESPACE", "kgf-nexus"), "namespace holding the leader-election Lease")
+		// NEXUS_POD_* is the runtime identity the chart gives every component;
+		// POD_* is what deploy/k8s and older charts set.
+		identity = flag.String("identity", envFirst(hostname(), "NEXUS_POD_NAME", "POD_NAME"),
+			"leader-election identity (the pod name in-cluster)")
+		leaseNS = flag.String("lease-namespace", envFirst("kgf-nexus", "NEXUS_POD_NAMESPACE", "POD_NAMESPACE"),
+			"namespace holding the leader-election Lease")
 		allowApply  = flag.Bool("allow-apply", envBool("NEXUS_CONTROLLER_ALLOW_APPLY"), "process-level permission to mutate the cluster; the registry must ALSO say apply")
 		interval    = flag.Duration("interval", envDuration("NEXUS_CONTROLLER_INTERVAL", 15*time.Second), "reconcile period")
-		jobSelector = flag.String("job-selector", envOr("NEXUS_JOB_LABEL_SELECTOR", "nexus.io/attempt-id"), "label selector for task Jobs to report")
-		kubeconfig  = flag.String("kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig path for out-of-cluster runs; in-cluster config otherwise")
-		logLevel    = flag.String("log-level", envOr("CONTROLLER_LOG_LEVEL", "info"), "debug|info|warn|error")
-		showVer     = flag.Bool("version", false, "print the version and exit")
+		hpaInterval = flag.Duration("scheduler-patch-interval", envDuration("NEXUS_CONTROLLER_SCHEDULER_PATCH_INTERVAL", time.Minute),
+			"least time between two patches of one scheduler HPA (ADR-0036)")
+		jobSelector = flag.String("job-selector", envOr("NEXUS_JOB_LABEL_SELECTOR", controller.DefaultJobLabelSelector),
+			"label selector for task Jobs to report (the kubernetes executor labels every Job it creates nexus.dev/attempt)")
+		kubeconfig = flag.String("kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig path for out-of-cluster runs; in-cluster config otherwise")
+		logLevel   = flag.String("log-level", envOr("CONTROLLER_LOG_LEVEL", "info"), "debug|info|warn|error")
+		showVer    = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
 	if *showVer {
@@ -74,7 +82,7 @@ func main() {
 
 	err := run(ctx, log, runConfig{
 		cluster: *clusterName, rmAddr: *rmAddr, httpAddr: *httpAddr, identity: *identity, leaseNS: *leaseNS,
-		allowApply: *allowApply, interval: *interval, jobSelector: *jobSelector, kubeconfig: *kubeconfig,
+		allowApply: *allowApply, interval: *interval, hpaInterval: *hpaInterval, jobSelector: *jobSelector, kubeconfig: *kubeconfig,
 	})
 	if err != nil {
 		log.Error("cluster-controller exiting with an error", "error", err)
@@ -86,7 +94,7 @@ func main() {
 type runConfig struct {
 	cluster, rmAddr, httpAddr, identity, leaseNS, jobSelector, kubeconfig string
 	allowApply                                                            bool
-	interval                                                              time.Duration
+	interval, hpaInterval                                                 time.Duration
 }
 
 func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
@@ -118,7 +126,7 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 
 	ctl, err := controller.New(controller.Config{
 		ClusterName: cfg.cluster, Identity: cfg.identity, AllowApply: cfg.allowApply,
-		Interval: cfg.interval, JobLabelSelector: cfg.jobSelector,
+		Interval: cfg.interval, SchedulerPatchInterval: cfg.hpaInterval, JobLabelSelector: cfg.jobSelector,
 		ClusterLabels:    parseKV(os.Getenv("NEXUS_CLUSTER_LABELS")),
 		TaskNamespaces:   splitNonEmpty(os.Getenv("NEXUS_CLUSTER_TASK_NAMESPACES")),
 		GPUResourceNames: splitNonEmpty(os.Getenv("NEXUS_CLUSTER_GPU_RESOURCES")),
@@ -242,6 +250,16 @@ func hostname() string {
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+// envFirst is the first of names that is set, else def.
+func envFirst(def string, names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
 	}
 	return def
 }

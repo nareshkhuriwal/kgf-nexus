@@ -118,6 +118,26 @@ func (a *API) authenticateRequest(w http.ResponseWriter, r *http.Request, presen
 		writeError(w, http.StatusForbidden, "kgf_service_not_allowed",
 			"this KGF service is not allowed to call Nexus for itself (NEXUS_KGF_SERVICE_PRINCIPALS)")
 		return p, nil, true
+	case errors.Is(err, authn.ErrKGFResourceInvalid):
+		writeError(w, http.StatusForbidden, "kgf_resource_invalid",
+			"the KGF context's res is not a KGF.Nexus workspace id in the context's own subscription and resource group")
+		return p, nil, true
+	case errors.Is(err, authn.ErrKGFResourceNotAllowed):
+		writeError(w, http.StatusForbidden, "kgf_resource_not_allowed",
+			"only a KGF provider front (NEXUS_KGF_FRONT_ISSUERS) may name a workspace in a KGF context")
+		return p, nil, true
+	case errors.Is(err, authn.ErrKGFResourceRequired):
+		writeError(w, http.StatusForbidden, "kgf_resource_required",
+			"a KGF context from a provider front must name the workspace it is for (res)")
+		return p, nil, true
+	case errors.Is(err, authn.ErrKGFFrontShape):
+		writeError(w, http.StatusForbidden, "kgf_front_context_invalid",
+			"a KGF context from a provider front must be a service context, delegated (obo) or the provisioner")
+		return p, nil, true
+	case errors.Is(err, authn.ErrWorkspaceNotProvisioned):
+		writeError(w, http.StatusNotFound, "workspace_not_provisioned",
+			"this workspace is not provisioned, or it was deleted")
+		return p, nil, true
 	case err == nil && p.KGF != nil && safeRequestID.MatchString(p.KGF.RequestID):
 		// One identifier follows the request across KGF and Nexus (ADR-0024 §5).
 		w.Header().Set(kgfctx.RequestIDHeader, p.KGF.RequestID)

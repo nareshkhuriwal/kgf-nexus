@@ -3,9 +3,12 @@ Copyright 2026 Khuriwal Group
 SPDX-License-Identifier: Apache-2.0
 
 In-cluster dependencies for a self-contained environment. Each can be turned
-off to point Nexus at a managed service instead (production).
+off to point Nexus at a managed service instead (production). None of them in
+a worker-pool release (components.controlPlane.enabled=false): its agents use
+the control plane's store and broker.
 */ -}}
 {{- include "nexus.required" . }}
+{{- if include "nexus.controlPlaneEnabled" . }}
 {{- if .Values.postgres.enabled }}
 ---
 apiVersion: v1
@@ -32,11 +35,20 @@ spec:
     metadata:
       labels: {{- include "nexus.labels" (list . "postgres") | nindent 8 }}
     spec:
-      # The postgres image's entrypoint prepares PGDATA as root and then drops
-      # to the postgres user (uid 70), so it is not forced non-root here.
+      # Started directly as the image's postgres user (uid 70) rather than as
+      # root dropping to it: the entrypoint then skips its chown, fsGroup makes
+      # the volume writable, and initdb creates PGDATA (a subdirectory) owned
+      # by uid 70. A volume an earlier root-started pod initialised is already
+      # uid 70's. Pod Security "restricted".
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
         fsGroup: 70
         seccompProfile: { type: RuntimeDefault }
+      # The control plane's pool, priority and taints (placement.*), like every
+      # Nexus pod: an in-cluster dependency must not float onto a batch pool.
+      {{- include "nexus.placement" (list . "postgres") | nindent 6 }}
       containers:
         - name: postgres
           {{- $pitr := .Values.postgres.pitr }}
@@ -81,8 +93,7 @@ spec:
             periodSeconds: 10
             failureThreshold: 6
           resources: {{- toYaml .Values.postgres.resources | nindent 12 }}
-          securityContext:
-            allowPrivilegeEscalation: false
+          securityContext: {{- include "nexus.containerSecurity" . | nindent 12 }}
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql/data }
             {{- if $pitr.enabled }}
@@ -147,7 +158,7 @@ spec:
         resources:
           requests: { storage: {{ .Values.postgres.storage.size }} }
 {{- end }}
-{{- if .Values.minio.enabled }}
+{{- if include "nexus.minioInRelease" . }}
 ---
 apiVersion: v1
 kind: Service
@@ -180,6 +191,7 @@ spec:
         fsGroup: 1000
         runAsNonRoot: true
         seccompProfile: { type: RuntimeDefault }
+      {{- include "nexus.placement" (list . "minio") | nindent 6 }}
       containers:
         - name: minio
           image: {{ .Values.minio.image }}
@@ -328,6 +340,7 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
         seccompProfile: { type: RuntimeDefault }
+      {{- include "nexus.placement" (list . "nats") | nindent 6 }}
       # The reloader signals nats-server (SIGHUP) when the config, the
       # authorization include or the TLS files change, so adding a tenant,
       # rotating an NKey or renewing the certificate needs no restart.
@@ -478,6 +491,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         seccompProfile: { type: RuntimeDefault }
+      {{- include "nexus.placement" (list . "mailpit") | nindent 6 }}
       containers:
         - name: mailpit
           image: {{ .Values.mailpit.image }}
@@ -494,4 +508,5 @@ spec:
             requests: { cpu: 10m, memory: 32Mi }
             limits: { memory: 128Mi }
           securityContext: {{- include "nexus.containerSecurity" . | nindent 12 }}
+{{- end }}
 {{- end }}

@@ -29,6 +29,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances/identity"
 	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
 )
 
@@ -77,6 +78,12 @@ type Runner struct {
 	// WorkerID is this session's identity, handed to executors that label
 	// their workloads with it. Set after registration.
 	WorkerID string
+	// DefaultExecutor runs an attempt whose spec names no executor: the
+	// agent's NEXUS_DEFAULT_EXECUTOR, which it advertises as the
+	// nexus.io/default-executor label so the scheduler only sends such an
+	// attempt here when that executor can run it. Empty means subprocess,
+	// the behaviour before the setting existed. Set with WorkerID.
+	DefaultExecutor string
 	// GPUKind and GPUCount are the GPUs this worker advertises, exported to
 	// every workload (executor.EnvWorkerGPUKind / EnvWorkerGPUCount). Set with
 	// WorkerID.
@@ -130,6 +137,19 @@ type Runner struct {
 	// Cache is the node-local artifact cache (ADR-0030 §4). Nil disables it:
 	// artifacts are then the task's own business, as before.
 	Cache *artifactcache.Cache
+
+	// Placement reports where each attempt's workload runs (ADR-0037;
+	// runtime_report.go). Nil reports nothing: a control plane that did not
+	// advertise placement_reporting, or a client without the RPC. Set before
+	// the first Run.
+	Placement PlacementClient
+	// Runtime is where THIS agent runs (identity.FromEnv): the cluster of
+	// every attempt it reports, and the pod and node of the attempts whose
+	// workload runs beside it. Set before the first Run.
+	Runtime identity.Runtime
+	// placementOff stops reporting for the rest of the session once the
+	// control plane answers Unimplemented.
+	placementOff atomic.Bool
 }
 
 // newShipper starts the attempt's log shipper, or returns nil when shipping is
@@ -216,6 +236,10 @@ type runningTask struct {
 	handle   *executor.Handle
 	handleMu sync.Mutex
 
+	// placement delivers the attempt's placement (ADR-0037); nil when this
+	// session reports none.
+	placement *placementReporter
+
 	// redactor replaces the attempt's secret values in everything that leaves
 	// the runner as text: shipped logs, the agent-log copy, progress notes
 	// and the reported error message. Set once, before the workload starts;
@@ -257,6 +281,21 @@ func (r *Runner) Executors() []string {
 	return out
 }
 
+// effectiveExecutor is the executor an attempt runs on: the one its spec
+// names, else this worker's default. A spec that names none ran as a
+// subprocess before NEXUS_DEFAULT_EXECUTOR existed, which is still what an
+// unset default means.
+func (r *Runner) effectiveExecutor(named string) string {
+	switch {
+	case named != "":
+		return named
+	case r.DefaultExecutor != "":
+		return r.DefaultExecutor
+	default:
+		return "subprocess"
+	}
+}
+
 // Run executes one assignment to completion. It is the whole body of a
 // per-attempt goroutine, and it OWNS the terminal cleanup: the registry release,
 // the lease untrack and the executor cleanup all happen on every exit path,
@@ -275,8 +314,7 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 			tracing.AttrNodeID.String(a.GetNodeId()),
 			tracing.AttrAttemptID.String(attemptID),
 			tracing.AttrAttemptNumber.Int(int(a.GetAttemptNumber())),
-			tracing.AttrWorkerID.String(r.WorkerID),
-			tracing.AttrExecutor.String(a.GetSpec().GetRuntime().GetExecutor())))
+			tracing.AttrWorkerID.String(r.WorkerID)))
 	defer span.End()
 
 	log := tracing.WithTrace(ctx, r.log.With("attempt_id", attemptID, "run_id", a.GetRunId(),
@@ -316,10 +354,8 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 		}
 	}()
 
-	kind := a.GetSpec().GetRuntime().GetExecutor()
-	if kind == "" {
-		kind = "subprocess"
-	}
+	kind := r.effectiveExecutor(a.GetSpec().GetRuntime().GetExecutor())
+	span.SetAttributes(tracing.AttrExecutor.String(kind))
 	if _, known := r.executors[kind]; !known {
 		// Bounded label: an executor this worker does not run is reported as
 		// "unsupported", not by the (task-author-controlled) name it asked for.
@@ -423,6 +459,14 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 		return
 	}
 	spec.Secrets = resolved
+	// Where the workload runs (ADR-0037). An executor that runs it in a pod of
+	// its own reports the pod as it learns it; for the others execute reports
+	// the agent's own placement once the workload has started.
+	rt.placement = r.startPlacementReporter(taskCtx, a, log)
+	if rt.placement != nil && reportsOwnPlacement(exec) {
+		kind := exec.Kind()
+		spec.OnPlacement = func(pp executor.PodPlacement) { rt.placement.set(r.podPlacement(kind, pp)) }
+	}
 	if rt.redactor != nil && spec.OnPhase != nil {
 		onPhase := spec.OnPhase
 		spec.OnPhase = func(phase, detail string) { onPhase(phase, redactString(rt.redactor, detail)) }
@@ -499,6 +543,9 @@ func (r *Runner) execute(ctx context.Context, exec executor.Executor, rt *runnin
 	rt.handleMu.Lock()
 	rt.handle = &handle
 	rt.handleMu.Unlock()
+	if rt.placement != nil && !reportsOwnPlacement(exec) {
+		rt.placement.set(r.localPlacement(exec.Kind(), handle))
+	}
 
 	// Cleanup uses a context detached from the task's: when a task is cancelled
 	// or its lease revoked, the task context is ALREADY cancelled, and a cleanup

@@ -6,10 +6,13 @@
 #
 # IMAGE PINNING: the tag below is a placeholder no registry serves, never
 # "latest". A release retargets it to the built digest -- the equivalent of
-#   kustomize edit set image kgf-nexus/cluster-controller=<acr>/nexus/cluster-controller@sha256:<digest>
+#   kustomize edit set image kgf-nexus/cluster-controller=<registry>/<prefix>/cluster-controller@sha256:<digest>
 # -- through deploy/scripts/cluster-controller-overlay.sh, which
-# .azure-pipelines/templates/deploy-aks.yml runs (clusterController: base|apply)
-# and which fails if the rendered Deployment would run any other image.
+# KGF Cloud's release pipeline (its deploy-aks.yml template, in the kgf-cloud
+# repository) runs (clusterController: base|apply), which this repository's
+# release workflow runs against every digest map it publishes
+# (.github/workflows/release.yml), and which fails if the rendered Deployment
+# would run any other image.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -56,10 +59,17 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - {name: NEXUS_CLUSTER_NAME, value: aks-dev}   # must equal clusters.name in the registry
-            - {name: NEXUS_RM_ADDR, value: "resource-manager.kgf-nexus.svc:50052"}
+            # The resource manager's gRPC port as the Helm chart serves it
+            # (services.resourceManager, port 9090).
+            - {name: NEXUS_RM_ADDR, value: "resource-manager.kgf-nexus.svc:9090"}
             # Plan (dry-run) unless apply/allow-apply-patch.yaml is applied.
             - {name: NEXUS_CONTROLLER_ALLOW_APPLY, value: "false"}
             - {name: NEXUS_CONTROLLER_INTERVAL, value: 15s}
+            # Where task Jobs run: the kubernetes executor's NEXUS_K8S_NAMESPACE
+            # (the agents in worker-deployment.example.yaml run theirs in their
+            # own namespace). Jobs are observed there, and its quota headroom is
+            # published. Comma-separated; each needs the observe Role below.
+            - {name: NEXUS_CLUSTER_TASK_NAMESPACES, value: nexus-workers}
             - name: POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - name: POD_NAMESPACE

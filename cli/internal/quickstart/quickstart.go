@@ -81,7 +81,7 @@ const (
 	gatewayService  = "api-gateway"
 	gatewayRESTPort = 8080
 	uiService       = "ui"
-	uiPort          = 80
+	uiPort          = 8080 // the unprivileged console image (deploy/Dockerfile.ui)
 	mailService     = "mailpit"
 	mailUIPort      = 8025
 	natsInitService = "nats-init"
@@ -110,7 +110,7 @@ var PortVars = []string{
 var portHints = map[string]string{
 	"api-gateway/8080": "NEXUS_API_PORT (--api-port)",
 	"api-gateway/9091": "NEXUS_GRPC_PORT (--grpc-port)",
-	"ui/80":            "NEXUS_UI_PORT (--ui-port)",
+	"ui/8080":          "NEXUS_UI_PORT (--ui-port)",
 	"postgres/5432":    "NEXUS_POSTGRES_PORT (--postgres-port)",
 	"minio/9000":       "NEXUS_MINIO_PORT (--minio-port)",
 	"minio/9001":       "NEXUS_MINIO_CONSOLE_PORT (--minio-console-port)",

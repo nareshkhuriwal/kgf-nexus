@@ -1,7 +1,7 @@
 # CI for Nexus.
 #
-# The last job is the one that matters most, and it is the reason this file
-# exists. Four defects blocked Phase 1 exit criterion 1 (F63-F66), every one was
+# One job matters most (`examples`), and it is the reason this file exists.
+# Four defects blocked Phase 1 exit criterion 1 (F63-F66), every one was
 # found by running an example BY HAND, and nothing in the repo would have caught
 # any of them. Unit tests could not: they construct ResourceVectors directly, so
 # they cannot see that no agent could advertise GPU memory. Spec validation could
@@ -9,21 +9,40 @@
 # runnable -- at the time, no example in the repo could reach SUCCEEDED at all.
 #
 # Only running the thing finds those. So CI runs it.
+#
+# Branch protection requires ONE check: `quality gate`. It needs every job
+# below and fails unless each one passed, or was skipped for a reason it can
+# name (a documentation-only change; a job that belongs to another event).
+# Requiring the jobs one by one does not work: a skipped job reports success,
+# and a skipped matrix job reports under a name the rule never matches, so the
+# rule waits forever.
+#
+# A push to main, or a vX.Y.Z tag, that passes the gate then publishes every
+# image to GHCR, digest-pinned, and the Helm chart to
+# oci://ghcr.io/<owner>/charts, through .github/workflows/release.yml
+# (`publish`). Pull requests build the same images and package the chart
+# without pushing anything (`images`).
 name: ci
 
 on:
   push:
     branches: [main]
+    # A release: the whole suite on the tagged commit, then `publish`.
+    tags: ["v*"]
   pull_request:
 
-# A new push supersedes the old run: these jobs bring up a full stack, and
-# queueing them behind superseded work wastes minutes for no signal.
+# A new push to a pull request supersedes its old run: these jobs bring up a
+# full stack, and queueing them behind superseded work wastes minutes for no
+# signal. A run on main or a tag is never cancelled part-way, because it ends
+# by publishing images and a publish cut off half-way leaves `main` naming a
+# mix of commits. A newer run waits instead (and a waiting one is superseded
+# by the next).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Nothing here writes to the repository, so the token cannot either. A job that
-# genuinely needs more asks for it by name.
+# genuinely needs more asks for it by name (`publish`, for the registry).
 permissions:
   contents: read
 
@@ -32,9 +51,14 @@ env:
   # Node 24 (Active LTS, supported to 2028-04-30; Node 20 went EOL 2026-04-30).
   # The exact patch, so CI and the console image (deploy/Dockerfile.ui,
   # node:24.21.0-alpine) run the same Node and npm, and a lockfile that resolves
-  # here resolves in the image. Move all four together: this file, both Azure
-  # pipelines and the Dockerfile (docs/OPERATIONS.md section 22.3).
+  # here resolves in the image. Move them together: this file, the Dockerfile
+  # and docs/OPERATIONS.md section 22.3 (tests/repo fails when they disagree).
   NODE_VERSION: "24.21.0"
+  # A floor, not a target, for the unit suite's statement coverage (go tool
+  # cover -func over every package, generated code included). It measured
+  # 46.1% when CI started enforcing it; a drop of two points is a regression
+  # worth failing on. Raise it as coverage rises; never lower it to pass.
+  GO_COVERAGE_FLOOR: "44"
   # Locally, every stack and test script uses the host's PostgreSQL and never
   # starts a Postgres container (tests/lib/hostpg.sh). A runner has no host
   # server, so the compose stacks here opt in to their bundled postgres
@@ -44,27 +68,169 @@ env:
   E2E_BUNDLED_POSTGRES: "1"
 
 jobs:
+  # What kind of change this is. One that touches only documentation
+  # (docs/**, or a *.md file anywhere outside sdk/) does not need images built
+  # and three stacks brought up. Not a workflow-level `paths-ignore`: a
+  # workflow that does not run leaves its required check pending forever, and
+  # the doc jobs must run on exactly those changes. So every run starts, the
+  # expensive jobs skip themselves, and the gate knows which skips are
+  # legitimate.
+  #
+  # `build` runs on documentation changes anyway: Go tests read Markdown
+  # (CONTRACT.md, golden import reports, the nexusctl init templates). sdk/
+  # counts as code because pip reads sdk/python/README.md as the package's
+  # description.
+  #
+  # Fails OPEN: what it cannot classify (a tag, a new branch, a base that no
+  # longer exists) counts as code, so the whole suite runs.
+  changes:
+    name: classify the change
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Documentation only, or code?
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          # A pull request is checked out as its merge commit, whose first
+          # parent is the base it would merge into.
+          case "$EVENT/$GITHUB_REF" in
+            pull_request/*) base=HEAD^1 ;;
+            push/refs/heads/*) base=$BEFORE ;;
+            *) base= ;;
+          esac
+          code=true
+          if [ -n "$base" ] && git cat-file -e "$base^{commit}" 2>/dev/null; then
+            # --no-renames: a file moved out of a code directory into docs/
+            # must count as the deletion it also is.
+            changed=$(git diff --name-only --no-renames "$base" HEAD)
+            if [ -n "$changed" ]; then
+              code=false
+              while IFS= read -r path; do
+                case "$path" in
+                  sdk/*) code=true ;;
+                  docs/*|*.md) ;;
+                  *) code=true ;;
+                esac
+              done <<<"$changed"
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" = true ]; then
+            echo "Code change: every job runs." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Documentation-only change: build, docs and lint jobs run; the rest skip." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   # Fast feedback. Deliberately first and deliberately cheap: a build error or a
   # failing unit test should not wait on a compose stack to come up.
+  #
+  # Then the repository's own hygiene: every source file carries its SPDX
+  # header, go.mod and go.sum are tidy, and the build and tests leave the tree
+  # exactly as committed -- a test that rewrites a golden file, or a generated
+  # file that no longer matches what produces it, fails here. Reports are
+  # written to $RUNNER_TEMP, outside the tree, so that check never sees them.
   build:
     name: build, vet and unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      # verify checks the module cache against go.sum: it is what turns a
+      # tampered module (or a poisoned cache) into a failure rather than a
+      # silent build.
+      - name: Download and verify modules
+        run: |
+          set -euo pipefail
+          go mod download
+          go mod verify
+      # Every first-party source file carries an SPDX identifier. Generated
+      # code under gen/ is exempt; the target knows that.
+      - name: SPDX headers (make license-check)
+        run: make license-check
+      # go.mod and go.sum are generated files too.
+      - name: go.mod and go.sum are tidy
+        run: go mod tidy -diff
       - run: go build ./...
       - run: go vet ./...
       # No -tags: the integration and chaos suites are tagged out on purpose, so
-      # this stays a pure unit run that needs no services.
-      - run: go test -race ./...
+      # this stays a pure unit run that needs no services. gotestsum runs
+      # `go test -json` and writes the JUnit report and the raw events; the log
+      # stays one line per package, plus the output of anything that failed.
+      - name: Unit tests (go test -race, with coverage)
+        id: test
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/go-reports"
+          go run gotest.tools/gotestsum@v1.13.0 \
+            --format pkgname-and-test-fails --hide-summary=skipped \
+            --junitfile "$RUNNER_TEMP/go-reports/go-junit.xml" \
+            --jsonfile "$RUNNER_TEMP/go-reports/go-test.json" \
+            -- -race -covermode=atomic -coverprofile="$RUNNER_TEMP/go-reports/go-coverage.out" ./...
+      # Whether or not a test failed: the summary is how a failure is read.
+      # Cobertura is the coverage format every coverage service takes.
+      - name: Test and coverage reports
+        if: always() && steps.test.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          r=$RUNNER_TEMP/go-reports
+          python3 deploy/scripts/junit-summary.py --title "Go unit tests (-race)" --require "$r/go-junit.xml" >> "$GITHUB_STEP_SUMMARY"
+          if [ -s "$r/go-coverage.out" ]; then
+            go run github.com/boumenot/gocover-cobertura@v1.5.0 < "$r/go-coverage.out" > "$r/go-coverage.xml"
+          fi
+      - name: Coverage floor
+        run: |
+          set -euo pipefail
+          total=$(go tool cover -func="$RUNNER_TEMP/go-reports/go-coverage.out" | awk '$1 == "total:" { sub("%", "", $NF); print $NF }')
+          echo "Unit-test statement coverage: **$total%** (floor $GO_COVERAGE_FLOOR%)" >> "$GITHUB_STEP_SUMMARY"
+          if awk -v t="$total" -v f="$GO_COVERAGE_FLOOR" 'BEGIN { exit !(t + 0 < f + 0) }'; then
+            echo "::error::unit-test statement coverage $total% is below the floor of $GO_COVERAGE_FLOOR%"
+            exit 1
+          fi
+          echo "statement coverage $total% (floor $GO_COVERAGE_FLOOR%)"
+      # Catches a hand-edited generated file that a test regenerates, a golden
+      # file a test rewrites, or anything else the build and tests write into
+      # the tree. Untracked files count too: `git diff` alone misses them.
+      - name: The tree is exactly as committed
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          dirty=$(git status --porcelain --untracked-files=all)
+          if [ -n "$dirty" ]; then
+            echo "::error::the build or the tests left files in the tree"
+            echo "$dirty"
+            exit 1
+          fi
+      - name: Upload test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-test-report
+          path: ${{ runner.temp }}/go-reports/
+          if-no-files-found: warn
+          retention-days: 14
 
   integration:
     name: integration tests
     runs-on: ubuntu-latest
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -81,6 +247,8 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -155,6 +323,15 @@ jobs:
           NEXUS_TEST_S3_ENDPOINT: 127.0.0.1:9000
           NEXUS_TEST_S3_ACCESS_KEY_ID: nexus-ci
           NEXUS_TEST_S3_SECRET_ACCESS_KEY: nexus-ci-password
+      # The whole verbose log: the step prints only its tail on failure.
+      - name: Upload the integration log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-log
+          path: integration.log
+          if-no-files-found: ignore
+          retention-days: 14
 
   # The outbox relay and dispatch hints against a REAL NATS JetStream server
   # (throwaway brokers the script starts: it stops and restarts one for the
@@ -164,7 +341,9 @@ jobs:
   nats-integration:
     name: nats integration tests
     runs-on: ubuntu-latest
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -180,6 +359,8 @@ jobs:
       NEXUS_TEST_PG_SERVER: postgres://nexus:nexus-dev-password@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -195,6 +376,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: make check-doc-refs
 
   # The documentation site: strict MkDocs build from the hash-locked toolchain,
@@ -206,6 +389,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -233,11 +418,14 @@ jobs:
   proto:
     name: proto lint and breaking-change check
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/cache@v4
         with:
           path: .tools
@@ -246,6 +434,12 @@ jobs:
         run: make proto-lint
       - name: buf breaking against the previous main
         run: make proto-breaking
+        env:
+          # A release tag can name a commit behind the main tip. Compare it
+          # with its own parent, as the push of that commit to main did, not
+          # with main changes it does not contain (empty: proto/check.sh's
+          # default).
+          BUF_AGAINST: ${{ startsWith(github.ref, 'refs/tags/') && 'HEAD~1' || '' }}
 
   # This file and any other workflow, with the pinned actionlint image (it
   # bundles shellcheck for the run: scripts). A duplicated job id, for one,
@@ -256,6 +450,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: make actionlint
 
   # The Helm chart, with the helm and kubeconform pinned and checksum-verified
@@ -264,17 +460,21 @@ jobs:
   # Kubernetes and CRD schemas pinned in deploy/helm/schemas.lock, and prove
   # every bad value is refused (docs/OPERATIONS.md §20.10). Then prove every
   # Nexus image the chart renders takes its digest from image.digests -- the
-  # key the release pipeline sets from its digest map (templates/deploy-aks.yml).
-  # The release re-runs the same check against the real map and environment
-  # values before `helm upgrade` (F112).
+  # key a release sets from its digest map. The release workflow
+  # (release.yml, `digests`) re-runs the same check against the real map, as
+  # KGF Cloud's release pipeline does before `helm upgrade` (F112).
   helm:
     name: helm validate and image-digest check
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 15
     env:
       KUBECONFORM_SCHEMA_CACHE: ${{ github.workspace }}/.cache/kubeconform-schemas
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # Both caches are content-verified on use (tool stamps, schema hashes),
       # so a poisoned cache fails the job rather than passing it.
       - uses: actions/cache@v4
@@ -307,6 +507,26 @@ jobs:
             NAMESPACE=ci AGENT_IMAGE="ci.example/nexus/agent@$d" \
               deploy/scripts/cluster-controller-overlay.sh "$mode" "ci.example/nexus/cluster-controller@$d" >/dev/null
           done
+  # The AKS install tooling: deploy/scripts/aks-preflight.sh against a stub
+  # kubectl (`make preflight-test`; no cluster), and shellcheck over it and
+  # deploy/helm/validate.sh (`make shellcheck`) with the shellcheck bundled in
+  # the pinned actionlint image -- ACTIONLINT_IMAGE in the Makefile, the one
+  # pin `make actionlint` uses too.
+  install-scripts:
+    name: AKS preflight (tests, shellcheck)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: aks-preflight tests (stub kubectl and az)
+        run: make preflight-test
+      - name: shellcheck
+        run: make shellcheck
+
   # Terraform for the dev environment and the AKS/EKS/GKE platforms, OFFLINE:
   # init -backend=false, validate, and `terraform test` plans with mocked
   # providers. No state, no cloud credentials, nothing is applied. Then the
@@ -314,11 +534,15 @@ jobs:
   terraform:
     name: terraform validate and lint (offline)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 25
     env:
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: hashicorp/setup-terraform@v4
         with:
           # Same pin as deploy/terraform/validate.sh.
@@ -338,16 +562,19 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
   # The operator console: typecheck, component tests and the production build.
-  # The same steps, in the same order, as the Azure gate's UserInterface stage.
   ui:
     name: ui typecheck, tests and build
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 20
     defaults:
       run:
         working-directory: ui
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -359,7 +586,11 @@ jobs:
       # Its own step even though `build` runs `tsc -b` too: a type error should
       # be reported as a type error, not as a failed build.
       - run: npm run typecheck
-      - run: npm run test:ci -- --outputFile.junit=reports/ui-junit.xml
+      - id: test
+        run: npm run test:ci -- --outputFile.junit=reports/ui-junit.xml
+      - name: Test report summary
+        if: always() && steps.test.outcome != 'skipped'
+        run: python3 ../deploy/scripts/junit-summary.py --title "Console component tests (vitest)" --require reports/ui-junit.xml >> "$GITHUB_STEP_SUMMARY"
       - run: npm run build
       - name: Upload test report
         if: always()
@@ -387,13 +618,16 @@ jobs:
   browser-e2e:
     name: browser e2e (playwright)
     runs-on: ubuntu-latest
-    needs: [build, ui]
+    needs: [changes, build, ui]
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 45
     env:
       E2E_PROJECT: nexus-e2e-${{ github.run_id }}-${{ github.run_attempt }}
       E2E_MINIO_IMAGE: ${{ vars.E2E_MINIO_IMAGE }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -406,6 +640,11 @@ jobs:
         working-directory: ui
       - name: Run the e2e suite on an isolated stack
         run: make e2e E2E_PROJECT="$E2E_PROJECT" E2E_MINIO_IMAGE="$E2E_MINIO_IMAGE"
+      # Not --require: `make e2e` can fail before Playwright writes anything
+      # (the stack did not come up), and its own output says so.
+      - name: Test report summary
+        if: always()
+        run: python3 deploy/scripts/junit-summary.py --title "Browser e2e (Playwright)" ui/e2e/test-results/junit.xml >> "$GITHUB_STEP_SUMMARY"
       - name: Upload Playwright report, traces and service logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -423,6 +662,8 @@ jobs:
   sdk:
     name: python sdk tests (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 15
     strategy:
       # One failing interpreter should not hide whether the others pass.
@@ -431,6 +672,8 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -440,10 +683,15 @@ jobs:
       # It builds its own venv, installs the [dev] extra and enforces the
       # coverage floor in pyproject.toml.
       - name: Run the SDK suite (make sdk-test)
+        id: test
         run: make sdk-test SDK_PYTHON=python SDK_REPORT_DIR=reports/sdk
-      - name: Coverage summary
-        if: always()
+      # --require: a suite that ran and wrote no JUnit report proved nothing.
+      - name: Test and coverage summary
+        if: always() && steps.test.outcome != 'skipped'
         run: |
+          set -euo pipefail
+          python3 deploy/scripts/junit-summary.py --title "Python SDK (Python ${{ matrix.python-version }})" \
+            --require reports/sdk/sdk-junit.xml >> "$GITHUB_STEP_SUMMARY"
           if [ -f .venv-sdk/.coverage ]; then
             cd sdk/python
             COVERAGE_FILE=../../.venv-sdk/.coverage ../../.venv-sdk/bin/python -m coverage report --format=markdown --fail-under=0 >> "$GITHUB_STEP_SUMMARY"
@@ -469,11 +717,16 @@ jobs:
   examples:
     name: examples and chaos suite
     runs-on: ubuntu-latest
-    needs: build
-    # Generous: this builds every service image before it can run anything.
-    timeout-minutes: 45
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
+    # Generous: this builds every service image before it can run anything,
+    # and the example sweep gives each example its own budget
+    # (tests/chaos/config.go).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -546,7 +799,8 @@ jobs:
   compat:
     name: previous-release skew smoke
     runs-on: ubuntu-latest
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 30
     services:
       postgres:
@@ -565,6 +819,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -581,3 +836,135 @@ jobs:
           path: ${{ runner.temp }}/compat.jsonl
           if-no-files-found: ignore
           retention-days: 14
+
+  # Every image builds (one job per image, linux/amd64 and linux/arm64), and
+  # nothing is pushed: release.yml with push: false. After `build`, so a
+  # compile error is reported once, as a compile error, and not again by
+  # eleven image builds. Pull requests only; on main and tags `publish` builds
+  # them for real, after the whole gate.
+  images:
+    name: images
+    needs: [changes, build]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release.yml
+    with:
+      push: false
+
+  # The one check branch protection requires (see the top of this file). It
+  # fails on a failed or cancelled job, and on a skipped one unless the skip is
+  # legitimate: a documentation-only change (changes.code false), or `images`
+  # outside a pull request. Every job above must be listed in `needs` AND in
+  # one of the lists below; the step refuses a job it cannot classify, so a
+  # new job cannot silently fall outside the gate.
+  gate:
+    name: quality gate
+    if: always()
+    needs:
+      - changes
+      - build
+      - integration
+      - nats-integration
+      - doc-refs
+      - docs
+      - proto
+      - workflow-lint
+      - helm
+      - install-scripts
+      - terraform
+      - ui
+      - browser-e2e
+      - sdk
+      - examples
+      - compat
+      - images
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every required job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # Run on every change, documentation included.
+          always="changes build doc-refs docs workflow-lint"
+          # Skip themselves on a documentation-only change.
+          code_jobs="integration nats-integration proto helm install-scripts terraform ui browser-e2e sdk examples compat"
+          # Pull requests only.
+          pr_jobs="images"
+
+          code=$(jq -r '.changes.outputs.code // "true"' <<<"$NEEDS")
+          required="$always"
+          if [ "$code" = true ]; then required="$required $code_jobs"; fi
+          if [ "$code" = true ] && [ "$EVENT" = pull_request ]; then required="$required $pr_jobs"; fi
+
+          failed=0
+          {
+            echo "### Quality gate"
+            echo
+            if [ "$code" = true ]; then echo "Code change ($EVENT)."; else echo "Documentation-only change ($EVENT)."; fi
+            echo
+            echo "| job | result | |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for job in $(jq -r 'keys[]' <<<"$NEEDS"); do
+            result=$(jq -r --arg j "$job" '.[$j].result' <<<"$NEEDS")
+            case " $always $code_jobs $pr_jobs " in
+              *" $job "*) ;;
+              *) echo "::error::job '$job' is in needs but in none of the gate's lists; classify it"; failed=1 ;;
+            esac
+            case " $required " in *" $job "*) want=required ;; *) want=optional ;; esac
+            if [ "$result" = success ] || { [ "$result" = skipped ] && [ "$want" = optional ]; }; then
+              mark="✅"
+            else
+              mark="❌"
+              echo "::error::$job: $result ($want)"
+              failed=1
+            fi
+            echo "| $job | $result | $mark |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          for job in $required; do
+            jq -e --arg j "$job" 'has($j)' <<<"$NEEDS" >/dev/null \
+              || { echo "::error::required job '$job' is not in the gate's needs"; failed=1; }
+          done
+          if [ "$failed" = 0 ]; then
+            echo "quality gate: passed"
+            if [ "$EVENT" = push ] && [ "$code" = true ]; then
+              echo >> "$GITHUB_STEP_SUMMARY"
+              echo "Passed on a push: \`publish\` releases every image to GHCR, digest-pinned, and the Helm chart." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          exit "$failed"
+
+  # A push to main or a vX.Y.Z tag that passed the WHOLE gate, on this commit,
+  # in this run: every image built for both platforms, pushed to GHCR,
+  # attested, and collected into one validated digest map, then the Helm
+  # chart packaged, pushed to oci://ghcr.io/<owner>/charts and attested
+  # (release.yml, push: true). The only job that can write to the registry, and the only one
+  # that asks for the permissions to: packages to push, id-token and
+  # attestations to sign and store the provenance. Never on a pull request,
+  # and never in a fork (which would publish to the fork owner's GHCR).
+  #
+  # !cancelled() and an explicit result check, not the default success(): a
+  # job skipped further up the chain (`images` on a push) would otherwise skip
+  # this one even though the gate passed.
+  publish:
+    name: publish
+    needs: [changes, gate]
+    if: >-
+      !cancelled()
+      && needs.gate.result == 'success'
+      && needs.changes.outputs.code == 'true'
+      && github.event_name == 'push'
+      && !github.event.repository.fork
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release.yml
+    with:
+      push: true

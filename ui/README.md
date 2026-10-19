@@ -139,8 +139,7 @@ What the suite covers, all through the browser:
 Rules the suite keeps: no fixed sleeps (web-first assertions and `expect.poll`
 only), one worker, and on failure a trace, screenshot and video per test plus
 every service's log in `ui/e2e/test-results/`. `npm run e2e:report` opens the
-HTML report. CI runs it in the `e2e` job of `.github/workflows/ci.yml`; the Azure
-PR pipeline has it as the opt-in `BrowserEndToEnd` stage (`runBrowserE2E`).
+HTML report. CI runs it in the `browser-e2e` job of `.github/workflows/ci.yml`.
 
 There is no endpoint that serves a task's output payload, so "retrieve an
 output" is covered through the attempt log (the summarising task prints what it

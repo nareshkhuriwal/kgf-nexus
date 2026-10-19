@@ -1,23 +1,30 @@
 # Copyright 2026 Khuriwal Group
 # SPDX-License-Identifier: Apache-2.0
 #
-# One KGF Nexus environment: namespace, generated credentials, and the Helm
-# release. Environment-specific choices come in through var.chart_values.
+# One KGF Nexus environment: namespace (unless it already exists), generated
+# credentials, and the Helm release. Environment-specific choices come in
+# through var.chart_values.
 #
 # Credentials are GENERATED here and only here. Nothing is typed, committed or
 # shared between environments. They do live in Terraform state (marked
 # sensitive), so state must be stored as carefully as the secrets themselves:
 # local and gitignored for dev, an encrypted remote backend anywhere else.
 
+# Created here by default. On a cluster whose namespaces a platform team owns
+# (create_namespace = false) the release goes into the existing one, which this
+# module neither labels, changes nor deletes.
 resource "kubernetes_namespace_v1" "this" {
+  count = var.create_namespace ? 1 : 0
+
   metadata {
     name = var.namespace
     labels = {
       "app.kubernetes.io/part-of"    = "kgf-nexus"
       "app.kubernetes.io/managed-by" = "terraform"
-      # Everything Nexus runs as non-root with no capabilities; Postgres and
-      # the console's nginx still start as root, hence baseline, not restricted.
-      "pod-security.kubernetes.io/enforce" = "baseline"
+      # Every pod of chart 0.3.0 passes restricted (OPERATIONS §20.17); the
+      # default stays baseline so an existing environment is not tightened by
+      # an apply, and warn=restricted reports anything that would not pass.
+      "pod-security.kubernetes.io/enforce" = var.pod_security_enforce
       "pod-security.kubernetes.io/warn"    = "restricted"
     }
   }
@@ -44,8 +51,14 @@ resource "random_password" "minio" {
   special = false
 }
 
-# These two gained `count`; existing state (the dev environment) moves to
-# index 0 instead of being regenerated, which would rotate live passwords.
+# These gained `count`; existing state (the dev environment) moves to index 0
+# instead of being regenerated, which would rotate live passwords -- or, for
+# the namespace, delete and recreate it with everything in it.
+moved {
+  from = kubernetes_namespace_v1.this
+  to   = kubernetes_namespace_v1.this[0]
+}
+
 moved {
   from = random_password.postgres
   to   = random_password.postgres[0]
@@ -66,10 +79,24 @@ resource "random_id" "admin_key" {
   byte_length = 32
 }
 
+# One worker key per KGF.Nexus workspace namespace this environment runs
+# agents for (var.workspace_worker_namespaces).
+resource "random_id" "workspace_worker_key" {
+  for_each    = toset(var.workspace_worker_namespaces)
+  byte_length = 32
+}
+
 locals {
+  # Every namespaced object below goes here: the namespace this module
+  # created, or the existing one it was given.
+  namespace = var.create_namespace ? kubernetes_namespace_v1.this[0].metadata[0].name : var.namespace
+
   worker_api_key = "nxs_worker_${random_id.worker_key.hex}"
-  admin_api_key  = "nxs_admin_${random_id.admin_key.hex}"
-  secret_name    = "${var.release_name}-credentials"
+  workspace_worker_keys = {
+    for ns, key in random_id.workspace_worker_key : "worker-api-key-${ns}" => "nxs_worker_${key.hex}"
+  }
+  admin_api_key = "nxs_admin_${random_id.admin_key.hex}"
+  secret_name   = "${var.release_name}-credentials"
 
   postgres_password = (
     var.postgres_password != null ? var.postgres_password : random_password.postgres[0].result
@@ -100,15 +127,26 @@ locals {
     "nats-event-service-nkey" = trimspace(file("${local.nats_dir}/event-service/user.nk"))
     "nats-agent-nkey"         = trimspace(file("${local.nats_dir}/${local.nats_agent}/user.nk"))
   }
+  # Each KGF.Nexus workspace namespace's agents have their own identity
+  # (nexus-nats-auth.sh add-tenant NS), seeded as nats-agent-nkey-<ns>.
+  workspace_nats_seeds = local.nats_dir == "" ? {} : {
+    for ns in var.workspace_worker_namespaces :
+    "nats-agent-nkey-${ns}" => trimspace(file("${local.nats_dir}/agent-${ns}/user.nk"))
+  }
   nats_auth_values = local.nats_dir == "" ? {} : {
     nats = {
       auth = {
         eventService = { publicKeys = [trimspace(file("${local.nats_dir}/event-service/user.pub"))] }
         monitor      = { publicKeys = [trimspace(file("${local.nats_dir}/monitor/user.pub"))] }
-        tenants = [{
+        tenants = concat([{
           namespace  = var.nexus_namespace
           publicKeys = [trimspace(file("${local.nats_dir}/${local.nats_agent}/user.pub"))]
-        }]
+          }], [
+          for ns in var.workspace_worker_namespaces : {
+            namespace  = ns
+            publicKeys = [trimspace(file("${local.nats_dir}/agent-${ns}/user.pub"))]
+          }
+        ])
       }
     }
   }
@@ -117,7 +155,7 @@ locals {
 resource "kubernetes_secret_v1" "credentials" {
   metadata {
     name      = local.secret_name
-    namespace = kubernetes_namespace_v1.this.metadata[0].name
+    namespace = local.namespace
     labels = {
       "app.kubernetes.io/part-of"    = "kgf-nexus"
       "app.kubernetes.io/managed-by" = "terraform"
@@ -130,7 +168,7 @@ resource "kubernetes_secret_v1" "credentials" {
     "postgres-password" = local.postgres_password
     "worker-api-key"    = local.worker_api_key
     "admin-api-key"     = local.admin_api_key
-  }, local.object_store_keys, local.nats_seeds)
+  }, local.object_store_keys, local.nats_seeds, local.workspace_nats_seeds, local.workspace_worker_keys)
 }
 
 # ── Database: server verification and runtime logins ────────────────────
@@ -143,7 +181,7 @@ resource "kubernetes_secret_v1" "postgres_ca" {
 
   metadata {
     name      = "${var.release_name}-postgres-ca"
-    namespace = kubernetes_namespace_v1.this.metadata[0].name
+    namespace = local.namespace
     labels = {
       "app.kubernetes.io/part-of"    = "kgf-nexus"
       "app.kubernetes.io/managed-by" = "terraform"
@@ -175,7 +213,7 @@ resource "kubernetes_secret_v1" "db_logins" {
 
   metadata {
     name      = "${var.release_name}-db-logins"
-    namespace = kubernetes_namespace_v1.this.metadata[0].name
+    namespace = local.namespace
     labels = {
       "app.kubernetes.io/part-of"    = "kgf-nexus"
       "app.kubernetes.io/managed-by" = "terraform"
@@ -204,8 +242,12 @@ locals {
 
 resource "helm_release" "nexus" {
   name      = var.release_name
-  namespace = kubernetes_namespace_v1.this.metadata[0].name
-  chart     = var.chart_path
+  namespace = local.namespace
+  # A local checkout of the chart, or the published chart at one exact
+  # version (oci://ghcr.io/<owner>/charts, kgf-nexus, <version>).
+  chart      = var.chart_repository == null ? var.chart_path : "kgf-nexus"
+  repository = var.chart_repository
+  version    = var.chart_repository == null ? null : var.chart_version
 
   # Wait for every Deployment AND the migrate/bootstrap Jobs, so a successful
   # apply means a working platform, not merely submitted manifests.
@@ -216,13 +258,27 @@ resource "helm_release" "nexus" {
   # out from under the person debugging it.
   atomic = false
 
+  lifecycle {
+    precondition {
+      condition     = (var.chart_path == null) != (var.chart_repository == null)
+      error_message = "Set exactly one of chart_path (a chart checkout) and chart_repository (the published chart)."
+    }
+    precondition {
+      condition     = var.chart_repository == null || var.chart_version != null
+      error_message = "chart_repository needs chart_version: one exact chart version, never \"whatever is newest\"."
+    }
+  }
+
   values = [
     yamlencode({
       existingSecret = kubernetes_secret_v1.credentials.metadata[0].name
       nexusNamespace = var.nexus_namespace
+      workspaceWorkers = [
+        for ns in var.workspace_worker_namespaces : { namespace = ns, secretKey = "worker-api-key-${ns}" }
+      ]
       image = {
         registry         = var.image_registry
-        repositoryPrefix = "kgf-nexus/"
+        repositoryPrefix = var.image_repository_prefix
         tag              = var.image_tag
         pullPolicy       = var.image_pull_policy
       }

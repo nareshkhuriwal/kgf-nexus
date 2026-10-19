@@ -91,7 +91,9 @@ inspected. args: root, annotation key, what (for the message).
 {{- define "nexus.resultStoreIdentityRequired" -}}
 {{- $root := index . 0 -}}{{- $annKey := index . 1 -}}{{- $what := index . 2 -}}
 {{- range $key := include "nexus.resultStoreClients" $root | fromYamlArray -}}
-{{- if eq $key "agent" -}}
+{{- if and (ne $key "agent") (not (include "nexus.controlPlaneEnabled" $root)) -}}
+{{- /* A worker-pool release creates only the agents' accounts. */ -}}
+{{- else if eq $key "agent" -}}
 {{- range $a := $root.Values.agents -}}
 {{- $sa := include "nexus.saFor" (list $root "agent" $a.serviceAccount) | fromYaml -}}
 {{- if and $sa.create (not (hasKey $sa.annotations $annKey)) -}}
@@ -126,9 +128,50 @@ automountServiceAccountToken: {{ .automount }}
 {{- (($a.gpu | default dict).resourceName) | default $root.Values.agentDefaults.gpuResourceName | default "nvidia.com/gpu" -}}
 {{- end -}}
 
+{{/*
+An agent's executors, normalized: the comma-separated agents[].executors
+(default subprocess), trimmed and de-duplicated in order. The agent builds and
+advertises exactly these (NEXUS_EXECUTORS, docs/IMAGES.md §4.3). args: agent.
+*/}}
+{{- define "nexus.agentExecutors" -}}
+{{- $out := list -}}
+{{- range splitList "," (.executors | default "subprocess") -}}
+{{- $e := trim . -}}
+{{- if and $e (not (has $e $out)) }}{{ $out = append $out $e }}{{ end -}}
+{{- end -}}
+{{- join "," $out -}}
+{{- end -}}
+
+{{/*
+The executor that runs an agent's tasks naming none (NEXUS_DEFAULT_EXECUTOR):
+agents[].defaultExecutor, else the first of its executors. args: agent.
+*/}}
+{{- define "nexus.agentDefaultExecutor" -}}
+{{- .defaultExecutor | default (first (splitList "," (include "nexus.agentExecutors" .))) -}}
+{{- end -}}
+
+{{/*
+Refuse executors the agent could not honour. The agent fails at startup when
+an executor in NEXUS_EXECUTORS cannot be built, and docker never can be in a
+chart pod: `docker info` needs a daemon socket, which the chart does not mount
+and a Pod Security restricted pod cannot. The default must be one of the
+executors: a worker never runs a task on an executor it does not advertise.
+args: agent.
+*/}}
+{{- define "nexus.agentExecutorsRequired" -}}
+{{- $execs := splitList "," (include "nexus.agentExecutors" .) -}}
+{{- if has "docker" $execs -}}
+{{- fail (printf "agents[%s].executors includes docker, which needs a Docker daemon socket in the agent pod; the chart mounts none (a Pod Security restricted pod cannot), so the agent would refuse to start. Use kubernetes (each attempt a Job, docs/OPERATIONS.md §13) or subprocess" .name) -}}
+{{- end -}}
+{{- $def := include "nexus.agentDefaultExecutor" . -}}
+{{- if not (has $def $execs) -}}
+{{- fail (printf "agents[%s].defaultExecutor %s is not one of its executors (%s): a worker runs a task that names no executor on its default, so the default must be an executor it advertises" .name $def (join "," $execs)) -}}
+{{- end -}}
+{{- end -}}
+
 {{/* "true" when an agent entry runs the kubernetes executor. args: agent. */}}
 {{- define "nexus.agentUsesKubernetes" -}}
-{{- if has "kubernetes" (splitList "," (.executors | default "subprocess" | nospace)) }}true{{ end -}}
+{{- if has "kubernetes" (splitList "," (include "nexus.agentExecutors" .)) }}true{{ end -}}
 {{- end -}}
 
 {{/*

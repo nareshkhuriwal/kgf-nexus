@@ -37,6 +37,8 @@ import (
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances/identity"
 	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/mail"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
@@ -219,6 +221,14 @@ func run() error {
 		return err
 	}
 	api = api.WithKGF(mode, kgfAuth)
+	// Who sees the control plane's pods and nodes in the live component view
+	// (ADR-0037 §4). A malformed value is fatal: guessing would either
+	// publish the topology to tenants or hide it from the operator.
+	topology, err := rest.ParseComponentTopology(os.Getenv("NEXUS_COMPONENT_TOPOLOGY"))
+	if err != nil {
+		return err
+	}
+	api = api.WithComponentTopology(topology)
 
 	// Audit export (ADR-0025): sink secrets are sealed under
 	// NEXUS_AUDIT_SINK_KEY(_FILE); without it sinks are refused (503) but
@@ -343,6 +353,16 @@ func run() error {
 		wcfg.WorkloadAPI = workergrpc.DefaultWorkloadAPI()
 		wcfg.WorkloadAPI.MaxCheckpointBytes = cfg.MaxCheckpointBytes
 	}
+	// Attempt placement (ADR-0037) is offered only when its table exists, so
+	// a gateway rolled out before migration 0042 tells agents not to report
+	// rather than failing every report (ADR-0011 rule 5).
+	if wcfg.PlacementReporting, err = store.GatewayAttemptRuntimePresent(ctx, db); err != nil {
+		return err
+	}
+	if !wcfg.PlacementReporting {
+		log.Warn("attempt placement reporting is off: migration 0042 is not applied",
+			"remedy", "apply it and restart the gateway; task runners show no pod or node until then")
+	}
 	nexusv1.RegisterWorkerServiceServer(workerSrv,
 		workergrpc.NewServer(db, rmClient, schedClient, wcfg, log))
 
@@ -359,6 +379,29 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen on %s for metrics: %w", cfg.MetricsAddr, err)
 	}
+
+	// The service-instance registry (ADR-0037): this replica's row, written
+	// every 10 s with the answer its /readyz gives (asked of the health
+	// handler in-process), and marked not ready as soon as shutdown begins.
+	// Deferred after the pool's Close, so it runs before it.
+	readyMux := http.NewServeMux()
+	hc.Routes(readyMux)
+	hb, err := instances.New(pool, instances.Config{
+		Component: instances.APIGateway,
+		Version:   version,
+		Runtime:   identity.FromEnv(nil),
+		Pool:      pool,
+		Ready:     instances.ProbeHandler(readyMux, "/readyz"),
+		Detail: func() map[string]any {
+			// Why task runners might show no pod or node (OPERATIONS §31).
+			return map[string]any{"placement_reporting": wcfg.PlacementReporting}
+		},
+	}, reg, log)
+	if err != nil {
+		return err
+	}
+	stopHeartbeat := instances.Start(ctx, hb)
+	defer stopHeartbeat()
 
 	// The sweeper derives from the same shutdown context as the listeners, so the
 	// signal that drains them ends it too and no goroutine outlives run().
@@ -413,6 +456,7 @@ func run() error {
 	// anything is torn down. Shutting down while still advertising readiness is what
 	// makes deploys drop connections.
 	hc.BeginDraining()
+	stopHeartbeat()
 	time.Sleep(cfg.DrainDelay)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
@@ -764,30 +808,42 @@ func kgfConfig(ctx context.Context, db store.GWDB, log *slog.Logger) (rest.AuthM
 	}
 	var keys kgfctx.KeySource
 	var ready health.Check
+	// Key sources are MERGED (ADR-0034): static keys plus one key document per
+	// URL in the comma-separated NEXUS_KGF_CONTEXT_KEYS_URL -- kgf-gateway's
+	// and each provider front's /.well-known/kgf-context.json.
 	static, url := env("NEXUS_KGF_CONTEXT_PUBLIC_KEYS", ""), env("NEXUS_KGF_CONTEXT_KEYS_URL", "")
-	switch {
-	case static != "" && url != "":
-		return "", nil, nil, nil, errors.New("set NEXUS_KGF_CONTEXT_PUBLIC_KEYS or NEXUS_KGF_CONTEXT_KEYS_URL, not both")
-	case static != "":
+	urls := kgfctx.ParseKeyURLs(url)
+	var sources kgfctx.MultiKeys
+	if static != "" {
 		sk, err := kgfctx.ParseStaticKeys(static)
 		if err != nil || len(sk) == 0 {
 			return "", nil, nil, nil, fmt.Errorf("NEXUS_KGF_CONTEXT_PUBLIC_KEYS: %v", err)
 		}
-		keys = sk
-	case url != "":
-		rk := kgfctx.NewRemoteKeys(url, &http.Client{Timeout: 5 * time.Second}, log)
-		rk.Refresh = time.Duration(envInt("NEXUS_KGF_CONTEXT_KEYS_REFRESH_SEC", 300)) * time.Second
-		keys, ready = rk, rk.Ready
-		if err := rk.Ready(ctx); err != nil {
-			// Not fatal: KGF's gateway may start after Nexus. /readyz reports it
-			// in kgf/both mode.
-			log.Warn("KGF context keys are not available yet; KGF contexts are refused until they are", "url", url, "error", err)
+		sources = append(sources, sk)
+	}
+	for _, u := range urls {
+		if !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://") {
+			return "", nil, nil, nil, fmt.Errorf("NEXUS_KGF_CONTEXT_KEYS_URL: %q is not an http(s) URL", u)
 		}
-	case mode == rest.AuthStandalone:
+		rk := kgfctx.NewRemoteKeys(u, &http.Client{Timeout: 5 * time.Second}, log)
+		rk.Refresh = time.Duration(envInt("NEXUS_KGF_CONTEXT_KEYS_REFRESH_SEC", 300)) * time.Second
+		if err := rk.Ready(ctx); err != nil {
+			// Not fatal: KGF's gateway and fronts may start after Nexus.
+			// /readyz reports it in kgf/both mode.
+			log.Warn("KGF context keys are not available yet; contexts they sign are refused until they are", "url", u, "error", err)
+		}
+		sources = append(sources, rk)
+	}
+	switch {
+	case len(sources) == 0 && mode == rest.AuthStandalone:
 		log.Info("authentication mode: standalone (Nexus credentials only; no KGF attribution keys configured)")
 		return mode, nil, nil, nil, nil
-	default:
+	case len(sources) == 0:
 		return "", nil, nil, nil, errors.New("NEXUS_AUTH_MODE=" + string(mode) + " needs NEXUS_KGF_CONTEXT_KEYS_URL or NEXUS_KGF_CONTEXT_PUBLIC_KEYS")
+	case len(sources) == 1 && static != "":
+		keys = sources[0]
+	default:
+		keys, ready = sources, sources.Ready
 	}
 	var issuers []string
 	for _, i := range strings.Split(env("NEXUS_KGF_USER_ISSUERS", "kgf-gateway"), ",") {
@@ -795,17 +851,46 @@ func kgfConfig(ctx context.Context, db store.GWDB, log *slog.Logger) (rest.AuthM
 			issuers = append(issuers, i)
 		}
 	}
+	// Provider fronts (ADR-0034): the only issuers that may name a workspace
+	// (`res`). An issuer may not be both a user issuer and a front: a user
+	// issuer's contexts must never carry `res`, and a front's must.
+	var fronts []string
+	for _, i := range strings.Split(env("NEXUS_KGF_FRONT_ISSUERS", ""), ",") {
+		if i = strings.TrimSpace(i); i != "" {
+			for _, u := range issuers {
+				if u == i {
+					return "", nil, nil, nil, fmt.Errorf("NEXUS_KGF_FRONT_ISSUERS: %q is also in NEXUS_KGF_USER_ISSUERS; an issuer is one or the other", i)
+				}
+			}
+			fronts = append(fronts, i)
+		}
+	}
+	// NEXUS_KGF_AUDIENCE: one audience, or a comma-separated list when the
+	// gateway's contexts ("kgf-nexus") and the KGF.Nexus front's
+	// ("kgf-nexus-engine") both reach this deployment.
+	var audiences []string
+	for _, a := range strings.Split(env("NEXUS_KGF_AUDIENCE", "kgf-nexus"), ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			if a == kgfctx.AnyAudience {
+				return "", nil, nil, nil, errors.New("NEXUS_KGF_AUDIENCE: \"*\" is not an audience; see NEXUS_KGF_ACCEPT_ANY_AUDIENCE")
+			}
+			audiences = append(audiences, a)
+		}
+	}
+	if len(audiences) == 0 {
+		audiences = []string{"kgf-nexus"}
+	}
 	verifier := kgfctx.Verifier{
-		Keys: keys, Audience: env("NEXUS_KGF_AUDIENCE", "kgf-nexus"),
+		Keys: keys, Audience: audiences[0], Audiences: audiences[1:],
 		AcceptAnyAudience: envBool("NEXUS_KGF_ACCEPT_ANY_AUDIENCE", false),
-		UserIssuers:       issuers, Seen: kgfctx.NewMemoryReplayGuard(),
+		UserIssuers:       issuers, FrontIssuers: fronts, Seen: kgfctx.NewMemoryReplayGuard(),
 	}
 	if verifier.AcceptAnyAudience {
 		log.Warn("NEXUS_KGF_ACCEPT_ANY_AUDIENCE=true: contexts minted for every KGF service are accepted here")
 	}
 	if mode == rest.AuthStandalone {
 		log.Info("authentication mode: standalone; X-KGF-Context is verified for audit attribution only",
-			"audience", verifier.Audience, "user_issuers", issuers, "keys_url", url, "static_keys", static != "")
+			"audiences", audiences, "user_issuers", issuers, "front_issuers", fronts, "keys_urls", urls, "static_keys", static != "")
 		return mode, nil, &verifier, nil, nil
 	}
 	services, err := authn.ParseServicePrincipals(env("NEXUS_KGF_SERVICE_PRINCIPALS", ""))
@@ -815,10 +900,12 @@ func kgfConfig(ctx context.Context, db store.GWDB, log *slog.Logger) (rest.AuthM
 	k := &authn.KGFAuthenticator{
 		Verifier:          verifier,
 		Provisioner:       authn.StoreProvisioner{DB: db},
+		Workspaces:        authn.StoreProvisioner{DB: db},
 		ServicePrincipals: services,
 	}
-	log.Info("authentication mode: KGF context", "mode", string(mode), "audience", k.Verifier.Audience,
-		"user_issuers", issuers, "keys_url", url, "static_keys", static != "", "service_principals", len(services))
+	log.Info("authentication mode: KGF context", "mode", string(mode), "audiences", audiences,
+		"user_issuers", issuers, "front_issuers", fronts, "keys_urls", urls, "static_keys", static != "",
+		"service_principals", len(services))
 	return mode, k, nil, ready, nil
 }
 

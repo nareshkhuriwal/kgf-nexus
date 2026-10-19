@@ -32,6 +32,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/worker"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances/identity"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
 	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
@@ -75,6 +76,14 @@ func main() {
 		// cannot get stays PENDING with a structured reason.
 		customFlag = flag.String("custom-resources", envOr("NEXUS_CUSTOM_RESOURCES", ""),
 			"comma-separated k=n countable custom capacity, e.g. license_token=2")
+		// The executors this agent builds and advertises (ADR-0007). Unset
+		// discovers them, as before the list existed: subprocess always,
+		// docker and kubernetes when usable. A list is exact: each named
+		// executor must be buildable or the agent stops with the reason.
+		executorsFlag = flag.String("executors", envOr("NEXUS_EXECUTORS", ""),
+			"comma-separated executors to build and advertise: subprocess, docker, kubernetes (k8s); unset discovers them")
+		defaultExecutor = flag.String("default-executor", envOr("NEXUS_DEFAULT_EXECUTOR", ""),
+			"executor for a task that names none; must be in --executors (default: subprocess when allowed, else the first)")
 		walDir = flag.String("wal-dir", envOr("NEXUS_WAL_DIR", "/var/lib/nexus-agent/wal"),
 			"local write-ahead log directory; MUST be on durable storage")
 		workDir = flag.String("work-dir", envOr("NEXUS_WORK_DIR", ""),
@@ -107,6 +116,20 @@ func main() {
 
 	log := newLogger(*logLevel, *logFormat)
 	slog.SetDefault(log)
+
+	// Executor selection is validated before anything else starts: a typo in
+	// NEXUS_EXECUTORS must stop the agent, not shrink what it advertises.
+	execSel, err := worker.ResolveExecutors(*executorsFlag, *defaultExecutor)
+	if err != nil {
+		log.Error("invalid executor configuration", "error", err)
+		os.Exit(2)
+	}
+	if execSel.Allow == nil {
+		log.Info("executors: discovering (NEXUS_EXECUTORS unset): subprocess always, docker and kubernetes when usable",
+			"default_executor", execSel.Default)
+	} else {
+		log.Info("executors: allow list", "executors", execSel.Allow, "default_executor", execSel.Default)
+	}
 
 	// SIGTERM is the deploy signal, so it must start a DRAIN, not a kill: an
 	// agent that dropped its tasks on SIGTERM would turn every routine deploy
@@ -189,9 +212,11 @@ func main() {
 	}
 
 	cfg := worker.Config{
-		Namespace: *namespace,
-		Queues:    splitCSV(*queues),
-		Labels:    parseLabels(*labelsFlag),
+		Namespace:       *namespace,
+		Queues:          splitCSV(*queues),
+		Labels:          parseLabels(*labelsFlag),
+		Executors:       execSel.Allow,
+		DefaultExecutor: execSel.Default,
 		Capacity: &nexusv1.ResourceVector{
 			CpuMillis:      *cpuMillis,
 			MemoryBytes:    *memoryBytes,
@@ -220,6 +245,10 @@ func main() {
 		Secrets:                  secretResolver,
 		SubprocessEnvPassthrough: passthrough,
 		TaskAPIRoot:              *taskAPIRoot,
+		// Where this agent runs, reported as the placement of its subprocess
+		// and docker attempts (ADR-0037). The chart sets these from the
+		// downward API; elsewhere they are empty.
+		Runtime: identity.FromEnv(nil),
 	}
 
 	// The kubernetes executor is opt-in: it exists only when NEXUS_K8S_NAMESPACE
@@ -232,11 +261,31 @@ func main() {
 		log.Error("invalid kubernetes executor configuration", "error", err)
 		os.Exit(1)
 	}
+	kListed := execSel.Allow != nil && execSel.Allows(executor.KubernetesKind)
+	switch {
+	case kListed && !kEnabled:
+		log.Error("invalid executor configuration", "error",
+			"NEXUS_EXECUTORS names kubernetes, but NEXUS_K8S_NAMESPACE is unset: set it (OPERATIONS §13), or remove kubernetes from NEXUS_EXECUTORS")
+		os.Exit(2)
+	case kEnabled && !execSel.Allows(executor.KubernetesKind):
+		// Configured, but excluded by the allow list: not built, so no
+		// informer runs and the worker does not claim the task namespace.
+		log.Info("NEXUS_K8S_NAMESPACE is set but NEXUS_EXECUTORS excludes kubernetes; the kubernetes executor is not built",
+			"executors", execSel.Allow)
+		kEnabled = false
+	}
 	if kEnabled {
 		client, cerr := executor.NewKubernetesClient(kcfg)
+		if cerr != nil && kListed {
+			// Named in the allow list: an agent that cannot reach its
+			// cluster must not start and advertise nothing it can run.
+			log.Error("could not build the kubernetes client for the kubernetes executor NEXUS_EXECUTORS names",
+				"error", cerr)
+			os.Exit(1)
+		}
 		if cerr != nil {
-			// Not fatal: the agent still serves subprocess/docker work, and
-			// buildExecutors will simply not advertise kubernetes.
+			// Discovery: not fatal. The agent still serves subprocess/docker
+			// work, and buildExecutors will simply not advertise kubernetes.
 			log.Error("could not build the kubernetes client; the kubernetes executor is disabled", "error", cerr)
 		}
 		ke := executor.NewKubernetesExecutor(kcfg, client, *workDir, log)

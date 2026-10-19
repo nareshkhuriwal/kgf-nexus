@@ -88,7 +88,7 @@ variable "cpu_pool" {
 }
 
 variable "gpu_pool" {
-  description = "Optional GPU pool (tainted). See F115: the chart cannot yet place agents on it."
+  description = "Optional GPU pool, tainted nvidia.com/gpu=present:NoSchedule. With it, the NVIDIA device plugin is installed on the pool and gpu_agent is placed there."
   type = object({
     enabled   = bool
     vm_size   = string

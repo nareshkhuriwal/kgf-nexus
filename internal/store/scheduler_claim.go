@@ -500,7 +500,7 @@ func (s *SchedulerStore) placeCandidate(
 		// §5.3 step 3: record WHY and leave it PENDING. Emphatically not a
 		// failure — the cluster is merely busy, and failing the attempt here
 		// would burn its retry budget on a capacity problem.
-		reason := domain.ShortfallReason(short)
+		reason := shortfallReason(short)
 		if reason == "" {
 			reason = "waiting_for_worker: no ACTIVE worker matches queue/labels/executor"
 		}
@@ -569,6 +569,26 @@ func (s *SchedulerStore) placeCandidate(
 	return ClaimReport{Outcome: ClaimDispatched, Attempt: cand, Dispatch: dispatch}, nil
 }
 
+// shortfallUnnamedExecutor is the shortfall of a worker that matched a task
+// naming no executor in every other respect, but whose default executor
+// cannot run it (domain.UnnamedRefusal is the Detail). It is the weakest
+// explanation: any other shortfall on another worker replaces it, because that
+// one is closer to placing the task.
+const shortfallUnnamedExecutor = "default_executor"
+
+// shortfallReason is domain.ShortfallReason, except that a task blocked only
+// by its workers' default executors is waiting for a WORKER, not for
+// resources, and says how to fix it.
+func shortfallReason(short []domain.Shortfall) string {
+	if len(short) == 1 && short[0].Dim == shortfallUnnamedExecutor {
+		return fmt.Sprintf("waiting_for_worker: the task names no runtime.executor, so it runs on a worker's "+
+			"default executor (label %s), and the matching workers' default cannot run it: %s; "+
+			"set runtime.executor (e.g. subprocess), or give the task what its default needs",
+			domain.LabelDefaultExecutor, short[0].Detail)
+	}
+	return domain.ShortfallReason(short)
+}
+
 // selectWorker implements §5.3 step 2. Fit and best-fit scoring are evaluated
 // in Go rather than SQL because the arithmetic (GPU kind matching, per-device
 // VRAM floors, the custom map, the fragmentation weighting) lives in
@@ -596,8 +616,14 @@ func (s *SchedulerStore) selectWorker(
 	//
 	// The placement facts ride on the same rows (ADR-0031): effective labels
 	// for eligibility, cached artifacts and locality for the score.
+	//
+	// A task that names an executor needs a worker advertising it. One that
+	// names none runs on the worker's default (nexus.io/default-executor, read
+	// from the worker's OWN labels, outside placementCols so it is there
+	// even before migration 0035), which the Go loop checks can run it.
 	q := `
-SELECT w.id, w.hostname, w.capacity, w.committed, ` + s.placementCols() + `
+SELECT w.id, w.hostname, w.capacity, w.committed,
+       COALESCE(w.labels ->> '` + domain.LabelDefaultExecutor + `', ''), ` + s.placementCols() + `
   FROM workers w` + s.placementJoin() + `
  WHERE w.state = 'ACTIVE'
    AND $1 = ANY(w.queues)
@@ -621,6 +647,9 @@ SELECT w.id, w.hostname, w.capacity, w.committed, ` + s.placementCols() + `
 	type scanned struct {
 		w     WorkerCandidate
 		facts workerFacts
+		// defaultExecutor is the worker's nexus.io/default-executor label,
+		// "" for a worker that predates it.
+		defaultExecutor string
 	}
 	var locked []scanned
 	for rows.Next() {
@@ -628,7 +657,7 @@ SELECT w.id, w.hostname, w.capacity, w.committed, ` + s.placementCols() + `
 		var capJSON, comJSON, labelsJSON, clLabels, headroom []byte
 		var cached []string
 		var at *time.Time
-		if err := rows.Scan(&sc.w.ID, &sc.w.Hostname, &capJSON, &comJSON,
+		if err := rows.Scan(&sc.w.ID, &sc.w.Hostname, &capJSON, &comJSON, &sc.defaultExecutor,
 			&labelsJSON, &cached, &clLabels, &headroom, &at); err != nil {
 			rows.Close()
 			return nil, nil, fmt.Errorf("scan worker row: %w", err)
@@ -656,16 +685,29 @@ SELECT w.id, w.hostname, w.capacity, w.committed, ` + s.placementCols() + `
 	cfg := s.scoreConfig()
 	for i := range locked {
 		w, facts := locked[i].w, locked[i].facts
+		exec := domain.EffectiveExecutor(cand.Spec.Executor,
+			map[string]string{domain.LabelDefaultExecutor: locked[i].defaultExecutor})
+		if cand.Spec.Executor == "" {
+			// The task names no executor, so it would run on this worker's
+			// default, which may be unable to (a container default and no
+			// image, say).
+			if why := domain.UnnamedRefusal(exec, cand.Spec.Unnamed()); why != "" {
+				if bestShort == nil {
+					bestShort = []domain.Shortfall{{Dim: shortfallUnnamedExecutor, Detail: why}}
+				}
+				continue
+			}
+		}
 		if ok, why := domain.Eligible(facts.Labels, cand.Spec.Placement); !ok {
-			if bestShort == nil {
+			if bestShort == nil || bestShort[0].Dim == shortfallUnnamedExecutor {
 				bestShort = []domain.Shortfall{{Dim: "placement", Detail: why}}
 			}
 			continue
 		}
-		if reason, err := s.headroomBlocks(ctx, tx, now, w.ID, &facts, cand); err != nil {
+		if reason, err := s.headroomBlocks(ctx, tx, now, w.ID, &facts, cand, exec); err != nil {
 			return nil, nil, err
 		} else if reason != "" {
-			if bestShort == nil {
+			if bestShort == nil || bestShort[0].Dim == shortfallUnnamedExecutor {
 				bestShort = []domain.Shortfall{{Dim: "cluster_quota", Detail: reason}}
 			}
 			continue
@@ -674,7 +716,7 @@ SELECT w.id, w.hostname, w.capacity, w.committed, ` + s.placementCols() + `
 			// Keep the shortfall from the CLOSEST worker (fewest blocking
 			// dimensions) so pending_reason names the bottleneck an operator can
 			// actually fix, not an arbitrary worker's unrelated limits.
-			if bestShort == nil || len(short) < len(bestShort) {
+			if bestShort == nil || bestShort[0].Dim == shortfallUnnamedExecutor || len(short) < len(bestShort) {
 				bestShort = short
 			}
 			continue

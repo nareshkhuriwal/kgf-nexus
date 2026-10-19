@@ -23,6 +23,12 @@ database logins (F115, OPERATIONS §20.12) and the KGF-compatible audit export
   subscription, resource group), as ADR-0024 implements. This replaces the
   per-subscription proposal this document first made; the reasoning is in §6.
 
+**Updated for KGF.Nexus workspaces (2026-09-26, ADR-0034).** KGF adds a
+provisioned resource type `KGF.Nexus/workspaces`, several per resource group,
+each its own Nexus namespace, provisioned explicitly by the KGF.Nexus provider
+front and opened in the Nexus workflow engine UI mounted in the KGF portal.
+The per-resource-group mapping of §6 stays, unchanged, beside it. The contract is [§15](#15-kgfnexus-workspaces-and-the-engine-ui).
+
 Nexus is **not a separate hosted product**. It ships as one service of KGF
 Cloud, in the `KGF.Nexus` provider namespace. KGF Cloud owns everything around
 the engine:
@@ -438,6 +444,15 @@ once KGF owns ingest the sink is the adapter to it.
 
 ## 10. UI: a KGF portal extension
 
+> **Updated (ADR-0034).** The UI for one workspace (§15) is the Nexus
+> workflow engine UI **mounted in the KGF portal** as a federated extension
+> below KGF's own header, calling Nexus through KGF with the workspace's
+> context. Its exact
+> contract -- routes, the API base path, what is hidden -- is **to be
+> specified** with the extension, which lives in the kgf-cloud repository
+> (`web/extensions/nexus`, its `src/kgf` layer). This repository's `ui/` is
+> unchanged by ADR-0034.
+
 The Nexus console is repackaged as the `kgf_ext_nexus` module-federation
 remote. It exposes `./routes`, `./nav`, `./landing`, `./createForm` and
 `./resourceDetail` (kgf-cloud: docs/portal.md). It is served same-origin under
@@ -595,3 +610,152 @@ in order.
 | OPEN-8 | KGF audit ingest: push route or exporter pull | a KGF-wide decision |
 | OPEN-9 | Tiering: any Nexus capability sold as a separate KGF edition (for example multi-cluster placement or GPU packing) is a **KGF product question**. This repository stays Apache-2.0 (LICENSE). Whether the KGF-mode integration code lives here or only in kgf-cloud is part of that decision. | KGF product decision; nothing assumed here |
 | OPEN-10 | The `feat/*` branches that duplicate KGF (SSO, cost management, audit sinks) | **decided** (owner, 2026-09-26): SSO withdrawn (ADR-0024 is context auth); cost management held out, moving to kgf-billing; audit export and sinks kept as KGF-compatible export (decision (a)) |
+
+---
+
+## 15. KGF.Nexus workspaces and the engine UI
+
+Recorded as [ADR-0034](adr/0034-kgf-nexus-workspaces.md). Implemented on the
+Nexus side (`internal/kgfctx/resource.go`, `services/api-gateway/authn/kgf.go`,
+`services/api-gateway/rest/kgf_workspace.go`, migration 0040); kgf-cloud builds
+the front, the provisioning workflow and the portal extension against it.
+
+### 15.1 What a workspace is
+
+Like an Azure Data Factory: the customer creates
+`/subscriptions/{sub}/resourceGroups/{rg}/providers/KGF.Nexus/workspaces/{ws}`
+in KGF, KGF provisions it, and the portal opens the Nexus workflow engine UI,
+mounted in the KGF portal, for that one workspace. Sign-in, users and
+permissions are KGF's; the engine UI has no login of its own. KGF passes
+requests through at `…/KGF.Nexus/workspaces/{ws}/engine/v1/…`; the engine
+receives them as ordinary `/v1/…` requests with the workspace's context.
+Each workspace is its own Nexus tenant namespace, so several workspaces in one
+resource group are isolated from each other and from the resource group's v1
+namespace (§6).
+
+### 15.2 The `res` claim
+
+An optional claim beside tenantctx's: `res`, the workspace's ARM-style id.
+
+- Well-formed: exactly `/subscriptions/{sub}/resourceGroups/{rg}/providers/KGF.Nexus/workspaces/{ws}`;
+  the fixed segments and the provider are compared case-insensitively; `{ws}`
+  matches `^[a-z][a-z0-9-]{2,47}$` as sent; `{sub}` and `{rg}` are 1-128
+  printable characters without `/ ? # %` or spaces; at most 512 bytes.
+- Consistent: its `{sub}` and `{rg}` equal the token's `sub` and `rg` claims
+  (case-insensitively).
+- Normalised to lower case, whole, for the namespace and for storage.
+
+A malformed or inconsistent `res` is `403 kgf_resource_invalid`.
+
+### 15.3 Who may send `res`
+
+| Issuer | `res` | Accepted as |
+| --- | --- | --- |
+| a user issuer (`NEXUS_KGF_USER_ISSUERS`, `kgf-gateway`) | absent | unchanged v1 behaviour (§6, ADR-0024) |
+| a user issuer | present | **refused**, `403 kgf_resource_not_allowed` |
+| a front (`NEXUS_KGF_FRONT_ISSUERS`, `kgf-nexus`), `role=service`, `obo` + `obo_role` | present | **delegated user**: the `obo` person with `obo_role` (operator/viewer), mapped through the same KGF role → Nexus permission table (ADR-0024 §4) as a gateway context with that role, in the workspace's namespace |
+| a front, `role=service`, no `obo` | present | **provisioner**: may call only `PUT`/`DELETE /v1/kgf/workspace`; every other route `403 kgf_provisioner_restricted` |
+| a front | absent | **refused**, `403 kgf_resource_required` |
+| a front, `role` operator or viewer | any | **refused**, `403 kgf_front_context_invalid` |
+| any other issuer | present | **refused**, `403 kgf_resource_not_allowed` |
+
+These checks run only after the signature, lifetime and audience verified, so
+the distinct codes are not an oracle. An issuer may not be both a user issuer
+and a front (startup fails).
+
+**No lazy provisioning.** A delegated context for a workspace that is not
+provisioned and active is `404 workspace_not_provisioned`, every time,
+immediately after a DELETE, on every replica (the state is read per request,
+one indexed lookup; it is never cached).
+
+**Audit.** A delegated request's rows record the person (`actor_label`,
+`kgf_on_behalf_of`, `detail.kgf.principal`) and the front
+(`kgf_principal`, `detail.kgf.via`), with `detail.kgf.resource_id`. The
+provisioner's rows record the front as the actor.
+
+### 15.4 Namespace (v2)
+
+```
+namespace = "kgf-" + hex(sha256("kgf-nexus/v2" 0x00 org 0x00 lower(res)))[:32]
+```
+
+`org` is the context's organization as sent (KGF organization ids are
+lower-case by KGF's own pattern). Golden value: org `acme`, res
+`/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/RG-Data/providers/KGF.Nexus/workspaces/etl-prod`
+→ `kgf-3fd1a3220e41dcf10e6ff3d0fc2172e7` (pinned in
+`internal/store/gateway_kgf_workspace_test.go`). The mapping is stored in
+`kgf_workspaces` (migration 0040; one row per namespace, `UNIQUE
+(organization, resource_id)`, `state` active or deleted). A namespace that
+exists but was not provisioned as that workspace is refused
+(`409 namespace_conflict`), never adopted, as in v1.
+
+### 15.5 Provisioning routes
+
+Both require the provisioner context (15.3); any other caller, including a
+delegated person and a Nexus admin API key, gets `403 kgf_provisioner_required`.
+The workspace is always the context's `res`; there is no body.
+
+| Request | Status | Body |
+| --- | --- | --- |
+| `PUT /v1/kgf/workspace`, workspace absent | `201` | `{"namespace":"kgf-…","resource_id":"/subscriptions/…/workspaces/etl-prod","state":"active"}` (`resource_id` lower-cased) |
+| `PUT`, already active | `200` | same |
+| `PUT`, deleted before | `409` | `{"error":"workspace_deleted",…}` |
+| `PUT`, derived namespace taken by something else | `409` | `{"error":"namespace_conflict",…}` |
+| `DELETE /v1/kgf/workspace` (active, already deleted, or never provisioned) | `200` | `{"state":"deleted"}` |
+| either, database or audit store unavailable | `503` | `unavailable` / `audit_unavailable` |
+
+- **PUT** creates the `tenants` row and the `kgf_workspaces` row in one
+  transaction together with its audit row (`kgf.workspace.provision`, a
+  security grant: it fails closed). Concurrent PUTs are safe: exactly one
+  creates (201), the rest answer 200.
+- **DELETE** marks the workspace deleted and, in the same transaction, revokes
+  the namespace's API keys and scoped tokens (including worker and
+  service-account tokens) and disables its service accounts. Its audit row
+  (`kgf.workspace.delete`, a revocation) is written after and never blocks it.
+  **Retained:** the tenant and everything it owns -- specs, runs, attempts,
+  logs, results, usage ledger, audit chain -- under Nexus's ordinary
+  retention. **Not done:** in-flight runs are not cancelled and schedules,
+  triggers and sensors are not disabled (other services own those rows); with
+  every credential revoked, no agent of the namespace can claim its work.
+- **Re-creating a deleted workspace is refused** (`409 workspace_deleted`).
+  The namespace is derived from (org, res), so the only way to "re-create" it
+  would be to reactivate the deleted namespace with its history -- which the
+  contract forbids -- and a fresh namespace would need a generation in the
+  derivation, which the v2 formula does not have. KGF must create the new
+  workspace under another name (or a future v3 mapping adds a generation).
+
+### 15.6 Configuration
+
+| Variable | Meaning |
+| --- | --- |
+| `NEXUS_KGF_FRONT_ISSUERS` | Front issuers, comma separated; KGF sets `kgf-nexus`. Empty: workspace contexts are refused. |
+| `NEXUS_KGF_CONTEXT_KEYS_URL` | Now a comma-separated list: kgf-gateway's and the front's `/.well-known/kgf-context.json` (`{"keys":[{"kid","alg":"EdDSA","key"}]}`, unchanged format). Merged with `NEXUS_KGF_CONTEXT_PUBLIC_KEYS`. |
+| `NEXUS_KGF_AUDIENCE` | Default unchanged (`kgf-nexus`); KGF sets `kgf-nexus-engine`. A comma-separated list is accepted, so `kgf-nexus,kgf-nexus-engine` serves gateway and KGF.Nexus front contexts together. |
+
+Operations detail: OPERATIONS §24.11.
+
+### 15.7 Security model
+
+- **Only fronts may assert `res`**, and a front can only assert it: a front
+  cannot mint a plain human context, and a user issuer cannot name a
+  workspace. A front's delegated context acts with exactly the role KGF
+  resolved for the person; it cannot exceed Contributor, and `users.*` and
+  `audit.manage` stay unmapped.
+- **Provisioning is service-only**: only the front's own context (no `obo`)
+  provisions or deletes, and it can do nothing else -- not even `whoami`.
+- **No lazy provisioning for workspaces**: a workspace exists only after the
+  front's PUT, and stops at its DELETE.
+- **Residual risk: keys are not bound to issuers.** `iss` is a signed claim,
+  but any trusted key can sign any `iss`. A compromised front key can
+  therefore mint gateway-issuer human contexts too, exactly as a compromised
+  gateway key can mint front contexts. The issuer rules separate the shapes,
+  not the keys. Binding each key source to the issuers it may sign for is the
+  recommended follow-up (it needs a per-URL issuer in the configuration).
+- The replay guard stays per replica (ADR-0024).
+
+### 15.8 The engine UI in the KGF portal
+
+Mounted in the KGF portal as a federated extension (KGF's header stays; the
+Nexus sidebar and pages render below it), calling Nexus through KGF with the
+delegated workspace context; to be specified with that extension (§10). No
+change to this repository's `ui/` is part of ADR-0034.

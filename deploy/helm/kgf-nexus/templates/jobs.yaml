@@ -6,9 +6,12 @@ Schema migration and bootstrap. Plain Jobs rather than Helm hooks on purpose: a
 post-install hook would run only after `helm --wait` saw every Deployment
 ready, but the services wait for the schema (wait-for-schema), so the two would
 wait on each other forever. Named per image tag: a new release runs them again;
-re-applying the same release changes nothing.
+re-applying the same release changes nothing. Not in a worker-pool release: it
+never touches the database.
 */ -}}
+{{- if include "nexus.controlPlaneEnabled" . }}
 {{- $sa := include "nexus.saFor" (list . "jobs" nil) | fromYaml }}
+{{- $registerWorker := include "nexus.registerWorkerKey" . }}
 ---
 apiVersion: batch/v1
 kind: Job
@@ -58,7 +61,9 @@ spec:
 # a log. This is the one credential path that bypasses the API, on purpose:
 # the agents need a key before anyone can authenticate a POST /tokens on a
 # fresh install. Later credentials, including rotated worker tokens (F114),
-# come from the API (docs/OPERATIONS.md §20.10).
+# come from the API (docs/OPERATIONS.md §20.10). bootstrap.registerWorkerKey
+# false leaves worker-api-key out: the agents then use scoped worker tokens
+# minted in the console (agentDefaults.workerApiKeySecretKey).
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -87,26 +92,51 @@ spec:
           args:
             - |
               set -eu
+              {{- if $registerWorker }}
               psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q \
                 -v ns="$NEXUS_NAMESPACE" -v wkey="$WORKER_API_KEY" -v akey="${ADMIN_API_KEY:-}" <<'SQL'
+              {{- else }}
+              # bootstrap.registerWorkerKey=false: no static worker key; the
+              # agents authenticate with scoped tokens minted in the console.
+              psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q \
+                -v ns="$NEXUS_NAMESPACE" -v akey="${ADMIN_API_KEY:-}" <<'SQL'
+              {{- end }}
               INSERT INTO tenants (namespace, name) VALUES (:'ns', :'ns')
                 ON CONFLICT (namespace) DO NOTHING;
+              {{- if $registerWorker }}
               INSERT INTO api_keys (namespace, name, key_hash, role)
                 VALUES (:'ns', 'bootstrap-worker', encode(sha256(convert_to(:'wkey', 'UTF8')), 'hex'), 'worker')
                 ON CONFLICT (key_hash) DO NOTHING;
+              {{- end }}
               INSERT INTO api_keys (namespace, name, key_hash, role)
                 SELECT :'ns', 'bootstrap-admin', encode(sha256(convert_to(:'akey', 'UTF8')), 'hex'), 'admin'
                  WHERE :'akey' <> ''
                 ON CONFLICT (key_hash) DO NOTHING;
               SQL
               echo "bootstrap: tenant and keys for namespace $NEXUS_NAMESPACE are in place"
+              {{- range $i, $w := .Values.workspaceWorkers }}
+              psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q \
+                -v ns={{ $w.namespace | quote }} -v wkey="$WORKSPACE_WORKER_KEY_{{ $i }}" <<'SQL'
+              INSERT INTO api_keys (namespace, name, key_hash, role)
+                SELECT :'ns', 'kgf-workspace-worker', encode(sha256(convert_to(:'wkey', 'UTF8')), 'hex'), 'worker'
+                 WHERE EXISTS (SELECT 1 FROM tenants WHERE namespace = :'ns')
+                ON CONFLICT (key_hash) DO NOTHING;
+              SQL
+              echo "bootstrap: worker key for workspace namespace {{ $w.namespace }} registered if it is provisioned"
+              {{- end }}
           env:
             {{- include "nexus.dbEnv" (list . "migrate") | nindent 12 }}
             - { name: NEXUS_NAMESPACE, value: {{ .Values.nexusNamespace | quote }} }
+            {{- if $registerWorker }}
             - name: WORKER_API_KEY
               valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: worker-api-key } }
+            {{- end }}
             - name: ADMIN_API_KEY
               valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: admin-api-key, optional: true } }
+            {{- range $i, $w := .Values.workspaceWorkers }}
+            - name: WORKSPACE_WORKER_KEY_{{ $i }}
+              valueFrom: { secretKeyRef: { name: {{ $.Values.existingSecret }}, key: {{ $w.secretKey | quote }} } }
+            {{- end }}
           resources:
             requests: { cpu: 10m, memory: 16Mi }
             limits: { memory: 64Mi }
@@ -182,4 +212,5 @@ spec:
       {{- with include "nexus.dbVolumes" . }}
       volumes: {{- . | indent 8 }}
       {{- end }}
+{{- end }}
 {{- end }}

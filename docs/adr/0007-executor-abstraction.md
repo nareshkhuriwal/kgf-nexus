@@ -102,3 +102,36 @@ After that, the agent reaps any remaining Jobs carrying its owner label.
 **Conformance.** The shared suite (`agent/internal/executor/conformance_test.go`; the ADR's `tests/conformance/` path predates it) has a `kubernetes` target and passes against a local Docker Desktop cluster. One subtest adapts rather than asserts identically: the no-orphan test checks that the Job and every pod of the attempt are gone, not that a grandchild pid is gone, because the pid lives on a node. The docker target makes the same substitution one level up.
 
 **Nested scheduling.** Pod phase changes, for example "Pending: Unschedulable: 0/3 nodes are available: insufficient nvidia.com/gpu", go to `ReportProgress`. This is the mitigation this ADR proposed. The scheduler stores the latest message and fraction per attempt (`attempt_progress`, migration 0024), fenced on the lease, and records a rate-limited `AttemptProgress` run event when the message changes. The REST attempt exposes it as `progress_message`, and the console shows it labelled as the executor's status, apart from the scheduler's own `pending_reason`. See CONTRACT-FINDINGS F96.
+
+## Addendum: an executor allow list and the default executor (2026-10-19)
+
+An agent built and advertised subprocess unconditionally, and a task that
+named no `runtime.executor` ran as a subprocess wherever it was claimed. On a
+kubernetes worker pool that ran every such task inside the agent's own pod,
+off the nodes the pool's task placement names. Two agent settings close it
+(docs/IMAGES.md §4.3):
+
+- `NEXUS_EXECUTORS` is an exact allow list. Unset keeps discovery as it was.
+  On a list, an executor that cannot be built stops the agent with the
+  reason: advertising less than the operator configured, silently, is the
+  failure this ADR's "advertise only what you verified" rule exists to
+  prevent, seen from the other side.
+- `NEXUS_DEFAULT_EXECUTOR` runs a task that names none: subprocess when
+  allowed, else the first allowed executor, always one the agent advertises.
+
+**The claim.** An empty executor used to mean "any worker", which was right
+while every worker's default was subprocess. It now means "the claiming
+worker's default". The agent advertises its default as the worker label
+`nexus.io/default-executor` rather than a new registration field: every
+reader of the worker row (both claim directions, the usage ledger, the
+console) sees it with no proto or schema change, an older control plane
+ignores it, and an older agent, which has no label, is read as subprocess,
+exactly what it does. The claim reads the worker's own label, never the
+cluster overlay. A default that runs container images (docker, kubernetes)
+can only run a task carrying `runtime.image`, and kubernetes refuses
+`runtime.stdout_output` (`domain.UnnamedRefusal`), so a kubernetes-only pool
+never claims an unnamed task that it would fail VALIDATION; such a task waits
+with a `waiting_for_worker` reason naming the fix. A task that names an executor is placed, as before, only on a worker
+advertising it. Cluster quota headroom and pull-path deferral use the
+effective executor, and the usage ledger meters an unnamed task under the
+worker's default.

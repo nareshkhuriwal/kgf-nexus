@@ -1,4 +1,26 @@
 KGF Nexus {{ .Values.image.tag }} -- release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}" ({{ if .Release.IsUpgrade }}upgrade, revision {{ .Release.Revision }}{{ else }}install{{ end }}).
+{{- if not (include "nexus.controlPlaneEnabled" .) }}
+{{- $addr := (.Values.agentDefaults.controlPlane | default dict).address | default "api-gateway:9091" }}
+
+WORKER-POOL release (components.controlPlane.enabled=false): agents only{{ if .Values.clusterController.enabled }}, plus the cluster controller{{ end }}.
+
+     Agents                    {{ range $i, $a := .Values.agents }}{{ if $i }}, {{ end }}{{ $a.name }} x{{ $a.replicas | default 1 }} (queues {{ $a.queues }}){{ end }}
+     Control plane             {{ $addr }}{{ if or .Values.tls.enabled (.Values.agentDefaults.controlPlane.tls | default dict).enabled }} over TLS{{ else }} (plaintext gRPC){{ end }}
+     NATS                      {{ if include "nexus.agentsUseNats" . }}{{ include "nexus.agentNatsURL" . }}, auth={{ .Values.nats.auth.mode }}, tls={{ .Values.nats.tls.enabled }}{{ else }}off (agents long-poll){{ end }}
+     Cluster                   {{ include "nexus.agentClusterName" . | default "(none reported)" }}
+{{- if hasPrefix "api-gateway:" $addr }}
+
+   NOTE: agentDefaults.controlPlane.address is the bare name {{ $addr }}, which
+   resolves only if the control plane runs in THIS namespace. For a control
+   plane in namespace <ns>: api-gateway.<ns>.svc:9091.
+{{- end }}
+
+   Check that every agent registered (readiness = registered with the control plane):
+     kubectl -n {{ .Release.Namespace }} wait --for=condition=Ready pod -l app.kubernetes.io/instance={{ .Release.Name }},nexus.khuriwalgroup.com/role=agent --timeout=5m
+     kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/instance={{ .Release.Name }},nexus.khuriwalgroup.com/role=agent --tail=20
+
+Worker pools: docs/OPERATIONS.md §20.16.
+{{- else }}
 
 1. Wait for the schema migration and bootstrap, then the services:
 
@@ -35,6 +57,8 @@ KGF Nexus {{ .Values.image.tag }} -- release "{{ .Release.Name }}" in namespace 
 {{- if .Values.artifactGC.enabled }}
                                run now: kubectl -n {{ .Release.Namespace }} create job --from=cronjob/artifact-gc artifact-gc-manual-$(date +%s)
 {{- end }}
+     Cluster name              {{ include "nexus.clusterName" . | default "(none: set cluster.name to the console's registered name)" }}
+     NetworkPolicy             {{ if .Values.networkPolicy.enabled }}ingress default-deny for the control plane{{ if not .Values.networkPolicy.metricsFrom }} (metrics reachable only from this release: networkPolicy.metricsFrom){{ end }}{{ else }}off{{ end }}
      Cluster controller        {{ if .Values.clusterController.enabled }}cluster "{{ .Values.clusterController.clusterName }}", {{ if .Values.clusterController.apply.enabled }}APPLY permitted by the process and RBAC (the registry entry must also say apply){{ else }}observe-only (plan mode){{ end }}{{ else }}off{{ end }}
 {{- if .Values.clusterController.enabled }}
                                leader: kubectl -n {{ .Release.Namespace }} get lease nexus-cluster-controller-{{ .Values.clusterController.clusterName }} -o jsonpath='{.spec.holderIdentity}'
@@ -52,3 +76,4 @@ NOTE: in-cluster Postgres without postgres.pitr -- no continuous archiving; see 
 {{- end }}
 
 Production checklist and values reference: docs/OPERATIONS.md §20.
+{{- end }}

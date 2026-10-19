@@ -1,20 +1,38 @@
-# Multi-stage build for ALL six Go control-plane services and the agent.
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
 #
-# One parameterised Dockerfile rather than seven near-identical ones: the build
-# is byte-identical per service apart from the package path, and seven copies of
-# the same file drift the moment someone bumps a Go version in six of them.
-# `SERVICE` selects which main package to compile.
+# Multi-stage build for EVERY Go image: the six control-plane services, the
+# agent, artifact-gc and the cluster controller.
+#
+# One parameterised Dockerfile rather than nine near-identical ones: the build
+# is byte-identical per service apart from the package path, and nine copies of
+# the same file drift the moment someone bumps a Go version in eight of them.
+# `SERVICE` selects which main package to compile AND which runtime stage below
+# becomes the image (image-<SERVICE>), so each image declares its own ports.
 #
 # Build context is the REPO ROOT, because the module lives there and every
 # service imports internal/ and gen/. Building from services/<name>/ would put
 # the shared packages outside the context.
 #
 #   docker build -f deploy/Dockerfile.service --build-arg SERVICE=scheduler .
+#
+# The runtime contract every stage shares (docs/IMAGES.md): one static binary
+# as the ENTRYPOINT, uid/gid 10001, SIGTERM for a graceful drain, no file
+# written outside the paths a volume provides (a read-only root filesystem
+# works), and OCI labels. EXPOSE lists the BINARY's default listeners, which is
+# what a plain `docker run` serves; the Helm chart and compose set their own
+# addresses through the environment (docs/IMAGES.md has both).
 
 ARG GO_VERSION=1.25
+# Global so the final FROM can select the component's stage. Set it.
+ARG SERVICE
 
 # ── build ─────────────────────────────────────────────────────────────────
-FROM golang:${GO_VERSION}-alpine AS build
+# Built on the builder's own platform and cross-compiled (CGO is off), so an
+# amd64 image built on an arm64 Mac never runs the compiler under emulation.
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
+ARG TARGETOS=linux
+ARG TARGETARCH
 
 # git is needed by `go mod download` for any VCS-resolved dependency.
 RUN apk add --no-cache git ca-certificates
@@ -38,44 +56,127 @@ ARG VERSION=dev
 # -trimpath keeps build paths out of the binary so images are reproducible.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
       -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" \
       -o /out/service \
       ./${SERVICE_PATH:-services/${SERVICE}}
 
-# ── runtime ───────────────────────────────────────────────────────────────
+# ── runtime (shared) ──────────────────────────────────────────────────────
 FROM alpine:3.21 AS runtime
 
 # wget is present in busybox and is what the compose healthchecks use to probe
-# /healthz; ca-certificates is needed for any outbound TLS (MinIO over https).
+# /healthz; ca-certificates is needed for any outbound TLS (a managed database,
+# Blob/S3, an OTLP collector); tzdata for schedules in named time zones.
 RUN apk add --no-cache ca-certificates tzdata \
  && adduser -D -u 10001 nexus
-
-# The worker agent's docker executor drives the Docker CLI (agent/internal/
-# executor/docker.go) and advertises the executor only when `docker info`
-# succeeds. Without the CLI the compose agents silently ran subprocess-only,
-# and every task with runtime.executor=docker -- including every nexusctl init
-# template -- waited unplaced forever (F144). bash is there for subprocess
-# tasks that need it: Airflow BashOperator commands converted by
-# `nexusctl import airflow` run as `bash -c`, and busybox sh is not bash.
-# Only the agent image gets either.
-ARG SERVICE
-RUN if [ "$SERVICE" = "agent" ]; then apk add --no-cache docker-cli bash; fi
 
 # --chmod is required: a plain COPY carries the build stage's mode bits, and the
 # binary is then not executable by the unprivileged runtime user, which fails at
 # container start with a bare "permission denied" that says nothing about why.
 COPY --from=build --chmod=0755 /out/service /usr/local/bin/nexus-service
 
-# The agent needs a writable WAL directory. Creating it in the image with the
-# right owner means a named volume mounted here inherits that ownership, so the
-# unprivileged user can write without the container needing root.
-RUN mkdir -p /var/lib/nexus/wal /var/lib/nexus-agent/wal /var/lib/nexus/effects \
- && chown -R 10001:10001 /var/lib/nexus /var/lib/nexus-agent
+# OCI labels (docs/IMAGES.md). The release workflow passes VERSION and sets the
+# same keys from its own context; these defaults make a local build say what
+# it is too. title and description are per component, below.
+ARG VERSION=dev
+ARG REVISION=""
+ARG SOURCE=https://github.com/nareshkhuriwal/kgf-nexus
+LABEL org.opencontainers.image.source="${SOURCE}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.vendor="Khuriwal Group" \
+      org.opencontainers.image.documentation="${SOURCE}/blob/main/docs/IMAGES.md"
 
-# Never run the control plane as root: a compromised service should not be able
-# to write outside its own container filesystem.
+# Never run as root: a compromised process should not be able to write outside
+# the volumes it was given. Numeric, so Kubernetes' runAsNonRoot can verify it.
 USER 10001:10001
 
+# Every binary drains on SIGTERM (stops taking work, finishes or hands back
+# what it holds) within its shutdown timeout; Kubernetes and `docker stop`
+# send it.
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/nexus-service"]
+
+# ── one stage per image ───────────────────────────────────────────────────
+# EXPOSE = the binary's DEFAULT listeners (docs/IMAGES.md, "Ports"). Each one
+# is moved by an environment variable, and the chart moves most of them.
+
+# REST :8080 (NEXUS_REST_ADDR), worker gRPC :9090 (NEXUS_GRPC_ADDR; the chart
+# and compose use 9091), ops /metrics + probes :8088 (NEXUS_METRICS_ADDR).
+FROM runtime AS image-api-gateway
+LABEL org.opencontainers.image.title="kgf-nexus/api-gateway" \
+      org.opencontainers.image.description="KGF Nexus API gateway: REST API, worker gRPC endpoint and authentication"
+EXPOSE 8080 9090 8088
+
+# gRPC :9091 (NEXUS_WFM_GRPC_ADDR), health + /metrics :8081 (NEXUS_WFM_HEALTH_ADDR).
+FROM runtime AS image-workflow-manager
+LABEL org.opencontainers.image.title="kgf-nexus/workflow-manager" \
+      org.opencontainers.image.description="KGF Nexus workflow manager: workflows, runs, timers, schedules and sensors"
+EXPOSE 9091 8081
+
+# gRPC :8092 (NEXUS_GRPC_ADDR), health + /metrics :8082 (NEXUS_HTTP_ADDR).
+FROM runtime AS image-dag-engine
+LABEL org.opencontainers.image.title="kgf-nexus/dag-engine" \
+      org.opencontainers.image.description="KGF Nexus DAG engine: run reconciliation and task readiness"
+EXPOSE 8092 8082
+
+# gRPC :9090 (NEXUS_GRPC_ADDR), health + /metrics :8081 (NEXUS_HTTP_ADDR).
+FROM runtime AS image-scheduler
+LABEL org.opencontainers.image.title="kgf-nexus/scheduler" \
+      org.opencontainers.image.description="KGF Nexus scheduler: claims attempts for one queue (NEXUS_QUEUE)"
+EXPOSE 9090 8081
+
+# gRPC :50052 (RM_GRPC_ADDR), health + /metrics :8082 (RM_HTTP_ADDR).
+FROM runtime AS image-resource-manager
+LABEL org.opencontainers.image.title="kgf-nexus/resource-manager" \
+      org.opencontainers.image.description="KGF Nexus resource manager: worker registry, liveness and capacity"
+EXPOSE 50052 8082
+
+# HTTP only, :8085 (HTTP_ADDR): run-event streams, health and /metrics.
+FROM runtime AS image-event-service
+LABEL org.opencontainers.image.title="kgf-nexus/event-service" \
+      org.opencontainers.image.description="KGF Nexus event service: outbox relay, run-event streams and notifications"
+EXPOSE 8085
+
+# /metrics + probes :8089 (NEXUS_METRICS_ADDR), on LOOPBACK by default: set
+# NEXUS_METRICS_ADDR=:8089 to reach it from outside the container.
+FROM runtime AS image-agent
+LABEL org.opencontainers.image.title="kgf-nexus/agent" \
+      org.opencontainers.image.description="KGF Nexus worker agent: registers with the control plane and runs task attempts"
+USER root
+# The docker executor drives the Docker CLI (agent/internal/executor/
+# docker.go) and advertises the executor only when `docker info` succeeds.
+# Without the CLI the compose agents silently ran subprocess-only, and every
+# task with runtime.executor=docker -- including every nexusctl init template
+# -- waited unplaced forever (F144). bash is there for subprocess tasks that
+# need it: Airflow BashOperator commands converted by `nexusctl import
+# airflow` run as `bash -c`, and busybox sh is not bash.
+#
+# The WAL directories are created owned by the runtime user, so a named
+# volume mounted there inherits that ownership and needs no root to write.
+# /var/lib/nexus/effects is a task convention (chaos examples), not the
+# agent's own.
+RUN apk add --no-cache docker-cli bash \
+ && mkdir -p /var/lib/nexus/wal /var/lib/nexus-agent/wal /var/lib/nexus/effects \
+ && chown -R 10001:10001 /var/lib/nexus /var/lib/nexus-agent
+USER 10001:10001
+EXPOSE 8089
+
+# No listener: one sweep, then exit (a CronJob). ARTIFACT_GC_METRICS_ADDR
+# serves /metrics during the sweep when set.
+FROM runtime AS image-artifact-gc
+LABEL org.opencontainers.image.title="kgf-nexus/artifact-gc" \
+      org.opencontainers.image.description="KGF Nexus artifact GC: one report-only (or deleting) sweep of the result store"
+
+# Health + /metrics :8090 (CONTROLLER_HTTP_ADDR).
+FROM runtime AS image-cluster-controller
+LABEL org.opencontainers.image.title="kgf-nexus/cluster-controller" \
+      org.opencontainers.image.description="KGF Nexus cluster controller: reports a Kubernetes cluster and applies saved scaling"
+EXPOSE 8090
+
+# ── the image ─────────────────────────────────────────────────────────────
+# An unknown SERVICE fails here ("image-<name>: ... did you mean ..."): add a
+# stage above for a new component.
+FROM image-${SERVICE}

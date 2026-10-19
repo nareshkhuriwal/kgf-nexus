@@ -50,6 +50,10 @@ type Context struct {
 	RequestID      string `json:"request_id,omitempty"`
 	OnBehalfOf     string `json:"obo,omitempty"`
 	OnBehalfOfRole string `json:"obo_role,omitempty"`
+	// Resource is the optional `res` claim: the ARM-style id of the one
+	// KGF.Nexus workspace the token is for (resource.go). Only a front
+	// issuer may assert it (Verifier.FrontIssuers).
+	Resource string `json:"res,omitempty"`
 }
 
 // Validate checks the fields every consumer relies on (tenantctx.Validate).
@@ -134,6 +138,22 @@ var (
 	ErrNoKeys            = errors.New("no KGF context verification keys are loaded")
 )
 
+// Workspace (`res`) errors. Unlike the ones above they are returned only for a
+// token whose signature, lifetime and audience already verified, so they are
+// not an oracle, and callers answer each with its own stable 403 code.
+var (
+	// ErrResourceInvalid: `res` is malformed, or names another subscription or
+	// resource group than the token's sub and rg claims.
+	ErrResourceInvalid = errors.New("kgf context resource id is malformed or does not match its scope")
+	// ErrResourceNotAllowed: `res` from an issuer that is not a front.
+	ErrResourceNotAllowed = errors.New("kgf context issuer may not assert a resource id")
+	// ErrResourceRequired: a front issuer's token without `res`.
+	ErrResourceRequired = errors.New("kgf context from a front issuer must name a resource id")
+	// ErrFrontShape: a front issuer's token that is neither a delegated user
+	// (role service with obo) nor a provisioner (role service without obo).
+	ErrFrontShape = errors.New("kgf context from a front issuer must be a service context")
+)
+
 // KeySource resolves a key id to a trusted public key.
 type KeySource interface {
 	Key(kid string) (ed25519.PublicKey, error)
@@ -147,8 +167,13 @@ type ReplayGuard interface {
 // Verifier accepts contexts signed by any of its keys, for its audience.
 type Verifier struct {
 	Keys KeySource
-	// Audience is this service's name; a token must name it.
+	// Audience is this service's name; a token must name it (or one of
+	// Audiences).
 	Audience string
+	// Audiences are further names this service answers to, e.g. both
+	// kgf-gateway's "kgf-nexus" and the KGF.Nexus front's "kgf-nexus-engine"
+	// (NEXUS_KGF_AUDIENCE as a comma-separated list). Empty: Audience only.
+	Audiences []string
 	// AcceptAnyAudience admits tenantctx's wildcard audience. Off by default
 	// in Nexus (tenantctx accepts it): a wildcard token is replayable against
 	// every provider.
@@ -156,7 +181,36 @@ type Verifier struct {
 	// UserIssuers lists issuers entitled to carry a human principal. Empty
 	// means every issuer (tenantctx's legacy behaviour); Nexus configures it.
 	UserIssuers []string
-	Seen        ReplayGuard
+	// FrontIssuers lists the provider fronts (NEXUS_KGF_FRONT_ISSUERS, e.g.
+	// "kgf-nexus"): the ONLY issuers that may assert `res`, and whose tokens
+	// must carry it. A front token is a service context, either delegated
+	// (obo and obo_role set: a person acting in the workspace) or not (the
+	// provisioner). Empty means no front: every token carrying `res` is
+	// refused.
+	FrontIssuers []string
+	Seen         ReplayGuard
+}
+
+func (v Verifier) hasAudience(aud string) bool {
+	if aud == v.Audience {
+		return true
+	}
+	for _, a := range v.Audiences {
+		if a == aud {
+			return true
+		}
+	}
+	return false
+}
+
+// IsFront reports whether issuer is a configured front.
+func (v Verifier) IsFront(issuer string) bool {
+	for _, candidate := range v.FrontIssuers {
+		if candidate == issuer {
+			return true
+		}
+	}
+	return false
 }
 
 func (v Verifier) mayAssertUser(issuer string) bool {
@@ -210,11 +264,32 @@ func (v Verifier) Verify(token string, now time.Time) (Claims, error) {
 	if c.Expires-c.IssuedAt > int64(MaxTTL/time.Second) {
 		return Claims{}, ErrInvalid
 	}
-	if v.Audience != "" && c.Audience != v.Audience && !(v.AcceptAnyAudience && c.Audience == AnyAudience) {
+	if v.Audience != "" && !v.hasAudience(c.Audience) && !(v.AcceptAnyAudience && c.Audience == AnyAudience) {
 		return Claims{}, ErrWrongAudience
 	}
-	if !c.Context.IsService() && !v.mayAssertUser(c.Issuer) {
-		return Claims{}, ErrIssuerNotEntitled
+	// Workspace tokens (ADR-0034). Only fronts assert `res`; a front's token
+	// always carries it, must be a service context, and its `res` must lie in
+	// the token's own subscription and resource group.
+	if v.IsFront(c.Issuer) {
+		if c.Resource == "" {
+			return Claims{}, ErrResourceRequired
+		}
+		if c.Role != RoleService {
+			return Claims{}, ErrFrontShape
+		}
+	} else {
+		if c.Resource != "" {
+			return Claims{}, ErrResourceNotAllowed
+		}
+		if !c.Context.IsService() && !v.mayAssertUser(c.Issuer) {
+			return Claims{}, ErrIssuerNotEntitled
+		}
+	}
+	if c.Resource != "" {
+		id, err := ParseWorkspaceID(c.Resource)
+		if err != nil || !id.Matches(c.Subscription, c.ResourceGroup) {
+			return Claims{}, ErrResourceInvalid
+		}
 	}
 	if v.Seen != nil && c.TokenID != "" && !v.Seen.Observe(c.TokenID, time.Unix(c.Expires, 0)) {
 		return Claims{}, ErrReplayed

@@ -50,6 +50,10 @@ type Metrics struct {
 	oldestAge   *metrics.GaugeVec
 	backlogSeen map[string]bool
 	backlogMu   sync.Mutex
+
+	// activity mirrors this replica's claim, dispatch and loss counts as
+	// plain atomics for its service-instance row (ADR-0037 §3; instance.go).
+	activity activity
 }
 
 // maxBacklogQueues caps the queues the backlog gauges report individually.
@@ -132,6 +136,7 @@ func (m *Metrics) observeClaim(path, outcome string, d time.Duration, dispatched
 	}
 	m.claims.With(metrics.Labels{"queue": m.queue, "path": path, "outcome": outcome}).Inc()
 	m.claimDuration.With(metrics.Labels{"queue": m.queue, "path": path}).Observe(d.Seconds())
+	m.activity.claimed(outcome, dispatched)
 	if dispatched > 0 {
 		m.dispatched.With(metrics.Labels{"queue": m.queue, "path": path}).Add(float64(dispatched))
 	}
@@ -204,6 +209,7 @@ func (m *Metrics) observeLost(l store.LostAttempt, cause string) {
 		retry = "true"
 	}
 	m.lost.With(metrics.Labels{"queue": m.queue, "cause": cause, "retry": retry}).Inc()
+	m.activity.lost.Add(1)
 	if cause == "lease_expired" {
 		m.leaseExpiries.Inc()
 	}
@@ -261,6 +267,7 @@ func (m *Metrics) setBacklog(sample []store.QueueBacklog) {
 		m.pending.With(metrics.Labels{"queue": q}).Set(pending[q])
 		m.oldestAge.With(metrics.Labels{"queue": q}).Set(oldest[q])
 	}
+	m.activity.sampled(m.queue, sample)
 	if _, ok := pending[OtherQueue]; ok || m.backlogSeen[OtherQueue] {
 		m.backlogSeen[OtherQueue] = true
 		m.pending.With(metrics.Labels{"queue": OtherQueue}).Set(pending[OtherQueue])

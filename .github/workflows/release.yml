@@ -1,0 +1,655 @@
+# Release images for Nexus.
+#
+# Every first-party image -- the six control-plane services, the agent,
+# artifact-gc, the cluster controller, the migration job and the console --
+# for linux/amd64 and linux/arm64, one job per image, so a Dockerfile that
+# stops building names the image in the failed job rather than in a log line a
+# thousand lines down. The Dockerfiles compile on the builder's own platform
+# and cross-compile (CGO is off), so arm64 costs an emulated `apk add`, not an
+# emulated compiler.
+#
+# NOT triggered on its own: .github/workflows/ci.yml calls it, twice over.
+#
+#   images   (pull requests) push: false, once the unit gate has passed. Every
+#            image is built and nothing is pushed; that run holds no registry
+#            credential at all, which is also why a pull request from a fork
+#            cannot acquire one.
+#   publish  (a push to main, or a vX.Y.Z tag) push: true, and only after EVERY
+#            check in ci.yml has passed on that commit, in that run. A digest
+#            is never published for a commit whose tests had not finished, or
+#            had failed.
+#
+# Push mode publishes ghcr.io/<owner>/kgf-nexus/<image>: the chart's own
+# naming, with image.registry "ghcr.io/" and image.repositoryPrefix
+# "<owner>/kgf-nexus/". A push to main is tagged with its commit (12 hex
+# digits) and `main` (moving; never deploy it), a vX.Y.Z tag with that version
+# only -- so a tag pushed while main's run for the same commit is still going
+# never races it for a tag. Never `latest`: the chart refuses it. Each image
+# carries a Sigstore-signed SLSA build-provenance attestation (`gh attestation
+# verify`) and BuildKit's own SBOM and provenance.
+# Then ONE job collects every digest into one map, refuses it unless it is
+# complete and digest-pinned, proves the chart and the cluster-controller
+# overlay run exactly those digests, and publishes it with the matching Helm
+# values (artifact `image-digests`). docs/OPERATIONS.md §22.4.
+#
+# The Helm chart is packaged on every run (pull requests: package, lint and
+# render the package, nothing pushed) and, in push mode and only after the
+# digest map has validated, pushed to oci://ghcr.io/<owner>/charts/kgf-nexus
+# with the same provenance attestation as the images. A vX.Y.Z tag publishes
+# the version in Chart.yaml; a push to main publishes
+# <version>-main.g<commit>, a SemVer pre-release that no version range
+# selects. A published version is never overwritten.
+#
+# Nothing here deploys. KGF's own environments (its ACR, AKS and Portainer
+# host) are released by KGF Cloud's pipelines, in the kgf-cloud repository.
+name: release
+
+on:
+  workflow_call:
+    inputs:
+      push:
+        description: Push to GHCR, attest, and publish the digest map (false builds only)
+        type: boolean
+        required: true
+
+# No top-level `permissions:`. A called workflow can only narrow what its
+# caller granted, so the caller's job decides: contents: read for a pull
+# request, and packages/id-token/attestations: write for `publish` only. The
+# jobs below that need less say so.
+
+env:
+  # The toolchain ci.yml validated against, passed to `docker build` so the
+  # images and the CI compile with the same Go (tests/repo checks the two
+  # agree with go.mod).
+  GO_VERSION: "1.25"
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  # The image set and the release's names, decided once. The build matrix and
+  # the digest-map check both read the set from here, so they cannot disagree
+  # about what a complete release is.
+  plan:
+    name: image set and tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      images: ${{ steps.images.outputs.images }}
+      names: ${{ steps.images.outputs.names }}
+      repository: ${{ steps.refs.outputs.repository }}
+      tag: ${{ steps.refs.outputs.tag }}
+      extra-tag: ${{ steps.refs.outputs.extra-tag }}
+    steps:
+      # path is the main package, stated for every Go image because the mains
+      # are not all in one place (api-gateway at services/api-gateway/cmd/...,
+      # dag-engine at services/dag-engine). deploy/docker-compose.yml and
+      # deploy/scripts/k8s-dev-images.sh pass the same paths; an image added
+      # here is added there too. scheduler appears once although compose runs
+      # two (scheduler, scheduler-gpu): an image list is not a topology.
+      - name: The image set
+        id: images
+        shell: python3 {0}
+        run: |
+          import json, os
+
+          images = [
+              # The six control-plane services (ADR-0011).
+              ("api-gateway", "service", "services/api-gateway/cmd/api-gateway"),
+              ("workflow-manager", "service", "services/workflow-manager/cmd/workflow-manager"),
+              ("dag-engine", "service", "services/dag-engine"),
+              ("scheduler", "service", "services/scheduler"),
+              ("resource-manager", "service", "services/resource-manager/cmd/resource-manager"),
+              ("event-service", "service", "services/event-service/cmd/event-service"),
+              # One agent image for every agent flavour.
+              ("agent", "service", "agent/cmd/nexus-agent"),
+              # Report-only orphan GC (ADR-0008), the chart's CronJob.
+              ("artifact-gc", "service", "services/artifact-gc/cmd/artifact-gc"),
+              # Kubernetes only (docs/CLUSTER-SCALING.md), so not in compose.
+              ("cluster-controller", "service", "services/cluster-controller"),
+              # Schema migrations run as a job, never at service start
+              # (ADR-0011 rule 4): psql plus nexus-db-roles.
+              ("migrate", "migrate", ""),
+              # The console: nginx serving the bundle its Dockerfile builds.
+              ("ui", "ui", ""),
+          ]
+          dockerfile = {"service": "deploy/Dockerfile.service",
+                        "migrate": "deploy/Dockerfile.migrate",
+                        "ui": "deploy/Dockerfile.ui"}
+          out = [{"name": n, "kind": k, "dockerfile": dockerfile[k], "path": p}
+                 for n, k, p in images]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("images=" + json.dumps(out) + "\n")
+              fh.write("names=" + ",".join(n for n, _, _ in images) + "\n")
+
+      # GHCR repository names must be lower case; an owner need not be. `tag`
+      # is the immutable tag the chart is installed with (image.tag) and the
+      # version the binaries report; `extra-tag` is the moving one.
+      - name: Repository and tags
+        id: refs
+        env:
+          PUSH: ${{ inputs.push }}
+        run: |
+          set -euo pipefail
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          tag=${GITHUB_SHA:0:12} extra=
+          case "$GITHUB_REF" in
+            refs/tags/*)
+              tag=${GITHUB_REF#refs/tags/}
+              if ! [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+                echo "::error::tag '$tag' is not a release version (vMAJOR.MINOR.PATCH[-PRERELEASE])"
+                exit 1
+              fi ;;
+            refs/heads/main) extra=main ;;
+            *)
+              if [ "$PUSH" = true ]; then
+                echo "::error::refusing to publish from $GITHUB_REF: only main and vX.Y.Z tags are released"
+                exit 1
+              fi ;;
+          esac
+          {
+            echo "repository=ghcr.io/$owner/kgf-nexus"
+            echo "tag=$tag"
+            echo "extra-tag=$extra"
+          } >> "$GITHUB_OUTPUT"
+          echo "ghcr.io/$owner/kgf-nexus/<image>:$tag${extra:+ and :$extra} (push: $PUSH)"
+
+  build:
+    name: build ${{ matrix.image.name }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      # One image that does not build should not hide whether the others do.
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.plan.outputs.images) }}
+    env:
+      IMAGE: ${{ needs.plan.outputs.repository }}/${{ matrix.image.name }}
+      # build-push-action uploads a build record per build; keep it as long
+      # as the test reports, not the repository default.
+      DOCKER_BUILD_RECORD_RETENTION_DAYS: 14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Only the runtime stages run under emulation for arm64. The emulator
+      # and the BuildKit daemon are pinned by digest like every other image we
+      # depend on (docs/OPERATIONS.md §22): a floating builder is a build that
+      # changes under you.
+      - uses: docker/setup-qemu-action@v4
+        with:
+          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+      # Exactly the arguments each Dockerfile declares: SERVICE and
+      # SERVICE_PATH select the main package (as deploy/docker-compose.yml
+      # passes them), VERSION reaches the binary through -ldflags -X
+      # main.version, VERSION/REVISION/SOURCE become every image's OCI labels,
+      # and GO_VERSION pins the builder to the toolchain CI validated rather
+      # than the Dockerfile default drifting on its own.
+      - name: Build arguments
+        id: args
+        env:
+          KIND: ${{ matrix.image.kind }}
+          NAME: ${{ matrix.image.name }}
+          SERVICE_PATH: ${{ matrix.image.path }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          EXTRA_TAG: ${{ needs.plan.outputs.extra-tag }}
+        run: |
+          set -euo pipefail
+          {
+            echo "args<<EOF"
+            case "$KIND" in
+              service) printf 'GO_VERSION=%s\nSERVICE=%s\nSERVICE_PATH=%s\n' "$GO_VERSION" "$NAME" "$SERVICE_PATH" ;;
+              migrate) printf 'GO_VERSION=%s\n' "$GO_VERSION" ;;
+              ui) ;;
+              *) echo "unknown image kind '$KIND'" >&2; exit 1 ;;
+            esac
+            # Every image labels itself with what it was built from
+            # (docs/IMAGES.md); services also report VERSION at runtime.
+            printf 'VERSION=%s\nREVISION=%s\nSOURCE=%s\n' "$TAG" "$GITHUB_SHA" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+            echo "EOF"
+            echo "tags<<EOF"
+            echo "$IMAGE:$TAG"
+            if [ -n "$EXTRA_TAG" ]; then echo "$IMAGE:$EXTRA_TAG"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sign in to GHCR
+        if: inputs.push
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # The build context is the repository root for every image: the module
+      # and the shared internal/ and gen/ packages live there. The layer cache
+      # is per image; a pull request reads main's and writes its own. A cache
+      # that cannot be written (the service rate-limits) costs time, not the
+      # build.
+      - name: Build ${{ matrix.image.name }}
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: ${{ env.PLATFORMS }}
+          build-args: ${{ steps.args.outputs.args }}
+          tags: ${{ steps.args.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=kgf-nexus/${{ matrix.image.name }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.plan.outputs.tag }}
+            org.opencontainers.image.licenses=Apache-2.0
+          push: ${{ inputs.push }}
+          provenance: ${{ inputs.push && 'mode=max' || 'false' }}
+          sbom: ${{ inputs.push }}
+          cache-from: type=gha,scope=image-${{ matrix.image.name }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.image.name }},ignore-error=true
+
+      # Read the index back from the registry rather than trusting the build's
+      # own report: it is the reference a cluster will pull, and the only proof
+      # the push landed. Every platform must be in it, and every tag pushed
+      # must resolve to it.
+      - name: Verify the pushed index
+        if: inputs.push
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.args.outputs.tags }}
+        run: |
+          set -euo pipefail
+          if ! [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::the build reported no digest for $IMAGE ('$DIGEST')"
+            exit 1
+          fi
+          index=$(docker buildx imagetools inspect --raw "$IMAGE@$DIGEST")
+          for platform in ${PLATFORMS//,/ }; do
+            jq -e --arg os "${platform%/*}" --arg arch "${platform#*/}" \
+              'any(.manifests[]; .platform.os == $os and .platform.architecture == $arch)' <<<"$index" >/dev/null \
+              || { echo "::error::$IMAGE@$DIGEST has no $platform image"; exit 1; }
+          done
+          while read -r ref; do
+            got=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$ref" | jq -r .digest)
+            [ "$got" = "$DIGEST" ] || { echo "::error::$ref resolves to $got, not $DIGEST"; exit 1; }
+          done <<<"$TAGS"
+          echo "$IMAGE@$DIGEST ($PLATFORMS)"
+
+      # Signed with a short-lived Sigstore certificate bound to THIS workflow
+      # file, and pushed to GHCR beside the image. No storage record: that is
+      # an organization feature, and the repository may be user-owned. Only
+      # for a public repository: GitHub signs a private repository's
+      # attestations only on GitHub Enterprise Cloud, so there the step would
+      # fail after the image was already published (the chart job's summary
+      # says it was skipped).
+      - name: Attest build provenance
+        if: inputs.push && github.event.repository.visibility == 'public'
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      # One file per image, named for it, holding the digest-pinned reference.
+      # A leg that never gets here leaves no file, which the digest map below
+      # refuses. overwrite: a re-run of a failed leg replaces its own file.
+      - name: Record the digest
+        if: inputs.push
+        env:
+          NAME: ${{ matrix.image.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/digests"
+          echo "$IMAGE@$DIGEST" > "$RUNNER_TEMP/digests/$NAME"
+      - name: Upload the digest
+        if: inputs.push
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ matrix.image.name }}
+          path: ${{ runner.temp }}/digests/${{ matrix.image.name }}
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  # Turn the per-image digests into ONE map and refuse it here if it is
+  # incomplete, not digest-pinned, or not what the chart would run -- so a bad
+  # map fails before anything consumes it. Only a push has digests to collect.
+  digests:
+    name: digest map
+    needs: [plan, build]
+    if: inputs.push
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Content-verified on use (pinned-tool.sh re-checks every binary against
+      # its pin), so a poisoned cache fails the job rather than passing it.
+      - uses: actions/cache@v4
+        with:
+          path: .tools
+          key: pinned-tools-${{ runner.os }}-${{ hashFiles('deploy/scripts/pinned-tool.sh') }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-digest-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/digests
+
+      # Exactly the plan's image set, every reference digest-pinned and named
+      # for its image, one repository base. Then the Helm values that pin the
+      # chart to it (image.registry, image.repositoryPrefix, image.digests).
+      - name: Assemble the digest map
+        env:
+          EXPECT: ${{ needs.plan.outputs.names }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release"
+          python3 deploy/scripts/helm-image-digests.py collect "$RUNNER_TEMP/digests" --expect "$EXPECT" \
+            > "$RUNNER_TEMP/release/digests.json"
+          python3 deploy/scripts/helm-image-digests.py values "$RUNNER_TEMP/release/digests.json" \
+            > "$RUNNER_TEMP/release/release-images.yaml"
+          cat "$RUNNER_TEMP/release/digests.json"
+
+      - name: Install pinned helm (sha256-verified)
+        run: dirname "$(deploy/scripts/pinned-tool.sh helm)" >> "$GITHUB_PATH"
+
+      # Render the chart with the map and refuse it unless every Nexus image
+      # resolves to exactly its digest: with the defaults (the cluster
+      # controller is then not in the chart), and with the controller enabled,
+      # so all eleven images are proved, not ten. The same two checks KGF
+      # Cloud's release runs before `helm upgrade` (F112).
+      - name: The chart runs exactly these digests
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          map="$RUNNER_TEMP/release/digests.json"
+          common=(--chart deploy/helm/kgf-nexus --set existingSecret=release-check
+                  --set "image.tag=$TAG" --set nats.auth.mode=none)
+          python3 deploy/scripts/helm-image-digests.py check "$map" "${common[@]}" \
+            --not-in-chart cluster-controller
+          python3 deploy/scripts/helm-image-digests.py check "$map" "${common[@]}" \
+            --set clusterController.enabled=true --set clusterController.clusterName=release-check \
+            --set clusterController.apply.enabled=false
+
+      # The controller also ships as a kustomize base; the overlay retargets
+      # its placeholder images to these digests and fails if any rendered
+      # container would run anything else.
+      - name: The cluster-controller overlay runs exactly these digests
+        run: |
+          set -euo pipefail
+          ref() { jq -er --arg n "$1" '.[$n]' "$RUNNER_TEMP/release/digests.json"; }
+          for mode in base apply; do
+            NAMESPACE=kgf-nexus AGENT_IMAGE="$(ref agent)" \
+              deploy/scripts/cluster-controller-overlay.sh "$mode" "$(ref cluster-controller)" >/dev/null
+          done
+          echo "cluster-controller overlay: base and apply render $(ref cluster-controller)"
+
+      - name: Summary
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          EXTRA_TAG: ${{ needs.plan.outputs.extra-tag }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published images"
+            echo
+            echo "Tags \`$TAG\`${EXTRA_TAG:+ and \`$EXTRA_TAG\`}; the digest map and Helm values are the \`image-digests\` artifact."
+            echo
+            echo "| image | reference |"
+            echo "|---|---|"
+            jq -r 'to_entries[] | "| \(.key) | `\(.value)` |"' "$RUNNER_TEMP/release/digests.json"
+            echo
+            echo "Install by digest: \`helm upgrade --install kgf-nexus deploy/helm/kgf-nexus -f <your values> -f release-images.yaml --set image.tag=$TAG\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Published only once the WHOLE map has validated, so a partial map
+      # never leaves this job.
+      - name: Upload the digest map
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digests
+          path: |
+            ${{ runner.temp }}/release/digests.json
+            ${{ runner.temp }}/release/release-images.yaml
+          if-no-files-found: error
+          retention-days: 90
+
+  # The chart, packaged once per run from this commit: the version from
+  # Chart.yaml (a vX.Y.Z tag) or that version plus a pre-release suffix
+  # naming the commit (main, pull requests), appVersion the image tag. Then
+  # the PACKAGE -- not the source directory -- is linted and rendered, so what
+  # is published is what was checked. Pull requests stop here.
+  chart:
+    name: helm chart (package)
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      repository: ${{ steps.version.outputs.repository }}
+      package: ${{ steps.version.outputs.package }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Content-verified on use (pinned-tool.sh re-checks every binary against
+      # its pin), so a poisoned cache fails the job rather than passing it.
+      - uses: actions/cache@v4
+        with:
+          path: .tools
+          key: pinned-tools-${{ runner.os }}-${{ hashFiles('deploy/scripts/pinned-tool.sh') }}
+      - name: Install pinned helm (sha256-verified)
+        run: dirname "$(deploy/scripts/pinned-tool.sh helm)" >> "$GITHUB_PATH"
+
+      - name: Chart version
+        id: version
+        run: |
+          set -euo pipefail
+          base=$(awk '$1 == "version:" { gsub(/"/, "", $2); print $2; exit }' deploy/helm/kgf-nexus/Chart.yaml)
+          if ! [[ $base =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::deploy/helm/kgf-nexus/Chart.yaml version '$base' is not MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          # A tag publishes the chart's own version. Anything else names the
+          # commit in a pre-release ('g' keeps the identifier alphanumeric:
+          # SemVer forbids a numeric one with a leading zero).
+          case "$GITHUB_REF" in
+            refs/tags/v*) version=$base ;;
+            refs/heads/main) version="$base-main.g${GITHUB_SHA:0:12}" ;;
+            *) version="$base-dev.g${GITHUB_SHA:0:12}" ;;
+          esac
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          {
+            echo "version=$version"
+            echo "repository=oci://ghcr.io/$owner/charts"
+            echo "package=kgf-nexus-$version.tgz"
+          } >> "$GITHUB_OUTPUT"
+          echo "chart kgf-nexus $version -> oci://ghcr.io/$owner/charts"
+
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/chart"
+          helm package deploy/helm/kgf-nexus --version "$VERSION" --app-version "$TAG" \
+            --destination "$RUNNER_TEMP/chart"
+          sha256sum "$RUNNER_TEMP/chart/kgf-nexus-$VERSION.tgz"
+
+      # The package must hold the chart exactly: every file the repository
+      # tracks under the chart (.helmignore keeps nothing tracked out), and
+      # Chart.yaml stamped with this version and appVersion (Helm quotes an
+      # all-digit appVersion, as a 12-digit commit can be). Then lint and render it the way an
+      # install would, with the minimal values every chart change keeps valid.
+      - name: Check, lint and render the package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          pkg="$RUNNER_TEMP/chart/kgf-nexus-$VERSION.tgz"
+          diff <(tar -tzf "$pkg" | sed 's#^kgf-nexus/##' | grep -v '/$' | sort) \
+               <(git ls-files deploy/helm/kgf-nexus | sed 's#^deploy/helm/kgf-nexus/##' | sort) \
+            || { echo "::error::the packaged chart differs from deploy/helm/kgf-nexus"; exit 1; }
+          meta=$(tar -xzOf "$pkg" kgf-nexus/Chart.yaml)
+          grep -qx "version: $VERSION" <<<"$meta" || { echo "::error::packaged Chart.yaml version is not $VERSION"; exit 1; }
+          grep -Eqx "appVersion: \"?$TAG\"?" <<<"$meta" || { echo "::error::packaged Chart.yaml appVersion is not $TAG"; exit 1; }
+          values=deploy/helm/kgf-nexus/ci/minimal-values.yaml
+          helm lint --strict "$pkg" -f "$values"
+          helm template kgf-nexus "$pkg" -n nexus -f "$values" --set "image.tag=$TAG" >/dev/null
+          echo "$pkg: $(tar -tzf "$pkg" | grep -vc '/$') files, lint and render OK"
+
+      - name: Upload the packaged chart
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: ${{ runner.temp }}/chart/${{ steps.version.outputs.package }}
+          if-no-files-found: error
+          retention-days: ${{ inputs.push && 90 || 7 }}
+
+  # Push mode only, and only once the digest map has validated: the chart
+  # names images by tag, and a chart must never be published for a release
+  # whose images are incomplete. The bytes pushed are the package the `chart`
+  # job checked. A version that already exists is never overwritten: when it
+  # holds exactly these bytes (a re-run) it is kept, otherwise the job fails
+  # and Chart.yaml's version must be bumped.
+  chart-publish:
+    name: helm chart (publish)
+    needs: [plan, chart, digests]
+    if: inputs.push
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.chart.outputs.version }}
+      REPOSITORY: ${{ needs.chart.outputs.repository }}
+      PACKAGE: ${{ needs.chart.outputs.package }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v4
+        with:
+          path: .tools
+          key: pinned-tools-${{ runner.os }}-${{ hashFiles('deploy/scripts/pinned-tool.sh') }}
+      - name: Install pinned helm (sha256-verified)
+        run: dirname "$(deploy/scripts/pinned-tool.sh helm)" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+          path: ${{ runner.temp }}/chart
+
+      - name: Sign in to GHCR
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+
+      - name: Push (never overwriting a published version)
+        id: push
+        run: |
+          set -euo pipefail
+          pkg="$RUNNER_TEMP/chart/$PACKAGE"
+          mkdir -p "$RUNNER_TEMP/published"
+          if out=$(helm pull "$REPOSITORY/kgf-nexus" --version "$VERSION" -d "$RUNNER_TEMP/published" 2>&1); then
+            if cmp -s "$pkg" "$RUNNER_TEMP/published/$PACKAGE"; then
+              echo "kgf-nexus $VERSION is already published with exactly these bytes (a re-run): kept"
+            else
+              echo "::error::kgf-nexus $VERSION is already published with different content. A published chart version is immutable: bump version in deploy/helm/kgf-nexus/Chart.yaml."
+              exit 1
+            fi
+          elif grep -Eqi 'not found|manifest unknown|name unknown|404|denied' <<<"$out"; then
+            # Absent (GHCR answers "denied" for a package that does not exist
+            # yet); a real permission problem fails the push itself.
+            helm push "$pkg" "$REPOSITORY"
+          else
+            # Anything else (the registry unreachable, a timeout) must not be
+            # mistaken for "absent": a push could then overwrite a release.
+            echo "::error::cannot tell whether kgf-nexus $VERSION is published: $out"
+            exit 1
+          fi
+
+      # Read it back from the registry: the reference users install and the
+      # only proof the push landed. Its bytes must be the package's, and the
+      # digest it reports is the attestation subject.
+      - name: Verify the published chart
+        id: verify
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/verify" && mkdir -p "$RUNNER_TEMP/verify"
+          out=$(helm pull "$REPOSITORY/kgf-nexus" --version "$VERSION" -d "$RUNNER_TEMP/verify" 2>&1)
+          digest=$(sed -n 's/^Digest: //p' <<<"$out")
+          if ! [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::no digest for $REPOSITORY/kgf-nexus:$VERSION ($out)"
+            exit 1
+          fi
+          cmp "$RUNNER_TEMP/chart/$PACKAGE" "$RUNNER_TEMP/verify/$PACKAGE" \
+            || { echo "::error::the published chart's bytes are not the package's"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "subject=${REPOSITORY#oci://}/kgf-nexus" >> "$GITHUB_OUTPUT"
+          echo "$REPOSITORY/kgf-nexus:$VERSION@$digest"
+
+      # The same Sigstore-signed SLSA provenance as every image, bound to this
+      # workflow and pushed beside the chart:
+      #   gh attestation verify oci://ghcr.io/<owner>/charts/kgf-nexus:<version> --repo <owner>/kgf-nexus
+      - name: Attest build provenance
+        if: github.event.repository.visibility == 'public'
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.verify.outputs.subject }}
+          subject-digest: ${{ steps.verify.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Note skipped attestations
+        if: github.event.repository.visibility != 'public'
+        run: |
+          {
+            echo "### Provenance attestations skipped"
+            echo
+            echo "This repository is not public, and GitHub signs a private repository's"
+            echo "attestations only on GitHub Enterprise Cloud. The images and the chart are"
+            echo "published and pinned by digest; no SLSA provenance was attached."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record the chart reference
+        env:
+          DIGEST: ${{ steps.verify.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/chart-release"
+          printf '{"chart":"%s/kgf-nexus","version":"%s","digest":"%s","appVersion":"%s"}\n' \
+            "$REPOSITORY" "$VERSION" "$DIGEST" "$TAG" > "$RUNNER_TEMP/chart-release/chart.json"
+          cat "$RUNNER_TEMP/chart-release/chart.json"
+          {
+            echo "### Published Helm chart"
+            echo
+            echo "| chart | version | digest |"
+            echo "|---|---|---|"
+            echo "| \`$REPOSITORY/kgf-nexus\` | \`$VERSION\` | \`$DIGEST\` |"
+            echo
+            echo "Install it with the run's image digests (artifact \`image-digests\`, docs/INSTALL-AKS.md):"
+            echo
+            echo "\`helm upgrade --install nexus $REPOSITORY/kgf-nexus --version $VERSION -n nexus -f <your values> -f release-images.yaml --set image.tag=$TAG\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the chart reference
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart-release
+          path: ${{ runner.temp }}/chart-release/chart.json
+          if-no-files-found: error
+          retention-days: 90

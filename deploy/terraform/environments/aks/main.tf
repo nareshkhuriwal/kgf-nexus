@@ -118,9 +118,23 @@ resource "helm_release" "nvidia_device_plugin" {
   version          = var.nvidia_device_plugin_version
   wait             = true
 
+  # The chart's default affinity requires node-feature-discovery labels
+  # (feature.node.kubernetes.io/pci-10de.present, nvidia.com/gpu.present) that
+  # AKS GPU nodes do not carry, and a nodeSelector only narrows it further: the
+  # DaemonSet would schedule nowhere and nvidia.com/gpu would never be
+  # advertised. Helm replaces lists, so this affinity REPLACES that default.
   values = [yamlencode({
     nodeSelector = { "nexus.khuriwalgroup.com/pool" = "gpu" }
-    tolerations  = [{ key = "nvidia.com/gpu", operator = "Exists", effect = "NoSchedule" }]
+    affinity = {
+      nodeAffinity = {
+        requiredDuringSchedulingIgnoredDuringExecution = {
+          nodeSelectorTerms = [{
+            matchExpressions = [{ key = "nexus.khuriwalgroup.com/pool", operator = "In", values = ["gpu"] }]
+          }]
+        }
+      }
+    }
+    tolerations = [{ key = "nvidia.com/gpu", operator = "Exists", effect = "NoSchedule" }]
   })]
 }
 

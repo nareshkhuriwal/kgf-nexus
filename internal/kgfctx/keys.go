@@ -251,3 +251,78 @@ func (g *MemoryReplayGuard) Observe(id string, expires time.Time) bool {
 	g.seen[id] = expires
 	return true
 }
+
+// MultiKeys trusts the union of several key sources: static keys
+// (NEXUS_KGF_CONTEXT_PUBLIC_KEYS) and one RemoteKeys per URL in
+// NEXUS_KGF_CONTEXT_KEYS_URL -- kgf-gateway's document and each provider
+// front's. A kid is looked up in each source in order; the first that holds
+// it answers. A kid is a function of its key (KeyID), so two sources cannot
+// disagree about which key a kid names.
+type MultiKeys []KeySource
+
+// Key returns the key for kid from the first source that holds it.
+func (m MultiKeys) Key(kid string) (ed25519.PublicKey, error) {
+	sawKeys := false
+	for _, src := range m {
+		k, err := src.Key(kid)
+		if err == nil {
+			return k, nil
+		}
+		if !errors.Is(err, ErrNoKeys) {
+			sawKeys = true
+		}
+	}
+	if !sawKeys {
+		return nil, ErrNoKeys
+	}
+	return nil, ErrUnknownKey
+}
+
+// readySource is a key source that can report readiness (RemoteKeys).
+type readySource interface {
+	Ready(context.Context) error
+}
+
+// Ready reports ready when at least one source holds a key: kgf-gateway and
+// the fronts start independently, and a gateway that can verify one issuer's
+// contexts must not be taken out of rotation because another's document is
+// not up yet. Each unready remote source is logged by RemoteKeys itself.
+func (m MultiKeys) Ready(ctx context.Context) error {
+	var firstErr error
+	for _, src := range m {
+		if rs, ok := src.(readySource); ok {
+			err := rs.Ready(ctx)
+			if err == nil {
+				return nil
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if s, ok := src.(StaticKeys); ok && len(s) > 0 {
+			return nil
+		}
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+	return ErrNoKeys
+}
+
+// ParseKeyURLs splits NEXUS_KGF_CONTEXT_KEYS_URL: a comma-separated list of
+// key-document URLs, each serving {"keys":[{"kid","alg":"EdDSA","key"}]}.
+// Blank items are ignored; duplicates are kept once.
+func ParseKeyURLs(list string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, item := range strings.Split(list, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" || seen[item] {
+			continue
+		}
+		seen[item] = true
+		out = append(out, item)
+	}
+	return out
+}

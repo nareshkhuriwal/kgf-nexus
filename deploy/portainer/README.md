@@ -1,8 +1,14 @@
 # Deploying Nexus to a Portainer-managed Docker host
 
-The release pipeline builds every image, pushes it to ACR digest-pinned, then
-deploys to a Docker daemon on a VM. Portainer manages the resulting containers
-as it manages anything else on that daemon.
+KGF Cloud's release pipeline builds every image, pushes it to ACR
+digest-pinned, then deploys to a Docker daemon on a VM. The pipeline is Azure
+DevOps and lives in the kgf-cloud repository (`.azure-pipelines/nexus/`); this
+repository's own CI is GitHub Actions (`.github/workflows/ci.yml`), which
+builds, tests and publishes every image to GHCR with a digest map
+(`.github/workflows/release.yml`, docs/OPERATIONS.md §22.4) but does not
+deploy. That map is what `deploy/render_compose.py --digests` takes, so the
+rendering below works from a GHCR release too. Portainer manages the resulting
+containers as it manages anything else on that daemon.
 
     build → push to ACR → render compose → copy to host → docker compose up -d
 
@@ -91,7 +97,7 @@ the host already uses them.
 
 ### 4. Turn the stage on
 
-In `.azure-pipelines/kgf-nexus-release.yml`:
+In the release pipeline (`.azure-pipelines/nexus/kgf-nexus-release.yml` in kgf-cloud):
 
 ```yaml
   - name: deployToDockerHost

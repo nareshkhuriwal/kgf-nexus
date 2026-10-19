@@ -2,7 +2,9 @@
 Copyright 2026 Khuriwal Group
 SPDX-License-Identifier: Apache-2.0
 
-Worker agents and the console.
+Worker agents and the console. A worker-pool release
+(components.controlPlane.enabled=false) renders the agents only; they dial
+agentDefaults.controlPlane and agentDefaults.nats.
 */ -}}
 {{- include "nexus.valuesComplete" . }}
 {{- $root := . -}}
@@ -18,7 +20,12 @@ metadata:
   labels: {{- include "nexus.labels" (list $root .name) | nindent 4 }}
     nexus.khuriwalgroup.com/role: agent
 spec:
-  replicas: {{ .replicas | default 1 }}
+  {{- $live := dict }}
+  {{- if include "nexus.controllerManagesAgentReplicas" (list $root .) }}
+  {{- /* The cluster controller scales this Deployment: keep its count. */}}
+  {{- $live = lookup "apps/v1" "Deployment" $root.Release.Namespace .name }}
+  {{- end }}
+  replicas: {{ include "nexus.agentReplicas" (list $root . $live) }}
   # An agent is a worker identity: replacing it while its old pod still holds
   # leases would briefly double its advertised capacity. Recreate drains the
   # old one (NEXUS_DRAIN_GRACE) before the new one registers.
@@ -46,16 +53,24 @@ spec:
           env:
             {{- include "nexus.resultStoreEnv" $root | nindent 12 }}
             {{- include "nexus.natsEnv" (list $root "agent") | nindent 12 }}
-            - { name: NEXUS_CONTROL_PLANE, value: "api-gateway:9091" }
+            # The worker gRPC endpoint: this release's api-gateway, or the
+            # control plane a worker-pool release serves.
+            - { name: NEXUS_CONTROL_PLANE, value: {{ ($root.Values.agentDefaults.controlPlane | default dict).address | default "api-gateway:9091" | quote }} }
             # The tenant this agent serves (agents[].namespace, else
             # nexusNamespace), and a worker key minted for that tenant
             # (agents[].workerApiKeySecretKey in existingSecret).
             - name: NEXUS_API_KEY
-              valueFrom: { secretKeyRef: { name: {{ $root.Values.existingSecret }}, key: {{ .workerApiKeySecretKey | default "worker-api-key" }} } }
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.existingSecret }}, key: {{ .workerApiKeySecretKey | default $root.Values.agentDefaults.workerApiKeySecretKey | default "worker-api-key" }} } }
             - { name: NEXUS_NAMESPACE, value: {{ .namespace | default $root.Values.nexusNamespace | quote }} }
             - { name: NEXUS_QUEUES, value: {{ .queues | quote }} }
             - { name: NEXUS_LABELS, value: {{ .labels | quote }} }
-            - { name: NEXUS_EXECUTORS, value: {{ .executors | default "subprocess" | quote }} }
+            {{- include "nexus.agentExecutorsRequired" . }}
+            # Exactly the executors this agent builds and advertises; one it
+            # cannot build stops it at startup. A task naming no executor runs
+            # on the default: with kubernetes alone, every task is its own pod
+            # (docs/IMAGES.md §4.3).
+            - { name: NEXUS_EXECUTORS, value: {{ include "nexus.agentExecutors" . | quote }} }
+            - { name: NEXUS_DEFAULT_EXECUTOR, value: {{ include "nexus.agentDefaultExecutor" . | quote }} }
             {{- if include "nexus.agentUsesKubernetes" . }}
             {{- $k := include "nexus.agentK8s" (list $root .) | fromYaml }}
             # The kubernetes executor (OPERATIONS §13). The pod name is the
@@ -88,6 +103,24 @@ spec:
             {{- end }}
             {{- with $k.gpuKindLabel }}
             - { name: NEXUS_K8S_GPU_KIND_LABEL, value: {{ . | quote }} }
+            {{- end }}
+            {{- /* Where the TASK pods run (the agent pod's own placement is
+                   nodeSelector/tolerations above): key=value pairs and the
+                   kubectl taint spelling the executor parses. */}}
+            {{- with $k.taskNodeSelector }}
+            {{- $kv := list }}
+            {{- range $key := keys . | sortAlpha }}{{ $kv = append $kv (printf "%s=%s" $key (index $k.taskNodeSelector $key)) }}{{ end }}
+            - { name: NEXUS_K8S_NODE_SELECTOR, value: {{ join "," $kv | quote }} }
+            {{- end }}
+            {{- with $k.taskTolerations }}
+            {{- $tols := list }}
+            {{- range . }}
+            {{- $t := .key }}
+            {{- if and .value (ne (.operator | default "Equal") "Exists") }}{{ $t = printf "%s=%s" $t .value }}{{ end }}
+            {{- with .effect }}{{ $t = printf "%s:%s" $t . }}{{ end }}
+            {{- $tols = append $tols $t }}
+            {{- end }}
+            - { name: NEXUS_K8S_TOLERATIONS, value: {{ join "," $tols | quote }} }
             {{- end }}
             {{- if $k.taskApi.enabled }}
             # The workload API for task pods, on this pod's IP (F148). Declared
@@ -124,11 +157,9 @@ spec:
             {{- with .capacityType }}
             - { name: NEXUS_CAPACITY_TYPE, value: {{ . | quote }} }
             {{- end }}
-            {{- with ($root.Values.claimPlacement.clusterName | default "") }}
-            - { name: NEXUS_CLUSTER_NAME, value: {{ . | quote }} }
-            {{- end }}
-            - name: NEXUS_NODE_NAME
-              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            {{- /* Pod, namespace, node and cluster: the instance the console
+                   places, and NEXUS_CLUSTER_NAME also labels the claims. */}}
+            {{- include "nexus.runtimeIdentityEnv" (list $root (include "nexus.agentClusterName" $root)) | nindent 12 }}
             {{- with .eviction }}
             {{- with .sources }}
             - { name: NEXUS_EVICTION_SOURCES, value: {{ . | quote }} }
@@ -147,7 +178,6 @@ spec:
             - { name: NEXUS_ARTIFACT_CACHE_VERIFY, value: {{ . | quote }} }
             {{- end }}
             {{- end }}
-            - { name: NEXUS_HEARTBEAT_INTERVAL_MS, value: {{ $root.Values.agentDefaults.heartbeatIntervalMs | int64 | toString | quote }} }
             - { name: NEXUS_DRAIN_GRACE, value: {{ $root.Values.agentDefaults.drainGrace | quote }} }
             - { name: NEXUS_WAL_DIR, value: /var/lib/nexus/wal }
             - { name: NEXUS_WORK_DIR, value: /var/lib/nexus/work }
@@ -169,7 +199,7 @@ spec:
             - { name: NEXUS_SUBPROCESS_ENV_PASSTHROUGH, value: {{ .subprocessEnvPassthrough | quote }} }
             {{- end }}
             {{- end }}
-            {{- include "nexus.tlsEnv" (list $root "client") | nindent 12 }}
+            {{- include "nexus.agentTlsEnv" $root | nindent 12 }}
             {{- include "nexus.tracingEnv" $root | nindent 12 }}
           ports:
             - { name: metrics, containerPort: {{ int $root.Values.metrics.agentPort }} }
@@ -206,8 +236,8 @@ spec:
             {{- if .artifactCache }}
             - { name: artifacts, mountPath: /var/lib/nexus/artifacts }
             {{- end }}
-            {{- include "nexus.natsVolumeMounts" $root | nindent 12 }}
-            {{- include "nexus.tlsVolumeMounts" $root | nindent 12 }}
+            {{- include "nexus.natsVolumeMounts" (list $root "agent") | nindent 12 }}
+            {{- include "nexus.agentTlsVolumeMounts" $root | nindent 12 }}
       volumes:
         - { name: wal, emptyDir: {} }
         - { name: work, emptyDir: {} }
@@ -232,10 +262,10 @@ spec:
           emptyDir: { sizeLimit: {{ .sizeLimit | default .bytes | quote }} }
         {{- end }}
         {{- include "nexus.natsVolumes" (list $root "agent" (.natsSeedKey | default "")) | nindent 8 }}
-        {{- include "nexus.tlsVolumes" (list $root "agent") | nindent 8 }}
+        {{- include "nexus.agentTlsVolumes" $root | nindent 8 }}
 {{- include "nexus.pdb" (list $root .name .name (.replicas | default 1) .podDisruptionBudget) }}
 {{- end }}
-{{- if .Values.ui.enabled }}
+{{- if and .Values.ui.enabled (include "nexus.controlPlaneEnabled" .) }}
 {{- $sa := include "nexus.saFor" (list . "ui" nil) | fromYaml }}
 {{- $resolver := .Values.dns.resolver }}
 {{- if not $resolver }}
@@ -271,6 +301,13 @@ spec:
     spec:
       {{- include "nexus.podIdentity" $sa | nindent 6 }}
       {{- include "nexus.pullSecrets" . | nindent 6 }}
+      # The console image is nginx-unprivileged: uid 101, port 8080, so the
+      # pod meets Pod Security "restricted" like every other Nexus pod.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile: { type: RuntimeDefault }
       {{- include "nexus.placement" (list . "ui") | nindent 6 }}
       containers:
         - name: ui
@@ -282,15 +319,25 @@ spec:
             - { name: NEXUS_DNS_RESOLVER, value: {{ $resolver | quote }} }
             - { name: NEXUS_GATEWAY_UPSTREAM, value: {{ printf "api-gateway.%s.svc.%s:8080" .Release.Namespace .Values.dns.clusterDomain | quote }} }
           ports:
-            - { name: http, containerPort: 80 }
+            - { name: http, containerPort: 8080 }
           readinessProbe:
-            httpGet: { path: /, port: http }
+            httpGet: { path: /healthz, port: http }
             periodSeconds: 5
           livenessProbe:
-            httpGet: { path: /, port: http }
+            httpGet: { path: /healthz, port: http }
             periodSeconds: 10
           resources: {{- toYaml .Values.ui.resources | nindent 12 }}
           securityContext:
-            allowPrivilegeEscalation: false
+            {{- include "nexus.containerSecurity" . | nindent 12 }}
+            readOnlyRootFilesystem: true
+          # The only writable paths: the image's entrypoint renders the nginx
+          # config from its template into conf.d at start, and nginx keeps its
+          # pid and temp files under /tmp.
+          volumeMounts:
+            - { name: conf, mountPath: /etc/nginx/conf.d }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: conf, emptyDir: { sizeLimit: 1Mi } }
+        - { name: tmp, emptyDir: { sizeLimit: 64Mi } }
 {{- include "nexus.pdb" (list . "ui" "ui" (.Values.ui.replicas | default 1) .Values.ui.podDisruptionBudget) }}
 {{- end }}

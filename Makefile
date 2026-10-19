@@ -253,7 +253,7 @@ verify-s3-image: ## Verify the pinned S3 image's GitHub build provenance (needs 
 check-doc-refs: ## Fail if any "OPERATIONS §N" reference in the repo names a section that does not exist
 	python3 deploy/scripts/check-operations-refs.py
 
-check-go-version: ## Fail unless go.mod, CONTRACT.md, CI and the service image name the same Go version
+check-go-version: ## Fail unless go.mod, CONTRACT.md, CI and the images name the same Go (and CI and the console image the same Node)
 	$(GO) test -count=1 ./tests/repo
 
 # ── Documentation site (docs-site/README.md) ───────────────────────────────
@@ -402,6 +402,11 @@ ps: ## Show container status
 # The whole platform on Docker Desktop's Kubernetes, via the kgf-nexus Helm
 # chart and Terraform. Runs alongside the compose stack (different ports).
 TF_DEV := deploy/terraform/environments/dev
+# Local, git-ignored settings for the dev environment (its .gitignore drops
+# *.tfvars), such as var.kgf or the KGF.Nexus workspace namespaces to run
+# agents for (workspace_worker_namespaces).
+TF_DEV_VARFILE := $(TF_DEV)/local.tfvars
+TF_DEV_VARS = $(if $(wildcard $(TF_DEV_VARFILE)),-var-file=local.tfvars)
 
 k8s-dev-images: ## Build every image and load it into the local kind node (prints the tag)
 	@deploy/scripts/k8s-dev-images.sh
@@ -409,11 +414,15 @@ k8s-dev-images: ## Build every image and load it into the local kind node (print
 k8s-dev-up: ## Build + load images, then terraform apply the dev environment on Docker Desktop (uses the host Postgres)
 	@set -euo pipefail; \
 	NEXUS_NATS_DIR=.dev-nats deploy/nats/nexus-nats-auth.sh init --tenant default; \
-	export TF_VAR_postgres_password="$$(cat "$$(deploy/scripts/dev-host-postgres.sh)")"; \
+	for ns in $$(grep -oE 'kgf-[0-9a-f]{32}' '$(TF_DEV_VARFILE)' 2>/dev/null | sort -u); do \
+	  NEXUS_NATS_DIR=.dev-nats deploy/nats/nexus-nats-auth.sh add-tenant "$$ns"; \
+	done; \
+	pgpass=$$(deploy/scripts/dev-host-postgres.sh); \
+	export TF_VAR_postgres_password="$$(cat "$$pgpass")"; \
 	tag=$$(deploy/scripts/k8s-dev-images.sh | tail -n 1); \
 	echo "image tag: $$tag"; \
 	terraform -chdir=$(TF_DEV) init -input=false -upgrade=false >/dev/null; \
-	terraform -chdir=$(TF_DEV) apply -input=false -auto-approve -var "image_tag=$$tag"; \
+	terraform -chdir=$(TF_DEV) apply -input=false -auto-approve $(TF_DEV_VARS) -var "image_tag=$$tag"; \
 	echo; echo "Admin API key: terraform -chdir=$(TF_DEV) output -raw admin_api_key"
 
 k8s-dev-test: ## Run the workload suite (CSV ETL, ML training, GPU scheduling, fan-out) on the dev environment
@@ -427,7 +436,7 @@ k8s-dev-status: ## Show the dev environment's pods and URLs
 	@terraform -chdir=$(TF_DEV) output
 
 k8s-dev-down: ## Destroy the dev environment (DELETES its data volumes)
-	TF_VAR_postgres_password="$$(cat .dev-postgres/password 2>/dev/null || echo unused)" terraform -chdir=$(TF_DEV) destroy -input=false
+	TF_VAR_postgres_password="$$(cat .dev-postgres/password 2>/dev/null || echo unused)" terraform -chdir=$(TF_DEV) destroy -input=false $(TF_DEV_VARS)
 
 # ── Terraform: cloud platforms (deploy/terraform) ─────────────────────────
 # OFFLINE only: init -backend=false, validate, and `terraform test` plans with
@@ -779,7 +788,7 @@ compat-smoke: ## Run the previous release's DB integration suite against this tr
 # ── Pinned tools, chart and proto checks ──────────────────────────────────
 # Every tool is one exact release, downloaded into .tools/ and refused unless
 # its SHA-256 matches the pin in deploy/scripts/pinned-tool.sh.
-.PHONY: tools helm-validate proto-lint proto-breaking proto-check actionlint
+.PHONY: tools helm-validate proto-lint proto-breaking proto-check actionlint preflight-test shellcheck
 tools: ## Install the pinned, checksum-verified helm, kubeconform and buf into .tools/
 	@for t in helm kubeconform buf; do deploy/scripts/pinned-tool.sh $$t; done
 
@@ -796,6 +805,20 @@ proto-check: ## buf lint and buf breaking
 	proto/check.sh all
 
 # actionlint in its digest-pinned image, over .github/workflows (needs Docker).
+# The ONE pin of it: `make shellcheck` runs the shellcheck it bundles, and CI
+# runs both targets, so the two can never drift.
 ACTIONLINT_IMAGE ?= rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
 actionlint: ## Lint the GitHub workflows with the pinned actionlint image
 	docker run --rm -v "$(CURDIR):/repo:ro" -w /repo $(ACTIONLINT_IMAGE) -color
+
+# The AKS install tooling. The harness runs deploy/scripts/aks-preflight.sh
+# against a stub kubectl and az: no cluster, no network, nothing created.
+preflight-test: ## Test deploy/scripts/aks-preflight.sh against stub kubectl and az (no cluster)
+	deploy/scripts/tests/aks-preflight-test.sh
+
+# Shell scripts held to shellcheck (warnings and above fail; an `info` must be
+# fixed or disabled inline with the reason).
+SHELLCHECK_FILES ?= deploy/scripts/aks-preflight.sh deploy/scripts/tests/aks-preflight-test.sh \
+	deploy/scripts/tests/aks-preflight-stub/kubectl deploy/helm/validate.sh
+shellcheck: ## shellcheck the AKS install scripts and validate.sh with the pinned actionlint image's shellcheck
+	docker run --rm -v "$(CURDIR):/repo:ro" -w /repo --entrypoint shellcheck $(ACTIONLINT_IMAGE) $(SHELLCHECK_FILES)

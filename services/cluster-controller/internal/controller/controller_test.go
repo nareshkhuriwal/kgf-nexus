@@ -404,7 +404,11 @@ func TestObservationsAreReportedPerKind(t *testing.T) {
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "aks-pool-1", Labels: map[string]string{"kubernetes.azure.com/agentpool": "tasks", "secret-ish": "x"}},
 			Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
 				Allocatable: corev1.ResourceList{corev1.ResourceCPU: mustQ("4")}}},
-		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "nexus-task-abc", Namespace: workerNS, Labels: map[string]string{"nexus.io/attempt-id": "a-1"}},
+		// The kubernetes executor's real metadata (agent/internal/executor/
+		// kubernetes_spec.go): the label selects, the annotations carry the ids.
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "nexus-task-abc", Namespace: workerNS,
+			Labels:      map[string]string{"app.kubernetes.io/managed-by": "nexus-agent", "nexus.dev/attempt": "a-1", "nexus.dev/run": "r-1"},
+			Annotations: map[string]string{"nexus.dev/attempt-id": "a-1", "nexus.dev/run-id": "r-1"}},
 			Status: batchv1.JobStatus{Active: 1}},
 		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "unrelated", Namespace: workerNS}},
 		&autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: "kgf-nexus"},
@@ -428,8 +432,9 @@ func TestObservationsAreReportedPerKind(t *testing.T) {
 	for _, o := range rep.Objects {
 		kinds[o.Kind] = append(kinds[o.Kind], o)
 	}
-	if len(kinds["Job"]) != 1 || !strings.Contains(kinds["Job"][0].SummaryJson, `"attempt_id":"a-1"`) {
-		t.Errorf("jobs = %+v, want only the labelled task job", kinds["Job"])
+	if len(kinds["Job"]) != 1 || !strings.Contains(kinds["Job"][0].SummaryJson, `"attempt_id":"a-1"`) ||
+		!strings.Contains(kinds["Job"][0].SummaryJson, `"run_id":"r-1"`) {
+		t.Errorf("jobs = %+v, want only the executor's task job, with its attempt and run", kinds["Job"])
 	}
 	if len(kinds["Node"]) != 1 || strings.Contains(kinds["Node"][0].SummaryJson, "secret-ish") {
 		t.Errorf("node summary leaks arbitrary labels: %+v", kinds["Node"])
@@ -540,4 +545,50 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// TestTaskJobsObservedWhereTheExecutorRunsThem: the kubernetes executor creates
+// Jobs in NEXUS_K8S_NAMESPACE, which need not be a worker namespace. With task
+// namespaces configured, Jobs are listed there (and only there).
+func TestTaskJobsObservedWhereTheExecutorRunsThem(t *testing.T) {
+	clk := start()
+	fc, rm := newFakeCluster(t, 1), newFakeRM("plan")
+	registerAll(fc, rm)
+	for _, j := range []*batchv1.Job{
+		{ObjectMeta: metav1.ObjectMeta{Name: "in-task-ns", Namespace: "nexus-tasks", Labels: map[string]string{"nexus.dev/attempt": "a-2"},
+			Annotations: map[string]string{"nexus.dev/attempt-id": "a-2", "nexus.dev/run-id": "r-2"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "in-worker-ns", Namespace: workerNS, Labels: map[string]string{"nexus.dev/attempt": "a-3"}}},
+	} {
+		if err := fc.kube.Tracker().Add(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rm.now = clk.Now
+	c, err := New(Config{ClusterName: "test", Identity: "controller-0", Now: clk.Now, Interval: time.Second,
+		TaskNamespaces: []string{"nexus-tasks"}}, fc.kube, rm, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, c)
+	var jobs []string
+	for _, o := range rm.reports[len(rm.reports)-1].Objects {
+		if o.Kind == "Job" {
+			jobs = append(jobs, o.Namespace+"/"+o.Name)
+			if !strings.Contains(o.SummaryJson, `"attempt_id":"a-2"`) || !strings.Contains(o.SummaryJson, `"run_id":"r-2"`) {
+				t.Errorf("job summary %s", o.SummaryJson)
+			}
+		}
+	}
+	if !slices.Equal(jobs, []string{"nexus-tasks/in-task-ns"}) {
+		t.Fatalf("jobs = %v, want only the task namespace's", jobs)
+	}
+	var listed []string
+	for _, a := range fc.kube.Actions() {
+		if a.GetVerb() == "list" && a.GetResource().Resource == "jobs" {
+			listed = append(listed, a.GetNamespace())
+		}
+	}
+	if !slices.Equal(listed, []string{"nexus-tasks"}) {
+		t.Fatalf("jobs listed in %v", listed)
+	}
 }

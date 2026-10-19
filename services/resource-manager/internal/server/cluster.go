@@ -23,11 +23,12 @@ import (
 type ClusterStore interface {
 	ClusterAssignmentByName(ctx context.Context, name string) (*store.ClusterAssignment, error)
 	ReportObservations(ctx context.Context, r store.ObservationReport) (int64, error)
-	PodWorkerStates(ctx context.Context, namespace string, hostnames []string) (map[string]store.PodWorkers, error)
+	PodWorkerStates(ctx context.Context, clusterID, namespace string, hostnames []string) (map[string]store.PodWorkers, error)
 	PoolDemand(ctx context.Context, b store.ClusterBinding) (platform.Demand, error)
 	DrainPod(ctx context.Context, clusterID, namespace, k8sNamespace, deployment, hostname, observedUID, reason, actor string) (int, int, error)
 	CheckPodRemovable(ctx context.Context, clusterID, namespace, hostname string) (store.PodWorkers, bool, string, error)
 	RecordScaling(ctx context.Context, r store.ScalingRecord) error
+	RecordSchedulerAutoscaling(ctx context.Context, r store.SchedulerAutoscalingReport) error
 	ReportReconcileError(ctx context.Context, clusterID, target, message, actor string) error
 	ClusterNameByID(ctx context.Context, id string) (string, error)
 }
@@ -124,7 +125,28 @@ func (s *ClusterServer) GetAssignment(ctx context.Context, req *rmv1.GetAssignme
 			LastScaleDirection: b.LastScaleDirection, IdleSinceUnixMs: unixMs(b.IdleSince), ConfigError: b.ConfigError,
 		})
 	}
+	sa := a.SchedulerAutoscaling
+	out.SchedulerAutoscaling = &rmv1.SchedulerAutoscaling{Desired: hpaSettingsPB(sa.Desired), ConfigRevision: sa.ConfigRevision}
+	for _, h := range sa.HPAs {
+		out.SchedulerAutoscaling.Hpas = append(out.SchedulerAutoscaling.Hpas, &rmv1.SchedulerHPAMemory{
+			KubernetesNamespace: h.KubernetesNamespace, HpaName: h.HPAName, LastAppliedAtUnixMs: unixMs(h.LastAppliedAt),
+		})
+	}
 	return out, nil
+}
+
+func hpaSettingsPB(h platform.HPASettings) *rmv1.SchedulerAutoscalingSettings {
+	return &rmv1.SchedulerAutoscalingSettings{MinReplicas: h.MinReplicas, MaxReplicas: h.MaxReplicas,
+		TargetCpuPercent: h.TargetCPUPercent, ScaleDownStabilizationSeconds: h.ScaleDownStabilizationSeconds}
+}
+
+// hpaSettings converts a wire message; nil (an unset field) is nil.
+func hpaSettings(m *rmv1.SchedulerAutoscalingSettings) *platform.HPASettings {
+	if m == nil {
+		return nil
+	}
+	return &platform.HPASettings{MinReplicas: m.GetMinReplicas(), MaxReplicas: m.GetMaxReplicas(),
+		TargetCPUPercent: m.GetTargetCpuPercent(), ScaleDownStabilizationSeconds: m.GetScaleDownStabilizationSeconds()}
 }
 
 // ReportObservations stores a snapshot.
@@ -202,7 +224,7 @@ func (s *ClusterServer) GetPoolState(ctx context.Context, req *rmv1.GetPoolState
 	if err != nil {
 		return nil, clusterErr("pool demand", err)
 	}
-	pods, err := s.store.PodWorkerStates(ctx, req.GetNamespace(), req.GetHostnames())
+	pods, err := s.store.PodWorkerStates(ctx, req.GetClusterId(), req.GetNamespace(), req.GetHostnames())
 	if err != nil {
 		return nil, clusterErr("pod worker states", err)
 	}
@@ -311,6 +333,44 @@ func (s *ClusterServer) RecordScaling(ctx context.Context, req *rmv1.RecordScali
 		return nil, clusterErr("record scaling", err)
 	}
 	return &rmv1.RecordScalingResponse{}, nil
+}
+
+// RecordSchedulerAutoscaling persists one cycle's scheduler HPA reconcile
+// (ADR-0036). The store refuses an HPA outside the cluster's control-plane
+// namespace, so the record can only describe HPAs the controller may manage.
+func (s *ClusterServer) RecordSchedulerAutoscaling(ctx context.Context, req *rmv1.RecordSchedulerAutoscalingRequest) (*rmv1.RecordSchedulerAutoscalingResponse, error) {
+	if err := required(map[string]string{"cluster_id": req.GetClusterId(), "actor": req.GetActor()}); err != nil {
+		return nil, err
+	}
+	r := store.SchedulerAutoscalingReport{ClusterID: req.GetClusterId(), Actor: req.GetActor(), Mode: req.GetMode(),
+		Complete: req.GetComplete()}
+	for _, t := range req.GetTargets() {
+		if err := required(map[string]string{"kubernetes_namespace": t.GetKubernetesNamespace(), "hpa_name": t.GetHpaName()}); err != nil {
+			return nil, err
+		}
+		observed := hpaSettings(t.GetObserved())
+		if observed == nil {
+			observed = &platform.HPASettings{}
+		}
+		rec := store.SchedulerHPAReconcile{
+			KubernetesNamespace: t.GetKubernetesNamespace(), HPAName: t.GetHpaName(),
+			Status: store.SchedulerHPAStatus{
+				Deployment: truncate(t.GetDeployment(), 253), UID: truncate(t.GetHpaUid(), 64), Managed: t.GetManaged(),
+				Result: t.GetResult(), Reason: truncate(t.GetReason(), 1024), Error: truncate(t.GetError(), 4096),
+				ConfigRevision: t.GetConfigRevision(), Observed: *observed,
+			},
+			Action: t.GetAction(), Applied: t.GetApplied(), Reason: truncate(t.GetReason(), 1024),
+			From: hpaSettings(t.GetFrom()), To: hpaSettings(t.GetTo()),
+		}
+		if d := t.GetDetailJson(); d != "" {
+			rec.Detail = []byte(d)
+		}
+		r.Targets = append(r.Targets, rec)
+	}
+	if err := s.store.RecordSchedulerAutoscaling(ctx, r); err != nil {
+		return nil, clusterErr("record scheduler autoscaling", err)
+	}
+	return &rmv1.RecordSchedulerAutoscalingResponse{}, nil
 }
 
 // ReportReconcileError records a controller failure for the console.

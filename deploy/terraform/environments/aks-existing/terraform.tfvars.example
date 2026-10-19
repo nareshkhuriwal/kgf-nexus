@@ -1,0 +1,130 @@
+# Copy to terraform.tfvars (gitignored) and fill in. Values below are examples.
+# The database owner password is NOT here: export TF_VAR_postgres_password, or
+# name a Key Vault secret in postgres.password_key_vault_secret.
+
+subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# The existing cluster. OIDC issuer and workload identity must be enabled
+# (docs/INSTALL-AKS.md, "The AKS cluster"); deploy/scripts/aks-preflight.sh checks it.
+aks_cluster = {
+  name                = "prod-weu-aks"
+  resource_group_name = "prod-weu-aks-rg"
+}
+
+# Entra ID token from the Azure CLI login of whoever runs Terraform. In CI:
+# kubelogin_login = "workloadidentity" (GitHub OIDC federated to an app).
+kube_auth = {
+  mode            = "azure-ad"
+  kubelogin_login = "azurecli"
+}
+
+# The existing Flexible Server. The database and its owner login are created
+# once by the DBA (docs/INSTALL-AKS.md, "Azure Database for PostgreSQL"); pgcrypto must be
+# allow-listed in azure.extensions.
+postgres = {
+  server_name         = "prod-weu-pg"
+  resource_group_name = "prod-weu-data-rg"
+  database            = "nexus"
+  owner_login         = "nexus"
+  # Read the owner password from the vault below instead of TF_VAR_postgres_password:
+  password_key_vault_secret = "nexus-postgres-owner-password"
+}
+
+# The existing storage account; the container is created here (private,
+# protected from `terraform destroy`).
+storage = {
+  account_name        = "prodweunexusresults"
+  resource_group_name = "prod-weu-data-rg"
+  container_name      = "nexus-results"
+  create_container    = true
+}
+
+# Optional: an RBAC-mode vault for the owner password and akv:// task secrets.
+key_vault = {
+  name                = "prod-weu-nexus-kv"
+  resource_group_name = "prod-weu-data-rg"
+}
+
+tags = {
+  project     = "kgf-nexus"
+  environment = "prod"
+  owner       = "platform@khuriwalgroup.com"
+}
+
+namespace        = "nexus"
+create_namespace = true
+nexus_namespace  = "default"
+
+# AKS node pools (agent pool names). The control plane and schedulers share a
+# general-purpose user pool; work runs on dedicated pools.
+control_plane_node_pool = "general"
+scheduler = {
+  node_pool = "general"
+  replicas  = 2
+}
+
+worker_pools = [
+  {
+    name         = "cpu"
+    node_pool    = "cpu"
+    queues       = "default"
+    replicas     = 2
+    max_replicas = 10
+    cpu_millis   = 3500 # Standard_D4as_v5: 4 vCPU, 16 GiB; leave room for the kubelet
+    memory_gib   = 12
+    disk_gib     = 50
+  },
+  {
+    name           = "gpu"
+    node_pool      = "gput4"
+    queues         = "gpu"
+    replicas       = 1
+    max_replicas   = 4
+    cpu_millis     = 3000 # Standard_NC4as_T4_v3: 4 vCPU, 28 GiB, one T4
+    memory_gib     = 20
+    disk_gib       = 100
+    gpu_count      = 1
+    gpu_kind       = "nvidia-t4"
+    gpu_memory_gib = 16
+    cpu_request    = "500m"
+    memory_request = "1Gi"
+  },
+]
+
+# AKS installs the GPU driver, not the device plugin. false if the cluster
+# already runs the plugin or the NVIDIA GPU Operator.
+install_nvidia_device_plugin = true
+
+# Plan mode first: register the cluster in the console with the
+# cluster_registration output, check the controller's plan, then switch to
+# apply with the UID from `terraform output cluster_uid`.
+cluster_controller = {
+  enabled = true
+  mode    = "plan"
+}
+
+# The published images and chart (release workflow, docs/OPERATIONS.md §22.4).
+# image.digests: the digests map from the run's release-images.yaml.
+image = {
+  tag               = "v0.3.0"
+  registry          = "ghcr.io/"
+  repository_prefix = "nareshkhuriwal/kgf-nexus/"
+}
+chart = {
+  repository = "oci://ghcr.io/nareshkhuriwal/charts"
+  version    = "0.3.0"
+}
+
+nats_credentials_dir = "/secure/nexus-nats"
+
+# Anything else the chart takes, deep-merged last.
+chart_values_overrides = {
+  logLevel = "info"
+  smtp = {
+    host      = "smtp.example.com"
+    port      = 587
+    tls       = "starttls"
+    from      = "KGF Nexus <no-reply@example.com>"
+    publicUrl = "https://nexus.example.com"
+  }
+}

@@ -1,0 +1,159 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# The values deploy/terraform/environments/aks-existing hands to the chart
+# through modules/kgf-nexus, for its terraform.tfvars.example plus one
+# kubernetes-executor pool. Merged in the module's order:
+#   1. the module's own block;
+#   2. the NATS identities;
+#   3. the environment's chart_values;
+#   4. the CA bundle and runtime logins the module created;
+#   5. chart_values_overrides (empty here).
+# Azure outputs (client ids, the server FQDN) are placeholders.
+# The namespace is created with pod-security.kubernetes.io/enforce=restricted
+# (pod_security_enforce), which validate.sh's restricted check stands in for.
+# Keep in step with deploy/terraform/environments/aks-existing/main.tf.
+
+# modules/kgf-nexus: release "kgf-nexus"
+existingSecret: kgf-nexus-credentials
+nexusNamespace: default
+workspaceWorkers: []
+image:
+  registry: ghcr.io/
+  repositoryPrefix: example-owner/kgf-nexus/
+  tag: v0.3.0
+  pullPolicy: IfNotPresent
+  digests: {}
+
+# nats_auth_values (from nats_credentials_dir)
+nats:
+  auth:
+    eventService: { publicKeys: [UEVENTSERVICEKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA] }
+    monitor: { publicKeys: [UMONITORKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA] }
+    tenants:
+      - namespace: default
+        publicKeys: [UAGENTKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA]
+  # chart_values: nats = { storage = { storageClass = var.storage_class } }
+  storage: { storageClass: managed-csi-premium }
+
+# chart_values (environments/aks-existing locals.chart_values)
+cluster:
+  name: prod-weu-aks                       # lower(aks_cluster.name)
+postgres:
+  enabled: false
+  host: prod-weu-pg.postgres.database.azure.com
+  port: 5432
+  user: nexus
+  database: nexus
+  # database_values and runtime_role_values (module, after chart_values)
+  sslmode: verify-full
+  caBundle: { secretName: kgf-nexus-postgres-ca, key: ca.crt }
+  runtimeRoles:
+    enabled: true
+    existingSecret: kgf-nexus-db-logins
+    passwordRevision: 1
+minio:
+  enabled: false
+  bucket: nexus-results                    # the Blob CONTAINER
+resultStore:
+  backend: azblob
+  azure:
+    account: prodweunexusresults
+    auth: workload-identity
+    # The Blob identity, pinned so the agents' secrets identity is never used
+    # for results.
+    clientId: 11111111-1111-1111-1111-111111111111
+# The accounts are split by what their pods may reach: nexus-artifacts (Blob
+# only), nexus-agent (subprocess agents: Blob and Key Vault), and
+# nexus-agent-kubernetes (kubernetes agents, which also mount an API token,
+# so they cannot share nexus-agent).
+serviceAccounts:
+  apiGateway: &artifacts
+    name: nexus-artifacts
+    annotations: { azure.workload.identity/client-id: 11111111-1111-1111-1111-111111111111 }
+  workflowManager: *artifacts
+  artifactGC: *artifacts
+  agent:
+    name: nexus-agent
+    annotations: { azure.workload.identity/client-id: 11111111-1111-1111-1111-111111111111 }
+# Control plane, console and controller on control_plane_node_pool ("general"),
+# by the label AKS puts on every node; the pool's taints, none here.
+placement:
+  nodeSelector: { kubernetes.azure.com/agentpool: general }
+  tolerations: []
+# One scheduler per queue the pools serve, on scheduler.node_pool.
+schedulers:
+  - name: scheduler
+    queue: default
+    replicas: 2
+    nodeSelector: { kubernetes.azure.com/agentpool: general }
+    tolerations: []
+  - name: scheduler-gpu
+    queue: gpu
+    replicas: 2
+    nodeSelector: { kubernetes.azure.com/agentpool: general }
+    tolerations: []
+  - name: scheduler-batch
+    queue: batch
+    replicas: 2
+    nodeSelector: { kubernetes.azure.com/agentpool: general }
+    tolerations: []
+agents:
+  # executor subprocess: on its own pool, sized to it.
+  - name: agent-cpu
+    replicas: 2
+    queues: default
+    labels: pool=cpu,nodepool=cpu,accelerator=none
+    executors: subprocess
+    cpuMillis: 3500
+    memoryBytes: 12884901888
+    diskBytes: 53687091200
+    gpuCount: 0
+    nodeSelector: { kubernetes.azure.com/agentpool: cpu }
+    tolerations: []
+    resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { memory: 12Gi } }
+  # A GPU pool: the pool's own taint, plus the chart's nvidia.com/gpu one.
+  - name: agent-gpu
+    replicas: 1
+    queues: gpu
+    labels: pool=gpu,nodepool=gput4,accelerator=nvidia
+    executors: subprocess
+    cpuMillis: 3000
+    memoryBytes: 21474836480
+    diskBytes: 107374182400
+    gpuCount: 1
+    gpuKind: nvidia-t4
+    gpuMemoryBytes: 17179869184
+    nodeSelector: { kubernetes.azure.com/agentpool: gput4 }
+    tolerations: [{ key: sku, operator: Equal, value: gpu, effect: NoSchedule }]
+    resources: { requests: { cpu: 500m, memory: 1Gi }, limits: { memory: 20Gi } }
+  # executor kubernetes: the agent pod stays on the control-plane pool, its
+  # task Jobs run on node_pool; its own account mounts the API token.
+  - name: agent-batch
+    replicas: 1
+    queues: batch
+    labels: pool=batch,nodepool=cpu,accelerator=none
+    executors: kubernetes
+    cpuMillis: 16000
+    memoryBytes: 68719476736
+    diskBytes: 107374182400
+    gpuCount: 0
+    nodeSelector: { kubernetes.azure.com/agentpool: general }
+    tolerations: []
+    serviceAccount:
+      name: nexus-agent-kubernetes
+      annotations: { azure.workload.identity/client-id: 11111111-1111-1111-1111-111111111111 }
+    kubernetes:
+      taskNodeSelector: { kubernetes.azure.com/agentpool: cpu }
+      taskTolerations: []
+    resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { memory: 1Gi } }
+claimPlacement:
+  clusterName: prod-weu-aks
+clusterController:
+  enabled: true
+  clusterName: prod-weu-aks
+  apply: { enabled: false, expectedClusterUID: "" }
+# key_vault set: the agents' secrets identity (akv://).
+agentDefaults:
+  secrets:
+    workloadIdentityClientId: 22222222-2222-2222-2222-222222222222

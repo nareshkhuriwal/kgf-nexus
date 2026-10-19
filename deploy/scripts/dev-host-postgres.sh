@@ -40,7 +40,11 @@ fi
 mkdir -p "$DIR"
 chmod 700 "$DIR"
 if [ ! -s "$DIR/password" ]; then
-  (umask 077; LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 >"$DIR/password")
+  # head closes the pipe after 32 bytes, so tr dies of SIGPIPE (141); under
+  # pipefail that failed the whole script on the first run, after the file was
+  # written. Only head's status matters, so take it alone.
+  (umask 077; set +o pipefail; LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 >"$DIR/password")
+  [ "$(wc -c <"$DIR/password")" -eq 32 ] || { echo "dev-host-postgres: could not generate a password" >&2; rm -f "$DIR/password"; exit 1; }
 fi
 chmod 600 "$DIR/password"
 PW=$(cat "$DIR/password")

@@ -21,8 +21,14 @@
 #    from a local cache filled from COMMIT-PINNED sources and checked against
 #    the SHA-256 of every file in schemas.lock. No schema is read from a
 #    floating branch, and a warm cache needs no network at all.
-# 3. Negative cases: values that MUST be refused -- by values.schema.json or by
-#    a template guard -- and the message that must name the fix.
+# 3. Every pod template of every render passes Pod Security "restricted"
+#    (pss-restricted.py), so a namespace enforcing it admits the whole release.
+# 4. The shipped examples (kgf-nexus/examples/*.yaml) are exactly their ci/
+#    copies, <owner> aside, so step 1 validates what users copy.
+# 5. Negative cases: values that MUST be refused -- by values.schema.json or by
+#    a template guard -- and the message that must name the fix. Then positive
+#    cases: what given values must render (worker-pool releases, runtime
+#    identity, the agents' control-plane settings, placement).
 #
 # Tools: helm and kubeconform are the versions pinned in
 # deploy/scripts/pinned-tool.sh, downloaded once into .tools/ and verified by
@@ -168,6 +174,22 @@ for values in "$chart"/ci/*-values.yaml; do
   if ! "$kubeconform" -strict -summary -kubernetes-version "$kube_version" "${schema_args[@]}" "$tmp/$name.yaml"; then
     fail=1
   fi
+  python3 -I "$here/pss-restricted.py" "$tmp/$name.yaml" || fail=1
+done
+
+# The examples users copy are validated through their ci/ copies: identical
+# but for the <owner> placeholder (an image path a render cannot leave open).
+echo "== examples match their ci/ copies"
+for example in "$chart"/examples/*.yaml; do
+  copy="$chart/ci/$(basename "$example" .yaml)-values.yaml"
+  if [ ! -f "$copy" ]; then
+    echo "FAIL: $example has no validated copy $copy"; fail=1
+  elif ! sed 's/<owner>/example-owner/g' "$example" | diff -u - "$copy" >"$tmp/example.diff"; then
+    echo "FAIL: $copy differs from $example (regenerate: sed 's/<owner>/example-owner/g'):"
+    sed 's/^/    /' "$tmp/example.diff" | head -20; fail=1
+  else
+    echo "ok   $(basename "$example") = ci/$(basename "$copy")"
+  fi
 done
 
 # The wrapper itself: values a template guard refuses must fail it, whatever
@@ -220,6 +242,8 @@ must_fail "unparsable minimum agent version"   "/agentPolicy/minVersion"      --
 k8s_agent='agents=[{"name":"agent-k8s","queues":"gpu","executors":"kubernetes","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824,"gpuCount":2,"gpuMig":"1g.10gb=7","kubernetes":{"namespace":"nexus-tasks","sharedGpuResourceName":"nvidia.com/gpu.shared"}}]'
 must_fail "MIG prefix without a separator"      "/migResourcePrefix"           --set agentDefaults.kubernetes.migResourcePrefix=nvidia.com/mig
 must_fail "shared GPU resource not qualified"   "/sharedGpuResourceName"       --set agentDefaults.kubernetes.sharedGpuResourceName=gpu-shared
+# $(NEXUS_POD_IP) below is the literal Kubernetes expands, not the shell's.
+# shellcheck disable=SC2016
 if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set-json "$k8s_agent" >"$tmp/k8s" 2>&1 &&
    grep -qF 'name: NEXUS_K8S_NAMESPACE, value: "nexus-tasks"' "$tmp/k8s" &&
    grep -qF 'name: NEXUS_K8S_MIG_RESOURCE_PREFIX, value: "nvidia.com/mig-"' "$tmp/k8s" &&
@@ -346,6 +370,420 @@ then
   echo "ok   rendered: azblob workload identity on exactly api-gateway, workflow-manager, agents and artifact-gc"
 else
   echo "FAIL: azblob workload identity did not reach exactly the result-store clients"; tail -5 "$tmp/wi"; fail=1
+fi
+
+# ── Component-scoped releases, runtime identity, agent dialing (ADR-0035) ──
+pool=(--set components.controlPlane.enabled=false)
+must_fail "worker pool with no agents"          "agents is empty"              "${pool[@]}" --set-json 'agents=[]'
+must_fail "worker pool without existingSecret"  "a worker-pool release (components.controlPlane.enabled=false) needs the Secret" "${pool[@]}" --set existingSecret=
+must_fail "worker pool on a self-signed CA"     "needs tls.certManager.issuerRef" "${pool[@]}" --set tls.enabled=true --set tls.requirePeerTLS=false
+must_fail "worker pool NATS mTLS, no client cert" "needs nats.tls.clientSecrets.agent" "${pool[@]}" --set nats.tls.enabled=true
+must_fail "worker pool NATS TLS, no CA"         "needs nats.tls.caSecret"      "${pool[@]}" --set nats.tls.enabled=true --set nats.tls.verifyClients=false
+must_fail "misspelt components key"            "additional properties 'controlplane' not allowed" --set components.controlplane.enabled=false
+must_fail "control-plane TLS without a CA"      "needs agentDefaults.controlPlane.tls.caSecretName" --set agentDefaults.controlPlane.tls.enabled=true
+must_fail "server name without any TLS"         "has no effect without TLS"    --set agentDefaults.controlPlane.tls.serverName=workers.example.com
+must_fail "control-plane address without port"  "/agentDefaults/controlPlane/address" --set agentDefaults.controlPlane.address=api-gateway
+must_fail "NATS URL that is not nats://"        "/agentDefaults/nats/url"      --set agentDefaults.nats.url=http://nats:4222
+must_fail "cluster name the registry refuses"   "/cluster/name"                --set cluster.name=Prod_Cluster
+must_fail "scheduler spread policy misspelt"    "whenUnsatisfiable"            --set-json 'schedulers=[{"name":"scheduler","queue":"default","topologySpread":{"whenUnsatisfiable":"Never"}}]'
+must_fail "task toleration with a bad effect"   "/agentDefaults/kubernetes/taskTolerations/0/effect" --set-json 'agentDefaults.kubernetes.taskTolerations=[{"key":"sku","effect":"Never"}]'
+must_fail "misspelt networkPolicy key"          "additional properties 'ingresFrom' not allowed" --set-json 'networkPolicy={"enabled":true,"ingresFrom":[]}'
+must_fail "component topology the gateway refuses" "/services/apiGateway/componentTopology" --set services.apiGateway.componentTopology=everyone
+
+# Executors are an exact list: the chart renders NEXUS_EXECUTORS (agents[].
+# executors, trimmed and de-duplicated) and NEXUS_DEFAULT_EXECUTOR
+# (defaultExecutor, else the first executor) on every agent, refuses docker
+# (no daemon socket in a chart pod: the agent would not start) and a default
+# outside the list, and never renders NEXUS_HEARTBEAT_INTERVAL_MS, which no
+# binary reads (the gateway dictates the interval, ADR-0005).
+one_agent='{"name":"agent-x","queues":"default","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824'
+must_fail "docker executor in a chart pod"      "the chart mounts none"        --set-json "agents[0]=$one_agent,\"executors\":\"subprocess,docker\"}"
+must_fail "an executor the agent does not have" "/agents/0/executors"          --set-json "agents[0]=$one_agent,\"executors\":\"podman\"}"
+must_fail "default executor outside the list"   "defaultExecutor subprocess is not one of its executors (kubernetes)" \
+  --set-json "agents[0]=$one_agent,\"executors\":\"kubernetes\",\"defaultExecutor\":\"subprocess\"}"
+must_fail "default executor the agent lacks"    "/agents/0/defaultExecutor"    --set-json "agents[0]=$one_agent,\"defaultExecutor\":\"wasm\"}"
+dead=0
+for values in "$chart"/ci/*-values.yaml; do
+  name=$(basename "$values" -values.yaml)
+  if [ -f "$tmp/$name.yaml" ] && grep -q 'NEXUS_HEARTBEAT_INTERVAL_MS' "$tmp/$name.yaml"; then
+    echo "FAIL: ci/$name renders NEXUS_HEARTBEAT_INTERVAL_MS, which the agent does not read"; dead=1; fail=1
+  fi
+done
+if [ "$dead" = 0 ] && "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set agentDefaults.heartbeatIntervalMs=5000 >/dev/null 2>&1; then
+  echo "ok   rendered: no NEXUS_HEARTBEAT_INTERVAL_MS in any ci/ render; agentDefaults.heartbeatIntervalMs still accepted"
+elif [ "$dead" = 0 ]; then
+  echo "FAIL: agentDefaults.heartbeatIntervalMs is no longer accepted (older values files set it)"; fail=1
+fi
+# What each agent gets: every agent of every ci/ render carries both
+# variables, the default among the executors; the AKS examples' agents run
+# kubernetes alone (every task its own pod); the default agent is subprocess;
+# a messy list is normalized and an explicit default kept.
+if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" \
+    --set-json "agents=[$one_agent,\"executors\":\" subprocess , kubernetes,subprocess\",\"defaultExecutor\":\"kubernetes\"}]" \
+    >"$tmp/execs-mixed.yaml" 2>&1 &&
+   python3 - "$tmp" "$chart"/ci/*-values.yaml <<'PY'
+import os, sys, yaml
+tmp, files = sys.argv[1], sys.argv[2:]
+def agents(path):
+    out = {}
+    for d in yaml.safe_load_all(open(path)):
+        if d and d["kind"] == "Deployment" and \
+           d["spec"]["template"]["metadata"]["labels"].get("nexus.khuriwalgroup.com/role") == "agent":
+            env = {e["name"]: e.get("value") for e in d["spec"]["template"]["spec"]["containers"][0]["env"]}
+            out[d["metadata"]["name"]] = (env.get("NEXUS_EXECUTORS"), env.get("NEXUS_DEFAULT_EXECUTOR"))
+    return out
+seen = 0
+for f in files:
+    name = os.path.basename(f)[:-len("-values.yaml")]
+    render = os.path.join(tmp, name + ".yaml")
+    if not os.path.exists(render):
+        continue
+    found = agents(render)
+    for agent, (execs, default) in found.items():
+        assert execs and default, (name, agent, execs, default)
+        assert default in execs.split(","), (name, agent, execs, default)
+        assert "docker" not in execs.split(","), (name, agent, execs)
+        seen += 1
+    if name in ("aks-existing-cluster", "aks-worker-pool"):
+        assert found and all(v == ("kubernetes", "kubernetes") for v in found.values()), (name, found)
+    if name == "minimal":
+        assert found == {"agent-cpu": ("subprocess", "subprocess")}, found
+assert seen, "no agent in any ci/ render"
+mixed = agents(os.path.join(tmp, "execs-mixed.yaml"))
+assert mixed == {"agent-x": ("subprocess,kubernetes", "kubernetes")}, mixed
+PY
+then
+  echo "ok   rendered: NEXUS_EXECUTORS and NEXUS_DEFAULT_EXECUTOR on every agent; the AKS examples' agents are kubernetes-only"
+else
+  echo "FAIL: agent executors did not render as expected"; tail -5 "$tmp/execs-mixed.yaml"; fail=1
+fi
+
+# NEXUS_COMPONENT_TOPOLOGY (ADR-0037 §4) reaches the api-gateway, and only it:
+# platform-operators by default, infrastructure-viewers in the AKS example.
+for case in "minimal:platform-operators" "aks-existing-cluster:infrastructure-viewers"; do
+  file=${case%%:*} want=${case#*:}
+  if "$helm" template nexus "$chart" -f "$chart/ci/$file-values.yaml" >"$tmp/topology" 2>&1 &&
+     [ "$(grep -c 'name: NEXUS_COMPONENT_TOPOLOGY' "$tmp/topology")" = 1 ] &&
+     grep -A80 -E 'image: .*/api-gateway:' "$tmp/topology" | grep -qF "name: NEXUS_COMPONENT_TOPOLOGY, value: \"$want\""; then
+    echo "ok   rendered: NEXUS_COMPONENT_TOPOLOGY=$want on the api-gateway alone ($file)"
+  else
+    echo "FAIL: NEXUS_COMPONENT_TOPOLOGY did not render $want on the api-gateway alone ($file)"; fail=1
+  fi
+done
+
+# A worker-pool release renders agents and nothing else -- no Service,
+# StatefulSet, Job, CronJob, ConfigMap or control-plane account -- even with
+# no schedulers, and its agents dial what agentDefaults names.
+if "$helm" template nexus-pool "$chart" -n nexus-pool -f "$chart/ci/aks-worker-pool-values.yaml" \
+    --set-json 'schedulers=[]' >"$tmp/pool" 2>&1 &&
+   python3 - "$tmp/pool" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+kinds = {d["kind"] for d in docs}
+assert kinds <= {"ServiceAccount", "Deployment", "PodDisruptionBudget", "Role", "RoleBinding", "NetworkPolicy"}, kinds
+sas = {d["metadata"]["name"] for d in docs if d["kind"] == "ServiceAccount"}
+assert sas == {"nexus-agent"}, sas
+deps = [d for d in docs if d["kind"] == "Deployment"]
+assert deps, "no agent Deployment"
+for d in deps:
+    tpl = d["spec"]["template"]
+    assert tpl["metadata"]["labels"].get("nexus.khuriwalgroup.com/role") == "agent", d["metadata"]["name"]
+    env = {e["name"]: e.get("value") for e in tpl["spec"]["containers"][0]["env"]}
+    assert env["NEXUS_CONTROL_PLANE"] == "api-gateway.nexus.svc:9091", env["NEXUS_CONTROL_PLANE"]
+    assert env["NEXUS_NATS_URL"] == "nats://nats.nexus.svc:4222", env.get("NEXUS_NATS_URL")
+    assert env["NEXUS_CLUSTER_NAME"] == "aks-prod-weu"
+    assert env["NEXUS_K8S_NODE_SELECTOR"] == "kubernetes.azure.com/agentpool=gpu"
+    assert env["NEXUS_K8S_TOLERATIONS"] == "sku=gpu:NoSchedule"
+PY
+then
+  echo "ok   rendered: worker-pool release = agents only, dialing agentDefaults.controlPlane and agentDefaults.nats"
+else
+  echo "FAIL: the worker-pool release did not render as expected"; tail -5 "$tmp/pool"; fail=1
+fi
+
+# Runtime identity on every Nexus process: the downward-API pod, namespace
+# and node on each container of a Nexus image but the console and the Jobs,
+# NEXUS_CLUSTER_NAME = cluster.name (claimPlacement.clusterName for the
+# agents), and no container that sets one variable twice. agentDefaults.nats.url
+# "" takes NATS away from the agents only. The cluster controller reports
+# clusterController.clusterName (which defaults to cluster.name), and keeps
+# POD_NAME / POD_NAMESPACE for its Lease.
+if "$helm" template nexus "$chart" -f "$chart/ci/full-values.yaml" --set claimPlacement.clusterName=gpu-claims \
+    --set agentDefaults.nats.url= >"$tmp/identity" 2>&1 &&
+   python3 - "$tmp/identity" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"] in ("Deployment", "CronJob")]
+seen = set()
+for d in docs:
+    tpl = d["spec"]["jobTemplate"]["spec"]["template"] if d["kind"] == "CronJob" else d["spec"]["template"]
+    agent = tpl["metadata"]["labels"].get("nexus.khuriwalgroup.com/role") == "agent"
+    for c in tpl["spec"].get("initContainers", []) + tpl["spec"]["containers"]:
+        names = [e["name"] for e in c.get("env", [])]
+        assert len(names) == len(set(names)), (d["metadata"]["name"], c["name"], "duplicate env")
+    c = tpl["spec"]["containers"][0]
+    if "kgf-nexus/ui:" in c["image"]:
+        continue
+    env = {e["name"]: e for e in c.get("env", [])}
+    for var, field in (("NEXUS_POD_NAME", "metadata.name"), ("NEXUS_POD_NAMESPACE", "metadata.namespace"), ("NEXUS_NODE_NAME", "spec.nodeName")):
+        assert env[var]["valueFrom"]["fieldRef"]["fieldPath"] == field, (d["metadata"]["name"], var)
+    want = "gpu-claims" if agent else ("dev" if d["metadata"]["name"] == "nexus-cluster-controller" else "ci-cluster")
+    assert env["NEXUS_CLUSTER_NAME"]["value"] == want, (d["metadata"]["name"], env["NEXUS_CLUSTER_NAME"])
+    if d["metadata"]["name"] == "nexus-cluster-controller":
+        assert env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"
+        assert env["POD_NAMESPACE"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.namespace"
+    if agent:
+        assert "NEXUS_NATS_URL" not in env, d["metadata"]["name"]
+    if d["metadata"]["name"] == "event-service":
+        assert env["NEXUS_NATS_URL"]["value"] == "nats://nats:4222"
+    seen.add(d["metadata"]["name"])
+for want in ("api-gateway", "workflow-manager", "dag-engine", "scheduler", "scheduler-gpu", "resource-manager", "event-service", "agent-cpu", "artifact-gc", "nexus-cluster-controller"):
+    assert want in seen, (want, sorted(seen))
+PY
+then
+  echo "ok   rendered: pod/namespace/node/cluster identity on every Nexus process; agents' NATS follows agentDefaults.nats.url"
+else
+  echo "FAIL: runtime identity or agent NATS did not render as expected"; tail -5 "$tmp/identity"; fail=1
+fi
+
+# The agents' control-plane TLS over this release's mTLS (ci/full-values.yaml):
+# the client leaf stays, the CA comes from caSecretName, the name is overridden.
+if grep -A60 'NEXUS_CONTROL_PLANE, value: "api-gateway.nexus-validate.svc:9091"' "$tmp/full.yaml" >"$tmp/cptls" &&
+   grep -qF 'name: NEXUS_TLS_CLIENT_CERT_FILE, value: /etc/nexus/tls/tls.crt' "$tmp/cptls" &&
+   grep -qF 'name: NEXUS_TLS_CA_FILE, value: "/etc/nexus/control-plane-ca/ca.crt"' "$tmp/cptls" &&
+   grep -qF 'name: NEXUS_TLS_SERVER_NAME, value: "workers.example.com"' "$tmp/cptls" &&
+   grep -qF 'secretName: nexus-gateway-ca' "$tmp/full.yaml"; then
+  echo "ok   rendered: agents verify the control plane against agentDefaults.controlPlane.tls.caSecretName and serverName"
+else
+  echo "FAIL: agentDefaults.controlPlane.tls did not render as expected"; fail=1
+fi
+
+# Scheduler HPAs the cluster controller owns (ADR-0036). One condition
+# (nexus.controllerOwnsSchedulerHPAs) both annotates a scheduler's HPA for the
+# controller and binds the controller's patch on it: controller on, apply on,
+# apply.schedulerAutoscaling not false. The stateless services' HPAs are never
+# annotated; every other combination annotates nothing and grants no patch.
+hpa_base=(--set autoscaling.enabled=true --set clusterController.clusterName=c
+  --set clusterController.apply.expectedClusterUID=00000000-0000-0000-0000-000000000000
+  --set-json 'schedulers=[{"name":"scheduler","queue":"default","autoscaling":{"enabled":true,"minReplicas":2,"maxReplicas":4}},{"name":"scheduler-gpu","queue":"gpu"}]')
+hpa_case() { # <want owned: yes|no> <description> <helm args...>
+  local want=$1 what=$2; shift 2
+  if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" "${hpa_base[@]}" "$@" >"$tmp/hpa" 2>&1 &&
+     python3 - "$tmp/hpa" "$want" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+owned = sys.argv[2] == "yes"
+key = "nexus.khuriwalgroup.com/autoscaling-owner"
+hpas = {d["metadata"]["name"]: d for d in docs if d["kind"] == "HorizontalPodAutoscaler"}
+assert set(hpas) >= {"scheduler", "api-gateway"}, sorted(hpas)
+assert "scheduler-gpu" not in hpas, "a scheduler without its own autoscaling got an HPA"
+for name, h in hpas.items():
+    ann = (h["metadata"].get("annotations") or {}).get(key)
+    want = "cluster-controller" if (owned and name == "scheduler") else None
+    assert ann == want, (name, ann)
+s = hpas["scheduler"]["spec"]
+assert (s["minReplicas"], s["maxReplicas"]) == (2, 4), s   # values: lookup is empty here
+roles = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Role"}
+role = roles.get("nexus-cluster-controller-apply-scheduler")
+if owned:
+    patch = [r for r in role["rules"] if "patch" in r["verbs"]]
+    assert patch and patch[0]["resourceNames"] == ["scheduler"], role["rules"]
+else:
+    assert role is None, "patch on scheduler HPAs bound although the chart does not hand them over"
+PY
+  then
+    echo "ok   rendered: $what"
+  else
+    echo "FAIL: $what"; tail -5 "$tmp/hpa"; fail=1
+  fi
+}
+hpa_case yes "scheduler HPA annotated for the controller, and patch bound on it, in apply mode" \
+  --set clusterController.enabled=true --set clusterController.apply.enabled=true
+hpa_case no  "scheduler HPA left to Helm in plan mode" \
+  --set clusterController.enabled=true
+hpa_case no  "scheduler HPA left to Helm with apply.schedulerAutoscaling=false" \
+  --set clusterController.enabled=true --set clusterController.apply.enabled=true --set clusterController.apply.schedulerAutoscaling=false
+hpa_case no  "scheduler HPA left to Helm without the controller" \
+  --set clusterController.apply.enabled=true
+
+# An owned HPA keeps the controller's four fields across `helm upgrade`: they
+# come from the live object when it carries the owner annotation. lookup is
+# empty under `helm template`, so the merge is rendered in a probe chart over
+# this chart's helpers with live objects given as values.
+probe="$tmp/hpa-probe"
+mkdir -p "$probe/templates"
+cp "$chart"/templates/_*.tpl "$probe/templates/"
+printf 'apiVersion: v2\nname: hpa-probe\nversion: 0.0.0\n' >"$probe/Chart.yaml"
+cat >"$probe/templates/probe.yaml" <<'TPL'
+{{- $a := dict "minReplicas" 2 "maxReplicas" 6 "targetCPUUtilizationPercentage" 70 "targetMemoryUtilizationPercentage" 80 "behavior" (dict "scaleDown" (dict "stabilizationWindowSeconds" 300 "policies" (list (dict "type" "Pods" "value" 1 "periodSeconds" 60)))) }}
+{{- range $case, $live := .Values.cases }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: {{ $case }} }
+data:
+  settings: {{ include "nexus.hpaOwnedSettings" (list $a $live) | fromYaml | toJson | quote }}
+{{- end }}
+TPL
+cat >"$tmp/hpa-live.yaml" <<'YAML'
+cases:
+  owned:
+    metadata: { annotations: { nexus.khuriwalgroup.com/autoscaling-owner: cluster-controller } }
+    spec:
+      minReplicas: 3
+      maxReplicas: 10
+      metrics:
+        - { type: Resource, resource: { name: memory, target: { type: Utilization, averageUtilization: 80 } } }
+        - { type: Resource, resource: { name: cpu, target: { type: Utilization, averageUtilization: 55 } } }
+      behavior: { scaleDown: { stabilizationWindowSeconds: 120 } }
+  owned-defaults:
+    metadata: { annotations: { nexus.khuriwalgroup.com/autoscaling-owner: cluster-controller } }
+    spec: { maxReplicas: 5, metrics: [] }
+  not-owned:
+    metadata: { annotations: { example.com/other: x } }
+    spec: { minReplicas: 5, maxReplicas: 9 }
+  absent: {}
+YAML
+if "$helm" template probe "$probe" -f "$tmp/hpa-live.yaml" >"$tmp/hpa-probe.out" 2>&1 &&
+   python3 - "$tmp/hpa-probe.out" <<'PY'
+import json, sys, yaml
+got = {d["metadata"]["name"]: json.loads(d["data"]["settings"]) for d in yaml.safe_load_all(open(sys.argv[1])) if d}
+def four(s):
+    return (s["minReplicas"], s["maxReplicas"], s["targetCPUUtilizationPercentage"], s["behavior"]["scaleDown"]["stabilizationWindowSeconds"])
+assert four(got["owned"]) == (3, 10, 55, 120), got["owned"]
+# Unset on the live object: Kubernetes' minReplicas default, values elsewhere.
+assert four(got["owned-defaults"]) == (1, 5, 70, 300), got["owned-defaults"]
+assert four(got["not-owned"]) == (2, 6, 70, 300), got["not-owned"]
+assert four(got["absent"]) == (2, 6, 70, 300), got["absent"]
+for s in got.values():   # never the controller's: still from values
+    assert s["targetMemoryUtilizationPercentage"] == 80, s
+    assert s["behavior"]["scaleDown"]["policies"] == [{"type": "Pods", "value": 1, "periodSeconds": 60}], s
+PY
+then
+  echo "ok   rendered: an owned HPA keeps the live min/max/CPU/scale-down window; values elsewhere and when not owned"
+else
+  echo "FAIL: the owned-HPA live merge did not render as expected"; tail -5 "$tmp/hpa-probe.out"; fail=1
+fi
+
+# The bootstrap's static worker key is optional (bootstrap.registerWorkerKey):
+# off, the Job registers no worker-api-key (and is renamed, its template being
+# immutable), and the agents read a scoped token from the key
+# agentDefaults.workerApiKeySecretKey names, an agent's own override first.
+must_fail "worker key under a malformed Secret key" "/agentDefaults/workerApiKeySecretKey" --set "agentDefaults.workerApiKeySecretKey=worker token"
+must_fail "misspelt bootstrap key"              "additional properties 'registerWorkerkey' not allowed" --set bootstrap.registerWorkerkey=false
+two_agents='agents=[{"name":"agent-a","queues":"default","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824},{"name":"agent-b","queues":"default","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824,"workerApiKeySecretKey":"worker-token-b"}]'
+if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set-json "$two_agents" >"$tmp/wk-on" 2>&1 &&
+   "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set-json "$two_agents" \
+     --set bootstrap.registerWorkerKey=false --set agentDefaults.workerApiKeySecretKey=worker-token >"$tmp/wk-off" 2>&1 &&
+   python3 - "$tmp/wk-on" "$tmp/wk-off" <<'PY'
+import sys, yaml
+def load(p):
+    docs = [d for d in yaml.safe_load_all(open(p)) if d]
+    boot = [d for d in docs if d["kind"] == "Job" and d["metadata"]["name"].startswith("bootstrap-")][0]
+    c = boot["spec"]["template"]["spec"]["containers"][0]
+    keys = {d["metadata"]["name"]: [e for e in d["spec"]["template"]["spec"]["containers"][0]["env"] if e["name"] == "NEXUS_API_KEY"][0]["valueFrom"]["secretKeyRef"]["key"]
+            for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"].startswith("agent-")}
+    return boot["metadata"]["name"], {e["name"] for e in c["env"]}, c["args"][0], keys
+on, off = load(sys.argv[1]), load(sys.argv[2])
+assert "WORKER_API_KEY" in on[1] and "bootstrap-worker" in on[2], "default must register worker-api-key"
+assert on[3] == {"agent-a": "worker-api-key", "agent-b": "worker-token-b"}, on[3]
+assert "WORKER_API_KEY" not in off[1] and "bootstrap-worker" not in off[2] and "wkey" not in off[2], "registered a worker key although told not to"
+assert "bootstrap-admin" in off[2] and "INSERT INTO tenants" in off[2], "the tenant and admin key must still be bootstrapped"
+assert off[0] != on[0], "the bootstrap Job must be renamed when its template changes"
+assert off[3] == {"agent-a": "worker-token", "agent-b": "worker-token-b"}, off[3]
+PY
+then
+  echo "ok   rendered: bootstrap.registerWorkerKey=false registers no static worker key; agents read agentDefaults.workerApiKeySecretKey"
+else
+  echo "FAIL: bootstrap.registerWorkerKey / workerApiKeySecretKey did not render as expected"; tail -5 "$tmp/wk-off"; fail=1
+fi
+
+# Agent Deployments whose replica count the cluster controller owns
+# (agents[].replicasManagedByController): once the Deployment exists, a render
+# keeps its live count, so `helm upgrade` never resets what the controller
+# scaled to. Honoured with this release's controller in apply mode, or always
+# in a worker-pool release. A probe chart over the real helpers stands in for
+# lookup, which cannot run offline; the real chart, where lookup is empty,
+# must render the value.
+rprobe="$tmp/replicas-probe"
+mkdir -p "$rprobe/templates"
+cp "$chart"/templates/_*.tpl "$rprobe/templates/"
+printf 'apiVersion: v2\nname: replicas-probe\nversion: 0.0.0\n' >"$rprobe/Chart.yaml"
+cat >"$rprobe/templates/probe.yaml" <<'TPL'
+{{- range $case, $c := .Values.cases }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: {{ $case }} }
+data:
+  replicas: {{ include "nexus.agentReplicas" (list (dict "Values" $c.values) $c.agent ($c.live | default dict)) | quote }}
+  want: {{ $c.want | quote }}
+{{- end }}
+TPL
+cat >"$tmp/replicas-cases.yaml" <<'YAML'
+apply: &apply { clusterController: { enabled: true, apply: { enabled: true } } }
+optin: &optin { name: agent-cpu, replicas: 3, replicasManagedByController: true }
+cases:
+  apply-live:        { values: *apply, agent: *optin, live: { spec: { replicas: 7 } }, want: 7 }
+  apply-live-zero:   { values: *apply, agent: *optin, live: { spec: { replicas: 0 } }, want: 0 }
+  apply-no-live:     { values: *apply, agent: *optin, want: 3 }
+  plan-mode:         { values: { clusterController: { enabled: true, apply: { enabled: false } } }, agent: *optin, live: { spec: { replicas: 7 } }, want: 3 }
+  no-controller:     { values: { clusterController: { enabled: false, apply: { enabled: true } } }, agent: *optin, live: { spec: { replicas: 7 } }, want: 3 }
+  not-opted-in:      { values: *apply, agent: { name: agent-cpu, replicas: 3 }, live: { spec: { replicas: 7 } }, want: 3 }
+  worker-pool:       { values: { components: { controlPlane: { enabled: false } }, clusterController: { enabled: false } }, agent: *optin, live: { spec: { replicas: 5 } }, want: 5 }
+YAML
+if "$helm" template probe "$rprobe" -f "$tmp/replicas-cases.yaml" >"$tmp/replicas-probe.out" 2>&1 &&
+   python3 - "$tmp/replicas-probe.out" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+assert len(docs) == 7, len(docs)
+for d in docs:
+    assert d["data"]["replicas"] == d["data"]["want"], (d["metadata"]["name"], d["data"])
+PY
+   "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set clusterController.enabled=true \
+     --set clusterController.clusterName=c --set clusterController.apply.enabled=true \
+     --set clusterController.apply.expectedClusterUID=00000000-0000-0000-0000-000000000000 \
+     --set-json 'agents=[{"name":"agent-cpu","queues":"default","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824,"replicas":3,"replicasManagedByController":true}]' \
+     >"$tmp/replicas" 2>&1 &&
+   grep -A3 -E '^  name: agent-cpu$' "$tmp/replicas" >/dev/null &&
+   python3 - "$tmp/replicas" <<'PY'
+import sys, yaml
+dep = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"] == "Deployment" and d["metadata"]["name"] == "agent-cpu"]
+assert dep and dep[0]["spec"]["replicas"] == 3, dep and dep[0]["spec"].get("replicas")
+PY
+then
+  echo "ok   rendered: a controller-managed agent keeps its live replica count (0 included) only in apply mode or a worker pool; values otherwise"
+else
+  echo "FAIL: controller-managed agent replicas did not render as expected"; tail -5 "$tmp/replicas-probe.out"; fail=1
+fi
+
+# environments/aks-existing (ci/terraform-aks-existing-values.yaml): the
+# three-way ServiceAccount split its federated credentials trust, each with
+# the token setting that keeps them apart, and every pod pinned by the
+# agentpool label AKS puts on every node.
+if python3 - "$tmp/terraform-aks-existing.yaml" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+sas = {d["metadata"]["name"]: d for d in docs if d["kind"] == "ServiceAccount"}
+for name, token in (("nexus-artifacts", False), ("nexus-agent", False), ("nexus-agent-kubernetes", True)):
+    sa = sas[name]
+    assert sa.get("automountServiceAccountToken") is token, (name, sa.get("automountServiceAccountToken"))
+    assert "azure.workload.identity/client-id" in sa["metadata"].get("annotations", {}), name
+want = {"api-gateway": "nexus-artifacts", "workflow-manager": "nexus-artifacts", "agent-cpu": "nexus-agent",
+        "agent-gpu": "nexus-agent", "agent-batch": "nexus-agent-kubernetes"}
+for d in docs:
+    if d["kind"] not in ("Deployment", "StatefulSet", "CronJob"):
+        continue
+    tpl = d["spec"]["jobTemplate"]["spec"]["template"] if d["kind"] == "CronJob" else d["spec"]["template"]
+    spec, name = tpl["spec"], d["metadata"]["name"]
+    if name in want:
+        assert spec["serviceAccountName"] == want[name], (name, spec["serviceAccountName"])
+        assert tpl["metadata"]["labels"].get("azure.workload.identity/use") == "true", name
+    assert "kubernetes.azure.com/agentpool" in (spec.get("nodeSelector") or {}), (name, "not pinned to a pool")
+PY
+then
+  echo "ok   rendered: environments/aks-existing: nexus-artifacts / nexus-agent / nexus-agent-kubernetes, every pod on its agentpool"
+else
+  echo "FAIL: the aks-existing values did not render the account split or the pool placement"; fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then

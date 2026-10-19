@@ -5,9 +5,11 @@ package store
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
+	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
 )
 
 func TestIdempotencyModeProto(t *testing.T) {
@@ -156,6 +158,39 @@ func TestTaskSpecViewToleratesUnknownFields(t *testing.T) {
 	}
 }
 
+// TestTaskSpecViewReadsExecutorAndImageInEveryDialect: the claim places a task
+// that names no executor by whether it carries an image and stdout_output, so
+// both must be read from the DAG engine's protojson (nested under runtime) as
+// well as the flat fixture form; reading neither would let a
+// kubernetes-default worker claim a task its executor refuses.
+func TestTaskSpecViewReadsExecutorAndImageInEveryDialect(t *testing.T) {
+	cases := map[string]struct {
+		raw, executor, image, stdout string
+	}{
+		"proto names":   {`{"task_ref":"t","runtime":{"executor":"kubernetes","image":"reg/x:1","command":["a"],"stdout_output":"o"}}`, "kubernetes", "reg/x:1", "o"},
+		"camel case":    {`{"taskRef":"t","runtime":{"image":"reg/y:2","stdoutOutput":"p"},"timeouts":{"startToCloseMs":"60000"}}`, "", "reg/y:2", "p"},
+		"flat fixture":  {`{"task_ref":"t","executor":"docker","image":"reg/z:3","stdout_output":"q"}`, "docker", "reg/z:3", "q"},
+		"no runtime":    {`{"task_ref":"t"}`, "", "", ""},
+		"command only":  {`{"task_ref":"t","runtime":{"command":["echo"]}}`, "", "", ""},
+		"quoted int64s": {`{"task_ref":"t","start_to_close_ms":"5","runtime":{"image":"reg/q:4"}}`, "", "reg/q:4", ""},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			var spec TaskSpecView
+			if err := json.Unmarshal([]byte(c.raw), &spec); err != nil {
+				t.Fatal(err)
+			}
+			if spec.Executor != c.executor || spec.Image != c.image || spec.StdoutOutput != c.stdout {
+				t.Errorf("executor=%q image=%q stdout_output=%q, want %q, %q and %q",
+					spec.Executor, spec.Image, spec.StdoutOutput, c.executor, c.image, c.stdout)
+			}
+			if u := spec.Unnamed(); u.HasImage != (c.image != "") || u.StdoutOutput != (c.stdout != "") {
+				t.Errorf("Unnamed() = %+v", u)
+			}
+		})
+	}
+}
+
 func TestClaimOutcomeStrings(t *testing.T) {
 	// These strings appear in logs and metrics labels, so they are pinned.
 	tests := map[ClaimOutcome]string{
@@ -169,5 +204,29 @@ func TestClaimOutcomeStrings(t *testing.T) {
 		if got := in.String(); got != want {
 			t.Errorf("ClaimOutcome(%d).String() = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestLedgerReadsTheDefaultExecutorLabel pins the literal label in
+// recordUsageSQL (a constant, so it cannot interpolate the Go name) to
+// domain.LabelDefaultExecutor: a renamed label would silently meter every
+// unnamed-executor attempt as NULL.
+func TestLedgerReadsTheDefaultExecutorLabel(t *testing.T) {
+	if !strings.Contains(recordUsageSQL, "'"+domain.LabelDefaultExecutor+"'") {
+		t.Fatalf("recordUsageSQL does not read the %s label", domain.LabelDefaultExecutor)
+	}
+}
+
+func TestShortfallReasonForAnUnnamedExecutor(t *testing.T) {
+	r := shortfallReason([]domain.Shortfall{{Dim: shortfallUnnamedExecutor, Detail: "kubernetes needs runtime.image"}})
+	for _, want := range []string{"waiting_for_worker: ", "(label nexus.io/default-executor)", ": kubernetes needs runtime.image;"} {
+		if !strings.Contains(r, want) {
+			t.Errorf("reason %q does not contain %q", r, want)
+		}
+	}
+	// Any other shortfall is unchanged.
+	short := []domain.Shortfall{{Dim: "gpu", Need: 4, Free: 3}}
+	if got, want := shortfallReason(short), domain.ShortfallReason(short); got != want {
+		t.Errorf("reason = %q, want %q", got, want)
 	}
 }

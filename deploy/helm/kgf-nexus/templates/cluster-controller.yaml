@@ -10,16 +10,23 @@ Least privilege:
   Role (release ns)          leases get/create/update (its own leader election),
                              deployments + HPAs read (schedulers and their HPAs)
   Role (each worker ns)      deployments, pods, resourcequotas, jobs: read only
+  Role (each other task ns)  jobs, resourcequotas: read only (task Jobs and the
+                             quota headroom, where the executor runs them)
   ClusterRole                nodes read; the kube-system Namespace object, get
                              only (the cluster identity) -- observeNodes
   Role (each worker ns)      ONLY with apply.enabled: deployments/scale update
-                             and pods patch. Nothing else, anywhere.
+                             and pods patch.
+  Role (release ns)          ONLY with apply.enabled and apply.schedulerAutoscaling:
+                             patch on the autoscaled schedulers' HPAs, by name
+                             (ADR-0036). Nothing else, anywhere.
 */ -}}
 {{- include "nexus.valuesComplete" . }}
 {{- $cc := .Values.clusterController }}
 {{- if $cc.enabled }}
-{{- if not $cc.clusterName }}
-{{- fail "clusterController.clusterName is required: the registry name (clusters.name) registered in the console under Cluster & scaling -> Live cluster" }}
+{{- /* cluster.name is the chart-wide cluster name; absent from older values. */}}
+{{- $clusterName := $cc.clusterName | default ((.Values.cluster | default dict).name | default "") }}
+{{- if not $clusterName }}
+{{- fail "clusterController.clusterName is required (or cluster.name, which it defaults to): the registry name (clusters.name) registered in the console under Govern -> Infrastructure -> Clusters" }}
 {{- end }}
 {{- if $cc.apply.enabled }}
 {{- if not $cc.apply.expectedClusterUID }}
@@ -33,6 +40,28 @@ Least privilege:
 {{- end }}
 {{- $name := "nexus-cluster-controller" }}
 {{- $workerNamespaces := $cc.workerNamespaces | default (list .Release.Namespace) }}
+{{- /* Task namespaces: explicit, else where this release's kubernetes-executor
+       agents run their Jobs; empty leaves the controller's own default (the
+       bound worker namespaces, which the observe Roles below cover). */}}
+{{- $taskNamespaces := $cc.taskNamespaces | default list }}
+{{- if not $taskNamespaces }}
+{{- range .Values.agents }}
+{{- if include "nexus.agentUsesKubernetes" . }}
+{{- $taskNamespaces = append $taskNamespaces (include "nexus.agentK8s" (list $ .) | fromYaml).namespace }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $taskNamespaces = uniq $taskNamespaces }}
+{{- /* ADR-0036: the HPAs the chart renders for schedulers (only those with
+       their own schedulers[].autoscaling.enabled). */}}
+{{- $schedulerHPAs := list }}
+{{- range .Values.schedulers }}
+{{- if (.autoscaling | default dict).enabled }}
+{{- $schedulerHPAs = append $schedulerHPAs .name }}
+{{- end }}
+{{- end }}
+{{- /* The same condition annotates those HPAs for the controller (nexus.hpa). */}}
+{{- $applySchedulers := include "nexus.controllerOwnsSchedulerHPAs" . }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -134,6 +163,71 @@ subjects:
   - { kind: ServiceAccount, name: {{ $name }}, namespace: {{ $.Release.Namespace }} }
 {{- end }}
 {{- end }}
+{{- range $ns := $taskNamespaces }}
+{{- if not (has $ns $workerNamespaces) }}
+---
+# Task Jobs are observed, and the quota headroom computed, where the
+# kubernetes executor runs them. Read only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-tasks
+  namespace: {{ $ns }}
+  labels: {{- include "nexus.labels" (list $ "cluster-controller") | nindent 4 }}
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [resourcequotas]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-tasks
+  namespace: {{ $ns }}
+  labels: {{- include "nexus.labels" (list $ "cluster-controller") | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-tasks }
+subjects:
+  - { kind: ServiceAccount, name: {{ $name }}, namespace: {{ $.Release.Namespace }} }
+{{- end }}
+{{- end }}
+{{- if $applySchedulers }}
+---
+# Scheduler autoscaling (ADR-0036), apply mode only: patch on the chart's
+# scheduler HPAs, by name. The controller writes four fields of an HPA
+# (minReplicas, maxReplicas, the CPU target, the scale-down window), and only
+# while it carries nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller.
+# Never the scheduler Deployment itself.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-apply-scheduler
+  labels: {{- include "nexus.labels" (list . "cluster-controller") | nindent 4 }}
+rules:
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+  {{- if $schedulerHPAs }}
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    resourceNames: {{- toYaml $schedulerHPAs | nindent 6 }}
+    verbs: [patch]
+  {{- else }}
+  # No scheduler here autoscales (schedulers[].autoscaling.enabled), so there
+  # is no HPA to patch and no patch is granted.
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-apply-scheduler
+  labels: {{- include "nexus.labels" (list . "cluster-controller") | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-apply-scheduler }
+subjects:
+  - { kind: ServiceAccount, name: {{ $name }}, namespace: {{ .Release.Namespace }} }
+{{- end }}
 {{- if $cc.observeNodes }}
 ---
 # Cluster-scoped objects need a ClusterRole. Named per release namespace, so
@@ -208,15 +302,27 @@ spec:
           image: {{ include "nexus.image" (list . "cluster-controller") }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
-            - { name: NEXUS_CLUSTER_NAME, value: {{ $cc.clusterName | quote }} }
-            - { name: NEXUS_RM_ADDR, value: "resource-manager:9090" }
+            {{- /* Pod, namespace, node and NEXUS_CLUSTER_NAME (ADR-0035): the
+                   controller's own instance row, and the cluster it reports.
+                   POD_NAME / POD_NAMESPACE below stay: the binary reads them
+                   for its Lease identity and namespace. */}}
+            {{- include "nexus.runtimeIdentityEnv" (list . $clusterName) | nindent 12 }}
+            - { name: NEXUS_RM_ADDR, value: {{ $cc.resourceManagerAddress | default "resource-manager:9090" | quote }} }
             # Opt-in 2 of 3. False = plan (dry run), whatever the registry says.
             - { name: NEXUS_CONTROLLER_ALLOW_APPLY, value: {{ ternary "true" "false" $cc.apply.enabled | quote }} }
             - { name: NEXUS_CONTROLLER_INTERVAL, value: {{ $cc.interval | quote }} }
-            - { name: NEXUS_JOB_LABEL_SELECTOR, value: {{ $cc.jobLabelSelector | quote }} }
-            {{- /* ADR-0031: placement labels and ResourceQuota headroom. Task
-                   namespaces default to the bound worker namespaces, which the
-                   read-only Role below already covers. */}}
+            - { name: NEXUS_CONTROLLER_SCHEDULER_PATCH_INTERVAL, value: {{ $cc.schedulerPatchInterval | default "1m" | quote }} }
+            {{- /* nexus.io/attempt-id was this chart's default before it matched
+                   the executor's labels and selected no Job at all; an upgrade
+                   with --reuse-values still carries it. */}}
+            {{- $jobSelector := $cc.jobLabelSelector | default "nexus.dev/attempt" }}
+            {{- if eq $jobSelector "nexus.io/attempt-id" }}{{ $jobSelector = "nexus.dev/attempt" }}{{ end }}
+            - { name: NEXUS_JOB_LABEL_SELECTOR, value: {{ $jobSelector | quote }} }
+            {{- with $taskNamespaces }}
+            - { name: NEXUS_CLUSTER_TASK_NAMESPACES, value: {{ join "," . | quote }} }
+            {{- end }}
+            {{- /* ADR-0031: placement labels and ResourceQuota headroom, the
+                   latter for the task namespaces above. */}}
             {{- with $cc.clusterLabels }}
             - { name: NEXUS_CLUSTER_LABELS, value: {{ . | quote }} }
             {{- end }}

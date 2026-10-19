@@ -288,7 +288,7 @@ file next to `docker-compose.yml`.
 |---|---|
 | `Dockerfile.service` | All six Go services **and** the agent, parameterised by `SERVICE` / `SERVICE_PATH` |
 | `Dockerfile.migrate` | The migration job (`postgres:16-alpine` + `migrate.sh`) |
-| `Dockerfile.ui` | The console (`node:24` LTS build → `nginx:1.27` runtime) |
+| `Dockerfile.ui` | The console (`node:24` LTS build → `nginxinc/nginx-unprivileged` runtime: uid 101, listening on 8080, read-only root filesystem; docs/IMAGES.md) |
 
 `Dockerfile.service` is one parameterised file rather than seven near-identical
 ones, because the build differs only in the main-package path and seven copies
@@ -369,8 +369,11 @@ Older MinIO images lack `mc ready`. Pin a newer release or substitute
 **Docker socket permission denied on an agent**
 The agents bind-mount `/var/run/docker.sock` for the docker executor, which is
 effectively root on the host — acceptable on a laptop, never in production
-(ADR-0007's k8s executor is the answer there). If you only need the subprocess
-executor, drop the mount and set `AGENT_EXECUTORS: subprocess`.
+(ADR-0007's k8s executor is the answer there). Without a usable socket an agent
+logs "docker daemon unreachable" and simply offers no docker executor. If you
+only need the subprocess executor, drop the mount and set
+`NEXUS_EXECUTORS: subprocess` on the agents, an exact list: they then never
+probe for docker (docs/IMAGES.md §4.3).
 
 **Reset everything**
 ```bash
