@@ -281,9 +281,13 @@ jobs:
 
       # Signed with a short-lived Sigstore certificate bound to THIS workflow
       # file, and pushed to GHCR beside the image. No storage record: that is
-      # an organization feature, and the repository may be user-owned.
+      # an organization feature, and the repository may be user-owned. Only
+      # for a public repository: GitHub signs a private repository's
+      # attestations only on GitHub Enterprise Cloud, so there the step would
+      # fail after the image was already published (the chart job's summary
+      # says it was skipped).
       - name: Attest build provenance
-        if: inputs.push
+        if: inputs.push && github.event.repository.visibility == 'public'
         uses: actions/attest@v4
         with:
           subject-name: ${{ env.IMAGE }}
@@ -602,12 +606,24 @@ jobs:
       # workflow and pushed beside the chart:
       #   gh attestation verify oci://ghcr.io/<owner>/charts/kgf-nexus:<version> --repo <owner>/kgf-nexus
       - name: Attest build provenance
+        if: github.event.repository.visibility == 'public'
         uses: actions/attest@v4
         with:
           subject-name: ${{ steps.verify.outputs.subject }}
           subject-digest: ${{ steps.verify.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
+
+      - name: Note skipped attestations
+        if: github.event.repository.visibility != 'public'
+        run: |
+          {
+            echo "### Provenance attestations skipped"
+            echo
+            echo "This repository is not public, and GitHub signs a private repository's"
+            echo "attestations only on GitHub Enterprise Cloud. The images and the chart are"
+            echo "published and pinned by digest; no SLSA provenance was attached."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Record the chart reference
         env:

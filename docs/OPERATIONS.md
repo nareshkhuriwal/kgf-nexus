@@ -3785,7 +3785,10 @@ built.
 
 **Provenance.** Each image carries a Sigstore-signed SLSA build-provenance
 attestation bound to the release workflow, and BuildKit's SBOM and provenance
-in its index:
+in its index. The signed attestation is produced only while the repository is
+public: GitHub signs a private repository's attestations only on GitHub
+Enterprise Cloud, so a private repository's release skips that step and says
+so in the run summary (BuildKit's SBOM and provenance are still attached):
 
 ```sh
 gh attestation verify oci://ghcr.io/<owner>/kgf-nexus/api-gateway@sha256:<digest> \
