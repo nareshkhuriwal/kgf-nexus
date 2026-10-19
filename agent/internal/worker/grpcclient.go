@@ -133,6 +133,15 @@ func (g *GRPCClient) ReportResult(ctx context.Context, req *nexusv1.ReportResult
 	return resp, nil
 }
 
+// ReportPlacement records where an attempt's workload runs (ADR-0037).
+func (g *GRPCClient) ReportPlacement(ctx context.Context, req *nexusv1.ReportPlacementRequest) (*nexusv1.Ack, error) {
+	resp, err := g.c.ReportPlacement(g.auth(ctx), req)
+	if err != nil {
+		return nil, fmt.Errorf("ReportPlacement: %w", err)
+	}
+	return resp, nil
+}
+
 // ReportLogs indexes log chunks already written to the result store (ADR-0020).
 func (g *GRPCClient) ReportLogs(ctx context.Context, req *nexusv1.ReportLogsRequest) (*nexusv1.Ack, error) {
 	resp, err := g.c.ReportLogs(g.auth(ctx), req)

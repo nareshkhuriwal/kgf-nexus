@@ -27,6 +27,8 @@ import (
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/dag"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances/identity"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
@@ -150,9 +152,10 @@ func run() error {
 	// balancer never routes to a replica that cannot serve. Liveness is weaker on
 	// purpose: a process that is up but not yet ready must not be killed.
 	var ready atomic.Bool
+	health := healthMux(pool, &ready)
 	httpSrv := &http.Server{
 		Addr:              *httpAddr,
-		Handler:           withMetrics(healthMux(pool, &ready), reg),
+		Handler:           withMetrics(health, reg),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -192,6 +195,23 @@ func run() error {
 		grpcErr <- grpcSrv.Serve(lis)
 	}()
 
+	// The service-instance registry (ADR-0037): this replica's row, written
+	// every 10 s with the answer its /readyz gives, and marked not ready as
+	// soon as shutdown begins. Deferred after the pool's Close, so it runs
+	// before it.
+	hb, err := instances.New(pool, instances.Config{
+		Component: instances.DAGEngine,
+		Version:   version,
+		Runtime:   identity.FromEnv(nil),
+		Pool:      pool,
+		Ready:     instances.ProbeHandler(health, "/readyz"),
+	}, reg, log)
+	if err != nil {
+		return err
+	}
+	stopHeartbeat := instances.Start(ctx, hb)
+	defer stopHeartbeat()
+
 	select {
 	case <-ctx.Done():
 		log.Info("shutting down")
@@ -206,8 +226,10 @@ func run() error {
 	}
 
 	// Stop advertising readiness BEFORE draining, so the load balancer stops
-	// sending new work while in-flight reconciles finish.
+	// sending new work while in-flight reconciles finish. The registry row
+	// follows at once.
 	ready.Store(false)
+	stopHeartbeat()
 	grpcSrv.GracefulStop()
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

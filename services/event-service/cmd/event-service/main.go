@@ -21,6 +21,8 @@ import (
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances/identity"
 	"github.com/khuriwalgroup/kgf-nexus/internal/mail"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/notify"
@@ -144,13 +146,14 @@ func main() {
 	notifierDone := make(chan struct{})
 	go func() { nt.Run(ctx); close(notifierDone) }()
 
+	routes := eventservice.NewServer(eventservice.NewStore(pool), log).
+		WithWaker(waker).
+		WithRoutes(reg.Routes).
+		Routes()
 	srv := &http.Server{
 		// Route-template RED metrics; the mux is passed directly so the
 		// middleware sees the matched pattern (metrics.HTTPMetrics).
-		Handler: httpMetrics.Middleware(eventservice.NewServer(eventservice.NewStore(pool), log).
-			WithWaker(waker).
-			WithRoutes(reg.Routes).
-			Routes()),
+		Handler:           httpMetrics.Middleware(routes),
 		Addr:              addr,
 		ReadHeaderTimeout: 10 * time.Second,
 		// No WriteTimeout: SSE streams are long-lived by design and a write
@@ -165,8 +168,28 @@ func main() {
 		}
 	}()
 
+	// The service-instance registry (ADR-0037): this replica's row, written
+	// every 10 s with the answer its /readyz gives (asked of the mux itself,
+	// so a beat is not counted as an HTTP request), and marked not ready as
+	// soon as shutdown begins. Deferred after the pool's Close, so it runs
+	// before it.
+	hb, err := instances.New(pool, instances.Config{
+		Component: instances.EventService,
+		Version:   version,
+		Runtime:   identity.FromEnv(nil),
+		Pool:      pool,
+		Ready:     instances.ProbeHandler(routes, "/readyz"),
+	}, reg, log)
+	if err != nil {
+		log.Error("could not build the service-instance heartbeat", "error", err)
+		os.Exit(1)
+	}
+	stopHeartbeat := instances.Start(ctx, hb)
+	defer stopHeartbeat()
+
 	<-ctx.Done()
 	log.Info("shutting down")
+	stopHeartbeat()
 	// Bounded drain: in-flight reads finish, but a client holding an idle SSE
 	// stream must not delay the deploy indefinitely.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

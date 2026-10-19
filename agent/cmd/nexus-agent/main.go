@@ -32,6 +32,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/worker"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances/identity"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
 	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
@@ -220,6 +221,10 @@ func main() {
 		Secrets:                  secretResolver,
 		SubprocessEnvPassthrough: passthrough,
 		TaskAPIRoot:              *taskAPIRoot,
+		// Where this agent runs, reported as the placement of its subprocess
+		// and docker attempts (ADR-0037). The chart sets these from the
+		// downward API; elsewhere they are empty.
+		Runtime: identity.FromEnv(nil),
 	}
 
 	// The kubernetes executor is opt-in: it exists only when NEXUS_K8S_NAMESPACE

@@ -29,6 +29,7 @@ import (
 	"github.com/khuriwalgroup/kgf-nexus/agent/internal/wal"
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances/identity"
 	"github.com/khuriwalgroup/kgf-nexus/internal/tracing"
 )
 
@@ -130,6 +131,19 @@ type Runner struct {
 	// Cache is the node-local artifact cache (ADR-0030 §4). Nil disables it:
 	// artifacts are then the task's own business, as before.
 	Cache *artifactcache.Cache
+
+	// Placement reports where each attempt's workload runs (ADR-0037;
+	// runtime_report.go). Nil reports nothing: a control plane that did not
+	// advertise placement_reporting, or a client without the RPC. Set before
+	// the first Run.
+	Placement PlacementClient
+	// Runtime is where THIS agent runs (identity.FromEnv): the cluster of
+	// every attempt it reports, and the pod and node of the attempts whose
+	// workload runs beside it. Set before the first Run.
+	Runtime identity.Runtime
+	// placementOff stops reporting for the rest of the session once the
+	// control plane answers Unimplemented.
+	placementOff atomic.Bool
 }
 
 // newShipper starts the attempt's log shipper, or returns nil when shipping is
@@ -215,6 +229,10 @@ type runningTask struct {
 	// context cancellation.
 	handle   *executor.Handle
 	handleMu sync.Mutex
+
+	// placement delivers the attempt's placement (ADR-0037); nil when this
+	// session reports none.
+	placement *placementReporter
 
 	// redactor replaces the attempt's secret values in everything that leaves
 	// the runner as text: shipped logs, the agent-log copy, progress notes
@@ -423,6 +441,14 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 		return
 	}
 	spec.Secrets = resolved
+	// Where the workload runs (ADR-0037). An executor that runs it in a pod of
+	// its own reports the pod as it learns it; for the others execute reports
+	// the agent's own placement once the workload has started.
+	rt.placement = r.startPlacementReporter(taskCtx, a, log)
+	if rt.placement != nil && reportsOwnPlacement(exec) {
+		kind := exec.Kind()
+		spec.OnPlacement = func(pp executor.PodPlacement) { rt.placement.set(r.podPlacement(kind, pp)) }
+	}
 	if rt.redactor != nil && spec.OnPhase != nil {
 		onPhase := spec.OnPhase
 		spec.OnPhase = func(phase, detail string) { onPhase(phase, redactString(rt.redactor, detail)) }
@@ -499,6 +525,9 @@ func (r *Runner) execute(ctx context.Context, exec executor.Executor, rt *runnin
 	rt.handleMu.Lock()
 	rt.handle = &handle
 	rt.handleMu.Unlock()
+	if rt.placement != nil && !reportsOwnPlacement(exec) {
+		rt.placement.set(r.localPlacement(exec.Kind(), handle))
+	}
 
 	// Cleanup uses a context detached from the task's: when a task is cancelled
 	// or its lease revoked, the task context is ALREADY cancelled, and a cleanup

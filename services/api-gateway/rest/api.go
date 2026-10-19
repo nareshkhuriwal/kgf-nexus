@@ -156,6 +156,10 @@ type API struct {
 	// events is nil unless WithEvents was called; the ADR-0028 routes then
 	// answer 501 (the hook route 404s: it does not exist here).
 	events *EventsConfig
+	// topology decides who sees control-plane placement in the component
+	// registry (ADR-0037 §4); the zero value means platform operators only.
+	// See infrastructure.go.
+	topology ComponentTopology
 }
 
 // New builds the REST API.
@@ -345,6 +349,9 @@ func (a *API) Routes() http.Handler {
 	mux.Handle("GET /v1/namespaces/{ns}/platform/config", a.guard(authn.ActionAdminWrite, a.platformGet))
 	mux.Handle("PUT /v1/namespaces/{ns}/platform/config", a.guard(authn.ActionAdminWrite, a.platformPut))
 	mux.Handle("GET /v1/namespaces/{ns}/platform/plan", a.guard(authn.ActionAdminWrite, a.platformPlan))
+	// Live infrastructure (ADR-0037): control-plane instances and task runners.
+	mux.Handle("GET /v1/namespaces/{ns}/platform/components", a.guard(authn.ActionAdminWrite, a.platformComponents))
+	mux.Handle("GET /v1/namespaces/{ns}/platform/task-runners", a.guard(authn.ActionAdminWrite, a.platformTaskRunners))
 	a.registerClusterRoutes(mux)
 	a.registerQuotaRoutes(mux)
 	a.registerRBACRoutes(mux)

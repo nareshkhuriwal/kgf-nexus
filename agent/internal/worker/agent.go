@@ -28,6 +28,7 @@ import (
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	"github.com/khuriwalgroup/kgf-nexus/internal/bus"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances/identity"
 	"github.com/khuriwalgroup/kgf-nexus/internal/objstore"
 )
 
@@ -137,6 +138,13 @@ type Config struct {
 	// Cache is the node-local artifact cache (ADR-0030 §4). Built once by the
 	// caller, like Metrics, so it survives REREGISTER. Nil disables it.
 	Cache *artifactcache.Cache
+
+	// Runtime is where this agent runs: its pod, pod namespace, node and
+	// cluster (identity.FromEnv; NEXUS_POD_NAME, NEXUS_POD_NAMESPACE,
+	// NEXUS_NODE_NAME, NEXUS_CLUSTER_NAME). Reported as the placement of the
+	// attempts whose workload runs beside the agent (ADR-0037). The zero
+	// value reports none of it.
+	Runtime identity.Runtime
 }
 
 // ResultStoreCredentials are the parts of result-store access the agent holds
@@ -439,6 +447,7 @@ func (a *Agent) register(ctx context.Context) error {
 	a.runner.InlineThreshold = domain.ClampInlineThreshold(resp.GetResultStore().GetInlineThresholdBytes())
 	a.configureLogShipping(resp.GetLogShipping())
 	a.configureWorkloadAPI(resp.GetWorkloadApi())
+	a.configurePlacement(resp.GetPlacementReporting())
 	// The keeper revokes into the runner and the runner renews through the
 	// keeper, so one of the two edges must be wired after construction.
 	a.keeper.SetHandler(a.runner)
@@ -627,6 +636,26 @@ func (a *Agent) configureWorkloadAPI(cfg *nexusv1.WorkloadApiConfig) {
 	a.log.Info("workload API enabled",
 		"usage_reporting", cfg.GetUsageReporting(), "rate_limits", cfg.GetRateLimits(),
 		"checkpoints", cfg.GetCheckpoints() && a.store != nil, "max_checkpoint_bytes", cfg.GetMaxCheckpointBytes())
+}
+
+// configurePlacement turns attempt placement reporting on for this session
+// when the control plane advertised it and this client can send it
+// (ADR-0037). An older gateway advertises nothing, and the agent then reports
+// nothing: its attempts simply show no pod or node.
+func (a *Agent) configurePlacement(advertised bool) {
+	a.runner.Runtime = a.cfg.Runtime
+	if !advertised {
+		a.log.Info("the control plane does not record attempt placement; not reporting it")
+		return
+	}
+	pc, ok := a.client.(PlacementClient)
+	if !ok {
+		a.log.Warn("the control plane records attempt placement but this client cannot report it")
+		return
+	}
+	a.runner.Placement = pc
+	a.log.Info("attempt placement reporting enabled", "cluster", a.cfg.Runtime.Cluster,
+		"pod", a.cfg.Runtime.Pod, "pod_namespace", a.cfg.Runtime.PodNamespace, "node", a.cfg.Runtime.Node)
 }
 
 func (a *Agent) initResultStore(cfg *nexusv1.ResultStoreConfig) {

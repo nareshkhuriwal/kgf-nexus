@@ -2263,6 +2263,175 @@ paths:
         '500': {$ref: '#/components/responses/InternalError'}
         '503': {$ref: '#/components/responses/AuthUnavailable'}
 
+  # ── live infrastructure (ADR-0037) ───────────────────────────────────────
+  /v1/namespaces/{ns}/platform/components:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Platform]
+      operationId: listPlatformComponents
+      summary: List every control-plane process and its live state
+      description: |
+        Every api-gateway, workflow-manager, dag-engine, scheduler,
+        resource-manager and event-service process writes its own row in the
+        service-instance registry every 10 seconds (ADR-0037). An instance is
+        `ready` or `not_ready` by its own readiness check (the answer its
+        `/readyz` gives), and `stale` when it has not written for
+        `stale_after_seconds`, judged against the database clock. A
+        gracefully stopped instance writes `not_ready` with
+        `detail.shutting_down` before it exits, then turns stale. Rows unseen
+        for 24 hours are pruned.
+
+        The six components are always listed, in that order; one with no
+        instances has `total` 0 and `instances` `[]`.
+
+        The control plane belongs to the installation, not to the namespace:
+        pod namespace, node, cluster and the component detail are shown only
+        when `topology_visible` is true -- to platform operators, or to every
+        caller when the gateway runs with
+        `NEXUS_COMPONENT_TOPOLOGY=infrastructure-viewers`. Otherwise each
+        instance is named by a stable opaque label, those fields are empty and
+        `detail` keeps only `readiness`, `shutting_down` and
+        `heartbeat_interval_seconds`.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [infrastructure.view]
+      responses:
+        '200':
+          description: The registry, grouped by component.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlatformComponents'}
+              example:
+                generated_at: '2026-10-19T09:30:12.418Z'
+                stale_after_seconds: 30
+                topology_visible: true
+                components:
+                  - component: api-gateway
+                    summary: {ready: 0, total: 0, stale: 0}
+                    instances: []
+                  - component: workflow-manager
+                    summary: {ready: 0, total: 0, stale: 0}
+                    instances: []
+                  - component: dag-engine
+                    summary: {ready: 0, total: 0, stale: 0}
+                    instances: []
+                  - component: scheduler
+                    summary: {ready: 1, total: 2, stale: 1}
+                    instances:
+                      - instance: kgf-nexus-scheduler-7c9d6b5f4-2xkqp
+                        pod_namespace: kgf-nexus
+                        node: aks-system-31415926-vmss000001
+                        cluster: aks-prod
+                        version: 1.9.0
+                        started_at: '2026-10-19T08:02:41Z'
+                        last_seen_at: '2026-10-19T09:30:05.112Z'
+                        state: ready
+                        detail:
+                          readiness: ok
+                          queue: default
+                          claims_total: 18422
+                          dispatched_total: 9310
+                          claims_recent: 41
+                          dispatched_recent: 17
+                          recent_window_seconds: 10
+                      - instance: kgf-nexus-scheduler-7c9d6b5f4-8mzrt
+                        pod_namespace: kgf-nexus
+                        node: aks-system-31415926-vmss000000
+                        cluster: aks-prod
+                        version: 1.8.2
+                        started_at: '2026-10-18T22:10:00Z'
+                        last_seen_at: '2026-10-19T09:01:44Z'
+                        state: stale
+                        detail: {readiness: shutting down, shutting_down: true}
+                  - component: resource-manager
+                    summary: {ready: 0, total: 0, stale: 0}
+                    instances: []
+                  - component: event-service
+                    summary: {ready: 0, total: 0, stale: 0}
+                    instances: []
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+
+  /v1/namespaces/{ns}/platform/task-runners:
+    parameters:
+      - $ref: '#/components/parameters/ns'
+    get:
+      tags: [Platform]
+      operationId: listTaskRunners
+      summary: List the namespace's in-flight attempts with where each one runs
+      description: |
+        The namespace's DISPATCHED and RUNNING attempts, newest dispatch first,
+        each with the worker that holds it and the placement its agent
+        reported (ADR-0037): the executor, the registered cluster and, on
+        Kubernetes, the pod, its namespace and its node. A kubernetes
+        attempt's pod is its own; a subprocess or docker attempt runs beside
+        the agent, so its pod and node are the agent's (a docker agent outside
+        Kubernetes reports the container's short id as `pod`). Placement
+        fields are empty strings, and `placement_reported_at` null, when
+        nothing was reported: an agent or gateway that predates the report, or
+        a pod not yet scheduled (`k8s_node` empty).
+
+        `summary` counts every in-flight attempt of the namespace, not just
+        the returned page, by executor and by cluster; the empty key counts
+        attempts with nothing reported. The page and the counts are one
+        consistent read.
+      x-nexus-action: admin_write
+      x-nexus-permissions: [infrastructure.view]
+      parameters:
+        - $ref: '#/components/parameters/limitTaskRunners'
+      responses:
+        '200':
+          description: The in-flight attempts.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TaskRunners'}
+              example:
+                generated_at: '2026-10-19T09:30:12.418Z'
+                summary:
+                  running: 2
+                  by_executor: {kubernetes: 1, '': 1}
+                  by_cluster: {aks-prod: 1, '': 1}
+                runners:
+                  - attempt_id: 9c8b7a6f-5e4d-4c3b-8a2f-1e0d9c8b7a6f
+                    run_id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                    node_id: extract
+                    workflow: daily-etl
+                    worker_id: 5f6e7d8c-9b0a-4f1e-8d2c-3b4a5f6e7d8c
+                    worker_host: build-host-3
+                    executor: ''
+                    cluster: ''
+                    k8s_namespace: ''
+                    pod: ''
+                    k8s_node: ''
+                    state: DISPATCHED
+                    started_at: null
+                    progress_message: ''
+                    placement_reported_at: null
+                  - attempt_id: 0f8b6c1e-3a2d-4e5f-9a8b-7c6d5e4f3a2b
+                    run_id: 6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d
+                    node_id: train
+                    workflow: nightly-training
+                    worker_id: 2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f6a
+                    worker_host: nexus-agent-gpu-5d8f7c6b9-qk2lm
+                    executor: kubernetes
+                    cluster: aks-prod
+                    k8s_namespace: nexus-tasks
+                    pod: nexus-0f8b6c1e3a2d-x7k2p
+                    k8s_node: aks-gpu-27182818-vmss000003
+                    state: RUNNING
+                    started_at: '2026-10-19T09:12:40Z'
+                    progress_message: 'pod Running: task container running on node aks-gpu-27182818-vmss000003'
+                    placement_reported_at: '2026-10-19T09:12:38.004Z'
+        '400': {$ref: '#/components/responses/InvalidLimit'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/AuthUnavailable'}
+
   # ── quotas and usage ─────────────────────────────────────────────────────
   /v1/namespaces/{ns}/quotas:
     parameters:
@@ -6124,6 +6293,14 @@ components:
         capped at 200). Zero, a negative number or a non-integer is 400
         `invalid_limit`.
       schema: {type: integer, minimum: 1, default: 50}
+    limitTaskRunners:
+      name: limit
+      in: query
+      description: >-
+        How many in-flight attempts to return: default 200, at most 1000 (a larger value is
+        capped at 1000). Zero, a negative number or a non-integer is 400
+        `invalid_limit`.
+      schema: {type: integer, minimum: 1, default: 200}
     limitTokens:
       name: limit
       in: query
@@ -7733,6 +7910,127 @@ components:
             reason: set min 1→2, max 4→6; then max 6→8 in further bounded steps
             last_applied_at: '2026-10-19T05:11:14.506434Z'
             last_error: null
+
+    PlatformComponents:
+      type: object
+      description: The service-instance registry, one entry per component in a fixed order (ADR-0037).
+      required: [generated_at, stale_after_seconds, topology_visible, components]
+      properties:
+        generated_at:
+          description: The database time the staleness was judged at.
+          $ref: '#/components/schemas/Timestamp'
+        stale_after_seconds:
+          type: integer
+          description: An instance that has not written for this long is `stale`.
+        topology_visible:
+          type: boolean
+          description: Whether pod namespace, node, cluster and the full detail are shown to this caller.
+        components:
+          type: array
+          items: {$ref: '#/components/schemas/PlatformComponent'}
+
+    PlatformComponent:
+      type: object
+      required: [component, summary, instances]
+      properties:
+        component:
+          type: string
+          enum: [api-gateway, workflow-manager, dag-engine, scheduler, resource-manager, event-service]
+        summary:
+          type: object
+          required: [ready, total, stale]
+          properties:
+            ready: {type: integer, minimum: 0}
+            total: {type: integer, minimum: 0}
+            stale: {type: integer, minimum: 0}
+        instances:
+          type: array
+          items: {$ref: '#/components/schemas/ComponentInstance'}
+
+    ComponentInstance:
+      type: object
+      required: [instance, pod_namespace, node, cluster, version, started_at, last_seen_at, state, detail]
+      properties:
+        instance:
+          type: string
+          description: >-
+            The pod name (NEXUS_POD_NAME), else the host name; an opaque
+            `<component>-<12 hex>` label when the topology is not visible.
+        pod_namespace: {type: string}
+        node: {type: string}
+        cluster: {type: string}
+        version: {type: string}
+        started_at: {$ref: '#/components/schemas/Timestamp'}
+        last_seen_at: {$ref: '#/components/schemas/Timestamp'}
+        state: {type: string, enum: [ready, not_ready, stale]}
+        detail:
+          type: object
+          description: >-
+            Every component writes `readiness` ("ok", or the reason its
+            readiness check gave), `pid`, `heartbeat_interval_seconds`,
+            `db_pool` (max, total, acquired, idle, empty_acquires_total) and,
+            on its last write, `shutting_down: true`. The scheduler adds
+            `queue`, `claims_total`, `claim_errors_total`, `dispatched_total`,
+            `lost_total`, `claims_recent`, `dispatched_recent`,
+            `recent_window_seconds` and, once sampled, `pending_attempts`,
+            `oldest_pending_age_seconds` and `backlog_sampled_at`; the
+            api-gateway adds `placement_reporting`. OPERATIONS §31.
+
+    TaskRunners:
+      type: object
+      required: [generated_at, summary, runners]
+      properties:
+        generated_at: {$ref: '#/components/schemas/Timestamp'}
+        summary:
+          type: object
+          required: [running, by_executor, by_cluster]
+          properties:
+            running:
+              type: integer
+              minimum: 0
+              description: Every in-flight (DISPATCHED or RUNNING) attempt of the namespace.
+            by_executor:
+              type: object
+              additionalProperties: {type: integer}
+              description: In-flight attempts per reported executor; "" is not reported.
+            by_cluster:
+              type: object
+              additionalProperties: {type: integer}
+              description: In-flight attempts per reported cluster; "" is not reported or outside a registered cluster.
+        runners:
+          type: array
+          items: {$ref: '#/components/schemas/TaskRunner'}
+
+    TaskRunner:
+      type: object
+      required: [attempt_id, run_id, node_id, workflow, worker_id, worker_host, executor, cluster,
+                 k8s_namespace, pod, k8s_node, state, started_at, progress_message, placement_reported_at]
+      properties:
+        attempt_id: {type: string}
+        run_id: {type: string}
+        node_id: {type: string}
+        workflow: {type: string}
+        worker_id: {type: string}
+        worker_host: {type: string, description: The worker's registered host name; "" once its row is reaped.}
+        executor:
+          type: string
+          description: >-
+            The executor the agent reported: kubernetes, docker or subprocess
+            (executors are pluggable, so treat another value as a name); ""
+            when nothing was reported.
+          examples: [kubernetes, docker, subprocess, '']
+        cluster: {type: string}
+        k8s_namespace: {type: string}
+        pod: {type: string}
+        k8s_node: {type: string}
+        state: {type: string, enum: [DISPATCHED, RUNNING]}
+        started_at:
+          description: Null while DISPATCHED.
+          $ref: '#/components/schemas/NullableTimestamp'
+        progress_message: {type: string, description: The latest ReportProgress message; "" when none.}
+        placement_reported_at:
+          description: When the latest placement report was accepted; null when none was.
+          $ref: '#/components/schemas/NullableTimestamp'
 
     QuotaDimension:
       type: object

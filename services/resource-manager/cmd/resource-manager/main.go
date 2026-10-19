@@ -28,6 +28,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances/identity"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
@@ -190,6 +192,23 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 			errs <- fmt.Errorf("http serve: %w", err)
 		}
 	}()
+	// The service-instance registry (ADR-0037): this replica's row, written
+	// every 10 s with the answer its /readyz gives, and marked not ready as
+	// soon as shutdown begins. Deferred after the pool's Close, so it runs
+	// before it.
+	hb, err := instances.New(pool, instances.Config{
+		Component: instances.ResourceManager,
+		Version:   version,
+		Runtime:   identity.FromEnv(nil),
+		Pool:      pool,
+		Ready:     instances.ProbeHandler(httpSrv.Handler, "/readyz"),
+	}, reg, log)
+	if err != nil {
+		return err
+	}
+	stopHeartbeat := instances.Start(ctx, hb)
+	defer stopHeartbeat()
+
 	go func() {
 		log.Info("liveness sweeper starting",
 			"liveness_window", cfg.livenessWindow, "interval", cfg.sweepInterval)
@@ -220,6 +239,7 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 	// completed.
 	ready.Store(false)
 	hs.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+	stopHeartbeat()
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
