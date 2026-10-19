@@ -48,6 +48,8 @@ type Metrics struct {
 	putSize    *metrics.Histogram
 	sessions   *metrics.Counter
 	capacity   *metrics.GaugeVec
+	executors  *metrics.GaugeVec
+	defaultExe *metrics.GaugeVec
 	reportErrs *metrics.Counter
 
 	registrations *metrics.CounterVec
@@ -123,6 +125,12 @@ func New(reg *metrics.Registry) *Metrics {
 		capacity: reg.NewGauge("nexus_agent_advertised_capacity",
 			"Capacity this agent advertises for scheduling (not what the runtime enforces), by resource.",
 			"resource"),
+		executors: reg.NewGauge("nexus_agent_executor_advertised",
+			"1 for each executor this agent advertised at its latest registration, 0 for one it does not (NEXUS_EXECUTORS, or discovery when unset).",
+			"executor"),
+		defaultExe: reg.NewGauge("nexus_agent_executor_default",
+			"1 for the executor that runs a task naming none (NEXUS_DEFAULT_EXECUTOR; the worker label nexus.io/default-executor), 0 for the others.",
+			"executor"),
 		reportErrs: reg.NewCounter("nexus_agent_result_report_failures_total",
 			"Result reports that could not be delivered; the WAL retains them for replay.").Counter(),
 		registrations: reg.NewCounter("nexus_agent_registration_attempts_total",
@@ -312,6 +320,39 @@ func (m *Metrics) SessionStarted(capacity *nexusv1.ResourceVector) {
 	set("memory_bytes", float64(capacity.GetMemoryBytes()))
 	set("disk_bytes", float64(capacity.GetDiskBytes()))
 	set("gpu_count", float64(capacity.GetGpuCount()))
+}
+
+// knownExecutors bounds the executor label of the two executor gauges: every
+// series is always present, so a series that dropped to 0 cannot linger at a
+// stale 1 after a re-registration advertised less.
+var knownExecutors = []string{"subprocess", "docker", "kubernetes"}
+
+// ExecutorsAdvertised records the executors a registration advertised and the
+// default one. The kubernetes alias k8s is folded into kubernetes.
+func (m *Metrics) ExecutorsAdvertised(kinds []string, def string) {
+	if m == nil {
+		return
+	}
+	has := map[string]bool{}
+	for _, k := range kinds {
+		if k == "k8s" {
+			k = "kubernetes"
+		}
+		has[k] = true
+	}
+	if def == "k8s" {
+		def = "kubernetes"
+	}
+	b := func(v bool) float64 {
+		if v {
+			return 1
+		}
+		return 0
+	}
+	for _, k := range knownExecutors {
+		m.executors.With(metrics.Labels{"executor": k}).Set(b(has[k]))
+		m.defaultExe.With(metrics.Labels{"executor": k}).Set(b(k == def))
+	}
 }
 
 // enumLabel turns "ATTEMPT_OUTCOME_TIMED_OUT" into "timed_out".
