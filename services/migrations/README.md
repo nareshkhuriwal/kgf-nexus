@@ -39,6 +39,8 @@ local equivalent. Services never migrate at startup (ADR-0011 rule 4).
 |---|---|---|
 | 0039 | `0039_run_reconcile_queue` | F160: the durable run-reconcile queue (`run_reconcile_requests`), its triggers on `task_attempts` (terminal) and `workflow_runs` (state changes that need the engine), and a one-time request for every live materialized run, which repairs runs stranded before the upgrade. Owned by the dag-engine; see the ADR-0011 addendum |
 | 0040 | `0040_kgf_workspaces` | ADR-0034: `kgf_workspaces`, one row per KGF.Nexus workspace namespace (`UNIQUE (organization, resource_id)`, state active/deleted); SELECT for every service, INSERT and `UPDATE (state, deleted_at, deleted_by)` for the api-gateway, through `nexus_role`. Owned by the api-gateway |
+| 0041 | `0041_service_instances` | ADR-0037: `service_instances`, the platform-scoped registry of running control-plane processes (no `tenant_id`), keyed by (component, cluster, pod namespace, instance); every service writes only its own row every 10 s and prunes rows unseen for 24 h, so SELECT, INSERT, UPDATE and DELETE for every service, through `nexus_role` |
+| 0042 | `0042_attempt_runtime` | ADR-0037: `attempt_runtime`, one row per attempt with the executor, cluster, Kubernetes namespace, pod and node the agent reported (ReportPlacement), fenced on the lease and its epoch; references the run (cascade), tenant assigned from the attempt. SELECT for every service, INSERT/UPDATE/DELETE for the api-gateway, through `nexus_role`. Owned by the api-gateway |
 
 **Granting after 0038.** An installation may have renamed its group roles, so
 a migration numbered above 0038 must not name `nexus_<service>` literally:
