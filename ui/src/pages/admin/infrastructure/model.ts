@@ -483,18 +483,52 @@ export interface WorkerCounts {
   stale: number;
   draining: number;
   quarantined: number;
+  /** DEAD and unexplained: no live replacement from its Deployment, and it died within RECENT_DEATH_MS. */
   dead: number;
+  /** DEAD registrations kept as history: replaced by a live pod of the same Deployment, or dead for longer than RECENT_DEATH_MS. */
+  retired: number;
 }
 
+/** How long an unexplained worker death keeps the fleet "Degraded". */
+export const RECENT_DEATH_MS = 15 * 60_000;
+
+// A Deployment's pod is named <deployment>-<pod-template-hash>-<5-char suffix>,
+// and an agent registers with its pod name as its hostname.
+const DEPLOYMENT_POD = /^(.+)-[a-z0-9]{6,10}-[a-z0-9]{5}$/;
+
+/** The Deployment a worker's pod belongs to, from its hostname; null when the name is not a Deployment pod's. */
+export function workerDeployment(hostname: string): string | null {
+  return DEPLOYMENT_POD.exec(hostname)?.[1] ?? null;
+}
+
+/**
+ * Counts a worker fleet. A rolling update or a rescheduled pod leaves the old
+ * pod's registration DEAD while a new pod of the same Deployment takes over:
+ * that is history, not a fault, so it is counted as retired. So is a death
+ * older than RECENT_DEATH_MS (the gateway keeps DEAD registrations). Only a
+ * recent death with no replacement counts as dead.
+ */
 export function countWorkers(workers: Worker[], now: number): WorkerCounts {
-  const c: WorkerCounts = { total: workers.length, active: 0, stale: 0, draining: 0, quarantined: 0, dead: 0 };
+  const c: WorkerCounts = { total: workers.length, active: 0, stale: 0, draining: 0, quarantined: 0, dead: 0, retired: 0 };
+  const live = new Set<string>();
+  for (const w of workers) {
+    const d = w.state === 'DEAD' ? null : workerDeployment(w.hostname);
+    if (d) live.add(d);
+  }
   for (const w of workers) {
     if (w.state === 'ACTIVE') {
       if (heartbeatStale(w, now)) c.stale++;
       else c.active++;
     } else if (w.state === 'DRAINING') c.draining++;
     else if (w.state === 'QUARANTINED') c.quarantined++;
-    else if (w.state === 'DEAD') c.dead++;
+    else if (w.state === 'DEAD') {
+      const d = workerDeployment(w.hostname);
+      const seen = Date.parse(w.last_heartbeat_at);
+      // An unknown heartbeat time cannot prove the death is old.
+      const recent = Number.isNaN(seen) || now - seen <= RECENT_DEATH_MS;
+      if (recent && !(d !== null && live.has(d))) c.dead++;
+      else c.retired++;
+    }
   }
   return c;
 }
@@ -515,7 +549,7 @@ export function workerHealth(workers: Worker[] | undefined, error: unknown, canV
       hint: 'Install a worker pool (Install on AKS) and give its agents a worker token.',
     };
   }
-  const detail = `${c.active} active · ${c.draining} draining · ${c.stale} stale${c.dead ? ` · ${c.dead} dead` : ''}`;
+  const detail = `${c.active} active · ${c.draining} draining · ${c.stale} stale${c.dead ? ` · ${c.dead} dead` : ''}${c.retired ? ` · ${c.retired} retired` : ''}`;
   if (c.active === 0) {
     return { level: 'down', label: 'No active workers', detail, hint: 'Nothing can run. Check the agent pods and their connection to the gateway (port 9091).' };
   }

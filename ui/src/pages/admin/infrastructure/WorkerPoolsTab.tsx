@@ -144,6 +144,7 @@ function WorkerCounts({ live }: { live: PoolLive }) {
       {c.stale > 0 && <ToneBadge tone="warning" glyph="◌" label={`${c.stale} stale`} small />}
       {c.quarantined > 0 && <ToneBadge tone="blocked" glyph="⚑" label={`${c.quarantined} quarantined`} small />}
       {c.dead > 0 && <ToneBadge tone="danger" glyph="✕" label={`${c.dead} dead`} small />}
+      {c.retired > 0 && <ToneBadge tone="muted" glyph="·" label={`${c.retired} retired`} small />}
     </div>
   );
 }

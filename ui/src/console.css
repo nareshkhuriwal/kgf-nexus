@@ -222,6 +222,9 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; c
 .infra-error-text { color: var(--tone-danger-fg); font-size: 12px; }
 .infra-not-reported { color: var(--fg-faint); font-style: italic; font-size: 12px; }
 .infra-id { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.infra-pod { display: flex; flex-direction: column; gap: 2px; min-width: 18ch; max-width: 34ch; }
+.infra-pod-ns { font-size: 11px; color: var(--fg-muted); }
+.infra-pod-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
 .infra-dirty { align-self: center; }
 .infra-error-list { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
 .infra-error-list li { margin: 3px 0; }

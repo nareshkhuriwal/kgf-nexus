@@ -27,7 +27,10 @@ describe('TaskRunnersTab', () => {
     const link = await screen.findByRole('link', { name: 'extract' });
     expect(link).toHaveAttribute('href', '/runs/run-1?node=extract');
     expect(screen.getByRole('link', { name: 'agent-cpu-0' })).toHaveAttribute('href', '/workers/wk-1');
-    expect(screen.getByText('nexus-tasks/extract-att-1-abcde')).toBeInTheDocument();
+    // The pod is one line (namespace above it), with namespace/name in full on hover.
+    const pod = screen.getByTitle('nexus-tasks/extract-att-1-abcde');
+    expect(within(pod).getByText('extract-att-1-abcde')).toHaveClass('infra-pod-name');
+    expect(within(pod).getByText('nexus-tasks')).toHaveClass('infra-pod-ns');
     expect(screen.getByText('aks-cpu-1234-vmss000002', { selector: 'code' })).toBeInTheDocument();
     expect(calls.find((c) => c.path.endsWith('/task-runners'))!.search).toBe('?limit=200');
   });

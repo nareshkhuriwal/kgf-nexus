@@ -186,7 +186,7 @@ export function OverviewTab({ namespace, now, onOpen }: { namespace: string; now
             counts ? (
               <>
                 <strong>{counts.active}</strong>
-                <span>active of {counts.total}</span>
+                <span>active of {counts.total - counts.retired}</span>
               </>
             ) : (
               <NotReported>{wk.level === 'loading' ? 'Loading…' : canWorkers ? 'not available' : 'needs workers.view'}</NotReported>

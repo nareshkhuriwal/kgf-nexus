@@ -99,10 +99,12 @@ export function TaskRunnersTab({ namespace, now }: { namespace: string; now: num
       header: 'pod',
       cell: (r) =>
         r.pod ? (
-          <code className="infra-id">
-            {r.k8s_namespace ? `${r.k8s_namespace}/` : ''}
-            {r.pod}
-          </code>
+          // Pod names are long and unbroken; one line with the full name on
+          // hover reads better than a column wrapped a character at a time.
+          <span className="infra-pod" title={r.k8s_namespace ? `${r.k8s_namespace}/${r.pod}` : r.pod}>
+            {r.k8s_namespace && <span className="infra-pod-ns">{r.k8s_namespace}</span>}
+            <code className="infra-id infra-pod-name">{r.pod}</code>
+          </span>
         ) : (
           <NotReported>{r.executor && r.executor !== 'kubernetes' ? `no pod (${r.executor})` : 'not reported'}</NotReported>
         ),

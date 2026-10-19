@@ -19,6 +19,8 @@ import {
   controllerFreshness,
   controlPlaneHealth,
   countWorkers,
+  RECENT_DEATH_MS,
+  workerDeployment,
   distinctValues,
   fieldId,
   filterRunners,
@@ -246,7 +248,48 @@ describe('worker health', () => {
       [worker(), worker({ id: 'w2', last_heartbeat_at: ago(60_000) }), worker({ id: 'w3', state: 'DRAINING' }), worker({ id: 'w4', state: 'DEAD' })],
       now,
     );
-    expect(c).toEqual({ total: 4, active: 1, stale: 1, draining: 1, quarantined: 0, dead: 1 });
+    expect(c).toEqual({ total: 4, active: 1, stale: 1, draining: 1, quarantined: 0, dead: 1, retired: 0 });
+  });
+
+  it('names the Deployment of a Deployment pod, and nothing else', () => {
+    expect(workerDeployment('agent-gpu-a10-77886cbb48-vfn55')).toBe('agent-gpu-a10');
+    expect(workerDeployment('agent-cpu-8c7c68bfc-2hkvr')).toBe('agent-cpu');
+    expect(workerDeployment('agent-cpu-0')).toBeNull(); // a StatefulSet pod or a host
+    expect(workerDeployment('build-host.example.com')).toBeNull();
+  });
+
+  it('counts a dead pod that its Deployment replaced as retired, not dead', () => {
+    const fresh = ago(30_000);
+    const c = countWorkers(
+      [
+        worker({ id: 'old', hostname: 'agent-cpu-7d9f6c5b8d-abcde', state: 'DEAD', last_heartbeat_at: fresh }),
+        worker({ id: 'new', hostname: 'agent-cpu-8c7c68bfc-2hkvr' }),
+      ],
+      now,
+    );
+    expect(c).toMatchObject({ active: 1, dead: 0, retired: 1 });
+    expect(workerHealth(
+      [
+        worker({ id: 'old', hostname: 'agent-cpu-7d9f6c5b8d-abcde', state: 'DEAD', last_heartbeat_at: fresh }),
+        worker({ id: 'new', hostname: 'agent-cpu-8c7c68bfc-2hkvr' }),
+      ],
+      null, true, now,
+    )).toMatchObject({ level: 'healthy', detail: '1 active · 0 draining · 0 stale · 1 retired' });
+  });
+
+  it('keeps a recent unexplained death degraded, and retires an old one', () => {
+    const lost = worker({ id: 'lost', hostname: 'agent-gpu-698b44bd5b-txbvj', state: 'DEAD', last_heartbeat_at: ago(5 * 60_000) });
+    const ancient = worker({ id: 'ancient', hostname: 'agent-gpu-698b44bd5b-zzzzz', state: 'DEAD', last_heartbeat_at: ago(RECENT_DEATH_MS + 60_000) });
+    const host = worker({ id: 'host', hostname: 'agent-cpu-0', state: 'DEAD', last_heartbeat_at: ago(60_000) });
+    const live = worker({ id: 'live', hostname: 'agent-cpu-8c7c68bfc-2hkvr' });
+    expect(countWorkers([lost, ancient, host, live], now)).toMatchObject({ active: 1, dead: 2, retired: 1 });
+    expect(workerHealth([lost, live], null, true, now).level).toBe('degraded');
+    expect(workerHealth([ancient, live], null, true, now).level).toBe('healthy');
+  });
+
+  it('treats a dead worker with an unreadable heartbeat as a recent death', () => {
+    const c = countWorkers([worker({ id: 'x', hostname: 'agent-cpu-0', state: 'DEAD', last_heartbeat_at: 'not a time' }), worker()], now);
+    expect(c).toMatchObject({ dead: 1, retired: 0 });
   });
 
   it('is honest about access, absence and outage', () => {
