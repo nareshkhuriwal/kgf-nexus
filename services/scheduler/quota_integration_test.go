@@ -379,6 +379,12 @@ type ledgerRow struct {
 	Executor                       *string
 }
 
+// clockSkewTolerance is how far a reserved duration may fall short of the
+// backdated 10 s when the dispatch time comes from the database's clock and the
+// end time from the test process's (a container against a host database, or a
+// managed database): skew of a few milliseconds is normal there.
+const clockSkewTolerance = 0.25
+
 func (f *fixture) ledger(attemptID uuid.UUID) ledgerRow {
 	f.t.Helper()
 	var r ledgerRow
@@ -442,8 +448,10 @@ VALUES ($1, 1, jsonb_build_object('pools', jsonb_build_array(jsonb_build_object(
 		t.Errorf("row identity: %+v", r)
 	}
 	// reserved ≈ 10 s (backdated dispatch); the derived columns are exact
-	// multiples of it.
-	if r.Reserved < 10 || r.Reserved > 15 {
+	// multiples of it. The dispatch is backdated on the database's clock and
+	// the result is reported on this process's, so allow clockSkewTolerance
+	// below 10 s for a database on another host or VM.
+	if r.Reserved < 10-clockSkewTolerance || r.Reserved > 15 {
 		t.Errorf("reserved_seconds = %v, want ~10", r.Reserved)
 	}
 	if d := r.CPUCore - 2*r.Reserved; d > 1e-9 || d < -1e-9 {
@@ -514,7 +522,7 @@ func TestUsageLedgerLostCancelAndPending(t *testing.T) {
 	if n, err := st.CancelRunAttempts(ctx, f.runID, time.Now().UTC()); err != nil || n != 2 {
 		t.Fatalf("cancel: n=%d err=%v", n, err)
 	}
-	if r := f.ledger(cancelled); r.Outcome != "CANCELLED" || r.Reserved < 10 {
+	if r := f.ledger(cancelled); r.Outcome != "CANCELLED" || r.Reserved < 10-clockSkewTolerance {
 		t.Errorf("cancelled row: %+v", r)
 	}
 	if n := f.ledgerRows(pending); n != 0 {
