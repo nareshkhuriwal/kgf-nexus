@@ -11,7 +11,7 @@
 import type { ClusterView, ComponentsReport, RouteResult, TaskRunnersReport } from '../../../../api/platform';
 import { CONTROL_PLANE_COMPONENTS } from '../../../../api/platform';
 import type { Worker } from '../../../../api/types';
-import { COMPONENT_LABEL, controllerFreshness, servesQueue, UPGRADE_HINT } from '../model';
+import { COMPONENT_LABEL, controllerFreshness, servesQueue, splitHistory, UPGRADE_HINT } from '../model';
 import { heartbeatStale } from '../../../WorkersPage';
 
 export type CheckStatus = 'ok' | 'pending' | 'problem' | 'unknown';
@@ -36,13 +36,19 @@ export interface VerifyInputs {
 }
 
 /**
- * The instances of a component that belong to this cluster. When no instance
- * reports a cluster at all (an older build), every instance counts and the
- * detail says so — better than never turning green on a working install.
+ * The items that belong to this cluster. When none carries a cluster at all
+ * (an older build, or a caller the topology is hidden from), every item counts
+ * and the detail says so — better than never turning green on a working install.
  */
 function inCluster<T extends { cluster: string }>(items: T[], cluster: string): { items: T[]; unlabelled: boolean } {
   if (items.length && items.every((i) => i.cluster === '')) return { items, unlabelled: true };
   return { items: items.filter((i) => i.cluster === cluster), unlabelled: false };
+}
+
+/** A component's instances in this cluster, without the replaced pods' lingering stale rows. */
+function currentIn<T extends { cluster: string; state: string }>(items: T[], cluster: string) {
+  const scoped = inCluster(items, cluster);
+  return { items: splitHistory(scoped.items).current, unlabelled: scoped.unlabelled };
 }
 
 function controlPlane(v: VerifyInputs): CheckItem {
@@ -57,12 +63,16 @@ function controlPlane(v: VerifyInputs): CheckItem {
   let unlabelled = false;
   for (const name of CONTROL_PLANE_COMPONENTS) {
     const g = groups.find((x) => x.component === name);
-    const scoped = inCluster(g?.instances ?? [], v.clusterName);
+    const scoped = currentIn(g?.instances ?? [], v.clusterName);
     unlabelled ||= scoped.unlabelled;
     if (!scoped.items.length) missing.push(COMPONENT_LABEL[name] ?? name);
     else if (scoped.items.some((i) => i.state !== 'ready')) notReady.push(COMPONENT_LABEL[name] ?? name);
   }
-  const suffix = unlabelled ? ' (instances do not report a cluster; counting all)' : '';
+  const suffix = unlabelled
+    ? v.components.data.topology_visible
+      ? ' (instances do not report a cluster; counting all)'
+      : ' (cluster names are hidden from this account; counting all)'
+    : '';
   if (notReady.length) {
     return { ...base, status: 'problem', detail: `Not ready: ${notReady.join(', ')}${suffix}.`, hint: 'kubectl get pods and the pods’ logs show why.' };
   }
@@ -79,7 +89,7 @@ function schedulers(v: VerifyInputs): CheckItem {
     return { ...base, status: 'unknown', detail: 'Scheduler replicas are not reported by this control plane.', hint: UPGRADE_HINT };
   }
   const g = v.components.data.components.find((x) => x.component === 'scheduler');
-  const scoped = inCluster(g?.instances ?? [], v.clusterName);
+  const scoped = currentIn(g?.instances ?? [], v.clusterName);
   const ready = scoped.items.filter((i) => i.state === 'ready').length;
   if (!scoped.items.length) return { ...base, status: 'pending', detail: 'No scheduler replica has reported yet.' };
   if (ready < scoped.items.length) {

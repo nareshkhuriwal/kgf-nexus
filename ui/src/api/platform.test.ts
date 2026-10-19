@@ -7,7 +7,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { normalizeCluster, normalizeConfig, normalizePlan, platformApi } from './platform';
+import { headroomEntries, normalizeCluster, normalizeComponents, normalizeConfig, normalizePlan, platformApi } from './platform';
 import { ApiError } from './client';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -52,7 +52,36 @@ describe('normalisation', () => {
     expect(newer.labels).toEqual({});
     expect(newer.scheduler_autoscaling).toBeNull();
     const observed = normalizeCluster({ scheduler_autoscaling: { state: 'drift', desired: { min_replicas: 1 }, observed: { max_replicas: 9 } } });
-    expect(observed.scheduler_autoscaling).toMatchObject({ state: 'drift', desired: { min_replicas: 1, max_replicas: 0 }, observed: { max_replicas: 9, min_replicas: null } });
+    expect(observed.scheduler_autoscaling).toMatchObject({ state: 'drift', desired: { min_replicas: 1, max_replicas: 0 }, observed: { max_replicas: 9, min_replicas: null }, targets: [] });
+  });
+
+  it('reads per-HPA targets, keeping an unreported ownership unknown', () => {
+    const c = normalizeCluster({
+      scheduler_autoscaling: {
+        state: 'drift',
+        targets: [
+          { state: 'drift', managed: false, reason: 'not controller-owned', observed: { hpa_name: 'scheduler', target_cpu_percent: null } },
+          { state: 'in_sync', observed: { hpa_name: 'scheduler-gpu' } },
+          'junk',
+        ],
+      },
+    });
+    expect(c.scheduler_autoscaling!.targets.map((t) => [t.observed?.hpa_name, t.state, t.managed])).toEqual([
+      ['scheduler', 'drift', false],
+      ['scheduler-gpu', 'in_sync', null],
+    ]);
+    expect(c.scheduler_autoscaling!.targets[0]!.observed!.target_cpu_percent).toBeNull();
+  });
+
+  it('turns headroom into rows per task namespace, keeping -1 for "not constrained"', () => {
+    expect(
+      headroomEntries({ 'nexus-tasks': { cpu_millis: 6000, memory_bytes: 1024, gpu_count: -1, pods: 40, extended: { 'nvidia.com/mig-1g.10gb': 2, bad: 'x' } }, broken: 3 }),
+    ).toEqual([{ namespace: 'nexus-tasks', cpu_millis: 6000, memory_bytes: 1024, gpu_count: -1, pods: 40, extended: { 'nvidia.com/mig-1g.10gb': 2 } }]);
+  });
+
+  it('assumes an older components report shows the topology, and honours false', () => {
+    expect(normalizeComponents({ components: [] }).topology_visible).toBe(true);
+    expect(normalizeComponents({ topology_visible: false, components: [] }).topology_visible).toBe(false);
   });
 });
 

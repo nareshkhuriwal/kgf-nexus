@@ -15,6 +15,7 @@ import { ApiError } from '../../../api/client';
 import { useClusters, useDeleteCluster, useSaveCluster } from '../../../api/hooks';
 import {
   clusterSpecOf,
+  headroomEntries,
   type ClusterBinding,
   type ClusterObservation,
   type ClusterSpec,
@@ -24,13 +25,12 @@ import {
 import { ErrorBox, Loading, StaleWarning } from '../../../components/Status';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
 import { usePermission } from '../../../components/Permissions';
-import { fmtAge, fmtTs } from '../../../lib/format';
-import { controllerFreshness, isDnsLabel, isDnsSubdomain, type FieldErrors } from './model';
+import { fmtAge, fmtBytes, fmtCpu, fmtTs } from '../../../lib/format';
+import { controllerFreshness, describeChange, eventTarget, headroomValue, isDnsLabel, isDnsSubdomain, type FieldErrors } from './model';
 import { AKS_RESOURCE_ID } from './install/generate';
 import {
   AutoscalingBadge,
   FreshnessBadge,
-  KeyValues,
   Notice,
   NotReported,
   NumberField,
@@ -251,7 +251,13 @@ function ClusterCard({
           </div>
           <div>
             <dt>Quota headroom</dt>
-            <dd>{c.headroom === undefined ? <NotReported>not reported by this control plane</NotReported> : <KeyValues data={c.headroom} empty="none reported" />}</dd>
+            <dd>
+              {c.headroom === undefined ? (
+                <NotReported>not reported by this control plane</NotReported>
+              ) : (
+                <Headroom headroom={c.headroom} observedAt={c.headroom_observed_at ?? null} now={now} />
+              )}
+            </dd>
           </div>
         </dl>
 
@@ -261,15 +267,39 @@ function ClusterCard({
         ) : a === null ? (
           <NotReported>The controller has not reported scheduler autoscaling yet.</NotReported>
         ) : (
-          <p className="infra-badge-row">
-            <AutoscalingBadge state={a.state} />
-            <span>
-              Desired{' '}
-              {a.desired ? `${a.desired.min_replicas}–${a.desired.max_replicas} @ ${a.desired.target_cpu_percent}% (revision ${a.desired.config_revision})` : 'not reported'} · observed{' '}
-              {a.observed ? `${a.observed.min_replicas ?? '?'}–${a.observed.max_replicas ?? '?'} @ ${a.observed.target_cpu_percent ?? '?'}%, ${a.observed.current_replicas ?? '?'} replicas` : 'no HPA'}
-            </span>
-            {a.last_error && <span className="infra-error-text">Last error: {a.last_error}</span>}
-          </p>
+          <div className="col infra-tight">
+            <p className="infra-badge-row">
+              <AutoscalingBadge state={a.state} />
+              <span>
+                Desired{' '}
+                {!a.desired
+                  ? 'not reported'
+                  : a.desired.config_revision === 0
+                    ? 'defaults (never saved; not applied)'
+                    : `${a.desired.min_replicas}–${a.desired.max_replicas} @ ${a.desired.target_cpu_percent}% (revision ${a.desired.config_revision})`}
+                {a.targets.length > 1 ? ` · ${a.targets.length} HPAs, worst shown` : ''}
+              </span>
+              {a.last_error && <span className="infra-error-text">Last error: {a.last_error}</span>}
+            </p>
+            {a.targets.length > 0 && (
+              <ul className="infra-plain-list" aria-label={`Scheduler HPAs in ${c.name}`}>
+                {a.targets.map((t, i) => (
+                  <li key={t.observed?.hpa_name || i} className="infra-badge-row">
+                    <AutoscalingBadge state={t.state} />
+                    <code className="infra-id">HPA {t.observed?.hpa_name || 'unnamed'}</code>
+                    <span>
+                      {t.observed
+                        ? `${t.observed.min_replicas ?? '?'}–${t.observed.max_replicas ?? '?'} @ ${t.observed.target_cpu_percent ?? '?'}%, ${t.observed.current_replicas ?? '?'} replicas`
+                        : 'not observed'}
+                    </span>
+                    {t.managed === false && <ToneBadge tone="warning" glyph="⊘" label="Not controller-owned" title="The HPA lacks the nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller annotation; the controller leaves it to Helm/GitOps." small />}
+                    {t.reason && <span className="sub">{t.reason}</span>}
+                    {t.last_error && <span className="infra-error-text">Last error: {t.last_error}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
         <SchedulerObserved deployments={byKind('SchedulerDeployment')} hpas={byKind('HorizontalPodAutoscaler')} policy={scheduler} now={now} />
 
@@ -430,29 +460,37 @@ function ClusterCard({
                   <th scope="col">When</th>
                   <th scope="col">Deployment</th>
                   <th scope="col">Action</th>
-                  <th scope="col">Replicas</th>
+                  <th scope="col">Change</th>
                   <th scope="col">Reason</th>
                 </tr>
               </thead>
               <tbody>
-                {c.events.map((e) => (
-                  <tr key={e.id}>
-                    <td title={fmtTs(e.occurred_at)}>{fmtAge(e.occurred_at, now)}</td>
-                    <td>
-                      <code className="infra-id">
-                        {e.kubernetes_namespace}/{e.worker_deployment}
-                      </code>
-                    </td>
-                    <td>
-                      {e.action}
-                      {e.mode === 'plan' ? ' (plan only)' : e.applied ? ' (applied)' : ''}
-                    </td>
-                    <td>
-                      {e.from_replicas ?? '—'} → {e.to_replicas ?? '—'}
-                    </td>
-                    <td>{e.reason}</td>
-                  </tr>
-                ))}
+                {c.events.map((e) => {
+                  const target = eventTarget(e);
+                  const change = describeChange(e.detail);
+                  return (
+                    <tr key={e.id}>
+                      <td title={fmtTs(e.occurred_at)}>{fmtAge(e.occurred_at, now)}</td>
+                      <td>
+                        <code className="infra-id">{target.label}</code>
+                      </td>
+                      <td>
+                        {e.action}
+                        {e.mode === 'plan' ? ' (plan only)' : e.applied ? ' (applied)' : ''}
+                      </td>
+                      <td>
+                        {target.hpa ? (
+                          change ?? <NotReported>—</NotReported>
+                        ) : (
+                          <>
+                            {e.from_replicas ?? '—'} → {e.to_replicas ?? '—'}
+                          </>
+                        )}
+                      </td>
+                      <td>{e.reason}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -710,5 +748,50 @@ function RegisterCluster({ busy, taken, onSave }: { busy: boolean; taken: string
         </div>
       </div>
     </section>
+  );
+}
+
+/** Remaining ResourceQuota room per task namespace (ADR-0031 §3); -1 = not constrained. */
+function Headroom({ headroom, observedAt, now }: { headroom: Record<string, unknown>; observedAt: string | null; now: number }) {
+  const rows = headroomEntries(headroom);
+  if (!rows.length) return <span className="sub">No quota observed yet</span>;
+  return (
+    <div className="col infra-tight">
+      <div className="table-scroll">
+        <table className="infra-table infra-table-compact">
+          <caption className="sr-only">Quota headroom per task namespace</caption>
+          <thead>
+            <tr>
+              <th scope="col">namespace</th>
+              <th scope="col">CPU</th>
+              <th scope="col">memory</th>
+              <th scope="col">GPUs</th>
+              <th scope="col">pods</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((h) => (
+              <tr key={h.namespace}>
+                <th scope="row">
+                  <code className="infra-id">{h.namespace}</code>
+                </th>
+                <td>{headroomValue(h.cpu_millis, fmtCpu)}</td>
+                <td>{headroomValue(h.memory_bytes, fmtBytes)}</td>
+                <td>{headroomValue(h.gpu_count, String)}</td>
+                <td>
+                  {headroomValue(h.pods, String)}
+                  {Object.entries(h.extended).map(([k, v]) => (
+                    <div key={k} className="sub">
+                      {k}: {headroomValue(v, String)}
+                    </div>
+                  ))}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {observedAt && <span className="sub">Observed {fmtAge(observedAt, now)}</span>}
+    </div>
   );
 }

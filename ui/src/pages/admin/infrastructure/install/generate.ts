@@ -442,7 +442,9 @@ export function valuesFiles(input: InstallInput): GeneratedFile[] {
         agents: 'Worker pools are separate releases (components.controlPlane.enabled=false), one per namespace.',
         clusterController: [
           'Reports this cluster to the console and starts in PLAN mode: it changes nothing.',
-          'Enable apply from the console (Clusters tab) after verifying the cluster UID.',
+          'Apply needs the cluster in apply mode in the console (Clusters tab) AND apply.enabled with',
+          'apply.expectedClusterUID here; apply.schedulerAutoscaling (default true) then also keeps the',
+          'scheduler HPAs at the saved scheduler policy.',
         ],
       },
     }),

@@ -192,6 +192,11 @@ export interface ClusterScalingEvent {
   reason: string;
   actor: string;
   occurred_at: string;
+  /**
+   * Structured context; for scheduler HPA rows (worker_deployment "hpa/<name>",
+   * actions hpa_plan / hpa_apply / hpa_refused) the settings before and after.
+   */
+  detail?: Record<string, unknown>;
 }
 
 export interface ClusterReconcileError {
@@ -223,12 +228,40 @@ export interface AutoscalingObserved {
   deployment: string;
 }
 
+/** One scheduler HPA the controller reconciles (one per autoscaled scheduler). */
+export interface AutoscalingTarget {
+  observed: AutoscalingObserved | null;
+  state: AutoscalingState | (string & {});
+  /**
+   * false: the HPA lacks the nexus.khuriwalgroup.com/autoscaling-owner=
+   * cluster-controller annotation, so the controller will not change it and
+   * reports any difference as drift. null: not reported.
+   */
+  managed: boolean | null;
+  /** What the controller did or would do, e.g. "set min 1→2, max 4→6; …". */
+  reason: string;
+  last_applied_at: string | null;
+  last_error: string | null;
+}
+
 export interface SchedulerAutoscaling {
   desired: AutoscalingDesired | null;
+  /** The top-level fields describe the WORST target; `targets` has each one. */
   observed: AutoscalingObserved | null;
   state: AutoscalingState | (string & {});
   last_applied_at: string | null;
   last_error: string | null;
+  targets: AutoscalingTarget[];
+}
+
+/** Remaining quota in one task namespace; -1 means not constrained. */
+export interface HeadroomEntry {
+  namespace: string;
+  cpu_millis: number | null;
+  memory_bytes: number | null;
+  gpu_count: number | null;
+  pods: number | null;
+  extended: Record<string, number>;
 }
 
 export type ClusterMode = 'plan' | 'apply';
@@ -253,7 +286,9 @@ export interface ClusterView {
   jobs_shown: number;
   /** C5. Undefined on an older gateway: "not reported", never "none". */
   labels?: Record<string, string>;
+  /** Keyed by task namespace (see headroomEntries). */
   headroom?: Record<string, unknown>;
+  headroom_observed_at?: string | null;
   scheduler_autoscaling?: SchedulerAutoscaling | null;
 }
 
@@ -311,6 +346,14 @@ export interface ComponentGroup {
 export interface ComponentsReport {
   generated_at: string;
   stale_after_seconds: number;
+  /**
+   * Whether pod namespace, node, cluster and the full detail are shown to this
+   * caller. When false (anyone but a platform operator, unless the gateway runs
+   * with NEXUS_COMPONENT_TOPOLOGY=infrastructure-viewers) instances carry an
+   * opaque name, those fields are "", and detail keeps only readiness,
+   * shutting_down and heartbeat_interval_seconds.
+   */
+  topology_visible: boolean;
   components: ComponentGroup[];
 }
 
@@ -325,12 +368,14 @@ export interface TaskRunner {
   worker_host: string;
   /** '' when the agent did not report which executor ran it. */
   executor: RunnerExecutor | (string & {});
-  /** Placement fields are '' when not reported. Never read '' as a value. */
+  /** Placement fields are '' when not reported (null timestamps too). Never read '' as a value. */
   cluster: string;
   k8s_namespace: string;
   pod: string;
   k8s_node: string;
+  /** DISPATCHED or RUNNING. */
   state: string;
+  /** '' while DISPATCHED: the worker has not confirmed the start yet. */
   started_at: string;
   progress_message: string;
   placement_reported_at: string;
@@ -338,6 +383,7 @@ export interface TaskRunner {
 
 export interface TaskRunnersReport {
   generated_at: string;
+  /** `running` counts every in-flight attempt: DISPATCHED and RUNNING. */
   summary: { running: number; by_executor: Record<string, number>; by_cluster: Record<string, number> };
   runners: TaskRunner[];
   /** The limit this report was requested with, so a count can say "at least". */
@@ -456,10 +502,23 @@ export function normalizePlan(raw: unknown): PlatformPlan {
   };
 }
 
+function normalizeObserved(raw: unknown): AutoscalingObserved | null {
+  if (!isObj(raw)) return null;
+  return {
+    min_replicas: numOrNull(raw.min_replicas),
+    max_replicas: numOrNull(raw.max_replicas),
+    target_cpu_percent: numOrNull(raw.target_cpu_percent),
+    scale_down_stabilization_seconds: numOrNull(raw.scale_down_stabilization_seconds),
+    current_replicas: numOrNull(raw.current_replicas),
+    desired_replicas: numOrNull(raw.desired_replicas),
+    hpa_name: str(raw.hpa_name),
+    deployment: str(raw.deployment),
+  };
+}
+
 function normalizeAutoscaling(raw: unknown): SchedulerAutoscaling | null {
   if (!isObj(raw)) return null;
   const d = isObj(raw.desired) ? raw.desired : null;
-  const o = isObj(raw.observed) ? raw.observed : null;
   return {
     desired: d
       ? {
@@ -470,22 +529,36 @@ function normalizeAutoscaling(raw: unknown): SchedulerAutoscaling | null {
           config_revision: num(d.config_revision),
         }
       : null,
-    observed: o
-      ? {
-          min_replicas: numOrNull(o.min_replicas),
-          max_replicas: numOrNull(o.max_replicas),
-          target_cpu_percent: numOrNull(o.target_cpu_percent),
-          scale_down_stabilization_seconds: numOrNull(o.scale_down_stabilization_seconds),
-          current_replicas: numOrNull(o.current_replicas),
-          desired_replicas: numOrNull(o.desired_replicas),
-          hpa_name: str(o.hpa_name),
-          deployment: str(o.deployment),
-        }
-      : null,
+    observed: normalizeObserved(raw.observed),
     state: str(raw.state) || 'not_observed',
     last_applied_at: strOrNull(raw.last_applied_at),
     last_error: strOrNull(raw.last_error),
+    targets: arr<unknown>(raw.targets)
+      .filter(isObj)
+      .map((t) => ({
+        observed: normalizeObserved(t.observed),
+        state: str(t.state) || 'not_observed',
+        managed: typeof t.managed === 'boolean' ? t.managed : null,
+        reason: str(t.reason),
+        last_applied_at: strOrNull(t.last_applied_at),
+        last_error: strOrNull(t.last_error),
+      })),
   };
+}
+
+/** A cluster's quota headroom as rows, one per task namespace; unparseable values are null. */
+export function headroomEntries(headroom: Record<string, unknown> | undefined): HeadroomEntry[] {
+  return Object.entries(headroom ?? {})
+    .filter((e): e is [string, Record<string, unknown>] => isObj(e[1]))
+    .map(([namespace, h]) => ({
+      namespace,
+      cpu_millis: numOrNull(h.cpu_millis),
+      memory_bytes: numOrNull(h.memory_bytes),
+      gpu_count: numOrNull(h.gpu_count),
+      pods: numOrNull(h.pods),
+      extended: Object.fromEntries(Object.entries(isObj(h.extended) ? h.extended : {}).filter((x): x is [string, number] => typeof x[1] === 'number')),
+    }))
+    .sort((a, b) => a.namespace.localeCompare(b.namespace));
 }
 
 export function normalizeCluster(raw: unknown): ClusterView {
@@ -531,7 +604,10 @@ export function normalizeCluster(raw: unknown): ClusterView {
       observed_at: str(o.observed_at),
     })),
     scaling: arr<ClusterScalingState>(c.scaling),
-    events: arr<ClusterScalingEvent>(c.events),
+    events: arr<Record<string, unknown>>(c.events).map((e) => ({
+      ...(e as unknown as ClusterScalingEvent),
+      ...(isObj(e.detail) ? { detail: e.detail } : { detail: undefined }),
+    })),
     errors: arr<ClusterReconcileError>(c.errors),
     jobs_shown: num(c.jobs_shown),
   };
@@ -539,6 +615,7 @@ export function normalizeCluster(raw: unknown): ClusterView {
   // not report it", which the UI must be able to tell apart from "empty".
   if (isObj(c.labels)) view.labels = strMap(c.labels);
   if (isObj(c.headroom)) view.headroom = c.headroom;
+  if ('headroom_observed_at' in c) view.headroom_observed_at = strOrNull(c.headroom_observed_at);
   if ('scheduler_autoscaling' in c) view.scheduler_autoscaling = normalizeAutoscaling(c.scheduler_autoscaling);
   return view;
 }
@@ -548,6 +625,8 @@ export function normalizeComponents(raw: unknown): ComponentsReport {
   return {
     generated_at: str(r.generated_at),
     stale_after_seconds: num(r.stale_after_seconds, 30),
+    // A build that predates the field always showed the topology.
+    topology_visible: r.topology_visible !== false,
     components: arr<Record<string, unknown>>(r.components).map((g) => {
       const s = isObj(g.summary) ? g.summary : {};
       return {

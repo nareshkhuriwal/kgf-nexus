@@ -15,7 +15,7 @@ afterEach(() => {
 const list = [
   runner(),
   runner({ attempt_id: 'att-2', run_id: 'run-2', node_id: 'load', worker_id: 'wk-2', worker_host: 'agent-cpu-1', executor: '', cluster: '', k8s_namespace: '', pod: '', k8s_node: '', placement_reported_at: '', progress_message: '' }),
-  runner({ attempt_id: 'att-3', run_id: 'run-3', node_id: 'train', worker_id: 'wk-3', worker_host: 'agent-gpu-0', executor: 'docker', cluster: 'aks-dr', pod: '', k8s_node: 'aks-gpu-0', state: 'DISPATCHED' }),
+  runner({ attempt_id: 'att-3', run_id: 'run-3', node_id: 'train', worker_id: 'wk-3', worker_host: 'agent-gpu-0', executor: 'docker', cluster: 'aks-dr', pod: '', k8s_node: 'aks-gpu-0', state: 'DISPATCHED', started_at: '' }),
 ];
 
 const render = () => renderInfra(<TaskRunnersTab namespace="acme" now={Date.now()} />);
@@ -42,6 +42,8 @@ describe('TaskRunnersTab', () => {
     // A docker task has no pod, and says why.
     const docker = screen.getByRole('link', { name: 'train' }).closest('tr')!;
     expect(within(docker).getByText('no pod (docker)')).toBeInTheDocument();
+    // started_at is null while DISPATCHED: not a missing report.
+    expect(within(docker).getByText('not started yet')).toBeInTheDocument();
   });
 
   it('summarises by executor and cluster, naming the unreported', async () => {
@@ -78,7 +80,7 @@ describe('TaskRunnersTab', () => {
   it('is honest when idle, unsupported or failing', async () => {
     serveInfra({ runners: runnersReport([]) });
     render();
-    expect(await screen.findByText('No task is running')).toBeInTheDocument();
+    expect(await screen.findByText('No task is in flight')).toBeInTheDocument();
     cleanup();
     vi.unstubAllGlobals();
     serveInfra({ runners: status(404) });

@@ -54,9 +54,15 @@ describe('ClusterControllerPanel', () => {
   it('shows labels, headroom and the scheduler autoscaling state (C5)', async () => {
     setup([withBindings()]);
     expect(await screen.findByText('nexus.io/region=westeurope')).toBeInTheDocument();
-    expect(screen.getByText('cpu millis')).toBeInTheDocument();
-    expect(screen.getByText('In sync')).toBeInTheDocument();
+    const headroom = screen.getByRole('table', { name: 'Quota headroom per task namespace' });
+    const row = within(headroom).getByRole('rowheader', { name: 'nexus-tasks' }).closest('tr')!;
+    expect(within(row).getByText('6 cpu')).toBeInTheDocument();
+    expect(within(row).getByText('24.0 GiB')).toBeInTheDocument();
+    expect(within(row).getByText('unlimited')).toBeInTheDocument();
+    expect(within(row).getByText('nvidia.com/mig-1g.10gb: 2')).toBeInTheDocument();
+    expect(screen.getAllByText('In sync').length).toBeGreaterThan(0);
     expect(screen.getByText(/Desired 2–6 @ 65% \(revision 3\)/)).toBeInTheDocument();
+    expect(within(screen.getByRole('list', { name: 'Scheduler HPAs in aks-prod' })).getByText('HPA scheduler')).toBeInTheDocument();
   });
 
   it('says when an older control plane does not report labels, headroom or autoscaling', async () => {
@@ -169,5 +175,30 @@ describe('ClusterControllerPanel', () => {
     expect(screen.queryByRole('button', { name: /Unbind/ })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Register a cluster' })).toBeNull();
     expect(screen.queryByRole('combobox', { name: 'Worker pool' })).toBeNull();
+  });
+});
+
+describe('ClusterControllerPanel scheduler HPAs', () => {
+  it('lists each HPA target, flags one the controller does not own, and describes HPA events', async () => {
+    const c = withBindings();
+    const a = c.scheduler_autoscaling!;
+    a.state = 'drift';
+    a.targets = [
+      { ...a.targets[0]!, state: 'drift', managed: false, reason: 'leaves HPA scheduler to Helm' },
+      { ...a.targets[0]!, observed: { ...a.targets[0]!.observed!, hpa_name: 'scheduler-gpu' }, state: 'in_sync' },
+    ];
+    c.events = [
+      { id: 9, kubernetes_namespace: 'kgf-nexus', worker_deployment: 'hpa/scheduler', action: 'hpa_update', mode: 'apply', applied: true, from_replicas: null, to_replicas: null, reason: 'bounded step', actor: 'controller-0', occurred_at: ago(30_000), detail: { before: { min_replicas: 1, max_replicas: 4 }, after: { min_replicas: 2, max_replicas: 6 } } },
+    ];
+    setup([c]);
+    const list = await screen.findByRole('list', { name: 'Scheduler HPAs in aks-prod' });
+    expect(within(list).getByText('Not controller-owned')).toBeInTheDocument();
+    expect(within(list).getByText('leaves HPA scheduler to Helm')).toBeInTheDocument();
+    expect(within(list).getByText('HPA scheduler-gpu')).toBeInTheDocument();
+    expect(screen.getByText(/2 HPAs, worst shown/)).toBeInTheDocument();
+    const event = screen.getByText('bounded step').closest('tr')!;
+    expect(within(event).getByText('HPA scheduler')).toBeInTheDocument();
+    expect(within(event).getByText('min replicas 1→2, max replicas 4→6')).toBeInTheDocument();
+    expect(within(event).getByText('hpa_update (applied)')).toBeInTheDocument();
   });
 });

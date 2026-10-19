@@ -313,15 +313,20 @@ export const AUTOSCALING_VISUAL: Record<AutoscalingState, { label: string; tone:
     label: 'Drift',
     tone: 'warning',
     glyph: '≠',
-    hint: 'The HPA in the cluster differs from the saved policy. In apply mode the controller corrects it; in plan mode it only reports it.',
+    hint: 'Apply mode: the controller reconciled this revision and the HPA still differs — the last error says why (often an HPA it does not own).',
   },
   plan_only: {
     label: 'Plan only',
     tone: 'queued',
     glyph: '◇',
-    hint: 'The controller runs in plan (dry-run) mode: it reports what it would change and changes nothing.',
+    hint: 'The HPA differs from the saved policy and the controller runs in plan (dry-run) mode: it reports what it would change and changes nothing.',
   },
-  applying: { label: 'Applying', tone: 'active', glyph: '↻', hint: 'The controller is applying the saved policy to the HPA.' },
+  applying: {
+    label: 'Applying',
+    tone: 'active',
+    glyph: '↻',
+    hint: 'Apply mode: the controller has not reconciled this revision yet, or is moving the HPA in bounded steps (replica bounds at most ×2 or ÷2 per patch, at most one patch a minute).',
+  },
   not_observed: {
     label: 'Not observed',
     tone: 'neutral',
@@ -358,9 +363,30 @@ export const COMPONENT_LABEL: Record<string, string> = {
   'event-service': 'Event service',
 };
 
+/**
+ * A component's instances split into the ones that matter now and history.
+ *
+ * A replaced pod's row stays for up to 24h as `stale`. While a ready
+ * replacement exists those rows are history, not a fault; when nothing is
+ * ready they are the evidence and stay in view.
+ */
+export function splitHistory<T extends { state: string }>(instances: T[]): { current: T[]; history: T[] } {
+  const anyReady = instances.some((i) => i.state === 'ready');
+  if (!anyReady) return { current: instances, history: [] };
+  return { current: instances.filter((i) => i.state !== 'stale'), history: instances.filter((i) => i.state === 'stale') };
+}
+
+/** Instances still reporting (ready or not ready); stale rows are excluded. */
+export const reporting = (g: ComponentGroup) => Math.max(0, g.summary.total - g.summary.stale);
+
+/** Every reporting instance ready, and at least one of them. */
+export const fullyReady = (g: ComponentGroup) => g.summary.ready > 0 && g.summary.ready >= reporting(g);
+
 export function componentHealth(g: ComponentGroup): Health {
   const { ready, total, stale } = g.summary;
+  const live = reporting(g);
   const name = COMPONENT_LABEL[g.component] ?? g.component;
+  const previous = ready > 0 && stale > 0 ? ` · ${stale} previous instance${stale === 1 ? '' : 's'}` : '';
   if (total === 0) {
     return {
       level: 'not_reported',
@@ -369,24 +395,26 @@ export function componentHealth(g: ComponentGroup): Health {
       hint: `Check that ${name} pods are running (kubectl get pods) and can reach the database.`,
     };
   }
-  if (ready === total) return { level: 'healthy', label: 'Healthy', detail: `${ready}/${total} ready` };
-  if (ready === 0 && stale === total) {
+  if (ready === 0 && live === 0) {
     return {
       level: 'stale',
       label: 'Stale',
-      detail: `0/${total} ready; every instance has stopped reporting.`,
+      detail: `0 ready; ${stale} instance${stale === 1 ? '' : 's'} stopped reporting.`,
       hint: `${name} instances stopped reporting. Check their pods, restarts and logs.`,
     };
   }
   if (ready === 0) {
-    return { level: 'down', label: 'Down', detail: `0/${total} ready`, hint: `No ${name} instance is ready. Check its pods and logs.` };
+    return { level: 'down', label: 'Down', detail: `0/${live} ready`, hint: `No ${name} instance is ready. Check its pods and logs.` };
   }
-  return {
-    level: 'degraded',
-    label: 'Degraded',
-    detail: `${ready}/${total} ready${stale ? `, ${stale} stale` : ''}`,
-    hint: `Some ${name} instances are not ready. Inspect them below.`,
-  };
+  if (ready < live) {
+    return {
+      level: 'degraded',
+      label: 'Degraded',
+      detail: `${ready}/${live} ready${previous}`,
+      hint: `Some ${name} instances report not ready. Inspect them below.`,
+    };
+  }
+  return { level: 'healthy', label: 'Healthy', detail: `${ready}/${live} ready${previous}` };
 }
 
 export const UPGRADE_HINT =
@@ -405,7 +433,7 @@ export function controlPlaneHealth(result: RouteResult<ComponentsReport> | undef
   if (!groups.length) return { level: 'not_reported', label: 'Not reported', detail: 'No component has reported.', hint: UPGRADE_HINT };
   const healths = groups.map(componentHealth);
   const level = worst(healths.map((h) => h.level));
-  const ready = groups.filter((g) => g.summary.total > 0 && g.summary.ready === g.summary.total).length;
+  const ready = groups.filter(fullyReady).length;
   const bad = groups.filter((_, i) => healths[i]!.level !== 'healthy').map((g) => COMPONENT_LABEL[g.component] ?? g.component);
   return {
     level,
@@ -513,8 +541,8 @@ export function runnersHealth(result: RouteResult<TaskRunnersReport> | undefined
   }
   const n = result.data.summary.running;
   return n === 0
-    ? { level: 'idle', label: 'Idle', detail: 'No task is running right now.' }
-    : { level: 'healthy', label: `${n} running`, detail: summarizeCounts(result.data.summary.by_executor, 'executor') };
+    ? { level: 'idle', label: 'Idle', detail: 'No task is in flight right now.' }
+    : { level: 'healthy', label: `${n} in flight`, detail: summarizeCounts(result.data.summary.by_executor, 'executor') };
 }
 
 export function summarizeCounts(counts: Record<string, number>, what: string): string {
@@ -683,4 +711,68 @@ export function filterRunners(runners: TaskRunner[], f: RunnerFilter): TaskRunne
 export function distinctValues(runners: TaskRunner[], field: keyof TaskRunner): string[] {
   const values = [...new Set(runners.map((r) => r[field]))];
   return values.sort((a, b) => (a === '' ? 1 : b === '' ? -1 : a.localeCompare(b)));
+}
+
+// ── scaling events ──────────────────────────────────────────────────────────
+
+/** "HPA scheduler" for the controller's HPA rows (worker_deployment "hpa/<name>"), else namespace/name. */
+export function eventTarget(e: { kubernetes_namespace: string; worker_deployment: string }): { hpa: boolean; label: string } {
+  if (e.worker_deployment.startsWith('hpa/')) return { hpa: true, label: `HPA ${e.worker_deployment.slice(4)}` };
+  return { hpa: false, label: `${e.kubernetes_namespace}/${e.worker_deployment}` };
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * An event's before/after settings as one line ("min_replicas 1→2, max_replicas
+ * 4→6"); keys that did not change are left out. Null when the event carries none.
+ */
+export function describeChange(detail: Record<string, unknown> | undefined): string | null {
+  if (!detail || !isRecord(detail.before) || !isRecord(detail.after)) return null;
+  const before = detail.before;
+  const after = detail.after;
+  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])];
+  const fmt = (v: unknown) => (v === null || v === undefined ? 'unset' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+  const parts = keys.filter((k) => fmt(before[k]) !== fmt(after[k])).map((k) => `${k.replaceAll('_', ' ')} ${fmt(before[k])}→${fmt(after[k])}`);
+  return parts.length ? parts.join(', ') : 'no change';
+}
+
+/** -1 in a headroom figure means the namespace is not constrained on it. */
+export function headroomValue(n: number | null, fmt: (n: number) => string): string {
+  if (n === null) return '—';
+  if (n < 0) return 'unlimited';
+  return fmt(n);
+}
+
+// ── instance detail ─────────────────────────────────────────────────────────
+
+const n = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/**
+ * The few detail values worth a glance in a table row (the rest stay one
+ * click away): readiness when it is not "ok", shutting down, and for a
+ * scheduler its queue, recent throughput, backlog and errors.
+ */
+export function detailSummary(component: string, d: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  if (d.shutting_down === true) out.push('shutting down');
+  if (typeof d.readiness === 'string' && d.readiness !== 'ok' && d.readiness !== '') out.push(`readiness: ${d.readiness}`);
+  if (component === 'scheduler') {
+    if (typeof d.queue === 'string' && d.queue) out.push(`queue ${d.queue}`);
+    const window = n(d.recent_window_seconds);
+    const dispatched = n(d.dispatched_recent);
+    if (dispatched !== null) out.push(`${dispatched} dispatched${window ? ` / ${window}s` : ''}`);
+    const pending = n(d.pending_attempts);
+    if (pending !== null) out.push(`${pending} pending`);
+    const oldest = n(d.oldest_pending_age_seconds);
+    if (oldest !== null && oldest > 0) out.push(`oldest ${Math.round(oldest)}s`);
+    const errors = n(d.claim_errors_total);
+    if (errors) out.push(`${errors} claim errors`);
+    const lost = n(d.lost_total);
+    if (lost) out.push(`${lost} lost`);
+  }
+  if (component === 'api-gateway' && typeof d.placement_reporting === 'boolean') {
+    out.push(d.placement_reporting ? 'placement reporting on' : 'placement reporting off');
+  }
+  return out;
 }

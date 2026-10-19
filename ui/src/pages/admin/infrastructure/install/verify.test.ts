@@ -89,3 +89,22 @@ describe('verifyInstall', () => {
     expect(byId(base({ canViewWorkers: false }))['workers-cpu']!.status).toBe('unknown');
   });
 });
+
+describe('verifyInstall against the live registry', () => {
+  it('ignores a replaced pod’s stale row once its replacement is ready', () => {
+    const report = components({ scheduler: [instance({ state: 'ready' }), instance({ instance: 'old', state: 'stale' })] });
+    const items = byId(base({ components: { kind: 'ok', data: report } }));
+    expect(items['control-plane']!.status).toBe('ok');
+    expect(items.schedulers).toMatchObject({ status: 'ok', detail: '1 of 1 replicas ready.' });
+  });
+
+  it('counts every instance, and says why, when the topology is hidden from this account', () => {
+    const report = components();
+    report.topology_visible = false;
+    for (const g of report.components) for (const i of g.instances) i.cluster = '';
+    expect(byId(base({ components: { kind: 'ok', data: report } }))['control-plane']).toMatchObject({
+      status: 'ok',
+      detail: expect.stringContaining('cluster names are hidden from this account'),
+    });
+  });
+});

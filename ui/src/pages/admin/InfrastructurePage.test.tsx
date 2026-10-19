@@ -53,7 +53,7 @@ describe('live status', () => {
     page();
     const strip = await screen.findByRole('list', { name: 'Live status' });
     await waitFor(() => expect(within(strip).getAllByText('Healthy')).toHaveLength(3));
-    expect(within(strip).getByText('1 running')).toBeInTheDocument();
+    expect(within(strip).getByText('1 in flight')).toBeInTheDocument();
     const services = screen.getByRole('article', { name: 'Services' });
     expect(within(services).getByText('6')).toBeInTheDocument();
     expect(within(services).getByText('/ 6 ready')).toBeInTheDocument();

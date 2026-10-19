@@ -113,7 +113,8 @@ export function TaskRunnersTab({ namespace, now }: { namespace: string; now: num
       header: 'running for',
       cell: (r) => {
         const t = parseTs(r.started_at);
-        return t === null ? <NotReported /> : <span title={fmtTs(r.started_at)}>{fmtDurationMs(now - t)}</span>;
+        if (t === null) return <NotReported>{r.state === 'DISPATCHED' ? 'not started yet' : 'not reported'}</NotReported>;
+        return <span title={fmtTs(r.started_at)}>{fmtDurationMs(now - t)}</span>;
       },
       sort: (a, b) => (parseTs(a.started_at) ?? 0) - (parseTs(b.started_at) ?? 0),
       align: 'end',
@@ -129,7 +130,7 @@ export function TaskRunnersTab({ namespace, now }: { namespace: string; now: num
   return (
     <div className="col">
       <Panel
-        title="Running task attempts"
+        title="Task attempts in flight"
         note={
           <>
             Refreshes every {INFRA_POLL_MS.taskRunners / 1000}s · <Updated at={q.dataUpdatedAt || null} now={now} />
@@ -169,15 +170,15 @@ export function TaskRunnersTab({ namespace, now }: { namespace: string; now: num
           report && (
             <>
               <div className="infra-summary" aria-label="Running task summary">
-                <span className="infra-summary-total">
-                  <strong>{report.summary.running}</strong> running
+                <span className="infra-summary-total" title="Dispatched or running">
+                  <strong>{report.summary.running}</strong> in flight
                   {report.runners.length < report.summary.running && <span className="sub"> · {report.runners.length} listed (limit {report.limit})</span>}
                 </span>
                 <CountChips counts={report.summary.by_executor} label="By executor" none="executor not reported" />
                 <CountChips counts={report.summary.by_cluster} label="By cluster" none="cluster not reported" />
               </div>
               {!runners.length ? (
-                <Notice title="No task is running">Running attempts appear here with their pod and node as soon as an agent starts them.</Notice>
+                <Notice title="No task is in flight">Dispatched and running attempts appear here, with their pod and node once the agent reports where it placed them.</Notice>
               ) : (
                 <DataTable
                   rows={rows}

@@ -11,7 +11,7 @@
  * replicas are RUNNING right now.
  */
 
-import type { ClusterView, SchedulerAutoscaling, SchedulerPolicy } from '../../../api/platform';
+import type { AutoscalingObserved, AutoscalingTarget, ClusterView, SchedulerAutoscaling, SchedulerPolicy } from '../../../api/platform';
 import { useClusters, usePlatformComponents } from '../../../api/hooks';
 import { ErrorBox, Loading, StaleWarning } from '../../../components/Status';
 import { fmtAge, fmtDurationMs } from '../../../lib/format';
@@ -91,9 +91,10 @@ export function SchedulerTab({
       </Panel>
 
       <Notice title="Saving does not change the cluster by itself — the cluster controller does">
-        Each registered cluster’s controller compares the saved policy with the scheduler HPA it observes. In <strong>plan</strong> mode it only
-        reports the difference (<em>Plan only</em>, <em>Drift</em>); in <strong>apply</strong> mode it updates the HPA and records the change in
-        the audit log (<em>Applying</em>, then <em>In sync</em>). Switch a cluster between modes on the Clusters tab.
+        Each registered cluster’s controller compares the saved policy with every scheduler HPA it observes. In <strong>plan</strong> mode it
+        only reports the difference (<em>Plan only</em>, <em>Drift</em>); in <strong>apply</strong> mode it moves each HPA it owns to the policy in
+        bounded steps and records every patch in the audit log (<em>Applying</em>, then <em>In sync</em>). Apply needs the cluster in apply mode
+        (Clusters tab) and the chart’s clusterController.apply.enabled with apply.schedulerAutoscaling, which marks the HPAs as controller-owned.
       </Notice>
 
       <Panel title="Autoscaling by cluster" note={<>Reported by each cluster controller · <Updated at={clusters.dataUpdatedAt || null} now={now} /></>}>
@@ -130,7 +131,7 @@ export function SchedulerTab({
             deploy) and their logs.
           </Notice>
         ) : (
-          <InstancesTable groups={[sg]} now={now} showComponent={false} noun="replicas" />
+          <InstancesTable groups={[sg]} now={now} showComponent={false} noun="replicas" topologyVisible={components.data.kind === 'ok' && components.data.data.topology_visible} />
         )}
       </Panel>
     </div>
@@ -142,6 +143,9 @@ const fmtBounds = (min: number | null, max: number | null, cpu: number | null) =
 
 function Desired({ a, savedRevision }: { a: SchedulerAutoscaling; savedRevision: number | null }) {
   if (!a.desired) return <NotReported />;
+  if (a.desired.config_revision === 0) {
+    return <NotReported>Defaults — never saved, so the controller does not apply them.</NotReported>;
+  }
   const behind = savedRevision !== null && a.desired.config_revision < savedRevision;
   return (
     <div className="cell-stack">
@@ -154,8 +158,7 @@ function Desired({ a, savedRevision }: { a: SchedulerAutoscaling; savedRevision:
   );
 }
 
-function Observed({ a }: { a: SchedulerAutoscaling }) {
-  const o = a.observed;
+function Observed({ o }: { o: AutoscalingObserved | null }) {
   if (!o) return <NotReported>no HPA observed</NotReported>;
   return (
     <div className="cell-stack">
@@ -164,73 +167,104 @@ function Observed({ a }: { a: SchedulerAutoscaling }) {
         replicas {o.current_replicas ?? '?'} now → {o.desired_replicas ?? '?'} wanted
         {o.scale_down_stabilization_seconds !== null ? ` · scale-down ${fmtDurationMs(o.scale_down_stabilization_seconds * 1000)}` : ''}
       </span>
-      <span className="sub">
-        {o.hpa_name ? <>HPA <code className="infra-id">{o.hpa_name}</code></> : <NotReported>HPA name not reported</NotReported>}
-        {o.deployment ? <> · Deployment <code className="infra-id">{o.deployment}</code></> : null}
-      </span>
     </div>
   );
 }
 
+const NOT_OWNED_HINT =
+  'This HPA lacks the nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller annotation, so the controller leaves it to Helm/GitOps and reports any difference as drift. The chart adds it with clusterController.apply.schedulerAutoscaling.';
+
+/** The per-target rows; an older controller reports only the worst target at the top level. */
+function targetsOf(a: SchedulerAutoscaling): AutoscalingTarget[] {
+  if (a.targets.length) return a.targets;
+  return [{ observed: a.observed, state: a.state, managed: null, reason: '', last_applied_at: a.last_applied_at, last_error: a.last_error }];
+}
+
 function AutoscalingTable({ clusters, savedPolicy, savedRevision, now }: { clusters: ClusterView[]; savedPolicy: SchedulerPolicy | null; savedRevision: number | null; now: number }) {
+  const unowned = clusters.some((c) => c.scheduler_autoscaling?.targets.some((t) => t.managed === false));
   return (
-    <div className="table-scroll">
-      <table className="infra-table">
-        <caption className="sr-only">Scheduler autoscaling, desired against observed, per cluster</caption>
-        <thead>
-          <tr>
-            <th scope="col">cluster</th>
-            <th scope="col">mode</th>
-            <th scope="col">state</th>
-            <th scope="col">desired (saved policy)</th>
-            <th scope="col">observed in cluster</th>
-            <th scope="col">last applied</th>
-          </tr>
-        </thead>
-        <tbody>
-          {clusters.map((c) => {
-            const a = c.scheduler_autoscaling;
-            return (
-              <tr key={c.id || c.name}>
-                <th scope="row">{c.name}</th>
-                <td>
-                  <ToneBadge tone={c.mode === 'apply' ? 'active' : 'queued'} glyph={c.mode === 'apply' ? '▶' : '◇'} label={c.mode === 'apply' ? 'Apply' : 'Plan'} small />
-                </td>
-                {a === undefined ? (
-                  <td colSpan={4}>
-                    <NotReported>Not reported by this control plane version.</NotReported>{' '}
-                    {savedPolicy && <span className="sub">Saved: {fmtBounds(savedPolicy.min_replicas, savedPolicy.max_replicas, savedPolicy.target_cpu_percent)}.</span>}
-                  </td>
-                ) : a === null ? (
-                  <td colSpan={4}>
-                    <NotReported>The controller has not reported scheduler autoscaling for this cluster.</NotReported>
-                  </td>
-                ) : (
-                  <>
-                    <td>
-                      <AutoscalingBadge state={a.state} />
-                    </td>
-                    <td>
-                      <Desired a={a} savedRevision={savedRevision} />
-                    </td>
-                    <td>
-                      <Observed a={a} />
-                    </td>
-                    <td>
-                      {a.last_applied_at ? fmtAge(a.last_applied_at, now) : <NotReported>never</NotReported>}
-                      {a.last_error && (
-                        <div className="infra-error-text" role="note">
-                          Last error: {a.last_error}
-                        </div>
+    <>
+      <div className="table-scroll">
+        <table className="infra-table">
+          <caption className="sr-only">Scheduler autoscaling, desired against observed, per cluster and HPA</caption>
+          <thead>
+            <tr>
+              <th scope="col">cluster</th>
+              <th scope="col">mode</th>
+              <th scope="col">HPA</th>
+              <th scope="col">state</th>
+              <th scope="col">desired (saved policy)</th>
+              <th scope="col">observed in cluster</th>
+              <th scope="col">last change</th>
+            </tr>
+          </thead>
+          <tbody>
+            {clusters.flatMap((c) => {
+              const a = c.scheduler_autoscaling;
+              const mode = (
+                <ToneBadge tone={c.mode === 'apply' ? 'active' : 'queued'} glyph={c.mode === 'apply' ? '▶' : '◇'} label={c.mode === 'apply' ? 'Apply' : 'Plan'} small />
+              );
+              if (!a) {
+                return [
+                  <tr key={c.id || c.name}>
+                    <th scope="row">{c.name}</th>
+                    <td>{mode}</td>
+                    <td colSpan={5}>
+                      {a === undefined ? (
+                        <>
+                          <NotReported>Not reported by this control plane version.</NotReported>{' '}
+                          {savedPolicy && <span className="sub">Saved: {fmtBounds(savedPolicy.min_replicas, savedPolicy.max_replicas, savedPolicy.target_cpu_percent)}.</span>}
+                        </>
+                      ) : (
+                        <NotReported>The controller has not reported scheduler autoscaling for this cluster.</NotReported>
                       )}
                     </td>
-                  </>
-                )}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+                  </tr>,
+                ];
+              }
+              const targets = targetsOf(a);
+              return targets.map((t, i) => (
+                <tr key={`${c.id || c.name}/${t.observed?.hpa_name || i}`}>
+                  {i === 0 && (
+                    <>
+                      <th scope="row" rowSpan={targets.length}>
+                        {c.name}
+                      </th>
+                      <td rowSpan={targets.length}>{mode}</td>
+                    </>
+                  )}
+                  <td>
+                    <div className="cell-stack">
+                      {t.observed?.hpa_name ? <code className="infra-id">{t.observed.hpa_name}</code> : <NotReported>no HPA</NotReported>}
+                      {t.observed?.deployment && <span className="sub">Deployment {t.observed.deployment}</span>}
+                      {t.managed === false && <ToneBadge tone="warning" glyph="⊘" label="Not controller-owned" title={NOT_OWNED_HINT} small />}
+                    </div>
+                  </td>
+                  <td>
+                    <AutoscalingBadge state={t.state} />
+                  </td>
+                  {i === 0 && (
+                    <td rowSpan={targets.length}>
+                      <Desired a={a} savedRevision={savedRevision} />
+                    </td>
+                  )}
+                  <td>
+                    <Observed o={t.observed} />
+                  </td>
+                  <td>
+                    <div className="cell-stack">
+                      <span>{t.last_applied_at ? `applied ${fmtAge(t.last_applied_at, now)}` : <NotReported>never applied</NotReported>}</span>
+                      {t.reason && <span className="sub">{t.reason}</span>}
+                      {t.last_error && <span className="infra-error-text">Last error: {t.last_error}</span>}
+                    </div>
+                  </td>
+                </tr>
+              ));
+            })}
+          </tbody>
+        </table>
+      </div>
+      {unowned && <p className="sub infra-measure">“Not controller-owned”: {NOT_OWNED_HINT}</p>}
+    </>
   );
 }

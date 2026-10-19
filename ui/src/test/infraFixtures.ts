@@ -124,7 +124,10 @@ export function cluster(over: Partial<ClusterView> = {}): ClusterView {
     errors: [],
     jobs_shown: 0,
     labels: { 'nexus.io/region': 'westeurope' },
-    headroom: { cpu_millis: 12000, gpu_count: 2 },
+    headroom: {
+      'nexus-tasks': { cpu_millis: 6000, memory_bytes: 25769803776, gpu_count: -1, pods: 40, extended: { 'nvidia.com/mig-1g.10gb': 2 } },
+    },
+    headroom_observed_at: ago(30_000),
     scheduler_autoscaling: {
       desired: { min_replicas: 2, max_replicas: 6, target_cpu_percent: 65, scale_down_stabilization_seconds: 300, config_revision: 3 },
       observed: {
@@ -140,6 +143,25 @@ export function cluster(over: Partial<ClusterView> = {}): ClusterView {
       state: 'in_sync',
       last_applied_at: ago(60_000),
       last_error: null,
+      targets: [
+        {
+          observed: {
+            min_replicas: 2,
+            max_replicas: 6,
+            target_cpu_percent: 65,
+            scale_down_stabilization_seconds: 300,
+            current_replicas: 2,
+            desired_replicas: 2,
+            hpa_name: 'scheduler',
+            deployment: 'scheduler',
+          },
+          state: 'in_sync',
+          managed: true,
+          reason: '',
+          last_applied_at: ago(60_000),
+          last_error: null,
+        },
+      ],
     },
     ...over,
   };
@@ -167,8 +189,11 @@ export function components(over: Partial<Record<string, ComponentInstance[]>> = 
       over[name] ??
       (name === 'scheduler'
         ? [
-            instance({ instance: 'scheduler-5f7b-a1', detail: { queue: 'default', claims_per_minute: 120 } }),
-            instance({ instance: 'scheduler-5f7b-b2', detail: { queue: 'default' } }),
+            instance({
+              instance: 'scheduler-5f7b-a1',
+              detail: { readiness: 'ok', queue: 'default', claims_recent: 120, dispatched_recent: 118, recent_window_seconds: 60, pending_attempts: 4, oldest_pending_age_seconds: 12, claim_errors_total: 0 },
+            }),
+            instance({ instance: 'scheduler-5f7b-b2', detail: { readiness: 'ok', queue: 'default' } }),
           ]
         : [instance({ instance: `${name}-6c8d-z9` })]);
     return {
@@ -181,7 +206,7 @@ export function components(over: Partial<Record<string, ComponentInstance[]>> = 
       instances,
     };
   });
-  return { generated_at: recent(), stale_after_seconds: 30, components: groups };
+  return { generated_at: recent(), stale_after_seconds: 30, topology_visible: true, components: groups };
 }
 
 export function runner(over: Partial<TaskRunner> = {}): TaskRunner {

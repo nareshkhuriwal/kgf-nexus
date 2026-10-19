@@ -11,6 +11,11 @@ import {
   changedSections,
   clustersHealth,
   componentHealth,
+  describeChange,
+  detailSummary,
+  eventTarget,
+  headroomValue,
+  splitHistory,
   controllerFreshness,
   controlPlaneHealth,
   countWorkers,
@@ -190,6 +195,15 @@ describe('component health', () => {
     expect(componentHealth(group(0, 2, 2)).level).toBe('stale');
   });
 
+  it('treats a replaced pod’s lingering stale row as history while a ready replacement exists', () => {
+    expect(componentHealth(group(2, 4, 2))).toMatchObject({ level: 'healthy', detail: '2/2 ready · 2 previous instances' });
+    expect(componentHealth(group(1, 3, 1))).toMatchObject({ level: 'degraded', detail: '1/2 ready · 1 previous instance' });
+    const rows = [instance({ state: 'ready' }), instance({ instance: 'old', state: 'stale' })];
+    expect(splitHistory(rows)).toEqual({ current: [rows[0]], history: [rows[1]] });
+    const onlyStale = [instance({ instance: 'old', state: 'stale' })];
+    expect(splitHistory(onlyStale)).toEqual({ current: onlyStale, history: [] });
+  });
+
   it('reports an older control plane as not reported, with the upgrade hint', () => {
     const h = controlPlaneHealth({ kind: 'unsupported', status: 404 }, null);
     expect(h.level).toBe('not_reported');
@@ -252,7 +266,7 @@ describe('runner and cluster health', () => {
 
   it('calls zero running tasks idle, not unhealthy', () => {
     expect(runnersHealth(runners(0), null)).toMatchObject({ level: 'idle', label: 'Idle' });
-    expect(runnersHealth(runners(2), null)).toMatchObject({ level: 'healthy', label: '2 running', detail: '2 kubernetes' });
+    expect(runnersHealth(runners(2), null)).toMatchObject({ level: 'healthy', label: '2 in flight', detail: '2 kubernetes' });
     expect(runnersHealth({ kind: 'unsupported', status: 404 }, null).level).toBe('not_reported');
   });
 
@@ -319,5 +333,33 @@ describe('runner filters', () => {
 
   it('lists distinct values with not-reported last', () => {
     expect(distinctValues(list, 'executor')).toEqual(['docker', 'kubernetes', '']);
+  });
+});
+
+describe('instance detail and events', () => {
+  it('summarises a scheduler’s throughput, backlog and errors, and any instance’s trouble', () => {
+    expect(
+      detailSummary('scheduler', { readiness: 'ok', queue: 'gpu', dispatched_recent: 40, recent_window_seconds: 60, pending_attempts: 3, oldest_pending_age_seconds: 95.4, claim_errors_total: 2, lost_total: 1 }),
+    ).toEqual(['queue gpu', '40 dispatched / 60s', '3 pending', 'oldest 95s', '2 claim errors', '1 lost']);
+    expect(detailSummary('dag-engine', { readiness: 'database unreachable', shutting_down: true })).toEqual(['shutting down', 'readiness: database unreachable']);
+    expect(detailSummary('api-gateway', { readiness: 'ok', placement_reporting: true })).toEqual(['placement reporting on']);
+    expect(detailSummary('scheduler', { readiness: 'ok', heartbeat_interval_seconds: 10 })).toEqual([]);
+  });
+
+  it('names HPA events and describes what changed', () => {
+    expect(eventTarget({ kubernetes_namespace: 'nexus', worker_deployment: 'hpa/scheduler' })).toEqual({ hpa: true, label: 'HPA scheduler' });
+    expect(eventTarget({ kubernetes_namespace: 'ns', worker_deployment: 'cpu' })).toEqual({ hpa: false, label: 'ns/cpu' });
+    expect(describeChange({ before: { min_replicas: 1, max_replicas: 4, target_cpu_percent: 70 }, after: { min_replicas: 2, max_replicas: 6, target_cpu_percent: 70 } })).toBe(
+      'min replicas 1→2, max replicas 4→6',
+    );
+    expect(describeChange({ before: { a: 1 }, after: { a: 1 } })).toBe('no change');
+    expect(describeChange(undefined)).toBeNull();
+    expect(describeChange({ reason: 'x' })).toBeNull();
+  });
+
+  it('reads -1 headroom as unlimited', () => {
+    expect(headroomValue(-1, String)).toBe('unlimited');
+    expect(headroomValue(null, String)).toBe('—');
+    expect(headroomValue(40, String)).toBe('40');
   });
 });

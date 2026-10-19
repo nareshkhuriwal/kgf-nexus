@@ -23,15 +23,19 @@ function render(savedRevision = 3) {
 
 function withState(name: string, state: string, over: Partial<ClusterView> = {}): ClusterView {
   const c = cluster({ id: name, name, ...over });
-  c.scheduler_autoscaling = { ...c.scheduler_autoscaling!, state };
+  const a = c.scheduler_autoscaling!;
+  c.scheduler_autoscaling = { ...a, state, targets: a.targets.map((t) => ({ ...t, state })) };
   return c;
 }
 
 describe('SchedulerTab', () => {
   it('shows desired against observed per cluster, with each state named', async () => {
     const drift = withState('aks-dr', 'drift');
-    drift.scheduler_autoscaling!.observed = { ...drift.scheduler_autoscaling!.observed!, max_replicas: 10, current_replicas: 7 };
-    drift.scheduler_autoscaling!.last_error = 'forbidden: cannot patch hpa';
+    const t = drift.scheduler_autoscaling!.targets[0]!;
+    t.observed = { ...t.observed!, max_replicas: 10, current_replicas: 7 };
+    t.last_error = 'forbidden: cannot patch hpa';
+    t.managed = false;
+    t.reason = 'would set max 10→6';
     serveInfra({ clusters: { clusters: [withState('aks-prod', 'in_sync'), drift, withState('aks-qa', 'plan_only'), withState('aks-new', 'not_observed', { mode: 'apply' })] } });
     render();
     const table = await screen.findByRole('table', { name: /Scheduler autoscaling, desired against observed/ });
@@ -41,6 +45,9 @@ describe('SchedulerTab', () => {
     expect(within(row('aks-dr')).getByText('2–10 replicas @ 65% CPU')).toBeInTheDocument();
     expect(within(row('aks-dr')).getByText(/replicas 7 now/)).toBeInTheDocument();
     expect(within(row('aks-dr')).getByText('Last error: forbidden: cannot patch hpa')).toBeInTheDocument();
+    expect(within(row('aks-dr')).getByText('Not controller-owned')).toBeInTheDocument();
+    expect(within(row('aks-dr')).getByText('would set max 10→6')).toBeInTheDocument();
+    expect(screen.getByText(/“Not controller-owned”: This HPA lacks the nexus.khuriwalgroup.com\/autoscaling-owner/)).toBeInTheDocument();
     expect(within(row('aks-qa')).getByText('Plan only')).toBeInTheDocument();
     expect(within(row('aks-new')).getByText('Not observed')).toBeInTheDocument();
     expect(within(row('aks-new')).getByText('Apply')).toBeInTheDocument();
@@ -73,7 +80,8 @@ describe('SchedulerTab', () => {
     serveInfra();
     render();
     expect(await screen.findByText('scheduler-5f7b-a1')).toBeInTheDocument();
-    expect(screen.getByText('claims per minute')).toBeInTheDocument();
+    expect(screen.getByText('queue default · 118 dispatched / 60s · 4 pending · oldest 12s')).toBeInTheDocument();
+    expect(screen.getAllByText(/All detail/).length).toBe(2);
     expect(screen.getAllByText('v0.2.0').length).toBeGreaterThan(0);
     expect(screen.getAllByText('1h 0m').length).toBeGreaterThan(0);
   });

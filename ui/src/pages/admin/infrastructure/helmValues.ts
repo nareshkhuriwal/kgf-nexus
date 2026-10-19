@@ -136,8 +136,8 @@ export function planValuesYaml(
   const decisions = new Map((plan?.decisions ?? []).map((d) => [d.pool, d]));
   const comments: Record<string, string[]> = {
     schedulers: [
-      'One scheduler per queue the pools use. autoscaling is the saved scheduler policy;',
-      'the cluster controller applies the same policy to the HPA when the cluster is in apply mode.',
+      'One scheduler per queue the pools use. autoscaling is the saved scheduler policy; in apply mode',
+      '(clusterController.apply.enabled and apply.schedulerAutoscaling) the cluster controller keeps the HPAs at it.',
     ],
   };
   const agents = config.pools.map((pool, i) => {

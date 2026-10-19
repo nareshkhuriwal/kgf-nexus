@@ -23,6 +23,8 @@ import {
   controllerFreshness,
   controlPlaneHealth,
   countWorkers,
+  fullyReady,
+  reporting,
   pendingTasks,
   runnersHealth,
   schedulerGroup,
@@ -120,7 +122,7 @@ export function OverviewTab({ namespace, now, onOpen }: { namespace: string; now
           figure={
             report ? (
               <>
-                <strong>{report.components.filter((g) => g.summary.total > 0 && g.summary.ready === g.summary.total).length}</strong>
+                <strong>{report.components.filter(fullyReady).length}</strong>
                 <span>/ {report.components.length} ready</span>
               </>
             ) : (
@@ -133,7 +135,7 @@ export function OverviewTab({ namespace, now, onOpen }: { namespace: string; now
               {report.components.map((g) => (
                 <li key={g.component}>
                   <span>{COMPONENT_LABEL[g.component] ?? g.component}</span>
-                  <span className="infra-tile-count">{g.summary.total ? `${g.summary.ready}/${g.summary.total}` : '—'}</span>
+                  <span className="infra-tile-count">{g.summary.total ? `${g.summary.ready}/${reporting(g)}` : '—'}</span>
                   <HealthBadge health={componentHealth(g)} small />
                 </li>
               ))}
@@ -150,7 +152,7 @@ export function OverviewTab({ namespace, now, onOpen }: { namespace: string; now
             sg && sg.summary.total > 0 ? (
               <>
                 <strong>{sg.summary.ready}</strong>
-                <span>/ {sg.summary.total} replicas ready</span>
+                <span>/ {reporting(sg)} replicas ready</span>
               </>
             ) : (
               <NotReported>{sched.level === 'loading' ? 'Loading…' : 'replicas not reported'}</NotReported>
@@ -206,7 +208,7 @@ export function OverviewTab({ namespace, now, onOpen }: { namespace: string; now
             runnerReport ? (
               <>
                 <strong>{runnerReport.summary.running}</strong>
-                <span>running</span>
+                <span>in flight</span>
               </>
             ) : (
               <NotReported>{run.level === 'loading' ? 'Loading…' : 'not reported'}</NotReported>
@@ -276,7 +278,7 @@ export function OverviewTab({ namespace, now, onOpen }: { namespace: string; now
             pods are running and can reach the database.
           </Notice>
         ) : (
-          report && <InstancesTable groups={report.components} now={now} />
+          report && <InstancesTable groups={report.components} now={now} topologyVisible={report.topology_visible} />
         )}
       </Panel>
     </div>

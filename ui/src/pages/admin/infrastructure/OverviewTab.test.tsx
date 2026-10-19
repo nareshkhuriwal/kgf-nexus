@@ -77,3 +77,32 @@ describe('OverviewTab', () => {
     expect(within(tile('Services')).getAllByText('Not reported').length).toBeGreaterThan(0);
   });
 });
+
+describe('OverviewTab topology and history', () => {
+  it('shows counts and health when the topology is hidden, saying who can see pods and nodes', async () => {
+    const report = components();
+    report.topology_visible = false;
+    for (const g of report.components)
+      g.instances.forEach((i, n) => Object.assign(i, { instance: `${g.component}-d7fd2b1c942${n}`, pod_namespace: '', node: '', cluster: '', detail: { readiness: 'ok', heartbeat_interval_seconds: 10 } }));
+    serveInfra({ components: report });
+    render();
+    expect(await screen.findByText(/Pod, node and cluster are shown to platform operators/)).toBeInTheDocument();
+    const row = screen.getByText('scheduler-d7fd2b1c9420').closest('tr')!;
+    expect(within(row).getAllByText('hidden')).toHaveLength(2);
+    expect(within(row).queryByText('not reported')).toBeNull();
+    expect(within(tile('Services')).getAllByText('Healthy').length).toBeGreaterThan(0);
+  });
+
+  it('lists replaced pods as history, not as faults', async () => {
+    serveInfra({
+      components: components({
+        scheduler: [instance({ instance: 'scheduler-new', state: 'ready' }), instance({ instance: 'scheduler-old', state: 'stale', last_seen_at: ago(3_600_000) })],
+      }),
+    });
+    render();
+    expect(await screen.findByText('1 previous instance — replaced pods that stopped reporting (kept up to 24h)')).toBeInTheDocument();
+    expect(screen.getByText('scheduler-old').closest('tr')).toBeNull();
+    expect(within(tile('Scheduler')).getByText('/ 1 replicas ready')).toBeInTheDocument();
+    expect(within(tile('Services')).queryByText('Degraded')).toBeNull();
+  });
+});
