@@ -12,24 +12,35 @@
 #
 # Branch protection requires ONE check: `quality gate`. It needs every job
 # below and fails unless each one passed, or was skipped for a reason it can
-# name (a documentation-only change). Requiring the jobs one by one does not
-# work: a skipped job reports success, and a skipped matrix job reports under
-# a name the rule never matches, so the rule waits forever.
+# name (a documentation-only change; a job that belongs to another event).
+# Requiring the jobs one by one does not work: a skipped job reports success,
+# and a skipped matrix job reports under a name the rule never matches, so the
+# rule waits forever.
+#
+# A push to main, or a vX.Y.Z tag, that passes the gate then publishes every
+# image to GHCR, digest-pinned, through .github/workflows/release.yml
+# (`publish`). Pull requests build the same images without pushing (`images`).
 name: ci
 
 on:
   push:
     branches: [main]
+    # A release: the whole suite on the tagged commit, then `publish`.
+    tags: ["v*"]
   pull_request:
 
-# A new push supersedes the old run: these jobs bring up a full stack, and
-# queueing them behind superseded work wastes minutes for no signal.
+# A new push to a pull request supersedes its old run: these jobs bring up a
+# full stack, and queueing them behind superseded work wastes minutes for no
+# signal. A run on main or a tag is never cancelled part-way, because it ends
+# by publishing images and a publish cut off half-way leaves `main` naming a
+# mix of commits. A newer run waits instead (and a waiting one is superseded
+# by the next).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Nothing here writes to the repository, so the token cannot either. A job that
-# genuinely needs more asks for it by name.
+# genuinely needs more asks for it by name (`publish`, for the registry).
 permissions:
   contents: read
 
@@ -441,9 +452,9 @@ jobs:
   # Kubernetes and CRD schemas pinned in deploy/helm/schemas.lock, and prove
   # every bad value is refused (docs/OPERATIONS.md §20.10). Then prove every
   # Nexus image the chart renders takes its digest from image.digests -- the
-  # key KGF Cloud's release pipeline sets from its digest map (deploy-aks.yml).
-  # The release re-runs the same check against the real map and environment
-  # values before `helm upgrade` (F112).
+  # key a release sets from its digest map. The release workflow
+  # (release.yml, `digests`) re-runs the same check against the real map, as
+  # KGF Cloud's release pipeline does before `helm upgrade` (F112).
   helm:
     name: helm validate and image-digest check
     runs-on: ubuntu-latest
@@ -796,12 +807,26 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Every image builds (one job per image, linux/amd64 and linux/arm64), and
+  # nothing is pushed: release.yml with push: false. After the unit gate, as
+  # the Azure gate's BuildValidation stage was. Pull requests only; on main and
+  # tags `publish` builds them for real, after the whole gate.
+  images:
+    name: images
+    needs: [changes, build]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release.yml
+    with:
+      push: false
+
   # The one check branch protection requires (see the top of this file). It
   # fails on a failed or cancelled job, and on a skipped one unless the skip is
-  # legitimate: a documentation-only change (changes.code false). Every job
-  # above must be listed in `needs` AND in one of the lists below; the step
-  # refuses a job it cannot classify, so a new job cannot silently fall
-  # outside the gate.
+  # legitimate: a documentation-only change (changes.code false), or `images`
+  # outside a pull request. Every job above must be listed in `needs` AND in
+  # one of the lists below; the step refuses a job it cannot classify, so a
+  # new job cannot silently fall outside the gate.
   gate:
     name: quality gate
     if: always()
@@ -821,6 +846,7 @@ jobs:
       - sdk
       - examples
       - compat
+      - images
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -834,10 +860,13 @@ jobs:
           always="changes build doc-refs docs workflow-lint"
           # Skip themselves on a documentation-only change.
           code_jobs="integration nats-integration proto helm terraform ui browser-e2e sdk examples compat"
+          # Pull requests only.
+          pr_jobs="images"
 
           code=$(jq -r '.changes.outputs.code // "true"' <<<"$NEEDS")
           required="$always"
           if [ "$code" = true ]; then required="$required $code_jobs"; fi
+          if [ "$code" = true ] && [ "$EVENT" = pull_request ]; then required="$required $pr_jobs"; fi
 
           failed=0
           {
@@ -850,7 +879,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           for job in $(jq -r 'keys[]' <<<"$NEEDS"); do
             result=$(jq -r --arg j "$job" '.[$j].result' <<<"$NEEDS")
-            case " $always $code_jobs " in
+            case " $always $code_jobs $pr_jobs " in
               *" $job "*) ;;
               *) echo "::error::job '$job' is in needs but in none of the gate's lists; classify it"; failed=1 ;;
             esac
@@ -868,5 +897,41 @@ jobs:
             jq -e --arg j "$job" 'has($j)' <<<"$NEEDS" >/dev/null \
               || { echo "::error::required job '$job' is not in the gate's needs"; failed=1; }
           done
-          if [ "$failed" = 0 ]; then echo "quality gate: passed"; fi
+          if [ "$failed" = 0 ]; then
+            echo "quality gate: passed"
+            if [ "$EVENT" = push ] && [ "$code" = true ]; then
+              echo >> "$GITHUB_STEP_SUMMARY"
+              echo "Passed on a push: \`publish\` releases every image to GHCR, digest-pinned." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
           exit "$failed"
+
+  # A push to main or a vX.Y.Z tag that passed the WHOLE gate, on this commit,
+  # in this run: every image built for both platforms, pushed to GHCR,
+  # attested, and collected into one validated digest map (release.yml,
+  # push: true). The only job that can write to the registry, and the only one
+  # that asks for the permissions to: packages to push, id-token and
+  # attestations to sign and store the provenance. Never on a pull request,
+  # and never in a fork (which would publish to the fork owner's GHCR).
+  #
+  # !cancelled() and an explicit result check, not the default success(): a
+  # job skipped further up the chain (`images` on a push) would otherwise skip
+  # this one even though the gate passed.
+  publish:
+    name: publish
+    needs: [changes, gate]
+    if: >-
+      !cancelled()
+      && needs.gate.result == 'success'
+      && needs.changes.outputs.code == 'true'
+      && github.event_name == 'push'
+      && !github.event.repository.fork
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release.yml
+    with:
+      push: true
