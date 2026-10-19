@@ -127,6 +127,11 @@ type Config struct {
 	// offers none of it: agents then expose no usage, permit or checkpoint
 	// endpoints to their tasks, and the RPCs answer Unimplemented.
 	WorkloadAPI *nexusv1.WorkloadApiConfig
+	// PlacementReporting is advertised to workers at registration (ADR-0037).
+	// The gateway sets it when the database has attempt_runtime (migration
+	// 0042); false makes agents report nothing and ReportPlacement answer
+	// Unimplemented, exactly like a gateway that predates the RPC.
+	PlacementReporting bool
 }
 
 // DefaultConfig is the tuning from ADR-0010 and §5.5.
@@ -231,6 +236,7 @@ func (s *Server) Register(ctx context.Context, req *nexusv1.RegisterRequest) (*n
 		ResultStore:         s.cfg.ResultStore,
 		LogShipping:         s.cfg.LogShipping,
 		WorkloadApi:         s.advertisedWorkloadAPI(),
+		PlacementReporting:  s.cfg.PlacementReporting,
 	}, nil
 }
 
@@ -737,25 +743,32 @@ func unixMsPtr(ms int64) *time.Time {
 // Both "no lease at all" and "token does not match" collapse to the same reason,
 // because they mean the same thing to the worker: you are not the owner, stop.
 func (s *Server) fence(ctx context.Context, attemptID, token, rpc string) *nexusv1.Ack {
+	_, ack := s.fenceLease(ctx, attemptID, token, rpc)
+	return ack
+}
+
+// fenceLease is fence, also returning the lease that passed, for an RPC whose
+// write must be conditioned on that very lease (ReportPlacement).
+func (s *Server) fenceLease(ctx context.Context, attemptID, token, rpc string) (store.LeaseView, *nexusv1.Ack) {
 	if attemptID == "" || token == "" {
-		return &nexusv1.Ack{Accepted: false, Reason: store.ReasonStaleLeaseToken}
+		return store.LeaseView{}, &nexusv1.Ack{Accepted: false, Reason: store.ReasonStaleLeaseToken}
 	}
-	_, err := store.GatewayVerifyLease(ctx, s.db, attemptID, token)
+	lease, err := store.GatewayVerifyLease(ctx, s.db, attemptID, token)
 	switch {
 	case err == nil:
-		return nil
+		return lease, nil
 	case errors.Is(err, store.ErrStaleLeaseToken), errors.Is(err, store.ErrLeaseNotFound):
 		// Logged at WARN with no token material: the lease token is a credential,
 		// and a log line is the easiest place to leak one.
 		s.log.WarnContext(ctx, "rejected attempt RPC on stale lease token",
 			"rpc", rpc, "attempt_id", attemptID)
-		return &nexusv1.Ack{Accepted: false, Reason: store.ReasonStaleLeaseToken}
+		return store.LeaseView{}, &nexusv1.Ack{Accepted: false, Reason: store.ReasonStaleLeaseToken}
 	default:
 		// A database failure is NOT a stale token. Saying "stale_lease_token" here
 		// would tell a healthy worker to abandon work it legitimately owns, and
 		// every worker in the fleet would do so at once during a database blip.
 		s.log.ErrorContext(ctx, "lease verification failed", "rpc", rpc, "attempt_id", attemptID, "error", err)
-		return &nexusv1.Ack{Accepted: false, Reason: "lease_verification_unavailable"}
+		return store.LeaseView{}, &nexusv1.Ack{Accepted: false, Reason: "lease_verification_unavailable"}
 	}
 }
 
