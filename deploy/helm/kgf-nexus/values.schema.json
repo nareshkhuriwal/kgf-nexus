@@ -1583,6 +1583,10 @@
         "clusterName": {
           "type": "string"
         },
+        "resourceManagerAddress": {
+          "type": "string",
+          "minLength": 1
+        },
         "replicas": {
           "type": "integer",
           "minimum": 1
@@ -1592,6 +1596,16 @@
         },
         "jobLabelSelector": {
           "type": "string"
+        },
+        "taskNamespaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/k8sName"
+          },
+          "uniqueItems": true
+        },
+        "schedulerPatchInterval": {
+          "$ref": "#/definitions/duration"
         },
         "clusterLabels": {
           "type": "string"
@@ -1627,6 +1641,9 @@
             "expectedClusterUID": {
               "type": "string",
               "pattern": "^$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "schedulerAutoscaling": {
+              "type": "boolean"
             }
           }
         },
