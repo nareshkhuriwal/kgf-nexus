@@ -42,6 +42,8 @@ type scriptedGateway struct {
 	keys   []string
 	last   *nexusv1.RegisterRequest
 	called chan struct{}
+	// placement is advertised as RegisterResponse.placement_reporting.
+	placement bool
 }
 
 func (g *scriptedGateway) Register(ctx context.Context, req *nexusv1.RegisterRequest) (*nexusv1.RegisterResponse, error) {
@@ -70,6 +72,7 @@ func (g *scriptedGateway) Register(ctx context.Context, req *nexusv1.RegisterReq
 	}
 	return &nexusv1.RegisterResponse{
 		WorkerId: "w-1", SessionToken: "sess", HeartbeatIntervalMs: 5000, LeaseTtlMs: 30000,
+		PlacementReporting: g.placement,
 	}, nil
 }
 
