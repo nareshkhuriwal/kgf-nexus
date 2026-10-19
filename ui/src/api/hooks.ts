@@ -37,6 +37,12 @@ import type {
 } from './types';
 import { isTerminal } from '../lib/states';
 import { pollInterval, type LiveTransport } from './live';
+import {
+  platformApi,
+  TASK_RUNNER_DEFAULT_LIMIT,
+  type ClusterSpec,
+  type PlatformConfig,
+} from './platform';
 
 export const qk = {
   // The cursor is part of the key: each page of a keyset listing is a DIFFERENT
@@ -81,6 +87,13 @@ export const qk = {
   assets: (ns: string, q: string) => ['assets', ns, q] as const,
   asset: (ns: string, uri: string) => ['asset', ns, uri] as const,
   assetGraph: (ns: string, uri: string, depth: number) => ['asset-graph', ns, uri, depth] as const,
+  // Infrastructure (Cluster & scaling). One prefix per resource so a save can
+  // invalidate exactly what it changed.
+  platformConfig: (ns: string) => ['platform-config', ns] as const,
+  platformPlan: (ns: string) => ['platform-plan', ns] as const,
+  clusters: (ns: string) => ['platform-clusters', ns] as const,
+  platformComponents: (ns: string) => ['platform-components', ns] as const,
+  taskRunners: (ns: string, limit: number) => ['platform-task-runners', ns, limit] as const,
 };
 
 export function shouldRetry(failureCount: number, error: unknown): boolean {
@@ -212,10 +225,11 @@ export function useRunEvents(
   );
 }
 
-export function useWorkers(namespace: string) {
+export function useWorkers(namespace: string, enabled = true) {
   return useQuery({
     queryKey: qk.workers(namespace),
     queryFn: () => api.listWorkers(namespace),
+    enabled,
     // Workers heartbeat every 5s (§11); polling faster than that shows nothing
     // new, polling much slower makes a dead worker look alive.
     refetchInterval: 5000,
@@ -246,10 +260,11 @@ export function useWorker(namespace: string, workerId: string) {
   });
 }
 
-export function useCapacity(namespace: string) {
+export function useCapacity(namespace: string, enabled = true) {
   return useQuery({
     queryKey: qk.capacity(namespace),
     queryFn: () => api.getCapacity(namespace),
+    enabled,
     refetchInterval: 5000,
     ...base,
   });
@@ -974,5 +989,142 @@ export function useAssetGraph(namespace: string, uri: string, depth: number, ena
     enabled,
     placeholderData: keepPreviousData,
     ...eventsBase,
+  });
+}
+
+
+// ── infrastructure (Cluster & scaling) ──────────────────────────────────────
+
+/**
+ * Poll intervals for the infrastructure page, in one place so the page can say
+ * what it is doing ("refreshes every 10s") from the same numbers it does it with.
+ *
+ * Each matches how fast its source can change: task runners turn over in
+ * seconds; component instances report on a heartbeat a few times slower; the
+ * cluster controller reports every 15s (docs/CLUSTER-SCALING.md), so polling it
+ * faster would only re-read the same report. Polling stops while the browser
+ * tab is hidden — TanStack Query's refetchIntervalInBackground defaults to
+ * false — and refetchOnWindowFocus catches up on return.
+ */
+export const INFRA_POLL_MS = {
+  components: 10_000,
+  taskRunners: 5_000,
+  clusters: 15_000,
+  plan: 15_000,
+} as const;
+
+/** The saved policy. Not polled: it changes only when someone saves it. */
+export function usePlatformConfig(namespace: string, enabled = true) {
+  return useQuery({
+    queryKey: qk.platformConfig(namespace),
+    queryFn: () => platformApi.getConfig(namespace),
+    enabled,
+    ...base,
+  });
+}
+
+export function usePlatformPlan(namespace: string, enabled = true) {
+  return useQuery({
+    queryKey: qk.platformPlan(namespace),
+    queryFn: () => platformApi.getPlan(namespace),
+    enabled,
+    refetchInterval: INFRA_POLL_MS.plan,
+    ...base,
+  });
+}
+
+export function useClusters(namespace: string, enabled = true) {
+  return useQuery({
+    queryKey: qk.clusters(namespace),
+    queryFn: () => platformApi.listClusters(namespace),
+    enabled,
+    refetchInterval: INFRA_POLL_MS.clusters,
+    ...base,
+  });
+}
+
+/** Control-plane instances (C3). `kind: 'unsupported'` on an older gateway. */
+export function usePlatformComponents(namespace: string, enabled = true) {
+  return useQuery({
+    queryKey: qk.platformComponents(namespace),
+    queryFn: () => platformApi.getComponents(namespace),
+    enabled,
+    refetchInterval: INFRA_POLL_MS.components,
+    ...base,
+  });
+}
+
+/** Running task attempts with their placement (C3). */
+export function useTaskRunners(namespace: string, limit = TASK_RUNNER_DEFAULT_LIMIT, enabled = true) {
+  return useQuery({
+    queryKey: qk.taskRunners(namespace, limit),
+    queryFn: () => platformApi.listTaskRunners(namespace, limit),
+    enabled,
+    refetchInterval: INFRA_POLL_MS.taskRunners,
+    ...base,
+  });
+}
+
+/**
+ * Save the policy. The response IS the new saved document, so it is written
+ * straight into the cache rather than re-read; the plan and the cluster view
+ * both derive from it and are invalidated.
+ */
+export function useSavePlatformConfig(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (config: PlatformConfig) => platformApi.saveConfig(namespace, config),
+    onSuccess: (saved) => {
+      qc.setQueryData(qk.platformConfig(namespace), saved);
+      void qc.invalidateQueries({ queryKey: qk.platformPlan(namespace) });
+      void qc.invalidateQueries({ queryKey: qk.clusters(namespace) });
+    },
+    retry: false,
+  });
+}
+
+export function useSaveCluster(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, spec }: { name: string; spec: ClusterSpec }) => platformApi.saveCluster(namespace, name, spec),
+    onSettled: () => {
+      // Also on error: a 409 means the registry moved under us, and the fix is
+      // to show the operator what it moved to.
+      void qc.invalidateQueries({ queryKey: qk.clusters(namespace) });
+      void qc.invalidateQueries({ queryKey: qk.platformPlan(namespace) });
+    },
+    retry: false,
+  });
+}
+
+export function useDeleteCluster(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, revision }: { name: string; revision: number }) =>
+      platformApi.deleteCluster(namespace, name, revision),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: qk.clusters(namespace) });
+      void qc.invalidateQueries({ queryKey: qk.platformPlan(namespace) });
+    },
+    retry: false,
+  });
+}
+
+/**
+ * Mint an agent credential. The secret lives only in the caller's state: it is
+ * never written to the query cache, so it cannot outlive the screen showing it.
+ */
+export function useMintWorkerToken(namespace: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { name: string; expires_in_days: number }) => platformApi.mintWorkerToken(namespace, input),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['tokens', namespace] });
+      void qc.invalidateQueries({ queryKey: ['audit', namespace] });
+    },
+    // Collected as soon as the caller resets it, so the secret in its result
+    // does not linger in the mutation cache.
+    gcTime: 0,
+    retry: false,
   });
 }
