@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# A stand-in kubectl for deploy/scripts/tests/aks-preflight-test.sh: answers
+# exactly the calls aks-preflight.sh makes, from a fake AKS cluster whose
+# shape the STUB_* variables set, and logs every call (verb first) to
+# $STUB_LOG so the test can prove the default mode never writes.
+#
+#   nodes  aks-system-0 (pool system, CriticalAddonsOnly), aks-cpu-0 and
+#          aks-cpu-1 (pool cpu), aks-gpu-0 (pool gput4, sku=gpu, STUB_GPU GPUs)
+set -u
+
+# Global flags the preflight passes first.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --context) shift 2 ;;
+    --request-timeout=*) shift ;;
+    *) break ;;
+  esac
+done
+printf '%s\n' "$*" >>"${STUB_LOG:-/dev/null}"
+
+if [ "${STUB_UNREACHABLE:-0}" = 1 ] && [ "$*" != "config current-context" ]; then
+  echo 'The connection to the server aks.example.test:443 was refused - did you specify the right host or port?' >&2
+  exit 1
+fi
+
+b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
+
+case "$*" in
+  "config current-context") echo "aks-test" ;;
+  "get --raw /version")
+    printf '{"major":"1","minor":"x","gitVersion":"%s","platform":"linux/amd64"}\n' "${STUB_VERSION:-v1.33.4}" ;;
+  "get nodes -o jsonpath="*)
+    t=$'\t'
+    printf '%s\n' \
+      "aks-system-0${t}system${t}True${t}30${t}${t}linux${t}MC_rg_aks_westeurope${t}CriticalAddonsOnly=true:NoSchedule," \
+      "aks-cpu-0${t}cpu${t}True${t}110${t}${t}linux${t}MC_rg_aks_westeurope${t}" \
+      "aks-cpu-1${t}cpu${t}${STUB_CPU1_READY:-True}${t}110${t}${t}linux${t}MC_rg_aks_westeurope${t}" \
+      "aks-gpu-0${t}gput4${t}True${t}30${t}${STUB_GPU-1}${t}linux${t}MC_rg_aks_westeurope${t}sku=gpu:NoSchedule," ;;
+  "get pods -A "*)
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do echo aks-system-0; done
+    for _ in 1 2 3 4 5; do echo aks-cpu-0; done
+    echo aks-gpu-0 ;;
+  "get daemonsets -A "*)
+    printf 'kube-system/azure-ip-masq-agent\n%s\n' "${STUB_DS-nvidia-device-plugin/nvidia-device-plugin-daemonset}" ;;
+  "get mutatingwebhookconfigurations "*)
+    echo aks-node-mutating-webhook
+    if [ "${STUB_WEBHOOK:-1}" = 1 ]; then echo azure-wi-webhook-mutating-webhook-configuration; fi ;;
+  "get --raw /.well-known/openid-configuration")
+    printf '{"issuer":"%s","jwks_uri":"https://example.test/openid/v1/jwks"}\n' \
+      "${STUB_ISSUER:-https://westeurope.oic.prod-aks.azure.com/00000000-0000-0000-0000-0000000000aa/11111111-1111-1111-1111-111111111111/}" ;;
+  "get apiservice v1beta1.metrics.k8s.io "*)
+    if [ "${STUB_METRICS:-True}" = missing ]; then
+      echo 'Error from server (NotFound): apiservices.apiregistration.k8s.io "v1beta1.metrics.k8s.io" not found' >&2
+      exit 1
+    fi
+    printf '%s' "${STUB_METRICS:-True}" ;;
+  "get storageclass managed-csi-premium -o jsonpath={.provisioner}") printf 'disk.csi.azure.com' ;;
+  "get storageclass "*" -o jsonpath={.provisioner}")
+    echo 'Error from server (NotFound): storageclasses.storage.k8s.io not found' >&2; exit 1 ;;
+  "get storageclass -o jsonpath="*) printf 'default ' ;;
+  "get gatewayclasses "*) printf '%s' "${STUB_GATEWAYCLASSES:-}" ;;
+  "get ingressclasses "*) printf 'webapprouting.kubernetes.azure.com ' ;;
+  "get crd certificates.cert-manager.io -o name")
+    [ "${STUB_CERT_MANAGER:-1}" = 1 ] || { echo 'Error from server (NotFound)' >&2; exit 1; }
+    echo customresourcedefinition.apiextensions.k8s.io/certificates.cert-manager.io ;;
+  "get namespace nexus -o jsonpath="*) printf '%s' "${STUB_ENFORCE-restricted}" ;;
+  "get namespace "*)
+    echo 'Error from server (NotFound): namespaces "missing" not found' >&2; exit 1 ;;
+  "get secret nexus-credentials -n nexus -o go-template="*)
+    for k in ${STUB_SECRET_KEYS-admin-api-key nats-agent-nkey nats-event-service-nkey postgres-password worker-api-key}; do echo "$k"; done ;;
+  "get secret nexus-credentials -n nexus -o jsonpath={.data.postgres-password}")
+    b64 "${STUB_PG_PASSWORD-OwnerPassword0123456789abcdef}" ;;
+  "get secret nexus-credentials -n nexus -o jsonpath={.data.worker-api-key}")
+    b64 "nxs_worker_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ;;
+  "get secret nexus-db-logins -n nexus -o go-template="*)
+    for c in api-gateway workflow-manager dag-engine scheduler resource-manager event-service ${STUB_GC_LOGIN-artifact-gc}; do
+      echo "postgres-password-$c"
+    done ;;
+  "get secret nexus-postgres-ca -n nexus -o go-template="*) echo ca.crt ;;
+  'get secret nexus-postgres-ca -n nexus -o jsonpath={.data.ca\.crt}')
+    b64 "$(printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----\n')" ;;
+  "get secret "*)
+    echo 'Error from server (NotFound): secrets "x" not found' >&2; exit 1 ;;
+  "create -f -")
+    cat >>"${STUB_LOG:-/dev/null}"
+    echo "pod/preflight created" ;;
+  "get pod nexus-preflight-pull-"*)
+    case "${STUB_PULL:-pulled}" in
+      pulled) printf '\t\tghcr.io/example/kgf-nexus/agent@sha256:%064d' 0 ;;
+      *) printf '%s\t\t' "$STUB_PULL" ;;
+    esac ;;
+  "get pod nexus-preflight-db-"*)
+    printf '\t%s\tdocker.io/library/postgres@sha256:%064d' "${STUB_DB_EXIT:-0}" 0 ;;
+  "delete pod "*) echo "pod deleted" ;;
+  *)
+    echo "UNEXPECTED $*" >>"${STUB_LOG:-/dev/null}"
+    echo "stub kubectl: unexpected call: $*" >&2
+    exit 99 ;;
+esac
