@@ -5047,3 +5047,144 @@ Order does not matter for correctness: an old dag-engine ignores the queue
 (rows wait for the new one), and the trigger enqueues whatever version of the
 scheduler wrote the terminal attempt. To roll back, roll the dag-engine back
 first, then 0039 (§6.4).
+
+## 31. Live infrastructure: component instances and task runners
+
+The console's Infrastructure page shows every control-plane process and every
+running task, live (ADR-0037). Two things feed it:
+
+- **The service-instance registry** (`service_instances`, migration 0041).
+  Every api-gateway, workflow-manager, dag-engine, scheduler, resource-manager
+  and event-service process writes its own row every 10 seconds: where it runs,
+  its version, when it started, whether it is ready, and a small detail object.
+- **Attempt placement** (`attempt_runtime`, migration 0042). Every agent reports,
+  for each attempt it runs, the executor, the cluster and, on Kubernetes, the
+  pod, its namespace and its node (`ReportPlacement` on the worker API).
+
+### 31.1 Runtime identity
+
+Every process, control plane and agent alike, reads where it runs from four
+variables. The Helm chart sets them on every Deployment and StatefulSet from the
+downward API and the release (§20); set them yourself in any other Kubernetes
+manifest.
+
+| Variable | Source | Unset |
+|---|---|---|
+| `NEXUS_POD_NAME` | `metadata.name` | the host name is the instance (compose: the container id) |
+| `NEXUS_POD_NAMESPACE` | `metadata.namespace` | empty |
+| `NEXUS_NODE_NAME` | `spec.nodeName` | empty |
+| `NEXUS_CLUSTER_NAME` | the cluster's registry name (`clusters.name`) | empty |
+
+Two processes must never share an identity (component, cluster, pod namespace,
+instance): they would overwrite each other's row. Pod names guarantee that on
+Kubernetes; on other hosts, keep host names distinct.
+
+### 31.2 Component instances
+
+`GET /v1/namespaces/{ns}/platform/components` (`infrastructure.view`) lists
+the registry by component, always all six, in the order above. Each instance is:
+
+| State | Meaning |
+|---|---|
+| `ready` | wrote within the last 30 s, and its own `/readyz` answered 2xx |
+| `not_ready` | wrote within the last 30 s, and its `/readyz` did not; `detail.readiness` says why (`draining`, `degraded: ...`, a failed check). A graceful shutdown writes this once, with `detail.shutting_down: true` |
+| `stale` | has not written for 30 s, by the database clock: crashed, stopped, partitioned from the database, or its connection pool is exhausted |
+
+A replaced pod stays listed as `stale` and is pruned 24 hours after its last
+write, so right after a rolling deploy each component shows its new instances
+ready and its old ones stale. Readiness is asked of the process's own
+`/readyz` handler, so the registry and the load balancer always agree.
+
+**Detail.** Every row: `readiness`, `pid`, `heartbeat_interval_seconds`,
+`db_pool` (`max`, `total`, `acquired`, `idle`, `empty_acquires_total`) and, on
+the last write, `shutting_down`. The scheduler adds `queue`, `claims_total`,
+`claim_errors_total`, `dispatched_total`, `lost_total`, `claims_recent`,
+`dispatched_recent`, `recent_window_seconds` (the `*_recent` values cover one
+beat) and, once its backlog sampler has run, `pending_attempts`,
+`oldest_pending_age_seconds` and `backlog_sampled_at` for its own queue. The
+api-gateway adds `placement_reporting` (§31.3).
+
+**Who sees the control plane's placement.** The control plane belongs to the
+installation, not to a namespace, so by default only a **platform operator**
+sees pod namespace, node, cluster and the detail. Everyone else with
+`infrastructure.view` sees component health only: state, version, start and
+last-seen times and the readiness reason, each instance under a stable opaque
+label (`scheduler-1a2b3c4d5e6f`). The response's `topology_visible` says which
+view was served.
+
+- **A single-organisation installation** (Nexus on your own AKS cluster) sets
+  `NEXUS_COMPONENT_TOPOLOGY=infrastructure-viewers` on the api-gateway: every
+  `infrastructure.view` holder then sees the full view. The default is
+  `platform-operators`; any other value stops the gateway at startup.
+- **To enrol a platform operator** (a database operator's action; the gateway
+  only reads the table), take an existing enabled administrator's user id:
+
+  ```sql
+  INSERT INTO platform_operators (user_id) VALUES ('<user-uuid>');
+  ```
+
+  The operator's sign-in session then sees the full view; API keys and tokens
+  never do.
+
+### 31.3 Task runners
+
+`GET /v1/namespaces/{ns}/platform/task-runners?limit=N` (`infrastructure.view`;
+default 200, at most 1000) lists the namespace's DISPATCHED and RUNNING
+attempts, newest dispatch first, with the worker that holds each one, the
+placement its agent reported, the latest progress line, and counts over all of
+them by executor and by cluster. What the placement means:
+
+| Executor | `pod`, `k8s_namespace`, `k8s_node` |
+|---|---|
+| `kubernetes` | the attempt's own pod; `k8s_node` stays empty until the scheduler binds the pod. `kubectl -n <k8s_namespace> logs <pod>` reaches it |
+| `subprocess` | the agent's own pod and node (the workload runs inside the agent's pod) |
+| `docker` | the agent's own pod and node; outside Kubernetes, `pod` is the container's short id (`docker inspect <pod>` on `worker_host`) |
+
+Placement fields are empty, and `placement_reported_at` is null, when nothing
+was reported:
+
+- the agent predates `ReportPlacement`, or its gateway does not offer it --
+  the gateway logs `attempt placement reporting is off: migration 0042 is not
+  applied` at startup, and its registry row shows `placement_reporting: false`;
+  apply 0042 and restart the gateway;
+- the attempt is DISPATCHED and its workload has not started yet;
+- the attempt ended before its first report landed (reports are advisory and
+  never delay or fail a task).
+
+An agent outside Kubernetes reports an empty cluster unless it sets
+`NEXUS_CLUSTER_NAME`; such attempts are counted under `""` in `by_cluster`.
+
+### 31.4 Monitoring
+
+- `nexus_instance_heartbeat_failures_total{op="beat"}` rising on a process: its
+  registry writes fail and the console shows it stale. The process logs
+  `service instance heartbeat failed` once per outage (and `recovered` after);
+  the error says whether the database refused the statement (migration 0041
+  missing, a grant missing) or the 2 s deadline passed (look at
+  `nexus_db_pool_empty_acquires_total` for pool exhaustion). Nothing else in
+  the process is affected.
+- `time() - nexus_instance_heartbeat_last_success_timestamp_seconds > 30` is the
+  console's stale condition as an alert expression.
+- `op="prune"` failures are harmless one by one; another process prunes.
+
+To look at the registry directly:
+
+```sql
+SELECT component, instance, node, ready, now() - last_seen_at AS silent, detail->>'readiness'
+  FROM service_instances ORDER BY component, instance;
+```
+
+### 31.5 Upgrading and rolling back
+
+Apply 0041 and 0042 before rolling the services (§6.3); both are additive. In
+either order with the services nothing breaks: a process that predates them
+writes no row, a newer process against a database without 0041 counts a failed
+beat every 10 s and runs normally, and a gateway that finds no
+`attempt_runtime` at startup does not offer placement reporting (agents then
+report nothing). Agents and gateways of any mix interoperate: an old agent
+never reports, an old gateway never advertises.
+
+To roll back (§6.4): roll the api-gateway back, or restart it, before reverting
+0042 (a gateway that found the table at startup keeps offering the RPC, and its
+writes would fail; agents log it and their tasks are unaffected), then revert
+0041. Both down migrations only drop their own table.
