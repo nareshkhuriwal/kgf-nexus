@@ -614,6 +614,36 @@ else
   echo "FAIL: the owned-HPA live merge did not render as expected"; tail -5 "$tmp/hpa-probe.out"; fail=1
 fi
 
+# environments/aks-existing (ci/terraform-aks-existing-values.yaml): the
+# three-way ServiceAccount split its federated credentials trust, each with
+# the token setting that keeps them apart, and every pod pinned by the
+# agentpool label AKS puts on every node.
+if python3 - "$tmp/terraform-aks-existing.yaml" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+sas = {d["metadata"]["name"]: d for d in docs if d["kind"] == "ServiceAccount"}
+for name, token in (("nexus-artifacts", False), ("nexus-agent", False), ("nexus-agent-kubernetes", True)):
+    sa = sas[name]
+    assert sa.get("automountServiceAccountToken") is token, (name, sa.get("automountServiceAccountToken"))
+    assert "azure.workload.identity/client-id" in sa["metadata"].get("annotations", {}), name
+want = {"api-gateway": "nexus-artifacts", "workflow-manager": "nexus-artifacts", "agent-cpu": "nexus-agent",
+        "agent-gpu": "nexus-agent", "agent-batch": "nexus-agent-kubernetes"}
+for d in docs:
+    if d["kind"] not in ("Deployment", "StatefulSet", "CronJob"):
+        continue
+    tpl = d["spec"]["jobTemplate"]["spec"]["template"] if d["kind"] == "CronJob" else d["spec"]["template"]
+    spec, name = tpl["spec"], d["metadata"]["name"]
+    if name in want:
+        assert spec["serviceAccountName"] == want[name], (name, spec["serviceAccountName"])
+        assert tpl["metadata"]["labels"].get("azure.workload.identity/use") == "true", name
+    assert "kubernetes.azure.com/agentpool" in (spec.get("nodeSelector") or {}), (name, "not pinned to a pool")
+PY
+then
+  echo "ok   rendered: environments/aks-existing: nexus-artifacts / nexus-agent / nexus-agent-kubernetes, every pod on its agentpool"
+else
+  echo "FAIL: the aks-existing values did not render the account split or the pool placement"; fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "validate: FAILED" >&2
   exit 1
