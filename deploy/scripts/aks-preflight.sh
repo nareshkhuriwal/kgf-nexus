@@ -507,10 +507,12 @@ NS_EXISTS=0
 if ns_labels=$(kro get namespace "$NAMESPACE" -o 'jsonpath={.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>"$TMP/err"); then
   NS_EXISTS=1
   case "$ns_labels" in
-    restricted | baseline)
-      record namespace PASS "$NAMESPACE exists, Pod Security enforce=$ns_labels" ;;
+    restricted)
+      record namespace PASS "$NAMESPACE exists, Pod Security enforce=restricted" ;;
+    baseline)
+      record namespace PASS "$NAMESPACE exists, Pod Security enforce=baseline (restricted recommended: every pod of chart 0.3.0 passes it)" ;;
     privileged | "")
-      record namespace WARN "$NAMESPACE exists with no Pod Security enforcement (enforce=${ns_labels:-unset}): label it pod-security.kubernetes.io/enforce=baseline (or restricted)" ;;
+      record namespace WARN "$NAMESPACE exists with no Pod Security enforcement (enforce=${ns_labels:-unset}): kubectl label ns $NAMESPACE pod-security.kubernetes.io/enforce=restricted" ;;
     *)
       record namespace WARN "$NAMESPACE: unexpected enforce label '$ns_labels'" ;;
   esac

@@ -132,6 +132,19 @@ run "creates_and_labels_the_namespace_by_default" {
   }
 }
 
+run "enforces_restricted_when_asked" {
+  command = plan
+
+  variables {
+    pod_security_enforce = "restricted"
+  }
+
+  assert {
+    condition     = kubernetes_namespace_v1.this[0].metadata[0].labels["pod-security.kubernetes.io/enforce"] == "restricted"
+    error_message = "pod_security_enforce sets the namespace's enforced Pod Security level."
+  }
+}
+
 run "installs_into_an_existing_namespace" {
   command = plan
 

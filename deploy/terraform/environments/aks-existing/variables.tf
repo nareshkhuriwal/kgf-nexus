@@ -189,7 +189,7 @@ variable "namespace" {
 }
 
 variable "create_namespace" {
-  description = "true: create the namespace (Pod Security: enforce baseline, warn restricted). false: it already exists (a platform team owns namespaces); deploy/scripts/aks-preflight.sh checks its Pod Security labels."
+  description = "true: create the namespace, enforcing the Pod Security restricted profile (every pod of chart 0.3.0 passes it). false: it already exists (a platform team owns namespaces); label it pod-security.kubernetes.io/enforce=restricted, which deploy/scripts/aks-preflight.sh checks."
   type        = bool
   default     = true
 }

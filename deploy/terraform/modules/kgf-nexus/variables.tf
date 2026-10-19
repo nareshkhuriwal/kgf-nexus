@@ -17,6 +17,17 @@ variable "create_namespace" {
   default     = true
 }
 
+variable "pod_security_enforce" {
+  description = "Pod Security Standards level the created namespace enforces (pod-security.kubernetes.io/enforce; warn is always restricted). Chart 0.3.0 renders every pod restricted-compliant (docs/OPERATIONS.md §20.17), so restricted is right for new installs; baseline stays the default for existing ones. Ignored with create_namespace = false."
+  type        = string
+  default     = "baseline"
+
+  validation {
+    condition     = contains(["baseline", "restricted"], var.pod_security_enforce)
+    error_message = "pod_security_enforce must be baseline or restricted."
+  }
+}
+
 variable "release_name" {
   description = "Helm release name."
   type        = string

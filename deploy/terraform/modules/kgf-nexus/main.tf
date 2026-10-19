@@ -21,9 +21,10 @@ resource "kubernetes_namespace_v1" "this" {
     labels = {
       "app.kubernetes.io/part-of"    = "kgf-nexus"
       "app.kubernetes.io/managed-by" = "terraform"
-      # Everything Nexus runs as non-root with no capabilities; Postgres and
-      # the console's nginx still start as root, hence baseline, not restricted.
-      "pod-security.kubernetes.io/enforce" = "baseline"
+      # Every pod of chart 0.3.0 passes restricted (OPERATIONS §20.17); the
+      # default stays baseline so an existing environment is not tightened by
+      # an apply, and warn=restricted reports anything that would not pass.
+      "pod-security.kubernetes.io/enforce" = var.pod_security_enforce
       "pod-security.kubernetes.io/warn"    = "restricted"
     }
   }

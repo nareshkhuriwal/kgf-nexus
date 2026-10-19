@@ -554,8 +554,11 @@ module "nexus" {
 
   namespace        = var.namespace
   create_namespace = var.create_namespace
-  release_name     = var.release_name
-  nexus_namespace  = var.nexus_namespace
+  # Every pod the chart renders, and every task pod the kubernetes executor
+  # creates, passes restricted (OPERATIONS §20.17).
+  pod_security_enforce = "restricted"
+  release_name         = var.release_name
+  nexus_namespace      = var.nexus_namespace
 
   chart_path       = var.chart.repository == "" ? "${path.module}/../../../helm/kgf-nexus" : null
   chart_repository = var.chart.repository == "" ? null : var.chart.repository
