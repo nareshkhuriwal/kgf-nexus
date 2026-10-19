@@ -133,11 +133,12 @@ Deployment:
 
 The console's cluster view reports `scheduler_autoscaling`: desired, observed,
 `state` (`in_sync`, `plan_only`, `applying`, `drift`, `not_observed`),
-`last_applied_at` and `last_error`, per HPA and for the worst one. A
-`helm upgrade` or `kubectl apply` resets an owned HPA's four fields to the
-rendered values until the next patch; exporting the saved settings as the
-scheduler's Helm values (`schedulers[].autoscaling`) makes the re-render a
-no-op.
+`last_applied_at` and `last_error`, per HPA and for the worst one. The Helm
+chart re-renders an owned HPA's four fields from the live object, so a
+`helm upgrade` leaves them as the controller set them (OPERATIONS §20.6). A
+`kubectl apply` of a static manifest (`deploy/k8s/cluster-controller`'s
+`scaling.yaml`) still resets them to the manifest until the next patch;
+exporting the saved settings into the manifest makes that re-apply a no-op.
 
 ### Why draining is enough to protect running work
 
