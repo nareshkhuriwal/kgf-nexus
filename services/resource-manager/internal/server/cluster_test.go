@@ -33,7 +33,7 @@ func (f *fakeClusterStore) ClusterAssignmentByName(context.Context, string) (*st
 func (f *fakeClusterStore) ReportObservations(context.Context, store.ObservationReport) (int64, error) {
 	return 0, fmt.Errorf("%w: unknown observation kind", store.ErrInvalidClusterReport)
 }
-func (f *fakeClusterStore) PodWorkerStates(context.Context, string, []string) (map[string]store.PodWorkers, error) {
+func (f *fakeClusterStore) PodWorkerStates(context.Context, string, string, []string) (map[string]store.PodWorkers, error) {
 	return map[string]store.PodWorkers{}, nil
 }
 func (f *fakeClusterStore) PoolDemand(context.Context, store.ClusterBinding) (platform.Demand, error) {

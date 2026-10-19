@@ -189,7 +189,7 @@ func TestIntegrationClusterRegistryAndControllerAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	states, err := rm.PodWorkerStates(ctx, ns, []string{host, "unregistered"})
+	states, err := rm.PodWorkerStates(ctx, clusterID, ns, []string{host, "unregistered"})
 	if err != nil || states[host].Active != 1 || states[host].LeaseCount != 1 || states["unregistered"].Active != 0 {
 		t.Fatalf("pod states %+v %v", states, err)
 	}
@@ -284,5 +284,80 @@ func TestIntegrationClusterRegistryAndControllerAPI(t *testing.T) {
 	_ = admin.QueryRow(ctx, `SELECT count(*) FROM cluster_observations WHERE cluster_id=$1`, clusterID).Scan(&left)
 	if left != 0 {
 		t.Fatalf("observations not removed with the cluster")
+	}
+}
+
+// TestIntegrationPodWorkersAreClusterScoped pins the pod <-> worker join to
+// the cluster: two clusters registered by one namespace, whose pods share a
+// name, never see or drain each other's workers. A worker naming no cluster
+// (an agent without NEXUS_CLUSTER_NAME) still matches, as before.
+func TestIntegrationPodWorkersAreClusterScoped(t *testing.T) {
+	admin := testPool(t)
+	ctx := context.Background()
+	ns, cfg := seedClusterNamespace(t, admin)
+	gw := rolePool(t, "nexus_api_gateway")
+	rm := NewRMStore(rolePool(t, "nexus_resource_manager"))
+
+	east, west := ns+"-east", ns+"-west"
+	for _, name := range []string{east, west} {
+		if _, err := GatewayClusterPut(ctx, gw, ns, "tester", ClusterSpec{Name: name, Provider: "kubernetes", Mode: "apply",
+			ExpectedClusterUID: "uid-" + name}, AuditEntry{ActorKind: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One pool may be bound to one cluster only; bind it to east.
+	spec := ClusterSpec{Name: east, Provider: "kubernetes", Mode: "apply", ExpectedClusterUID: "uid-" + east, DesiredRevision: 1,
+		Bindings: []ClusterBindingSpec{{KubernetesNamespace: "workers", WorkerDeployment: "workers-cpu", Pool: cfg.Pools[0].Name,
+			MaxReplicas: 5, MaxScaleDownStep: 1, ScaleUpCooldownSeconds: 30, ScaleDownCooldownSeconds: 120}}}
+	if _, err := GatewayClusterPut(ctx, gw, ns, "tester", spec, AuditEntry{ActorKind: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	var eastID string
+	if err := admin.QueryRow(ctx, `SELECT id FROM clusters WHERE name=$1`, east).Scan(&eastID); err != nil {
+		t.Fatal(err)
+	}
+	// The same pod name in both clusters, plus an agent that names no cluster.
+	for host, labels := range map[string]string{
+		"workers-cpu-1": `{"nexus.io/cluster":"` + east + `"}`,
+		"workers-cpu-2": `{"nexus.io/cluster":"` + west + `"}`,
+		"workers-cpu-3": `{}`,
+	} {
+		if _, err := admin.Exec(ctx, `INSERT INTO workers(id,namespace,hostname,queues,capacity,agent_version,session_token_hash,labels)
+			VALUES($1,$2,$3,ARRAY[$4],'{"cpu_millis":1000}','t','t',$5)`, uuid.New(), ns, host, cfg.Pools[0].Queue, labels); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// west's worker shares east's pod name.
+	if _, err := admin.Exec(ctx, `INSERT INTO workers(id,namespace,hostname,queues,capacity,agent_version,session_token_hash,labels)
+		VALUES($1,$2,'workers-cpu-1',ARRAY[$3],'{"cpu_millis":1000}','t','t',$4)`, uuid.New(), ns, cfg.Pools[0].Queue,
+		`{"nexus.io/cluster":"`+west+`"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	states, err := rm.PodWorkerStates(ctx, eastID, ns, []string{"workers-cpu-1", "workers-cpu-2", "workers-cpu-3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states["workers-cpu-1"].Active != 1 || states["workers-cpu-2"].Active != 0 || states["workers-cpu-3"].Active != 1 {
+		t.Fatalf("east sees %+v; want its own pod (once, not west's namesake), not west's, and the unlabelled one", states)
+	}
+	drained, _, err := rm.DrainPod(ctx, eastID, ns, "workers", "workers-cpu", "workers-cpu-1", "uid-"+east, "test", "ctl")
+	if err != nil || drained != 1 {
+		t.Fatalf("drain: %d %v", drained, err)
+	}
+	var westState string
+	if err := admin.QueryRow(ctx, `SELECT state FROM workers WHERE namespace=$1 AND hostname='workers-cpu-1' AND labels->>'nexus.io/cluster'=$2`,
+		ns, west).Scan(&westState); err != nil {
+		t.Fatal(err)
+	}
+	if westState != "ACTIVE" {
+		t.Fatalf("east's drain reached west's worker of the same pod name: %s", westState)
+	}
+	if drained, _, err = rm.DrainPod(ctx, eastID, ns, "workers", "workers-cpu", "workers-cpu-2", "uid-"+east, "test", "ctl"); err != nil || drained != 0 {
+		t.Fatalf("east drained west's pod: %d %v", drained, err)
+	}
+	// Leave apply mode so the cleanup can delete the clusters.
+	for _, name := range []string{east, west} {
+		_, _ = admin.Exec(ctx, `UPDATE clusters SET mode='plan' WHERE name=$1`, name)
 	}
 }

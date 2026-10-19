@@ -413,13 +413,25 @@ func (p PodWorkers) Removable() (bool, string) {
 	return true, "drained with no leases or reservations"
 }
 
-// PodWorkerStates returns one aggregate per requested hostname (zero-valued
-// for a hostname with no worker rows).
-func (s *RMStore) PodWorkerStates(ctx context.Context, namespace string, hostnames []string) (map[string]PodWorkers, error) {
-	return podWorkerStates(ctx, s.pool, namespace, hostnames)
+// workerOfCluster restricts a query over `workers w` to the rows that can have
+// been registered from the cluster whose id is the given placeholder: those
+// whose agent names that cluster (ADR-0031's nexus.io/cluster label, which
+// the chart sets from NEXUS_CLUSTER_NAME) and, for agents that set no cluster
+// at all, every row. A worker naming a DIFFERENT cluster never matches, so two
+// clusters registered by one namespace cannot see -- or drain -- each other's
+// workers when their pods happen to share a name.
+func workerOfCluster(clusterIDParam string) string {
+	return `(NOT (w.labels ? 'nexus.io/cluster') OR w.labels ->> 'nexus.io/cluster' = (SELECT c.name FROM clusters c WHERE c.id = ` +
+		clusterIDParam + `))`
 }
 
-func podWorkerStates(ctx context.Context, q GWQuerier, namespace string, hostnames []string) (map[string]PodWorkers, error) {
+// PodWorkerStates returns one aggregate per requested hostname (zero-valued
+// for a hostname with no worker rows), counting only workers of the cluster.
+func (s *RMStore) PodWorkerStates(ctx context.Context, clusterID, namespace string, hostnames []string) (map[string]PodWorkers, error) {
+	return podWorkerStates(ctx, s.pool, clusterID, namespace, hostnames)
+}
+
+func podWorkerStates(ctx context.Context, q GWQuerier, clusterID, namespace string, hostnames []string) (map[string]PodWorkers, error) {
 	out := make(map[string]PodWorkers, len(hostnames))
 	for _, h := range hostnames {
 		out[h] = PodWorkers{Hostname: h}
@@ -442,8 +454,8 @@ func podWorkerStates(ctx context.Context, q GWQuerier, namespace string, hostnam
 		  FROM workers w
 		  LEFT JOIN LATERAL (SELECT count(*) AS n FROM leases l WHERE l.worker_id = w.id) lc ON true
 		  LEFT JOIN LATERAL (SELECT count(*) AS n FROM reservations r WHERE r.worker_id = w.id) rc ON true
-		 WHERE w.namespace = $1 AND w.hostname = ANY($2)
-		 GROUP BY w.hostname`, namespace, hostnames)
+		 WHERE w.namespace = $1 AND w.hostname = ANY($2) AND `+workerOfCluster("$3")+`
+		 GROUP BY w.hostname`, namespace, hostnames, clusterID)
 	if err != nil {
 		return nil, fmt.Errorf("store: pod worker states: %w", err)
 	}
@@ -523,14 +535,15 @@ func (s *RMStore) DrainPod(ctx context.Context, clusterID, namespace, k8sNamespa
 			return err
 		}
 		tag, err := tx.Exec(ctx, `
-			UPDATE workers SET state = 'DRAINING'
-			 WHERE namespace = $1 AND hostname = $2 AND state IN ('ACTIVE','QUARANTINED')`, namespace, hostname)
+			UPDATE workers w SET state = 'DRAINING'
+			 WHERE w.namespace = $1 AND w.hostname = $2 AND w.state IN ('ACTIVE','QUARANTINED')
+			   AND `+workerOfCluster("$3"), namespace, hostname, clusterID)
 		if err != nil {
 			return fmt.Errorf("store: drain workers of pod %s: %w", hostname, err)
 		}
 		drained = int(tag.RowsAffected())
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM workers WHERE namespace = $1 AND hostname = $2 AND state = 'DRAINING'`,
-			namespace, hostname).Scan(&already); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM workers w WHERE w.namespace = $1 AND w.hostname = $2 AND w.state = 'DRAINING'
+			   AND `+workerOfCluster("$3"), namespace, hostname, clusterID).Scan(&already); err != nil {
 			return fmt.Errorf("store: count draining workers: %w", err)
 		}
 		already -= drained
@@ -562,7 +575,7 @@ func (s *RMStore) CheckPodRemovable(ctx context.Context, clusterID, namespace, h
 	if owner != namespace {
 		return PodWorkers{}, false, "", fmt.Errorf("%w: namespace %s", ErrBindingNotFound, namespace)
 	}
-	states, err := s.PodWorkerStates(ctx, namespace, []string{hostname})
+	states, err := s.PodWorkerStates(ctx, clusterID, namespace, []string{hostname})
 	if err != nil {
 		return PodWorkers{}, false, "", err
 	}

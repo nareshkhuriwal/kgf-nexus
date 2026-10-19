@@ -23,7 +23,7 @@ import (
 type ClusterStore interface {
 	ClusterAssignmentByName(ctx context.Context, name string) (*store.ClusterAssignment, error)
 	ReportObservations(ctx context.Context, r store.ObservationReport) (int64, error)
-	PodWorkerStates(ctx context.Context, namespace string, hostnames []string) (map[string]store.PodWorkers, error)
+	PodWorkerStates(ctx context.Context, clusterID, namespace string, hostnames []string) (map[string]store.PodWorkers, error)
 	PoolDemand(ctx context.Context, b store.ClusterBinding) (platform.Demand, error)
 	DrainPod(ctx context.Context, clusterID, namespace, k8sNamespace, deployment, hostname, observedUID, reason, actor string) (int, int, error)
 	CheckPodRemovable(ctx context.Context, clusterID, namespace, hostname string) (store.PodWorkers, bool, string, error)
@@ -202,7 +202,7 @@ func (s *ClusterServer) GetPoolState(ctx context.Context, req *rmv1.GetPoolState
 	if err != nil {
 		return nil, clusterErr("pool demand", err)
 	}
-	pods, err := s.store.PodWorkerStates(ctx, req.GetNamespace(), req.GetHostnames())
+	pods, err := s.store.PodWorkerStates(ctx, req.GetClusterId(), req.GetNamespace(), req.GetHostnames())
 	if err != nil {
 		return nil, clusterErr("pod worker states", err)
 	}
