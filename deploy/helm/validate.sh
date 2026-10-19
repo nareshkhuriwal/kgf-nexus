@@ -421,9 +421,9 @@ fi
 # and node on each container of a Nexus image but the console and the Jobs,
 # NEXUS_CLUSTER_NAME = cluster.name (claimPlacement.clusterName for the
 # agents), and no container that sets one variable twice. agentDefaults.nats.url
-# "" takes NATS away from the agents only. The cluster controller renders its
-# own identity (templates/cluster-controller.yaml, clusterController.clusterName)
-# and is checked for duplicates only.
+# "" takes NATS away from the agents only. The cluster controller reports
+# clusterController.clusterName (which defaults to cluster.name), and keeps
+# POD_NAME / POD_NAMESPACE for its Lease.
 if "$helm" template nexus "$chart" -f "$chart/ci/full-values.yaml" --set claimPlacement.clusterName=gpu-claims \
     --set agentDefaults.nats.url= >"$tmp/identity" 2>&1 &&
    python3 - "$tmp/identity" <<'PY'
@@ -437,19 +437,22 @@ for d in docs:
         names = [e["name"] for e in c.get("env", [])]
         assert len(names) == len(set(names)), (d["metadata"]["name"], c["name"], "duplicate env")
     c = tpl["spec"]["containers"][0]
-    if "kgf-nexus/ui:" in c["image"] or d["metadata"]["name"] == "nexus-cluster-controller":
+    if "kgf-nexus/ui:" in c["image"]:
         continue
     env = {e["name"]: e for e in c.get("env", [])}
     for var, field in (("NEXUS_POD_NAME", "metadata.name"), ("NEXUS_POD_NAMESPACE", "metadata.namespace"), ("NEXUS_NODE_NAME", "spec.nodeName")):
         assert env[var]["valueFrom"]["fieldRef"]["fieldPath"] == field, (d["metadata"]["name"], var)
-    want = "gpu-claims" if agent else "ci-cluster"
+    want = "gpu-claims" if agent else ("dev" if d["metadata"]["name"] == "nexus-cluster-controller" else "ci-cluster")
     assert env["NEXUS_CLUSTER_NAME"]["value"] == want, (d["metadata"]["name"], env["NEXUS_CLUSTER_NAME"])
+    if d["metadata"]["name"] == "nexus-cluster-controller":
+        assert env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"
+        assert env["POD_NAMESPACE"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.namespace"
     if agent:
         assert "NEXUS_NATS_URL" not in env, d["metadata"]["name"]
     if d["metadata"]["name"] == "event-service":
         assert env["NEXUS_NATS_URL"]["value"] == "nats://nats:4222"
     seen.add(d["metadata"]["name"])
-for want in ("api-gateway", "workflow-manager", "dag-engine", "scheduler", "scheduler-gpu", "resource-manager", "event-service", "agent-cpu", "artifact-gc"):
+for want in ("api-gateway", "workflow-manager", "dag-engine", "scheduler", "scheduler-gpu", "resource-manager", "event-service", "agent-cpu", "artifact-gc", "nexus-cluster-controller"):
     assert want in seen, (want, sorted(seen))
 PY
 then
