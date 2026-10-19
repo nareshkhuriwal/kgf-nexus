@@ -288,7 +288,7 @@ file next to `docker-compose.yml`.
 |---|---|
 | `Dockerfile.service` | All six Go services **and** the agent, parameterised by `SERVICE` / `SERVICE_PATH` |
 | `Dockerfile.migrate` | The migration job (`postgres:16-alpine` + `migrate.sh`) |
-| `Dockerfile.ui` | The console (`node:24` LTS build → `nginx:1.27` runtime) |
+| `Dockerfile.ui` | The console (`node:24` LTS build → `nginxinc/nginx-unprivileged` runtime: uid 101, listening on 8080, read-only root filesystem; docs/IMAGES.md) |
 
 `Dockerfile.service` is one parameterised file rather than seven near-identical
 ones, because the build differs only in the main-package path and seven copies
