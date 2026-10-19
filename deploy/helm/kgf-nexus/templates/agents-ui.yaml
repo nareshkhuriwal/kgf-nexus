@@ -60,7 +60,7 @@ spec:
             # nexusNamespace), and a worker key minted for that tenant
             # (agents[].workerApiKeySecretKey in existingSecret).
             - name: NEXUS_API_KEY
-              valueFrom: { secretKeyRef: { name: {{ $root.Values.existingSecret }}, key: {{ .workerApiKeySecretKey | default "worker-api-key" }} } }
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.existingSecret }}, key: {{ .workerApiKeySecretKey | default $root.Values.agentDefaults.workerApiKeySecretKey | default "worker-api-key" }} } }
             - { name: NEXUS_NAMESPACE, value: {{ .namespace | default $root.Values.nexusNamespace | quote }} }
             - { name: NEXUS_QUEUES, value: {{ .queues | quote }} }
             - { name: NEXUS_LABELS, value: {{ .labels | quote }} }

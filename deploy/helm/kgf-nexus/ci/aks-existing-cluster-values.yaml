@@ -47,6 +47,13 @@ cluster:
 
 existingSecret: nexus-credentials
 nexusNamespace: default
+# worker-api-key is registered as a static worker key on the first install,
+# so the agents can authenticate before anyone can mint a token. Once the
+# console is up, mint scoped worker tokens (Govern -> Tokens: role worker,
+# scope worker_rpc), store one in nexus-credentials, point the agents at it
+# and stop registering the static key (OPERATIONS §20.10):
+# agentDefaults: { workerApiKeySecretKey: worker-token }
+# bootstrap: { registerWorkerKey: false }
 
 image:
   registry: ghcr.io/

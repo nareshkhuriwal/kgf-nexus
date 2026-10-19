@@ -557,6 +557,18 @@ migrate:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { memory: 256Mi }
 
+# The bootstrap Job (templates/jobs.yaml): the Nexus namespace's tenant row,
+# admin-api-key if the Secret holds one, and -- unless turned off here --
+# worker-api-key as a STATIC worker key that never expires. Production
+# agents should authenticate with scoped worker tokens minted in the console
+# (Govern -> Tokens: role worker, scope worker_rpc; rotated without a
+# restart of anything else, revoked one by one): put the token in
+# existingSecret, point agentDefaults.workerApiKeySecretKey at it, and set
+# this false. Turning it off does not revoke a key registered earlier: revoke
+# "bootstrap-worker" in the console (docs/OPERATIONS.md §20.10).
+bootstrap:
+  registerWorkerKey: true
+
 # Shared defaults for the Go services; each service below can override.
 serviceDefaults:
   replicas: 1
@@ -725,6 +737,11 @@ claimPlacement:
   clusterName: ""
 
 agentDefaults:
+  # The key in existingSecret holding the agents' credential (NEXUS_API_KEY):
+  # the bootstrap's static worker-api-key, or a scoped worker token minted in
+  # the console (bootstrap.registerWorkerKey). agents[].workerApiKeySecretKey
+  # overrides it per agent.
+  workerApiKeySecretKey: worker-api-key
   # Where the agents dial the worker gRPC endpoint (NEXUS_CONTROL_PLANE).
   # The default is this release's api-gateway Service. A worker-pool release
   # in another namespace names the control plane's Service by its FQDN

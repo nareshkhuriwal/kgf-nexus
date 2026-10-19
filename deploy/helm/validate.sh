@@ -616,6 +616,39 @@ else
   echo "FAIL: the owned-HPA live merge did not render as expected"; tail -5 "$tmp/hpa-probe.out"; fail=1
 fi
 
+# The bootstrap's static worker key is optional (bootstrap.registerWorkerKey):
+# off, the Job registers no worker-api-key (and is renamed, its template being
+# immutable), and the agents read a scoped token from the key
+# agentDefaults.workerApiKeySecretKey names, an agent's own override first.
+must_fail "worker key under a malformed Secret key" "/agentDefaults/workerApiKeySecretKey" --set "agentDefaults.workerApiKeySecretKey=worker token"
+must_fail "misspelt bootstrap key"              "additional properties 'registerWorkerkey' not allowed" --set bootstrap.registerWorkerkey=false
+two_agents='agents=[{"name":"agent-a","queues":"default","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824},{"name":"agent-b","queues":"default","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824,"workerApiKeySecretKey":"worker-token-b"}]'
+if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set-json "$two_agents" >"$tmp/wk-on" 2>&1 &&
+   "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set-json "$two_agents" \
+     --set bootstrap.registerWorkerKey=false --set agentDefaults.workerApiKeySecretKey=worker-token >"$tmp/wk-off" 2>&1 &&
+   python3 - "$tmp/wk-on" "$tmp/wk-off" <<'PY'
+import sys, yaml
+def load(p):
+    docs = [d for d in yaml.safe_load_all(open(p)) if d]
+    boot = [d for d in docs if d["kind"] == "Job" and d["metadata"]["name"].startswith("bootstrap-")][0]
+    c = boot["spec"]["template"]["spec"]["containers"][0]
+    keys = {d["metadata"]["name"]: [e for e in d["spec"]["template"]["spec"]["containers"][0]["env"] if e["name"] == "NEXUS_API_KEY"][0]["valueFrom"]["secretKeyRef"]["key"]
+            for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"].startswith("agent-")}
+    return boot["metadata"]["name"], {e["name"] for e in c["env"]}, c["args"][0], keys
+on, off = load(sys.argv[1]), load(sys.argv[2])
+assert "WORKER_API_KEY" in on[1] and "bootstrap-worker" in on[2], "default must register worker-api-key"
+assert on[3] == {"agent-a": "worker-api-key", "agent-b": "worker-token-b"}, on[3]
+assert "WORKER_API_KEY" not in off[1] and "bootstrap-worker" not in off[2] and "wkey" not in off[2], "registered a worker key although told not to"
+assert "bootstrap-admin" in off[2] and "INSERT INTO tenants" in off[2], "the tenant and admin key must still be bootstrapped"
+assert off[0] != on[0], "the bootstrap Job must be renamed when its template changes"
+assert off[3] == {"agent-a": "worker-token", "agent-b": "worker-token-b"}, off[3]
+PY
+then
+  echo "ok   rendered: bootstrap.registerWorkerKey=false registers no static worker key; agents read agentDefaults.workerApiKeySecretKey"
+else
+  echo "FAIL: bootstrap.registerWorkerKey / workerApiKeySecretKey did not render as expected"; tail -5 "$tmp/wk-off"; fail=1
+fi
+
 # Agent Deployments whose replica count the cluster controller owns
 # (agents[].replicasManagedByController): once the Deployment exists, a render
 # keeps its live count, so `helm upgrade` never resets what the controller

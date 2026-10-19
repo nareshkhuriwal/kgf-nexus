@@ -1047,6 +1047,16 @@
         }
       }
     },
+    "bootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "registerWorkerKey": {
+          "type": "boolean",
+          "description": "Register existingSecret's worker-api-key as a static worker key (default true). false: the agents use scoped worker tokens minted in the console."
+        }
+      }
+    },
     "serviceDefaults": {
       "type": "object",
       "additionalProperties": false,
@@ -1248,8 +1258,7 @@
             "minLength": 1
           },
           "workerApiKeySecretKey": {
-            "type": "string",
-            "minLength": 1
+            "$ref": "#/definitions/secretKey"
           },
           "natsSeedKey": {
             "type": "string",
@@ -1343,6 +1352,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "workerApiKeySecretKey": {
+          "$ref": "#/definitions/secretKey",
+          "description": "Key in existingSecret holding the agents' credential (NEXUS_API_KEY); agents[].workerApiKeySecretKey overrides it."
+        },
         "gpuResourceName": {
           "type": "string",
           "pattern": "^[a-z0-9.-]+/[a-z0-9._-]+$"

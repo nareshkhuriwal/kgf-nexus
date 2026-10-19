@@ -18,9 +18,14 @@
 # What must exist first (docs/OPERATIONS.md §20.16):
 #   - namespace nexus-pool-gpu, labelled pod-security.kubernetes.io/enforce=restricted
 #     (the task namespace, nexus-tasks, already exists for the control plane);
-#   - Secret nexus-pool-gpu-credentials in it: worker-api-key (a worker key of
-#     the Nexus namespace below) and nats-agent-nkey (a seed whose public key
-#     is in the control-plane release's nats.auth.tenants);
+#   - Secret nexus-pool-gpu-credentials in it: worker-api-key and
+#     nats-agent-nkey (a seed whose public key is in the control-plane
+#     release's nats.auth.tenants). For worker-api-key use a scoped worker
+#     token minted for this pool in the console (Govern -> Tokens: role
+#     worker, scope worker_rpc, the Nexus namespace below), not the control
+#     plane's static bootstrap key: it is revoked on its own, without touching
+#     any other pool (OPERATIONS §20.10). Another key name: set
+#     agentDefaults.workerApiKeySecretKey;
 #   - a federated credential on the result-store identity for
 #     system:serviceaccount:nexus-pool-gpu:nexus-agent;
 #   - in the control-plane release: this namespace admitted to NATS

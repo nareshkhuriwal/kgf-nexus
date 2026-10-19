@@ -2661,6 +2661,8 @@ durations, a `latest` tag, and any misspelt **top-level** key at install time.
 | `schedulers[].nodeSelector` / `.tolerations` / `.affinity` / `.topologySpread` | `placement.*` | per-scheduler placement; the first three replace `placement.*`, `topologySpread` merges over it |
 | `networkPolicy.enabled` / `.ingressFrom` / `.metricsFrom` / `.minioFrom` | off / any / none / none | ingress default-deny for the control plane with explicit allows, §20.17 |
 | `ui.service.port` | 80 | the console Service's port; the container listens on 8080 (unprivileged nginx) |
+| `bootstrap.registerWorkerKey` | `true` | `false`: the bootstrap Job registers no static `worker-api-key`, and the agents use scoped worker tokens (§20.10) |
+| `agentDefaults.workerApiKeySecretKey` | `worker-api-key` | the key in `existingSecret` holding the agents' credential; `agents[].workerApiKeySecretKey` overrides it |
 | `services.apiGateway.componentTopology` | `platform-operators` | `NEXUS_COMPONENT_TOPOLOGY`: who sees the control plane's pods, nodes and cluster (§31.2); `infrastructure-viewers` for a single-organisation install |
 
 `deploy/helm/kgf-nexus/ci/*-values.yaml` are complete, validated values files:
@@ -3003,6 +3005,19 @@ tokens (role `worker`, scope `worker_rpc`, F114), through the console or
 `nexusctl up` mints both of its credentials through the API and writes nothing
 to the database (cli/README.md, "Local quick start").
 
+The bootstrap worker key is static: it never expires, and every agent that
+holds it is the same credential. Once a scoped token works:
+
+1. Put the token in `existingSecret` under a key of your choice.
+2. Point `agentDefaults.workerApiKeySecretKey` (or an agent's own
+   `agents[].workerApiKeySecretKey`) at that key.
+3. Set `bootstrap.registerWorkerKey: false`, so the Job stops registering
+   `worker-api-key`. That stops future registrations only.
+4. Revoke `bootstrap-worker` in the console.
+
+Worker-pool releases (§20.16) run no bootstrap Job, so they should start on
+scoped tokens: one per pool, revoked on its own.
+
 ### 20.11 Database TLS: verify-full and the CA bundle
 
 `sslmode=require` encrypts but accepts any server that answers, so anyone who
@@ -3330,7 +3345,7 @@ that registers but never gets dispatch hints.
 | `agentDefaults.controlPlane.tls` (`caSecretName`, `serverName`) | the CA and a SAN of whatever terminates TLS in front of the gateway |
 | `agentDefaults.nats.url` (`""` = long-poll) | `nats://nats.<namespace>.svc:4222`, and `nats.networkPolicy.extraFrom` admitting the pool namespace's agent pods (example in aks-existing-cluster.yaml) |
 | the seed under `nats-agent-nkey` (or `agents[].natsSeedKey`) | its public key in `nats.auth.tenants` for the Nexus namespace the agents serve (§11.7). Under `nats.tls`, the pool sets `nats.tls.clientSecrets.agent` or `caSecret` (the chart refuses neither). |
-| `worker-api-key` in `existingSecret` | a worker key of `nexusNamespace` (or `agents[].namespace`): the bootstrap key, or one minted with `POST /v1/namespaces/{ns}/tokens` (§20.10) |
+| `worker-api-key` in `existingSecret` (or the key `agentDefaults.workerApiKeySecretKey` names) | a worker credential of `nexusNamespace` (or `agents[].namespace`). Prefer a scoped token minted for this pool (role `worker`, scope `worker_rpc`, §20.10) to the control plane's static bootstrap key: it can be revoked without touching any other pool |
 | `resultStore.*`, `minio.bucket` | the same store. With workload identity, a federated credential for `system:serviceaccount:<pool namespace>:<agent account>`. Against the control plane's in-cluster MinIO: `minio.endpoint: http://minio.<namespace>.svc:9000`, the key pair in the pool's Secret, and `networkPolicy.minioFrom` when §20.17's policy is on. |
 | `cluster.name` | the registered cluster, as on the control plane |
 | the pool namespace | listed in `clusterController.workerNamespaces`, so the controller observes it |
