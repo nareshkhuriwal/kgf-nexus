@@ -35,6 +35,15 @@ func PodTemplate(p PodProfile) map[string]any {
 func JobTemplate(p PodProfile) map[string]any {
 	return map[string]any{"apiVersion": "batch/v1", "kind": "Job", "metadata": map[string]any{"generateName": "nexus-task-", "namespace": p.KubernetesNamespace}, "spec": map[string]any{"backoffLimit": 0, "activeDeadlineSeconds": p.DeadlineSeconds, "ttlSecondsAfterFinished": 3600, "template": PodTemplate(p)}}
 }
+
+// SchedulerHPA is a scheduler Deployment's HorizontalPodAutoscaler built from
+// the saved policy: the manifest an operator can apply instead of the chart's.
+// It carries the labels the cluster controller finds schedulers by and the
+// ownership opt-in (HPAOwnerAnnotation), so the controller keeps it at the
+// saved settings in apply mode (ADR-0036); remove the annotation to keep it
+// hand-managed.
 func SchedulerHPA(s Scheduler, namespace, deployment string) map[string]any {
-	return map[string]any{"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": map[string]string{"name": deployment, "namespace": namespace}, "spec": map[string]any{"scaleTargetRef": map[string]string{"apiVersion": "apps/v1", "kind": "Deployment", "name": deployment}, "minReplicas": s.MinReplicas, "maxReplicas": s.MaxReplicas, "metrics": []any{map[string]any{"type": "Resource", "resource": map[string]any{"name": "cpu", "target": map[string]any{"type": "Utilization", "averageUtilization": s.TargetCPU}}}}, "behavior": map[string]any{"scaleDown": map[string]any{"stabilizationWindowSeconds": s.ScaleDownSeconds, "policies": []any{map[string]any{"type": "Pods", "value": 1, "periodSeconds": 60}}}}}}
+	return map[string]any{"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": map[string]any{"name": deployment, "namespace": namespace,
+		"labels":      map[string]string{"app.kubernetes.io/part-of": "kgf-nexus", "app.kubernetes.io/component": "scheduler"},
+		"annotations": map[string]string{HPAOwnerAnnotation: HPAOwnerValue}}, "spec": map[string]any{"scaleTargetRef": map[string]string{"apiVersion": "apps/v1", "kind": "Deployment", "name": deployment}, "minReplicas": s.MinReplicas, "maxReplicas": s.MaxReplicas, "metrics": []any{map[string]any{"type": "Resource", "resource": map[string]any{"name": "cpu", "target": map[string]any{"type": "Utilization", "averageUtilization": s.TargetCPU}}}}, "behavior": map[string]any{"scaleDown": map[string]any{"stabilizationWindowSeconds": s.ScaleDownSeconds, "policies": []any{map[string]any{"type": "Pods", "value": 1, "periodSeconds": 60}}}}}}
 }
