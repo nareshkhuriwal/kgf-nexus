@@ -646,6 +646,15 @@ schedulers:
 #       overrides serviceAccounts.agent for this agent.
 #   namespace, workerApiKeySecretKey, natsSeedKey, podDisruptionBudget,
 #       resources, customResources.
+#   replicasManagedByController: true   the cluster controller owns this
+#       Deployment's replica count (it is bound to the pool, in apply mode):
+#       once the Deployment exists, every render keeps the LIVE count, so
+#       `helm upgrade` never resets what the controller scaled to, and
+#       `replicas` only seeds a new Deployment. Change the count in the
+#       console (the pool's binding) or with kubectl scale, not here. Honoured
+#       when this release's controller can apply (clusterController.enabled
+#       and apply.enabled), or always in a worker-pool release, whose
+#       controller runs in the control-plane release (OPERATIONS §20.6).
 #
 # Each agent serves nexusNamespace unless it sets `namespace`. An agent of
 # another tenant also needs a worker key minted for that tenant

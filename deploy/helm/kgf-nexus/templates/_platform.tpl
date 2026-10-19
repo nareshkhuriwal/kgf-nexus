@@ -106,6 +106,42 @@ nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller under it.
 {{- end -}}
 
 {{/*
+"true" when the cluster controller owns one agent Deployment's replica count:
+the agent opts in (agents[].replicasManagedByController) and the controller
+that scales it can apply. In a release that runs the control plane that is
+this release's controller in apply mode (clusterController.enabled and
+apply.enabled); a worker-pool release has no controller of its own, and the
+one scaling its agents runs in the control-plane release, so there the
+opt-in alone decides. args: root, agent entry.
+*/}}
+{{- define "nexus.controllerManagesAgentReplicas" -}}
+{{- $root := index . 0 -}}{{- $a := index . 1 -}}
+{{- $cc := $root.Values.clusterController | default dict -}}
+{{- if $a.replicasManagedByController -}}
+{{- if or (not (include "nexus.controlPlaneEnabled" $root)) (and $cc.enabled ($cc.apply | default dict).enabled) }}true{{ end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+An agent Deployment's spec.replicas. The value, unless the cluster
+controller owns the count (nexus.controllerManagesAgentReplicas) and the
+Deployment exists: then the live count, so `helm upgrade` never resets what
+the controller scaled to -- a reset it would only undo again, after its
+cooldown, possibly draining workers on the way. 0 is a count like any other.
+args: root, agent entry, the live Deployment (an empty dict when there is
+none, or under `helm template`, where lookup returns nothing).
+*/}}
+{{- define "nexus.agentReplicas" -}}
+{{- $root := index . 0 -}}{{- $a := index . 1 -}}{{- $live := index . 2 | default dict -}}
+{{- $n := $a.replicas | default 1 -}}
+{{- if include "nexus.controllerManagesAgentReplicas" (list $root $a) -}}
+{{- $spec := $live.spec | default dict -}}
+{{- if hasKey $spec "replicas" }}{{ $n = $spec.replicas }}{{ end -}}
+{{- end -}}
+{{- int $n -}}
+{{- end -}}
+
+{{/*
 The autoscaling settings of a controller-owned HPA. The controller patches
 four fields of an HPA it owns (internal/platform/autoscaling.go):
 minReplicas, maxReplicas, the CPU utilization target and

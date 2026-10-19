@@ -2800,6 +2800,31 @@ Helm's: no annotation, no patch Role, and the console shows any difference as
 `plan_only` or `drift`. `helm template` cannot read the live HPA, so it always
 shows the values.
 
+**Worker Deployments the controller scales.** In apply mode the controller
+sets the replica count of every worker Deployment bound to a pool. A
+`helm upgrade` that re-renders `agents[].replicas` resets that count. The
+controller then scales back after its cooldown, and on the way it may drain
+workers the reset had added.
+
+`agents[].replicasManagedByController: true` hands the count to the
+controller. Once the Deployment exists, every render keeps its live
+`spec.replicas`, 0 included, and `replicas` only seeds a new Deployment.
+Change the count through the pool's binding in the console, or with
+`kubectl scale`, not in values.
+
+When the opt-in is honoured:
+
+- **A release running the control plane:** only while its own controller can
+  apply (`clusterController.enabled` and `apply.enabled`). In plan mode the
+  value applies as before.
+- **A worker-pool release (§20.16):** always. It has no controller of its
+  own; the one scaling it runs in the control-plane release, with the pool's
+  namespace in its `workerNamespaces`.
+
+Set the opt-in on exactly the agents whose Deployments are bound to a pool,
+and only once apply is enabled for them. Under `helm template` the lookup is
+empty, so it shows the value.
+
 ### 20.7 Artifact GC CronJob
 
 Report-only by default (`artifactGC.mode=report`): the nightly job logs what it

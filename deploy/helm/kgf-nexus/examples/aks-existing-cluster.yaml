@@ -183,6 +183,9 @@ ui:
 # pool they hand out. An agent always offers the subprocess executor as well,
 # and a task that names no executor runs as a subprocess inside the agent pod
 # (within its 1Gi): give these queues' tasks runtime.executor: kubernetes.
+# Once the controller runs in apply mode and a pool is bound to an agent's
+# Deployment, add replicasManagedByController: true to that agent, so
+# `helm upgrade` keeps the count the controller set (OPERATIONS §20.6).
 agentDefaults:
   kubernetes:
     namespace: nexus-tasks

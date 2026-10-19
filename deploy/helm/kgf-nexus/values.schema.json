@@ -1168,6 +1168,10 @@
             "type": "integer",
             "minimum": 0
           },
+          "replicasManagedByController": {
+            "type": "boolean",
+            "description": "The cluster controller owns the replica count: once the Deployment exists, renders keep its live spec.replicas (in a control-plane release only while clusterController.enabled and apply.enabled)."
+          },
           "queues": {
             "type": "string",
             "minLength": 1

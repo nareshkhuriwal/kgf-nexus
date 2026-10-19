@@ -614,6 +614,65 @@ else
   echo "FAIL: the owned-HPA live merge did not render as expected"; tail -5 "$tmp/hpa-probe.out"; fail=1
 fi
 
+# Agent Deployments whose replica count the cluster controller owns
+# (agents[].replicasManagedByController): once the Deployment exists, a render
+# keeps its live count, so `helm upgrade` never resets what the controller
+# scaled to. Honoured with this release's controller in apply mode, or always
+# in a worker-pool release. A probe chart over the real helpers stands in for
+# lookup, which cannot run offline; the real chart, where lookup is empty,
+# must render the value.
+rprobe="$tmp/replicas-probe"
+mkdir -p "$rprobe/templates"
+cp "$chart"/templates/_*.tpl "$rprobe/templates/"
+printf 'apiVersion: v2\nname: replicas-probe\nversion: 0.0.0\n' >"$rprobe/Chart.yaml"
+cat >"$rprobe/templates/probe.yaml" <<'TPL'
+{{- range $case, $c := .Values.cases }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: {{ $case }} }
+data:
+  replicas: {{ include "nexus.agentReplicas" (list (dict "Values" $c.values) $c.agent ($c.live | default dict)) | quote }}
+  want: {{ $c.want | quote }}
+{{- end }}
+TPL
+cat >"$tmp/replicas-cases.yaml" <<'YAML'
+apply: &apply { clusterController: { enabled: true, apply: { enabled: true } } }
+optin: &optin { name: agent-cpu, replicas: 3, replicasManagedByController: true }
+cases:
+  apply-live:        { values: *apply, agent: *optin, live: { spec: { replicas: 7 } }, want: 7 }
+  apply-live-zero:   { values: *apply, agent: *optin, live: { spec: { replicas: 0 } }, want: 0 }
+  apply-no-live:     { values: *apply, agent: *optin, want: 3 }
+  plan-mode:         { values: { clusterController: { enabled: true, apply: { enabled: false } } }, agent: *optin, live: { spec: { replicas: 7 } }, want: 3 }
+  no-controller:     { values: { clusterController: { enabled: false, apply: { enabled: true } } }, agent: *optin, live: { spec: { replicas: 7 } }, want: 3 }
+  not-opted-in:      { values: *apply, agent: { name: agent-cpu, replicas: 3 }, live: { spec: { replicas: 7 } }, want: 3 }
+  worker-pool:       { values: { components: { controlPlane: { enabled: false } }, clusterController: { enabled: false } }, agent: *optin, live: { spec: { replicas: 5 } }, want: 5 }
+YAML
+if "$helm" template probe "$rprobe" -f "$tmp/replicas-cases.yaml" >"$tmp/replicas-probe.out" 2>&1 &&
+   python3 - "$tmp/replicas-probe.out" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+assert len(docs) == 7, len(docs)
+for d in docs:
+    assert d["data"]["replicas"] == d["data"]["want"], (d["metadata"]["name"], d["data"])
+PY
+   "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set clusterController.enabled=true \
+     --set clusterController.clusterName=c --set clusterController.apply.enabled=true \
+     --set clusterController.apply.expectedClusterUID=00000000-0000-0000-0000-000000000000 \
+     --set-json 'agents=[{"name":"agent-cpu","queues":"default","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824,"replicas":3,"replicasManagedByController":true}]' \
+     >"$tmp/replicas" 2>&1 &&
+   grep -A3 -E '^  name: agent-cpu$' "$tmp/replicas" >/dev/null &&
+   python3 - "$tmp/replicas" <<'PY'
+import sys, yaml
+dep = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"] == "Deployment" and d["metadata"]["name"] == "agent-cpu"]
+assert dep and dep[0]["spec"]["replicas"] == 3, dep and dep[0]["spec"].get("replicas")
+PY
+then
+  echo "ok   rendered: a controller-managed agent keeps its live replica count (0 included) only in apply mode or a worker pool; values otherwise"
+else
+  echo "FAIL: controller-managed agent replicas did not render as expected"; tail -5 "$tmp/replicas-probe.out"; fail=1
+fi
+
 # environments/aks-existing (ci/terraform-aks-existing-values.yaml): the
 # three-way ServiceAccount split its federated credentials trust, each with
 # the token setting that keeps them apart, and every pod pinned by the

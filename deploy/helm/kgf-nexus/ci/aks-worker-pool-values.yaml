@@ -78,6 +78,11 @@ serviceAccounts:
 agents:
   - name: agent-gpu-a100
     replicas: 1
+    # When the control plane's controller scales this pool (apply mode, the
+    # pool bound to this Deployment), let it own the count: every upgrade
+    # then keeps the live replicas, and `replicas` only seeds the first
+    # install (OPERATIONS §20.6).
+    # replicasManagedByController: true
     queues: gpu
     labels: "zone=cluster,accelerator=nvidia"
     executors: kubernetes

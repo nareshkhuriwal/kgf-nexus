@@ -20,7 +20,12 @@ metadata:
   labels: {{- include "nexus.labels" (list $root .name) | nindent 4 }}
     nexus.khuriwalgroup.com/role: agent
 spec:
-  replicas: {{ .replicas | default 1 }}
+  {{- $live := dict }}
+  {{- if include "nexus.controllerManagesAgentReplicas" (list $root .) }}
+  {{- /* The cluster controller scales this Deployment: keep its count. */}}
+  {{- $live = lookup "apps/v1" "Deployment" $root.Release.Namespace .name }}
+  {{- end }}
+  replicas: {{ include "nexus.agentReplicas" (list $root . $live) }}
   # An agent is a worker identity: replacing it while its old pod still holds
   # leases would briefly double its advertised capacity. Recreate drains the
   # old one (NEXUS_DRAIN_GRACE) before the new one registers.
