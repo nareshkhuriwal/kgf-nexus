@@ -160,10 +160,15 @@ type k8sState struct {
 	onPhase   func(phase, detail string)
 	adopted   bool
 
-	mu        sync.Mutex
-	startedAt time.Time
-	signalled bool
-	lastPhase string
+	// onPlacement is TaskSpec.OnPlacement; lastPlacement (under mu) is what
+	// it was last told, so only changes are forwarded (ADR-0037).
+	onPlacement func(PodPlacement)
+
+	mu            sync.Mutex
+	startedAt     time.Time
+	signalled     bool
+	lastPhase     string
+	lastPlacement PodPlacement
 
 	followOnce   sync.Once
 	followCancel context.CancelFunc
@@ -200,6 +205,39 @@ func (st *k8sState) started() time.Time {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.startedAt
+}
+
+// observe reports what one snapshot of the attempt's objects says: the pod's
+// phase (OnPhase) and its placement (OnPlacement). Both forward changes only.
+func (e *KubernetesExecutor) observe(st *k8sState, snap k8sSnapshot) {
+	e.reportPhase(st, snap)
+	e.reportPlacement(st, snap)
+}
+
+// ReportsPlacement makes the kubernetes executor a PlacementSource: the
+// attempt runs in its own pod, on whatever node the cluster chose.
+func (e *KubernetesExecutor) ReportsPlacement() bool { return true }
+
+// reportPlacement forwards a CHANGED pod placement to OnPlacement (ADR-0037):
+// the pod's name and namespace as soon as the pod exists, and its node once
+// the scheduler has bound it -- the two facts an operator needs to find the
+// workload (`kubectl -n <ns> logs <pod>`, the node's pressure). A deleted
+// pod's tombstone keeps its last placement, which is still where it ran.
+func (e *KubernetesExecutor) reportPlacement(st *k8sState, snap k8sSnapshot) {
+	if st.onPlacement == nil || snap.Pod == nil {
+		return
+	}
+	p := PodPlacement{Namespace: snap.Pod.Namespace, Pod: snap.Pod.Name, Node: snap.Pod.Spec.NodeName}
+	if p.Namespace == "" {
+		p.Namespace = e.Config.Namespace
+	}
+	st.mu.Lock()
+	changed := p != st.lastPlacement
+	st.lastPlacement = p
+	st.mu.Unlock()
+	if changed {
+		st.onPlacement(p)
+	}
 }
 
 // reportPhase forwards a CHANGED pod phase to OnPhase and the log. Only
@@ -271,6 +309,8 @@ func (e *KubernetesExecutor) Prepare(ctx context.Context, spec TaskSpec) (Prepar
 		memLimit:  spec.Limit.GetMemoryBytes(),
 		workDir:   workDir,
 		onPhase:   spec.OnPhase,
+
+		onPlacement: spec.OnPlacement,
 	}
 	log := e.logger().With("attempt_id", spec.AttemptID, "run_id", spec.RunID,
 		"node_id", spec.NodeID, "job", job.Name, "namespace", e.Config.Namespace)
@@ -356,7 +396,7 @@ func (e *KubernetesExecutor) awaitStart(ctx context.Context, t *k8sTracker, st *
 
 	for {
 		snap := t.snapshot(st.key)
-		e.reportPhase(st, snap)
+		e.observe(st, snap)
 		obs := startVerdict(snap.Job, snap.Pod)
 		switch obs.Verdict {
 		case k8sStartStarted, k8sStartTerminal:
@@ -599,7 +639,7 @@ func (e *KubernetesExecutor) Wait(ctx context.Context, h Handle) (Outcome, error
 loop:
 	for {
 		snap = t.snapshot(st.key)
-		e.reportPhase(st, snap)
+		e.observe(st, snap)
 		switch {
 		case podTerminal(snap.Pod), snap.PodGone:
 			break loop

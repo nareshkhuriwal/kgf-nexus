@@ -159,6 +159,14 @@ type TaskSpec struct {
 	// Executors whose workload has no such lifecycle never call it.
 	OnPhase func(phase, detail string)
 
+	// OnPlacement, when set, is called by an executor whose workload runs in
+	// a pod of its own (a PlacementSource: kubernetes) whenever the pod's
+	// name, namespace or node changes -- once when the pod exists, again when
+	// it is scheduled (ADR-0037). The runner reports it to the control plane.
+	// Like OnPhase it MUST NOT block. Executors whose workload runs beside the
+	// agent never call it; the runner reports the agent's own placement.
+	OnPlacement func(PodPlacement)
+
 	// LogSink, when set, receives the workload's output for durable shipping
 	// (ADR-0020). Executors that implement LogCapturer write to it directly,
 	// tagged by stream; for the others the runner follows Logs() into it. Nil
