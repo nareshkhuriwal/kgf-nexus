@@ -286,7 +286,7 @@ For the other eight:
   item 5.
 
 **History.** Criteria 2 and 3 were first met in CONTRACT-FINDINGS F80 and F82,
-and CI runs the suite in the `e2e` job (`.github/workflows/ci.yml`). This local run is the most recent
+and CI runs the suite in the `examples` job (`.github/workflows/ci.yml`). This local run is the most recent
 recorded evidence.
 
 ## 5. Restore and point-in-time recovery

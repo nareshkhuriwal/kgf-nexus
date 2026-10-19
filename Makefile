@@ -253,7 +253,7 @@ verify-s3-image: ## Verify the pinned S3 image's GitHub build provenance (needs 
 check-doc-refs: ## Fail if any "OPERATIONS §N" reference in the repo names a section that does not exist
 	python3 deploy/scripts/check-operations-refs.py
 
-check-go-version: ## Fail unless go.mod, CONTRACT.md, CI and the service image name the same Go version
+check-go-version: ## Fail unless go.mod, CONTRACT.md, CI and the images name the same Go (and CI and the console image the same Node)
 	$(GO) test -count=1 ./tests/repo
 
 # ── Documentation site (docs-site/README.md) ───────────────────────────────
