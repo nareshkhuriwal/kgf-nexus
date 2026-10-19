@@ -213,16 +213,38 @@ variable "control_plane_node_pool" {
 }
 
 variable "scheduler" {
-  description = "The scheduler Deployments: one per queue the worker pools serve (always including default), each with this many replicas, on node_pool (\"\" = control_plane_node_pool). Replicas are safe to scale; past a ~10k pending backlog Postgres, not replica count, is the limit (ADR-0018). Saved autoscaling in the console is applied by the cluster controller, not here."
+  description = <<-EOT
+    The scheduler Deployments: one per queue the worker pools serve (always
+    including default), each with `replicas`, on node_pool ("" =
+    control_plane_node_pool). Replicas are safe to scale; past a ~10k pending
+    backlog Postgres, not replica count, is the limit (ADR-0018).
+    autoscaling (null = fixed replicas): an HPA per scheduler with these
+    bounds and CPU target, the starting point the cluster controller then
+    keeps at the Scheduler settings saved in the console, in apply mode, once
+    the HPA is annotated nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller
+    (docs/OPERATIONS.md §12, "Scheduler autoscaling").
+  EOT
   type = object({
     node_pool = optional(string, "")
     replicas  = optional(number, 2)
+    autoscaling = optional(object({
+      min_replicas       = number
+      max_replicas       = number
+      target_cpu_percent = optional(number, 70)
+    }))
   })
   default = {}
 
   validation {
     condition     = var.scheduler.replicas >= 1 && floor(var.scheduler.replicas) == var.scheduler.replicas
     error_message = "scheduler.replicas must be a positive integer."
+  }
+  validation {
+    condition = var.scheduler.autoscaling == null || (
+      try(var.scheduler.autoscaling.min_replicas >= 1 && var.scheduler.autoscaling.max_replicas >= var.scheduler.autoscaling.min_replicas &&
+      var.scheduler.autoscaling.target_cpu_percent >= 1 && var.scheduler.autoscaling.target_cpu_percent <= 100, false)
+    )
+    error_message = "scheduler.autoscaling needs 1 <= min_replicas <= max_replicas and a CPU target between 1 and 100 percent."
   }
 }
 

@@ -644,6 +644,20 @@ plan mode, and the console names which:
   another. (Terraform: `cluster_controller = { mode = "apply",
   expected_cluster_uid = "<uid>" }`, checked the same way at plan time.)
 
+**Scheduler autoscaling.** The Scheduler settings saved in the console (min
+and max replicas, CPU target, scale-down window) reach an HPA, never the
+scheduler Deployment: give each scheduler one (`schedulers[].autoscaling`, or
+Terraform's `scheduler.autoscaling`) and mark it as the controller's:
+
+```sh
+kubectl -n $NS annotate hpa scheduler nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller
+```
+
+In plan mode the console shows the difference; in apply mode the controller
+moves the HPA there in bounded steps. A `helm upgrade` resets the four fields
+to the rendered values and the controller restores the saved ones within a
+minute (OPERATIONS §12, "Scheduler autoscaling").
+
 **Back out** at any moment: the console's **Switch to plan** (the next cycle
 stops mutating), or the upgrade without the two `--set`s (OPERATIONS §12.4).
 Keep `max_replicas` within budget: there is no cost estimate.

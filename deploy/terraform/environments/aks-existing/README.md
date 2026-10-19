@@ -129,7 +129,12 @@ adding to an existing pool.
   schedulers may, and then tolerate it.
 
 One scheduler Deployment is rendered per queue the pools serve, always
-including `default`, with `scheduler.replicas` each.
+including `default`, with `scheduler.replicas` each, or, with
+`scheduler.autoscaling`, an HPA each (the Deployment then has no replica
+count for Helm to reset). In apply mode the cluster controller keeps such an
+HPA at the Scheduler settings saved in the console, once it is annotated
+`nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller`
+(docs/OPERATIONS.md §12, "Scheduler autoscaling").
 
 ## The cluster controller: plan, then apply
 

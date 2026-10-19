@@ -467,11 +467,24 @@ locals {
     for p in var.worker_pools : [for q in split(",", p.queues) : trimspace(q)]
   ])))
   schedulers = [
-    for q in local.queues : merge({
-      name     = q == "default" ? "scheduler" : "scheduler-${q}"
-      queue    = q
-      replicas = var.scheduler.replicas
-    }, local.placement_for[local.scheduler_pool])
+    for q in local.queues : merge(
+      {
+        name     = q == "default" ? "scheduler" : "scheduler-${q}"
+        queue    = q
+        replicas = var.scheduler.replicas
+      },
+      local.placement_for[local.scheduler_pool],
+      # With an HPA the chart omits spec.replicas, so neither Helm nor this
+      # root fights the autoscaler (or the controller that tunes it).
+      [{
+        autoscaling = {
+          enabled                        = true
+          minReplicas                    = try(var.scheduler.autoscaling.min_replicas, 1)
+          maxReplicas                    = try(var.scheduler.autoscaling.max_replicas, 1)
+          targetCPUUtilizationPercentage = try(var.scheduler.autoscaling.target_cpu_percent, 70)
+        }
+      }, {}][var.scheduler.autoscaling == null ? 1 : 0],
+    )
   ]
 
   # subprocess: tasks run inside the agent pod, on the pool; the pod's memory

@@ -190,7 +190,7 @@ run "chart_values_place_every_workload" {
     error_message = "The control plane is pinned to control_plane_node_pool by the label AKS puts on every node."
   }
   assert {
-    condition     = [for s in local.chart_values.schedulers : s.name] == ["scheduler", "scheduler-gpu"] && alltrue([for s in local.chart_values.schedulers : s.replicas == 2 && s.nodeSelector["kubernetes.azure.com/agentpool"] == "general"])
+    condition     = [for s in local.chart_values.schedulers : s.name] == ["scheduler", "scheduler-gpu"] && alltrue([for s in local.chart_values.schedulers : s.replicas == 2 && s.nodeSelector["kubernetes.azure.com/agentpool"] == "general" && !contains(keys(s), "autoscaling")])
     error_message = "One scheduler per served queue (default always), on the scheduler pool."
   }
   assert {
@@ -337,6 +337,31 @@ run "schedulers_may_use_the_system_pool" {
     jsonencode(local.chart_values.schedulers[0].tolerations) == jsonencode([{ effect = "NoSchedule", key = "CriticalAddonsOnly", operator = "Equal", value = "true" }]))
     error_message = "The schedulers may share the system pool (small, and dispatch stops without them); they then tolerate its taint, read from the pool."
   }
+}
+
+run "scheduler_autoscaling_renders_an_hpa_per_scheduler" {
+  command = plan
+
+  variables {
+    scheduler = { node_pool = "general", autoscaling = { min_replicas = 2, max_replicas = 6 } }
+  }
+
+  assert {
+    condition = alltrue([for s in local.chart_values.schedulers :
+      s.autoscaling.enabled && s.autoscaling.minReplicas == 2 && s.autoscaling.maxReplicas == 6 && s.autoscaling.targetCPUUtilizationPercentage == 70
+    ])
+    error_message = "scheduler.autoscaling gives every scheduler an HPA with those bounds."
+  }
+}
+
+run "refuses_inverted_scheduler_bounds" {
+  command = plan
+
+  variables {
+    scheduler = { autoscaling = { min_replicas = 4, max_replicas = 2 } }
+  }
+
+  expect_failures = [var.scheduler]
 }
 
 run "kubernetes_executor_pool_runs_tasks_on_its_pool" {
