@@ -772,11 +772,16 @@ gateway:
     api: ""
     mail: ""
 
+# The console: an unprivileged nginx (uid 101) listening on 8080 inside the
+# pod, behind the ui Service's own port. Pod Security "restricted" with a
+# read-only root filesystem (docs/IMAGES.md).
 ui:
   enabled: true
   replicas: 1
   service:
     type: ClusterIP
+    # The Service port clients and the Gateway API route use; the container
+    # port (8080) is fixed by the image.
     port: 80
   resources:
     requests: { cpu: 25m, memory: 32Mi }

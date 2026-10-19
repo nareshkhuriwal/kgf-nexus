@@ -1,3 +1,6 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
 # Migration job (ADR-0011 rule 4): schema migrations are applied by a DEDICATED
 # JOB, never by a service at startup, because concurrent service replicas must
 # not race to migrate.
@@ -32,8 +35,12 @@ FROM postgres:16-alpine
 
 COPY --from=build --chmod=0755 /out/nexus-db-roles /usr/local/bin/nexus-db-roles
 
-COPY deploy/migrate.sh /usr/local/bin/migrate.sh
-RUN chmod +x /usr/local/bin/migrate.sh
+COPY --chmod=0755 deploy/migrate.sh /usr/local/bin/migrate.sh
+
+# The same unprivileged uid as every other Nexus image, with a passwd entry so
+# psql and libpq can name the OS user. Neither tool writes anything here: the
+# DSN carries the login, and a TLS root bundle is mounted read-only.
+RUN adduser -D -u 10001 nexus
 
 # The migrations ship IN the image, versioned with the code that needs them.
 # Compose also bind-mounts services/migrations over this path, which still wins
@@ -42,4 +49,23 @@ RUN chmod +x /usr/local/bin/migrate.sh
 COPY services/migrations /migrations
 ENV MIGRATIONS_DIR=/migrations
 
+# OCI labels (docs/IMAGES.md); the release workflow sets the same keys.
+ARG VERSION=dev
+ARG REVISION=""
+ARG SOURCE=https://github.com/nareshkhuriwal/kgf-nexus
+LABEL org.opencontainers.image.title="kgf-nexus/migrate" \
+      org.opencontainers.image.description="KGF Nexus schema migrations (psql) and per-service database logins (nexus-db-roles)" \
+      org.opencontainers.image.source="${SOURCE}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.vendor="Khuriwal Group" \
+      org.opencontainers.image.documentation="${SOURCE}/blob/main/docs/IMAGES.md"
+
+# A Job, not a server: nothing listens (the 5432 EXPOSE and the data VOLUME
+# are the postgres base image's, and cannot be removed). Runs to completion and
+# exits 0, or non-zero with the reason; safe to re-run (applied versions are
+# skipped). SIGTERM, not the base image's SIGINT (a server's fast shutdown).
+USER 10001:10001
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/migrate.sh"]
