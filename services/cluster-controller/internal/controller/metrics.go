@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
+	rmv1 "github.com/khuriwalgroup/kgf-nexus/services/resource-manager/gen/nexus/rm/v1"
 )
 
 // Metrics are the controller's reconcile-loop instruments.
@@ -21,6 +22,8 @@ type Metrics struct {
 	actions     *metrics.CounterVec
 	replicas    *metrics.GaugeVec
 	lastSuccess *metrics.Gauge
+	hpaActions  *metrics.CounterVec
+	hpaBlocked  *metrics.GaugeVec
 }
 
 // NewMetrics registers the controller families on reg.
@@ -41,6 +44,13 @@ func NewMetrics(reg *metrics.Registry) *Metrics {
 			"pool", "kind"),
 		lastSuccess: reg.NewGauge("nexus_controller_last_success_timestamp_seconds",
 			"Unix time of the last cycle that completed without error. Alert on time() minus this.").Gauge(),
+		hpaActions: reg.NewCounter("nexus_controller_scheduler_hpa_actions_total",
+			"Scheduler HPA autoscaling events (ADR-0036), by action (hpa_plan, hpa_update, hpa_refused) and mode (plan, apply).",
+			"action", "mode"),
+		hpaBlocked: reg.NewGauge("nexus_controller_scheduler_hpa_blocked",
+			"1 while a scheduler HPA differs from the saved scheduler settings and apply mode cannot converge it without a human "+
+				"(not opted in, no CPU metric, or patches refused); 0 otherwise. The hpa label is the HPA's name.",
+			"hpa"),
 	}
 }
 
@@ -79,4 +89,18 @@ func (m *Metrics) step(pool string, st Step, mode Mode, applied bool, action str
 		a = "true"
 	}
 	m.actions.With(metrics.Labels{"pool": pool, "action": action, "mode": mode.String(), "applied": a}).Inc()
+}
+
+func (m *Metrics) hpa(rep *rmv1.SchedulerHPAReconcile, mode Mode) {
+	if m == nil {
+		return
+	}
+	blocked := 0.0
+	if mode.Apply && rep.GetResult() == "blocked" {
+		blocked = 1
+	}
+	m.hpaBlocked.With(metrics.Labels{"hpa": rep.GetHpaName()}).Set(blocked)
+	if a := rep.GetAction(); a != "" {
+		m.hpaActions.With(metrics.Labels{"action": a, "mode": mode.String()}).Inc()
+	}
 }

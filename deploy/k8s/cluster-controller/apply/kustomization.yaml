@@ -1,9 +1,15 @@
 # Copyright 2026 Khuriwal Group
 # SPDX-License-Identifier: Apache-2.0
 #
-# Apply mode = the base + the mutating Role + the process-level permission.
-# The registry entry must ALSO be switched to apply, with the cluster's
-# kube-system UID, from the console (Cluster & scaling -> Live cluster).
+# Apply mode = the base + the mutating Roles + the process-level permission
+# + the scheduler HPA's ownership opt-in. The registry entry must ALSO be
+# switched to apply, with the cluster's kube-system UID, from the console
+# (Cluster & scaling -> Live cluster).
+#
+# To keep the scheduler HPA hand- or GitOps-managed while the controller
+# scales workers, drop scheduler-hpa-owner-patch.yaml: the controller then
+# reports the HPA's difference from the saved settings as drift and never
+# writes it (docs/adr/0036-scheduler-autoscaling-applied-by-the-controller.md).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -11,3 +17,4 @@ resources:
   - rbac-apply.yaml
 patches:
   - path: allow-apply-patch.yaml
+  - path: scheduler-hpa-owner-patch.yaml

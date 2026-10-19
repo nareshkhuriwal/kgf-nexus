@@ -69,6 +69,29 @@ type ClusterAssignment struct {
 	Mode                  string
 	DesiredRevision       int64
 	Bindings              []ClusterBinding
+	// SchedulerAutoscaling is the namespace's saved scheduler policy and the
+	// controller's memory per scheduler HPA (ADR-0036).
+	SchedulerAutoscaling SchedulerAutoscalingAssignment
+}
+
+// SchedulerAutoscalingAssignment is what the controller applies to the
+// scheduler HorizontalPodAutoscalers in the control-plane namespace.
+type SchedulerAutoscalingAssignment struct {
+	// Desired is platform_config.scheduler of the cluster's namespace.
+	Desired platform.HPASettings
+	// ConfigRevision is the platform_config revision; 0 means the namespace
+	// never saved one, and the controller applies nothing.
+	ConfigRevision int64
+	HPAs           []SchedulerHPAMemory
+}
+
+// SchedulerHPAMemory is the persisted part of the controller's state for one
+// scheduler HPA.
+type SchedulerHPAMemory struct {
+	KubernetesNamespace string
+	HPAName             string
+	// LastAppliedAt is when the controller last patched it; nil if never.
+	LastAppliedAt *time.Time
 }
 
 // ClusterBinding is one worker Deployment and the pool policy that drives it.
@@ -151,20 +174,54 @@ func (s *RMStore) ClusterAssignmentByName(ctx context.Context, name string) (*Cl
 
 	// Pool policy lives in platform_config (0010) and is resolved per binding
 	// here rather than copied into the registry, so there is one source of truth
-	// for min/max/slots and a pool edit takes effect on the next cycle.
+	// for min/max/slots and a pool edit takes effect on the next cycle. The
+	// scheduler policy comes from the same document of the cluster's own
+	// namespace (every binding's namespace is that one, by foreign key).
 	configs := map[string]platform.Config{}
+	configFor := func(ns string) (platform.Config, error) {
+		if cfg, ok := configs[ns]; ok {
+			return cfg, nil
+		}
+		cfg, err := GatewayPlatformGet(ctx, s.pool, ns)
+		if err != nil {
+			return cfg, fmt.Errorf("store: load platform config for %s: %w", ns, err)
+		}
+		configs[ns] = cfg
+		return cfg, nil
+	}
 	for i := range a.Bindings {
 		b := &a.Bindings[i]
-		cfg, ok := configs[b.Namespace]
-		if !ok {
-			cfg, err = GatewayPlatformGet(ctx, s.pool, b.Namespace)
-			if err != nil {
-				return nil, fmt.Errorf("store: load platform config for %s: %w", b.Namespace, err)
-			}
-			configs[b.Namespace] = cfg
+		cfg, err := configFor(b.Namespace)
+		if err != nil {
+			return nil, err
 		}
 		b.PlatformRevision = cfg.Revision
 		resolveBindingPolicy(b, cfg)
+	}
+	cfg, err := configFor(a.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	a.SchedulerAutoscaling.Desired = cfg.Scheduler.HPASettings()
+	a.SchedulerAutoscaling.ConfigRevision = cfg.Revision
+	hpas, err := s.pool.Query(ctx, `
+		SELECT kubernetes_namespace, substr(worker_deployment, $2), last_scale_at
+		  FROM cluster_scaling_state
+		 WHERE cluster_id = $1 AND worker_deployment LIKE 'hpa/%'
+		 ORDER BY kubernetes_namespace, worker_deployment`, a.ID, len(SchedulerHPATargetPrefix)+1)
+	if err != nil {
+		return nil, fmt.Errorf("store: load scheduler HPA state for cluster %s: %w", a.ID, err)
+	}
+	defer hpas.Close()
+	for hpas.Next() {
+		var m SchedulerHPAMemory
+		if err := hpas.Scan(&m.KubernetesNamespace, &m.HPAName, &m.LastAppliedAt); err != nil {
+			return nil, fmt.Errorf("store: scan scheduler HPA state: %w", err)
+		}
+		a.SchedulerAutoscaling.HPAs = append(a.SchedulerAutoscaling.HPAs, m)
+	}
+	if err := hpas.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate scheduler HPA state: %w", err)
 	}
 	return &a, nil
 }
@@ -413,13 +470,25 @@ func (p PodWorkers) Removable() (bool, string) {
 	return true, "drained with no leases or reservations"
 }
 
-// PodWorkerStates returns one aggregate per requested hostname (zero-valued
-// for a hostname with no worker rows).
-func (s *RMStore) PodWorkerStates(ctx context.Context, namespace string, hostnames []string) (map[string]PodWorkers, error) {
-	return podWorkerStates(ctx, s.pool, namespace, hostnames)
+// workerOfCluster restricts a query over `workers w` to the rows that can have
+// been registered from the cluster whose id is the given placeholder: those
+// whose agent names that cluster (ADR-0031's nexus.io/cluster label, which
+// the chart sets from NEXUS_CLUSTER_NAME) and, for agents that set no cluster
+// at all, every row. A worker naming a DIFFERENT cluster never matches, so two
+// clusters registered by one namespace cannot see -- or drain -- each other's
+// workers when their pods happen to share a name.
+func workerOfCluster(clusterIDParam string) string {
+	return `(NOT (w.labels ? 'nexus.io/cluster') OR w.labels ->> 'nexus.io/cluster' = (SELECT c.name FROM clusters c WHERE c.id = ` +
+		clusterIDParam + `))`
 }
 
-func podWorkerStates(ctx context.Context, q GWQuerier, namespace string, hostnames []string) (map[string]PodWorkers, error) {
+// PodWorkerStates returns one aggregate per requested hostname (zero-valued
+// for a hostname with no worker rows), counting only workers of the cluster.
+func (s *RMStore) PodWorkerStates(ctx context.Context, clusterID, namespace string, hostnames []string) (map[string]PodWorkers, error) {
+	return podWorkerStates(ctx, s.pool, clusterID, namespace, hostnames)
+}
+
+func podWorkerStates(ctx context.Context, q GWQuerier, clusterID, namespace string, hostnames []string) (map[string]PodWorkers, error) {
 	out := make(map[string]PodWorkers, len(hostnames))
 	for _, h := range hostnames {
 		out[h] = PodWorkers{Hostname: h}
@@ -442,8 +511,8 @@ func podWorkerStates(ctx context.Context, q GWQuerier, namespace string, hostnam
 		  FROM workers w
 		  LEFT JOIN LATERAL (SELECT count(*) AS n FROM leases l WHERE l.worker_id = w.id) lc ON true
 		  LEFT JOIN LATERAL (SELECT count(*) AS n FROM reservations r WHERE r.worker_id = w.id) rc ON true
-		 WHERE w.namespace = $1 AND w.hostname = ANY($2)
-		 GROUP BY w.hostname`, namespace, hostnames)
+		 WHERE w.namespace = $1 AND w.hostname = ANY($2) AND `+workerOfCluster("$3")+`
+		 GROUP BY w.hostname`, namespace, hostnames, clusterID)
 	if err != nil {
 		return nil, fmt.Errorf("store: pod worker states: %w", err)
 	}
@@ -523,14 +592,15 @@ func (s *RMStore) DrainPod(ctx context.Context, clusterID, namespace, k8sNamespa
 			return err
 		}
 		tag, err := tx.Exec(ctx, `
-			UPDATE workers SET state = 'DRAINING'
-			 WHERE namespace = $1 AND hostname = $2 AND state IN ('ACTIVE','QUARANTINED')`, namespace, hostname)
+			UPDATE workers w SET state = 'DRAINING'
+			 WHERE w.namespace = $1 AND w.hostname = $2 AND w.state IN ('ACTIVE','QUARANTINED')
+			   AND `+workerOfCluster("$3"), namespace, hostname, clusterID)
 		if err != nil {
 			return fmt.Errorf("store: drain workers of pod %s: %w", hostname, err)
 		}
 		drained = int(tag.RowsAffected())
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM workers WHERE namespace = $1 AND hostname = $2 AND state = 'DRAINING'`,
-			namespace, hostname).Scan(&already); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM workers w WHERE w.namespace = $1 AND w.hostname = $2 AND w.state = 'DRAINING'
+			   AND `+workerOfCluster("$3"), namespace, hostname, clusterID).Scan(&already); err != nil {
 			return fmt.Errorf("store: count draining workers: %w", err)
 		}
 		already -= drained
@@ -562,7 +632,7 @@ func (s *RMStore) CheckPodRemovable(ctx context.Context, clusterID, namespace, h
 	if owner != namespace {
 		return PodWorkers{}, false, "", fmt.Errorf("%w: namespace %s", ErrBindingNotFound, namespace)
 	}
-	states, err := s.PodWorkerStates(ctx, namespace, []string{hostname})
+	states, err := s.PodWorkerStates(ctx, clusterID, namespace, []string{hostname})
 	if err != nil {
 		return PodWorkers{}, false, "", err
 	}
@@ -655,6 +725,186 @@ func (s *RMStore) RecordScaling(ctx context.Context, r ScalingRecord) error {
 		}
 		return nil
 	})
+}
+
+// ── scheduler autoscaling (ADR-0036) ────────────────────────────────────────
+
+// SchedulerHPATargetPrefix marks a cluster_scaling_state or
+// cluster_scaling_events target that is a scheduler HorizontalPodAutoscaler
+// rather than a worker Deployment: worker_deployment holds "hpa/<name>". A
+// Deployment name cannot contain '/', so the two never collide, and 0018's
+// tables carry the HPA's memory and audit trail without a new column. The SQL
+// below spells the prefix as the literal 'hpa/%'.
+const SchedulerHPATargetPrefix = "hpa/"
+
+// maxSchedulerHPAs bounds one report; a control-plane namespace holds one
+// scheduler Deployment per queue.
+const maxSchedulerHPAs = 50
+
+// Scheduler HPA reconcile results, as the controller reports them.
+const (
+	SchedulerHPAInSync        = "in_sync"
+	SchedulerHPAApplying      = "applying"
+	SchedulerHPABlocked       = "blocked"
+	SchedulerHPAPlan          = "plan"
+	SchedulerHPANotConfigured = "not_configured"
+)
+
+var (
+	schedulerHPAResults = map[string]bool{SchedulerHPAInSync: true, SchedulerHPAApplying: true,
+		SchedulerHPABlocked: true, SchedulerHPAPlan: true, SchedulerHPANotConfigured: true}
+	schedulerHPAActions = map[string]bool{"": true, "hpa_plan": true, "hpa_update": true, "hpa_refused": true}
+)
+
+// SchedulerHPAStatus is the controller's last reconcile of one scheduler HPA,
+// stored as cluster_scaling_state.last_decision of its hpa/<name> target and
+// read back by the console's view.
+type SchedulerHPAStatus struct {
+	Deployment     string               `json:"deployment"`
+	UID            string               `json:"uid"`
+	Managed        bool                 `json:"managed"`
+	Result         string               `json:"result"`
+	Reason         string               `json:"reason"`
+	Error          string               `json:"error"`
+	ConfigRevision int64                `json:"config_revision"`
+	Mode           string               `json:"mode"`
+	Observed       platform.HPASettings `json:"observed"`
+}
+
+// SchedulerHPAReconcile is one HPA's part of a report.
+type SchedulerHPAReconcile struct {
+	KubernetesNamespace string
+	HPAName             string
+	Status              SchedulerHPAStatus
+	// Action is the audit event (hpa_plan, hpa_update, hpa_refused); empty
+	// records state only.
+	Action string
+	// Applied is true only when the HPA was patched; it moves last_applied_at.
+	Applied  bool
+	Reason   string
+	From, To *platform.HPASettings
+	Detail   []byte
+}
+
+// SchedulerAutoscalingReport is one controller cycle's scheduler HPA reconcile.
+type SchedulerAutoscalingReport struct {
+	ClusterID string
+	Actor     string
+	Mode      string
+	// Complete: the HPA list succeeded, so state for HPAs not in Targets is
+	// stale and removed.
+	Complete bool
+	Targets  []SchedulerHPAReconcile
+}
+
+// RecordSchedulerAutoscaling appends each target's event and upserts its
+// state, in one transaction (the RecordScaling rule: the audit trail and the
+// state it justifies cannot disagree). Only HPAs in the cluster's registered
+// control-plane namespace are accepted: that is the one namespace the
+// controller is granted HPA patch in.
+func (s *RMStore) RecordSchedulerAutoscaling(ctx context.Context, r SchedulerAutoscalingReport) error {
+	if r.Mode != "apply" {
+		r.Mode = "plan"
+	}
+	if len(r.Targets) > maxSchedulerHPAs {
+		return fmt.Errorf("%w: %d scheduler HPAs in one report; the bound is %d", ErrInvalidClusterReport, len(r.Targets), maxSchedulerHPAs)
+	}
+	seen := map[string]bool{}
+	for i := range r.Targets {
+		t := &r.Targets[i]
+		switch {
+		case len(t.HPAName) > 253 || !dnsSubdomain.MatchString(t.HPAName):
+			return fmt.Errorf("%w: HPA name %q is not a DNS subdomain", ErrInvalidClusterReport, t.HPAName)
+		case seen[t.KubernetesNamespace+"/"+t.HPAName]:
+			return fmt.Errorf("%w: HPA %s/%s reported twice", ErrInvalidClusterReport, t.KubernetesNamespace, t.HPAName)
+		case !schedulerHPAResults[t.Status.Result]:
+			return fmt.Errorf("%w: unknown scheduler HPA result %q", ErrInvalidClusterReport, t.Status.Result)
+		case !schedulerHPAActions[t.Action]:
+			return fmt.Errorf("%w: unknown scheduler HPA action %q", ErrInvalidClusterReport, t.Action)
+		case t.Applied && t.Action != "hpa_update":
+			return fmt.Errorf("%w: only an hpa_update event can be applied", ErrInvalidClusterReport)
+		case len(t.Detail) > 0 && !json.Valid(t.Detail):
+			return fmt.Errorf("%w: scheduler HPA event detail must be JSON", ErrInvalidClusterReport)
+		}
+		seen[t.KubernetesNamespace+"/"+t.HPAName] = true
+		if len(t.Status.Error) > 4096 {
+			t.Status.Error = t.Status.Error[:4096]
+		}
+		t.Status.Mode = r.Mode
+	}
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		var cp string
+		err := tx.QueryRow(ctx, `SELECT control_plane_namespace FROM clusters WHERE id = $1`, r.ClusterID).Scan(&cp)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrClusterNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("store: load cluster %s: %w", r.ClusterID, err)
+		}
+		targets := make([]string, 0, len(r.Targets))
+		for _, t := range r.Targets {
+			if t.KubernetesNamespace != cp {
+				return fmt.Errorf("%w: HPA %s/%s is outside the cluster's control-plane namespace %s",
+					ErrBindingNotFound, t.KubernetesNamespace, t.HPAName, cp)
+			}
+			target := SchedulerHPATargetPrefix + t.HPAName
+			targets = append(targets, target)
+			if t.Action != "" {
+				detail := t.Detail
+				if len(detail) == 0 {
+					detail, err = json.Marshal(map[string]any{"hpa": t.HPAName, "deployment": t.Status.Deployment,
+						"from": t.From, "to": t.To, "config_revision": t.Status.ConfigRevision})
+					if err != nil {
+						return fmt.Errorf("store: encode scheduler HPA event: %w", err)
+					}
+				}
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO cluster_scaling_events (cluster_id, kubernetes_namespace, worker_deployment, action, mode,
+					       applied, reason, actor, detail)
+					VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+					r.ClusterID, t.KubernetesNamespace, target, t.Action, r.Mode, t.Applied,
+					truncateString(t.Reason, 1024), r.Actor, detail); err != nil {
+					return fmt.Errorf("store: append scheduler HPA event: %w", err)
+				}
+			}
+			status, err := json.Marshal(t.Status)
+			if err != nil {
+				return fmt.Errorf("store: encode scheduler HPA status: %w", err)
+			}
+			// A report reconciled against an OLDER platform revision (a demoted
+			// leader racing the new one) neither moves the revision back nor
+			// replaces the newer status.
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO cluster_scaling_state (cluster_id, kubernetes_namespace, worker_deployment, last_scale_at,
+				       observed_platform_revision, last_decision, updated_at)
+				VALUES ($1,$2,$3, CASE WHEN $4 THEN now() END, $5, $6, now())
+				ON CONFLICT (cluster_id, kubernetes_namespace, worker_deployment) DO UPDATE SET
+				       last_scale_at = CASE WHEN $4 THEN now() ELSE cluster_scaling_state.last_scale_at END,
+				       last_decision = CASE WHEN $5 >= cluster_scaling_state.observed_platform_revision
+				                            THEN EXCLUDED.last_decision ELSE cluster_scaling_state.last_decision END,
+				       observed_platform_revision = GREATEST(cluster_scaling_state.observed_platform_revision, $5),
+				       updated_at = now()`,
+				r.ClusterID, t.KubernetesNamespace, target, t.Applied, t.Status.ConfigRevision, status); err != nil {
+				return fmt.Errorf("store: upsert scheduler HPA state: %w", err)
+			}
+		}
+		if r.Complete {
+			if _, err := tx.Exec(ctx, `
+				DELETE FROM cluster_scaling_state
+				 WHERE cluster_id = $1 AND worker_deployment LIKE 'hpa/%' AND NOT (worker_deployment = ANY($2))`,
+				r.ClusterID, targets); err != nil {
+				return fmt.Errorf("store: prune scheduler HPA state: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+func truncateString(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // maxRetainedReconcileErrors bounds the error table per cluster: a controller

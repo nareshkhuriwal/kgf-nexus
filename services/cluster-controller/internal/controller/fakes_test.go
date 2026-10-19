@@ -53,10 +53,12 @@ type fakeRM struct {
 	failAssignment error
 	failPoolState  error
 
-	drains  []string
-	records []*rmv1.RecordScalingRequest
-	reports []*rmv1.ReportObservationsRequest
-	errs    []*rmv1.ReportReconcileErrorRequest
+	drains     []string
+	records    []*rmv1.RecordScalingRequest
+	reports    []*rmv1.ReportObservationsRequest
+	errs       []*rmv1.ReportReconcileErrorRequest
+	hpaReports []*rmv1.RecordSchedulerAutoscalingRequest
+	failHPA    error
 }
 
 func newFakeRM(mode string) *fakeRM {
@@ -187,6 +189,75 @@ func (f *fakeRM) ReportReconcileError(ctx context.Context, in *rmv1.ReportReconc
 	return &rmv1.ReportReconcileErrorResponse{}, nil
 }
 
+// RecordSchedulerAutoscaling emulates the resource manager's persistence of
+// the per-HPA memory: an applied patch moves last_applied_at to "now", and a
+// complete report drops HPAs it does not list.
+func (f *fakeRM) RecordSchedulerAutoscaling(ctx context.Context, in *rmv1.RecordSchedulerAutoscalingRequest, _ ...grpc.CallOption) (*rmv1.RecordSchedulerAutoscalingResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failHPA != nil {
+		return nil, f.failHPA
+	}
+	f.hpaReports = append(f.hpaReports, proto.Clone(in).(*rmv1.RecordSchedulerAutoscalingRequest))
+	sa := f.assignment.SchedulerAutoscaling
+	if sa == nil {
+		return nil, status.Error(codes.FailedPrecondition, "no scheduler autoscaling in this assignment")
+	}
+	mem := map[string]*rmv1.SchedulerHPAMemory{}
+	for _, m := range sa.Hpas {
+		mem[m.KubernetesNamespace+"/"+m.HpaName] = m
+	}
+	var kept []*rmv1.SchedulerHPAMemory
+	for _, t := range in.Targets {
+		k := t.KubernetesNamespace + "/" + t.HpaName
+		m := mem[k]
+		if m == nil {
+			m = &rmv1.SchedulerHPAMemory{KubernetesNamespace: t.KubernetesNamespace, HpaName: t.HpaName}
+		}
+		if t.Applied {
+			m.LastAppliedAtUnixMs = f.now().UnixMilli()
+		}
+		delete(mem, k)
+		kept = append(kept, m)
+	}
+	if !in.Complete {
+		for _, m := range mem {
+			kept = append(kept, m)
+		}
+	}
+	sa.Hpas = kept
+	return &rmv1.RecordSchedulerAutoscalingResponse{}, nil
+}
+
+// hpaTargets returns the latest report's targets by HPA name.
+func (f *fakeRM) hpaTargets() map[string]*rmv1.SchedulerHPAReconcile {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]*rmv1.SchedulerHPAReconcile{}
+	if len(f.hpaReports) == 0 {
+		return out
+	}
+	for _, t := range f.hpaReports[len(f.hpaReports)-1].Targets {
+		out[t.HpaName] = t
+	}
+	return out
+}
+
+// hpaEvents returns every non-empty scheduler HPA event action, in order.
+func (f *fakeRM) hpaEvents() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, r := range f.hpaReports {
+		for _, t := range r.Targets {
+			if t.Action != "" {
+				out = append(out, t.Action)
+			}
+		}
+	}
+	return out
+}
+
 // events returns recorded non-empty event actions.
 func (f *fakeRM) events() []string {
 	f.mu.Lock()
@@ -210,6 +281,12 @@ type fakeCluster struct {
 	mu     sync.Mutex
 	serial int
 	scales []int32
+
+	// Scheduler HPA patches as the API server would see them (ADR-0036).
+	hpaReactor     bool
+	hpaPatchCalls  int
+	hpaPatches     [][]byte
+	beforeHPAPatch func(k8stesting.PatchAction) error
 }
 
 // newFakeCluster builds a cluster with the kube-system namespace, one worker

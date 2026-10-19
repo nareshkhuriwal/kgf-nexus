@@ -1641,11 +1641,19 @@ Design and safety argument: docs/CLUSTER-SCALING.md. This section is the runbook
 - Migration `0018_cluster_registry` applied (additive; safe before the new
   gateway and resource-manager are deployed).
 - A resource-manager that serves `ClusterControllerService` (this release), reachable
-  from the controller at `NEXUS_RM_ADDR`. The controller uses the same TLS
-  environment as other peers (`internal/transport`).
+  from the controller at `NEXUS_RM_ADDR` -- `resource-manager.<ns>.svc:9090` for
+  the chart's (`clusterController.resourceManagerAddress` in a Helm install).
+  The controller uses the same TLS environment as other peers
+  (`internal/transport`).
 - The worker Deployment follows `deploy/k8s/cluster-controller/base/worker-deployment.example.yaml`:
   no hostname override, CPU/memory requests, `terminationGracePeriodSeconds` at
-  least `NEXUS_DRAIN_GRACE`, no HPA of its own.
+  least `NEXUS_DRAIN_GRACE`, no HPA of its own, the gateway's worker port
+  (`api-gateway.<ns>.svc:9091`) with a worker key (`NEXUS_API_KEY`), and
+  `NEXUS_CLUSTER_NAME` set to the registered name (it scopes the pod ↔ worker
+  join to this cluster).
+- Task Jobs are observed where the kubernetes executor runs them:
+  `NEXUS_CLUSTER_TASK_NAMESPACES` (the base sets `nexus-workers`; the chart
+  derives it from its kubernetes-executor agents), each with the observe Role.
 - The cluster-controller image, pinned by digest. The release workflow
   builds and pushes `ghcr.io/<owner>/kgf-nexus/cluster-controller` (§22.4;
   KGF Cloud's release pipeline pushes `<acr>/nexus/cluster-controller`);
@@ -1669,8 +1677,9 @@ kubectl -n kgf-nexus get lease nexus-cluster-controller-<cluster> -o jsonpath='{
 
 In the console (Cluster & scaling → Live cluster) confirm: a report under a minute
 old, "Controller running: plan", the observed UID, desired = observed revision,
-the scheduler HPA with `ScalingActive`, and plan-only events that match what you
-would have done by hand. `/readyz` is `standby` on the follower and fails on the
+the scheduler HPA with `ScalingActive`, scheduler autoscaling `in_sync` or
+`plan_only` (an `hpa_plan` event says what apply would change), task Jobs
+listed, and plan-only events that match what you would have done by hand. `/readyz` is `standby` on the follower and fails on the
 leader after four intervals without a successful cycle -- alert on that.
 
 ### 12.3 Enabling apply
@@ -1680,6 +1689,10 @@ leader after four intervals without a successful cycle -- alert on that.
 2. `kubectl apply -k deploy/k8s/cluster-controller/apply`.
 3. Watch for `scale_out` / `drain` / `scale_in` events and "Controller running:
    apply". If the tab still says plan, its reason names the missing opt-in.
+4. Scheduler autoscaling (§12.7) applies once the scheduler HPA carries
+   `nexus.khuriwalgroup.com/autoscaling-owner: cluster-controller` -- the apply
+   overlay adds it to `scaling.yaml`'s HPA. Expect `hpa_update` events and the
+   state to reach `in_sync`; a large change takes a few one-minute steps.
 
 Keep registry ceilings (`max_replicas`) at what the budget allows: there is no
 provider cost estimate, and budget alerts are not hard caps.
@@ -1689,7 +1702,10 @@ provider cost estimate, and budget alerts are not hard caps.
 Fastest to slowest, all safe at any moment:
 
 1. Console: **Switch to plan**. The next cycle (≤ 15 s) stops mutating; the resource
-   manager refuses drains immediately.
+   manager refuses drains immediately. To hand only the scheduler HPA back to
+   its other owner, remove its `nexus.khuriwalgroup.com/autoscaling-owner`
+   annotation (`kubectl -n kgf-nexus annotate hpa scheduler
+   nexus.khuriwalgroup.com/autoscaling-owner-`); it is never written again.
 2. `kubectl apply -k deploy/k8s/cluster-controller/base` (drops the apply Role
    binding and `NEXUS_CONTROLLER_ALLOW_APPLY`).
 3. `kubectl -n kgf-nexus scale deploy/nexus-cluster-controller --replicas=0`.
@@ -1705,21 +1721,64 @@ common ones: `scale-in cooldown`, `removal of drained pods held: pod … is not
 Running and Ready` (fix the pod), `pod … kept: holds N live lease(s)` (working as
 intended -- it is removed when the work finishes), `namespace quota: …` (raise the
 quota or the pod requests are undeclared), and `deployment changed since it was
-read` (someone else is writing replicas -- find the second writer).
+read` (someone else is writing replicas -- find the second writer). For the
+scheduler HPA see §12.7.
 
 ### 12.6 Testing locally
 
 The end-to-end test only runs against `docker-desktop` or `kind-*` contexts, in
-namespace `nexus-scaling-test`, which it creates and deletes:
+namespace `nexus-scaling-test`, which it creates and deletes. The database is a
+disposable one on the host's PostgreSQL (`tests/lib/hostpg-db.sh`; never a
+Postgres container):
 
 ```sh
-docker run -d --name nexus-scaling-pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=nexus \
-  -p 127.0.0.1:55531:5432 postgres:16-alpine   # then apply services/migrations/*.up.sql
-NEXUS_TEST_DATABASE_URL=postgres://postgres:test@localhost:55531/nexus \
+dsn=$(tests/lib/hostpg-db.sh create nexus_it_scaling)   # created and migrated
+NEXUS_TEST_DATABASE_URL=$dsn \
   go test -tags k8s_integration -run TestK8s -v ./services/cluster-controller/internal/controller/
-NEXUS_TEST_DATABASE_URL=postgres://postgres:test@localhost:55531/nexus \
-  go test -tags integration -run TestIntegrationClusterRegistry ./internal/store/
+NEXUS_TEST_DATABASE_URL=$dsn \
+  go test -tags integration -run 'TestIntegration(ClusterRegistry|SchedulerAutoscaling|PodWorkersAreClusterScoped)' ./internal/store/
+NEXUS_TEST_DATABASE_URL=$dsn \
+  go test -tags integration -run TestIntegrationClusterViewShape ./services/api-gateway/rest/
+tests/lib/hostpg-db.sh drop nexus_it_scaling
 ```
+
+### 12.7 Scheduler autoscaling
+
+ADR-0036; design in docs/CLUSTER-SCALING.md, "Scheduler autoscaling". The
+scheduler settings saved in the console (Scheduler: min/max replicas, CPU
+target, scale-down cooldown) are applied to the scheduler HPA by the
+controller, in apply mode, on an HPA that opts in. The cluster view's
+`scheduler_autoscaling.state`, and what to do:
+
+| State | Meaning | Action |
+|---|---|---|
+| `in_sync` | The HPA has the saved settings | none |
+| `plan_only` | They differ; the controller runs in plan mode | enable apply (§12.3), or accept |
+| `applying` | Apply mode; the controller has not yet reconciled the saved revision, or is moving the HPA in bounded steps (replica bounds at most halve or double per patch, one patch a minute) | wait; `hpa_update` events show each step |
+| `drift` | Apply mode; it reconciled and cannot converge. `last_error` names why | see below |
+| `not_observed` | No HPA scales a scheduler Deployment | add one (`scaling.yaml`, or `schedulers[].autoscaling` in the chart) |
+
+`drift` reasons: **not controller-owned** -- the HPA lacks
+`nexus.khuriwalgroup.com/autoscaling-owner: cluster-controller`; annotate it,
+or change the settings where the HPA is managed (Helm values, Git).
+**No CPU utilization metric** -- the HPA scales on something else; the
+controller will not change what it scales on. **Never saved** -- save the
+Scheduler settings once. **Patch forbidden** -- the apply RBAC lacks
+`horizontalpodautoscalers` patch for this HPA's name in the control-plane
+namespace (re-apply `deploy/k8s/cluster-controller/apply`, or name the HPA in
+`rbac-apply.yaml` if it is not `scheduler`). **Changed under every attempt**
+-- another writer is rewriting the HPA; find it (`kubectl get hpa -o yaml
+--show-managed-fields`: the controller's writes are `nexus-cluster-controller`).
+
+A `kubectl apply -k` / `helm upgrade` resets an owned HPA's four settings to
+the rendered values; the controller restores the saved ones within a minute
+(an `hpa_update` event). Exporting the saved settings as the scheduler's Helm
+values avoids the round trip.
+
+Metrics: `nexus_controller_scheduler_hpa_actions_total{action,mode}` (`hpa_plan`,
+`hpa_update`, `hpa_refused`) and `nexus_controller_scheduler_hpa_blocked{hpa}`,
+1 while an HPA differs and apply mode cannot converge it -- alert on
+`max(nexus_controller_scheduler_hpa_blocked) == 1` for 15 minutes.
 
 ## 13. Kubernetes executor
 
@@ -2700,7 +2759,9 @@ permission anywhere.
    (console), **and** `clusterController.apply.enabled=true` with
    `apply.expectedClusterUID` set to that UID. The chart then sets the process
    flag and binds the apply Role (`deployments/scale` update, `pods` patch,
-   worker namespaces only). On a real install/upgrade the chart compares the
+   worker namespaces only) and, with `apply.schedulerAutoscaling` (default
+   true), patch on the autoscaled schedulers' HPAs by name in the release
+   namespace (§12.7). On a real install/upgrade the chart compares the
    UID with the live cluster and refuses a mismatch, so values written for one
    cluster cannot enable apply on another. (`helm template` cannot look it up.)
 4. Back out: console **Switch to plan**, then `apply.enabled=false` (drops the

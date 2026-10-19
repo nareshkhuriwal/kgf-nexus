@@ -22,13 +22,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ClusterControllerService_GetAssignment_FullMethodName        = "/nexus.rm.v1.ClusterControllerService/GetAssignment"
-	ClusterControllerService_ReportObservations_FullMethodName   = "/nexus.rm.v1.ClusterControllerService/ReportObservations"
-	ClusterControllerService_GetPoolState_FullMethodName         = "/nexus.rm.v1.ClusterControllerService/GetPoolState"
-	ClusterControllerService_DrainPod_FullMethodName             = "/nexus.rm.v1.ClusterControllerService/DrainPod"
-	ClusterControllerService_CheckPodRemovable_FullMethodName    = "/nexus.rm.v1.ClusterControllerService/CheckPodRemovable"
-	ClusterControllerService_RecordScaling_FullMethodName        = "/nexus.rm.v1.ClusterControllerService/RecordScaling"
-	ClusterControllerService_ReportReconcileError_FullMethodName = "/nexus.rm.v1.ClusterControllerService/ReportReconcileError"
+	ClusterControllerService_GetAssignment_FullMethodName              = "/nexus.rm.v1.ClusterControllerService/GetAssignment"
+	ClusterControllerService_ReportObservations_FullMethodName         = "/nexus.rm.v1.ClusterControllerService/ReportObservations"
+	ClusterControllerService_GetPoolState_FullMethodName               = "/nexus.rm.v1.ClusterControllerService/GetPoolState"
+	ClusterControllerService_DrainPod_FullMethodName                   = "/nexus.rm.v1.ClusterControllerService/DrainPod"
+	ClusterControllerService_CheckPodRemovable_FullMethodName          = "/nexus.rm.v1.ClusterControllerService/CheckPodRemovable"
+	ClusterControllerService_RecordScaling_FullMethodName              = "/nexus.rm.v1.ClusterControllerService/RecordScaling"
+	ClusterControllerService_RecordSchedulerAutoscaling_FullMethodName = "/nexus.rm.v1.ClusterControllerService/RecordSchedulerAutoscaling"
+	ClusterControllerService_ReportReconcileError_FullMethodName       = "/nexus.rm.v1.ClusterControllerService/ReportReconcileError"
 )
 
 // ClusterControllerServiceClient is the client API for ClusterControllerService service.
@@ -67,6 +68,11 @@ type ClusterControllerServiceClient interface {
 	CheckPodRemovable(ctx context.Context, in *CheckPodRemovableRequest, opts ...grpc.CallOption) (*CheckPodRemovableResponse, error)
 	// Appends a scaling event and updates the persisted cooldown/idle state.
 	RecordScaling(ctx context.Context, in *RecordScalingRequest, opts ...grpc.CallOption) (*RecordScalingResponse, error)
+	// Records one cycle's reconcile of the scheduler HorizontalPodAutoscalers
+	// against the namespace's saved scheduler settings (ADR-0036): per HPA the
+	// controller's progress, and the event for anything it planned, changed or
+	// refused. The HPA itself is patched by the controller, never through here.
+	RecordSchedulerAutoscaling(ctx context.Context, in *RecordSchedulerAutoscalingRequest, opts ...grpc.CallOption) (*RecordSchedulerAutoscalingResponse, error)
 	ReportReconcileError(ctx context.Context, in *ReportReconcileErrorRequest, opts ...grpc.CallOption) (*ReportReconcileErrorResponse, error)
 }
 
@@ -138,6 +144,16 @@ func (c *clusterControllerServiceClient) RecordScaling(ctx context.Context, in *
 	return out, nil
 }
 
+func (c *clusterControllerServiceClient) RecordSchedulerAutoscaling(ctx context.Context, in *RecordSchedulerAutoscalingRequest, opts ...grpc.CallOption) (*RecordSchedulerAutoscalingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordSchedulerAutoscalingResponse)
+	err := c.cc.Invoke(ctx, ClusterControllerService_RecordSchedulerAutoscaling_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *clusterControllerServiceClient) ReportReconcileError(ctx context.Context, in *ReportReconcileErrorRequest, opts ...grpc.CallOption) (*ReportReconcileErrorResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ReportReconcileErrorResponse)
@@ -184,6 +200,11 @@ type ClusterControllerServiceServer interface {
 	CheckPodRemovable(context.Context, *CheckPodRemovableRequest) (*CheckPodRemovableResponse, error)
 	// Appends a scaling event and updates the persisted cooldown/idle state.
 	RecordScaling(context.Context, *RecordScalingRequest) (*RecordScalingResponse, error)
+	// Records one cycle's reconcile of the scheduler HorizontalPodAutoscalers
+	// against the namespace's saved scheduler settings (ADR-0036): per HPA the
+	// controller's progress, and the event for anything it planned, changed or
+	// refused. The HPA itself is patched by the controller, never through here.
+	RecordSchedulerAutoscaling(context.Context, *RecordSchedulerAutoscalingRequest) (*RecordSchedulerAutoscalingResponse, error)
 	ReportReconcileError(context.Context, *ReportReconcileErrorRequest) (*ReportReconcileErrorResponse, error)
 	mustEmbedUnimplementedClusterControllerServiceServer()
 }
@@ -212,6 +233,9 @@ func (UnimplementedClusterControllerServiceServer) CheckPodRemovable(context.Con
 }
 func (UnimplementedClusterControllerServiceServer) RecordScaling(context.Context, *RecordScalingRequest) (*RecordScalingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RecordScaling not implemented")
+}
+func (UnimplementedClusterControllerServiceServer) RecordSchedulerAutoscaling(context.Context, *RecordSchedulerAutoscalingRequest) (*RecordSchedulerAutoscalingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordSchedulerAutoscaling not implemented")
 }
 func (UnimplementedClusterControllerServiceServer) ReportReconcileError(context.Context, *ReportReconcileErrorRequest) (*ReportReconcileErrorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportReconcileError not implemented")
@@ -346,6 +370,24 @@ func _ClusterControllerService_RecordScaling_Handler(srv interface{}, ctx contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ClusterControllerService_RecordSchedulerAutoscaling_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordSchedulerAutoscalingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClusterControllerServiceServer).RecordSchedulerAutoscaling(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClusterControllerService_RecordSchedulerAutoscaling_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClusterControllerServiceServer).RecordSchedulerAutoscaling(ctx, req.(*RecordSchedulerAutoscalingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ClusterControllerService_ReportReconcileError_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ReportReconcileErrorRequest)
 	if err := dec(in); err != nil {
@@ -394,6 +436,10 @@ var ClusterControllerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RecordScaling",
 			Handler:    _ClusterControllerService_RecordScaling_Handler,
+		},
+		{
+			MethodName: "RecordSchedulerAutoscaling",
+			Handler:    _ClusterControllerService_RecordSchedulerAutoscaling_Handler,
 		},
 		{
 			MethodName: "ReportReconcileError",

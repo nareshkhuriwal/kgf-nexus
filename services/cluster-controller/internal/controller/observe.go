@@ -22,6 +22,19 @@ import (
 // namespace. deploy/k8s labels them this way.
 const SchedulerSelector = "app.kubernetes.io/part-of=kgf-nexus,app.kubernetes.io/component=scheduler"
 
+// The kubernetes executor's task Job metadata (agent/internal/executor/
+// kubernetes_spec.go): every Job it creates carries the label, and the
+// annotations hold the full ids (a label value is hashed when too long).
+const (
+	DefaultJobLabelSelector = "nexus.dev/attempt"
+	jobAnnAttemptID         = "nexus.dev/attempt-id"
+	jobAnnRunID             = "nexus.dev/run-id"
+	// Read as a fallback, for Jobs created by hand with the selector this
+	// controller used before it matched the executor.
+	legacyJobLabelAttemptID = "nexus.io/attempt-id"
+	legacyJobLabelRunID     = "nexus.io/run-id"
+)
+
 type observation struct {
 	objects       []*rmv1.ObservedObject
 	completeKinds []string
@@ -29,6 +42,25 @@ type observation struct {
 	// nodes is the full Node list when it succeeded, for the cluster's
 	// placement labels (ADR-0031); nil when the list failed.
 	nodes []corev1.Node
+	// The scheduler Deployments' names and every HPA in the control-plane
+	// namespace, for scheduler autoscaling (ADR-0036); each usable only when
+	// its list succeeded.
+	schedulerNames   []string
+	schedulersListed bool
+	hpas             []autoscalingv2.HorizontalPodAutoscaler
+	hpasListed       bool
+}
+
+// replace swaps the reported object of the same kind, namespace and name for
+// obj: after a patch, the report carries the object the API server returned
+// rather than the one listed before it.
+func (o *observation) replace(obj *rmv1.ObservedObject) {
+	for i, cur := range o.objects {
+		if cur.GetKind() == obj.GetKind() && cur.GetNamespace() == obj.GetNamespace() && cur.GetName() == obj.GetName() {
+			o.objects[i] = obj
+			return
+		}
+	}
 }
 
 // observe collects the snapshot. Each kind is complete or not independently:
@@ -65,8 +97,10 @@ func (c *Controller) observe(ctx context.Context, a *rmv1.ClusterAssignment) obs
 		o.errs = append(o.errs, fmt.Errorf("observe scheduler deployments in %s: %w", cp, err))
 	} else {
 		o.completeKinds = append(o.completeKinds, "SchedulerDeployment")
+		o.schedulersListed = true
 		for i := range deps.Items {
 			o.objects = append(o.objects, deploymentObject("SchedulerDeployment", &deps.Items[i]))
+			o.schedulerNames = append(o.schedulerNames, deps.Items[i].Name)
 		}
 	}
 
@@ -77,6 +111,7 @@ func (c *Controller) observe(ctx context.Context, a *rmv1.ClusterAssignment) obs
 		o.errs = append(o.errs, fmt.Errorf("observe HPAs in %s: %w", cp, err))
 	} else {
 		o.completeKinds = append(o.completeKinds, "HorizontalPodAutoscaler")
+		o.hpas, o.hpasListed = hpas.Items, true
 		for i := range hpas.Items {
 			o.objects = append(o.objects, hpaObject(&hpas.Items[i]))
 		}
@@ -95,15 +130,11 @@ func (c *Controller) observe(ctx context.Context, a *rmv1.ClusterAssignment) obs
 		}
 	}
 
+	// Task Jobs live where the kubernetes executor creates them -- its
+	// NEXUS_K8S_NAMESPACE, which is not necessarily a worker namespace.
 	jobsOK := true
 	var jobs []batchv1.Job
-	seen := map[string]bool{}
-	for _, b := range a.GetBindings() {
-		ns := b.GetKubernetesNamespace()
-		if seen[ns] {
-			continue
-		}
-		seen[ns] = true
+	for _, ns := range c.taskNamespaces(a) {
 		kctx, cancel := c.rpcCtx(ctx)
 		list, err := c.kube.BatchV1().Jobs(ns).List(kctx, metav1.ListOptions{LabelSelector: c.cfg.JobLabelSelector})
 		cancel()
@@ -174,15 +205,10 @@ func deploymentObject(kind string, d *appsv1.Deployment) *rmv1.ObservedObject {
 }
 
 func hpaObject(h *autoscalingv2.HorizontalPodAutoscaler) *rmv1.ObservedObject {
-	min := int32(1)
-	if h.Spec.MinReplicas != nil {
-		min = *h.Spec.MinReplicas
-	}
+	settings, cpu := hpaSettings(h)
 	var targetCPU, currentCPU *int32
-	for _, m := range h.Spec.Metrics {
-		if m.Type == autoscalingv2.ResourceMetricSourceType && m.Resource != nil && m.Resource.Name == corev1.ResourceCPU {
-			targetCPU = m.Resource.Target.AverageUtilization
-		}
+	if cpu >= 0 {
+		targetCPU = &settings.TargetCPUPercent
 	}
 	for _, m := range h.Status.CurrentMetrics {
 		if m.Type == autoscalingv2.ResourceMetricSourceType && m.Resource != nil && m.Resource.Name == corev1.ResourceCPU {
@@ -207,9 +233,13 @@ func hpaObject(h *autoscalingv2.HorizontalPodAutoscaler) *rmv1.ObservedObject {
 		// metric; without it the HPA is present but not actually scaling.
 		Ready: able, ResourceVersion: h.ResourceVersion, CreatedAtUnixMs: created(h.ObjectMeta),
 		SummaryJson: summary(map[string]any{
-			"min_replicas": min, "max_replicas": h.Spec.MaxReplicas, "target_cpu_percent": targetCPU,
-			"current_cpu_percent": currentCPU, "scale_target": h.Spec.ScaleTargetRef.Kind + "/" + h.Spec.ScaleTargetRef.Name,
+			"min_replicas": settings.MinReplicas, "max_replicas": settings.MaxReplicas, "target_cpu_percent": targetCPU,
+			"scale_down_stabilization_seconds": settings.ScaleDownStabilizationSeconds,
+			"current_cpu_percent":              currentCPU, "scale_target": h.Spec.ScaleTargetRef.Kind + "/" + h.Spec.ScaleTargetRef.Name,
+			"current_replicas": h.Status.CurrentReplicas, "desired_replicas": h.Status.DesiredReplicas,
 			"scaling_active": able,
+			// ADR-0036: whether the controller may change the four settings.
+			"managed": hpaOwned(h),
 		}),
 	}
 }
@@ -293,7 +323,16 @@ func jobObject(j *batchv1.Job) *rmv1.ObservedObject {
 			"state": state, "active": j.Status.Active, "succeeded": j.Status.Succeeded, "failed": j.Status.Failed,
 			"start_time": ts(j.Status.StartTime), "completion_time": ts(j.Status.CompletionTime),
 			// The join back to Nexus: which attempt this Job runs.
-			"attempt_id": j.Labels["nexus.io/attempt-id"], "run_id": j.Labels["nexus.io/run-id"],
+			"attempt_id": jobMeta(j, jobAnnAttemptID, legacyJobLabelAttemptID),
+			"run_id":     jobMeta(j, jobAnnRunID, legacyJobLabelRunID),
 		}),
 	}
+}
+
+// jobMeta is the executor's annotation, else the legacy label.
+func jobMeta(j *batchv1.Job, annotation, legacyLabel string) string {
+	if v := j.Annotations[annotation]; v != "" {
+		return v
+	}
+	return j.Labels[legacyLabel]
 }

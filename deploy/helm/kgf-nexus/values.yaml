@@ -1053,15 +1053,31 @@ tls:
 # below -- scales bound worker Deployments. Off by default.
 clusterController:
   enabled: false
-  # REQUIRED when enabled: the registry name (clusters.name) registered in the
-  # console (Cluster & scaling -> Live cluster). Its control-plane namespace
+  # The registry name (clusters.name) registered in the console (Cluster &
+  # scaling -> Live cluster). Empty = cluster.name, the chart-wide cluster
+  # name; one of the two is REQUIRED when enabled. Its control-plane namespace
   # must be this release's namespace.
   clusterName: ""
+  # The resource manager's gRPC address. The default is this release's own;
+  # a release without the control plane (a worker-pool cluster) names the
+  # control plane's, reachable from here, with the release's tls.* settings.
+  resourceManagerAddress: resource-manager:9090
   # Two replicas for failover; a Lease (nexus-cluster-controller-<cluster>)
   # makes exactly one act, the other reports /readyz "standby".
   replicas: 2
   interval: 15s
-  jobLabelSelector: nexus.io/attempt-id
+  # Task Jobs to report: the kubernetes executor labels every Job it creates
+  # nexus.dev/attempt.
+  jobLabelSelector: nexus.dev/attempt
+  # Namespaces where task Jobs run (the kubernetes executor's
+  # NEXUS_K8S_NAMESPACE): Jobs are observed there and their ResourceQuota
+  # headroom is published (ADR-0031). Empty = the task namespace of every
+  # agent here that runs the kubernetes executor, or, when none does, the
+  # bound worker namespaces. A read-only Role (Jobs, quotas) is created in
+  # each one that is not already a worker namespace.
+  taskNamespaces: []
+  # The least time between two patches of one scheduler HPA (ADR-0036).
+  schedulerPatchInterval: 1m
   logLevel: info
   # ADR-0031. Operator-declared cluster placement labels, published with every
   # report over the observed region and provider, e.g.
@@ -1090,6 +1106,14 @@ clusterController:
   apply:
     enabled: false
     expectedClusterUID: ""
+    # ADR-0036: in apply mode, also keep the scheduler HPAs' minReplicas,
+    # maxReplicas, CPU target and scale-down window at the scheduler settings
+    # saved in the console. Binds patch on the autoscaled schedulers' HPAs
+    # (by name, this namespace). The controller still changes only an HPA
+    # annotated nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller;
+    # false (or an HPA without it) leaves the HPA to Helm/GitOps and reports
+    # the difference as drift.
+    schedulerAutoscaling: true
   terminationGracePeriodSeconds: 30
   resources:
     requests: { cpu: 20m, memory: 64Mi }

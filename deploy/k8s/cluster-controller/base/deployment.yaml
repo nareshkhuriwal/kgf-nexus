@@ -59,10 +59,17 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - {name: NEXUS_CLUSTER_NAME, value: aks-dev}   # must equal clusters.name in the registry
-            - {name: NEXUS_RM_ADDR, value: "resource-manager.kgf-nexus.svc:50052"}
+            # The resource manager's gRPC port as the Helm chart serves it
+            # (services.resourceManager, port 9090).
+            - {name: NEXUS_RM_ADDR, value: "resource-manager.kgf-nexus.svc:9090"}
             # Plan (dry-run) unless apply/allow-apply-patch.yaml is applied.
             - {name: NEXUS_CONTROLLER_ALLOW_APPLY, value: "false"}
             - {name: NEXUS_CONTROLLER_INTERVAL, value: 15s}
+            # Where task Jobs run: the kubernetes executor's NEXUS_K8S_NAMESPACE
+            # (the agents in worker-deployment.example.yaml run theirs in their
+            # own namespace). Jobs are observed there, and its quota headroom is
+            # published. Comma-separated; each needs the observe Role below.
+            - {name: NEXUS_CLUSTER_TASK_NAMESPACES, value: nexus-workers}
             - name: POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - name: POD_NAMESPACE

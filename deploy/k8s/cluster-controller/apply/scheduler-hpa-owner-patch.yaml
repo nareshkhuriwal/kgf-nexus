@@ -1,0 +1,14 @@
+# Copyright 2026 Khuriwal Group
+# SPDX-License-Identifier: Apache-2.0
+#
+# The opt-in that lets the controller keep this HPA's minReplicas, maxReplicas,
+# CPU target and scale-down stabilization window at the scheduler settings
+# saved in the console (ADR-0036). Without it the HPA is reported, never
+# written.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: scheduler
+  namespace: kgf-nexus
+  annotations:
+    nexus.khuriwalgroup.com/autoscaling-owner: cluster-controller
