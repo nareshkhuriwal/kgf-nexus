@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -295,19 +296,22 @@ type ScalingStateView struct {
 	UpdatedAt                time.Time       `json:"updated_at"`
 }
 
-// ScalingEventView is one audit row.
+// ScalingEventView is one audit row. A scheduler HPA's events (ADR-0036)
+// carry worker_deployment "hpa/<name>" and an hpa_* action, with the settings
+// before and after in detail.
 type ScalingEventView struct {
-	ID                  int64     `json:"id"`
-	KubernetesNamespace string    `json:"kubernetes_namespace"`
-	WorkerDeployment    string    `json:"worker_deployment"`
-	Action              string    `json:"action"`
-	Mode                string    `json:"mode"`
-	Applied             bool      `json:"applied"`
-	FromReplicas        *int32    `json:"from_replicas"`
-	ToReplicas          *int32    `json:"to_replicas"`
-	Reason              string    `json:"reason"`
-	Actor               string    `json:"actor"`
-	OccurredAt          time.Time `json:"occurred_at"`
+	ID                  int64           `json:"id"`
+	KubernetesNamespace string          `json:"kubernetes_namespace"`
+	WorkerDeployment    string          `json:"worker_deployment"`
+	Action              string          `json:"action"`
+	Mode                string          `json:"mode"`
+	Applied             bool            `json:"applied"`
+	FromReplicas        *int32          `json:"from_replicas"`
+	ToReplicas          *int32          `json:"to_replicas"`
+	Reason              string          `json:"reason"`
+	Actor               string          `json:"actor"`
+	Detail              json.RawMessage `json:"detail"`
+	OccurredAt          time.Time       `json:"occurred_at"`
 }
 
 // ReconcileErrorView is one controller failure.
@@ -333,6 +337,204 @@ type ClusterView struct {
 	// JobsShown counts the task Jobs included; the view carries at most
 	// maxJobsInView, newest first, even when the controller reported more.
 	JobsShown int `json:"jobs_shown"`
+
+	// Labels are the cluster's placement labels as the controller last
+	// published them (ADR-0031): operator-declared over the observed
+	// nexus.io/region and nexus.io/provider. {} before the first report.
+	Labels map[string]string `json:"labels"`
+	// Headroom is the remaining ResourceQuota room per task namespace
+	// (ADR-0031 §3), keyed by Kubernetes namespace; -1 = unbounded. {} before
+	// the first complete quota observation.
+	Headroom map[string]ClusterHeadroom `json:"headroom"`
+	// HeadroomObservedAt is when Headroom was observed; null if never.
+	HeadroomObservedAt *time.Time `json:"headroom_observed_at"`
+	// SchedulerAutoscaling compares the namespace's saved scheduler settings
+	// with the scheduler HPAs the controller observed (ADR-0036).
+	SchedulerAutoscaling SchedulerAutoscalingView `json:"scheduler_autoscaling"`
+}
+
+// Scheduler autoscaling states (ADR-0036).
+const (
+	SchedulerAutoscalingNotObserved = "not_observed"
+	SchedulerAutoscalingInSync      = "in_sync"
+	SchedulerAutoscalingPlanOnly    = "plan_only"
+	SchedulerAutoscalingApplying    = "applying"
+	SchedulerAutoscalingDrift       = "drift"
+)
+
+// schedulerAutoscalingSeverity orders the states for the top-level summary.
+var schedulerAutoscalingSeverity = map[string]int{
+	SchedulerAutoscalingInSync: 1, SchedulerAutoscalingPlanOnly: 2, SchedulerAutoscalingApplying: 3, SchedulerAutoscalingDrift: 4,
+}
+
+// SchedulerAutoscalingDesired is the namespace's saved scheduler policy.
+type SchedulerAutoscalingDesired struct {
+	MinReplicas                   int `json:"min_replicas"`
+	MaxReplicas                   int `json:"max_replicas"`
+	TargetCPUPercent              int `json:"target_cpu_percent"`
+	ScaleDownStabilizationSeconds int `json:"scale_down_stabilization_seconds"`
+	// ConfigRevision is the platform_config revision; 0 = never saved (the
+	// values are the defaults, and the controller applies nothing).
+	ConfigRevision int64 `json:"config_revision"`
+}
+
+// SchedulerAutoscalingObserved is one scheduler HPA as last reported.
+type SchedulerAutoscalingObserved struct {
+	MinReplicas int `json:"min_replicas"`
+	MaxReplicas int `json:"max_replicas"`
+	// TargetCPUPercent is null when the HPA has no CPU utilization metric.
+	TargetCPUPercent *int `json:"target_cpu_percent"`
+	// ScaleDownStabilizationSeconds is the effective window (Kubernetes' 300
+	// when the HPA sets none); null from a controller that predates ADR-0036.
+	ScaleDownStabilizationSeconds *int   `json:"scale_down_stabilization_seconds"`
+	CurrentReplicas               int    `json:"current_replicas"`
+	DesiredReplicas               int    `json:"desired_replicas"`
+	HPAName                       string `json:"hpa_name"`
+	Deployment                    string `json:"deployment"`
+}
+
+// SchedulerAutoscalingTarget is one scheduler HPA's comparison.
+type SchedulerAutoscalingTarget struct {
+	Observed SchedulerAutoscalingObserved `json:"observed"`
+	State    string                       `json:"state"`
+	// Managed: the HPA carries the controller-ownership annotation, so apply
+	// mode may change its settings.
+	Managed bool `json:"managed"`
+	// Reason is the controller's one-line account of its last reconcile.
+	Reason        string     `json:"reason"`
+	LastAppliedAt *time.Time `json:"last_applied_at"`
+	LastError     *string    `json:"last_error"`
+}
+
+// SchedulerAutoscalingView is the console's scheduler autoscaling panel. The
+// top-level observed/state/last_applied_at/last_error describe the scheduler
+// HPA in the worst state (drift, then applying, plan_only, in_sync; ties by
+// name); targets lists every scheduler HPA.
+type SchedulerAutoscalingView struct {
+	Desired       SchedulerAutoscalingDesired   `json:"desired"`
+	Observed      *SchedulerAutoscalingObserved `json:"observed"`
+	State         string                        `json:"state"`
+	LastAppliedAt *time.Time                    `json:"last_applied_at"`
+	LastError     *string                       `json:"last_error"`
+	Targets       []SchedulerAutoscalingTarget  `json:"targets"`
+}
+
+// schedulerHPAState is a scheduler HPA's controller memory
+// (cluster_scaling_state, target hpa/<name>).
+type schedulerHPAState struct {
+	Status        SchedulerHPAStatus
+	LastAppliedAt *time.Time
+}
+
+// hpaSummary is the part of a reported HorizontalPodAutoscaler summary the
+// comparison reads (cluster-controller observe.go writes it).
+type hpaSummary struct {
+	MinReplicas                   *int   `json:"min_replicas"`
+	MaxReplicas                   *int   `json:"max_replicas"`
+	TargetCPUPercent              *int   `json:"target_cpu_percent"`
+	ScaleDownStabilizationSeconds *int   `json:"scale_down_stabilization_seconds"`
+	ScaleTarget                   string `json:"scale_target"`
+	Managed                       *bool  `json:"managed"`
+}
+
+// schedulerAutoscaling builds the view: desired from the saved policy,
+// observed from every HPA in the control-plane namespace whose scale target is
+// a reported scheduler Deployment, and per HPA a state:
+//
+//	in_sync      observed equals desired
+//	plan_only    they differ and the controller runs in plan mode
+//	applying     they differ in apply mode, and the controller has not yet
+//	             reconciled this config revision or is moving the HPA in
+//	             bounded steps
+//	drift        they differ in apply mode after a reconcile of this revision
+//	             that could not converge (last_error says why)
+//	not_observed (top level only) no scheduler HPA is reported
+func schedulerAutoscaling(c *ClusterView, cfg platform.Config, states map[string]schedulerHPAState) SchedulerAutoscalingView {
+	d := cfg.Scheduler.HPASettings()
+	v := SchedulerAutoscalingView{
+		Desired: SchedulerAutoscalingDesired{MinReplicas: int(d.MinReplicas), MaxReplicas: int(d.MaxReplicas),
+			TargetCPUPercent: int(d.TargetCPUPercent), ScaleDownStabilizationSeconds: int(d.ScaleDownStabilizationSeconds),
+			ConfigRevision: cfg.Revision},
+		State:   SchedulerAutoscalingNotObserved,
+		Targets: []SchedulerAutoscalingTarget{},
+	}
+	apply := c.Status != nil && c.Status.EffectiveMode == "apply"
+	schedulers := map[string]bool{}
+	for _, o := range c.Observations {
+		if o.Kind == "SchedulerDeployment" && o.Namespace == c.ControlPlaneNamespace {
+			schedulers[o.Name] = true
+		}
+	}
+	for _, o := range c.Observations {
+		if o.Kind != "HorizontalPodAutoscaler" || o.Namespace != c.ControlPlaneNamespace {
+			continue
+		}
+		var sum hpaSummary
+		if json.Unmarshal(o.Summary, &sum) != nil {
+			continue
+		}
+		kind, name, _ := strings.Cut(sum.ScaleTarget, "/")
+		if kind != "Deployment" || !schedulers[name] {
+			continue
+		}
+		obs := SchedulerAutoscalingObserved{MinReplicas: 1, TargetCPUPercent: sum.TargetCPUPercent,
+			ScaleDownStabilizationSeconds: sum.ScaleDownStabilizationSeconds, HPAName: o.Name, Deployment: name}
+		if sum.MinReplicas != nil {
+			obs.MinReplicas = *sum.MinReplicas
+		}
+		if sum.MaxReplicas != nil {
+			obs.MaxReplicas = *sum.MaxReplicas
+		}
+		// The HPA's status, as the observation's columns carry it.
+		if o.ReadyReplicas != nil {
+			obs.CurrentReplicas = int(*o.ReadyReplicas)
+		}
+		if o.SpecReplicas != nil {
+			obs.DesiredReplicas = int(*o.SpecReplicas)
+		}
+		t := SchedulerAutoscalingTarget{Observed: obs, Managed: sum.Managed != nil && *sum.Managed}
+		st, reported := states[o.Namespace+"/"+o.Name]
+		if reported {
+			t.Reason, t.LastAppliedAt = st.Status.Reason, st.LastAppliedAt
+		}
+		inSync := obs.MinReplicas == int(d.MinReplicas) && obs.MaxReplicas == int(d.MaxReplicas) &&
+			obs.TargetCPUPercent != nil && *obs.TargetCPUPercent == int(d.TargetCPUPercent) &&
+			obs.ScaleDownStabilizationSeconds != nil && *obs.ScaleDownStabilizationSeconds == int(d.ScaleDownStabilizationSeconds)
+		switch {
+		case inSync:
+			t.State = SchedulerAutoscalingInSync
+		case !apply:
+			t.State = SchedulerAutoscalingPlanOnly
+		case !reported:
+			// Observed by a controller that never reports scheduler
+			// autoscaling: it predates ADR-0036 and will not converge it.
+			t.State = SchedulerAutoscalingDrift
+			msg := "the controller reports this HPA but not its scheduler autoscaling; upgrade the cluster controller to apply the saved settings"
+			t.LastError = &msg
+		case st.Status.ConfigRevision < cfg.Revision || st.Status.Result == SchedulerHPAApplying:
+			t.State = SchedulerAutoscalingApplying
+		default:
+			t.State = SchedulerAutoscalingDrift
+			msg := st.Status.Error
+			if msg == "" {
+				msg = st.Status.Reason
+			}
+			if msg == "" {
+				msg = "differs from the saved scheduler settings"
+			}
+			t.LastError = &msg
+		}
+		v.Targets = append(v.Targets, t)
+	}
+	sort.Slice(v.Targets, func(i, j int) bool { return v.Targets[i].Observed.HPAName < v.Targets[j].Observed.HPAName })
+	for i := range v.Targets {
+		t := &v.Targets[i]
+		if v.Observed == nil || schedulerAutoscalingSeverity[t.State] > schedulerAutoscalingSeverity[v.State] {
+			obs := t.Observed
+			v.Observed, v.State, v.LastAppliedAt, v.LastError = &obs, t.State, t.LastAppliedAt, t.LastError
+		}
+	}
+	return v
 }
 
 // maxJobsInView bounds the console payload; the controller may report more.
@@ -357,56 +559,77 @@ func GatewayClusterList(ctx context.Context, q GWQuerier, ns string) ([]ClusterV
 		}
 		c.Bindings, c.Observations, c.Scaling, c.Events, c.Errors =
 			[]ClusterBindingSpec{}, []ObservationView{}, []ScalingStateView{}, []ScalingEventView{}, []ReconcileErrorView{}
+		c.Labels, c.Headroom = map[string]string{}, map[string]ClusterHeadroom{}
 		out = append(out, c)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate clusters: %w", err)
 	}
+	if len(out) == 0 {
+		return []ClusterView{}, nil
+	}
+	// The saved scheduler policy every registered cluster of the namespace is
+	// compared with (ADR-0036).
+	cfg, err := GatewayPlatformGet(ctx, q, ns)
+	if err != nil {
+		return nil, fmt.Errorf("load platform config: %w", err)
+	}
 	for i := range out {
-		if err := fillClusterView(ctx, q, &out[i]); err != nil {
+		states, err := fillClusterView(ctx, q, &out[i])
+		if err != nil {
 			return nil, err
 		}
-	}
-	if out == nil {
-		out = []ClusterView{}
+		out[i].SchedulerAutoscaling = schedulerAutoscaling(&out[i], cfg, states)
 	}
 	return out, nil
 }
 
-func fillClusterView(ctx context.Context, q GWQuerier, c *ClusterView) error {
+// fillClusterView loads one cluster's bindings and everything observed, and
+// returns the scheduler HPAs' controller memory, keyed "<namespace>/<hpa>".
+func fillClusterView(ctx context.Context, q GWQuerier, c *ClusterView) (map[string]schedulerHPAState, error) {
 	rows, err := q.Query(ctx, `
 		SELECT kubernetes_namespace, worker_deployment, pool, max_replicas, max_scale_down_step,
 		       scale_up_cooldown_seconds, scale_down_cooldown_seconds
 		  FROM cluster_namespace_bindings WHERE cluster_id = $1 ORDER BY kubernetes_namespace, worker_deployment`, c.ID)
 	if err != nil {
-		return fmt.Errorf("list bindings: %w", err)
+		return nil, fmt.Errorf("list bindings: %w", err)
 	}
 	for rows.Next() {
 		var b ClusterBindingSpec
 		if err := rows.Scan(&b.KubernetesNamespace, &b.WorkerDeployment, &b.Pool, &b.MaxReplicas, &b.MaxScaleDownStep,
 			&b.ScaleUpCooldownSeconds, &b.ScaleDownCooldownSeconds); err != nil {
 			rows.Close()
-			return fmt.Errorf("scan binding: %w", err)
+			return nil, fmt.Errorf("scan binding: %w", err)
 		}
 		c.Bindings = append(c.Bindings, b)
 	}
 	rows.Close()
 
 	var st ClusterStatusView
+	var labels, headroom []byte
 	err = q.QueryRow(ctx, `
 		SELECT observed_revision, observed_cluster_uid, kubernetes_version, controller_identity, effective_mode,
-		       effective_mode_reason, last_report_at, last_error, last_error_at
+		       effective_mode_reason, last_report_at, last_error, last_error_at, labels, headroom, headroom_observed_at
 		  FROM cluster_status WHERE cluster_id = $1`, c.ID).Scan(
 		&st.ObservedRevision, &st.ObservedClusterUID, &st.KubernetesVersion, &st.ControllerIdentity,
-		&st.EffectiveMode, &st.EffectiveModeReason, &st.LastReportAt, &st.LastError, &st.LastErrorAt)
+		&st.EffectiveMode, &st.EffectiveModeReason, &st.LastReportAt, &st.LastError, &st.LastErrorAt,
+		&labels, &headroom, &c.HeadroomObservedAt)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
-		return fmt.Errorf("load cluster status: %w", err)
+		return nil, fmt.Errorf("load cluster status: %w", err)
 	default:
 		st.IdentityVerified = c.ExpectedClusterUID != "" && st.ObservedClusterUID == c.ExpectedClusterUID
 		c.Status = &st
+		// Written by the resource manager from a validated report; a document
+		// that does not decode is shown as empty rather than failing the page.
+		if json.Unmarshal(labels, &c.Labels) != nil || c.Labels == nil {
+			c.Labels = map[string]string{}
+		}
+		if json.Unmarshal(headroom, &c.Headroom) != nil || c.Headroom == nil {
+			c.Headroom = map[string]ClusterHeadroom{}
+		}
 	}
 
 	// Jobs are bounded to the newest; every other kind is small by nature.
@@ -421,7 +644,7 @@ func fillClusterView(ctx context.Context, q GWQuerier, c *ClusterView) error {
 		  ORDER BY object_created_at DESC NULLS LAST LIMIT $2)
 		ORDER BY kind, kubernetes_namespace, name`, c.ID, maxJobsInView)
 	if err != nil {
-		return fmt.Errorf("list observations: %w", err)
+		return nil, fmt.Errorf("list observations: %w", err)
 	}
 	for rows.Next() {
 		var o ObservationView
@@ -429,7 +652,7 @@ func fillClusterView(ctx context.Context, q GWQuerier, c *ClusterView) error {
 		if err := rows.Scan(&o.Kind, &o.Namespace, &o.Name, &o.Generation, &o.ObservedGeneration, &o.SpecReplicas,
 			&o.ReadyReplicas, &o.Ready, &summary, &o.CreatedAt, &o.ObservedAt); err != nil {
 			rows.Close()
-			return fmt.Errorf("scan observation: %w", err)
+			return nil, fmt.Errorf("scan observation: %w", err)
 		}
 		o.Summary = summary
 		if o.Kind == "Job" {
@@ -444,15 +667,24 @@ func fillClusterView(ctx context.Context, q GWQuerier, c *ClusterView) error {
 		       observed_platform_revision, last_decision, updated_at
 		  FROM cluster_scaling_state WHERE cluster_id = $1 ORDER BY kubernetes_namespace, worker_deployment`, c.ID)
 	if err != nil {
-		return fmt.Errorf("list scaling state: %w", err)
+		return nil, fmt.Errorf("list scaling state: %w", err)
 	}
+	states := map[string]schedulerHPAState{}
 	for rows.Next() {
 		var s ScalingStateView
 		var decision []byte
 		if err := rows.Scan(&s.KubernetesNamespace, &s.WorkerDeployment, &s.LastScaleAt, &s.LastScaleDirection,
 			&s.IdleSince, &s.ObservedPlatformRevision, &decision, &s.UpdatedAt); err != nil {
 			rows.Close()
-			return fmt.Errorf("scan scaling state: %w", err)
+			return nil, fmt.Errorf("scan scaling state: %w", err)
+		}
+		if hpa, ok := strings.CutPrefix(s.WorkerDeployment, SchedulerHPATargetPrefix); ok {
+			// A scheduler HPA's memory: shown under scheduler_autoscaling,
+			// not as a worker Deployment.
+			st := schedulerHPAState{LastAppliedAt: s.LastScaleAt}
+			_ = json.Unmarshal(decision, &st.Status)
+			states[s.KubernetesNamespace+"/"+hpa] = st
+			continue
 		}
 		s.LastDecision = decision
 		c.Scaling = append(c.Scaling, s)
@@ -461,18 +693,20 @@ func fillClusterView(ctx context.Context, q GWQuerier, c *ClusterView) error {
 
 	rows, err = q.Query(ctx, `
 		SELECT id, kubernetes_namespace, worker_deployment, action, mode, applied, from_replicas, to_replicas,
-		       reason, actor, occurred_at
+		       reason, actor, detail, occurred_at
 		  FROM cluster_scaling_events WHERE cluster_id = $1 ORDER BY id DESC LIMIT 50`, c.ID)
 	if err != nil {
-		return fmt.Errorf("list scaling events: %w", err)
+		return nil, fmt.Errorf("list scaling events: %w", err)
 	}
 	for rows.Next() {
 		var e ScalingEventView
+		var detail []byte
 		if err := rows.Scan(&e.ID, &e.KubernetesNamespace, &e.WorkerDeployment, &e.Action, &e.Mode, &e.Applied,
-			&e.FromReplicas, &e.ToReplicas, &e.Reason, &e.Actor, &e.OccurredAt); err != nil {
+			&e.FromReplicas, &e.ToReplicas, &e.Reason, &e.Actor, &detail, &e.OccurredAt); err != nil {
 			rows.Close()
-			return fmt.Errorf("scan scaling event: %w", err)
+			return nil, fmt.Errorf("scan scaling event: %w", err)
 		}
+		e.Detail = detail
 		c.Events = append(c.Events, e)
 	}
 	rows.Close()
@@ -481,15 +715,15 @@ func fillClusterView(ctx context.Context, q GWQuerier, c *ClusterView) error {
 		SELECT target, message, actor, occurred_at FROM cluster_reconcile_errors
 		 WHERE cluster_id = $1 ORDER BY id DESC LIMIT 20`, c.ID)
 	if err != nil {
-		return fmt.Errorf("list reconcile errors: %w", err)
+		return nil, fmt.Errorf("list reconcile errors: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var e ReconcileErrorView
 		if err := rows.Scan(&e.Target, &e.Message, &e.Actor, &e.OccurredAt); err != nil {
-			return fmt.Errorf("scan reconcile error: %w", err)
+			return nil, fmt.Errorf("scan reconcile error: %w", err)
 		}
 		c.Errors = append(c.Errors, e)
 	}
-	return rows.Err()
+	return states, rows.Err()
 }
