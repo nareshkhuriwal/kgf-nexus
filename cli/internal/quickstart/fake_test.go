@@ -243,7 +243,7 @@ func (f *fakeDocker) config(project string, env []string) []byte {
 	services := map[string]any{
 		"api-gateway": svc(map[string]any{"healthcheck": hc,
 			"environment": map[string]string{"DATABASE_URL": "postgres://nexus:pw@postgres:5432/nexus?sslmode=disable"}}),
-		"ui":        svc(map[string]any{"healthcheck": hc, "ports": []map[string]any{{"target": 80, "published": uiPort}}}),
+		"ui":        svc(map[string]any{"healthcheck": hc, "ports": []map[string]any{{"target": 8080, "published": uiPort}}}),
 		"mailpit":   svc(map[string]any{"healthcheck": hc}),
 		"postgres":  svc(map[string]any{"healthcheck": hc, "volumes": []map[string]any{{"type": "volume", "source": "postgres-data", "target": "/var/lib/postgresql/data"}}}),
 		"nats":      svc(map[string]any{"image": "nats:2.14.7-alpine", "healthcheck": hc}),
