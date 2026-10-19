@@ -57,7 +57,7 @@ function Tile({
   const id = useId();
   const needsHint = health.hint && !['healthy', 'idle', 'loading'].includes(health.level);
   return (
-    <article className={`infra-tile infra-tile-${health.level}`} aria-labelledby={id}>
+    <article className={`infra-tile infra-tile--${health.level}`} aria-labelledby={id}>
       <div className="infra-tile-head">
         <span className="infra-tile-eyebrow">{eyebrow}</span>
         <HealthBadge health={health} small />
@@ -69,7 +69,7 @@ function Tile({
       <p className="infra-tile-detail">{health.detail}</p>
       {children}
       {staleError != null && (
-        <p className="infra-tile-stale" role="status">
+        <p className="infra-tile-stalenote" role="status">
           <span aria-hidden="true">◌ </span>Showing the last good report: the latest refresh failed.
         </p>
       )}
@@ -152,7 +152,9 @@ export function OverviewTab({ namespace, now, onOpen }: { namespace: string; now
             sg && sg.summary.total > 0 ? (
               <>
                 <strong>{sg.summary.ready}</strong>
-                <span>/ {reporting(sg)} replicas ready</span>
+                <span>
+                  / {reporting(sg)} replica{reporting(sg) === 1 ? '' : 's'} ready
+                </span>
               </>
             ) : (
               <NotReported>{sched.level === 'loading' ? 'Loading…' : 'replicas not reported'}</NotReported>

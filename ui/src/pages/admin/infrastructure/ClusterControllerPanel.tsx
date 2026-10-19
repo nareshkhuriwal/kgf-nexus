@@ -249,7 +249,7 @@ function ClusterCard({
               )}
             </dd>
           </div>
-          <div>
+          <div className="infra-facts-wide">
             <dt>Quota headroom</dt>
             <dd>
               {c.headroom === undefined ? (

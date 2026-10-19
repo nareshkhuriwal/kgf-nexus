@@ -139,7 +139,7 @@ function WorkerCounts({ live }: { live: PoolLive }) {
   if (c.total === 0) return <NotReported>no worker on this queue</NotReported>;
   return (
     <div className="infra-badge-row">
-      <ToneBadge tone="success" glyph="●" label={`${c.active} active`} small />
+      <ToneBadge tone={c.active > 0 ? 'success' : 'muted'} glyph={c.active > 0 ? '●' : '○'} label={`${c.active} active`} small />
       {c.draining > 0 && <ToneBadge tone="warning" glyph="◐" label={`${c.draining} draining`} small />}
       {c.stale > 0 && <ToneBadge tone="warning" glyph="◌" label={`${c.stale} stale`} small />}
       {c.quarantined > 0 && <ToneBadge tone="blocked" glyph="⚑" label={`${c.quarantined} quarantined`} small />}

@@ -79,9 +79,12 @@ export function useNow(ms = 5000): number {
 export function Updated({ at, now, label = 'Updated' }: { at: number | string | null | undefined; now: number; label?: string }) {
   if (!at) return <span className="sub">Not loaded yet</span>;
   const iso = typeof at === 'number' ? new Date(at).toISOString() : at;
+  const ms = typeof at === 'number' ? at : Date.parse(at);
+  // A sub-second age reads as noise ("0ms ago"); anything this recent is "just now".
+  const age = Number.isFinite(ms) && now - ms < 5000 ? 'just now' : fmtAge(iso, Math.max(now, Number.isFinite(ms) ? ms : 0));
   return (
     <span className="sub" title={iso}>
-      {label} {fmtAge(iso, Math.max(now, typeof at === 'number' ? at : 0))}
+      {label} {age}
     </span>
   );
 }

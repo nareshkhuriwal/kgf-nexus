@@ -233,10 +233,10 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; c
 
 .infra-tiles { display: grid; grid-template-columns: repeat(auto-fill,minmax(250px,1fr)); gap: 16px; }
 .infra-tile { display: flex; flex-direction: column; gap: 8px; padding: 18px; background: var(--console-surface); border: 1px solid var(--console-line); border-left-width: 3px; border-radius: 12px; box-shadow: var(--console-shadow); min-width: 0; }
-.infra-tile-healthy { border-left-color: var(--tone-success-bd); }
-.infra-tile-degraded, .infra-tile-stale { border-left-color: var(--tone-warning-bd); }
-.infra-tile-down { border-left-color: var(--tone-danger-bd); }
-.infra-tile-not_reported, .infra-tile-unavailable { border-left-color: var(--tone-muted-bd); border-left-style: dashed; }
+.infra-tile--healthy { border-left-color: var(--tone-success-bd); }
+.infra-tile--degraded, .infra-tile--stale { border-left-color: var(--tone-warning-bd); }
+.infra-tile--down { border-left-color: var(--tone-danger-bd); }
+.infra-tile--not_reported, .infra-tile--unavailable { border-left-color: var(--tone-muted-bd); border-left-style: dashed; }
 .infra-tile-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .infra-tile-eyebrow { font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: var(--fg-muted); }
 .infra-tile-title { margin: 0; font-size: 16px; font-weight: 650; }
@@ -247,7 +247,7 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; c
 .infra-tile-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; }
 .infra-tile-list li { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 8px; align-items: center; }
 .infra-tile-count { font-family: var(--mono); font-size: 12px; color: var(--fg-muted); }
-.infra-tile-stale { margin: 0; font-size: 12px; color: var(--tone-warning-fg); }
+.infra-tile-stalenote { margin: 0; font-size: 12px; color: var(--tone-warning-fg); }
 .infra-tile-hint { margin: 0; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 8px; background: var(--console-subtle); border: 1px solid var(--console-line); }
 .infra-tile-action { margin-top: auto; padding-top: 4px; font-size: 13px; }
 
@@ -260,8 +260,9 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; c
 .infra-facts { margin: 0; display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 12px 20px; }
 .infra-facts dt { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--fg-muted); margin-bottom: 4px; }
 .infra-facts dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
-.infra-table th[scope=row] { font-weight: 600; text-align: left; }
+.infra-table tbody th[scope=row] { font-weight: 600; text-align: left; text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--fg); background: transparent; white-space: normal; padding: 13px 16px; border-bottom: 1px solid var(--console-line); }
 .infra-table td, .infra-table th { vertical-align: top; }
+.infra-table tbody tr:last-child th[scope=row] { border-bottom: 0; }
 .infra-instances td, .infra-runners td { vertical-align: top; }
 
 .infra-fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
@@ -269,6 +270,11 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; c
 .infra-card legend .chip { margin-left: 8px; }
 .infra-chip-unsaved { color: var(--tone-warning-fg); border-color: var(--tone-warning-bd); }
 .infra-card-foot { margin-top: 8px; gap: 10px; }
+.infra-card-foot .spacer { margin-left: auto; }
+.infra-facts .infra-facts-wide { grid-column: 1 / -1; }
+.infra-page .panel-body > :first-child, .infra-fieldset > legend + * { margin-top: 0; }
+.infra-page .col > p, .infra-page .panel-body.col > p { margin: 0; }
+.infra-page .panel-body.col > h3 { margin: 10px 0 0; font-size: 14px; }
 .infra-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .infra-field > label { font-size: 12px; font-weight: 600; color: var(--fg); }
 .infra-field input, .infra-field select { width: 100%; min-width: 0; }
@@ -283,8 +289,10 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; c
 .infra-details > summary { cursor: pointer; font-size: 13px; font-weight: 550; padding: 4px 0; }
 .infra-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .infra-rows h4 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--fg-muted); }
-.infra-row-fields { display: grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)) auto; gap: 8px 12px; align-items: end; }
-.infra-row-remove { align-self: end; }
+.infra-row-fields { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; }
+.infra-row-fields > .infra-field { flex: 1 1 200px; }
+.infra-row-remove { flex: 0 0 auto; }
+.infra-rows > button { align-self: flex-start; }
 
 .infra-filters { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; }
 .infra-filter { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--fg-muted); }
@@ -304,6 +312,7 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; c
 .infra-secret { display: block; padding: 12px 14px; overflow-wrap: anywhere; user-select: all; }
 
 .infra-wizard { display: grid; grid-template-columns: minmax(190px,240px) minmax(0,1fr); gap: 24px; align-items: start; }
+.infra-wizard > * { min-width: 0; }
 .infra-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; position: sticky; top: 12px; }
 .infra-step button { width: 100%; display: flex; align-items: center; gap: 10px; text-align: left; border-color: transparent; background: transparent; white-space: normal; }
 .infra-step-n { flex: 0 0 24px; height: 24px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; border: 1px solid var(--console-line); background: var(--console-subtle); }
@@ -325,7 +334,7 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; c
 .infra-verify-progress { margin: 0; font-weight: 600; }
 
 @media (max-width: 900px) {
-  .infra-wizard { grid-template-columns: 1fr; }
+  .infra-wizard { grid-template-columns: minmax(0,1fr); }
   .infra-steps { position: static; flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
   .infra-step button { white-space: nowrap; }
 }
@@ -342,3 +351,7 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; c
 .infra-history { margin-top: 12px; font-size: 13px; }
 .infra-history > summary { cursor: pointer; color: var(--fg-muted); }
 .infra-history ul { margin-top: 8px; }
+/* Visually-hidden text inside a scrolling table is absolutely positioned; make
+   the scroller its containing block so it is clipped there instead of
+   widening the page on a phone. */
+.infra-page .table-scroll, .infra-detail-disclosure > summary { position: relative; }

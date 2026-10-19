@@ -102,7 +102,7 @@ describe('OverviewTab topology and history', () => {
     render();
     expect(await screen.findByText('1 previous instance — replaced pods that stopped reporting (kept up to 24h)')).toBeInTheDocument();
     expect(screen.getByText('scheduler-old').closest('tr')).toBeNull();
-    expect(within(tile('Scheduler')).getByText('/ 1 replicas ready')).toBeInTheDocument();
+    expect(within(tile('Scheduler')).getByText('/ 1 replica ready')).toBeInTheDocument();
     expect(within(tile('Services')).queryByText('Degraded')).toBeNull();
   });
 });
