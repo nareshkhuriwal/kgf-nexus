@@ -54,9 +54,9 @@ subprocess executor, which assumes the agent host has Python: the compose
 agents are Alpine images without it, so generate_data failed with
 ERROR_CLASS_NOT_FOUND (F150). Declaring `docker` is also a placement
 constraint -- the scheduler only offers these tasks to workers that advertise
-the docker executor (compose agents do: NEXUS_EXECUTORS=subprocess,docker) --
-so a fleet without one leaves the run PENDING with that reason instead of
-failing it. The steps need no network and run under the executor's default
+the docker executor (compose agents do once their Docker socket is usable;
+an agent with NEXUS_EXECUTORS set must list docker) -- so a fleet without one
+leaves the run PENDING with that reason instead of failing it. The steps need no network and run under the executor's default
 `--network none`.
 """
 
