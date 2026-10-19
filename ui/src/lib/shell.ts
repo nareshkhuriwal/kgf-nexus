@@ -42,9 +42,18 @@ export function envRef(name: string): RawArg {
   return { raw: `"$${checkEnv(name)}"` };
 }
 
-/** A literal prefix followed by an env reference: `--from-literal=key="$NAME"`. */
-export function withEnv(prefix: string, name: string): RawArg {
-  return { raw: `${prefix === '' ? '' : shQuote(prefix)}"$${checkEnv(name)}"` };
+/**
+ * A literal prefix, an env reference, and an optional literal suffix:
+ * `--from-literal=key="$NAME"`, `--from-file=k="$DIR"/user.nk`.
+ */
+export function withEnv(prefix: string, name: string, suffix = ''): RawArg {
+  const lit = (s: string) => (s === '' ? '' : shQuote(s));
+  return { raw: `${lit(prefix)}"$${checkEnv(name)}"${lit(suffix)}` };
+}
+
+/** `: "${NAME:?message}"` — stops a script early when a variable it needs is unset. */
+export function requireEnv(name: string, message: string): string {
+  return `: "\${${checkEnv(name)}:?${message.replace(/[\\"$`}]/g, '')}}"`;
 }
 
 function word(a: ShellArg): string {
@@ -52,18 +61,27 @@ function word(a: ShellArg): string {
 }
 
 /**
- * Joins arguments into one command line. Long commands are wrapped before each
- * `--flag` with a backslash continuation, so a reviewer reads one option per
- * line and the command still pastes as one.
+ * Joins arguments into one command line. A long command is wrapped with a
+ * backslash continuation before each `--long-flag`, so a reviewer reads one
+ * option per line and the command still pastes as one. The command's own
+ * words stay together: no break comes until the first line holds at least
+ * four words or a flag (`helm upgrade --install x chart` stays whole).
  */
 export function shellCommand(args: ShellArg[], { wrap = true }: { wrap?: boolean } = {}): string {
   const words = args.map(word);
   if (!wrap || words.join(' ').length <= 80) return words.join(' ');
   let out = words[0] ?? '';
+  let line: string[] = [out];
   for (let i = 1; i < words.length; i++) {
     const w = words[i]!;
-    const flag = typeof args[i] === 'string' ? (args[i] as string) : w;
-    out += flag.startsWith('-') ? ` \\\n  ${w}` : ` ${w}`;
+    const isFlag = w.startsWith('--');
+    if (isFlag && (line.length >= 4 || line.some((x) => x.startsWith('--')))) {
+      out += ` \\\n  ${w}`;
+      line = [w];
+    } else {
+      out += ` ${w}`;
+      line.push(w);
+    }
   }
   return out;
 }

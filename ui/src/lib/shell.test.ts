@@ -11,44 +11,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { envRef, heredoc, pipeline, shellCommand, shQuote, withEnv } from './shell';
+import { envRef, heredoc, pipeline, requireEnv, shellCommand, shQuote, withEnv } from './shell';
+import { loadShell } from '../test/nodeApi';
 
-/**
- * Node's APIs, loaded dynamically: the app's tsconfig deliberately carries no
- * Node typings (this is browser code), so the few calls the oracle needs are
- * typed here instead of widening the whole program's globals.
- */
-interface NodeApi {
-  execFileSync(file: string, args: string[], opts: { encoding: 'utf8'; env: Record<string, string> }): string;
-  existsSync(path: string): boolean;
-  mkdtempSync(prefix: string): string;
-  readFileSync(path: string, encoding: 'utf8'): string;
-  rmSync(path: string, opts: { recursive: boolean; force: boolean }): void;
-  tmpdir(): string;
-  join(...parts: string[]): string;
-  PATH: string;
-}
-
-async function loadNodeApi(): Promise<NodeApi | null> {
-  try {
-    const load = (m: string) => import(/* @vite-ignore */ m) as Promise<Record<string, unknown>>;
-    const [cp, fs, os, path] = await Promise.all([
-      load('node:child_process'),
-      load('node:fs'),
-      load('node:os'),
-      load('node:path'),
-    ]);
-    const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
-    return { ...cp, ...fs, ...os, ...path, PATH: env.PATH ?? '' } as unknown as NodeApi;
-  } catch {
-    return null;
-  }
-}
-
-const node = await loadNodeApi();
-const hasSh = node?.existsSync('/bin/sh') ?? false;
-const sh = (script: string, env: Record<string, string> = {}) =>
-  node!.execFileSync('/bin/sh', ['-c', script], { encoding: 'utf8', env: { PATH: node!.PATH, ...env } });
+const { node, hasSh, sh } = await loadShell();
 
 const AWKWARD = [
   'plain', 'with space', "it's", '$HOME', '`id`', '$(id)', '!event', 'a;b', 'a&&b', 'a|b',
@@ -84,6 +50,19 @@ describe('environment references', () => {
     );
   });
 
+  it('take an optional literal suffix', () => {
+    expect(withEnv('--from-file=k=', 'NEXUS_NATS_DIR', '/agent-default/user.nk').raw).toBe(
+      '--from-file=k="$NEXUS_NATS_DIR"/agent-default/user.nk',
+    );
+  });
+
+  it.skipIf(!hasSh)('stop a script when a required variable is unset', () => {
+    const guard = requireEnv('NEXUS_PG_PASSWORD', 'export NEXUS_PG_PASSWORD first');
+    expect(guard).toBe(': "${NEXUS_PG_PASSWORD:?export NEXUS_PG_PASSWORD first}"');
+    expect(() => sh(`${guard}; echo reached`)).toThrow();
+    expect(sh(`${guard}; echo reached`, { NEXUS_PG_PASSWORD: 'x' })).toBe('reached\n');
+  });
+
   it('refuse a name that is not a plain variable', () => {
     expect(() => envRef('X; rm -rf /')).toThrow(/invalid environment variable/);
     expect(() => withEnv('--a=', 'lower')).toThrow(/invalid environment variable/);
@@ -107,8 +86,7 @@ describe('shellCommand', () => {
     ]);
     expect(out).toBe(
       [
-        'helm upgrade \\',
-        '  --install kgf-nexus oci://ghcr.io/acme/charts/kgf-nexus \\',
+        'helm upgrade --install kgf-nexus oci://ghcr.io/acme/charts/kgf-nexus \\',
         '  --version 0.2.0 \\',
         '  --namespace kgf-nexus \\',
         '  --values kgf-nexus-values.yaml \\',
