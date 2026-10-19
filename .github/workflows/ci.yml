@@ -18,8 +18,10 @@
 # rule waits forever.
 #
 # A push to main, or a vX.Y.Z tag, that passes the gate then publishes every
-# image to GHCR, digest-pinned, through .github/workflows/release.yml
-# (`publish`). Pull requests build the same images without pushing (`images`).
+# image to GHCR, digest-pinned, and the Helm chart to
+# oci://ghcr.io/<owner>/charts, through .github/workflows/release.yml
+# (`publish`). Pull requests build the same images and package the chart
+# without pushing anything (`images`).
 name: ci
 
 on:
@@ -505,6 +507,30 @@ jobs:
             NAMESPACE=ci AGENT_IMAGE="ci.example/nexus/agent@$d" \
               deploy/scripts/cluster-controller-overlay.sh "$mode" "ci.example/nexus/cluster-controller@$d" >/dev/null
           done
+  # The AKS install tooling: deploy/scripts/aks-preflight.sh against a stub
+  # kubectl (deploy/scripts/tests/aks-preflight-test.sh; no cluster), and
+  # shellcheck over it with the shellcheck the pinned actionlint image
+  # bundles (the same image as `make actionlint`, ACTIONLINT_IMAGE in the
+  # Makefile: move the two together).
+  install-scripts:
+    name: AKS preflight (tests, shellcheck)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: aks-preflight tests (stub kubectl and az)
+        run: deploy/scripts/tests/aks-preflight-test.sh
+      - name: shellcheck
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" -w /repo --entrypoint shellcheck \
+            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            deploy/scripts/aks-preflight.sh deploy/scripts/tests/aks-preflight-test.sh \
+            deploy/scripts/tests/aks-preflight-stub/kubectl
+
   # Terraform for the dev environment and the AKS/EKS/GKE platforms, OFFLINE:
   # init -backend=false, validate, and `terraform test` plans with mocked
   # providers. No state, no cloud credentials, nothing is applied. Then the
@@ -849,6 +875,7 @@ jobs:
       - proto
       - workflow-lint
       - helm
+      - install-scripts
       - terraform
       - ui
       - browser-e2e
@@ -868,7 +895,7 @@ jobs:
           # Run on every change, documentation included.
           always="changes build doc-refs docs workflow-lint"
           # Skip themselves on a documentation-only change.
-          code_jobs="integration nats-integration proto helm terraform ui browser-e2e sdk examples compat"
+          code_jobs="integration nats-integration proto helm install-scripts terraform ui browser-e2e sdk examples compat"
           # Pull requests only.
           pr_jobs="images"
 
@@ -910,15 +937,16 @@ jobs:
             echo "quality gate: passed"
             if [ "$EVENT" = push ] && [ "$code" = true ]; then
               echo >> "$GITHUB_STEP_SUMMARY"
-              echo "Passed on a push: \`publish\` releases every image to GHCR, digest-pinned." >> "$GITHUB_STEP_SUMMARY"
+              echo "Passed on a push: \`publish\` releases every image to GHCR, digest-pinned, and the Helm chart." >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
           exit "$failed"
 
   # A push to main or a vX.Y.Z tag that passed the WHOLE gate, on this commit,
   # in this run: every image built for both platforms, pushed to GHCR,
-  # attested, and collected into one validated digest map (release.yml,
-  # push: true). The only job that can write to the registry, and the only one
+  # attested, and collected into one validated digest map, then the Helm
+  # chart packaged, pushed to oci://ghcr.io/<owner>/charts and attested
+  # (release.yml, push: true). The only job that can write to the registry, and the only one
   # that asks for the permissions to: packages to push, id-token and
   # attestations to sign and store the provenance. Never on a pull request,
   # and never in a fork (which would publish to the fork owner's GHCR).
