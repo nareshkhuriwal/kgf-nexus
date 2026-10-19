@@ -1192,7 +1192,16 @@
           "executors": {
             "type": "string",
             "pattern": "^\\s*(subprocess|kubernetes|docker)\\s*(,\\s*(subprocess|kubernetes|docker)\\s*)*$",
-            "description": "Comma-separated: subprocess (always offered by the agent), kubernetes (renders the kubernetes executor's configuration). docker is refused by the templates: the chart mounts no Docker daemon."
+            "description": "Comma-separated executors the agent builds and advertises, exactly (NEXUS_EXECUTORS; default subprocess): subprocess, kubernetes (also renders the kubernetes executor's configuration, Role and task-API policy). An agent whose executors include only kubernetes runs every task as its own pod. docker is refused by the templates: the chart mounts no Docker daemon."
+          },
+          "defaultExecutor": {
+            "type": "string",
+            "enum": [
+              "subprocess",
+              "kubernetes",
+              "docker"
+            ],
+            "description": "The executor that runs a task naming no runtime.executor (NEXUS_DEFAULT_EXECUTOR). Default: the first entry of executors. Must be one of executors (the templates refuse anything else)."
           },
           "cpuMillis": {
             "type": "integer",

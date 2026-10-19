@@ -78,6 +78,12 @@ type Runner struct {
 	// WorkerID is this session's identity, handed to executors that label
 	// their workloads with it. Set after registration.
 	WorkerID string
+	// DefaultExecutor runs an attempt whose spec names no executor: the
+	// agent's NEXUS_DEFAULT_EXECUTOR, which it advertises as the
+	// nexus.io/default-executor label so the scheduler only sends such an
+	// attempt here when that executor can run it. Empty means subprocess,
+	// the behaviour before the setting existed. Set with WorkerID.
+	DefaultExecutor string
 	// GPUKind and GPUCount are the GPUs this worker advertises, exported to
 	// every workload (executor.EnvWorkerGPUKind / EnvWorkerGPUCount). Set with
 	// WorkerID.
@@ -275,6 +281,21 @@ func (r *Runner) Executors() []string {
 	return out
 }
 
+// effectiveExecutor is the executor an attempt runs on: the one its spec
+// names, else this worker's default. A spec that names none ran as a
+// subprocess before NEXUS_DEFAULT_EXECUTOR existed, which is still what an
+// unset default means.
+func (r *Runner) effectiveExecutor(named string) string {
+	switch {
+	case named != "":
+		return named
+	case r.DefaultExecutor != "":
+		return r.DefaultExecutor
+	default:
+		return "subprocess"
+	}
+}
+
 // Run executes one assignment to completion. It is the whole body of a
 // per-attempt goroutine, and it OWNS the terminal cleanup: the registry release,
 // the lease untrack and the executor cleanup all happen on every exit path,
@@ -293,8 +314,7 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 			tracing.AttrNodeID.String(a.GetNodeId()),
 			tracing.AttrAttemptID.String(attemptID),
 			tracing.AttrAttemptNumber.Int(int(a.GetAttemptNumber())),
-			tracing.AttrWorkerID.String(r.WorkerID),
-			tracing.AttrExecutor.String(a.GetSpec().GetRuntime().GetExecutor())))
+			tracing.AttrWorkerID.String(r.WorkerID)))
 	defer span.End()
 
 	log := tracing.WithTrace(ctx, r.log.With("attempt_id", attemptID, "run_id", a.GetRunId(),
@@ -334,10 +354,8 @@ func (r *Runner) Run(ctx context.Context, a *nexusv1.TaskAssignment) {
 		}
 	}()
 
-	kind := a.GetSpec().GetRuntime().GetExecutor()
-	if kind == "" {
-		kind = "subprocess"
-	}
+	kind := r.effectiveExecutor(a.GetSpec().GetRuntime().GetExecutor())
+	span.SetAttributes(tracing.AttrExecutor.String(kind))
 	if _, known := r.executors[kind]; !known {
 		// Bounded label: an executor this worker does not run is reported as
 		// "unsupported", not by the (task-author-controlled) name it asked for.

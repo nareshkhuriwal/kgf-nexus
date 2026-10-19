@@ -390,24 +390,72 @@ must_fail "task toleration with a bad effect"   "/agentDefaults/kubernetes/taskT
 must_fail "misspelt networkPolicy key"          "additional properties 'ingresFrom' not allowed" --set-json 'networkPolicy={"enabled":true,"ingresFrom":[]}'
 must_fail "component topology the gateway refuses" "/services/apiGateway/componentTopology" --set services.apiGateway.componentTopology=everyone
 
-# Executors are discovered by the agent, never read from a list: the chart
-# renders the kubernetes executor's configuration for "kubernetes", refuses
-# docker (no daemon socket in a chart pod), and renders neither
-# NEXUS_EXECUTORS nor NEXUS_HEARTBEAT_INTERVAL_MS, which no binary reads.
+# Executors are an exact list: the chart renders NEXUS_EXECUTORS (agents[].
+# executors, trimmed and de-duplicated) and NEXUS_DEFAULT_EXECUTOR
+# (defaultExecutor, else the first executor) on every agent, refuses docker
+# (no daemon socket in a chart pod: the agent would not start) and a default
+# outside the list, and never renders NEXUS_HEARTBEAT_INTERVAL_MS, which no
+# binary reads (the gateway dictates the interval, ADR-0005).
 one_agent='{"name":"agent-x","queues":"default","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824'
-must_fail "docker executor in a chart pod"      "the chart mounts no daemon socket" --set-json "agents[0]=$one_agent,\"executors\":\"subprocess,docker\"}"
+must_fail "docker executor in a chart pod"      "the chart mounts none"        --set-json "agents[0]=$one_agent,\"executors\":\"subprocess,docker\"}"
 must_fail "an executor the agent does not have" "/agents/0/executors"          --set-json "agents[0]=$one_agent,\"executors\":\"podman\"}"
+must_fail "default executor outside the list"   "defaultExecutor subprocess is not one of its executors (kubernetes)" \
+  --set-json "agents[0]=$one_agent,\"executors\":\"kubernetes\",\"defaultExecutor\":\"subprocess\"}"
+must_fail "default executor the agent lacks"    "/agents/0/defaultExecutor"    --set-json "agents[0]=$one_agent,\"defaultExecutor\":\"wasm\"}"
 dead=0
 for values in "$chart"/ci/*-values.yaml; do
   name=$(basename "$values" -values.yaml)
-  if [ -f "$tmp/$name.yaml" ] && grep -qE 'NEXUS_EXECUTORS|NEXUS_HEARTBEAT_INTERVAL_MS' "$tmp/$name.yaml"; then
-    echo "FAIL: ci/$name renders NEXUS_EXECUTORS or NEXUS_HEARTBEAT_INTERVAL_MS, which the agent does not read"; dead=1; fail=1
+  if [ -f "$tmp/$name.yaml" ] && grep -q 'NEXUS_HEARTBEAT_INTERVAL_MS' "$tmp/$name.yaml"; then
+    echo "FAIL: ci/$name renders NEXUS_HEARTBEAT_INTERVAL_MS, which the agent does not read"; dead=1; fail=1
   fi
 done
 if [ "$dead" = 0 ] && "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set agentDefaults.heartbeatIntervalMs=5000 >/dev/null 2>&1; then
-  echo "ok   rendered: no dead agent variable in any ci/ render; agentDefaults.heartbeatIntervalMs still accepted"
+  echo "ok   rendered: no NEXUS_HEARTBEAT_INTERVAL_MS in any ci/ render; agentDefaults.heartbeatIntervalMs still accepted"
 elif [ "$dead" = 0 ]; then
   echo "FAIL: agentDefaults.heartbeatIntervalMs is no longer accepted (older values files set it)"; fail=1
+fi
+# What each agent gets: every agent of every ci/ render carries both
+# variables, the default among the executors; the AKS examples' agents run
+# kubernetes alone (every task its own pod); the default agent is subprocess;
+# a messy list is normalized and an explicit default kept.
+if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" \
+    --set-json "agents=[$one_agent,\"executors\":\" subprocess , kubernetes,subprocess\",\"defaultExecutor\":\"kubernetes\"}]" \
+    >"$tmp/execs-mixed.yaml" 2>&1 &&
+   python3 - "$tmp" "$chart"/ci/*-values.yaml <<'PY'
+import os, sys, yaml
+tmp, files = sys.argv[1], sys.argv[2:]
+def agents(path):
+    out = {}
+    for d in yaml.safe_load_all(open(path)):
+        if d and d["kind"] == "Deployment" and \
+           d["spec"]["template"]["metadata"]["labels"].get("nexus.khuriwalgroup.com/role") == "agent":
+            env = {e["name"]: e.get("value") for e in d["spec"]["template"]["spec"]["containers"][0]["env"]}
+            out[d["metadata"]["name"]] = (env.get("NEXUS_EXECUTORS"), env.get("NEXUS_DEFAULT_EXECUTOR"))
+    return out
+seen = 0
+for f in files:
+    name = os.path.basename(f)[:-len("-values.yaml")]
+    render = os.path.join(tmp, name + ".yaml")
+    if not os.path.exists(render):
+        continue
+    found = agents(render)
+    for agent, (execs, default) in found.items():
+        assert execs and default, (name, agent, execs, default)
+        assert default in execs.split(","), (name, agent, execs, default)
+        assert "docker" not in execs.split(","), (name, agent, execs)
+        seen += 1
+    if name in ("aks-existing-cluster", "aks-worker-pool"):
+        assert found and all(v == ("kubernetes", "kubernetes") for v in found.values()), (name, found)
+    if name == "minimal":
+        assert found == {"agent-cpu": ("subprocess", "subprocess")}, found
+assert seen, "no agent in any ci/ render"
+mixed = agents(os.path.join(tmp, "execs-mixed.yaml"))
+assert mixed == {"agent-x": ("subprocess,kubernetes", "kubernetes")}, mixed
+PY
+then
+  echo "ok   rendered: NEXUS_EXECUTORS and NEXUS_DEFAULT_EXECUTOR on every agent; the AKS examples' agents are kubernetes-only"
+else
+  echo "FAIL: agent executors did not render as expected"; tail -5 "$tmp/execs-mixed.yaml"; fail=1
 fi
 
 # NEXUS_COMPONENT_TOPOLOGY (ADR-0037 §4) reaches the api-gateway, and only it:
@@ -499,7 +547,7 @@ fi
 
 # The agents' control-plane TLS over this release's mTLS (ci/full-values.yaml):
 # the client leaf stays, the CA comes from caSecretName, the name is overridden.
-if grep -A40 'NEXUS_CONTROL_PLANE, value: "api-gateway.nexus-validate.svc:9091"' "$tmp/full.yaml" >"$tmp/cptls" &&
+if grep -A60 'NEXUS_CONTROL_PLANE, value: "api-gateway.nexus-validate.svc:9091"' "$tmp/full.yaml" >"$tmp/cptls" &&
    grep -qF 'name: NEXUS_TLS_CLIENT_CERT_FILE, value: /etc/nexus/tls/tls.crt' "$tmp/cptls" &&
    grep -qF 'name: NEXUS_TLS_CA_FILE, value: "/etc/nexus/control-plane-ca/ca.crt"' "$tmp/cptls" &&
    grep -qF 'name: NEXUS_TLS_SERVER_NAME, value: "workers.example.com"' "$tmp/cptls" &&

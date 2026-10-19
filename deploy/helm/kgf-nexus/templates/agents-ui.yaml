@@ -64,11 +64,13 @@ spec:
             - { name: NEXUS_NAMESPACE, value: {{ .namespace | default $root.Values.nexusNamespace | quote }} }
             - { name: NEXUS_QUEUES, value: {{ .queues | quote }} }
             - { name: NEXUS_LABELS, value: {{ .labels | quote }} }
-            {{- /* No NEXUS_EXECUTORS: the agent discovers its executors
-                   (subprocess always; kubernetes from the NEXUS_K8S_*
-                   configuration below). `executors` selects that
-                   configuration; nexus.agentExecutorsRequired checks it. */}}
             {{- include "nexus.agentExecutorsRequired" . }}
+            # Exactly the executors this agent builds and advertises; one it
+            # cannot build stops it at startup. A task naming no executor runs
+            # on the default: with kubernetes alone, every task is its own pod
+            # (docs/IMAGES.md §4.3).
+            - { name: NEXUS_EXECUTORS, value: {{ include "nexus.agentExecutors" . | quote }} }
+            - { name: NEXUS_DEFAULT_EXECUTOR, value: {{ include "nexus.agentDefaultExecutor" . | quote }} }
             {{- if include "nexus.agentUsesKubernetes" . }}
             {{- $k := include "nexus.agentK8s" (list $root .) | fromYaml }}
             # The kubernetes executor (OPERATIONS §13). The pod name is the

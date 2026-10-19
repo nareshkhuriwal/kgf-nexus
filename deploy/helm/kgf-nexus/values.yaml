@@ -627,20 +627,25 @@ schedulers:
 # Worker agents. Real hardware only by default; simulated capacity belongs in a
 # dev environment and must be labelled as such.
 #
-# executors: which optional executor the chart configures for this agent.
-#   The agent DISCOVERS its executors; it reads no list (docs/IMAGES.md §4.3):
-#     subprocess  always offered, and not something the chart can turn off;
-#     kubernetes  offered when NEXUS_K8S_NAMESPACE is set and its RBAC probe
-#                 passes -- "kubernetes" here renders that configuration, the
-#                 task-namespace Role and the task-API policy, and mounts the
-#                 API token;
-#     docker      offered only when `docker info` reaches a daemon. The chart
-#                 mounts no Docker socket (a restricted pod cannot), so it is
-#                 refused here rather than silently never offered.
-#   A task that names no executor (runtime.executor) runs as a SUBPROCESS on
-#   whichever worker claims it, a kubernetes agent included: inside that agent
-#   pod, within its resources. Give tasks for a kubernetes agent's queues
-#   runtime.executor: kubernetes.
+# executors: the executors this agent builds and advertises, exactly
+#   (comma-separated, default subprocess; rendered as NEXUS_EXECUTORS,
+#   docs/IMAGES.md §4.3). The agent stops at startup if one cannot be built.
+#     subprocess  tasks run as processes inside the agent pod, within its
+#                 resources;
+#     kubernetes  each attempt is its own Job/pod in the task namespace, placed
+#                 by kubernetes.taskNodeSelector/taskTolerations. It also renders
+#                 the NEXUS_K8S_* configuration, the task-namespace Role and the
+#                 task-API policy, and mounts the API token. The RBAC probe must
+#                 pass, or the agent does not start;
+#     docker      needs a Docker daemon socket, which the chart does not mount
+#                 (a restricted pod cannot), so it is refused here.
+#   "kubernetes" alone makes every task on this agent a pod; a task that names
+#   runtime.executor: subprocess is then never given to it.
+# defaultExecutor: the executor for a task that names no runtime.executor
+#   (NEXUS_DEFAULT_EXECUTOR). Default: the first entry of executors; it must be
+#   one of them. The scheduler gives such a task to this agent only when the
+#   default can run it: a kubernetes default needs the task's runtime.image
+#   (the agent advertises it as the worker label nexus.io/default-executor).
 #
 # Optional per entry, beyond the capacity it advertises:
 #   gpuCount / gpuKind / gpuMemoryBytes   what the agent ADVERTISES (--gpu-count,

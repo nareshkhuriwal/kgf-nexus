@@ -369,8 +369,11 @@ Older MinIO images lack `mc ready`. Pin a newer release or substitute
 **Docker socket permission denied on an agent**
 The agents bind-mount `/var/run/docker.sock` for the docker executor, which is
 effectively root on the host — acceptable on a laptop, never in production
-(ADR-0007's k8s executor is the answer there). If you only need the subprocess
-executor, drop the mount and set `AGENT_EXECUTORS: subprocess`.
+(ADR-0007's k8s executor is the answer there). Without a usable socket an agent
+logs "docker daemon unreachable" and simply offers no docker executor. If you
+only need the subprocess executor, drop the mount and set
+`NEXUS_EXECUTORS: subprocess` on the agents, an exact list: they then never
+probe for docker (docs/IMAGES.md §4.3).
 
 **Reset everything**
 ```bash

@@ -40,6 +40,8 @@ services:
       mock-llm:
         condition: service_healthy
     environment:
+      # Exactly subprocess (the image has no Docker CLI, so discovery would
+      # find nothing more): the Python tasks run in this container.
       NEXUS_EXECUTORS: subprocess
     volumes:
       - ../examples:/opt/nexus/examples:ro

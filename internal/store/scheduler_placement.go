@@ -123,11 +123,17 @@ func (s *SchedulerStore) scoreConfig() domain.ScoreConfig {
 	return domain.ScoreConfig{Policy: s.cfg.PlacementPolicy, Cost: s.cfg.Cost}
 }
 
-func isKubernetesExecutor(kind string) bool { return kind == "kubernetes" || kind == "k8s" }
+func isKubernetesExecutor(kind string) bool {
+	return domain.CanonicalExecutor(kind) == domain.ExecutorKubernetes
+}
 
 // headroomBlocks applies a cluster's published ResourceQuota headroom (ADR-0031
 // §3) to an attempt that will create pods in the worker's task namespace. It
 // returns a pending_reason when the attempt does not fit, "" otherwise.
+//
+// executor is the one the attempt runs on if this worker takes it
+// (domain.EffectiveExecutor): a task that names none becomes a pod on a
+// kubernetes-default worker, and is gated like one that names kubernetes.
 //
 // The observed headroom is reduced by what was reserved on the same cluster's
 // workers for that namespace SINCE the observation, which the quota controller
@@ -135,8 +141,9 @@ func isKubernetesExecutor(kind string) bool { return kind == "kubernetes" || kin
 // routing guard, and the API server's quota admission is the enforcement.
 func (s *SchedulerStore) headroomBlocks(
 	ctx context.Context, tx pgx.Tx, now time.Time, workerID uuid.UUID, f *workerFacts, cand *Candidate,
+	executor string,
 ) (string, error) {
-	if !isKubernetesExecutor(cand.Spec.Executor) || f.HeadroomAt == nil || len(f.Headroom) == 0 {
+	if !isKubernetesExecutor(executor) || f.HeadroomAt == nil || len(f.Headroom) == 0 {
 		return "", nil
 	}
 	ns, cluster := f.Labels[domain.LabelK8sTaskNamespace], f.Labels[domain.LabelCluster]
@@ -221,6 +228,25 @@ SELECT w.hostname
 type peerWorker struct {
 	view  domain.WorkerView
 	facts workerFacts
+	// executors and defaultExecutor decide whether the peer could run the
+	// candidate at all: a peer that cannot is no reason to wait.
+	executors       []string
+	defaultExecutor string
+}
+
+// canRun reports whether the peer could run cand: it advertises the executor
+// the task names, or, for a task naming none, its default can run it.
+func (p *peerWorker) canRun(cand *Candidate) bool {
+	if named := cand.Spec.Executor; named != "" {
+		for _, e := range p.executors {
+			if e == named {
+				return true
+			}
+		}
+		return false
+	}
+	return domain.CanRunUnnamed(domain.WorkerDefaultExecutor(
+		map[string]string{domain.LabelDefaultExecutor: p.defaultExecutor}), cand.Spec.Unnamed())
 }
 
 // peerSet lazily loads the polling worker's peers once per claim transaction.
@@ -240,7 +266,8 @@ func (s *SchedulerStore) loadPeers(ctx context.Context, tx pgx.Tx, now time.Time
 	}
 	ps.loaded = true
 	rows, err := tx.Query(ctx, `
-SELECT w.hostname, w.capacity, w.committed, `+s.placementCols()+`
+SELECT w.hostname, w.capacity, w.committed, w.executors,
+       COALESCE(w.labels ->> '`+domain.LabelDefaultExecutor+`', ''), `+s.placementCols()+`
   FROM workers w`+s.placementJoin()+`
  WHERE w.tenant_id = (SELECT tenant_id FROM workers WHERE id = $1)
    AND w.id <> $1
@@ -257,11 +284,13 @@ SELECT w.hostname, w.capacity, w.committed, `+s.placementCols()+`
 		var (
 			host                         string
 			capJSON, comJSON, labelsJSON []byte
-			cached                       []string
+			executors, cached            []string
+			defaultExecutor              string
 			clLabels, headroom           []byte
 			at                           *time.Time
 		)
-		if err := rows.Scan(&host, &capJSON, &comJSON, &labelsJSON, &cached, &clLabels, &headroom, &at); err != nil {
+		if err := rows.Scan(&host, &capJSON, &comJSON, &executors, &defaultExecutor,
+			&labelsJSON, &cached, &clLabels, &headroom, &at); err != nil {
 			return fmt.Errorf("scan deferral peer: %w", err)
 		}
 		capacity, err := decodeVector(capJSON)
@@ -273,9 +302,10 @@ SELECT w.hostname, w.capacity, w.committed, `+s.placementCols()+`
 			continue
 		}
 		f := scanFacts(labelsJSON, cached, clLabels, headroom, at)
-		ps.peers = append(ps.peers, peerWorker{facts: f, view: domain.WorkerView{
-			Hostname: host, Labels: f.Labels, Capacity: capacity, Committed: committed, Cached: f.Cached,
-		}})
+		ps.peers = append(ps.peers, peerWorker{facts: f, executors: executors, defaultExecutor: defaultExecutor,
+			view: domain.WorkerView{
+				Hostname: host, Labels: f.Labels, Capacity: capacity, Committed: committed, Cached: f.Cached,
+			}})
 	}
 	return rows.Err()
 }
@@ -307,6 +337,9 @@ func (s *SchedulerStore) shouldDefer(
 	}
 	for i := range ps.peers {
 		p := &ps.peers[i]
+		if !p.canRun(cand) {
+			continue
+		}
 		if ok, _ := domain.Eligible(p.facts.Labels, cand.Spec.Placement); !ok {
 			continue
 		}

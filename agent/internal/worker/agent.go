@@ -90,6 +90,17 @@ type Config struct {
 	// URL disables it and the agent long-polls exactly as it always has.
 	Bus bus.Config
 
+	// Executors is the executor allow list (NEXUS_EXECUTORS): the agent
+	// builds and advertises exactly these, and fails when one cannot be built.
+	// Nil means discovery, the behaviour before the list existed: subprocess
+	// always, docker and kubernetes when usable. See executors.go.
+	Executors []string
+	// DefaultExecutor runs a task that names no executor
+	// (NEXUS_DEFAULT_EXECUTOR), and is advertised as the worker label
+	// nexus.io/default-executor. Empty means subprocess when allowed, else
+	// the first allowed executor. It must be in Executors.
+	DefaultExecutor string
+
 	// Kubernetes is the kubernetes executor, or nil when NEXUS_K8S_NAMESPACE is
 	// unset. Built once by the caller rather than per session: it owns
 	// long-lived informers, and a REREGISTER must not leak a watch per session.
@@ -211,6 +222,11 @@ type Agent struct {
 	// execs is built once per session at registration, so what the worker
 	// advertises and what it runs (and reaps) are the same instances.
 	execs map[string]executor.Executor
+	// sel is the validated executor selection (Config.Executors and
+	// Config.DefaultExecutor); probes are its availability checks, nil
+	// outside tests.
+	sel    ExecutorSelection
+	probes executorProbes
 
 	// reregister signals the supervising loop that this session is invalid and a
 	// fresh registration (a NEW worker_id) is required.
@@ -245,12 +261,20 @@ func New(cfg Config, client Client, log *slog.Logger) (*Agent, error) {
 		cfg.DrainGracePeriod = 5 * time.Minute
 	}
 
+	sel, err := cfg.selection()
+	if err != nil {
+		return nil, fmt.Errorf("agent: %w", err)
+	}
+	if err := checkLabelConflict(cfg.Labels, sel); err != nil {
+		return nil, fmt.Errorf("agent: %w", err)
+	}
+
 	w, err := wal.Open(cfg.WALDir)
 	if err != nil {
 		return nil, fmt.Errorf("agent: open WAL: %w", err)
 	}
 	return &Agent{
-		cfg: cfg, client: client, log: log, wal: w,
+		cfg: cfg, client: client, log: log, wal: w, sel: sel,
 		registry:   newAgentRegistry(cfg),
 		reregister: make(chan struct{}, 1),
 	}, nil
@@ -392,19 +416,26 @@ var ErrReregister = errors.New("agent: control plane requested re-registration")
 
 // register advertises capacity, queues, labels, supported executors and the
 // agent version, and receives the per-session worker_id and session_token.
+//
+// The default executor travels as the nexus.io/default-executor label, so the
+// scheduler gives this worker a task that names no executor only when its
+// default can run it.
 func (a *Agent) register(ctx context.Context) error {
-	execs := a.buildExecutors()
-	kinds := make([]string, 0, len(execs))
-	for k := range execs {
-		kinds = append(kinds, k)
+	execs, err := a.buildExecutors()
+	if err != nil {
+		// Configuration the operator must fix, not a condition to retry: an
+		// agent advertising less than its allow list would leave work unplaced
+		// for no visible reason.
+		return fmt.Errorf("agent: executors: %w", err)
 	}
+	kinds := advertisedKinds(execs)
 
 	// Retried while the control plane is merely not ready; see register.go.
 	resp, err := a.registerWithRetry(ctx, &nexusv1.RegisterRequest{
 		Namespace:    a.cfg.Namespace,
 		Hostname:     a.cfg.Hostname,
 		Queues:       a.cfg.Queues,
-		Labels:       a.cfg.Labels,
+		Labels:       a.registrationLabels(),
 		Capacity:     a.cfg.Capacity,
 		Executors:    kinds,
 		AgentVersion: a.cfg.AgentVersion,
@@ -422,6 +453,7 @@ func (a *Agent) register(ctx context.Context) error {
 	a.log = a.log.With("worker_id", a.workerID)
 	a.log.Info("registered with the control plane",
 		"namespace", a.cfg.Namespace, "queues", a.cfg.Queues, "executors", kinds,
+		"default_executor", a.sel.Default,
 		"heartbeat_interval_ms", resp.GetHeartbeatIntervalMs(), "lease_ttl_ms", resp.GetLeaseTtlMs())
 
 	a.initResultStore(resp.GetResultStore())
@@ -436,6 +468,7 @@ func (a *Agent) register(ctx context.Context) error {
 	a.execs = execs
 	a.runner = NewRunner(execs, a.registry, a.keeper, reporter, a.wal, a.store, a.log)
 	a.runner.WorkerID = a.workerID
+	a.runner.DefaultExecutor = a.sel.Default
 	a.runner.GPUKind = a.cfg.Capacity.GetGpuKind()
 	a.runner.GPUCount = a.cfg.Capacity.GetGpuCount()
 	a.runner.Metrics = a.cfg.Metrics
@@ -455,6 +488,7 @@ func (a *Agent) register(ctx context.Context) error {
 	a.hb = heartbeat.New(a.workerID, a.client, a.registry, a, hbInterval, a.log)
 	a.hb.Observe = a.cfg.Metrics.Heartbeat
 	a.cfg.Metrics.SessionStarted(a.cfg.Capacity)
+	a.cfg.Metrics.ExecutorsAdvertised(kinds, a.sel.Default)
 	a.puller = NewPuller(a.workerID, a.cfg.Queues, a.client, a.registry, a.keeper, a.runner, a.log)
 	a.runner.Cache = a.cfg.Cache
 	a.hb.Extra = a.heartbeatExtra
@@ -467,49 +501,6 @@ func newAgentRegistry(cfg Config) *Registry {
 	r := NewRegistryWithGPUs(cfg.Capacity, cfg.GPU)
 	r.MPSPipeDir = cfg.MPSPipeDir
 	return r
-}
-
-// buildExecutors constructs the substrates this worker supports.
-//
-// Docker is advertised only when a daemon is actually reachable: advertising an
-// executor we cannot run turns every task routed here into an INFRASTRUCTURE
-// failure, and the scheduler would keep routing them here because we said we
-// supported it.
-func (a *Agent) buildExecutors() map[string]executor.Executor {
-	out := map[string]executor.Executor{
-		"subprocess": &executor.SubprocessExecutor{
-			Root: a.cfg.WorkDir, Log: a.log,
-			AllowUnenforceableLimits: a.cfg.AllowUnenforceableLimits,
-			// Variables a task may only receive by declaring them (env://)
-			// must not also arrive by inheritance (F138).
-			InheritDeny:    a.cfg.Secrets.EnvAllowPatterns(),
-			EnvPassthrough: a.cfg.SubprocessEnvPassthrough,
-		},
-	}
-	probe, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if executor.DockerAvailable(probe, "") {
-		out["docker"] = &executor.DockerExecutor{Root: a.cfg.WorkDir, Log: a.log}
-	} else {
-		a.log.Warn("docker daemon unreachable; not advertising the docker executor")
-	}
-	if k := a.cfg.Kubernetes; k != nil {
-		// Same rule as docker: advertise only what we verified we can run.
-		// Probe checks reachability, server version and the RBAC verbs the
-		// executor uses, so a missing Role is a log line at boot rather than
-		// an INFRASTRUCTURE failure on every task routed here.
-		kprobe, kcancel := context.WithTimeout(context.Background(), 20*time.Second)
-		err := k.Probe(kprobe)
-		kcancel()
-		if err != nil {
-			a.log.Warn("kubernetes executor configured but not usable; not advertising it",
-				"namespace", k.Config.Namespace, "error", err)
-		} else {
-			out[executor.KubernetesKind] = k
-			out[executor.KubernetesKindAlias] = k
-		}
-	}
-	return out
 }
 
 // reattachKubernetes resolves the WAL's STARTING entries whose attempts ran as

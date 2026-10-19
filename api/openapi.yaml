@@ -1696,7 +1696,7 @@ paths:
                     queues: [default, gpu]
                     executors: [subprocess, docker]
                     state: ACTIVE
-                    labels: {zone: eu-west-1a}
+                    labels: {zone: eu-west-1a, nexus.io/default-executor: subprocess}
                     capacity: {cpu_millis: 8000, memory_bytes: 34359738368, gpu_count: 1}
                     committed: {cpu_millis: 500, memory_bytes: 536870912}
                     agent_version: 1.14.2
@@ -7406,8 +7406,19 @@ components:
         executors:
           type: [array, 'null']
           items: {type: string}
+          description: >-
+            The executors this worker advertised at registration (the agent's
+            NEXUS_EXECUTORS, or what it discovered when that is unset). A task
+            naming one of them can be placed here; kubernetes is listed with
+            its alias k8s.
         state: {$ref: '#/components/schemas/WorkerState'}
-        labels: {$ref: '#/components/schemas/AnyJSON'}
+        labels:
+          $ref: '#/components/schemas/AnyJSON'
+          description: >-
+            The worker's labels, an object of strings. The agent adds
+            nexus.io/default-executor: the executor that runs a task naming no
+            runtime.executor (NEXUS_DEFAULT_EXECUTOR). Absent from agents that
+            predate it, which run such tasks as subprocesses.
         capacity: {$ref: '#/components/schemas/AnyJSON'}
         committed: {$ref: '#/components/schemas/AnyJSON'}
         agent_version: {type: string}
