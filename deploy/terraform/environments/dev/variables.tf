@@ -114,10 +114,22 @@ variable "kgf" {
   default = {
     authMode = "standalone"
   }
+
+  validation {
+    condition     = contains(["standalone", "kgf", "both"], var.kgf.authMode)
+    error_message = "kgf.authMode must be standalone, kgf or both (the chart's values.schema.json)."
+  }
 }
 
 variable "workspace_worker_namespaces" {
   description = "KGF.Nexus workspace namespaces (kgf-...) to run local agents for. Needs authMode kgf and namespaces KGF has provisioned. Kept out of git in local.tfvars here, which make k8s-dev-up passes when it exists."
   type        = list(string)
   default     = []
+
+  # The derived KGF.Nexus namespace (OPERATIONS §24.11), and what make
+  # k8s-dev-up matches to create each one's NATS identity.
+  validation {
+    condition     = alltrue([for ns in var.workspace_worker_namespaces : can(regex("^kgf-[0-9a-f]{32}$", ns))])
+    error_message = "Each workspace namespace is kgf- followed by 32 lowercase hex characters."
+  }
 }

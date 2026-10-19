@@ -449,8 +449,9 @@ once KGF owns ingest the sink is the adapter to it.
 > below KGF's own header, calling Nexus through KGF with the workspace's
 > context. Its exact
 > contract -- routes, the API base path, what is hidden -- is **to be
-> specified** with the extension, which is to move into the kgf-cloud
-> repository. This repository's `ui/` is unchanged by ADR-0034.
+> specified** with the extension, which lives in the kgf-cloud repository
+> (`web/extensions/nexus`, its `src/kgf` layer). This repository's `ui/` is
+> unchanged by ADR-0034.
 
 The Nexus console is repackaged as the `kgf_ext_nexus` module-federation
 remote. It exposes `./routes`, `./nav`, `./landing`, `./createForm` and

@@ -422,7 +422,7 @@ k8s-dev-up: ## Build + load images, then terraform apply the dev environment on 
 	tag=$$(deploy/scripts/k8s-dev-images.sh | tail -n 1); \
 	echo "image tag: $$tag"; \
 	terraform -chdir=$(TF_DEV) init -input=false -upgrade=false >/dev/null; \
-	terraform -chdir=$(TF_DEV) apply -input=false -auto-approve -var "image_tag=$$tag" $(TF_DEV_VARS); \
+	terraform -chdir=$(TF_DEV) apply -input=false -auto-approve $(TF_DEV_VARS) -var "image_tag=$$tag"; \
 	echo; echo "Admin API key: terraform -chdir=$(TF_DEV) output -raw admin_api_key"
 
 k8s-dev-test: ## Run the workload suite (CSV ETL, ML training, GPU scheduling, fan-out) on the dev environment
@@ -436,7 +436,7 @@ k8s-dev-status: ## Show the dev environment's pods and URLs
 	@terraform -chdir=$(TF_DEV) output
 
 k8s-dev-down: ## Destroy the dev environment (DELETES its data volumes)
-	TF_VAR_postgres_password="$$(cat .dev-postgres/password 2>/dev/null || echo unused)" terraform -chdir=$(TF_DEV) destroy -input=false
+	TF_VAR_postgres_password="$$(cat .dev-postgres/password 2>/dev/null || echo unused)" terraform -chdir=$(TF_DEV) destroy -input=false $(TF_DEV_VARS)
 
 # ── Terraform: cloud platforms (deploy/terraform) ─────────────────────────
 # OFFLINE only: init -backend=false, validate, and `terraform test` plans with

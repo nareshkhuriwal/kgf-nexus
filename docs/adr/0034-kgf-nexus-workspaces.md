@@ -1,6 +1,6 @@
 # ADR-0034: KGF.Nexus workspaces — one namespace per provisioned workspace
 
-- **Status:** Proposed — pending owner sign-off (implemented on `feature/kgf-studio`)
+- **Status:** Proposed — pending owner sign-off (implemented: migration 0040)
 - **Date:** 2026-09-26
 - **Deciders:** owner, platform team
 - **Refines:** ADR-0024 (context authentication and tenancy mapping),
