@@ -64,6 +64,9 @@ var routePermissions = map[string][]string{
 	"GET /v1/namespaces/{ns}/platform/clusters":           {"infrastructure.view"},
 	"PUT /v1/namespaces/{ns}/platform/clusters/{name}":    {"infrastructure.configure"},
 	"DELETE /v1/namespaces/{ns}/platform/clusters/{name}": {"infrastructure.configure"},
+	// ADR-0037: the live infrastructure views.
+	"GET /v1/namespaces/{ns}/platform/components":         {"infrastructure.view"},
+	"GET /v1/namespaces/{ns}/platform/task-runners":       {"infrastructure.view"},
 	"POST /v1/auth/logout":                                {},
 	"GET /v1/auth/whoami":                                 {},
 	"GET /v1/namespaces/{ns}/users":                       {"users.view"},

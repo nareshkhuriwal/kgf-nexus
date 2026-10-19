@@ -37,6 +37,8 @@ import (
 	nexusv1 "github.com/khuriwalgroup/kgf-nexus/gen/nexus/v1"
 	nexuscfg "github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances/identity"
 	"github.com/khuriwalgroup/kgf-nexus/internal/kgfctx"
 	"github.com/khuriwalgroup/kgf-nexus/internal/mail"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
@@ -219,6 +221,14 @@ func run() error {
 		return err
 	}
 	api = api.WithKGF(mode, kgfAuth)
+	// Who sees the control plane's pods and nodes in the live component view
+	// (ADR-0037 §4). A malformed value is fatal: guessing would either
+	// publish the topology to tenants or hide it from the operator.
+	topology, err := rest.ParseComponentTopology(os.Getenv("NEXUS_COMPONENT_TOPOLOGY"))
+	if err != nil {
+		return err
+	}
+	api = api.WithComponentTopology(topology)
 
 	// Audit export (ADR-0025): sink secrets are sealed under
 	// NEXUS_AUDIT_SINK_KEY(_FILE); without it sinks are refused (503) but
@@ -343,6 +353,16 @@ func run() error {
 		wcfg.WorkloadAPI = workergrpc.DefaultWorkloadAPI()
 		wcfg.WorkloadAPI.MaxCheckpointBytes = cfg.MaxCheckpointBytes
 	}
+	// Attempt placement (ADR-0037) is offered only when its table exists, so
+	// a gateway rolled out before migration 0042 tells agents not to report
+	// rather than failing every report (ADR-0011 rule 5).
+	if wcfg.PlacementReporting, err = store.GatewayAttemptRuntimePresent(ctx, db); err != nil {
+		return err
+	}
+	if !wcfg.PlacementReporting {
+		log.Warn("attempt placement reporting is off: migration 0042 is not applied",
+			"remedy", "apply it and restart the gateway; task runners show no pod or node until then")
+	}
 	nexusv1.RegisterWorkerServiceServer(workerSrv,
 		workergrpc.NewServer(db, rmClient, schedClient, wcfg, log))
 
@@ -359,6 +379,29 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen on %s for metrics: %w", cfg.MetricsAddr, err)
 	}
+
+	// The service-instance registry (ADR-0037): this replica's row, written
+	// every 10 s with the answer its /readyz gives (asked of the health
+	// handler in-process), and marked not ready as soon as shutdown begins.
+	// Deferred after the pool's Close, so it runs before it.
+	readyMux := http.NewServeMux()
+	hc.Routes(readyMux)
+	hb, err := instances.New(pool, instances.Config{
+		Component: instances.APIGateway,
+		Version:   version,
+		Runtime:   identity.FromEnv(nil),
+		Pool:      pool,
+		Ready:     instances.ProbeHandler(readyMux, "/readyz"),
+		Detail: func() map[string]any {
+			// Why task runners might show no pod or node (OPERATIONS §31).
+			return map[string]any{"placement_reporting": wcfg.PlacementReporting}
+		},
+	}, reg, log)
+	if err != nil {
+		return err
+	}
+	stopHeartbeat := instances.Start(ctx, hb)
+	defer stopHeartbeat()
 
 	// The sweeper derives from the same shutdown context as the listeners, so the
 	// signal that drains them ends it too and no goroutine outlives run().
@@ -413,6 +456,7 @@ func run() error {
 	// anything is torn down. Shutting down while still advertising readiness is what
 	// makes deploys drop connections.
 	hc.BeginDraining()
+	stopHeartbeat()
 	time.Sleep(cfg.DrainDelay)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
