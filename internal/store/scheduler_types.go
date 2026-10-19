@@ -65,6 +65,11 @@ type TaskSpecView struct {
 	Version      int32             `json:"version"`
 	NodeSelector map[string]string `json:"node_selector"`
 	Executor     string            `json:"executor"`
+	// Image is runtime.image. Read only so a task that names no executor is
+	// claimed only by a worker whose default executor can run it: a
+	// container default (docker, kubernetes) needs an image
+	// (domain.CanRunUnnamed).
+	Image string `json:"image"`
 
 	ScheduleToStartMs int64 `json:"schedule_to_start_ms"`
 	StartToCloseMs    int64 `json:"start_to_close_ms"`
@@ -376,6 +381,7 @@ func (s *TaskSpecView) UnmarshalJSON(b []byte) error {
 		} `json:"timeouts"`
 		Runtime *struct {
 			Executor string `json:"executor"`
+			Image    string `json:"image"`
 		} `json:"runtime"`
 		Idempotency      string          `json:"idempotency"`
 		ConcurrencyKey   string          `json:"concurrency_key"`
@@ -394,6 +400,9 @@ func (s *TaskSpecView) UnmarshalJSON(b []byte) error {
 		}
 		if sn.Runtime != nil && sn.Runtime.Executor != "" {
 			s.Executor = sn.Runtime.Executor
+		}
+		if sn.Runtime != nil && sn.Runtime.Image != "" {
+			s.Image = sn.Runtime.Image
 		}
 		if t := sn.Timeouts; t != nil {
 			if v, ok := numInt64(t.ScheduleToStartMs); ok {
@@ -438,6 +447,7 @@ func (s *TaskSpecView) UnmarshalJSON(b []byte) error {
 		} `json:"timeouts"`
 		Runtime *struct {
 			Executor string `json:"executor"`
+			Image    string `json:"image"`
 		} `json:"runtime"`
 		Idempotency      string          `json:"idempotency"`
 		ConcurrencyKey   string          `json:"concurrencyKey"`
@@ -462,6 +472,9 @@ func (s *TaskSpecView) UnmarshalJSON(b []byte) error {
 	}
 	if pj.Runtime != nil && pj.Runtime.Executor != "" {
 		s.Executor = pj.Runtime.Executor
+	}
+	if pj.Runtime != nil && pj.Runtime.Image != "" {
+		s.Image = pj.Runtime.Image
 	}
 	if t := pj.Timeouts; t != nil {
 		if v, ok := numInt64(t.ScheduleToStartMs); ok {

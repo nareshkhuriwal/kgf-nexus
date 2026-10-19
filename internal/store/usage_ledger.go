@@ -49,7 +49,10 @@ const OutboxTopicUsageRecorded = "usage_recorded"
 //   - *_seconds: the reserved vector times reserved_seconds.
 //
 // The executor is the one the task declared (both spec dialects, as the claim
-// reads it); the pool is the namespace policy's pool serving the queue, if any.
+// reads it), else the default of the worker that ran it (its
+// nexus.io/default-executor label: what the claim and the agent resolved an
+// unnamed executor to); NULL when neither says, as for a worker that predates
+// the label. The pool is the namespace policy's pool serving the queue, if any.
 const recordUsageSQL = `
 WITH src AS (
   SELECT a.id, a.tenant_id, r.namespace, a.run_id, a.node_id, a.attempt_number,
@@ -57,7 +60,8 @@ WITH src AS (
          (SELECT qp.pool FROM namespace_queue_pools qp
            WHERE qp.tenant_id = a.tenant_id AND qp.queue = a.queue) AS pool,
          a.worker_id, w.hostname,
-         NULLIF(COALESCE(n.spec_json #>> '{runtime,executor}', n.spec_json #>> '{executor}', ''), '') AS executor,
+         COALESCE(NULLIF(COALESCE(n.spec_json #>> '{runtime,executor}', n.spec_json #>> '{executor}', ''), ''),
+                  NULLIF(w.labels ->> 'nexus.io/default-executor', '')) AS executor,
          COALESCE((a.resource_request ->> 'cpu_millis')::bigint, 0)   AS cpu_millis,
          COALESCE((a.resource_request ->> 'memory_bytes')::bigint, 0) AS memory_bytes,
          COALESCE((a.resource_request ->> 'gpu_count')::int, 0)       AS gpu_count,

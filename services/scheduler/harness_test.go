@@ -185,6 +185,11 @@ type nodeSpec struct {
 	// writes.
 	Placement          map[string]any `json:"placement,omitempty"`
 	PreferSameWorkerAs string         `json:"prefer_same_worker_as,omitempty"`
+	// Image is runtime.image in the flat dialect; Runtime is the DAG
+	// engine's nested runtime block (runtime.executor, runtime.image), the
+	// dialect production specs arrive in.
+	Image   string         `json:"image,omitempty"`
+	Runtime map[string]any `json:"runtime,omitempty"`
 }
 
 // addAttempt creates a node and its first PENDING attempt.
