@@ -2641,7 +2641,7 @@ durations, a `latest` tag, and any misspelt **top-level** key at install time.
 | `ui.replicas` | 1 | console replicas |
 | `placement.priorityClassName` | `""` | PriorityClass for every Nexus pod (must exist) |
 | `placement.topologySpread.*` | on, zone then hostname, `ScheduleAnyway` | spread replicas; `DoNotSchedule` makes it a hard rule |
-| `placement.nodeSelector` / `.tolerations` / `.affinity` | empty | applied to every Nexus Deployment and the GC job |
+| `placement.nodeSelector` / `.tolerations` / `.affinity` | empty | applied to every Nexus Deployment, the in-cluster postgres/MinIO/NATS StatefulSets and the GC job |
 | `podDisruptionBudget.enabled` / `.maxUnavailable` / `.minAvailable` | on / 1 / null | a PDB for every Deployment whatever its size; `minAvailable ≥ replicas` is refused |
 | `autoscaling.enabled` / `.minReplicas` / `.maxReplicas` / `.targetCPUUtilizationPercentage` / `.targetMemoryUtilizationPercentage` / `.behavior` | off / 2 / 6 / 70 / null / 1 pod per 60 s down, 300 s window | HPAs for the four stateless services |
 | `tls.enabled` / `.requireClientCert` / `.requirePeerTLS` / `.reloadInterval` / `.caBundleConfigMap` | off / true / true / 10s / `""` | gRPC mTLS, §20.4 |

@@ -930,9 +930,10 @@ serviceAccounts:
   jobs: {}             # migrate, bootstrap, db-roles
 
 # ─── Pod placement (every Nexus Deployment) ──────────────────────────────
-# Applied to the control-plane services, schedulers, agents, console and the
-# cluster controller. The dependencies (postgres, minio, nats) are
-# single-replica StatefulSets and take none of this.
+# Applied to the control-plane services, schedulers, agents, console, the
+# cluster controller and the in-cluster dependencies (postgres, minio, nats,
+# mailpit), so none of them floats onto a batch or GPU pool. The artifact-gc
+# CronJob takes the priority class, nodeSelector, tolerations and affinity.
 placement:
   # A PriorityClass that must already exist in the cluster -- e.g. one above
   # the batch workloads the agents run, so node pressure evicts task pods
