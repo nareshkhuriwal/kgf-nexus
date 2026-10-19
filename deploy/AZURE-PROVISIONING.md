@@ -1,5 +1,14 @@
 # Nexus Azure development provisioning
 
+This is the record of one short development test on Azure (2026-09-13): an
+AKS cluster created, smoke-tested and stopped. It is not an installation
+guide, and it predates the Helm chart's AKS support. To install Nexus:
+
+- on an AKS cluster you already run: [docs/INSTALL-AKS.md](../docs/INSTALL-AKS.md)
+  (Helm), or [terraform/environments/aks-existing](terraform/environments/aks-existing/README.md);
+- on a new cluster with every Azure service created for it:
+  [terraform/environments/aks](terraform/environments/aks/README.md).
+
 ## Applied on 2026-09-13
 
 - Subscription: KGF (`a136dc2d-6000-426d-843c-1f8b12d597fb`).
@@ -34,7 +43,7 @@ Use a dedicated managed node resource group matching the budget filter. Disable 
 
 ## Validation execution
 
-`deploy/azure/validate_dev.py` scopes every Azure call to KGF and requests stop in a finally block. Kubernetes credentials are temporary and do not alter the default kubeconfig. API access is restricted to the initiating public IP. Two fixed nodes, 32-GiB managed OS disks, no autoscaling, no paid control-plane tier. The smoke test uses a disposable namespace/job and does not deploy Nexus itself. Local Kubernetes RBAC credentials are used for this development test; production identity hardening is separate.
+`deploy/azure/validate_dev.py` scopes every Azure call to KGF and requests stop in a finally block. Kubernetes credentials are temporary and do not alter the default kubeconfig. API access is restricted to the initiating public IP. Two fixed nodes, 32-GiB managed OS disks, no autoscaling, no paid control-plane tier. The smoke test uses a disposable namespace/job and does not deploy Nexus itself. Local Kubernetes RBAC credentials were used for this development test. A cluster for Nexus needs Entra ID integration with local accounts disabled, and the OIDC issuer and workload identity enabled; docs/INSTALL-AKS.md covers them.
 
 Retained costs after stopping include disks and potentially networking. Two P4 LRS disks list at USD 10.559/month together; a Standard IPv4 address lists at USD 3.65/month at 730 hours, excluding tax. Load-balancer and traffic costs must also be considered. No automatic starts are configured.
 
@@ -46,7 +55,7 @@ Retained costs after stopping include disks and potentially networking. Two P4 L
 - Underlying scale set `aks-nodepool1-10158221-vmss`: capacity 0, provisioning Succeeded; instance list empty. No node compute remains running.
 - Managed disk listing after shutdown returned no disks. Scale-set OS disk configuration is 32 GiB Premium_LRS when nodes run. Public IP and outbound load balancer remain and may incur charges.
 - Monthly INR 3,500 tracking budget was verified. No alert recipients or automatic starts configured.
-- Nexus application itself has not been deployed or end-to-end validated on AKS; this validates cluster provisioning and Kubernetes job execution only.
+- Nexus application itself has not been deployed or end-to-end validated on AKS; this validates cluster provisioning and Kubernetes job execution only. That is still the case for every AKS path in this repository (finding F115); they are validated offline only.
 
 Read-only status:
 

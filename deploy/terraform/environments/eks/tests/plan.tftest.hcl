@@ -139,3 +139,19 @@ run "refuses_an_unpinned_ca_bundle" {
     error_message = "The vendored CA bundle must match its pin in ca-bundles/SHA256SUMS."
   }
 }
+
+# The device plugin must actually land on the GPU pool: its chart's default
+# affinity needs node-feature-discovery labels the nodes do not have.
+run "device_plugin_schedules_on_the_gpu_pool" {
+  command = plan
+
+  variables {
+    gpu_node_group = merge(var.gpu_node_group, { enabled = true })
+  }
+
+  assert {
+    condition = (yamldecode(helm_release.nvidia_device_plugin[0].values[0]).affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms ==
+    [{ matchExpressions = [{ key = "nexus.khuriwalgroup.com/pool", operator = "In", values = ["gpu"] }] }])
+    error_message = "The device plugin's affinity must replace the chart default and select the GPU pool's label."
+  }
+}

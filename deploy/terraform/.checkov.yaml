@@ -50,10 +50,11 @@ skip-check:
   # the registry is the distribution channel, not a git URL.
   - CKV_TF_1
 
-  # ── Known gaps, tracked in F115 ──────────────────────────────────────────
-  # The Nexus S3 client takes static keys only, so EKS needs an IAM user for
-  # the result store today (scoped to one bucket, usable only through the VPC
-  # endpoint). The IRSA / Pod Identity role is provisioned for when F115 lands.
+  # ── Opt-in static S3 keys (EKS artifact_identity = "static") ─────────────
+  # The default is EKS Pod Identity (or IRSA): no IAM user and no key. The
+  # opt-in "static" fallback creates an IAM user scoped to one bucket and
+  # usable only through the VPC endpoint; checkov reads the conditional
+  # resource as always present.
   - CKV_AWS_273
   - CKV_AWS_40
 

@@ -137,11 +137,14 @@ nav:
   - Operations:
       - operations/index.md
       - Runbook (OPERATIONS.md): operations/runbook.md
+      - Install on an existing AKS cluster: operations/install-aks.md
+      - Container images: operations/images.md
       - Deploying: operations/deploy.md
       - TLS: operations/tls.md
       - Terraform:
           - operations/terraform/index.md
           - AKS: operations/terraform/aks.md
+          - AKS (existing cluster): operations/terraform/aks-existing.md
           - EKS: operations/terraform/eks.md
           - GKE: operations/terraform/gke.md
       - Azure provisioning: operations/azure-provisioning.md
