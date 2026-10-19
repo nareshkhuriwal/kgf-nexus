@@ -14,7 +14,11 @@
 ARG GO_VERSION=1.25
 
 # ── build ─────────────────────────────────────────────────────────────────
-FROM golang:${GO_VERSION}-alpine AS build
+# Built on the builder's own platform and cross-compiled (CGO is off), so an
+# amd64 image built on an arm64 Mac never runs the compiler under emulation.
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
+ARG TARGETOS=linux
+ARG TARGETARCH
 
 # git is needed by `go mod download` for any VCS-resolved dependency.
 RUN apk add --no-cache git ca-certificates
@@ -38,7 +42,7 @@ ARG VERSION=dev
 # -trimpath keeps build paths out of the binary so images are reproducible.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
       -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" \
       -o /out/service \

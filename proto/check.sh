@@ -63,7 +63,7 @@ if [ "$mode" != lint ]; then
   echo "== buf breaking against $(git log -1 --format='%h %s' "$against_sha") ($why)"
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
-  if git cat-file -e "$against_sha:proto" 2>/dev/null; then
+  if git cat-file -e "$against_sha:./proto" 2>/dev/null; then
     git archive --format=tar "$against_sha" proto | tar -x -C "$tmp"
     # The against tree's own buf.yaml (if any) defines only its module layout;
     # the rules come from the CURRENT proto/buf.yaml, as buf documents.

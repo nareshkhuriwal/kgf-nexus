@@ -14,7 +14,11 @@ ARG GO_VERSION=1.25
 # the chart's db-roles Job. Go, not psql, because it hashes each password into
 # a SCRAM verifier client-side, which psql can only do interactively
 # (\password); the plaintext then never reaches the server or its logs.
-FROM golang:${GO_VERSION}-alpine AS build
+# Built on the builder's own platform and cross-compiled (CGO is off), so an
+# amd64 image built on an arm64 Mac never runs the compiler under emulation.
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
+ARG TARGETOS=linux
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
@@ -22,7 +26,7 @@ COPY services/db-roles ./services/db-roles
 COPY internal ./internal
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w" -o /out/nexus-db-roles ./services/db-roles
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w" -o /out/nexus-db-roles ./services/db-roles
 
 FROM postgres:16-alpine
 
