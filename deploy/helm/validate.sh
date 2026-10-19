@@ -242,6 +242,8 @@ must_fail "unparsable minimum agent version"   "/agentPolicy/minVersion"      --
 k8s_agent='agents=[{"name":"agent-k8s","queues":"gpu","executors":"kubernetes","cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":1073741824,"gpuCount":2,"gpuMig":"1g.10gb=7","kubernetes":{"namespace":"nexus-tasks","sharedGpuResourceName":"nvidia.com/gpu.shared"}}]'
 must_fail "MIG prefix without a separator"      "/migResourcePrefix"           --set agentDefaults.kubernetes.migResourcePrefix=nvidia.com/mig
 must_fail "shared GPU resource not qualified"   "/sharedGpuResourceName"       --set agentDefaults.kubernetes.sharedGpuResourceName=gpu-shared
+# $(NEXUS_POD_IP) below is the literal Kubernetes expands, not the shell's.
+# shellcheck disable=SC2016
 if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set-json "$k8s_agent" >"$tmp/k8s" 2>&1 &&
    grep -qF 'name: NEXUS_K8S_NAMESPACE, value: "nexus-tasks"' "$tmp/k8s" &&
    grep -qF 'name: NEXUS_K8S_MIG_RESOURCE_PREFIX, value: "nvidia.com/mig-"' "$tmp/k8s" &&
