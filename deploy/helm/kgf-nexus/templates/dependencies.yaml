@@ -46,6 +46,9 @@ spec:
         runAsGroup: 70
         fsGroup: 70
         seccompProfile: { type: RuntimeDefault }
+      # The control plane's pool, priority and taints (placement.*), like every
+      # Nexus pod: an in-cluster dependency must not float onto a batch pool.
+      {{- include "nexus.placement" (list . "postgres") | nindent 6 }}
       containers:
         - name: postgres
           {{- $pitr := .Values.postgres.pitr }}
@@ -188,6 +191,7 @@ spec:
         fsGroup: 1000
         runAsNonRoot: true
         seccompProfile: { type: RuntimeDefault }
+      {{- include "nexus.placement" (list . "minio") | nindent 6 }}
       containers:
         - name: minio
           image: {{ .Values.minio.image }}
@@ -336,6 +340,7 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
         seccompProfile: { type: RuntimeDefault }
+      {{- include "nexus.placement" (list . "nats") | nindent 6 }}
       # The reloader signals nats-server (SIGHUP) when the config, the
       # authorization include or the TLS files change, so adding a tenant,
       # rotating an NKey or renewing the certificate needs no restart.
@@ -486,6 +491,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         seccompProfile: { type: RuntimeDefault }
+      {{- include "nexus.placement" (list . "mailpit") | nindent 6 }}
       containers:
         - name: mailpit
           image: {{ .Values.mailpit.image }}

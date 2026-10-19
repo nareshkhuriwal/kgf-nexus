@@ -133,11 +133,12 @@ Deployment:
 
 The console's cluster view reports `scheduler_autoscaling`: desired, observed,
 `state` (`in_sync`, `plan_only`, `applying`, `drift`, `not_observed`),
-`last_applied_at` and `last_error`, per HPA and for the worst one. A
-`helm upgrade` or `kubectl apply` resets an owned HPA's four fields to the
-rendered values until the next patch; exporting the saved settings as the
-scheduler's Helm values (`schedulers[].autoscaling`) makes the re-render a
-no-op.
+`last_applied_at` and `last_error`, per HPA and for the worst one. The Helm
+chart re-renders an owned HPA's four fields from the live object, so a
+`helm upgrade` leaves them as the controller set them (OPERATIONS §20.6). A
+`kubectl apply` of a static manifest (`deploy/k8s/cluster-controller`'s
+`scaling.yaml`) still resets them to the manifest until the next patch;
+exporting the saved settings into the manifest makes that re-apply a no-op.
 
 ### Why draining is enough to protect running work
 
@@ -183,13 +184,14 @@ a controller in the wrong mode or pointed at the wrong cluster cannot drain.
 
 ## Operator flow
 
-1. Define pod profiles and worker pools (Cluster & scaling → Task runtime /
-   Worker pools) and save.
-2. Register the cluster (Live cluster → Register a cluster). It starts in plan.
+1. Define worker pools and the pod profiles they run (Govern → Infrastructure
+   → Worker pools) and save.
+2. Register the cluster (Infrastructure → Clusters → Register a cluster). It
+   starts in plan.
 3. Install `kubectl apply -k deploy/k8s/cluster-controller/base` with
    `NEXUS_CLUSTER_NAME` set to the registered name -- or, for a Helm install,
    `clusterController.enabled=true` with `clusterController.clusterName`
-   (docs/OPERATIONS.md §20.6, same RBAC); confirm the Live cluster tab
+   (docs/OPERATIONS.md §20.6, same RBAC); confirm the Clusters tab
    shows a recent report, the observed UID and the scheduler HPA.
 4. Bind worker Deployments; watch plan-only events for a representative period.
 5. To apply: enter the kube-system UID the controller reports, confirm apply,

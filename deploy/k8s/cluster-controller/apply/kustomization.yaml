@@ -4,7 +4,7 @@
 # Apply mode = the base + the mutating Roles + the process-level permission
 # + the scheduler HPA's ownership opt-in. The registry entry must ALSO be
 # switched to apply, with the cluster's kube-system UID, from the console
-# (Cluster & scaling -> Live cluster).
+# (Govern -> Infrastructure -> Clusters).
 #
 # To keep the scheduler HPA hand- or GitOps-managed while the controller
 # scales workers, drop scheduler-hpa-owner-patch.yaml: the controller then

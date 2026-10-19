@@ -1047,6 +1047,16 @@
         }
       }
     },
+    "bootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "registerWorkerKey": {
+          "type": "boolean",
+          "description": "Register existingSecret's worker-api-key as a static worker key (default true). false: the agents use scoped worker tokens minted in the console."
+        }
+      }
+    },
     "serviceDefaults": {
       "type": "object",
       "additionalProperties": false,
@@ -1065,7 +1075,22 @@
       "additionalProperties": false,
       "properties": {
         "apiGateway": {
-          "$ref": "#/definitions/service"
+          "allOf": [
+            {
+              "$ref": "#/definitions/service"
+            },
+            {
+              "properties": {
+                "componentTopology": {
+                  "enum": [
+                    "platform-operators",
+                    "infrastructure-viewers"
+                  ],
+                  "description": "NEXUS_COMPONENT_TOPOLOGY on the api-gateway: who sees the control plane's pods, nodes and cluster (ADR-0037 \u00a74)."
+                }
+              }
+            }
+          ]
         },
         "workflowManager": {
           "$ref": "#/definitions/service"
@@ -1153,6 +1178,10 @@
             "type": "integer",
             "minimum": 0
           },
+          "replicasManagedByController": {
+            "type": "boolean",
+            "description": "The cluster controller owns the replica count: once the Deployment exists, renders keep its live spec.replicas (in a control-plane release only while clusterController.enabled and apply.enabled)."
+          },
           "queues": {
             "type": "string",
             "minLength": 1
@@ -1161,7 +1190,9 @@
             "type": "string"
           },
           "executors": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^\\s*(subprocess|kubernetes|docker)\\s*(,\\s*(subprocess|kubernetes|docker)\\s*)*$",
+            "description": "Comma-separated: subprocess (always offered by the agent), kubernetes (renders the kubernetes executor's configuration). docker is refused by the templates: the chart mounts no Docker daemon."
           },
           "cpuMillis": {
             "type": "integer",
@@ -1227,8 +1258,7 @@
             "minLength": 1
           },
           "workerApiKeySecretKey": {
-            "type": "string",
-            "minLength": 1
+            "$ref": "#/definitions/secretKey"
           },
           "natsSeedKey": {
             "type": "string",
@@ -1322,6 +1352,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "workerApiKeySecretKey": {
+          "$ref": "#/definitions/secretKey",
+          "description": "Key in existingSecret holding the agents' credential (NEXUS_API_KEY); agents[].workerApiKeySecretKey overrides it."
+        },
         "gpuResourceName": {
           "type": "string",
           "pattern": "^[a-z0-9.-]+/[a-z0-9._-]+$"
@@ -1331,7 +1365,8 @@
         },
         "heartbeatIntervalMs": {
           "type": "integer",
-          "minimum": 100
+          "minimum": 100,
+          "description": "Ignored: not rendered, never read by the agent (the control plane sets the heartbeat interval at registration, ADR-0005). Accepted so older values files still validate."
         },
         "drainGrace": {
           "$ref": "#/definitions/duration"

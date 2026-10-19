@@ -128,6 +128,20 @@ automountServiceAccountToken: {{ .automount }}
 {{- (($a.gpu | default dict).resourceName) | default $root.Values.agentDefaults.gpuResourceName | default "nvidia.com/gpu" -}}
 {{- end -}}
 
+{{/*
+Refuse an executors list the agent could not honour. The agent discovers its
+executors instead of reading a list: subprocess is always offered, kubernetes
+when its configuration (rendered for "kubernetes" here) passes the RBAC
+probe, and docker only when `docker info` reaches a daemon -- which a chart
+pod never does: the chart mounts no Docker socket, and a Pod Security
+restricted pod cannot. args: agent.
+*/}}
+{{- define "nexus.agentExecutorsRequired" -}}
+{{- if has "docker" (splitList "," (.executors | default "subprocess" | nospace)) -}}
+{{- fail (printf "agents[%s].executors includes docker, which the agent offers only when `docker info` reaches a Docker daemon; the chart mounts no daemon socket (a Pod Security restricted pod cannot), so it would silently never be offered. Use kubernetes (each attempt a Job, docs/OPERATIONS.md §13) or subprocess" .name) -}}
+{{- end -}}
+{{- end -}}
+
 {{/* "true" when an agent entry runs the kubernetes executor. args: agent. */}}
 {{- define "nexus.agentUsesKubernetes" -}}
 {{- if has "kubernetes" (splitList "," (.executors | default "subprocess" | nospace)) }}true{{ end -}}

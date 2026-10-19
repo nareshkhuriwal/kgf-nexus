@@ -508,10 +508,10 @@ jobs:
               deploy/scripts/cluster-controller-overlay.sh "$mode" "ci.example/nexus/cluster-controller@$d" >/dev/null
           done
   # The AKS install tooling: deploy/scripts/aks-preflight.sh against a stub
-  # kubectl (deploy/scripts/tests/aks-preflight-test.sh; no cluster), and
-  # shellcheck over it with the shellcheck the pinned actionlint image
-  # bundles (the same image as `make actionlint`, ACTIONLINT_IMAGE in the
-  # Makefile: move the two together).
+  # kubectl (`make preflight-test`; no cluster), and shellcheck over it and
+  # deploy/helm/validate.sh (`make shellcheck`) with the shellcheck bundled in
+  # the pinned actionlint image -- ACTIONLINT_IMAGE in the Makefile, the one
+  # pin `make actionlint` uses too.
   install-scripts:
     name: AKS preflight (tests, shellcheck)
     runs-on: ubuntu-latest
@@ -523,13 +523,9 @@ jobs:
         with:
           persist-credentials: false
       - name: aks-preflight tests (stub kubectl and az)
-        run: deploy/scripts/tests/aks-preflight-test.sh
+        run: make preflight-test
       - name: shellcheck
-        run: |
-          docker run --rm -v "$PWD:/repo:ro" -w /repo --entrypoint shellcheck \
-            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
-            deploy/scripts/aks-preflight.sh deploy/scripts/tests/aks-preflight-test.sh \
-            deploy/scripts/tests/aks-preflight-stub/kubectl
+        run: make shellcheck
 
   # Terraform for the dev environment and the AKS/EKS/GKE platforms, OFFLINE:
   # init -backend=false, validate, and `terraform test` plans with mocked

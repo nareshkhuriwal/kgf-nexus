@@ -26,7 +26,7 @@ Least privilege:
 {{- /* cluster.name is the chart-wide cluster name; absent from older values. */}}
 {{- $clusterName := $cc.clusterName | default ((.Values.cluster | default dict).name | default "") }}
 {{- if not $clusterName }}
-{{- fail "clusterController.clusterName is required (or cluster.name, which it defaults to): the registry name (clusters.name) registered in the console under Cluster & scaling -> Live cluster" }}
+{{- fail "clusterController.clusterName is required (or cluster.name, which it defaults to): the registry name (clusters.name) registered in the console under Govern -> Infrastructure -> Clusters" }}
 {{- end }}
 {{- if $cc.apply.enabled }}
 {{- if not $cc.apply.expectedClusterUID }}
@@ -60,7 +60,8 @@ Least privilege:
 {{- $schedulerHPAs = append $schedulerHPAs .name }}
 {{- end }}
 {{- end }}
-{{- $applySchedulers := and $cc.apply.enabled (ne (toString $cc.apply.schedulerAutoscaling) "false") }}
+{{- /* The same condition annotates those HPAs for the controller (nexus.hpa). */}}
+{{- $applySchedulers := include "nexus.controllerOwnsSchedulerHPAs" . }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -301,7 +302,11 @@ spec:
           image: {{ include "nexus.image" (list . "cluster-controller") }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
-            - { name: NEXUS_CLUSTER_NAME, value: {{ $clusterName | quote }} }
+            {{- /* Pod, namespace, node and NEXUS_CLUSTER_NAME (ADR-0035): the
+                   controller's own instance row, and the cluster it reports.
+                   POD_NAME / POD_NAMESPACE below stay: the binary reads them
+                   for its Lease identity and namespace. */}}
+            {{- include "nexus.runtimeIdentityEnv" (list . $clusterName) | nindent 12 }}
             - { name: NEXUS_RM_ADDR, value: {{ $cc.resourceManagerAddress | default "resource-manager:9090" | quote }} }
             # Opt-in 2 of 3. False = plan (dry run), whatever the registry says.
             - { name: NEXUS_CONTROLLER_ALLOW_APPLY, value: {{ ternary "true" "false" $cc.apply.enabled | quote }} }

@@ -459,6 +459,17 @@ that changes a Job template (a label) at the same image tag failed on "field is
 immutable" (F113). migrate and bootstrap are idempotent, so re-running them for
 a new chart version is harmless.
 */}}
+{{/*
+"true" unless bootstrap.registerWorkerKey is false: the bootstrap Job then
+does not register existingSecret's worker-api-key, a static key that never
+expires, and the agents authenticate with scoped worker tokens minted in the
+console (role worker, scope worker_rpc) instead.
+*/}}
+{{- define "nexus.registerWorkerKey" -}}
+{{- $b := .Values.bootstrap | default dict -}}
+{{- if or (kindIs "invalid" $b.registerWorkerKey) $b.registerWorkerKey }}true{{ end -}}
+{{- end -}}
+
 {{- define "nexus.jobSuffix" -}}
 {{- /* Every other input of a Job's pod template goes in too. The migrate
        digest, when pinned: a rebuilt image under the same tag is a different
@@ -476,6 +487,11 @@ a new chart version is harmless.
 {{- /* The bootstrap Job registers a key per workspaceWorkers entry. */ -}}
 {{- with .Values.workspaceWorkers -}}
 {{- $key = printf "%s|%s" $key (toJson .) -}}
+{{- end -}}
+{{- /* ...and worker-api-key unless bootstrap.registerWorkerKey is false. Only
+       the non-default state enters the hash, so existing Job names stand. */ -}}
+{{- if not (include "nexus.registerWorkerKey" .) -}}
+{{- $key = printf "%s|no-worker-key" $key -}}
 {{- end -}}
 {{- $key | sha256sum | trunc 10 -}}
 {{- end -}}

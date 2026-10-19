@@ -20,7 +20,12 @@ metadata:
   labels: {{- include "nexus.labels" (list $root .name) | nindent 4 }}
     nexus.khuriwalgroup.com/role: agent
 spec:
-  replicas: {{ .replicas | default 1 }}
+  {{- $live := dict }}
+  {{- if include "nexus.controllerManagesAgentReplicas" (list $root .) }}
+  {{- /* The cluster controller scales this Deployment: keep its count. */}}
+  {{- $live = lookup "apps/v1" "Deployment" $root.Release.Namespace .name }}
+  {{- end }}
+  replicas: {{ include "nexus.agentReplicas" (list $root . $live) }}
   # An agent is a worker identity: replacing it while its old pod still holds
   # leases would briefly double its advertised capacity. Recreate drains the
   # old one (NEXUS_DRAIN_GRACE) before the new one registers.
@@ -55,11 +60,15 @@ spec:
             # nexusNamespace), and a worker key minted for that tenant
             # (agents[].workerApiKeySecretKey in existingSecret).
             - name: NEXUS_API_KEY
-              valueFrom: { secretKeyRef: { name: {{ $root.Values.existingSecret }}, key: {{ .workerApiKeySecretKey | default "worker-api-key" }} } }
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.existingSecret }}, key: {{ .workerApiKeySecretKey | default $root.Values.agentDefaults.workerApiKeySecretKey | default "worker-api-key" }} } }
             - { name: NEXUS_NAMESPACE, value: {{ .namespace | default $root.Values.nexusNamespace | quote }} }
             - { name: NEXUS_QUEUES, value: {{ .queues | quote }} }
             - { name: NEXUS_LABELS, value: {{ .labels | quote }} }
-            - { name: NEXUS_EXECUTORS, value: {{ .executors | default "subprocess" | quote }} }
+            {{- /* No NEXUS_EXECUTORS: the agent discovers its executors
+                   (subprocess always; kubernetes from the NEXUS_K8S_*
+                   configuration below). `executors` selects that
+                   configuration; nexus.agentExecutorsRequired checks it. */}}
+            {{- include "nexus.agentExecutorsRequired" . }}
             {{- if include "nexus.agentUsesKubernetes" . }}
             {{- $k := include "nexus.agentK8s" (list $root .) | fromYaml }}
             # The kubernetes executor (OPERATIONS §13). The pod name is the
@@ -167,7 +176,6 @@ spec:
             - { name: NEXUS_ARTIFACT_CACHE_VERIFY, value: {{ . | quote }} }
             {{- end }}
             {{- end }}
-            - { name: NEXUS_HEARTBEAT_INTERVAL_MS, value: {{ $root.Values.agentDefaults.heartbeatIntervalMs | int64 | toString | quote }} }
             - { name: NEXUS_DRAIN_GRACE, value: {{ $root.Values.agentDefaults.drainGrace | quote }} }
             - { name: NEXUS_WAL_DIR, value: /var/lib/nexus/wal }
             - { name: NEXUS_WORK_DIR, value: /var/lib/nexus/work }

@@ -13,12 +13,14 @@
 #     --wait --wait-for-jobs --timeout 15m
 #
 # What must exist first (docs/INSTALL-AKS.md, docs/OPERATIONS.md §20.16):
-#   - the cluster's OIDC issuer and workload identity enabled; a user-assigned
-#     managed identity with "Storage Blob Data Contributor" on the storage
-#     account, federated with system:serviceaccount:nexus:nexus-artifacts and
+#   - the cluster's OIDC issuer and workload identity enabled;
+#   - the Blob container (minio.bucket) in the storage account;
+#   - a user-assigned managed identity holding "Storage Blob Data Contributor"
+#     on that CONTAINER -- not the storage account, which would open every
+#     container in it (docs/OPERATIONS.md §26.4) -- federated with
+#     system:serviceaccount:nexus:nexus-artifacts and
 #     system:serviceaccount:nexus:nexus-agent (and the worker-pool namespaces'
 #     agent accounts, examples/aks-worker-pool.yaml);
-#   - the Blob container (minio.bucket) in that account;
 #   - the Flexible Server reachable from the pods (VNet integration or a
 #     private endpoint), its database, and an owner login that can CREATE in it;
 #   - namespaces nexus (the release) and nexus-tasks (task pods), both
@@ -45,6 +47,13 @@ cluster:
 
 existingSecret: nexus-credentials
 nexusNamespace: default
+# worker-api-key is registered as a static worker key on the first install,
+# so the agents can authenticate before anyone can mint a token. Once the
+# console is up, mint scoped worker tokens (Govern -> Tokens: role worker,
+# scope worker_rpc), store one in nexus-credentials, point the agents at it
+# and stop registering the static key (OPERATIONS §20.10):
+# agentDefaults: { workerApiKeySecretKey: worker-token }
+# bootstrap: { registerWorkerKey: false }
 
 image:
   registry: ghcr.io/
@@ -133,7 +142,13 @@ nats:
 
 # ── Control plane ─────────────────────────────────────────────────────────
 services:
-  apiGateway: { replicas: 2 }
+  apiGateway:
+    replicas: 2
+    # A single-organisation install: whoever may view a namespace's
+    # infrastructure also runs this cluster, so they see the control plane's
+    # pods, nodes and cluster too (ADR-0037 §4). Keep the default,
+    # platform-operators, if tenants you do not trust share this install.
+    componentTopology: infrastructure-viewers
   workflowManager: { replicas: 2 }
   dagEngine: { replicas: 2 }
   resourceManager: { replicas: 2 }
@@ -172,7 +187,12 @@ ui:
 # The agents run the kubernetes executor: each attempt is a Job in
 # nexus-tasks, placed on the pool the agent fronts. The agent pods are small
 # and stay on the cpu pool; cpuMillis/memoryBytes/gpuCount describe the TASK
-# pool they hand out.
+# pool they hand out. An agent always offers the subprocess executor as well,
+# and a task that names no executor runs as a subprocess inside the agent pod
+# (within its 1Gi): give these queues' tasks runtime.executor: kubernetes.
+# Once the controller runs in apply mode and a pool is bound to an agent's
+# Deployment, add replicasManagedByController: true to that agent, so
+# `helm upgrade` keeps the count the controller set (OPERATIONS §20.6).
 agentDefaults:
   kubernetes:
     namespace: nexus-tasks

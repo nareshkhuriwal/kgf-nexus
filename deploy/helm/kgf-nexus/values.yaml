@@ -557,6 +557,18 @@ migrate:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { memory: 256Mi }
 
+# The bootstrap Job (templates/jobs.yaml): the Nexus namespace's tenant row,
+# admin-api-key if the Secret holds one, and -- unless turned off here --
+# worker-api-key as a STATIC worker key that never expires. Production
+# agents should authenticate with scoped worker tokens minted in the console
+# (Govern -> Tokens: role worker, scope worker_rpc; rotated without a
+# restart of anything else, revoked one by one): put the token in
+# existingSecret, point agentDefaults.workerApiKeySecretKey at it, and set
+# this false. Turning it off does not revoke a key registered earlier: revoke
+# "bootstrap-worker" in the console (docs/OPERATIONS.md §20.10).
+bootstrap:
+  registerWorkerKey: true
+
 # Shared defaults for the Go services; each service below can override.
 serviceDefaults:
   replicas: 1
@@ -567,6 +579,17 @@ serviceDefaults:
 services:
   apiGateway:
     replicas: 1
+    # Who sees the control plane's placement in the console's Infrastructure
+    # page (NEXUS_COMPONENT_TOPOLOGY, ADR-0037 §4, OPERATIONS §31.2):
+    #   platform-operators     -- only platform operators see pods, nodes and
+    #                             the cluster; every other infrastructure.view
+    #                             holder sees component health under opaque
+    #                             labels. For a shared installation (KGF Cloud).
+    #   infrastructure-viewers -- every infrastructure.view holder sees it: a
+    #                             single-organisation install, where whoever
+    #                             administers a namespace also runs the cluster.
+    # Anything else stops the gateway, so the schema refuses it.
+    componentTopology: platform-operators
     # Exposure outside the cluster, as a SEPARATE Service. The in-cluster
     # api-gateway Service always keeps 8080 (REST) and 9091 (worker gRPC).
     external:
@@ -604,6 +627,21 @@ schedulers:
 # Worker agents. Real hardware only by default; simulated capacity belongs in a
 # dev environment and must be labelled as such.
 #
+# executors: which optional executor the chart configures for this agent.
+#   The agent DISCOVERS its executors; it reads no list (docs/IMAGES.md §4.3):
+#     subprocess  always offered, and not something the chart can turn off;
+#     kubernetes  offered when NEXUS_K8S_NAMESPACE is set and its RBAC probe
+#                 passes -- "kubernetes" here renders that configuration, the
+#                 task-namespace Role and the task-API policy, and mounts the
+#                 API token;
+#     docker      offered only when `docker info` reaches a daemon. The chart
+#                 mounts no Docker socket (a restricted pod cannot), so it is
+#                 refused here rather than silently never offered.
+#   A task that names no executor (runtime.executor) runs as a SUBPROCESS on
+#   whichever worker claims it, a kubernetes agent included: inside that agent
+#   pod, within its resources. Give tasks for a kubernetes agent's queues
+#   runtime.executor: kubernetes.
+#
 # Optional per entry, beyond the capacity it advertises:
 #   gpuCount / gpuKind / gpuMemoryBytes   what the agent ADVERTISES (--gpu-count,
 #       --gpu-kind, --gpu-memory-bytes). With gpuCount > 0 the pod also REQUESTS
@@ -620,6 +658,15 @@ schedulers:
 #       overrides serviceAccounts.agent for this agent.
 #   namespace, workerApiKeySecretKey, natsSeedKey, podDisruptionBudget,
 #       resources, customResources.
+#   replicasManagedByController: true   the cluster controller owns this
+#       Deployment's replica count (it is bound to the pool, in apply mode):
+#       once the Deployment exists, every render keeps the LIVE count, so
+#       `helm upgrade` never resets what the controller scaled to, and
+#       `replicas` only seeds a new Deployment. Change the count in the
+#       console (the pool's binding) or with kubectl scale, not here. Honoured
+#       when this release's controller can apply (clusterController.enabled
+#       and apply.enabled), or always in a worker-pool release, whose
+#       controller runs in the control-plane release (OPERATIONS §20.6).
 #
 # Each agent serves nexusNamespace unless it sets `namespace`. An agent of
 # another tenant also needs a worker key minted for that tenant
@@ -690,6 +737,11 @@ claimPlacement:
   clusterName: ""
 
 agentDefaults:
+  # The key in existingSecret holding the agents' credential (NEXUS_API_KEY):
+  # the bootstrap's static worker-api-key, or a scoped worker token minted in
+  # the console (bootstrap.registerWorkerKey). agents[].workerApiKeySecretKey
+  # overrides it per agent.
+  workerApiKeySecretKey: worker-api-key
   # Where the agents dial the worker gRPC endpoint (NEXUS_CONTROL_PLANE).
   # The default is this release's api-gateway Service. A worker-pool release
   # in another namespace names the control plane's Service by its FQDN
@@ -767,7 +819,9 @@ agentDefaults:
     taskApi:
       enabled: true
       port: 9443
-  heartbeatIntervalMs: 5000
+  # heartbeatIntervalMs: no longer rendered, and still accepted so older
+  # values files validate. The agent never read it: the control plane sets
+  # the heartbeat interval in its Register response (ADR-0005).
   # Must stay below terminationGracePeriodSeconds, or Kubernetes kills an agent
   # mid-drain and strands its attempts until their leases expire.
   drainGrace: 60s
@@ -902,9 +956,10 @@ serviceAccounts:
   jobs: {}             # migrate, bootstrap, db-roles
 
 # ─── Pod placement (every Nexus Deployment) ──────────────────────────────
-# Applied to the control-plane services, schedulers, agents, console and the
-# cluster controller. The dependencies (postgres, minio, nats) are
-# single-replica StatefulSets and take none of this.
+# Applied to the control-plane services, schedulers, agents, console, the
+# cluster controller and the in-cluster dependencies (postgres, minio, nats,
+# mailpit), so none of them floats onto a batch or GPU pool. The artifact-gc
+# CronJob takes the priority class, nodeSelector, tolerations and affinity.
 placement:
   # A PriorityClass that must already exist in the cluster -- e.g. one above
   # the batch workloads the agents run, so node pressure evicts task pods
@@ -984,7 +1039,9 @@ podDisruptionBudget:
 # claim cost as linear in the queue's PENDING backlog and bound by Postgres
 # CPU, not the scheduler's own: past a ~10k backlog more replicas add latency.
 # Size it with schedulers[].replicas. schedulers[].autoscaling (same shape)
-# exists for operators who have measured their own curve (OPERATIONS §20).
+# exists for operators who have measured their own curve (OPERATIONS §20);
+# with the cluster controller in apply mode it then follows the scheduler
+# settings saved in the console (clusterController.apply.schedulerAutoscaling).
 autoscaling:
   enabled: false
   minReplicas: 2
@@ -1053,8 +1110,8 @@ tls:
 # below -- scales bound worker Deployments. Off by default.
 clusterController:
   enabled: false
-  # The registry name (clusters.name) registered in the console (Cluster &
-  # scaling -> Live cluster). Empty = cluster.name, the chart-wide cluster
+  # The registry name (clusters.name) registered in the console
+  # (Infrastructure -> Clusters). Empty = cluster.name, the chart-wide cluster
   # name; one of the two is REQUIRED when enabled. Its control-plane namespace
   # must be this release's namespace.
   clusterName: ""
@@ -1108,11 +1165,15 @@ clusterController:
     expectedClusterUID: ""
     # ADR-0036: in apply mode, also keep the scheduler HPAs' minReplicas,
     # maxReplicas, CPU target and scale-down window at the scheduler settings
-    # saved in the console. Binds patch on the autoscaled schedulers' HPAs
-    # (by name, this namespace). The controller still changes only an HPA
-    # annotated nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller;
-    # false (or an HPA without it) leaves the HPA to Helm/GitOps and reports
-    # the difference as drift.
+    # saved in the console. With enabled and apply.enabled, this hands the
+    # chart's scheduler HPAs (schedulers[].autoscaling.enabled) to the
+    # controller: they are annotated
+    # nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller, patch on
+    # them (by name, this namespace) is bound, and on `helm upgrade` their four
+    # managed fields are re-rendered from the live HPA, so an upgrade never
+    # reverts what the controller applied (the values for them only seed a new
+    # HPA). false leaves them to Helm and the controller reports any
+    # difference as drift. The stateless services' HPAs are always Helm's.
     schedulerAutoscaling: true
   terminationGracePeriodSeconds: 30
   resources:

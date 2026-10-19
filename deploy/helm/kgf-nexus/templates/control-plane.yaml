@@ -27,7 +27,8 @@ release (components.controlPlane.enabled=false).
       (dict "name" "NEXUS_KGF_AUDIENCE" "value" (.Values.kgf.audience | toString))
       (dict "name" "NEXUS_KGF_USER_ISSUERS" "value" (.Values.kgf.userIssuers | toString))
       (dict "name" "NEXUS_KGF_FRONT_ISSUERS" "value" (.Values.kgf.frontIssuers | default "" | toString))
-      (dict "name" "NEXUS_KGF_SERVICE_PRINCIPALS" "value" (.Values.kgf.servicePrincipals | toString))))
+      (dict "name" "NEXUS_KGF_SERVICE_PRINCIPALS" "value" (.Values.kgf.servicePrincipals | toString))
+      (dict "name" "NEXUS_COMPONENT_TOPOLOGY" "value" ((.Values.services.apiGateway | default dict).componentTopology | default "platform-operators" | toString))))
   (dict "name" "workflow-manager" "key" "workflowManager" "image" "workflow-manager" "grpc" 9090 "resultStore" true "hpa" true "tls" true "extra" (list
       (dict "name" "TIMER_POLL_INTERVAL_MS" "value" "1000")))
   (dict "name" "dag-engine" "key" "dagEngine" "image" "dag-engine" "grpc" 9090 "hpa" true "tls" true "extra" (list))
@@ -230,7 +231,10 @@ spec:
         {{- end }}
 {{- include "nexus.pdb" (list $root .name .name $floor $over.podDisruptionBudget) }}
 {{- if $hpa.enabled }}
-{{- include "nexus.hpa" (list $root .name .name $hpa) }}
+{{- /* A scheduler's HPA is the cluster controller's to tune when it is in
+       apply mode with schedulerAutoscaling (ADR-0036); the stateless
+       services' HPAs stay Helm's. */}}
+{{- include "nexus.hpa" (list $root .name .name $hpa (and .scheduler (include "nexus.controllerOwnsSchedulerHPAs" $root))) }}
 {{- end }}
 {{- end }}
 {{- end }}

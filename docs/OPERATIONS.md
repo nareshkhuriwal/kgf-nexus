@@ -1675,7 +1675,7 @@ kubectl apply -k deploy/k8s/cluster-controller/base   # after setting NEXUS_CLUS
 kubectl -n kgf-nexus get lease nexus-cluster-controller-<cluster> -o jsonpath='{.spec.holderIdentity}'
 ```
 
-In the console (Cluster & scaling → Live cluster) confirm: a report under a minute
+In the console (Govern → Infrastructure → Clusters) confirm: a report under a minute
 old, "Controller running: plan", the observed UID, desired = observed revision,
 the scheduler HPA with `ScalingActive`, scheduler autoscaling `in_sync` or
 `plan_only` (an `hpa_plan` event says what apply would change), task Jobs
@@ -1716,7 +1716,7 @@ pod that is no longer going to be removed can simply be deleted
 
 ### 12.5 Diagnosing a pool that does not scale
 
-The Live cluster tab shows the last decision and its holds per Deployment. The
+The Clusters tab shows the last decision and its holds per Deployment. The
 common ones: `scale-in cooldown`, `removal of drained pods held: pod … is not
 Running and Ready` (fix the pod), `pod … kept: holds N live lease(s)` (working as
 intended -- it is removed when the work finishes), `namespace quota: …` (raise the
@@ -2315,6 +2315,10 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_controller_pool_replicas` | G | pool, kind (current/desired) | cluster-controller | Replicas observed and planned |
 | `nexus_controller_last_success_timestamp_seconds` | G | — | cluster-controller | Alert on the leader when `time() - this > 4 * interval` |
 | `nexus_controller_leader` | G | — | cluster-controller | 1 on the leader. Alert if `sum() != 1` for 5 minutes: no leader, or two |
+| `nexus_controller_scheduler_hpa_actions_total` | C | action (hpa_plan/hpa_update/hpa_refused), mode (plan/apply) | cluster-controller | Scheduler HPA autoscaling events (ADR-0036, §12.7): `hpa_plan` what plan mode would change, `hpa_update` a patch applied, `hpa_refused` a patch the API server refused. `hpa_refused` rising: RBAC or another writer |
+| `nexus_controller_scheduler_hpa_blocked` | G | hpa (the HPA's name) | cluster-controller | 1 while, in apply mode, a scheduler HPA differs from the saved settings and cannot converge without a human (not opted in, no CPU metric, patches refused); 0 otherwise. Alert on `max(this) == 1` for 15 minutes |
+| `nexus_instance_heartbeat_failures_total` | C | op (beat/prune/shutdown) | api-gateway, workflow-manager, dag-engine, scheduler, resource-manager, event-service | Failed service-instance registry writes (ADR-0037, §31.4). Every `op` series exists from start. `op="beat"` rising: this replica shows as stale in the console; `prune` failures alone are harmless |
+| `nexus_instance_heartbeat_last_success_timestamp_seconds` | G | — | the same six | Last successful registry beat (every 10 s). `time() - this > 30` is the console's stale condition, as an alert |
 | `nexus_agent_tasks_running` | G | executor | agent | Attempts executing |
 | `nexus_agent_tasks_started_total` | C | executor | agent | Attempts started |
 | `nexus_agent_tasks_completed_total` | C | executor, outcome, error_class | agent | Attempts reported. `error_class="infrastructure"` rising on one host: a quarantine candidate |
@@ -2637,7 +2641,7 @@ durations, a `latest` tag, and any misspelt **top-level** key at install time.
 | `ui.replicas` | 1 | console replicas |
 | `placement.priorityClassName` | `""` | PriorityClass for every Nexus pod (must exist) |
 | `placement.topologySpread.*` | on, zone then hostname, `ScheduleAnyway` | spread replicas; `DoNotSchedule` makes it a hard rule |
-| `placement.nodeSelector` / `.tolerations` / `.affinity` | empty | applied to every Nexus Deployment and the GC job |
+| `placement.nodeSelector` / `.tolerations` / `.affinity` | empty | applied to every Nexus Deployment, the in-cluster postgres/MinIO/NATS StatefulSets and the GC job |
 | `podDisruptionBudget.enabled` / `.maxUnavailable` / `.minAvailable` | on / 1 / null | a PDB for every Deployment whatever its size; `minAvailable ≥ replicas` is refused |
 | `autoscaling.enabled` / `.minReplicas` / `.maxReplicas` / `.targetCPUUtilizationPercentage` / `.targetMemoryUtilizationPercentage` / `.behavior` | off / 2 / 6 / 70 / null / 1 pod per 60 s down, 300 s window | HPAs for the four stateless services |
 | `tls.enabled` / `.requireClientCert` / `.requirePeerTLS` / `.reloadInterval` / `.caBundleConfigMap` | off / true / true / 10s / `""` | gRPC mTLS, §20.4 |
@@ -2657,6 +2661,9 @@ durations, a `latest` tag, and any misspelt **top-level** key at install time.
 | `schedulers[].nodeSelector` / `.tolerations` / `.affinity` / `.topologySpread` | `placement.*` | per-scheduler placement; the first three replace `placement.*`, `topologySpread` merges over it |
 | `networkPolicy.enabled` / `.ingressFrom` / `.metricsFrom` / `.minioFrom` | off / any / none / none | ingress default-deny for the control plane with explicit allows, §20.17 |
 | `ui.service.port` | 80 | the console Service's port; the container listens on 8080 (unprivileged nginx) |
+| `bootstrap.registerWorkerKey` | `true` | `false`: the bootstrap Job registers no static `worker-api-key`, and the agents use scoped worker tokens (§20.10) |
+| `agentDefaults.workerApiKeySecretKey` | `worker-api-key` | the key in `existingSecret` holding the agents' credential; `agents[].workerApiKeySecretKey` overrides it |
+| `services.apiGateway.componentTopology` | `platform-operators` | `NEXUS_COMPONENT_TOPOLOGY`: who sees the control plane's pods, nodes and cluster (§31.2); `infrastructure-viewers` for a single-organisation install |
 
 `deploy/helm/kgf-nexus/ci/*-values.yaml` are complete, validated values files:
 minimal, every feature on, the production shape (managed database and object
@@ -2752,7 +2759,7 @@ permission anywhere.
    `control_plane_namespace` = the release namespace, `mode: plan`). Until then
    the leader logs `cluster not registered` and, after four intervals, reports
    NotReady — which is the alert you want.
-2. Confirm in the console (Live cluster): a fresh report, effective mode `plan`,
+2. Confirm in the console (Infrastructure → Clusters): a fresh report, effective mode `plan`,
    the observed kube-system UID, the scheduler Deployments and HPAs.
 3. **Apply** needs all three opt-ins (CLUSTER-SCALING, "Apply is three
    independent opt-ins"): the registry entry in apply mode with the UID
@@ -2771,6 +2778,54 @@ The scheduler Deployments carry `app.kubernetes.io/component=scheduler` and
 `app.kubernetes.io/part-of=kgf-nexus` on the Deployment object (pods keep their
 per-queue component), which is the selector the controller uses; before 0.2.0
 the chart's schedulers were invisible to it (F113).
+
+**Scheduler HPAs (ADR-0036, §12.7).** A scheduler with
+`schedulers[].autoscaling.enabled` has an HPA. With
+`clusterController.enabled`, `apply.enabled` and
+`apply.schedulerAutoscaling` (the default), the chart hands that HPA to the
+controller in three ways:
+
+- it annotates it `nexus.khuriwalgroup.com/autoscaling-owner: cluster-controller`;
+- it binds `patch` on it, by name;
+- on every upgrade it re-renders the four fields the controller manages from
+  the live HPA: `minReplicas`, `maxReplicas`, the CPU target and
+  `behavior.scaleDown.stabilizationWindowSeconds`.
+
+So `helm upgrade` never reverts the settings saved in the console. The
+`schedulers[].autoscaling` values for those four fields only seed a new HPA;
+change them in the console. Everything else on the HPA still comes from
+values: the memory metric, the scale-down policies, scale-up. The first
+upgrade that hands an existing HPA over applies the values once, then the
+controller takes it from there. In plan mode, with
+`apply.schedulerAutoscaling: false`, or without the controller, the HPA stays
+Helm's: no annotation, no patch Role, and the console shows any difference as
+`plan_only` or `drift`. `helm template` cannot read the live HPA, so it always
+shows the values.
+
+**Worker Deployments the controller scales.** In apply mode the controller
+sets the replica count of every worker Deployment bound to a pool. A
+`helm upgrade` that re-renders `agents[].replicas` resets that count. The
+controller then scales back after its cooldown, and on the way it may drain
+workers the reset had added.
+
+`agents[].replicasManagedByController: true` hands the count to the
+controller. Once the Deployment exists, every render keeps its live
+`spec.replicas`, 0 included, and `replicas` only seeds a new Deployment.
+Change the count through the pool's binding in the console, or with
+`kubectl scale`, not in values.
+
+When the opt-in is honoured:
+
+- **A release running the control plane:** only while its own controller can
+  apply (`clusterController.enabled` and `apply.enabled`). In plan mode the
+  value applies as before.
+- **A worker-pool release (§20.16):** always. It has no controller of its
+  own; the one scaling it runs in the control-plane release, with the pool's
+  namespace in its `workerNamespaces`.
+
+Set the opt-in on exactly the agents whose Deployments are bound to a pool,
+and only once apply is enabled for them. Under `helm template` the lookup is
+empty, so it shows the value.
 
 ### 20.7 Artifact GC CronJob
 
@@ -2949,6 +3004,19 @@ tokens (role `worker`, scope `worker_rpc`, F114), through the console or
 `POST /v1/namespaces/{ns}/tokens`, and revoke the bootstrap keys. Locally,
 `nexusctl up` mints both of its credentials through the API and writes nothing
 to the database (cli/README.md, "Local quick start").
+
+The bootstrap worker key is static: it never expires, and every agent that
+holds it is the same credential. Once a scoped token works:
+
+1. Put the token in `existingSecret` under a key of your choice.
+2. Point `agentDefaults.workerApiKeySecretKey` (or an agent's own
+   `agents[].workerApiKeySecretKey`) at that key.
+3. Set `bootstrap.registerWorkerKey: false`, so the Job stops registering
+   `worker-api-key`. That stops future registrations only.
+4. Revoke `bootstrap-worker` in the console.
+
+Worker-pool releases (§20.16) run no bootstrap Job, so they should start on
+scoped tokens: one per pool, revoked on its own.
 
 ### 20.11 Database TLS: verify-full and the CA bundle
 
@@ -3185,6 +3253,22 @@ agents:
 
 The AKS/EKS/GKE environments add exactly such an agent (variable `gpu_agent`)
 when their GPU pool is enabled, next to a CPU agent pinned to the cpu pool.
+
+`agents[].executors` selects configuration, not what the agent offers. The
+agent discovers its executors (docs/IMAGES.md §4.3):
+
+- **subprocess** is always offered.
+- **kubernetes** is offered when the configuration the chart renders for it
+  passes the executor's RBAC probe.
+- **docker** needs a daemon socket a chart pod does not have, so the chart
+  refuses it.
+
+A task that names no `runtime.executor` therefore runs as a subprocess even
+on a kubernetes agent, inside the agent pod. Route such queues' tasks with
+`runtime.executor: kubernetes`. The chart no longer renders
+`NEXUS_EXECUTORS` or `NEXUS_HEARTBEAT_INTERVAL_MS`: the agent never read
+either, and the control plane sets the heartbeat interval (ADR-0005).
+`agentDefaults.heartbeatIntervalMs` is still accepted and ignored.
 Size the agent inside one GPU node. GPU execution itself is still unqualified
 on real hardware (production brief).
 
@@ -3261,7 +3345,7 @@ that registers but never gets dispatch hints.
 | `agentDefaults.controlPlane.tls` (`caSecretName`, `serverName`) | the CA and a SAN of whatever terminates TLS in front of the gateway |
 | `agentDefaults.nats.url` (`""` = long-poll) | `nats://nats.<namespace>.svc:4222`, and `nats.networkPolicy.extraFrom` admitting the pool namespace's agent pods (example in aks-existing-cluster.yaml) |
 | the seed under `nats-agent-nkey` (or `agents[].natsSeedKey`) | its public key in `nats.auth.tenants` for the Nexus namespace the agents serve (§11.7). Under `nats.tls`, the pool sets `nats.tls.clientSecrets.agent` or `caSecret` (the chart refuses neither). |
-| `worker-api-key` in `existingSecret` | a worker key of `nexusNamespace` (or `agents[].namespace`): the bootstrap key, or one minted with `POST /v1/namespaces/{ns}/tokens` (§20.10) |
+| `worker-api-key` in `existingSecret` (or the key `agentDefaults.workerApiKeySecretKey` names) | a worker credential of `nexusNamespace` (or `agents[].namespace`). Prefer a scoped token minted for this pool (role `worker`, scope `worker_rpc`, §20.10) to the control plane's static bootstrap key: it can be revoked without touching any other pool |
 | `resultStore.*`, `minio.bucket` | the same store. With workload identity, a federated credential for `system:serviceaccount:<pool namespace>:<agent account>`. Against the control plane's in-cluster MinIO: `minio.endpoint: http://minio.<namespace>.svc:9000`, the key pair in the pool's Secret, and `networkPolicy.minioFrom` when §20.17's policy is on. |
 | `cluster.name` | the registered cluster, as on the control plane |
 | the pool namespace | listed in `clusterController.workerNamespaces`, so the controller observes it |
