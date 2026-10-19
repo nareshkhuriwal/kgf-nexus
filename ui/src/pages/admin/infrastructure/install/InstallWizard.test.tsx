@@ -117,7 +117,7 @@ describe('InstallWizard', () => {
 
   it('shows a minted worker token once, with a copy button and a warning', async () => {
     const { calls } = serveInfra();
-    render();
+    const { qc } = render();
     fillRequired('aks-new');
     step(/Worker token/);
     expect(field('Token name')).toHaveValue('nexus-agents-aks-new');
@@ -126,6 +126,9 @@ describe('InstallWizard', () => {
     expect(warning).toHaveTextContent('Copy this token now. It is shown once and cannot be shown again.');
     expect(screen.getByText('nxs_tok_SECRET123')).toBeInTheDocument();
     expect(calls.find((c) => c.method === 'POST')!.body).toEqual({ name: 'nexus-agents-aks-new', role: 'worker', scopes: ['worker_rpc'], expires_in_days: 90 });
+    // The secret is held by the step alone, never by a query or mutation cache.
+    await waitFor(() => expect(JSON.stringify(qc.getMutationCache().getAll().map((m) => m.state.data ?? null))).not.toContain('nxs_tok_SECRET123'));
+    expect(JSON.stringify(qc.getQueryCache().getAll().map((q) => q.state.data ?? null))).not.toContain('nxs_tok_SECRET123');
     fireEvent.click(screen.getByRole('button', { name: 'Copy worker token' }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('nxs_tok_SECRET123'));
     expect(await screen.findByText('Copied worker token to the clipboard.')).toBeInTheDocument();

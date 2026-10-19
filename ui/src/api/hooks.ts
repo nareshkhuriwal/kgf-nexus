@@ -1122,6 +1122,9 @@ export function useMintWorkerToken(namespace: string) {
       void qc.invalidateQueries({ queryKey: ['tokens', namespace] });
       void qc.invalidateQueries({ queryKey: ['audit', namespace] });
     },
+    // Collected as soon as the caller resets it, so the secret in its result
+    // does not linger in the mutation cache.
+    gcTime: 0,
     retry: false,
   });
 }

@@ -432,6 +432,7 @@ export function TokenStep({ namespace, input, canMint }: { namespace: string; in
   const [name, setName] = useState(`nexus-agents-${input.clusterName || 'aks'}`);
   const [days, setDays] = useState(90);
   const [issued, setIssued] = useState<ScopedToken | null>(null);
+  const [dismissed, setDismissed] = useState('');
   const daysError = Number.isInteger(days) && days >= 1 && days <= 365 ? undefined : 'Between 1 and 365 days.';
   const nameError = name.trim() ? undefined : 'Name the token so it can be recognised and revoked later.';
 
@@ -453,7 +454,14 @@ export function TokenStep({ namespace, input, canMint }: { namespace: string; in
         <code className="token-secret infra-secret">{issued.token}</code>
         <div className="row">
           <CopyButton text={issued.token} what="worker token" />
-          <button type="button" className="primary" onClick={() => setIssued(null)}>
+          <button
+            type="button"
+            className="primary"
+            onClick={() => {
+              setDismissed(issued.name);
+              setIssued(null);
+            }}
+          >
             I have stored it
           </button>
         </div>
@@ -469,9 +477,9 @@ export function TokenStep({ namespace, input, canMint }: { namespace: string; in
         Agents authenticate with a worker token: role <code>worker</code>, scope <code>worker_rpc</code> and nothing else. The commands read it
         from <code>${ENV.workerToken}</code> and put it only in the pool namespaces’ Secrets. Skip this step to use a token you already have.
       </p>
-      {mint.data && !issued && (
+      {dismissed && (
         <p className="sub" role="status">
-          Token {mint.data.name} was minted and its secret dismissed. Mint another if you did not store it.
+          Token {dismissed} was minted and its secret dismissed. Mint another if you did not store it.
         </p>
       )}
       {canMint ? (
@@ -488,7 +496,13 @@ export function TokenStep({ namespace, input, canMint }: { namespace: string; in
               onClick={() =>
                 void mint
                   .mutateAsync({ name: name.trim(), expires_in_days: days })
-                  .then(setIssued)
+                  .then((t) => {
+                    // The secret lives only in this component's state: clear it
+                    // from the mutation cache at once.
+                    setIssued(t);
+                    setDismissed('');
+                    mint.reset();
+                  })
                   .catch(() => undefined)
               }
             >
