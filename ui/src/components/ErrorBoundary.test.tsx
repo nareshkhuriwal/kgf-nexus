@@ -15,6 +15,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useState } from 'react';
+import type { JSX } from 'react';
 import { ErrorBoundary } from './ErrorBoundary';
 
 function Boom({ explode = true }: { explode?: boolean }): JSX.Element {

@@ -183,7 +183,7 @@ describe('the navigation drawer', () => {
     const trigger = document.createElement('button');
     document.body.append(trigger);
     const ref = createRef<HTMLElement>();
-    // @ts-expect-error createRef gives a read-only current; assigning it here is
+    // Assigning createRef's current (writable since React 19) here is
     // how the test stands in for the ref NavBar actually attaches to its button.
     ref.current = trigger;
 
@@ -198,7 +198,6 @@ describe('the navigation drawer', () => {
     const trigger = document.createElement('button');
     document.body.append(trigger);
     const ref = createRef<HTMLElement>();
-    // @ts-expect-error see above.
     ref.current = trigger;
 
     wrap(<NavDrawer open onClose={() => {}} returnFocusTo={ref} canAdmin />);
@@ -218,7 +217,6 @@ describe('the navigation drawer', () => {
     const trigger = document.createElement('button');
     document.body.append(trigger);
     const ref = createRef<HTMLElement>();
-    // @ts-expect-error see above.
     ref.current = trigger;
 
     wrap(<NavDrawer open onClose={() => {}} returnFocusTo={ref} canAdmin />);
