@@ -1646,11 +1646,14 @@ Design and safety argument: docs/CLUSTER-SCALING.md. This section is the runbook
 - The worker Deployment follows `deploy/k8s/cluster-controller/base/worker-deployment.example.yaml`:
   no hostname override, CPU/memory requests, `terminationGracePeriodSeconds` at
   least `NEXUS_DRAIN_GRACE`, no HPA of its own.
-- The cluster-controller image, pinned by digest. The release pipeline builds
-  and pushes `<acr>/nexus/cluster-controller`; `deploy/scripts/cluster-controller-overlay.sh`
+- The cluster-controller image, pinned by digest. The release workflow
+  builds and pushes `ghcr.io/<owner>/kgf-nexus/cluster-controller` (§22.4;
+  KGF Cloud's release pipeline pushes `<acr>/nexus/cluster-controller`);
+  `deploy/scripts/cluster-controller-overlay.sh`
   renders `base` or `apply` with that digest (the `kustomize edit set image`
   retarget, as a throwaway overlay) and fails if any container would run
-  something else. KGF Cloud's release pipeline (its `deploy-aks.yml`
+  something else. The release workflow proves both modes against every digest
+  map it publishes; KGF Cloud's release pipeline (its `deploy-aks.yml`
   template, in the kgf-cloud repository) runs it when its
   `clusterController` parameter is `base` or `apply` (default `none`). By hand:
   `NAMESPACE=kgf-nexus deploy/scripts/cluster-controller-overlay.sh base <acr>/nexus/cluster-controller@sha256:<digest> | kubectl apply -f -`.
@@ -2500,7 +2503,7 @@ are docs/TLS.md (mTLS), docs/CLUSTER-SCALING.md (controller), §7.7/§19.2
 | Need | Why | Check |
 |---|---|---|
 | Kubernetes ≥ 1.29 | `kubeVersion` in Chart.yaml; `matchLabelKeys` in spread constraints | `kubectl version` |
-| Images for **one immutable tag**: api-gateway, workflow-manager, dag-engine, scheduler, resource-manager, event-service, agent, migrate, ui, **artifact-gc**, **cluster-controller** | every component renders `<registry><prefix><component>:<tag>`; the last two are new in 0.2.0 | the release pipeline builds all eleven (KGF Cloud's `images.yml` template); locally `make k8s-dev-images` |
+| Images for **one immutable tag**: api-gateway, workflow-manager, dag-engine, scheduler, resource-manager, event-service, agent, migrate, ui, **artifact-gc**, **cluster-controller** | every component renders `<registry><prefix><component>:<tag>`; the last two are new in 0.2.0 | the release workflow builds all eleven and publishes them to GHCR by digest (`.github/workflows/release.yml`, §22.4); KGF Cloud's release pipeline builds the same set for its ACR; locally `make k8s-dev-images` |
 | A credentials Secret (`existingSecret`) | no credential is ever rendered into a manifest | keys `postgres-password`, `minio-root-user`, `minio-root-password`, `worker-api-key`, optional `admin-api-key` |
 | NATS identities (`nats.auth`) | the chart refuses an unauthenticated broker | §11.7; `nats.auth.mode=none` only for a throwaway cluster |
 | metrics-server | HPAs (`autoscaling.enabled`) | `kubectl get apiservice v1beta1.metrics.k8s.io` |
@@ -2546,7 +2549,7 @@ durations, a `latest` tag, and any misspelt **top-level** key at install time.
 | `existingSecret` | — (required) | Secret with the credentials in §20.1 |
 | `image.tag` | — (required) | immutable tag for every Nexus image; `latest` is refused |
 | `image.registry`, `image.repositoryPrefix`, `image.pullSecrets` | `""`, `kgf-nexus/`, `[]` | image location |
-| `image.digests.<component>` | `{}` | `sha256:<64 hex>` per image; renders `<ref>:<tag>@<digest>`. The release pipeline writes it (`deploy/scripts/helm-image-digests.py`, §22) |
+| `image.digests.<component>` | `{}` | `sha256:<64 hex>` per image; renders `<ref>:<tag>@<digest>`. A release writes it: `release-images.yaml` in the release workflow's `image-digests` artifact (`deploy/scripts/helm-image-digests.py`, §22.4) |
 | `nexusNamespace` | `default` | the Nexus tenant the agents serve and bootstrap creates |
 | `postgres.enabled` / `.host` / `.sslmode` | `true` / `postgres` / `disable` | `false` + host for a managed database (use `verify-full`) |
 | `postgres.caBundle.secretName` / `.configMapName` / `.key` | `""` / `""` / `ca.crt` | root CAs for `verify-ca`/`verify-full`, mounted as `sslrootcert`, §20.11 |
@@ -2778,7 +2781,7 @@ external gRPC Service.
 ### 20.10 Helm 4: what lint and `--wait` do not tell you
 
 Two Helm 4 behaviours make its own exit codes weaker gates than they look.
-`deploy/helm/validate.sh` (CI: GitHub job `helm`, Azure stage `Helm`) is built
+`deploy/helm/validate.sh` (CI: the `helm` job of `.github/workflows/ci.yml`) is built
 around both. Helm and kubeconform are pinned and checksum-verified
 (`deploy/scripts/pinned-tool.sh`), and so are the Kubernetes and CRD schemas
 (`deploy/helm/schemas.lock`).
@@ -3314,6 +3317,8 @@ the digest is what Docker and Kubernetes actually resolve.
 | S3 result store and backup store (server) | `docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46` (multi-arch index: amd64 + arm64) | `deploy/docker-compose.yml` (`minio`), `deploy/docker-compose.pitr.yml` (`backup-store`, `NEXUS_PITR_MINIO_IMAGE`), Helm `minio.image`, Makefile `S3_IMAGE` (bench, CI) |
 | `mc` bucket-init jobs | the **same** Silo image (it bundles a version-matched `mc`) | compose `minio-init`, `backup-store-init` (`NEXUS_PITR_MC_IMAGE`), Helm `minio.mcImage` |
 | Console build | `node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1` | `deploy/Dockerfile.ui`; CI uses Node `24.21.0` (`.github/workflows/ci.yml`, and KGF Cloud's Azure pipelines) |
+| Image builder (release workflow) | `moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea` | `.github/workflows/release.yml` (`docker/setup-buildx-action` `driver-opts`) |
+| arm64 emulation for the images' runtime stages | `docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0` | `.github/workflows/release.yml` (`docker/setup-qemu-action` `image`) |
 
 ### 22.1 The S3 store: why Silo, and not MinIO
 
@@ -3367,8 +3372,70 @@ tests against (GitHub Actions).
 Node 20 reached end of life on 2026-04-30. The console builds and CI run on
 Node **24** ("Krypton"), Active LTS until 2026-10-20 and maintained until
 2028-04-30 (github.com/nodejs/Release, `schedule.json`). The exact patch
-(`24.21.0`) is pinned in all three CI definitions and in the Dockerfile, and
-they move together. Node 26 becomes LTS on 2026-10-28; move once it has.
+(`24.21.0`) is pinned in `.github/workflows/ci.yml` (`NODE_VERSION`), in
+`deploy/Dockerfile.ui` and in this section's table, and they move together:
+`tests/repo` (`make check-go-version`, and the unit tests in CI) fails when
+they disagree. KGF Cloud's Azure pipelines, in the kgf-cloud repository, carry
+the same pin. Node 26 becomes LTS on 2026-10-28; move once it has.
+
+### 22.4 Nexus's own images: the release workflow
+
+Every first-party image is built by `.github/workflows/release.yml`, which
+`.github/workflows/ci.yml` calls; it is never triggered on its own.
+
+| Event | What happens |
+|---|---|
+| Pull request | `images`: all eleven images built for `linux/amd64` and `linux/arm64`, one job per image, after the unit tests pass. Nothing is pushed and the run holds no registry credential. |
+| Push to `main` | after **every** CI job has passed on that commit (`quality gate`), `publish` pushes `ghcr.io/<owner>/kgf-nexus/<image>:<commit>` (12 hex digits) and `:main`. |
+| Tag `vX.Y.Z[-pre]` | the whole CI suite on the tagged commit, then `publish` pushes `:vX.Y.Z`. A tag that is not a release version is refused. |
+
+Documentation-only changes (`docs/**`, `*.md` outside `sdk/`) build and
+publish nothing. Nothing is ever tagged `latest` (the chart refuses it), and
+`main` moves with every merge: install by the commit or version tag, and by
+digest.
+
+The names are the chart's own: `image.registry: ghcr.io/` and
+`image.repositoryPrefix: <owner>/kgf-nexus/` (the lower-cased repository
+owner). After the images are pushed, one job collects every digest and refuses
+the map unless it holds exactly the eleven images, each digest-pinned under one
+repository base; then it renders the chart with the map, with the cluster
+controller off and on, and the cluster-controller overlay in both modes, and
+fails unless every Nexus image runs exactly its digest (the checks KGF Cloud's
+release runs before `helm upgrade`, F112). Only then is the map published, as
+the run's `image-digests` artifact:
+
+| File | Use |
+|---|---|
+| `digests.json` | `{"<image>": "ghcr.io/<owner>/kgf-nexus/<image>@sha256:...", ...}`; `deploy/render_compose.py --digests digests.json` renders a compose file a Docker host can pull (§9.5, `deploy/portainer/README.md`) |
+| `release-images.yaml` | Helm values: `image.registry`, `image.repositoryPrefix`, `image.digests` |
+
+```sh
+helm upgrade --install kgf-nexus deploy/helm/kgf-nexus -n kgf-nexus \
+  -f my-values.yaml -f release-images.yaml --set image.tag=<commit or vX.Y.Z>
+```
+
+Pass `release-images.yaml` last, so no other values file can override what was
+built.
+
+**Provenance.** Each image carries a Sigstore-signed SLSA build-provenance
+attestation bound to the release workflow, and BuildKit's SBOM and provenance
+in its index:
+
+```sh
+gh attestation verify oci://ghcr.io/<owner>/kgf-nexus/api-gateway@sha256:<digest> \
+  --repo <owner>/kgf-nexus --signer-workflow <owner>/kgf-nexus/.github/workflows/release.yml
+docker buildx imagetools inspect ghcr.io/<owner>/kgf-nexus/api-gateway@sha256:<digest> \
+  --format '{{ json .SBOM }}'
+```
+
+**One-time setup.** GHCR creates each package on its first push, private. Make
+each of the eleven packages public (package settings), or give the cluster a
+pull secret (`image.pullSecrets`). Nothing else needs configuring: the push
+uses the workflow's own token.
+
+KGF's own deployments (its ACR, AKS and Portainer host) are released by KGF
+Cloud's Azure DevOps pipelines in the kgf-cloud repository, which build the
+same eleven images into `<acr>/nexus/<image>`.
 
 ---
 

@@ -45,9 +45,14 @@ applied to a real subscription yet (F115).
 - The NATS identities, generated on an admin machine:
   `NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh init --tenant default`
   (docs/OPERATIONS.md §11.7). The chart refuses to run without them.
-- Images pushed to the ACR created here, as
-  `<registry>/kgf-nexus/<component>:<git-sha>`. Run the release pipeline
-  against this ACR, or use `az acr import` / `docker push`.
+- Images in the ACR created here, as
+  `<registry>/kgf-nexus/<component>:<git-sha>`. This repository's release
+  workflow publishes every image to GHCR, digest-pinned
+  (`.github/workflows/release.yml`, docs/OPERATIONS.md §22.4); copy them in by
+  digest with `az acr import --name <acr> --source
+  ghcr.io/<owner>/kgf-nexus/<component>@sha256:<digest> --image
+  kgf-nexus/<component>:<git-sha>`, or `docker push` your own builds. KGF's own
+  AKS release pipeline lives in the kgf-cloud repository.
 - For a **private cluster** (`private_cluster_enabled = true`), Terraform,
   kubectl and CI must run from inside the VNet or a peered network (jump host,
   self-hosted agent, Bastion).

@@ -23,9 +23,11 @@ image:
   # dag-engine, scheduler, resource-manager, event-service, agent, migrate, ui),
   # NOT by the camelCase keys under `services`. A digest here is appended to that
   # image's reference (<repo>:<tag>@sha256:...), so the kubelet pulls exactly the
-  # bytes the release built. The release pipeline sets the whole map from its
-  # digest map (templates/deploy-aks.yml); deploy/scripts/helm-image-digests.py
-  # fails the release if any rendered Nexus image does not resolve to it.
+  # bytes the release built. A release sets the whole map from its digest map:
+  # release-images.yaml in the release workflow's image-digests artifact
+  # (.github/workflows/release.yml), or KGF Cloud's deploy-aks.yml template;
+  # deploy/scripts/helm-image-digests.py fails the release if any rendered
+  # Nexus image does not resolve to it.
   digests: {}
   pullPolicy: IfNotPresent
   pullSecrets: []
