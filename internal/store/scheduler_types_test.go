@@ -159,20 +159,20 @@ func TestTaskSpecViewToleratesUnknownFields(t *testing.T) {
 }
 
 // TestTaskSpecViewReadsExecutorAndImageInEveryDialect: the claim places a task
-// that names no executor by whether it carries an image, so the image must be
-// read from the DAG engine's protojson (runtime.image, nested) as well as the
-// flat fixture form; reading neither would let a kubernetes-default worker
-// claim an image-less task.
+// that names no executor by whether it carries an image and stdout_output, so
+// both must be read from the DAG engine's protojson (nested under runtime) as
+// well as the flat fixture form; reading neither would let a
+// kubernetes-default worker claim a task its executor refuses.
 func TestTaskSpecViewReadsExecutorAndImageInEveryDialect(t *testing.T) {
 	cases := map[string]struct {
-		raw, executor, image string
+		raw, executor, image, stdout string
 	}{
-		"proto names":   {`{"task_ref":"t","runtime":{"executor":"kubernetes","image":"reg/x:1","command":["a"]}}`, "kubernetes", "reg/x:1"},
-		"camel case":    {`{"taskRef":"t","runtime":{"image":"reg/y:2"},"timeouts":{"startToCloseMs":"60000"}}`, "", "reg/y:2"},
-		"flat fixture":  {`{"task_ref":"t","executor":"docker","image":"reg/z:3"}`, "docker", "reg/z:3"},
-		"no runtime":    {`{"task_ref":"t"}`, "", ""},
-		"command only":  {`{"task_ref":"t","runtime":{"command":["echo"]}}`, "", ""},
-		"quoted int64s": {`{"task_ref":"t","start_to_close_ms":"5","runtime":{"image":"reg/q:4"}}`, "", "reg/q:4"},
+		"proto names":   {`{"task_ref":"t","runtime":{"executor":"kubernetes","image":"reg/x:1","command":["a"],"stdout_output":"o"}}`, "kubernetes", "reg/x:1", "o"},
+		"camel case":    {`{"taskRef":"t","runtime":{"image":"reg/y:2","stdoutOutput":"p"},"timeouts":{"startToCloseMs":"60000"}}`, "", "reg/y:2", "p"},
+		"flat fixture":  {`{"task_ref":"t","executor":"docker","image":"reg/z:3","stdout_output":"q"}`, "docker", "reg/z:3", "q"},
+		"no runtime":    {`{"task_ref":"t"}`, "", "", ""},
+		"command only":  {`{"task_ref":"t","runtime":{"command":["echo"]}}`, "", "", ""},
+		"quoted int64s": {`{"task_ref":"t","start_to_close_ms":"5","runtime":{"image":"reg/q:4"}}`, "", "reg/q:4", ""},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -180,8 +180,12 @@ func TestTaskSpecViewReadsExecutorAndImageInEveryDialect(t *testing.T) {
 			if err := json.Unmarshal([]byte(c.raw), &spec); err != nil {
 				t.Fatal(err)
 			}
-			if spec.Executor != c.executor || spec.Image != c.image {
-				t.Errorf("executor=%q image=%q, want %q and %q", spec.Executor, spec.Image, c.executor, c.image)
+			if spec.Executor != c.executor || spec.Image != c.image || spec.StdoutOutput != c.stdout {
+				t.Errorf("executor=%q image=%q stdout_output=%q, want %q, %q and %q",
+					spec.Executor, spec.Image, spec.StdoutOutput, c.executor, c.image, c.stdout)
+			}
+			if u := spec.Unnamed(); u.HasImage != (c.image != "") || u.StdoutOutput != (c.stdout != "") {
+				t.Errorf("Unnamed() = %+v", u)
 			}
 		})
 	}
@@ -214,9 +218,11 @@ func TestLedgerReadsTheDefaultExecutorLabel(t *testing.T) {
 }
 
 func TestShortfallReasonForAnUnnamedExecutor(t *testing.T) {
-	r := shortfallReason([]domain.Shortfall{{Dim: shortfallUnnamedExecutor, Detail: "kubernetes"}})
-	if !strings.HasPrefix(r, "waiting_for_worker: ") || !strings.Contains(r, "(kubernetes, label nexus.io/default-executor)") {
-		t.Errorf("reason = %q", r)
+	r := shortfallReason([]domain.Shortfall{{Dim: shortfallUnnamedExecutor, Detail: "kubernetes needs runtime.image"}})
+	for _, want := range []string{"waiting_for_worker: ", "(label nexus.io/default-executor)", ": kubernetes needs runtime.image;"} {
+		if !strings.Contains(r, want) {
+			t.Errorf("reason %q does not contain %q", r, want)
+		}
 	}
 	// Any other shortfall is unchanged.
 	short := []domain.Shortfall{{Dim: "gpu", Need: 4, Free: 3}}

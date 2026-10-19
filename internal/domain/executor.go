@@ -82,12 +82,41 @@ func ExecutorRunsImage(kind string) bool {
 	return false
 }
 
+// ExecutorRejectsStdoutOutput reports whether an executor refuses a task that
+// sets runtime.stdout_output: the kubernetes executor does, with VALIDATION
+// (agent/internal/executor/kubernetes.go, Prepare), because a pod's stdout
+// reaches the agent only through the kubelet's log, interleaved with stderr.
+func ExecutorRejectsStdoutOutput(kind string) bool {
+	return CanonicalExecutor(kind) == ExecutorKubernetes
+}
+
+// UnnamedTask is what the claim knows of a task that names no executor: the
+// parts of its runtime a default executor may be unable to run.
+type UnnamedTask struct {
+	HasImage     bool // runtime.image is set
+	StdoutOutput bool // runtime.stdout_output is set
+}
+
+// UnnamedRefusal says why a worker whose default executor is def cannot run a
+// task that names no executor, or "" when it can. A subprocess default runs
+// anything, which is every worker before NEXUS_DEFAULT_EXECUTOR existed; a
+// container default needs an image, and kubernetes also refuses
+// stdout_output. Without this check a kubernetes-only pool would claim such a
+// task and fail it VALIDATION, while a subprocess worker elsewhere could have
+// run it.
+func UnnamedRefusal(def string, t UnnamedTask) string {
+	def = CanonicalExecutor(def)
+	switch {
+	case ExecutorRunsImage(def) && !t.HasImage:
+		return def + " needs runtime.image"
+	case ExecutorRejectsStdoutOutput(def) && t.StdoutOutput:
+		return def + " does not support runtime.stdout_output"
+	}
+	return ""
+}
+
 // CanRunUnnamed reports whether a worker whose default executor is def can run
-// a task that names no executor. A subprocess default runs anything, which is
-// every worker before NEXUS_DEFAULT_EXECUTOR existed; a container default
-// needs the task to carry an image. Without this check a kubernetes-only pool
-// would claim an image-less task and fail it VALIDATION, while a subprocess
-// worker elsewhere could have run it.
-func CanRunUnnamed(def string, hasImage bool) bool {
-	return hasImage || !ExecutorRunsImage(def)
+// a task that names no executor (UnnamedRefusal is the reason it cannot).
+func CanRunUnnamed(def string, t UnnamedTask) bool {
+	return UnnamedRefusal(def, t) == ""
 }

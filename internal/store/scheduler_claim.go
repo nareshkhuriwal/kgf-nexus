@@ -570,10 +570,10 @@ func (s *SchedulerStore) placeCandidate(
 }
 
 // shortfallUnnamedExecutor is the shortfall of a worker that matched a task
-// naming no executor in every other respect, but whose default executor runs
-// container images while the task has none. It is the weakest explanation:
-// any other shortfall on another worker replaces it, because that one is
-// closer to placing the task.
+// naming no executor in every other respect, but whose default executor
+// cannot run it (domain.UnnamedRefusal is the Detail). It is the weakest
+// explanation: any other shortfall on another worker replaces it, because that
+// one is closer to placing the task.
 const shortfallUnnamedExecutor = "default_executor"
 
 // shortfallReason is domain.ShortfallReason, except that a task blocked only
@@ -581,10 +581,10 @@ const shortfallUnnamedExecutor = "default_executor"
 // resources, and says how to fix it.
 func shortfallReason(short []domain.Shortfall) string {
 	if len(short) == 1 && short[0].Dim == shortfallUnnamedExecutor {
-		return fmt.Sprintf("waiting_for_worker: the task names no runtime.executor and no runtime.image, and "+
-			"the matching workers run such a task on their default executor (%s, label %s), which needs an image; "+
-			"set runtime.executor (e.g. subprocess) or runtime.image",
-			short[0].Detail, domain.LabelDefaultExecutor)
+		return fmt.Sprintf("waiting_for_worker: the task names no runtime.executor, so it runs on a worker's "+
+			"default executor (label %s), and the matching workers' default cannot run it: %s; "+
+			"set runtime.executor (e.g. subprocess), or give the task what its default needs",
+			domain.LabelDefaultExecutor, short[0].Detail)
 	}
 	return domain.ShortfallReason(short)
 }
@@ -687,13 +687,16 @@ SELECT w.id, w.hostname, w.capacity, w.committed,
 		w, facts := locked[i].w, locked[i].facts
 		exec := domain.EffectiveExecutor(cand.Spec.Executor,
 			map[string]string{domain.LabelDefaultExecutor: locked[i].defaultExecutor})
-		if cand.Spec.Executor == "" && !domain.CanRunUnnamed(exec, cand.Spec.Image != "") {
+		if cand.Spec.Executor == "" {
 			// The task names no executor, so it would run on this worker's
-			// default -- a container executor, and the task has no image.
-			if bestShort == nil {
-				bestShort = []domain.Shortfall{{Dim: shortfallUnnamedExecutor, Detail: exec}}
+			// default, which may be unable to (a container default and no
+			// image, say).
+			if why := domain.UnnamedRefusal(exec, cand.Spec.Unnamed()); why != "" {
+				if bestShort == nil {
+					bestShort = []domain.Shortfall{{Dim: shortfallUnnamedExecutor, Detail: why}}
+				}
+				continue
 			}
-			continue
 		}
 		if ok, why := domain.Eligible(facts.Labels, cand.Spec.Placement); !ok {
 			if bestShort == nil || bestShort[0].Dim == shortfallUnnamedExecutor {

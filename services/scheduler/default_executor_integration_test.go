@@ -84,10 +84,26 @@ func TestUnnamedExecutorPushClaimUsesTheWorkersDefault(t *testing.T) {
 		t.Fatalf("outcome %s for %v, want the image-less task blocked", rep.Outcome, rep.Attempt)
 	}
 	r := f.pendingReason(bare)
-	for _, want := range []string{"waiting_for_worker:", "runtime.image", "kubernetes", domain.LabelDefaultExecutor} {
+	for _, want := range []string{"waiting_for_worker:", "kubernetes needs runtime.image", domain.LabelDefaultExecutor} {
 		if !strings.Contains(r, want) {
 			t.Errorf("pending_reason %q does not contain %q", r, want)
 		}
+	}
+
+	// With an image but runtime.stdout_output, which the kubernetes executor
+	// refuses: the same, for that reason. (Above bare's priority, so this
+	// claim examines it.)
+	stdout := f.addAttempt("stdout", 250, vec{CPUMillis: 1000},
+		nodeSpec{TaskRef: "t", Version: 1, Runtime: map[string]any{"image": "reg/x:1", "stdout_output": "result"}}, now)
+	rep, err = st.Claim(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Outcome != store.ClaimBlocked || rep.Attempt.ID != stdout {
+		t.Fatalf("outcome %s for %v, want the stdout_output task blocked", rep.Outcome, rep.Attempt)
+	}
+	if r := f.pendingReason(stdout); !strings.Contains(r, "kubernetes does not support runtime.stdout_output") {
+		t.Errorf("pending_reason %q does not name stdout_output", r)
 	}
 
 	// A task that NAMES subprocess is never given to a kubernetes-only pool
@@ -99,18 +115,23 @@ func TestUnnamedExecutorPushClaimUsesTheWorkersDefault(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if f.attemptState(bare) != "PENDING" || f.attemptState(named) != "PENDING" {
-		t.Fatalf("bare=%s named=%s, want both PENDING with only the kubernetes pool", f.attemptState(bare), f.attemptState(named))
+	for _, id := range []uuid.UUID{bare, stdout, named} {
+		if s := f.attemptState(id); s != "PENDING" {
+			t.Fatalf("attempt %s is %s, want PENDING with only the kubernetes pool", id, s)
+		}
 	}
 
-	// A worker that predates the label defaults to subprocess and takes both.
+	// A worker that predates the label defaults to subprocess and takes all three.
 	legacy := f.addWorker(vec{CPUMillis: 8000}, nil, []string{"subprocess"})
-	for i := 0; i < 6 && (f.attemptState(bare) == "PENDING" || f.attemptState(named) == "PENDING"); i++ {
+	pending := func() bool {
+		return f.attemptState(bare) == "PENDING" || f.attemptState(stdout) == "PENDING" || f.attemptState(named) == "PENDING"
+	}
+	for i := 0; i < 9 && pending(); i++ {
 		if _, err := st.Claim(ctx, now); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, id := range []uuid.UUID{bare, named} {
+	for _, id := range []uuid.UUID{bare, stdout, named} {
 		if got := workerOf(t, f, id); got != legacy {
 			t.Errorf("attempt %s went to %s, want the subprocess worker %s", id, got, legacy)
 		}
@@ -140,6 +161,9 @@ func TestUnnamedExecutorPullClaimUsesTheWorkersDefault(t *testing.T) {
 		nodeSpec{TaskRef: "t", Version: 1, Image: "reg/a:1"}, old)
 	nested := f.addAttempt("nested-image", 600, vec{CPUMillis: 100},
 		nodeSpec{TaskRef: "t", Version: 1, Runtime: map[string]any{"image": "reg/b:1"}}, old)
+	// An image, but stdout_output, which the kubernetes executor refuses.
+	stdout := f.addAttempt("stdout", 500, vec{CPUMillis: 100},
+		nodeSpec{TaskRef: "t", Version: 1, Runtime: map[string]any{"image": "reg/c:1", "stdout_output": "o"}}, old)
 
 	got, err := st.ClaimForWorker(ctx, time.Now().UTC(), store.WorkerClaimRequest{WorkerID: pool, MaxTasks: 8})
 	if err != nil {
@@ -156,6 +180,9 @@ func TestUnnamedExecutorPullClaimUsesTheWorkersDefault(t *testing.T) {
 	got, err = st.ClaimForWorker(ctx, time.Now().UTC(), store.WorkerClaimRequest{WorkerID: legacy, MaxTasks: 1})
 	if err != nil || len(got) != 1 || got[0].AttemptID != bare {
 		t.Fatalf("legacy worker claimed %v (%v), want the image-less unnamed task", got, err)
+	}
+	if f.attemptState(stdout) != "PENDING" {
+		t.Fatal("the kubernetes pool claimed a stdout_output task")
 	}
 	got, err = st.ClaimForWorker(ctx, time.Now().UTC(), store.WorkerClaimRequest{WorkerID: explicitDefault, MaxTasks: 1})
 	if err != nil || len(got) != 1 || got[0].AttemptID != named {

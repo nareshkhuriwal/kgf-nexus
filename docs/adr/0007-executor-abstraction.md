@@ -128,10 +128,10 @@ console) sees it with no proto or schema change, an older control plane
 ignores it, and an older agent, which has no label, is read as subprocess,
 exactly what it does. The claim reads the worker's own label, never the
 cluster overlay. A default that runs container images (docker, kubernetes)
-can only run a task carrying `runtime.image` (`domain.CanRunUnnamed`), so a
-kubernetes-only pool never claims an image-less unnamed task that it would
-fail VALIDATION; such a task waits with a `waiting_for_worker` reason naming
-the fix. A task that names an executor is placed, as before, only on a worker
+can only run a task carrying `runtime.image`, and kubernetes refuses
+`runtime.stdout_output` (`domain.UnnamedRefusal`), so a kubernetes-only pool
+never claims an unnamed task that it would fail VALIDATION; such a task waits
+with a `waiting_for_worker` reason naming the fix. A task that names an executor is placed, as before, only on a worker
 advertising it. Cluster quota headroom and pull-path deferral use the
 effective executor, and the usage ledger meters an unnamed task under the
 worker's default.

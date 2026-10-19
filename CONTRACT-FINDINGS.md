@@ -5184,8 +5184,9 @@ before), and an allow-listed executor that cannot be built stops the agent
 with the reason. `NEXUS_DEFAULT_EXECUTOR` runs an unnamed task (subprocess when
 allowed, else the first listed) and is advertised as the worker label
 `nexus.io/default-executor`. The scheduler reads an empty executor as the
-claiming worker's default: a container default needs `runtime.image`, so a
-kubernetes-only pool never claims an image-less task (it waits with a
+claiming worker's default: a container default needs `runtime.image` and
+kubernetes refuses `runtime.stdout_output`, so a kubernetes-only pool never
+claims an unnamed task it would fail VALIDATION (the task waits with a
 `waiting_for_worker` reason naming the fix); headroom, deferral and metering
 use the effective executor. The chart renders both variables from
 `agents[].executors` and the new `agents[].defaultExecutor`; the AKS examples'

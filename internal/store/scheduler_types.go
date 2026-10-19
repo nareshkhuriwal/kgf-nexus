@@ -65,11 +65,13 @@ type TaskSpecView struct {
 	Version      int32             `json:"version"`
 	NodeSelector map[string]string `json:"node_selector"`
 	Executor     string            `json:"executor"`
-	// Image is runtime.image. Read only so a task that names no executor is
-	// claimed only by a worker whose default executor can run it: a
-	// container default (docker, kubernetes) needs an image
+	// Image and StdoutOutput are runtime.image and runtime.stdout_output.
+	// Read only so a task that names no executor is claimed only by a worker
+	// whose default executor can run it: a container default (docker,
+	// kubernetes) needs an image, and kubernetes refuses stdout_output
 	// (domain.CanRunUnnamed).
-	Image string `json:"image"`
+	Image        string `json:"image"`
+	StdoutOutput string `json:"stdout_output"`
 
 	ScheduleToStartMs int64 `json:"schedule_to_start_ms"`
 	StartToCloseMs    int64 `json:"start_to_close_ms"`
@@ -380,8 +382,9 @@ func (s *TaskSpecView) UnmarshalJSON(b []byte) error {
 			HeartbeatMs       *json.Number `json:"heartbeat_ms"`
 		} `json:"timeouts"`
 		Runtime *struct {
-			Executor string `json:"executor"`
-			Image    string `json:"image"`
+			Executor     string `json:"executor"`
+			Image        string `json:"image"`
+			StdoutOutput string `json:"stdout_output"`
 		} `json:"runtime"`
 		Idempotency      string          `json:"idempotency"`
 		ConcurrencyKey   string          `json:"concurrency_key"`
@@ -403,6 +406,9 @@ func (s *TaskSpecView) UnmarshalJSON(b []byte) error {
 		}
 		if sn.Runtime != nil && sn.Runtime.Image != "" {
 			s.Image = sn.Runtime.Image
+		}
+		if sn.Runtime != nil && sn.Runtime.StdoutOutput != "" {
+			s.StdoutOutput = sn.Runtime.StdoutOutput
 		}
 		if t := sn.Timeouts; t != nil {
 			if v, ok := numInt64(t.ScheduleToStartMs); ok {
@@ -446,8 +452,9 @@ func (s *TaskSpecView) UnmarshalJSON(b []byte) error {
 			HeartbeatMs       *json.Number `json:"heartbeatMs"`
 		} `json:"timeouts"`
 		Runtime *struct {
-			Executor string `json:"executor"`
-			Image    string `json:"image"`
+			Executor     string `json:"executor"`
+			Image        string `json:"image"`
+			StdoutOutput string `json:"stdoutOutput"`
 		} `json:"runtime"`
 		Idempotency      string          `json:"idempotency"`
 		ConcurrencyKey   string          `json:"concurrencyKey"`
@@ -475,6 +482,9 @@ func (s *TaskSpecView) UnmarshalJSON(b []byte) error {
 	}
 	if pj.Runtime != nil && pj.Runtime.Image != "" {
 		s.Image = pj.Runtime.Image
+	}
+	if pj.Runtime != nil && pj.Runtime.StdoutOutput != "" {
+		s.StdoutOutput = pj.Runtime.StdoutOutput
 	}
 	if t := pj.Timeouts; t != nil {
 		if v, ok := numInt64(t.ScheduleToStartMs); ok {
@@ -603,4 +613,10 @@ func capacityPreference(raw json.RawMessage) nexusv1.CapacityPreference {
 		return nexusv1.CapacityPreference(n)
 	}
 	return nexusv1.CapacityPreference_CAPACITY_PREFERENCE_SPOT_ALLOWED
+}
+
+// Unnamed is what the claim needs of a task that names no executor to decide
+// whether a worker's default executor can run it (domain.UnnamedRefusal).
+func (s *TaskSpecView) Unnamed() domain.UnnamedTask {
+	return domain.UnnamedTask{HasImage: s.Image != "", StdoutOutput: s.StdoutOutput != ""}
 }

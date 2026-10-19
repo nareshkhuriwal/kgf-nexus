@@ -209,9 +209,10 @@ agent's **default executor**: `NEXUS_DEFAULT_EXECUTOR`, which must be one of
 agent advertises it as the worker label `nexus.io/default-executor` (it owns
 that label; a `NEXUS_LABELS` value that disagrees is refused), and the
 scheduler gives such a task only to a worker whose default can run it: a docker
-or kubernetes default needs the task's `runtime.image`. A task without an image
-on a fleet whose defaults all need one waits with
-`waiting_for_worker: the task names no runtime.executor and no runtime.image ...`.
+or kubernetes default needs the task's `runtime.image`, and kubernetes also
+refuses `runtime.stdout_output`. A task no default in the fleet can run waits
+with `waiting_for_worker: the task names no runtime.executor ...`, naming what
+its workers' default needs.
 A task that names an executor is placed only on a worker that advertises it.
 Agents older than these settings carry no label and default to subprocess. The
 console shows a worker's executors and its `nexus.io/default-executor` label;

@@ -41,22 +41,30 @@ func TestEffectiveExecutorPrefersTheNamedOne(t *testing.T) {
 }
 
 func TestCanRunUnnamed(t *testing.T) {
+	image := UnnamedTask{HasImage: true}
+	bare := UnnamedTask{}
+	stdout := UnnamedTask{HasImage: true, StdoutOutput: true}
 	cases := []struct {
-		def      string
-		hasImage bool
-		want     bool
+		def  string
+		task UnnamedTask
+		want string
 	}{
-		{ExecutorSubprocess, false, true},
-		{ExecutorSubprocess, true, true},
-		{ExecutorKubernetes, true, true},
-		{ExecutorKubernetes, false, false},
-		{ExecutorK8sAlias, false, false},
-		{ExecutorDocker, false, false},
-		{ExecutorDocker, true, true},
+		{ExecutorSubprocess, bare, ""},
+		{ExecutorSubprocess, stdout, ""},
+		{"", bare, ""},
+		{ExecutorKubernetes, image, ""},
+		{ExecutorKubernetes, bare, "kubernetes needs runtime.image"},
+		{ExecutorK8sAlias, bare, "kubernetes needs runtime.image"},
+		{ExecutorKubernetes, stdout, "kubernetes does not support runtime.stdout_output"},
+		{ExecutorDocker, bare, "docker needs runtime.image"},
+		{ExecutorDocker, stdout, ""},
 	}
 	for _, c := range cases {
-		if got := CanRunUnnamed(c.def, c.hasImage); got != c.want {
-			t.Errorf("CanRunUnnamed(%q, image=%v) = %v, want %v", c.def, c.hasImage, got, c.want)
+		if got := UnnamedRefusal(c.def, c.task); got != c.want {
+			t.Errorf("UnnamedRefusal(%q, %+v) = %q, want %q", c.def, c.task, got, c.want)
+		}
+		if got := CanRunUnnamed(c.def, c.task); got != (c.want == "") {
+			t.Errorf("CanRunUnnamed(%q, %+v) = %v", c.def, c.task, got)
 		}
 	}
 }

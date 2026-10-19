@@ -246,7 +246,7 @@ func (p *peerWorker) canRun(cand *Candidate) bool {
 		return false
 	}
 	return domain.CanRunUnnamed(domain.WorkerDefaultExecutor(
-		map[string]string{domain.LabelDefaultExecutor: p.defaultExecutor}), cand.Spec.Image != "")
+		map[string]string{domain.LabelDefaultExecutor: p.defaultExecutor}), cand.Spec.Unnamed())
 }
 
 // peerSet lazily loads the polling worker's peers once per claim transaction.

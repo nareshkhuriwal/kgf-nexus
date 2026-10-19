@@ -506,15 +506,17 @@ func (s *SchedulerStore) selectCandidateForWorker(
 
 	// A task that names no executor runs on this worker's default; a
 	// container default (docker, kubernetes) can run it only if it carries an
-	// image (domain.CanRunUnnamed).
-	unnamedNeedsImage := domain.ExecutorRunsImage(domain.WorkerDefaultExecutor(worker.Labels))
+	// image, and kubernetes only without stdout_output (domain.UnnamedRefusal).
+	def := domain.WorkerDefaultExecutor(worker.Labels)
+	unnamedNeedsImage := domain.ExecutorRunsImage(def)
+	unnamedNoStdout := domain.ExecutorRejectsStdoutOutput(def)
 
 	args := []any{
 		s.cfg.Queue, now, s.cfg.AgingRate, skip, executors, labelsJSON,
 		budget.GetCpuMillis(), budget.GetMemoryBytes(),
 		int64(budget.GetGpuCount()), budget.GetDiskBytes(), worker.ID,
 		effJSON, domain.IsSpot(worker.facts.Labels), domain.CostTier(worker.facts.Labels),
-		unnamedNeedsImage,
+		unnamedNeedsImage, unnamedNoStdout,
 	}
 
 	if s.windowed && s.cfg.ClaimWindow > 0 {
@@ -546,8 +548,8 @@ func (s *SchedulerStore) selectCandidateForWorker(
 // Parameters, shared by both callers: $1 queue, $2 now, $3 aging rate,
 // $4 skip ids, $5 executors, $6 worker labels, $7-$10 budget, $11 worker id,
 // $12 effective labels (own + cluster), $13 worker is spot, $14 cost tier,
-// $15 the worker's default executor needs an image. The windowed caller adds
-// $16, the window's ids.
+// $15 the worker's default executor needs an image, $16 it refuses
+// stdout_output. The windowed caller adds $17, the window's ids.
 //
 // Aging is in the ORDER BY for the same reason as in selectCandidate: a
 // background UPDATE-based ager would rewrite every PENDING row every tick, and
@@ -580,13 +582,18 @@ SELECT a.id, a.run_id, a.node_id, a.attempt_number, a.queue, a.priority,
    -- An absent executor means "this worker's default" (nexus.io/default-
    -- executor; subprocess for a worker that predates it), so the COALESCE is
    -- load-bearing: a spec that omits the field must match every worker whose
-   -- default can run it rather than none. A container default ($15) needs
-   -- the task to carry an image, read in both dialects like the executor.
+   -- default can run it rather than none (domain.UnnamedRefusal). A container
+   -- default ($15) needs the task to carry an image; kubernetes ($16) also
+   -- refuses stdout_output. Both read in every dialect, like the executor.
    AND ((COALESCE(n.spec_json #>> '{runtime,executor}',
                   n.spec_json #>> '{executor}', '') = ''
          AND (NOT $15::bool
               OR COALESCE(n.spec_json #>> '{runtime,image}',
-                          n.spec_json #>> '{image}', '') <> ''))
+                          n.spec_json #>> '{image}', '') <> '')
+         AND (NOT $16::bool
+              OR COALESCE(n.spec_json #>> '{runtime,stdout_output}',
+                          n.spec_json #>> '{runtime,stdoutOutput}',
+                          n.spec_json #>> '{stdout_output}', '') = ''))
         OR COALESCE(n.spec_json #>> '{runtime,executor}',
                     n.spec_json #>> '{executor}') = ANY($5::text[]))
    -- Hard label constraints (§5.3 step 2), as jsonb containment in the same
@@ -691,7 +698,7 @@ func (s *SchedulerStore) selectCandidateWindowed(
 		}
 
 		row := tx.QueryRow(ctx, workerCandidateSQL(
-			"AND a.id = ANY($16::uuid[])",
+			"AND a.id = ANY($17::uuid[])",
 			// The same order the window was read in, with the configured rate
 			// passed as a parameter: this sorts at most ClaimWindow rows, so it
 			// needs no index, and it keeps the pick identical to the window's.

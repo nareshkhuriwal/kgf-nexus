@@ -3279,9 +3279,10 @@ advertises, rendered as `NEXUS_EXECUTORS` (docs/IMAGES.md §4.3; default
 the chart refuses one that is not among `executors`. So an agent with
 `executors: kubernetes` runs every task of its queues as a pod and nothing
 inside its own pod: the AKS examples' agents are such agents. A task naming
-no executor is given to it only with a `runtime.image` (the scheduler reads
-the agent's `nexus.io/default-executor` label); without one it waits with a
-`waiting_for_worker` reason naming the fix, and a task naming `subprocess`
+no executor is given to it only with a `runtime.image` and without
+`runtime.stdout_output`, which the kubernetes executor refuses (the scheduler
+reads the agent's `nexus.io/default-executor` label); otherwise it waits with
+a `waiting_for_worker` reason naming the fix, and a task naming `subprocess`
 waits for a worker that offers subprocess. An agent that should run both says
 `executors: subprocess,kubernetes` and picks its `defaultExecutor`.
 
