@@ -4,6 +4,17 @@
 variable "namespace" {
   description = "Kubernetes namespace for the release. One Nexus release per namespace."
   type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", var.namespace))
+    error_message = "namespace must be a Kubernetes namespace name (RFC 1123 label: lower case, digits and '-', at most 63 characters)."
+  }
+}
+
+variable "create_namespace" {
+  description = "true: create the namespace, labelled for Pod Security (enforce baseline, warn restricted). false: install into a namespace that already exists (an existing cluster whose namespaces a platform team owns); it must allow the baseline profile (the console's nginx starts as root) and is never modified or deleted here."
+  type        = bool
+  default     = true
 }
 
 variable "release_name" {
@@ -13,8 +24,31 @@ variable "release_name" {
 }
 
 variable "chart_path" {
-  description = "Path to the kgf-nexus Helm chart."
+  description = "Path to the kgf-nexus Helm chart (a checkout of deploy/helm/kgf-nexus). Leave null when installing the published chart from chart_repository."
   type        = string
+  default     = null
+}
+
+variable "chart_repository" {
+  description = "Repository of the PUBLISHED chart, e.g. oci://ghcr.io/<owner>/charts (the release workflow pushes kgf-nexus there; docs/OPERATIONS.md §22.4). null: install chart_path instead. Exactly one of the two."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.chart_repository == null || can(regex("^(oci|https)://[^\\s]+[^/]$", coalesce(var.chart_repository, "x")))
+    error_message = "chart_repository must be an oci:// or https:// repository URL without a trailing slash, e.g. oci://ghcr.io/<owner>/charts."
+  }
+}
+
+variable "chart_version" {
+  description = "Exact chart version to install from chart_repository (the chart's Chart.yaml version, e.g. 0.3.0). Required with chart_repository; never a range, so an apply cannot pick up a chart nobody reviewed."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.chart_version == null || can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$", coalesce(var.chart_version, "x")))
+    error_message = "chart_version must be one exact semantic version (MAJOR.MINOR.PATCH[-PRERELEASE]), not a range."
+  }
 }
 
 variable "image_tag" {
@@ -31,6 +65,17 @@ variable "image_registry" {
   description = "Registry prefix for Nexus images, with trailing slash (\"\" for images loaded into the node)."
   type        = string
   default     = ""
+}
+
+variable "image_repository_prefix" {
+  description = "Path between the registry and the component name: <image_registry><image_repository_prefix><component>:<tag>. \"kgf-nexus/\" for images built or imported under that path (ACR, a local node); \"<owner>/kgf-nexus/\" for the images the release workflow publishes to ghcr.io."
+  type        = string
+  default     = "kgf-nexus/"
+
+  validation {
+    condition     = var.image_repository_prefix == "" || can(regex("^[a-z0-9]([a-z0-9._/-]*[a-z0-9])?/$", var.image_repository_prefix))
+    error_message = "image_repository_prefix must be empty or a lower-case repository path ending in '/', e.g. \"kgf-nexus/\" or \"<owner>/kgf-nexus/\"."
+  }
 }
 
 variable "image_pull_policy" {

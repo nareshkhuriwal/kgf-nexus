@@ -120,3 +120,101 @@ run "refuses_latest_tag" {
 
   expect_failures = [var.image_tag]
 }
+
+# ── Existing namespace and the published chart ───────────────────────────
+
+run "creates_and_labels_the_namespace_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(kubernetes_namespace_v1.this) == 1 && kubernetes_namespace_v1.this[0].metadata[0].labels["pod-security.kubernetes.io/enforce"] == "baseline"
+    error_message = "By default the module creates the namespace with the baseline Pod Security profile enforced."
+  }
+}
+
+run "installs_into_an_existing_namespace" {
+  command = plan
+
+  variables {
+    namespace        = "platform-nexus"
+    create_namespace = false
+  }
+
+  assert {
+    condition     = length(kubernetes_namespace_v1.this) == 0
+    error_message = "With create_namespace = false the module must not create (or later delete) the namespace."
+  }
+  assert {
+    condition     = kubernetes_secret_v1.credentials.metadata[0].namespace == "platform-nexus" && helm_release.nexus.namespace == "platform-nexus"
+    error_message = "The Secrets and the release must go into the existing namespace."
+  }
+  assert {
+    condition     = output.namespace == "platform-nexus"
+    error_message = "The namespace output must name the existing namespace."
+  }
+}
+
+run "installs_the_published_chart_at_one_version" {
+  command = plan
+
+  variables {
+    chart_path              = null
+    chart_repository        = "oci://ghcr.io/example/charts"
+    chart_version           = "0.3.0"
+    image_registry          = "ghcr.io/"
+    image_repository_prefix = "example/kgf-nexus/"
+  }
+
+  assert {
+    condition     = helm_release.nexus.repository == "oci://ghcr.io/example/charts" && helm_release.nexus.chart == "kgf-nexus" && helm_release.nexus.version == "0.3.0"
+    error_message = "The published chart must be installed from its repository at the exact version given."
+  }
+  assert {
+    condition     = yamldecode(helm_release.nexus.values[0]).image.repositoryPrefix == "example/kgf-nexus/" && yamldecode(helm_release.nexus.values[0]).image.registry == "ghcr.io/"
+    error_message = "The images must be named the way the release workflow publishes them: ghcr.io/<owner>/kgf-nexus/<component>."
+  }
+}
+
+run "refuses_a_repository_without_a_version" {
+  command = plan
+
+  variables {
+    chart_path       = null
+    chart_repository = "oci://ghcr.io/example/charts"
+  }
+
+  expect_failures = [helm_release.nexus]
+}
+
+run "refuses_both_chart_sources" {
+  command = plan
+
+  variables {
+    chart_repository = "oci://ghcr.io/example/charts"
+    chart_version    = "0.3.0"
+  }
+
+  expect_failures = [helm_release.nexus]
+}
+
+run "refuses_a_version_range" {
+  command = plan
+
+  variables {
+    chart_path       = null
+    chart_repository = "oci://ghcr.io/example/charts"
+    chart_version    = "~0.3"
+  }
+
+  expect_failures = [var.chart_version]
+}
+
+run "refuses_an_invalid_namespace_name" {
+  command = plan
+
+  variables {
+    namespace = "Nexus_Prod"
+  }
+
+  expect_failures = [var.namespace]
+}

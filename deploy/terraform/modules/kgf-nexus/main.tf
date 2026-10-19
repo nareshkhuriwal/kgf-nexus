@@ -1,15 +1,21 @@
 # Copyright 2026 Khuriwal Group
 # SPDX-License-Identifier: Apache-2.0
 #
-# One KGF Nexus environment: namespace, generated credentials, and the Helm
-# release. Environment-specific choices come in through var.chart_values.
+# One KGF Nexus environment: namespace (unless it already exists), generated
+# credentials, and the Helm release. Environment-specific choices come in
+# through var.chart_values.
 #
 # Credentials are GENERATED here and only here. Nothing is typed, committed or
 # shared between environments. They do live in Terraform state (marked
 # sensitive), so state must be stored as carefully as the secrets themselves:
 # local and gitignored for dev, an encrypted remote backend anywhere else.
 
+# Created here by default. On a cluster whose namespaces a platform team owns
+# (create_namespace = false) the release goes into the existing one, which this
+# module neither labels, changes nor deletes.
 resource "kubernetes_namespace_v1" "this" {
+  count = var.create_namespace ? 1 : 0
+
   metadata {
     name = var.namespace
     labels = {
@@ -44,8 +50,14 @@ resource "random_password" "minio" {
   special = false
 }
 
-# These two gained `count`; existing state (the dev environment) moves to
-# index 0 instead of being regenerated, which would rotate live passwords.
+# These gained `count`; existing state (the dev environment) moves to index 0
+# instead of being regenerated, which would rotate live passwords -- or, for
+# the namespace, delete and recreate it with everything in it.
+moved {
+  from = kubernetes_namespace_v1.this
+  to   = kubernetes_namespace_v1.this[0]
+}
+
 moved {
   from = random_password.postgres
   to   = random_password.postgres[0]
@@ -74,6 +86,10 @@ resource "random_id" "workspace_worker_key" {
 }
 
 locals {
+  # Every namespaced object below goes here: the namespace this module
+  # created, or the existing one it was given.
+  namespace = var.create_namespace ? kubernetes_namespace_v1.this[0].metadata[0].name : var.namespace
+
   worker_api_key = "nxs_worker_${random_id.worker_key.hex}"
   workspace_worker_keys = {
     for ns, key in random_id.workspace_worker_key : "worker-api-key-${ns}" => "nxs_worker_${key.hex}"
@@ -138,7 +154,7 @@ locals {
 resource "kubernetes_secret_v1" "credentials" {
   metadata {
     name      = local.secret_name
-    namespace = kubernetes_namespace_v1.this.metadata[0].name
+    namespace = local.namespace
     labels = {
       "app.kubernetes.io/part-of"    = "kgf-nexus"
       "app.kubernetes.io/managed-by" = "terraform"
@@ -164,7 +180,7 @@ resource "kubernetes_secret_v1" "postgres_ca" {
 
   metadata {
     name      = "${var.release_name}-postgres-ca"
-    namespace = kubernetes_namespace_v1.this.metadata[0].name
+    namespace = local.namespace
     labels = {
       "app.kubernetes.io/part-of"    = "kgf-nexus"
       "app.kubernetes.io/managed-by" = "terraform"
@@ -196,7 +212,7 @@ resource "kubernetes_secret_v1" "db_logins" {
 
   metadata {
     name      = "${var.release_name}-db-logins"
-    namespace = kubernetes_namespace_v1.this.metadata[0].name
+    namespace = local.namespace
     labels = {
       "app.kubernetes.io/part-of"    = "kgf-nexus"
       "app.kubernetes.io/managed-by" = "terraform"
@@ -225,8 +241,12 @@ locals {
 
 resource "helm_release" "nexus" {
   name      = var.release_name
-  namespace = kubernetes_namespace_v1.this.metadata[0].name
-  chart     = var.chart_path
+  namespace = local.namespace
+  # A local checkout of the chart, or the published chart at one exact
+  # version (oci://ghcr.io/<owner>/charts, kgf-nexus, <version>).
+  chart      = var.chart_repository == null ? var.chart_path : "kgf-nexus"
+  repository = var.chart_repository
+  version    = var.chart_repository == null ? null : var.chart_version
 
   # Wait for every Deployment AND the migrate/bootstrap Jobs, so a successful
   # apply means a working platform, not merely submitted manifests.
@@ -237,6 +257,17 @@ resource "helm_release" "nexus" {
   # out from under the person debugging it.
   atomic = false
 
+  lifecycle {
+    precondition {
+      condition     = (var.chart_path == null) != (var.chart_repository == null)
+      error_message = "Set exactly one of chart_path (a chart checkout) and chart_repository (the published chart)."
+    }
+    precondition {
+      condition     = var.chart_repository == null || var.chart_version != null
+      error_message = "chart_repository needs chart_version: one exact chart version, never \"whatever is newest\"."
+    }
+  }
+
   values = [
     yamlencode({
       existingSecret = kubernetes_secret_v1.credentials.metadata[0].name
@@ -246,7 +277,7 @@ resource "helm_release" "nexus" {
       ]
       image = {
         registry         = var.image_registry
-        repositoryPrefix = "kgf-nexus/"
+        repositoryPrefix = var.image_repository_prefix
         tag              = var.image_tag
         pullPolicy       = var.image_pull_policy
       }
