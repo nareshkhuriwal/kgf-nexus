@@ -81,7 +81,7 @@ describe('InstallWizard', () => {
     expect(text).toContain('helm upgrade --install nexus oci://ghcr.io/nareshkhuriwal/charts/kgf-nexus');
     expect(text).toContain('--version 0.3.0');
     expect(text).toContain('--from-literal=worker-api-key="$NEXUS_WORKER_TOKEN"');
-    expect(text).not.toContain('nxs_');
+    expect(text).not.toMatch(/nxs_[a-z]+_[0-9a-f]{16}/);
     expect(screen.getByRole('button', { name: 'Download nexus-values.yaml' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Download nexus-pool-gpu-values.yaml' })).toBeInTheDocument();
     fireEvent.click(within(script).getByRole('button', { name: 'Copy Everything, as one script' }));

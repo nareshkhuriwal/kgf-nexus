@@ -38,7 +38,7 @@ export const PREREQUISITES = [
     id: 'aks',
     title: 'An AKS cluster on Kubernetes 1.29 or newer, with the OIDC issuer and workload identity enabled',
     detail: 'az aks update --enable-oidc-issuer --enable-workload-identity. The chart refuses Kubernetes older than 1.29.',
-    anchor: 'prerequisites',
+    anchor: 'the-aks-cluster',
   },
   {
     id: 'postgres',
@@ -159,6 +159,10 @@ export function ConfigureStep({ input, set, errors, savedPoolNames }: { input: I
           <TextField path="imageTag" label="Image tag" value={input.imageTag} mono error={errors.imageTag} hint="vX.Y.Z or a commit SHA — never latest" onChange={(imageTag) => patch({ imageTag })} />
           <TextField path="secretName" label="Secret name" value={input.secretName} mono error={errors.secretName} hint="Created by the commands in every namespace" onChange={(secretName) => patch({ secretName })} />
         </div>
+        <label className="infra-check">
+          <input type="checkbox" checked={input.pinDigests} onChange={(e) => patch({ pinDigests: e.target.checked })} />
+          Pin every image to the digest the release built (release-images.yaml, recommended)
+        </label>
         <label className="infra-check">
           <input type="checkbox" checked={input.privateRegistry} onChange={(e) => patch({ privateRegistry: e.target.checked })} />
           The GHCR packages are private (create an image pull secret and log in to the chart registry)
@@ -543,7 +547,13 @@ export function CommandsStep({ input, valid, errorCount }: { input: InstallInput
   return (
     <div className="col">
       <Notice title="Nothing here contains a secret">
-        Export <code>{ENV.pgPassword}</code>, <code>{ENV.bootstrapKey}</code> and <code>{ENV.workerToken}</code>
+        Export <code>{ENV.identityName}</code>, <code>{ENV.identityGroup}</code>, <code>{ENV.pgPassword}</code>, <code>{ENV.bootstrapKey}</code>,{' '}
+        <code>{ENV.workerToken}</code>
+        {input.pinDigests ? (
+          <>
+            , <code>{ENV.releaseRun}</code>
+          </>
+        ) : null}
         {input.privateRegistry ? (
           <>
             , <code>{ENV.ghcrUser}</code>, <code>{ENV.ghcrToken}</code>

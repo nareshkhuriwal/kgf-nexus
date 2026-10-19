@@ -91,6 +91,8 @@ export interface InstallInput {
   schedulerNodePool: string;
   scheduler: SchedulerPolicy;
   pools: InstallPool[];
+  /** Pin every image to the digest the release built (release-images.yaml, passed last). */
+  pinDigests: boolean;
 }
 
 export const PULL_SECRET = 'ghcr-pull';
@@ -105,12 +107,15 @@ export const ENV = {
   identityName: 'NEXUS_IDENTITY_NAME',
   identityGroup: 'NEXUS_IDENTITY_RG',
   oidcIssuer: 'AKS_OIDC_ISSUER',
+  releaseRun: 'NEXUS_RELEASE_RUN_ID',
 } as const;
+
+export const RELEASE_IMAGES = 'release-images.yaml';
 
 /** Service accounts the chart creates that use the result store (and so need the federated identity). */
 export const ARTIFACTS_SA = 'nexus-artifacts';
 export const AGENT_SA = 'nexus-agent';
-export const POD_SECURITY = 'pod-security.kubernetes.io/enforce=restricted';
+export const POD_SECURITY = ['pod-security.kubernetes.io/enforce=restricted', 'pod-security.kubernetes.io/warn=restricted'];
 const GiB = 1024 ** 3;
 
 export function defaultInstallInput(nexusNamespace: string, saved: PlatformConfig | undefined): InstallInput {
@@ -141,6 +146,7 @@ export function defaultInstallInput(nexusNamespace: string, saved: PlatformConfi
     schedulerNodePool: '',
     scheduler: saved?.scheduler ?? { min_replicas: 2, max_replicas: 6, target_cpu_percent: 70, scale_down_seconds: 300 },
     pools: defaultPools(saved, 'nexus'),
+    pinDigests: true,
   };
 }
 
@@ -488,7 +494,7 @@ export interface CommandStep {
 
 const ensureNamespace = (ns: string) => [
   pipeline(['kubectl', 'create', 'namespace', ns, '--dry-run=client', '-o', 'yaml'], ['kubectl', 'apply', '-f', '-']),
-  shellCommand(['kubectl', 'label', 'namespace', ns, POD_SECURITY, '--overwrite'], { wrap: false }),
+  shellCommand(['kubectl', 'label', 'namespace', ns, ...POD_SECURITY, '--overwrite'], { wrap: false }),
 ];
 
 const applySecret = (ns: string, args: ShellArg[]) =>
@@ -568,7 +574,7 @@ export function installSteps(input: InstallInput): CommandStep[] {
   const secrets: string[] = [
     '# Export these in this shell first. They are never written into these commands:',
     `#   export ${ENV.pgPassword}='…'            # password of database user "${input.dbUser}"`,
-    `#   export ${ENV.bootstrapKey}="$(openssl rand -hex 32)"   # once; keep it with your secrets`,
+    `#   export ${ENV.bootstrapKey}="nxs_worker_$(openssl rand -hex 32)"   # once; keep it in Key Vault`,
     `#   export ${ENV.workerToken}='…'           # the worker token (wizard step 4, or Tokens page)`,
   ];
   if (input.privateRegistry) secrets.push(`#   export ${ENV.ghcrUser}='…' ${ENV.ghcrToken}='…'   # a GitHub token with read:packages`);
@@ -645,6 +651,47 @@ export function installSteps(input: InstallInput): CommandStep[] {
     });
   }
 
+  const rid = AKS_RESOURCE_ID.test(input.providerResourceId) ? /resourceGroups\/([^/]+)\/.*managedClusters\/([^/]+)$/.exec(input.providerResourceId) : null;
+  const cpuPools = [...new Set(input.pools.filter((p) => p.kind === 'cpu' && p.nodePool).map((p) => p.nodePool))];
+  const gpuPools = [...new Set(input.pools.filter((p) => p.kind === 'gpu' && p.nodePool).map((p) => p.nodePool))];
+  steps.push({
+    id: 'preflight',
+    title: 'Run the preflight',
+    detail: 'Read-only checks of the cluster, node pools and Secrets (from a repository checkout); the pull and database tests start a short-lived pod.',
+    script: shellCommand([
+      'deploy/scripts/aks-preflight.sh',
+      '--namespace', input.namespace,
+      ...(input.schedulerNodePool ? ['--system-pool', input.schedulerNodePool] : []),
+      ...cpuPools.flatMap((p) => ['--pool', p]),
+      ...gpuPools.flatMap((p) => ['--gpu-pool', p]),
+      ...(rid ? ['--az-resource-group', rid[1]!, '--az-cluster', rid[2]!] : []),
+      '--storage-class', '',
+      ...(input.mtls ? ['--tls'] : []),
+      '--secret', input.secretName,
+      ...(nats ? [] : ['--no-nats']),
+      ...(input.dbRuntimeRoles ? ['--db-logins-secret', input.dbLoginsSecret] : []),
+      ...(input.dbSslMode === 'verify-full' ? ['--ca-secret', input.dbCaSecret] : []),
+      '--db-test', `${input.dbHost}:5432`,
+      '--pull-test', `ghcr.io/${input.owner}/kgf-nexus/agent:${input.imageTag}`,
+      ...(input.privateRegistry ? ['--pull-secret', PULL_SECRET] : []),
+    ]),
+  });
+
+  if (input.pinDigests) {
+    steps.push({
+      id: 'images',
+      title: 'Fetch the release’s image digests and verify the chart',
+      detail: `${RELEASE_IMAGES} pins every image to the digest the release built; it is passed last so nothing overrides it.`,
+      script: [
+        `# The run of .github/workflows/release.yml that published ${input.imageTag}:`,
+        `#   export ${ENV.releaseRun}=…`,
+        requireEnv(ENV.releaseRun, `export ${ENV.releaseRun} first`),
+        shellCommand(['gh', 'run', 'download', withEnv('', ENV.releaseRun), '--repo', `${input.owner}/kgf-nexus`, '-n', 'image-digests']),
+        shellCommand(['gh', 'attestation', 'verify', `${chartRef(input.owner)}:${input.chartVersion}`, '--repo', `${input.owner}/kgf-nexus`]),
+      ].join('\n'),
+    });
+  }
+
   steps.push({
     id: 'values',
     title: 'Write the values files',
@@ -657,7 +704,7 @@ export function installSteps(input: InstallInput): CommandStep[] {
       'helm', 'upgrade', '--install', release, chartRef(input.owner),
       '--version', input.chartVersion,
       '--namespace', ns,
-      ...valueFiles.flatMap((f) => ['--values', f]),
+      ...[...valueFiles, ...(input.pinDigests ? [RELEASE_IMAGES] : [])].flatMap((f) => ['--values', f]),
       ...extra,
     ]);
   const login = input.privateRegistry
@@ -667,14 +714,25 @@ export function installSteps(input: InstallInput): CommandStep[] {
     id: 'control-plane',
     title: 'Install the control plane',
     detail: 'Migrations run first; --wait --wait-for-jobs returns once every Deployment is ready and every Job has finished.',
-    script: [...login, helm(input.releaseName, input.namespace, [files[0]!.path, ...(nats ? ['nats-auth-values.yaml'] : [])], ['--wait', '--wait-for-jobs', '--timeout', '15m'])].join('\n'),
+    script: [
+      ...login,
+      helm(input.releaseName, input.namespace, [files[0]!.path, ...(nats ? ['nats-auth-values.yaml'] : [])], ['--wait', '--wait-for-jobs', '--timeout', '15m']),
+      '# Do not trust --wait alone: wait for every service pod to be Ready.',
+      shellCommand(['kubectl', '-n', input.namespace, 'wait', '--for=condition=Ready', 'pod', '-l', 'app.kubernetes.io/component notin (migrate,bootstrap,db-roles,minio-init,artifact-gc)', '--timeout=5m']),
+    ].join('\n'),
   });
 
   steps.push({
     id: 'pools',
     title: `Install the worker pool${input.pools.length === 1 ? '' : 's'}`,
     detail: 'One release per pool, agents only (components.controlPlane.enabled=false).',
-    script: input.pools.map((p, i) => helm(poolRelease(input, p), p.namespace, [files[i + 1]!.path], ['--wait', '--timeout', '10m'])).join('\n'),
+    script: input.pools
+      .flatMap((p, i) => [
+        helm(poolRelease(input, p), p.namespace, [files[i + 1]!.path], ['--wait', '--timeout', '10m']),
+        // An agent is Ready only once the control plane accepted it: this proves the two releases agree.
+        shellCommand(['kubectl', '-n', p.namespace, 'wait', '--for=condition=Ready', 'pod', '-l', 'nexus.khuriwalgroup.com/role=agent', '--timeout=5m']),
+      ])
+      .join('\n'),
   });
 
   steps.push({

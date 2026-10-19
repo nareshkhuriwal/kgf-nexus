@@ -43,6 +43,9 @@ function input(over: Partial<InstallInput> = {}): InstallInput {
   };
 }
 
+/** A command as one line: backslash continuations folded away. */
+const flat = (s: string) => s.replace(/ \\\n\s+/g, ' ');
+
 /** The tree Helm sees: undefined keys are not written. */
 const asWritten = (v: unknown) => JSON.parse(JSON.stringify(v)) as unknown;
 
@@ -263,11 +266,11 @@ describe('install steps', () => {
     const ns = installSteps(input()).find((s) => s.id === 'namespaces')!.script;
     expect(ns.split('\n')).toEqual([
       'kubectl create namespace nexus --dry-run=client -o yaml | kubectl apply -f -',
-      'kubectl label namespace nexus pod-security.kubernetes.io/enforce=restricted --overwrite',
+      'kubectl label namespace nexus pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted --overwrite',
       'kubectl create namespace nexus-pool-cpu --dry-run=client -o yaml | kubectl apply -f -',
-      'kubectl label namespace nexus-pool-cpu pod-security.kubernetes.io/enforce=restricted --overwrite',
+      'kubectl label namespace nexus-pool-cpu pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted --overwrite',
       'kubectl create namespace nexus-pool-gpu --dry-run=client -o yaml | kubectl apply -f -',
-      'kubectl label namespace nexus-pool-gpu pod-security.kubernetes.io/enforce=restricted --overwrite',
+      'kubectl label namespace nexus-pool-gpu pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted --overwrite',
     ]);
   });
 
@@ -300,7 +303,8 @@ describe('install steps', () => {
     expect(secrets).toContain(`--from-literal=postgres-password="$${ENV.pgPassword}"`);
     expect(secrets).toContain(`--from-literal=worker-api-key="$${ENV.bootstrapKey}"`);
     expect(secrets.match(/--from-literal=worker-api-key="\$NEXUS_WORKER_TOKEN"/g)).toHaveLength(2);
-    expect(secrets).not.toMatch(/nxs_|password=[^"]/);
+    // Key FORMATS appear in the hints (nxs_worker_…); key MATERIAL never does.
+    expect(secrets).not.toMatch(/nxs_[a-z]+_[0-9a-f]{16}|password=[^"]/);
     expect(secrets).not.toContain('docker-registry');
   });
 
@@ -320,15 +324,41 @@ describe('install steps', () => {
         '  --version 0.3.0 \\',
         '  --namespace nexus \\',
         '  --values nexus-values.yaml \\',
+        '  --values release-images.yaml \\',
         '  --wait \\',
         '  --wait-for-jobs \\',
         '  --timeout 15m',
+        '# Do not trust --wait alone: wait for every service pod to be Ready.',
+        'kubectl -n nexus wait \\',
+        "  --for=condition=Ready pod -l 'app.kubernetes.io/component notin (migrate,bootstrap,db-roles,minio-init,artifact-gc)' \\",
+        '  --timeout=5m',
       ].join('\n'),
     );
     const pools = steps.find((s) => s.id === 'pools')!.script;
     expect(pools).toContain('helm upgrade --install nexus-pool-gpu oci://ghcr.io/nareshkhuriwal/charts/kgf-nexus \\\n');
     expect(pools).toContain('--namespace nexus-pool-gpu');
-    expect(pools).toContain('--values nexus-pool-gpu-values.yaml');
+    expect(flat(pools)).toContain('--values nexus-pool-gpu-values.yaml --values release-images.yaml');
+    expect(flat(pools)).toContain('kubectl -n nexus-pool-gpu wait --for=condition=Ready pod -l nexus.khuriwalgroup.com/role=agent --timeout=5m');
+  });
+
+  it('pins image digests only when asked, fetching them from the release run', () => {
+    const steps = installSteps(input());
+    const images = flat(steps.find((s) => s.id === 'images')!.script);
+    expect(images).toContain('gh run download "$NEXUS_RELEASE_RUN_ID" --repo nareshkhuriwal/kgf-nexus -n image-digests');
+    expect(images).toContain('gh attestation verify oci://ghcr.io/nareshkhuriwal/charts/kgf-nexus:0.3.0');
+    const unpinned = installSteps(input({ pinDigests: false }));
+    expect(unpinned.some((s) => s.id === 'images')).toBe(false);
+    expect(unpinned.find((s) => s.id === 'control-plane')!.script).not.toContain('release-images.yaml');
+  });
+
+  it('runs the preflight against exactly what this install uses', () => {
+    const i = input({ privateRegistry: true });
+    i.pools[0]!.nodePool = 'cpu';
+    i.pools[1]!.nodePool = 'gpua100';
+    const pre = flat(installSteps(i).find((s) => s.id === 'preflight')!.script);
+    expect(pre).toBe(
+      "deploy/scripts/aks-preflight.sh --namespace nexus --system-pool system --pool cpu --gpu-pool gpua100 --az-resource-group rg-nexus --az-cluster aks-prod --storage-class '' --secret nexus-credentials --no-nats --db-logins-secret nexus-db-logins --ca-secret nexus-postgres-ca --db-test nexus-pg.postgres.database.azure.com:5432 --pull-test ghcr.io/nareshkhuriwal/kgf-nexus/agent:v0.3.0 --pull-secret ghcr-pull",
+    );
   });
 
   it('generates and passes the NATS identities only for the NATS event bus', () => {
