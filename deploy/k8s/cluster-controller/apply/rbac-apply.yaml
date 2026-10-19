@@ -7,13 +7,18 @@
 #     (apply/allow-apply-patch.yaml).
 # Any one of the three missing keeps the controller in plan mode.
 #
-# Scoped to the worker namespace and to exactly two verbs:
+# In the worker namespace, exactly two verbs:
 #   deployments/scale update -- the replica count, and nothing else about the
 #                               Deployment (not its image, not its template)
 #   pods patch               -- to set controller.kubernetes.io/pod-deletion-cost
 #                               on a drained, lease-free pod just before scale-in
-# The controller cannot create, delete or exec into pods, and cannot touch the
-# scheduler (its HPA owns that) or nodes (the cluster autoscaler owns those).
+# In the control-plane namespace, patch on the scheduler's HPA by name
+# (ADR-0036) -- and the controller writes only four fields of it, only while
+# it carries nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller
+# (scheduler-hpa-owner-patch.yaml). Never the scheduler Deployment itself.
+# The controller cannot create, delete or exec into pods, cannot change any
+# Deployment's template, and cannot touch nodes (the cluster autoscaler owns
+# those).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -35,5 +40,32 @@ metadata:
   namespace: nexus-workers
   labels: {app.kubernetes.io/part-of: kgf-nexus}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: nexus-cluster-controller-apply}
+subjects:
+  - {kind: ServiceAccount, name: nexus-cluster-controller, namespace: kgf-nexus}
+---
+# Scheduler autoscaling (ADR-0036). Name another scheduler HPA here if the
+# control plane runs more than one; the base Role already grants the reads.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nexus-cluster-controller-apply-scheduler
+  namespace: kgf-nexus
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+rules:
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    resourceNames: [scheduler]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nexus-cluster-controller-apply-scheduler
+  namespace: kgf-nexus
+  labels: {app.kubernetes.io/part-of: kgf-nexus}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: nexus-cluster-controller-apply-scheduler}
 subjects:
   - {kind: ServiceAccount, name: nexus-cluster-controller, namespace: kgf-nexus}

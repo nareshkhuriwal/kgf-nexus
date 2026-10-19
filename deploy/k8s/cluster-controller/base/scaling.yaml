@@ -8,10 +8,16 @@
 # Do not also put an HPA on a worker Deployment the controller is bound to:
 # two writers to one replica count fight, and the loser's drains are wasted.
 #
-# Bounds here mirror the scheduler policy saved in the console (platform
-# config); the controller reports this HPA and the console flags drift, but
-# does not rewrite it. Scheduler pods must declare CPU requests and the
-# cluster needs metrics-server, or the HPA reports ScalingActive=False.
+# Bounds here are the starting point. The scheduler policy saved in the
+# console (platform config) is what the controller compares this HPA with: in
+# plan mode it reports the difference; in apply mode, and only on an HPA
+# carrying nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller (which
+# apply/ adds to this one), it moves minReplicas, maxReplicas, the CPU target
+# and the scale-down stabilization window to the saved values (ADR-0036).
+# Re-applying this file resets them; the controller restores the saved values
+# within a minute, recorded as an hpa_update event. Scheduler pods must
+# declare CPU requests and the cluster needs metrics-server, or the HPA
+# reports ScalingActive=False.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:

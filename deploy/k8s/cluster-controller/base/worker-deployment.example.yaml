@@ -39,7 +39,15 @@ spec:
           image: kgf-nexus/agent:0.1.0   # pin to a digest at release
           args: ["-namespace=acme", "-queues=cpu"]
           env:
-            - {name: NEXUS_CONTROL_PLANE, value: "api-gateway.kgf-nexus.svc:50051"}
+            # The gateway's worker gRPC port (9091, as the chart serves it) and
+            # a worker API key minted for namespace acme.
+            - {name: NEXUS_CONTROL_PLANE, value: "api-gateway.kgf-nexus.svc:9091"}
+            - name: NEXUS_API_KEY
+              valueFrom: {secretKeyRef: {name: nexus-worker-credentials, key: api-key}}
+            # The registered cluster (clusters.name): labels the worker
+            # nexus.io/cluster, which scopes the controller's pod <-> worker join
+            # to this cluster and resolves its placement facts (ADR-0031).
+            - {name: NEXUS_CLUSTER_NAME, value: aks-dev}
             - {name: NEXUS_DRAIN_GRACE, value: 5m}
           resources:
             requests: {cpu: "1", memory: 1Gi}
