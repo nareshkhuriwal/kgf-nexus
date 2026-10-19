@@ -25,6 +25,8 @@ import (
 
 	"github.com/khuriwalgroup/kgf-nexus/internal/config"
 	"github.com/khuriwalgroup/kgf-nexus/internal/domain"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances"
+	"github.com/khuriwalgroup/kgf-nexus/internal/instances/identity"
 	"github.com/khuriwalgroup/kgf-nexus/internal/metrics"
 	"github.com/khuriwalgroup/kgf-nexus/internal/store"
 	"github.com/khuriwalgroup/kgf-nexus/internal/transport"
@@ -189,9 +191,10 @@ func run() error {
 	// The scheduler is live once it can reach the DB. Readiness is stricter:
 	// see readyHandler.
 	var ready atomic.Bool
+	health := healthMux(st, sched, &ready)
 	srv := &http.Server{
 		Addr:              *httpAddr,
-		Handler:           withMetrics(healthMux(st, sched, &ready), reg),
+		Handler:           withMetrics(health, reg),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	srvErr := make(chan error, 1)
@@ -237,6 +240,26 @@ func run() error {
 	}()
 
 	ready.Store(true)
+
+	// The service-instance registry (ADR-0037): this replica's row, written
+	// every 10 s with the answer its /readyz gives and its claim activity, and
+	// marked not ready as soon as shutdown begins. Started once ready, so the
+	// first beat says so; stopped before the pool closes (defers run last
+	// first).
+	hb, err := instances.New(pool, instances.Config{
+		Component: instances.Scheduler,
+		Version:   version,
+		Runtime:   identity.FromEnv(nil),
+		Pool:      pool,
+		Ready:     instances.ProbeHandler(health, "/readyz"),
+		Detail:    schedMetrics.instanceDetail(),
+	}, reg, log)
+	if err != nil {
+		return err
+	}
+	stopHeartbeat := instances.Start(ctx, hb)
+	defer stopHeartbeat()
+
 	log.Info("scheduler starting",
 		"lease_ttl", claimCfg.LeaseTTL, "liveness_window", claimCfg.LivenessWindow,
 		"aging_rate", claimCfg.AgingRate, "look_ahead", claimCfg.LookAhead,
@@ -270,6 +293,9 @@ func run() error {
 	// but finishing it avoids a needless PENDING round trip.
 	ready.Store(false)
 	stop()
+	// The registry row goes not ready now, with the load balancer's view,
+	// not after the drain below.
+	stopHeartbeat()
 	select {
 	case <-done:
 		log.Info("loops drained")
