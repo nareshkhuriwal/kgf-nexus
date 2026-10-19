@@ -70,7 +70,7 @@ everything below that the cluster can tell, read-only.
   has `CREATEROLE`; `pgcrypto` is allow-listed (`azure.extensions`) and created;
   the server accepts TLS connections from the pods (VNet integration, or a
   firewall rule for the cluster's egress IPs). The owner password is
-  alphanumeric, at least 16 characters. docs/INSTALL-AKS.md, step 3.
+  alphanumeric, at least 16 characters. docs/INSTALL-AKS.md, "Azure Database for PostgreSQL".
 - **Storage:** the account is reachable from the pods (public endpoint, or a
   private endpoint with the `privatelink.blob.core.windows.net` zone linked to
   the cluster's VNet).

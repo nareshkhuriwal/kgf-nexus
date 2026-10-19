@@ -45,7 +45,7 @@ data "azurerm_kubernetes_cluster" "this" {
     # is nothing to federate and every result-store call would fail at runtime.
     postcondition {
       condition     = self.oidc_issuer_enabled && self.oidc_issuer_url != ""
-      error_message = "The cluster has no OIDC issuer. Enable it and the workload identity webhook first: az aks update -g <rg> -n <cluster> --enable-oidc-issuer --enable-workload-identity (docs/INSTALL-AKS.md, step 1)."
+      error_message = "The cluster has no OIDC issuer. Enable it and the workload identity webhook first: az aks update -g <rg> -n <cluster> --enable-oidc-issuer --enable-workload-identity (docs/INSTALL-AKS.md, \"The AKS cluster\")."
     }
     postcondition {
       condition     = var.kube_auth.mode != "azure-ad" || length(self.azure_active_directory_role_based_access_control) > 0

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # aks-preflight.sh -- is this AKS cluster ready for KGF Nexus?
-# (docs/INSTALL-AKS.md, step 0; deploy/terraform/environments/aks-existing)
+# (docs/INSTALL-AKS.md, "Preflight"; deploy/terraform/environments/aks-existing)
 #
 # READ-ONLY by default: every Kubernetes call is a get or a list against the
 # current (or --context) kube context, and `az` is called only with read

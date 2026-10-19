@@ -66,7 +66,7 @@ variable "kube_auth" {
 
 variable "postgres" {
   description = <<-EOT
-    The existing Azure Database for PostgreSQL Flexible Server (docs/INSTALL-AKS.md, step 3).
+    The existing Azure Database for PostgreSQL Flexible Server (docs/INSTALL-AKS.md, "Azure Database for PostgreSQL").
       database     must already exist, owned by owner_login (Terraform does not
                    create it: destroying this root must never be able to drop
                    the data).

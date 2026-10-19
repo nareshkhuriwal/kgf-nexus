@@ -5,7 +5,7 @@
 subscription_id = "00000000-0000-0000-0000-000000000000"
 
 # The existing cluster. OIDC issuer and workload identity must be enabled
-# (docs/INSTALL-AKS.md, step 1); deploy/scripts/aks-preflight.sh checks it.
+# (docs/INSTALL-AKS.md, "The AKS cluster"); deploy/scripts/aks-preflight.sh checks it.
 aks_cluster = {
   name                = "prod-weu-aks"
   resource_group_name = "prod-weu-aks-rg"
@@ -19,7 +19,7 @@ kube_auth = {
 }
 
 # The existing Flexible Server. The database and its owner login are created
-# once by the DBA (docs/INSTALL-AKS.md, step 3); pgcrypto must be
+# once by the DBA (docs/INSTALL-AKS.md, "Azure Database for PostgreSQL"); pgcrypto must be
 # allow-listed in azure.extensions.
 postgres = {
   server_name         = "prod-weu-pg"
