@@ -2177,8 +2177,8 @@ paths:
                 required: [clusters, observed_at]
                 properties:
                   clusters:
-                    description: '`null` (not `[]`) when no cluster is registered.'
-                    type: [array, 'null']
+                    description: '`[]` (never `null`) when no cluster is registered.'
+                    type: array
                     items: {$ref: '#/components/schemas/ClusterView'}
                   observed_at: {$ref: '#/components/schemas/Timestamp'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
@@ -7594,10 +7594,145 @@ components:
             last_error: {type: string}
             last_error_at: {$ref: '#/components/schemas/NullableTimestamp'}
         observations: {type: [array, 'null'], items: {type: object}}
-        scaling: {type: [array, 'null'], items: {type: object}}
-        events: {type: [array, 'null'], items: {type: object}}
+        scaling:
+          description: The controller's memory per bound worker Deployment. Scheduler HPAs are under `scheduler_autoscaling`, not here.
+          type: [array, 'null']
+          items: {type: object}
+        events:
+          description: |
+            The latest 50 scaling events, newest first. A scheduler HPA's events
+            (ADR-0036) have `worker_deployment` `hpa/<name>` and action
+            `hpa_plan`, `hpa_update` or `hpa_refused`, with the settings before
+            and after in `detail`.
+          type: [array, 'null']
+          items: {$ref: '#/components/schemas/ClusterScalingEvent'}
         errors: {type: [array, 'null'], items: {type: object}}
         jobs_shown: {type: integer}
+        labels:
+          description: |
+            The cluster's placement labels as the controller last published them
+            (ADR-0031): operator-declared (`NEXUS_CLUSTER_LABELS`) over the
+            observed `nexus.io/region` and `nexus.io/provider`. `{}` before the
+            first report.
+          type: object
+          additionalProperties: {type: string}
+        headroom:
+          description: |
+            Remaining ResourceQuota room per task namespace (ADR-0031 §3), keyed
+            by Kubernetes namespace. `{}` before the first complete quota
+            observation.
+          type: object
+          additionalProperties: {$ref: '#/components/schemas/ClusterHeadroom'}
+        headroom_observed_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        scheduler_autoscaling: {$ref: '#/components/schemas/SchedulerAutoscalingView'}
+
+    ClusterScalingEvent:
+      type: object
+      properties:
+        id: {type: integer}
+        kubernetes_namespace: {type: string}
+        worker_deployment: {type: string, description: 'A worker Deployment, or `hpa/<name>` for a scheduler HPA.'}
+        action:
+          type: string
+          description: plan, scale_out, drain, scale_in, hold, refused (worker Deployments); hpa_plan, hpa_update, hpa_refused (scheduler HPAs).
+        mode: {type: string, enum: [plan, apply]}
+        applied: {type: boolean}
+        from_replicas: {type: [integer, 'null']}
+        to_replicas: {type: [integer, 'null']}
+        reason: {type: string}
+        actor: {type: string}
+        detail: {type: object, description: 'The decision behind the event, as the controller recorded it.'}
+        occurred_at: {$ref: '#/components/schemas/Timestamp'}
+
+    ClusterHeadroom:
+      type: object
+      description: min(hard - used) over a namespace's ResourceQuotas, per resource; -1 = no quota constrains it.
+      required: [cpu_millis, memory_bytes, gpu_count, pods]
+      properties:
+        cpu_millis: {type: integer}
+        memory_bytes: {type: integer}
+        gpu_count: {type: integer}
+        pods: {type: integer}
+        extended:
+          type: object
+          description: Extended resources other than the GPU, e.g. `nvidia.com/mig-1g.10gb`.
+          additionalProperties: {type: integer}
+
+    SchedulerAutoscalingObserved:
+      type: object
+      description: One scheduler HorizontalPodAutoscaler as the cluster controller last reported it.
+      required: [min_replicas, max_replicas, target_cpu_percent, scale_down_stabilization_seconds, current_replicas, desired_replicas, hpa_name, deployment]
+      properties:
+        min_replicas: {type: integer}
+        max_replicas: {type: integer}
+        target_cpu_percent: {type: [integer, 'null'], description: '`null` when the HPA has no CPU utilization metric.'}
+        scale_down_stabilization_seconds:
+          type: [integer, 'null']
+          description: The effective window (Kubernetes' 300 when the HPA sets none); `null` from a controller that predates ADR-0036.
+        current_replicas: {type: integer}
+        desired_replicas: {type: integer}
+        hpa_name: {type: string}
+        deployment: {type: string, description: The scheduler Deployment the HPA scales.}
+
+    SchedulerAutoscalingTarget:
+      type: object
+      required: [observed, state, managed, reason, last_applied_at, last_error]
+      properties:
+        observed: {$ref: '#/components/schemas/SchedulerAutoscalingObserved'}
+        state: {type: string, enum: [in_sync, plan_only, applying, drift]}
+        managed:
+          type: boolean
+          description: The HPA carries `nexus.khuriwalgroup.com/autoscaling-owner=cluster-controller`, so apply mode may change its settings.
+        reason: {type: string, description: "The controller's one-line account of its last reconcile of this HPA."}
+        last_applied_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        last_error: {type: [string, 'null']}
+
+    SchedulerAutoscalingView:
+      type: object
+      description: |
+        The namespace's saved scheduler settings (platform config `scheduler`)
+        against the scheduler HPAs the cluster controller observed (ADR-0036).
+        `state`: `in_sync` (equal), `plan_only` (they differ and the controller
+        runs in plan mode), `applying` (apply mode: the controller has not yet
+        reconciled this config revision, or is moving the HPA in bounded
+        steps), `drift` (apply mode: it reconciled this revision and could not
+        converge; `last_error` says why), `not_observed` (no scheduler HPA
+        reported). The top-level `observed`, `state`, `last_applied_at` and
+        `last_error` describe the HPA in the worst state; `targets` lists all.
+      required: [desired, observed, state, last_applied_at, last_error, targets]
+      properties:
+        desired:
+          type: object
+          required: [min_replicas, max_replicas, target_cpu_percent, scale_down_stabilization_seconds, config_revision]
+          properties:
+            min_replicas: {type: integer}
+            max_replicas: {type: integer}
+            target_cpu_percent: {type: integer}
+            scale_down_stabilization_seconds: {type: integer}
+            config_revision: {type: integer, description: 'The platform config revision; 0 = never saved (defaults, which the controller does not apply).'}
+        observed:
+          oneOf:
+            - {$ref: '#/components/schemas/SchedulerAutoscalingObserved'}
+            - {type: 'null'}
+        state: {type: string, enum: [in_sync, plan_only, applying, drift, not_observed]}
+        last_applied_at: {$ref: '#/components/schemas/NullableTimestamp'}
+        last_error: {type: [string, 'null']}
+        targets:
+          type: array
+          items: {$ref: '#/components/schemas/SchedulerAutoscalingTarget'}
+      example:
+        desired: {min_replicas: 2, max_replicas: 8, target_cpu_percent: 70, scale_down_stabilization_seconds: 600, config_revision: 1}
+        observed: {min_replicas: 2, max_replicas: 6, target_cpu_percent: 70, scale_down_stabilization_seconds: 600, current_replicas: 2, desired_replicas: 3, hpa_name: scheduler, deployment: scheduler}
+        state: applying
+        last_applied_at: '2026-10-19T05:11:14.506434Z'
+        last_error: null
+        targets:
+          - observed: {min_replicas: 2, max_replicas: 6, target_cpu_percent: 70, scale_down_stabilization_seconds: 600, current_replicas: 2, desired_replicas: 3, hpa_name: scheduler, deployment: scheduler}
+            state: applying
+            managed: true
+            reason: set min 1→2, max 4→6; then max 6→8 in further bounded steps
+            last_applied_at: '2026-10-19T05:11:14.506434Z'
+            last_error: null
 
     QuotaDimension:
       type: object
