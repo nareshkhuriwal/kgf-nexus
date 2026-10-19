@@ -68,11 +68,11 @@ env:
 jobs:
   # What kind of change this is. One that touches only documentation
   # (docs/**, or a *.md file anywhere outside sdk/) does not need images built
-  # and three stacks brought up: the exclusion the Azure gate made with
-  # `paths: exclude`. Not a workflow-level `paths-ignore` here: a workflow that
-  # does not run leaves its required check pending forever, and the doc jobs
-  # must run on exactly those changes. So every run starts, the expensive jobs
-  # skip themselves, and the gate knows which skips are legitimate.
+  # and three stacks brought up. Not a workflow-level `paths-ignore`: a
+  # workflow that does not run leaves its required check pending forever, and
+  # the doc jobs must run on exactly those changes. So every run starts, the
+  # expensive jobs skip themselves, and the gate knows which skips are
+  # legitimate.
   #
   # `build` runs on documentation changes anyway: Go tests read Markdown
   # (CONTRACT.md, golden import reports, the nexusctl init templates). sdk/
@@ -699,7 +699,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     # Generous: this builds every service image before it can run anything,
     # and the example sweep gives each example its own budget
-    # (tests/chaos/config.go). The hour the Azure EndToEnd stage had.
+    # (tests/chaos/config.go).
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -816,9 +816,10 @@ jobs:
           retention-days: 14
 
   # Every image builds (one job per image, linux/amd64 and linux/arm64), and
-  # nothing is pushed: release.yml with push: false. After the unit gate, as
-  # the Azure gate's BuildValidation stage was. Pull requests only; on main and
-  # tags `publish` builds them for real, after the whole gate.
+  # nothing is pushed: release.yml with push: false. After `build`, so a
+  # compile error is reported once, as a compile error, and not again by
+  # eleven image builds. Pull requests only; on main and tags `publish` builds
+  # them for real, after the whole gate.
   images:
     name: images
     needs: [changes, build]

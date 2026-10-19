@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Summarise JUnit XML test reports as Markdown, for a CI job summary.
 
-GitHub Actions has no test-results tab of its own (Azure DevOps had one, fed
-by PublishTestResults). So every CI job that writes a JUnit report appends
-this summary to $GITHUB_STEP_SUMMARY -- totals per report, then the failing
-tests by name -- and uploads the report itself as an artifact.
+GitHub Actions has no test-results tab of its own. So every CI job that
+writes a JUnit report appends this summary to $GITHUB_STEP_SUMMARY -- totals
+per report, then the failing tests by name -- and uploads the report itself as
+an artifact.
 
 Usage:
     junit-summary.py --title TITLE [--require] REPORT.xml... >> "$GITHUB_STEP_SUMMARY"
@@ -15,8 +15,7 @@ The counts come from the <testcase> elements, not from the suite attributes,
 which not every reporter fills in; time is the sum of the test cases' own
 times. The exit status is 0 whatever the tests did: the test step owns that
 verdict. With --require it is 1 when a report is missing or unreadable,
-because a suite that wrote no report proved nothing (Azure's
-failTaskOnMissingResultsFile).
+because a suite that wrote no report proved nothing.
 """
 
 import argparse

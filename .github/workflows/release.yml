@@ -17,16 +17,16 @@
 #   publish  (a push to main, or a vX.Y.Z tag) push: true, and only after EVERY
 #            check in ci.yml has passed on that commit, in that run. A digest
 #            is never published for a commit whose tests had not finished, or
-#            had failed. (The Azure release got the same guarantee from a
-#            pipeline-resource trigger on its validation pipeline.)
+#            had failed.
 #
 # Push mode publishes ghcr.io/<owner>/kgf-nexus/<image>: the chart's own
 # naming, with image.registry "ghcr.io/" and image.repositoryPrefix
 # "<owner>/kgf-nexus/". A push to main is tagged with its commit (12 hex
 # digits) and `main` (moving; never deploy it), a vX.Y.Z tag with that version
 # only -- so a tag pushed while main's run for the same commit is still going
-# never races it for a tag. Never `latest`: the chart refuses it. Each image carries a Sigstore-signed SLSA build-provenance
-# attestation (`gh attestation verify`) and BuildKit's own SBOM and provenance.
+# never races it for a tag. Never `latest`: the chart refuses it. Each image
+# carries a Sigstore-signed SLSA build-provenance attestation (`gh attestation
+# verify`) and BuildKit's own SBOM and provenance.
 # Then ONE job collects every digest into one map, refuses it unless it is
 # complete and digest-pinned, proves the chart and the cluster-controller
 # overlay run exactly those digests, and publishes it with the matching Helm
