@@ -33,6 +33,9 @@ venv/
 .pytest_cache/
 
 # Local
+# Per-machine state that never belongs in the repository: deployment
+# configs (e.g. .local/k8s-standalone), logs, credentials and tool caches.
+/.local/
 .env
 .env.local
 *.log

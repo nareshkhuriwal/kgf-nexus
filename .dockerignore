@@ -9,3 +9,14 @@ gpt_architecture.zip
 # images that must never become part of an image build context.
 dist
 .claude
+# Per-machine state and secrets, all gitignored: deployment configs, logs and
+# credentials (.local), NATS NKey seeds (.dev-nats), the dev database password
+# (.dev-postgres), compose secrets (deploy/.env) and tool caches. Dockerfile.service
+# copies the whole context into its build stage, so without these lines they
+# would sit in every builder layer.
+.local
+.dev-nats
+.dev-postgres
+deploy/.env
+.tools
+.venv-sdk
