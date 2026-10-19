@@ -119,7 +119,7 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: admin-api-key, optional: true } }
             {{- range $i, $w := .Values.workspaceWorkers }}
             - name: WORKSPACE_WORKER_KEY_{{ $i }}
-              valueFrom: { secretKeyRef: { name: {{ $.Values.existingSecret }}, key: {{ $w.secretKey }} } }
+              valueFrom: { secretKeyRef: { name: {{ $.Values.existingSecret }}, key: {{ $w.secretKey | quote }} } }
             {{- end }}
           resources:
             requests: { cpu: 10m, memory: 16Mi }
