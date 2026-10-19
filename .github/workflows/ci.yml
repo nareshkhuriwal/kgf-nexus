@@ -264,7 +264,7 @@ jobs:
   # Kubernetes and CRD schemas pinned in deploy/helm/schemas.lock, and prove
   # every bad value is refused (docs/OPERATIONS.md §20.10). Then prove every
   # Nexus image the chart renders takes its digest from image.digests -- the
-  # key the release pipeline sets from its digest map (templates/deploy-aks.yml).
+  # key KGF Cloud's release pipeline sets from its digest map (deploy-aks.yml).
   # The release re-runs the same check against the real map and environment
   # values before `helm upgrade` (F112).
   helm:
@@ -338,7 +338,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
   # The operator console: typecheck, component tests and the production build.
-  # The same steps, in the same order, as the Azure gate's UserInterface stage.
   ui:
     name: ui typecheck, tests and build
     runs-on: ubuntu-latest

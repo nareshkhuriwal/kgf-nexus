@@ -1,7 +1,10 @@
 # Deploying Nexus to a Portainer-managed Docker host
 
-The release pipeline builds every image, pushes it to ACR digest-pinned, then
-deploys to a Docker daemon on a VM. Portainer manages the resulting containers
+KGF Cloud's release pipeline builds every image, pushes it to ACR
+digest-pinned, then deploys to a Docker daemon on a VM. The pipeline is Azure
+DevOps and lives in the kgf-cloud repository (`.azure-pipelines/nexus/`); this
+repository's own CI is GitHub Actions (`.github/workflows/ci.yml`), which
+builds and tests but does not deploy. Portainer manages the resulting containers
 as it manages anything else on that daemon.
 
     build → push to ACR → render compose → copy to host → docker compose up -d
@@ -91,7 +94,7 @@ the host already uses them.
 
 ### 4. Turn the stage on
 
-In `.azure-pipelines/kgf-nexus-release.yml`:
+In the release pipeline (`.azure-pipelines/nexus/kgf-nexus-release.yml` in kgf-cloud):
 
 ```yaml
   - name: deployToDockerHost

@@ -195,5 +195,4 @@ These checks need `terraform` 1.11 or later, or Docker, in which case the
 pinned `hashicorp/terraform` image is used. They also need network access to
 the Terraform registry for providers and modules. Set `TF_PLUGIN_CACHE_DIR`
 to reuse downloads. CI runs both targets: the `terraform` job in
-`.github/workflows/ci.yml` and the `Terraform` stage in
-`.azure-pipelines/pr-build-validation.yml`.
+`.github/workflows/ci.yml`.

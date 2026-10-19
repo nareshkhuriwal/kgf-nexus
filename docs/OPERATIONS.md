@@ -1233,7 +1233,8 @@ that window immediately, restart the gateway after step 5.
 ### 9.5 Portainer-managed Docker host
 
 The deploy pipeline renders only the base compose file
-(`.azure-pipelines/templates/deploy-portainer-host.yml` → `deploy/render_compose.py`).
+(`deploy/render_compose.py`, run by KGF Cloud's release pipeline, whose
+Azure DevOps definitions live in the kgf-cloud repository).
 It does not know about TLS, so TLS on this host is a one-time manual setup,
 followed by monthly renewals.
 
@@ -1649,7 +1650,8 @@ Design and safety argument: docs/CLUSTER-SCALING.md. This section is the runbook
   and pushes `<acr>/nexus/cluster-controller`; `deploy/scripts/cluster-controller-overlay.sh`
   renders `base` or `apply` with that digest (the `kustomize edit set image`
   retarget, as a throwaway overlay) and fails if any container would run
-  something else. `templates/deploy-aks.yml` runs it when its
+  something else. KGF Cloud's release pipeline (its `deploy-aks.yml`
+  template, in the kgf-cloud repository) runs it when its
   `clusterController` parameter is `base` or `apply` (default `none`). By hand:
   `NAMESPACE=kgf-nexus deploy/scripts/cluster-controller-overlay.sh base <acr>/nexus/cluster-controller@sha256:<digest> | kubectl apply -f -`.
   On a local kind/Docker Desktop cluster, `make k8s-dev-images` builds and loads
@@ -2498,7 +2500,7 @@ are docs/TLS.md (mTLS), docs/CLUSTER-SCALING.md (controller), §7.7/§19.2
 | Need | Why | Check |
 |---|---|---|
 | Kubernetes ≥ 1.29 | `kubeVersion` in Chart.yaml; `matchLabelKeys` in spread constraints | `kubectl version` |
-| Images for **one immutable tag**: api-gateway, workflow-manager, dag-engine, scheduler, resource-manager, event-service, agent, migrate, ui, **artifact-gc**, **cluster-controller** | every component renders `<registry><prefix><component>:<tag>`; the last two are new in 0.2.0 | the release pipeline builds all eleven (`.azure-pipelines/templates/images.yml`); locally `make k8s-dev-images` |
+| Images for **one immutable tag**: api-gateway, workflow-manager, dag-engine, scheduler, resource-manager, event-service, agent, migrate, ui, **artifact-gc**, **cluster-controller** | every component renders `<registry><prefix><component>:<tag>`; the last two are new in 0.2.0 | the release pipeline builds all eleven (KGF Cloud's `images.yml` template); locally `make k8s-dev-images` |
 | A credentials Secret (`existingSecret`) | no credential is ever rendered into a manifest | keys `postgres-password`, `minio-root-user`, `minio-root-password`, `worker-api-key`, optional `admin-api-key` |
 | NATS identities (`nats.auth`) | the chart refuses an unauthenticated broker | §11.7; `nats.auth.mode=none` only for a throwaway cluster |
 | metrics-server | HPAs (`autoscaling.enabled`) | `kubectl get apiservice v1beta1.metrics.k8s.io` |
@@ -3311,7 +3313,7 @@ the digest is what Docker and Kubernetes actually resolve.
 |---|---|---|
 | S3 result store and backup store (server) | `docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46` (multi-arch index: amd64 + arm64) | `deploy/docker-compose.yml` (`minio`), `deploy/docker-compose.pitr.yml` (`backup-store`, `NEXUS_PITR_MINIO_IMAGE`), Helm `minio.image`, Makefile `S3_IMAGE` (bench, CI) |
 | `mc` bucket-init jobs | the **same** Silo image (it bundles a version-matched `mc`) | compose `minio-init`, `backup-store-init` (`NEXUS_PITR_MC_IMAGE`), Helm `minio.mcImage` |
-| Console build | `node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1` | `deploy/Dockerfile.ui`; CI uses Node `24.21.0` (`.github/workflows/ci.yml`, both Azure pipelines) |
+| Console build | `node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1` | `deploy/Dockerfile.ui`; CI uses Node `24.21.0` (`.github/workflows/ci.yml`, and KGF Cloud's Azure pipelines) |
 
 ### 22.1 The S3 store: why Silo, and not MinIO
 

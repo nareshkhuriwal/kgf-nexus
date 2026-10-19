@@ -8,7 +8,8 @@
 # "latest". A release retargets it to the built digest -- the equivalent of
 #   kustomize edit set image kgf-nexus/cluster-controller=<acr>/nexus/cluster-controller@sha256:<digest>
 # -- through deploy/scripts/cluster-controller-overlay.sh, which
-# .azure-pipelines/templates/deploy-aks.yml runs (clusterController: base|apply)
+# KGF Cloud's release pipeline (its deploy-aks.yml template, in the kgf-cloud
+# repository) runs (clusterController: base|apply)
 # and which fails if the rendered Deployment would run any other image.
 apiVersion: apps/v1
 kind: Deployment
