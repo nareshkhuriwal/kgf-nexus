@@ -627,20 +627,22 @@ matching the registration, and plan-only decisions you agree with
 **3. Apply** needs all three opt-ins (OPERATIONS §12.3); missing any one keeps
 plan mode, and the console names which:
 
-1. the registration switched to apply, with `expected_cluster_uid` = `$UID_KS`
-   (the API refuses apply without it);
-2. and 3. the process permission and the scale RBAC, from the chart:
+- **The registration** switched to apply, with `expected_cluster_uid` =
+  `$UID_KS` (the API refuses apply without it): the Clusters tab, or the PUT
+  above with `"mode": "apply"` and the current `desired_revision`.
+- **The process permission and the scale RBAC** (the other two), from the
+  chart:
 
-   ```sh
-   helm upgrade nexus oci://ghcr.io/$OWNER/charts/kgf-nexus --version $CHART_VERSION -n $NS \
-     -f aks-existing-cluster.yaml -f nats-values.yaml -f release-images.yaml --set image.tag=$TAG \
-     --set clusterController.apply.enabled=true --set clusterController.apply.expectedClusterUID=$UID_KS
-   ```
+  ```sh
+  helm upgrade nexus oci://ghcr.io/$OWNER/charts/kgf-nexus --version $CHART_VERSION -n $NS \
+    -f aks-existing-cluster.yaml -f nats-values.yaml -f release-images.yaml --set image.tag=$TAG \
+    --set clusterController.apply.enabled=true --set clusterController.apply.expectedClusterUID=$UID_KS
+  ```
 
-   The chart compares that UID with the live cluster at install and refuses a
-   mismatch, so a values file written for one cluster cannot enable apply on
-   another. (Terraform: `cluster_controller = { mode = "apply",
-   expected_cluster_uid = "<uid>" }`, checked the same way at plan time.)
+  The chart compares that UID with the live cluster at install and refuses a
+  mismatch, so a values file written for one cluster cannot enable apply on
+  another. (Terraform: `cluster_controller = { mode = "apply",
+  expected_cluster_uid = "<uid>" }`, checked the same way at plan time.)
 
 **Back out** at any moment: the console's **Switch to plan** (the next cycle
 stops mutating), or the upgrade without the two `--set`s (OPERATIONS §12.4).
