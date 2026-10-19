@@ -2315,6 +2315,10 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_controller_pool_replicas` | G | pool, kind (current/desired) | cluster-controller | Replicas observed and planned |
 | `nexus_controller_last_success_timestamp_seconds` | G | — | cluster-controller | Alert on the leader when `time() - this > 4 * interval` |
 | `nexus_controller_leader` | G | — | cluster-controller | 1 on the leader. Alert if `sum() != 1` for 5 minutes: no leader, or two |
+| `nexus_controller_scheduler_hpa_actions_total` | C | action (hpa_plan/hpa_update/hpa_refused), mode (plan/apply) | cluster-controller | Scheduler HPA autoscaling events (ADR-0036, §12.7): `hpa_plan` what plan mode would change, `hpa_update` a patch applied, `hpa_refused` a patch the API server refused. `hpa_refused` rising: RBAC or another writer |
+| `nexus_controller_scheduler_hpa_blocked` | G | hpa (the HPA's name) | cluster-controller | 1 while, in apply mode, a scheduler HPA differs from the saved settings and cannot converge without a human (not opted in, no CPU metric, patches refused); 0 otherwise. Alert on `max(this) == 1` for 15 minutes |
+| `nexus_instance_heartbeat_failures_total` | C | op (beat/prune/shutdown) | api-gateway, workflow-manager, dag-engine, scheduler, resource-manager, event-service | Failed service-instance registry writes (ADR-0037, §31.4). Every `op` series exists from start. `op="beat"` rising: this replica shows as stale in the console; `prune` failures alone are harmless |
+| `nexus_instance_heartbeat_last_success_timestamp_seconds` | G | — | the same six | Last successful registry beat (every 10 s). `time() - this > 30` is the console's stale condition, as an alert |
 | `nexus_agent_tasks_running` | G | executor | agent | Attempts executing |
 | `nexus_agent_tasks_started_total` | C | executor | agent | Attempts started |
 | `nexus_agent_tasks_completed_total` | C | executor, outcome, error_class | agent | Attempts reported. `error_class="infrastructure"` rising on one host: a quarantine candidate |
