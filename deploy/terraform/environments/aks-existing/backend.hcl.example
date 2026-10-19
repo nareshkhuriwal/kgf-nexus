@@ -1,0 +1,10 @@
+# Copy to backend.hcl (gitignored) and run: terraform init -backend-config=backend.hcl
+# The state storage account is created once, by hand or from a bootstrap
+# stack: private, versioning + soft delete on, shared keys off, RBAC "Storage
+# Blob Data Contributor" for the deployers only. State holds the database
+# owner password and every generated Nexus credential.
+resource_group_name  = "kgf-nexus-tfstate-rg"
+storage_account_name = "kgfnexustfstate"
+container_name       = "tfstate"
+key                  = "aks-existing/kgf-nexus-prod.tfstate"
+use_azuread_auth     = true

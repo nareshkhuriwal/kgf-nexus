@@ -3618,6 +3618,7 @@ the digest is what Docker and Kubernetes actually resolve.
 | S3 result store and backup store (server) | `docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46` (multi-arch index: amd64 + arm64) | `deploy/docker-compose.yml` (`minio`), `deploy/docker-compose.pitr.yml` (`backup-store`, `NEXUS_PITR_MINIO_IMAGE`), Helm `minio.image`, Makefile `S3_IMAGE` (bench, CI) |
 | `mc` bucket-init jobs | the **same** Silo image (it bundles a version-matched `mc`) | compose `minio-init`, `backup-store-init` (`NEXUS_PITR_MC_IMAGE`), Helm `minio.mcImage` |
 | Console build | `node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1` | `deploy/Dockerfile.ui`; CI uses Node `24.21.0` (`.github/workflows/ci.yml`, and KGF Cloud's Azure pipelines) |
+| Console runtime | `nginxinc/nginx-unprivileged:1.30.5-alpine3.24@sha256:56b8272e43a0525f67aed68d1e0794a712d10e3e45a563e118e9a77c817e6f86` (uid 101, port 8080) | `deploy/Dockerfile.ui` (`runtime` stage); docs/IMAGES.md |
 | Image builder (release workflow) | `moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea` | `.github/workflows/release.yml` (`docker/setup-buildx-action` `driver-opts`) |
 | arm64 emulation for the images' runtime stages | `docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0` | `.github/workflows/release.yml` (`docker/setup-qemu-action` `image`) |
 
@@ -3686,9 +3687,9 @@ Every first-party image is built by `.github/workflows/release.yml`, which
 
 | Event | What happens |
 |---|---|
-| Pull request | `images`: all eleven images built for `linux/amd64` and `linux/arm64`, one job per image, after the unit tests pass. Nothing is pushed and the run holds no registry credential. |
-| Push to `main` | after **every** CI job has passed on that commit (`quality gate`), `publish` pushes `ghcr.io/<owner>/kgf-nexus/<image>:<commit>` (12 hex digits) and `:main`. |
-| Tag `vX.Y.Z[-pre]` | the whole CI suite on the tagged commit, then `publish` pushes `:vX.Y.Z`. A tag that is not a release version is refused. |
+| Pull request | `images`: all eleven images built for `linux/amd64` and `linux/arm64`, one job per image, after the unit tests pass, and the Helm chart packaged, linted and rendered. Nothing is pushed and the run holds no registry credential. |
+| Push to `main` | after **every** CI job has passed on that commit (`quality gate`), `publish` pushes `ghcr.io/<owner>/kgf-nexus/<image>:<commit>` (12 hex digits) and `:main`, then the chart as `oci://ghcr.io/<owner>/charts/kgf-nexus:<version>-main.g<commit>`. |
+| Tag `vX.Y.Z[-pre]` | the whole CI suite on the tagged commit, then `publish` pushes `:vX.Y.Z` and the chart at Chart.yaml's `version`. A tag that is not a release version is refused. |
 
 Documentation-only changes (`docs/**`, `*.md` outside `sdk/`) build and
 publish nothing. Nothing is ever tagged `latest` (the chart refuses it), and
@@ -3729,10 +3730,40 @@ docker buildx imagetools inspect ghcr.io/<owner>/kgf-nexus/api-gateway@sha256:<d
   --format '{{ json .SBOM }}'
 ```
 
+**The Helm chart.** Packaged once per run from the commit (`chart` job):
+`helm package` (the pinned helm) with Chart.yaml's version on a `vX.Y.Z` tag,
+or that version plus a SemVer pre-release naming the commit
+(`<version>-main.g<commit>` on `main`, `-dev.g<commit>` on a pull request), so
+a version range never selects a build of `main`; `appVersion` is the image
+tag. The job then checks the **package**, not the source directory: its files
+are exactly what git tracks under `deploy/helm/kgf-nexus` (examples included),
+its Chart.yaml carries that version, and `helm lint --strict` and
+`helm template` pass. In push mode, and only after the digest map has
+validated, `chart-publish` pushes those bytes to
+`oci://ghcr.io/<owner>/charts/kgf-nexus`, pulls them back (they must be
+identical; the digest is recorded), and attests them like the images:
+
+```sh
+helm show chart oci://ghcr.io/<owner>/charts/kgf-nexus --version <version>
+gh attestation verify oci://ghcr.io/<owner>/charts/kgf-nexus:<version> \
+  --repo <owner>/kgf-nexus --signer-workflow <owner>/kgf-nexus/.github/workflows/release.yml
+helm upgrade --install kgf-nexus oci://ghcr.io/<owner>/charts/kgf-nexus --version <version> -n kgf-nexus \
+  -f my-values.yaml -f release-images.yaml --set image.tag=<commit or vX.Y.Z>
+```
+
+A published chart version is immutable: a re-run that would push the same
+bytes keeps them, and different bytes under an existing version fail the job
+(bump `version` in Chart.yaml; a release tag's chart must change version
+whenever its content does). The run's `helm-chart` artifact holds the package
+and `helm-chart-release` holds `chart.json` (reference, version, digest,
+`appVersion`); the run summary prints the install command. On an AKS cluster
+you already run, docs/INSTALL-AKS.md uses exactly this chart.
+
 **One-time setup.** GHCR creates each package on its first push, private. Make
-each of the eleven packages public (package settings), or give the cluster a
-pull secret (`image.pullSecrets`). Nothing else needs configuring: the push
-uses the workflow's own token.
+each of the eleven image packages and the `charts/kgf-nexus` package public
+(package settings), or give the cluster a pull secret (`image.pullSecrets`)
+and Helm a `helm registry login ghcr.io`. Nothing else needs configuring: the
+push uses the workflow's own token.
 
 KGF's own deployments (its ACR, AKS and Portainer host) are released by KGF
 Cloud's Azure DevOps pipelines in the kgf-cloud repository, which build the

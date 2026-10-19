@@ -89,6 +89,10 @@ run "secure_defaults" {
     error_message = "PostgreSQL must have no public endpoint."
   }
   assert {
+    condition     = contains(split(",", upper(azurerm_postgresql_flexible_server_configuration.extensions.value)), "PGCRYPTO")
+    error_message = "pgcrypto must be allow-listed (azure.extensions): migration 0001 creates it."
+  }
+  assert {
     condition     = azurerm_postgresql_flexible_server.this.backup_retention_days >= 7
     error_message = "PITR retention must be at least 7 days."
   }

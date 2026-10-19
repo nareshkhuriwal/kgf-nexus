@@ -6,9 +6,11 @@ rendered here unchanged, so there is one copy of each:
 | Page | Source | Covers |
 | --- | --- | --- |
 | [Runbook](runbook.md) | `docs/OPERATIONS.md` | backup, restore, PITR, migrations and upgrades, artifacts, email, NATS, the cluster controller, the Kubernetes executor, rate limiting, metrics, durable logs, Helm, quotas, pinned images |
+| [Install on an existing AKS cluster](install-aks.md) | `docs/INSTALL-AKS.md` | the full install on AKS you already run: Flexible Server, Blob through workload identity, worker pools, the cluster controller; Helm or Terraform |
+| [Container images](images.md) | `docs/IMAGES.md` | what each Nexus image listens on, needs and writes, for any runtime |
 | [Deploying](deploy.md) | `deploy/README.md` | the Docker Compose stack, development against production configuration |
 | [TLS](tls.md) | `docs/TLS.md` | inter-service TLS/mTLS and how to roll it out |
-| [Terraform](terraform/index.md) | `deploy/terraform/` | AKS, EKS and GKE environments |
+| [Terraform](terraform/index.md) | `deploy/terraform/` | AKS, EKS and GKE environments, and an existing AKS cluster |
 | [Azure provisioning](azure-provisioning.md) | `deploy/AZURE-PROVISIONING.md` | Azure specifics |
 | [Tracing and storage backends](tracing-storage.md) | ADR-0026, ADR-0027 | OpenTelemetry tracing; the S3, Azure Blob and GCS result stores |
 | [Air-gapped installation](airgap.md) | `docs/AIRGAP.md` | a digest-pinned bundle and mirroring it into a private registry |
@@ -18,6 +20,7 @@ rendered here unchanged, so there is one copy of each:
 | I need to… | Runbook section |
 | --- | --- |
 | install on Kubernetes with Helm | [§20](runbook.md#20-installing-with-helm), then the [production checklist, §20.9](runbook.md#209-production-checklist) |
+| install on an AKS cluster I already run | [Install on an existing AKS cluster](install-aks.md), then [§20.16](runbook.md#2016-existing-clusters-and-worker-pool-releases) for worker-pool releases |
 | back up and restore the database | [§2](runbook.md#2-backup) and [§3](runbook.md#3-restore) |
 | set up point-in-time recovery | [§4](runbook.md#4-rpo-rto-and-point-in-time-recovery) |
 | back up the result store | [§7](runbook.md#7-artifacts-backing-up-the-result-store) |

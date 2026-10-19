@@ -101,6 +101,16 @@ resource "azurerm_postgresql_flexible_server_configuration" "require_tls" {
   value     = "ON"
 }
 
+# Migration 0001 runs CREATE EXTENSION pgcrypto, and Flexible Server refuses
+# any extension that is not allow-listed in azure.extensions ("extension is
+# not allow-listed for users"). The value is the WHOLE list: add to it here,
+# never in the portal, or the next apply takes the addition away.
+resource "azurerm_postgresql_flexible_server_configuration" "extensions" {
+  name      = "azure.extensions"
+  server_id = azurerm_postgresql_flexible_server.this.id
+  value     = "PGCRYPTO"
+}
+
 resource "azurerm_postgresql_flexible_server_configuration" "log_connections" {
   name      = "log_connections"
   server_id = azurerm_postgresql_flexible_server.this.id
