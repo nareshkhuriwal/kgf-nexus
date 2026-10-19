@@ -432,6 +432,12 @@ jobs:
         run: make proto-lint
       - name: buf breaking against the previous main
         run: make proto-breaking
+        env:
+          # A release tag can name a commit behind the main tip. Compare it
+          # with its own parent, as the push of that commit to main did, not
+          # with main changes it does not contain (empty: proto/check.sh's
+          # default).
+          BUF_AGAINST: ${{ startsWith(github.ref, 'refs/tags/') && 'HEAD~1' || '' }}
 
   # This file and any other workflow, with the pinned actionlint image (it
   # bundles shellcheck for the run: scripts). A duplicated job id, for one,
