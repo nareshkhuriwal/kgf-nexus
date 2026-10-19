@@ -42,6 +42,25 @@ type observation struct {
 	// nodes is the full Node list when it succeeded, for the cluster's
 	// placement labels (ADR-0031); nil when the list failed.
 	nodes []corev1.Node
+	// The scheduler Deployments' names and every HPA in the control-plane
+	// namespace, for scheduler autoscaling (ADR-0036); each usable only when
+	// its list succeeded.
+	schedulerNames   []string
+	schedulersListed bool
+	hpas             []autoscalingv2.HorizontalPodAutoscaler
+	hpasListed       bool
+}
+
+// replace swaps the reported object of the same kind, namespace and name for
+// obj: after a patch, the report carries the object the API server returned
+// rather than the one listed before it.
+func (o *observation) replace(obj *rmv1.ObservedObject) {
+	for i, cur := range o.objects {
+		if cur.GetKind() == obj.GetKind() && cur.GetNamespace() == obj.GetNamespace() && cur.GetName() == obj.GetName() {
+			o.objects[i] = obj
+			return
+		}
+	}
 }
 
 // observe collects the snapshot. Each kind is complete or not independently:
@@ -78,8 +97,10 @@ func (c *Controller) observe(ctx context.Context, a *rmv1.ClusterAssignment) obs
 		o.errs = append(o.errs, fmt.Errorf("observe scheduler deployments in %s: %w", cp, err))
 	} else {
 		o.completeKinds = append(o.completeKinds, "SchedulerDeployment")
+		o.schedulersListed = true
 		for i := range deps.Items {
 			o.objects = append(o.objects, deploymentObject("SchedulerDeployment", &deps.Items[i]))
+			o.schedulerNames = append(o.schedulerNames, deps.Items[i].Name)
 		}
 	}
 
@@ -90,6 +111,7 @@ func (c *Controller) observe(ctx context.Context, a *rmv1.ClusterAssignment) obs
 		o.errs = append(o.errs, fmt.Errorf("observe HPAs in %s: %w", cp, err))
 	} else {
 		o.completeKinds = append(o.completeKinds, "HorizontalPodAutoscaler")
+		o.hpas, o.hpasListed = hpas.Items, true
 		for i := range hpas.Items {
 			o.objects = append(o.objects, hpaObject(&hpas.Items[i]))
 		}
@@ -183,15 +205,10 @@ func deploymentObject(kind string, d *appsv1.Deployment) *rmv1.ObservedObject {
 }
 
 func hpaObject(h *autoscalingv2.HorizontalPodAutoscaler) *rmv1.ObservedObject {
-	min := int32(1)
-	if h.Spec.MinReplicas != nil {
-		min = *h.Spec.MinReplicas
-	}
+	settings, cpu := hpaSettings(h)
 	var targetCPU, currentCPU *int32
-	for _, m := range h.Spec.Metrics {
-		if m.Type == autoscalingv2.ResourceMetricSourceType && m.Resource != nil && m.Resource.Name == corev1.ResourceCPU {
-			targetCPU = m.Resource.Target.AverageUtilization
-		}
+	if cpu >= 0 {
+		targetCPU = &settings.TargetCPUPercent
 	}
 	for _, m := range h.Status.CurrentMetrics {
 		if m.Type == autoscalingv2.ResourceMetricSourceType && m.Resource != nil && m.Resource.Name == corev1.ResourceCPU {
@@ -216,9 +233,13 @@ func hpaObject(h *autoscalingv2.HorizontalPodAutoscaler) *rmv1.ObservedObject {
 		// metric; without it the HPA is present but not actually scaling.
 		Ready: able, ResourceVersion: h.ResourceVersion, CreatedAtUnixMs: created(h.ObjectMeta),
 		SummaryJson: summary(map[string]any{
-			"min_replicas": min, "max_replicas": h.Spec.MaxReplicas, "target_cpu_percent": targetCPU,
-			"current_cpu_percent": currentCPU, "scale_target": h.Spec.ScaleTargetRef.Kind + "/" + h.Spec.ScaleTargetRef.Name,
+			"min_replicas": settings.MinReplicas, "max_replicas": settings.MaxReplicas, "target_cpu_percent": targetCPU,
+			"scale_down_stabilization_seconds": settings.ScaleDownStabilizationSeconds,
+			"current_cpu_percent":              currentCPU, "scale_target": h.Spec.ScaleTargetRef.Kind + "/" + h.Spec.ScaleTargetRef.Name,
+			"current_replicas": h.Status.CurrentReplicas, "desired_replicas": h.Status.DesiredReplicas,
 			"scaling_active": able,
+			// ADR-0036: whether the controller may change the four settings.
+			"managed": hpaOwned(h),
 		}),
 	}
 }
