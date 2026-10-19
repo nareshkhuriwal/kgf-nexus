@@ -697,8 +697,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build]
     if: needs.changes.outputs.code == 'true'
-    # Generous: this builds every service image before it can run anything.
-    timeout-minutes: 45
+    # Generous: this builds every service image before it can run anything,
+    # and the example sweep gives each example its own budget
+    # (tests/chaos/config.go). The hour the Azure EndToEnd stage had.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
