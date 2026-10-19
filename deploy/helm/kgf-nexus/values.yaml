@@ -6,9 +6,37 @@
 # Environment-specific choices -- Docker Desktop's LoadBalancer ports, dev
 # simulated GPU agents -- live in deploy/terraform/environments/*, not here.
 #
-# One release per Kubernetes namespace: components use fixed Service names
-# (api-gateway, postgres, ...) exactly as the compose stack does, so the
-# services' peer addresses are the same everywhere.
+# One control-plane release per Kubernetes namespace: components use fixed
+# Service names (api-gateway, postgres, ...) exactly as the compose stack does,
+# so the services' peer addresses are the same everywhere. Worker pools may be
+# separate releases (components.controlPlane.enabled=false, below), ideally
+# each in its own namespace.
+
+# ─── What this release runs (ADR-0035, docs/OPERATIONS.md §20.16) ─────────
+components:
+  controlPlane:
+    # false = a WORKER-POOL release: only the agents (and the cluster
+    # controller, when enabled). No control-plane services, schedulers,
+    # console, migrate/bootstrap/db-roles Jobs, artifact GC, Gateway API
+    # routes, or in-cluster postgres/minio/nats; postgres.*, services.*,
+    # schedulers and ui are ignored. The agents dial agentDefaults.controlPlane
+    # and agentDefaults.nats, so a pool is scaled, upgraded and placed on its
+    # own, against a control plane another release installed:
+    #   helm upgrade --install <release> <chart> -n <ns> \
+    #     --set components.controlPlane.enabled=false \
+    #     --set existingSecret=<secret> -f <pool-values.yaml>
+    # examples/aks-worker-pool.yaml is a complete pool values file.
+    enabled: true
+
+# The Kubernetes cluster this release runs in, by its registered name
+# (clusters.name in the console). Every Nexus process reports it as
+# NEXUS_CLUSTER_NAME, next to its pod, namespace and node (NEXUS_POD_NAME,
+# NEXUS_POD_NAMESPACE, NEXUS_NODE_NAME from the downward API), so the console's
+# Infrastructure page can place each instance. The agents also label their
+# claims with it unless claimPlacement.clusterName names another. Empty = no
+# cluster reported.
+cluster:
+  name: ""
 
 image:
   # Prefix for every Nexus image: <registry><repositoryPrefix><component>:<tag>.
@@ -555,6 +583,16 @@ services:
 # claim is atomic in Postgres (ADR-0011, F81). Optional per entry: resources
 # (default serviceDefaults.resources), podDisruptionBudget, and autoscaling --
 # read the ADR-0018 note under `autoscaling` before using the last one.
+# Placement per entry: nodeSelector / tolerations / affinity REPLACE
+# placement.* for that scheduler (pin it to a system or CPU pool, away from
+# the batch nodes its queue fills), and topologySpread is merged key by key
+# over placement.topologySpread.
+#   - name: scheduler
+#     queue: default
+#     replicas: 2
+#     nodeSelector: { kubernetes.azure.com/mode: system }
+#     tolerations: [{ key: CriticalAddonsOnly, operator: Exists }]
+#     topologySpread: { whenUnsatisfiable: DoNotSchedule }
 schedulers:
   - name: scheduler
     queue: default
@@ -623,6 +661,7 @@ agentPolicy:
 #   gpuDiscovery: nvidia-smi                            read GPUs/MIG from nvidia-smi -L
 #   kubernetes: { namespace, serviceAccount, helperImage, gpuResourceName,
 #                 migResourcePrefix, sharedGpuResourceName, gpuKindLabel,
+#                 taskNodeSelector, taskTolerations,
 #                 taskApi: { enabled, port } }       agentDefaults.kubernetes, per agent
 #       (only for an agent whose executors include kubernetes; gpuMig is then
 #       profile=count, e.g. "1g.10gb=7": the task pool's instances, allocated
@@ -646,11 +685,41 @@ claimPlacement:
   # Retries after PREEMPTED (spot eviction) that do not spend max_attempts.
   maxPreemptionRetries: 5
   preemptionRetryDelay: 2s
-  # The registered cluster this release's agents run in (clusters.name);
-  # empty = no cluster labels for them.
+  # The registered cluster this release's agents run in (clusters.name).
+  # Empty = cluster.name; both empty = no cluster labels for them.
   clusterName: ""
 
 agentDefaults:
+  # Where the agents dial the worker gRPC endpoint (NEXUS_CONTROL_PLANE).
+  # The default is this release's api-gateway Service. A worker-pool release
+  # in another namespace names the control plane's Service by its FQDN
+  # (api-gateway.<namespace>.svc:9091); in another cluster, the endpoint the
+  # control-plane release exposes (services.apiGateway.external, or your own
+  # load balancer). Agents in any namespace other than the control plane's
+  # must NOT keep the default: a bare name resolves only in the same namespace.
+  controlPlane:
+    address: api-gateway:9091
+    # TLS to that endpoint where this release's own mTLS (tls.enabled) does
+    # not cover it, e.g. a load balancer that terminates TLS in front of a
+    # plaintext gateway. With tls.enabled as well, the agents still present
+    # their client leaf and verify the server against caSecretName instead.
+    tls:
+      enabled: false
+      # REQUIRED with enabled: a Secret in this namespace with key ca.crt,
+      # the CA that issued the endpoint's certificate.
+      caSecretName: ""
+      # The name the server certificate is verified against when it is not
+      # the host in `address` (an IP, or a load-balancer name the certificate
+      # lacks): NEXUS_TLS_SERVER_NAME. Applies to tls.enabled's mTLS too.
+      serverName: ""
+  # The broker the agents take dispatch hints from (NEXUS_NATS_URL) while
+  # nats.enabled. "" = no NATS: the agents long-poll (ADR-0003). A pool
+  # release names the control plane's broker, e.g.
+  # nats://nats.<namespace>.svc:4222, and the control-plane release admits
+  # the pool's agents in nats.networkPolicy.extraFrom; their NKey must be in
+  # its nats.auth.tenants.
+  nats:
+    url: nats://nats:4222
   # Extended resource a GPU agent requests (agents[].gpu.resourceName overrides).
   gpuResourceName: nvidia.com/gpu
   # The kubernetes executor (an agent whose `executors` include kubernetes;
@@ -681,6 +750,14 @@ agentDefaults:
     # Node label carrying the GPU model; gpu_kind becomes a nodeSelector on it
     # (e.g. nvidia.com/gpu.product). Empty = no pinning.
     gpuKindLabel: ""
+    # Where the TASK pods run, as opposed to the agent pod itself
+    # (agents[].nodeSelector / tolerations): node labels they are pinned to
+    # (NEXUS_K8S_NODE_SELECTOR) and taints they tolerate
+    # (NEXUS_K8S_TOLERATIONS), e.g. an AKS GPU pool:
+    #   taskNodeSelector: { kubernetes.azure.com/agentpool: gpu }
+    #   taskTolerations: [{ key: sku, operator: Equal, value: gpu, effect: NoSchedule }]
+    taskNodeSelector: {}
+    taskTolerations: []
     # The workload API for task pods (usage units, shared rate limits,
     # checkpoints, heartbeats; ADR-0032 addendum, OPERATIONS §29.10): a TLS
     # listener on the agent pod's IP, per-attempt tokens delivered through the
@@ -847,6 +924,38 @@ placement:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+
+# ─── NetworkPolicy for the control plane (off by default) ───────────────
+# INGRESS default-deny for the control-plane pods of this release (the six
+# services, the schedulers, the console, and the in-cluster postgres and
+# MinIO), then explicit allows:
+#   * api-gateway REST (8080) and worker gRPC (9091), and the console: from
+#     `ingressFrom` (empty = any source: they are the platform's front door),
+#     plus always from this release's agents and console;
+#   * every service's own ports: from the other control-plane pods of this
+#     release and the cluster controller;
+#   * postgres: from the control plane, the migrate/bootstrap/db-roles Jobs
+#     and artifact-gc; MinIO: from its result-store clients, the agents,
+#     minio-init and `minioFrom`;
+#   * /metrics ports: from `metricsFrom` (empty = nothing outside the release).
+# Egress is not restricted: the services reach endpoints the chart cannot
+# know (a managed database, Blob/S3, Entra ID, OTLP, SMTP, webhook targets).
+# NATS keeps its own policy (nats.networkPolicy). Agents are not selected:
+# their task pods and the task API reach them. Needs a network-policy engine
+# (AKS: Azure NPM, Calico or Cilium); without one the objects are inert.
+# Kubelet probes come from the node and are not subject to these policies on
+# those engines.
+networkPolicy:
+  enabled: false
+  # NetworkPolicyPeer list, e.g. the ingress controller's namespace:
+  #   - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: app-routing-system } }
+  ingressFrom: []
+  # The Prometheus that scrapes the pods, e.g. its namespace:
+  #   - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } }
+  # (Azure Monitor's managed Prometheus scrapes from kube-system.)
+  metricsFrom: []
+  # Worker-pool releases in other namespaces that use this release's MinIO.
+  minioFrom: []
 
 # ─── PodDisruptionBudgets ────────────────────────────────────────────────
 # One per control-plane Deployment, scheduler, agent Deployment, the console

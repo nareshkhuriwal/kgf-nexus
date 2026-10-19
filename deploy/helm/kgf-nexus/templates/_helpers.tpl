@@ -4,6 +4,10 @@ SPDX-License-Identifier: Apache-2.0
 */}}
 
 {{- define "nexus.required" -}}
+{{- include "nexus.componentsRequired" . -}}
+{{- if include "nexus.controlPlaneEnabled" . -}}
+{{- /* The database settings matter only where the control plane and its Jobs
+       run; a worker-pool release never connects to the database. */ -}}
 {{- include "nexus.dbRequired" . -}}
 {{- if and .Values.postgres.pitr.enabled (not .Values.postgres.enabled) -}}
 {{- fail "postgres.pitr.enabled needs the in-cluster postgres (postgres.enabled=true). A managed database (Azure Flexible Server, RDS, Cloud SQL) must use the provider's automated backups and point-in-time restore instead -- see docs/OPERATIONS.md §4." -}}
@@ -13,6 +17,9 @@ SPDX-License-Identifier: Apache-2.0
 {{- end -}}
 {{- if not .Values.existingSecret -}}
 {{- fail "existingSecret is required: the name of a Secret holding postgres-password and worker-api-key, plus minio-root-user and minio-root-password for static S3 keys (deploy/terraform creates it)" -}}
+{{- end -}}
+{{- else if not .Values.existingSecret -}}
+{{- fail "existingSecret is required: a worker-pool release (components.controlPlane.enabled=false) needs the Secret holding the agents' worker-api-key (and their NATS seed nats-agent-nkey, and minio-root-user/minio-root-password for static S3 keys), created in this namespace" -}}
 {{- end -}}
 {{- if not .Values.image.tag -}}
 {{- fail "image.tag is required: pin an immutable tag (a git SHA), never latest" -}}
@@ -122,10 +129,13 @@ that renders a result-store client checks it.
 */}}
 {{- define "nexus.resultStoreRequired" -}}
 {{- $rs := .Values.resultStore -}}
-{{- if and .Values.minio.enabled (ne $rs.backend "s3") -}}
+{{- /* A worker-pool release runs no MinIO whatever minio.enabled says; its
+       agents reach the control plane's store at minio.endpoint. */ -}}
+{{- $minio := include "nexus.minioInRelease" . -}}
+{{- if and $minio (ne $rs.backend "s3") -}}
 {{- fail (printf "minio.enabled=true runs an in-cluster MinIO, but resultStore.backend=%s would never use it: set minio.enabled=false (the %s store is external)" $rs.backend $rs.backend) -}}
 {{- end -}}
-{{- if and .Values.minio.enabled (not (has $rs.s3.credentials (list "static" "auto"))) -}}
+{{- if and $minio (not (has $rs.s3.credentials (list "static" "auto"))) -}}
 {{- fail (printf "minio.enabled=true needs resultStore.s3.credentials static or auto (MinIO authenticates with its root key pair); %q is a cloud-identity mode for an external S3 store -- set minio.enabled=false or credentials=static" $rs.s3.credentials) -}}
 {{- end -}}
 {{- if eq $rs.backend "azblob" -}}
@@ -172,7 +182,7 @@ the one backend they ever described.
        (which cannot start without its root pair either): required, so a
        missing key is a visible CreateContainerConfigError, never a client
        that quietly goes looking for another identity. */}}
-{{- $optional := and (eq $rs.s3.credentials "auto") (not .Values.minio.enabled) }}
+{{- $optional := and (eq $rs.s3.credentials "auto") (not (include "nexus.minioInRelease" .)) }}
 - name: NEXUS_S3_ACCESS_KEY_ID
   valueFrom: { secretKeyRef: { name: {{ $secret }}, key: {{ $rs.s3.accessKeySecret.accessKeyIdKey }}, optional: {{ $optional }} } }
 - name: RESULT_STORE_ACCESS_KEY
@@ -252,13 +262,19 @@ so they cannot collide with a container's own POD_NAME.
 NATS client settings for one role ("event-service" or "agent"). Under
 nats.auth.mode=nkey the client authenticates with the seed nexus.natsVolumes
 mounts, and NEXUS_NATS_REQUIRE_AUTH makes a missing seed fatal rather than a
-quiet unauthenticated connection.
+quiet unauthenticated connection. The event-service dials this release's
+broker; the agents dial agentDefaults.nats.url, and none when it is empty.
 */}}
+{{- define "nexus.natsClientEnabled" -}}
+{{- $root := index . 0 -}}{{- $role := index . 1 -}}
+{{- if eq $role "agent" }}{{ include "nexus.agentsUseNats" $root }}{{ else if $root.Values.nats.enabled }}true{{ end -}}
+{{- end -}}
+
 {{- define "nexus.natsEnv" -}}
 {{- $root := index . 0 -}}{{- $role := index . 1 -}}
 {{- $n := $root.Values.nats -}}
-{{- if $n.enabled }}
-- { name: NEXUS_NATS_URL, value: "nats://nats:4222" }
+{{- if include "nexus.natsClientEnabled" . }}
+- { name: NEXUS_NATS_URL, value: {{ ternary (include "nexus.agentNatsURL" $root) "nats://nats:4222" (eq $role "agent") | quote }} }
 {{- if eq $n.auth.mode "none" }}
 - { name: NEXUS_NATS_REQUIRE_AUTH, value: "0" }
 {{- else }}
@@ -276,9 +292,10 @@ quiet unauthenticated connection.
 {{- end }}
 {{- end -}}
 
+{{/* args: root, role ("event-service" or "agent"). */}}
 {{- define "nexus.natsVolumeMounts" -}}
-{{- $n := .Values.nats -}}
-{{- if $n.enabled }}
+{{- $n := (index . 0).Values.nats -}}
+{{- if include "nexus.natsClientEnabled" . }}
 {{- if ne $n.auth.mode "none" }}
 - { name: nats-nkey, mountPath: /etc/nexus/nats, readOnly: true }
 {{- end }}
@@ -297,7 +314,7 @@ needs a restart, docs/OPERATIONS.md §11.8). args: root, role, per-agent key ove
 {{- define "nexus.natsVolumes" -}}
 {{- $root := index . 0 -}}{{- $role := index . 1 -}}{{- $keyOverride := index . 2 -}}
 {{- $n := $root.Values.nats -}}
-{{- if $n.enabled }}
+{{- if include "nexus.natsClientEnabled" (list $root $role) }}
 {{- if ne $n.auth.mode "none" }}
 {{- $key := ternary $n.auth.eventServiceSeedKey ($keyOverride | default $n.auth.agentSeedKey) (eq $role "event-service") }}
 - name: nats-nkey

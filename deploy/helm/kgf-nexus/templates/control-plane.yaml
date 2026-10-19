@@ -4,10 +4,12 @@ SPDX-License-Identifier: Apache-2.0
 
 The six control-plane services (ADR-0011): one Deployment and Service each,
 plus one scheduler Deployment per queue. Env mirrors deploy/docker-compose.yml
-so the two deployments cannot drift in behaviour.
+so the two deployments cannot drift in behaviour. Nothing here in a worker-pool
+release (components.controlPlane.enabled=false).
 */ -}}
 {{- $root := . -}}
 {{- include "nexus.valuesComplete" . -}}
+{{- if include "nexus.controlPlaneEnabled" . }}
 {{- $svcs := list
   (dict "name" "api-gateway" "key" "apiGateway" "image" "api-gateway" "grpc" 9091 "resultStore" true "events" true "hpa" true "tls" true "extra" (list
       (dict "name" "AUTH_MODE" "value" "api_key")
@@ -30,6 +32,7 @@ so the two deployments cannot drift in behaviour.
       (dict "name" "TIMER_POLL_INTERVAL_MS" "value" "1000")))
   (dict "name" "dag-engine" "key" "dagEngine" "image" "dag-engine" "grpc" 9090 "hpa" true "tls" true "extra" (list))
   (dict "name" "resource-manager" "key" "resourceManager" "image" "resource-manager" "grpc" 9090 "tls" true "extra" (list
+      (dict "name" "RM_LOG_LEVEL" "value" (.Values.logLevel | toString))
       (dict "name" "WORKER_LIVENESS_TIMEOUT_MS" "value" "15000")
       (dict "name" "RECONCILE_INTERVAL_MS" "value" "10000")))
   (dict "name" "event-service" "key" "eventService" "image" "event-service" "grpc" 9090 "nats" true "events" true "hpa" true "extra" (list
@@ -138,7 +141,7 @@ spec:
       {{- include "nexus.podIdentity" $sa | nindent 6 }}
       {{- include "nexus.pullSecrets" $root | nindent 6 }}
       securityContext: {{- include "nexus.podSecurity" $root | nindent 8 }}
-      {{- include "nexus.placement" (list $root .name) | nindent 6 }}
+      {{- include "nexus.placement" (list $root .name (include "nexus.schedulerPlacement" (list $root .scheduler) | fromYaml)) | nindent 6 }}
       initContainers:
         {{- include "nexus.waitForSchema" (list $root $saKey) | nindent 8 }}
       containers:
@@ -148,6 +151,7 @@ spec:
           env:
             {{- include "nexus.serviceEnv" (list $root $saKey) | nindent 12 }}
             {{- include "nexus.listenEnv" (list .grpc) | nindent 12 }}
+            {{- include "nexus.runtimeIdentityEnv" (list $root (include "nexus.clusterName" $root)) | nindent 12 }}
             {{- if .resultStore }}
             {{- include "nexus.resultStoreEnv" $root | nindent 12 }}
             {{- end }}
@@ -210,7 +214,7 @@ spec:
             - { name: tmp, mountPath: /tmp }
             {{- include "nexus.dbVolumeMounts" $root | nindent 12 }}
             {{- if .nats }}
-            {{- include "nexus.natsVolumeMounts" $root | nindent 12 }}
+            {{- include "nexus.natsVolumeMounts" (list $root "event-service") | nindent 12 }}
             {{- end }}
             {{- if .tls }}
             {{- include "nexus.tlsVolumeMounts" $root | nindent 12 }}
@@ -227,5 +231,6 @@ spec:
 {{- include "nexus.pdb" (list $root .name .name $floor $over.podDisruptionBudget) }}
 {{- if $hpa.enabled }}
 {{- include "nexus.hpa" (list $root .name .name $hpa) }}
+{{- end }}
 {{- end }}
 {{- end }}

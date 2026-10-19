@@ -2,7 +2,9 @@
 Copyright 2026 Khuriwal Group
 SPDX-License-Identifier: Apache-2.0
 
-Worker agents and the console.
+Worker agents and the console. A worker-pool release
+(components.controlPlane.enabled=false) renders the agents only; they dial
+agentDefaults.controlPlane and agentDefaults.nats.
 */ -}}
 {{- include "nexus.valuesComplete" . }}
 {{- $root := . -}}
@@ -46,7 +48,9 @@ spec:
           env:
             {{- include "nexus.resultStoreEnv" $root | nindent 12 }}
             {{- include "nexus.natsEnv" (list $root "agent") | nindent 12 }}
-            - { name: NEXUS_CONTROL_PLANE, value: "api-gateway:9091" }
+            # The worker gRPC endpoint: this release's api-gateway, or the
+            # control plane a worker-pool release serves.
+            - { name: NEXUS_CONTROL_PLANE, value: {{ ($root.Values.agentDefaults.controlPlane | default dict).address | default "api-gateway:9091" | quote }} }
             # The tenant this agent serves (agents[].namespace, else
             # nexusNamespace), and a worker key minted for that tenant
             # (agents[].workerApiKeySecretKey in existingSecret).
@@ -89,6 +93,24 @@ spec:
             {{- with $k.gpuKindLabel }}
             - { name: NEXUS_K8S_GPU_KIND_LABEL, value: {{ . | quote }} }
             {{- end }}
+            {{- /* Where the TASK pods run (the agent pod's own placement is
+                   nodeSelector/tolerations above): key=value pairs and the
+                   kubectl taint spelling the executor parses. */}}
+            {{- with $k.taskNodeSelector }}
+            {{- $kv := list }}
+            {{- range $key := keys . | sortAlpha }}{{ $kv = append $kv (printf "%s=%s" $key (index $k.taskNodeSelector $key)) }}{{ end }}
+            - { name: NEXUS_K8S_NODE_SELECTOR, value: {{ join "," $kv | quote }} }
+            {{- end }}
+            {{- with $k.taskTolerations }}
+            {{- $tols := list }}
+            {{- range . }}
+            {{- $t := .key }}
+            {{- if and .value (ne (.operator | default "Equal") "Exists") }}{{ $t = printf "%s=%s" $t .value }}{{ end }}
+            {{- with .effect }}{{ $t = printf "%s:%s" $t . }}{{ end }}
+            {{- $tols = append $tols $t }}
+            {{- end }}
+            - { name: NEXUS_K8S_TOLERATIONS, value: {{ join "," $tols | quote }} }
+            {{- end }}
             {{- if $k.taskApi.enabled }}
             # The workload API for task pods, on this pod's IP (F148). Declared
             # before the $(VAR) reference that expands it.
@@ -124,11 +146,9 @@ spec:
             {{- with .capacityType }}
             - { name: NEXUS_CAPACITY_TYPE, value: {{ . | quote }} }
             {{- end }}
-            {{- with ($root.Values.claimPlacement.clusterName | default "") }}
-            - { name: NEXUS_CLUSTER_NAME, value: {{ . | quote }} }
-            {{- end }}
-            - name: NEXUS_NODE_NAME
-              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            {{- /* Pod, namespace, node and cluster: the instance the console
+                   places, and NEXUS_CLUSTER_NAME also labels the claims. */}}
+            {{- include "nexus.runtimeIdentityEnv" (list $root (include "nexus.agentClusterName" $root)) | nindent 12 }}
             {{- with .eviction }}
             {{- with .sources }}
             - { name: NEXUS_EVICTION_SOURCES, value: {{ . | quote }} }
@@ -169,7 +189,7 @@ spec:
             - { name: NEXUS_SUBPROCESS_ENV_PASSTHROUGH, value: {{ .subprocessEnvPassthrough | quote }} }
             {{- end }}
             {{- end }}
-            {{- include "nexus.tlsEnv" (list $root "client") | nindent 12 }}
+            {{- include "nexus.agentTlsEnv" $root | nindent 12 }}
             {{- include "nexus.tracingEnv" $root | nindent 12 }}
           ports:
             - { name: metrics, containerPort: {{ int $root.Values.metrics.agentPort }} }
@@ -206,8 +226,8 @@ spec:
             {{- if .artifactCache }}
             - { name: artifacts, mountPath: /var/lib/nexus/artifacts }
             {{- end }}
-            {{- include "nexus.natsVolumeMounts" $root | nindent 12 }}
-            {{- include "nexus.tlsVolumeMounts" $root | nindent 12 }}
+            {{- include "nexus.natsVolumeMounts" (list $root "agent") | nindent 12 }}
+            {{- include "nexus.agentTlsVolumeMounts" $root | nindent 12 }}
       volumes:
         - { name: wal, emptyDir: {} }
         - { name: work, emptyDir: {} }
@@ -232,10 +252,10 @@ spec:
           emptyDir: { sizeLimit: {{ .sizeLimit | default .bytes | quote }} }
         {{- end }}
         {{- include "nexus.natsVolumes" (list $root "agent" (.natsSeedKey | default "")) | nindent 8 }}
-        {{- include "nexus.tlsVolumes" (list $root "agent") | nindent 8 }}
+        {{- include "nexus.agentTlsVolumes" $root | nindent 8 }}
 {{- include "nexus.pdb" (list $root .name .name (.replicas | default 1) .podDisruptionBudget) }}
 {{- end }}
-{{- if .Values.ui.enabled }}
+{{- if and .Values.ui.enabled (include "nexus.controlPlaneEnabled" .) }}
 {{- $sa := include "nexus.saFor" (list . "ui" nil) | fromYaml }}
 {{- $resolver := .Values.dns.resolver }}
 {{- if not $resolver }}

@@ -10,7 +10,8 @@ artifactGC.confirmDelete=true. Run once by hand:
 */ -}}
 {{- include "nexus.valuesComplete" . }}
 {{- $gc := .Values.artifactGC }}
-{{- if $gc.enabled }}
+{{- /* Part of the control plane: it reads the database. */}}
+{{- if and $gc.enabled (include "nexus.controlPlaneEnabled" .) }}
 {{- if not (has $gc.mode (list "report" "delete")) }}
 {{- fail (printf "artifactGC.mode=%q: use report (the default) or delete" $gc.mode) }}
 {{- end }}
@@ -66,6 +67,9 @@ spec:
           {{- with .Values.placement.tolerations }}
           tolerations: {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- with .Values.placement.affinity }}
+          affinity: {{- toYaml . | nindent 12 }}
+          {{- end }}
           containers:
             - name: artifact-gc
               image: {{ include "nexus.image" (list . "artifact-gc") }}
@@ -87,6 +91,7 @@ spec:
                 {{- include "nexus.dbEnv" (list . "artifactGC") | nindent 16 }}
                 {{- include "nexus.resultStoreEnv" . | nindent 16 }}
                 - { name: ARTIFACT_GC_LOG_LEVEL, value: {{ $gc.logLevel | quote }} }
+                {{- include "nexus.runtimeIdentityEnv" (list . (include "nexus.clusterName" .)) | nindent 16 }}
                 {{- include "nexus.tracingEnv" . | nindent 16 }}
                 {{- with $gc.pushgatewayUrl }}
                 - { name: ARTIFACT_GC_PUSHGATEWAY_URL, value: {{ . | quote }} }

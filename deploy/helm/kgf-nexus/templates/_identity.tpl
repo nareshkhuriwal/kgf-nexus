@@ -91,7 +91,9 @@ inspected. args: root, annotation key, what (for the message).
 {{- define "nexus.resultStoreIdentityRequired" -}}
 {{- $root := index . 0 -}}{{- $annKey := index . 1 -}}{{- $what := index . 2 -}}
 {{- range $key := include "nexus.resultStoreClients" $root | fromYamlArray -}}
-{{- if eq $key "agent" -}}
+{{- if and (ne $key "agent") (not (include "nexus.controlPlaneEnabled" $root)) -}}
+{{- /* A worker-pool release creates only the agents' accounts. */ -}}
+{{- else if eq $key "agent" -}}
 {{- range $a := $root.Values.agents -}}
 {{- $sa := include "nexus.saFor" (list $root "agent" $a.serviceAccount) | fromYaml -}}
 {{- if and $sa.create (not (hasKey $sa.annotations $annKey)) -}}

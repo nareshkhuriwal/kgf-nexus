@@ -5,8 +5,15 @@ name: kgf-nexus
 description: >-
   KGF Nexus workflow orchestration -- the six control-plane services, worker
   agents, console, and (optionally) the Postgres, MinIO, NATS and Mailpit
-  dependencies. Environments are driven by deploy/terraform.
+  dependencies; or, with components.controlPlane.enabled=false, a worker pool
+  of agents for a control plane installed by another release.
 type: application
-version: 0.2.0
+# The chart's own version (SemVer): MINOR when every existing values file
+# still installs (new keys, new defaults, template changes); MAJOR when one no
+# longer does (a removed or renamed key). Published as
+# oci://ghcr.io/<owner>/charts/kgf-nexus:<version>.
+version: 0.3.0
+# The product version the chart was cut with (docs/COMPATIBILITY.md). It is a
+# label only: images come from image.tag.
 appVersion: "0.1.0"
 kubeVersion: ">=1.29.0-0"
