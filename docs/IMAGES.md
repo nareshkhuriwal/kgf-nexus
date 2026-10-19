@@ -181,26 +181,51 @@ its own (§3 names the listener variable each one reads).
 | `NEXUS_TLS_CA_FILE`, `NEXUS_TLS_CLIENT_CERT_FILE` / `_KEY_FILE`, `NEXUS_TLS_SERVER_NAME`, `NEXUS_REQUIRE_TLS` | plaintext | TLS to the control plane. A CA file alone gives server-verified TLS; add the client pair for mTLS. `NEXUS_REQUIRE_TLS` also refuses a plaintext broker. |
 | `NEXUS_RESULT_STORE_ENDPOINT`, `NEXUS_RESULT_STORE_BACKEND`, `NEXUS_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY`, `NEXUS_AZURE_*`, `NEXUS_GCS_*` | from the gateway | §4.4 |
 | `NEXUS_K8S_NAMESPACE` (+ `NEXUS_K8S_*`) | unset = no kubernetes executor | Setting it, with the executor's API permissions, enables the kubernetes executor ([OPERATIONS §13](OPERATIONS.md#13-kubernetes-executor)). |
+| `NEXUS_EXECUTORS` | unset = discover | the executors the agent builds and advertises, comma-separated: `subprocess`, `docker`, `kubernetes` (`k8s` is read as kubernetes). Below. |
+| `NEXUS_DEFAULT_EXECUTOR` | `subprocess` when allowed, else the first of `NEXUS_EXECUTORS` | the executor for a task that names none. Below. |
 | `NEXUS_LOG_LEVEL`, `NEXUS_LOG_FORMAT` | `info`, `json` | |
 
-Executors are **discovered**, not configured:
+**Which executors an agent offers.** With `NEXUS_EXECUTORS` unset the agent
+**discovers** them, as it always has:
 
 - **subprocess** is always available.
 - **docker** is available when `docker info` succeeds, which needs a Docker
   socket mounted into the agent. That socket is root-equivalent on the host.
-- **kubernetes** is available with `NEXUS_K8S_NAMESPACE` set.
+- **kubernetes** is available with `NEXUS_K8S_NAMESPACE` set and its startup
+  probe passing ([OPERATIONS §13](OPERATIONS.md#13-kubernetes-executor)).
 
-The agent reads no executor list. A task that names no executor
-(`runtime.executor`) runs as a subprocess on whichever worker claims it, so
-on a kubernetes agent it runs inside the agent's own container. There is no
-setting yet that stops an agent from offering subprocess.
+An unusable docker or kubernetes is then a warning, and the agent serves the
+rest. With `NEXUS_EXECUTORS` set, the list is **exact**: the agent builds and
+advertises only those executors, and refuses to start when one of them cannot
+be built, with the reason (an unknown name, kubernetes without
+`NEXUS_K8S_NAMESPACE` or with a failing RBAC probe, docker without a reachable
+daemon). A configured kubernetes executor the list leaves out is not built.
+`NEXUS_EXECUTORS=kubernetes` is a worker on which every task is its own pod and
+nothing runs inside the agent's container.
 
-The chart's `agents[].executors` decides which configuration it renders:
-`kubernetes` renders the `NEXUS_K8S_*` variables, the executor's Role and
-the task-API policy. It refuses `docker`, because a chart pod has no Docker
-daemon to reach. The heartbeat interval is not an agent setting either: the
-gateway dictates it in the Register response (ADR-0005). Compose still sets
-`NEXUS_EXECUTORS` and `NEXUS_HEARTBEAT_INTERVAL_MS`, which have no effect.
+**A task that names no executor** (`runtime.executor`) runs on the claiming
+agent's **default executor**: `NEXUS_DEFAULT_EXECUTOR`, which must be one of
+`NEXUS_EXECUTORS`, else `subprocess` when allowed, else the first listed. The
+agent advertises it as the worker label `nexus.io/default-executor` (it owns
+that label; a `NEXUS_LABELS` value that disagrees is refused), and the
+scheduler gives such a task only to a worker whose default can run it: a docker
+or kubernetes default needs the task's `runtime.image`. A task without an image
+on a fleet whose defaults all need one waits with
+`waiting_for_worker: the task names no runtime.executor and no runtime.image ...`.
+A task that names an executor is placed only on a worker that advertises it.
+Agents older than these settings carry no label and default to subprocess. The
+console shows a worker's executors and its `nexus.io/default-executor` label;
+`nexus_agent_executor_advertised` and `nexus_agent_executor_default` export the
+same per executor.
+
+The chart renders both variables from `agents[].executors` (default
+`subprocess`) and `agents[].defaultExecutor` (default: the first executor);
+`kubernetes` there also renders the `NEXUS_K8S_*` variables, the executor's
+Role and the task-API policy. It refuses `docker`, because a chart pod has no
+Docker daemon to reach and the agent would not start. Compose leaves
+`NEXUS_EXECUTORS` unset, so its agents discover docker through the mounted
+socket. The heartbeat interval is not an agent setting: the gateway dictates
+it in the Register response (ADR-0005).
 
 ### 4.4 Result store (api-gateway, agents, artifact-gc, workflow-manager sensors)
 

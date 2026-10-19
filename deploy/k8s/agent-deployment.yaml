@@ -106,6 +106,13 @@ spec:
             # - name: NEXUS_CLUSTER_NAME
             #   value: "<registered cluster name>"
             # ── Kubernetes executor ──────────────────────────────────────
+            # The only executor, and so the default: every attempt is a Job,
+            # including a task that names no runtime.executor (which then needs
+            # a runtime.image), and nothing runs inside this pod. Unset, the
+            # agent would also offer subprocess and run such tasks here
+            # (docs/IMAGES.md §4.3). A failing RBAC probe stops the agent.
+            - name: NEXUS_EXECUTORS
+              value: "kubernetes"
             # Setting the namespace is what enables the executor. Tasks run in
             # the agent's OWN namespace, which is also what allows each Job to
             # be owned by (and garbage-collected with) this agent pod.

@@ -5164,3 +5164,43 @@ computes a frontier the scheduler will never dispatch (pre-existing, not made
 worse: the same reconcile ran from the report RPC before). The dev cluster's
 stuck run itself was not touched; it is repaired when the fixed release and
 0039 are deployed there.
+
+### F161. A kubernetes worker pool ran tasks as subprocesses inside its agent pod, and NEXUS_EXECUTORS was read by nothing — FIXED
+
+**Severity:** medium (on AKS, a task that named no `runtime.executor` ran in
+the agent pod, within its 1 GiB, off the GPU nodes the pool's
+`taskNodeSelector`/`taskTolerations` name, with no resource isolation).
+
+The agent built and advertised the subprocess executor unconditionally and
+ran a task naming no executor as a subprocess. Both claim directions treated
+an empty executor as "any worker", so every pool agent, `executors:
+kubernetes` included, claimed such tasks. The chart had rendered
+`NEXUS_EXECUTORS` (and `NEXUS_HEARTBEAT_INTERVAL_MS`) for agents, compose
+still did, and no binary read either: the chart workstream stopped rendering
+them, leaving no way to keep a pool's tasks out of its agent pod.
+
+**Fix.** `NEXUS_EXECUTORS` is an exact allow list (unset: discovery, as
+before), and an allow-listed executor that cannot be built stops the agent
+with the reason. `NEXUS_DEFAULT_EXECUTOR` runs an unnamed task (subprocess when
+allowed, else the first listed) and is advertised as the worker label
+`nexus.io/default-executor`. The scheduler reads an empty executor as the
+claiming worker's default: a container default needs `runtime.image`, so a
+kubernetes-only pool never claims an image-less task (it waits with a
+`waiting_for_worker` reason naming the fix); headroom, deferral and metering
+use the effective executor. The chart renders both variables from
+`agents[].executors` and the new `agents[].defaultExecutor`; the AKS examples'
+agents are kubernetes/kubernetes. Compose drops both dead variables and keeps
+discovering. ADR-0007 addendum; docs/IMAGES.md §4.3; OPERATIONS §13, §20.14.
+
+**Tests.** `agent/internal/worker/executors_test.go` (selection, startup
+refusals, registration labels and gauges, the runner's default);
+`services/scheduler/default_executor_integration_test.go` (push and pull
+claims, headroom, ledger; all four fail on the previous store);
+`TestNodeSelectorAndExecutorArePlacementConstraints` unchanged and passing;
+`validate.sh` render checks.
+
+**Remaining.** An upgrade changes chart agents with `executors: kubernetes`:
+they no longer offer subprocess (OPERATIONS §20.14 says how to keep it). An
+allow-listed executor that becomes unusable between sessions stops the agent
+at its next registration rather than waiting for it. Specs stored before the
+upgrade keep their executor exactly as authored.

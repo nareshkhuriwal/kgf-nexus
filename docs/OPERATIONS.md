@@ -1787,9 +1787,14 @@ notes). It is opt-in per agent: setting `NEXUS_K8S_NAMESPACE` enables it, and
 the agent advertises `kubernetes` (and its alias `k8s`) only after a startup
 probe passes. The probe checks that the cluster is reachable, that the server is
 1.29 or later (native sidecars), and, through SelfSubjectAccessReview, that the
-agent holds the RBAC verbs the executor uses. If the probe fails, the agent logs
+agent holds the RBAC verbs the executor uses. If the probe fails, what happens
+depends on `NEXUS_EXECUTORS` (docs/IMAGES.md §4.3). Unset, the agent logs
 `kubernetes executor configured but not usable; not advertising it` with the
-reason and keeps serving its other executors.
+reason and keeps serving its other executors. When the list names kubernetes,
+the agent stops before registering, with the probe's reason, rather than run as
+a worker that cannot do what it was deployed for; with `NEXUS_EXECUTORS=kubernetes`
+(the chart's `executors: kubernetes`) every attempt on the worker is a Job,
+including a task that names no executor and has a `runtime.image`.
 
 ### 13.1 Deploying
 
@@ -2336,6 +2341,8 @@ C is a counter, G a gauge and H a histogram.
 | `nexus_objstore_bytes_total` | C | backend, direction (in/out) | agent, api-gateway, artifact-gc | Payload bytes through the result store |
 | `nexus_agent_sessions_total` | C | — | agent | Registrations. More than 1 per process means the control plane forced a re-registration |
 | `nexus_agent_advertised_capacity` | G | resource | agent | Capacity advertised for scheduling, which the runtime does not necessarily enforce |
+| `nexus_agent_executor_advertised` | G | executor (subprocess/docker/kubernetes) | agent | 1 for each executor the latest registration advertised (`NEXUS_EXECUTORS`, or discovery), 0 for the others. A kubernetes pool agent with `subprocess` at 1 runs tasks inside its own pod |
+| `nexus_agent_executor_default` | G | executor | agent | 1 for the executor that runs tasks naming none (`NEXUS_DEFAULT_EXECUTOR`, the `nexus.io/default-executor` label) |
 | `nexus_agent_result_report_failures_total` | C | — | agent | Reports not delivered. The WAL retains them |
 | `nexus_agent_registration_attempts_total` | C | result (ok/retryable_error/permanent_error) | agent | Register calls. An agent that starts before the gateway retries `Unavailable`, `DeadlineExceeded`, `ResourceExhausted`, `Aborted` and `Internal` with capped exponential backoff (0.5 s to 30 s, full jitter) and stays not-ready meanwhile; a rising `retryable_error` with no `ok` means the gateway is unreachable or its auth backend is down. `permanent_error` (bad API key, wrong role, invalid request) exits the process with a message naming the fix |
 | `nexus_agent_registered` | G | — | agent | 1 while the agent holds a registered session; the `/readyz` condition |
@@ -3254,21 +3261,37 @@ agents:
 The AKS/EKS/GKE environments add exactly such an agent (variable `gpu_agent`)
 when their GPU pool is enabled, next to a CPU agent pinned to the cpu pool.
 
-`agents[].executors` selects configuration, not what the agent offers. The
-agent discovers its executors (docs/IMAGES.md §4.3):
+`agents[].executors` is the exact set of executors the agent builds and
+advertises, rendered as `NEXUS_EXECUTORS` (docs/IMAGES.md §4.3; default
+`subprocess`):
 
-- **subprocess** is always offered.
-- **kubernetes** is offered when the configuration the chart renders for it
-  passes the executor's RBAC probe.
+- **subprocess** runs tasks as processes inside the agent pod, within its
+  resources (and, with `gpuCount`, its devices).
+- **kubernetes** runs each attempt as its own Job in the task namespace, on the
+  nodes `kubernetes.taskNodeSelector` / `taskTolerations` choose. It also
+  renders the executor's configuration, Role and task-API policy; the agent
+  does not start if the RBAC probe fails.
 - **docker** needs a daemon socket a chart pod does not have, so the chart
-  refuses it.
+  refuses it (the agent would not start).
 
-A task that names no `runtime.executor` therefore runs as a subprocess even
-on a kubernetes agent, inside the agent pod. Route such queues' tasks with
-`runtime.executor: kubernetes`. The chart no longer renders
-`NEXUS_EXECUTORS` or `NEXUS_HEARTBEAT_INTERVAL_MS`: the agent never read
-either, and the control plane sets the heartbeat interval (ADR-0005).
-`agentDefaults.heartbeatIntervalMs` is still accepted and ignored.
+`agents[].defaultExecutor` (default: the first of `executors`; rendered as
+`NEXUS_DEFAULT_EXECUTOR`) runs a task that names no `runtime.executor`, and
+the chart refuses one that is not among `executors`. So an agent with
+`executors: kubernetes` runs every task of its queues as a pod and nothing
+inside its own pod: the AKS examples' agents are such agents. A task naming
+no executor is given to it only with a `runtime.image` (the scheduler reads
+the agent's `nexus.io/default-executor` label); without one it waits with a
+`waiting_for_worker` reason naming the fix, and a task naming `subprocess`
+waits for a worker that offers subprocess. An agent that should run both says
+`executors: subprocess,kubernetes` and picks its `defaultExecutor`.
+
+Upgrading from a chart that rendered no `NEXUS_EXECUTORS`: an agent with
+`executors: kubernetes` used to offer subprocess as well and ran unnamed tasks
+inside its pod. It now runs them as pods, or leaves image-less ones waiting;
+add `subprocess` to its executors to keep the old behaviour. The chart does not
+render `NEXUS_HEARTBEAT_INTERVAL_MS`: the control plane sets the heartbeat
+interval (ADR-0005), and `agentDefaults.heartbeatIntervalMs` is still accepted
+and ignored.
 Size the agent inside one GPU node. GPU execution itself is still unqualified
 on real hardware (production brief).
 
@@ -4943,8 +4966,10 @@ SELECT c.name, cs.labels, cs.headroom, cs.headroom_observed_at
   FROM clusters c JOIN cluster_status cs ON cs.cluster_id = c.id;
 ```
 
-Headroom gates only kubernetes-executor attempts on workers labelled
-`nexus.io/k8s-task-namespace`, only while younger than
+Headroom gates only kubernetes-executor attempts (a task naming kubernetes,
+or naming no executor on a worker whose `nexus.io/default-executor` is
+kubernetes) on workers labelled `nexus.io/k8s-task-namespace`, only while
+younger than
 `NEXUS_CLUSTER_HEADROOM_TTL` (2 m), and is reduced by reservations made since
 the observation. A gated attempt reads
 `waiting_for_cluster_quota: cluster <c> namespace <ns> <dim> (need N, headroom H)`.
