@@ -448,8 +448,12 @@ services:
       # KGF Cloud context authentication (ADR-0024, OPERATIONS §24). Standalone
       # unless set; kgf/both need the gateway's key document or static keys.
       NEXUS_AUTH_MODE: ${NEXUS_AUTH_MODE:-standalone}
+      # Comma-separated key-document URLs (gateway and provider fronts), merged
+      # with the static keys (ADR-0034).
       NEXUS_KGF_CONTEXT_KEYS_URL: ${NEXUS_KGF_CONTEXT_KEYS_URL:-}
       NEXUS_KGF_CONTEXT_PUBLIC_KEYS: ${NEXUS_KGF_CONTEXT_PUBLIC_KEYS:-}
+      # KGF provider fronts allowed to name a KGF.Nexus workspace (`res`).
+      NEXUS_KGF_FRONT_ISSUERS: ${NEXUS_KGF_FRONT_ISSUERS:-}
       # The operations listener: /metrics, /healthz, /readyz. NOT the REST port,
       # which is the public ingress (docs/OPERATIONS.md, "Metrics").
       NEXUS_METRICS_ADDR: ":8088"

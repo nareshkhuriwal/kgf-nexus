@@ -456,6 +456,10 @@ a new chart version is harmless.
 {{- if .Values.minio.enabled -}}
 {{- $key = printf "%s|%s" $key (.Values.minio.mcImage | default "") -}}
 {{- end -}}
+{{- /* The bootstrap Job registers a key per workspaceWorkers entry. */ -}}
+{{- with .Values.workspaceWorkers -}}
+{{- $key = printf "%s|%s" $key (toJson .) -}}
+{{- end -}}
 {{- $key | sha256sum | trunc 10 -}}
 {{- end -}}
 

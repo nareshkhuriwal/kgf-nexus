@@ -99,3 +99,25 @@ variable "postgres_password" {
   type        = string
   sensitive   = true
 }
+
+variable "kgf" {
+  description = "KGF Cloud integration (the chart's kgf block). Standalone by default. To run this engine behind a local KGF platform, set authMode = \"kgf\", contextKeysUrl to kgf-gateway's and the KGF.Nexus front's /.well-known/kgf-context.json (comma-separated), audience = \"kgf-nexus,kgf-nexus-engine\" and frontIssuers = \"kgf-nexus\" (docs/OPERATIONS.md §24.11)."
+  type = object({
+    authMode          = string
+    contextKeysUrl    = optional(string, "")
+    contextPublicKeys = optional(string, "")
+    audience          = optional(string, "kgf-nexus")
+    userIssuers       = optional(string, "kgf-gateway")
+    frontIssuers      = optional(string, "")
+    servicePrincipals = optional(string, "")
+  })
+  default = {
+    authMode = "standalone"
+  }
+}
+
+variable "workspace_worker_namespaces" {
+  description = "KGF.Nexus workspace namespaces (kgf-...) to run local agents for. Needs authMode kgf and namespaces KGF has provisioned. Kept out of git in local.tfvars here, which make k8s-dev-up passes when it exists."
+  type        = list(string)
+  default     = []
+}

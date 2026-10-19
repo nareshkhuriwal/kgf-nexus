@@ -1466,3 +1466,4 @@ Asset/lineage layer over the task core (the Dagster idea, added without rewritin
 | [ADR-0028](adr/0028-event-triggers-notifications-sensors-lineage.md) | Notifications, webhook triggers, sensors and declared asset lineage (Phase 3/4) |
 | [ADR-0032](adr/0032-ai-workloads-usage-rate-limits-checkpoints.md) | AI workloads: the workload API, usage units, shared rate limits, checkpoints |
 | [ADR-0033](adr/0033-nexus-as-kgf-nexus-service.md) | Nexus as the KGF.Nexus service of KGF Cloud |
+| [ADR-0034](adr/0034-kgf-nexus-workspaces.md) | KGF.Nexus workspaces: one namespace per provisioned workspace, asserted only by KGF provider fronts |

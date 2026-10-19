@@ -3427,25 +3427,28 @@ Requests that would confuse identity are refused, never guessed at:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `NEXUS_AUTH_MODE` | `standalone` | `standalone`, `kgf` or `both`. Anything else stops startup. |
-| `NEXUS_KGF_CONTEXT_KEYS_URL` | — | kgf-gateway's key document, e.g. `http://kgf-gateway.kgf-platform.svc:18080/.well-known/kgf-context.json`. |
-| `NEXUS_KGF_CONTEXT_PUBLIC_KEYS` | — | Alternatively, static base64url Ed25519 public keys, comma separated (the value of the gateway's `key` field). Exactly one of the two is required in `kgf`/`both`; in `standalone` either one turns on audit attribution only (§25.2). |
-| `NEXUS_KGF_CONTEXT_KEYS_REFRESH_SEC` | `300` | Periodic refresh of the key document. |
-| `NEXUS_KGF_AUDIENCE` | `kgf-nexus` | The audience kgf-gateway mints for Nexus: `kgf-` + the manifest `id`. Must match the name Nexus is registered under. |
-| `NEXUS_KGF_USER_ISSUERS` | `kgf-gateway` | Issuers allowed to carry a human principal. Add a KGF facade service here only if it delegates (`obo`) to Nexus. |
+| `NEXUS_KGF_CONTEXT_KEYS_URL` | — | Key documents, **comma separated**: kgf-gateway's, e.g. `http://kgf-gateway.kgf-platform.svc:18080/.well-known/kgf-context.json`, and each provider front's (ADR-0034). Each serves `{"keys":[{"kid","alg":"EdDSA","key"}]}` and is fetched and rotated independently (§24.3). Only `http://` and `https://` URLs are accepted. |
+| `NEXUS_KGF_CONTEXT_PUBLIC_KEYS` | — | Static base64url Ed25519 public keys, comma separated (the value of a document's `key` field). **Merged** with the key documents: a context verifies under any of them. At least one key source is required in `kgf`/`both`; in `standalone` any turns on audit attribution only (§25.2). |
+| `NEXUS_KGF_CONTEXT_KEYS_REFRESH_SEC` | `300` | Periodic refresh of each key document. |
+| `NEXUS_KGF_AUDIENCE` | `kgf-nexus` | The audience a context must name, or a comma-separated list of them. kgf-gateway mints `kgf-` + the manifest `id`; the KGF.Nexus front mints `kgf-nexus-engine` (§24.11), so a deployment serving both sets `kgf-nexus,kgf-nexus-engine`. `*` is refused here (see the next row but one). |
+| `NEXUS_KGF_USER_ISSUERS` | `kgf-gateway` | Issuers allowed to carry a human principal. Add a KGF facade service here only if it delegates (`obo`) to Nexus without naming a workspace. |
+| `NEXUS_KGF_FRONT_ISSUERS` | — | KGF provider fronts, comma separated (KGF sets `kgf-nexus`): the only issuers whose contexts may, and must, name a KGF.Nexus workspace (`res`), and the only ones that may provision workspaces (§24.11). An issuer may not be in both lists (startup fails). Empty: every context naming a workspace is refused. |
 | `NEXUS_KGF_SERVICE_PRINCIPALS` | — | KGF services that may call Nexus for themselves, with the role they act as: `svc:kgf-billing=viewer,svc:kgf-orchestrator=operator`. Unlisted services are refused. |
 | `NEXUS_KGF_ACCEPT_ANY_AUDIENCE` | `false` | Accept tenantctx's wildcard audience `*`. Only for KGF's single-process local profile. |
 
 Helm: the `kgf:` values block (`authMode`, `contextKeysUrl`,
-`contextPublicKeys`, `audience`, `userIssuers`, `servicePrincipals`) sets
-these on the api-gateway; the schema rejects an unknown mode. Compose passes
-`NEXUS_AUTH_MODE`, `NEXUS_KGF_CONTEXT_KEYS_URL` and
-`NEXUS_KGF_CONTEXT_PUBLIC_KEYS` through.
+`contextPublicKeys`, `audience`, `userIssuers`, `frontIssuers`,
+`servicePrincipals`) sets these on the api-gateway; the schema rejects an
+unknown mode. Compose passes `NEXUS_AUTH_MODE`, `NEXUS_KGF_CONTEXT_KEYS_URL`,
+`NEXUS_KGF_CONTEXT_PUBLIC_KEYS` and `NEXUS_KGF_FRONT_ISSUERS` through.
 
 **Startup and readiness.** The gateway logs `authentication mode: KGF
-context` with the audience, issuers and key source. With a key URL it tries a
-first fetch; if kgf-gateway is not up yet it logs a WARN and starts, and
-`/readyz` fails (`kgf_context_keys`) until a key is held, so the load balancer
-does not send it traffic it would refuse.
+context` with the audience, issuers and key sources. For each key URL it tries
+a first fetch; if the gateway or a front is not up yet it logs a WARN and
+starts. `/readyz` fails (`kgf_context_keys`) until at least one key is held
+from any source, so the load balancer does not send it traffic it would
+refuse. One document being down does not make the gateway unready: contexts
+signed by the other issuers still verify.
 
 **Registering Nexus in KGF.** kgf-gateway routes `KGF.Nexus` to the manifest's
 `internalURL`. Today `kgf-cloud/services/nexus` (the simulation provider) owns
@@ -3596,6 +3599,44 @@ if required) apply the down migration after exporting `kgf_scopes` and
   check, not re-derived here, until contexts carry assignments.
 - The per-replica provisioning cache means the first request for a new scope
   on each replica runs one small transaction.
+
+### 24.11 KGF.Nexus workspaces
+
+A KGF.Nexus **workspace** (`/subscriptions/{sub}/resourceGroups/{rg}/providers/KGF.Nexus/workspaces/{ws}`)
+is its own Nexus tenant namespace, several per resource group, provisioned
+explicitly by the KGF.Nexus provider front (ADR-0034,
+[KGF-INTEGRATION.md §15](KGF-INTEGRATION.md#15-kgfnexus-workspaces-and-the-engine-ui)).
+
+```
+namespace = "kgf-" + hex(sha256("kgf-nexus/v2" \0 org \0 lower(resource id)))[:32]
+```
+
+- **Configure:** apply migration `0040_kgf_workspaces`, then set
+  `NEXUS_KGF_FRONT_ISSUERS=kgf-nexus`, add the front's key document to
+  `NEXUS_KGF_CONTEXT_KEYS_URL` (comma separated), and add the audience the
+  front mints to `NEXUS_KGF_AUDIENCE` (`kgf-nexus,kgf-nexus-engine` keeps
+  kgf-gateway's per-resource-group contexts working beside the front's).
+- **Provision / delete:** only the front's own service context calls
+  `PUT` / `DELETE /v1/kgf/workspace`. Nothing is provisioned on first use: a
+  person's context for a workspace that is not active gets
+  `404 workspace_not_provisioned`.
+- **Read the mapping:**
+
+  ```sql
+  SELECT namespace, resource_id, state, created_at, deleted_at
+    FROM kgf_workspaces WHERE organization = 'org-acme' ORDER BY created_at;
+  ```
+
+- **Deleted workspaces** keep their tenant, specs, runs, logs, usage ledger and
+  audit chain (ordinary Nexus retention); deletion revokes the namespace's API
+  keys, scoped tokens and service accounts. It does **not** cancel in-flight
+  runs or disable schedules, triggers and sensors: those rows are owned by
+  other services (ADR-0011), and with every credential revoked no agent of the
+  namespace can claim work. A deleted workspace's resource id cannot be
+  provisioned again (`409 workspace_deleted`); KGF must use a new name.
+- **Rollback:** unset `NEXUS_KGF_FRONT_ISSUERS` (every workspace context is
+  then refused), roll the gateway back, then, only if required, apply
+  `0040`'s down migration after exporting `kgf_workspaces`.
 
 ---
 

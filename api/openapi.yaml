@@ -53,6 +53,20 @@ info:
     alone authorizes. These errors can come from every authenticated
     operation and are not repeated on each.
 
+    **KGF.Nexus workspaces (ADR-0034).** A KGF provider front (an issuer in
+    `NEXUS_KGF_FRONT_ISSUERS`) sends contexts that carry `res`, the ARM id of
+    ONE workspace (`/subscriptions/{sub}/resourceGroups/{rg}/providers/KGF.Nexus/workspaces/{ws}`),
+    which maps to its own namespace. Only fronts may send `res` (403
+    `kgf_resource_not_allowed`), a front's context must carry it (403
+    `kgf_resource_required`) and be a service context (403
+    `kgf_front_context_invalid`), and `res` must be well-formed and inside the
+    context's own subscription and resource group (403 `kgf_resource_invalid`).
+    A delegated front context (`obo`) for a workspace that is not provisioned,
+    or was deleted, is refused with 404 `workspace_not_provisioned`; it is
+    never provisioned on first use. The front's own context (no `obo`) may call
+    only `PUT` and `DELETE /v1/kgf/workspace` (403 `kgf_provisioner_restricted`
+    elsewhere).
+
     **Correlation.** A request may send `X-Request-ID` (1-64 of `A-Z a-z 0-9 . _ : -`);
     it is recorded as the `request_id` of every audit row the request writes.
     A request authenticated by a KGF context uses the context's request id
@@ -235,6 +249,8 @@ tags:
     description: Pollers that start runs when objects land or upstream workflows succeed (ADR-0028).
   - name: Assets
     description: Declared data-asset lineage across workflows (ADR-0028).
+  - name: KGF workspaces
+    description: Provisioning of KGF.Nexus workspace namespaces by the KGF provider front (ADR-0034).
   - name: Meta
     description: Machine-readable descriptions of the API and the spec grammar.
   - name: Health
@@ -5814,6 +5830,99 @@ paths:
                 draining:
                   value: {status: draining, detail: shutting down; not accepting new traffic}
 
+  # ── KGF.Nexus workspaces (ADR-0034) ──────────────────────────────────────
+  /v1/kgf/workspace:
+    put:
+      tags: [KGF workspaces]
+      operationId: provisionKGFWorkspace
+      summary: Provision the workspace named by the KGF context
+      description: |
+        Only a KGF provider front's own service context (issuer in
+        `NEXUS_KGF_FRONT_ISSUERS`, role `service`, no `obo`, with `res`) may
+        call this; every other caller gets 403 `kgf_provisioner_required`. The
+        workspace is the context's `res`, never a body or path value.
+        Idempotent: creates the tenant namespace
+        `kgf-` + hex(sha256("kgf-nexus/v2" 0x00 org 0x00 lower(res)))[:32]
+        and its `kgf_workspaces` row when absent (201), and answers 200 when
+        the workspace is already active. A deleted workspace is not
+        re-created (409 `workspace_deleted`): its namespace is derived from
+        the resource id, so re-creating it would reactivate the old
+        namespace. The row and its audit record commit together.
+      security:
+        - kgfContext: []
+      x-nexus-action: admin_write
+      x-nexus-permissions: []
+      responses:
+        '200':
+          description: Already provisioned and active.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KGFWorkspace'}
+        '201':
+          description: Provisioned by this call.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KGFWorkspace'}
+              example:
+                namespace: kgf-0123456789abcdef0123456789abcdef
+                resource_id: /subscriptions/sub-1/resourcegroups/rg-data/providers/kgf.nexus/workspaces/etl-prod
+                state: active
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403':
+          description: '`kgf_provisioner_required`, or a workspace context error (see Authentication).'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '409':
+          description: '`workspace_deleted` or `namespace_conflict`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503':
+          description: '`unavailable` or `audit_unavailable`; nothing was provisioned.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+    delete:
+      tags: [KGF workspaces]
+      operationId: deleteKGFWorkspace
+      summary: Delete the workspace named by the KGF context
+      description: |
+        Same caller rule as `PUT`. Idempotent: always 200 `{"state":"deleted"}`,
+        also when the workspace was already deleted or never provisioned.
+        Marks the workspace deleted -- every later context for it gets 404
+        `workspace_not_provisioned` -- and revokes the namespace's API keys,
+        scoped tokens and service accounts in the same transaction. Nothing is
+        hard-deleted: specs, runs, logs, usage and the audit chain are
+        retained. In-flight runs are not cancelled and schedules are not
+        disabled (ADR-0034 §5).
+      security:
+        - kgfContext: []
+      x-nexus-action: admin_write
+      x-nexus-permissions: []
+      responses:
+        '200':
+          description: Deleted (or already deleted, or never provisioned).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KGFWorkspace'}
+              example: {state: deleted}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403':
+          description: '`kgf_provisioner_required`, or a workspace context error (see Authentication).'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503':
+          description: '`unavailable`; nothing was changed.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
 components:
   securitySchemes:
     apiKey:
@@ -6484,6 +6593,21 @@ components:
           - {from_node_id: transform, to_node_id: load, output_to_input: {summary: result}}
 
   schemas:
+    KGFWorkspace:
+      description: A KGF.Nexus workspace's namespace and state (ADR-0034).
+      type: object
+      required: [state]
+      properties:
+        namespace:
+          type: string
+          pattern: '^kgf-[0-9a-f]{32}$'
+          description: The workspace's Nexus namespace (absent on delete).
+        resource_id:
+          type: string
+          description: The normalised (lower-case) workspace resource id (absent on delete).
+        state:
+          type: string
+          enum: [active, deleted]
     WorkflowSpec:
       description: |
         A workflow spec document. This is a `$ref` to the gateway's own JSON

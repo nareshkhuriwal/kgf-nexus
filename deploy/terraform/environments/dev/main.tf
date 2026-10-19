@@ -100,6 +100,8 @@ module "nexus" {
   # The workstation's own Postgres, not an in-cluster one.
   postgres_password = var.postgres_password
 
+  workspace_worker_namespaces = var.workspace_worker_namespaces
+
   chart_values = {
     logLevel = "info"
 
@@ -148,8 +150,24 @@ module "nexus" {
       }
     }
 
-    agents = local.agents
+    # The engine's own agents, and the same set again for each KGF.Nexus
+    # workspace namespace, authenticated with that workspace's worker key and
+    # NATS identity.
+    agents = concat(local.agents, flatten([
+      for ns in var.workspace_worker_namespaces : [
+        for a in local.agents : merge(a, {
+          name                  = "${a.name}-${substr(ns, 4, 8)}"
+          namespace             = ns
+          workerApiKeySecretKey = "worker-api-key-${ns}"
+          natsSeedKey           = "nats-agent-nkey-${ns}"
+        })
+      ]
+    ]))
 
     ui = { service = { type = "LoadBalancer", port = var.ports.ui } }
+
+    # Standalone sign-in by default. var.kgf switches the engine to KGF Cloud
+    # context authentication (KGF-INTEGRATION.md §15, ADR-0034).
+    kgf = var.kgf
   }
 }

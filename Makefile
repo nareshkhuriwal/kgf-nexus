@@ -402,6 +402,11 @@ ps: ## Show container status
 # The whole platform on Docker Desktop's Kubernetes, via the kgf-nexus Helm
 # chart and Terraform. Runs alongside the compose stack (different ports).
 TF_DEV := deploy/terraform/environments/dev
+# Local, git-ignored settings for the dev environment (its .gitignore drops
+# *.tfvars), such as var.kgf or the KGF.Nexus workspace namespaces to run
+# agents for (workspace_worker_namespaces).
+TF_DEV_VARFILE := $(TF_DEV)/local.tfvars
+TF_DEV_VARS = $(if $(wildcard $(TF_DEV_VARFILE)),-var-file=local.tfvars)
 
 k8s-dev-images: ## Build every image and load it into the local kind node (prints the tag)
 	@deploy/scripts/k8s-dev-images.sh
@@ -409,11 +414,15 @@ k8s-dev-images: ## Build every image and load it into the local kind node (print
 k8s-dev-up: ## Build + load images, then terraform apply the dev environment on Docker Desktop (uses the host Postgres)
 	@set -euo pipefail; \
 	NEXUS_NATS_DIR=.dev-nats deploy/nats/nexus-nats-auth.sh init --tenant default; \
-	export TF_VAR_postgres_password="$$(cat "$$(deploy/scripts/dev-host-postgres.sh)")"; \
+	for ns in $$(grep -oE 'kgf-[0-9a-f]{32}' '$(TF_DEV_VARFILE)' 2>/dev/null | sort -u); do \
+	  NEXUS_NATS_DIR=.dev-nats deploy/nats/nexus-nats-auth.sh add-tenant "$$ns"; \
+	done; \
+	pgpass=$$(deploy/scripts/dev-host-postgres.sh); \
+	export TF_VAR_postgres_password="$$(cat "$$pgpass")"; \
 	tag=$$(deploy/scripts/k8s-dev-images.sh | tail -n 1); \
 	echo "image tag: $$tag"; \
 	terraform -chdir=$(TF_DEV) init -input=false -upgrade=false >/dev/null; \
-	terraform -chdir=$(TF_DEV) apply -input=false -auto-approve -var "image_tag=$$tag"; \
+	terraform -chdir=$(TF_DEV) apply -input=false -auto-approve -var "image_tag=$$tag" $(TF_DEV_VARS); \
 	echo; echo "Admin API key: terraform -chdir=$(TF_DEV) output -raw admin_api_key"
 
 k8s-dev-test: ## Run the workload suite (CSV ETL, ML training, GPU scheduling, fan-out) on the dev environment

@@ -33,6 +33,12 @@ image:
 # The Nexus namespace (tenant) the agents serve and that bootstrap creates if
 # missing. Distinct from the Kubernetes namespace the release is installed in.
 nexusNamespace: default
+# KGF.Nexus workspace namespaces whose agents authenticate with a worker key
+# the bootstrap job registers: [{namespace, secretKey}], the key held in
+# existingSecret under secretKey. A development path: KGF issuing worker
+# tokens (KGF-INTEGRATION.md §4.3) replaces it. A namespace the engine has not
+# provisioned yet is skipped, and registered on a later release.
+workspaceWorkers: []
 logLevel: info
 
 # Credentials. REQUIRED: the name of a Secret in the release namespace with:
@@ -479,13 +485,21 @@ smtp:
 #                          audit rows are attributed to that context.
 kgf:
   authMode: standalone
-  # Exactly one key source when set: KGF's /.well-known/kgf-context.json, or
-  # static base64url Ed25519 public keys (comma-separated).
+  # Key sources, merged (ADR-0034): a comma-separated list of key-document
+  # URLs (kgf-gateway's and each provider front's
+  # /.well-known/kgf-context.json) and/or static base64url Ed25519 public keys
+  # (comma-separated).
   contextKeysUrl: ""
   contextPublicKeys: ""
+  # The audience a context must name, or a comma-separated list. KGF's
+  # KGF.Nexus front mints kgf-nexus-engine.
   audience: kgf-nexus
   # Issuers entitled to assert a human principal (comma-separated).
   userIssuers: kgf-gateway
+  # KGF provider fronts (comma-separated, e.g. kgf-nexus): the only issuers
+  # that may name a KGF.Nexus workspace (`res`) and provision workspaces.
+  # Empty: workspace contexts are refused. Never also a user issuer.
+  frontIssuers: ""
   # KGF services allowed to call Nexus for themselves: "svc:kgf-billing=viewer".
   servicePrincipals: ""
 

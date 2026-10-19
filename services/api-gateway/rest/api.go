@@ -350,6 +350,7 @@ func (a *API) Routes() http.Handler {
 	a.registerRBACRoutes(mux)
 	a.registerIdentityRoutes(mux)
 	a.registerEventRoutes(mux)
+	a.registerKGFWorkspaceRoutes(mux)
 
 	return mux
 }
@@ -482,6 +483,14 @@ func (a *API) guard(action authn.Action, h func(http.ResponseWriter, *http.Reque
 		// the credential's ID. Before authorization, so a principal hammering routes
 		// it may not use still spends its own allowance.
 		if a.credentialRateLimited(w, p) {
+			return
+		}
+
+		// A KGF workspace provisioner (ADR-0034) reaches the provisioning
+		// routes and nothing else, whatever the rest of this guard would say.
+		if p.KGF != nil && p.KGF.Provisioner && !kgfProvisioningRoutes[r.Pattern] {
+			writeError(w, http.StatusForbidden, "kgf_provisioner_restricted",
+				"a KGF workspace provisioner context may only provision or delete its workspace")
 			return
 		}
 

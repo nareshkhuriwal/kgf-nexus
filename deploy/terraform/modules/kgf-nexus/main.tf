@@ -66,10 +66,20 @@ resource "random_id" "admin_key" {
   byte_length = 32
 }
 
+# One worker key per KGF.Nexus workspace namespace this environment runs
+# agents for (var.workspace_worker_namespaces).
+resource "random_id" "workspace_worker_key" {
+  for_each    = toset(var.workspace_worker_namespaces)
+  byte_length = 32
+}
+
 locals {
   worker_api_key = "nxs_worker_${random_id.worker_key.hex}"
-  admin_api_key  = "nxs_admin_${random_id.admin_key.hex}"
-  secret_name    = "${var.release_name}-credentials"
+  workspace_worker_keys = {
+    for ns, key in random_id.workspace_worker_key : "worker-api-key-${ns}" => "nxs_worker_${key.hex}"
+  }
+  admin_api_key = "nxs_admin_${random_id.admin_key.hex}"
+  secret_name   = "${var.release_name}-credentials"
 
   postgres_password = (
     var.postgres_password != null ? var.postgres_password : random_password.postgres[0].result
@@ -100,15 +110,26 @@ locals {
     "nats-event-service-nkey" = trimspace(file("${local.nats_dir}/event-service/user.nk"))
     "nats-agent-nkey"         = trimspace(file("${local.nats_dir}/${local.nats_agent}/user.nk"))
   }
+  # Each KGF.Nexus workspace namespace's agents have their own identity
+  # (nexus-nats-auth.sh add-tenant NS), seeded as nats-agent-nkey-<ns>.
+  workspace_nats_seeds = local.nats_dir == "" ? {} : {
+    for ns in var.workspace_worker_namespaces :
+    "nats-agent-nkey-${ns}" => trimspace(file("${local.nats_dir}/agent-${ns}/user.nk"))
+  }
   nats_auth_values = local.nats_dir == "" ? {} : {
     nats = {
       auth = {
         eventService = { publicKeys = [trimspace(file("${local.nats_dir}/event-service/user.pub"))] }
         monitor      = { publicKeys = [trimspace(file("${local.nats_dir}/monitor/user.pub"))] }
-        tenants = [{
+        tenants = concat([{
           namespace  = var.nexus_namespace
           publicKeys = [trimspace(file("${local.nats_dir}/${local.nats_agent}/user.pub"))]
-        }]
+          }], [
+          for ns in var.workspace_worker_namespaces : {
+            namespace  = ns
+            publicKeys = [trimspace(file("${local.nats_dir}/agent-${ns}/user.pub"))]
+          }
+        ])
       }
     }
   }
@@ -130,7 +151,7 @@ resource "kubernetes_secret_v1" "credentials" {
     "postgres-password" = local.postgres_password
     "worker-api-key"    = local.worker_api_key
     "admin-api-key"     = local.admin_api_key
-  }, local.object_store_keys, local.nats_seeds)
+  }, local.object_store_keys, local.nats_seeds, local.workspace_nats_seeds, local.workspace_worker_keys)
 }
 
 # ── Database: server verification and runtime logins ────────────────────
@@ -220,6 +241,9 @@ resource "helm_release" "nexus" {
     yamlencode({
       existingSecret = kubernetes_secret_v1.credentials.metadata[0].name
       nexusNamespace = var.nexus_namespace
+      workspaceWorkers = [
+        for ns in var.workspace_worker_namespaces : { namespace = ns, secretKey = "worker-api-key-${ns}" }
+      ]
       image = {
         registry         = var.image_registry
         repositoryPrefix = "kgf-nexus/"

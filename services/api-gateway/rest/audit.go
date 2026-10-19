@@ -130,6 +130,11 @@ var auditActionClasses = map[string]AuditClass{
 	"worker.quarantine": AuditOps,
 	"worker.release":    AuditOps,
 	"cache.invalidate":  AuditOps,
+	// KGF.Nexus workspaces (ADR-0034): provisioning creates a namespace KGF
+	// people can then act in; deletion removes that access and revokes the
+	// namespace's machine credentials.
+	"kgf.workspace.provision": AuditGrant,
+	"kgf.workspace.delete":    AuditRevoke,
 }
 
 // ClassOf returns an action's class. Unknown actions are treated as grants
@@ -836,7 +841,8 @@ func (a *API) attachKGF(r *http.Request, p authn.Principal) *http.Request {
 // principal and the person it acted for is on_behalf_of, as KGF records it.
 func kgfAttributionOf(k *authn.KGFIdentity) kgfctx.Context {
 	c := kgfctx.Context{Organization: k.Organization, Subscription: k.Subscription,
-		ResourceGroup: k.ResourceGroup, Principal: k.Principal, Role: k.Role, RequestID: k.RequestID}
+		ResourceGroup: k.ResourceGroup, Principal: k.Principal, Role: k.Role, RequestID: k.RequestID,
+		Resource: k.ResourceID}
 	if k.Via != "" {
 		c.Principal, c.Role = k.Via, kgfctx.RoleService
 		c.OnBehalfOf, c.OnBehalfOfRole = k.Principal, k.Role

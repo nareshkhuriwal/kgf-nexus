@@ -124,3 +124,9 @@ variable "helm_timeout_seconds" {
   type        = number
   default     = 900
 }
+
+variable "workspace_worker_namespaces" {
+  description = "KGF.Nexus workspace namespaces to give a worker key (chart workspaceWorkers): a development path until KGF issues worker tokens. A namespace must already be provisioned by KGF for its key to be registered."
+  type        = list(string)
+  default     = []
+}

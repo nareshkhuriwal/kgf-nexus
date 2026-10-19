@@ -100,6 +100,16 @@ spec:
                 ON CONFLICT (key_hash) DO NOTHING;
               SQL
               echo "bootstrap: tenant and keys for namespace $NEXUS_NAMESPACE are in place"
+              {{- range $i, $w := .Values.workspaceWorkers }}
+              psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q \
+                -v ns={{ $w.namespace | quote }} -v wkey="$WORKSPACE_WORKER_KEY_{{ $i }}" <<'SQL'
+              INSERT INTO api_keys (namespace, name, key_hash, role)
+                SELECT :'ns', 'kgf-workspace-worker', encode(sha256(convert_to(:'wkey', 'UTF8')), 'hex'), 'worker'
+                 WHERE EXISTS (SELECT 1 FROM tenants WHERE namespace = :'ns')
+                ON CONFLICT (key_hash) DO NOTHING;
+              SQL
+              echo "bootstrap: worker key for workspace namespace {{ $w.namespace }} registered if it is provisioned"
+              {{- end }}
           env:
             {{- include "nexus.dbEnv" (list . "migrate") | nindent 12 }}
             - { name: NEXUS_NAMESPACE, value: {{ .Values.nexusNamespace | quote }} }
@@ -107,6 +117,10 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: worker-api-key } }
             - name: ADMIN_API_KEY
               valueFrom: { secretKeyRef: { name: {{ .Values.existingSecret }}, key: admin-api-key, optional: true } }
+            {{- range $i, $w := .Values.workspaceWorkers }}
+            - name: WORKSPACE_WORKER_KEY_{{ $i }}
+              valueFrom: { secretKeyRef: { name: {{ $.Values.existingSecret }}, key: {{ $w.secretKey }} } }
+            {{- end }}
           resources:
             requests: { cpu: 10m, memory: 16Mi }
             limits: { memory: 64Mi }

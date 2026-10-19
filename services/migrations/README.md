@@ -38,6 +38,7 @@ local equivalent. Services never migrate at startup (ADR-0011 rule 4).
 | Version | Migration | Design |
 |---|---|---|
 | 0039 | `0039_run_reconcile_queue` | F160: the durable run-reconcile queue (`run_reconcile_requests`), its triggers on `task_attempts` (terminal) and `workflow_runs` (state changes that need the engine), and a one-time request for every live materialized run, which repairs runs stranded before the upgrade. Owned by the dag-engine; see the ADR-0011 addendum |
+| 0040 | `0040_kgf_workspaces` | ADR-0034: `kgf_workspaces`, one row per KGF.Nexus workspace namespace (`UNIQUE (organization, resource_id)`, state active/deleted); SELECT for every service, INSERT and `UPDATE (state, deleted_at, deleted_by)` for the api-gateway, through `nexus_role`. Owned by the api-gateway |
 
 **Granting after 0038.** An installation may have renamed its group roles, so
 a migration numbered above 0038 must not name `nexus_<service>` literally:

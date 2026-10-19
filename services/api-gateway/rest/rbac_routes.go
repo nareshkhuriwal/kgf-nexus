@@ -3,9 +3,13 @@
 package rest
 
 var routePermissions = map[string][]string{
-	"GET /v1/account/tenant":                              {},
-	"GET /v1/platform/tenants":                            {},
-	"POST /v1/platform/tenants":                           {},
+	"GET /v1/account/tenant":    {},
+	"GET /v1/platform/tenants":  {},
+	"POST /v1/platform/tenants": {},
+	// KGF.Nexus workspace provisioning (ADR-0034): no Nexus permission; the
+	// handler admits only a KGF front's provisioner context.
+	"PUT /v1/kgf/workspace":                               {},
+	"DELETE /v1/kgf/workspace":                            {},
 	"GET /v1/namespaces/{ns}/roles":                       {"roles.view"},
 	"PUT /v1/namespaces/{ns}/roles/{name}":                {"roles.manage"},
 	"DELETE /v1/namespaces/{ns}/roles/{name}":             {"roles.manage"},
