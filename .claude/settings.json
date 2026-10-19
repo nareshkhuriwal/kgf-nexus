@@ -1,7 +1,16 @@
 {
   "permissions": {
     "allow": [
-      "Bash(docker exec *)"
+      "Bash(docker exec *)",
+      "Bash(break)",
+      "Bash(helm -n nexus-dev history kgf-nexus)",
+      "Bash(kubectl -n nexus-dev get pods)",
+      "Bash(kubectl -n nexus-dev get deploy -o wide)",
+      "Bash(awk '{print $1,$2,$3,$4,$7}')",
+      "Bash(kubectl get *)",
+      "Bash(curl -s -m 5 -w \"\\\\nreadyz=%{http_code}\\\\n\" http://localhost:8290/readyz)",
+      "Bash(curl -s -m 5 -o /dev/null -w \"console=%{http_code}\\\\n\" http://localhost:3200/)",
+      "Bash(curl -s -m 5 http://localhost:3200/)"
     ]
   }
 }
