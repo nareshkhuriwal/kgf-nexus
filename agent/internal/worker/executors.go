@@ -44,14 +44,6 @@ type ExecutorSelection struct {
 	Default string
 }
 
-// String renders the selection for a startup log line.
-func (s ExecutorSelection) String() string {
-	if s.Allow == nil {
-		return "discover (default " + s.Default + ")"
-	}
-	return strings.Join(s.Allow, ",") + " (default " + s.Default + ")"
-}
-
 // ResolveExecutors validates NEXUS_EXECUTORS and NEXUS_DEFAULT_EXECUTOR.
 //
 //   - executors: comma-separated allow list. Blank means discovery. A name
