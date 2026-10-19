@@ -1093,8 +1093,8 @@ tls:
 # below -- scales bound worker Deployments. Off by default.
 clusterController:
   enabled: false
-  # The registry name (clusters.name) registered in the console (Cluster &
-  # scaling -> Live cluster). Empty = cluster.name, the chart-wide cluster
+  # The registry name (clusters.name) registered in the console
+  # (Infrastructure -> Clusters). Empty = cluster.name, the chart-wide cluster
   # name; one of the two is REQUIRED when enabled. Its control-plane namespace
   # must be this release's namespace.
   clusterName: ""

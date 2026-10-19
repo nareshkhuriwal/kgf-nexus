@@ -1675,7 +1675,7 @@ kubectl apply -k deploy/k8s/cluster-controller/base   # after setting NEXUS_CLUS
 kubectl -n kgf-nexus get lease nexus-cluster-controller-<cluster> -o jsonpath='{.spec.holderIdentity}'
 ```
 
-In the console (Cluster & scaling → Live cluster) confirm: a report under a minute
+In the console (Govern → Infrastructure → Clusters) confirm: a report under a minute
 old, "Controller running: plan", the observed UID, desired = observed revision,
 the scheduler HPA with `ScalingActive`, scheduler autoscaling `in_sync` or
 `plan_only` (an `hpa_plan` event says what apply would change), task Jobs
@@ -1716,7 +1716,7 @@ pod that is no longer going to be removed can simply be deleted
 
 ### 12.5 Diagnosing a pool that does not scale
 
-The Live cluster tab shows the last decision and its holds per Deployment. The
+The Clusters tab shows the last decision and its holds per Deployment. The
 common ones: `scale-in cooldown`, `removal of drained pods held: pod … is not
 Running and Ready` (fix the pod), `pod … kept: holds N live lease(s)` (working as
 intended -- it is removed when the work finishes), `namespace quota: …` (raise the
@@ -2757,7 +2757,7 @@ permission anywhere.
    `control_plane_namespace` = the release namespace, `mode: plan`). Until then
    the leader logs `cluster not registered` and, after four intervals, reports
    NotReady — which is the alert you want.
-2. Confirm in the console (Live cluster): a fresh report, effective mode `plan`,
+2. Confirm in the console (Infrastructure → Clusters): a fresh report, effective mode `plan`,
    the observed kube-system UID, the scheduler Deployments and HPAs.
 3. **Apply** needs all three opt-ins (CLUSTER-SCALING, "Apply is three
    independent opt-ins"): the registry entry in apply mode with the UID

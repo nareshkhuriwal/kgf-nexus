@@ -26,7 +26,7 @@ Least privilege:
 {{- /* cluster.name is the chart-wide cluster name; absent from older values. */}}
 {{- $clusterName := $cc.clusterName | default ((.Values.cluster | default dict).name | default "") }}
 {{- if not $clusterName }}
-{{- fail "clusterController.clusterName is required (or cluster.name, which it defaults to): the registry name (clusters.name) registered in the console under Cluster & scaling -> Live cluster" }}
+{{- fail "clusterController.clusterName is required (or cluster.name, which it defaults to): the registry name (clusters.name) registered in the console under Govern -> Infrastructure -> Clusters" }}
 {{- end }}
 {{- if $cc.apply.enabled }}
 {{- if not $cc.apply.expectedClusterUID }}
