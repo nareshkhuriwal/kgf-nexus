@@ -1,0 +1,34 @@
+# GitHub Linguist: what counts towards the repository's language statistics,
+# and which files a pull request's diff collapses. Only linguist-* attributes
+# are set here, so nothing changes how git stores, diffs or checks out a file.
+# Linguist already treats docs/ and examples/ as documentation and already
+# leaves Markdown, JSON and YAML out of the statistics.
+
+# Generated code: protoc-gen-go and protoc-gen-go-grpc, run by `make proto`
+# (gen/, and the resource manager's own services/resource-manager/gen/).
+gen/** linguist-generated
+*.pb.go linguist-generated
+
+# Files that tools write: lock files and checksum lists.
+go.sum linguist-generated
+ui/package-lock.json linguist-generated
+docs-site/requirements.txt linguist-generated
+.terraform.lock.hcl linguist-generated
+
+# Test fixtures that the tests themselves rewrite: the importer's golden specs
+# (`go test ./cli/internal/importer -update`) and the spec content-address
+# golden file (sdk/python/tests/parity/make_spec_hash_golden.py).
+cli/internal/importer/testdata/golden/** linguist-generated
+sdk/python/tests/parity/spec_hash_golden.json linguist-generated
+
+# Third-party files kept byte for byte. These are the upstream Airflow,
+# Prefect and Argo examples the importer is tested against (each directory's
+# README says where they come from), the OpenAPI 3.1 meta-schema, and the
+# self-hosted Inter typeface.
+cli/internal/importer/testdata/upstream/** linguist-vendored
+services/api-gateway/rest/testdata/oas-3.1-schema-2022-10-07.json linguist-vendored
+ui/src/assets/fonts/** linguist-vendored
+
+# The documentation site: its pages and the hooks and link checker that build
+# them. These are not part of any shipped component.
+docs-site/** linguist-documentation
