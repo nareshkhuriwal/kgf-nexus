@@ -363,6 +363,7 @@ rejected at runtime, with nothing in the manifest pointing at why.
 {{- end -}}
 {{- range $keys }}{{ if not (regexMatch $keyRe .) }}{{ fail (printf "nats.auth.%s.publicKeys: %q is not a user public NKey (U...)" $role .) }}{{ end }}{{ end -}}
 {{- end -}}
+{{- range (($a.admin | default dict).publicKeys | default list) }}{{ if not (regexMatch $keyRe .) }}{{ fail (printf "nats.auth.admin.publicKeys: %q is not a user public NKey (U...)" .) }}{{ end }}{{ end -}}
 {{- $seen := dict -}}
 {{- range $a.tenants -}}
 {{- if not (regexMatch "^[A-Za-z0-9_-]+$" (.namespace | default "")) -}}

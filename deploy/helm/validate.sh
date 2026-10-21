@@ -841,6 +841,26 @@ if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" >"$tmp/nat
 else
   echo "FAIL: NATS JetStream sizing did not render as expected"; tail -5 "$tmp"/natssize*; fail=1
 fi
+# The optional admin identity (stream maintenance, OPERATIONS §11.7): a
+# malformed key is refused; a valid one renders with stream-maintenance grants
+# and its own inbox only; without one, no such user exists.
+default_tenant='nats.auth.tenants=[{"namespace":"default","publicKeys":["UAGENTKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]}]'
+must_fail "malformed NATS admin key"            "nats.auth.admin.publicKeys"   "${nkeys[@]}" --set-json "$default_tenant" --set-json 'nats.auth.admin.publicKeys=["nope"]'
+# "$JS.API..." below is a literal NATS subject, not a shell expansion.
+# shellcheck disable=SC2016
+if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" "${nkeys[@]}" --set-json "$default_tenant" \
+     --set-json 'nats.auth.admin.publicKeys=["UADMINKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]' \
+     --show-only templates/nats-config.yaml >"$tmp/natsadmin" 2>&1 &&
+   grep -A3 -F 'nkey: UADMINKEY' "$tmp/natsadmin" | grep -qF '"$JS.API.STREAM.UPDATE.NEXUS_USAGE"' &&
+   grep -A4 -F 'nkey: UADMINKEY' "$tmp/natsadmin" | grep -qF 'subscribe: { allow: ["_INBOX.nexus-admin.>"] }' &&
+   ! grep -A3 -F 'nkey: UADMINKEY' "$tmp/natsadmin" | grep -qE '"nexus\.|MSG\.GET|CONSUMER|STREAM\.CREATE' &&
+   "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" "${nkeys[@]}" --set-json "$default_tenant" \
+     --show-only templates/nats-config.yaml >"$tmp/natsnoadmin" 2>&1 &&
+   ! grep -qF '_INBOX.nexus-admin' "$tmp/natsnoadmin"; then
+  echo "ok   rendered: optional NATS admin identity with stream-maintenance grants only; absent unless keys are given"
+else
+  echo "FAIL: the NATS admin identity did not render as expected"; tail -5 "$tmp/natsadmin"; fail=1
+fi
 
 if [ "$fail" -ne 0 ]; then
   echo "validate: FAILED" >&2

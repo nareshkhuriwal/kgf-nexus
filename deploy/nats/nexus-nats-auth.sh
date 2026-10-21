@@ -24,6 +24,12 @@
 #                        subscribe nexus.run.> plus its own reply inbox.
 #     agent-<ns>         subscribe nexus.task.dispatch.<ns>.> ONLY. Publish:
 #                        nothing at all. One identity per tenant namespace.
+#     admin (optional)   an operator's stream maintenance (resize, purge,
+#                        delete: docs/OPERATIONS.md §11.10): the JetStream
+#                        API for the three streams' configuration and state,
+#                        and its own reply inbox. No application subject, no
+#                        message reads, no consumers. Created only by
+#                        `init --admin`; its seed never leaves the key dir.
 #   account SYS (system account)
 #     monitor            read-only $SYS server/account queries, for
 #                        `nats server report`, nats-surveyor and the like.
@@ -58,7 +64,9 @@
 # (2 x 1 GiB) need about 2.7 GiB free on /data without it.
 #
 # Commands (run with no arguments for usage):
-#   init [--tenant NS]...     keys for event-service, monitor and agent-<NS> if missing
+#   init [--tenant NS]... [--admin]
+#                             keys for event-service, monitor and agent-<NS> if
+#                             missing; --admin also the optional admin identity
 #   add-tenant NS             a key for tenant NS's agents
 #   rotate ROLE               new key for ROLE; the old public key stays accepted
 #   retire ROLE               stop accepting ROLE's previous key
@@ -87,6 +95,8 @@ SUBJ_DISPATCH="nexus.task.dispatch"
 SUBJ_USAGE="nexus.usage.>"
 STREAMS="NEXUS_RUNS NEXUS_DISPATCH NEXUS_USAGE"
 EVENT_SERVICE_INBOX="_INBOX.nexus-event-service.>"
+# The admin's reply prefix: run the nats CLI with --inbox-prefix _INBOX.nexus-admin.
+ADMIN_INBOX="_INBOX.nexus-admin.>"
 
 die() { echo "nexus-nats-auth: $*" >&2; exit 1; }
 say() { echo "nexus-nats-auth: $*" >&2; }
@@ -104,9 +114,9 @@ check_ns() {
 
 check_role() {
 	case "$1" in
-	event-service | monitor) ;;
+	event-service | monitor | admin) ;;
 	agent-*) check_ns "${1#agent-}" ;;
-	*) die "unknown role '$1' (event-service, monitor, agent-<namespace>)" ;;
+	*) die "unknown role '$1' (event-service, monitor, admin, agent-<namespace>)" ;;
 	esac
 }
 
@@ -209,6 +219,22 @@ render_auth() {
 			echo "          subscribe: { allow: [$(q "$SUBJ_RUNS"), $(q "$EVENT_SERVICE_INBOX")] }"
 			echo "        } }"
 		done
+		if [ -s "$DIR/admin/user.pub" ]; then
+			for k in $(keys admin); do
+				echo "      # admin: stream maintenance only (resize, purge, delete); no messages"
+				echo "      { nkey: $k"
+				echo "        permissions: {"
+				printf '          publish: { allow: [%s, %s, %s' "$(q '$JS.API.INFO')" "$(q '$JS.API.STREAM.NAMES')" "$(q '$JS.API.STREAM.LIST')"
+				for s in $STREAMS; do
+					for op in INFO UPDATE PURGE DELETE; do
+						printf ', %s' "$(q "\$JS.API.STREAM.$op.$s")"
+					done
+				done
+				echo "] }"
+				echo "          subscribe: { allow: [$(q "$ADMIN_INBOX")] }"
+				echo "        } }"
+			done
+		fi
 		for ns in $(tenants); do
 			for k in $(keys "agent-$ns"); do
 				echo "      # agents of tenant $ns: dispatch hints for $ns only, publish nothing"
@@ -293,9 +319,11 @@ render_server() {
 
 cmd_init() {
 	ts=""
+	admin=0
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--tenant) [ $# -ge 2 ] || die "--tenant needs a namespace"; ts="$ts $2"; shift 2 ;;
+		--admin) admin=1; shift ;;
 		*) die "init: unknown argument $1" ;;
 		esac
 	done
@@ -304,6 +332,9 @@ cmd_init() {
 	chmod 700 "$DIR"
 	ensure_role event-service
 	ensure_role monitor
+	if [ "$admin" = 1 ]; then
+		ensure_role admin
+	fi
 	for ns in $ts; do
 		check_ns "$ns"
 		ensure_role "agent-$ns"
@@ -430,6 +461,9 @@ cmd_compose_init() {
 cmd_helm_values() {
 	printf 'nats:\n  auth:\n    eventService:\n      publicKeys: [%s]\n' "$(keys event-service | paste -sd, -)"
 	printf '    monitor:\n      publicKeys: [%s]\n' "$(keys monitor | paste -sd, -)"
+	if [ -s "$DIR/admin/user.pub" ]; then
+		printf '    admin:\n      publicKeys: [%s]\n' "$(keys admin | paste -sd, -)"
+	fi
 	printf '    tenants:\n'
 	for ns in $(tenants); do
 		printf '      - namespace: %s\n        publicKeys: [%s]\n' "$ns" "$(keys "agent-$ns" | paste -sd, -)"

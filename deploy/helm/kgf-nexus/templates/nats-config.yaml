@@ -15,6 +15,9 @@ checks every role against it. Change one, change both.
     event-service   pub nexus.run.>, nexus.task.dispatch.>, nexus.usage.>, $JS.API.STREAM.{INFO,CREATE}.<its three streams>
                     sub nexus.run.>, _INBOX.nexus-event-service.>
     agent-<ns>      pub nothing; sub nexus.task.dispatch.<ns>.> only
+    admin           optional (nats.auth.admin.publicKeys): pub $JS.API.INFO,
+                    $JS.API.STREAM.{NAMES,LIST}, $JS.API.STREAM.{INFO,UPDATE,PURGE,DELETE}.<the three streams>;
+                    sub _INBOX.nexus-admin.> -- stream maintenance, no messages
   account SYS (system_account)
     monitor         read-only $SYS server/account queries
 No anonymous user exists, so an unauthenticated connection is refused.
@@ -76,6 +79,14 @@ data:
             permissions: {
               publish: { allow: ["nexus.run.>", "nexus.task.dispatch.>", "nexus.usage.>"{{ range list "NEXUS_RUNS" "NEXUS_DISPATCH" "NEXUS_USAGE" }}, "$JS.API.STREAM.INFO.{{ . }}", "$JS.API.STREAM.CREATE.{{ . }}"{{ end }}] }
               subscribe: { allow: ["nexus.run.>", "_INBOX.nexus-event-service.>"] }
+            } }
+          {{- end }}
+          {{- range (($a.admin | default dict).publicKeys | default list) }}
+          # admin: stream maintenance only (resize, purge, delete); no messages
+          { nkey: {{ . }}
+            permissions: {
+              publish: { allow: ["$JS.API.INFO", "$JS.API.STREAM.NAMES", "$JS.API.STREAM.LIST"{{ range $s := list "NEXUS_RUNS" "NEXUS_DISPATCH" "NEXUS_USAGE" }}{{ range list "INFO" "UPDATE" "PURGE" "DELETE" }}, "$JS.API.STREAM.{{ . }}.{{ $s }}"{{ end }}{{ end }}] }
+              subscribe: { allow: ["_INBOX.nexus-admin.>"] }
             } }
           {{- end }}
           {{- range $t := $a.tenants }}

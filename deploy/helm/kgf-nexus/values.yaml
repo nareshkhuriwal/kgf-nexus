@@ -450,6 +450,13 @@ nats:
     # SYS-account identity for `nats server report`, nats-surveyor and the like.
     monitor:
       publicKeys: []
+    # OPTIONAL operator identity for stream maintenance (resize, purge, delete:
+    # docs/OPERATIONS.md §11.10), from `nexus-nats-auth.sh init --admin`. It
+    # may inspect and change the three streams' configuration and nothing else:
+    # no application subject, no message reads. Empty: no such identity, and
+    # nothing can change a stream once it exists. Keep its seed off the cluster.
+    admin:
+      publicKeys: []
     # One entry per Nexus namespace whose agents may receive dispatch hints;
     # each may subscribe to nexus.task.dispatch.<namespace>.> and nothing
     # else. Several keys per tenant = per-agent identities, or a rotation overlap.

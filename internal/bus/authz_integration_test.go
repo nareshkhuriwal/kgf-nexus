@@ -32,6 +32,9 @@ import (
 const (
 	eventServiceName = "nexus-event-service" // services/event-service/cmd/event-service
 	agentName        = "nexus-agent"         // agent/cmd/nexus-agent
+	// adminName fixes the reply prefix _INBOX.nexus-admin, which an operator
+	// passes to the nats CLI as --inbox-prefix (docs/OPERATIONS.md §11.10).
+	adminName = "nexus-admin"
 )
 
 // TestNATSAuthzUnauthenticatedIsRejected: no credentials, an unknown key, and
@@ -289,6 +292,101 @@ func TestNATSAuthzAgentIsConfinedToItsTenant(t *testing.T) {
 	// Request/reply also needs publish: refused.
 	if _, err := agent.Request("$JS.API.INFO", nil, time.Second); err == nil {
 		t.Error("the agent reached the JetStream API")
+	}
+}
+
+// TestNATSAuthzAdminMaintainsStreamsOnly: the optional admin identity can do
+// what resizing a stream takes (docs/OPERATIONS.md §11.10) -- list, inspect,
+// update, purge and delete Nexus's streams -- and nothing that touches
+// application traffic: no publish or subscribe on nexus.>, no message reads,
+// no consumers, no other stream, no other inbox. The deleted stream comes back
+// when the event-service next ensures its streams, which is the documented
+// recovery for a broker whose streams reserve more than max_file_store.
+func TestNATSAuthzAdminMaintainsStreamsOnly(t *testing.T) {
+	b := bustest.Authz(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	esJS, err := jetstream.New(b.Connect(t, "event-service", eventServiceName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bus.EnsureStreams(ctx, esJS, bus.DefaultStreamLimits()); err != nil {
+		t.Fatalf("EnsureStreams as event-service: %v", err)
+	}
+
+	errs, opt := bustest.NewErrors()
+	admin := b.Connect(t, "admin", adminName, opt)
+	js, err := jetstream.New(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	lister := js.StreamNames(ctx)
+	for n := range lister.Name() {
+		names[n] = true
+	}
+	if err := lister.Err(); err != nil || !names[bus.StreamRuns] || !names[bus.StreamUsage] {
+		t.Fatalf("admin stream names: %v %v", names, err)
+	}
+
+	// Resize NEXUS_USAGE down and back: the operation the runbook documents.
+	s, err := js.Stream(ctx, bus.StreamUsage)
+	if err != nil {
+		t.Fatalf("admin stream info: %v", err)
+	}
+	cfg := s.CachedInfo().Config
+	orig := cfg.MaxBytes
+	for _, size := range []int64{bus.MinStreamMaxBytes, orig} {
+		cfg.MaxBytes = size
+		got, err := js.UpdateStream(ctx, cfg)
+		if err != nil {
+			t.Fatalf("admin resize %s to %d: %v", bus.StreamUsage, size, err)
+		}
+		if mb := got.CachedInfo().Config.MaxBytes; mb != size {
+			t.Fatalf("after the resize %s has max bytes %d, want %d", bus.StreamUsage, mb, size)
+		}
+	}
+
+	// Purge and delete the dispatch stream (memory, hints only: losing it
+	// costs nothing), then the event-service recreates it.
+	d, err := js.Stream(ctx, bus.StreamDispatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Purge(ctx); err != nil {
+		t.Fatalf("admin purge: %v", err)
+	}
+	if err := js.DeleteStream(ctx, bus.StreamDispatch); err != nil {
+		t.Fatalf("admin delete: %v", err)
+	}
+	rep, err := bus.EnsureStreams(ctx, esJS, bus.DefaultStreamLimits())
+	if err != nil || len(rep.Created) != 1 || rep.Created[0] != bus.StreamDispatch {
+		t.Fatalf("the event-service did not recreate the deleted stream: %+v %v", rep, err)
+	}
+
+	ns := b.Tenants[0]
+	for _, subj := range []string{
+		bus.RunEventSubject(ns, uuid.NewString()),
+		bus.DispatchSubject(ns, "default"),
+		bus.UsageSubject(ns),
+		"$JS.API.STREAM.MSG.GET." + bus.StreamRuns,
+		"$JS.API.DIRECT.GET." + bus.StreamRuns,
+		"$JS.API.CONSUMER.CREATE." + bus.StreamRuns,
+		"$JS.API.STREAM.CREATE." + bus.StreamRuns,
+		"$JS.API.STREAM.UPDATE.OTHER",
+	} {
+		_ = admin.Publish(subj, []byte(`{}`))
+		_ = admin.Flush()
+		errs.ExpectViolation(t, "admin publish "+subj, subj)
+	}
+	for _, subj := range []string{"nexus.>", "_INBOX.>", bus.InboxPrefixFor(eventServiceName) + ".>"} {
+		sub, err := admin.SubscribeSync(subj)
+		if err != nil {
+			continue // refused synchronously: fine
+		}
+		_ = admin.Flush()
+		errs.ExpectViolation(t, "admin subscribe "+subj, subj)
+		_ = sub.Unsubscribe()
 	}
 }
 

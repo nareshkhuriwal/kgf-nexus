@@ -188,7 +188,8 @@ js_max_storage() {
 KEYS="$WORK/keys"
 tenant_args=()
 for t in $AUTHZ_TENANTS; do tenant_args+=(--tenant "$t"); done
-NEXUS_NATS_DIR="$KEYS" deploy/nats/nexus-nats-auth.sh init "${tenant_args[@]}"
+# --admin: the optional stream-maintenance identity (TestNATSAuthzAdmin*).
+NEXUS_NATS_DIR="$KEYS" deploy/nats/nexus-nats-auth.sh init "${tenant_args[@]}" --admin
 NEXUS_NATS_DIR="$KEYS" deploy/nats/nexus-nats-auth.sh render
 docker rm -f "$AUTHZ_NAME" >/dev/null 2>&1 || true
 docker run -d --name "$AUTHZ_NAME" -p "127.0.0.1:${AUTHZ_PORT}:4222" \
