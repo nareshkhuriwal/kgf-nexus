@@ -3753,7 +3753,7 @@ Every first-party image is built by `.github/workflows/release.yml`, which
 |---|---|
 | Pull request | `images`: all eleven images built for `linux/amd64` and `linux/arm64`, one job per image, after the unit tests pass, and the Helm chart packaged, linted and rendered. Nothing is pushed and the run holds no registry credential. |
 | Push to `main` | after **every** CI job has passed on that commit (`quality gate`), `publish` pushes `ghcr.io/<owner>/kgf-nexus/<image>:<commit>` (12 hex digits) and `:main`, then the chart as `oci://ghcr.io/<owner>/charts/kgf-nexus:<version>-main.g<commit>`. |
-| Tag `vX.Y.Z[-pre]` | the whole CI suite on the tagged commit, then `publish` pushes `:vX.Y.Z[-pre]` and the chart as version `X.Y.Z[-pre]`. A tag that is not a release version, or whose `X.Y.Z` is not Chart.yaml's `version`, is refused before anything is built. |
+| Tag `vX.Y.Z[-pre]` | the whole CI suite on the tagged commit, then `publish` pushes `:vX.Y.Z[-pre]` and the chart as version `X.Y.Z[-pre]`, then `github-release` creates the GitHub Release. A tag that is not a release version, or whose `X.Y.Z` is not Chart.yaml's `version`, is refused before anything is built. |
 
 Documentation-only changes (`docs/**`, `*.md` outside `sdk/`) build and
 publish nothing. Nothing is ever tagged `latest` (the chart refuses it), and
@@ -3838,16 +3838,50 @@ repository's packages. `helm-chart` is the `chart-publish` job, and it links
 the chart's package. Only those push-mode jobs name an environment, so a pull
 request records no deployment. GitHub creates both environments on first use,
 with no protection rules. A rule added later (a required reviewer, or
-deployment tags `v*` only) holds the digest map and the chart, but not the
-image pushes, which come first. The jobs' OIDC subject
+deployment tags `v*` only) holds the digest map, the chart and the GitHub
+Release, but not the image pushes, which come first. The jobs' OIDC subject
 becomes `repo:<owner>/kgf-nexus:environment:<name>`, which the attestations do
 not depend on.
+
+**The GitHub Release.** A release tag that `publish` released gets a GitHub
+Release, created by `github-release` in ci.yml. That is the only job with
+`contents: write`, and it writes only the release. It lives in ci.yml because a
+called workflow can only narrow its caller's permissions.
+
+- **Title:** `KGF Nexus X.Y.Z`.
+- **Notes:** CHANGELOG.md's `## X.Y.Z` section. A pre-release tag uses its own
+  section if there is one, and otherwise its release's section, marked as a
+  candidate. Then how to install exactly this release, the chart by version
+  and every image by digest. Then GitHub's generated notes. A missing section
+  is a warning, not a failure. `deploy/scripts/release-notes.sh` writes the
+  notes, and `make release-notes-test` tests it. Preview a release's notes
+  with `GITHUB_REPOSITORY=<owner>/kgf-nexus deploy/scripts/release-notes.sh
+  vX.Y.Z CHANGELOG.md`.
+- **Assets:** the chart package `kgf-nexus-X.Y.Z.tgz`, `chart.json`,
+  `digests.json` and `release-images.yaml`. These are the run artifacts
+  above, which expire after 90 days; the release keeps them.
+- **Flags:** a `-pre` tag is a pre-release. A `vX.Y.Z` tag is marked latest
+  unless a higher `vX.Y.Z` tag exists, because a patch to an older line is not
+  the latest.
+
+A re-run finds the release and replaces only its assets, keeping notes that
+were edited by hand.
+
+To cut a release:
+
+1. Set `version: X.Y.Z` in `deploy/helm/kgf-nexus/Chart.yaml` and add a
+   `## X.Y.Z` section to CHANGELOG.md, and merge both to `main`.
+2. Tag that commit and push the tag:
+   `git tag -a vX.Y.Z -m "KGF Nexus X.Y.Z" && git push origin vX.Y.Z`.
 
 **One-time setup.** GHCR creates each package on its first push, private. Make
 each of the eleven image packages and the `charts/kgf-nexus` package public
 (package settings), or give the cluster a pull secret (`image.pullSecrets`)
-and Helm a `helm registry login ghcr.io`. Nothing else needs configuring: the
-push uses the workflow's own token.
+and Helm a `helm registry login ghcr.io`. A package pushed by the workflow is
+linked to this repository, so it is listed under the repository's Packages.
+The push and the release use the workflow's own token. The documentation
+site's Pages source must be set to "GitHub Actions" (Settings > Pages;
+`.github/workflows/docs.yml`).
 
 KGF's own deployments (its ACR, AKS and Portainer host) are released by KGF
 Cloud's Azure DevOps pipelines in the kgf-cloud repository, which build the

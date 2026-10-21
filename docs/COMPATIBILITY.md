@@ -32,10 +32,10 @@ noticing.
 
 **No release has been tagged yet**, and the product is pre-1.0. The first
 release is `v0.3.0`, the version Chart.yaml carries: a release tag must equal
-it (OPERATIONS §22.4). `nexusctl` and the Python SDK still state 0.1.0
-(above) and are not stamped from the tag. Until the first tag, a deployment
-is identified by its image tag, which is a git SHA. The chart's `appVersion`
-is a label and does not select images.
+it (OPERATIONS §22.4), and CHANGELOG.md has its notes. `nexusctl` and the
+Python SDK still state 0.1.0 (above) and are not stamped from the tag. Until
+the first tag, a deployment is identified by its image tag, which is a git SHA.
+The chart's `appVersion` is a label and does not select images.
 
 ## 2. What MAJOR.MINOR.PATCH means for this product
 
@@ -57,9 +57,10 @@ running rolling upgrades. The exception is that a 0.x MINOR *may* contain a
 breaking change **if** its release notes say so and give the upgrade procedure.
 From 1.0 the table above is binding.
 
-**Gap:** no release process exists yet (no tags, no changelog, no pipeline that
-tags images with a version). Until one does, "previous release" means the
-previous merge on `main` (§7.2).
+**Gap: no release tagged yet.** The process exists. A `vX.Y.Z` tag publishes
+the images tagged with it and the chart at that version, and creates a GitHub
+Release whose notes are CHANGELOG.md's section (OPERATIONS §22.4). Until the
+first tag, "previous release" means the previous merge on `main` (§7.2).
 
 ## 3. API versioning: `/v1` REST and `nexus.v1` proto
 
@@ -560,9 +561,12 @@ are newer than the server.
 3. Capability-gated **dispatch** for task semantics an old agent would
    silently ignore (§4.3). `RegisterRequest.capabilities` and the fleet-wide
    admission gate exist (§4.4); per-task requirements do not.
-4. A release process: `vX.Y.Z` tags, versioned images, a changelog with a
-   deprecations section. §7 then tests against real releases instead of
-   `main~1`.
+4. ~~A release process~~ -- built: a `vX.Y.Z` tag publishes images tagged
+   with it, the chart at that version and a GitHub Release, with notes from
+   CHANGELOG.md (OPERATIONS §22.4). Still open: the first tag, after which §7
+   tests against real releases instead of `main~1`; a deprecations section in
+   CHANGELOG.md once something is deprecated (§3.6); and stamping `nexusctl`
+   and the SDK with the release version.
 5. An error-code catalogue (§3.5), `GET /v1/version` and stamped client
    versions (§8).
 6. §7 extensions: seed data written by the **new** code before running the old

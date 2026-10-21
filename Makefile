@@ -792,7 +792,7 @@ compat-smoke: ## Run the previous release's DB integration suite against this tr
 # ── Pinned tools, chart and proto checks ──────────────────────────────────
 # Every tool is one exact release, downloaded into .tools/ and refused unless
 # its SHA-256 matches the pin in deploy/scripts/pinned-tool.sh.
-.PHONY: tools helm-validate proto-lint proto-breaking proto-check actionlint preflight-test shellcheck
+.PHONY: tools helm-validate proto-lint proto-breaking proto-check actionlint preflight-test release-notes-test shellcheck
 tools: ## Install the pinned, checksum-verified helm, kubeconform and buf into .tools/
 	@for t in helm kubeconform buf; do deploy/scripts/pinned-tool.sh $$t; done
 
@@ -820,9 +820,16 @@ actionlint: ## Lint the GitHub workflows with the pinned actionlint image
 preflight-test: ## Test deploy/scripts/aks-preflight.sh against stub kubectl and az (no cluster)
 	deploy/scripts/tests/aks-preflight-test.sh
 
+# The GitHub Release's notes for a release tag (ci.yml, github-release), from
+# a fixture CHANGELOG and fixture release files. Preview a real release's
+# notes with: GITHUB_REPOSITORY=<owner>/kgf-nexus deploy/scripts/release-notes.sh vX.Y.Z CHANGELOG.md
+release-notes-test: ## Test deploy/scripts/release-notes.sh, which writes a release tag's GitHub Release notes
+	deploy/scripts/tests/release-notes-test.sh
+
 # Shell scripts held to shellcheck (warnings and above fail; an `info` must be
 # fixed or disabled inline with the reason).
 SHELLCHECK_FILES ?= deploy/scripts/aks-preflight.sh deploy/scripts/tests/aks-preflight-test.sh \
-	deploy/scripts/tests/aks-preflight-stub/kubectl deploy/helm/validate.sh
-shellcheck: ## shellcheck the AKS install scripts and validate.sh with the pinned actionlint image's shellcheck
+	deploy/scripts/tests/aks-preflight-stub/kubectl deploy/helm/validate.sh \
+	deploy/scripts/release-notes.sh deploy/scripts/tests/release-notes-test.sh
+shellcheck: ## shellcheck the AKS install and release scripts and validate.sh with the pinned actionlint image's shellcheck
 	docker run --rm -v "$(CURDIR):/repo:ro" -w /repo --entrypoint shellcheck $(ACTIONLINT_IMAGE) $(SHELLCHECK_FILES)

@@ -416,10 +416,14 @@ publishes, for every push to `main` and every `vX.Y.Z` tag:
   pin every image to its digest;
 - the chart `oci://ghcr.io/<owner>/charts/kgf-nexus`: a `vX.Y.Z` tag
   publishes version `X.Y.Z`, which must be Chart.yaml's (0.3.0 here); `main`
-  publishes `<version>-main.g<commit>`; attested the same way.
+  publishes `<version>-main.g<commit>`; attested the same way;
+- for a `vX.Y.Z` tag, a GitHub Release with the chart package,
+  `release-images.yaml`, `digests.json` and `chart.json` attached; unlike the
+  run artifact, which expires after 90 days, they stay.
 
 ```sh
-gh run download <release run id> --repo $OWNER/kgf-nexus -n image-digests      # release-images.yaml
+gh release download $TAG --repo $OWNER/kgf-nexus -p release-images.yaml        # a vX.Y.Z release
+gh run download <release run id> --repo $OWNER/kgf-nexus -n image-digests      # a build of main
 helm show chart oci://ghcr.io/$OWNER/charts/kgf-nexus --version $CHART_VERSION
 gh attestation verify oci://ghcr.io/$OWNER/charts/kgf-nexus:$CHART_VERSION --repo $OWNER/kgf-nexus
 helm pull oci://ghcr.io/$OWNER/charts/kgf-nexus --version $CHART_VERSION --untar   # kgf-nexus/examples/*.yaml

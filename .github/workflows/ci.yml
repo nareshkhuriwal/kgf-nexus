@@ -20,8 +20,10 @@
 # A push to main, or a vX.Y.Z tag, that passes the gate then publishes every
 # image to GHCR, digest-pinned, and the Helm chart to
 # oci://ghcr.io/<owner>/charts, through .github/workflows/release.yml
-# (`publish`). Pull requests build the same images and package the chart
-# without pushing anything (`images`).
+# (`publish`). A vX.Y.Z tag then gets its GitHub Release (`github-release`):
+# CHANGELOG.md's notes, and the chart package, digest map and Helm values as
+# assets. Pull requests build the same images and package the chart without
+# pushing anything (`images`).
 name: ci
 
 on:
@@ -42,7 +44,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Nothing here writes to the repository, so the token cannot either. A job that
-# genuinely needs more asks for it by name (`publish`, for the registry).
+# genuinely needs more asks for it by name (`publish`, for the registry;
+# `github-release`, for a release tag's GitHub Release and nothing else).
 permissions:
   contents: read
 
@@ -507,13 +510,15 @@ jobs:
             NAMESPACE=ci AGENT_IMAGE="ci.example/nexus/agent@$d" \
               deploy/scripts/cluster-controller-overlay.sh "$mode" "ci.example/nexus/cluster-controller@$d" >/dev/null
           done
-  # The AKS install tooling: deploy/scripts/aks-preflight.sh against a stub
-  # kubectl (`make preflight-test`; no cluster), and shellcheck over it and
-  # deploy/helm/validate.sh (`make shellcheck`) with the shellcheck bundled in
-  # the pinned actionlint image -- ACTIONLINT_IMAGE in the Makefile, the one
-  # pin `make actionlint` uses too.
+  # The AKS install tooling and the release tooling:
+  # deploy/scripts/aks-preflight.sh against a stub kubectl (`make
+  # preflight-test`; no cluster), deploy/scripts/release-notes.sh against a
+  # fixture changelog (`make release-notes-test`), and shellcheck over both,
+  # their tests and deploy/helm/validate.sh (`make shellcheck`) with the
+  # shellcheck bundled in the pinned actionlint image -- ACTIONLINT_IMAGE in
+  # the Makefile, the one pin `make actionlint` uses too.
   install-scripts:
-    name: AKS preflight (tests, shellcheck)
+    name: AKS preflight and release notes (tests, shellcheck)
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -524,6 +529,8 @@ jobs:
           persist-credentials: false
       - name: aks-preflight tests (stub kubectl and az)
         run: make preflight-test
+      - name: release-notes tests (fixture changelog)
+        run: make release-notes-test
       - name: shellcheck
         run: make shellcheck
 
@@ -933,7 +940,7 @@ jobs:
             echo "quality gate: passed"
             if [ "$EVENT" = push ] && [ "$code" = true ]; then
               echo >> "$GITHUB_STEP_SUMMARY"
-              echo "Passed on a push: \`publish\` releases every image to GHCR, digest-pinned, and the Helm chart." >> "$GITHUB_STEP_SUMMARY"
+              echo "Passed on a push: \`publish\` releases every image to GHCR, digest-pinned, and the Helm chart (and, for a vX.Y.Z tag, \`github-release\` the GitHub Release)." >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
           exit "$failed"
@@ -968,3 +975,101 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       push: true
+
+  # A vX.Y.Z tag that `publish` released, and only once it has: every image
+  # pushed and attested, the digest map validated, the chart pushed and read
+  # back. Its GitHub Release, titled "KGF Nexus X.Y.Z", is what the
+  # repository's Releases and its latest-release badge show:
+  #   - notes: CHANGELOG.md's section for the version (a pre-release without
+  #     its own section takes its release's, said to be a candidate), how to
+  #     install exactly this release, then GitHub's generated notes
+  #     (deploy/scripts/release-notes.sh, `make release-notes-test`);
+  #   - assets: the files `publish` produced and checked -- the chart package,
+  #     chart.json, digests.json and release-images.yaml -- so an install by
+  #     digest does not depend on a run artifact that expires;
+  #   - a vX.Y.Z-PRE tag is a pre-release; a vX.Y.Z tag is marked latest
+  #     unless a higher vX.Y.Z tag exists (a patch to an older line is not).
+  # The chart's version is the tag's: release.yml refused the tag before any
+  # build if Chart.yaml disagreed.
+  #
+  # The only job that can write to the repository, and it writes nothing but
+  # the release (contents: write is what creating one and uploading its
+  # assets takes). It is here rather than in release.yml because a called
+  # workflow can only narrow its caller's permissions: `publish` would have to
+  # grant contents: write to every image build to give it to this one job.
+  # A re-run finds the release and replaces only its assets, keeping notes
+  # that may have been edited since.
+  github-release:
+    name: github release
+    needs: publish
+    if: >-
+      !cancelled()
+      && needs.publish.result == 'success'
+      && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Under the names the release attaches them by.
+      - uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+          path: ${{ runner.temp }}/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: helm-chart-release
+          path: ${{ runner.temp }}/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-digests
+          path: ${{ runner.temp }}/release
+
+      # Fails if chart.json is not this tag's chart; no CHANGELOG.md section is
+      # a warning, not a failure.
+      - name: Release notes
+        env:
+          ATTESTED: ${{ github.event.repository.visibility == 'public' }}
+        run: |
+          set -euo pipefail
+          r=$RUNNER_TEMP/release
+          deploy/scripts/release-notes.sh "$TAG" CHANGELOG.md "$r/chart.json" "$r/digests.json" > "$RUNNER_TEMP/notes.md"
+          { echo "### Release notes for $TAG (before GitHub's generated notes)"; echo; cat "$RUNNER_TEMP/notes.md"; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          r=$RUNNER_TEMP/release
+          assets=("$r/kgf-nexus-$version.tgz" "$r/chart.json" "$r/digests.json" "$r/release-images.yaml")
+          for f in "${assets[@]}"; do
+            [ -s "$f" ] || { echo "::error::release asset $f is missing or empty"; exit 1; }
+          done
+          if url=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url 2>&1); then
+            gh release upload "$TAG" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+            echo "$TAG is already released ($url): assets replaced, title and notes kept"
+            exit 0
+          elif ! grep -qi 'release not found' <<<"$url"; then
+            # Not "absent" (the API unreachable, a timeout): creating could
+            # fail half-way or duplicate what is there.
+            echo "::error::cannot tell whether $TAG is released: $url"
+            exit 1
+          fi
+          flags=(--title "KGF Nexus $version" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes --verify-tag)
+          if [[ $version == *-* ]]; then
+            flags+=(--prerelease --latest=false)
+          else
+            newest=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --jq '.[].ref | ltrimstr("refs/tags/")' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+            if [ "$newest" = "$TAG" ]; then flags+=(--latest); else flags+=(--latest=false); fi
+          fi
+          gh release create "$TAG" "${assets[@]}" "${flags[@]}" --repo "$GITHUB_REPOSITORY"
+          echo "### GitHub Release" >> "$GITHUB_STEP_SUMMARY"
+          echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
