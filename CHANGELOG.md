@@ -106,6 +106,13 @@ cluster you already run, and a console that shows that installation live.
 - **The bootstrap's static worker key is now optional.**
   `bootstrap.registerWorkerKey: false` registers no static key, for
   installations whose agents use worker tokens minted by the console.
+- **JetStream stream sizes.** New installations create `NEXUS_RUNS` and
+  `NEXUS_USAGE` at 1 GiB each (`nats.streams.*`, or
+  `NEXUS_NATS_RUNS_MAX_BYTES` / `NEXUS_NATS_USAGE_MAX_BYTES`), and the chart
+  sets the broker's `max_file_store` to 80% of `nats.storage.size`; the NATS
+  pod restarts once on upgrade. Existing 4 GiB streams are left as they are and
+  the event-service logs how to shrink them; a volume too small for them needs
+  the steps in OPERATIONS §11.10.
 
 ### Fixes
 
@@ -123,6 +130,13 @@ cluster you already run, and a console that shows that installation live.
   validation; every key is now quoted.
 - **The NVIDIA device plugin scheduled on no node.** In the AKS and EKS
   environments it now runs on the GPU pool.
+- **The event-service could not create its JetStream streams on a small
+  volume.** Two 4 GiB file streams were reserved against 75% of the broker's
+  free disk, so the default 5Gi volume could not hold even one, and the relay
+  reported the broker unavailable (F162).
+- **`make up` and the browser e2e stack failed every task on a fresh Linux
+  host.** The agents' shared work directory was created by Docker as root;
+  it is now created with mode 1777 first, as `nexusctl up` already did.
 - **pgcrypto on Azure Flexible Server.** The AKS platform module
   allow-lists the extension, so the first migration can create it.
 - **Faster arm64 and amd64 builds.** Images cross-compile on the builder's
