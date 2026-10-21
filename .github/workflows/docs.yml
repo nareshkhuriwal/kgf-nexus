@@ -22,8 +22,8 @@ on:
     # CHANGELOG.md: hooks/repo_docs.py), the REST reference (api/openapi.yaml),
     # the CLI reference (a nexusctl built from cli/), the spec reference
     # (schemas/), the SDK reference (sdk/python/, by static analysis), and this
-    # file. A change anywhere else cannot change a page; run it by hand if it
-    # must.
+    # file. A change elsewhere (internal/ packages the CLI imports, the
+    # Makefile) rarely touches a page; run the workflow by hand when one does.
     paths:
       - docs/**
       - docs-site/**
