@@ -364,6 +364,7 @@ up: ## Bring up the full stack with your own keys (first run on a fresh checkout
 	  HOSTPG_TAG=org.kgf-nexus.dev-compose tests/lib/hostpg-db.sh ensure $(NEXUS_DEV_DB) >/dev/null && \
 	  echo "make up: database $(NEXUS_DEV_DB) on the host's PostgreSQL (NEXUS_BUNDLED_POSTGRES=1 for the bundled container)"; \
 	fi
+	@deploy/scripts/agent-workdir.sh >/dev/null
 	$(COMPOSE) up --build -d
 	@echo
 	@echo "UI      http://localhost:$${NEXUS_UI_PORT:-3000}"
@@ -460,6 +461,7 @@ dev-certs: ## Generate a local CA + per-service TLS leaves into .dev-certs/ (git
 
 up-tls: ## Bring up the stack with mTLS between every gRPC hop (run dev-certs first)
 	@test -f .dev-certs/ca-bundle.pem || { echo "no certificates yet; run 'make dev-certs' first"; exit 1; }
+	@deploy/scripts/agent-workdir.sh >/dev/null
 	$(COMPOSE_TLS) up --build -d
 
 certs-check: ## Show expiry of every cert in .dev-certs; nonzero if any is within 7 days
@@ -677,6 +679,7 @@ BACKUP_TYPE  ?= full
 PITR_REPORT  ?= ./pitr-drill-report.json
 
 up-pitr: ## Bring up the stack with continuous WAL archiving + base backups (pgBackRest)
+	@deploy/scripts/agent-workdir.sh >/dev/null
 	$(COMPOSE_PITR) up --build -d
 
 backup-base: ## Take a pgBackRest base backup now (BACKUP_TYPE=full|diff|incr)
@@ -819,6 +822,7 @@ preflight-test: ## Test deploy/scripts/aks-preflight.sh against stub kubectl and
 # Shell scripts held to shellcheck (warnings and above fail; an `info` must be
 # fixed or disabled inline with the reason).
 SHELLCHECK_FILES ?= deploy/scripts/aks-preflight.sh deploy/scripts/tests/aks-preflight-test.sh \
-	deploy/scripts/tests/aks-preflight-stub/kubectl deploy/helm/validate.sh
+	deploy/scripts/tests/aks-preflight-stub/kubectl deploy/helm/validate.sh \
+	deploy/scripts/agent-workdir.sh
 shellcheck: ## shellcheck the AKS install scripts and validate.sh with the pinned actionlint image's shellcheck
 	docker run --rm -v "$(CURDIR):/repo:ro" -w /repo --entrypoint shellcheck $(ACTIONLINT_IMAGE) $(SHELLCHECK_FILES)

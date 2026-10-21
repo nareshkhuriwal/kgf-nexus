@@ -233,6 +233,8 @@ cmd_up() {
     hostpg_ensure "$E2E_DB"
     log "project $PROJECT: console :$NEXUS_UI_PORT, gateway :$NEXUS_API_PORT, database $E2E_DB on $(hostpg_redact "$HOSTPG_SERVER")"
   fi
+  # The agents' shared work directory, writable by uid 10001 (see the script).
+  "$ROOT/deploy/scripts/agent-workdir.sh" >/dev/null
   compose up -d --build
   deadline=$((SECONDS + READY_TIMEOUT_S))
   until migrate_done; do
