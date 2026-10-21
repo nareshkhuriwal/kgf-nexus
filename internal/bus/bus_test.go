@@ -107,7 +107,7 @@ func TestStreamsCoverEveryProducedSubjectAndDoNotOverlap(t *testing.T) {
 	}
 	for _, subj := range produced {
 		n := 0
-		for _, sc := range StreamConfigs() {
+		for _, sc := range StreamConfigs(DefaultStreamLimits()) {
 			for _, f := range sc.Subjects {
 				if subjectMatches(f, subj) {
 					n++
@@ -118,7 +118,7 @@ func TestStreamsCoverEveryProducedSubjectAndDoNotOverlap(t *testing.T) {
 			t.Errorf("%q is captured by %d streams, want exactly 1", subj, n)
 		}
 	}
-	for _, sc := range StreamConfigs() {
+	for _, sc := range StreamConfigs(DefaultStreamLimits()) {
 		if sc.Duplicates <= 0 || (sc.MaxAge > 0 && sc.Duplicates > sc.MaxAge) {
 			t.Errorf("stream %s: duplicate window %v must be positive and within MaxAge %v",
 				sc.Name, sc.Duplicates, sc.MaxAge)

@@ -98,12 +98,38 @@ func TestNATSAuthzEventServiceDoesItsJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := bus.EnsureStreams(ctx, js); err != nil {
+	limits := bus.DefaultStreamLimits()
+	rep, err := bus.EnsureStreams(ctx, js, limits)
+	if err != nil {
 		t.Fatalf("EnsureStreams as event-service: %v", err)
 	}
+	// The broker's store is deliberately small (run-integration.sh), so this
+	// also says the DEFAULT sizes fit it (F162). A stream that already existed
+	// (KEEP=1 reruns, the relay suite) must at least be reported, not resized.
+	for _, want := range []struct {
+		stream string
+		bytes  int64
+	}{{bus.StreamRuns, limits.RunsMaxBytes}, {bus.StreamUsage, limits.UsageMaxBytes}} {
+		s, err := js.Stream(ctx, want.stream)
+		if err != nil {
+			t.Fatalf("stream %s after EnsureStreams: %v", want.stream, err)
+		}
+		got := s.CachedInfo().Config.MaxBytes
+		drifted := false
+		for _, d := range rep.Drift {
+			drifted = drifted || (d.Stream == want.stream && d.MaxBytes == got)
+		}
+		if got != want.bytes && !drifted {
+			t.Errorf("stream %s has max bytes %d, want %d (or a drift report)", want.stream, got, want.bytes)
+		}
+	}
 	// Twice: the second call is the INFO-only path every reconnect takes.
-	if err := bus.EnsureStreams(ctx, js); err != nil {
+	rep, err = bus.EnsureStreams(ctx, js, limits)
+	if err != nil {
 		t.Fatalf("EnsureStreams (existing streams): %v", err)
+	}
+	if len(rep.Created) != 0 {
+		t.Errorf("EnsureStreams re-created existing streams: %v", rep.Created)
 	}
 
 	waker := eventservice.NewRunWaker()

@@ -107,6 +107,12 @@ type Config struct {
 	// larger payload is replaced by payload_truncated=true, and the consumer reads
 	// the full event from the event-service API, which is authoritative anyway.
 	MaxEventPayloadBytes int
+	// Streams sizes the file-backed streams the relay creates when they are
+	// missing (bus.StreamLimits; a zero field takes its default). Existing
+	// streams are never resized. Not read by ConfigFromEnv: the event-service
+	// reads it with bus.StreamLimitsFromEnv, which refuses a bad value at
+	// startup instead of ignoring it.
+	Streams bus.StreamLimits
 }
 
 // DefaultConfig returns the production defaults.
@@ -123,6 +129,7 @@ func DefaultConfig() Config {
 		BacklogInterval:      5 * time.Second,
 		HintInterval:         10 * time.Second,
 		MaxEventPayloadBytes: 64 << 10,
+		Streams:              bus.DefaultStreamLimits(),
 	}
 }
 
@@ -238,6 +245,10 @@ func New(pool *pgxpool.Pool, nc *nats.Conn, cfg Config, log *slog.Logger, m *Met
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = DefaultConfig().BatchSize
 	}
+	cfg.Streams = cfg.Streams.WithDefaults()
+	if err := cfg.Streams.Validate(); err != nil {
+		return nil, fmt.Errorf("relay: %w", err)
+	}
 	r := &Relay{pool: pool, nc: nc, cfg: cfg, log: log.With("component", "outbox-relay"), m: m}
 	if nc != nil {
 		js, err := jetstream.New(nc,
@@ -248,6 +259,9 @@ func New(pool *pgxpool.Pool, nc *nats.Conn, cfg Config, log *slog.Logger, m *Met
 		}
 		r.js = js
 		m.Enabled.Set(1)
+		r.log.Info("jetstream sizes for the streams this relay creates when missing",
+			"runs_max_bytes", bus.FormatBytes(cfg.Streams.RunsMaxBytes),
+			"usage_max_bytes", bus.FormatBytes(cfg.Streams.UsageMaxBytes))
 	} else {
 		m.Enabled.Set(0)
 	}
@@ -407,6 +421,14 @@ func (r *Relay) PublishBatch(ctx context.Context) (BatchResult, error) {
 		return res, fmt.Errorf("%w: connection status %v", ErrBrokerUnavailable, r.nc.Status())
 	}
 	if err := r.ensureStreams(ctx); err != nil {
+		if errors.Is(err, bus.ErrInsufficientStorage) {
+			// Not an outage: the broker is up and refuses the configured size,
+			// and will keep refusing it until an operator acts. Reported as a
+			// failure (ERROR), not as the broker being unavailable (WARN). The
+			// rows wait in the outbox and the loop keeps retrying, so the
+			// relay recovers by itself once the size or the storage is fixed.
+			return res, fmt.Errorf("relay: %w", err)
+		}
 		return res, fmt.Errorf("%w: %v", ErrBrokerUnavailable, err)
 	}
 
@@ -560,7 +582,18 @@ func (r *Relay) ensureStreams(ctx context.Context) error {
 	}
 	sctx, cancel := context.WithTimeout(ctx, r.cfg.PublishTimeout)
 	defer cancel()
-	if err := bus.EnsureStreams(sctx, r.js); err != nil {
+	rep, err := bus.EnsureStreams(sctx, r.js, r.cfg.Streams)
+	for _, name := range rep.Created {
+		r.log.Info("created jetstream stream", "stream", name)
+	}
+	for _, d := range rep.Drift {
+		// Left alone on purpose (bus.EnsureStreams). Said once per connect, so
+		// a size that disagrees with the configuration is never silent.
+		r.log.Warn("existing jetstream stream is not the configured size; it is left as it is",
+			"stream", d.Stream, "max_bytes", bus.FormatBytes(d.MaxBytes), "configured", bus.FormatBytes(d.Configured),
+			"configured_by", d.Env, "resize_with", d.ResizeCommand(), "see", "docs/OPERATIONS.md §11.10")
+	}
+	if err != nil {
 		return err
 	}
 	r.streamsReady.Store(true)
