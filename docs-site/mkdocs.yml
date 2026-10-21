@@ -175,3 +175,4 @@ nav:
       - Cluster scaling: design/cluster-scaling.md
       - Compatibility: design/compatibility.md
       - Third-party licences: design/third-party-licenses.md
+  - Release notes: release-notes.md

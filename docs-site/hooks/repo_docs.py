@@ -60,6 +60,7 @@ REPO_DOCS: dict[str, str] = {
     "deploy/terraform/environments/aks-existing/README.md": "operations/terraform/aks-existing.md",
     "deploy/terraform/environments/eks/README.md": "operations/terraform/eks.md",
     "deploy/terraform/environments/gke/README.md": "operations/terraform/gke.md",
+    "CHANGELOG.md": "release-notes.md",
 }
 # Every ADR, discovered rather than listed so a new ADR cannot be forgotten.
 ADR_DIR = "docs/adr"

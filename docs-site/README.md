@@ -40,7 +40,7 @@ lead off the site. `make docs-serve` serves under the same path.
 | `reference/cli.md` | `hooks/cli_reference.py` | `nexusctl help` of a binary built from this checkout (`$NEXUS_DOCS_NEXUSCTL`, or `go build`) |
 | `reference/sdk.md` (bodies) | mkdocstrings | the SDK's docstrings, by static analysis. The package is never imported. |
 | `reference/workflow-spec.md` | `hooks/schema_reference.py` | `schemas/workflow-spec-v1.json` |
-| `design/*`, `operations/runbook.md`, `operations/deploy.md`, `operations/tls.md`, `operations/terraform/*` | `hooks/repo_docs.py` | `docs/*.md`, `docs/adr/*.md`, `deploy/**/README.md`: rendered **in place**, not copied |
+| `design/*`, `operations/runbook.md`, `operations/deploy.md`, `operations/tls.md`, `operations/terraform/*`, `release-notes.md` | `hooks/repo_docs.py` | `docs/*.md`, `docs/adr/*.md`, `deploy/**/README.md`, `CHANGELOG.md`: rendered **in place**, not copied |
 
 `repo_docs.py` rewrites each relative link in a rendered repository document.
 A link to another rendered document becomes a site link. A link to any other

@@ -18,15 +18,17 @@ on:
   push:
     branches: [main]
     # Everything a page is built from: the site and its toolchain (docs-site/),
-    # the repository documents rendered in place (docs/ and deploy/**/*.md,
-    # hooks/repo_docs.py), the REST reference (api/openapi.yaml), the CLI
-    # reference (a nexusctl built from cli/), the spec reference (schemas/),
-    # the SDK reference (sdk/python/, by static analysis), and this file. A
-    # change anywhere else cannot change a page; run it by hand if it must.
+    # the repository documents rendered in place (docs/, deploy/**/*.md and
+    # CHANGELOG.md: hooks/repo_docs.py), the REST reference (api/openapi.yaml),
+    # the CLI reference (a nexusctl built from cli/), the spec reference
+    # (schemas/), the SDK reference (sdk/python/, by static analysis), and this
+    # file. A change anywhere else cannot change a page; run it by hand if it
+    # must.
     paths:
       - docs/**
       - docs-site/**
       - deploy/**/*.md
+      - CHANGELOG.md
       - api/openapi.yaml
       - cli/**
       - schemas/**
