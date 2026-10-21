@@ -43,6 +43,16 @@
 # certificates live in a temporary directory that is deleted on exit. The
 # semantic suites above run against the unauthenticated broker, as before, so
 # they keep testing relay semantics rather than permissions.
+#
+# JETSTREAM STORAGE (F162, docs/OPERATIONS.md §11.10). nats-server reserves a
+# file stream's whole size when it is created. The compose broker's store is a
+# deliberately SMALL 3 GiB tmpfs, so its derived limit (75% of free space) is
+# the same on every machine, and the suite's stream creation proves the DEFAULT
+# sizes fit a small volume -- rather than passing or failing with the runner's
+# free disk, which is how 2 x 4 GiB streams once failed CI. The Helm broker
+# runs the chart's explicit max_file_store, and the script checks the broker
+# reports exactly the rendered value. Neither store allocates memory it does not
+# use: tmpfs holds only what is written.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -167,16 +177,33 @@ wait_healthy() { # container
   done
 }
 
+# js_max_storage CONTAINER: the JetStream file-store limit the broker enforces,
+# in bytes (/jsz, on the container's loopback-only monitoring port).
+js_max_storage() {
+  docker exec "$1" wget -q -O- 'http://127.0.0.1:8222/jsz' |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["config"]["max_storage"])'
+}
+
 # ── compose rendering ──────────────────────────────────────────────────────
 KEYS="$WORK/keys"
 tenant_args=()
 for t in $AUTHZ_TENANTS; do tenant_args+=(--tenant "$t"); done
-NEXUS_NATS_DIR="$KEYS" deploy/nats/nexus-nats-auth.sh init "${tenant_args[@]}"
+# --admin: the optional stream-maintenance identity (TestNATSAuthzAdmin*).
+NEXUS_NATS_DIR="$KEYS" deploy/nats/nexus-nats-auth.sh init "${tenant_args[@]}" --admin
 NEXUS_NATS_DIR="$KEYS" deploy/nats/nexus-nats-auth.sh render
 docker rm -f "$AUTHZ_NAME" >/dev/null 2>&1 || true
 docker run -d --name "$AUTHZ_NAME" -p "127.0.0.1:${AUTHZ_PORT}:4222" \
-  -v "$KEYS/server:/etc/nats:ro" "$NATS_IMAGE" -c /etc/nats/nats.conf >/dev/null
+  -v "$KEYS/server:/etc/nats:ro" --tmpfs /data:size=3g "$NATS_IMAGE" -c /etc/nats/nats.conf >/dev/null
 wait_healthy "$AUTHZ_NAME"
+# The rendered config leaves max_file_store unset (the compose default), so the
+# limit must come from the 3 GiB store, not from the host's disk.
+small=2415919104 # 75% of 3 GiB, as nats-server derives it
+max=$(js_max_storage "$AUTHZ_NAME")
+if [ -z "$max" ] || [ "$max" -gt "$small" ]; then
+  echo "compose broker: JetStream file-store limit '$max' is not derived from its 3 GiB store (at most $small)" >&2
+  exit 1
+fi
+echo "compose broker: JetStream file-store limit $max bytes (75% of a 3 GiB store)"
 
 export NEXUS_TEST_NATS_AUTHZ_DIR="$KEYS"
 export NEXUS_TEST_NATS_AUTHZ_TENANTS="$AUTHZ_TENANTS"
@@ -208,6 +235,13 @@ docker run -d --name "$HELM_NAME" -p "127.0.0.1:${HELM_PORT}:4222" \
   -v "$WORK/helm:/etc/nats:ro" -v "$CERTS/nats:/etc/nats-tls:ro" --tmpfs /var/run/nats \
   "$NATS_IMAGE" -c /etc/nats/nats.conf >/dev/null
 wait_healthy "$HELM_NAME"
+want=$(sed -n 's/^ *max_file_store: *\([0-9][0-9]*\) *$/\1/p' "$WORK/helm/nats.conf")
+max=$(js_max_storage "$HELM_NAME")
+if [ -z "$want" ] || [ "$max" != "$want" ]; then
+  echo "helm broker: JetStream file-store limit '$max', but the chart rendered max_file_store '$want'" >&2
+  exit 1
+fi
+echo "helm broker: JetStream file-store limit $max bytes = the chart's max_file_store (80% of nats.storage.size)"
 
 NEXUS_TEST_NATS_AUTHZ_VARIANT=helm-tls NEXUS_TEST_NATS_AUTHZ_URL="tls://127.0.0.1:${HELM_PORT}" \
   NEXUS_TEST_NATS_AUTHZ_CA="$CERTS/ca-bundle.pem" \

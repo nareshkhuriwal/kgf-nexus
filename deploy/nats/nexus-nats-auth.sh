@@ -24,6 +24,12 @@
 #                        subscribe nexus.run.> plus its own reply inbox.
 #     agent-<ns>         subscribe nexus.task.dispatch.<ns>.> ONLY. Publish:
 #                        nothing at all. One identity per tenant namespace.
+#     admin (optional)   an operator's stream maintenance (resize, purge,
+#                        delete: docs/OPERATIONS.md §11.10): the JetStream
+#                        API for the three streams' configuration and state,
+#                        and its own reply inbox. No application subject, no
+#                        message reads, no consumers. Created only by
+#                        `init --admin`; its seed never leaves the key dir.
 #   account SYS (system account)
 #     monitor            read-only $SYS server/account queries, for
 #                        `nats server report`, nats-surveyor and the like.
@@ -41,17 +47,37 @@
 #
 # .dev-nats/ is gitignored. Nothing this tool writes is ever committed.
 #
+# ─── JetStream storage (docs/OPERATIONS.md §11.10) ─────────────────────────
+#
+# nats-server reserves each file stream's whole max bytes against its file-store
+# limit when the stream is created, and refuses a stream that does not fit.
+# render leaves that limit (max_file_store) UNSET by default, so nats-server
+# allows up to 75% of the space free on /data when it starts. That is the right
+# check where this tool's config runs: /data is a Docker volume or a container
+# filesystem on the host's shared disk, whose size this tool cannot know. A
+# fixed number larger than the free space would let streams reserve space the
+# disk does not have, and nats-server disables JetStream when the disk fills;
+# the derived limit instead refuses the stream up front, with an error the
+# event-service reports. A broker with a dedicated volume of known size can opt
+# in with --max-file-store SIZE (or NEXUS_NATS_MAX_FILE_STORE), as the Helm
+# chart does with 80% of its volume. The event-service's default streams
+# (2 x 1 GiB) need about 2.7 GiB free on /data without it.
+#
 # Commands (run with no arguments for usage):
-#   init [--tenant NS]...     keys for event-service, monitor and agent-<NS> if missing
+#   init [--tenant NS]... [--admin]
+#                             keys for event-service, monitor and agent-<NS> if
+#                             missing; --admin also the optional admin identity
 #   add-tenant NS             a key for tenant NS's agents
 #   rotate ROLE               new key for ROLE; the old public key stays accepted
 #   retire ROLE               stop accepting ROLE's previous key
-#   render [--tls DIR [--tls-ca FILE]] [--verify-clients]
+#   render [--tls DIR [--tls-ca FILE]] [--verify-clients] [--max-file-store SIZE]
 #                             write server/auth.conf and server/nats.conf
+#                             (SIZE: bytes or an integer with Ki, Mi, Gi, Ti;
+#                             default $NEXUS_NATS_MAX_FILE_STORE, else unset)
 #   install DEST [--owner U:G] [--agent-tenant NS]
 #                             copy each role's seed into DEST/<role>/ (a mounted
 #                             volume per role) and the server config into DEST/server/
-#   compose-init [--tenant NS] [--tls DIR [--tls-ca FILE]] [--verify-clients] [--owner U:G]
+#   compose-init [--tenant NS] [--tls DIR [--tls-ca FILE]] [--verify-clients] [--max-file-store SIZE] [--owner U:G]
 #                             init + render + install /out (the compose nats-init step)
 #   helm-values               print the public keys as Helm values (nats.auth.*)
 #   list                      print every role and its public key(s)
@@ -69,6 +95,8 @@ SUBJ_DISPATCH="nexus.task.dispatch"
 SUBJ_USAGE="nexus.usage.>"
 STREAMS="NEXUS_RUNS NEXUS_DISPATCH NEXUS_USAGE"
 EVENT_SERVICE_INBOX="_INBOX.nexus-event-service.>"
+# The admin's reply prefix: run the nats CLI with --inbox-prefix _INBOX.nexus-admin.
+ADMIN_INBOX="_INBOX.nexus-admin.>"
 
 die() { echo "nexus-nats-auth: $*" >&2; exit 1; }
 say() { echo "nexus-nats-auth: $*" >&2; }
@@ -86,9 +114,9 @@ check_ns() {
 
 check_role() {
 	case "$1" in
-	event-service | monitor) ;;
+	event-service | monitor | admin) ;;
 	agent-*) check_ns "${1#agent-}" ;;
-	*) die "unknown role '$1' (event-service, monitor, agent-<namespace>)" ;;
+	*) die "unknown role '$1' (event-service, monitor, admin, agent-<namespace>)" ;;
 	esac
 }
 
@@ -145,6 +173,26 @@ tenants() {
 
 q() { printf '"%s"' "$1"; }
 
+# to_bytes SIZE: plain bytes or an integer with Ki, Mi, Gi or Ti -- the grammar
+# the event-service reads its stream sizes in -- printed as bytes. Decimal units
+# are refused: nats-server reads "1G" and "1GB" as 2^30, Kubernetes "1G" as 10^9.
+to_bytes() {
+	case "$1" in
+	*Ki) n=${1%Ki} m=1024 ;;
+	*Mi) n=${1%Mi} m=1048576 ;;
+	*Gi) n=${1%Gi} m=1073741824 ;;
+	*Ti) n=${1%Ti} m=1099511627776 ;;
+	*) n=$1 m=1 ;;
+	esac
+	case "$n" in '' | *[!0-9]*) return 1 ;; esac
+	# Leading zeros off: shell arithmetic reads 010 as octal.
+	n=$(printf '%s' "$n" | sed 's/^0*\([0-9]\)/\1/')
+	[ "${#n}" -le 18 ] || return 1
+	b=$((n * m))
+	[ "$b" -gt 0 ] && [ $((b / m)) = "$n" ] || return 1
+	echo "$b"
+}
+
 render_auth() {
 	[ -s "$DIR/event-service/user.pub" ] || die "no event-service key in $DIR; run init first"
 	[ -s "$DIR/monitor/user.pub" ] || die "no monitor key in $DIR; run init first"
@@ -171,6 +219,22 @@ render_auth() {
 			echo "          subscribe: { allow: [$(q "$SUBJ_RUNS"), $(q "$EVENT_SERVICE_INBOX")] }"
 			echo "        } }"
 		done
+		if [ -s "$DIR/admin/user.pub" ]; then
+			for k in $(keys admin); do
+				echo "      # admin: stream maintenance only (resize, purge, delete); no messages"
+				echo "      { nkey: $k"
+				echo "        permissions: {"
+				printf '          publish: { allow: [%s, %s, %s' "$(q '$JS.API.INFO')" "$(q '$JS.API.STREAM.NAMES')" "$(q '$JS.API.STREAM.LIST')"
+				for s in $STREAMS; do
+					for op in INFO UPDATE PURGE DELETE; do
+						printf ', %s' "$(q "\$JS.API.STREAM.$op.$s")"
+					done
+				done
+				echo "] }"
+				echo "          subscribe: { allow: [$(q "$ADMIN_INBOX")] }"
+				echo "        } }"
+			done
+		fi
 		for ns in $(tenants); do
 			for k in $(keys "agent-$ns"); do
 				echo "      # agents of tenant $ns: dispatch hints for $ns only, publish nothing"
@@ -217,6 +281,7 @@ render_server() {
 	tls_dir="$1"
 	verify="$2"
 	tls_ca="${3:-$tls_dir/ca.crt}"
+	max_file_store="${4:-}"
 	out="$DIR/server/nats.conf.tmp.$$"
 	{
 		echo "# GENERATED by deploy/nats/nexus-nats-auth.sh render."
@@ -229,6 +294,13 @@ render_server() {
 		echo "max_payload: 1MB"
 		echo "jetstream {"
 		echo "  store_dir: \"/data\""
+		if [ -n "$max_file_store" ]; then
+			echo "  # --max-file-store: the most JetStream reserves for streams, in bytes."
+			echo "  max_file_store: $max_file_store"
+		else
+			echo "  # max_file_store unset: 75% of the space free on /data at start"
+			echo "  # (render --max-file-store sets it; docs/OPERATIONS.md §11.10)."
+		fi
 		echo "}"
 		if [ -n "$tls_dir" ]; then
 			echo "tls {"
@@ -247,9 +319,11 @@ render_server() {
 
 cmd_init() {
 	ts=""
+	admin=0
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--tenant) [ $# -ge 2 ] || die "--tenant needs a namespace"; ts="$ts $2"; shift 2 ;;
+		--admin) admin=1; shift ;;
 		*) die "init: unknown argument $1" ;;
 		esac
 	done
@@ -258,6 +332,9 @@ cmd_init() {
 	chmod 700 "$DIR"
 	ensure_role event-service
 	ensure_role monitor
+	if [ "$admin" = 1 ]; then
+		ensure_role admin
+	fi
 	for ns in $ts; do
 		check_ns "$ns"
 		ensure_role "agent-$ns"
@@ -268,16 +345,24 @@ cmd_render() {
 	tls_dir=""
 	tls_ca=""
 	verify=0
+	mfs="${NEXUS_NATS_MAX_FILE_STORE:-}"
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--tls) [ $# -ge 2 ] || die "--tls needs a directory"; tls_dir="$2"; shift 2 ;;
 		--tls-ca) [ $# -ge 2 ] || die "--tls-ca needs a file"; tls_ca="$2"; shift 2 ;;
 		--verify-clients) verify=1; shift ;;
+		--max-file-store) [ $# -ge 2 ] || die "--max-file-store needs a size"; mfs="$2"; shift 2 ;;
 		*) die "render: unknown argument $1" ;;
 		esac
 	done
+	mfs_bytes=""
+	if [ -n "$mfs" ]; then
+		mfs_bytes=$(to_bytes "$mfs") ||
+			die "max file store '$mfs' is not a size: use bytes or an integer with Ki, Mi, Gi or Ti (e.g. 4Gi)"
+		[ "$mfs_bytes" -ge 67108864 ] || die "max file store '$mfs' is below 64Mi (a missing unit? 4096 is bytes; write 4Gi)"
+	fi
 	render_auth
-	render_server "$tls_dir" "$verify" "$tls_ca"
+	render_server "$tls_dir" "$verify" "$tls_ca" "$mfs_bytes"
 	say "rendered $DIR/server/nats.conf and auth.conf (reload a running broker: nats-server --signal reload, or SIGHUP)"
 }
 
@@ -361,6 +446,7 @@ cmd_compose_init() {
 		--tls) rargs="$rargs --tls $2"; shift 2 ;;
 		--tls-ca) rargs="$rargs --tls-ca $2"; shift 2 ;;
 		--verify-clients) rargs="$rargs --verify-clients"; shift ;;
+		--max-file-store) rargs="$rargs --max-file-store $2"; shift 2 ;;
 		--owner) owner="$2"; shift 2 ;;
 		*) die "compose-init: unknown argument $1" ;;
 		esac
@@ -375,6 +461,9 @@ cmd_compose_init() {
 cmd_helm_values() {
 	printf 'nats:\n  auth:\n    eventService:\n      publicKeys: [%s]\n' "$(keys event-service | paste -sd, -)"
 	printf '    monitor:\n      publicKeys: [%s]\n' "$(keys monitor | paste -sd, -)"
+	if [ -s "$DIR/admin/user.pub" ]; then
+		printf '    admin:\n      publicKeys: [%s]\n' "$(keys admin | paste -sd, -)"
+	fi
 	printf '    tenants:\n'
 	for ns in $(tenants); do
 		printf '      - namespace: %s\n        publicKeys: [%s]\n' "$ns" "$(keys "agent-$ns" | paste -sd, -)"

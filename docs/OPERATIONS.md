@@ -1329,8 +1329,11 @@ latency and live-update freshness, never correctness.
   the background and retry forever.
 - Streams are created by the relay if missing and **never modified** if present,
   so retention retuned with the `nats` CLI sticks:
-  `NEXUS_RUNS` (`nexus.run.>`, file, 7 days, 4 GiB, 10-minute duplicate window)
-  and `NEXUS_DISPATCH` (`nexus.task.dispatch.>`, memory, 2 minutes).
+  `NEXUS_RUNS` (`nexus.run.>`, file, 7 days, 1 GiB by default, 10-minute
+  duplicate window), `NEXUS_DISPATCH` (`nexus.task.dispatch.>`, memory,
+  2 minutes) and `NEXUS_USAGE` (`nexus.usage.>`, file, 30 days, 1 GiB by
+  default; §21.5). The broker reserves each file stream's full size when it is
+  created, so the sizes must fit its volume: §11.10.
 - **Every deployment path provisions authorization.** Compose generates
   identities in its `nats-init` step, the Helm chart refuses to render a broker
   without them, and the services refuse to start without credentials when
@@ -1408,7 +1411,10 @@ one running the Helm chart's rendered ConfigMap with TLS and client
 verification. Each role is exercised through the production code (`bus.Connect`,
 the real relay, `SubscribeDispatchHints`, the SSE waker), and every denial has a
 positive control. Needs Docker and `helm`. `AUTHZ=0` skips the authorization
-half and says so.
+half and says so. The compose broker's store is a deliberately small 3 GiB
+tmpfs, so its JetStream limit is the same on every machine and the suite's
+stream creation proves the default stream sizes fit a small volume; the Helm
+broker must report exactly the `max_file_store` the chart rendered (§11.10).
 
 ### 11.7 Authorization: identities and permissions
 
@@ -1431,18 +1437,43 @@ because the password is sent in `CONNECT`.
 
 | Identity | Account | Publish | Subscribe |
 |---|---|---|---|
-| `event-service` | NEXUS | `nexus.run.>`, `nexus.task.dispatch.>`, `$JS.API.STREAM.INFO.NEXUS_RUNS/NEXUS_DISPATCH`, `$JS.API.STREAM.CREATE.NEXUS_RUNS/NEXUS_DISPATCH` | `nexus.run.>` (SSE waker), `_INBOX.nexus-event-service.>` (its own JetStream acks) |
+| `event-service` | NEXUS | `nexus.run.>`, `nexus.task.dispatch.>`, `nexus.usage.>`, `$JS.API.STREAM.INFO.NEXUS_RUNS/NEXUS_DISPATCH/NEXUS_USAGE`, `$JS.API.STREAM.CREATE.NEXUS_RUNS/NEXUS_DISPATCH/NEXUS_USAGE` | `nexus.run.>` (SSE waker), `_INBOX.nexus-event-service.>` (its own JetStream acks) |
 | `agent-<ns>` (one per tenant) | NEXUS | **nothing** (`deny >`) | `nexus.task.dispatch.<ns>.>` only |
+| `admin` (optional) | NEXUS | `$JS.API.INFO`, `$JS.API.STREAM.NAMES`, `$JS.API.STREAM.LIST`, `$JS.API.STREAM.INFO/UPDATE/PURGE/DELETE.<each of the three streams>` | `_INBOX.nexus-admin.>` (its own replies) |
 | `monitor` | SYS (system account) | read-only `$SYS.REQ.SERVER.PING.*` / `$SYS.REQ.SERVER.*.<Z>` / `$SYS.REQ.ACCOUNT.*.<Z>` queries (no RELOAD, KICK or LDM) | `_INBOX.>`, `$SYS.SERVER.>`, `$SYS.ACCOUNT.>` |
 
 There is no anonymous user and no `no_auth_user`, so an unauthenticated
-connection is refused. The event-service can inspect and create its two streams
+connection is refused. The event-service can inspect and create its three streams
 and nothing else: it cannot delete, purge or update them, or create consumers.
 Each client sets a reply-inbox prefix of `_INBOX.<connection name>`, which is
 why the event-service's subscribe grant covers only its own replies. The
 scheduler, dag-engine, workflow-manager, resource-manager and api-gateway have
 no identity at all, because they never connect. They reach the bus only through
 `outbox` rows the event-service relays.
+
+**The admin identity (optional).** It exists only when you create it, for an
+operator's stream maintenance: resizing a stream (§11.10), purging or deleting
+one. It sees stream configuration and state, never a message, and it can
+neither publish nor subscribe to application subjects, create consumers, create
+streams, nor touch any other stream. Without it, nothing can change a stream
+once the event-service has created it. Its seed is never installed into a
+container or a Secret: use it from the machine that holds the key directory,
+with the `nats` CLI's `--inbox-prefix _INBOX.nexus-admin` (the only reply
+subject it may receive on).
+
+```sh
+# compose: the seed stays in the nats-auth-store volume
+docker compose -f deploy/docker-compose.yml run --rm nats-init init --admin
+docker compose -f deploy/docker-compose.yml run --rm nats-init   # render + install
+docker compose -f deploy/docker-compose.yml kill -s HUP nats
+# Kubernetes (admin machine that holds the key directory)
+NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh init --admin
+NEXUS_NATS_DIR=/secure/nexus-nats deploy/nats/nexus-nats-auth.sh helm-values  # adds nats.auth.admin; helm upgrade
+```
+
+`rotate admin` and `retire admin` work as for any role (§11.8). To withdraw the
+identity, remove its public keys (`nats.auth.admin.publicKeys: []`, or delete
+`admin/` from the key directory and re-render) and reload the broker.
 
 **Tenants.** An agent identity is per Nexus namespace. A tenant's agents share
 it, or you list several public keys for one tenant to give each agent (or edge
@@ -1629,6 +1660,158 @@ certificate or CA bundle is used at the next reconnect without a restart.
   Certificate for `nats`, `nats.<ns>.svc`). With `verifyClients` (the default),
   `clientSecrets.eventService` and `.agent` must also be set. Otherwise
   `caSecret` supplies `ca.crt`. The reloader picks renewed certificates up.
+
+### 11.10 JetStream storage: stream sizes and the broker's file store
+
+**How the broker counts space.** nats-server reserves a file stream's whole
+`max_bytes` against its file-store limit, `max_file_store`, when the stream is
+*created*, not as messages arrive, and refuses a stream that does not fit
+(`err_code=10047 description=insufficient storage resources available`).
+Unset, the limit is 75% of the space free on the store volume when the server
+starts (plus 75% of what its recovered streams occupy, so it is stable across
+restarts). Existing streams are recovered on every start whatever the limit:
+the limit applies to creating a stream and to raising its size, and once the
+streams already reserve more than the limit, nats-server refuses every stream
+update, including one that shrinks a stream. Publishes are refused only when
+the bytes actually stored reach the limit. All of this was verified against
+nats-server 2.14.7 (F162).
+
+Until F162 the two file streams were 4 GiB each, which needed about 10.7 GiB
+free. On the chart's default 5Gi volume the event-service could not create
+`NEXUS_RUNS` and the bus never came up; on a CI runner only the first stream
+fit.
+
+**The sizes.** The event-service creates the streams when they are missing:
+
+| Stream | Subjects | Kept | Size | Default |
+|---|---|---|---|---|
+| `NEXUS_RUNS` | `nexus.run.>` | 7 days | `NEXUS_NATS_RUNS_MAX_BYTES` | 1Gi |
+| `NEXUS_USAGE` | `nexus.usage.>` | 30 days | `NEXUS_NATS_USAGE_MAX_BYTES` | 1Gi |
+| `NEXUS_DISPATCH` | `nexus.task.dispatch.>` | 2 minutes | memory, 100,000 messages | |
+
+A size is bytes or an integer with `Ki`, `Mi`, `Gi` or `Ti`, at least `64Mi`.
+Decimal units (`G`, `GB`) and fractions are refused, because Kubernetes reads
+`1G` as 10^9 and nats-server reads it as 2^30. An invalid value stops the
+event-service at startup, even with `NEXUS_NATS_URL` empty. At its size a
+stream drops its **oldest** messages. Both are projections of Postgres
+(ADR-0003): a full `NEXUS_RUNS` shortens how far back a subscriber can replay,
+and a billing consumer that falls further behind than `NEXUS_USAGE` holds
+re-reads the ledger (§21.5). A run event or usage message is typically well
+under 1 KiB, so 1 GiB holds on the order of a million messages. Size up when a
+deployment produces more than that within the stream's age.
+
+**The broker's limit.**
+
+- **Helm** renders `max_file_store` as 80% of `nats.storage.size`, in bytes
+  (5Gi: 4 GiB), and **refuses to render** when `nats.streams.runsMaxBytes +
+  nats.streams.usageMaxBytes` exceed 70% of `nats.storage.size`. The two values
+  become the event-service's variables, in bytes.
+  - *Explicit, not 75% of free space:* the derived limit changes with what is
+    free at each start and with the storage class's filesystem overhead, so a
+    render-time check could not know what the broker will allow. A hostPath
+    provisioner that ignores the requested size (Docker Desktop, kind) would
+    let JetStream reserve the node's disk.
+  - *80%:* the other 20% is what `max_bytes` does not count: filesystem
+    metadata and journal, the file store's indexes and the partly expired
+    oldest block of each stream, consumer state. Streams at their sizes must
+    never fill the volume, because nats-server answers a full disk by disabling
+    JetStream.
+  - *70% for the two streams* (7/8 of `max_file_store`): the rest stays
+    reservable, so a stream can be grown with `nats stream edit`, or a stream
+    added, without resizing the volume first.
+  - nats-server cannot apply a new `max_file_store` on reload when it was unset
+    before or when it shrinks, and a refused reload applies nothing else in it.
+    The limit is therefore also an annotation on the broker's pod template
+    (`nexus.khuriwalgroup.com/nats-max-file-store`), so a change rolls the pod.
+- **Compose and the Portainer host** leave `max_file_store` unset: 75% of the
+  space free on the `nats-data` volume, the right check on a shared disk whose
+  size the renderer cannot know (a fixed number larger than the free space
+  would let streams reserve space the disk does not have). The default streams
+  need about 2.7 GiB free. For a dedicated volume of known size, set
+  `NEXUS_NATS_MAX_FILE_STORE` (read by nats-init; `nexus-nats-auth.sh render
+  --max-file-store SIZE` elsewhere), re-render (`docker compose run --rm
+  nats-init`) and `docker compose restart nats`. A SIGHUP cannot apply it.
+- **A broker you run yourself:** give it a `max_file_store` at least the sum of
+  the stream sizes with headroom, or enough free space that 75% of it is.
+
+What the broker allows and has reserved (`config.max_storage`,
+`reserved_storage`):
+
+```sh
+kubectl -n <ns> exec nats-0 -c nats -- wget -q -O- http://127.0.0.1:8222/jsz
+docker compose -f deploy/docker-compose.yml exec nats wget -q -O- http://127.0.0.1:8222/jsz
+```
+
+**When the broker refuses a stream,** the event-service logs `outbox publish
+failed` at ERROR with `create stream NEXUS_RUNS with max bytes 1Gi: the broker
+cannot reserve the stream's max bytes (... err_code=10047 ...)`, naming the
+variable to change. No fact is lost, since Postgres holds them all: the rows
+wait in `outbox` (unpublished rows older than `NEXUS_OUTBOX_MAX_AGE` are
+dropped and counted, §11.4), `nexus_outbox_oldest_unpublished_seconds` grows
+(§11.3), and the relay retries on its own. Lower the size or give the broker
+more storage, and the next retry creates the stream.
+
+**Upgrading from a release with 4 GiB streams.** The event-service never
+changes an existing stream. On each connect it logs `existing jetstream stream
+is not the configured size; it is left as it is` at WARN, with the stream, both
+sizes and a `resize_with` command.
+
+- Where the old streams were never created (the default 5Gi volume), nothing is
+  needed: the event-service creates them at the new sizes.
+- Where they exist at 4 GiB, they keep working. Resize them (below), or set the
+  variables to their current size if the volume has room for that.
+- The Helm upgrade rolls the broker once, because of the new `max_file_store`
+  annotation: a short bus outage (§11.4).
+- A volume larger than `nats.storage.size` says (a hostPath provisioner such as
+  Docker Desktop's, or a disk rounded up to a provider minimum) may hold 4 GiB
+  streams that together reserve more than the new `max_file_store`. They are
+  recovered and keep accepting messages until the stored bytes reach the
+  limit, but nats-server refuses any `stream edit` while it is over-committed.
+  With the admin identity (below), delete `NEXUS_RUNS` (`nats stream rm
+  NEXUS_RUNS -f`) and shrink `NEXUS_USAGE`; the event-service recreates
+  `NEXUS_RUNS` at its configured size on its next retry.
+
+**Resizing an existing stream** needs an identity allowed to update streams:
+the optional `admin` identity (§11.7). Use the size in bytes, which the `nats`
+CLI and nats-server read the same way, and the admin's own reply prefix:
+
+```sh
+# compose (C="docker compose -f deploy/docker-compose.yml")
+$C run --rm nats-init init --admin && $C run --rm nats-init && $C kill -s HUP nats   # once
+$C run --rm --entrypoint nats nats-init --server nats://nats:4222 \
+  --nkey /store/admin/user.nk --inbox-prefix _INBOX.nexus-admin \
+  stream edit NEXUS_RUNS --max-bytes=1073741824 -f
+# Kubernetes: the admin key from the key directory (§11.7), through a port-forward
+kubectl -n <ns> port-forward nats-0 4222:4222 &
+nats --server nats://127.0.0.1:4222 --nkey /secure/nexus-nats/admin/user.nk \
+  --inbox-prefix _INBOX.nexus-admin stream edit NEXUS_RUNS --max-bytes=1073741824 -f
+```
+
+With `nats.tls` on, the broker's certificate names `nats`, not `127.0.0.1`,
+and the `nats` CLI cannot override the name it verifies. Map the name to the
+port-forward for the session (`127.0.0.1 nats` in the admin machine's
+`/etc/hosts`) and use `--server tls://nats:4222 --tlsca ca.crt`, plus
+`--tlscert`/`--tlskey` from a client certificate of the same CA when
+`verifyClients` is on.
+
+Shrinking below what a stream holds discards its oldest messages at once.
+Growing needs room under `max_file_store`. Then set the event-service's
+variable (`nats.streams.*`) to the same size, or it warns on every connect and
+a broker that loses its storage recreates the stream at the variable's size.
+
+**Growing the broker's volume (Helm).** `helm upgrade` cannot change the
+StatefulSet's claim template. With a storage class that allows expansion
+(`allowVolumeExpansion: true`):
+
+```sh
+kubectl -n <ns> patch pvc data-nats-0 -p '{"spec":{"resources":{"requests":{"storage":"10Gi"}}}}'
+kubectl -n <ns> get pvc data-nats-0 -w                    # until CAPACITY is 10Gi
+kubectl -n <ns> delete statefulset nats --cascade=orphan  # the pod and its claim stay
+helm upgrade … --set nats.storage.size=10Gi               # recreates the StatefulSet
+```
+
+The new StatefulSet adopts the running pod and, because `max_file_store`
+changed, replaces it with one that uses the new limit.
 
 ---
 
@@ -3576,7 +3759,7 @@ Two paths, both at-least-once; **deduplicate on `attempt_id`**:
 - **Push.** Each ledger row writes an outbox row (topic `usage_recorded`) in
   the same statement. The event-service relay publishes it to
   `nexus.usage.recorded.<namespace>` in stream `NEXUS_USAGE` (file storage, 30
-  days, 4 GiB). The message carries `ledger_id`, `attempt_id`, tenant,
+  days, 1 GiB by default; §11.10). The message carries `ledger_id`, `attempt_id`, tenant,
   namespace, run, outcome, queue, pool, `ended_at` and the four derived
   quantities. The relay's NATS identity needs publish on `nexus.usage.>` and
   the JetStream INFO/CREATE API for `NEXUS_USAGE`; both renderings

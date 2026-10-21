@@ -273,6 +273,13 @@ services:
     command: ["compose-init", "--tenant", "${NEXUS_AGENT_NAMESPACE:-${NEXUS_NAMESPACE:-default}}"]
     environment:
       NEXUS_NATS_DIR: /store
+      # JetStream's file-store limit for the broker. Empty (the default):
+      # nats-server allows 75% of the space free on the nats-data volume, the
+      # right check on a shared disk of unknown size. Set it (bytes or
+      # Ki/Mi/Gi/Ti) only for a dedicated volume of known size, then
+      # `docker compose restart nats`: nats-server cannot apply it on reload
+      # (docs/OPERATIONS.md §11.10).
+      NEXUS_NATS_MAX_FILE_STORE: ${NEXUS_NATS_MAX_FILE_STORE:-}
     volumes:
       # render_compose.py inlines this script for the Portainer host, which has
       # no source tree to bind-mount it from.
@@ -659,6 +666,13 @@ services:
       # Outbox relay tuning (services/event-service/relay). Defaults shown.
       NEXUS_OUTBOX_RETENTION: 1h
       NEXUS_OUTBOX_MAX_AGE: 24h
+      # Sizes of the JetStream streams this service creates when they are
+      # missing (bytes or Ki/Mi/Gi/Ti; empty = 1Gi each). nats-server reserves
+      # both in full at creation, so 2 x 1Gi needs about 2.7 GiB free on the
+      # nats-data volume. An existing stream is never resized
+      # (docs/OPERATIONS.md §11.10).
+      NEXUS_NATS_RUNS_MAX_BYTES: ${NEXUS_NATS_RUNS_MAX_BYTES:-}
+      NEXUS_NATS_USAGE_MAX_BYTES: ${NEXUS_NATS_USAGE_MAX_BYTES:-}
       # run_events is append-only (invariant 8); this service is its sole writer.
       EVENT_SSE_KEEPALIVE_MS: "15000"
     # /metrics on the health listener, published on LOOPBACK only (docs/OPERATIONS.md, "Metrics").

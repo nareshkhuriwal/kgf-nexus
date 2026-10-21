@@ -450,6 +450,13 @@ nats:
     # SYS-account identity for `nats server report`, nats-surveyor and the like.
     monitor:
       publicKeys: []
+    # OPTIONAL operator identity for stream maintenance (resize, purge, delete:
+    # docs/OPERATIONS.md §11.10), from `nexus-nats-auth.sh init --admin`. It
+    # may inspect and change the three streams' configuration and nothing else:
+    # no application subject, no message reads. Empty: no such identity, and
+    # nothing can change a stream once it exists. Keep its seed off the cluster.
+    admin:
+      publicKeys: []
     # One entry per Nexus namespace whose agents may receive dispatch hints;
     # each may subscribe to nexus.task.dispatch.<namespace>.> and nothing
     # else. Several keys per tenant = per-agent identities, or a rotation overlap.
@@ -483,9 +490,28 @@ nats:
   networkPolicy:
     enabled: true
     extraFrom: []
+  # The broker's volume (the StatefulSet's claim). JetStream may reserve at
+  # most 80% of it for streams: max_file_store in the rendered nats.conf, set
+  # explicitly rather than left to nats-server's 75%-of-free-space default
+  # (docs/OPERATIONS.md §11.10). `helm upgrade` cannot change the size of an
+  # existing claim; §11.10 has the procedure for growing it.
   storage:
     size: 5Gi
     storageClass: ""
+  # Sizes of the JetStream streams the event-service creates when they are
+  # missing (its NEXUS_NATS_RUNS_MAX_BYTES / NEXUS_NATS_USAGE_MAX_BYTES):
+  # bytes, or an integer with Ki, Mi, Gi or Ti; at least 64Mi each. At its
+  # size a stream drops its OLDEST messages, and both are projections of
+  # Postgres (ADR-0003). nats-server reserves each stream's full size when it
+  # is created and refuses one that does not fit, so rendering FAILS when the
+  # two together exceed 70% of storage.size. Changing these never resizes an
+  # existing stream (an upgraded install keeps what it has; the event-service
+  # logs the difference): docs/OPERATIONS.md §11.10.
+  streams:
+    # NEXUS_RUNS: run events and state changes, kept up to 7 days.
+    runsMaxBytes: 1Gi
+    # NEXUS_USAGE: usage-ledger rows for billing consumers, kept up to 30 days.
+    usageMaxBytes: 1Gi
   resources:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { memory: 512Mi }

@@ -102,7 +102,19 @@ func main() {
 	} else {
 		log.Info("NEXUS_NATS_URL is empty: event bus disabled; polling only")
 	}
-	rl, err := relay.New(pool, nc, relay.ConfigFromEnv(log), log, relay.NewMetrics(reg))
+	// The sizes of the streams the relay creates. Refused at startup, like a
+	// bad credential: a size the broker cannot reserve, or one the operator
+	// did not mean, would otherwise surface much later as a missing stream.
+	// Checked even with the bus disabled, so enabling it later cannot be the
+	// moment a typo is found.
+	streams, err := bus.StreamLimitsFromEnv()
+	if err != nil {
+		log.Error("invalid NATS stream size", "error", err)
+		os.Exit(1)
+	}
+	rcfg := relay.ConfigFromEnv(log)
+	rcfg.Streams = streams
+	rl, err := relay.New(pool, nc, rcfg, log, relay.NewMetrics(reg))
 	if err != nil {
 		log.Error("could not build outbox relay", "error", err)
 		os.Exit(1)

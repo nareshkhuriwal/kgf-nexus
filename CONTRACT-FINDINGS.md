@@ -5205,3 +5205,82 @@ they no longer offer subprocess (OPERATIONS §20.14 says how to keep it). An
 allow-listed executor that becomes unusable between sessions stops the agent
 at its next registration rather than waiting for it. Specs stored before the
 upgrade keep their executor exactly as authored.
+
+### F162. The event bus never came up on the chart's default NATS volume: two 4 GiB streams did not fit — FIXED
+
+**Severity:** high (on AKS with the chart's defaults the event-service could
+not create `NEXUS_RUNS`, so no run event, dispatch hint or usage record ever
+reached the bus; the platform ran on polling alone and reported the broker
+unavailable. CI's `nats integration tests` job failed the same way).
+
+nats-server reserves a file stream's whole `max_bytes` against its file-store
+limit when the stream is *created*, and refuses one that does not fit
+(`err_code=10047 insufficient storage resources available`). With
+`max_file_store` unset, as every Nexus rendering left it, the limit is 75% of
+the space free on the store volume when the server starts. `bus.StreamConfigs`
+hard-coded `NEXUS_RUNS` and `NEXUS_USAGE` at 4 GiB each, so the pair needed
+about 10.7 GiB free. The chart's default 5Gi volume allows about 3.6 GiB, less
+than the first stream, and a GitHub runner's container filesystem held the
+first but not the second
+(`create stream NEXUS_USAGE: ... err_code=10047`). Docker Desktop masked it:
+its hostPath volumes see the whole node disk (a 270 GB limit here). Reproduced
+against nats 2.14.7 on a 3 GiB tmpfs store (`NEXUS_RUNS` refused) and a 6 GiB
+one (`NEXUS_USAGE` refused). Also verified there: recovery ignores the limit,
+an over-committed broker refuses every stream update including a shrink, and
+a reload cannot switch `max_file_store` from unset to set or lower it (a
+refused reload applies nothing else in it).
+
+**Fix.**
+- The event-service reads `NEXUS_NATS_RUNS_MAX_BYTES` and
+  `NEXUS_NATS_USAGE_MAX_BYTES` (bytes or `Ki`/`Mi`/`Gi`/`Ti`, at least 64Mi;
+  decimal units and fractions refused because Kubernetes and nats-server read
+  them differently) and refuses to start on a bad value. The defaults are
+  1 GiB each: 40% of the default 5Gi volume, about 2.7 GiB free where the
+  broker derives its limit, on the order of a million messages per stream, and
+  both streams are projections of Postgres that drop their oldest messages.
+- `EnsureStreams` still never changes an existing stream (an upgraded install
+  keeps its 4 GiB streams). It reports a size that differs from the
+  configuration, which the relay logs once per connect with the `nats stream
+  edit` command, attempts every missing stream, and wraps a storage refusal in
+  `bus.ErrInsufficientStorage` naming the stream, its size and the variable.
+  The relay logs that as the misconfiguration it is (ERROR), not as an
+  unavailable broker, and keeps retrying, so it recovers once the size or the
+  storage is fixed.
+- Chart: `nats.streams.runsMaxBytes`/`usageMaxBytes` (schema-checked) become
+  the event-service's variables, in bytes. `nats.conf` sets `max_file_store` to
+  80% of `nats.storage.size` explicitly, so the limit no longer depends on free
+  space at start, filesystem overhead or a provisioner that ignores the
+  requested size; rendering fails when the two streams exceed 70% of the
+  volume. The limit is also a pod-template annotation, so a change rolls the
+  broker instead of failing its reload. `environments/dev` (1Gi volume) uses
+  256Mi streams.
+- Compose and the Portainer host keep the derived limit on purpose (a shared
+  disk of unknown size, where a fixed number could over-commit it);
+  `NEXUS_NATS_MAX_FILE_STORE` / `nexus-nats-auth.sh render --max-file-store`
+  set one for a dedicated volume.
+- Resizing an existing stream needs an identity allowed to update it, and the
+  authorization model had none. Both renderers gain an optional `admin`
+  identity (`init --admin`, `nats.auth.admin.publicKeys`) limited to stream
+  maintenance on the three streams: inspect, update, purge, delete; no
+  application subject, no message reads, no consumers.
+- OPERATIONS §11.10 (new) covers the semantics, sizing, the refusal, the
+  upgrade (including over-commit on a hostPath volume), resizing a stream and
+  growing the volume; §11.1, §11.6, §11.7 and §21.5 updated.
+
+**Tests.** `internal/bus/limits_test.go` (parsing, env, validation,
+`StreamConfigs`, the defaults against a 5Gi chart volume and a 3 GiB store,
+`EnsureStreams` against a fake JetStream: creation sizes, drift without
+update, every refusal reported, races and lookup failures); the relay's
+`TestNewTakesValidStreamSizesOnly`; `validate.sh` refusals and render checks.
+`make test-nats` now runs the compose-rendered authorization broker on a
+3 GiB tmpfs, so stream creation proves the default sizes fit a small volume
+on every machine (with the old 4 GiB defaults the same two tests fail again,
+deterministically), checks the Helm broker reports exactly the rendered
+`max_file_store`, and adds `TestNATSAuthzAdminMaintainsStreamsOnly`.
+
+**Remaining.** An install whose 4 GiB streams exist keeps them until an
+operator resizes them (the event-service warns on every connect). On a
+hostPath-style volume the explicit limit can leave those streams
+over-committed, which needs the delete-then-shrink step in §11.10. The
+in-chart broker is a single replica; sizing for a clustered (R3) broker,
+where each replica reserves its share, is not modelled by the guard.

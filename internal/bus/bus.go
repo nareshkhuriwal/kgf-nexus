@@ -314,7 +314,8 @@ const (
 // they must tolerate anyway (dedupe on run_id + seq).
 const RunsDuplicateWindow = 10 * time.Minute
 
-// StreamConfigs are the streams the relay publishes into.
+// StreamConfigs are the streams the relay publishes into, sized by limits (a
+// zero field takes its default; see StreamLimits).
 //
 // NEXUS_RUNS is the durable, replayable projection of run history for UI
 // clients and external subscribers (ADR-0003 proposes 7 days). NEXUS_DISPATCH
@@ -322,7 +323,13 @@ const RunsDuplicateWindow = 10 * time.Minute
 // worthless a minute later, so it lives in memory with a short MaxAge. Workers
 // receive hints through plain core subscriptions on the same subjects, which a
 // stream does not interfere with.
-func StreamConfigs() []jetstream.StreamConfig {
+//
+// Both file streams are bounded by bytes as well as age, so a runaway producer
+// fills the stream, not the disk; at the bound the OLDEST messages go
+// (DiscardOld). nats-server reserves each bound in full at creation (F162), so
+// the bounds must fit the broker's file store -- see StreamLimits.
+func StreamConfigs(limits StreamLimits) []jetstream.StreamConfig {
+	limits = limits.WithDefaults()
 	return []jetstream.StreamConfig{
 		{
 			Name:        StreamRuns,
@@ -332,9 +339,8 @@ func StreamConfigs() []jetstream.StreamConfig {
 			Retention:   jetstream.LimitsPolicy,
 			Discard:     jetstream.DiscardOld,
 			MaxAge:      7 * 24 * time.Hour,
-			// Bounded so a runaway producer fills the stream, not the disk.
-			MaxBytes:   4 << 30,
-			Duplicates: RunsDuplicateWindow,
+			MaxBytes:    limits.RunsMaxBytes,
+			Duplicates:  RunsDuplicateWindow,
 		},
 		{
 			Name:        StreamDispatch,
@@ -359,31 +365,115 @@ func StreamConfigs() []jetstream.StreamConfig {
 			Retention:   jetstream.LimitsPolicy,
 			Discard:     jetstream.DiscardOld,
 			MaxAge:      30 * 24 * time.Hour,
-			MaxBytes:    4 << 30,
+			MaxBytes:    limits.UsageMaxBytes,
 			Duplicates:  RunsDuplicateWindow,
 		},
 	}
 }
 
+// sizeEnv names the variable that sizes a stream ("" for one with no byte bound).
+func sizeEnv(stream string) string {
+	switch stream {
+	case StreamRuns:
+		return EnvRunsMaxBytes
+	case StreamUsage:
+		return EnvUsageMaxBytes
+	}
+	return ""
+}
+
+// StreamReport is what EnsureStreams found and did.
+type StreamReport struct {
+	// Created lists the streams that were missing and are now created with the
+	// configured limits.
+	Created []string
+	// Drift lists existing streams whose MaxBytes is not the configured one.
+	// They are left alone (see EnsureStreams); the caller reports them so an
+	// operator can bring the two into agreement.
+	Drift []StreamDrift
+}
+
+// StreamDrift is an existing stream sized differently from the configuration --
+// typically one created by an older release (4 GiB) or resized by an operator.
+type StreamDrift struct {
+	Stream     string
+	MaxBytes   int64  // what the stream has
+	Configured int64  // what this process would create it with
+	Env        string // the variable that sets Configured
+}
+
+// ResizeCommand is the nats CLI command that applies the configured size to
+// the existing stream. It needs an identity allowed to update the stream (the
+// optional admin identity, docs/OPERATIONS.md §11.7); plain bytes, because the
+// nats CLI and nats-server read unit suffixes differently.
+func (d StreamDrift) ResizeCommand() string {
+	return fmt.Sprintf("nats stream edit %s --max-bytes=%d -f", d.Stream, d.Configured)
+}
+
 // EnsureStreams creates any missing stream and leaves existing ones ALONE.
 //
 // Not CreateOrUpdate: an operator who retuned retention with the nats CLI must
-// not have it silently reverted every time a relay replica starts or reconnects.
-// Called on every (re)connect, because a broker whose storage was lost comes back
-// with no streams at all, and every publish would then fail with "no responders"
-// until something recreated them.
-func EnsureStreams(ctx context.Context, js jetstream.JetStream) error {
-	for _, cfg := range StreamConfigs() {
-		_, err := js.Stream(ctx, cfg.Name)
+// not have it silently reverted every time a relay replica starts or reconnects,
+// and an install upgraded from a release that created 4 GiB streams keeps them
+// until an operator resizes them (docs/OPERATIONS.md §11.10). Such a stream is
+// returned in StreamReport.Drift. Called on every (re)connect, because a broker
+// whose storage was lost comes back with no streams at all, and every publish
+// would then fail with "no responders" until something recreated them.
+//
+// A lookup error stops at once (the broker is unreachable or refusing this
+// identity). A creation error does not: every missing stream is attempted, and
+// the error names each one the broker refused, wrapping ErrInsufficientStorage
+// when the refusal is for lack of file storage.
+func EnsureStreams(ctx context.Context, js jetstream.JetStream, limits StreamLimits) (StreamReport, error) {
+	var rep StreamReport
+	limits = limits.WithDefaults()
+	if err := limits.Validate(); err != nil {
+		return rep, err
+	}
+	var errs []error
+	for _, cfg := range StreamConfigs(limits) {
+		s, err := js.Stream(ctx, cfg.Name)
 		if err == nil {
+			if info := s.CachedInfo(); info != nil && cfg.MaxBytes > 0 && info.Config.MaxBytes != cfg.MaxBytes {
+				rep.Drift = append(rep.Drift, StreamDrift{Stream: cfg.Name, MaxBytes: info.Config.MaxBytes,
+					Configured: cfg.MaxBytes, Env: sizeEnv(cfg.Name)})
+			}
 			continue
 		}
 		if !errors.Is(err, jetstream.ErrStreamNotFound) {
-			return fmt.Errorf("bus: look up stream %s: %w", cfg.Name, err)
+			return rep, fmt.Errorf("bus: look up stream %s: %w", cfg.Name, err)
 		}
-		if _, err := js.CreateStream(ctx, cfg); err != nil && !errors.Is(err, jetstream.ErrStreamNameAlreadyInUse) {
-			return fmt.Errorf("bus: create stream %s: %w", cfg.Name, err)
+		_, err = js.CreateStream(ctx, cfg)
+		switch {
+		case err == nil:
+			rep.Created = append(rep.Created, cfg.Name)
+		case errors.Is(err, jetstream.ErrStreamNameAlreadyInUse):
+			// Another relay replica created it between our lookup and create.
+		case insufficientStorage(err) && cfg.Storage == jetstream.FileStorage:
+			errs = append(errs, fmt.Errorf("bus: create stream %s with max bytes %s: %w (%w): lower %s, or give the broker "+
+				"more file storage (its max_file_store, or 75%% of the free space on its volume when that is unset; "+
+				"docs/OPERATIONS.md §11.10)", cfg.Name, FormatBytes(cfg.MaxBytes), ErrInsufficientStorage, err, sizeEnv(cfg.Name)))
+		default:
+			errs = append(errs, fmt.Errorf("bus: create stream %s: %w", cfg.Name, err))
 		}
 	}
-	return nil
+	return rep, errors.Join(errs...)
+}
+
+// JetStream API error codes for a stream the server cannot reserve resources
+// for: 10047 is JSStorageResourcesExceededErr ("insufficient storage resources
+// available"), what a single server answers; 10023 is JSInsufficientResourcesErr,
+// what a cluster answers when no peer can place the stream. nats.go names
+// neither.
+const (
+	jsErrCodeStorageResourcesExceeded jetstream.ErrorCode = 10047
+	jsErrCodeInsufficientResources    jetstream.ErrorCode = 10023
+)
+
+func insufficientStorage(err error) bool {
+	var apiErr *jetstream.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.ErrorCode == jsErrCodeStorageResourcesExceeded || apiErr.ErrorCode == jsErrCodeInsufficientResources
 }

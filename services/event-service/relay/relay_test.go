@@ -171,3 +171,27 @@ func TestConfigFromEnvIgnoresGarbage(t *testing.T) {
 		t.Errorf("valid retention not applied: %v", c.Retention)
 	}
 }
+
+// TestNewTakesValidStreamSizesOnly: a zero size is the default (a Config built
+// by hand), a size below the minimum is refused before the relay ever creates a
+// stream with it, and ConfigFromEnv leaves the sizes to bus.StreamLimitsFromEnv,
+// which fails startup instead of ignoring a bad value.
+func TestNewTakesValidStreamSizesOnly(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Streams != bus.DefaultStreamLimits() {
+		t.Errorf("DefaultConfig().Streams = %+v", cfg.Streams)
+	}
+	cfg.Streams = bus.StreamLimits{}
+	r, err := New(nil, nil, cfg, nil, nil)
+	if err != nil || r.cfg.Streams != bus.DefaultStreamLimits() {
+		t.Fatalf("zero sizes: %v, %+v; want the defaults", err, r)
+	}
+	cfg.Streams = bus.StreamLimits{RunsMaxBytes: 512}
+	if _, err := New(nil, nil, cfg, nil, nil); err == nil || !strings.Contains(err.Error(), bus.EnvRunsMaxBytes) {
+		t.Errorf("a 512-byte stream was accepted: %v", err)
+	}
+	t.Setenv(bus.EnvRunsMaxBytes, "garbage")
+	if c := ConfigFromEnv(testRelay(t).log); c.Streams != bus.DefaultStreamLimits() {
+		t.Errorf("ConfigFromEnv read %s: %+v", bus.EnvRunsMaxBytes, c.Streams)
+	}
+}
