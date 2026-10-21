@@ -16,6 +16,15 @@
         "number"
       ]
     },
+    "streamBytes": {
+      "type": [
+        "string",
+        "integer"
+      ],
+      "pattern": "^[0-9]+(Ki|Mi|Gi|Ti)?$",
+      "minimum": 67108864,
+      "description": "A JetStream stream size: bytes, or an integer with Ki, Mi, Gi or Ti (what the event-service reads); at least 64Mi. Decimal units and fractions are refused: Kubernetes and nats-server read them differently."
+    },
     "agentKubernetes": {
       "type": "object",
       "additionalProperties": false,
@@ -937,6 +946,33 @@
             },
             "verifyClients": {
               "type": "boolean"
+            }
+          }
+        },
+        "storage": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "size": {
+              "type": [
+                "string",
+                "integer"
+              ],
+              "pattern": "^[0-9]+([.][0-9]+)?(Ki|Mi|Gi|Ti|Pi|k|M|G|T|P)?$",
+              "description": "The broker's PersistentVolumeClaim size; max_file_store is 80% of it."
+            }
+          }
+        },
+        "streams": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Sizes of the streams the event-service creates; together at most 70% of nats.storage.size (a template guard).",
+          "properties": {
+            "runsMaxBytes": {
+              "$ref": "#/definitions/streamBytes"
+            },
+            "usageMaxBytes": {
+              "$ref": "#/definitions/streamBytes"
             }
           }
         },

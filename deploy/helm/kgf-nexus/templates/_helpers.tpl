@@ -289,6 +289,12 @@ broker; the agents dial agentDefaults.nats.url, and none when it is empty.
 - { name: NEXUS_NATS_TLS_KEY_FILE, value: /etc/nexus/nats-tls/tls.key }
 {{- end }}
 {{- end }}
+{{- if eq $role "event-service" }}
+{{- /* The sizes the relay creates its streams with, in bytes; checked against
+       nats.storage.size by nexus.natsStreamsFit (docs/OPERATIONS.md §11.10). */}}
+- { name: NEXUS_NATS_RUNS_MAX_BYTES, value: {{ include "nexus.natsStreamBytes" (list $root "runsMaxBytes") | quote }} }
+- { name: NEXUS_NATS_USAGE_MAX_BYTES, value: {{ include "nexus.natsStreamBytes" (list $root "usageMaxBytes") | quote }} }
+{{- end }}
 {{- end }}
 {{- end -}}
 
@@ -386,6 +392,99 @@ rejected at runtime, with nothing in the manifest pointing at why.
 {{- else if not (or $n.tls.caSecret (and $n.tls.clientSecrets.eventService $n.tls.clientSecrets.agent)) -}}
 {{- fail "nats.tls.enabled needs nats.tls.caSecret (a Secret with ca.crt) so clients can verify the broker" -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+A size as a whole number of bytes (printed as a decimal integer).
+args: value, the value's name (for messages), quantity (bool).
+
+quantity=false is the grammar the event-service reads (internal/bus
+ParseByteSize): an integer, optionally with Ki, Mi, Gi or Ti. quantity=true
+also takes what a PersistentVolumeClaim size is usually written as: a decimal
+fraction and the decimal units k, M, G, T (and Pi, P). A YAML number is taken
+as bytes. Anything else fails rendering with the value's name.
+*/}}
+{{- define "nexus.bytes" -}}
+{{- $v := index . 0 -}}{{- $what := index . 1 -}}{{- $quantity := index . 2 -}}
+{{- $s := ternary (printf "%.0f" $v) (toString $v | trim) (kindIs "float64" $v) -}}
+{{- $re := ternary "^[0-9]+([.][0-9]+)?(Ki|Mi|Gi|Ti|Pi|k|M|G|T|P)?$" "^[0-9]+(Ki|Mi|Gi|Ti)?$" $quantity -}}
+{{- if not (regexMatch $re $s) -}}
+{{- if $quantity -}}
+{{- fail (printf "%s=%q is not a size: use an integer or decimal with Ki, Mi, Gi, Ti or k, M, G, T (e.g. 5Gi)" $what $s) -}}
+{{- else -}}
+{{- fail (printf "%s=%q is not a size: use plain bytes or an integer with Ki, Mi, Gi or Ti (e.g. 512Mi, 1Gi); decimal units (G, GB) and fractions are refused because Kubernetes and nats-server read them differently" $what $s) -}}
+{{- end -}}
+{{- end -}}
+{{- $num := regexReplaceAll "[A-Za-z]+$" $s "" -}}
+{{- $unit := regexReplaceAll "^[0-9.]+" $s "" -}}
+{{- $mult := get (dict "" 1 "Ki" 1024 "Mi" 1048576 "Gi" 1073741824 "Ti" 1099511627776 "Pi" 1125899906842624 "k" 1000 "M" 1000000 "G" 1000000000 "T" 1000000000000 "P" 1000000000000000) $unit -}}
+{{- if contains "." $num -}}
+{{- mulf (float64 $num) $mult | floor | int64 -}}
+{{- else -}}
+{{- /* Leading zeros stripped: sprig's int64 would read "010" as octal. */ -}}
+{{- $n := regexReplaceAll "^0+([0-9])" $num "${1}" | int64 -}}
+{{- $b := mul $n $mult -}}
+{{- if ne (div $b $mult) $n -}}
+{{- fail (printf "%s=%q is too large" $what $s) -}}
+{{- end -}}
+{{- $b -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+NATS JetStream sizing (docs/OPERATIONS.md §11.10, CONTRACT-FINDINGS F162).
+
+nats-server reserves a file stream's whole max bytes against max_file_store
+when the stream is CREATED and refuses one that does not fit (err_code 10047),
+so the sizes the event-service creates its streams with must fit the broker's
+volume. Three numbers, all derived from nats.storage.size:
+
+  max_file_store = 80% of the volume. Rendered explicitly rather than left to
+      nats-server's default (75% of the space free on the volume when the
+      server starts), so the limit is the same on every start and on every
+      storage class, and so a hostPath-style provisioner that ignores the
+      requested size (Docker Desktop, kind) does not let JetStream reserve
+      the node's whole disk. The other 20% is what max bytes does not count:
+      filesystem metadata and journal, the file store's indexes and the
+      partly expired oldest block of each stream, consumer state. Streams at
+      their limits must never fill the volume: nats-server answers a full
+      disk by disabling JetStream.
+  runsMaxBytes + usageMaxBytes <= 70% of the volume (7/8 of max_file_store),
+      checked here. The rest of max_file_store stays reservable, so an
+      operator can grow a stream with `nats stream edit` or add one without
+      resizing the volume first.
+  each stream >= 64Mi, the minimum the event-service accepts.
+*/}}
+{{- define "nexus.natsStreamBytes" -}}
+{{- $root := index . 0 -}}{{- $key := index . 1 -}}
+{{- /* nats.streams can be missing after `helm upgrade --reuse-values` from a
+       chart that had none: take the defaults rather than a nil error. */ -}}
+{{- $v := index ($root.Values.nats.streams | default dict) $key | default "1Gi" -}}
+{{- include "nexus.bytes" (list $v (printf "nats.streams.%s" $key) false) -}}
+{{- end -}}
+
+{{- define "nexus.natsVolumeBytes" -}}
+{{- include "nexus.bytes" (list .Values.nats.storage.size "nats.storage.size" true) -}}
+{{- end -}}
+
+{{- define "nexus.natsMaxFileStore" -}}
+{{- div (mul (include "nexus.natsVolumeBytes" . | int64) 4) 5 -}}
+{{- end -}}
+
+{{- define "nexus.natsStreamsFit" -}}
+{{- $runs := include "nexus.natsStreamBytes" (list . "runsMaxBytes") | int64 -}}
+{{- $usage := include "nexus.natsStreamBytes" (list . "usageMaxBytes") | int64 -}}
+{{- $min := 67108864 -}}
+{{- range $k, $b := dict "runsMaxBytes" $runs "usageMaxBytes" $usage -}}
+{{- if lt $b $min -}}
+{{- fail (printf "nats.streams.%s=%d bytes is below the 64Mi minimum the event-service accepts" $k $b) -}}
+{{- end -}}
+{{- end -}}
+{{- $size := include "nexus.natsVolumeBytes" . | int64 -}}
+{{- $sum := add $runs $usage -}}
+{{- if gt (mul $sum 10) (mul $size 7) -}}
+{{- fail (printf "nats.streams: runsMaxBytes + usageMaxBytes = %d bytes, more than 70%% of nats.storage.size %s (%d bytes). nats-server reserves each stream's full size when the event-service creates it, against max_file_store (80%% of the volume), and refuses a stream that does not fit, which leaves the event bus down: lower nats.streams.* or raise nats.storage.size (docs/OPERATIONS.md §11.10)" $sum (toString .Values.nats.storage.size) $size) -}}
 {{- end -}}
 {{- end -}}
 

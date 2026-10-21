@@ -786,6 +786,62 @@ else
   echo "FAIL: the aks-existing values did not render the account split or the pool placement"; fail=1
 fi
 
+# NATS JetStream sizing (F162, OPERATIONS §11.10): nats-server reserves a file
+# stream's whole size against max_file_store when the event-service creates it
+# and refuses one that does not fit. Streams that cannot fit the volume are
+# refused at render, sizes the event-service would refuse are refused by the
+# schema or a guard, and a render carries max_file_store (80% of the volume,
+# in bytes), the stream sizes on the event-service only, and the limit on the
+# broker's pod template (a change must roll it: nats-server cannot reload it).
+must_fail "NATS streams beyond 70% of the volume" "more than 70% of nats.storage.size" --set nats.streams.runsMaxBytes=3Gi
+must_fail "default NATS streams on a 1Gi volume" "more than 70% of nats.storage.size 1Gi" --set nats.storage.size=1Gi
+must_fail "NATS stream size in a decimal unit"  "/nats/streams/runsMaxBytes"   --set nats.streams.runsMaxBytes=1G
+must_fail "NATS stream size as a fraction"      "/nats/streams/usageMaxBytes"  --set nats.streams.usageMaxBytes=1.5Gi
+must_fail "NATS stream below the 64Mi minimum"  "below the 64Mi minimum"       --set nats.streams.usageMaxBytes=32Mi
+must_fail "NATS stream bytes below the minimum" "/nats/streams/usageMaxBytes"  --set nats.streams.usageMaxBytes=1000
+must_fail "misspelt nats.streams key"           "additional properties 'runsMaxByte' not allowed" --set nats.streams.runsMaxByte=1Gi
+must_fail "NATS volume size not a quantity"     "/nats/storage/size"           --set nats.storage.size=5Gb
+nats_sizing() { # <render> <max_file_store> <runs> <usage>
+  python3 - "$@" <<'PY'
+import sys, yaml
+path, mfs, runs, usage = sys.argv[1:]
+docs = [d for d in yaml.safe_load_all(open(path)) if d]
+conf = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "nats-config")["data"]["nats.conf"]
+assert f"max_file_store: {mfs}\n" in conf, conf
+sts = next(d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "nats")
+ann = sts["spec"]["template"]["metadata"].get("annotations", {})
+assert ann.get("nexus.khuriwalgroup.com/nats-max-file-store") == mfs, ann
+seen = 0
+for d in docs:
+    if d["kind"] != "Deployment":
+        continue
+    for c in d["spec"]["template"]["spec"]["containers"]:
+        env = {e["name"]: e.get("value") for e in c.get("env", [])}
+        sizes = (env.get("NEXUS_NATS_RUNS_MAX_BYTES"), env.get("NEXUS_NATS_USAGE_MAX_BYTES"))
+        if d["metadata"]["name"].endswith("event-service"):
+            assert sizes == (runs, usage), sizes
+            seen += 1
+        else:
+            assert sizes == (None, None), (d["metadata"]["name"], sizes)
+assert seen == 1, seen
+PY
+}
+if "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" >"$tmp/natssize" 2>&1 &&
+   nats_sizing "$tmp/natssize" 4294967296 1073741824 1073741824 &&
+   "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set nats.storage.size=1Gi \
+     --set nats.streams.runsMaxBytes=256Mi --set nats.streams.usageMaxBytes=268435456 >"$tmp/natssize-dev" 2>&1 &&
+   nats_sizing "$tmp/natssize-dev" 858993459 268435456 268435456 &&
+   "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set nats.storage.size=10G >"$tmp/natssize-dec" 2>&1 &&
+   nats_sizing "$tmp/natssize-dec" 8000000000 1073741824 1073741824 &&
+   "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set-json 'nats.streams=null' >"$tmp/natssize-reuse" 2>&1 &&
+   nats_sizing "$tmp/natssize-reuse" 4294967296 1073741824 1073741824 &&
+   "$helm" template nexus "$chart" -f "$chart/ci/minimal-values.yaml" --set nats.enabled=false --set nats.storage.size=1Gi >"$tmp/natssize-off" 2>&1 &&
+   ! grep -qE 'max_file_store|NEXUS_NATS_(RUNS|USAGE)_MAX_BYTES' "$tmp/natssize-off"; then
+  echo "ok   rendered: max_file_store = 80% of the NATS volume on the broker and its pod template; stream sizes on the event-service only (5Gi, 1Gi dev, 10G, reuse-values); nothing without NATS"
+else
+  echo "FAIL: NATS JetStream sizing did not render as expected"; tail -5 "$tmp"/natssize*; fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "validate: FAILED" >&2
   exit 1

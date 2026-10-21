@@ -327,12 +327,18 @@ spec:
   template:
     metadata:
       labels: {{- include "nexus.labels" (list . "nats") | nindent 8 }}
-      {{- if not .Values.nats.configReloader.enabled }}
-      # Without the reloader sidecar a changed ConfigMap (a new tenant, a
-      # rotated key) must roll the pod to take effect.
       annotations:
+        # nats-server refuses to change max_file_store on reload when it was
+        # unset before (every release before F162) or when it shrinks, and a
+        # refused reload applies nothing else in it either. The limit is
+        # therefore part of the pod template: changing it rolls the broker
+        # (a brief outage the bus is built to absorb, ADR-0003).
+        nexus.khuriwalgroup.com/nats-max-file-store: {{ include "nexus.natsMaxFileStore" . | quote }}
+        {{- if not .Values.nats.configReloader.enabled }}
+        # Without the reloader sidecar a changed ConfigMap (a new tenant, a
+        # rotated key) must roll the pod to take effect.
         checksum/nats-config: {{ include (print $.Template.BasePath "/nats-config.yaml") . | sha256sum }}
-      {{- end }}
+        {{- end }}
     spec:
       securityContext:
         runAsNonRoot: true

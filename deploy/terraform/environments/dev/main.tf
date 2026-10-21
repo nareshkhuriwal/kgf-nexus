@@ -120,9 +120,14 @@ module "nexus" {
       }
     }, var.postgres)
 
-    # Laptop-sized volumes; the defaults are sized for a shared cluster.
+    # Laptop-sized volumes; the defaults are sized for a shared cluster. The
+    # JetStream streams must fit 70% of the NATS volume, so they shrink with
+    # it (the chart refuses the 1Gi defaults on a 1Gi volume; OPERATIONS §11.10).
     minio = { storage = { size = "5Gi" } }
-    nats  = { storage = { size = "1Gi" } }
+    nats = {
+      storage = { size = "1Gi" }
+      streams = { runsMaxBytes = "256Mi", usageMaxBytes = "256Mi" }
+    }
 
     # Mail goes to Mailpit, so verification and password-reset emails can be
     # read at http://localhost:<ports.mailpit>.

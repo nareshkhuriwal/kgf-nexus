@@ -21,6 +21,7 @@ No anonymous user exists, so an unauthenticated connection is refused.
 */ -}}
 {{- if and .Values.nats.enabled (include "nexus.controlPlaneEnabled" .) }}
 {{- include "nexus.natsAuthRequired" . }}
+{{- include "nexus.natsStreamsFit" . }}
 {{- $a := .Values.nats.auth -}}
 ---
 apiVersion: v1
@@ -40,6 +41,13 @@ data:
     max_payload: 1MB
     jetstream {
       store_dir: "/data"
+      # 80% of nats.storage.size ({{ .Values.nats.storage.size }}), in bytes:
+      # the most JetStream will ever reserve for streams. Explicit, not
+      # nats-server's default of 75% of the space free at start, so it is the
+      # same on every start and storage class (docs/OPERATIONS.md §11.10).
+      # nats-server cannot apply a change of it on reload; the StatefulSet
+      # rolls the pod instead (nexus.khuriwalgroup.com/nats-max-file-store).
+      max_file_store: {{ include "nexus.natsMaxFileStore" . }}
     }
     {{- if .Values.nats.tls.enabled }}
     tls {
