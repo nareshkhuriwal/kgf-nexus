@@ -3826,6 +3826,18 @@ and `helm-chart-release` holds `chart.json` (reference, version, digest,
 `appVersion`); the run summary prints the install command. On an AKS cluster
 you already run, docs/INSTALL-AKS.md uses exactly this chart.
 
+**Deployments.** Each publish is recorded as two GitHub deployments, listed
+under the repository's Deployments. `ghcr-images` is the `digests` job: the
+image set counts as released once its map has validated. It links the
+repository's packages. `helm-chart` is the `chart-publish` job, and it links
+the chart's package. Only those push-mode jobs name an environment, so a pull
+request records no deployment. GitHub creates both environments on first use,
+with no protection rules. A rule added later (a required reviewer, or
+deployment tags `v*` only) holds the digest map and the chart, but not the
+image pushes, which come first. The jobs' OIDC subject
+becomes `repo:<owner>/kgf-nexus:environment:<name>`, which the attestations do
+not depend on.
+
 **One-time setup.** GHCR creates each package on its first push, private. Make
 each of the eleven image packages and the `charts/kgf-nexus` package public
 (package settings), or give the cluster a pull secret (`image.pullSecrets`)

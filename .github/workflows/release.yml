@@ -40,6 +40,17 @@
 # <version>-main.g<commit>, a SemVer pre-release that no version range
 # selects. A published version is never overwritten.
 #
+# Two push-mode jobs are GitHub deployments, so each release is listed under
+# the repository's Deployments: `digests` (environment `ghcr-images`, the
+# image set) and `chart-publish` (`helm-chart`). No job a pull request runs
+# names an environment, so a pull request creates no deployment. They are
+# named here and not on ci.yml's `publish`, because a job that calls a
+# reusable workflow cannot name an environment. GitHub creates each
+# environment on first use, with no protection rules. Naming one changes the
+# job's OIDC subject to repo:<owner>/kgf-nexus:environment:<name>. The
+# provenance attestations do not depend on that subject (they are bound to
+# this workflow file), but a cloud trust policy keyed on it would.
+#
 # Nothing here deploys. KGF's own environments (its ACR, AKS and Portainer
 # host) are released by KGF Cloud's pipelines, in the kgf-cloud repository.
 name: release
@@ -320,6 +331,15 @@ jobs:
   # Turn the per-image digests into ONE map and refuse it here if it is
   # incomplete, not digest-pinned, or not what the chart would run -- so a bad
   # map fails before anything consumes it. Only a push has digests to collect.
+  #
+  # The `ghcr-images` deployment (the repository's Deployments): this job, not
+  # the eleven build legs, because the image set is released when its map has
+  # validated, and as one deployment per release rather than eleven. The legs
+  # also run for pull requests, and a job's environment cannot be switched off
+  # for one caller (an empty environment name is not documented behaviour),
+  # whereas this job runs only when publishing. A protection rule on the
+  # environment therefore holds the map and the chart, not the image pushes,
+  # which precede it.
   digests:
     name: digest map
     needs: [plan, build]
@@ -328,6 +348,9 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    environment:
+      name: ghcr-images
+      url: ${{ github.server_url }}/${{ github.repository }}/packages
     steps:
       - uses: actions/checkout@v4
         with:
@@ -525,13 +548,17 @@ jobs:
   # whose images are incomplete. The bytes pushed are the package the `chart`
   # job checked. A version that already exists is never overwritten: when it
   # holds exactly these bytes (a re-run) it is kept, otherwise the job fails
-  # and Chart.yaml's version must be bumped.
+  # and Chart.yaml's version must be bumped. Recorded as a `helm-chart`
+  # deployment, linking the package GHCR lists under this repository.
   chart-publish:
     name: helm chart (publish)
     needs: [plan, chart, digests]
     if: inputs.push
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment:
+      name: helm-chart
+      url: ${{ github.server_url }}/${{ github.repository }}/pkgs/container/charts%2Fkgf-nexus
     env:
       VERSION: ${{ needs.chart.outputs.version }}
       REPOSITORY: ${{ needs.chart.outputs.repository }}
