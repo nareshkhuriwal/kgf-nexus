@@ -39,7 +39,8 @@ func TestPagesBuildsTheSiteAsCIChecksIt(t *testing.T) {
 // https://<owner>.github.io/<repository>/ for its repo_url. The link check,
 // the canonical links, the sitemap and `make docs-serve` all take the site's
 // path from site_url; a repository that moves without it publishes a site whose
-// 404 page and canonical links point at the old address.
+// 404 page and canonical links point at the old address. README.md's badge and
+// documentation section link the same address.
 func TestSiteURLIsTheRepositorysPagesSite(t *testing.T) {
 	repo := find(t, "docs-site/mkdocs.yml", `(?m)^repo_url:\s*https://github\.com/(\S+?)/?\s*$`)
 	owner, name, ok := strings.Cut(repo, "/")
@@ -49,5 +50,8 @@ func TestSiteURLIsTheRepositorysPagesSite(t *testing.T) {
 	want := "https://" + strings.ToLower(owner) + ".github.io/" + name + "/"
 	if got := find(t, "docs-site/mkdocs.yml", `(?m)^site_url:\s*(\S+)\s*$`); got != want {
 		t.Errorf("docs-site/mkdocs.yml: site_url is %s, but the Pages site of %s is %s", got, repo, want)
+	}
+	if readme := read(t, "README.md"); !strings.Contains(readme, "]("+want+")") {
+		t.Errorf("README.md does not link the documentation site %s", want)
 	}
 }
