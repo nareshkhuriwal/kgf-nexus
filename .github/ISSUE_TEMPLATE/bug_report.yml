@@ -1,0 +1,72 @@
+name: Bug report
+description: Something in Nexus does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Security problems must not be reported here**: use the Security tab → "Report a vulnerability" (see SECURITY.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Minimal steps, a workflow spec, or a command sequence that shows the problem.
+      placeholder: |
+        1. nexusctl workflow submit ...
+        2. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      multiple: true
+      options:
+        - api-gateway
+        - scheduler
+        - dag-engine / workflow-manager
+        - resource-manager
+        - event-service
+        - worker agent / executors
+        - cluster controller
+        - console (ui)
+        - nexusctl (CLI)
+        - Python SDK
+        - Helm chart
+        - Terraform
+        - docs
+        - other / not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How Nexus is installed
+      options:
+        - docker compose (make up / nexusctl up)
+        - Helm on AKS
+        - Helm on another Kubernetes cluster
+        - local Kubernetes (Docker Desktop / kind)
+        - other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: e.g. chart 0.3.0, image tag, or commit sha
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and output
+      description: Relevant logs, API responses or screenshots. Remove secrets and API keys first.
+      render: shell

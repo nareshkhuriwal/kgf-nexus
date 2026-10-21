@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a capability or an improvement.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How you would like it to work. API, spec, console or chart changes are all welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other ways you solved or worked around it.
+  - type: checkboxes
+    id: adr
+    attributes:
+      label: Design impact
+      options:
+        - label: This changes a recorded design decision (docs/adr) or a public contract (API, workflow spec, chart values, database schema).
