@@ -36,16 +36,18 @@ func find(t *testing.T, rel, pattern string) string {
 
 // TestGoVersionIsStatedConsistently: go.mod's `go` directive is the language
 // version and minimum toolchain. CONTRACT.md's header, the CI toolchain, the
-// toolchain the release workflow passes to the image builds, and the builders
-// of the Go images must name the same MAJOR.MINOR. CONTRACT.md said "Go 1.27"
-// while go.mod, CI and the images were on 1.25, so a reader following the
-// contract assumed language features the module does not allow.
+// toolchain the release workflow passes to the image builds, the toolchain the
+// Pages workflow builds the documentation site's nexusctl with, and the
+// builders of the Go images must name the same MAJOR.MINOR. CONTRACT.md said
+// "Go 1.27" while go.mod, CI and the images were on 1.25, so a reader following
+// the contract assumed language features the module does not allow.
 func TestGoVersionIsStatedConsistently(t *testing.T) {
 	mod := find(t, "go.mod", `(?m)^go\s+(\d+\.\d+)(?:\.\d+)?\s*$`)
 	for _, c := range []struct{ file, pattern string }{
 		{"CONTRACT.md", `(?m)^Module: .*·\s+Go\s+(\d+\.\d+)\b`},
 		{".github/workflows/ci.yml", `(?m)^\s*GO_VERSION:\s*"?(\d+\.\d+)`},
 		{".github/workflows/release.yml", `(?m)^\s*GO_VERSION:\s*"?(\d+\.\d+)`},
+		{".github/workflows/docs.yml", `(?m)^\s*GO_VERSION:\s*"?(\d+\.\d+)`},
 		{"deploy/Dockerfile.service", `(?m)^ARG\s+GO_VERSION=(\d+\.\d+)`},
 		{"deploy/Dockerfile.migrate", `(?m)^ARG\s+GO_VERSION=(\d+\.\d+)`},
 	} {

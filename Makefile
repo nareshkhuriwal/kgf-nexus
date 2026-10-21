@@ -265,6 +265,10 @@ check-go-version: ## Fail unless go.mod, CONTRACT.md, CI and the images name the
 DOCS_PYTHON   ?= python3
 DOCS_VENV     ?= docs-site/.venv
 DOCS_NEXUSCTL ?= docs-site/.venv/bin/nexusctl
+# Where the site is published (GitHub Pages, .github/workflows/docs.yml), read
+# from mkdocs.yml's site_url: the link check maps root-relative and canonical
+# links under its path (/kgf-nexus/) onto docs-site/site, as Pages serves them.
+DOCS_SITE_URL ?= $(shell sed -n 's/^site_url: *//p' docs-site/mkdocs.yml)
 
 $(DOCS_VENV)/.installed: docs-site/requirements.txt
 	@$(DOCS_PYTHON) -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
@@ -278,10 +282,10 @@ docs: $(DOCS_VENV)/.installed ## Build the documentation site (strict) and check
 	$(GO) build -o $(DOCS_NEXUSCTL) ./cli/cmd/nexusctl
 	cd docs-site && NO_MKDOCS_2_WARNING=1 NEXUS_DOCS_NEXUSCTL='$(abspath $(DOCS_NEXUSCTL))' \
 	  '$(abspath $(DOCS_VENV))/bin/mkdocs' build --strict --clean
-	$(DOCS_VENV)/bin/python docs-site/scripts/check_links.py docs-site/site
+	$(DOCS_VENV)/bin/python docs-site/scripts/check_links.py docs-site/site --site-url '$(DOCS_SITE_URL)'
 	@echo "docs: built docs-site/site (open docs-site/site/index.html, or run make docs-serve)"
 
-docs-serve: $(DOCS_VENV)/.installed ## Preview the documentation site at http://127.0.0.1:8000
+docs-serve: $(DOCS_VENV)/.installed ## Preview the documentation site at http://127.0.0.1:8000/kgf-nexus/ (site_url's path)
 	$(GO) build -o $(DOCS_NEXUSCTL) ./cli/cmd/nexusctl
 	cd docs-site && NO_MKDOCS_2_WARNING=1 NEXUS_DOCS_NEXUSCTL='$(abspath $(DOCS_NEXUSCTL))' \
 	  '$(abspath $(DOCS_VENV))/bin/mkdocs' serve --strict
@@ -791,7 +795,7 @@ compat-smoke: ## Run the previous release's DB integration suite against this tr
 # ── Pinned tools, chart and proto checks ──────────────────────────────────
 # Every tool is one exact release, downloaded into .tools/ and refused unless
 # its SHA-256 matches the pin in deploy/scripts/pinned-tool.sh.
-.PHONY: tools helm-validate proto-lint proto-breaking proto-check actionlint preflight-test shellcheck
+.PHONY: tools helm-validate proto-lint proto-breaking proto-check actionlint preflight-test release-notes-test shellcheck
 tools: ## Install the pinned, checksum-verified helm, kubeconform and buf into .tools/
 	@for t in helm kubeconform buf; do deploy/scripts/pinned-tool.sh $$t; done
 
@@ -819,10 +823,17 @@ actionlint: ## Lint the GitHub workflows with the pinned actionlint image
 preflight-test: ## Test deploy/scripts/aks-preflight.sh against stub kubectl and az (no cluster)
 	deploy/scripts/tests/aks-preflight-test.sh
 
+# The GitHub Release's notes for a release tag (ci.yml, github-release), from
+# a fixture CHANGELOG and fixture release files. Preview a real release's
+# notes with: GITHUB_REPOSITORY=<owner>/kgf-nexus deploy/scripts/release-notes.sh vX.Y.Z CHANGELOG.md
+release-notes-test: ## Test deploy/scripts/release-notes.sh, which writes a release tag's GitHub Release notes
+	deploy/scripts/tests/release-notes-test.sh
+
 # Shell scripts held to shellcheck (warnings and above fail; an `info` must be
 # fixed or disabled inline with the reason).
 SHELLCHECK_FILES ?= deploy/scripts/aks-preflight.sh deploy/scripts/tests/aks-preflight-test.sh \
 	deploy/scripts/tests/aks-preflight-stub/kubectl deploy/helm/validate.sh \
+	deploy/scripts/release-notes.sh deploy/scripts/tests/release-notes-test.sh \
 	deploy/scripts/agent-workdir.sh
-shellcheck: ## shellcheck the AKS install scripts and validate.sh with the pinned actionlint image's shellcheck
+shellcheck: ## shellcheck the install, release and compose helper scripts and validate.sh with the pinned actionlint image's shellcheck
 	docker run --rm -v "$(CURDIR):/repo:ro" -w /repo --entrypoint shellcheck $(ACTIONLINT_IMAGE) $(SHELLCHECK_FILES)

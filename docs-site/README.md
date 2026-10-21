@@ -4,13 +4,33 @@ The KGF Nexus documentation site. Build and check it with:
 
 ```bash
 make docs          # venv from the lock file, strict build, link check
-make docs-serve    # live preview on http://127.0.0.1:8000
+make docs-serve    # live preview on http://127.0.0.1:8000/kgf-nexus/
 ```
 
 `make docs` creates `docs-site/.venv` from `requirements.txt`, installing with
 `--require-hashes`. It builds `nexusctl` from this checkout for the CLI
 reference, runs `mkdocs build --strict` into `docs-site/site/`, and then runs
-`scripts/check_links.py` over the result. Nothing is published anywhere.
+`scripts/check_links.py` over the result. Nothing is published from your
+machine.
+
+## Publishing
+
+The site is published to GitHub Pages at
+<https://nareshkhuriwal.github.io/kgf-nexus/> (`site_url` in `mkdocs.yml`) by
+`.github/workflows/docs.yml`, on every push to `main` that changes something a
+page is built from, and by hand (Actions > docs > Run workflow). It builds the
+site exactly as CI's `docs` job does, with the same Go and Python (`tests/repo`
+fails when they differ), and deploys it only if the strict build and the link
+check pass. The repository's Pages source must be set to **GitHub Actions**
+(Settings > Pages) once.
+
+The site lives under a path, `/kgf-nexus/`, not at a domain root. MkDocs keeps
+page links relative, so that path matters only where it writes absolute links:
+the canonical link of every page, the sitemap, and the 404 page (which must work
+at any depth). `check_links.py --site-url` (the Makefile passes `site_url`)
+checks those against `site/` as Pages will serve them. A root-relative link
+outside `/kgf-nexus/` fails the check, because on the published site it would
+lead off the site. `make docs-serve` serves under the same path.
 
 ## What is generated, and from where
 
@@ -20,7 +40,7 @@ reference, runs `mkdocs build --strict` into `docs-site/site/`, and then runs
 | `reference/cli.md` | `hooks/cli_reference.py` | `nexusctl help` of a binary built from this checkout (`$NEXUS_DOCS_NEXUSCTL`, or `go build`) |
 | `reference/sdk.md` (bodies) | mkdocstrings | the SDK's docstrings, by static analysis. The package is never imported. |
 | `reference/workflow-spec.md` | `hooks/schema_reference.py` | `schemas/workflow-spec-v1.json` |
-| `design/*`, `operations/runbook.md`, `operations/deploy.md`, `operations/tls.md`, `operations/terraform/*` | `hooks/repo_docs.py` | `docs/*.md`, `docs/adr/*.md`, `deploy/**/README.md`: rendered **in place**, not copied |
+| `design/*`, `operations/runbook.md`, `operations/deploy.md`, `operations/tls.md`, `operations/terraform/*`, `release-notes.md` | `hooks/repo_docs.py` | `docs/*.md`, `docs/adr/*.md`, `deploy/**/README.md`, `CHANGELOG.md`: rendered **in place**, not copied |
 
 `repo_docs.py` rewrites each relative link in a rendered repository document.
 A link to another rendered document becomes a site link. A link to any other

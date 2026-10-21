@@ -47,7 +47,7 @@ CI runs these on every pull request, and the single required check is the
 | Helm chart | `make helm-validate` |
 | Terraform | `make tf-validate` and `make tf-lint` |
 | Docs | `make check-doc-refs` and `make docs` (strict build and link check) |
-| Workflows and scripts | `make actionlint`, `make shellcheck`, `make preflight-test` |
+| Workflows and scripts | `make actionlint`, `make shellcheck`, `make preflight-test`, `make release-notes-test` |
 | Any source file | `make license-check` |
 
 ## Conventions
@@ -75,6 +75,15 @@ CI runs these on every pull request, and the single required check is the
   it.
 - **Commits** have a sentence-case subject that says what changed, and a body
   that says why. Keep unrelated changes in separate commits.
+
+## Releases
+
+A release is a `vX.Y.Z` tag on `main`. Its version is the `version` in
+`deploy/helm/kgf-nexus/Chart.yaml`, and its notes are the `## X.Y.Z` section of
+[CHANGELOG.md](CHANGELOG.md). A change worth a line in the next release's notes
+can add it to that section. When the tag is pushed, CI publishes the images,
+the chart and the GitHub Release. [docs/OPERATIONS.md](docs/OPERATIONS.md)
+§22.4 has the steps.
 
 ## Licensing of contributions
 

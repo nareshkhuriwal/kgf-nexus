@@ -1,5 +1,11 @@
 # KGF Nexus
 
+[![CI](https://github.com/nareshkhuriwal/kgf-nexus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nareshkhuriwal/kgf-nexus/actions/workflows/ci.yml?query=branch%3Amain)
+[![Latest release](https://img.shields.io/github/v/release/nareshkhuriwal/kgf-nexus?sort=semver)](https://github.com/nareshkhuriwal/kgf-nexus/releases/latest)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://nareshkhuriwal.github.io/kgf-nexus/)
+[![Go version](https://img.shields.io/github/go-mod/go-version/nareshkhuriwal/kgf-nexus)](go.mod)
+
 A distributed workflow orchestrator. You describe a DAG of tasks as a
 versioned, declarative spec, in Python or YAML. Nexus decides when and where
 each task runs, dispatches it to a fleet of worker agents under a fenced
@@ -124,9 +130,10 @@ for driving Compose with your own keys (deploy/README.md).
 
 ## Documentation
 
-The documentation site lives in [`docs-site/`](docs-site/README.md). Build it
-with `make docs`, a strict build with a link check, and preview it with
-`make docs-serve`. It contains:
+The documentation site is published at
+<https://nareshkhuriwal.github.io/kgf-nexus/>, and its source lives in
+[`docs-site/`](docs-site/README.md). Build it with `make docs`, a strict build
+with a link check, and preview it with `make docs-serve`. It contains:
 
 | Section | What it covers |
 | --- | --- |

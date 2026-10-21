@@ -11,7 +11,10 @@ type: application
 # The chart's own version (SemVer): MINOR when every existing values file
 # still installs (new keys, new defaults, template changes); MAJOR when one no
 # longer does (a removed or renamed key). Published as
-# oci://ghcr.io/<owner>/charts/kgf-nexus:<version>.
+# oci://ghcr.io/<owner>/charts/kgf-nexus:<version>. It is also the release's
+# version: a vX.Y.Z (or vX.Y.Z-rc.N) tag publishes chart X.Y.Z (X.Y.Z-rc.N),
+# and the release workflow refuses the tag unless X.Y.Z is this version. Bump
+# it, with a CHANGELOG.md section, before tagging (docs/OPERATIONS.md §22.4).
 version: 0.3.0
 # The product version the chart was cut with (docs/COMPATIBILITY.md). It is a
 # label only: images come from image.tag.

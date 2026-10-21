@@ -36,9 +36,22 @@
 # render the package, nothing pushed) and, in push mode and only after the
 # digest map has validated, pushed to oci://ghcr.io/<owner>/charts/kgf-nexus
 # with the same provenance attestation as the images. A vX.Y.Z tag publishes
-# the version in Chart.yaml; a push to main publishes
-# <version>-main.g<commit>, a SemVer pre-release that no version range
-# selects. A published version is never overwritten.
+# chart X.Y.Z, and X.Y.Z must be Chart.yaml's version (a vX.Y.Z-rc.N tag
+# publishes X.Y.Z-rc.N, under the same rule): `plan` refuses any other tag
+# before an image is built. A push to main publishes <version>-main.g<commit>,
+# a SemVer pre-release that no version range selects. A published version is
+# never overwritten.
+#
+# Two push-mode jobs are GitHub deployments, so each release is listed under
+# the repository's Deployments: `digests` (environment `ghcr-images`, the
+# image set) and `chart-publish` (`helm-chart`). No job a pull request runs
+# names an environment, so a pull request creates no deployment. They are
+# named here and not on ci.yml's `publish`, because a job that calls a
+# reusable workflow cannot name an environment. GitHub creates each
+# environment on first use, with no protection rules. Naming one changes the
+# job's OIDC subject to repo:<owner>/kgf-nexus:environment:<name>. The
+# provenance attestations do not depend on that subject (they are bound to
+# this workflow file), but a cloud trust policy keyed on it would.
 #
 # Nothing here deploys. KGF's own environments (its ACR, AKS and Portainer
 # host) are released by KGF Cloud's pipelines, in the kgf-cloud repository.
@@ -67,19 +80,30 @@ env:
 jobs:
   # The image set and the release's names, decided once. The build matrix and
   # the digest-map check both read the set from here, so they cannot disagree
-  # about what a complete release is.
+  # about what a complete release is; the chart and its publish read the
+  # chart version from here, so a release tag that disagrees with Chart.yaml
+  # fails before anything is built, let alone pushed.
   plan:
     name: image set and tags
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
     outputs:
       images: ${{ steps.images.outputs.images }}
       names: ${{ steps.images.outputs.names }}
       repository: ${{ steps.refs.outputs.repository }}
       tag: ${{ steps.refs.outputs.tag }}
       extra-tag: ${{ steps.refs.outputs.extra-tag }}
+      chart-version: ${{ steps.chart.outputs.version }}
     steps:
+      # Chart.yaml is all this job reads from the tree.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: deploy/helm/kgf-nexus/Chart.yaml
+          sparse-checkout-cone-mode: false
+
       # path is the main package, stated for every Go image because the mains
       # are not all in one place (api-gateway at services/api-gateway/cmd/...,
       # dag-engine at services/dag-engine). deploy/docker-compose.yml and
@@ -135,7 +159,9 @@ jobs:
           case "$GITHUB_REF" in
             refs/tags/*)
               tag=${GITHUB_REF#refs/tags/}
-              if ! [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              # SemVer's pre-release: dot-separated, non-empty identifiers
+              # (helm refuses anything else as a chart version).
+              if ! [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
                 echo "::error::tag '$tag' is not a release version (vMAJOR.MINOR.PATCH[-PRERELEASE])"
                 exit 1
               fi ;;
@@ -152,6 +178,39 @@ jobs:
             echo "extra-tag=$extra"
           } >> "$GITHUB_OUTPUT"
           echo "ghcr.io/$owner/kgf-nexus/<image>:$tag${extra:+ and :$extra} (push: $PUSH)"
+
+      # The chart's version for this run. A release tag publishes the tag's own
+      # version, vX.Y.Z -> X.Y.Z and vX.Y.Z-rc.1 -> X.Y.Z-rc.1, and X.Y.Z must
+      # be Chart.yaml's version: the version a user installs is then the
+      # release's, the chart a tag publishes is the one that tag's tree
+      # declares, and a release candidate never takes the final version (a
+      # published version is immutable, so it would block the release). Any
+      # other run names the commit in a pre-release ('g' keeps the identifier
+      # alphanumeric: SemVer forbids a numeric one with a leading zero).
+      - name: Chart version
+        id: chart
+        env:
+          TAG: ${{ steps.refs.outputs.tag }}
+        run: |
+          set -euo pipefail
+          chart=deploy/helm/kgf-nexus/Chart.yaml
+          base=$(awk '$1 == "version:" { gsub(/"/, "", $2); print $2; exit }' "$chart")
+          if ! [[ $base =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$chart version '$base' is not MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          case "$GITHUB_REF" in
+            refs/tags/*)
+              version=${TAG#v}
+              if [ "${version%%-*}" != "$base" ]; then
+                echo "::error::tag $TAG does not match $chart (version $base). A release tag vX.Y.Z[-PRE] publishes chart X.Y.Z[-PRE] and requires Chart.yaml version X.Y.Z: set version: ${version%%-*} in $chart (and a CHANGELOG.md section) and tag that commit, or tag v$base. Nothing was built or published."
+                exit 1
+              fi ;;
+            refs/heads/main) version="$base-main.g${GITHUB_SHA:0:12}" ;;
+            *) version="$base-dev.g${GITHUB_SHA:0:12}" ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "chart kgf-nexus $version (Chart.yaml $base)"
 
   build:
     name: build ${{ matrix.image.name }}
@@ -320,6 +379,15 @@ jobs:
   # Turn the per-image digests into ONE map and refuse it here if it is
   # incomplete, not digest-pinned, or not what the chart would run -- so a bad
   # map fails before anything consumes it. Only a push has digests to collect.
+  #
+  # The `ghcr-images` deployment (the repository's Deployments): this job, not
+  # the eleven build legs, because the image set is released when its map has
+  # validated, and as one deployment per release rather than eleven. The legs
+  # also run for pull requests, and a job's environment cannot be switched off
+  # for one caller (an empty environment name is not documented behaviour),
+  # whereas this job runs only when publishing. A protection rule on the
+  # environment therefore holds the map and the chart, not the image pushes,
+  # which precede it.
   digests:
     name: digest map
     needs: [plan, build]
@@ -328,6 +396,9 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    environment:
+      name: ghcr-images
+      url: ${{ github.server_url }}/${{ github.repository }}/packages
     steps:
       - uses: actions/checkout@v4
         with:
@@ -424,9 +495,9 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  # The chart, packaged once per run from this commit: the version from
-  # Chart.yaml (a vX.Y.Z tag) or that version plus a pre-release suffix
-  # naming the commit (main, pull requests), appVersion the image tag. Then
+  # The chart, packaged once per run from this commit at the plan's version
+  # (a release tag's own, or Chart.yaml's plus a pre-release suffix naming the
+  # commit on main and pull requests), appVersion the image tag. Then
   # the PACKAGE -- not the source directory -- is linted and rendered, so what
   # is published is what was checked. Pull requests stop here.
   chart:
@@ -453,30 +524,21 @@ jobs:
       - name: Install pinned helm (sha256-verified)
         run: dirname "$(deploy/scripts/pinned-tool.sh helm)" >> "$GITHUB_PATH"
 
+      # The version is the plan's: a release tag's was checked against
+      # Chart.yaml there, before any image was built.
       - name: Chart version
         id: version
+        env:
+          VERSION: ${{ needs.plan.outputs.chart-version }}
         run: |
           set -euo pipefail
-          base=$(awk '$1 == "version:" { gsub(/"/, "", $2); print $2; exit }' deploy/helm/kgf-nexus/Chart.yaml)
-          if ! [[ $base =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::deploy/helm/kgf-nexus/Chart.yaml version '$base' is not MAJOR.MINOR.PATCH"
-            exit 1
-          fi
-          # A tag publishes the chart's own version. Anything else names the
-          # commit in a pre-release ('g' keeps the identifier alphanumeric:
-          # SemVer forbids a numeric one with a leading zero).
-          case "$GITHUB_REF" in
-            refs/tags/v*) version=$base ;;
-            refs/heads/main) version="$base-main.g${GITHUB_SHA:0:12}" ;;
-            *) version="$base-dev.g${GITHUB_SHA:0:12}" ;;
-          esac
           owner=${GITHUB_REPOSITORY_OWNER,,}
           {
-            echo "version=$version"
+            echo "version=$VERSION"
             echo "repository=oci://ghcr.io/$owner/charts"
-            echo "package=kgf-nexus-$version.tgz"
+            echo "package=kgf-nexus-$VERSION.tgz"
           } >> "$GITHUB_OUTPUT"
-          echo "chart kgf-nexus $version -> oci://ghcr.io/$owner/charts"
+          echo "chart kgf-nexus $VERSION -> oci://ghcr.io/$owner/charts"
 
       - name: Package
         env:
@@ -525,13 +587,17 @@ jobs:
   # whose images are incomplete. The bytes pushed are the package the `chart`
   # job checked. A version that already exists is never overwritten: when it
   # holds exactly these bytes (a re-run) it is kept, otherwise the job fails
-  # and Chart.yaml's version must be bumped.
+  # and Chart.yaml's version must be bumped. Recorded as a `helm-chart`
+  # deployment, linking the package GHCR lists under this repository.
   chart-publish:
     name: helm chart (publish)
     needs: [plan, chart, digests]
     if: inputs.push
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment:
+      name: helm-chart
+      url: ${{ github.server_url }}/${{ github.repository }}/pkgs/container/charts%2Fkgf-nexus
     env:
       VERSION: ${{ needs.chart.outputs.version }}
       REPOSITORY: ${{ needs.chart.outputs.repository }}
