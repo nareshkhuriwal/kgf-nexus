@@ -265,6 +265,10 @@ check-go-version: ## Fail unless go.mod, CONTRACT.md, CI and the images name the
 DOCS_PYTHON   ?= python3
 DOCS_VENV     ?= docs-site/.venv
 DOCS_NEXUSCTL ?= docs-site/.venv/bin/nexusctl
+# Where the site is published (GitHub Pages, .github/workflows/docs.yml), read
+# from mkdocs.yml's site_url: the link check maps root-relative and canonical
+# links under its path (/kgf-nexus/) onto docs-site/site, as Pages serves them.
+DOCS_SITE_URL ?= $(shell sed -n 's/^site_url: *//p' docs-site/mkdocs.yml)
 
 $(DOCS_VENV)/.installed: docs-site/requirements.txt
 	@$(DOCS_PYTHON) -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
@@ -278,10 +282,10 @@ docs: $(DOCS_VENV)/.installed ## Build the documentation site (strict) and check
 	$(GO) build -o $(DOCS_NEXUSCTL) ./cli/cmd/nexusctl
 	cd docs-site && NO_MKDOCS_2_WARNING=1 NEXUS_DOCS_NEXUSCTL='$(abspath $(DOCS_NEXUSCTL))' \
 	  '$(abspath $(DOCS_VENV))/bin/mkdocs' build --strict --clean
-	$(DOCS_VENV)/bin/python docs-site/scripts/check_links.py docs-site/site
+	$(DOCS_VENV)/bin/python docs-site/scripts/check_links.py docs-site/site --site-url '$(DOCS_SITE_URL)'
 	@echo "docs: built docs-site/site (open docs-site/site/index.html, or run make docs-serve)"
 
-docs-serve: $(DOCS_VENV)/.installed ## Preview the documentation site at http://127.0.0.1:8000
+docs-serve: $(DOCS_VENV)/.installed ## Preview the documentation site at http://127.0.0.1:8000/kgf-nexus/ (site_url's path)
 	$(GO) build -o $(DOCS_NEXUSCTL) ./cli/cmd/nexusctl
 	cd docs-site && NO_MKDOCS_2_WARNING=1 NEXUS_DOCS_NEXUSCTL='$(abspath $(DOCS_NEXUSCTL))' \
 	  '$(abspath $(DOCS_VENV))/bin/mkdocs' serve --strict

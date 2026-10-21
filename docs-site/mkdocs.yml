@@ -3,6 +3,11 @@
 # MkDocs Material.
 site_name: KGF Nexus
 site_description: Documentation for KGF Nexus, a distributed workflow orchestrator.
+# Published to GitHub Pages by .github/workflows/docs.yml. The path matters:
+# canonical links, the sitemap and the 404 page's links are written under
+# /kgf-nexus/, `make docs-serve` serves there, and the link check maps it onto
+# site/ (tests/repo holds it to repo_url's Pages address).
+site_url: https://nareshkhuriwal.github.io/kgf-nexus/
 repo_url: https://github.com/nareshkhuriwal/kgf-nexus
 repo_name: kgf-nexus
 edit_uri: edit/main/docs-site/docs/

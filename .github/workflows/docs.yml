@@ -1,0 +1,102 @@
+# The documentation site, published to GitHub Pages at mkdocs.yml's site_url
+# (https://nareshkhuriwal.github.io/kgf-nexus/).
+#
+# Built exactly as ci.yml's `docs` job builds it on every pull request: the
+# same Go and Python (tests/repo fails when the two files disagree), then
+# `make docs` -- the hash-locked MkDocs toolchain, the CLI, API, SDK and spec
+# references generated from this commit, a --strict build, and the link and
+# anchor check over the rendered HTML, which maps the site's /kgf-nexus/ path
+# the way Pages serves it. Only a build that passed all of that is deployed, so
+# a broken site never replaces a good one.
+#
+# The repository's Pages source must be "GitHub Actions" (Settings > Pages): a
+# one-time setting that this workflow cannot make. Until it is set, the deploy
+# job fails and nothing else is affected.
+name: docs
+
+on:
+  push:
+    branches: [main]
+    # Everything a page is built from: the site and its toolchain (docs-site/),
+    # the repository documents rendered in place (docs/ and deploy/**/*.md,
+    # hooks/repo_docs.py), the REST reference (api/openapi.yaml), the CLI
+    # reference (a nexusctl built from cli/), the spec reference (schemas/),
+    # the SDK reference (sdk/python/, by static analysis), and this file. A
+    # change anywhere else cannot change a page; run it by hand if it must.
+    paths:
+      - docs/**
+      - docs-site/**
+      - deploy/**/*.md
+      - api/openapi.yaml
+      - cli/**
+      - schemas/**
+      - sdk/python/**
+      - .github/workflows/docs.yml
+  # Actions > docs > Run workflow. From main it deploys; from any other branch
+  # it builds and checks the site and deploys nothing.
+  workflow_dispatch:
+
+# One Pages deployment at a time, and never one cut off half-way: a newer run
+# waits for the one in progress rather than cancelling it (and a run still
+# waiting is superseded by the next). Each deploys the whole site, so the last
+# one to finish is the newest.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+# The build only reads. The deploy job asks for exactly what Pages needs.
+permissions:
+  contents: read
+
+env:
+  # ci.yml's toolchain (tests/repo checks the two files agree with go.mod).
+  GO_VERSION: "1.25"
+
+jobs:
+  # ci.yml's `docs` job, step for step, then the site as the Pages artifact.
+  build:
+    name: docs site (strict build + link check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: docs-site/requirements.txt
+      - run: make docs DOCS_PYTHON=python
+      # A gzipped tar of docs-site/site under the name deploy-pages looks for
+      # (`github-pages`), kept one day: the deployed copy is what persists.
+      - name: Upload the site for Pages
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs-site/site
+
+  # The only job that can publish, and the only one holding the permissions to:
+  # pages to deploy, id-token for Pages to verify the deployment comes from
+  # this workflow. It checks nothing out and runs nothing from the repository.
+  # Never from a branch other than main (the github-pages environment refuses
+  # that too) and never in a fork, whose Pages are not this site.
+  deploy:
+    name: deploy to GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/main' && !github.event.repository.fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
