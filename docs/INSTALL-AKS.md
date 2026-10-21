@@ -414,9 +414,9 @@ publishes, for every push to `main` and every `vX.Y.Z` tag:
   provenance attestation (docs/IMAGES.md);
 - the run artifact `image-digests`: `release-images.yaml`, the Helm values that
   pin every image to its digest;
-- the chart `oci://ghcr.io/<owner>/charts/kgf-nexus`: `vX.Y.Z` tags publish
-  the version in Chart.yaml (0.3.0 here), `main` publishes
-  `<version>-main.g<commit>`; attested the same way.
+- the chart `oci://ghcr.io/<owner>/charts/kgf-nexus`: a `vX.Y.Z` tag
+  publishes version `X.Y.Z`, which must be Chart.yaml's (0.3.0 here); `main`
+  publishes `<version>-main.g<commit>`; attested the same way.
 
 ```sh
 gh run download <release run id> --repo $OWNER/kgf-nexus -n image-digests      # release-images.yaml

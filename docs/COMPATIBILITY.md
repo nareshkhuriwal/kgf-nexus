@@ -28,12 +28,14 @@ noticing.
 | Worker agent | `agent/cmd/nexus-agent/main.go:39`, same `-ldflags` mechanism. Sent as `RegisterRequest.agent_version` (field 7), stored in `workers.agent_version`, shown in the fleet view. | Same as the services. |
 | `nexusctl` | `cli/internal/cmd/root.go:30` `Version = "0.1.0-dev"` ("stamped at build time via -ldflags"). | **No build in the repo stamps it.** The HTTP `User-Agent` is the constant `nexusctl/0.1` (`cli/internal/client/client.go:30`). |
 | Python SDK | `sdk/python/pyproject.toml` `version = "0.1.0"`. `User-Agent: nexus-python-sdk/0.1` (`sdk/python/nexus/client.py:40`). | Static. |
-| Helm chart | `deploy/helm/kgf-nexus/Chart.yaml`: `version: 0.3.0`, `appVersion: "0.1.0"`. The release workflow publishes it as `oci://ghcr.io/<owner>/charts/kgf-nexus`: a `vX.Y.Z` tag at Chart.yaml's version, `main` at `<version>-main.g<commit>` (docs/OPERATIONS.md §22.4). | `helm package` stamps the published chart's `appVersion` with the image tag. Images still come from `image.tag`, **not** from `appVersion`. The chart fails to render without a tag (`_helpers.tpl`: "pin an immutable tag (a git SHA), never latest"). `app.kubernetes.io/version` is set to `image.tag`. |
+| Helm chart | `deploy/helm/kgf-nexus/Chart.yaml`: `version: 0.3.0`, `appVersion: "0.1.0"`. The release workflow publishes it as `oci://ghcr.io/<owner>/charts/kgf-nexus`: a `vX.Y.Z[-pre]` tag as version `X.Y.Z[-pre]`, and refuses the tag unless Chart.yaml's `version` is `X.Y.Z`; `main` at `<version>-main.g<commit>` (docs/OPERATIONS.md §22.4). | `helm package` stamps the published chart's `appVersion` with the image tag. Images still come from `image.tag`, **not** from `appVersion`. The chart fails to render without a tag (`_helpers.tpl`: "pin an immutable tag (a git SHA), never latest"). `app.kubernetes.io/version` is set to `image.tag`. |
 
-**Current version: 0.1.0**, pre-1.0, with **no release tags** in the repository
-(`git tag` lists only `pre-identity-merge`). What a deployment actually runs is
-identified by the image tag, which is a git SHA. The chart's `appVersion` is a
-label and does not select images.
+**No release has been tagged yet**, and the product is pre-1.0. The first
+release is `v0.3.0`, the version Chart.yaml carries: a release tag must equal
+it (OPERATIONS §22.4). `nexusctl` and the Python SDK still state 0.1.0
+(above) and are not stamped from the tag. Until the first tag, a deployment
+is identified by its image tag, which is a git SHA. The chart's `appVersion`
+is a label and does not select images.
 
 ## 2. What MAJOR.MINOR.PATCH means for this product
 

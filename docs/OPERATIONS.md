@@ -3753,7 +3753,7 @@ Every first-party image is built by `.github/workflows/release.yml`, which
 |---|---|
 | Pull request | `images`: all eleven images built for `linux/amd64` and `linux/arm64`, one job per image, after the unit tests pass, and the Helm chart packaged, linted and rendered. Nothing is pushed and the run holds no registry credential. |
 | Push to `main` | after **every** CI job has passed on that commit (`quality gate`), `publish` pushes `ghcr.io/<owner>/kgf-nexus/<image>:<commit>` (12 hex digits) and `:main`, then the chart as `oci://ghcr.io/<owner>/charts/kgf-nexus:<version>-main.g<commit>`. |
-| Tag `vX.Y.Z[-pre]` | the whole CI suite on the tagged commit, then `publish` pushes `:vX.Y.Z` and the chart at Chart.yaml's `version`. A tag that is not a release version is refused. |
+| Tag `vX.Y.Z[-pre]` | the whole CI suite on the tagged commit, then `publish` pushes `:vX.Y.Z[-pre]` and the chart as version `X.Y.Z[-pre]`. A tag that is not a release version, or whose `X.Y.Z` is not Chart.yaml's `version`, is refused before anything is built. |
 
 Documentation-only changes (`docs/**`, `*.md` outside `sdk/`) build and
 publish nothing. Nothing is ever tagged `latest` (the chart refuses it), and
@@ -3797,11 +3797,16 @@ docker buildx imagetools inspect ghcr.io/<owner>/kgf-nexus/api-gateway@sha256:<d
   --format '{{ json .SBOM }}'
 ```
 
-**The Helm chart.** Packaged once per run from the commit (`chart` job):
-`helm package` (the pinned helm) with Chart.yaml's version on a `vX.Y.Z` tag,
-or that version plus a SemVer pre-release naming the commit
+**The Helm chart.** Packaged once per run from the commit (`chart` job), by
+`helm package` (the pinned helm). On a release tag the chart's version is the
+tag's: `vX.Y.Z` publishes `X.Y.Z`, and `vX.Y.Z-rc.1` publishes `X.Y.Z-rc.1`.
+`X.Y.Z` must be Chart.yaml's `version`; the `plan` job refuses any other tag
+before an image is built, and says which to change. So the version a user
+installs is the release's, and a release candidate never takes the final
+version, which is immutable once published. Anywhere else the version is
+Chart.yaml's plus a SemVer pre-release naming the commit
 (`<version>-main.g<commit>` on `main`, `-dev.g<commit>` on a pull request), so
-a version range never selects a build of `main`; `appVersion` is the image
+a version range never selects a build of `main`. `appVersion` is the image
 tag. The job then checks the **package**, not the source directory: its files
 are exactly what git tracks under `deploy/helm/kgf-nexus` (examples included),
 its Chart.yaml carries that version, and `helm lint --strict` and
